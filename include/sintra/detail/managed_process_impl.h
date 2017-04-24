@@ -36,7 +36,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <boost/lexical_cast.hpp>
 
 #ifdef _WIN32
-    #include <getopt/getopt.h>
+    #include "detail/third_party/getopt.h"
 #else
     #include <getopt.h>
 #endif
@@ -151,10 +151,6 @@ void Process_group<T, ID>::enroll()
     }
     process_group_membership<T>() = true;
 }
-
-
-
-
 
 
 
