@@ -27,18 +27,18 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define __SINTRA_H__
 
 
-#include "pm/managed_process.h"
-#include "pm/coordinator.h"
-#include "pm/transceiver.h"
+#include "detail/managed_process.h"
+#include "detail/coordinator.h"
+#include "detail/transceiver.h"
 
-#include "pm/globals.h"
+#include "detail/globals.h"
 
-#include "pm/managed_process_impl.h"
-#include "pm/coordinator_impl.h"
-#include "pm/transceiver_impl.h"
-#include "pm/process_message_reader_impl.h"
-#include "pm/resolvable_instance_impl.h"
-#include "pm/message_impl.h"
+#include "detail/managed_process_impl.h"
+#include "detail/coordinator_impl.h"
+#include "detail/transceiver_impl.h"
+#include "detail/process_message_reader_impl.h"
+#include "detail/resolvable_instance_impl.h"
+#include "detail/message_impl.h"
 
 
 namespace sintra
@@ -77,7 +77,7 @@ bool deactivate_slot(type_id_type message_id);
 } // namespace sintra
 
 
-#include "pm/sintra_impl.h"
+#include "detail/sintra_impl.h"
 
 
 #endif
