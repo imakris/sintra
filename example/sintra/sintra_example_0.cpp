@@ -53,6 +53,7 @@ int process_2()
 }
 
 
+
 int process_3()
 {
 	auto int_slot = [&] (int number) {

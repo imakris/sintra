@@ -33,13 +33,13 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <iomanip>
 #include <cstdint>
 #include <thread>
+#include <experimental/filesystem>
 
 #include <boost/interprocess/sync/scoped_lock.hpp>
 #include <boost/interprocess/sync/interprocess_condition.hpp>
 #include <boost/interprocess/mapped_region.hpp>
 #include <boost/interprocess/file_mapping.hpp>
 #include <boost/interprocess/detail/os_file_functions.hpp>
-#include <boost/filesystem.hpp>
 
 #include <omp.h>
 
@@ -49,9 +49,11 @@ namespace sintra {
 
 
 using std::atomic;
+using std::error_code;
 using std::string;
 using std::stringstream;
 using std::thread;
+namespace fs = std::experimental::filesystem;
 
 
 /*
@@ -104,18 +106,16 @@ uint32_t floor_log2(uint32_t x)
 inline
 bool check_or_create_directory(const string& dir_name)
 {
-    using namespace boost::filesystem;
-
     bool c = true;
-    boost::system::error_code ec;
-    path ps(dir_name);
-    if (!exists(ps)) {
-        c &= create_directory(ps, ec);
+    error_code ec;
+    fs::path ps(dir_name);
+    if (!fs::exists(ps)) {
+        c &= fs::create_directory(ps, ec);
     }
     else
-    if (is_regular_file(ps)) {
-        c &= remove(ps, ec);
-        c &= create_directory(ps, ec);
+    if (fs::is_regular_file(ps)) {
+        c &= fs::remove(ps, ec);
+        c &= fs::create_directory(ps, ec);
     }
     return c;
 }
@@ -123,12 +123,10 @@ bool check_or_create_directory(const string& dir_name)
 
 inline bool remove_directory(const string& dir_name)
 {
-    using namespace boost::filesystem;
-
     uintmax_t c = 0;
-    boost::system::error_code ec;
-    path ps(dir_name);
-    auto rv = remove_all(dir_name.c_str(), ec);
+    error_code ec;
+    fs::path ps(dir_name);
+    auto rv = fs::remove_all(dir_name.c_str(), ec);
     string koko = ec.message();
     return !!rv;
 }
@@ -216,8 +214,6 @@ template <int NUM_ELEMENTS, typename T>
 Ring<NUM_ELEMENTS, T>::Ring(const string& directory, const string& prefix, uint64_t id):
     m_id(id)
 {
-    using namespace boost::filesystem;
-
     stringstream stream;
     stream << std::hex << id;
 
@@ -225,11 +221,11 @@ Ring<NUM_ELEMENTS, T>::Ring(const string& directory, const string& prefix, uint6
     m_data_filename = m_directory + prefix + stream.str();
     m_control_filename = m_data_filename + "_control";
 
-    path pr(m_data_filename);
-    path pc(m_control_filename);
+    fs::path pr(m_data_filename);
+    fs::path pc(m_control_filename);
 
-    bool c1 = exists(pr) && is_regular_file(pr) && file_size(pr) &&
-              exists(pc) && is_regular_file(pc) && file_size(pc);
+    bool c1 = fs::exists(pr) && fs::is_regular_file(pr) && fs::file_size(pr) &&
+              fs::exists(pc) && fs::is_regular_file(pc) && fs::file_size(pc);
     bool c2 = c1 || create();
 
     if (!c2 || !attach()) {
@@ -266,7 +262,6 @@ template <int NUM_ELEMENTS, typename T>
 bool Ring<NUM_ELEMENTS, T>::create()
 {
     try {
-        using namespace boost::filesystem;
         using namespace boost::interprocess;
         using namespace boost::interprocess::ipcdetail;
 
@@ -319,11 +314,10 @@ template <int NUM_ELEMENTS, typename T>
 bool Ring<NUM_ELEMENTS, T>::destroy()
 {
     try {
-        using namespace boost::filesystem;
         using namespace boost::interprocess::ipcdetail;
 
-        path pr(m_data_filename);
-        path pc(m_control_filename);
+        fs::path pr(m_data_filename);
+        fs::path pc(m_control_filename);
         return remove(pr) && remove(pc);
     }
     catch (...) {
@@ -342,11 +336,10 @@ bool Ring<NUM_ELEMENTS, T>::attach()
         m_data           == nullptr);
 
     try {
-        using namespace boost::filesystem;
         using namespace boost::interprocess;
 
-        if (file_size(m_data_filename)      != data_region_size ||
-            file_size(m_control_filename)   != sizeof(Control))
+        if (fs::file_size(m_data_filename)      != data_region_size ||
+            fs::file_size(m_control_filename)   != sizeof(Control))
         {
             return false;
         }

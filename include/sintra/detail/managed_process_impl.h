@@ -28,6 +28,12 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
 #include "utility.h"
+#include <getopt/getopt.h>
+#include <chrono>
+#include <mutex>
+#include <experimental/filesystem>
+
+#include <boost/lexical_cast.hpp>
 
 
 namespace sintra
@@ -42,6 +48,10 @@ using std::string;
 using std::stringstream;
 using std::to_string;
 using std::vector;
+using std::unique_lock;
+using std::lock_guard;
+namespace fs = std::experimental::filesystem;
+namespace chrono = std::chrono;
 
 
 inline
@@ -118,7 +128,7 @@ void Process_group<T, ID>::barrier()
     }
 
     // this mutex protects from matching multiple threads on the same process group's barrier
-    boost::mutex::scoped_lock barrier_lock(m_barrier_mutex);
+    lock_guard<mutex> barrier_lock(m_barrier_mutex);
 
     if (!Coordinator::rpc_barrier(coord_id::s, id() )) {
         // This means that another thread must have called the barrier directly as rpc.
@@ -170,7 +180,7 @@ Managed_process::Managed_process():
 
     // NOTE: Do not be tempted to use get_current_process_creation_time from boost::interprocess,
     // it is only implementeded for Windows.
-    m_time_instantiated = boost::chrono::system_clock::now();
+    m_time_instantiated = chrono::system_clock::now();
 }
 
 
@@ -220,61 +230,92 @@ Managed_process::~Managed_process()
 inline
 void Managed_process::init(int argc, char* argv[])
 {
-    // figure out what kind of process i am
-
-    using namespace boost::program_options;
-    using namespace boost::chrono;
-
     m_binary_name = argv[0];
-
     uint32_t self_index = 0;
-    options_description desc("Managed process options");
-    variables_map vm;
-    
-    try {
-        desc.add_options()
-            ("help", "[optional] produce help message and exit")
-            ("self_index",
-                value<decltype(self_index)>(&self_index),
-                "used by the coordinator process, when it invokes itself with a different entry index")
-            ("swarm_id",
-                value<decltype(m_swarm_id)>(&m_swarm_id),
-                "unique identifier of the swarm that is being joined")
-            ("own_id",
-                value<decltype(m_instance_id)>(&m_instance_id),
-                "the instance id of this process, that was assigned by the supervisor")
-            ("coordinator_id",
-                value<decltype(coord_id::s)>(&coord_id::s),
-                "the instance id of this coordinator that this process should refer to")
-            ;
 
-        store(parse_command_line(argc, argv, desc), vm);
-        notify(vm);
+    int help_arg = 0;
+    string self_index_arg;
+    string swarm_id_arg;
+    string own_id_arg;
+    string coordinator_id_arg;
+
+    try {
+        while (true) {
+            static struct ::option long_options[] = {
+                {"help",            no_argument,        &help_arg,  'h' },
+                {"self_index",      required_argument,  0,          'a' },
+                {"swarm_id",        required_argument,  0,          'b' },
+                {"own_id",          required_argument,  0,          'c' },
+                {"coordinator_id",  required_argument,  0,          'd' },
+                {0, 0, 0, 0}
+            };
+
+            int option_index = 0;
+            int c = getopt_long(argc, argv, "ha:b:c:d:", long_options, &option_index);
+
+            if (c == -1)
+                break;
+
+            switch (c) {
+                case 'h':
+                    if (long_options[option_index].flag != 0)
+                        throw -1;
+                    break;
+                case 'a':
+                    self_index_arg      = optarg;
+                    self_index          = boost::lexical_cast<decltype(self_index   )>(optarg);
+                    break;
+                case 'b':
+                    swarm_id_arg        = optarg;
+                    m_swarm_id          = boost::lexical_cast<decltype(m_swarm_id   )>(optarg);
+                    break;
+                case 'c':
+                    own_id_arg          = optarg;
+                    m_instance_id       = boost::lexical_cast<decltype(m_instance_id)>(optarg);
+                    break;
+                case 'd':
+                    coordinator_id_arg  = optarg;
+                    coord_id::s         = boost::lexical_cast<decltype(coord_id::s  )>(optarg);
+                    break;
+                case '?':
+                    /* getopt_long already printed an error message. */
+                    break;
+                default :
+                    throw -1;
+            }
+        }
     }
     catch(...) {
-        cout << desc << "\n";
-        exit(1);
-    }
-
-    if (vm.count("help")) {
-        cout << desc << "\n";
+        cout << R"(
+Managed process options:
+  --help                (optional) produce help message and exit
+  --self_index arg      used by the coordinator process, when it invokes itself
+                        with a different entry index
+  --swarm_id arg        unique identifier of the swarm that is being joined
+  --own_id arg          the instance id of this process, that was assigned by
+                        the supervisor
+  --coordinator_id arg  the instance id of this coordinator that this process
+                        should refer to
+)";
         exit(1);
     }
 
 
     bool coordinator_is_local = false;
-
-    if (vm.count("swarm_id") == 0) {
+    if (swarm_id_arg.empty()) {
         mproc_id::s = m_instance_id = make_process_instance_id(1);
 
-        m_swarm_id = duration_cast<nanoseconds>(m_time_instantiated.time_since_epoch()).count();
+        m_swarm_id = 
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                m_time_instantiated.time_since_epoch()
+            ).count();
         m_directory = obtain_swarm_directory();
         coordinator_is_local = true;
 
         // NOTE: leave m_self_index uninitialised. The supervisor does not have an entry
     }
     else {
-        if (vm.count("self_index") && vm.count("coordinator_id") && vm.count("own_id")) {
+        if (!self_index_arg.empty() && !coordinator_id_arg.empty() && !own_id_arg.empty()) {
             assert((self_index >= 0) && (self_index < max_process_instance_id - 1));
             m_self_index = self_index;
             assert(m_instance_id != 0);
@@ -430,7 +471,7 @@ void Managed_process::start(int(*entry_function)())
 inline
 void Managed_process::stop()
 {
-    boost::mutex::scoped_lock start_stop_lock(m_start_stop_mutex);
+    lock_guard<mutex> start_stop_lock(m_start_stop_mutex);
 
     // stop() might be call either by start() when the entry function finishes execution,
     // or explicitly from one of the handlers, or the entry function itself.
@@ -479,7 +520,7 @@ void Managed_process::stop()
 inline
 bool Managed_process::wait_for_stop()
 {
-    boost::mutex::scoped_lock start_stop_lock(m_start_stop_mutex);
+    unique_lock<mutex> start_stop_lock(m_start_stop_mutex);
     bool running_state_at_entry = m_running;
     while (m_running) {
         m_start_stop_condition.wait(start_stop_lock);
@@ -508,9 +549,8 @@ void Managed_process::deferred_call(double delay, void(T::*v)())
 inline
 void Managed_process::deferred_call(double delay, function<void()> fn)
 {
-    using namespace boost::chrono;
-    boost::unique_lock<boost::mutex> deferred_queue_lock(m_deferred_mutex);
-    auto when = steady_clock::now() + duration<double>(delay);
+    unique_lock<mutex> deferred_queue_lock(m_deferred_mutex);
+    auto when = chrono::steady_clock::now() + chrono::duration<double>(delay);
     auto it = m_deferred_insertion_queue.insert(make_pair(when, fn)).first;
     if (it == m_deferred_insertion_queue.begin()) {
         m_next_deferred_insertion_is_sooner.notify_all();
@@ -543,7 +583,7 @@ void Managed_process::work_loop()
     m_work_thread_running.store(true);
 
     while (!m_must_stop.load()) {
-        boost::unique_lock<boost::mutex> work_items_lock(m_work_items_mutex);
+        unique_lock<mutex> work_items_lock(m_work_items_mutex);
         // wait until there is some work to do
         if (m_work_items.empty()) {
             m_work_items_dirty_condition.wait(work_items_lock);
@@ -566,14 +606,12 @@ void Managed_process::work_loop()
 inline
 void Managed_process::deferred_insertion_loop()
 {
-    using namespace boost::chrono;
-
     install_signal_handler();
     m_deferred_insertion_thread_running.store(true);
     insertion_time_type time_of_next_insertion =
-        steady_clock::now() + duration<double>(1000);
+        chrono::steady_clock::now() + chrono::duration<double>(1000);
 
-    boost::unique_lock<boost::mutex> deferred_queue_lock(m_deferred_mutex);
+    unique_lock<mutex> deferred_queue_lock(m_deferred_mutex);
 
     if (m_deferred_insertion_queue.empty()) {
         m_next_deferred_insertion_is_sooner.wait_until(deferred_queue_lock, time_of_next_insertion);
@@ -586,15 +624,15 @@ void Managed_process::deferred_insertion_loop()
         do {
             if (m_deferred_insertion_queue.empty()) {
                 time_of_next_insertion =
-                    steady_clock::now() + duration<double>(1000);
+                    chrono::steady_clock::now() + chrono::duration<double>(1000);
                 break;
             }
             auto element_insertion_time = m_deferred_insertion_queue.begin()->first;
-            if (steady_clock::now() < element_insertion_time) {
+            if (chrono::steady_clock::now() < element_insertion_time) {
                 time_of_next_insertion = element_insertion_time;
                 break;
             }
-            boost::unique_lock<boost::mutex> work_items_lock(m_work_items_mutex);
+            unique_lock<mutex> work_items_lock(m_work_items_mutex);
             m_work_items.push_back(m_deferred_insertion_queue.begin()->second);
             m_work_items_dirty_condition.notify_all();
             work_items_lock.unlock();
@@ -613,7 +651,7 @@ void Managed_process::deferred_insertion_loop()
 inline
 string Managed_process::obtain_swarm_directory()
 {
-    string sintra_directory = boost::filesystem::temp_directory_path().string() + "/sintra/";
+    string sintra_directory = fs::temp_directory_path().string() + "/sintra/";
     if (!check_or_create_directory(sintra_directory)) {
         throw runtime_error("access to a working directory failed");
     }

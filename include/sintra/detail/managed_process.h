@@ -36,8 +36,11 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "transceiver.h"
 #include "process_message_reader.h"
 
-#include <csignal>
 #include <cassert>
+#include <chrono>
+#include <csignal>
+#include <condition_variable>
+#include <mutex>
 #include <list>
 #include <type_traits>
 #include <map>
@@ -50,12 +53,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <deque>
 #include <stdexcept>
 
-#include <boost/chrono.hpp>
 #include <boost/atomic.hpp>
-#include <boost/thread/mutex.hpp>
-#include <boost/thread/condition_variable.hpp>
-#include <boost/program_options.hpp>
-#include <boost/chrono.hpp>
 
 
 #include <boost/interprocess/detail/os_thread_functions.hpp>
@@ -72,9 +70,11 @@ using std::deque;
 using std::function;
 using std::list;
 using std::map;
+using std::mutex;
 using std::string;
 using std::thread;
 using std::vector;
+using std::condition_variable;
 
 
 
@@ -150,7 +150,7 @@ struct Process_group
         return tid;
     }
 
-    static boost::mutex m_barrier_mutex;
+    static mutex m_barrier_mutex;
     static void barrier();
     static void enroll();
 };
@@ -158,7 +158,7 @@ struct Process_group
 
 
 template <typename T, type_id_type ID>
-boost::mutex Process_group<T, ID>::m_barrier_mutex;
+mutex Process_group<T, ID>::m_barrier_mutex;
 
 
 // default process groups
@@ -188,8 +188,8 @@ struct Work_loop
 {
     thread                              m_thread;
     atomic<bool>                        m_running;
-    boost::condition_variable           m_dirt;
-    boost::mutex                        m_mutex;
+    condition_variable                  m_dirt;
+    mutex                               m_mutex;
 };
 
 
@@ -228,8 +228,8 @@ struct Managed_process: Transceiver
 
     // START/STOP
     bool                                m_running;
-    boost::mutex                        m_start_stop_mutex;
-    boost::condition_variable           m_start_stop_condition;
+    mutex                               m_start_stop_mutex;
+    condition_variable                  m_start_stop_condition;
 
 
     template<typename T>
@@ -258,7 +258,7 @@ struct Managed_process: Transceiver
                                         m_pid;
 
     atomic<bool>                        m_must_stop;
-    boost::condition_variable           m_termination_condition;
+    condition_variable                  m_termination_condition;
 
     thread                              m_message_reading_thread;
     atomic<bool>                        m_message_reading_thread_running;
@@ -267,19 +267,19 @@ struct Managed_process: Transceiver
     thread                              m_work_thread;
     atomic<bool>                        m_work_thread_running;
     list<function<void()> >             m_work_items;
-    boost::condition_variable           m_work_items_dirty_condition;
-    boost::mutex                        m_work_items_mutex; 
+    condition_variable                  m_work_items_dirty_condition;
+    mutex                               m_work_items_mutex; 
 
     thread                              m_deferred_insertion_thread;
     atomic<bool>                        m_deferred_insertion_thread_running;
 
-    typedef boost::chrono::time_point<boost::chrono::steady_clock, boost::chrono::duration<double> >
+    typedef std::chrono::time_point<std::chrono::steady_clock, std::chrono::duration<double> >
         insertion_time_type;
 
     map<insertion_time_type, function<void()> >
                                         m_deferred_insertion_queue;
-    boost::condition_variable           m_next_deferred_insertion_is_sooner;
-    boost::mutex                        m_deferred_mutex;
+    condition_variable                  m_next_deferred_insertion_is_sooner;
+    mutex                               m_deferred_mutex;
 
 
     bool                                m_branched = false;
@@ -315,7 +315,7 @@ struct Managed_process: Transceiver
     uint64_t                            m_messages_rejected_since_reference_time;
     sequence_counter_type               m_total_sequences_missed;
 
-    boost::chrono::time_point<boost::chrono::system_clock>
+    std::chrono::time_point<std::chrono::system_clock>
                                         m_time_instantiated;
 
     deque<Process_message_reader>       m_readers;
