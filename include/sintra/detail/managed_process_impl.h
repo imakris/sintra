@@ -36,7 +36,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <boost/lexical_cast.hpp>
 
 #ifdef _WIN32
-    #include "detail/third_party/getopt.h"
+    #include "third_party/getopt.h"
 #else
     #include <getopt.h>
 #endif
