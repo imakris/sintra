@@ -26,7 +26,12 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #ifndef __SINTRA_PROCESS_MESSAGE_READER_IMPL_H__
 #define __SINTRA_PROCESS_MESSAGE_READER_IMPL_H__
 
+
+#include "transceiver_impl.h"
+
+
 namespace sintra {
+
 
 using std::thread;
 

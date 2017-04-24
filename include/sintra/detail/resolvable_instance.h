@@ -26,11 +26,12 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #ifndef __SINTRA_RESOLVABLE_INSTANCE_H__
 #define __SINTRA_RESOLVABLE_INSTANCE_H__
 
+
 #include "message.h"
 
 
-namespace sintra
-{
+namespace sintra {
+
 
 using std::string;
 

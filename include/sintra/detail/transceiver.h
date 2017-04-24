@@ -27,19 +27,20 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define __SINTRA_TRANSCEIVER__
 
 
-#include "spinlocked_map.h"
 #include "globals.h"
-#include "message.h"
 #include "id_types.h"
+#include "message.h"
+#include "spinlocked_map.h"
 
+#include <list>
+#include <mutex>
 #include <unordered_map>
 
-#include <boost/type_traits.hpp>
-#include <boost/thread/mutex.hpp>
 #include <boost/bind.hpp>
+#include <boost/type_traits.hpp>
 
-namespace sintra
-{
+
+namespace sintra {
 
 
 using std::function;
@@ -48,6 +49,7 @@ using std::is_const;
 using std::is_reference;
 using std::list;
 using std::multimap;
+using std::mutex;
 using std::remove_reference;
 using std::string;
 using std::unordered_map;
@@ -114,7 +116,7 @@ public:
     // different process
 
 
-    boost::mutex m_handlers_mutex;
+    mutex m_handlers_mutex;
 
     using handler_self_registry_mid_record_type =
         list <
@@ -457,7 +459,7 @@ private:
     // Those message handlers identify with particular function message invocations, and their
     // lifetime ends with the end of the call.
     // They are assigned in pairs, to handle successful and failed calls.
-    boost::mutex m_return_handlers_mutex;
+    mutex m_return_handlers_mutex;
     spinlocked_map<instance_id_type, Return_handler> m_active_return_handlers;
 
 
@@ -475,7 +477,7 @@ private:
 };
 
 
-}
+} // sintra
 
 
 #endif

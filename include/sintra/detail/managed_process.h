@@ -26,36 +26,34 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #ifndef __SINTRA_MANAGED_PROCESS_H__
 #define __SINTRA_MANAGED_PROCESS_H__
 
-#include "message.h"
-#include "ipc_rings.h"
 #include "config.h"
-#include "resolve_type.h"
-#include "utility/call_function_with_fusion_vector_args.h"
-#include "spinlocked_map.h"
 #include "globals.h"
-#include "transceiver.h"
+#include "ipc_rings.h"
+#include "message.h"
 #include "process_message_reader.h"
+#include "resolve_type.h"
+#include "spinlocked_map.h"
+#include "transceiver.h"
+#include "utility/call_function_with_fusion_vector_args.h"
 
+#include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <chrono>
-#include <csignal>
 #include <condition_variable>
-#include <mutex>
-#include <list>
-#include <type_traits>
-#include <map>
-#include <algorithm>
-#include <float.h>
-#include <omp.h>
-#include <string>
-#include <atomic>
-#include <thread>
+#include <csignal>
 #include <deque>
+#include <float.h>
+#include <list>
+#include <map>
+#include <mutex>
+#include <omp.h>
 #include <stdexcept>
+#include <string>
+#include <thread>
+#include <type_traits>
 
 #include <boost/atomic.hpp>
-
-
 #include <boost/interprocess/detail/os_thread_functions.hpp>
 
 
@@ -66,6 +64,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 namespace sintra {
 
 
+using std::condition_variable;
 using std::deque;
 using std::function;
 using std::list;
@@ -74,7 +73,6 @@ using std::mutex;
 using std::string;
 using std::thread;
 using std::vector;
-using std::condition_variable;
 
 
 
@@ -254,8 +252,7 @@ struct Managed_process: Transceiver
 
     string                              m_binary_name;
 
-    boost::interprocess::ipcdetail::OS_process_id_t 
-                                        m_pid;
+    ipc::ipcdetail::OS_process_id_t     m_pid;
 
     atomic<bool>                        m_must_stop;
     condition_variable                  m_termination_condition;

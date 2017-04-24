@@ -41,8 +41,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
     using name = name##_struct<void>;
 
 
-namespace sintra
-{
+namespace sintra {
+
 
 using type_id_type        = uint64_t;
 using instance_id_type    = uint64_t;

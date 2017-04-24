@@ -27,12 +27,13 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define __SINTRA_SPINLOCKED_MAP__
 
 
+#include <atomic>
 #include <unordered_map>
 #include <unordered_set>
-#include <atomic>
 
-namespace sintra
-{
+
+namespace sintra {
+
 
 using std::atomic_flag;
 using std::memory_order_acquire;
@@ -123,6 +124,7 @@ private:
     unordered_set<T> m_set;
     mutable spinlock m_sl;
 };
+
 
 } // namespace sintra
 

@@ -31,28 +31,18 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <string>
 #include <unordered_set>
 
-/*
-#include <windows.h>
-#include <psapi.h>
-#include <tlhelp32.h>
-*/
 
 #ifdef _WIN32
     #include <process.h>
 #else
     #include <cstring>
     #include <fcntl.h>
-    #include <unistd.h>
     #include <sys/wait.h>
+    #include <unistd.h>
 #endif
 
 
-
-
-
-namespace sintra
-{
-
+namespace sintra {
 
 
 inline

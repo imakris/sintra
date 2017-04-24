@@ -27,17 +27,19 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define __SINTRA_COORDINATOR_H__
 
 
-#include "transceiver.h"
-#include "resolve_type.h"
 #include "resolvable_instance.h"
+#include "resolve_type.h"
+#include "transceiver.h"
 
-#include <boost/thread/condition_variable.hpp>
+#include <mutex>
+#include <condition_variable>
 
 
-namespace sintra
-{
+namespace sintra {
 
 
+using std::condition_variable;
+using std::mutex;
 using std::string;
 using std::unordered_set;
 
@@ -64,22 +66,22 @@ private:
 
     struct Barrier
     {
-        boost::mutex m;
-        boost::condition_variable cv;
+        mutex m;
+        condition_variable cv;
         uint32_t processes_reached = 0;
     };
 
     spinlocked_map<type_id_type, Barrier >      m_barriers;
-    boost::mutex                                m_barrier_mutex;
+    mutex                                       m_barrier_mutex;
 
     spinlocked_map<
         instance_id_type,
         unordered_set< instance_id_type >
     >                                           m_published;
-    boost::mutex                                m_publish_mutex;
+    mutex                                       m_publish_mutex;
 
-    boost::mutex                                m_all_other_processes_done_mutex;
-    boost::condition_variable                   m_all_other_processes_done_condition;
+    mutex                                       m_all_other_processes_done_mutex;
+    condition_variable                          m_all_other_processes_done_condition;
 
     spinlocked_map<instance_id_type, string>    m_name_of_instance_id;
 

@@ -27,8 +27,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define __SINTRA_MESSAGE_IMPL_H__
 
 
-namespace sintra
-{
+namespace sintra {
+
 
 using std::copy;
 

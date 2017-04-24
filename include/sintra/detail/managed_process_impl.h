@@ -28,28 +28,33 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
 #include "utility.h"
-#include <getopt/getopt.h>
+
 #include <chrono>
 #include <mutex>
 #include <experimental/filesystem>
 
 #include <boost/lexical_cast.hpp>
 
+#ifdef _WIN32
+    #include <getopt/getopt.h>
+#else
+    #include <getopt.h>
+#endif
 
-namespace sintra
-{
+
+namespace sintra {
 
 
 using std::cout;
 using std::function;
 using std::is_base_of;
+using std::lock_guard;
 using std::runtime_error;
 using std::string;
 using std::stringstream;
 using std::to_string;
-using std::vector;
 using std::unique_lock;
-using std::lock_guard;
+using std::vector;
 namespace fs = std::experimental::filesystem;
 namespace chrono = std::chrono;
 
@@ -59,12 +64,10 @@ static void s_signal_handler(int sig)
 {
     mproc::s->send<Transceiver::instance_invalidated, any_remote>(mproc_id::s);
 
-
     if (coord::s) {
         // should we do something special here?
         // kill every other process?
     }
-
 }
 
 
@@ -174,7 +177,7 @@ Managed_process::Managed_process():
     assert(mproc::s == nullptr);
     mproc::s = this;
 
-    m_pid = boost::interprocess::ipcdetail::get_current_process_id();
+    m_pid = ipc::ipcdetail::get_current_process_id();
 
     install_signal_handler();
 
