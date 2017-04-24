@@ -30,15 +30,16 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "config.h"
 #include "globals.h"
 
-#include <cstdint>
-#include <cassert>
 #include <atomic>
+#include <cassert>
+#include <cstdint>
 
 
-namespace sintra
-{
+namespace sintra {
+
 
 using std::atomic;
+
 
 constexpr type_id_type        invalid_type_id       =  0;
 constexpr type_id_type        not_defined_type_id   = ~0;

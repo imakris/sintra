@@ -26,15 +26,15 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #ifndef __SINTRA_MESSAGE_H__
 #define __SINTRA_MESSAGE_H__
 
-#include "utility.h"
-#include "ipc_rings.h"
 #include "id_types.h"
+#include "ipc_rings.h"
+#include "utility.h"
 
 #include <cstdint>
 #include <type_traits>
 
-#include <boost/type_index.hpp>
 #include <boost/fusion/container/vector.hpp>
+#include <boost/type_index.hpp>
 
 
 

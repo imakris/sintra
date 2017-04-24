@@ -28,11 +28,13 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
 #include <type_traits>
+
 #include <boost/fusion/sequence/intrinsic/at_c.hpp>
 #include <boost/fusion/include/vector.hpp>
 
 
 namespace sintra {
+
     
 using std::enable_if_t;
 using boost::fusion::at_c;

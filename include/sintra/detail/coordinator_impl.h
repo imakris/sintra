@@ -26,15 +26,20 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #ifndef __SINTRA_COORDINATOR_IMPL_H__
 #define __SINTRA_COORDINATOR_IMPL_H__
 
+
+#include <mutex>
+
 #include "managed_process.h"
 
 
+namespace sintra {
 
-namespace sintra
-{
 
 using std::cout;
+using std::lock_guard;
+using std::mutex;
 using std::string;
+using std::unique_lock;
 
 
 inline
@@ -89,7 +94,7 @@ instance_id_type Coordinator::resolve_instance(const string& name)
 inline
 bool Coordinator::publish_transceiver(instance_id_type instance_id, const string& name)
 {
-    boost::mutex::scoped_lock lock(m_publish_mutex);
+    lock_guard<mutex> lock(m_publish_mutex);
 
     // if the name is already assigned...
     if (!name.empty() && resolve_instance(name) != invalid_instance_id) {
@@ -117,7 +122,7 @@ bool Coordinator::publish_transceiver(instance_id_type instance_id, const string
 inline
 bool Coordinator::unpublish_transceiver(instance_id_type instance_id)
 {
-    boost::mutex::scoped_lock lock(m_publish_mutex);
+    lock_guard<mutex> lock(m_publish_mutex);
 
     auto it = m_name_of_instance_id.find(instance_id);
     if (it != m_name_of_instance_id.end()) {
@@ -129,7 +134,7 @@ bool Coordinator::unpublish_transceiver(instance_id_type instance_id)
         Message_prefix* m = tl_current_message::s;
         instance_id_type process_id = m ? m->sender_instance_id : mproc::s->m_instance_id;
 
-        boost::mutex::scoped_lock lock(m_all_other_processes_done_mutex);
+        lock_guard<mutex> lock(m_all_other_processes_done_mutex);
 
         auto removed_process = process_of(instance_id);
 
@@ -184,7 +189,7 @@ bool Coordinator::barrier(type_id_type process_group_id)
     m_barrier_mutex.lock();
 
     auto &b = m_barriers[process_group_id];
-    boost::mutex::scoped_lock lock(b.m);
+    unique_lock<mutex> lock(b.m);
 
     m_barrier_mutex.unlock();
 
@@ -244,7 +249,7 @@ void Coordinator::wait_until_all_other_processes_are_done()
 {
     // if the coordinator lives in this process, we have to postpone destruction until
     // every other process is finished.
-    boost::mutex::scoped_lock lock(m_all_other_processes_done_mutex);
+    unique_lock<mutex> lock(m_all_other_processes_done_mutex);
     while (m_processes_of_group[All_processes::id()].size() != 1) {
         m_all_other_processes_done_condition.wait(lock);
     }

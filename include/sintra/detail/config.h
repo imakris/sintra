@@ -27,8 +27,9 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define __SINTRA_CONFIG_H__
 
 
-namespace sintra
-{
+namespace sintra {
+
+
     // This can be increased if necessary. Note however that the upper bits of the instance id of
     // any transceiver hold the id of the process it is instantiated in. The number of those
     // upper bits allocated for that purpose is the number of bits needed to represent

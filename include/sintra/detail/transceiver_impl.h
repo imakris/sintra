@@ -27,8 +27,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define __SINTRA_TRANSCEIVER_IMPL_H__
 
 
-namespace sintra
-{
+namespace sintra {
+
 
 using std::enable_if;
 using std::function;
@@ -119,7 +119,7 @@ void Transceiver::destroy()
 inline
 void Transceiver::instance_invalidated_handler(const instance_invalidated& msg)
 {
-    boost::mutex::scoped_lock sl(m_return_handlers_mutex);
+    lock_guard<mutex> sl(m_return_handlers_mutex);
 
     auto it = m_active_return_handlers.begin();
     while (it != m_active_return_handlers.end()) {
@@ -140,7 +140,7 @@ Transceiver::handler_provoker_desrcriptor
 Transceiver::activate_impl(HT&& handler, instance_id_type sender_id)
 {
     auto message_type_id = MESSAGE_TYPE::id();
-    boost::mutex::scoped_lock sl(m_handlers_mutex);
+    lock_guard<mutex> sl(m_handlers_mutex);
 
     auto f = (function<void(const Message_prefix&)>&) handler;
     auto mid_proc_iterator = mproc::s->m_active_handlers[message_type_id].emplace(
@@ -418,23 +418,23 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
     using return_type = typename MESSAGE_TYPE::return_type;
     using return_message_type = Message<Enclosure<return_type>, void, not_defined_type_id>;
 
-    boost::mutex                keep_waiting_mutex;
-    boost::condition_variable   keep_waiting_condition;
-    bool                        keep_waiting = true;
-    bool                        success = false;
+    mutex               keep_waiting_mutex;
+    condition_variable  keep_waiting_condition;
+    bool                keep_waiting = true;
+    bool                success = false;
 
     Unserialized_Enclosure<return_type> rm_body;
     Return_handler rh;
     rh.success_handler = [&] (const Message_prefix& msg) {
         const auto& returned_message = (const return_message_type&)(msg);
-        boost::mutex::scoped_lock sl(keep_waiting_mutex);
+        lock_guard<mutex> sl(keep_waiting_mutex);
         rm_body = returned_message;
         success = true;
         keep_waiting = false;
         keep_waiting_condition.notify_all();
     };
     rh.failure_handler = [&] () {
-        boost::mutex::scoped_lock sl(keep_waiting_mutex);
+        lock_guard<mutex> sl(keep_waiting_mutex);
         success = false;
         keep_waiting = false;
         keep_waiting_condition.notify_all();
@@ -445,7 +445,7 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
     auto function_instance_id = mproc::s->activate_return_handler(rh);
 
     // block until reading thread either receives results or the call fails
-    boost::mutex::scoped_lock sl(keep_waiting_mutex);
+    unique_lock<mutex> sl(keep_waiting_mutex);
 
     // write the message for the rpc call into the communication ring
     static auto once = MESSAGE_TYPE::id();
@@ -488,7 +488,7 @@ instance_id_type
 Transceiver::activate_return_handler(const Return_handler &rh)
 {
     instance_id_type message_instance_id = make_instance_id();
-    boost::mutex::scoped_lock sl(m_return_handlers_mutex);
+    lock_guard<mutex> sl(m_return_handlers_mutex);
     m_active_return_handlers[message_instance_id] = rh;
     return message_instance_id;
 }
@@ -499,7 +499,7 @@ inline
 void
 Transceiver::deactivate_return_handler(instance_id_type message_instance_id)
 {
-    boost::mutex::scoped_lock sl(m_return_handlers_mutex);
+    lock_guard<mutex> sl(m_return_handlers_mutex);
     m_active_return_handlers.erase(message_instance_id);
 }
 

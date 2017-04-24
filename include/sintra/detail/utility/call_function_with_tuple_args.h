@@ -27,16 +27,17 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define __SINTRA_CALL_FUNCTION_WITH_TUPLE_ARGS_H__
 
 
-#include <type_traits>
 #include <tuple>
+#include <type_traits>
 
 
 namespace sintra {
 
+
 using std::enable_if_t;
+using std::get;
 using std::tuple;
 using std::tuple_size;
-using std::get;
 
 
  //////////////////////////////////////////////////////////////////////////

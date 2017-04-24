@@ -28,22 +28,23 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "config.h"
 
-#include <string>
 #include <atomic>
-#include <iomanip>
 #include <cstdint>
+#include <iomanip>
+#include <string>
 #include <thread>
 #include <experimental/filesystem>
 
-#include <boost/interprocess/sync/scoped_lock.hpp>
-#include <boost/interprocess/sync/interprocess_condition.hpp>
-#include <boost/interprocess/mapped_region.hpp>
-#include <boost/interprocess/file_mapping.hpp>
-#include <boost/interprocess/detail/os_file_functions.hpp>
-
 #include <omp.h>
 
+#include <boost/interprocess/detail/os_file_functions.hpp>
+#include <boost/interprocess/file_mapping.hpp>
+#include <boost/interprocess/mapped_region.hpp>
+#include <boost/interprocess/sync/interprocess_condition.hpp>
+#include <boost/interprocess/sync/scoped_lock.hpp>
+
 #undef max
+
 
 namespace sintra {
 
@@ -53,7 +54,8 @@ using std::error_code;
 using std::string;
 using std::stringstream;
 using std::thread;
-namespace fs = std::experimental::filesystem;
+namespace fs  = std::experimental::filesystem;
+namespace ipc = boost::interprocess;
 
 
 /*
@@ -149,19 +151,19 @@ struct Ring
         // If my understanding is correct, and the implementation is also correct, the use of
         // atomics should be fine for that purpose. [see N3337 29.4]
 
-        atomic<size_t>                              num_attached;
-        atomic<size_t>                              read_access[2];
+        atomic<size_t>                  num_attached;
+        atomic<size_t>                  read_access[2];
 
         //the index of the nth element written to the ringbuffer.
-        atomic<sequence_counter_type>               leading_sequence;
+        atomic<sequence_counter_type>   leading_sequence;
 
         // Used to avoid accidentaly having multiple writers on the same ring
-        boost::interprocess::interprocess_mutex     ownership_mutex;
+        ipc::interprocess_mutex         ownership_mutex;
 
 
-        boost::interprocess::interprocess_mutex     condition_mutex;
-        atomic<bool>                                crossed_checkpoint;
-        boost::interprocess::interprocess_condition dirty_condition;
+        ipc::interprocess_mutex         condition_mutex;
+        atomic<bool>                    crossed_checkpoint;
+        ipc::interprocess_condition     dirty_condition;
 
         Control():
             num_attached(0),
@@ -185,25 +187,25 @@ struct Ring
     const uint64_t      m_id;
 
 protected:
-    using region_ptr_type = boost::interprocess::mapped_region*;
+    using region_ptr_type = ipc::mapped_region*;
 
-    region_ptr_type     m_data_region_0     = nullptr;
-    region_ptr_type     m_data_region_1     = nullptr;
-    region_ptr_type     m_control_region    = nullptr;
+    bool create();
+    bool destroy();
+    bool attach();
+    bool detach();
 
-    T*                  m_data              = nullptr;
-    Control*            m_control           = nullptr;
+    region_ptr_type                     m_data_region_0     = nullptr;
+    region_ptr_type                     m_data_region_1     = nullptr;
+    region_ptr_type                     m_control_region    = nullptr;
 
-    bool                create();
-    bool                destroy();
-    bool                attach();
-    bool                detach();
+    T*                                  m_data              = nullptr;
+    Control*                            m_control           = nullptr;
 
-    string              m_directory;
-    string              m_data_filename;
-    string              m_control_filename;
+    string                              m_directory;
+    string                              m_data_filename;
+    string                              m_control_filename;
 
-    const uint32_t      m_semiring_shift    = floor_log2(NUM_ELEMENTS) - 1;
+    const uint32_t                      m_semiring_shift    = floor_log2(NUM_ELEMENTS) - 1;
 
     friend struct Managed_process;
 };
@@ -262,18 +264,17 @@ template <int NUM_ELEMENTS, typename T>
 bool Ring<NUM_ELEMENTS, T>::create()
 {
     try {
-        using namespace boost::interprocess;
-        using namespace boost::interprocess::ipcdetail;
-
         if (!check_or_create_directory(m_directory))
             return false;
 
-        file_handle_t fh_data    = create_new_file(m_data_filename.c_str(),    read_write);
-        if (fh_data == invalid_file())
+        ipc::file_handle_t fh_data =
+            ipc::ipcdetail::create_new_file(m_data_filename.c_str(),    ipc::read_write);
+        if (fh_data == ipc::ipcdetail::invalid_file())
             return false;
 
-        file_handle_t fh_control = create_new_file(m_control_filename.c_str(), read_write);
-        if (fh_control == invalid_file())
+        ipc::file_handle_t fh_control =
+            ipc::ipcdetail::create_new_file(m_control_filename.c_str(), ipc::read_write);
+        if (fh_control == ipc::ipcdetail::invalid_file())
             return false;
 
 #ifdef NDEBUG
@@ -291,16 +292,16 @@ bool Ring<NUM_ELEMENTS, T>::create()
         for (size_t i=0; i<sizeof(Control);  i++)
             u_control[i] = ustring[i%dv];
 
-        write_file(fh_data,  u_data, data_region_size);
-        write_file(fh_control, u_control,sizeof(Control));
+        ipc::ipcdetail::write_file(fh_data,  u_data, data_region_size);
+        ipc::ipcdetail::write_file(fh_control, u_control,sizeof(Control));
 
         delete [] u_data;
         delete [] u_control;
 #endif
 
         bool success = false;
-        success |= close_file(fh_data);
-        success |= close_file(fh_control);
+        success |= ipc::ipcdetail::close_file(fh_data);
+        success |= ipc::ipcdetail::close_file(fh_control);
 
         return success;
     }
@@ -314,8 +315,6 @@ template <int NUM_ELEMENTS, typename T>
 bool Ring<NUM_ELEMENTS, T>::destroy()
 {
     try {
-        using namespace boost::interprocess::ipcdetail;
-
         fs::path pr(m_data_filename);
         fs::path pc(m_control_filename);
         return remove(pr) && remove(pc);
@@ -336,15 +335,13 @@ bool Ring<NUM_ELEMENTS, T>::attach()
         m_data           == nullptr);
 
     try {
-        using namespace boost::interprocess;
-
         if (fs::file_size(m_data_filename)      != data_region_size ||
             fs::file_size(m_control_filename)   != sizeof(Control))
         {
             return false;
         }
 
-        size_t page_size = mapped_region::get_page_size();
+        size_t page_size = ipc::mapped_region::get_page_size();
         assert(data_region_size % page_size == 0);
 
         // WARNING: This might eventually require system specific implementations.
@@ -352,10 +349,9 @@ bool Ring<NUM_ELEMENTS, T>::attach()
         void *mem = malloc(data_region_size * 2 + page_size);
         char *ptr = (char*)(ptrdiff_t((char *)mem + page_size) & ~(page_size - 1));
 
-        file_mapping file(m_data_filename.c_str(), read_write);
+        ipc::file_mapping file(m_data_filename.c_str(), ipc::read_write);
 
-
-        map_options_t map_extra_options = 0;
+        ipc::map_options_t map_extra_options = 0;
 
 #ifdef _WIN32
         free(mem); // here we make the assumption that that pages are put back into the free list.
@@ -370,10 +366,10 @@ bool Ring<NUM_ELEMENTS, T>::attach()
     #endif
 #endif
 
-        m_data_region_0 = new mapped_region(
-            file, read_write, 0, data_region_size, ptr, map_extra_options);
-        m_data_region_1 = new mapped_region(
-            file, read_write, 0, 0,
+        m_data_region_0 = new ipc::mapped_region(
+            file, ipc::read_write, 0, data_region_size, ptr, map_extra_options);
+        m_data_region_1 = new ipc::mapped_region(
+            file, ipc::read_write, 0, 0,
             ((char*)m_data_region_0->get_address()) + data_region_size, map_extra_options);
         m_data = (T*)m_data_region_0->get_address();
 
@@ -382,8 +378,8 @@ bool Ring<NUM_ELEMENTS, T>::attach()
         assert(m_data_region_0->get_size() == data_region_size);
         assert(m_data_region_1->get_size() == data_region_size);
 
-        file_mapping fm_control(m_control_filename.c_str(), read_write);
-        m_control_region = new mapped_region(fm_control, read_write, 0, 0);
+        ipc::file_mapping fm_control(m_control_filename.c_str(), ipc::read_write);
+        m_control_region = new ipc::mapped_region(fm_control, ipc::read_write, 0, 0);
         m_control = (Control*)m_control_region->get_address();
 
         return true;
@@ -453,7 +449,6 @@ struct Ring_R: Ring<NUM_ELEMENTS, T>
     // The caller must call done_reading() once it is done accessing the ring.
     T* start_reading(size_t* num_available_elements)
     {
-        using namespace boost::interprocess;
         double time_limit = 0.;
         size_t sc_limit = 1; // spin count limit - to avoid calling omp_get_wtime too often
 
@@ -475,16 +470,13 @@ struct Ring_R: Ring<NUM_ELEMENTS, T>
 
                     // if sufficient time has passed, go to sleep
 
-                    using boost::interprocess::scoped_lock;
-                    using boost::interprocess::interprocess_mutex;
-
                     // The thread may as well not go to sleep after that, but if this value is
                     // false, it guarantees that no thread is sleeping
                     this->m_control->crossed_checkpoint = true;
 
                     // the lock has to precede the if block, because in case it doen't, the
                     // notify may be lost.
-                    scoped_lock<interprocess_mutex> lock(this->m_control->condition_mutex);
+                    ipc::scoped_lock<ipc::interprocess_mutex> lock(this->m_control->condition_mutex);
 
                     if (m_reading_sequence == this->m_control->leading_sequence.load() &&
                         !m_unblocked)
@@ -534,9 +526,7 @@ struct Ring_R: Ring<NUM_ELEMENTS, T>
         // "just in case" the other thread is sleeping.
         // On the other hand, it's simple enough, for a call that should only go to the very end.
 
-        using boost::interprocess::scoped_lock;
-        using boost::interprocess::interprocess_mutex;
-        scoped_lock<interprocess_mutex> lock(this->m_control->condition_mutex);
+        ipc::scoped_lock<ipc::interprocess_mutex> lock(this->m_control->condition_mutex);
         m_unblocked = true;
         this->m_control->dirty_condition.notify_all();
     }
@@ -673,11 +663,9 @@ struct Ring_W: Ring<NUM_ELEMENTS, T>
         bool expected = true;
 
         if (this->m_control->crossed_checkpoint.compare_exchange_weak(expected, false)) {
-            using boost::interprocess::scoped_lock;
-            using boost::interprocess::interprocess_mutex;
             // acquires and releases the lock, only to make sure that a reader is not already inside
             // the critical section
-            scoped_lock<interprocess_mutex>(this->m_control->condition_mutex);
+            ipc::scoped_lock<ipc::interprocess_mutex>(this->m_control->condition_mutex);
             this->m_control->dirty_condition.notify_all();
         }
 

@@ -27,22 +27,19 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define __SINTRA_H__
 
 
-#include "detail/managed_process.h"
 #include "detail/coordinator.h"
-#include "detail/transceiver.h"
-
-#include "detail/globals.h"
-
-#include "detail/managed_process_impl.h"
 #include "detail/coordinator_impl.h"
-#include "detail/transceiver_impl.h"
+#include "detail/globals.h"
+#include "detail/managed_process.h"
+#include "detail/managed_process_impl.h"
+#include "detail/message_impl.h"
 #include "detail/process_message_reader_impl.h"
 #include "detail/resolvable_instance_impl.h"
-#include "detail/message_impl.h"
+#include "detail/transceiver.h"
+#include "detail/transceiver_impl.h"
 
 
-namespace sintra
-{
+namespace sintra {
 
 
 template <typename ...Args>

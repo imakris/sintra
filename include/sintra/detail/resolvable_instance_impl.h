@@ -26,15 +26,19 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #ifndef __SINTRA_RESOLVABLE_INSTANCE_IMPL_H__
 #define __SINTRA_RESOLVABLE_INSTANCE_IMPL_H__
 
+
 namespace sintra {
 
+
 using std::string;
+
 
 template<typename>
 void Resolvable_instance_id::from_string(const string& str)
 {
     value = Coordinator::rpc_resolve_instance(coord_id::s, str);
 }
+
 
 } // namespace sintra
 
