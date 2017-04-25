@@ -20,67 +20,67 @@ using namespace sintra;
 
 int process_1()
 {
-	// This barrier ensures that the slots receiving the messages have been activated.
-	barrier();
+    // This barrier ensures that the slots receiving the messages have been activated.
+    barrier();
 
-	// send some messages
-	world() << "good morning";
-	world() << 1;
-	world() << "good afternoon" << "good evening" << "good night";
-	world() << 2 << 3 << 4;
+    // send some messages
+    world() << "good morning";
+    world() << 1;
+    world() << "good afternoon" << "good evening" << "good night";
+    world() << 2 << 3 << 4;
 
-	return 0;
+    return 0;
 }
 
 
 int process_2()
 {
-	auto string_slot = [] (const string& str) {
-		cout << "Received string \"" << str << "\"\n";
+    auto string_slot = [] (const string& str) {
+        cout << "Received string \"" << str << "\"\n";
 
-		static int num_messages = 0;
-		if (++num_messages == 4) {
-			stop();
-		}
-	};
+        static int num_messages = 0;
+        if (++num_messages == 4) {
+            stop();
+        }
+    };
 
-	activate_slot(string_slot);
-	barrier();
+    activate_slot(string_slot);
+    barrier();
 
-	wait_for_stop();
+    wait_for_stop();
 
-	return 0;
+    return 0;
 }
 
 
 
 int process_3()
 {
-	auto int_slot = [&] (int number) {
-		cout << "Received number " << number << "\n";
+    auto int_slot = [&] (int number) {
+        cout << "Received number " << number << "\n";
 
-		static int num_messages = 0;
-		if (++num_messages == 2) { //it will not receive them all, just 2
-			stop();
-		}
-	};
+        static int num_messages = 0;
+        if (++num_messages == 2) { //it will not receive them all, just 2
+            stop();
+        }
+    };
 
-	activate_slot(int_slot);
-	barrier();
+    activate_slot(int_slot);
+    barrier();
 
-	wait_for_stop();
+    wait_for_stop();
 
-	return 0;
+    return 0;
 }
 
 
 int main(int argc, char* argv[])
-{	
-	start(argc, argv,
-		Process_descriptor(process_1)
-	,	Process_descriptor(process_2)
-	,	Process_descriptor(process_3)
-	);
+{    
+    start(argc, argv,
+        Process_descriptor(process_1)
+    ,   Process_descriptor(process_2)
+    ,   Process_descriptor(process_3)
+    );
 
-	return 0;
+    return 0;
 }

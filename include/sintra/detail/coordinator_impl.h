@@ -27,6 +27,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define __SINTRA_COORDINATOR_IMPL_H__
 
 
+#include <iostream>
 #include <mutex>
 
 #include "managed_process.h"

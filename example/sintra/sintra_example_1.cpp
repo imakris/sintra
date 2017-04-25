@@ -27,69 +27,69 @@ struct Pong {};
 
 int process_1()
 {
-	auto ping_slot = [] (Ping) {
-		//console() << "received ping, sending pong \n";
-		world() << Pong();
-	};
+    auto ping_slot = [] (Ping) {
+        //console() << "received ping, sending pong \n";
+        world() << Pong();
+    };
 
-	activate_slot(ping_slot);
-	barrier();
+    activate_slot(ping_slot);
+    barrier();
 
-	wait_for_stop();
-	return 0;
+    wait_for_stop();
+    return 0;
 }
 
 
 int process_2()
 {
-	auto pong_slot = [] (Pong) {
-		//console() << "received pong, sending ping \n";
-		world() << Ping();
-	};
+    auto pong_slot = [] (Pong) {
+        //console() << "received pong, sending ping \n";
+        world() << Ping();
+    };
 
-	activate_slot(pong_slot);
-	barrier();
+    activate_slot(pong_slot);
+    barrier();
 
-	// the spark
-	world() << Ping();
+    // the spark
+    world() << Ping();
 
-	wait_for_stop();
-	return 0;
+    wait_for_stop();
+    return 0;
 }
 
 
 int process_3()
 {
-	double ts = omp_get_wtime();
-	double next_ts = ts + 1.;
-	uint64_t counter = 0;
+    double ts = omp_get_wtime();
+    double next_ts = ts + 1.;
+    uint64_t counter = 0;
 
-	auto ping_slot = [&] (Ping) {
-		double ts = omp_get_wtime();
-		if (ts > next_ts) {
-			next_ts = ts + 1.;
-			console() << counter << " ping-pongs / second\n";
-			counter = 0;
-		}
-		counter++;
-	};
+    auto ping_slot = [&] (Ping) {
+        double ts = omp_get_wtime();
+        if (ts > next_ts) {
+            next_ts = ts + 1.;
+            console() << counter << " ping-pongs / second\n";
+            counter = 0;
+        }
+        counter++;
+    };
 
-	auto slot_id = activate_slot(ping_slot);
-	barrier();
+    auto slot_id = activate_slot(ping_slot);
+    barrier();
 
-	wait_for_stop();
-	return 0;
+    wait_for_stop();
+    return 0;
 }
 
 
 
 int main(int argc, char* argv[])
 {
-	start(argc, argv,
-		Process_descriptor(process_1)
-	,	Process_descriptor(process_2)
-	,	Process_descriptor(process_3)
-	);
+    start(argc, argv,
+        Process_descriptor(process_1)
+    ,   Process_descriptor(process_2)
+    ,   Process_descriptor(process_3)
+    );
 
-	return 0;
+    return 0;
 }
