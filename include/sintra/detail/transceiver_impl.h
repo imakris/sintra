@@ -64,7 +64,7 @@ Transceiver::Transceiver(const string& name/* = ""*/, uint64_t id/* = 0*/)
 inline
 Transceiver::~Transceiver()
 {
-	destroy();
+    destroy();
 }
 
 

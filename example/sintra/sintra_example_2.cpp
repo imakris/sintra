@@ -19,49 +19,49 @@ struct Remotely_accessible: Transceiver
 {
     TRANSCEIVER(Remotely_accessible)
 
-	string append(const string& s, int v)
-	{
-		return s + to_string(v);
-	}
+    string append(const string& s, int v)
+    {
+        return s + to_string(v);
+    }
 
-	EXPORT_RPC(append)
+    EXPORT_RPC(append)
 };
 
 
 
 int process_1()
 {
-	Remotely_accessible ra;
+    Remotely_accessible ra;
 
-	ra.assign_name("some name");
+    ra.assign_name("some name");
 
-	// ensure that the object has been named before trying to access it from another process
-	barrier();
+    // ensure that the object has been named before trying to access it from another process
+    barrier();
 
-	string test_string = ra.append("sydney_", 2000);
+    string test_string = ra.append("sydney_", 2000);
 
-	console() << test_string << "\n";
+    console() << test_string << "\n";
 
-	// ensure that ra still exists, since it in the stack of another process's thread.
-	barrier();
-	return 0;
+    // ensure that ra still exists, since it in the stack of another process's thread.
+    barrier();
+    return 0;
 }
 
 
 
 int process_2()
 {
-	// ensure that the object has been named before trying to access it with its name
-	barrier();
+    // ensure that the object has been named before trying to access it with its name
+    barrier();
 
-	string test_string = Remotely_accessible::rpc_append("some name", "beijing_", 2008);
-	
-	// ensure that "some object" still exists, since it in the stack of another processe's thread.
-	barrier();
+    string test_string = Remotely_accessible::rpc_append("some name", "beijing_", 2008);
+    
+    // ensure that "some object" still exists, since it in the stack of another processe's thread.
+    barrier();
 
-	console() << test_string << "\n";
+    console() << test_string << "\n";
 
-	return 0;
+    return 0;
 }
 
 
@@ -69,11 +69,11 @@ int process_2()
 
 int main(int argc, char* argv[])
 {
-	start(
-		argc, argv,
-		Process_descriptor(process_1)
-	,	Process_descriptor(process_2)
-	);
+    start(
+        argc, argv,
+        Process_descriptor(process_1)
+    ,   Process_descriptor(process_2)
+    );
 
-	return 0;
+    return 0;
 }
