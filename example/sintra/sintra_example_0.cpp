@@ -6,7 +6,7 @@
 // which initializes the sintra library, spawns the process swarm and starts the multi-process
 // execution.
 //
-// In this example, there are 2 user processes, of which the first is acting as a sender, and
+// In this example, there are 3 user processes, of which the first is acting as a sender, and
 // the other two as receivers.
 // Each receiver activates a slot function that handles arguments of a different type (int, string).
 // The sender process sends messages of both types, which are handled by each process accordingly.
