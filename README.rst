@@ -8,7 +8,7 @@ Overview
 
 The library was written to provide the dispatch mechanism for VIK, an OpenGL based GUI framework, which is currently not open source.
 
-Sintra has is a header-only library.
+Sintra is a header-only library.
 It has dependencies on header-only boost libraries (interprocess, type_index, fusion, atomic, bind).
 
 It has been tested on Windows with Visual Studio 2015 and Linux with gcc 6.3.
