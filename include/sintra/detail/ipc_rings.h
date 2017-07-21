@@ -278,9 +278,9 @@ bool Ring<NUM_ELEMENTS, T>::create()
             return false;
 
 #ifdef NDEBUG
-        if (!truncate_file(fh_data,    data_region_size    ))
+        if (!ipc::ipcdetail::truncate_file(fh_data,    data_region_size    ))
             return false;
-        if (!truncate_file(fh_control, sizeof(Control)))
+        if (!ipc::ipcdetail::truncate_file(fh_control, sizeof(Control)))
             return false;
 #else
         auto ustring = "UNINITIALIZED";
