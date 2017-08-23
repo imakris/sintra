@@ -38,6 +38,7 @@ using std::runtime_error;
 using std::string;
 
 
+
 template <typename/* = void*/>
 Transceiver::Transceiver(const string& name/* = ""*/, uint64_t id/* = 0*/)
 {
@@ -51,14 +52,14 @@ Transceiver::Transceiver(const string& name/* = ""*/, uint64_t id/* = 0*/)
 
     // A transceiver instance may as well not have a name (in which case, name lookups fail).
     if (!name.empty()) {
-        bool success = assign_name(name);
-        if (success) {
+        if (!assign_name(name)) {
             throw runtime_error("Transceiver instance allocation failed");
         }
     }
 
     activate(&Transceiver::instance_invalidated_handler, any_local_or_remote);
 }
+
 
 
 inline
@@ -72,9 +73,7 @@ Transceiver::~Transceiver()
 template <typename/* = void*/>
 bool Transceiver::assign_name(const string& name)
 {
-    bool success = Coordinator::rpc_publish_transceiver(coord_id::s, m_instance_id, name);
-
-    if (success) {
+    if (Coordinator::rpc_publish_transceiver(coord_id::s, m_instance_id, name)) {
         m_named = true;
 
         if (!coord::s) {
@@ -99,6 +98,9 @@ void Transceiver::destroy()
         // itself being destroyed.
         return;
     }
+
+    deactivate_all();
+
     if (m_named) {
         auto success = Coordinator::rpc_unpublish_transceiver(coord_id::s, m_instance_id);
         assert(success);
@@ -266,6 +268,21 @@ void Transceiver::deactivate(handler_provoker_desrcriptor pd)
 
 
 
+template <typename /* = void*/>
+void Transceiver::deactivate_all()
+{
+    for (auto& el1 : m_active_handler_iterators) {
+        
+        for (auto& el2 : el1.second) {
+            mproc::s->m_active_handlers[el1.first].erase(el2);
+        }
+    }
+
+    m_active_handler_iterators.clear();
+}
+
+
+
 template <
     typename MESSAGE_TYPE,
     instance_id_type LOCALITY,
@@ -322,6 +339,7 @@ void Transceiver::finalize_rpc_write(
     placed_msg->message_type_id = not_defined_type_id;
     mproc::s->m_out_rep_c->done_writing();
 }
+
 
 
 template <

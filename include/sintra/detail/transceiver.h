@@ -186,9 +186,13 @@ public:
         RT(OBJECT_TYPE::*v)(const MESSAGE_TYPE&), 
         instance_id_type sender_id);
 
-
+    
     template <typename = void>
     void deactivate(handler_provoker_desrcriptor pd);
+
+
+    template <typename = void>
+    void deactivate_all();
 
 
     template <
