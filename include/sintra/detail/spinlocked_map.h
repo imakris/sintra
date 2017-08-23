@@ -30,6 +30,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <atomic>
 #include <unordered_map>
 #include <unordered_set>
+#include <deque>
 
 
 namespace sintra {
@@ -40,6 +41,10 @@ using std::memory_order_acquire;
 using std::memory_order_release;
 using std::unordered_map;
 using std::unordered_set;
+using std::deque;
+
+
+namespace detail {
 
 
 struct spinlock
@@ -77,6 +82,8 @@ struct spinlocked_map
     auto erase(const Key& k)            {spinlock::locker l(m_sl); return m_map.erase(k);          }
     auto erase(const_iterator first, const_iterator last)
                                         {spinlock::locker l(m_sl); return m_map.erase(first, last);}
+    auto clear() noexcept               {spinlock::locker l(m_sl); return m_map.clear();           }
+
     template <typename... Args>
     auto insert(const Args&... v)       {spinlock::locker l(m_sl); return m_map.insert(v...);      }
     template <typename... Args>
@@ -124,6 +131,54 @@ private:
     unordered_set<T> m_set;
     mutable spinlock m_sl;
 };
+
+
+
+template <typename T>
+struct spinlocked_deque
+{
+    using iterator       = typename deque<T>::iterator;
+    using const_iterator = typename deque<T>::const_iterator;
+
+    auto begin() noexcept               {spinlock::locker l(m_sl); return m_deq.begin();           }
+    auto begin() const noexcept         {spinlock::locker l(m_sl); return m_deq.begin();           }
+    auto end()   noexcept               {spinlock::locker l(m_sl); return m_deq.end();             }
+    auto end()   const noexcept         {spinlock::locker l(m_sl); return m_deq.end();             }
+    auto pop_front()                    {spinlock::locker l(m_sl); return m_deq.pop_front();       }
+    auto push_back(const T& v)          {spinlock::locker l(m_sl); return m_deq.push_back(v);      }
+    auto empty() const noexcept         {spinlock::locker l(m_sl); return m_deq.empty();           }
+    auto size()  const noexcept         {spinlock::locker l(m_sl); return m_deq.size();            }
+
+    auto front() noexcept               {spinlock::locker l(m_sl); return m_deq.front();           }
+    auto front() const noexcept         {spinlock::locker l(m_sl); return m_deq.front();           }
+    auto back() noexcept                {spinlock::locker l(m_sl); return m_deq.back();            }
+    auto back() const noexcept          {spinlock::locker l(m_sl); return m_deq.back();            }
+
+    auto operator= (const spinlocked_deque& x)
+                                        {spinlock::locker l(m_sl); return m_deq.operator=(x.m_deq);}
+    auto operator= (spinlocked_deque&& x)
+                                        {spinlock::locker l(m_sl); return m_deq.operator=(x.m_deq);}
+
+private:
+    deque<T> m_deq;
+    mutable spinlock m_sl;
+};
+
+
+} // namespace detail
+
+
+//template <typename T>
+//using spinlocked_map<T> = detail::spinlocked_map<T>;
+using detail::spinlocked_map;
+
+//template <typename T>
+//using spinlocked_set<T> = detail::spinlocked_set<T>;
+using detail::spinlocked_set;
+
+//template <typename T>
+//using spinlocked_deque<T> = detail::spinlocked_deque<T>;
+using detail::spinlocked_deque;
 
 
 } // namespace sintra
