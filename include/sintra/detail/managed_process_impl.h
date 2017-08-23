@@ -59,6 +59,7 @@ namespace fs = std::experimental::filesystem;
 namespace chrono = std::chrono;
 
 
+
 inline
 static void s_signal_handler(int sig)
 {
@@ -69,6 +70,7 @@ static void s_signal_handler(int sig)
         // kill every other process?
     }
 }
+
 
 
 inline
@@ -118,8 +120,6 @@ sintra::instance_id_type get_instance_id(string&& name)
     auto iid = Coordinator::rpc_resolve_instance(coord_id::s, name);
     return mproc::s->m_instance_id_of_name[name] = iid;
 }
-
-
 
 
 
@@ -358,6 +358,7 @@ Managed process options:
 }
 
 
+
 inline
 void Managed_process::branch()
 {
@@ -433,6 +434,7 @@ void Managed_process::branch()
 
     assign_name(string("sintra_process_") + to_string(m_pid));
 }
+
 
 
  //////////////////////////////////////////////////////////////////////////
@@ -516,6 +518,7 @@ void Managed_process::stop()
 }
 
 
+
 inline
 bool Managed_process::wait_for_stop()
 {
@@ -537,13 +540,14 @@ bool Managed_process::wait_for_stop()
 
 
 
-
 template<typename T>
 void Managed_process::deferred_call(double delay, void(T::*v)())
 {
     BOOST_STATIC_ASSERT(is_base_of<Managed_process, T>::value);
     deferred_call(delay, boost::bind(v, static_cast<T*>(this)));
 }
+
+
 
 inline
 void Managed_process::deferred_call(double delay, function<void()> fn)
@@ -555,6 +559,8 @@ void Managed_process::deferred_call(double delay, function<void()> fn)
         m_next_deferred_insertion_is_sooner.notify_all();
     }
 }
+
+
 
 template<typename MANAGED_TYPE>
 void Managed_process::manage(MANAGED_TYPE* v)
@@ -602,6 +608,8 @@ void Managed_process::work_loop()
     m_termination_condition.notify_all();
 }
 
+
+
 inline
 void Managed_process::deferred_insertion_loop()
 {
@@ -647,6 +655,7 @@ void Managed_process::deferred_insertion_loop()
 }
 
 
+
 inline
 string Managed_process::obtain_swarm_directory()
 {
@@ -664,7 +673,6 @@ string Managed_process::obtain_swarm_directory()
 
     return swarm_directory;
 }
-
 
 
 
