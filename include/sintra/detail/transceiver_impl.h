@@ -99,7 +99,9 @@ void Transceiver::destroy()
         return;
     }
 
-    deactivate_all();
+    if (this != mproc::s) {
+        deactivate_all();
+    }
 
     if (m_named) {
         auto success = Coordinator::rpc_unpublish_transceiver(coord_id::s, m_instance_id);
