@@ -215,13 +215,14 @@ Managed_process::~Managed_process()
 
         // now it's safe to delete the Coordinator.
         delete coord::s;
+        coord::s = 0;
 
         // removes the swarm directory
         remove_directory(m_directory);
     }
 
     mproc::s    = nullptr;
-    mproc_id::s    = 0;
+    mproc_id::s = 0;
 }
 
 
