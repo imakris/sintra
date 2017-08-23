@@ -248,7 +248,7 @@ void Process_message_reader::local_request_reader_function()
         // it might be a good idea to kill it. If it is in the core set of processes,
         // then it is a bug.
         assert(m_in_req_c->m_id == process_of(m->sender_instance_id) ||
-                m_in_req_c->m_id == process_of(coord_id::s));
+               m_in_req_c->m_id == process_of(coord_id::s));
 
         if (is_local_instance(m->sender_instance_id) && m->receiver_instance_id == any_remote) {
 
@@ -301,16 +301,19 @@ void Process_message_reader::local_request_reader_function()
                     // get handlers operating on this type of message, if it is
                     // from this specific local sender
                     auto shr = it_mt->second.equal_range(m->sender_instance_id);
-                    for (auto it = shr.first; it != shr.second; ++it)
+                    for (auto it = shr.first; it != shr.second; ++it) {
                         it->second(*m);
+                    }
 
                     // get all handlers operating on this type of message, from
                     auto chr1 = it_mt->second.equal_range(any_local);
                     auto chr2 = it_mt->second.equal_range(any_local_or_remote);
-                    for (auto it = chr1.first; it != chr1.second; ++it)
+                    for (auto it = chr1.first; it != chr1.second; ++it) {
                         it->second(*m);
-                    for (auto it = chr2.first; it != chr2.second; ++it)
+                    }
+                    for (auto it = chr2.first; it != chr2.second; ++it) {
                         it->second(*m);
+                    }
 
                 }
             }
