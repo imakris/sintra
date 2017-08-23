@@ -192,7 +192,6 @@ struct Work_loop
 
 
 
-
 struct Managed_process: Transceiver
 {
     Managed_process();
@@ -316,24 +315,11 @@ struct Managed_process: Transceiver
                                         m_time_instantiated;
 
     deque<Process_message_reader>       m_readers;
-
-
-
-
 };
 
 
 
-
-
-
-
-
-
-
-}
-
-
+} // namespace sintra
 
 
 #endif
