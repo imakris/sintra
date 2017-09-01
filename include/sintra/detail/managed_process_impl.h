@@ -453,7 +453,7 @@ void Managed_process::start(int(*entry_function)())
     m_running = true;
 
     for (auto& r : m_readers) {
-        r.go();
+        r.start();
     }
     m_start_stop_mutex.unlock();
 

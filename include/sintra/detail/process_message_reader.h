@@ -37,6 +37,8 @@ namespace sintra {
 using std::atomic;
 using std::string;
 using std::thread;
+using std::mutex;
+using std::condition_variable;
 
 // Note: this should be a specialization of Message_reader (which does not exist), but for the sake
 // of simplicity and code coverage, the Message_reader was not implemented.
@@ -69,7 +71,8 @@ struct Process_message_reader
     ~Process_message_reader();
 
 
-    void go()       { m_status = FULL_FUNCTIONALITY;    }
+    void start()    { m_status = FULL_FUNCTIONALITY;    }
+    void stop()     { m_status = STOPPING;              }
     void suspend()  { m_status = COORDINATOR_ONLY;      }
 
 
@@ -86,10 +89,8 @@ struct Process_message_reader
     void request_reader_function();
 
 
-
     inline
     void local_request_reader_function();
-
 
 
     inline
@@ -102,18 +103,26 @@ private:
     {
         FULL_FUNCTIONALITY,
         COORDINATOR_ONLY,
-        STOP
+        STOPPING
     };
 
-    atomic<Status> m_status;
+    atomic<Status>          m_status;
 
-    instance_id_type m_process_instance_id;
+    instance_id_type        m_process_instance_id;
 
-    Message_ring_R* m_in_req_c;
-    Message_ring_R* m_in_rep_c;
+    Message_ring_R*         m_in_req_c;
+    Message_ring_R*         m_in_rep_c;
 
-    thread* m_request_reader_thread;
-    thread* m_reply_reader_thread;
+    thread*                 m_request_reader_thread;
+    thread*                 m_reply_reader_thread;
+    
+    atomic<bool>            m_req_running;
+    mutex                   m_req_stop_mutex;
+    condition_variable      m_req_stop_condition;
+
+    atomic<bool>            m_rep_running;
+    mutex                   m_rep_stop_mutex;
+    condition_variable      m_rep_stop_condition;
 
 };
 
