@@ -63,16 +63,28 @@ Process_message_reader::Process_message_reader(instance_id_type process_instance
 inline
 Process_message_reader::~Process_message_reader()
 {
+    using namespace std::chrono;
+
     if (is_local_instance(m_process_instance_id)) {
+        std::unique_lock<std::mutex> lk(m_req_stop_mutex);
+        stop();
         m_in_req_c->unblock();
+        auto req_predicate = [=]{return m_req_running == false;};
+        m_req_stop_condition.wait_for(lk, duration<double>(0.5), req_predicate);
         m_request_reader_thread->join();
-            
         delete m_request_reader_thread;
         delete m_in_req_c;
     }
     else {
+        std::unique_lock<std::mutex> lk1(m_req_stop_mutex);
+        std::unique_lock<std::mutex> lk2(m_rep_stop_mutex);
+        stop();
         m_in_req_c->unblock();
         m_in_rep_c->unblock();
+        auto req_predicate = [=]{return m_req_running == false;};
+        m_req_stop_condition.wait_for(lk1, duration<double>(0.5), req_predicate);
+        auto rep_predicate = [=]{return m_rep_running == false;};
+        m_rep_stop_condition.wait_for(lk2, duration<double>(0.5), rep_predicate);
         m_request_reader_thread->join();
         m_reply_reader_thread->join();
 
@@ -96,7 +108,9 @@ Process_message_reader::~Process_message_reader()
 inline
 void Process_message_reader::request_reader_function()
 {
-    while (m_status != STOP) {
+    m_req_running = true;
+
+    while (m_status != STOPPING) {
         tl_current_message::s = nullptr;
         Message_prefix* m = m_in_req_c->fetch_message();
 
@@ -216,6 +230,13 @@ void Process_message_reader::request_reader_function()
             }
         }
     }
+
+    {
+        std::unique_lock<std::mutex> lk(m_req_stop_mutex);
+        m_req_running = false;
+        m_req_stop_condition.notify_one();
+    }
+
 }
 
 
@@ -230,8 +251,9 @@ void Process_message_reader::local_request_reader_function()
     // However, if the coordinator is remote, a local reader is irrelevant, and if
     // it is local, ring RPC is also irrelevant.
 
+    m_req_running = true;
 
-    while (m_status != STOP) {
+    while (m_status != STOPPING) {
         tl_current_message::s = nullptr;
         Message_prefix* m = m_in_req_c->fetch_message();
 
@@ -319,6 +341,13 @@ void Process_message_reader::local_request_reader_function()
             }
         }
     }
+
+    {
+        std::unique_lock<std::mutex> lk(m_req_stop_mutex);
+        m_req_running = false;
+        m_req_stop_condition.notify_one();
+    }
+
 }
 
 
@@ -326,7 +355,9 @@ void Process_message_reader::local_request_reader_function()
 inline
 void Process_message_reader::reply_reader_function()
 {
-    while (m_status != STOP) {
+    m_rep_running = true;
+
+    while (m_status != STOPPING) {
         tl_current_message::s = nullptr;
         Message_prefix* m = m_in_rep_c->fetch_message();
         tl_current_message::s = m;
@@ -381,6 +412,13 @@ void Process_message_reader::reply_reader_function()
             }
         }
     }
+
+    {
+        std::unique_lock<std::mutex> lk(m_rep_stop_mutex);
+        m_rep_running = false;
+        m_rep_stop_condition.notify_one();
+    }
+
 }
 
 
