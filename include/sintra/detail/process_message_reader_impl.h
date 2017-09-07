@@ -231,12 +231,9 @@ void Process_message_reader::request_reader_function()
         }
     }
 
-    {
-        std::unique_lock<std::mutex> lk(m_req_stop_mutex);
-        m_req_running = false;
-        m_req_stop_condition.notify_one();
-    }
-
+    std::unique_lock<std::mutex> lk(m_req_stop_mutex);
+    m_req_running = false;
+    m_req_stop_condition.notify_one();
 }
 
 
@@ -342,12 +339,9 @@ void Process_message_reader::local_request_reader_function()
         }
     }
 
-    {
-        std::unique_lock<std::mutex> lk(m_req_stop_mutex);
-        m_req_running = false;
-        m_req_stop_condition.notify_one();
-    }
-
+    std::unique_lock<std::mutex> lk(m_req_stop_mutex);
+    m_req_running = false;
+    m_req_stop_condition.notify_one();
 }
 
 
@@ -413,12 +407,9 @@ void Process_message_reader::reply_reader_function()
         }
     }
 
-    {
-        std::unique_lock<std::mutex> lk(m_rep_stop_mutex);
-        m_rep_running = false;
-        m_rep_stop_condition.notify_one();
-    }
-
+    std::unique_lock<std::mutex> lk(m_rep_stop_mutex);
+    m_rep_running = false;
+    m_rep_stop_condition.notify_one();
 }
 
 
