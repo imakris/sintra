@@ -43,9 +43,9 @@ using std::tuple_size;
  //////////////////////////////////////////////////////////////////////////
 ///// BEGIN simple function backend ////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////
-//////    //////    //////    //////    //////    //////    //////    //////
- ////      ////      ////      ////      ////      ////      ////      ////
-  //        //        //        //        //        //        //        //
+//////   \//////   \//////   \//////   \//////   \//////   \//////   \//////
+ ////     \////     \////     \////     \////     \////     \////     \////
+  //       \//       \//       \//       \//       \//       \//       \//
 
 
 template <
@@ -111,9 +111,9 @@ auto call_function_with_tuple_args(const FT& f, const TT& t) -> decltype(f())
 }
 
 
-  //        //        //        //        //        //        //        //
- ////      ////      ////      ////      ////      ////      ////      ////
-//////    //////    //////    //////    //////    //////    //////    //////
+  //\       //\       //\       //\       //\       //\       //\       //
+ ////\     ////\     ////\     ////\     ////\     ////\     ////\     ////
+//////\   //////\   //////\   //////\   //////\   //////\   //////\   //////
 ////////////////////////////////////////////////////////////////////////////
 ///// END simple function backend //////////////////////////////////////////
  //////////////////////////////////////////////////////////////////////////
@@ -122,9 +122,9 @@ auto call_function_with_tuple_args(const FT& f, const TT& t) -> decltype(f())
  //////////////////////////////////////////////////////////////////////////
 ///// BEGIN member function backend ////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////
-//////    //////    //////    //////    //////    //////    //////    //////
- ////      ////      ////      ////      ////      ////      ////      ////
-  //        //        //        //        //        //        //        //
+//////   \//////   \//////   \//////   \//////   \//////   \//////   \//////
+ ////     \////     \////     \////     \////     \////     \////     \////
+  //       \//       \//       \//       \//       \//       \//       \//
 
 
 
@@ -200,9 +200,9 @@ auto call_function_with_tuple_args(TObj& obj, FT f, const TT& t) -> decltype((ob
 }
 
 
-  //        //        //        //        //        //        //        //
- ////      ////      ////      ////      ////      ////      ////      ////
-//////    //////    //////    //////    //////    //////    //////    //////
+  //\       //\       //\       //\       //\       //\       //\       //
+ ////\     ////\     ////\     ////\     ////\     ////\     ////\     ////
+//////\   //////\   //////\   //////\   //////\   //////\   //////\   //////
 ////////////////////////////////////////////////////////////////////////////
 ///// END member function backend //////////////////////////////////////////
  //////////////////////////////////////////////////////////////////////////
@@ -211,16 +211,16 @@ auto call_function_with_tuple_args(TObj& obj, FT f, const TT& t) -> decltype((ob
  //////////////////////////////////////////////////////////////////////////
 ///// BEGIN for_each_in_tuple //////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////
-//////    //////    //////    //////    //////    //////    //////    //////
- ////      ////      ////      ////      ////      ////      ////      ////
-  //        //        //        //        //        //        //        //
+//////   \//////   \//////   \//////   \//////   \//////   \//////   \//////
+ ////     \////     \////     \////     \////     \////     \////     \////
+  //       \//       \//       \//       \//       \//       \//       \//
 
 
-// This part was taken from here:
+// The following code was mostly taken from here:
 // http://stackoverflow.com/questions/16387354/template-tuple-calling-a-function-on-each-element
 
 
-namespace detail
+namespace detail_for_each_in_tuple
 {
     template<int... Is>
     struct seq { };
@@ -236,30 +236,95 @@ namespace detail
     {
         auto l = { (f(get<Is>(t)), 0)... };
     }
+
+    template<typename T, typename F, int... Is>
+    void for_each_i(T&& t, F f, seq<Is...>)
+    {
+        auto l = { (f(get<Is>(t), Is), 0)... };
+    }
 }
 
 template<typename... Ts, typename F>
 void for_each_in_tuple(tuple<Ts...> const& t, F f)
 {
-    detail::for_each(t, f, detail::gen_seq<sizeof...(Ts)>());
+    detail_for_each_in_tuple::for_each(t, f, detail_for_each_in_tuple::gen_seq<sizeof...(Ts)>());
 }
 
 template<typename... Ts, typename F>
 void for_each_in_tuple(tuple<Ts...> & t, F f)
 {
-    detail::for_each(t, f, detail::gen_seq<sizeof...(Ts)>());
+    detail_for_each_in_tuple::for_each(t, f, detail_for_each_in_tuple::gen_seq<sizeof...(Ts)>());
 }
+
+template<typename... Ts, typename F>
+void for_each_in_tuple_i(tuple<Ts...> const& t, F f)
+{
+    detail_for_each_in_tuple::for_each_i(t, f, detail_for_each_in_tuple::gen_seq<sizeof...(Ts)>());
+}
+
+template<typename... Ts, typename F>
+void for_each_in_tuple_i(tuple<Ts...> & t, F f)
+{
+    detail_for_each_in_tuple::for_each_i(t, f, detail_for_each_in_tuple::gen_seq<sizeof...(Ts)>());
+}
+
+
+
+namespace tuple_zip_detail
+{
+    template<std::size_t ...S>
+    struct seq { };
+
+    template<std::size_t N, std::size_t ...S>
+    struct gens : gens<N-1, N-1, S...> { };
+
+    template<std::size_t ...S>
+    struct gens<0, S...> {
+        typedef seq<S...> type;
+    };
+}
+
+
+
+template <
+    template <typename ...> class Tup1,
+    template <typename ...> class Tup2,
+    typename ...A,
+    typename ...B,
+    std::size_t ...S
+>
+auto tuple_zip_helper(Tup1<A...> t1, Tup2<B...> t2, tuple_zip_detail::seq<S...> s) ->
+decltype(std::make_tuple(std::make_pair(std::get<S>(t1), std::get<S>(t2))...))
+{
+    return std::make_tuple(std::make_pair(std::get<S>(t1), std::get<S>(t2))...);
+}
+
+template <
+    template <typename ...> class Tup1,
+    template <typename ...> class Tup2,
+    typename ...A,
+    typename ...B
+>
+auto tuple_zip(Tup1<A...> t1, Tup2<B...> t2) ->
+decltype(tuple_zip_helper(t1, t2, typename tuple_zip_detail::gens<sizeof...(A)>::type() ))
+{
+      static_assert(sizeof...(A) == sizeof...(B), "The tuple sizes must be the same");
+      return tuple_zip_helper( t1, t2, typename tuple_zip_detail::gens<sizeof...(A)>::type() );
+}
+
 
 
 } // namespace sintra
 
 
-  //        //        //        //        //        //        //        //
- ////      ////      ////      ////      ////      ////      ////      ////
-//////    //////    //////    //////    //////    //////    //////    //////
+  //\       //\       //\       //\       //\       //\       //\       //
+ ////\     ////\     ////\     ////\     ////\     ////\     ////\     ////
+//////\   //////\   //////\   //////\   //////\   //////\   //////\   //////
 ////////////////////////////////////////////////////////////////////////////
 ///// END for_each_in_tuple ////////////////////////////////////////////////
  //////////////////////////////////////////////////////////////////////////
+
+
 
 
 /*
