@@ -6,7 +6,7 @@ A C++ library for type safe Interprocess signal dispatch and remote procedure ca
 Overview
 --------
 
-The library was written to provide the dispatch mechanism for VIK, an OpenGL based GUI framework, which is currently not open source.
+The library was written to provide the message dispatch mechanism for VIK, an OpenGL based GUI framework, which is currently not open source.
 
 Sintra is a header-only library.
 It has dependencies on header-only boost libraries (interprocess, type_index, fusion, atomic, bind).
