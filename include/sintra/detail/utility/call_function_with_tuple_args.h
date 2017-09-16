@@ -216,7 +216,7 @@ auto call_function_with_tuple_args(TObj& obj, FT f, const TT& t) -> decltype((ob
   //       \//       \//       \//       \//       \//       \//       \//
 
 
-// The following code was mostly taken from here:
+// The following code was mostly taken from here (with some minor additions):
 // http://stackoverflow.com/questions/16387354/template-tuple-calling-a-function-on-each-element
 
 
@@ -224,17 +224,27 @@ namespace detail_for_each_in_tuple
 {
     template<int... Is>
     struct seq { };
- 
+
     template<int N, int... Is>
     struct gen_seq : gen_seq<N - 1, N - 1, Is...> { };
- 
+
     template<int... Is>
     struct gen_seq<0, Is...> : seq<Is...> { };
- 
+
+    template<typename T, typename F>
+    void for_each(T&& t, F f, seq<>)
+    {
+    }
+
     template<typename T, typename F, int... Is>
     void for_each(T&& t, F f, seq<Is...>)
     {
         auto l = { (f(get<Is>(t)), 0)... };
+    }
+
+    template<typename T, typename F>
+    void for_each_i(T&& t, F f, seq<>)
+    {
     }
 
     template<typename T, typename F, int... Is>
