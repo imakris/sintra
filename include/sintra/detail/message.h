@@ -472,7 +472,7 @@ struct Message: public Message_prefix, public T
 
 #define EXPORT_SIGNAL_BASE(name, idv, ...)                  \
     _DEFINE_STRUCT(_sm_body_type_##name, __VA_ARGS__)       \
-    using name = Message<_sm_body_type_##name, void, idv>;  \
+    using name = Message<_sm_body_type_##name, void, idv>;
 
 #define EXPORT_SIGNAL(name, ...)                            \
     EXPORT_SIGNAL_BASE(name, invalid_type_id, __VA_ARGS__)
