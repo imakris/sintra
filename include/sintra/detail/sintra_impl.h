@@ -107,15 +107,15 @@ void wait_for_stop()
 
 
 // This is a convenience function.
-template <typename PROCESS_GROUP_TYPE>
+template <typename PROCESS_GROUP_T>
 void barrier()
 {
-    PROCESS_GROUP_TYPE::barrier();
+    PROCESS_GROUP_T::barrier();
 }
 
 
-template <typename FT>
-auto activate_slot(const FT& slot_function, instance_id_type sender_id)
+template <typename FT, typename SENDER_T>
+auto activate_slot(const FT& slot_function, Typed_instance_id<SENDER_T> sender_id)
 {
     return mproc::s->activate(slot_function, sender_id);
 }

@@ -17,7 +17,7 @@ using namespace sintra;
 
 struct Remotely_accessible: Transceiver
 {
-    TRANSCEIVER(Remotely_accessible)
+    TRANSCEIVER_PROLOGUE(Remotely_accessible)
 
     string append(const string& s, int v)
     {
