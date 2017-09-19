@@ -15,8 +15,12 @@
 #include <iostream>
 #include <sintra/sintra.h>
 
+
+
 using namespace std;
 using namespace sintra;
+
+
 
 int process_1()
 {
