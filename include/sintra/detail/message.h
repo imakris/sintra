@@ -476,8 +476,8 @@ struct Message: public Message_prefix, public T
     using name = Message<_sm_body_type_##name, void, idv, Transceiver_type>;    \
     inline void message_type_sanity_test(name) {                                \
         static_assert(is_same<name::exporter*, decltype(this)>::value,          \
-            "Please put the TRANSCEIVER( [transceiver_type] ) macro in the "    \
-            "beginning of the class definition");                               \
+            "Please put the TRANSCEIVER_PROLOGUE( [transceiver_type] ) macro "  \
+            "in the beginning of the class definition");                        \
         assert(!"Do not call this function.");                                  \
     }
 
