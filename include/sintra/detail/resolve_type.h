@@ -30,60 +30,71 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 namespace sintra {
 
 
-template<typename RT, typename OBJECT_TYPE, typename... Args>
-constexpr static RT resolve_rt(RT(OBJECT_TYPE::*v)(Args...)) {  }
+template<typename RT, typename OBJECT_T, typename... Args>
+constexpr static RT resolve_rt(RT(OBJECT_T::*v)(Args...)) {  }
 
 
-template<typename RT, typename OBJECT_TYPE, typename... Args>
-constexpr static OBJECT_TYPE resolve_object_type(RT(OBJECT_TYPE::*v)(Args...)) {  }
+template<typename RT, typename OBJECT_T, typename... Args>
+constexpr static OBJECT_T resolve_object_type(RT(OBJECT_T::*v)(Args...)) {  }
 
 
-template<typename RT, typename OBJECT_TYPE, typename... Args>
-constexpr static RT resolve_rt(RT(OBJECT_TYPE::*v)(Args...) const) {  }
+template<typename RT, typename OBJECT_T, typename... Args>
+constexpr static RT resolve_rt(RT(OBJECT_T::*v)(Args...) const) {  }
 
 
-template<typename RT, typename OBJECT_TYPE, typename... Args>
-constexpr static OBJECT_TYPE resolve_object_type(RT(OBJECT_TYPE::*v)(Args...) const) {  }
+template<typename RT, typename OBJECT_T, typename... Args>
+constexpr static OBJECT_T resolve_object_type(RT(OBJECT_T::*v)(Args...) const) {  }
 
 
-template<template<typename...> typename TYPE_CONTAINER,
-         typename RT, typename OBJECT_TYPE, typename... Args>
-constexpr static TYPE_CONTAINER<Args...> resolve_args(RT(OBJECT_TYPE::*v)(Args...)) {  }
+template<
+    template<typename...> typename TYPE_CONTAINER,
+    typename RT,
+    typename OBJECT_T,
+    typename... Args
+>
+constexpr static TYPE_CONTAINER<Args...> resolve_args(RT(OBJECT_T::*v)(Args...)) {  }
 
 
-template<template<typename...> typename TYPE_CONTAINER,
-         typename RT, typename OBJECT_TYPE, typename... Args>
-constexpr static TYPE_CONTAINER<Args...> resolve_args(RT(OBJECT_TYPE::*v)(Args...) const) {  }
+template<
+    template<typename...> typename TYPE_CONTAINER,
+    typename RT,
+    typename OBJECT_T,
+    typename... Args
+>
+constexpr static TYPE_CONTAINER<Args...> resolve_args(RT(OBJECT_T::*v)(Args...) const) {  }
 
 
-template<template<typename...> typename TYPE_CONTAINER,
-         typename RT, typename... Args>
+template<
+    template<typename...> typename TYPE_CONTAINER,
+    typename RT,
+    typename... Args
+>
 constexpr static TYPE_CONTAINER<Args...> resolve_args(RT(*v)(Args...)) {  }
 
 
-template<typename RT, typename OBJECT_TYPE, typename ARG_TYPE>
-constexpr static ARG_TYPE resolve_single_arg(RT(OBJECT_TYPE::*v)(const ARG_TYPE&) const) {  }
+template<typename RT, typename OBJECT_T, typename ARG_T>
+constexpr static ARG_T resolve_single_arg(RT(OBJECT_T::*v)(const ARG_T&) const) {  }
 
 
-template<typename RT, typename OBJECT_TYPE, typename ARG_TYPE>
-constexpr static ARG_TYPE resolve_single_arg(RT(OBJECT_TYPE::*v)(ARG_TYPE) const) {  }
+template<typename RT, typename OBJECT_T, typename ARG_T>
+constexpr static ARG_T resolve_single_arg(RT(OBJECT_T::*v)(ARG_T) const) {  }
 
 
-template<typename RT, typename ARG_TYPE>
-constexpr static ARG_TYPE resolve_single_arg(RT(*v)(ARG_TYPE)) {  }
+template<typename RT, typename ARG_T>
+constexpr static ARG_T resolve_single_arg(RT(*v)(ARG_T)) {  }
 
 
-template <typename LAMBDA_TYPE>
-constexpr static decltype(resolve_single_arg(&LAMBDA_TYPE::operator()))
-resolve_single_functor_arg(const LAMBDA_TYPE& lt) {}
+template <typename LAMBDA_T>
+constexpr static decltype(resolve_single_arg(&LAMBDA_T::operator()))
+resolve_single_functor_arg(const LAMBDA_T& lt) {}
 
 
-template<typename VAR_TYPE, typename OBJECT_TYPE>
-constexpr static VAR_TYPE resolve_var_type(VAR_TYPE OBJECT_TYPE::*v) {}
+template<typename VAR_T, typename OBJECT_T>
+constexpr static VAR_T resolve_var_type(VAR_T OBJECT_T::*v) {}
 
 
-template<typename VAR_TYPE, typename OBJECT_TYPE>
-constexpr static OBJECT_TYPE resolve_object_type(VAR_TYPE OBJECT_TYPE::*v) {}
+template<typename VAR_T, typename OBJECT_T>
+constexpr static OBJECT_T resolve_object_type(VAR_T OBJECT_T::*v) {}
 
 } // namespace sintra
 
