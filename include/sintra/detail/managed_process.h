@@ -194,6 +194,8 @@ struct Work_loop
 
 struct Managed_process: Transceiver
 {
+    TRANSCEIVER_PROLOGUE(Managed_process)
+
     Managed_process();
     ~Managed_process();
 

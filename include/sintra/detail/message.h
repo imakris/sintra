@@ -331,12 +331,13 @@ template <
     typename T,
     typename RT = void,
     type_id_type ID = 0,
-    typename Tag = void
+    typename EXPORTER = void
 >
 struct Message: public Message_prefix, public T
 {
     using body_type = T;
     using return_type = RT;
+    using exporter = EXPORTER;
 
 
     static type_id_type id()
@@ -470,14 +471,20 @@ struct Message: public Message_prefix, public T
 
 
 
-#define EXPORT_SIGNAL_BASE(name, idv, ...)                  \
-    _DEFINE_STRUCT(_sm_body_type_##name, __VA_ARGS__)       \
-    using name = Message<_sm_body_type_##name, void, idv>;
+#define EXPORT_SIGNAL_BASE(name, idv, ...)                                      \
+    _DEFINE_STRUCT(_sm_body_type_##name, __VA_ARGS__)                           \
+    using name = Message<_sm_body_type_##name, void, idv, Transceiver_type>;    \
+    inline void message_type_sanity_test(name) {                                \
+        static_assert(is_same<name::exporter*, decltype(this)>::value,          \
+            "Please put the TRANSCEIVER( [transceiver_type] ) macro in the "    \
+            "beginning of the class definition");                               \
+        assert(!"Do not call this function.");                                  \
+    }
 
-#define EXPORT_SIGNAL(name, ...)                            \
+#define EXPORT_SIGNAL(name, ...)                                                \
     EXPORT_SIGNAL_BASE(name, invalid_type_id, __VA_ARGS__)
 
-#define EXPORT_SIGNAL_EXPLICIT(name, ...)                   \
+#define EXPORT_SIGNAL_EXPLICIT(name, ...)                                       \
     EXPORT_SIGNAL_BASE(name, sintra::detail::reserved_id::name, __VA_ARGS__)
 
 

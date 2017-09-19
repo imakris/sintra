@@ -46,7 +46,7 @@ using std::unordered_set;
 
 struct Coordinator: public Transceiver
 {
-    TRANSCEIVER(Coordinator)
+    TRANSCEIVER_PROLOGUE(Coordinator)
 
 private:
     Coordinator();

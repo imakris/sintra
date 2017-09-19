@@ -27,6 +27,9 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define __SINTRA_TRANSCEIVER_IMPL_H__
 
 
+#include <type_traits>
+
+
 namespace sintra {
 
 
@@ -36,7 +39,8 @@ using std::make_pair;
 using std::remove_reference;
 using std::runtime_error;
 using std::string;
-
+using std::is_same_v;
+using std::is_base_of_v;
 
 
 template <typename/* = void*/>
@@ -57,7 +61,9 @@ Transceiver::Transceiver(const string& name/* = ""*/, uint64_t id/* = 0*/)
         }
     }
 
-    activate(&Transceiver::instance_invalidated_handler, any_local_or_remote);
+    activate(
+        &Transceiver::instance_invalidated_handler,
+        Typed_instance_id<void>(any_local_or_remote) );
 }
 
 
@@ -139,11 +145,11 @@ void Transceiver::instance_invalidated_handler(const instance_invalidated& msg)
 
 
 
-template<typename MESSAGE_TYPE, typename HT>
+template<typename MESSAGE_T, typename HT>
 Transceiver::handler_provoker_desrcriptor
 Transceiver::activate_impl(HT&& handler, instance_id_type sender_id)
 {
-    auto message_type_id = MESSAGE_TYPE::id();
+    auto message_type_id = MESSAGE_T::id();
     lock_guard<mutex> sl(m_handlers_mutex);
 
     auto f = (function<void(const Message_prefix&)>&) handler;
@@ -160,20 +166,23 @@ Transceiver::activate_impl(HT&& handler, instance_id_type sender_id)
 
 // A functor with an arbitrary non-message argument
 template<
+    typename SENDER_T,
     typename FT,
     typename  /* = decltype(&FT::operator())*/,  //must be functor
-    typename FUNCTOR_ARG_TYPE /* = decltype(resolve_single_functor_arg(*((FT*)0)))*/,
+    typename FUNCTOR_ARG_T /* = decltype(resolve_single_functor_arg(*((FT*)0)))*/,
 
     // prevent functors with message arguments from matching the template
     typename /* = typename enable_if_t<
         !std::is_base_of<
             Message_prefix,
-            typename std::remove_reference<FUNCTOR_ARG_TYPE>::type
+            typename std::remove_reference<FUNCTOR_ARG_T>::type
         >::value
     >*/
 >
 typename Transceiver::handler_provoker_desrcriptor
-Transceiver::activate(const FT& internal_slot, instance_id_type sender_id)
+Transceiver::activate(
+    const FT& internal_slot,
+    Typed_instance_id<SENDER_T> sender_id)
 {
     // this is an arbitrary functor, quite possibly a lambda. The first and only argument
     // should be matched here. If it fails, the function is incompatible to its purpose.
@@ -189,28 +198,31 @@ Transceiver::activate(const FT& internal_slot, instance_id_type sender_id)
         return internal_slot(msg.get_value());
     };
 
-    return activate_impl<MT>(handler, sender_id);
+    return activate_impl<MT>(handler, sender_id.id);
 }
 
 
 
 // A functor with a message argument
 template<
+    typename SENDER_T,
     typename FT,
     typename  /* = decltype(&FT::operator())*/,    //must be functor
     typename  /* = void*/, // differentiate from the previous template
-    typename FUNCTOR_ARG_TYPE /* = decltype(resolve_single_functor_arg(*((FT*)0)))*/,
+    typename FUNCTOR_ARG_T /* = decltype(resolve_single_functor_arg(*((FT*)0)))*/,
 
     // only allow functors with message arguments to match the template
     typename /* = typename enable_if_t<
         is_base_of<
             Message_prefix,
-            typename remove_reference<FUNCTOR_ARG_TYPE>::type
+            typename remove_reference<FUNCTOR_ARG_T>::type
         >::value
     >*/
 >
 typename Transceiver::handler_provoker_desrcriptor
-Transceiver::activate(const FT& internal_slot, instance_id_type sender_id)
+Transceiver::activate(
+    const FT& internal_slot,
+    Typed_instance_id<SENDER_T> sender_id)
 {
     // the given slot is already a functor taking a message argument, thus there is no need for
     // inclusion into a lambda. There is however the need to convert to function, since
@@ -220,27 +232,40 @@ Transceiver::activate(const FT& internal_slot, instance_id_type sender_id)
     using MT = typename remove_reference<arg_type>::type;
     auto handler = static_cast<function<typename MT::return_type(const arg_type&)>>(internal_slot);
 
-    return activate_impl<MT>(handler, sender_id);
+    constexpr bool sender_capability =
+        is_same_v    < SENDER_T, void > ||                   // generic sender (e.g. any_local)
+        is_base_of_v < typename MT::exporter, SENDER_T >;    // the exporter is sender's base
+
+    static_assert(sender_capability, "This type of sender cannot send messages of this type.");
+
+    return activate_impl<MT>(handler, sender_id.id);
 }
 
 
 
 // A Transceiver member function with a message argument. The sender has to exist.
 template<
-    typename MESSAGE_TYPE,
-    typename OBJECT_TYPE,
-    typename RT /* = typename MESSAGE_TYPE::return_type*/
+    typename SENDER_T,
+    typename MESSAGE_T,
+    typename OBJECT_T,
+    typename RT /* = typename MESSAGE_T::return_type*/
 >
 Transceiver::handler_provoker_desrcriptor
 Transceiver::activate(
-    RT(OBJECT_TYPE::*v)(const MESSAGE_TYPE&), 
-    instance_id_type sender_id)
+    RT(OBJECT_T::*v)(const MESSAGE_T&), 
+    Typed_instance_id<SENDER_T> sender_id)
 {
     auto handler =
-        function<typename MESSAGE_TYPE::return_type(const MESSAGE_TYPE&)>(
-            boost::bind(v, static_cast<OBJECT_TYPE*>(this), _1));
+        function<typename MESSAGE_T::return_type(const MESSAGE_T&)>(
+            boost::bind(v, static_cast<OBJECT_T*>(this), _1));
 
-    return activate_impl<MESSAGE_TYPE>(handler, sender_id);
+    constexpr bool sender_capability =
+        is_same_v    < SENDER_T, void > ||                        // generic sender (e.g. any_local)
+        is_base_of_v < typename MESSAGE_T::exporter, SENDER_T >;  // exporter is sender's base
+
+    static_assert(sender_capability, "This type of sender cannot send messages of this type.");
+
+    return activate_impl<MESSAGE_T>(handler, sender_id.id);
 }
 
 
@@ -286,15 +311,21 @@ void Transceiver::deactivate_all()
 
 
 template <
-    typename MESSAGE_TYPE,
+    typename MESSAGE_T,
     instance_id_type LOCALITY,
-    typename /* = void*/,
+    typename SENDER_T,
     typename... Args>
 void Transceiver::send(Args&&... args)
 {
-    static auto once = MESSAGE_TYPE::id();
+    constexpr bool sender_capability =
+        is_same_v    < typename MESSAGE_T::exporter, void     > ||
+        is_base_of_v < typename MESSAGE_T::exporter, SENDER_T >;
 
-    MESSAGE_TYPE* msg = mproc::s->m_out_req_c->write<MESSAGE_TYPE>(vb_size(args...), args...);
+    static_assert(sender_capability, "This type of sender cannot send messages of this type.");
+
+    static auto once = MESSAGE_T::id();
+
+    MESSAGE_T* msg = mproc::s->m_out_req_c->write<MESSAGE_T>(vb_size(args...), args...);
     msg->sender_instance_id = m_instance_id;
     msg->receiver_instance_id = LOCALITY;
     mproc::s->m_out_req_c->done_writing();
@@ -331,9 +362,9 @@ auto& Transceiver::get_instance_to_object_map()
 
 
 
-template <typename R_MESSAGE_TYPE, typename MESSAGE_TYPE, typename OBJ_TYPE>
+template <typename R_MESSAGE_T, typename MESSAGE_T, typename OBJECT_T>
 void Transceiver::finalize_rpc_write(
-    R_MESSAGE_TYPE* placed_msg, const MESSAGE_TYPE& msg, const OBJ_TYPE* obj)
+    R_MESSAGE_T* placed_msg, const MESSAGE_T& msg, const OBJECT_T* obj)
 {
     placed_msg->sender_instance_id = obj->m_instance_id;
     placed_msg->receiver_instance_id = msg.sender_instance_id;
@@ -346,13 +377,13 @@ void Transceiver::finalize_rpc_write(
 
 template <
     typename RPCTC,
-    typename MESSAGE_TYPE,
+    typename MESSAGE_T,
     typename /* = void*/,
     typename /* = enable_if_t<is_same< typename RPCTC::r_type, void>::value> */
 >
 void Transceiver::rpc_handler(Message_prefix& untyped_msg)
 {
-    MESSAGE_TYPE& msg = (MESSAGE_TYPE&)untyped_msg;
+    MESSAGE_T& msg = (MESSAGE_T&)untyped_msg;
     typename RPCTC::o_type* obj = get_instance_to_object_map<RPCTC>()[untyped_msg.receiver_instance_id];
     using return_message_type = Message<Enclosure<typename RPCTC::r_type>, void, not_defined_type_id>;
     static auto once = return_message_type::id();
@@ -365,12 +396,12 @@ void Transceiver::rpc_handler(Message_prefix& untyped_msg)
 
 template <
     typename RPCTC,
-    typename MESSAGE_TYPE,
+    typename MESSAGE_T,
     typename /* = enable_if_t<!is_same< typename RPCTC::r_type, void>::value> */
 >
 void Transceiver::rpc_handler(Message_prefix& untyped_msg)
 {
-    MESSAGE_TYPE& msg = (MESSAGE_TYPE&)untyped_msg;
+    MESSAGE_T& msg = (MESSAGE_T&)untyped_msg;
     typename RPCTC::o_type* obj = get_instance_to_object_map<RPCTC>()[untyped_msg.receiver_instance_id];
     using return_message_type = Message<Enclosure<typename RPCTC::r_type>, void, not_defined_type_id>;
     static auto once = return_message_type::id();
@@ -385,12 +416,12 @@ void Transceiver::rpc_handler(Message_prefix& untyped_msg)
 template <
     typename RPCTC,
     typename RT,
-    typename OBJECT_TYPE,
+    typename OBJECT_T,
     typename... FArgs,      // The argument types of the exported member function
     typename... RArgs       // The artument types used by the caller
 >
 RT Transceiver::rpc(
-    RT(OBJECT_TYPE::*resolution_dummy)(FArgs...),
+    RT(OBJECT_T::*resolution_dummy)(FArgs...),
     instance_id_type instance_id,
     RArgs&&... args)
 {
@@ -403,12 +434,12 @@ RT Transceiver::rpc(
 template <
     typename RPCTC,
     typename RT,
-    typename OBJECT_TYPE,
+    typename OBJECT_T,
     typename... FArgs,
     typename... RArgs
 >
 RT Transceiver::rpc(
-    RT(OBJECT_TYPE::*resolution_dummy)(FArgs...) const,
+    RT(OBJECT_T::*resolution_dummy)(FArgs...) const,
     instance_id_type instance_id,
     RArgs&&... args)
 {
@@ -420,7 +451,7 @@ RT Transceiver::rpc(
 
 template <
     typename RPCTC,
-    typename MESSAGE_TYPE,
+    typename MESSAGE_T,
     typename... Args
 >
 typename RPCTC::r_type
@@ -435,7 +466,7 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
         return (it->second->*RPCTC::mf())(args...);
     }
 
-    using return_type = typename MESSAGE_TYPE::return_type;
+    using return_type = typename MESSAGE_T::return_type;
     using return_message_type = Message<Enclosure<return_type>, void, not_defined_type_id>;
 
     mutex               keep_waiting_mutex;
@@ -468,8 +499,8 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
     unique_lock<mutex> sl(keep_waiting_mutex);
 
     // write the message for the rpc call into the communication ring
-    static auto once = MESSAGE_TYPE::id();
-    MESSAGE_TYPE* msg = mproc::s->m_out_req_c->write<MESSAGE_TYPE>(vb_size(args...), args...);
+    static auto once = MESSAGE_T::id();
+    MESSAGE_T* msg = mproc::s->m_out_req_c->write<MESSAGE_T>(vb_size(args...), args...);
     msg->sender_instance_id = mproc::s->m_instance_id;
     msg->receiver_instance_id = instance_id;
     msg->function_instance_id = function_instance_id;
@@ -546,9 +577,9 @@ Transceiver::export_rpc_impl()
 
 
 
-template <typename RPCTC, typename RT, typename OBJECT_TYPE, typename... Args>
+template <typename RPCTC, typename RT, typename OBJECT_T, typename... Args>
 function<void()>
-Transceiver::export_rpc(RT(OBJECT_TYPE::*resolution_dummy)(Args...) const)
+Transceiver::export_rpc(RT(OBJECT_T::*resolution_dummy)(Args...) const)
 {
     using message_type = Message<unique_message_body<RPCTC, Args...>, RT, RPCTC::id>;
     return export_rpc_impl<RPCTC, message_type>();
@@ -556,9 +587,9 @@ Transceiver::export_rpc(RT(OBJECT_TYPE::*resolution_dummy)(Args...) const)
 
 
 
-template <typename RPCTC, typename RT, typename OBJECT_TYPE, typename... Args>
+template <typename RPCTC, typename RT, typename OBJECT_T, typename... Args>
 function<void()>
-Transceiver::export_rpc(RT(OBJECT_TYPE::*resolution_dummy)(Args...))
+Transceiver::export_rpc(RT(OBJECT_T::*resolution_dummy)(Args...))
 {
     using message_type = Message<unique_message_body<RPCTC, Args...>, RT, RPCTC::id>;
     return export_rpc_impl<RPCTC, message_type>();
