@@ -156,7 +156,7 @@ private:
 public:
 
 
-    EXPORT_SIGNAL_EXPLICIT(instance_invalidated, instance_id_type instance_id);
+    SINTRA_SIGNAL_EXPLICIT(instance_invalidated, instance_id_type instance_id);
 
     inline
     void instance_invalidated_handler(const instance_invalidated& msg);
@@ -452,7 +452,7 @@ public:
 
 
 
-#define EXPORT_RPC_IMPL(m, mfp, id)                                                             \
+#define SINTRA_RPC_IMPL(m, mfp, id)                                                             \
     using m ## _mftc = RPCTC_d<decltype(mfp), mfp, id>;                                         \
     Instantiator m ## _itt = export_rpc<m ## _mftc>(mfp);                                       \
                                                                                                 \
@@ -468,41 +468,41 @@ public:
     // This is probably exploiting a bug of GCC, which circumvents the need for
     // TRANSCEIVER_PROLOGUE(name) inside any class deriving from Transceiver that uses RPC.
 
-    #define EXPORT_RPC(m)                                                                       \
+    #define SINTRA_RPC(m)                                                                       \
         typedef auto otr_ ## m ## _function() -> decltype(*this);                               \
         using otr_ ## m = std::remove_reference<decltype(((otr_ ## m ## _function*)0)())>::type;\
-        EXPORT_RPC_IMPL(m, &otr_ ## m :: m, invalid_type_id)
+        SINTRA_RPC_IMPL(m, &otr_ ## m :: m, invalid_type_id)
 
-    #define EXPORT_RPC_EXPLICIT(m)                                                              \
+    #define SINTRA_RPC_EXPLICIT(m)                                                              \
         typedef auto otr_ ## m ## _function() -> decltype(*this);                               \
         using otr_ ## m = std::remove_reference<decltype(((otr_ ## m ## _function*)0)())>::type;\
-        EXPORT_RPC_IMPL(m, &otr_ ## m :: m, sintra::detail::reserved_id::m)
+        SINTRA_RPC_IMPL(m, &otr_ ## m :: m, sintra::detail::reserved_id::m)
 
 #elif 0 //(_MSC_VER >= 1900) // && (_MSC_VER < 1999)
 
     // And this is probably exploiting another bug, this time of of MSVC, which
     // also circumvents the need for TRANSCEIVER_PROLOGUE(name) inside the class definition.
 
-    #define EXPORT_RPC(m)                                                                       \
+    #define SINTRA_RPC(m)                                                                       \
         template <typename = void> void otr_ ## m ## _function () {}                            \
         using otr_ ## m = decltype ( resolve_object_type(& otr_ ## m ## _function<>) );         \
-        EXPORT_RPC_IMPL(m, &otr_ ## m :: m, invalid_type_id)
+        SINTRA_RPC_IMPL(m, &otr_ ## m :: m, invalid_type_id)
 
-    #define EXPORT_RPC_EXPLICIT(m)                                                              \
+    #define SINTRA_RPC_EXPLICIT(m)                                                              \
         template <typename = void> void otr_ ## m ## _function () {}                            \
         using otr_ ## m = decltype ( resolve_object_type(& otr_ ## m ## _function<>) );         \
-        EXPORT_RPC_IMPL(m, &otr_ ## m :: m, sintra::detail::reserved_id::m)
+        SINTRA_RPC_IMPL(m, &otr_ ## m :: m, sintra::detail::reserved_id::m)
 
 #else
 
     // However, this is probably the right way to go, strictly abiding to C++,
     // which unfortunately requires TRANSCEIVER_PROLOGUE(name) in the class definition.
 
-    #define EXPORT_RPC(m)                                                                       \
-        EXPORT_RPC_IMPL(m, &Transceiver_type :: m, invalid_type_id)
+    #define SINTRA_RPC(m)                                                                       \
+        SINTRA_RPC_IMPL(m, &Transceiver_type :: m, invalid_type_id)
 
-    #define EXPORT_RPC_EXPLICIT(m)                                                              \
-        EXPORT_RPC_IMPL(m, &Transceiver_type :: m, sintra::detail::reserved_id::m)
+    #define SINTRA_RPC_EXPLICIT(m)                                                              \
+        SINTRA_RPC_IMPL(m, &Transceiver_type :: m, sintra::detail::reserved_id::m)
 
 #endif
 

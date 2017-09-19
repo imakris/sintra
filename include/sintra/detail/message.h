@@ -471,7 +471,7 @@ struct Message: public Message_prefix, public T
 
 
 
-#define EXPORT_SIGNAL_BASE(name, idv, ...)                                      \
+#define SINTRA_SIGNAL_BASE(name, idv, ...)                                      \
     _DEFINE_STRUCT(_sm_body_type_##name, __VA_ARGS__)                           \
     using name = Message<_sm_body_type_##name, void, idv, Transceiver_type>;    \
     inline void message_type_sanity_test(name) {                                \
@@ -481,11 +481,11 @@ struct Message: public Message_prefix, public T
         assert(!"Do not call this function.");                                  \
     }
 
-#define EXPORT_SIGNAL(name, ...)                                                \
-    EXPORT_SIGNAL_BASE(name, invalid_type_id, __VA_ARGS__)
+#define SINTRA_SIGNAL(name, ...)                                                \
+    SINTRA_SIGNAL_BASE(name, invalid_type_id, __VA_ARGS__)
 
-#define EXPORT_SIGNAL_EXPLICIT(name, ...)                                       \
-    EXPORT_SIGNAL_BASE(name, sintra::detail::reserved_id::name, __VA_ARGS__)
+#define SINTRA_SIGNAL_EXPLICIT(name, ...)                                       \
+    SINTRA_SIGNAL_BASE(name, sintra::detail::reserved_id::name, __VA_ARGS__)
 
 
 
