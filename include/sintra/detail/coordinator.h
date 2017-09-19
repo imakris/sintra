@@ -95,13 +95,13 @@ private:
     >                                           m_groups_of_process;
 
 public:
-    EXPORT_RPC_EXPLICIT(resolve_type)  
-    EXPORT_RPC_EXPLICIT(resolve_instance)
-    EXPORT_RPC_EXPLICIT(publish_transceiver)
-    EXPORT_RPC_EXPLICIT(unpublish_transceiver)
-    EXPORT_RPC_EXPLICIT(barrier)
-    EXPORT_RPC_EXPLICIT(add_this_process_into_group)
-    EXPORT_RPC_EXPLICIT(print)
+    SINTRA_RPC_EXPLICIT(resolve_type)  
+    SINTRA_RPC_EXPLICIT(resolve_instance)
+    SINTRA_RPC_EXPLICIT(publish_transceiver)
+    SINTRA_RPC_EXPLICIT(unpublish_transceiver)
+    SINTRA_RPC_EXPLICIT(barrier)
+    SINTRA_RPC_EXPLICIT(add_this_process_into_group)
+    SINTRA_RPC_EXPLICIT(print)
 
     friend struct Managed_process;
     friend struct Transceiver;

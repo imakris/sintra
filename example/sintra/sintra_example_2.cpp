@@ -24,7 +24,7 @@ struct Remotely_accessible: Transceiver
         return s + to_string(v);
     }
 
-    EXPORT_RPC(append)
+    SINTRA_RPC(append)
 };
 
 
