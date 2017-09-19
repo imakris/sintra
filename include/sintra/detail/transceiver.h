@@ -55,11 +55,70 @@ using std::string;
 using std::unordered_map;
 
 
+struct Transceiver;
+
+
+
+ //////////////////////////////////////////////////////////////////////////
+///// BEGIN Typed_instance_id //////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////
+//////   \//////   \//////   \//////   \//////   \//////   \//////   \//////
+ ////     \////     \////     \////     \////     \////     \////     \////
+  //       \//       \//       \//       \//       \//       \//       \//
+
+
+template <typename T>
+struct Typed_instance_id
+{
+    instance_id_type    id;
+    Typed_instance_id(const T& transceiver)
+    {
+        id = transceiver.m_instance_id;
+    }
+};
+
+
+template <typename T>
+Typed_instance_id<T> make_typed_instance_id(const T& transceiver)
+{
+    return Typed_instance_id<T>(transceiver);
+}
+
+
+// This specialization applies to non-typed generic groups such as any_local etc.
+template<>
+struct Typed_instance_id<void>
+{
+    instance_id_type    id;
+    Typed_instance_id(instance_id_type id_)
+    {
+        id = id_;
+    }
+};
+
+
+inline
+Typed_instance_id<void> make_untyped_instance_id(instance_id_type naked_instance_id)
+{
+    return Typed_instance_id<void>(naked_instance_id);
+}
+
+
+  //\       //\       //\       //\       //\       //\       //\       //
+ ////\     ////\     ////\     ////\     ////\     ////\     ////\     ////
+//////\   //////\   //////\   //////\   //////\   //////\   //////\   //////
+////////////////////////////////////////////////////////////////////////////
+///// END Typed_instance_id ////////////////////////////////////////////////
+ //////////////////////////////////////////////////////////////////////////
+
+
+
 using handler_proc_registry_mid_record_type = 
     multimap <
         instance_id_type,                                // sender
         function<void(const Message_prefix &)>
     >;
+
 
 using handler_registry_type =
     unordered_map <
@@ -74,7 +133,7 @@ struct Transceiver
 
     template <typename = void>
     Transceiver(const string& name = "", uint64_t id = 0);
-    
+
     ~Transceiver();
 
     inline
@@ -85,7 +144,6 @@ struct Transceiver
 
     template <typename = void>
     void destroy();
-
 
 
 private:
@@ -102,8 +160,6 @@ public:
 
     inline
     void instance_invalidated_handler(const instance_invalidated& msg);
-
-
 
 
     // this is not well defined. what is the question that this function trying to answer
@@ -137,54 +193,61 @@ public:
     };
 
 
-    template<typename MESSAGE_TYPE, typename HT>
+    template<typename MESSAGE_T, typename HT>
     handler_provoker_desrcriptor activate_impl(HT&& handler, instance_id_type sender_id);
 
 
     // A functor with an arbitrary non-message argument
     template<
+        typename SENDER_T,
         typename FT,
         typename = decltype(&FT::operator()),  //must be functor
-        typename FUNCTOR_ARG_TYPE = decltype(resolve_single_functor_arg(*((FT*)0))),
+        typename FUNCTOR_ARG_T = decltype(resolve_single_functor_arg(*((FT*)0))),
 
         // prevent functors with message arguments from matching the template
         typename = enable_if_t<
             !is_base_of<
                 Message_prefix,
-                typename remove_reference<FUNCTOR_ARG_TYPE>::type
+                typename remove_reference<FUNCTOR_ARG_T>::type
             >::value
         >
     >
-    handler_provoker_desrcriptor activate(const FT& internal_slot, instance_id_type sender_id);
+    handler_provoker_desrcriptor activate(
+        const FT& internal_slot,
+        Typed_instance_id<SENDER_T> sender_id);
 
 
     // A functor with a message argument
     template<
+        typename SENDER_T,
         typename FT,
         typename = decltype(&FT::operator()),    //must be functor
         typename = void, // differentiate from the previous template
-        typename FUNCTOR_ARG_TYPE = decltype(resolve_single_functor_arg(*((FT*)0))),
+        typename FUNCTOR_ARG_T = decltype(resolve_single_functor_arg(*((FT*)0))),
 
         // only allow functors with message arguments to match the template
         typename = enable_if_t<
             is_base_of<
                 Message_prefix,
-                typename remove_reference<FUNCTOR_ARG_TYPE>::type
+                typename remove_reference<FUNCTOR_ARG_T>::type
             >::value
         >
     >
-    handler_provoker_desrcriptor activate(const FT& internal_slot, instance_id_type sender_id);
+    handler_provoker_desrcriptor activate(
+        const FT& internal_slot,
+        Typed_instance_id<SENDER_T> sender_id);
 
 
     // A Transceiver member function with a message argument. The sender has to exist.
     template<
-        typename MESSAGE_TYPE,
-        typename OBJECT_TYPE,
-        typename RT = typename MESSAGE_TYPE::return_type
+        typename SENDER_T,
+        typename MESSAGE_T,
+        typename OBJECT_T,
+        typename RT = typename MESSAGE_T::return_type
     >
     handler_provoker_desrcriptor activate(
-        RT(OBJECT_TYPE::*v)(const MESSAGE_TYPE&), 
-        instance_id_type sender_id);
+        RT(OBJECT_T::*v)(const MESSAGE_T&), 
+        Typed_instance_id<SENDER_T> sender_id);
 
     
     template <typename = void>
@@ -194,21 +257,22 @@ public:
     template <typename = void>
     void deactivate_all();
 
-
+    
     template <
-        typename MESSAGE_TYPE,
+        typename MESSAGE_T,
         instance_id_type LOCALITY,
-        typename = void,
+        typename SENDER_T,
         typename... Args>
     void send(Args&&... args);
+
 
 
  //////////////////////////////////////////////////////////////////////////
 ///// BEGIN RPC ////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////
-//////    //////    //////    //////    //////    //////    //////    //////
- ////      ////      ////      ////      ////      ////      ////      ////
-  //        //        //        //        //        //        //        //
+//////   \//////   \//////   \//////   \//////   \//////   \//////   \//////
+ ////     \////     \////     \////     \////     \////     \////     \////
+  //       \//       \//       \//       \//       \//       \//       \//
 
 
     // The following code was originally developed in MSVC2015 Update 2.
@@ -222,13 +286,13 @@ public:
         MF m,
         type_id_type ID,
         typename RT = decltype(resolve_rt(m)),
-        typename OBJECT_TYPE = decltype(resolve_object_type(m))
+        typename OBJECT_T = decltype(resolve_object_type(m))
     >
     struct RPCTC_d // remote process call type container
     {
         using mf_type = MF;
         using r_type = RT;
-        using o_type = OBJECT_TYPE;
+        using o_type = OBJECT_T;
         const static MF mf() { return m; };
         enum { id = ID };
     };
@@ -304,14 +368,14 @@ public:
     static auto& get_instance_to_object_map();
 
 
-    template <typename R_MESSAGE_TYPE, typename MESSAGE_TYPE, typename OBJ_TYPE>
+    template <typename R_MESSAGE_T, typename MESSAGE_T, typename OBJECT_T>
     static void finalize_rpc_write(
-        R_MESSAGE_TYPE* placed_msg, const MESSAGE_TYPE& msg, const OBJ_TYPE* obj);
+        R_MESSAGE_T* placed_msg, const MESSAGE_T& msg, const OBJECT_T* obj);
 
 
     template <
         typename RPCTC,
-        typename MESSAGE_TYPE,
+        typename MESSAGE_T,
         typename = void,
         typename = enable_if_t<is_same< typename RPCTC::r_type, void>::value>
     >
@@ -320,7 +384,7 @@ public:
 
     template <
         typename RPCTC,
-        typename MESSAGE_TYPE,
+        typename MESSAGE_T,
         typename = enable_if_t<!is_same< typename RPCTC::r_type, void>::value>
     >
     static void rpc_handler(Message_prefix& untyped_msg);
@@ -329,12 +393,12 @@ public:
     template <
         typename RPCTC,
         typename RT,
-        typename OBJECT_TYPE,
+        typename OBJECT_T,
         typename... FArgs,      // The argument types of the exported member function
         typename... RArgs        // The artument types used by the caller
     >
     static RT rpc(
-        RT(OBJECT_TYPE::*resolution_dummy)(FArgs...),
+        RT(OBJECT_T::*resolution_dummy)(FArgs...),
         instance_id_type instance_id,
         RArgs&&... args);
 
@@ -342,19 +406,19 @@ public:
     template <
         typename RPCTC,
         typename RT,
-        typename OBJECT_TYPE,
+        typename OBJECT_T,
         typename... FArgs,
         typename... RArgs
     >
     static RT rpc(
-        RT(OBJECT_TYPE::*resolution_dummy)(FArgs...) const,
+        RT(OBJECT_T::*resolution_dummy)(FArgs...) const,
         instance_id_type instance_id,
         RArgs&&... args);
 
 
     template <
         typename RPCTC,
-        typename MESSAGE_TYPE,
+        typename MESSAGE_T,
         typename... Args
     >
     static auto rpc_impl(instance_id_type instance_id, Args... args) -> typename RPCTC::r_type;
@@ -380,11 +444,11 @@ public:
     template <typename RPCTC, typename MT>
     function<void()> export_rpc_impl();
 
-    template <typename RPCTC, typename RT, typename OBJECT_TYPE, typename... Args>
-    function<void()> export_rpc(RT(OBJECT_TYPE::*resolution_dummy)(Args...) const);
+    template <typename RPCTC, typename RT, typename OBJECT_T, typename... Args>
+    function<void()> export_rpc(RT(OBJECT_T::*resolution_dummy)(Args...) const);
 
-    template <typename RPCTC, typename RT, typename OBJECT_TYPE, typename... Args>
-    function<void()> export_rpc(RT(OBJECT_TYPE::*resolution_dummy)(Args...));
+    template <typename RPCTC, typename RT, typename OBJECT_T, typename... Args>
+    function<void()> export_rpc(RT(OBJECT_T::*resolution_dummy)(Args...));
 
 
 
@@ -399,16 +463,10 @@ public:
     }
 
 
-// This must be present in the definition of any class deriving from Transceiver that uses RPC.
-// An alternative would be to implement the Transceiver with CRTP, but then all derivatives
-// would have to be templated, which could be somewhat pointless.
-#define TRANSCEIVER(n)                                                                          \
-    using Transceiver_type = n;
-
 #if 0 //defined(__GNUG__)
 
     // This is probably exploiting a bug of GCC, which circumvents the need for
-    // TRANSCEIVER(name) inside any class deriving from Transceiver that uses RPC.
+    // TRANSCEIVER_PROLOGUE(name) inside any class deriving from Transceiver that uses RPC.
 
     #define EXPORT_RPC(m)                                                                       \
         typedef auto otr_ ## m ## _function() -> decltype(*this);                               \
@@ -423,7 +481,7 @@ public:
 #elif 0 //(_MSC_VER >= 1900) // && (_MSC_VER < 1999)
 
     // And this is probably exploiting another bug, this time of of MSVC, which
-    // also circumvents the need for TRANSCEIVER(name) inside the class definition.
+    // also circumvents the need for TRANSCEIVER_PROLOGUE(name) inside the class definition.
 
     #define EXPORT_RPC(m)                                                                       \
         template <typename = void> void otr_ ## m ## _function () {}                            \
@@ -438,7 +496,7 @@ public:
 #else
 
     // However, this is probably the right way to go, strictly abiding to C++,
-    // which unfortunately requires TRANSCEIVER(name) inside the class definition.
+    // which unfortunately requires TRANSCEIVER_PROLOGUE(name) in the class definition.
 
     #define EXPORT_RPC(m)                                                                       \
         EXPORT_RPC_IMPL(m, &Transceiver_type :: m, invalid_type_id)
@@ -448,13 +506,29 @@ public:
 
 #endif
 
-  //        //        //        //        //        //        //        //
- ////      ////      ////      ////      ////      ////      ////      ////
-//////    //////    //////    //////    //////    //////    //////    //////
+  //\       //\       //\       //\       //\       //\       //\       //
+ ////\     ////\     ////\     ////\     ////\     ////\     ////\     ////
+//////\   //////\   //////\   //////\   //////\   //////\   //////\   //////
 ////////////////////////////////////////////////////////////////////////////
 ///// END RPC //////////////////////////////////////////////////////////////
  //////////////////////////////////////////////////////////////////////////
 
+
+// This must be present in the definition of any class deriving from Transceiver that uses RPC.
+// An alternative would be to implement the Transceiver with CRTP, but then all derivatives
+// would have to be templated, which could be somewhat pointless.
+#define TRANSCEIVER_PROLOGUE(n)                                                                 \
+    using Transceiver_type = n;                                                                 \
+                                                                                                \
+    template <                                                                                  \
+        typename MESSAGE_T,                                                                     \
+        instance_id_type LOCALITY = any_local,                                                  \
+        typename SENDER_T = Transceiver_type,                                                   \
+        typename... Args>                                                                       \
+    void send(Args&&... args)                                                                   \
+    {                                                                                           \
+        Transceiver::send<MESSAGE_T, LOCALITY, SENDER_T>(std::forward<Args>(args)...);          \
+    }
 
 private:
 
@@ -478,6 +552,9 @@ private:
     friend struct Managed_process;
     friend struct Coordinator;
     friend struct Process_message_reader;
+
+    template<typename>
+    friend struct Typed_instance_id;
 };
 
 
