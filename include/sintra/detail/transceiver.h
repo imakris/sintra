@@ -517,8 +517,16 @@ public:
 // This must be present in the definition of any class deriving from Transceiver that uses RPC.
 // An alternative would be to implement the Transceiver with CRTP, but then all derivatives
 // would have to be templated, which could be somewhat pointless.
-#define TRANSCEIVER_PROLOGUE(n)                                                                 \
-    using Transceiver_type = n;                                                                 \
+#define TRANSCEIVER_PROLOGUE(transceiver_type_arg)                                              \
+                                                                                                \
+    inline void transceiver_prologue_sanity_test() {                                            \
+        static_assert(is_same<transceiver_type_arg*, decltype(this)>::value,                    \
+            "The argument of TRANSCEIVER_PROLOGUE( [transceiver_type] ) macro "                 \
+            "does not match the type of the class it is being used in.");                       \
+        assert(!"Do not call this function.");                                                  \
+    }                                                                                           \
+                                                                                                \
+    using Transceiver_type = transceiver_type_arg;                                              \
                                                                                                 \
     template <                                                                                  \
         typename MESSAGE_T,                                                                     \
