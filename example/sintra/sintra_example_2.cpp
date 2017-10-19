@@ -35,7 +35,7 @@ int process_1()
 
     ra.assign_name("some name");
 
-    // ensure that the object has been named before trying to access it from another process
+    // ensure that the instance has been named before trying to access it from another process
     barrier();
 
     string test_string = ra.append("sydney_", 2000);
