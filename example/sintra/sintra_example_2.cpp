@@ -42,7 +42,7 @@ int process_1()
 
     console() << test_string << "\n";
 
-    // ensure that ra still exists, since it in the stack of another process's thread.
+    // ensure that ra still exists
     barrier();
     return 0;
 }
@@ -56,7 +56,7 @@ int process_2()
 
     string test_string = Remotely_accessible::rpc_append("some name", "beijing_", 2008);
     
-    // ensure that "some object" still exists, since it in the stack of another processe's thread.
+    // ensure that the remotely accessible instance still exists
     barrier();
 
     console() << test_string << "\n";
