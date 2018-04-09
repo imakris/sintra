@@ -69,9 +69,17 @@ Process_message_reader::~Process_message_reader()
         std::unique_lock<std::mutex> lk(m_req_stop_mutex);
         stop();
         m_in_req_c->unblock();
-        auto req_predicate = [=]{return m_req_running == false;};
-        m_req_stop_condition.wait_for(lk, duration<double>(0.5), req_predicate);
-        m_request_reader_thread->join();
+        auto req_predicate = [&] {return m_req_running == false;};
+        m_req_stop_condition.wait_for(lk, duration<double>(2.), req_predicate);
+
+        if (m_req_running == false) {
+            m_request_reader_thread->join();
+        }
+        else {
+            // wait_for timed out. To avoid hanging, on an attempt to join, we exit.
+            exit(1);
+        }
+
         delete m_request_reader_thread;
         delete m_in_req_c;
     }
@@ -81,12 +89,26 @@ Process_message_reader::~Process_message_reader()
         stop();
         m_in_req_c->unblock();
         m_in_rep_c->unblock();
-        auto req_predicate = [=]{return m_req_running == false;};
-        m_req_stop_condition.wait_for(lk1, duration<double>(0.5), req_predicate);
-        auto rep_predicate = [=]{return m_rep_running == false;};
-        m_rep_stop_condition.wait_for(lk2, duration<double>(0.5), rep_predicate);
-        m_request_reader_thread->join();
-        m_reply_reader_thread->join();
+        auto req_predicate = [&]{return m_req_running == false;};
+        m_req_stop_condition.wait_for(lk1, duration<double>(2.), req_predicate);
+        auto rep_predicate = [&]{return m_rep_running == false;};
+        m_rep_stop_condition.wait_for(lk2, duration<double>(2.), rep_predicate);
+
+        if (m_req_running == false) {
+            m_request_reader_thread->join();
+        }
+        else {
+            // wait_for timed out. To avoid hanging, on an attempt to join, we exit.
+            exit(1);
+        }
+
+        if (m_rep_running == false) {
+            m_reply_reader_thread->join();
+        }
+        else {
+            // wait_for timed out. To avoid hanging, on an attempt to join, we exit.
+            exit(1);
+        }
 
         delete m_reply_reader_thread;
         delete m_request_reader_thread;
@@ -124,7 +146,7 @@ void Process_message_reader::request_reader_function()
         // someone else's behalf (for relay purposes).
         // TODO: If some process not being part of the core set of processes sends nonsense,
         // it might be a good idea to kill it. If it is in the core set of processes,
-        // then it is a bug.
+        // then it would be a bug.
         assert(m_in_req_c->m_id == process_of(m->sender_instance_id) ||
                 m_in_req_c->m_id == process_of(coord_id::s));
 
@@ -199,15 +221,22 @@ void Process_message_reader::request_reader_function()
                 // find handlers that operate with this type of message in this process
                 auto it_mt = mproc::s->m_active_handlers.find(m->message_type_id);
                 if (it_mt != mproc::s->m_active_handlers.end()) {
-                    // get handlers operating with this type of message from given sender
-                    auto shr = it_mt->second.equal_range(m->sender_instance_id);
-                    for (auto it = shr.first; it != shr.second; ++it)
-                        it->second(*m);
 
-                    // covers any_remote AND any_local_or_remote
-                    auto chr = it_mt->second.lower_bound(any_remote);
-                    for (auto it = chr; it != it_mt->second.end(); ++it)
-                        it->second(*m);
+                    
+                    instance_id_type sids[] = {
+                        m->sender_instance_id,
+                        any_remote,
+                        any_local_or_remote
+                    };
+
+                    for (auto sid : sids) {
+                        auto shl = it_mt->second.find(sid);
+                        if (shl != it_mt->second.end()) {
+                            for (auto& e : shl->second) {
+                                e(*m);
+                            }
+                        }
+                    }
 
                 }
             }
@@ -265,7 +294,7 @@ void Process_message_reader::local_request_reader_function()
         // someone else's behalf (for relay purposes).
         // TODO: If some process not being part of the core set of processes sends nonsense,
         // it might be a good idea to kill it. If it is in the core set of processes,
-        // then it is a bug.
+        // then it would be a bug.
         assert(m_in_req_c->m_id == process_of(m->sender_instance_id) ||
                m_in_req_c->m_id == process_of(coord_id::s));
 
@@ -312,26 +341,25 @@ void Process_message_reader::local_request_reader_function()
             // this is an event message.
 
             if (m_status == FULL_FUNCTIONALITY) {
-
+                
                 // NEW STUFF, UNTESTED
                 // receivers that handle this type of message in this process
                 auto it_mt = mproc::s->m_active_handlers.find(m->message_type_id);
                 if (it_mt != mproc::s->m_active_handlers.end()) {
-                    // get handlers operating on this type of message, if it is
-                    // from this specific local sender
-                    auto shr = it_mt->second.equal_range(m->sender_instance_id);
-                    for (auto it = shr.first; it != shr.second; ++it) {
-                        it->second(*m);
-                    }
 
-                    // get all handlers operating on this type of message, from
-                    auto chr1 = it_mt->second.equal_range(any_local);
-                    auto chr2 = it_mt->second.equal_range(any_local_or_remote);
-                    for (auto it = chr1.first; it != chr1.second; ++it) {
-                        it->second(*m);
-                    }
-                    for (auto it = chr2.first; it != chr2.second; ++it) {
-                        it->second(*m);
+                    instance_id_type sids[] = {
+                        m->sender_instance_id,
+                        any_local,
+                        any_local_or_remote
+                    };
+
+                    for (auto sid : sids) {
+                        auto shl = it_mt->second.find(sid);
+                        if (shl != it_mt->second.end()) {
+                            for (auto& e : shl->second) {
+                                e(*m);
+                            }
+                        }
                     }
 
                 }
