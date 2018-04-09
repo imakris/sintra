@@ -64,8 +64,7 @@ Coordinator::~Coordinator()
 inline
 type_id_type Coordinator::resolve_type(const string& name)
 {
-    auto& koko = mproc::s->m_type_id_of_name;// PORT
-    auto it = koko.find(name);
+    auto it = mproc::s->m_type_id_of_name.find(name);
     if (it != mproc::s->m_type_id_of_name.end()) {
         return it->second;
     }
