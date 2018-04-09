@@ -333,7 +333,7 @@ public:
             "A function with non-const reference arguments cannot be exported for RPC. "
             "Read Sintra documentation for details."
             );
-        warn_about_reference_args_impl<SEQ_T, I + 1, J> koko;
+        warn_about_reference_args_impl<SEQ_T, I + 1, J> dummy;
     };
 
     template <typename SEQ_T, int I>

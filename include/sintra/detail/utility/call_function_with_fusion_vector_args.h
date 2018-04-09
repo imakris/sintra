@@ -235,7 +235,7 @@ using namespace sintra;
 
 int func0()
 {
-    std::cout << "koko" << '\n';
+    std::cout << "func0" << '\n';
     return 5;
 }
 
@@ -256,7 +256,7 @@ struct B
 {
     int mfunc0()
     {
-        std::cout << "koko" << '\n';
+        std::cout << "mfunc0" << '\n';
         return 5;
     }
 
