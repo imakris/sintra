@@ -40,14 +40,14 @@ int process_1()
 
     ra.assign_name("some name");
 
-    // ensure that the object has been named before trying to access it from another process
+    // ensure that the instance has been named before trying to access it from another process
     barrier();
 
     string test_string = ra.append("sydney_", 2000);
 
     console() << test_string << "\n";
 
-    // ensure that ra still exists, since it in the stack of another process's thread.
+    // ensure that ra still exists
     barrier();
     return 0;
 }
@@ -61,7 +61,7 @@ int process_2()
 
     string test_string = Remotely_accessible::rpc_append("some name", "beijing_", 2008);
     
-    // ensure that "some object" still exists, since it in the stack of another processe's thread.
+    // ensure that the remotely accessible instance still exists
     barrier();
 
     console() << test_string << "\n";
