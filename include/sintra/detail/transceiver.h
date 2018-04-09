@@ -33,6 +33,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "spinlocked_map.h"
 
 #include <list>
+#include <map>
 #include <mutex>
 #include <unordered_map>
 
@@ -48,7 +49,7 @@ using std::is_base_of;
 using std::is_const;
 using std::is_reference;
 using std::list;
-using std::multimap;
+using std::map;
 using std::mutex;
 using std::remove_reference;
 using std::string;
@@ -114,14 +115,14 @@ Typed_instance_id<void> make_untyped_instance_id(instance_id_type naked_instance
 
 
 using handler_proc_registry_mid_record_type = 
-    multimap <
+    map <
         instance_id_type,                                // sender
-        function<void(const Message_prefix &)>
+        list<function<void(const Message_prefix &)>>
     >;
 
 
 using handler_registry_type =
-    unordered_map <
+    map <
         type_id_type,                                    // message type
         handler_proc_registry_mid_record_type
     >;
@@ -174,27 +175,17 @@ public:
 
     mutex m_handlers_mutex;
 
-    using handler_self_registry_mid_record_type =
-        list <
-            handler_proc_registry_mid_record_type::iterator
-        >;
-
-    spinlocked_map <
-        type_id_type,            // message type id
-        handler_self_registry_mid_record_type
-    >
-    m_active_handler_iterators;
 
 
-    struct handler_provoker_desrcriptor
-    {
-        type_id_type                                        message_type_id;
-        handler_self_registry_mid_record_type::iterator     mid_self_iterator;
-    };
+    list<function<void()>> m_deactivators;
+
+
+
+    using handler_deactivator = std::function<void()>;
 
 
     template<typename MESSAGE_T, typename HT>
-    handler_provoker_desrcriptor activate_impl(HT&& handler, instance_id_type sender_id);
+    handler_deactivator activate_impl(HT&& handler, instance_id_type sender_id);
 
 
     // A functor with an arbitrary non-message argument
@@ -212,7 +203,7 @@ public:
             >::value
         >
     >
-    handler_provoker_desrcriptor activate(
+    handler_deactivator activate(
         const FT& internal_slot,
         Typed_instance_id<SENDER_T> sender_id);
 
@@ -233,7 +224,7 @@ public:
             >::value
         >
     >
-    handler_provoker_desrcriptor activate(
+    handler_deactivator activate(
         const FT& internal_slot,
         Typed_instance_id<SENDER_T> sender_id);
 
@@ -245,13 +236,11 @@ public:
         typename OBJECT_T,
         typename RT = typename MESSAGE_T::return_type
     >
-    handler_provoker_desrcriptor activate(
+    handler_deactivator activate(
         RT(OBJECT_T::*v)(const MESSAGE_T&), 
         Typed_instance_id<SENDER_T> sender_id);
 
     
-    template <typename = void>
-    void deactivate(handler_provoker_desrcriptor pd);
 
 
     template <typename = void>

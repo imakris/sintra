@@ -121,13 +121,6 @@ auto activate_slot(const FT& slot_function, Typed_instance_id<SENDER_T> sender_i
 }
 
 
-inline
-void deactivate_slot(Transceiver::handler_provoker_desrcriptor hpd)
-{
-    return mproc::s->deactivate(hpd);
-}
-
-
 
 template <instance_id_type LOCALITY>
 struct Maildrop

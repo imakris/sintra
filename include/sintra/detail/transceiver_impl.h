@@ -134,6 +134,8 @@ void Transceiver::instance_invalidated_handler(const instance_invalidated& msg)
     auto it = m_active_return_handlers.begin();
     while (it != m_active_return_handlers.end()) {
         if (it->second.instance_id == msg.instance_id) {
+            // if this transceiver is waiting on an rpc call to a function
+            // of the transceiver being invalidated, the call will fail.
             it->second.failure_handler();
             it = m_active_return_handlers.erase(it);
         }
@@ -146,20 +148,48 @@ void Transceiver::instance_invalidated_handler(const instance_invalidated& msg)
 
 
 template<typename MESSAGE_T, typename HT>
-Transceiver::handler_provoker_desrcriptor
+Transceiver::handler_deactivator
 Transceiver::activate_impl(HT&& handler, instance_id_type sender_id)
 {
     auto message_type_id = MESSAGE_T::id();
     lock_guard<mutex> sl(m_handlers_mutex);
 
-    auto f = (function<void(const Message_prefix&)>&) handler;
-    auto mid_proc_iterator = mproc::s->m_active_handlers[message_type_id].emplace(
-        make_pair(sender_id, f));
+    auto& ms  = mproc::s->m_active_handlers[message_type_id];
+    list<function<void(const Message_prefix &)>>::iterator mid_sid_it;
+    auto  msm_it = ms.lower_bound(sender_id);
+    if (msm_it == ms.end() || msm_it->first != sender_id) {
+        // There was no record for this sender_id, thus we have to make one.
+        msm_it = ms.emplace_hint(
+            msm_it,
+            make_pair(
+                sender_id,
+                list<function<void(const Message_prefix&)>> {
+                    (function<void(const Message_prefix&)>&) handler
+                }
+            )
+        );
+        mid_sid_it = msm_it->second.begin();
+    }
+    else {
+        mid_sid_it = msm_it->second.emplace(msm_it->second.end(),
+            (function<void(const Message_prefix&)>&) handler
+        );
+    }
 
-    auto& ahir = m_active_handler_iterators[message_type_id];
-    auto mid_self_iterator = ahir.emplace(ahir.end(), mid_proc_iterator);
+    // emplace a default object in the deactivators, to obtain an iterator
+    // which is needed in the lambda below.
+    m_deactivators.emplace_back(std::function<void()>());
+    auto it = std::prev(m_deactivators.end());
 
-    return handler_provoker_desrcriptor{message_type_id, mid_self_iterator};
+    *it = [=, this, &ms] () {
+            msm_it->second.erase(mid_sid_it);
+            if (msm_it->second.empty()) {
+                ms.erase(msm_it);
+            }
+            m_deactivators.erase(it);
+        };
+
+    return m_deactivators.back();
 }
 
 
@@ -179,7 +209,7 @@ template<
         >::value
     >*/
 >
-typename Transceiver::handler_provoker_desrcriptor
+typename Transceiver::handler_deactivator
 Transceiver::activate(
     const FT& internal_slot,
     Typed_instance_id<SENDER_T> sender_id)
@@ -219,7 +249,7 @@ template<
         >::value
     >*/
 >
-typename Transceiver::handler_provoker_desrcriptor
+typename Transceiver::handler_deactivator
 Transceiver::activate(
     const FT& internal_slot,
     Typed_instance_id<SENDER_T> sender_id)
@@ -250,7 +280,7 @@ template<
     typename OBJECT_T,
     typename RT /* = typename MESSAGE_T::return_type*/
 >
-Transceiver::handler_provoker_desrcriptor
+Transceiver::handler_deactivator
 Transceiver::activate(
     RT(OBJECT_T::*v)(const MESSAGE_T&), 
     Typed_instance_id<SENDER_T> sender_id)
@@ -270,42 +300,15 @@ Transceiver::activate(
 
 
 
-template <typename /* = void*/>
-void Transceiver::deactivate(handler_provoker_desrcriptor pd)
-{
-    auto& pah = mproc::s->m_active_handlers;
-    auto& ahi = m_active_handler_iterators;
 
-    const auto& hr_proc = pah.find(pd.message_type_id);
-    const auto& hr_self = ahi.find(pd.message_type_id);
-        
-    assert(hr_proc != pah.end());
-    assert(hr_self != ahi.end());
-
-    hr_proc->second.erase(*pd.mid_self_iterator);
-    hr_self->second.erase( pd.mid_self_iterator);
-
-    if (!hr_proc->second.size()) {
-        pah.erase(hr_proc);
-    }
-    if (!hr_self->second.size()) {
-        ahi.erase(hr_self);
-    }
-}
 
 
 
 template <typename /* = void*/>
 void Transceiver::deactivate_all()
 {
-    for (auto& el1 : m_active_handler_iterators) {
-        
-        for (auto& el2 : el1.second) {
-            mproc::s->m_active_handlers[el1.first].erase(el2);
-        }
-    }
-
-    m_active_handler_iterators.clear();
+    while (!m_deactivators.empty())
+        m_deactivators.back()();
 }
 
 
