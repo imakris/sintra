@@ -162,13 +162,11 @@ struct Ring
 
 
         ipc::interprocess_mutex         condition_mutex;
-        atomic<bool>                    crossed_checkpoint;
         ipc::interprocess_condition     dirty_condition;
 
         Control():
             num_attached(0),
-            leading_sequence(0),
-            crossed_checkpoint(false)
+            leading_sequence(0)
         {
             read_access[0] = 0;
             read_access[1] = 0;
@@ -470,11 +468,7 @@ struct Ring_R: Ring<NUM_ELEMENTS, T>
 
                     // if sufficient time has passed, go to sleep
 
-                    // The thread may as well not go to sleep after that, but if this value is
-                    // false, it guarantees that no thread is sleeping
-                    this->m_control->crossed_checkpoint = true;
-
-                    // the lock has to precede the if block, because in case it doen't, the
+                    // the lock has to precede the 'if' block, because in case it doen't, the
                     // notify may be lost.
                     ipc::scoped_lock<ipc::interprocess_mutex> lock(this->m_control->condition_mutex);
 
@@ -656,16 +650,8 @@ struct Ring_W: Ring<NUM_ELEMENTS, T>
         // m_reading_sequence == m_control->leading_sequence
         // on the reader will keep failing until done_reading() is called
 
-        // in the reading counterpart, the following atomic is set true before testing
-        // against the leading_sequence atomic (the one that was modified in the previous line,
-        // i.e. they are accessed in the opposite order).
-
-        bool expected = true;
-
-        if (this->m_control->crossed_checkpoint.compare_exchange_weak(expected, false)) {
-            // acquires and releases the lock, only to make sure that a reader is not already inside
-            // the critical section
-            ipc::scoped_lock<ipc::interprocess_mutex>(this->m_control->condition_mutex);
+        {
+            ipc::scoped_lock<ipc::interprocess_mutex> lock(this->m_control->condition_mutex);
             this->m_control->dirty_condition.notify_all();
         }
 
