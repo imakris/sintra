@@ -40,7 +40,7 @@ int process_1()
 int process_2()
 {
     auto string_slot = [] (const string& str) {
-        cout << "Received string \"" << str << "\"\n";
+        cout << "[process 2] Received string \"" << str << "\"\n";
 
         static int num_messages = 0;
         if (++num_messages == 4) {
@@ -61,7 +61,7 @@ int process_2()
 int process_3()
 {
     auto int_slot = [&] (int number) {
-        cout << "Received number " << number << "\n";
+        cout << "[process 3] Received number " << number << "\n";
 
         static int num_messages = 0;
         if (++num_messages == 2) { //it will not receive them all, just 2

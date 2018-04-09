@@ -6,6 +6,11 @@
 // - how to assign a name on the object, which is usable across processes
 // - how to make the remote call of the exported method, using the known name of the object
 //
+// In this example, Remotely_accessible is a struct defined to offer an 'append' method,
+// which takes a string and an integer and returns another string with its arguments concatenated.
+// This method is exported for RPC.
+// An instance of Remotely_accessible is local to process_1, and used locally.
+// This same instance is used by process_2 remotely.
 
 #include <iostream>
 #include <sintra/sintra.h>
