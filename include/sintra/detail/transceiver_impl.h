@@ -181,7 +181,7 @@ Transceiver::activate_impl(HT&& handler, instance_id_type sender_id)
     m_deactivators.emplace_back(std::function<void()>());
     auto it = std::prev(m_deactivators.end());
 
-    *it = [=, this, &ms] () {
+    *it = [=, &ms] () {
             msm_it->second.erase(mid_sid_it);
             if (msm_it->second.empty()) {
                 ms.erase(msm_it);
