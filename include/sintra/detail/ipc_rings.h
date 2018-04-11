@@ -483,7 +483,7 @@ struct Ring_R: Ring<NUM_ELEMENTS, T>
 
             double time_limit = omp_get_wtime() + spin_before_sleep * 0.5;
             size_t sc = 0;
-            size_t sc_limit = 2; // spin count limit - to avoid calling omp_get_wtime too often
+            size_t sc_limit = 40; // initial spin count limit, to reduce the calls to omp_get_wtime
 
             while (m_reading_sequence == this->m_control->leading_sequence.load() && !m_unblocked) {
                 
