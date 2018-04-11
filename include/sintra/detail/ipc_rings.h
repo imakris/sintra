@@ -129,7 +129,11 @@ inline bool remove_directory(const string& dir_name)
     error_code ec;
     fs::path ps(dir_name);
     auto rv = fs::remove_all(dir_name.c_str(), ec);
-    string koko = ec.message();
+
+    // [TESTING] please do not enable
+    //if (!rv) {
+    //    string msg = ec.message();
+    //}
     return !!rv;
 }
 
@@ -164,9 +168,16 @@ struct Ring
         ipc::interprocess_mutex         condition_mutex;
         ipc::interprocess_condition     dirty_condition;
 
+#if !defined(SINTRA_RING_READING_POLICY_ALWAYS_SPIN)
+        atomic<int>                     sleeping_readers;
+#endif
+
         Control():
-            num_attached(0),
-            leading_sequence(0)
+            num_attached(0)
+        ,   leading_sequence(0)
+#if !defined(SINTRA_RING_READING_POLICY_ALWAYS_SPIN)
+        ,   sleeping_readers(0)
+#endif
         {
             read_access[0] = 0;
             read_access[1] = 0;
@@ -425,11 +436,10 @@ struct Ring_R: Ring<NUM_ELEMENTS, T>
 {
     Ring_R(const string& directory, const string& prefix, uint64_t id):
         Ring<NUM_ELEMENTS, char>::Ring(directory, prefix, id),
-        m_sleeping(false),
         m_unblocked(false)
     {
         m_reading_sequence = this->m_control->leading_sequence.load();
-        this->m_semiring = (m_reading_sequence >> this->m_semiring_shift) & 1;
+        m_semiring = (m_reading_sequence >> this->m_semiring_shift) & 1;
         this->m_control->read_access[m_semiring]++;
     }
 
@@ -447,41 +457,65 @@ struct Ring_R: Ring<NUM_ELEMENTS, T>
     // The caller must call done_reading() once it is done accessing the ring.
     T* start_reading(size_t* num_available_elements)
     {
-        double time_limit = 0.;
-        size_t sc_limit = 1; // spin count limit - to avoid calling omp_get_wtime too often
+
+#if defined(SINTRA_RING_READING_POLICY_ALWAYS_SLEEP)
+
+        ipc::scoped_lock<ipc::interprocess_mutex> lock(m_control->condition_mutex);
+        while (m_reading_sequence == m_control->leading_sequence.load() && !m_unblocked) {
+
+            m_control->sleeping_readers++;
+
+            if (m_reading_sequence == m_control->leading_sequence.load() && !m_unblocked) {
+                m_control->dirty_condition.wait(lock);
+            }
+
+            m_control->sleeping_readers--;
+        }
+
+#elif defined(SINTRA_RING_READING_POLICY_ALWAYS_SPIN)
+
+        while (m_reading_sequence == m_control->leading_sequence.load() && !m_unblocked) {}
+
+#elif defined(SINTRA_RING_READING_POLICY_HYBRID)
 
         // if there is nothing to read
         if (m_reading_sequence == this->m_control->leading_sequence.load()) {
 
-            time_limit = omp_get_wtime() + spin_before_sleep;
-            
+            double time_limit = omp_get_wtime() + spin_before_sleep * 0.5;
             size_t sc = 0;
+            size_t sc_limit = 2; // spin count limit - to avoid calling omp_get_wtime too often
+
             while (m_reading_sequence == this->m_control->leading_sequence.load() && !m_unblocked) {
                 
                 if (sc++ > sc_limit) {
 
-                    if (omp_get_wtime() > time_limit) {
+                    double tmp = omp_get_wtime();
+                    if (tmp < time_limit) {
+                        time_limit = tmp + spin_before_sleep * 0.5;
                         sc = 0;
                         sc_limit *= 2;
                         continue;
                     }
 
-                    // if sufficient time has passed, go to sleep
+                    // if sufficient repetitions (=time) have taken place, go to sleep
 
-                    // the lock has to precede the 'if' block, because in case it doen't, the
-                    // notify may be lost.
+                    // the lock has to precede the 'if' block, to prevent a missed notification.
                     ipc::scoped_lock<ipc::interprocess_mutex> lock(this->m_control->condition_mutex);
+
+                    this->m_control->sleeping_readers++;
 
                     if (m_reading_sequence == this->m_control->leading_sequence.load() &&
                         !m_unblocked)
                     {
-                        m_sleeping = true;
                         this->m_control->dirty_condition.wait(lock);
-                        m_sleeping = false;
                     }
+                    
+                    this->m_control->sleeping_readers--;
                 }
             }
         }
+
+#endif
 
         if (m_unblocked) {
             *num_available_elements = 0;
@@ -497,6 +531,7 @@ struct Ring_R: Ring<NUM_ELEMENTS, T>
     }
 
 
+
     // Increments the reading sequence counter by as many sequences as it was returned in
     // num_available_elements.
     void done_reading()
@@ -508,7 +543,7 @@ struct Ring_R: Ring<NUM_ELEMENTS, T>
         if (new_semiring != m_semiring) {
             this->m_control->read_access[new_semiring]++;
             this->m_control->read_access[  m_semiring]--;
-            this->m_semiring = new_semiring;
+            m_semiring = new_semiring;
         }
     }
 
@@ -530,9 +565,9 @@ private:
     size_t m_semiring;
 
     size_t m_num_elements_being_read = 0;
-    atomic<bool> m_sleeping;
     atomic<bool> m_unblocked;
 };
+
 
 
   //\       //\       //\       //\       //\       //\       //\       //
@@ -620,7 +655,7 @@ struct Ring_W: Ring<NUM_ELEMENTS, T>
         // write (copy) the message
         *(write_location) = obj;
 
-        // hack for testing, please don not enable
+        // [TESTING] please do not enable
         //using pod_type = typename Make_pod<T2>::type;
         //*((pod_type*)(write_location)) = (pod_type&&)obj;
         return write_location;
@@ -643,17 +678,36 @@ struct Ring_W: Ring<NUM_ELEMENTS, T>
 
     void done_writing()
     {
+
         // update sequence
         this->m_control->leading_sequence.store(m_pending_new_sequence);
+
+#if defined(SINTRA_RING_READING_POLICY_ALWAYS_SLEEP)
+
+        {
+            ipc::scoped_lock<ipc::interprocess_mutex> lock(m_control->condition_mutex);
+            m_control->dirty_condition.notify_all();
+        }
+
+#elif defined(SINTRA_RING_READING_POLICY_ALWAYS_SPIN)
+
+        // nothing to do...
+
+#elif defined(SINTRA_RING_READING_POLICY_HYBRID)
+
 
         // from this point on, any comparison of the form:
         // m_reading_sequence == m_control->leading_sequence
         // on the reader will keep failing until done_reading() is called
-
+        int expected = 0;
+        if (!this->m_control->sleeping_readers.compare_exchange_weak(expected, expected))
         {
             ipc::scoped_lock<ipc::interprocess_mutex> lock(this->m_control->condition_mutex);
             this->m_control->dirty_condition.notify_all();
         }
+
+#endif
+
 
         m_writing_thread = thread::id();
     }
@@ -664,6 +718,7 @@ private:
     size_t m_semiring = 0;
     sequence_counter_type m_pending_new_sequence = 0;
 };
+
 
 
   //\       //\       //\       //\       //\       //\       //\       //
