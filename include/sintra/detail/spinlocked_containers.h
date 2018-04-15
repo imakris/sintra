@@ -23,27 +23,33 @@ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-#ifndef __SINTRA_SPINLOCKED_MAP__
-#define __SINTRA_SPINLOCKED_MAP__
+#ifndef SINTRA_SPINLOCKED_CONTAINERS_H
+#define SINTRA_SPINLOCKED_CONTAINERS_H
 
 
 #include <atomic>
-#include <unordered_map>
-#include <unordered_set>
 #include <deque>
 #include <list>
+#include <map>
+#include <set>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 
 namespace sintra {
 
 
 using std::atomic_flag;
-using std::memory_order_acquire;
-using std::memory_order_release;
-using std::unordered_map;
-using std::unordered_set;
 using std::deque;
 using std::list;
+using std::map;
+using std::memory_order_acquire;
+using std::memory_order_release;
+using std::set;
+using std::unordered_map;
+using std::unordered_set;
+using std::vector;
 
 
 namespace detail {
@@ -70,61 +76,58 @@ private:
 template <template <typename...> typename CT, typename... Args>
 struct spinlocked
 {
-    using iterator       = typename CT<Args...>::iterator;
-    using const_iterator = typename CT<Args...>::const_iterator;
-    using locker         = spinlock::locker;
+    using iterator          = typename CT<Args...>::iterator;
+    using const_iterator    = typename CT<Args...>::const_iterator;
+    using reference         = typename CT<Args...>::reference;
+    using const_reference   = typename CT<Args...>::const_reference;
+    using size_type         = typename CT<Args...>::size_type;
+    using locker            = spinlock::locker;
 
-    auto back() noexcept                {locker l(m_sl); return m_c.back();            }
-    auto back() const noexcept          {locker l(m_sl); return m_c.back();            }
-    auto begin() noexcept               {locker l(m_sl); return m_c.begin();           }
-    auto begin() const noexcept         {locker l(m_sl); return m_c.begin();           }
-    auto clear() noexcept               {locker l(m_sl); return m_c.clear();           }
-    auto empty() const noexcept         {locker l(m_sl); return m_c.empty();           }
-    auto end()   noexcept               {locker l(m_sl); return m_c.end();             }
-    auto end()   const noexcept         {locker l(m_sl); return m_c.end();             }
-
-    template <typename... FArgs>
-    auto erase(const FArgs&... v)       {locker l(m_sl); return m_c.erase(v...);       }
-    template <typename... FArgs>
-    auto erase(FArgs&&... v)            {locker l(m_sl); return m_c.erase(v...);       }
+    reference back() noexcept                      {locker l(m_sl); return m_c.back();            }
+    const_reference back() const noexcept          {locker l(m_sl); return m_c.back();            }
+    iterator begin() noexcept                      {locker l(m_sl); return m_c.begin();           }
+    const_iterator begin() const noexcept          {locker l(m_sl); return m_c.begin();           }
+    void clear() noexcept                          {locker l(m_sl); return m_c.clear();           }
+    bool empty() const noexcept                    {locker l(m_sl); return m_c.empty();           }
+    iterator end() noexcept                        {locker l(m_sl); return m_c.end();             }
+    const_iterator end() const noexcept            {locker l(m_sl); return m_c.end();             }
 
     template <typename... FArgs>
-    auto find(const FArgs&... v)        {locker l(m_sl); return m_c.find(v...);        }
+    auto erase(FArgs&... v)                        {locker l(m_sl); return m_c.erase(v...);       }
     template <typename... FArgs>
-    auto find(FArgs&&... v)             {locker l(m_sl); return m_c.find(v...);        }
-
-    auto front() noexcept               {locker l(m_sl); return m_c.front();           }
-    auto front() const noexcept         {locker l(m_sl); return m_c.front();           }
+    auto erase(FArgs&&... v)                       {locker l(m_sl); return m_c.erase(v...);       }
 
     template <typename... FArgs>
-    auto insert(const FArgs&... v)      {locker l(m_sl); return m_c.insert(v...);      }
+    iterator find(const FArgs&... v)               {locker l(m_sl); return m_c.find(v...);        }
     template <typename... FArgs>
-    auto insert(FArgs&&... v)           {locker l(m_sl); return m_c.insert(v...);      }
+    const_iterator find(const FArgs&&... v) const  {locker l(m_sl); return m_c.find(v...);        }
 
-    auto pop_front()                    {locker l(m_sl); return m_c.pop_front();       }
+    reference front() noexcept                     {locker l(m_sl); return m_c.front();           }
+    const_reference front() const noexcept         {locker l(m_sl); return m_c.front();           }
 
     template <typename... FArgs>
-    auto push_back(const FArgs&... v)   {locker l(m_sl); return m_c.push_back(v...);   }
+    auto insert(const FArgs&... v)                 {locker l(m_sl); return m_c.insert(v...);      }
+    template <typename... FArgs>
+    auto insert(FArgs&&... v)                      {locker l(m_sl); return m_c.insert(v...);      }
 
-    auto size()  const noexcept         {locker l(m_sl); return m_c.size();            }
+    auto pop_front()                               {locker l(m_sl); return m_c.pop_front();       }
 
-    operator CT<Args...>() const        {locker l(m_sl); return m_c;                   }
-    auto operator=(const CT<Args...>& x){locker l(m_sl); return m_c.operator=(x.m_c);  }
-    auto operator=(CT<Args...>&& x)     {locker l(m_sl); return m_c.operator=(x.m_c);  }
+    template <typename... FArgs>
+    auto push_back(const FArgs&... v)              {locker l(m_sl); return m_c.push_back(v...);   }
+
+    auto size()  const noexcept                    {locker l(m_sl); return m_c.size();            }
+
+    operator CT<Args...>() const                   {locker l(m_sl); return m_c;                   }
+    auto operator=(const CT<Args...>& x)           {locker l(m_sl); return m_c.operator=(x.m_c);  }
+    auto operator=(CT<Args...>&& x)                {locker l(m_sl); return m_c.operator=(x.m_c);  }
+
+
+    reference operator[] (size_type p)             {locker l(m_sl); return m_c[p];                }
+    const_reference operator[] (size_type p) const {locker l(m_sl); return m_c[p];                }
 
 protected:
     CT<Args...>         m_c;
     mutable spinlock    m_sl;
-};
-
-
-
-template <typename Key, typename T>
-struct spinlocked_umap: spinlocked<unordered_map, Key, T>
-{
-    using locker = spinlock::locker;
-    T& operator[] (const Key& k)        {locker l(this->m_sl); return this->m_c[k];    }
-    T& operator[] (Key&& k)             {locker l(this->m_sl); return this->m_c[k];    }
 };
 
 
@@ -140,9 +143,20 @@ template <typename T>
 using spinlocked_list = detail::spinlocked<list, T>;
 
 template <typename T>
-using spinlocked_set = detail::spinlocked<unordered_set, T>;
+using spinlocked_uset = detail::spinlocked<unordered_set, T>;
 
-using detail::spinlocked_umap;
+
+template <typename Key, typename T>
+struct spinlocked_umap: detail::spinlocked<unordered_map, Key, T>
+{
+    using locker = detail::spinlock::locker;
+    T& operator[] (const Key& k)                   {locker l(this->m_sl); return this->m_c[k];    }
+    T& operator[] (Key&& k)                        {locker l(this->m_sl); return this->m_c[k];    }
+};
+
+
+template <typename T>
+using spinlocked_vector = detail::spinlocked<vector, T>;
 
 } // namespace sintra
 
