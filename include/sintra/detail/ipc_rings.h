@@ -181,6 +181,12 @@ struct Ring
         {
             read_access[0] = 0;
             read_access[1] = 0;
+
+            // See the 'Note' in N4713 32.5 [Lock-free property], Par. 4.
+            // The program is only valid if the conditions below are true.
+            assert(num_attached.is_lock_free());        // size_t
+            assert(leading_sequence.is_lock_free());    // sequence_counter_type
+            assert(sleeping_readers.is_lock_free());    // int
         }
     };
 
