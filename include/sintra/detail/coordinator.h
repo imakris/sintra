@@ -23,8 +23,8 @@ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-#ifndef __SINTRA_COORDINATOR_H__
-#define __SINTRA_COORDINATOR_H__
+#ifndef SINTRA_COORDINATOR_H
+#define SINTRA_COORDINATOR_H
 
 
 #include "resolvable_instance.h"
@@ -87,11 +87,11 @@ private:
 
     spinlocked_umap<
         instance_id_type, 
-        spinlocked_set< instance_id_type >
+        spinlocked_uset< instance_id_type >
     >                                           m_processes_of_group;
     spinlocked_umap<
         instance_id_type,
-        spinlocked_set< instance_id_type >
+        spinlocked_uset< instance_id_type >
     >                                           m_groups_of_process;
 
 public:
