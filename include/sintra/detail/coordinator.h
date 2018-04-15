@@ -71,10 +71,10 @@ private:
         uint32_t processes_reached = 0;
     };
 
-    spinlocked_map<type_id_type, Barrier >      m_barriers;
+    spinlocked_umap<type_id_type, Barrier >     m_barriers;
     mutex                                       m_barrier_mutex;
 
-    spinlocked_map<
+    spinlocked_umap<
         instance_id_type,
         unordered_set< instance_id_type >
     >                                           m_published;
@@ -83,13 +83,13 @@ private:
     mutex                                       m_all_other_processes_done_mutex;
     condition_variable                          m_all_other_processes_done_condition;
 
-    spinlocked_map<instance_id_type, string>    m_name_of_instance_id;
+    spinlocked_umap<instance_id_type, string>   m_name_of_instance_id;
 
-    spinlocked_map<
+    spinlocked_umap<
         instance_id_type, 
         spinlocked_set< instance_id_type >
     >                                           m_processes_of_group;
-    spinlocked_map<
+    spinlocked_umap<
         instance_id_type,
         spinlocked_set< instance_id_type >
     >                                           m_groups_of_process;

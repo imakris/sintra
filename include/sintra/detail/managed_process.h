@@ -32,7 +32,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "message.h"
 #include "process_message_reader.h"
 #include "resolve_type.h"
-#include "spinlocked_map.h"
+#include "spinlocked_containers.h"
 #include "transceiver.h"
 #include "utility/call_function_with_fusion_vector_args.h"
 
@@ -210,17 +210,17 @@ struct Managed_process: Transceiver
     Message_ring_W*                     m_out_req_c;
     Message_ring_W*                     m_out_rep_c;
 
-    spinlocked_map<
+    spinlocked_umap<
         string,
         type_id_type
     >                                   m_type_id_of_name;
 
-    spinlocked_map<
+    spinlocked_umap<
         string,
         instance_id_type
     >                                   m_instance_id_of_name;
 
-    spinlocked_map<
+    spinlocked_umap<
         instance_id_type,
         Transceiver*
     >                                   m_local_pointer_of_instance_id;

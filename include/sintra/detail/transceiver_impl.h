@@ -350,7 +350,7 @@ void Transceiver::send(Args&&... args)
 inline
 auto& Transceiver::get_rpc_handler_map()
 {
-    static spinlocked_map<type_id_type, void(*)(Message_prefix&)> message_id_to_handler;
+    static spinlocked_umap<type_id_type, void(*)(Message_prefix&)> message_id_to_handler;
     return message_id_to_handler;
 }
 
@@ -359,7 +359,7 @@ auto& Transceiver::get_rpc_handler_map()
 template <typename RPCTC>
 auto& Transceiver::get_instance_to_object_map()
 {
-    static spinlocked_map<instance_id_type, typename RPCTC::o_type*> instance_to_object;
+    static spinlocked_umap<instance_id_type, typename RPCTC::o_type*> instance_to_object;
     return instance_to_object;
 }
 

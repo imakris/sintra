@@ -30,7 +30,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "globals.h"
 #include "id_types.h"
 #include "message.h"
-#include "spinlocked_map.h"
+#include "spinlocked_containers.h"
 
 #include <list>
 #include <map>
@@ -535,7 +535,7 @@ private:
     // lifetime ends with the end of the call.
     // They are assigned in pairs, to handle successful and failed calls.
     mutex m_return_handlers_mutex;
-    spinlocked_map<instance_id_type, Return_handler> m_active_return_handlers;
+    spinlocked_umap<instance_id_type, Return_handler> m_active_return_handlers;
 
 
     handler_registry_type m_active_handlers;
@@ -543,7 +543,7 @@ private:
     instance_id_type m_instance_id = 0;
     bool m_named = false;
 
-    spinlocked_map<string, instance_id_type>::iterator m_cache_iterator;
+    spinlocked_umap<string, instance_id_type>::iterator m_cache_iterator;
 
 
     friend struct Managed_process;
