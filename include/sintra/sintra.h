@@ -26,6 +26,10 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #ifndef SINTRA_H
 #define SINTRA_H
 
+#ifndef BOOST_ALL_NO_LIB
+#define BOOST_ALL_NO_LIB
+#define SINTRA_UNDEF_BOOST_ALL_NO_LIB
+#endif
 
 #include "detail/coordinator.h"
 #include "detail/coordinator_impl.h"
@@ -77,6 +81,11 @@ bool deactivate_slot(type_id_type message_id);
 
 
 #include "detail/sintra_impl.h"
+
+
+#ifdef SINTRA_UNDEF_BOOST_ALL_NO_LIB
+#undef BOOST_ALL_NO_LIB
+#endif
 
 
 #endif
