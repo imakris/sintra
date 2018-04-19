@@ -31,6 +31,13 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define SINTRA_UNDEF_BOOST_ALL_NO_LIB
 #endif
 
+
+#ifdef _MSC_VER  // if compiling with Visual Studio
+#pragma warning( push )
+#pragma warning( disable : 4996 )
+#endif
+
+
 #include "detail/coordinator.h"
 #include "detail/coordinator_impl.h"
 #include "detail/globals.h"
@@ -81,6 +88,11 @@ bool deactivate_slot(type_id_type message_id);
 
 
 #include "detail/sintra_impl.h"
+
+
+#ifdef _MSC_VER
+#pragma warning( pop ) 
+#endif
 
 
 #ifdef SINTRA_UNDEF_BOOST_ALL_NO_LIB
