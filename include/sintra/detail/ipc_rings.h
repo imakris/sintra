@@ -161,7 +161,7 @@ struct Ring
         //the index of the nth element written to the ringbuffer.
         atomic<sequence_counter_type>   leading_sequence;
 
-        // Used to avoid accidentaly having multiple writers on the same ring
+        // Used to avoid accidentally having multiple writers on the same ring
         ipc::interprocess_mutex         ownership_mutex;
 
 
