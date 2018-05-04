@@ -27,7 +27,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define SINTRA_SPINLOCKED_CONTAINERS_H
 
 
-#include <atomic>
+#include "spinlock.h"
+
 #include <deque>
 #include <list>
 #include <map>
@@ -40,7 +41,6 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 namespace sintra {
 
 
-using std::atomic_flag;
 using std::deque;
 using std::list;
 using std::map;
@@ -53,23 +53,6 @@ using std::vector;
 
 
 namespace detail {
-
-
-struct spinlock
-{
-    struct locker
-    {
-        locker(spinlock& sl): m_sl(sl) { m_sl.lock();   }
-        ~locker()                      { m_sl.unlock(); }
-        spinlock& m_sl;
-    };
-
-    void lock()   { while (m_locked.test_and_set(memory_order_acquire)) {} }
-    void unlock() { m_locked.clear(memory_order_release);                  }
-
-private:
-    atomic_flag m_locked = ATOMIC_FLAG_INIT;
-};
 
 
 
@@ -88,6 +71,14 @@ struct spinlocked
     iterator begin() noexcept                      {locker l(m_sl); return m_c.begin();           }
     const_iterator begin() const noexcept          {locker l(m_sl); return m_c.begin();           }
     void clear() noexcept                          {locker l(m_sl); return m_c.clear();           }
+
+    template <class... FArgs>
+    auto emplace_hint(const_iterator hint, FArgs&&... args)
+    {
+        locker l(this->m_sl);
+        return this->m_c.emplace_hint(hint, args...);
+    }
+
     bool empty() const noexcept                    {locker l(m_sl); return m_c.empty();           }
     iterator end() noexcept                        {locker l(m_sl); return m_c.end();             }
     const_iterator end() const noexcept            {locker l(m_sl); return m_c.end();             }
@@ -109,6 +100,9 @@ struct spinlocked
     auto insert(const FArgs&... v)                 {locker l(m_sl); return m_c.insert(v...);      }
     template <typename... FArgs>
     auto insert(FArgs&&... v)                      {locker l(m_sl); return m_c.insert(v...);      }
+
+    template <typename... FArgs>
+    auto lower_bound(const FArgs&... v)            {locker l(m_sl); return m_c.lower_bound(v...); }
 
     auto pop_front()                               {locker l(m_sl); return m_c.pop_front();       }
 
@@ -143,13 +137,25 @@ template <typename T>
 using spinlocked_list = detail::spinlocked<list, T>;
 
 template <typename T>
+using spinlocked_set = detail::spinlocked<set, T>;
+
+template <typename T>
 using spinlocked_uset = detail::spinlocked<unordered_set, T>;
+
+
+template <typename Key, typename T>
+struct spinlocked_map: detail::spinlocked<map, Key, T>
+{
+    using locker = spinlock::locker;
+    T& operator[] (const Key& k)                   {locker l(this->m_sl); return this->m_c[k];    }
+    T& operator[] (Key&& k)                        {locker l(this->m_sl); return this->m_c[k];    }
+};
 
 
 template <typename Key, typename T>
 struct spinlocked_umap: detail::spinlocked<unordered_map, Key, T>
 {
-    using locker = detail::spinlock::locker;
+    using locker = spinlock::locker;
     T& operator[] (const Key& k)                   {locker l(this->m_sl); return this->m_c[k];    }
     T& operator[] (Key&& k)                        {locker l(this->m_sl); return this->m_c[k];    }
 };
