@@ -81,9 +81,6 @@ auto activate_slot(
     Typed_instance_id<SENDER_T> sender_id = Typed_instance_id<void>(any_local_or_remote) );
 
 
-bool deactivate_slot(type_id_type message_id);
-
-
 } // namespace sintra
 
 
