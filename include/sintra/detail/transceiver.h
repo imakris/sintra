@@ -115,14 +115,14 @@ Typed_instance_id<void> make_untyped_instance_id(instance_id_type naked_instance
 
 
 using handler_proc_registry_mid_record_type = 
-    map <
+    spinlocked_umap <
         instance_id_type,                                // sender
         list<function<void(const Message_prefix &)>>
     >;
 
 
 using handler_registry_type =
-    map <
+    spinlocked_umap <
         type_id_type,                                    // message type
         handler_proc_registry_mid_record_type
     >;
