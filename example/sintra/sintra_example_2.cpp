@@ -12,8 +12,8 @@
 // An instance of Remotely_accessible is local to process_1, and used locally.
 // This same instance is used by process_2 remotely.
 
-#include <iostream>
 #include <sintra/sintra.h>
+#include <iostream>
 
 
 using namespace std;

@@ -11,8 +11,8 @@
 // effect in performance (they are currently commented out).
 //
 
-#include <iostream>
 #include <sintra/sintra.h>
+#include <iostream>
 #include <omp.h>
 
 
