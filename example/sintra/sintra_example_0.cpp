@@ -12,8 +12,8 @@
 // The sender process sends messages of both types, which are handled by each process accordingly.
 // A barrier is used to ensure that the slots are activated before the messages are sent.
 
-#include <iostream>
 #include <sintra/sintra.h>
+#include <iostream>
 
 
 
