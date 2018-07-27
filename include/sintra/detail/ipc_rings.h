@@ -146,7 +146,7 @@ inline bool remove_directory(const string& dir_name)
   //       \//       \//       \//       \//       \//       \//       \//
 
 // Ring sizes should be powers of 2 and multiple of the page size
-template <int NUM_ELEMENTS, typename T>
+template <int NUM_ELEMENTS, typename T, bool READ_ONLY_DATA>
 struct Ring
 {
     struct Control
@@ -199,7 +199,7 @@ struct Ring
     Ring(const string& directory, const string& prefix, uint64_t id);
     ~Ring();
 
-    const uint64_t      m_id;
+    const uint64_t                      m_id;
 
 protected:
     using region_ptr_type = ipc::mapped_region*;
@@ -227,8 +227,10 @@ protected:
 
 
 
-template <int NUM_ELEMENTS, typename T>
-Ring<NUM_ELEMENTS, T>::Ring(const string& directory, const string& prefix, uint64_t id):
+template <int NUM_ELEMENTS, typename T, bool READ_ONLY_DATA>
+Ring<NUM_ELEMENTS, T, READ_ONLY_DATA>::Ring(
+    const string& directory, const string& prefix, uint64_t id)
+:
     m_id(id)
 {
     stringstream stream;
@@ -262,8 +264,8 @@ Ring<NUM_ELEMENTS, T>::Ring(const string& directory, const string& prefix, uint6
 }
 
 
-template <int NUM_ELEMENTS, typename T>
-Ring<NUM_ELEMENTS, T>::~Ring()
+template <int NUM_ELEMENTS, typename T, bool READ_ONLY_DATA>
+Ring<NUM_ELEMENTS, T, READ_ONLY_DATA>::~Ring()
 {
     if (m_control->num_attached-- == 1) {
         detach();
@@ -275,8 +277,8 @@ Ring<NUM_ELEMENTS, T>::~Ring()
 }
 
 
-template <int NUM_ELEMENTS, typename T>
-bool Ring<NUM_ELEMENTS, T>::create()
+template <int NUM_ELEMENTS, typename T, bool READ_ONLY_DATA>
+bool Ring<NUM_ELEMENTS, T, READ_ONLY_DATA>::create()
 {
     try {
         if (!check_or_create_directory(m_directory))
@@ -326,8 +328,8 @@ bool Ring<NUM_ELEMENTS, T>::create()
 }
 
 
-template <int NUM_ELEMENTS, typename T>
-bool Ring<NUM_ELEMENTS, T>::destroy()
+template <int NUM_ELEMENTS, typename T, bool READ_ONLY_DATA>
+bool Ring<NUM_ELEMENTS, T, READ_ONLY_DATA>::destroy()
 {
     try {
         fs::path pr(m_data_filename);
@@ -340,8 +342,8 @@ bool Ring<NUM_ELEMENTS, T>::destroy()
 }
 
 
-template <int NUM_ELEMENTS, typename T>
-bool Ring<NUM_ELEMENTS, T>::attach()
+template <int NUM_ELEMENTS, typename T, bool READ_ONLY_DATA>
+bool Ring<NUM_ELEMENTS, T, READ_ONLY_DATA>::attach()
 {
     assert(
         m_data_region_0  == nullptr &&
@@ -364,7 +366,8 @@ bool Ring<NUM_ELEMENTS, T>::attach()
         void *mem = malloc(data_region_size * 2 + page_size);
         char *ptr = (char*)(ptrdiff_t((char *)mem + page_size) & ~(page_size - 1));
 
-        ipc::file_mapping file(m_data_filename.c_str(), ipc::read_write);
+        auto data_rights = READ_ONLY_DATA ? ipc::read_only : ipc::read_write;
+        ipc::file_mapping file(m_data_filename.c_str(), data_rights);
 
         ipc::map_options_t map_extra_options = 0;
 
@@ -382,9 +385,9 @@ bool Ring<NUM_ELEMENTS, T>::attach()
 #endif
 
         m_data_region_0 = new ipc::mapped_region(
-            file, ipc::read_write, 0, data_region_size, ptr, map_extra_options);
+            file, data_rights, 0, data_region_size, ptr, map_extra_options);
         m_data_region_1 = new ipc::mapped_region(
-            file, ipc::read_write, 0, 0,
+            file, data_rights, 0, 0,
             ((char*)m_data_region_0->get_address()) + data_region_size, map_extra_options);
         m_data = (T*)m_data_region_0->get_address();
 
@@ -405,8 +408,8 @@ bool Ring<NUM_ELEMENTS, T>::attach()
 }
 
 
-template <int NUM_ELEMENTS, typename T>
-bool Ring<NUM_ELEMENTS, T>::detach()
+template <int NUM_ELEMENTS, typename T, bool READ_ONLY_DATA>
+bool Ring<NUM_ELEMENTS, T, READ_ONLY_DATA>::detach()
 {
     delete m_data_region_0;
     delete m_data_region_1;
@@ -438,10 +441,10 @@ bool Ring<NUM_ELEMENTS, T>::detach()
 
 
 template <int NUM_ELEMENTS, typename T>
-struct Ring_R: Ring<NUM_ELEMENTS, T>
+struct Ring_R: Ring<NUM_ELEMENTS, T, true>
 {
     Ring_R(const string& directory, const string& prefix, uint64_t id):
-        Ring<NUM_ELEMENTS, char>::Ring(directory, prefix, id),
+        Ring<NUM_ELEMENTS, char, true>::Ring(directory, prefix, id),
         m_unblocked(false)
     {
         m_reading_sequence = this->m_control->leading_sequence.load();
@@ -461,7 +464,7 @@ struct Ring_R: Ring<NUM_ELEMENTS, T>
     // num_available_elements.
     // The function will block until elements become available or it is explicitly unblocked.
     // The caller must call done_reading() once it is done accessing the ring.
-    T* start_reading(size_t* num_available_elements)
+    const T* start_reading(size_t* num_available_elements)
     {
 
 #if defined(SINTRA_RING_READING_POLICY_ALWAYS_SLEEP)
@@ -593,15 +596,15 @@ private:
 
 
 template <int NUM_ELEMENTS, typename T>
-struct Ring_W: Ring<NUM_ELEMENTS, T>
+struct Ring_W: Ring<NUM_ELEMENTS, T, false>
 {
     atomic<thread::id> m_writing_thread;
 
     Ring_W(const string& directory, const string& prefix, uint64_t id):
-        Ring<NUM_ELEMENTS, char>::Ring(directory, prefix, id)
+        Ring<NUM_ELEMENTS, char, false>::Ring(directory, prefix, id)
     {
         if (!this->m_control->ownership_mutex.try_lock()) {
-            using afe = typename Ring<NUM_ELEMENTS, T>::acquisition_failure_exception;
+            using afe = typename Ring<NUM_ELEMENTS, T, false>::acquisition_failure_exception;
             throw afe();
         }
     }

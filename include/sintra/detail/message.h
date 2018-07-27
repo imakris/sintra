@@ -623,8 +623,8 @@ struct Message_ring_R: protected Ring_R<message_ring_size, char>
 
 protected:
 
-    char* m_end_location = nullptr;
-    char* m_reading_location = nullptr;
+    const char* m_end_location = nullptr;
+    const char* m_reading_location = nullptr;
 };
 
 
