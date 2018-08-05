@@ -34,39 +34,27 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 // be driven by a condition variable and an interprocess mutex, which may have some impact
 // in performance.
 
-//#define SINTRA_RING_READING_POLICY_ALWAYS_SLEEP
+#define SINTRA_RING_READING_POLICY_ALWAYS_SLEEP     0
 
 
-// Using this policy, the readong loop will be constantly spinning. As a concequence, this
+// Using this policy, the reader will livelock while waiting for data. As a concequence, this
 // policy does not require locking on either reading or writing.
 // NOTE: It needs to be used with care and only when necessary, to avoid wasting CPU resources.
 
-//#define SINTRA_RING_READING_POLICY_ALWAYS_SPIN
+#define SINTRA_RING_READING_POLICY_ALWAYS_SPIN      1
 
 
-// With this policy, the reading loop will initially spin once a read is made, but it will
+// With this policy, the reading loop will initially spin once a read is made, but will
 // eventually sleep after a certain time of inactivity.
 // NOTE: This policy assumes that omp_get_wtime() is faster than locking an interprocess_mutex.
 // The aforementioned condition would very likely be true for an x86 implementation using rdtsc.
 // But should this not be the case on a given system, then this policy might eventually provide
 // inferior performance.
 
-#define SINTRA_RING_READING_POLICY_HYBRID
+#define SINTRA_RING_READING_POLICY_HYBRID           2
 
 
-#if !((defined(SINTRA_RING_READING_POLICY_ALWAYS_SLEEP) ^\
-       defined(SINTRA_RING_READING_POLICY_ALWAYS_SPIN) ^\
-       defined(SINTRA_RING_READING_POLICY_HYBRID)\
-      ) ^\
-      (defined(SINTRA_RING_READING_POLICY_ALWAYS_SLEEP) &&\
-       defined(SINTRA_RING_READING_POLICY_ALWAYS_SPIN) &&\
-       defined(SINTRA_RING_READING_POLICY_HYBRID)\
-      ))\
-
-#error Only one ring reading policy macro may be defined
-
-#endif
-
+#define SINTRA_RING_READING_POLICY SINTRA_RING_READING_POLICY_HYBRID
 
 
 namespace sintra {
