@@ -599,32 +599,30 @@ struct Message_ring_R: protected Ring_R<message_ring_size, char>
     Message_prefix* fetch_message()
     {
         // if all the messages in the reading buffer have been read
-        if (m_reading_location == m_end_location) {
+        if (m_range.begin == m_range.end) {
             // if this is not an uninitialised state
-            if (m_reading_location) {
+            if (m_range.begin) {
                 // finalise the reading
                 done_reading();
             }
-            size_t bytes_remaining = 0;
+
             // start with a new reading buffer. this will block until there is something to read.
-            auto rl = start_reading(&bytes_remaining);
-            if (!rl) {
+            auto range = start_reading_new_data();
+            if (!range.begin) {
                 return nullptr;
             }
-            m_reading_location = rl;
-            m_end_location = m_reading_location + bytes_remaining;
+            m_range = range;
         }
 
-        Message_prefix* ret = (Message_prefix*)m_reading_location;
+        Message_prefix* ret = (Message_prefix*)m_range.begin;
         assert(ret->magic == message_magic);
-        m_reading_location += ret->bytes_to_next_message;
+        m_range.begin += ret->bytes_to_next_message;
         return ret;
     }
 
 protected:
 
-    const char* m_end_location = nullptr;
-    const char* m_reading_location = nullptr;
+    Range m_range;
 };
 
 

@@ -58,50 +58,105 @@ namespace fs  = std::experimental::filesystem;
 namespace ipc = boost::interprocess;
 
 
+
 /*
-A note on the types of the sequence counters:
 
-The sequence counters are currently of type uint64_t. Iterating over INT_MAX in an empty loop,
-takes about 1 second in a desktop system assembled in 2013. Assuming similar performance for
-64-bit counters, this would take about 70 years, and the loop of a message ring is orders of
-magnitude slower than an empty loop.
+This is an implementation of an interprocess mutex-free circular ring buffer,
+accessed by a single writer and multiple concurrent readers.
 
-Thus the overflow of uint64_t is practically unreachable and will probably not be an issue
-to consider during the lifetime of this code.
+Concepts
+--------
+1. The circular ring buffer consists of a data segment, and a control data segment.
+   Both of them have a filesystem mapping.
+
+2. The buffer's data segment size is fixed, configured at compile-time in its
+   corresponding template type parameter.
+
+3. Readers and writers are implemented with separate types, which derive from a basic
+   'Ring' type, and provide accessors accordingly.
+
+4. Accessor functions do not employ the typical STL philosophy in their interface.
+   Rather, they return raw pointers, and allow the caller to write to the buffer
+   directly. This provides the potential for improved performance in some scenarios
+   and is only feasible because of #7 (see below). As a consequence, the client code
+   must be written carefully.
+
+5. Conceptually the writer may only write immediately after an always increasing
+   'leading sequence', thus strictly acting as 'producer'.
+
+6. Readers may follow the writer acting as typical 'consumers', but they may as
+   well access a contiguous part of the ringbuffer trailing the "leading sequence".
+   The size of this trailing part is configured statically in the reader's templated
+   type and must not exceed 3/4 of the buffer's size.
+
+7. The buffer's data region is mapped to virtual memory twice concecutively, to
+   allow the buffer's wrapping being handled natively. This is an optimization
+   technique which is sometimes called "the magic ring buffer".
+
+8. A conceptual segmentation of the buffer's region into 8 octiles, allows
+   handling the data structure atomically, and in a cache-friendly way.
+   A shared atomically accessed 64-bit integer is used as a control variable, to
+   communicate the number of readers per octile, on each of its 8 bytes. The variable
+   is always handled atomically and on its whole, thus this is a SWAR technique.
+   Before a write operation, the writer checks if the operation is on the same octile
+   as the previous write operation, and only if it is not, it will have to check if
+   the octile intended to be written is being read. If it is, the writer will livelock.
+   An advantage of this method is that, unless there is contention, the writer will
+   not even have to access the shared control variable more than 8 times in a full loop.
+   That is because once the writer has reached a certain octile, it is guaranteed
+   that there will be no data races in this octile.
+
+Limitations
+-----------
+1. The aforementioned configuration, limits the number of readers to a maximum of
+   255. This limit could easily be increased to 16383, if the ring was partitioned
+   in quarters, rather than octiles. In this case though, the maximum trailing segment
+   of a reader would not exceed 1/2 of the size of the ringbuffer, which would be
+   a tradeoff to memory efficiency.
+
+2. For code simplicity, the writer may not write more data than the size of an octile in
+   a single operation. This limitation is not absolutely necessary, but removing it
+   would require some corner case handling, with a minor performance hit.
+
+3. If there was no requirement for a trailing reader segment, partitioning the ring in
+   two halves would be better optimized.
+
+Remarks
+-------
+1. Sequence counters are of type uint64_t and count indefinitely, but overflowing a
+   uint64_t is practically not going to be an issue during the lifetime of this code.
+   Iterating over INT_MAX in an empty loop, would take about 1 second in a desktop
+   system assembled in 2013. Assuming similar performance for 64-bit counters, this
+   would take about 70 years, and ring buffer operations are not an empty loop.
+
+2. There are several approaches in extending this implementation to allow multiple
+   writers. All of the approaches considered would require the introduction of data
+   in the control section, which would have to be accessed and modified in every write
+   operation, in a non-trivial way.
+   The implementation would then become cache unfriendly and significantly more complex.
+   Writing in the data sector with multiple writers would also require a lot of
+   restrictions and caution, to avoid a "false sharing" cache effect, which, in many
+   cases might just be inevitable.
+   It was therefore not introduced.
+
+3. Strictly speaking, this data structure is not lock-free. It could be, if the read
+   and write functions would return when the operation is not possible, instead of
+   waiting until it is. But it was chosen not to, as placing such functions inside loops
+   externally would be less efficient.
+   It is also not even mutex-free, unless the reading policy is
+   SINTRA_RING_READING_POLICY_ALWAYS_SPIN (see below), which is generally not a good
+   policy for generic usage. The default policy is SINTRA_RING_READING_POLICY_HYBRID,
+   which spins for a predefined amount of time, before it goes to sleep, using a mutex
+   and a condvar.
+
+4. The choice of omp_get_wtime() for timing is because it was measured to work at least
+   2x faster than comparable functions from std::chrono. This might not be the case
+   in all systems.
+
 */
 
+
 using sequence_counter_type = uint64_t;
-
-
-//
-// counts an integer's number of one bits (source: http://aggregate.org/MAGIC/)
-//
-inline
-uint32_t ones32(uint32_t x)
-{
-    x -= ((x >> 1) & 0x55555555);
-    x = (((x >> 2) & 0x33333333) + (x & 0x33333333));
-    x = (((x >> 4) + x) & 0x0f0f0f0f);
-    x += (x >> 8);
-    x += (x >> 16);
-    return(x & 0x0000003f);
-}
-
-//
-// (source: http://aggregate.org/MAGIC/)
-//
-inline
-uint32_t floor_log2(uint32_t x)
-{
-    x |= (x >>  1);
-    x |= (x >>  2);
-    x |= (x >>  4);
-    x |= (x >>  8);
-    x |= (x >> 16);
-
-    return(ones32(x >> 1));
-}
-
 
 
 // helpers
@@ -123,17 +178,15 @@ bool check_or_create_directory(const string& dir_name)
 }
 
 
-inline bool remove_directory(const string& dir_name)
+
+inline
+bool remove_directory(const string& dir_name)
 {
     uintmax_t c = 0;
     error_code ec;
     fs::path ps(dir_name);
     auto rv = fs::remove_all(dir_name.c_str(), ec);
 
-    // [TESTING] please do not enable
-    //if (!rv) {
-    //    string msg = ec.message();
-    //}
     return !!rv;
 }
 
@@ -149,6 +202,12 @@ inline bool remove_directory(const string& dir_name)
 template <int NUM_ELEMENTS, typename T, bool READ_ONLY_DATA>
 struct Ring
 {
+    struct Range
+    {
+        T* begin = nullptr;
+        T* end   = nullptr;
+    };
+
     struct Control
     {
         // This struct is always instantiated in a memory region which is shared among processes.
@@ -156,10 +215,14 @@ struct Ring
         // atomics should be fine for that purpose. [see N3337 29.4]
 
         atomic<size_t>                  num_attached;
-        atomic<size_t>                  read_access[2];
 
-        //the index of the nth element written to the ringbuffer.
+        // The index of the nth element written to the ringbuffer.
         atomic<sequence_counter_type>   leading_sequence;
+
+        // An 8-byte integer, with each byte corresponding to an octile of the ring
+        // and representing the number of readers currently accessing it.
+        // This imposes a limit of maximum 255 readers per ring.
+        atomic<uint64_t>                read_access;
 
         // Used to avoid accidentally having multiple writers on the same ring
         ipc::interprocess_mutex         ownership_mutex;
@@ -168,20 +231,18 @@ struct Ring
         ipc::interprocess_mutex         condition_mutex;
         ipc::interprocess_condition     dirty_condition;
 
-#if !defined(SINTRA_RING_READING_POLICY_ALWAYS_SPIN)
+#if SINTRA_RING_READING_POLICY != SINTRA_RING_READING_POLICY_ALWAYS_SPIN
         atomic<int>                     sleeping_readers;
 #endif
 
         Control():
             num_attached(0)
         ,   leading_sequence(0)
-#if !defined(SINTRA_RING_READING_POLICY_ALWAYS_SPIN)
+#if SINTRA_RING_READING_POLICY != SINTRA_RING_READING_POLICY_ALWAYS_SPIN
         ,   sleeping_readers(0)
 #endif
         {
-            read_access[0] = 0;
-            read_access[1] = 0;
-
+            read_access = 0;
             // See the 'Note' in N4713 32.5 [Lock-free property], Par. 4.
             // The program is only valid if the conditions below are true.
             assert(num_attached.is_lock_free());        // size_t
@@ -219,8 +280,6 @@ protected:
     string                              m_directory;
     string                              m_data_filename;
     string                              m_control_filename;
-
-    const uint32_t                      m_semiring_shift    = floor_log2(NUM_ELEMENTS) - 1;
 
     friend struct Managed_process;
 };
@@ -440,21 +499,30 @@ bool Ring<NUM_ELEMENTS, T, READ_ONLY_DATA>::detach()
   //       \//       \//       \//       \//       \//       \//       \//
 
 
-template <int NUM_ELEMENTS, typename T>
+template <int NUM_ELEMENTS, typename T, int NUM_TRAILING_ELEMENTS = 0>
 struct Ring_R: Ring<NUM_ELEMENTS, T, true>
 {
+    using typename Ring<NUM_ELEMENTS, T, true>::Range;
+
     Ring_R(const string& directory, const string& prefix, uint64_t id):
         Ring<NUM_ELEMENTS, char, true>::Ring(directory, prefix, id),
         m_unblocked(false)
     {
+        static_assert(NUM_ELEMENTS % 8 == 0,
+            "NUM_ELEMENTS must be a multiple of 8.");
+        static_assert(NUM_TRAILING_ELEMENTS < 3 * NUM_ELEMENTS / 4,
+            "NUM_TRAILING_ELEMENTS may not be grater than 3/4 of the size of the ring.");
+
         m_reading_sequence = this->m_control->leading_sequence.load();
-        m_semiring = (m_reading_sequence >> this->m_semiring_shift) & 1;
-        this->m_control->read_access[m_semiring]++;
+        m_trailing_octile =
+            (8 * ((m_reading_sequence - NUM_TRAILING_ELEMENTS) % NUM_ELEMENTS)) / NUM_ELEMENTS;
+
+        this->m_control->read_access += uint64_t(1) << (8 * m_trailing_octile);
     }
 
     ~Ring_R()
     {
-        this->m_control->read_access[m_semiring]--;
+        this->m_control->read_access -= uint64_t(1) << (8 * m_trailing_octile);
     }
 
 
@@ -462,12 +530,13 @@ struct Ring_R: Ring<NUM_ELEMENTS, T, true>
     // if there are no elements available.
     // The number of elements in the ring available to the reader are returned in
     // num_available_elements.
+    // Returns a memory range
     // The function will block until elements become available or it is explicitly unblocked.
     // The caller must call done_reading() once it is done accessing the ring.
-    const T* start_reading(size_t* num_available_elements)
+    const Range start_reading_new_data()
     {
 
-#if defined(SINTRA_RING_READING_POLICY_ALWAYS_SLEEP)
+#if SINTRA_RING_READING_POLICY == SINTRA_RING_READING_POLICY_ALWAYS_SLEEP
 
         ipc::scoped_lock<ipc::interprocess_mutex> lock(m_control->condition_mutex);
         while (m_reading_sequence == m_control->leading_sequence.load() && !m_unblocked) {
@@ -481,11 +550,11 @@ struct Ring_R: Ring<NUM_ELEMENTS, T, true>
             m_control->sleeping_readers--;
         }
 
-#elif defined(SINTRA_RING_READING_POLICY_ALWAYS_SPIN)
+#elif SINTRA_RING_READING_POLICY == SINTRA_RING_READING_POLICY_ALWAYS_SPIN
 
         while (m_reading_sequence == m_control->leading_sequence.load() && !m_unblocked) {}
 
-#elif defined(SINTRA_RING_READING_POLICY_HYBRID)
+#elif SINTRA_RING_READING_POLICY == SINTRA_RING_READING_POLICY_HYBRID
 
         // if there is nothing to read
         if (m_reading_sequence == this->m_control->leading_sequence.load()) {
@@ -524,39 +593,54 @@ struct Ring_R: Ring<NUM_ELEMENTS, T, true>
             }
         }
 
+#else
+
+#error No reading policy is defined
+
 #endif
+        Range ret;
 
         if (m_unblocked) {
-            *num_available_elements = 0;
-            return nullptr;
+            return ret;
         }
 
-        m_num_elements_being_read =
-            size_t(this->m_control->leading_sequence.load() - m_reading_sequence);
-        *num_available_elements = m_num_elements_being_read;
+        auto num_elements = size_t(this->m_control->leading_sequence.load() - m_reading_sequence);
 
-        // return the pointer to the reading location
-        return this->m_data + (m_reading_sequence % NUM_ELEMENTS);
+        ret.begin = this->m_data + (m_reading_sequence % NUM_ELEMENTS);
+        ret.end   = ret.begin + num_elements;
+        m_reading_sequence += num_elements;
+        return ret;
     }
 
 
 
-    // Increments the reading sequence counter by as many sequences as it was returned in
-    // num_available_elements.
+    Range get_data()
+    {
+        return Range {
+            this->m_data + max(0, int64_t(m_reading_sequence) - NUM_TRAILING_ELEMENTS) % NUM_ELEMENTS;
+            this->m_data + (m_reading_sequence % NUM_ELEMENTS);
+        };
+    }
+
+
+    // release the ring's range that was blocked for reading
+    // (it might still be blocked by other readers).
     void done_reading()
     {
-        m_reading_sequence += m_num_elements_being_read;
-        m_num_elements_being_read = 0;
+        size_t new_trailing_octile =
+            (8 * ((m_reading_sequence - NUM_TRAILING_ELEMENTS) % NUM_ELEMENTS)) / NUM_ELEMENTS;
 
-        size_t new_semiring = (m_reading_sequence >> this->m_semiring_shift) & 1;
-        if (new_semiring != m_semiring) {
-            this->m_control->read_access[new_semiring]++;
-            this->m_control->read_access[  m_semiring]--;
-            m_semiring = new_semiring;
+        if (new_trailing_octile != m_trailing_octile) {
+            auto diff =
+                (uint64_t(1) << (8 * new_trailing_octile)) -
+                (uint64_t(1) << (8 *   m_trailing_octile));
+            this->m_control->read_access += diff;
+            m_trailing_octile = new_trailing_octile;
         }
     }
 
-    // If start_reading() is either sleeping or spinning, it will force it to return a nullptr
+
+    // If start_reading_new_data() is either sleeping or spinning, it will force it to return a nullptr
     // and 0 elements.
     void unblock()
     {
@@ -571,9 +655,8 @@ struct Ring_R: Ring<NUM_ELEMENTS, T, true>
 
 private:
     sequence_counter_type m_reading_sequence;
-    size_t m_semiring;
+    size_t m_trailing_octile;
 
-    size_t m_num_elements_being_read = 0;
     atomic<bool> m_unblocked;
 };
 
@@ -598,45 +681,17 @@ private:
 template <int NUM_ELEMENTS, typename T>
 struct Ring_W: Ring<NUM_ELEMENTS, T, false>
 {
-    atomic<thread::id> m_writing_thread;
-
     Ring_W(const string& directory, const string& prefix, uint64_t id):
         Ring<NUM_ELEMENTS, char, false>::Ring(directory, prefix, id)
     {
         if (!this->m_control->ownership_mutex.try_lock()) {
-            using afe = typename Ring<NUM_ELEMENTS, T, false>::acquisition_failure_exception;
-            throw afe();
+            throw typename Ring<NUM_ELEMENTS, T, false>::acquisition_failure_exception();
         }
     }
 
     ~Ring_W()
     {
         this->m_control->ownership_mutex.unlock();
-    }
-
-
-    inline
-    T* prepare_write(size_t num_elements_to_write)
-    {
-        // assure exclusive write access
-        while (m_writing_thread != std::this_thread::get_id()) {
-            auto invalid_thread = thread::id();
-            m_writing_thread.compare_exchange_strong(invalid_thread, std::this_thread::get_id());
-        }
-
-        size_t index = m_pending_new_sequence % NUM_ELEMENTS;
-        m_pending_new_sequence += num_elements_to_write;
-        size_t new_semiring = (m_pending_new_sequence >> this->m_semiring_shift) & 1;
-
-        // if the writing range has not been acquired
-        if (m_semiring != new_semiring) {
-
-            // if anyone is reading the new_semiring, wait (spin) to avoid an overwrite
-            while (this->m_control->read_access[new_semiring].load()) {}
-
-            m_semiring = new_semiring;
-        }
-        return this->m_data+index;
     }
 
 
@@ -664,9 +719,6 @@ struct Ring_W: Ring<NUM_ELEMENTS, T, false>
         // write (copy) the message
         *(write_location) = obj;
 
-        // [TESTING] please do not enable
-        //using pod_type = typename Make_pod<T2>::type;
-        //*((pod_type*)(write_location)) = (pod_type&&)obj;
         return write_location;
     }
 
@@ -691,18 +743,18 @@ struct Ring_W: Ring<NUM_ELEMENTS, T, false>
         // update sequence
         this->m_control->leading_sequence.store(m_pending_new_sequence);
 
-#if defined(SINTRA_RING_READING_POLICY_ALWAYS_SLEEP)
+#if SINTRA_RING_READING_POLICY == SINTRA_RING_READING_POLICY_ALWAYS_SLEEP
 
         {
             ipc::scoped_lock<ipc::interprocess_mutex> lock(m_control->condition_mutex);
             m_control->dirty_condition.notify_all();
         }
 
-#elif defined(SINTRA_RING_READING_POLICY_ALWAYS_SPIN)
+#elif SINTRA_RING_READING_POLICY == SINTRA_RING_READING_POLICY_ALWAYS_SPIN
 
         // nothing to do...
 
-#elif defined(SINTRA_RING_READING_POLICY_HYBRID)
+#elif SINTRA_RING_READING_POLICY == SINTRA_RING_READING_POLICY_HYBRID
 
 
         // from this point on, any comparison of the form:
@@ -715,17 +767,50 @@ struct Ring_W: Ring<NUM_ELEMENTS, T, false>
             this->m_control->dirty_condition.notify_all();
         }
 
-#endif
+#else
 
+#error No reading policy is defined
+
+#endif
 
         m_writing_thread = thread::id();
     }
 
 
 private:
-    // something referring to the writing range
-    size_t m_semiring = 0;
-    sequence_counter_type m_pending_new_sequence = 0;
+
+    inline
+    T* prepare_write(size_t num_elements_to_write)
+    {
+        assert(num_elements_to_write <= NUM_ELEMENTS/8);
+
+        // assure exclusive write access
+        while (m_writing_thread != std::this_thread::get_id()) {
+            auto invalid_thread = thread::id();
+            m_writing_thread.compare_exchange_strong(invalid_thread, std::this_thread::get_id());
+        }
+
+        size_t index = m_pending_new_sequence % NUM_ELEMENTS;
+        m_pending_new_sequence += num_elements_to_write;
+        size_t new_octile = (8 * (m_pending_new_sequence % NUM_ELEMENTS)) / NUM_ELEMENTS;
+
+        // if the writing range has not been acquired
+        if (m_octile != new_octile) {
+            auto range_mask = (uint64_t(0xff) << (8 * new_octile));
+
+            // if anyone is reading the octile range of the write operation,
+            // wait (spin) to prevent an overwrite
+            while (this->m_control->read_access & range_mask) {}
+
+            m_octile = new_octile;
+        }
+        return this->m_data+index;
+    }
+
+
+    atomic<thread::id>          m_writing_thread;
+    size_t                      m_octile                    = 0;
+    sequence_counter_type       m_pending_new_sequence      = 0;
 };
 
 
