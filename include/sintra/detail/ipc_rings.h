@@ -617,8 +617,8 @@ struct Ring_R: Ring<NUM_ELEMENTS, T, true>
     Range get_data()
     {
         return Range {
-            this->m_data + max(0, int64_t(m_reading_sequence) - NUM_TRAILING_ELEMENTS) % NUM_ELEMENTS;
-            this->m_data + (m_reading_sequence % NUM_ELEMENTS);
+            this->m_data + max(0, int64_t(m_reading_sequence) - NUM_TRAILING_ELEMENTS) % NUM_ELEMENTS,
+            this->m_data + (m_reading_sequence % NUM_ELEMENTS)
         };
     }
 
