@@ -588,11 +588,29 @@ struct Unserialized_Enclosure<T, true, false>: Enclosure <T, true, false>
   //       \//       \//       \//       \//       \//       \//       \//
 
 
-struct Message_ring_R: protected Ring_R<message_ring_size, char>
+
+std::string get_base_filename(const string& prefix, uint64_t id)
 {
-    using Ring_R::Ring_R;
+    std::stringstream stream;
+    stream << std::hex << id;
+    return prefix + stream.str();
+}
+
+
+struct Message_ring_R: protected Ring_R<char>
+{
+    Message_ring_R(const string& directory, const string& prefix, uint64_t id):
+        Ring_R(directory, get_base_filename(prefix, id), message_ring_size),
+        m_id(id)
+    {}
+
     using Ring_R::unblock;
-    using Ring_R::m_id;
+
+    void done_reading()
+    {
+        Ring_R::done_reading();
+        m_range = decltype(m_range)();
+    }
 
     // Returns a pointer to the buffer of the message
     // If there is no message to read, it blocks.
@@ -603,11 +621,15 @@ struct Message_ring_R: protected Ring_R<message_ring_size, char>
             // if this is not an uninitialised state
             if (m_range.begin) {
                 // finalise the reading
-                done_reading();
+                done_reading_new_data();
+            }
+            else {
+                // initialize for all subsequent reads
+                start_reading();
             }
 
             // start with a new reading buffer. this will block until there is something to read.
-            auto range = start_reading_new_data();
+            auto range = wait_for_new_data();
             if (!range.begin) {
                 return nullptr;
             }
@@ -620,16 +642,21 @@ struct Message_ring_R: protected Ring_R<message_ring_size, char>
         return ret;
     }
 
-protected:
+public:
+    const uint64_t m_id;
 
-    Range m_range;
+protected:
+    Range<char> m_range;
 };
 
 
 
-struct Message_ring_W: public Ring_W<message_ring_size, char>
+struct Message_ring_W: public Ring_W<char>
 {
-    using Ring_W::Ring_W;
+    Message_ring_W(const string& directory, const string& prefix, uint64_t id) :
+        Ring_W(directory, get_base_filename(prefix, id), message_ring_size),
+        m_id(id)
+    {}
 
     Message_ring_W(const Message_ring_W&) = delete;
     const Message_ring_W& operator = (const Message_ring_W&) = delete;
@@ -640,6 +667,8 @@ struct Message_ring_W: public Ring_W<message_ring_size, char>
         done_writing();
     }
 
+public:
+    const uint64_t m_id;
 };
 
 

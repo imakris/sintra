@@ -31,9 +31,10 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <atomic>
 #include <cstdint>
 #include <iomanip>
+#include <limits>
 #include <string>
 #include <thread>
-#include <experimental/filesystem>
+#include "fich.h"  // #include <filesystem> compatibility helper
 
 #include <omp.h>
 
@@ -43,7 +44,15 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <boost/interprocess/sync/interprocess_condition.hpp>
 #include <boost/interprocess/sync/scoped_lock.hpp>
 
-#undef max
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <Windows.h>
+#endif
 
 
 namespace sintra {
@@ -54,7 +63,7 @@ using std::error_code;
 using std::string;
 using std::stringstream;
 using std::thread;
-namespace fs  = std::experimental::filesystem;
+namespace fs  = std::filesystem;
 namespace ipc = boost::interprocess;
 
 
@@ -69,31 +78,22 @@ Concepts
 1. The circular ring buffer consists of a data segment, and a control data segment.
    Both of them have a filesystem mapping.
 
-2. The buffer's data segment size is fixed, configured at compile-time in its
-   corresponding template type parameter.
-
-3. Readers and writers are implemented with separate types, which derive from a basic
+2. Readers and writers are implemented with separate types, which derive from a basic
    'Ring' type, and provide accessors accordingly.
 
-4. Accessor functions do not employ the typical STL philosophy in their interface.
-   Rather, they return raw pointers, and allow the caller to write to the buffer
-   directly. This provides the potential for improved performance in some scenarios
-   and is only feasible because of #7 (see below). As a consequence, the client code
-   must be written carefully.
-
-5. Conceptually the writer may only write immediately after an always increasing
+3. Conceptually the writer may only write immediately after an always increasing
    'leading sequence', thus strictly acting as 'producer'.
 
-6. Readers may follow the writer acting as typical 'consumers', but they may as
+4. Readers may follow the writer acting as typical 'consumers', but they may as
    well access a contiguous part of the ringbuffer trailing the "leading sequence".
-   The size of this trailing part is configured statically in the reader's templated
-   type and must not exceed 3/4 of the buffer's size.
+   The size of this trailing part is constant throughout the lifetime of the reader
+   and must not exceed 3/4 of the buffer's size.
 
-7. The buffer's data region is mapped to virtual memory twice concecutively, to
+5. The buffer's data region is mapped to virtual memory twice concecutively, to
    allow the buffer's wrapping being handled natively. This is an optimization
    technique which is sometimes called "the magic ring buffer".
 
-8. A conceptual segmentation of the buffer's region into 8 octiles, allows
+6. A conceptual segmentation of the buffer's region into 8 octiles, allows
    handling the data structure atomically, and in a cache-friendly way.
    A shared atomically accessed 64-bit integer is used as a control variable, to
    communicate the number of readers per octile, on each of its 8 bytes. The variable
@@ -118,38 +118,21 @@ Limitations
    a single operation. This limitation is not absolutely necessary, but removing it
    would require some corner case handling, with a minor performance hit.
 
-3. If there was no requirement for a trailing reader segment, partitioning the ring in
-   two halves would be better optimized.
 
 Remarks
 -------
 1. Sequence counters are of type uint64_t and count indefinitely, but overflowing a
    uint64_t is practically not going to be an issue during the lifetime of this code.
-   Iterating over INT_MAX in an empty loop, would take about 1 second in a desktop
-   system assembled in 2013. Assuming similar performance for 64-bit counters, this
-   would take about 70 years, and ring buffer operations are not an empty loop.
 
-2. There are several approaches in extending this implementation to allow multiple
-   writers. All of the approaches considered would require the introduction of data
-   in the control section, which would have to be accessed and modified in every write
-   operation, in a non-trivial way.
-   The implementation would then become cache unfriendly and significantly more complex.
-   Writing in the data sector with multiple writers would also require a lot of
-   restrictions and caution, to avoid a "false sharing" cache effect, which, in many
-   cases might just be inevitable.
-   It was therefore not introduced.
-
-3. Strictly speaking, this data structure is not lock-free. It could be, if the read
-   and write functions would return when the operation is not possible, instead of
-   waiting until it is. But it was chosen not to, as placing such functions inside loops
-   externally would be less efficient.
+2. Strictly speaking, this data structure is not lock-free. It could be, if the read
+   and write functions would return when the operation is not possible.
    It is also not even mutex-free, unless the reading policy is
    SINTRA_RING_READING_POLICY_ALWAYS_SPIN (see below), which is generally not a good
    policy for generic usage. The default policy is SINTRA_RING_READING_POLICY_HYBRID,
    which spins for a predefined amount of time, before it goes to sleep, using a mutex
-   and a condvar.
+   and a condition variable.
 
-4. The choice of omp_get_wtime() for timing is because it was measured to work at least
+3. The choice of omp_get_wtime() for timing is because it was measured to work at least
    2x faster than comparable functions from std::chrono. This might not be the case
    in all systems.
 
@@ -182,13 +165,257 @@ bool check_or_create_directory(const string& dir_name)
 inline
 bool remove_directory(const string& dir_name)
 {
-    uintmax_t c = 0;
     error_code ec;
     fs::path ps(dir_name);
     auto rv = fs::remove_all(dir_name.c_str(), ec);
 
     return !!rv;
 }
+
+
+
+template <typename T>
+std::vector<size_t> get_ring_configurations(
+    size_t min_elements, size_t max_size, size_t max_subdivisions)
+{
+    auto gcd = [](size_t m, size_t n)
+    {
+        size_t tmp;
+        while(m) { tmp = m; m = n % m; n = tmp; }
+        return n;
+    };
+
+    auto lcm = [=](size_t m, size_t n)
+    {
+        return m / gcd(m, n) * n;
+    };
+
+    size_t page_size = boost::interprocess::mapped_region::get_page_size();
+    size_t base_size = lcm(sizeof(T), page_size);
+    size_t min_size = std::max(min_elements * sizeof(T), base_size);
+    size_t tmp_size = base_size;
+
+    std::vector<size_t> ret;
+
+    while (tmp_size*2 <= max_size) {
+        tmp_size *= 2;
+    }
+
+    for (size_t i=0; i<max_subdivisions && tmp_size >= min_size; i++) {
+        ret.push_back(tmp_size/sizeof(T));
+        tmp_size /= 2;
+    }
+
+    std::reverse(std::begin(ret), std::end(ret));
+
+    return ret;
+}
+
+
+
+template <typename T>
+struct Range
+{
+    T* begin = nullptr;
+    T* end   = nullptr;
+};
+
+
+
+class ring_acquisition_failure_exception {};
+
+
+
+ //////////////////////////////////////////////////////////////////////////
+///// BEGIN Ring_data //////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////
+//////   \//////   \//////   \//////   \//////   \//////   \//////   \//////
+ ////     \////     \////     \////     \////     \////     \////     \////
+  //       \//       \//       \//       \//       \//       \//       \//
+
+
+
+// Ring sizes should be powers of 2 and multiple of the page size
+template <typename T, bool READ_ONLY_DATA>
+struct Ring_data
+{
+    using                   element_t       = T;
+    constexpr static bool   read_only_data  = READ_ONLY_DATA;
+
+
+    Ring_data(
+        const string& directory,
+        const string& data_filename,
+        const size_t num_elements)
+    :
+        m_num_elements(num_elements),
+        m_data_region_size(num_elements * sizeof(T))
+    {
+        m_directory = directory + "/";
+        m_data_filename = m_directory + data_filename;
+
+        fs::path pr(m_data_filename);
+
+        bool c1 = fs::exists(pr) && fs::is_regular_file(pr) && fs::file_size(pr);
+        bool c2 = c1 || create();
+
+        if (!c2 || !attach()) {
+            throw ring_acquisition_failure_exception();
+        }
+    }
+
+
+    ~Ring_data()
+    {
+        delete m_data_region_0;
+        delete m_data_region_1;
+
+        m_data_region_0 = nullptr;
+        m_data_region_1 = nullptr;
+        m_data = nullptr;
+
+        if (m_remove_files_on_destruction) {
+            error_code ec;
+            remove(fs::path(m_data_filename), ec);
+        }
+    }
+
+    size_t   get_num_elements() const { return m_num_elements; }
+    const T* get_base_address() const { return m_data;         }
+
+private:
+    using region_ptr_type = ipc::mapped_region*;
+
+    bool create()
+    {
+        try {
+            if (!check_or_create_directory(m_directory))
+                return false;
+
+            ipc::file_handle_t fh_data =
+                ipc::ipcdetail::create_new_file(m_data_filename.c_str(), ipc::read_write);
+            if (fh_data == ipc::ipcdetail::invalid_file())
+                return false;
+
+#ifdef NDEBUG
+            if (!ipc::ipcdetail::truncate_file(fh_data, m_data_region_size))
+                return false;
+#else
+            auto ustring = "UNINITIALIZED";
+            auto dv = strlen(ustring);
+            char* u_data = new char[m_data_region_size];
+            for (size_t i=0; i<m_data_region_size; i++)
+                u_data[i] = ustring[i%dv];
+
+            ipc::ipcdetail::write_file(fh_data,  u_data, m_data_region_size);
+
+            delete [] u_data;
+#endif
+            return ipc::ipcdetail::close_file(fh_data);
+        }
+        catch (...) {
+        }
+        return false;
+    }
+
+
+    bool attach()
+    {
+        assert(
+            m_data_region_0  == nullptr &&
+            m_data_region_1  == nullptr &&
+            m_data           == nullptr);
+
+        try {
+            if (fs::file_size(m_data_filename) != m_data_region_size) {
+                return false;
+            }
+
+            // NOTE: just to be clear, on Windows, this function does not return the page size.
+            // It returns the "allocation granularity" (see dwAllocationGranularity in SYSTEM_INFO),
+            // which is usually hardcoded to 64KB and refers to VirtualAlloc's allocation granularity.
+            // However, this is what we actually need here, the page size is not relevant.
+            size_t page_size = ipc::mapped_region::get_page_size();
+            assert(m_data_region_size % page_size == 0);
+
+#ifdef _WIN32
+            void* mem = VirtualAlloc(NULL, m_data_region_size * 2 + page_size, MEM_RESERVE, PAGE_READWRITE);
+#else
+            // WARNING: This might eventually require a system specific implementation.
+            // [translation: it has not failed so far, thus it's still here. If it fails, reimplement]
+            void* mem = malloc(m_data_region_size * 2 + page_size);
+#endif
+            if (!mem) {
+                return false;
+            }
+
+            char *ptr = (char*)(ptrdiff_t((char *)mem + page_size) & ~(page_size - 1));
+
+            auto data_rights = READ_ONLY_DATA ? ipc::read_only : ipc::read_write;
+            ipc::file_mapping file(m_data_filename.c_str(), data_rights);
+
+            ipc::map_options_t map_extra_options = 0;
+
+#ifdef _WIN32
+            // here we make the assumption that between the release and the mapping that follows afterwards,
+            // there will not be an allocation from a different thread, that could mess it all up.
+            VirtualFree(mem, 0,  MEM_RELEASE);
+
+#else
+            // on Linux however, we do not free.
+    #ifdef MAP_FIXED
+            map_extra_options |= MAP_FIXED;
+    #endif
+
+    #ifdef MAP_NOSYNC
+            map_extra_options |= MAP_NOSYNC
+    #endif
+#endif
+
+            m_data_region_0 = new ipc::mapped_region(
+                file, data_rights, 0, m_data_region_size, ptr, map_extra_options);
+            m_data_region_1 = new ipc::mapped_region(
+                file, data_rights, 0, 0,
+                ((char*)m_data_region_0->get_address()) + m_data_region_size, map_extra_options);
+            m_data = (T*)m_data_region_0->get_address();
+
+            assert(m_data_region_0->get_address() == ptr);
+            assert(m_data_region_1->get_address() == ptr + m_data_region_size);
+            assert(m_data_region_0->get_size() == m_data_region_size);
+            assert(m_data_region_1->get_size() == m_data_region_size);
+
+            return true;
+        }
+        catch (...) {
+            return false;
+        }
+    }
+
+
+    region_ptr_type                     m_data_region_0                 = nullptr;
+    region_ptr_type                     m_data_region_1                 = nullptr;
+    string                              m_directory;
+
+protected:
+
+    const size_t                        m_num_elements;
+    const size_t                        m_data_region_size;
+
+    T*                                  m_data                          = nullptr;
+    string                              m_data_filename;
+    bool                                m_remove_files_on_destruction   = false;
+
+    friend struct Managed_process;
+};
+
+
+
+  //\       //\       //\       //\       //\       //\       //\       //
+ ////\     ////\     ////\     ////\     ////\     ////\     ////\     ////
+//////\   //////\   //////\   //////\   //////\   //////\   //////\   //////
+////////////////////////////////////////////////////////////////////////////
+///// END Ring_data ////////////////////////////////////////////////////////
+ //////////////////////////////////////////////////////////////////////////
 
 
  //////////////////////////////////////////////////////////////////////////
@@ -198,15 +425,11 @@ bool remove_directory(const string& dir_name)
  ////     \////     \////     \////     \////     \////     \////     \////
   //       \//       \//       \//       \//       \//       \//       \//
 
-// Ring sizes should be powers of 2 and multiple of the page size
-template <int NUM_ELEMENTS, typename T, bool READ_ONLY_DATA>
-struct Ring
+
+
+template <typename T, bool READ_ONLY_DATA>
+struct Ring: Ring_data<T, READ_ONLY_DATA>
 {
-    struct Range
-    {
-        T* begin = nullptr;
-        T* end   = nullptr;
-    };
 
     struct Control
     {
@@ -251,236 +474,115 @@ struct Ring
         }
     };
 
-    class acquisition_failure_exception {};
-
-    enum { capacity         = NUM_ELEMENTS           };
-    enum { data_region_size = NUM_ELEMENTS/sizeof(T) };
 
 
-    Ring(const string& directory, const string& prefix, uint64_t id);
-    ~Ring();
+    Ring(const string& directory, const string& data_filename, size_t num_elements)
+    :
+        Ring_data<T, READ_ONLY_DATA>(directory, data_filename, num_elements)
+    {
+        m_control_filename = this->m_data_filename + "_control";
 
-    const uint64_t                      m_id;
+        fs::path pc(m_control_filename);
 
-protected:
+        bool c1 = fs::exists(pc) && fs::is_regular_file(pc) && fs::file_size(pc);
+        bool c2 = c1 || create();
+
+        if (!c2 || !attach()) {
+            throw ring_acquisition_failure_exception();
+        }
+
+        if (!c1) {
+            try {
+                new (m_control) Control;
+            }
+            catch (...) {
+                throw ring_acquisition_failure_exception();
+            }
+        }
+
+        m_control->num_attached++;
+    }
+
+    ~Ring()
+    {
+        if (m_control->num_attached-- == 1) {
+            this->m_remove_files_on_destruction = true;
+        }
+
+        delete m_control_region;
+        m_control_region = nullptr;
+
+        if (this->m_remove_files_on_destruction) {
+            error_code ec;
+            remove(fs::path(m_control_filename), ec);
+        }
+    }
+
+
+private:
     using region_ptr_type = ipc::mapped_region*;
 
-    bool create();
-    bool destroy();
-    bool attach();
-    bool detach();
+    bool create()
+    {
+        try {
+            ipc::file_handle_t fh_control =
+                ipc::ipcdetail::create_new_file(m_control_filename.c_str(), ipc::read_write);
+            if (fh_control == ipc::ipcdetail::invalid_file())
+                return false;
 
-    region_ptr_type                     m_data_region_0     = nullptr;
-    region_ptr_type                     m_data_region_1     = nullptr;
+#ifdef NDEBUG
+            if (!ipc::ipcdetail::truncate_file(fh_control, sizeof(Control)))
+                return false;
+#else
+            auto ustring = "UNINITIALIZED";
+            auto dv = strlen(ustring);
+            char* u_control = new char[sizeof(Control)];
+            for (size_t i=0; i<sizeof(Control); i++)
+                u_control[i] = ustring[i%dv];
+
+            ipc::ipcdetail::write_file(fh_control, u_control,sizeof(Control));
+
+            delete [] u_control;
+#endif
+            return ipc::ipcdetail::close_file(fh_control);
+        }
+        catch (...) {
+        }
+        return false;
+    }
+
+
+    bool attach()
+    {
+        assert(m_control_region == nullptr);
+
+        try {
+            if (fs::file_size(m_control_filename) != sizeof(Control)) {
+                return false;
+            }
+
+            ipc::file_mapping fm_control(m_control_filename.c_str(), ipc::read_write);
+            m_control_region = new ipc::mapped_region(fm_control, ipc::read_write, 0, 0);
+            m_control = (Control*)m_control_region->get_address();
+
+            return true;
+        }
+        catch (...) {
+            return false;
+        }
+    }
+
     region_ptr_type                     m_control_region    = nullptr;
-
-    T*                                  m_data              = nullptr;
-    Control*                            m_control           = nullptr;
-
-    string                              m_directory;
-    string                              m_data_filename;
     string                              m_control_filename;
+
+protected:
+    Control*                            m_control           = nullptr;
 
     friend struct Managed_process;
 };
 
 
 
-template <int NUM_ELEMENTS, typename T, bool READ_ONLY_DATA>
-Ring<NUM_ELEMENTS, T, READ_ONLY_DATA>::Ring(
-    const string& directory, const string& prefix, uint64_t id)
-:
-    m_id(id)
-{
-    stringstream stream;
-    stream << std::hex << id;
-
-    m_directory = directory + "/";
-    m_data_filename = m_directory + prefix + stream.str();
-    m_control_filename = m_data_filename + "_control";
-
-    fs::path pr(m_data_filename);
-    fs::path pc(m_control_filename);
-
-    bool c1 = fs::exists(pr) && fs::is_regular_file(pr) && fs::file_size(pr) &&
-              fs::exists(pc) && fs::is_regular_file(pc) && fs::file_size(pc);
-    bool c2 = c1 || create();
-
-    if (!c2 || !attach()) {
-        throw acquisition_failure_exception();
-    }
-
-    if (!c1) {
-        try {
-            new (m_control) Control;
-        }
-        catch (...) {
-            throw acquisition_failure_exception();
-        }
-    }
-    
-    m_control->num_attached++;
-}
-
-
-template <int NUM_ELEMENTS, typename T, bool READ_ONLY_DATA>
-Ring<NUM_ELEMENTS, T, READ_ONLY_DATA>::~Ring()
-{
-    if (m_control->num_attached-- == 1) {
-        detach();
-        destroy();
-    }
-    else {
-        detach();
-    }
-}
-
-
-template <int NUM_ELEMENTS, typename T, bool READ_ONLY_DATA>
-bool Ring<NUM_ELEMENTS, T, READ_ONLY_DATA>::create()
-{
-    try {
-        if (!check_or_create_directory(m_directory))
-            return false;
-
-        ipc::file_handle_t fh_data =
-            ipc::ipcdetail::create_new_file(m_data_filename.c_str(),    ipc::read_write);
-        if (fh_data == ipc::ipcdetail::invalid_file())
-            return false;
-
-        ipc::file_handle_t fh_control =
-            ipc::ipcdetail::create_new_file(m_control_filename.c_str(), ipc::read_write);
-        if (fh_control == ipc::ipcdetail::invalid_file())
-            return false;
-
-#ifdef NDEBUG
-        if (!ipc::ipcdetail::truncate_file(fh_data,    data_region_size    ))
-            return false;
-        if (!ipc::ipcdetail::truncate_file(fh_control, sizeof(Control)))
-            return false;
-#else
-        auto ustring = "UNINITIALIZED";
-        auto dv = strlen(ustring);
-        char* u_data    = new char[data_region_size];
-        char* u_control = new char[sizeof(Control)];
-        for (size_t i=0; i<data_region_size; i++)
-            u_data[i]    = ustring[i%dv];
-        for (size_t i=0; i<sizeof(Control);  i++)
-            u_control[i] = ustring[i%dv];
-
-        ipc::ipcdetail::write_file(fh_data,  u_data, data_region_size);
-        ipc::ipcdetail::write_file(fh_control, u_control,sizeof(Control));
-
-        delete [] u_data;
-        delete [] u_control;
-#endif
-
-        bool success = false;
-        success |= ipc::ipcdetail::close_file(fh_data);
-        success |= ipc::ipcdetail::close_file(fh_control);
-
-        return success;
-    }
-    catch (...) {
-    }
-    return false;
-}
-
-
-template <int NUM_ELEMENTS, typename T, bool READ_ONLY_DATA>
-bool Ring<NUM_ELEMENTS, T, READ_ONLY_DATA>::destroy()
-{
-    try {
-        fs::path pr(m_data_filename);
-        fs::path pc(m_control_filename);
-        return remove(pr) && remove(pc);
-    }
-    catch (...) {
-    }
-    return false;
-}
-
-
-template <int NUM_ELEMENTS, typename T, bool READ_ONLY_DATA>
-bool Ring<NUM_ELEMENTS, T, READ_ONLY_DATA>::attach()
-{
-    assert(
-        m_data_region_0  == nullptr &&
-        m_data_region_1  == nullptr &&
-        m_control_region == nullptr &&
-        m_data           == nullptr);
-
-    try {
-        if (fs::file_size(m_data_filename)      != data_region_size ||
-            fs::file_size(m_control_filename)   != sizeof(Control))
-        {
-            return false;
-        }
-
-        size_t page_size = ipc::mapped_region::get_page_size();
-        assert(data_region_size % page_size == 0);
-
-        // WARNING: This might eventually require system specific implementations.
-        // [translation: it has not failed so far, thus it's still here. If it fails, reimplement]
-        void *mem = malloc(data_region_size * 2 + page_size);
-        char *ptr = (char*)(ptrdiff_t((char *)mem + page_size) & ~(page_size - 1));
-
-        auto data_rights = READ_ONLY_DATA ? ipc::read_only : ipc::read_write;
-        ipc::file_mapping file(m_data_filename.c_str(), data_rights);
-
-        ipc::map_options_t map_extra_options = 0;
-
-#ifdef _WIN32
-        free(mem); // here we make the assumption that that pages are put back into the free list.
-#else
-        // on Linux however, we do not free.
-    #ifdef MAP_FIXED
-        map_extra_options |= MAP_FIXED;
-    #endif
-
-    #ifdef MAP_NOSYNC
-        map_extra_options |= MAP_NOSYNC
-    #endif
-#endif
-
-        m_data_region_0 = new ipc::mapped_region(
-            file, data_rights, 0, data_region_size, ptr, map_extra_options);
-        m_data_region_1 = new ipc::mapped_region(
-            file, data_rights, 0, 0,
-            ((char*)m_data_region_0->get_address()) + data_region_size, map_extra_options);
-        m_data = (T*)m_data_region_0->get_address();
-
-        assert(m_data_region_0->get_address() == ptr);
-        assert(m_data_region_1->get_address() == ptr + data_region_size);
-        assert(m_data_region_0->get_size() == data_region_size);
-        assert(m_data_region_1->get_size() == data_region_size);
-
-        ipc::file_mapping fm_control(m_control_filename.c_str(), ipc::read_write);
-        m_control_region = new ipc::mapped_region(fm_control, ipc::read_write, 0, 0);
-        m_control = (Control*)m_control_region->get_address();
-
-        return true;
-    }
-    catch (...) {
-        return false;
-    }
-}
-
-
-template <int NUM_ELEMENTS, typename T, bool READ_ONLY_DATA>
-bool Ring<NUM_ELEMENTS, T, READ_ONLY_DATA>::detach()
-{
-    delete m_data_region_0;
-    delete m_data_region_1;
-    delete m_control_region;
-
-    m_data_region_0 = nullptr;
-    m_data_region_1 = nullptr;
-    m_control_region = nullptr;
-    m_data = nullptr;
-
-    return true;
-}
 
 
   //\       //\       //\       //\       //\       //\       //\       //
@@ -499,41 +601,106 @@ bool Ring<NUM_ELEMENTS, T, READ_ONLY_DATA>::detach()
   //       \//       \//       \//       \//       \//       \//       \//
 
 
-template <int NUM_ELEMENTS, typename T, int NUM_TRAILING_ELEMENTS = 0>
-struct Ring_R: Ring<NUM_ELEMENTS, T, true>
-{
-    using typename Ring<NUM_ELEMENTS, T, true>::Range;
 
-    Ring_R(const string& directory, const string& prefix, uint64_t id):
-        Ring<NUM_ELEMENTS, char, true>::Ring(directory, prefix, id),
+// To have this ring work as consumer, the sequence is
+// start_reading
+//     wait_for_new_data
+//     done_reading_new_data
+// done_reading
+
+
+
+template <typename T>
+struct Ring_R: Ring<T, true>
+{
+    Ring_R(const string& directory, const string& data_filename,
+        size_t num_elements, size_t max_trailing_elements = 0)
+    :
+        Ring<T, true>::Ring(directory, data_filename, num_elements),
+        m_max_trailing_elements(max_trailing_elements),
         m_unblocked(false)
     {
-        static_assert(NUM_ELEMENTS % 8 == 0,
-            "NUM_ELEMENTS must be a multiple of 8.");
-        static_assert(NUM_TRAILING_ELEMENTS < 3 * NUM_ELEMENTS / 4,
-            "NUM_TRAILING_ELEMENTS may not be grater than 3/4 of the size of the ring.");
+        // num_elements must be a multiple of 8
+        assert(num_elements % 8 == 0);
 
-        m_reading_sequence = this->m_control->leading_sequence.load();
-        m_trailing_octile =
-            (8 * ((m_reading_sequence - NUM_TRAILING_ELEMENTS) % NUM_ELEMENTS)) / NUM_ELEMENTS;
-
-        this->m_control->read_access += uint64_t(1) << (8 * m_trailing_octile);
+        // m_max_trailing_elements may not be grater than 3/4 of the size of the ring
+        assert(max_trailing_elements <= 3 * num_elements / 4);
     }
 
     ~Ring_R()
     {
-        this->m_control->read_access -= uint64_t(1) << (8 * m_trailing_octile);
+        //this->m_control->read_access -= uint64_t(1) << (8 * m_trailing_octile);
+
+        if (m_reading) {
+            done_reading();
+        }
     }
 
 
-    // Returns a pointer to the first element that is pending to be read, or the head of the ring,
-    // if there are no elements available.
-    // The number of elements in the ring available to the reader are returned in
-    // num_available_elements.
-    // Returns a memory range
+    Range<T> start_reading()
+    {
+        return start_reading(m_max_trailing_elements);
+    }
+
+
+    // start reading up to num_trailing_elements elements behind the leading sequence.
+    // When data is no longer being accessed, the caller should call done_reading(), to prevent blocking the writer
+    Range<T> start_reading(size_t num_trailing_elements)
+    {
+        bool f = false;
+        while (!m_reading.compare_exchange_strong(f, true)) { f = false; }
+
+        assert(num_trailing_elements <= m_max_trailing_elements);
+
+        // this prevents the writer from progressing beyond the end of the octile that succeeds the one it is currently on
+        uint64_t access_mask = 0x0101010101010101;
+        this->m_control->read_access += access_mask;
+
+        // reading out the leading sequence atomically, ensures that the return range will not exceed num_trailing_elements
+        auto leading_sequence = this->m_control->leading_sequence.load();
+
+        auto range_first_sequence = std::max(int64_t(0), int64_t(leading_sequence) - int64_t(num_trailing_elements));
+        m_trailing_octile = (8 * ((range_first_sequence - m_max_trailing_elements) % this->m_num_elements)) / this->m_num_elements;
+
+        access_mask -= uint64_t(1) << (8 * m_trailing_octile);
+        this->m_control->read_access -= access_mask;
+
+        Range<T> ret;
+        ret.begin = this->m_data + std::max(int64_t(0), int64_t(range_first_sequence)) % this->m_num_elements;
+        ret.end = ret.begin + leading_sequence - range_first_sequence;
+
+        assert(ret.end >= ret.begin);
+        assert(ret.begin >= this->m_data);
+
+        // advance to the leading sequence that was read in the beginning
+        // this way the function will work orthogonally to wait_for_new_data()
+        m_reading_sequence = leading_sequence;
+
+        return ret;
+    }
+
+
+    // this reading ring will no longer block the writer
+    void done_reading()
+    {
+        this->m_control->read_access -= uint64_t(1) << (8 * m_trailing_octile);
+        m_reading_sequence = m_trailing_octile = 0;
+        m_reading = false;
+    }
+
+
+
+    sequence_counter_type reading_sequence() const { return m_reading_sequence; }
+
+
+
+
+
+    // Returns a range with the elements succeeding the current reader's reading sequence,
+    // and sets the reading sequence to the current leading sequence
     // The function will block until elements become available or it is explicitly unblocked.
-    // The caller must call done_reading() once it is done accessing the ring.
-    const Range start_reading_new_data()
+    // The caller must call done_reading_new_data() to move the read
+    const Range<T> wait_for_new_data()
     {
 
 #if SINTRA_RING_READING_POLICY == SINTRA_RING_READING_POLICY_ALWAYS_SLEEP
@@ -564,7 +731,7 @@ struct Ring_R: Ring<NUM_ELEMENTS, T, true>
             size_t sc_limit = 40; // initial spin count limit, to reduce the calls to omp_get_wtime
 
             while (m_reading_sequence == this->m_control->leading_sequence.load() && !m_unblocked) {
-                
+
                 if (sc++ > sc_limit) {
 
                     double tmp = omp_get_wtime();
@@ -587,7 +754,7 @@ struct Ring_R: Ring<NUM_ELEMENTS, T, true>
                     {
                         this->m_control->dirty_condition.wait(lock);
                     }
-                    
+
                     this->m_control->sleeping_readers--;
                 }
             }
@@ -598,37 +765,27 @@ struct Ring_R: Ring<NUM_ELEMENTS, T, true>
 #error No reading policy is defined
 
 #endif
-        Range ret;
+        Range<T> ret;
 
         if (m_unblocked) {
             return ret;
         }
 
-        auto num_elements = size_t(this->m_control->leading_sequence.load() - m_reading_sequence);
+        auto num_range_elements = size_t(this->m_control->leading_sequence.load() - m_reading_sequence);
 
-        ret.begin = this->m_data + (m_reading_sequence % NUM_ELEMENTS);
-        ret.end   = ret.begin + num_elements;
-        m_reading_sequence += num_elements;
+        ret.begin = this->m_data + (m_reading_sequence % this->m_num_elements);
+        ret.end   = ret.begin + num_range_elements;
+        m_reading_sequence += num_range_elements;
         return ret;
     }
 
 
-
-    Range get_data()
-    {
-        return Range {
-            this->m_data + max(0, int64_t(m_reading_sequence) - NUM_TRAILING_ELEMENTS) % NUM_ELEMENTS,
-            this->m_data + (m_reading_sequence % NUM_ELEMENTS)
-        };
-    }
-
-
-    // release the ring's range that was blocked for reading
+    // release the ring's range that was blocked for reading the new data
     // (it might still be blocked by other readers).
-    void done_reading()
+    void done_reading_new_data()
     {
         size_t new_trailing_octile =
-            (8 * ((m_reading_sequence - NUM_TRAILING_ELEMENTS) % NUM_ELEMENTS)) / NUM_ELEMENTS;
+            (8 * ((m_reading_sequence - m_max_trailing_elements) % this->m_num_elements)) / this->m_num_elements;
 
         if (new_trailing_octile != m_trailing_octile) {
             auto diff =
@@ -654,9 +811,11 @@ struct Ring_R: Ring<NUM_ELEMENTS, T, true>
     }
 
 private:
-    sequence_counter_type m_reading_sequence;
-    size_t m_trailing_octile;
-
+    const size_t m_max_trailing_elements;
+    sequence_counter_type m_reading_sequence = 0;
+    size_t m_trailing_octile = 0;
+    
+    atomic<bool> m_reading = false;
     atomic<bool> m_unblocked;
 };
 
@@ -678,14 +837,14 @@ private:
   //       \//       \//       \//       \//       \//       \//       \//
 
 
-template <int NUM_ELEMENTS, typename T>
-struct Ring_W: Ring<NUM_ELEMENTS, T, false>
+template <typename T>
+struct Ring_W: Ring<T, false>
 {
-    Ring_W(const string& directory, const string& prefix, uint64_t id):
-        Ring<NUM_ELEMENTS, char, false>::Ring(directory, prefix, id)
+    Ring_W(const string& directory, const string& data_filename, size_t num_elements):
+        Ring<T, false>::Ring(directory, data_filename, num_elements)
     {
         if (!this->m_control->ownership_mutex.try_lock()) {
-            throw typename Ring<NUM_ELEMENTS, T, false>::acquisition_failure_exception();
+            throw ring_acquisition_failure_exception();
         }
     }
 
@@ -700,7 +859,7 @@ struct Ring_W: Ring<NUM_ELEMENTS, T, false>
     {
         T* write_location = prepare_write(num_src_elements);
 
-        for (size_t i = 0; i < num_src_elements*sizeof(T); i++) {
+        for (size_t i = 0; i < num_src_elements; i++) {
             write_location[i] = src_buffer[i];
         }
         return write_location;
@@ -708,13 +867,14 @@ struct Ring_W: Ring<NUM_ELEMENTS, T, false>
 
 
     // The specialised version, writing (copying) an arbitrary type object into the ring
+    // sizeof(T2) must be a multiple of sizeof(T)
     template <typename T2>
-    T2* write(size_t num_extra_bytes, T2&& obj)
+    T2* write(size_t num_extra_elements, T2&& obj)
     {
-        auto num_bytes = sizeof(T2)+num_extra_bytes;
-        assert(num_bytes % sizeof(T) == 0);
+        assert(sizeof(T2) % sizeof(T) == 0);
+        auto num_elements = sizeof(T2)/sizeof(T)+num_extra_elements;
 
-        T2* write_location = (T2*) prepare_write(num_bytes / sizeof(T));
+        T2* write_location = (T2*) prepare_write(num_elements);
 
         // write (copy) the message
         *(write_location) = obj;
@@ -724,13 +884,14 @@ struct Ring_W: Ring<NUM_ELEMENTS, T, false>
 
 
     // The specialised version, for constructing an arbitrary type object in-place into the ring
+    // sizeof(T2) must be a multiple of sizeof(T)
     template <typename T2, typename... Args>
-    T2* write(size_t num_extra_bytes, Args... args)
+    T2* write(size_t num_extra_elements, Args... args)
     {
-        auto num_bytes = sizeof(T2) + num_extra_bytes;
-        assert(num_bytes % sizeof(T) == 0);
+        assert(sizeof(T2) % sizeof(T) == 0);
+        auto num_elements = sizeof(T2)/sizeof(T)+num_extra_elements;
 
-        T2* write_location = (T2*) prepare_write(num_bytes / sizeof(T));
+        T2* write_location = (T2*) prepare_write(num_elements);
 
         // write (construct) the message
         return new (write_location) T2(args...);
@@ -741,6 +902,9 @@ struct Ring_W: Ring<NUM_ELEMENTS, T, false>
     {
 
         // update sequence
+        // after the next line, any comparison of the form:
+        // m_reading_sequence == m_control->leading_sequence
+        // on the reader will keep failing until done_reading() is called
         this->m_control->leading_sequence.store(m_pending_new_sequence);
 
 #if SINTRA_RING_READING_POLICY == SINTRA_RING_READING_POLICY_ALWAYS_SLEEP
@@ -757,12 +921,8 @@ struct Ring_W: Ring<NUM_ELEMENTS, T, false>
 #elif SINTRA_RING_READING_POLICY == SINTRA_RING_READING_POLICY_HYBRID
 
 
-        // from this point on, any comparison of the form:
-        // m_reading_sequence == m_control->leading_sequence
-        // on the reader will keep failing until done_reading() is called
-        int expected = 0;
-        if (!this->m_control->sleeping_readers.compare_exchange_weak(expected, expected))
-        {
+
+        if (this->m_control->sleeping_readers.load()) {
             ipc::scoped_lock<ipc::interprocess_mutex> lock(this->m_control->condition_mutex);
             this->m_control->dirty_condition.notify_all();
         }
@@ -777,12 +937,26 @@ struct Ring_W: Ring<NUM_ELEMENTS, T, false>
     }
 
 
+    // This functions allows a writer to read the ring's readable data, without locking.
+    Range<T> get_readable_range()
+    {
+        auto leading_sequence = this->m_control->leading_sequence.load();
+        auto range_first_sequence = std::max(int64_t(0), int64_t(leading_sequence) - int64_t(3 * this->m_num_elements / 4));
+
+        Range<T> ret;
+        ret.begin = this->m_data + std::max(int64_t(0), int64_t(range_first_sequence)) % this->m_num_elements;
+        ret.end = ret.begin + leading_sequence - range_first_sequence;
+
+        return ret;
+    }
+
+
 private:
 
     inline
     T* prepare_write(size_t num_elements_to_write)
     {
-        assert(num_elements_to_write <= NUM_ELEMENTS/8);
+        assert(num_elements_to_write <= this->m_num_elements/8);
 
         // assure exclusive write access
         while (m_writing_thread != std::this_thread::get_id()) {
@@ -790,9 +964,9 @@ private:
             m_writing_thread.compare_exchange_strong(invalid_thread, std::this_thread::get_id());
         }
 
-        size_t index = m_pending_new_sequence % NUM_ELEMENTS;
+        size_t index = m_pending_new_sequence % this->m_num_elements;
         m_pending_new_sequence += num_elements_to_write;
-        size_t new_octile = (8 * (m_pending_new_sequence % NUM_ELEMENTS)) / NUM_ELEMENTS;
+        size_t new_octile = (8 * (m_pending_new_sequence % this->m_num_elements)) / this->m_num_elements;
 
         // if the writing range has not been acquired
         if (m_octile != new_octile) {
@@ -821,6 +995,7 @@ private:
 ////////////////////////////////////////////////////////////////////////////
 ///// END Ring_W ///////////////////////////////////////////////////////////
  //////////////////////////////////////////////////////////////////////////
+
 
 } // namespace sintra
 

@@ -31,7 +31,6 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <chrono>
 #include <mutex>
-#include <experimental/filesystem>
 
 #include <boost/lexical_cast.hpp>
 
@@ -43,20 +42,6 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
 namespace sintra {
-
-
-using std::cout;
-using std::function;
-using std::is_base_of;
-using std::lock_guard;
-using std::runtime_error;
-using std::string;
-using std::stringstream;
-using std::to_string;
-using std::unique_lock;
-using std::vector;
-namespace fs = std::experimental::filesystem;
-namespace chrono = std::chrono;
 
 
 
@@ -89,7 +74,7 @@ void install_signal_handler()
 template <typename T>
 sintra::type_id_type get_type_id()
 {
-    const string name = boost::typeindex::type_id<T>().pretty_name();
+    const std::string name = boost::typeindex::type_id<T>().pretty_name();
     const char* test = name.c_str();
     auto it = mproc::s->m_type_id_of_name.find(name);
     if (it != mproc::s->m_type_id_of_name.end()) {
@@ -106,7 +91,7 @@ sintra::type_id_type get_type_id()
 
 
 template <typename>
-sintra::instance_id_type get_instance_id(string&& name)
+sintra::instance_id_type get_instance_id(std::string&& name)
 {
     auto it = mproc::s->m_instance_id_of_name.find(name);
     if (it != mproc::s->m_instance_id_of_name.end()) {
@@ -131,12 +116,12 @@ void Process_group<T, ID>::barrier()
     }
 
     // this mutex protects from matching multiple threads on the same process group's barrier
-    lock_guard<mutex> barrier_lock(m_barrier_mutex);
+    std::lock_guard<mutex> barrier_lock(m_barrier_mutex);
 
     if (!Coordinator::rpc_barrier(coord_id::s, id() )) {
         // This means that another thread must have called the barrier directly as rpc.
         // If this is not the case, then it is a bug.
-        throw runtime_error(
+        throw std::runtime_error(
             "The barrier was matched by multiple threads of the same process.");
     }
 }
@@ -147,7 +132,7 @@ template <typename T, type_id_type ID /* = 0*/>
 void Process_group<T, ID>::enroll()
 {
     if (!Coordinator::rpc_add_this_process_into_group(coord_id::s, id() ) ) {
-        throw runtime_error("Attempted to enroll into a process group after branching.");
+        throw std::runtime_error("Attempted to enroll into a process group after branching.");
     }
     process_group_membership<T>() = true;
 }
@@ -179,7 +164,7 @@ Managed_process::Managed_process():
 
     // NOTE: Do not be tempted to use get_current_process_creation_time from boost::interprocess,
     // it is only implementeded for Windows.
-    m_time_instantiated = chrono::system_clock::now();
+    m_time_instantiated = std::chrono::system_clock::now();
 }
 
 
@@ -234,10 +219,10 @@ void Managed_process::init(int argc, char* argv[])
     uint32_t self_index = 0;
 
     int help_arg = 0;
-    string self_index_arg;
-    string swarm_id_arg;
-    string own_id_arg;
-    string coordinator_id_arg;
+    std::string self_index_arg;
+    std::string swarm_id_arg;
+    std::string own_id_arg;
+    std::string coordinator_id_arg;
 
     try {
         while (true) {
@@ -364,6 +349,7 @@ inline
 void Managed_process::branch()
 {
     using namespace sintra;
+    using std::to_string;
 
     if (coord::s) {
 
@@ -393,7 +379,7 @@ void Managed_process::branch()
         it = branch_vector::s.begin();
         for (int i = 0; it != branch_vector::s.end(); it++, i++) {
 
-            vector<string> all_args = {it->entry.m_binary_name.c_str()};
+            std::vector<std::string> all_args = {it->entry.m_binary_name.c_str()};
             all_args.insert(all_args.end(), it->sintra_options.begin(), it->sintra_options.end());
             all_args.insert(all_args.end(), it->user_options.begin(), it->user_options.end());
 
@@ -433,7 +419,7 @@ void Managed_process::branch()
 
     All_processes::barrier();
 
-    assign_name(string("sintra_process_") + to_string(m_pid));
+    assign_name(std::string("sintra_process_") + to_string(m_pid));
 }
 
 
@@ -473,7 +459,7 @@ void Managed_process::start(int(*entry_function)())
 inline
 void Managed_process::stop()
 {
-    lock_guard<mutex> start_stop_lock(m_start_stop_mutex);
+    std::lock_guard<mutex> start_stop_lock(m_start_stop_mutex);
 
     // stop() might be call either by start() when the entry function finishes execution,
     // or explicitly from one of the handlers, or the entry function itself.
@@ -523,7 +509,7 @@ void Managed_process::stop()
 inline
 bool Managed_process::wait_for_stop()
 {
-    unique_lock<mutex> start_stop_lock(m_start_stop_mutex);
+    std::unique_lock<mutex> start_stop_lock(m_start_stop_mutex);
     bool running_state_at_entry = m_running;
     while (m_running) {
         m_start_stop_condition.wait(start_stop_lock);
@@ -544,17 +530,17 @@ bool Managed_process::wait_for_stop()
 template<typename T>
 void Managed_process::deferred_call(double delay, void(T::*v)())
 {
-    BOOST_STATIC_ASSERT(is_base_of<Managed_process, T>::value);
+    BOOST_STATIC_ASSERT(std::is_base_of<Managed_process, T>::value);
     deferred_call(delay, boost::bind(v, static_cast<T*>(this)));
 }
 
 
 
 inline
-void Managed_process::deferred_call(double delay, function<void()> fn)
+void Managed_process::deferred_call(double delay, std::function<void()> fn)
 {
-    unique_lock<mutex> deferred_queue_lock(m_deferred_mutex);
-    auto when = chrono::steady_clock::now() + chrono::duration<double>(delay);
+    std::unique_lock<mutex> deferred_queue_lock(m_deferred_mutex);
+    auto when = std::chrono::steady_clock::now() + std::chrono::duration<double>(delay);
     auto it = m_deferred_insertion_queue.insert(make_pair(when, fn)).first;
     if (it == m_deferred_insertion_queue.begin()) {
         m_next_deferred_insertion_is_sooner.notify_all();
@@ -589,7 +575,7 @@ void Managed_process::work_loop()
     m_work_thread_running.store(true);
 
     while (!m_must_stop.load()) {
-        unique_lock<mutex> work_items_lock(m_work_items_mutex);
+        std::unique_lock<mutex> work_items_lock(m_work_items_mutex);
         // wait until there is some work to do
         if (m_work_items.empty()) {
             m_work_items_dirty_condition.wait(work_items_lock);
@@ -614,12 +600,14 @@ void Managed_process::work_loop()
 inline
 void Managed_process::deferred_insertion_loop()
 {
+    namespace chrono = std::chrono;
+
     install_signal_handler();
     m_deferred_insertion_thread_running.store(true);
     insertion_time_type time_of_next_insertion =
         chrono::steady_clock::now() + chrono::duration<double>(1000);
 
-    unique_lock<mutex> deferred_queue_lock(m_deferred_mutex);
+    std::unique_lock<mutex> deferred_queue_lock(m_deferred_mutex);
 
     if (m_deferred_insertion_queue.empty()) {
         m_next_deferred_insertion_is_sooner.wait_until(deferred_queue_lock, time_of_next_insertion);
@@ -640,7 +628,7 @@ void Managed_process::deferred_insertion_loop()
                 time_of_next_insertion = element_insertion_time;
                 break;
             }
-            unique_lock<mutex> work_items_lock(m_work_items_mutex);
+            std::unique_lock<mutex> work_items_lock(m_work_items_mutex);
             m_work_items.push_back(m_deferred_insertion_queue.begin()->second);
             m_work_items_dirty_condition.notify_all();
             work_items_lock.unlock();
@@ -658,18 +646,18 @@ void Managed_process::deferred_insertion_loop()
 
 
 inline
-string Managed_process::obtain_swarm_directory()
+std::string Managed_process::obtain_swarm_directory()
 {
-    string sintra_directory = fs::temp_directory_path().string() + "/sintra/";
+    std::string sintra_directory = fs::temp_directory_path().string() + "/sintra/";
     if (!check_or_create_directory(sintra_directory)) {
-        throw runtime_error("access to a working directory failed");
+        throw std::runtime_error("access to a working directory failed");
     }
 
-    stringstream stream;
+    std::stringstream stream;
     stream << std::hex << m_swarm_id;
     auto swarm_directory = sintra_directory + stream.str();
     if (!check_or_create_directory(swarm_directory)) {
-        throw runtime_error("access to a working directory failed");
+        throw std::runtime_error("access to a working directory failed");
     }
 
     return swarm_directory;
