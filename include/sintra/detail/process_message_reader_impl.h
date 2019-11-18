@@ -148,7 +148,7 @@ void Process_message_reader::request_reader_function()
         // it might be a good idea to kill it. If it is in the core set of processes,
         // then it would be a bug.
         assert(m_in_req_c->m_id == process_of(m->sender_instance_id) ||
-                m_in_req_c->m_id == process_of(coord_id::s));
+               m_in_req_c->m_id == process_of(coord_id::s));
 
         if (is_local_instance(m->sender_instance_id) && m->receiver_instance_id == any_remote) {
 
@@ -260,6 +260,8 @@ void Process_message_reader::request_reader_function()
         }
     }
 
+    m_in_req_c->done_reading();
+
     std::unique_lock<std::mutex> lk(m_req_stop_mutex);
     m_req_running = false;
     m_req_stop_condition.notify_one();
@@ -367,6 +369,8 @@ void Process_message_reader::local_request_reader_function()
         }
     }
 
+    m_in_req_c->done_reading();
+
     std::unique_lock<std::mutex> lk(m_req_stop_mutex);
     m_req_running = false;
     m_req_stop_condition.notify_one();
@@ -391,7 +395,7 @@ void Process_message_reader::reply_reader_function()
         // Only the process with the coordinator's instance is allowed to send messages on
         // someone else's behalf (for relay purposes).
         assert(m_in_rep_c->m_id == process_of(m->sender_instance_id) ||
-                m_in_rep_c->m_id == process_of(coord_id::s));
+               m_in_rep_c->m_id == process_of(coord_id::s));
 
         assert(m->receiver_instance_id < any_local);
         assert(m->message_type_id == not_defined_type_id);
