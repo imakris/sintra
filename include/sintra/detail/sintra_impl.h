@@ -105,6 +105,12 @@ void wait_for_stop()
 }
 
 
+inline
+int process_index()
+{
+    return branch_index::s;
+}
+
 
 // This is a convenience function.
 template <typename PROCESS_GROUP_T>
@@ -172,26 +178,34 @@ inline Maildrop<any_local_or_remote>& world()  { static Maildrop<any_local_or_re
 
 struct Console
 {
+    Console(){}
+    Console(const Console&)             = delete;
+    Console& operator=(const Console&)  = delete;
+
+    ~Console()
+    {
+        Coordinator::rpc_print(coord_id::s, m_oss.str());
+    }
+
     template <typename T>
     Console& operator << (const T& value)
     {
-        ostringstream oss;
-        oss << value;
-        Coordinator::rpc_print(coord_id::s, oss.str());
-
+        m_oss << value;
         return *this;
     }
+
+private:
+    ostringstream m_oss;
+
+    // prevent heap instances
+    void* operator new(size_t);
+    void* operator new(size_t, void*);
+    void* operator new[](size_t);
+    void* operator new[](size_t, void*);
 };
 
 
-
-inline
-Console& console()
-{
-    static Console w;
-    return w;
-}
-
+using console = Console;
 
 
 } // namespace sintra

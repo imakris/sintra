@@ -216,21 +216,20 @@ inline
 void Managed_process::init(int argc, char* argv[])
 {
     m_binary_name = argv[0];
-    uint32_t self_index = 0;
 
     int help_arg = 0;
-    std::string self_index_arg;
+    std::string branch_index_arg;
     std::string swarm_id_arg;
-    std::string own_id_arg;
+    std::string instance_id_arg;
     std::string coordinator_id_arg;
 
     try {
         while (true) {
             static struct ::option long_options[] = {
                 {"help",            no_argument,        &help_arg,  'h' },
-                {"self_index",      required_argument,  0,          'a' },
+                {"branch_index",    required_argument,  0,          'a' },
                 {"swarm_id",        required_argument,  0,          'b' },
-                {"own_id",          required_argument,  0,          'c' },
+                {"instance_id",     required_argument,  0,          'c' },
                 {"coordinator_id",  required_argument,  0,          'd' },
                 {0, 0, 0, 0}
             };
@@ -247,20 +246,23 @@ void Managed_process::init(int argc, char* argv[])
                         throw -1;
                     break;
                 case 'a':
-                    self_index_arg      = optarg;
-                    self_index          = boost::lexical_cast<decltype(self_index   )>(optarg);
+                    branch_index_arg    = optarg;
+                    branch_index::s     = boost::lexical_cast<decltype(branch_index::s)>(optarg);
+                    if (branch_index::s < 1) {
+                        throw -1;
+                    }
                     break;
                 case 'b':
                     swarm_id_arg        = optarg;
-                    m_swarm_id          = boost::lexical_cast<decltype(m_swarm_id   )>(optarg);
+                    m_swarm_id          = boost::lexical_cast<decltype(m_swarm_id     )>(optarg);
                     break;
                 case 'c':
-                    own_id_arg          = optarg;
-                    m_instance_id       = boost::lexical_cast<decltype(m_instance_id)>(optarg);
+                    instance_id_arg     = optarg;
+                    m_instance_id       = boost::lexical_cast<decltype(m_instance_id  )>(optarg);
                     break;
                 case 'd':
                     coordinator_id_arg  = optarg;
-                    coord_id::s         = boost::lexical_cast<decltype(coord_id::s  )>(optarg);
+                    coord_id::s         = boost::lexical_cast<decltype(coord_id::s    )>(optarg);
                     break;
                 case '?':
                     /* getopt_long already printed an error message. */
@@ -274,17 +276,16 @@ void Managed_process::init(int argc, char* argv[])
         cout << R"(
 Managed process options:
   --help                (optional) produce help message and exit
-  --self_index arg      used by the coordinator process, when it invokes itself
-                        with a different entry index
+  --branch_index arg    used by the coordinator process, when it invokes itself
+                        with a different entry index. It must be 1 or greater.
   --swarm_id arg        unique identifier of the swarm that is being joined
-  --own_id arg          the instance id of this process, that was assigned by
+  --instance_id arg     the instance id of this process, that was assigned by
                         the supervisor
-  --coordinator_id arg  the instance id of this coordinator that this process
+  --coordinator_id arg  the instance id of the coordinator that this process
                         should refer to
 )";
         exit(1);
     }
-
 
     bool coordinator_is_local = false;
     if (swarm_id_arg.empty()) {
@@ -297,21 +298,31 @@ Managed process options:
         m_directory = obtain_swarm_directory();
         coordinator_is_local = true;
 
-        // NOTE: leave m_self_index uninitialised. The supervisor does not have an entry
+        // NOTE: leave m_branch_index uninitialised. The supervisor does not have an entry
     }
     else {
-        if (!self_index_arg.empty() && !coordinator_id_arg.empty() && !own_id_arg.empty()) {
-            assert((self_index >= 0) && (self_index < max_process_instance_id - 1));
-            m_self_index = self_index;
-            assert(m_instance_id != 0);
+        if (coordinator_id_arg.empty() || (branch_index_arg.empty() && instance_id_arg.empty()) ) {
 
-            mproc_id::s = m_instance_id;
-
-            m_directory = obtain_swarm_directory();
-        }
-        else {
             assert(!"if the binary was not invoked manually, this is definitely a bug.");
             exit(1);
+        }
+        else {
+            if (!branch_index_arg.empty()) {
+                assert((branch_index::s >= 0) && (branch_index::s < max_process_instance_id - 1));
+                assert(m_instance_id != 0);
+
+                if (instance_id_arg.empty()) {
+                    // If branch_index is specified, the explicit instance_id may not, thus
+                    // we need to make a process instance id based on the branch_index.
+                    // Transceiver IDs start from 2 (0 is invalid, 1 is the first process)
+                    m_instance_id = make_process_instance_id(branch_index::s + 2);
+                }
+
+                mproc_id::s = m_instance_id;
+
+                m_directory = obtain_swarm_directory();
+            }
+ 
         }
     }
 
@@ -322,17 +333,9 @@ Managed process options:
         m_readers.emplace_back(process_of(coord_id::s));
     }
 
-    // now we can proceed with the rest of the initialization
 
-    // why pid: Because this only serves as a unique name, not as an identifier for lookups.
-    // It has no other practical use.
-    // why m_self_index+2: because Transceiver IDs start from 2:
-    // - 0 is invalid
-    // - 1 is the first process
-    new (static_cast<Transceiver*>(this)) Transceiver(
-        "",
-        make_process_instance_id(m_self_index + 2)
-    );
+
+    new (static_cast<Transceiver*>(this)) Transceiver("", m_instance_id);
 
     if (coordinator_is_local) {
         coord::s = new Coordinator;
@@ -355,16 +358,16 @@ void Managed_process::branch()
 
         // 1. prepare the commandline for each invocation
         auto it = branch_vector::s.begin();
-        for (int i = 0; it != branch_vector::s.end(); it++, i++) {
+        for (int i = 1; it != branch_vector::s.end(); it++, i++) {
             it->sintra_options.push_back("--swarm_id");
             it->sintra_options.push_back(to_string(m_swarm_id));
             if (it->entry.m_binary_name.empty()) {
                 it->entry.m_binary_name = m_binary_name;
-                it->sintra_options.push_back("--self_index");
+                it->sintra_options.push_back("--branch_index");
                 it->sintra_options.push_back(to_string(i));
             }
             auto assigned_instance_id = make_process_instance_id();
-            it->sintra_options.push_back("--own_id");
+            it->sintra_options.push_back("--instance_id");
             it->sintra_options.push_back(to_string(assigned_instance_id));
             it->sintra_options.push_back("--coordinator_id");
             it->sintra_options.push_back(to_string(coord_id::s));
@@ -376,8 +379,7 @@ void Managed_process::branch()
         }
 
         // 2. spawn
-        it = branch_vector::s.begin();
-        for (int i = 0; it != branch_vector::s.end(); it++, i++) {
+        for (it = branch_vector::s.begin(); it != branch_vector::s.end(); it++) {
 
             std::vector<std::string> all_args = {it->entry.m_binary_name.c_str()};
             all_args.insert(all_args.end(), it->sintra_options.begin(), it->sintra_options.end());
@@ -393,9 +395,11 @@ void Managed_process::branch()
 
             delete [] argv;
         }
+
+        branch_index::s = 0;
     }
     else {
-        Process_descriptor& own_pd = branch_vector::s[m_self_index];
+        Process_descriptor& own_pd = branch_vector::s[branch_index::s-1];
         if (own_pd.entry.m_entry_function != nullptr) {
             m_entry_function = own_pd.entry.m_entry_function;
         }
@@ -406,7 +410,7 @@ void Managed_process::branch()
 
         //m_coordinator links to the coordinator
         // what happens here:
-        // the comm will try to start reading fro the ring of m_coordinator_id
+        // the comm will try to start reading from the ring of m_coordinator_id
         // its write channel is already available
         // the supervisor, which is its own coordinator, will do that too (loop comm)
         //m_peers->read_from(m_coordinator_id);
