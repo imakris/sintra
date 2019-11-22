@@ -77,7 +77,7 @@ namespace sintra {
     constexpr int       max_process_instance_id             = 1023;
 
     // The reason for setting such restriction is that the coordinator has to keep track of all
-    // globaly visible (public) transceivers. If a process is misbehaving and allocates public
+    // globally visible (public) transceivers. If a process is misbehaving and allocates public
     // transceivers carelessly, this could compromise the stability of the system
     constexpr int       max_public_transceivers_per_proc    = 65535;
 
