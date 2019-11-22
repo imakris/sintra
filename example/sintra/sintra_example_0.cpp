@@ -40,7 +40,7 @@ int process_1()
 int process_2()
 {
     auto string_slot = [] (const string& str) {
-        cout << "[process 2] Received string \"" << str << "\"\n";
+        console() << "[process 2] Received string \"" << str << "\"\n";
 
         static int num_messages = 0;
         if (++num_messages == 4) {
@@ -61,7 +61,7 @@ int process_2()
 int process_3()
 {
     auto int_slot = [&] (int number) {
-        cout << "[process 3] Received number " << number << "\n";
+        console() << "[process 3] Received number " << number << "\n";
 
         static int num_messages = 0;
         if (++num_messages == 2) { //it will not receive them all, just 2
@@ -79,17 +79,19 @@ int process_3()
 
 
 int main(int argc, char* argv[])
-{    
+{
     start(argc, argv,
         Process_descriptor(process_1)
     ,   Process_descriptor(process_2)
     ,   Process_descriptor(process_3)
     );
 
-    do {
-        cout << '\n' << "Press ENTER to continue...";
+    if (process_index() == 0) {
+        do {
+            cout << '\n' << "Press ENTER to continue...";
+        }
+        while (cin.get() != '\n');
     }
-    while (cin.get() != '\n');
 
     return 0;
 }

@@ -80,9 +80,11 @@ int main(int argc, char* argv[])
     ,   Process_descriptor(process_2)
     );
 
-    do {
-        cout << '\n' << "Press ENTER to continue...";
-    } while (cin.get() != '\n');
+    if (process_index() == 0) {
+        do {
+            cout << '\n' << "Press ENTER to continue...";
+        } while (cin.get() != '\n');
+    }
 
     return 0;
 }
