@@ -117,6 +117,11 @@ struct Process_descriptor
 };
 
 
+// Branch indices have the following meaning:
+// -1: No branching has taken place - this variable is not relevant
+//  0: The process that branched
+// >0: A spawned process
+DECLARE_STATIC_VARIABLE(uint32_t, branch_index, = -1)
 
 DECLARE_STATIC_VARIABLE(vector<Process_descriptor>, branch_vector)
 
@@ -282,7 +287,7 @@ struct Managed_process: Transceiver
 
     bool                                m_branched = false;
 
-    
+
     struct user_loop
     {
         thread m_thread;
@@ -296,9 +301,6 @@ struct Managed_process: Transceiver
 
     inline
     string obtain_swarm_directory();
-
-
-    uint32_t                            m_self_index = -1;
 
     function<int()> m_entry_function = [&] ()->int { return 0; };
     int                                 m_children_quota = 0;
