@@ -76,6 +76,12 @@ struct Typed_instance_id
     {
         id = transceiver.m_instance_id;
     }
+
+
+    Typed_instance_id(instance_id_type id_)
+    {
+        id = id_;
+    }
 };
 
 
@@ -146,13 +152,14 @@ struct Transceiver
     template <typename = void>
     void destroy();
 
-
 private:
 
-    // Used when there is no infrastructure to initialize a Transceiver, thus whoever calls it
-    // should initialize the transceiver at a later stage with placement new.
-    Transceiver(int) {}
+    // Used when there is no infrastructure to initialize a Transceiver, thus the caller
+    // (Managed_process) calls the other constructor explicitly, when construction is possible.
+    Transceiver(void*) {}
 
+    template <typename = void>
+    void construct(const string& name = "", uint64_t id = 0);
 
 public:
 
@@ -240,7 +247,17 @@ public:
         RT(OBJECT_T::*v)(const MESSAGE_T&), 
         Typed_instance_id<SENDER_T> sender_id);
 
-    
+
+    // less safe convenience function
+    template<
+        typename MESSAGE_T,
+        typename OBJECT_T,
+        typename RT /* = typename MESSAGE_T::return_type*/
+    >
+    handler_deactivator
+    activate(
+        RT(OBJECT_T::* v)(const MESSAGE_T&),
+        std::string sender_name);
 
 
     template <typename = void>
@@ -387,7 +404,7 @@ public:
         typename... RArgs        // The artument types used by the caller
     >
     static RT rpc(
-        RT(OBJECT_T::*resolution_dummy)(FArgs...),
+        RT(OBJECT_T::* /*resolution dummy arg*/)(FArgs...),
         instance_id_type instance_id,
         RArgs&&... args);
 
@@ -400,7 +417,7 @@ public:
         typename... RArgs
     >
     static RT rpc(
-        RT(OBJECT_T::*resolution_dummy)(FArgs...) const,
+        RT(OBJECT_T::* /*resolution dummy arg*/)(FArgs...) const,
         instance_id_type instance_id,
         RArgs&&... args);
 
@@ -418,7 +435,7 @@ public:
     {
         function<void(const Message_prefix&)>   success_handler;
         function<void()>                        failure_handler;
-        instance_id_type                        instance_id;
+        instance_id_type                        instance_id = 0;
     };
 
 
@@ -434,10 +451,10 @@ public:
     function<void()> export_rpc_impl();
 
     template <typename RPCTC, typename RT, typename OBJECT_T, typename... Args>
-    function<void()> export_rpc(RT(OBJECT_T::*resolution_dummy)(Args...) const);
+    function<void()> export_rpc(RT(OBJECT_T::* /*resolution dummy arg*/)(Args...) const);
 
     template <typename RPCTC, typename RT, typename OBJECT_T, typename... Args>
-    function<void()> export_rpc(RT(OBJECT_T::*resolution_dummy)(Args...));
+    function<void()> export_rpc(RT(OBJECT_T::* /*resolution dummy arg*/)(Args...));
 
 
 

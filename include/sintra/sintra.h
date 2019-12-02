@@ -33,8 +33,23 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
 #ifdef _MSC_VER  // if compiling with Visual Studio
+
 #pragma warning( push )
 #pragma warning( disable : 4996 )
+
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
+#ifndef BOOST_USE_WINDOWS_H
+#define BOOST_USE_WINDOWS_H
+#endif
+
+#endif // _MSC_VER
+
+
+#ifndef __cpp_inline_variables
+#error Inline variables are not supported. Sintra requires this and other C++17 features.
 #endif
 
 

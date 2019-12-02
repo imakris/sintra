@@ -149,7 +149,7 @@ template <
     > */,
     typename... Args
 >
-size_t vb_size(const T& v, Args&&... args)
+size_t vb_size(const T&, Args&&... args)
 {
     auto ret = vb_size(args...);
     return ret;
@@ -640,6 +640,11 @@ struct Message_ring_R: protected Ring_R<char>
         assert(ret->magic == message_magic);
         m_range.begin += ret->bytes_to_next_message;
         return ret;
+    }
+
+    int get_sleeping_readers() const
+    {
+        return m_control->sleeping_readers.load();
     }
 
 public:

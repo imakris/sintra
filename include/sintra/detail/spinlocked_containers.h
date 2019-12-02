@@ -72,6 +72,14 @@ struct spinlocked
     const_iterator begin() const noexcept          {locker l(m_sl); return m_c.begin();           }
     void clear() noexcept                          {locker l(m_sl); return m_c.clear();           }
 
+
+    template <class... FArgs>
+    auto emplace(FArgs&&... args)
+    {
+        locker l(this->m_sl);
+        return this->m_c.emplace(args...);
+    }
+
     template <class... FArgs>
     auto emplace_hint(const_iterator hint, FArgs&&... args)
     {
@@ -100,9 +108,6 @@ struct spinlocked
     auto insert(const FArgs&... v)                 {locker l(m_sl); return m_c.insert(v...);      }
     template <typename... FArgs>
     auto insert(FArgs&&... v)                      {locker l(m_sl); return m_c.insert(v...);      }
-
-    template <typename... FArgs>
-    auto lower_bound(const FArgs&... v)            {locker l(m_sl); return m_c.lower_bound(v...); }
 
     auto pop_front()                               {locker l(m_sl); return m_c.pop_front();       }
 
@@ -147,6 +152,13 @@ template <typename Key, typename T>
 struct spinlocked_map: detail::spinlocked<map, Key, T>
 {
     using locker = spinlock::locker;
+
+    template <typename... FArgs>
+    auto lower_bound(const FArgs&... v) {
+        locker l(this->m_sl);
+        return this->m_c.lower_bound(v...);
+    }
+
     T& operator[] (const Key& k)                   {locker l(this->m_sl); return this->m_c[k];    }
     T& operator[] (Key&& k)                        {locker l(this->m_sl); return this->m_c[k];    }
 };
