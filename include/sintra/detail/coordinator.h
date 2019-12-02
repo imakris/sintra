@@ -56,9 +56,9 @@ private:
     void wait_until_all_other_processes_are_done();
 
     // EXPORTED FOR RPC
-    type_id_type resolve_type(const string& name);
-    instance_id_type resolve_instance(const string& name);
-    bool publish_transceiver(instance_id_type instance_id, const string& name);
+    type_id_type resolve_type(const string& pretty_name);
+    instance_id_type resolve_instance(const string& assigned_name);
+    bool publish_transceiver(instance_id_type instance_id, const string& assigned_name);
     bool unpublish_transceiver(instance_id_type instance_id);
     bool barrier(type_id_type process_group_id);
     bool add_this_process_into_group(type_id_type process_group_id);
@@ -75,15 +75,18 @@ private:
     mutex                                       m_barrier_mutex;
 
     spinlocked_umap<
-        instance_id_type,
-        unordered_set< instance_id_type >
-    >                                           m_published;
+        instance_id_type,                       // process instance id
+        spinlocked_umap<
+            instance_id_type,                   // transceiver instance id (within the process)
+            string                              // assigned name
+        >
+    >                                           m_transceiver_registry;
+
     mutex                                       m_publish_mutex;
 
     mutex                                       m_all_other_processes_done_mutex;
     condition_variable                          m_all_other_processes_done_condition;
 
-    spinlocked_umap<instance_id_type, string>   m_name_of_instance_id;
 
     spinlocked_umap<
         instance_id_type, 

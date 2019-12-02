@@ -56,7 +56,9 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+#ifdef _MSC_VER
 #pragma warning(disable:4996)
+#endif
 
 #define __GETOPT_H__
 
@@ -216,7 +218,7 @@ permute_args(int panonopt_start, int panonopt_end, int opt_end,
  *
  * [eventually this will replace the BSD getopt]
  */
-static int
+static inline int
 getopt(int nargc, char * const *nargv, const char *options)
 {
 
@@ -623,7 +625,7 @@ getopt_long(int nargc, char * const *nargv, const char *options,
  * getopt_long_only --
  *	Parse argc/argv argument vector.
  */
-static int
+static inline int
 getopt_long_only(int nargc, char * const *nargv, const char *options,
     const struct option *long_options, int *idx)
 {

@@ -121,9 +121,9 @@ struct Process_descriptor
 // -1: No branching has taken place - this variable is not relevant
 //  0: The process that branched
 // >0: A spawned process
-DECLARE_STATIC_VARIABLE(uint32_t, branch_index, = -1)
+static inline uint32_t s_branch_index = -1;
 
-DECLARE_STATIC_VARIABLE(vector<Process_descriptor>, branch_vector)
+static inline vector<Process_descriptor> s_branch_vector;
 
 
 
@@ -183,7 +183,7 @@ sintra::type_id_type get_type_id();
 
 
 template <typename = void>
-sintra::instance_id_type get_instance_id(string&& name);
+sintra::instance_id_type get_instance_id(string&& assigned_name);
 
 
 
@@ -212,18 +212,18 @@ struct Managed_process: Transceiver
     bool wait_for_stop();
 
 
-    Message_ring_W*                     m_out_req_c;
-    Message_ring_W*                     m_out_rep_c;
+    Message_ring_W*                     m_out_req_c = nullptr;
+    Message_ring_W*                     m_out_rep_c = nullptr;
 
     spinlocked_umap<
         string,
         type_id_type
-    >                                   m_type_id_of_name;
+    >                                   m_type_id_of_type_name;
 
     spinlocked_umap<
         string,
         instance_id_type
-    >                                   m_instance_id_of_name;
+    >                                   m_instance_id_of_assigned_name;
 
     spinlocked_umap<
         instance_id_type,

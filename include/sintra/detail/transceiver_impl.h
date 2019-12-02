@@ -43,27 +43,11 @@ using std::is_same_v;
 using std::is_base_of_v;
 
 
+
 template <typename/* = void*/>
-Transceiver::Transceiver(const string& name/* = ""*/, uint64_t id/* = 0*/)
+Transceiver::Transceiver(const string& name/* = ""*/, uint64_t instance_id/* = 0*/)
 {
-    m_instance_id = id ? id : make_instance_id();
-
-    if (m_instance_id == invalid_instance_id) {
-        throw runtime_error("Transceiver instance allocation failed");
-    }
-
-    mproc::s->m_local_pointer_of_instance_id[m_instance_id] = this;
-
-    // A transceiver instance may as well not have a name (in which case, name lookups fail).
-    if (!name.empty()) {
-        if (!assign_name(name)) {
-            throw runtime_error("Transceiver instance allocation failed");
-        }
-    }
-
-    activate(
-        &Transceiver::instance_invalidated_handler,
-        Typed_instance_id<void>(any_local_or_remote) );
+    construct(name, instance_id);
 }
 
 
@@ -77,14 +61,40 @@ Transceiver::~Transceiver()
 
 
 template <typename/* = void*/>
+void Transceiver::construct(const string& name/* = ""*/, uint64_t instance_id/* = 0*/)
+{
+    m_instance_id = instance_id ? instance_id : make_instance_id();
+
+    if (m_instance_id == invalid_instance_id) {
+        // this is practically unreachable
+        throw runtime_error("Failed to create a Transceiver instance id.");
+    }
+
+    s_mproc->m_local_pointer_of_instance_id[m_instance_id] = this;
+
+    // A transceiver instance may as well not have a name (in which case, name lookups fail).
+    if (!name.empty()) {
+        if (!assign_name(name)) {
+            throw runtime_error("Transceiver name assignment failed.");
+        }
+    }
+
+    activate(
+        &Transceiver::instance_invalidated_handler,
+        Typed_instance_id<void>(any_local_or_remote) );
+}
+
+
+
+template <typename/* = void*/>
 bool Transceiver::assign_name(const string& name)
 {
-    if (Coordinator::rpc_publish_transceiver(coord_id::s, m_instance_id, name)) {
+    if (Coordinator::rpc_publish_transceiver(s_coord_id, m_instance_id, name)) {
         m_named = true;
 
-        if (!coord::s) {
+        if (!s_coord) {
             auto cache_entry = make_pair(name, m_instance_id);
-            auto rvp = mproc::s->m_instance_id_of_name.insert(cache_entry);
+            auto rvp = s_mproc->m_instance_id_of_assigned_name.insert(cache_entry);
             assert(rvp.second == true);
             m_cache_iterator = rvp.first;
         }
@@ -98,29 +108,29 @@ bool Transceiver::assign_name(const string& name)
 template <typename/* = void*/>
 void Transceiver::destroy()
 {
-    if (!mproc::s || !coord_id::s || mproc::s->m_readers.empty()) {
+    if (!s_mproc || !s_coord_id || s_mproc->m_readers.empty()) {
         // If the process is not running, there is nothing to facilitate the basic
         // functionality of a Transceiver object. This can happen if the process object is
         // itself being destroyed.
         return;
     }
 
-    if (this != mproc::s) {
+    if (this != s_mproc) {
         deactivate_all();
     }
 
     if (m_named) {
-        auto success = Coordinator::rpc_unpublish_transceiver(coord_id::s, m_instance_id);
+        auto success = Coordinator::rpc_unpublish_transceiver(s_coord_id, m_instance_id);
         assert(success);
 
         // if the coordinator is local, it would be deleted already in the unpublish call
-        if (!coord::s) {
-            mproc::s->m_instance_id_of_name.erase(m_cache_iterator);
+        if (!s_coord) {
+            s_mproc->m_instance_id_of_assigned_name.erase(m_cache_iterator);
         }
     }
     else
-    if (m_instance_id != coord_id::s) {
-        mproc::s->m_local_pointer_of_instance_id.erase(m_instance_id);
+    if (m_instance_id != s_coord_id) {
+        s_mproc->m_local_pointer_of_instance_id.erase(m_instance_id);
     }
 }
 
@@ -154,20 +164,20 @@ Transceiver::activate_impl(HT&& handler, instance_id_type sender_id)
     auto message_type_id = MESSAGE_T::id();
     lock_guard<mutex> sl(m_handlers_mutex);
 
-    auto& ms  = mproc::s->m_active_handlers[message_type_id];
+    auto& ms  = s_mproc->m_active_handlers[message_type_id];
     list<function<void(const Message_prefix &)>>::iterator mid_sid_it;
-    auto  msm_it = ms.lower_bound(sender_id);
-    if (msm_it == ms.end() || msm_it->first != sender_id) {
+
+    auto  msm_it = ms.find(sender_id);
+    if (msm_it == ms.end()) {
+
         // There was no record for this sender_id, thus we have to make one.
-        msm_it = ms.emplace_hint(
-            msm_it,
-            make_pair(
-                sender_id,
-                list<function<void(const Message_prefix&)>> {
-                    (function<void(const Message_prefix&)>&) handler
-                }
-            )
-        );
+        
+        msm_it = ms.emplace(
+            sender_id,
+            list<function<void(const Message_prefix&)>> {
+                (function<void(const Message_prefix&)>&) handler
+            }
+        ).first;
         mid_sid_it = msm_it->second.begin();
     }
     else {
@@ -266,7 +276,8 @@ Transceiver::activate(
         is_same_v    < SENDER_T, void > ||                   // generic sender (e.g. any_local)
         is_base_of_v < typename MT::exporter, SENDER_T >;    // the exporter is sender's base
 
-    static_assert(sender_capability, "This type of sender cannot send messages of this type.");
+    static_assert(sender_capability, "This type of sender cannot send the type of messages "
+        "handled by the specified handler.");
 
     return activate_impl<MT>(handler, sender_id.id);
 }
@@ -282,7 +293,7 @@ template<
 >
 Transceiver::handler_deactivator
 Transceiver::activate(
-    RT(OBJECT_T::*v)(const MESSAGE_T&), 
+    RT(OBJECT_T::*v)(const MESSAGE_T&),
     Typed_instance_id<SENDER_T> sender_id)
 {
     auto handler =
@@ -291,16 +302,34 @@ Transceiver::activate(
 
     constexpr bool sender_capability =
         is_same_v    < SENDER_T, void > ||                        // generic sender (e.g. any_local)
-        is_base_of_v < typename MESSAGE_T::exporter, SENDER_T >;  // exporter is sender's base
+        is_base_of_v < typename MESSAGE_T::exporter, SENDER_T >;  // the exporter is sender's base
 
-    static_assert(sender_capability, "This type of sender cannot send messages of this type.");
+    static_assert(sender_capability, "This type of sender cannot send the type of messages "
+        "handled by the specified handler.");
 
     return activate_impl<MESSAGE_T>(handler, sender_id.id);
 }
 
 
 
+// less safe convenience function
+template<
+    typename MESSAGE_T,
+    typename OBJECT_T,
+    typename RT /* = typename MESSAGE_T::return_type*/
+>
+Transceiver::handler_deactivator
+Transceiver::activate(
+    RT(OBJECT_T::* v)(const MESSAGE_T&),
+    std::string sender_name)
+{
+    auto handler =
+        function<typename MESSAGE_T::return_type(const MESSAGE_T&)>(
+            boost::bind(v, static_cast<OBJECT_T*>(this), _1));
 
+    auto sender_id = get_instance_id(std::move(sender_name));
+    return activate_impl<MESSAGE_T>(handler, sender_id);
+}
 
 
 
@@ -327,11 +356,12 @@ void Transceiver::send(Args&&... args)
     static_assert(sender_capability, "This type of sender cannot send messages of this type.");
 
     static auto once = MESSAGE_T::id();
+    (void)(once); // suppress unused variable warning
 
-    MESSAGE_T* msg = mproc::s->m_out_req_c->write<MESSAGE_T>(vb_size(args...), args...);
+    MESSAGE_T* msg = s_mproc->m_out_req_c->write<MESSAGE_T>(vb_size(args...), args...);
     msg->sender_instance_id = m_instance_id;
     msg->receiver_instance_id = LOCALITY;
-    mproc::s->m_out_req_c->done_writing();
+    s_mproc->m_out_req_c->done_writing();
 }
 
 
@@ -373,7 +403,7 @@ void Transceiver::finalize_rpc_write(
     placed_msg->receiver_instance_id = msg.sender_instance_id;
     placed_msg->function_instance_id = msg.function_instance_id;
     placed_msg->message_type_id = not_defined_type_id;
-    mproc::s->m_out_rep_c->done_writing();
+    s_mproc->m_out_rep_c->done_writing();
 }
 
 
@@ -390,8 +420,9 @@ void Transceiver::rpc_handler(Message_prefix& untyped_msg)
     typename RPCTC::o_type* obj = get_instance_to_object_map<RPCTC>()[untyped_msg.receiver_instance_id];
     using return_message_type = Message<Enclosure<typename RPCTC::r_type>, void, not_defined_type_id>;
     static auto once = return_message_type::id();
+    (void)(once); // suppress unused variable warning
     call_function_with_fusion_vector_args(*obj, RPCTC::mf(), msg);
-    return_message_type* placed_msg = mproc::s->m_out_rep_c->write<return_message_type>(0);
+    return_message_type* placed_msg = s_mproc->m_out_rep_c->write<return_message_type>(0);
     finalize_rpc_write(placed_msg, msg, obj);
 }
 
@@ -408,9 +439,10 @@ void Transceiver::rpc_handler(Message_prefix& untyped_msg)
     typename RPCTC::o_type* obj = get_instance_to_object_map<RPCTC>()[untyped_msg.receiver_instance_id];
     using return_message_type = Message<Enclosure<typename RPCTC::r_type>, void, not_defined_type_id>;
     static auto once = return_message_type::id();
+    (void)(once); // suppress unused variable warning
     typename RPCTC::r_type ret = call_function_with_fusion_vector_args(*obj, RPCTC::mf(), msg);
     return_message_type* placed_msg =
-        mproc::s->m_out_rep_c->write<return_message_type>(vb_size(ret), ret);
+        s_mproc->m_out_rep_c->write<return_message_type>(vb_size(ret), ret);
     finalize_rpc_write(placed_msg, msg, obj);
 }
 
@@ -424,7 +456,7 @@ template <
     typename... RArgs       // The artument types used by the caller
 >
 RT Transceiver::rpc(
-    RT(OBJECT_T::*resolution_dummy)(FArgs...),
+    RT(OBJECT_T::* /*resolution dummy arg*/)(FArgs...),
     instance_id_type instance_id,
     RArgs&&... args)
 {
@@ -442,7 +474,7 @@ template <
     typename... RArgs
 >
 RT Transceiver::rpc(
-    RT(OBJECT_T::*resolution_dummy)(FArgs...) const,
+    RT(OBJECT_T::* /*resolution_dummy arg*/)(FArgs...) const,
     instance_id_type instance_id,
     RArgs&&... args)
 {
@@ -496,18 +528,19 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
     rh.instance_id = instance_id;
 
 
-    auto function_instance_id = mproc::s->activate_return_handler(rh);
+    auto function_instance_id = s_mproc->activate_return_handler(rh);
 
     // block until reading thread either receives results or the call fails
     unique_lock<mutex> sl(keep_waiting_mutex);
 
     // write the message for the rpc call into the communication ring
     static auto once = MESSAGE_T::id();
-    MESSAGE_T* msg = mproc::s->m_out_req_c->write<MESSAGE_T>(vb_size(args...), args...);
-    msg->sender_instance_id = mproc::s->m_instance_id;
+    (void)(once); // suppress unused variable warning
+    MESSAGE_T* msg = s_mproc->m_out_req_c->write<MESSAGE_T>(vb_size(args...), args...);
+    msg->sender_instance_id = s_mproc->m_instance_id;
     msg->receiver_instance_id = instance_id;
     msg->function_instance_id = function_instance_id;
-    mproc::s->m_out_req_c->done_writing();
+    s_mproc->m_out_req_c->done_writing();
 
     //    _       .//'
     //   (_).  .//'                          TODO: for an asynchronous implementation, cut here
@@ -525,10 +558,10 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
     sl.unlock();
 
     // we can now disable the return message handler
-    mproc::s->deactivate_return_handler(function_instance_id);
+    s_mproc->deactivate_return_handler(function_instance_id);
 
     if (!success) {
-        // unlil an abort mechanism is implemented, this is unreachable.
+        // until an abort mechanism is implemented, this is unreachable.
         throw runtime_error("RPC failed");
     }
 
@@ -574,6 +607,7 @@ Transceiver::export_rpc_impl()
     using RPCTC_o_type = typename RPCTC::o_type;
     static auto once = get_rpc_handler_map()[test] =
         &RPCTC_o_type::template rpc_handler<RPCTC, MT>;
+    (void)(once); // suppress unused variable warning
 
     return [&] () {get_instance_to_object_map<RPCTC>().erase(m_instance_id); };
 }
@@ -582,7 +616,7 @@ Transceiver::export_rpc_impl()
 
 template <typename RPCTC, typename RT, typename OBJECT_T, typename... Args>
 function<void()>
-Transceiver::export_rpc(RT(OBJECT_T::*resolution_dummy)(Args...) const)
+Transceiver::export_rpc(RT(OBJECT_T::* /*resolution dummy arg*/)(Args...) const)
 {
     using message_type = Message<unique_message_body<RPCTC, Args...>, RT, RPCTC::id>;
     return export_rpc_impl<RPCTC, message_type>();
@@ -592,7 +626,7 @@ Transceiver::export_rpc(RT(OBJECT_T::*resolution_dummy)(Args...) const)
 
 template <typename RPCTC, typename RT, typename OBJECT_T, typename... Args>
 function<void()>
-Transceiver::export_rpc(RT(OBJECT_T::*resolution_dummy)(Args...))
+Transceiver::export_rpc(RT(OBJECT_T::* /*resolution dummy arg*/)(Args...))
 {
     using message_type = Message<unique_message_body<RPCTC, Args...>, RT, RPCTC::id>;
     return export_rpc_impl<RPCTC, message_type>();
