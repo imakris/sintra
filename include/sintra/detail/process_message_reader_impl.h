@@ -42,20 +42,25 @@ Process_message_reader::Process_message_reader(instance_id_type process_instance
     m_process_instance_id(process_instance_id)
 {
     if (is_local_instance(m_process_instance_id)) {
-        m_in_req_c = new Message_ring_R(mproc::s->m_directory, "req", m_process_instance_id);
+        m_in_req_c = new Message_ring_R(s_mproc->m_directory, "req", m_process_instance_id);
         m_request_reader_thread = new thread([&] () { local_request_reader_function(); });
-
-        // wait until the thread is running
-        while (!m_request_reader_thread->joinable()) {}
     }
     else {
-        m_in_req_c = new Message_ring_R(mproc::s->m_directory, "req", m_process_instance_id);
-        m_in_rep_c = new Message_ring_R(mproc::s->m_directory, "rep", m_process_instance_id);
+        m_in_req_c = new Message_ring_R(s_mproc->m_directory, "req", m_process_instance_id);
+        m_in_rep_c = new Message_ring_R(s_mproc->m_directory, "rep", m_process_instance_id);
         m_request_reader_thread = new thread([&] () { request_reader_function(); });
         m_reply_reader_thread   = new thread([&] () { reply_reader_function();   });
+    }
+}
 
-        // wait until the threads are running
-        while (!m_request_reader_thread->joinable() || !m_reply_reader_thread->joinable()) {}
+
+inline
+void Process_message_reader::wait_until_ready()
+{
+    while (!m_in_req_c->get_sleeping_readers()) {}
+
+    if (!is_local_instance(m_process_instance_id)) {
+        while (!m_in_rep_c->get_sleeping_readers()) {}
     }
 }
 
@@ -133,10 +138,10 @@ void Process_message_reader::request_reader_function()
     m_req_running = true;
 
     while (m_status != STOPPING) {
-        tl_current_message::s = nullptr;
+        s_tl_current_message = nullptr;
         Message_prefix* m = m_in_req_c->fetch_message();
 
-        tl_current_message::s = m;
+        s_tl_current_message = m;
 
         if (m == nullptr) {
             break;
@@ -148,7 +153,7 @@ void Process_message_reader::request_reader_function()
         // it might be a good idea to kill it. If it is in the core set of processes,
         // then it would be a bug.
         assert(m_in_req_c->m_id == process_of(m->sender_instance_id) ||
-               m_in_req_c->m_id == process_of(coord_id::s));
+               m_in_req_c->m_id == process_of(s_coord_id));
 
         if (is_local_instance(m->sender_instance_id) && m->receiver_instance_id == any_remote) {
 
@@ -162,7 +167,7 @@ void Process_message_reader::request_reader_function()
             //   it, even though it is from an external channel, which is a paradox.
             // Such messages must be ignored.
 
-            assert(!coord::s);
+            assert(!s_coord);
             continue;
         }
 
@@ -171,12 +176,12 @@ void Process_message_reader::request_reader_function()
         if (is_local_instance(m->receiver_instance_id)) {
 
             if (m_status == FULL_FUNCTIONALITY) {
-                auto it = mproc::s->m_local_pointer_of_instance_id.find(m->receiver_instance_id);
+                auto it = s_mproc->m_local_pointer_of_instance_id.find(m->receiver_instance_id);
 
                 // If addressed to a specified local receiver, this may only be an RPC call,
                 // thus the named receiver must exist.
 
-                if (it == mproc::s->m_local_pointer_of_instance_id.end()) {
+                if (it == s_mproc->m_local_pointer_of_instance_id.end()) {
                     // that's an exception, and an exception message should be sent back
                     assert(false); // FIXME: IMPLEMENT
                 }
@@ -193,8 +198,8 @@ void Process_message_reader::request_reader_function()
                 }
             }
             else // COORDINATOR_ONLY
-            if (m->receiver_instance_id == coord_id::s && coord::s ||
-                m->sender_instance_id == coord_id::s)
+            if ((m->receiver_instance_id == s_coord_id && s_coord) ||
+                (m->sender_instance_id == s_coord_id) )
             {
                 // If addressed to a specified local receiver (in this case the
                 // coordinator), this may only be an RPC call.
@@ -219,8 +224,8 @@ void Process_message_reader::request_reader_function()
                     
                 // [ NEW IMPLEMENTATION - NOT COVERED ]
                 // find handlers that operate with this type of message in this process
-                auto it_mt = mproc::s->m_active_handlers.find(m->message_type_id);
-                if (it_mt != mproc::s->m_active_handlers.end()) {
+                auto it_mt = s_mproc->m_active_handlers.find(m->message_type_id);
+                if (it_mt != s_mproc->m_active_handlers.end()) {
 
                     
                     instance_id_type sids[] = {
@@ -242,8 +247,8 @@ void Process_message_reader::request_reader_function()
             }
 
             // if the coordinator is in this process, relay
-            if (coord::s) {
-                mproc::s->m_out_req_c->relay(*m);
+            if (s_coord) {
+                s_mproc->m_out_req_c->relay(*m);
             }
         }
         else {
@@ -253,9 +258,9 @@ void Process_message_reader::request_reader_function()
 
             // a specific non-local receiver means an rpc to another process.
             // if the coordinator is in this process, relay
-            if (coord::s) {
+            if (s_coord) {
                 // the message type is specified, thus it is a request
-                mproc::s->m_out_req_c->relay(*m);
+                s_mproc->m_out_req_c->relay(*m);
             }
         }
     }
@@ -282,11 +287,11 @@ void Process_message_reader::local_request_reader_function()
     m_req_running = true;
 
     while (m_status != STOPPING) {
-        tl_current_message::s = nullptr;
+        s_tl_current_message = nullptr;
         Message_prefix* m = m_in_req_c->fetch_message();
 
 
-        tl_current_message::s = m;
+        s_tl_current_message = m;
 
         if (m == nullptr) {
             break;
@@ -298,7 +303,7 @@ void Process_message_reader::local_request_reader_function()
         // it might be a good idea to kill it. If it is in the core set of processes,
         // then it would be a bug.
         assert(m_in_req_c->m_id == process_of(m->sender_instance_id) ||
-               m_in_req_c->m_id == process_of(coord_id::s));
+               m_in_req_c->m_id == process_of(s_coord_id));
 
         if (is_local_instance(m->sender_instance_id) && m->receiver_instance_id == any_remote) {
 
@@ -307,7 +312,7 @@ void Process_message_reader::local_request_reader_function()
             // processes, thus the messages are visible to their sender.
             // But if they are addressed to any_remote, the sender should ignore them.
                     
-            assert(!coord::s);
+            assert(!s_coord);
             continue;
         }
 
@@ -315,12 +320,12 @@ void Process_message_reader::local_request_reader_function()
 
         if (is_local_instance(m->receiver_instance_id)) {
 
-            auto it = mproc::s->m_local_pointer_of_instance_id.find(m->receiver_instance_id);
+            auto it = s_mproc->m_local_pointer_of_instance_id.find(m->receiver_instance_id);
 
             // If addressed to a specified local receiver, this may only be an RPC call,
             //thus the named receiver must exist.
 
-            if (it == mproc::s->m_local_pointer_of_instance_id.end()) {
+            if (it == s_mproc->m_local_pointer_of_instance_id.end()) {
                 // that's an exception, and an exception message should be sent back
                 assert(false); // FIXME: IMPLEMENT
             }
@@ -346,8 +351,8 @@ void Process_message_reader::local_request_reader_function()
                 
                 // NEW STUFF, UNTESTED
                 // receivers that handle this type of message in this process
-                auto it_mt = mproc::s->m_active_handlers.find(m->message_type_id);
-                if (it_mt != mproc::s->m_active_handlers.end()) {
+                auto it_mt = s_mproc->m_active_handlers.find(m->message_type_id);
+                if (it_mt != s_mproc->m_active_handlers.end()) {
 
                     instance_id_type sids[] = {
                         m->sender_instance_id,
@@ -384,9 +389,9 @@ void Process_message_reader::reply_reader_function()
     m_rep_running = true;
 
     while (m_status != STOPPING) {
-        tl_current_message::s = nullptr;
+        s_tl_current_message = nullptr;
         Message_prefix* m = m_in_rep_c->fetch_message();
-        tl_current_message::s = m;
+        s_tl_current_message = m;
 
         if (m == nullptr) {
             break;
@@ -395,21 +400,21 @@ void Process_message_reader::reply_reader_function()
         // Only the process with the coordinator's instance is allowed to send messages on
         // someone else's behalf (for relay purposes).
         assert(m_in_rep_c->m_id == process_of(m->sender_instance_id) ||
-               m_in_rep_c->m_id == process_of(coord_id::s));
+               m_in_rep_c->m_id == process_of(s_coord_id));
 
-        assert(m->receiver_instance_id < any_local);
+        assert(m->receiver_instance_id != any_local);
         assert(m->message_type_id == not_defined_type_id);
 
         if (is_local_instance(m->receiver_instance_id)) {
 
-            if (m_status == FULL_FUNCTIONALITY ||
-                m->receiver_instance_id == coord_id::s && coord::s ||
-                m->sender_instance_id   == coord_id::s)
+            if ((m_status == FULL_FUNCTIONALITY) ||
+                (m->receiver_instance_id == s_coord_id && s_coord) ||
+                (m->sender_instance_id   == s_coord_id) )
             {
 
-                auto it = mproc::s->m_local_pointer_of_instance_id.find(m->receiver_instance_id);
+                auto it = s_mproc->m_local_pointer_of_instance_id.find(m->receiver_instance_id);
 
-                if (it != mproc::s->m_local_pointer_of_instance_id.end()) {
+                if (it != s_mproc->m_local_pointer_of_instance_id.end()) {
                     auto &return_handlers = it->second->m_active_return_handlers;
                     auto it2 = return_handlers.find(m->function_instance_id);
                     if (it2 != return_handlers.end()) {
@@ -432,9 +437,9 @@ void Process_message_reader::reply_reader_function()
 
             // a specific non-local receiver means an rpc to another process.
             // if the coordinator is in this process, relay
-            if (coord::s) {
+            if (s_coord) {
                 // the message type is not specified, thus it is a reply
-                mproc::s->m_out_rep_c->relay(*m);
+                s_mproc->m_out_rep_c->relay(*m);
             }
         }
     }

@@ -46,11 +46,11 @@ namespace sintra {
 
 
 inline
-static void s_signal_handler(int sig)
+static void s_signal_handler(int /*sig*/)
 {
-    mproc::s->send<Transceiver::instance_invalidated, any_remote>(mproc_id::s);
+    s_mproc->send<Transceiver::instance_invalidated, any_remote>(s_mproc_id);
 
-    if (coord::s) {
+    if (s_coord) {
         // should we do something special here?
         // kill every other process?
     }
@@ -74,27 +74,26 @@ void install_signal_handler()
 template <typename T>
 sintra::type_id_type get_type_id()
 {
-    const std::string name = boost::typeindex::type_id<T>().pretty_name();
-    const char* test = name.c_str();
-    auto it = mproc::s->m_type_id_of_name.find(name);
-    if (it != mproc::s->m_type_id_of_name.end()) {
+    const std::string pretty_name = boost::typeindex::type_id<T>().pretty_name();
+    auto it = s_mproc->m_type_id_of_type_name.find(pretty_name);
+    if (it != s_mproc->m_type_id_of_type_name.end()) {
         return it->second;
     }
 
     // Caution the Coordinator call will refer to the map that is being assigned,
     // if the Coordinator is local. Do not be tempted to simplify the temporary,
     // because depending on the order of evaluation, it may or it may not work.
-    auto tid = Coordinator::rpc_resolve_type(coord_id::s, name);
-    return mproc::s->m_type_id_of_name[name] = tid;
+    auto tid = Coordinator::rpc_resolve_type(s_coord_id, pretty_name);
+    return s_mproc->m_type_id_of_type_name[pretty_name] = tid;
 }
 
 
 
 template <typename>
-sintra::instance_id_type get_instance_id(std::string&& name)
+sintra::instance_id_type get_instance_id(std::string&& assigned_name)
 {
-    auto it = mproc::s->m_instance_id_of_name.find(name);
-    if (it != mproc::s->m_instance_id_of_name.end()) {
+    auto it = s_mproc->m_instance_id_of_assigned_name.find(assigned_name);
+    if (it != s_mproc->m_instance_id_of_assigned_name.end()) {
         return it->second;
     }
 
@@ -102,8 +101,8 @@ sintra::instance_id_type get_instance_id(std::string&& name)
     // Caution the Coordinator call will refer to the map that is being assigned,
     // if the Coordinator is local. Do not be tempted to simplify the temporary,
     // because depending on the order of evaluation, it may or it may not work.
-    auto iid = Coordinator::rpc_resolve_instance(coord_id::s, name);
-    return mproc::s->m_instance_id_of_name[name] = iid;
+    auto iid = Coordinator::rpc_resolve_instance(s_coord_id, assigned_name);
+    return s_mproc->m_instance_id_of_assigned_name[assigned_name] = iid;
 }
 
 
@@ -118,7 +117,7 @@ void Process_group<T, ID>::barrier()
     // this mutex protects from matching multiple threads on the same process group's barrier
     std::lock_guard<mutex> barrier_lock(m_barrier_mutex);
 
-    if (!Coordinator::rpc_barrier(coord_id::s, id() )) {
+    if (!Coordinator::rpc_barrier(s_coord_id, id() )) {
         // This means that another thread must have called the barrier directly as rpc.
         // If this is not the case, then it is a bug.
         throw std::runtime_error(
@@ -131,7 +130,7 @@ void Process_group<T, ID>::barrier()
 template <typename T, type_id_type ID /* = 0*/>
 void Process_group<T, ID>::enroll()
 {
-    if (!Coordinator::rpc_add_this_process_into_group(coord_id::s, id() ) ) {
+    if (!Coordinator::rpc_add_this_process_into_group(s_coord_id, id() ) ) {
         throw std::runtime_error("Attempted to enroll into a process group after branching.");
     }
     process_group_membership<T>() = true;
@@ -141,9 +140,9 @@ void Process_group<T, ID>::enroll()
 
 inline
 Managed_process::Managed_process():
-    Transceiver(0),
-    m_must_stop(false),
+    Transceiver((void*)0),
     m_running(false),
+    m_must_stop(false),
     m_message_reading_thread_running(false),
     m_work_thread_running(false),
     m_deferred_insertion_thread_running(false),
@@ -155,15 +154,15 @@ Managed_process::Managed_process():
     m_messages_rejected_since_reference_time(0),
     m_total_sequences_missed(0)
 {
-    assert(mproc::s == nullptr);
-    mproc::s = this;
+    assert(s_mproc == nullptr);
+    s_mproc = this;
 
     m_pid = ipc::ipcdetail::get_current_process_id();
 
     install_signal_handler();
 
     // NOTE: Do not be tempted to use get_current_process_creation_time from boost::interprocess,
-    // it is only implementeded for Windows.
+    // it is only implemented for Windows.
     m_time_instantiated = std::chrono::system_clock::now();
 }
 
@@ -172,8 +171,8 @@ Managed_process::Managed_process():
 inline
 Managed_process::~Managed_process()
 {
-    if (coord::s) {
-        coord::s->wait_until_all_other_processes_are_done();
+    if (s_coord) {
+        s_coord->wait_until_all_other_processes_are_done();
     }
 
     assert(!m_running);
@@ -196,18 +195,18 @@ Managed_process::~Managed_process()
         m_out_rep_c = nullptr;
     }
 
-    if (coord::s) {
+    if (s_coord) {
 
         // now it's safe to delete the Coordinator.
-        delete coord::s;
-        coord::s = 0;
+        delete s_coord;
+        s_coord = 0;
 
         // removes the swarm directory
         remove_directory(m_directory);
     }
 
-    mproc::s    = nullptr;
-    mproc_id::s = 0;
+    s_mproc    = nullptr;
+    s_mproc_id = 0;
 }
 
 
@@ -247,8 +246,8 @@ void Managed_process::init(int argc, char* argv[])
                     break;
                 case 'a':
                     branch_index_arg    = optarg;
-                    branch_index::s     = boost::lexical_cast<decltype(branch_index::s)>(optarg);
-                    if (branch_index::s < 1) {
+                    s_branch_index     = boost::lexical_cast<decltype(s_branch_index)>(optarg);
+                    if (s_branch_index < 1) {
                         throw -1;
                     }
                     break;
@@ -262,7 +261,7 @@ void Managed_process::init(int argc, char* argv[])
                     break;
                 case 'd':
                     coordinator_id_arg  = optarg;
-                    coord_id::s         = boost::lexical_cast<decltype(coord_id::s    )>(optarg);
+                    s_coord_id         = boost::lexical_cast<decltype(s_coord_id    )>(optarg);
                     break;
                 case '?':
                     /* getopt_long already printed an error message. */
@@ -289,7 +288,7 @@ Managed process options:
 
     bool coordinator_is_local = false;
     if (swarm_id_arg.empty()) {
-        mproc_id::s = m_instance_id = make_process_instance_id(1);
+        s_mproc_id = m_instance_id = make_process_instance_id();
 
         m_swarm_id = 
             std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -308,17 +307,17 @@ Managed process options:
         }
         else {
             if (!branch_index_arg.empty()) {
-                assert((branch_index::s >= 0) && (branch_index::s < max_process_instance_id - 1));
+                assert(s_branch_index < max_process_index - 1);
                 assert(m_instance_id != 0);
 
                 if (instance_id_arg.empty()) {
                     // If branch_index is specified, the explicit instance_id may not, thus
                     // we need to make a process instance id based on the branch_index.
                     // Transceiver IDs start from 2 (0 is invalid, 1 is the first process)
-                    m_instance_id = make_process_instance_id(branch_index::s + 2);
+                    m_instance_id = make_process_instance_id(s_branch_index + 2);
                 }
 
-                mproc_id::s = m_instance_id;
+                s_mproc_id = m_instance_id;
 
                 m_directory = obtain_swarm_directory();
             }
@@ -330,17 +329,19 @@ Managed process options:
     m_out_rep_c = new Message_ring_W(m_directory, "rep", m_instance_id);
 
     if (!coordinator_is_local) {
-        m_readers.emplace_back(process_of(coord_id::s));
+        m_readers.emplace_back(process_of(s_coord_id));
+        m_readers.back().wait_until_ready();
     }
 
+    // Up to this point, there was no infrastructure for a proper construction
+    // of Transceiver base.
 
-
-    new (static_cast<Transceiver*>(this)) Transceiver("", m_instance_id);
+    this->Transceiver::construct("", m_instance_id);
 
     if (coordinator_is_local) {
-        coord::s = new Coordinator;
-        coord_id::s = coord::s->m_instance_id;
-        coord::s->add_process_into_group(m_instance_id, All_processes::id());
+        s_coord = new Coordinator;
+        s_coord_id = s_coord->m_instance_id;
+        s_coord->add_process_into_group(m_instance_id, All_processes::id());
     }
 
     process_group_membership<All_processes>() = true;
@@ -354,11 +355,13 @@ void Managed_process::branch()
     using namespace sintra;
     using std::to_string;
 
-    if (coord::s) {
+    if (s_coord) {
 
-        // 1. prepare the commandline for each invocation
-        auto it = branch_vector::s.begin();
-        for (int i = 1; it != branch_vector::s.end(); it++, i++) {
+        size_t num_initial_readers = s_mproc->m_readers.size();
+
+        // 1. prepare the command line for each invocation
+        auto it = s_branch_vector.begin();
+        for (int i = 1; it != s_branch_vector.end(); it++, i++) {
             it->sintra_options.push_back("--swarm_id");
             it->sintra_options.push_back(to_string(m_swarm_id));
             if (it->entry.m_binary_name.empty()) {
@@ -370,16 +373,20 @@ void Managed_process::branch()
             it->sintra_options.push_back("--instance_id");
             it->sintra_options.push_back(to_string(assigned_instance_id));
             it->sintra_options.push_back("--coordinator_id");
-            it->sintra_options.push_back(to_string(coord_id::s));
+            it->sintra_options.push_back(to_string(s_coord_id));
 
-            coord::s->add_process_into_group(assigned_instance_id, All_processes::id());
-            coord::s->add_process_into_group(assigned_instance_id, Externally_coordinated::id());
+            s_coord->add_process_into_group(assigned_instance_id, All_processes::id());
+            s_coord->add_process_into_group(assigned_instance_id, Externally_coordinated::id());
 
-            mproc::s->m_readers.emplace_back(assigned_instance_id);
+            // create the readers. The next line will start the reader threads,
+            // which might take some time. At this stage, we do not have to wait
+            // until they are ready for messages.
+            s_mproc->m_readers.emplace_back(assigned_instance_id);
         }
 
         // 2. spawn
-        for (it = branch_vector::s.begin(); it != branch_vector::s.end(); it++) {
+        it = s_branch_vector.begin();
+        for (int i = 0; it != s_branch_vector.end(); it++, i++) {
 
             std::vector<std::string> all_args = {it->entry.m_binary_name.c_str()};
             all_args.insert(all_args.end(), it->sintra_options.begin(), it->sintra_options.end());
@@ -391,15 +398,18 @@ void Managed_process::branch()
             }
             argv[all_args.size()] = 0;
 
+            // Before spawning the new process, we have to assure that the
+            // corresponding reading threads are up and running.
+            s_mproc->m_readers[num_initial_readers+i].wait_until_ready();
             spawn_detached(it->entry.m_binary_name.c_str(), argv);
 
             delete [] argv;
         }
 
-        branch_index::s = 0;
+        s_branch_index = 0;
     }
     else {
-        Process_descriptor& own_pd = branch_vector::s[branch_index::s-1];
+        Process_descriptor& own_pd = s_branch_vector[s_branch_index-1];
         if (own_pd.entry.m_entry_function != nullptr) {
             m_entry_function = own_pd.entry.m_entry_function;
         }
@@ -451,7 +461,8 @@ void Managed_process::start(int(*entry_function)())
         m_entry_function();
     }
     else {
-        mproc::s->m_readers.emplace_back(mproc_id::s);
+        s_mproc->m_readers.emplace_back(s_mproc_id);
+        m_readers.back().wait_until_ready();
         entry_function();
     }
 

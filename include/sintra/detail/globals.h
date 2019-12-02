@@ -29,33 +29,22 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <cstdint>
 
-// The purpose of this macro is to declare and define static data in a header-only library
-
-#define DECLARE_STATIC_VARIABLE(type, name, ...)                \
-    template <typename T = void>                                \
-    struct name##_struct                                        \
-    {                                                           \
-        static type s;                                          \
-    };                                                          \
-    template <typename T> type name##_struct<T>::s __VA_ARGS__; \
-    using name = name##_struct<void>;
-
 
 namespace sintra {
 
-
-using type_id_type        = uint64_t;
-using instance_id_type    = uint64_t;
+using type_id_type = uint64_t;
+using instance_id_type = uint64_t;
 
 
 struct Managed_process;
 struct Coordinator;
 
 
-DECLARE_STATIC_VARIABLE(Managed_process*,    mproc,         = nullptr   )
-DECLARE_STATIC_VARIABLE(Coordinator*,        coord,         = nullptr   )
-DECLARE_STATIC_VARIABLE(instance_id_type,    mproc_id,      = 0         )
-DECLARE_STATIC_VARIABLE(instance_id_type,    coord_id,      = 0         )
+static inline Managed_process* s_mproc = nullptr;
+static inline Coordinator* s_coord = nullptr;
+static inline instance_id_type s_mproc_id = 0;
+static inline instance_id_type s_coord_id = 0;
+
 
 }
 

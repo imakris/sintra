@@ -57,7 +57,7 @@ using std::condition_variable;
 
 
 
-DECLARE_STATIC_VARIABLE(thread_local Message_prefix*, tl_current_message, = nullptr);
+static inline thread_local Message_prefix* s_tl_current_message = nullptr;
 
 
 
@@ -95,6 +95,12 @@ struct Process_message_reader
 
     inline
     void reply_reader_function();
+
+
+    // this is only meant to be called when the reader is started, to assure that
+    // no messages are sent and lost before the thread is ready to process them
+    inline
+    void wait_until_ready();
 
 
 private:
