@@ -54,33 +54,33 @@ Coordinator::Coordinator():
 inline
 Coordinator::~Coordinator()
 {
-    coord::s     = nullptr;
-    coord_id::s = 0;
+    s_coord     = nullptr;
+    s_coord_id  = 0;
 }
 
 
 
 // EXPORTED FOR RPC
 inline
-type_id_type Coordinator::resolve_type(const string& name)
+type_id_type Coordinator::resolve_type(const string& pretty_name)
 {
-    auto it = mproc::s->m_type_id_of_name.find(name);
-    if (it != mproc::s->m_type_id_of_name.end()) {
+    auto it = s_mproc->m_type_id_of_type_name.find(pretty_name);
+    if (it != s_mproc->m_type_id_of_type_name.end()) {
         return it->second;
     }
 
     // a type is always assumed to exist
-    return mproc::s->m_type_id_of_name[name] = make_type_id();
+    return s_mproc->m_type_id_of_type_name[pretty_name] = make_type_id();
 }
 
 
 
 // EXPORTED FOR RPC
 inline
-instance_id_type Coordinator::resolve_instance(const string& name)
+instance_id_type Coordinator::resolve_instance(const string& assigned_name)
 {
-    auto it = mproc::s->m_instance_id_of_name.find(name);
-    if (it != mproc::s->m_instance_id_of_name.end()) {
+    auto it = s_mproc->m_instance_id_of_assigned_name.find(assigned_name);
+    if (it != s_mproc->m_instance_id_of_assigned_name.end()) {
         return it->second;
     }
 
@@ -92,100 +92,134 @@ instance_id_type Coordinator::resolve_instance(const string& name)
 
 // EXPORTED FOR RPC
 inline
-bool Coordinator::publish_transceiver(instance_id_type instance_id, const string& name)
+bool Coordinator::publish_transceiver(instance_id_type iid, const string& assigned_name)
 {
     lock_guard<mutex> lock(m_publish_mutex);
 
-    // if the name is already assigned...
-    if (!name.empty() && resolve_instance(name) != invalid_instance_id) {
+    // empty strings are not valid names
+    if (assigned_name.empty()) {
         return false;
     }
 
-    auto process_index = instance_id >> detail::pid_shift;
-    if (m_published[process_index].size() < max_public_transceivers_per_proc &&
-        !m_published[process_index].count(instance_id))
-    {
-        if (!name.empty()) {
-            mproc::s->m_instance_id_of_name[name] = instance_id;
-            m_name_of_instance_id[instance_id] = name;
+    auto process_iid = process_of(iid);
+    auto pr_it = m_transceiver_registry.find(process_iid);
+
+    if (pr_it != m_transceiver_registry.end()) { // the transceiver's process is known
+        
+        auto& pr = pr_it->second; // process registry
+
+        // observe the limit of transceivers per process
+        if (pr.size() >= max_public_transceivers_per_proc) {
+            return false;
         }
-        m_published[process_index].insert(instance_id);
+
+        // the transceiver must not have been already published
+        if (pr.find(iid) != pr.end()) {
+            return false;
+        }
+
+        // the assigned_name should not be taken
+        if (resolve_instance(assigned_name) != invalid_instance_id) {
+            return false;
+        }
+
+        s_mproc->m_instance_id_of_assigned_name[assigned_name] = iid;
+        pr[iid] = assigned_name;
+
         return true;
     }
+    else
+    if (iid == process_iid) { // the transceiver is a Managed_process
 
-    return false;
+        // the assigned_name should not be taken
+        if (resolve_instance(assigned_name) != invalid_instance_id) {
+            return false;
+        }
+
+        s_mproc->m_instance_id_of_assigned_name[assigned_name] = iid;
+        m_transceiver_registry[iid][iid] = assigned_name;
+
+        return true;
+    }
+    else {
+        return false;
+    }
+
+
 }
+
 
 
 
 // EXPORTED FOR RPC
 inline
-bool Coordinator::unpublish_transceiver(instance_id_type instance_id)
+bool Coordinator::unpublish_transceiver(instance_id_type iid)
 {
     lock_guard<mutex> lock(m_publish_mutex);
 
-    auto it = m_name_of_instance_id.find(instance_id);
-    if (it != m_name_of_instance_id.end()) {
-        mproc::s->m_instance_id_of_name.erase(it->second);
-        m_name_of_instance_id.erase(it);
+
+    // the process of the transceiver must have been registered
+    auto process_iid = process_of(iid);
+    auto pr_it = m_transceiver_registry.find(process_iid);
+    if (pr_it == m_transceiver_registry.end()) {
+        return false;
     }
 
-    if (is_process(instance_id)) {
-        Message_prefix* m = tl_current_message::s;
-        instance_id_type process_id = m ? m->sender_instance_id : mproc::s->m_instance_id;
+    auto& pr = pr_it->second; // process registry
+
+    // the transceiver must have been published
+    auto it = pr.find(iid);
+    if (it == pr.end()) {
+        return false;
+    }
+
+    // if the transceiver is named, delete the reverse name lookup entry
+    if (!it->second.empty()) {
+        s_mproc->m_instance_id_of_assigned_name.erase(it->second);
+    }
+
+    // if it is a Managed_process is being unpublished, more cleanup is required
+    if (iid == process_iid) {
+        //Message_prefix* m = s_tl_current_message;
+        //instance_id_type process_id = m ? m->sender_instance_id : s_mproc->m_instance_id;
 
         lock_guard<mutex> lock(m_all_other_processes_done_mutex);
 
-        auto removed_process = process_of(instance_id);
-
-        // forget about all transceivers that live in the removed process
-
-        for (auto it = mproc::s->m_instance_id_of_name.begin();
-            it != mproc::s->m_instance_id_of_name.end(); )
+        // remove all name lookup entries resolving to the unpublished process
+        for (auto it = s_mproc->m_instance_id_of_assigned_name.begin();
+            it != s_mproc->m_instance_id_of_assigned_name.end(); )
         {
-            if (process_of(it->second) == removed_process) {
-                mproc::s->m_instance_id_of_name.erase(it++);
+            if (process_of(it->second) == process_iid) {
+                s_mproc->m_instance_id_of_assigned_name.erase(it++);
             }
             else {
                 ++it;
             }
         }
 
-        for (auto it = m_name_of_instance_id.begin();
-            it != m_name_of_instance_id.end(); )
-        {
-            if (process_of(it->first) == removed_process) {
-                m_name_of_instance_id.erase(it++);
-            }
-            else {
-                ++it;
-            }
-        }
+        // remove the unpublished process's registry entry
+        m_transceiver_registry.erase(pr_it);
 
         // remove the process from all groups it was member of
-        for (auto group : m_groups_of_process[process_id]) {
-            m_processes_of_group[group].erase(process_id);
+        for (auto group : m_groups_of_process[process_iid]) {
+            m_processes_of_group[group].erase(process_iid);
         }
-        m_groups_of_process.erase(process_id);
+        m_groups_of_process.erase(process_iid);
         if (m_processes_of_group[All_processes::id()].size() == 1) {
             m_all_other_processes_done_condition.notify_all();
         }
     }
 
-    send<instance_invalidated, any_local_or_remote>(instance_id);
+    send<instance_invalidated, any_local_or_remote>(iid);
 
     return true;
 }
-
 
 
 // EXPORTED FOR RPC
 inline
 bool Coordinator::barrier(type_id_type process_group_id)
 {
-    Message_prefix* m = tl_current_message::s;
-    instance_id_type process_id = m ? m->sender_instance_id : mproc::s->m_instance_id;
-
     m_barrier_mutex.lock();
 
     auto &b = m_barriers[process_group_id];
@@ -214,11 +248,11 @@ bool Coordinator::barrier(type_id_type process_group_id)
 inline
 bool Coordinator::add_this_process_into_group(type_id_type process_group_id)
 {
-    if (mproc::s->m_branched)
+    if (s_mproc->m_branched)
         return false;
 
-    Message_prefix* m = tl_current_message::s;
-    instance_id_type process_id = m ? m->sender_instance_id : mproc::s->m_instance_id;
+    Message_prefix* m = s_tl_current_message;
+    instance_id_type process_id = m ? m->sender_instance_id : s_mproc->m_instance_id;
     add_process_into_group(process_id, process_group_id);
     return true;
 }

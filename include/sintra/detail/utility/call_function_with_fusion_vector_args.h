@@ -145,7 +145,7 @@ template <
 auto call_function_with_fusion_vector_args_mfb(
     TObj& obj,
     const TFunction& f,
-    const TVector& t,
+    const TVector& /* t */,
     const Args&... args) -> decltype((obj.*f)(args...))
 {
     return (obj.*f)(args...);

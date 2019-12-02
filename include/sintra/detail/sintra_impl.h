@@ -42,7 +42,7 @@ namespace detail {
     template <typename ...Args>
     void branch(const Process_descriptor& first, Args&&... rest)
     {
-        branch_vector::s.push_back(first);
+        s_branch_vector.push_back(first);
         detail::branch(rest...);
     }
 }
@@ -53,13 +53,13 @@ namespace detail {
 inline
 void start(int argc, char* argv[], int(*entry)())
 {
-    mproc::s = new Managed_process;
-    mproc::s->init(argc, argv);
+    s_mproc = new Managed_process;
+    s_mproc->init(argc, argv);
 
-    branch_vector::s.clear();
-    mproc::s->start(entry);
+    s_branch_vector.clear();
+    s_mproc->start(entry);
 
-    delete mproc::s;
+    delete s_mproc;
 }
 
 
@@ -77,15 +77,15 @@ void start(int argc, char* argv[], const Process_descriptor& first, Args&&... re
     setsid();
 #endif
 
-    mproc::s = new Managed_process;
-    mproc::s->init(argc, argv);
+    s_mproc = new Managed_process;
+    s_mproc->init(argc, argv);
 
-    branch_vector::s.clear();
+    s_branch_vector.clear();
     detail::branch(first, rest...);
-    mproc::s->branch();
-    mproc::s->start();
+    s_mproc->branch();
+    s_mproc->start();
 
-    delete mproc::s;
+    delete s_mproc;
 }
 
 
@@ -93,7 +93,7 @@ void start(int argc, char* argv[], const Process_descriptor& first, Args&&... re
 inline
 void stop()
 {
-    mproc::s->stop();
+    s_mproc->stop();
 }
 
 
@@ -101,14 +101,14 @@ void stop()
 inline
 void wait_for_stop()
 {
-    mproc::s->wait_for_stop();
+    s_mproc->wait_for_stop();
 }
 
 
 inline
 int process_index()
 {
-    return branch_index::s;
+    return s_branch_index;
 }
 
 
@@ -123,7 +123,7 @@ void barrier()
 template <typename FT, typename SENDER_T>
 auto activate_slot(const FT& slot_function, Typed_instance_id<SENDER_T> sender_id)
 {
-    return mproc::s->activate(slot_function, sender_id);
+    return s_mproc->activate(slot_function, sender_id);
 }
 
 
@@ -137,7 +137,7 @@ struct Maildrop
     Maildrop& operator << (const char(&value)[N])
     {
         using MT = Message<Enclosure<string>>;
-        mproc::s->send<MT, LOCALITY>(string(value));
+        s_mproc->send<MT, LOCALITY>(string(value));
         return *this;
     }
 
@@ -145,7 +145,7 @@ struct Maildrop
     Maildrop& operator << (const char* value)
     {
         using MT = Message<Enclosure<string>>;
-        mproc::s->send<MT, LOCALITY>(string(value));
+        s_mproc->send<MT, LOCALITY>(string(value));
         return *this;
     }
 
@@ -154,7 +154,7 @@ struct Maildrop
     Maildrop& operator << (const T(&v)[N])
     {
         using MT = Message<Enclosure<vector<T>>>;
-        mproc::s->send<MT, LOCALITY>(vector<T>(v, v + sizeof v / sizeof *v));
+        s_mproc->send<MT, LOCALITY>(vector<T>(v, v + sizeof v / sizeof *v));
         return *this;
     }
 
@@ -162,7 +162,7 @@ struct Maildrop
     Maildrop& operator << (const T& value)
     {
         using MT = Message<Enclosure<T>>;
-        mproc::s->send<MT, LOCALITY>(value);
+        s_mproc->send<MT, LOCALITY>(value);
         return *this;
     }
 
@@ -184,7 +184,7 @@ struct Console
 
     ~Console()
     {
-        Coordinator::rpc_print(coord_id::s, m_oss.str());
+        Coordinator::rpc_print(s_coord_id, m_oss.str());
     }
 
     template <typename T>

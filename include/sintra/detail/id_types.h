@@ -41,12 +41,13 @@ namespace sintra {
 using std::atomic;
 
 
-constexpr type_id_type        invalid_type_id       =  0;
-constexpr type_id_type        not_defined_type_id   = ~0;
-constexpr instance_id_type    any_local_or_remote   = ~0;
-constexpr instance_id_type    any_remote            = ~0 - 1;
-constexpr instance_id_type    any_local             = ~0 - 2;
-constexpr instance_id_type    invalid_instance_id   =  0;
+
+// type id
+//========
+
+
+constexpr type_id_type        invalid_type_id = 0;
+constexpr type_id_type        not_defined_type_id = ~0ull;
 
 
 namespace detail {
@@ -71,28 +72,6 @@ namespace detail {
 
         num_reserved_type_ids
     };
-
-
-    constexpr
-    int bits_required_to_represent(uint64_t v, int counter = 0)
-    {
-        return (v == (v >> (counter + 1))) ?
-            counter :
-            bits_required_to_represent(v >> 1, counter + 1);
-    }
-
-    constexpr
-    uint64_t flag_n_most_significant_bits(uint64_t v)
-    {
-        return (v == (v | (v << 1))) ? v : flag_n_most_significant_bits(v | (v << 1));
-    }
-
-    constexpr uint64_t pid_shift =
-        8 * sizeof(instance_id_type) - bits_required_to_represent(max_process_instance_id);
-
-    constexpr uint64_t pid_mask = flag_n_most_significant_bits(uint64_t(1)<<pid_shift);
-
-    constexpr uint64_t reserved_instance_ids = max_process_instance_id;
 }
 
 inline
@@ -110,54 +89,192 @@ type_id_type make_type_id(uint64_t v)
     return v;
 }
 
+
+
+
+/*
+
+
+instance id
+===========
+
+An instance id is a two part variable. The first part (p) is in the higher bits and
+identifies the process, while the second part (i) the transceiver within process p.
+The number of bits for each part is determined by num_process_index_bits, which is
+defined in config.h.
+The meaning is as follows:
+
+process index               | transceiver index
+----------------------------|-------------------------------
+ a : process a              |  b : transceiver b
+~a : any process except a   | ~b : any transceiver except b
+ 0 : no processes           |  0 : no transceivers
+~0 : all processes          | ~0 : all transceivers
+ 1 : the local process      |  1 : the local Managed_process
+~1 : all remote processes   | ~1 : all transceivers except the local Managed_process
+
+Examples:
+p =  2, i =  4 -> Transceiver instance 4 of process 2
+p =  2, i =  1 -> Managed_process instance of process 2
+p =  0, i =  0 -> no process, no transceiver (invalid)
+p =  1, i =  4 -> Transceiver instance 4 in the local process
+p =  1, i = ~4 -> All transceivers except 4 in the local process
+p = ~3, i = ~4 -> All transceivers except 4, in all processes except process 3
+
+*/
+
+
+constexpr int num_transceiver_index_bits =
+    sizeof(instance_id_type) * 8 - num_process_index_bits;
+
+static constexpr
+uint64_t flag_most_significant_bits(uint64_t v)
+{
+    return (v == (v | (v << 1))) ? v : flag_most_significant_bits(v | (v << 1));
+}
+
+constexpr uint64_t pid_mask =
+    flag_most_significant_bits(uint64_t(1) << num_transceiver_index_bits);
+
+constexpr uint64_t max_process_index = (1ull << (num_process_index_bits - 1)) - 1;
+constexpr uint64_t max_transceiver_index = (1ull << (num_transceiver_index_bits - 1)) - 1;
+
+constexpr uint64_t all_remote_processess_wildcard = (max_process_index << 1);
+constexpr uint64_t all_processes_wildcard = all_remote_processess_wildcard | 1;
+constexpr uint64_t all_transceivers_except_mproc_wildcard = (max_transceiver_index << 1);
+constexpr uint64_t all_transceivers_wildcard = all_transceivers_except_mproc_wildcard | 1;
+
+
+
+instance_id_type get_instance_id_type(uint64_t process_index, uint64_t transceiver_index)
+{
+    return (process_index << num_transceiver_index_bits) | transceiver_index;
+};
+
+
+inline
+uint64_t get_process_index(instance_id_type instance_id)
+{
+    return instance_id >> num_transceiver_index_bits;
+}
+
+
+inline
+uint64_t get_transceiver_index(instance_id_type instance_id)
+{
+    return instance_id & (~pid_mask);
+}
+
+
+inline
+uint64_t get_process_complement(instance_id_type instance_id)
+{
+    return ~instance_id >> num_transceiver_index_bits;
+}
+
+
+inline
+uint64_t get_transceiver_complement(instance_id_type instance_id)
+{
+    return ~instance_id & (~pid_mask);
+}
+
+
+
+constexpr instance_id_type any_local_or_remote   =
+    (all_processes_wildcard         << num_transceiver_index_bits) | all_transceivers_wildcard;
+constexpr instance_id_type any_remote            =
+    (all_remote_processess_wildcard << num_transceiver_index_bits) | all_transceivers_wildcard;
+constexpr instance_id_type any_local             =
+    (                          1ull << num_transceiver_index_bits) | all_transceivers_wildcard;
+constexpr instance_id_type invalid_instance_id   = 0;
+
+
+
+
+
+
 inline
 instance_id_type make_instance_id()
 {
-    static atomic<uint64_t> counter(detail::reserved_instance_ids);
-    return (mproc_id::s << detail::pid_shift) | ++counter;
+    // 1 is always the transceiver index of the local Managed_process,
+    // thus other transceivers start from 2
+    static atomic<uint64_t> transceiver_index_counter(2);
+    assert(transceiver_index_counter < max_transceiver_index);
+    return (s_mproc_id & pid_mask) | transceiver_index_counter++;
 }
+
+
 
 inline
 instance_id_type make_process_instance_id()
 {
-    // 1 is reserved for the first process
-    static atomic<uint64_t> counter(1);
-    counter++;
-    assert(counter <= detail::reserved_instance_ids);
-    return (counter << detail::pid_shift) | counter;
+    // 1 is the wildcard for the local process
+    // thus process indices start from 2
+    static atomic<uint64_t> process_index_counter(2);
+    assert(process_index_counter <= max_process_index);
+    return get_instance_id_type(process_index_counter++, 1);
 }
 
-inline
-instance_id_type make_process_instance_id(uint64_t v)
-{
-    assert(v <= detail::reserved_instance_ids);
-    assert(v > 0);
-    return (v << detail::pid_shift) | v;
-}
+
 
 inline
-bool is_local_instance(instance_id_type instance_id)
+instance_id_type make_process_instance_id(uint32_t process_index)
 {
-    return (instance_id >> detail::pid_shift) == (mproc_id::s & ~detail::pid_mask);
+    assert(process_index>0 && process_index <= max_process_index);
+    return get_instance_id_type(process_index, 1);
 }
 
+
+
+// returns true if iid refers to one local instance
 inline
-bool is_not_any_transceiver(instance_id_type instance_id)
+bool is_local_instance(instance_id_type iid)
 {
-    return (instance_id & ~detail::pid_mask) != ~detail::pid_mask;
+    auto process_index = get_process_index(iid);
+    return
+        // local process wildcard, always matches
+        (process_index == 1) ||
+        // explicitly specified process index match
+        (process_index == get_process_index(s_mproc_id));
 }
 
+
+
+// returns true if iid refers to one or multiple local instances
 inline
-bool is_process(instance_id_type instance_id)
+bool is_local(instance_id_type iid)
 {
-    return (instance_id >> detail::pid_shift) == (instance_id & ~detail::pid_mask);
+    auto process_index = get_process_index(iid);
+    return
+        is_local_instance(iid) ||
+        // complement of explicitly specified process, matches this process implicitly
+        (process_index > max_process_index && get_process_complement(process_index) != get_process_index(s_mproc_id)) ||
+        // all processes wildcard, always matches
+        (process_index == all_processes_wildcard);
 }
 
+
+
 inline
-instance_id_type process_of(instance_id_type instance_id)
+bool is_process(instance_id_type iid)
 {
-    return (instance_id >> detail::pid_shift) | (instance_id & detail::pid_mask);
+    // it was not meant to be matched implicitly
+    assert (get_process_index(iid) > 0 && get_process_index(iid) <= max_process_index);
+
+    return (iid & (~pid_mask)) == 1;
 }
+
+
+
+inline
+instance_id_type process_of(instance_id_type iid)
+{
+    assert(get_process_index(iid) > 0 && get_process_index(iid) <= max_process_index);
+    return (iid & pid_mask) | 1;
+}
+
+
 
 }
 
