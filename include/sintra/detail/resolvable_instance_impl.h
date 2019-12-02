@@ -36,7 +36,7 @@ using std::string;
 template<typename>
 void Resolvable_instance_id::from_string(const string& str)
 {
-    value = Coordinator::rpc_resolve_instance(coord_id::s, str);
+    value = Coordinator::rpc_resolve_instance(s_coord_id, str);
 }
 
 

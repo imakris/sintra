@@ -59,22 +59,12 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 namespace sintra {
 
-
-    // This can be increased if necessary. Note however that the upper bits of the instance id of
-    // any transceiver hold the id of the process it is instantiated in. The number of those
-    // upper bits allocated for that purpose is the number of bits needed to represent
-    // the max_process_instance_id.
-    // As of writing, the instance_id_type is set to be a uint64_t, which means that
-    // for max_process_instance_id = 1023, we need log2(1023+1) == 10 bits, thus the
-    // bits of a transceiver instance id would look like this:
-    //
-    // ppppppppppiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii
-    //  
-    // where
-    // p = process instance id
-    // i = object speciic bits
-    //
-    constexpr int       max_process_instance_id             = 1023;
+    // instance_id_type is a 2-part integer variable. The first part identifies the process and
+    // the second the transceiver in the process. This variable configures the number of bits
+    // allocated to the process index part and consequently the number of bits of transceiver
+    // part as well.
+    // see definition of instance_id_type
+    constexpr int       num_process_index_bits              = 10;
 
     // The reason for setting such restriction is that the coordinator has to keep track of all
     // globally visible (public) transceivers. If a process is misbehaving and allocates public
