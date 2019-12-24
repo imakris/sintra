@@ -65,8 +65,6 @@ namespace detail {
         add_this_process_into_group,
         print,
 
-        append,
-
         // EXPLICITLY DEFINED SIGNALS
         instance_invalidated,
 
