@@ -20,7 +20,6 @@ using namespace std;
 using namespace sintra;
 
 
-
 struct Ping {};
 struct Pong {};
 
