@@ -45,7 +45,7 @@ using std::unique_lock;
 
 inline
 Coordinator::Coordinator():
-    Transceiver("", make_instance_id())
+    Transceiver<Coordinator>("", make_instance_id())
 {
 }
 
@@ -210,7 +210,7 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
         }
     }
 
-    send<instance_invalidated, any_local_or_remote>(iid);
+    emit_global<instance_invalidated>(iid);
 
     return true;
 }

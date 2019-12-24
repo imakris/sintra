@@ -56,8 +56,6 @@ using std::string;
 using std::unordered_map;
 
 
-struct Transceiver;
-
 
 
  //////////////////////////////////////////////////////////////////////////
@@ -134,14 +132,14 @@ using handler_registry_type =
     >;
 
 
-struct Transceiver
+struct Transceiver_base
 {
-    using Transceiver_type = Transceiver;
+    using Transceiver_type = Transceiver_base;
 
     template <typename = void>
-    Transceiver(const string& name = "", uint64_t id = 0);
+    Transceiver_base(const string& name = "", uint64_t id = 0);
 
-    ~Transceiver();
+    ~Transceiver_base();
 
     inline
     instance_id_type instance_id() { return m_instance_id; }
@@ -154,9 +152,9 @@ struct Transceiver
 
 private:
 
-    // Used when there is no infrastructure to initialize a Transceiver, thus the caller
+    // Used when there is no infrastructure to initialize Transceiver_base, thus the caller
     // (Managed_process) calls the other constructor explicitly, when construction is possible.
-    Transceiver(void*) {}
+    Transceiver_base(void*) {}
 
     template <typename = void>
     void construct(const string& name = "", uint64_t id = 0);
@@ -236,7 +234,7 @@ public:
         Typed_instance_id<SENDER_T> sender_id);
 
 
-    // A Transceiver member function with a message argument. The sender has to exist.
+    // A Transceiver_base member function with a message argument. The sender has to exist.
     template<
         typename SENDER_T,
         typename MESSAGE_T,
@@ -472,7 +470,7 @@ public:
 #if 0 //defined(__GNUG__)
 
     // This is probably exploiting a bug of GCC, which circumvents the need for
-    // TRANSCEIVER_PROLOGUE(name) inside any class deriving from Transceiver that uses RPC.
+    // TRANSCEIVER_PROLOGUE(name) inside any class deriving from Transceiver_base that uses RPC.
 
     #define SINTRA_RPC(m)                                                                       \
         typedef auto otr_ ## m ## _function() -> decltype(*this);                               \
@@ -520,30 +518,6 @@ public:
  //////////////////////////////////////////////////////////////////////////
 
 
-// This must be present in the definition of any class deriving from Transceiver that uses RPC.
-// An alternative would be to implement the Transceiver with CRTP, but then all derivatives
-// would have to be templated, which could be somewhat pointless.
-#define TRANSCEIVER_PROLOGUE(transceiver_type_arg)                                              \
-                                                                                                \
-    inline void transceiver_prologue_sanity_test() {                                            \
-        static_assert(is_same<transceiver_type_arg*, decltype(this)>::value,                    \
-            "The argument of TRANSCEIVER_PROLOGUE( [transceiver_type] ) macro "                 \
-            "does not match the type of the class it is being used in.");                       \
-        assert(!"Do not call this function.");                                                  \
-    }                                                                                           \
-                                                                                                \
-    using Transceiver_type = transceiver_type_arg;                                              \
-                                                                                                \
-    template <                                                                                  \
-        typename MESSAGE_T,                                                                     \
-        instance_id_type LOCALITY = any_local,                                                  \
-        typename SENDER_T = Transceiver_type,                                                   \
-        typename... Args>                                                                       \
-    void send(Args&&... args)                                                                   \
-    {                                                                                           \
-        Transceiver::send<MESSAGE_T, LOCALITY, SENDER_T>(std::forward<Args>(args)...);          \
-    }
-
 private:
 
     // Handlers of return messages (i.e. messages delivering the results of function messages).
@@ -570,6 +544,45 @@ private:
     template<typename>
     friend struct Typed_instance_id;
 };
+
+
+
+template<typename Derived_T>
+struct Transceiver: Transceiver_base
+{
+    using Transceiver_base::Transceiver_base;
+
+    using Transceiver_type = Derived_T;
+
+    template <
+        typename MESSAGE_T,
+        typename SENDER_T = Transceiver_type,
+        typename... Args>
+    void emit_local(Args&&... args)
+    {
+        Transceiver_base::send<MESSAGE_T, any_local, SENDER_T>(std::forward<Args>(args)...);
+    }
+
+    template <
+        typename MESSAGE_T,
+        typename SENDER_T = Transceiver_type,
+        typename... Args>
+    void emit_remote(Args&&... args)
+    {
+        Transceiver_base::send<MESSAGE_T, any_remote, SENDER_T>(std::forward<Args>(args)...);
+    }
+
+    template <
+        typename MESSAGE_T,
+        typename SENDER_T = Transceiver_type,
+        typename... Args>
+    void emit_global(Args&&... args)
+    {
+        Transceiver_base::send<MESSAGE_T, any_local_or_remote, SENDER_T>(std::forward<Args>(args)...);
+    }
+};
+
+
 
 
 } // sintra

@@ -48,7 +48,7 @@ namespace sintra {
 inline
 static void s_signal_handler(int /*sig*/)
 {
-    s_mproc->send<Transceiver::instance_invalidated, any_remote>(s_mproc_id);
+    s_mproc->emit_remote<Transceiver_base::instance_invalidated>(s_mproc_id);
 
     if (s_coord) {
         // should we do something special here?

@@ -197,10 +197,8 @@ struct Work_loop
 
 
 
-struct Managed_process: Transceiver
+struct Managed_process: Transceiver<Managed_process>
 {
-    TRANSCEIVER_PROLOGUE(Managed_process)
-
     Managed_process();
     ~Managed_process();
 
@@ -227,7 +225,7 @@ struct Managed_process: Transceiver
 
     spinlocked_umap<
         instance_id_type,
-        Transceiver*
+        Transceiver_base*
     >                                   m_local_pointer_of_instance_id;
 
     // START/STOP
