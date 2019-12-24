@@ -20,10 +20,8 @@ using namespace std;
 using namespace sintra;
 
 
-struct Remotely_accessible: Transceiver
+struct Remotely_accessible: Transceiver<Remotely_accessible>
 {
-    TRANSCEIVER_PROLOGUE(Remotely_accessible)
-
     string append(const string& s, int v)
     {
         return s + to_string(v);

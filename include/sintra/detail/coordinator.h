@@ -44,9 +44,8 @@ using std::string;
 using std::unordered_set;
 
 
-struct Coordinator: public Transceiver
+struct Coordinator: public Transceiver<Coordinator>
 {
-    TRANSCEIVER_PROLOGUE(Coordinator)
 
 private:
     Coordinator();

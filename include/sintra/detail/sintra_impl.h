@@ -131,13 +131,14 @@ auto activate_slot(const FT& slot_function, Typed_instance_id<SENDER_T> sender_i
 template <instance_id_type LOCALITY>
 struct Maildrop
 {
+    using mp_type = Managed_process::Transceiver_type;
 
     // an array of char turns to an std::string.
     template <size_t N>
     Maildrop& operator << (const char(&value)[N])
     {
         using MT = Message<Enclosure<string>>;
-        s_mproc->send<MT, LOCALITY>(string(value));
+        s_mproc->send<MT, LOCALITY, mp_type>(string(value));
         return *this;
     }
 
@@ -145,7 +146,7 @@ struct Maildrop
     Maildrop& operator << (const char* value)
     {
         using MT = Message<Enclosure<string>>;
-        s_mproc->send<MT, LOCALITY>(string(value));
+        s_mproc->send<MT, LOCALITY, mp_type>(string(value));
         return *this;
     }
 
@@ -154,7 +155,7 @@ struct Maildrop
     Maildrop& operator << (const T(&v)[N])
     {
         using MT = Message<Enclosure<vector<T>>>;
-        s_mproc->send<MT, LOCALITY>(vector<T>(v, v + sizeof v / sizeof *v));
+        s_mproc->send<MT, LOCALITY, mp_type>(vector<T>(v, v + sizeof v / sizeof *v));
         return *this;
     }
 
@@ -162,11 +163,9 @@ struct Maildrop
     Maildrop& operator << (const T& value)
     {
         using MT = Message<Enclosure<T>>;
-        s_mproc->send<MT, LOCALITY>(value);
+        s_mproc->send<MT, LOCALITY, mp_type>(value);
         return *this;
     }
-
-
 };
 
 

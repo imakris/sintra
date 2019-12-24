@@ -187,8 +187,8 @@ void Process_message_reader::request_reader_function()
                 }
                 else {
                     // if the receiver has a registered handler, call the handler
-                    auto it2 = Transceiver::get_rpc_handler_map().find(m->message_type_id);
-                    if (it2 == Transceiver::get_rpc_handler_map().end()) {
+                    auto it2 = Transceiver_base::get_rpc_handler_map().find(m->message_type_id);
+                    if (it2 == Transceiver_base::get_rpc_handler_map().end()) {
                         assert(false); // same here  // FIXME: IMPLEMENT
                     }
                     else {
@@ -205,8 +205,8 @@ void Process_message_reader::request_reader_function()
                 // coordinator), this may only be an RPC call.
 
                 // if the receiver has a registered handler, call the handler
-                auto it2 = Transceiver::get_rpc_handler_map().find(m->message_type_id);
-                if (it2 == Transceiver::get_rpc_handler_map().end()) {
+                auto it2 = Transceiver_base::get_rpc_handler_map().find(m->message_type_id);
+                if (it2 == Transceiver_base::get_rpc_handler_map().end()) {
                     assert(false); // same here  // FIXME: IMPLEMENT
                 }
                 else {
@@ -331,8 +331,8 @@ void Process_message_reader::local_request_reader_function()
             }
             else {
                 // if the receiver has a registered handler, call the handler
-                auto it2 = Transceiver::get_rpc_handler_map().find(m->message_type_id);
-                if (it2 == Transceiver::get_rpc_handler_map().end()) {
+                auto it2 = Transceiver_base::get_rpc_handler_map().find(m->message_type_id);
+                if (it2 == Transceiver_base::get_rpc_handler_map().end()) {
                     assert(false); // same here  // FIXME: IMPLEMENT
                 }
                 else {
