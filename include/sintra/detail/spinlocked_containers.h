@@ -27,6 +27,16 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define SINTRA_SPINLOCKED_CONTAINERS_H
 
 
+// This file defines crippled spinlock-wrapped versions of common containers.
+// The only guarantee that these containers provide is that individual
+// operations on them are thread safe.
+// By no means should anyone ever assume that this offers any kind of generic
+// thread safety associated with their usage. Their sole purpose was to save
+// some typing, in a few common scenarios within sintra, but also to simplify
+// debugging, by eliminating a class of bugs associated with container
+// corruption.
+
+
 #include "spinlock.h"
 
 #include <deque>
@@ -53,7 +63,6 @@ using std::vector;
 
 
 namespace detail {
-
 
 
 template <template <typename...> typename CT, typename... Args>

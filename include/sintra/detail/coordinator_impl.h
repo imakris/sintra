@@ -45,7 +45,7 @@ using std::unique_lock;
 
 inline
 Coordinator::Coordinator():
-    Transceiver<Coordinator>("", make_instance_id())
+    Derived_transceiver<Coordinator>("", make_instance_id())
 {
 }
 
@@ -92,7 +92,7 @@ instance_id_type Coordinator::resolve_instance(const string& assigned_name)
 
 // EXPORTED FOR RPC
 inline
-bool Coordinator::publish_transceiver(instance_id_type iid, const string& assigned_name)
+bool Coordinator::publish_transceiver(type_id_type tid, instance_id_type iid, const string& assigned_name)
 {
     lock_guard<mutex> lock(m_publish_mutex);
 
@@ -103,6 +103,7 @@ bool Coordinator::publish_transceiver(instance_id_type iid, const string& assign
 
     auto process_iid = process_of(iid);
     auto pr_it = m_transceiver_registry.find(process_iid);
+    auto entry = tn_type{ tid, assigned_name };
 
     if (pr_it != m_transceiver_registry.end()) { // the transceiver's process is known
         
@@ -123,9 +124,10 @@ bool Coordinator::publish_transceiver(instance_id_type iid, const string& assign
             return false;
         }
 
-        s_mproc->m_instance_id_of_assigned_name[assigned_name] = iid;
-        pr[iid] = assigned_name;
+        s_mproc->m_instance_id_of_assigned_name[entry.name] = iid;
+        pr[iid] = entry;
 
+        emit_global<instance_published>(tid, iid, assigned_name);
         return true;
     }
     else
@@ -136,18 +138,16 @@ bool Coordinator::publish_transceiver(instance_id_type iid, const string& assign
             return false;
         }
 
-        s_mproc->m_instance_id_of_assigned_name[assigned_name] = iid;
-        m_transceiver_registry[iid][iid] = assigned_name;
+        s_mproc->m_instance_id_of_assigned_name[entry.name] = iid;
+        m_transceiver_registry[iid][iid] = entry;
 
+        emit_global<instance_published>(tid, iid, assigned_name);
         return true;
     }
     else {
         return false;
     }
-
-
 }
-
 
 
 
@@ -156,7 +156,6 @@ inline
 bool Coordinator::unpublish_transceiver(instance_id_type iid)
 {
     lock_guard<mutex> lock(m_publish_mutex);
-
 
     // the process of the transceiver must have been registered
     auto process_iid = process_of(iid);
@@ -173,10 +172,15 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
         return false;
     }
 
-    // if the transceiver is named, delete the reverse name lookup entry
-    if (!it->second.empty()) {
-        s_mproc->m_instance_id_of_assigned_name.erase(it->second);
-    }
+    // the transceiver is assumed to have a name, not an empty string
+    // (it shouldn't have made it through publish_transceiver otherwise)
+    assert(!it->second.name.empty());
+
+    // delete the reverse name lookup entry
+    s_mproc->m_instance_id_of_assigned_name.erase(it->second.name);
+
+    // keep a copy of the assigned name before deleting it
+    auto tn = it->second;
 
     // if it is a Managed_process is being unpublished, more cleanup is required
     if (iid == process_iid) {
@@ -205,15 +209,26 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
             m_processes_of_group[group].erase(process_iid);
         }
         m_groups_of_process.erase(process_iid);
-        if (m_processes_of_group[All_processes::id()].size() == 1) {
+        if (m_processes_of_group[Externally_coordinated::id()].size() == 0) {
             m_all_other_processes_done_condition.notify_all();
+        }
+
+        // remove all group associations of unpublished process
+        auto groups_it = m_groups_of_process.find(iid);
+        if (groups_it != m_groups_of_process.end()) {
+            for (auto& group : groups_it->second) {
+                m_processes_of_group.erase(group);
+                m_group_sizes[group]--;
+            }
+            m_groups_of_process.erase(groups_it);
         }
     }
 
-    emit_global<instance_invalidated>(iid);
+    emit_global<instance_unpublished>(tn.type_id, iid, tn.name);
 
     return true;
 }
+
 
 
 // EXPORTED FOR RPC
@@ -227,13 +242,15 @@ bool Coordinator::barrier(type_id_type process_group_id)
 
     m_barrier_mutex.unlock();
 
-    if (++b.processes_reached == m_processes_of_group[process_group_id].size()) {
+    if (++b.processes_reached == m_group_sizes[process_group_id]) {
         b.processes_reached = 0;
         lock.unlock();
         b.cv.notify_all();
     }
     else {
         do {
+            // this code might be reached either if the other processes have
+            // not called barrier, or if the group size has not been set (yet).
             b.cv.wait(lock);
         }
         while (b.processes_reached);
@@ -269,6 +286,15 @@ void Coordinator::print(const string& str)
 
 
 inline
+void Coordinator::set_group_size(type_id_type process_group_id, size_t size)
+{
+    m_group_sizes[process_group_id] = (uint32_t)size;
+    m_barriers[process_group_id].cv.notify_all();
+}
+
+
+
+inline
 bool Coordinator::add_process_into_group(instance_id_type process_id, type_id_type process_group_id)
 {
     m_processes_of_group[process_group_id].insert(process_id);
@@ -284,7 +310,7 @@ void Coordinator::wait_until_all_other_processes_are_done()
     // if the coordinator lives in this process, we have to postpone destruction until
     // every other process is finished.
     unique_lock<mutex> lock(m_all_other_processes_done_mutex);
-    while (m_processes_of_group[All_processes::id()].size() != 1) {
+    while (m_processes_of_group[Externally_coordinated::id()].size() != 0) {
         m_all_other_processes_done_condition.wait(lock);
     }
 }

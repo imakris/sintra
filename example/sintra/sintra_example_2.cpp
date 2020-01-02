@@ -20,7 +20,7 @@ using namespace std;
 using namespace sintra;
 
 
-struct Remotely_accessible: Transceiver<Remotely_accessible>
+struct Remotely_accessible: Derived_transceiver<Remotely_accessible>
 {
     string append(const string& s, int v)
     {

@@ -27,6 +27,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define SINTRA_UTILITY_H
 
 #include <functional>
+#include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <unordered_set>
@@ -43,6 +45,43 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
 namespace sintra {
+
+
+using std::function;
+using std::shared_ptr;
+using std::mutex;
+using std::lock_guard;
+
+struct Adaptive_function
+{
+    Adaptive_function(function<void()> f) :
+        ppf(new shared_ptr<function<void()>>(new function<void()>(f))),
+        m(new mutex)
+    {}
+
+    Adaptive_function(const Adaptive_function& rhs)
+    {
+        lock_guard<mutex> lock(*rhs.m);
+        ppf = rhs.ppf;
+        m = rhs.m;
+    }
+
+    void operator()()
+    {
+        lock_guard<mutex> lock(*m);
+        (**ppf)();
+    }
+
+    void set(function<void()> f)
+    {
+        lock_guard<mutex> lock(*m);
+        **ppf = f;
+    }
+
+    shared_ptr<shared_ptr<function<void()>>> ppf;
+    shared_ptr<mutex> m;
+};
+
 
 
 inline

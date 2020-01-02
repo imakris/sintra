@@ -66,7 +66,11 @@ namespace detail {
         print,
 
         // EXPLICITLY DEFINED SIGNALS
-        instance_invalidated,
+        instance_invalidated, // sent by Transceiver on destruction
+        instance_published,   // sent by Coordinator when a transceiver is named
+                              // and can be subsequently looked up by its name.
+        instance_unpublished, // sent by Coordinator, always before the
+                              // Transceiver sends instance_invalidated
 
         num_reserved_type_ids
     };

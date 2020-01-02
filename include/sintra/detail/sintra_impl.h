@@ -97,6 +97,13 @@ void stop()
 }
 
 
+inline
+bool running()
+{
+    return s_mproc->m_running;
+}
+
+
 
 inline
 void wait_for_stop()

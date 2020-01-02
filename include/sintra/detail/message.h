@@ -358,7 +358,7 @@ struct Message: public Message_prefix, public T
         void* body_ptr = static_cast<body_type*>(this);
         new (body_ptr) body_type{args...};
 
-        assert(bytes_to_next_message < (message_ring_size / 2));
+        assert(bytes_to_next_message < (message_ring_size / 8));
 
         message_type_id = id();
     }
@@ -381,7 +381,7 @@ struct Message: public Message_prefix, public T
         variable_buffer::S::tl_message_start_address = nullptr;
         variable_buffer::S::tl_pbytes_to_next_message = nullptr;
 
-        assert(bytes_to_next_message < (message_ring_size / 2));
+        assert(bytes_to_next_message < (message_ring_size / 8));
 
         message_type_id = id();
     }
@@ -472,8 +472,16 @@ struct Message: public Message_prefix, public T
 
 
 #define SINTRA_SIGNAL_BASE(name, idv, ...)                                      \
+    void inheritance_assertion_##name() {                                       \
+        static_assert(std::is_same_v<                                           \
+            std::remove_pointer_t<decltype(this)>,                              \
+            Transceiver_type>,                                                  \
+            "This Transceiver is not derived correctly."                        \
+        );                                                                      \
+    }                                                                           \
     _DEFINE_STRUCT(_sm_body_type_##name, __VA_ARGS__)                           \
-    using name = Message<_sm_body_type_##name, void, idv, Transceiver_type>;
+    using name = Message<_sm_body_type_##name, void, idv, Transceiver_type>;    \
+
 
 #define SINTRA_SIGNAL(name, ...)                                                \
     SINTRA_SIGNAL_BASE(name, invalid_type_id, __VA_ARGS__)
@@ -628,6 +636,10 @@ struct Message_ring_R: protected Ring_R<char>
                 return nullptr;
             }
             m_range = range;
+        }
+
+        if (!m_reading) {
+            return nullptr;
         }
 
         Message_prefix* ret = (Message_prefix*)m_range.begin;

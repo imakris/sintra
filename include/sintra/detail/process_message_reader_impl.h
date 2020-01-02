@@ -135,6 +135,8 @@ Process_message_reader::~Process_message_reader()
 inline
 void Process_message_reader::request_reader_function()
 {
+    install_signal_handler();
+
     m_req_running = true;
 
     while (m_status != STOPPING) {
@@ -167,6 +169,8 @@ void Process_message_reader::request_reader_function()
             //   it, even though it is from an external channel, which is a paradox.
             // Such messages must be ignored.
 
+            // if the coordinator was resident, this would be handled in the
+            // local_request_reader_function
             assert(!s_coord);
             continue;
         }
@@ -187,8 +191,8 @@ void Process_message_reader::request_reader_function()
                 }
                 else {
                     // if the receiver has a registered handler, call the handler
-                    auto it2 = Transceiver_base::get_rpc_handler_map().find(m->message_type_id);
-                    if (it2 == Transceiver_base::get_rpc_handler_map().end()) {
+                    auto it2 = Transceiver::get_rpc_handler_map().find(m->message_type_id);
+                    if (it2 == Transceiver::get_rpc_handler_map().end()) {
                         assert(false); // same here  // FIXME: IMPLEMENT
                     }
                     else {
@@ -205,8 +209,8 @@ void Process_message_reader::request_reader_function()
                 // coordinator), this may only be an RPC call.
 
                 // if the receiver has a registered handler, call the handler
-                auto it2 = Transceiver_base::get_rpc_handler_map().find(m->message_type_id);
-                if (it2 == Transceiver_base::get_rpc_handler_map().end()) {
+                auto it2 = Transceiver::get_rpc_handler_map().find(m->message_type_id);
+                if (it2 == Transceiver::get_rpc_handler_map().end()) {
                     assert(false); // same here  // FIXME: IMPLEMENT
                 }
                 else {
@@ -221,6 +225,8 @@ void Process_message_reader::request_reader_function()
             // this is an interprocess event message.
 
             if (m_status == FULL_FUNCTIONALITY) {
+
+                lock_guard<recursive_mutex> sl(s_mproc->m_handlers_mutex);
                     
                 // [ NEW IMPLEMENTATION - NOT COVERED ]
                 // find handlers that operate with this type of message in this process
@@ -277,19 +283,22 @@ void Process_message_reader::request_reader_function()
 inline
 void Process_message_reader::local_request_reader_function()
 {
-    // - There should be no remote rpc requests in this function. Local RPC should never find
-    //     its way into any ring.
+    install_signal_handler();
+
+    // - There should be no requests to remote transceivers in this function.
+    // - RPC calls to lolal transceivers are serviced like regular functions,
+    //   with some overhead, yet those requests should never find their way
+    //   into any ring.
     // - There should also not be any COORDINATOR_ONLY state.
-    // This state exists to facilitate RPC with a remote coordinator.
-    // However, if the coordinator is remote, a local reader is irrelevant, and if
-    // it is local, ring RPC is also irrelevant.
+    //   This state exists to facilitate RPC with a remote coordinator.
+    //   However, if the coordinator is remote, a local reader is irrelevant,
+    //   and if it is local, ring RPC is also irrelevant.
 
     m_req_running = true;
 
     while (m_status != STOPPING) {
         s_tl_current_message = nullptr;
         Message_prefix* m = m_in_req_c->fetch_message();
-
 
         s_tl_current_message = m;
 
@@ -311,8 +320,7 @@ void Process_message_reader::local_request_reader_function()
             // coordinator's ring. The Coordinator's ring is only one, and observed by all
             // processes, thus the messages are visible to their sender.
             // But if they are addressed to any_remote, the sender should ignore them.
-                    
-            assert(!s_coord);
+ 
             continue;
         }
 
@@ -331,8 +339,8 @@ void Process_message_reader::local_request_reader_function()
             }
             else {
                 // if the receiver has a registered handler, call the handler
-                auto it2 = Transceiver_base::get_rpc_handler_map().find(m->message_type_id);
-                if (it2 == Transceiver_base::get_rpc_handler_map().end()) {
+                auto it2 = Transceiver::get_rpc_handler_map().find(m->message_type_id);
+                if (it2 == Transceiver::get_rpc_handler_map().end()) {
                     assert(false); // same here  // FIXME: IMPLEMENT
                 }
                 else {
@@ -349,6 +357,8 @@ void Process_message_reader::local_request_reader_function()
 
             if (m_status == FULL_FUNCTIONALITY) {
                 
+                lock_guard<recursive_mutex> sl(s_mproc->m_handlers_mutex);
+
                 // NEW STUFF, UNTESTED
                 // receivers that handle this type of message in this process
                 auto it_mt = s_mproc->m_active_handlers.find(m->message_type_id);
@@ -368,7 +378,6 @@ void Process_message_reader::local_request_reader_function()
                             }
                         }
                     }
-
                 }
             }
         }
@@ -386,6 +395,8 @@ void Process_message_reader::local_request_reader_function()
 inline
 void Process_message_reader::reply_reader_function()
 {
+    install_signal_handler();
+
     m_rep_running = true;
 
     while (m_status != STOPPING) {
@@ -430,7 +441,6 @@ void Process_message_reader::reply_reader_function()
                     // This can occur by both local and remote error.
                     assert(!"The object that this return message refers to does not exist.");
                 }
-
             }
         }
         else {
@@ -451,7 +461,6 @@ void Process_message_reader::reply_reader_function()
 
 
 
-
-}
+} // namespace sintra
 
 #endif

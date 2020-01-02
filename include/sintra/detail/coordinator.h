@@ -44,7 +44,7 @@ using std::string;
 using std::unordered_set;
 
 
-struct Coordinator: public Transceiver<Coordinator>
+struct Coordinator: public Derived_transceiver<Coordinator>
 {
 
 private:
@@ -57,11 +57,16 @@ private:
     // EXPORTED FOR RPC
     type_id_type resolve_type(const string& pretty_name);
     instance_id_type resolve_instance(const string& assigned_name);
-    bool publish_transceiver(instance_id_type instance_id, const string& assigned_name);
+
+    bool publish_transceiver(
+        type_id_type type_id, instance_id_type instance_id, const string& assigned_name);
     bool unpublish_transceiver(instance_id_type instance_id);
+
     bool barrier(type_id_type process_group_id);
     bool add_this_process_into_group(type_id_type process_group_id);
     void print(const string& str);
+
+    void set_group_size(type_id_type process_group_id, size_t size);
 
     struct Barrier
     {
@@ -77,7 +82,7 @@ private:
         instance_id_type,                       // process instance id
         spinlocked_umap<
             instance_id_type,                   // transceiver instance id (within the process)
-            string                              // assigned name
+            tn_type                             // type id and assigned name
         >
     >                                           m_transceiver_registry;
 
@@ -88,13 +93,18 @@ private:
 
 
     spinlocked_umap<
-        instance_id_type, 
+        type_id_type,
         spinlocked_uset< instance_id_type >
     >                                           m_processes_of_group;
     spinlocked_umap<
         instance_id_type,
-        spinlocked_uset< instance_id_type >
+        spinlocked_uset< type_id_type >
     >                                           m_groups_of_process;
+
+    spinlocked_umap<
+        type_id_type,
+        uint32_t
+    >                                           m_group_sizes;
 
 public:
     SINTRA_RPC_EXPLICIT(resolve_type)  
@@ -104,6 +114,11 @@ public:
     SINTRA_RPC_EXPLICIT(barrier)
     SINTRA_RPC_EXPLICIT(add_this_process_into_group)
     SINTRA_RPC_EXPLICIT(print)
+
+    SINTRA_SIGNAL_EXPLICIT(instance_published,
+        type_id_type type_id, instance_id_type instance_id, message_string assigned_name)
+    SINTRA_SIGNAL_EXPLICIT(instance_unpublished,
+        type_id_type type_id, instance_id_type instance_id, message_string assigned_name)
 
     friend struct Managed_process;
     friend struct Transceiver;
