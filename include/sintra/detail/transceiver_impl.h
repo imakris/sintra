@@ -28,6 +28,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
 #include <type_traits>
+#include <memory>
 
 
 namespace sintra {
@@ -38,6 +39,7 @@ using std::function;
 using std::make_pair;
 using std::remove_reference;
 using std::runtime_error;
+using std::shared_ptr;
 using std::string;
 using std::is_same_v;
 using std::is_base_of_v;
@@ -45,7 +47,7 @@ using std::is_base_of_v;
 
 
 template <typename/* = void*/>
-Transceiver_base::Transceiver_base(const string& name/* = ""*/, uint64_t instance_id/* = 0*/)
+Transceiver::Transceiver(const string& name/* = ""*/, uint64_t instance_id/* = 0*/)
 {
     construct(name, instance_id);
 }
@@ -53,7 +55,7 @@ Transceiver_base::Transceiver_base(const string& name/* = ""*/, uint64_t instanc
 
 
 inline
-Transceiver_base::~Transceiver_base()
+Transceiver::~Transceiver()
 {
     destroy();
 }
@@ -61,13 +63,13 @@ Transceiver_base::~Transceiver_base()
 
 
 template <typename/* = void*/>
-void Transceiver_base::construct(const string& name/* = ""*/, uint64_t instance_id/* = 0*/)
+void Transceiver::construct(const string& name/* = ""*/, uint64_t instance_id/* = 0*/)
 {
     m_instance_id = instance_id ? instance_id : make_instance_id();
 
     if (m_instance_id == invalid_instance_id) {
         // this is practically unreachable
-        throw runtime_error("Failed to create a Transceiver_base instance id.");
+        throw runtime_error("Failed to create a Transceiver instance id.");
     }
 
     s_mproc->m_local_pointer_of_instance_id[m_instance_id] = this;
@@ -75,22 +77,23 @@ void Transceiver_base::construct(const string& name/* = ""*/, uint64_t instance_
     // A transceiver instance may as well not have a name (in which case, name lookups fail).
     if (!name.empty()) {
         if (!assign_name(name)) {
-            throw runtime_error("Transceiver_base name assignment failed.");
+            throw runtime_error("Transceiver name assignment failed.");
         }
     }
 
     activate(
-        &Transceiver_base::instance_invalidated_handler,
+        &Transceiver::instance_invalidated_handler,
         Typed_instance_id<void>(any_local_or_remote) );
 }
 
 
 
 template <typename/* = void*/>
-bool Transceiver_base::assign_name(const string& name)
+bool Transceiver::assign_name(const string& name)
 {
-    if (Coordinator::rpc_publish_transceiver(s_coord_id, m_instance_id, name)) {
-        m_named = true;
+    initialize_type_id();
+    if (Coordinator::rpc_publish_transceiver(s_coord_id, m_type_id, m_instance_id, name)) {
+        m_published = true;
 
         if (!s_coord) {
             auto cache_entry = make_pair(name, m_instance_id);
@@ -106,11 +109,11 @@ bool Transceiver_base::assign_name(const string& name)
 
 
 template <typename/* = void*/>
-void Transceiver_base::destroy()
+void Transceiver::destroy()
 {
     if (!s_mproc || !s_coord_id || s_mproc->m_readers.empty()) {
         // If the process is not running, there is nothing to facilitate the basic
-        // functionality of a Transceiver_base object. This can happen if the process object is
+        // functionality of a Transceiver object. This can happen if the process object is
         // itself being destroyed.
         return;
     }
@@ -119,9 +122,13 @@ void Transceiver_base::destroy()
         deactivate_all();
     }
 
-    if (m_named) {
+    if (m_published) {
+
         auto success = Coordinator::rpc_unpublish_transceiver(s_coord_id, m_instance_id);
+        // TODO: FIXME: there is no implementation to handle failure
         assert(success);
+
+        m_published = false;
 
         // if the coordinator is local, it would be deleted already in the unpublish call
         if (!s_coord) {
@@ -137,13 +144,13 @@ void Transceiver_base::destroy()
 
 
 inline
-void Transceiver_base::instance_invalidated_handler(const instance_invalidated& msg)
+void Transceiver::instance_invalidated_handler(const instance_invalidated& msg)
 {
     lock_guard<mutex> sl(m_return_handlers_mutex);
 
     auto it = m_active_return_handlers.begin();
     while (it != m_active_return_handlers.end()) {
-        if (it->second.instance_id == msg.instance_id) {
+        if (it->second.instance_id == msg.sender_instance_id) {
             // if this transceiver is waiting on an rpc call to a function
             // of the transceiver being invalidated, the call will fail.
             it->second.failure_handler();
@@ -158,11 +165,18 @@ void Transceiver_base::instance_invalidated_handler(const instance_invalidated& 
 
 
 template<typename MESSAGE_T, typename HT>
-Transceiver_base::handler_deactivator
-Transceiver_base::activate_impl(HT&& handler, instance_id_type sender_id)
+Transceiver::handler_deactivator
+Transceiver::activate_impl(
+    HT&& handler,
+    instance_id_type sender_id,
+    decltype(m_deactivators)::iterator* deactivator_it_ptr)
 {
+    // an invalid instance must never be passed to this function (must be checked earlier)
+    assert(sender_id != invalid_instance_id);
+
     auto message_type_id = MESSAGE_T::id();
-    lock_guard<mutex> sl(m_handlers_mutex);
+
+    lock_guard<recursive_mutex> sl(s_mproc->m_handlers_mutex);
 
     auto& ms  = s_mproc->m_active_handlers[message_type_id];
     list<function<void(const Message_prefix &)>>::iterator mid_sid_it;
@@ -171,7 +185,7 @@ Transceiver_base::activate_impl(HT&& handler, instance_id_type sender_id)
     if (msm_it == ms.end()) {
 
         // There was no record for this sender_id, thus we have to make one.
-        
+
         msm_it = ms.emplace(
             sender_id,
             list<function<void(const Message_prefix&)>> {
@@ -186,17 +200,24 @@ Transceiver_base::activate_impl(HT&& handler, instance_id_type sender_id)
         );
     }
 
-    // emplace a default object in the deactivators, to obtain an iterator
-    // which is needed in the lambda below.
-    m_deactivators.emplace_back(std::function<void()>());
-    auto it = std::prev(m_deactivators.end());
+    decltype(m_deactivators)::iterator deactivator_it;
 
-    *it = [=, &ms] () {
+    if (!deactivator_it_ptr) {
+        // emplace a default object in the deactivators, to obtain an iterator
+        // which is needed in the lambda below.
+        m_deactivators.emplace_back();
+        deactivator_it = std::prev(m_deactivators.end());
+    }
+    else {
+        deactivator_it = *deactivator_it_ptr;
+    }
+
+    *deactivator_it = [=, &ms] () {
             msm_it->second.erase(mid_sid_it);
             if (msm_it->second.empty()) {
                 ms.erase(msm_it);
             }
-            m_deactivators.erase(it);
+            m_deactivators.erase(deactivator_it);
         };
 
     return m_deactivators.back();
@@ -219,10 +240,11 @@ template<
         >::value
     >*/
 >
-typename Transceiver_base::handler_deactivator
-Transceiver_base::activate(
+typename Transceiver::handler_deactivator
+Transceiver::activate(
     const FT& internal_slot,
-    Typed_instance_id<SENDER_T> sender_id)
+    Typed_instance_id<SENDER_T> sender_id,
+    decltype(m_deactivators)::iterator* deactivator_it_ptr)
 {
     // this is an arbitrary functor, quite possibly a lambda. The first and only argument
     // should be matched here. If it fails, the function is incompatible to its purpose.
@@ -238,7 +260,7 @@ Transceiver_base::activate(
         return internal_slot(msg.get_value());
     };
 
-    return activate_impl<MT>(handler, sender_id.id);
+    return activate_impl<MT>(handler, sender_id.id, deactivator_it_ptr);
 }
 
 
@@ -259,10 +281,11 @@ template<
         >::value
     >*/
 >
-typename Transceiver_base::handler_deactivator
-Transceiver_base::activate(
+typename Transceiver::handler_deactivator
+Transceiver::activate(
     const FT& internal_slot,
-    Typed_instance_id<SENDER_T> sender_id)
+    Typed_instance_id<SENDER_T> sender_id,
+    decltype(m_deactivators)::iterator* deactivator_it_ptr)
 {
     // the given slot is already a functor taking a message argument, thus there is no need for
     // inclusion into a lambda. There is however the need to convert to function, since
@@ -279,22 +302,23 @@ Transceiver_base::activate(
     static_assert(sender_capability, "This type of sender cannot send the type of messages "
         "handled by the specified handler.");
 
-    return activate_impl<MT>(handler, sender_id.id);
+    return activate_impl<MT>(handler, sender_id.id, deactivator_it_ptr);
 }
 
 
 
-// A Transceiver_base member function with a message argument. The sender has to exist.
+// A Transceiver member function with a message argument. The sender has to exist.
 template<
     typename SENDER_T,
     typename MESSAGE_T,
     typename OBJECT_T,
     typename RT /* = typename MESSAGE_T::return_type*/
 >
-Transceiver_base::handler_deactivator
-Transceiver_base::activate(
+Transceiver::handler_deactivator
+Transceiver::activate(
     RT(OBJECT_T::*v)(const MESSAGE_T&),
-    Typed_instance_id<SENDER_T> sender_id)
+    Typed_instance_id<SENDER_T> sender_id,
+    decltype(m_deactivators)::iterator* deactivator_it_ptr)
 {
     auto handler =
         function<typename MESSAGE_T::return_type(const MESSAGE_T&)>(
@@ -307,34 +331,85 @@ Transceiver_base::activate(
     static_assert(sender_capability, "This type of sender cannot send the type of messages "
         "handled by the specified handler.");
 
-    return activate_impl<MESSAGE_T>(handler, sender_id.id);
+    return activate_impl<MESSAGE_T>(handler, sender_id.id, deactivator_it_ptr);
 }
 
 
 
-// less safe convenience function
+// Any kind of slot (member or function) will be accepted here.
+// By default, the sender does not have to exist. If it does not exist, the
+// Coordinator is notified, and once the conditions are met, it will send a signal
+// back, to trigger a new activation attempt. This behaviour may be disabled,
+// by specifying 'true' in the first template parameter.
 template<
-    typename MESSAGE_T,
-    typename OBJECT_T,
-    typename RT /* = typename MESSAGE_T::return_type*/
+    bool sender_must_exist /* = false */,
+    typename SLOT_T,
+    typename SENDER_T
 >
-Transceiver_base::handler_deactivator
-Transceiver_base::activate(
-    RT(OBJECT_T::* v)(const MESSAGE_T&),
-    std::string sender_name)
+Transceiver::handler_deactivator
+Transceiver::activate(
+    const SLOT_T& rcv_slot,
+    Named_instance<SENDER_T> sender)
 {
-    auto handler =
-        function<typename MESSAGE_T::return_type(const MESSAGE_T&)>(
-            boost::bind(v, static_cast<OBJECT_T*>(this), _1));
+    auto iid = Typed_instance_id<SENDER_T>(get_instance_id(std::move(sender)));
+   
+    //obtain activation lock
 
-    auto sender_id = get_instance_id(std::move(sender_name));
-    return activate_impl<MESSAGE_T>(handler, sender_id);
+    lock_guard<recursive_mutex> sl(s_mproc->m_handlers_mutex);
+
+    /*
+    //if the transceiver is available, activate
+    if (iid.id != invalid_instance_id) {
+        return activate(rcv_slot, iid);   // successful activation
+    }
+    */
+
+    // make an entry in the deactivators list first - it must be captured below
+    m_deactivators.emplace_back();
+    auto it = std::prev(m_deactivators.end());
+
+    // make a lambda that will perform the activation, and will also replace
+    // the deactivator with the one returned by activate_impl
+    auto wrapped_activation = [&, rcv_slot, sender, it]() mutable {
+
+        lock_guard<recursive_mutex> sl(s_mproc->m_handlers_mutex);
+
+            auto iid = Typed_instance_id<SENDER_T>(get_instance_id(std::move(sender) ) );
+        
+            // the enclosing lambda is guaranteed to have been triggered by a publish event
+            // which means that the transceiver exists
+            assert (iid.id != invalid_instance_id);
+
+            // activate and replace the old deactivator with the one returned by activate_impl
+            // note the last argument, which specifies a place in the deactivation list, which
+            // prevents allocating a new one.
+            activate(rcv_slot, iid, &it);
+
+            // a function with the same effect as coa_abort (below) is called
+            // immediately after this lambda, by its caller
+        };
+
+    // Let the activation happen when a transceiver with matching name and type becomes available.
+    auto coa_abort = s_mproc->call_on_availability(sender, wrapped_activation);
+
+    // Until the actual activation happens, this lambda will serve as a temporary deactivator.
+    // It only aborts the call on availability by calling its aborter, and also removes
+    // itself from the deactivator list
+    *it = [=]() {
+
+        lock_guard<recursive_mutex> sl(s_mproc->m_handlers_mutex);
+
+        coa_abort(); // this will also remove the coa request from the corresponding list
+        m_deactivators.erase(it);
+    };
+
+    return m_deactivators.back();
 }
 
 
 
 template <typename /* = void*/>
-void Transceiver_base::deactivate_all()
+void Transceiver::deactivate_all()
 {
     while (!m_deactivators.empty())
         m_deactivators.back()();
@@ -347,7 +422,7 @@ template <
     instance_id_type LOCALITY,
     typename SENDER_T,
     typename... Args>
-void Transceiver_base::send(Args&&... args)
+void Transceiver::send(Args&&... args)
 {
     static_assert(
         std::is_base_of_v<Message_prefix, MESSAGE_T>,
@@ -382,7 +457,7 @@ void Transceiver_base::send(Args&&... args)
 // instances of this class/struct use the same handler, which is just a function enclosing
 // a __thiscall to whichever member function was exported.
 inline
-auto& Transceiver_base::get_rpc_handler_map()
+auto& Transceiver::get_rpc_handler_map()
 {
     static spinlocked_umap<type_id_type, void(*)(Message_prefix&)> message_id_to_handler;
     return message_id_to_handler;
@@ -391,7 +466,7 @@ auto& Transceiver_base::get_rpc_handler_map()
 
 
 template <typename RPCTC>
-auto& Transceiver_base::get_instance_to_object_map()
+auto& Transceiver::get_instance_to_object_map()
 {
     static spinlocked_umap<instance_id_type, typename RPCTC::o_type*> instance_to_object;
     return instance_to_object;
@@ -400,7 +475,7 @@ auto& Transceiver_base::get_instance_to_object_map()
 
 
 template <typename R_MESSAGE_T, typename MESSAGE_T, typename OBJECT_T>
-void Transceiver_base::finalize_rpc_write(
+void Transceiver::finalize_rpc_write(
     R_MESSAGE_T* placed_msg, const MESSAGE_T& msg, const OBJECT_T* obj)
 {
     placed_msg->sender_instance_id = obj->m_instance_id;
@@ -418,7 +493,7 @@ template <
     typename /* = void*/,
     typename /* = enable_if_t<is_same< typename RPCTC::r_type, void>::value> */
 >
-void Transceiver_base::rpc_handler(Message_prefix& untyped_msg)
+void Transceiver::rpc_handler(Message_prefix& untyped_msg)
 {
     MESSAGE_T& msg = (MESSAGE_T&)untyped_msg;
     typename RPCTC::o_type* obj = get_instance_to_object_map<RPCTC>()[untyped_msg.receiver_instance_id];
@@ -437,7 +512,7 @@ template <
     typename MESSAGE_T,
     typename /* = enable_if_t<!is_same< typename RPCTC::r_type, void>::value> */
 >
-void Transceiver_base::rpc_handler(Message_prefix& untyped_msg)
+void Transceiver::rpc_handler(Message_prefix& untyped_msg)
 {
     MESSAGE_T& msg = (MESSAGE_T&)untyped_msg;
     typename RPCTC::o_type* obj = get_instance_to_object_map<RPCTC>()[untyped_msg.receiver_instance_id];
@@ -459,7 +534,7 @@ template <
     typename... FArgs,      // The argument types of the exported member function
     typename... RArgs       // The artument types used by the caller
 >
-RT Transceiver_base::rpc(
+RT Transceiver::rpc(
     RT(OBJECT_T::* /*resolution dummy arg*/)(FArgs...),
     instance_id_type instance_id,
     RArgs&&... args)
@@ -477,7 +552,7 @@ template <
     typename... FArgs,
     typename... RArgs
 >
-RT Transceiver_base::rpc(
+RT Transceiver::rpc(
     RT(OBJECT_T::* /*resolution_dummy arg*/)(FArgs...) const,
     instance_id_type instance_id,
     RArgs&&... args)
@@ -494,7 +569,7 @@ template <
     typename... Args
 >
 typename RPCTC::r_type
-Transceiver_base::rpc_impl(instance_id_type instance_id, Args... args)
+Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
 {
     if (is_local_instance(instance_id))
     {
@@ -576,7 +651,7 @@ Transceiver_base::rpc_impl(instance_id_type instance_id, Args... args)
 
 inline
 instance_id_type
-Transceiver_base::activate_return_handler(const Return_handler &rh)
+Transceiver::activate_return_handler(const Return_handler &rh)
 {
     instance_id_type message_instance_id = make_instance_id();
     lock_guard<mutex> sl(m_return_handlers_mutex);
@@ -588,7 +663,7 @@ Transceiver_base::activate_return_handler(const Return_handler &rh)
 
 inline
 void
-Transceiver_base::deactivate_return_handler(instance_id_type message_instance_id)
+Transceiver::deactivate_return_handler(instance_id_type message_instance_id)
 {
     lock_guard<mutex> sl(m_return_handlers_mutex);
     m_active_return_handlers.erase(message_instance_id);
@@ -598,7 +673,7 @@ Transceiver_base::deactivate_return_handler(instance_id_type message_instance_id
 
 template <typename RPCTC, typename MT>
 function<void()>
-Transceiver_base::export_rpc_impl()
+Transceiver::export_rpc_impl()
 {
     warn_about_reference_return<typename RPCTC::r_type>();
     warn_about_reference_args<MT>();
@@ -620,7 +695,7 @@ Transceiver_base::export_rpc_impl()
 
 template <typename RPCTC, typename RT, typename OBJECT_T, typename... Args>
 function<void()>
-Transceiver_base::export_rpc(RT(OBJECT_T::* /*resolution dummy arg*/)(Args...) const)
+Transceiver::export_rpc(RT(OBJECT_T::* /*resolution dummy arg*/)(Args...) const)
 {
     using message_type = Message<unique_message_body<RPCTC, Args...>, RT, RPCTC::id>;
     return export_rpc_impl<RPCTC, message_type>();
@@ -630,7 +705,7 @@ Transceiver_base::export_rpc(RT(OBJECT_T::* /*resolution dummy arg*/)(Args...) c
 
 template <typename RPCTC, typename RT, typename OBJECT_T, typename... Args>
 function<void()>
-Transceiver_base::export_rpc(RT(OBJECT_T::* /*resolution dummy arg*/)(Args...))
+Transceiver::export_rpc(RT(OBJECT_T::* /*resolution dummy arg*/)(Args...))
 {
     using message_type = Message<unique_message_body<RPCTC, Args...>, RT, RPCTC::id>;
     return export_rpc_impl<RPCTC, message_type>();

@@ -48,12 +48,9 @@ namespace sintra {
 inline
 static void s_signal_handler(int /*sig*/)
 {
-    s_mproc->emit_remote<Transceiver_base::instance_invalidated>(s_mproc_id);
-
-    if (s_coord) {
-        // should we do something special here?
-        // kill every other process?
-    }
+    s_mproc->emit_remote<Managed_process::terminated_abnormally>(1);
+    s_mproc->stop();
+    s_mproc->destroy();
 }
 
 
@@ -84,7 +81,13 @@ sintra::type_id_type get_type_id()
     // if the Coordinator is local. Do not be tempted to simplify the temporary,
     // because depending on the order of evaluation, it may or it may not work.
     auto tid = Coordinator::rpc_resolve_type(s_coord_id, pretty_name);
-    return s_mproc->m_type_id_of_type_name[pretty_name] = tid;
+
+    // if it is not invalid, cache it
+    if (tid != invalid_type_id) {
+        s_mproc->m_type_id_of_type_name[pretty_name] = tid;
+    }
+
+    return tid;
 }
 
 
@@ -97,12 +100,17 @@ sintra::instance_id_type get_instance_id(std::string&& assigned_name)
         return it->second;
     }
 
-
     // Caution the Coordinator call will refer to the map that is being assigned,
     // if the Coordinator is local. Do not be tempted to simplify the temporary,
     // because depending on the order of evaluation, it may or it may not work.
     auto iid = Coordinator::rpc_resolve_instance(s_coord_id, assigned_name);
-    return s_mproc->m_instance_id_of_assigned_name[assigned_name] = iid;
+
+    // if it is not invalid, cache it
+    if (iid != invalid_instance_id) {
+        s_mproc->m_instance_id_of_assigned_name[assigned_name] = iid;
+    }
+
+    return iid;
 }
 
 
@@ -140,12 +148,9 @@ void Process_group<T, ID>::enroll()
 
 inline
 Managed_process::Managed_process():
-    Transceiver((void*)0),
+    Derived_transceiver<Managed_process>((void*)0),
     m_running(false),
     m_must_stop(false),
-    m_message_reading_thread_running(false),
-    m_work_thread_running(false),
-    m_deferred_insertion_thread_running(false),
     m_swarm_id(0),
     m_last_message_sequence(0),
     m_check_sequence(0),
@@ -179,7 +184,7 @@ Managed_process::~Managed_process()
 
     // this is called explicitly, in order to inform the coordinator of the destruction early.
     // it would not be possible to communicate it after the channels were closed.
-    this->Transceiver::destroy();
+    this->Derived_transceiver<Managed_process>::destroy();
 
     // no more reading
     m_readers.clear();
@@ -336,7 +341,7 @@ Managed process options:
     // Up to this point, there was no infrastructure for a proper construction
     // of Transceiver base.
 
-    this->Transceiver::construct("", m_instance_id);
+    this->Derived_transceiver<Managed_process>::construct("", m_instance_id);
 
     if (coordinator_is_local) {
         s_coord = new Coordinator;
@@ -345,6 +350,50 @@ Managed process options:
     }
 
     process_group_membership<All_processes>() = true;
+
+    auto published_handler = [this](const Coordinator::instance_published& msg)
+    {
+        tn_type tn = {msg.type_id, msg.assigned_name};
+        lock_guard<mutex> lock(m_availability_mutex);
+
+        auto it = m_queued_availability_calls.find(tn);
+        if (it != m_queued_availability_calls.end()) {
+            while (!it->second.empty()) {
+                // each function call, which is a lambda defined inside 
+                // call_on_availability(), clears itself from the list as well.
+                it->second.front()();
+            }
+            m_queued_availability_calls.erase(it);
+        }
+    };
+
+
+    auto unpublished_handler = [this](const Coordinator::instance_unpublished& msg)
+    {
+        auto iid = msg.instance_id;
+        auto process_iid = process_of(iid);
+        if (iid == process_iid) {
+            // the unpublished transceiver was a process, thus we should
+            // remove all transceiver records who are known to live in it.
+            for (auto it = m_instance_id_of_assigned_name.begin(); it != m_instance_id_of_assigned_name.end();) {
+                if (process_of(it->second) == iid) {
+                    it = m_instance_id_of_assigned_name.erase(it);
+                }
+                else {
+                    ++it;
+                }
+            }
+        }
+
+        // if the unpublished transceiver is the coordinator process, we have to stop.
+        if (process_of(s_coord_id) == msg.instance_id) {
+            stop();
+        }
+    };
+
+
+    activate(published_handler, Typed_instance_id<Coordinator>(s_coord_id));
+    activate(unpublished_handler, Typed_instance_id<Coordinator>(s_coord_id));
 }
 
 
@@ -377,6 +426,9 @@ void Managed_process::branch()
 
             s_coord->add_process_into_group(assigned_instance_id, All_processes::id());
             s_coord->add_process_into_group(assigned_instance_id, Externally_coordinated::id());
+
+            s_coord->set_group_size(All_processes::id(),          s_branch_vector.size() + 1);
+            s_coord->set_group_size(Externally_coordinated::id(), s_branch_vector.size()    );
 
             // create the readers. The next line will start the reader threads,
             // which might take some time. At this stage, we do not have to wait
@@ -482,40 +534,11 @@ void Managed_process::stop()
     if (!m_running)
         return;
 
-    // call each user defined loop's stop function
-    for (auto& v : m_user_loops)
-        v.stop();
-
-
-    /*
-
-    m_must_stop.store(true);
-
-    //m_mr_control->dirty_condition.notify_all();
-    m_next_deferred_insertion_is_sooner.notify_all();
-    m_work_items_dirty_condition.notify_all();
-
-    boost::unique_lock<boost::mutex> lock(m_work_items_mutex);
-    while (m_message_reading_thread_running.load() ||
-        m_work_thread_running.load() ||
-        m_deferred_insertion_thread_running.load())
-    {
-        m_termination_condition.wait(lock);
-    }
-
-    m_deferred_insertion_thread.join();
-    m_message_reading_thread.join();
-    m_work_thread.join();
-
-    */
-
-
     for (auto& i : m_readers) {
         i.suspend();
     }
 
     m_running = false;
-
     m_start_stop_condition.notify_all();
 }
 
@@ -542,124 +565,6 @@ bool Managed_process::wait_for_stop()
 
 
 
-template<typename T>
-void Managed_process::deferred_call(double delay, void(T::*v)())
-{
-    BOOST_STATIC_ASSERT(std::is_base_of<Managed_process, T>::value);
-    deferred_call(delay, boost::bind(v, static_cast<T*>(this)));
-}
-
-
-
-inline
-void Managed_process::deferred_call(double delay, std::function<void()> fn)
-{
-    std::unique_lock<mutex> deferred_queue_lock(m_deferred_mutex);
-    auto when = std::chrono::steady_clock::now() + std::chrono::duration<double>(delay);
-    auto it = m_deferred_insertion_queue.insert(make_pair(when, fn)).first;
-    if (it == m_deferred_insertion_queue.begin()) {
-        m_next_deferred_insertion_is_sooner.notify_all();
-    }
-}
-
-
-
-template<typename MANAGED_TYPE>
-void Managed_process::manage(MANAGED_TYPE* v)
-{
-    user_loop ul;
-    // make thread with the user defined main loop, decorated as needed
-    // (i.e. with signal handler and termination condition notifier).
-    ul.decorated_loop = [&]() {
-        install_signal_handler();
-        v->loop();
-        stop();
-    };
-    ul.stop = [&]() {
-        v->stop();
-    };
-    m_user_loops.push_back(ul);
-}
-
-
-
-inline
-void Managed_process::work_loop()
-{
-    install_signal_handler();
-    m_work_thread_running.store(true);
-
-    while (!m_must_stop.load()) {
-        std::unique_lock<mutex> work_items_lock(m_work_items_mutex);
-        // wait until there is some work to do
-        if (m_work_items.empty()) {
-            m_work_items_dirty_condition.wait(work_items_lock);
-
-            // the above condition can unblock even if there are no calls
-            continue;
-        }
-
-        auto& work_item = m_work_items.front();
-        work_items_lock.unlock();
-        work_item();
-        work_items_lock.lock();
-        m_work_items.pop_front();
-    }
-
-    m_work_thread_running.store(false);
-    m_termination_condition.notify_all();
-}
-
-
-
-inline
-void Managed_process::deferred_insertion_loop()
-{
-    namespace chrono = std::chrono;
-
-    install_signal_handler();
-    m_deferred_insertion_thread_running.store(true);
-    insertion_time_type time_of_next_insertion =
-        chrono::steady_clock::now() + chrono::duration<double>(1000);
-
-    std::unique_lock<mutex> deferred_queue_lock(m_deferred_mutex);
-
-    if (m_deferred_insertion_queue.empty()) {
-        m_next_deferred_insertion_is_sooner.wait_until(deferred_queue_lock, time_of_next_insertion);
-    }
-
-    while (!m_must_stop.load()) {
-
-        // keep inserting, while now() is later than the first element's
-        // insertion time and m_deferred_queue is not empty.
-        do {
-            if (m_deferred_insertion_queue.empty()) {
-                time_of_next_insertion =
-                    chrono::steady_clock::now() + chrono::duration<double>(1000);
-                break;
-            }
-            auto element_insertion_time = m_deferred_insertion_queue.begin()->first;
-            if (chrono::steady_clock::now() < element_insertion_time) {
-                time_of_next_insertion = element_insertion_time;
-                break;
-            }
-            std::unique_lock<mutex> work_items_lock(m_work_items_mutex);
-            m_work_items.push_back(m_deferred_insertion_queue.begin()->second);
-            m_work_items_dirty_condition.notify_all();
-            work_items_lock.unlock();
-            m_deferred_insertion_queue.erase(m_deferred_insertion_queue.begin());
-        }
-        while (true);
-
-        m_next_deferred_insertion_is_sooner.wait_until(deferred_queue_lock, time_of_next_insertion);
-    }
-
-    m_deferred_insertion_thread_running.store(false);
-    m_termination_condition.notify_all();
-}
-
-
-
 inline
 std::string Managed_process::obtain_swarm_directory()
 {
@@ -676,6 +581,52 @@ std::string Managed_process::obtain_swarm_directory()
     }
 
     return swarm_directory;
+}
+
+
+
+// Calls f when the specified transceiver becomes available.
+// if the transceiver is available, f is invoked immediately.
+template <typename T>
+function<void()> Managed_process::call_on_availability(Named_instance<T> transceiver, function<void()> f)
+{
+    lock_guard<mutex> lock(m_availability_mutex);
+
+    auto iid = Typed_instance_id<T>(get_instance_id(std::move(transceiver)));
+
+    //if the transceiver is available, call f and skip the queue
+    if (iid.id != invalid_instance_id) {
+        f();
+
+        // it's done - there is nothing to disable, thus returning an empty function.
+        return []() {};
+    }
+
+    tn_type tn = { get_type_id<T>(), transceiver };
+
+    // insert an empty function, in order to be able to capture the iterator within it
+    m_queued_availability_calls[tn].emplace_back();
+    auto f_it = std::prev(m_queued_availability_calls[tn].end());
+
+    // this is the abort call
+    auto ret = Adaptive_function([this, tn, f_it]() {
+        m_queued_availability_calls[tn].erase(f_it);
+        });
+
+    // and this is the actual call, which besides calling f, also neutralizes the
+    // returned abort calls and deletes its entry from the call queue.
+    *f_it = [this, f, ret, tn, f_it]() mutable {
+        f();
+
+        // neutralize abort calls. Calling abort using the function returned
+        // by call_on_availability() from now on would have no effect.
+        ret.set([]() {});
+
+        // erase the current lambda from the list
+        m_queued_availability_calls[tn].erase(f_it);
+    };
+
+    return ret;
 }
 
 

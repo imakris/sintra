@@ -80,6 +80,9 @@ void stop();
 void wait_for_stop();
 
 
+bool running();
+
+
 // Blocks the calling thread of the calling process, until at least one thread of each processes
 // in the the specified process group has called barrier().
 // If multiple threads in each process call barrier(), they will take turns matching corresponding

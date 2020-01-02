@@ -187,17 +187,7 @@ sintra::instance_id_type get_instance_id(string&& assigned_name);
 
 
 
-struct Work_loop
-{
-    thread                              m_thread;
-    atomic<bool>                        m_running;
-    condition_variable                  m_dirt;
-    mutex                               m_mutex;
-};
-
-
-
-struct Managed_process: Transceiver<Managed_process>
+struct Managed_process: Derived_transceiver<Managed_process>
 {
     Managed_process();
     ~Managed_process();
@@ -225,7 +215,7 @@ struct Managed_process: Transceiver<Managed_process>
 
     spinlocked_umap<
         instance_id_type,
-        Transceiver_base*
+        Transceiver*
     >                                   m_local_pointer_of_instance_id;
 
     // START/STOP
@@ -234,22 +224,6 @@ struct Managed_process: Transceiver<Managed_process>
     condition_variable                  m_start_stop_condition;
 
 
-    template<typename T>
-    void deferred_call(double delay, void(T::*v)());
-
-    inline
-    void deferred_call(double delay, function<void()> fn);
-
-    template<typename MANAGED_TYPE>
-    void manage(MANAGED_TYPE* v);
-
-    inline
-    void work_loop();
-
-    inline
-    void deferred_insertion_loop();
-
-//:
     Managed_process(Managed_process const&) = delete;
     void operator=(Managed_process const&)  = delete;
 
@@ -261,38 +235,7 @@ struct Managed_process: Transceiver<Managed_process>
     atomic<bool>                        m_must_stop;
     condition_variable                  m_termination_condition;
 
-    thread                              m_message_reading_thread;
-    atomic<bool>                        m_message_reading_thread_running;
-    
-
-    thread                              m_work_thread;
-    atomic<bool>                        m_work_thread_running;
-    list<function<void()> >             m_work_items;
-    condition_variable                  m_work_items_dirty_condition;
-    mutex                               m_work_items_mutex; 
-
-    thread                              m_deferred_insertion_thread;
-    atomic<bool>                        m_deferred_insertion_thread_running;
-
-    typedef std::chrono::time_point<std::chrono::steady_clock, std::chrono::duration<double> >
-        insertion_time_type;
-
-    map<insertion_time_type, function<void()> >
-                                        m_deferred_insertion_queue;
-    condition_variable                  m_next_deferred_insertion_is_sooner;
-    mutex                               m_deferred_mutex;
-
-
     bool                                m_branched = false;
-
-
-    struct user_loop
-    {
-        thread m_thread;
-        function<void()> decorated_loop; 
-        function<void()> stop; 
-    };
-    vector<user_loop>                   m_user_loops;
 
     uint64_t                            m_swarm_id;
     string                              m_directory;
@@ -317,9 +260,28 @@ struct Managed_process: Transceiver<Managed_process>
                                         m_time_instantiated;
 
     deque<Process_message_reader>       m_readers;
+
+    // This signal will be sent BEFORE the coordinator sends instance_unpublished
+    // for this process. It is meant to notify crash guards about the reason of the
+    // instance_unpublished event, which will follow shortly after.
+    SINTRA_SIGNAL(terminated_abnormally, int status);
+
+
+    spinlocked_umap<tn_type, list<function<void()>>>
+                                        m_queued_availability_calls;
+    
+    mutex                               m_availability_mutex;
+
+    // TODO: FIXME: The recursive can be easily avoided. Implement an additional
+    // activation path.
+    recursive_mutex                     m_handlers_mutex;
+
+
+    // Calls f when the specified transceiver becomes available.
+    // if the transceiver is available, f is invoked immediately.
+    template <typename T>
+    function<void()> call_on_availability(Named_instance<T> transceiver, function<void()> f);
 };
-
-
 
 } // namespace sintra
 

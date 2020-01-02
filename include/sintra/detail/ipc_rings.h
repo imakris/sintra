@@ -810,7 +810,7 @@ struct Ring_R: Ring<T, true>
         this->m_control->dirty_condition.notify_all();
     }
 
-private:
+protected:
     const size_t m_max_trailing_elements;
     sequence_counter_type m_reading_sequence = 0;
     size_t m_trailing_octile = 0;

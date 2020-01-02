@@ -32,6 +32,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "message.h"
 #include "spinlocked_containers.h"
 
+#include <functional>
 #include <list>
 #include <map>
 #include <mutex>
@@ -51,6 +52,7 @@ using std::is_reference;
 using std::list;
 using std::map;
 using std::mutex;
+using std::recursive_mutex;
 using std::remove_reference;
 using std::string;
 using std::unordered_map;
@@ -118,6 +120,50 @@ Typed_instance_id<void> make_untyped_instance_id(instance_id_type naked_instance
 
 
 
+struct tn_type
+{
+    type_id_type                            type_id = 0;
+    string                                  name;
+
+    bool operator==(const tn_type& rhs) const
+    {
+        return
+            type_id == rhs.type_id &&
+            name    == rhs.name;
+    }
+};
+
+
+} // leaving sintra namespace temporarily, to define the hasher
+
+namespace std
+{
+    template <>
+    struct hash<sintra::tn_type>
+    {
+        uint64_t operator()(const sintra::tn_type& k) const
+        {
+            uint64_t res = 17;
+            res = res * 31 + hash<sintra::type_id_type>()(k.type_id);
+            res = res * 31 + hash<string>()(k.name);
+            return res;
+        }
+    };
+}
+
+
+namespace sintra { // continue with sintra namespace
+
+
+template <typename T>
+struct Named_instance: std::string
+{
+    Named_instance(const std::string& rhs) : std::string(rhs) {}
+    Named_instance(std::string&& rhs) : std::string(std::move(rhs)) {}
+};
+
+
+
 using handler_proc_registry_mid_record_type = 
     spinlocked_umap <
         instance_id_type,                                // sender
@@ -132,14 +178,14 @@ using handler_registry_type =
     >;
 
 
-struct Transceiver_base
+struct Transceiver
 {
-    using Transceiver_type = Transceiver_base;
+    using Transceiver_type = Transceiver;
 
     template <typename = void>
-    Transceiver_base(const string& name = "", uint64_t id = 0);
+    Transceiver(const string& name = "", uint64_t id = 0);
 
-    ~Transceiver_base();
+    ~Transceiver();
 
     inline
     instance_id_type instance_id() { return m_instance_id; }
@@ -150,11 +196,11 @@ struct Transceiver_base
     template <typename = void>
     void destroy();
 
-private:
+protected:
 
-    // Used when there is no infrastructure to initialize Transceiver_base, thus the caller
+    // Used when there is no infrastructure to initialize Transceiver, thus the caller
     // (Managed_process) calls the other constructor explicitly, when construction is possible.
-    Transceiver_base(void*) {}
+    Transceiver(void*) {}
 
     template <typename = void>
     void construct(const string& name = "", uint64_t id = 0);
@@ -162,35 +208,23 @@ private:
 public:
 
 
-    SINTRA_SIGNAL_EXPLICIT(instance_invalidated, instance_id_type instance_id);
+    SINTRA_SIGNAL_EXPLICIT(instance_invalidated);
 
     inline
     void instance_invalidated_handler(const instance_invalidated& msg);
 
 
-    // this is not well defined. what is the question that this function trying to answer
-    // and why? what is the point?
-    // if there is ANY handler active for this type of message? local? remote? what?
-    //bool is_handler_active(type_id_type message_type_id);
-
-    // you have tried to activate a message handler of a message explicitly defined as local
-    // (i.e. a message that is not supposed to cross process boundaries) on a sender of a
-    // different process
-
-
-    mutex m_handlers_mutex;
-
-
-
     list<function<void()>> m_deactivators;
 
-
+    map< type_id_type, map< string, function<void()> > > m_pending_actions;
 
     using handler_deactivator = std::function<void()>;
 
-
     template<typename MESSAGE_T, typename HT>
-    handler_deactivator activate_impl(HT&& handler, instance_id_type sender_id);
+    handler_deactivator activate_impl(
+        HT&& handler,
+        instance_id_type sender_id,
+        decltype(m_deactivators)::iterator* deactivator_it_ptr = nullptr);
 
 
     // A functor with an arbitrary non-message argument
@@ -210,7 +244,8 @@ public:
     >
     handler_deactivator activate(
         const FT& internal_slot,
-        Typed_instance_id<SENDER_T> sender_id);
+        Typed_instance_id<SENDER_T> sender_id,
+        decltype(m_deactivators)::iterator* deactivator_it_ptr = nullptr);
 
 
     // A functor with a message argument
@@ -231,10 +266,11 @@ public:
     >
     handler_deactivator activate(
         const FT& internal_slot,
-        Typed_instance_id<SENDER_T> sender_id);
+        Typed_instance_id<SENDER_T> sender_id,
+        decltype(m_deactivators)::iterator* deactivator_it_ptr = nullptr);
 
 
-    // A Transceiver_base member function with a message argument. The sender has to exist.
+    // A Transceiver member function with a message argument. The sender has to exist.
     template<
         typename SENDER_T,
         typename MESSAGE_T,
@@ -243,19 +279,24 @@ public:
     >
     handler_deactivator activate(
         RT(OBJECT_T::*v)(const MESSAGE_T&), 
-        Typed_instance_id<SENDER_T> sender_id);
+        Typed_instance_id<SENDER_T> sender_id,
+        decltype(m_deactivators)::iterator* deactivator_it_ptr = nullptr);
 
 
-    // less safe convenience function
+    // Any kind of slot (member or function) will be accepted here.
+    // By default, the sender does not have to exist. If it does not exist, the
+    // Coordinator is notified, and once the conditions are met, it will send a signal
+    // back, to trigger a new activation attempt. This behaviour may be disabled,
+    // by specifying 'true' in the first template parameter.
     template<
-        typename MESSAGE_T,
-        typename OBJECT_T,
-        typename RT /* = typename MESSAGE_T::return_type*/
+        bool sender_must_exist = false,
+        typename SLOT_T,
+        typename SENDER_T
     >
-    handler_deactivator
+    handler_deactivator // unlike its overloads, this one does not return pointer
     activate(
-        RT(OBJECT_T::* v)(const MESSAGE_T&),
-        std::string sender_name);
+        const SLOT_T& rcv_slot,
+        Named_instance<SENDER_T> sender);
 
 
     template <typename = void>
@@ -457,6 +498,13 @@ public:
 
 
 #define SINTRA_RPC_IMPL(m, mfp, id)                                                             \
+    void rpc_assertion_##m() {                                                                  \
+        static_assert(std::is_same_v<                                                           \
+            std::remove_pointer_t<decltype(this)>,                                              \
+            Transceiver_type>,                                                                  \
+            "This Transceiver is not derived correctly."                                        \
+        );                                                                                      \
+    }                                                                                           \
     using m ## _mftc = RPCTC_d<decltype(mfp), mfp, id>;                                         \
     Instantiator m ## _itt = export_rpc<m ## _mftc>(mfp);                                       \
                                                                                                 \
@@ -470,7 +518,7 @@ public:
 #if 0 //defined(__GNUG__)
 
     // This is probably exploiting a bug of GCC, which circumvents the need for
-    // TRANSCEIVER_PROLOGUE(name) inside any class deriving from Transceiver_base that uses RPC.
+    // TRANSCEIVER_PROLOGUE(name) inside any class deriving from Transceiver that uses RPC.
 
     #define SINTRA_RPC(m)                                                                       \
         typedef auto otr_ ## m ## _function() -> decltype(*this);                               \
@@ -529,12 +577,22 @@ private:
     spinlocked_umap<instance_id_type, Return_handler> m_active_return_handlers;
 
 
-    handler_registry_type m_active_handlers;
-
-    instance_id_type m_instance_id = 0;
-    bool m_named = false;
+    handler_registry_type       m_active_handlers;    
+    instance_id_type            m_instance_id       = invalid_instance_id;
+    bool                        m_published         = false;
 
     spinlocked_umap<string, instance_id_type>::iterator m_cache_iterator;
+
+
+protected:
+
+    // WARNING: this will be set when the Transceiver is published.
+    // If it is not published, it will remain invalid.
+    type_id_type                m_type_id           = invalid_type_id;
+    function<void()>            initialize_type_id  = [this]()
+    {
+        m_type_id = get_type_id<Transceiver_type>();
+    };
 
 
     friend struct Managed_process;
@@ -543,14 +601,27 @@ private:
 
     template<typename>
     friend struct Typed_instance_id;
+
+    template<typename , typename>
+    friend struct Derived_transceiver;
 };
 
 
 
-template<typename Derived_T>
-struct Transceiver: Transceiver_base
+struct Empty_struct{};
+
+
+// Second or higher level inheritance (i.e. inherits from a parent
+// who is already derived from Transceiver)
+template<typename Derived_T, typename Parent=void>
+struct Derived_transceiver: Parent
 {
-    using Transceiver_base::Transceiver_base;
+    //using Transceiver::Transceiver;
+
+    Derived_transceiver():
+        base( *static_cast<Transceiver*>(static_cast<Derived_T*>(this)) )
+    {
+    }
 
     using Transceiver_type = Derived_T;
 
@@ -558,30 +629,59 @@ struct Transceiver: Transceiver_base
         typename MESSAGE_T,
         typename SENDER_T = Transceiver_type,
         typename... Args>
-    void emit_local(Args&&... args)
+        void emit_local(Args&&... args)
     {
-        Transceiver_base::send<MESSAGE_T, any_local, SENDER_T>(std::forward<Args>(args)...);
+        base.send<MESSAGE_T, any_local, SENDER_T>(std::forward<Args>(args)...);
     }
 
     template <
         typename MESSAGE_T,
         typename SENDER_T = Transceiver_type,
         typename... Args>
-    void emit_remote(Args&&... args)
+        void emit_remote(Args&&... args)
     {
-        Transceiver_base::send<MESSAGE_T, any_remote, SENDER_T>(std::forward<Args>(args)...);
+        base.send<MESSAGE_T, any_remote, SENDER_T>(std::forward<Args>(args)...);
     }
 
     template <
         typename MESSAGE_T,
         typename SENDER_T = Transceiver_type,
         typename... Args>
-    void emit_global(Args&&... args)
+        void emit_global(Args&&... args)
     {
-        Transceiver_base::send<MESSAGE_T, any_local_or_remote, SENDER_T>(std::forward<Args>(args)...);
+        base.send<MESSAGE_T, any_local_or_remote, SENDER_T>(std::forward<Args>(args)...);
     }
+
+
+    static Named_instance<Transceiver_type> named_instance(const std::string& name)
+    {
+        return name;
+    }
+
+private:
+    Transceiver& base;
+
+    // initialize the initialize_type_id
+    int itidi = ( base.initialize_type_id = [this]() {
+        base.m_type_id = get_type_id<Transceiver_type>();
+    }, 0 );
 };
 
+
+
+// First level inheritance, after Transceiver (thus has to inherit from Transceiver)
+template<typename Derived_T>
+struct Derived_transceiver<Derived_T, void>: Transceiver, Derived_transceiver<Derived_T, Empty_struct>
+{
+    using Transceiver::Transceiver;
+    using Transceiver_type = Derived_T;
+
+private:
+    // initialize the initialize_type_id
+    int itidi = ( initialize_type_id = [this]() {
+        m_type_id = get_type_id<Transceiver_type>();
+    }, 0 );
+};
 
 
 
