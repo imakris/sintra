@@ -599,7 +599,7 @@ std::string get_base_filename(const string& prefix, uint64_t id)
 }
 
 
-struct Message_ring_R: protected Ring_R<char>
+struct Message_ring_R: Ring_R<char>
 {
     Message_ring_R(const string& directory, const string& prefix, uint64_t id):
         Ring_R(directory, get_base_filename(prefix, id), message_ring_size),
@@ -646,6 +646,11 @@ struct Message_ring_R: protected Ring_R<char>
         assert(ret->magic == message_magic);
         m_range.begin += ret->bytes_to_next_message;
         return ret;
+    }
+
+    sequence_counter_type get_message_reading_sequence() const
+    {
+        return reading_sequence() - (m_range.end - m_range.begin);
     }
 
     int get_sleeping_readers() const

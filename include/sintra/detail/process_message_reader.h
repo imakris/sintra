@@ -103,6 +103,12 @@ struct Process_message_reader
     void wait_until_ready();
 
 
+    sequence_counter_type get_request_reading_sequence() const
+    { 
+        return m_in_req_c->reading_sequence();
+    }
+
+
 private:
 
     enum Status

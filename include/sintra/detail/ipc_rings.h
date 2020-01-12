@@ -503,6 +503,7 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         m_control->num_attached++;
     }
 
+
     ~Ring()
     {
         if (m_control->num_attached-- == 1) {
@@ -517,6 +518,9 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
             remove(fs::path(m_control_filename), ec);
         }
     }
+
+    
+    sequence_counter_type get_leading_sequence() const { return m_control->leading_sequence.load(); }
 
 
 private:
