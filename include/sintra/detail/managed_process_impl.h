@@ -125,11 +125,24 @@ void Process_group<T, ID>::barrier()
     // this mutex protects from matching multiple threads on the same process group's barrier
     std::lock_guard<mutex> barrier_lock(m_barrier_mutex);
 
-    if (!Coordinator::rpc_barrier(s_coord_id, id() )) {
-        // This means that another thread must have called the barrier directly as rpc.
-        // If this is not the case, then it is a bug.
-        throw std::runtime_error(
-            "The barrier was matched by multiple threads of the same process.");
+    auto flush_seq = Coordinator::rpc_barrier(s_coord_id, id());
+
+    // if the coordinator is not local, we must flush the it's channel
+    // (i.e. all messages on the coordinator's channel must be processed before proceeding further)
+    if (!s_coord) {
+
+        if (s_mproc->m_readers.front().get_request_reading_sequence() < flush_seq) {
+
+            std::unique_lock<mutex> flush_lock(s_mproc->m_flush_sequence_mutex);
+
+            s_mproc->m_flush_sequence.push_back(flush_seq);
+            while (!s_mproc->m_flush_sequence.empty() &&
+                s_mproc->m_flush_sequence.front() <= flush_seq)
+            {
+                s_mproc->m_flush_sequence_condition.wait(flush_lock);
+            }
+        }
+
     }
 }
 

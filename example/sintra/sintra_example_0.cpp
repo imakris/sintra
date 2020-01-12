@@ -24,14 +24,15 @@ using namespace sintra;
 
 int process_1()
 {
-    // This barrier ensures that the slots receiving the messages have been activated.
-    barrier();
+    barrier(); // ensures that the slots receiving the messages have been activated.
 
     // send some messages
     world() << "good morning";
     world() << 1;
     world() << "good afternoon" << "good evening" << "good night";
     world() << 2 << 3 << 4;
+
+    barrier(); // ensures that the messages have been received and processed
 
     return 0;
 }
@@ -41,17 +42,12 @@ int process_2()
 {
     auto string_slot = [] (const string& str) {
         console() << "[process 2] Received string \"" << str << "\"\n";
-
-        static int num_messages = 0;
-        if (++num_messages == 4) {
-            stop();
-        }
     };
 
     activate_slot(string_slot);
-    barrier();
 
-    wait_for_stop();
+    barrier(); // ensures that the slots receiving the messages have been activated.
+    barrier(); // ensures that the messages have been received and processed
 
     return 0;
 }
@@ -62,17 +58,12 @@ int process_3()
 {
     auto int_slot = [&] (int number) {
         console() << "[process 3] Received number " << number << "\n";
-
-        static int num_messages = 0;
-        if (++num_messages == 2) { //it will not receive them all, just 2
-            stop();
-        }
     };
 
     activate_slot(int_slot);
-    barrier();
 
-    wait_for_stop();
+    barrier(); // ensures that the slots receiving the messages have been activated.
+    barrier(); // ensures that the messages have been received and processed
 
     return 0;
 }

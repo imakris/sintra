@@ -62,7 +62,10 @@ private:
         type_id_type type_id, instance_id_type instance_id, const string& assigned_name);
     bool unpublish_transceiver(instance_id_type instance_id);
 
-    bool barrier(type_id_type process_group_id);
+    // blocks until all processes identified by process_group_id have called the function
+    // returns the leading sequence of the coordinator process' request ring when the barrier
+    // is complete.
+    sequence_counter_type barrier(type_id_type process_group_id);
     bool add_this_process_into_group(type_id_type process_group_id);
     void print(const string& str);
 
@@ -70,9 +73,10 @@ private:
 
     struct Barrier
     {
-        mutex m;
-        condition_variable cv;
-        uint32_t processes_reached = 0;
+        mutex                       m;
+        condition_variable          cv;
+        uint32_t                    processes_reached = 0;
+        sequence_counter_type       flush_sequence = 0;
     };
 
     spinlocked_umap<type_id_type, Barrier >     m_barriers;

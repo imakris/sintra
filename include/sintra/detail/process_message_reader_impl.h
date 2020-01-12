@@ -141,6 +141,17 @@ void Process_message_reader::request_reader_function()
 
     while (m_status != STOPPING) {
         s_tl_current_message = nullptr;
+
+        // if there is an interprocess barrier and m_in_req_c has reached the barrier's sequence,
+        // then the barrier is good to go.
+        while (!s_mproc->m_flush_sequence.empty() &&
+            m_in_req_c->get_message_reading_sequence() >= s_mproc->m_flush_sequence.front())
+        {
+            lock_guard<mutex> lk(s_mproc->m_flush_sequence_mutex);
+            s_mproc->m_flush_sequence.pop_front();
+            s_mproc->m_flush_sequence_condition.notify_one();
+        }
+
         Message_prefix* m = m_in_req_c->fetch_message();
 
         s_tl_current_message = m;
@@ -273,7 +284,7 @@ void Process_message_reader::request_reader_function()
 
     m_in_req_c->done_reading();
 
-    std::unique_lock<std::mutex> lk(m_req_stop_mutex);
+    std::lock_guard<std::mutex> lk(m_req_stop_mutex);
     m_req_running = false;
     m_req_stop_condition.notify_one();
 }
@@ -385,7 +396,7 @@ void Process_message_reader::local_request_reader_function()
 
     m_in_req_c->done_reading();
 
-    std::unique_lock<std::mutex> lk(m_req_stop_mutex);
+    std::lock_guard<std::mutex> lk(m_req_stop_mutex);
     m_req_running = false;
     m_req_stop_condition.notify_one();
 }
@@ -454,7 +465,7 @@ void Process_message_reader::reply_reader_function()
         }
     }
 
-    std::unique_lock<std::mutex> lk(m_rep_stop_mutex);
+    std::lock_guard<std::mutex> lk(m_rep_stop_mutex);
     m_rep_running = false;
     m_rep_stop_condition.notify_one();
 }

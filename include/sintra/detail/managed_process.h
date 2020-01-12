@@ -259,6 +259,8 @@ struct Managed_process: Derived_transceiver<Managed_process>
     std::chrono::time_point<std::chrono::system_clock>
                                         m_time_instantiated;
 
+    // if the coordinator is not local to the process, the first reader in the queue
+    // is reading the process of the coordinator.
     deque<Process_message_reader>       m_readers;
 
     // This signal will be sent BEFORE the coordinator sends instance_unpublished
@@ -281,6 +283,12 @@ struct Managed_process: Derived_transceiver<Managed_process>
     // if the transceiver is available, f is invoked immediately.
     template <typename T>
     function<void()> call_on_availability(Named_instance<T> transceiver, function<void()> f);
+
+
+    deque<sequence_counter_type>        m_flush_sequence;
+    mutex                               m_flush_sequence_mutex;
+    condition_variable                  m_flush_sequence_condition;
+
 };
 
 } // namespace sintra

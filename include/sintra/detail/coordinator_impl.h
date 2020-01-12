@@ -233,7 +233,7 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
 
 // EXPORTED FOR RPC
 inline
-bool Coordinator::barrier(type_id_type process_group_id)
+sequence_counter_type Coordinator::barrier(type_id_type process_group_id)
 {
     m_barrier_mutex.lock();
 
@@ -244,6 +244,7 @@ bool Coordinator::barrier(type_id_type process_group_id)
 
     if (++b.processes_reached == m_group_sizes[process_group_id]) {
         b.processes_reached = 0;
+        b.flush_sequence = s_mproc->m_out_req_c->get_leading_sequence();
         lock.unlock();
         b.cv.notify_all();
     }
@@ -256,7 +257,7 @@ bool Coordinator::barrier(type_id_type process_group_id)
         while (b.processes_reached);
     }
 
-    return true;
+    return b.flush_sequence;
 }
 
 
