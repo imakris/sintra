@@ -72,6 +72,10 @@ namespace detail {
         instance_unpublished, // sent by Coordinator, always before the
                               // Transceiver sends instance_invalidated
 
+        // EXPLICITLY DEFINED SIGNALS HANDLED BY COORDINATOR
+        base_of_messages_handled_by_coordinator = 0x80000000,
+        terminated_abnormally,
+
         num_reserved_type_ids
     };
 }
