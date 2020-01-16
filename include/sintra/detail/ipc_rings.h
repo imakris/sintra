@@ -687,9 +687,11 @@ struct Ring_R: Ring<T, true>
     // this reading ring will no longer block the writer
     void done_reading()
     {
-        this->m_control->read_access -= uint64_t(1) << (8 * m_trailing_octile);
-        m_reading_sequence = m_trailing_octile = 0;
-        m_reading = false;
+        if (m_reading) {
+            this->m_control->read_access -= uint64_t(1) << (8 * m_trailing_octile);
+            m_reading_sequence = m_trailing_octile = 0;
+            m_reading = false;
+        }
     }
 
 
@@ -904,7 +906,6 @@ struct Ring_W: Ring<T, false>
 
     void done_writing()
     {
-
         // update sequence
         // after the next line, any comparison of the form:
         // m_reading_sequence == m_control->leading_sequence
@@ -923,8 +924,6 @@ struct Ring_W: Ring<T, false>
         // nothing to do...
 
 #elif SINTRA_RING_READING_POLICY == SINTRA_RING_READING_POLICY_HYBRID
-
-
 
         if (this->m_control->sleeping_readers.load()) {
             ipc::scoped_lock<ipc::interprocess_mutex> lock(this->m_control->condition_mutex);
