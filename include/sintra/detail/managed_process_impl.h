@@ -452,8 +452,6 @@ void Managed_process::branch()
 
     if (s_coord) {
 
-        size_t num_initial_readers = m_readers.size();
-
         // 1. prepare the command line for each invocation
         auto it = s_branch_vector.begin();
         for (int i = 1; it != s_branch_vector.end(); it++, i++) {
