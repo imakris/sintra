@@ -46,11 +46,22 @@ namespace sintra {
 
 
 inline
-static void s_signal_handler(int /*sig*/)
+static void s_signal_handler(int sig)
 {
-    s_mproc->emit_remote<Managed_process::terminated_abnormally>(1);
-    s_mproc->stop();
-    s_mproc->destroy();
+    s_mproc->emit_remote<Managed_process::terminated_abnormally>(sig);
+
+    if (s_coord) {
+        for (auto& reader : s_mproc->m_readers) {
+            reader.force_stop_and_wait(2.);
+        }
+    }
+    else {
+        for (auto& reader : s_mproc->m_readers) {
+            reader.stop_and_abandon();
+        }
+    }
+
+    raise(sig);
 }
 
 
@@ -58,11 +69,14 @@ static void s_signal_handler(int /*sig*/)
 inline
 void install_signal_handler()
 {
+    // synchronous (traps)
     signal(SIGABRT, s_signal_handler);
     signal(SIGFPE,  s_signal_handler);
     signal(SIGILL,  s_signal_handler);
-    signal(SIGINT,  s_signal_handler);
     signal(SIGSEGV, s_signal_handler);
+
+    // asynchronous
+    signal(SIGINT, s_signal_handler);
     signal(SIGTERM, s_signal_handler);
 }
 
@@ -162,7 +176,7 @@ void Process_group<T, ID>::enroll()
 inline
 Managed_process::Managed_process():
     Derived_transceiver<Managed_process>((void*)0),
-    m_running(false),
+    m_state(STOPPED),
     m_must_stop(false),
     m_swarm_id(0),
     m_last_message_sequence(0),
@@ -193,7 +207,7 @@ Managed_process::~Managed_process()
         s_coord->wait_until_all_other_processes_are_done();
     }
 
-    assert(!m_running);
+    assert(m_state <= PAUSED); // i.e. paused or stopped
 
     // this is called explicitly, in order to inform the coordinator of the destruction early.
     // it would not be possible to communicate it after the channels were closed.
@@ -223,7 +237,7 @@ Managed_process::~Managed_process()
         remove_directory(m_directory);
     }
 
-    s_mproc    = nullptr;
+    s_mproc = nullptr;
     s_mproc_id = 0;
 }
 
@@ -401,12 +415,31 @@ Managed process options:
         // if the unpublished transceiver is the coordinator process, we have to stop.
         if (process_of(s_coord_id) == msg.instance_id) {
             stop();
+            exit(0);
         }
     };
 
-
     activate(published_handler, Typed_instance_id<Coordinator>(s_coord_id));
     activate(unpublished_handler, Typed_instance_id<Coordinator>(s_coord_id));
+
+    if (coordinator_is_local) {
+        auto cr_handler = [this](const Managed_process::terminated_abnormally& msg)
+        {
+            s_coord->unpublish_transceiver(msg.sender_instance_id);
+        };
+        activate<Managed_process>(cr_handler, any_remote);
+    }
+    else {
+        auto cr_handler = [this](const Managed_process::terminated_abnormally& msg)
+        {
+            // if the unpublished transceiver is the coordinator process, we have to stop.
+            if (process_of(s_coord_id) == msg.sender_instance_id) {
+                s_mproc->stop();
+                exit(1);
+            }
+        };
+        activate<Managed_process>(cr_handler, any_remote);
+    }
 }
 
 
@@ -419,7 +452,7 @@ void Managed_process::branch()
 
     if (s_coord) {
 
-        size_t num_initial_readers = s_mproc->m_readers.size();
+        size_t num_initial_readers = m_readers.size();
 
         // 1. prepare the command line for each invocation
         auto it = s_branch_vector.begin();
@@ -446,12 +479,13 @@ void Managed_process::branch()
             // create the readers. The next line will start the reader threads,
             // which might take some time. At this stage, we do not have to wait
             // until they are ready for messages.
-            s_mproc->m_readers.emplace_back(assigned_instance_id);
+            m_readers.emplace_back(assigned_instance_id);
         }
 
         // 2. spawn
         it = s_branch_vector.begin();
-        for (int i = 0; it != s_branch_vector.end(); it++, i++) {
+        auto readers_it = m_readers.begin();
+        for (int i = 0; it != s_branch_vector.end(); readers_it++, it++, i++) {
 
             std::vector<std::string> all_args = {it->entry.m_binary_name.c_str()};
             all_args.insert(all_args.end(), it->sintra_options.begin(), it->sintra_options.end());
@@ -465,7 +499,8 @@ void Managed_process::branch()
 
             // Before spawning the new process, we have to assure that the
             // corresponding reading threads are up and running.
-            s_mproc->m_readers[num_initial_readers+i].wait_until_ready();
+            readers_it->wait_until_ready();
+
             spawn_detached(it->entry.m_binary_name.c_str(), argv);
 
             delete [] argv;
@@ -515,25 +550,43 @@ inline
 void Managed_process::start(int(*entry_function)())
 {
     m_start_stop_mutex.lock();
-    m_running = true;
 
-    for (auto& r : m_readers) {
-        r.start();
-    }
+    m_state = RUNNING;
     m_start_stop_mutex.unlock();
 
     if (!entry_function) {
         m_entry_function();
     }
     else {
-        s_mproc->m_readers.emplace_back(s_mproc_id);
+        m_readers.emplace_back(s_mproc_id);
         m_readers.back().wait_until_ready();
         entry_function();
     }
 
-    stop();
+    pause();
 }
 
+
+
+inline
+void Managed_process::pause()
+{
+    std::lock_guard<mutex> start_stop_lock(m_start_stop_mutex);
+
+    // pause() might be called when the entry function finishes execution,
+    // explicitly from one of the handlers, or from the entry function itself.
+    // If called when the process is already paused, this should not have any
+    // side effects.
+    if (m_state <= PAUSED)
+        return;
+
+    for (auto& i : m_readers) {
+        i.pause();
+    }
+
+    m_state = PAUSED;
+    m_start_stop_condition.notify_all();
+}
 
 
 inline
@@ -541,31 +594,29 @@ void Managed_process::stop()
 {
     std::lock_guard<mutex> start_stop_lock(m_start_stop_mutex);
 
-    // stop() might be call either by start() when the entry function finishes execution,
-    // or explicitly from one of the handlers, or the entry function itself.
-    // If called when the process is already stopped, this should not cause problems.
-    if (!m_running)
+    // stop() might be called explicitly from one of the handlers, or from the
+    // entry function. If called when the process is already stopped, this
+    // should not have any side effects.
+    if (m_state == STOPPED)
         return;
 
     for (auto& i : m_readers) {
-        i.suspend();
+        i.stop_and_abandon();
     }
 
-    m_running = false;
+    m_state = STOPPED;
     m_start_stop_condition.notify_all();
 }
 
 
 
 inline
-bool Managed_process::wait_for_stop()
+void Managed_process::wait_for_stop()
 {
     std::unique_lock<mutex> start_stop_lock(m_start_stop_mutex);
-    bool running_state_at_entry = m_running;
-    while (m_running) {
+    while (m_state == RUNNING) {
         m_start_stop_condition.wait(start_stop_lock);
     }
-    return running_state_at_entry;
 }
 
 

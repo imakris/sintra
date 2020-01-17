@@ -47,6 +47,8 @@ inline
 Coordinator::Coordinator():
     Derived_transceiver<Coordinator>("", make_instance_id())
 {
+    // Leave it empty. The coordinator is constructed within the Mnanaged_process
+    // constructor, while still building the basic infrastructure.
 }
 
 
@@ -221,6 +223,17 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
                 m_group_sizes[group]--;
             }
             m_groups_of_process.erase(groups_it);
+        }
+
+        // and finally, if the process was being read, stop reading from it
+        // [ remove_if cannot be used here, 'operator =' is not available ]
+        auto it = std::find_if(s_mproc->m_readers.begin(), s_mproc->m_readers.end(),
+            [&](const Process_message_reader& reader) {
+                return reader.get_process_instance_id() == process_iid;
+            }
+        );
+        if (it != s_mproc->m_readers.end()) {
+            it->stop_and_abandon();
         }
     }
 

@@ -195,9 +195,22 @@ struct Managed_process: Derived_transceiver<Managed_process>
     void init(int argc, char* argv[]);
     void branch();
 
+    // Starts the readers and calls the supplied function on its own thread.
+    // If the supplied function returns, the function will pause() (see below)
+    // Calling start when the process is paused (possibly with a different
+    // function) will resume the execution.
     void start(int(*entry_function)() = nullptr);
+
+    // Pauses the process. When called, the readers threads will keep running,
+    // but in a mode where only messages originating from the coordinator are
+    // processed.
+    void pause();
+
+    // Stops the readers and causes their threads to exit.
     void stop();
-    bool wait_for_stop();
+
+
+    void wait_for_stop();
 
 
     Message_ring_W*                     m_out_req_c = nullptr;
@@ -219,7 +232,15 @@ struct Managed_process: Derived_transceiver<Managed_process>
     >                                   m_local_pointer_of_instance_id;
 
     // START/STOP
-    bool                                m_running;
+
+    enum State
+    {
+        STOPPED, // ring threads have been stopped
+        PAUSED,  // rings answer to COORDINATOR_ONLY
+        RUNNING  // rings in FULL_FUNCTIONALITY
+    };
+
+    State                               m_state;
     mutex                               m_start_stop_mutex;
     condition_variable                  m_start_stop_condition;
 
@@ -259,14 +280,14 @@ struct Managed_process: Derived_transceiver<Managed_process>
     std::chrono::time_point<std::chrono::system_clock>
                                         m_time_instantiated;
 
-    // if the coordinator is not local to the process, the first reader in the queue
-    // is reading the process of the coordinator.
-    deque<Process_message_reader>       m_readers;
+    // if the coordinator is not local to the process, the first reader in the list
+    // will be reading the process of the coordinator.
+    list<Process_message_reader>        m_readers;
 
     // This signal will be sent BEFORE the coordinator sends instance_unpublished
     // for this process. It is meant to notify crash guards about the reason of the
     // instance_unpublished event, which will follow shortly after.
-    SINTRA_SIGNAL(terminated_abnormally, int status);
+    SINTRA_SIGNAL_EXPLICIT(terminated_abnormally, int status);
 
 
     spinlocked_umap<tn_type, list<function<void()>>>
@@ -289,6 +310,7 @@ struct Managed_process: Derived_transceiver<Managed_process>
     mutex                               m_flush_sequence_mutex;
     condition_variable                  m_flush_sequence_condition;
 
+    handler_registry_type               m_active_handlers;
 };
 
 } // namespace sintra

@@ -577,7 +577,6 @@ private:
     spinlocked_umap<instance_id_type, Return_handler> m_active_return_handlers;
 
 
-    handler_registry_type       m_active_handlers;    
     instance_id_type            m_instance_id       = invalid_instance_id;
     bool                        m_published         = false;
 
