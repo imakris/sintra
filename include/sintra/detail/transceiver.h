@@ -660,10 +660,14 @@ struct Derived_transceiver: Parent
 private:
     Transceiver& base;
 
-    // initialize the initialize_type_id
-    int itidi = ( base.initialize_type_id = [this]() {
-        base.m_type_id = get_type_id<Transceiver_type>();
-    }, 0 );
+    int type_initializer()
+    {
+        base.initialize_type_id = [this]() {
+            base.m_type_id = get_type_id<Transceiver_type>();
+        };
+        return 0;
+    }
+    int itidi = type_initializer(); // initialize the initialize_type_id
 };
 
 
@@ -676,10 +680,15 @@ struct Derived_transceiver<Derived_T, void>: Transceiver, Derived_transceiver<De
     using Transceiver_type = Derived_T;
 
 private:
-    // initialize the initialize_type_id
-    int itidi = ( initialize_type_id = [this]() {
-        m_type_id = get_type_id<Transceiver_type>();
-    }, 0 );
+
+    int type_initializer()
+    {
+        initialize_type_id = [this]() {
+            m_type_id = get_type_id<Transceiver_type>();
+        };
+        return 0;
+    }
+    int itidi = type_initializer(); // initialize the initialize_type_id
 };
 
 
