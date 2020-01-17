@@ -71,9 +71,15 @@ struct Process_message_reader
     ~Process_message_reader();
 
 
-    void start()    { m_status = FULL_FUNCTIONALITY;    }
-    void stop()     { m_status = STOPPING;              }
-    void suspend()  { m_status = COORDINATOR_ONLY;      }
+    void pause() { m_state = COORDINATOR_ONLY; }
+
+
+    inline
+    bool force_stop_and_wait(double waiting_period);  // waiting period in seconds
+
+
+    inline
+    void stop_and_abandon();
 
 
     // This implementation of the following functions assumes the following:
@@ -103,6 +109,11 @@ struct Process_message_reader
     void wait_until_ready();
 
 
+    instance_id_type get_process_instance_id() const
+    {
+        return m_process_instance_id;
+    }
+
     sequence_counter_type get_request_reading_sequence() const
     { 
         return m_in_req_c->reading_sequence();
@@ -111,30 +122,28 @@ struct Process_message_reader
 
 private:
 
-    enum Status
+    enum State
     {
         FULL_FUNCTIONALITY,
         COORDINATOR_ONLY,
         STOPPING
     };
 
-    atomic<Status>          m_status;
+    atomic<State>           m_state                 = FULL_FUNCTIONALITY;
 
     instance_id_type        m_process_instance_id;
 
-    Message_ring_R*         m_in_req_c;
-    Message_ring_R*         m_in_rep_c;
+    Message_ring_R*         m_in_req_c              = nullptr;
+    Message_ring_R*         m_in_rep_c              = nullptr;
 
-    thread*                 m_request_reader_thread;
-    thread*                 m_reply_reader_thread;
+    thread*                 m_request_reader_thread = nullptr;
+    thread*                 m_reply_reader_thread   = nullptr;
     
-    atomic<bool>            m_req_running;
-    mutex                   m_req_stop_mutex;
-    condition_variable      m_req_stop_condition;
+    atomic<bool>            m_req_running           = false;
+    atomic<bool>            m_rep_running           = false;
+    mutex                   m_stop_mutex;
+    condition_variable      m_stop_condition;
 
-    atomic<bool>            m_rep_running;
-    mutex                   m_rep_stop_mutex;
-    condition_variable      m_rep_stop_condition;
 
 };
 

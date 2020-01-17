@@ -124,9 +124,13 @@ void Transceiver::destroy()
 
     if (m_published) {
 
-        auto success = Coordinator::rpc_unpublish_transceiver(s_coord_id, m_instance_id);
-        // TODO: FIXME: there is no implementation to handle failure
-        assert(success);
+        // If the message ring threads are not running, attempting rpc would deadlock,
+        // which must be prevented. This is a likely scenario on an emergency exit.
+        if (s_mproc->m_state >= Managed_process::PAUSED) {
+            auto success = Coordinator::rpc_unpublish_transceiver(s_coord_id, m_instance_id);
+            // TODO: FIXME: there is still no implementation to handle failure
+            assert(success);
+        }
 
         m_published = false;
 

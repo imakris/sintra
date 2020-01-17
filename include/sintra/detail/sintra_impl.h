@@ -100,7 +100,7 @@ void stop()
 inline
 bool running()
 {
-    return s_mproc->m_running;
+    return s_mproc->m_state == Managed_process::RUNNING;
 }
 
 

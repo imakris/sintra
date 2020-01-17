@@ -38,18 +38,21 @@ using std::thread;
 
 inline
 Process_message_reader::Process_message_reader(instance_id_type process_instance_id):
-    m_status(FULL_FUNCTIONALITY),
+    m_state(FULL_FUNCTIONALITY),
     m_process_instance_id(process_instance_id)
 {
     if (is_local_instance(m_process_instance_id)) {
         m_in_req_c = new Message_ring_R(s_mproc->m_directory, "req", m_process_instance_id);
         m_request_reader_thread = new thread([&] () { local_request_reader_function(); });
+        m_request_reader_thread->detach();
     }
     else {
         m_in_req_c = new Message_ring_R(s_mproc->m_directory, "req", m_process_instance_id);
         m_in_rep_c = new Message_ring_R(s_mproc->m_directory, "rep", m_process_instance_id);
         m_request_reader_thread = new thread([&] () { request_reader_function(); });
+        m_request_reader_thread->detach();
         m_reply_reader_thread   = new thread([&] () { reply_reader_function();   });
+        m_reply_reader_thread->detach();
     }
 }
 
@@ -66,59 +69,49 @@ void Process_message_reader::wait_until_ready()
 
 
 inline
+void Process_message_reader::stop_and_abandon()
+{
+    m_state = STOPPING;
+    m_in_req_c->done_reading();
+
+    if (!is_local_instance(m_process_instance_id)) {
+        m_in_rep_c->done_reading();
+    }
+}
+
+
+inline
+bool Process_message_reader::force_stop_and_wait(double waiting_period)
+{
+    std::unique_lock<std::mutex> lk(m_stop_mutex);
+    m_state = STOPPING;
+    m_in_req_c->unblock();
+
+    if (!is_local_instance(m_process_instance_id)) {
+        m_in_rep_c->unblock();
+    }
+
+    auto predicate = [&] {return !m_req_running && !m_rep_running; };
+    m_stop_condition.wait_for(lk, std::chrono::duration<double>(waiting_period), predicate);
+
+    return !(m_req_running || m_rep_running);
+}
+
+
+inline
 Process_message_reader::~Process_message_reader()
 {
-    using namespace std::chrono;
-
-    if (is_local_instance(m_process_instance_id)) {
-        std::unique_lock<std::mutex> lk(m_req_stop_mutex);
-        stop();
-        m_in_req_c->unblock();
-        auto req_predicate = [&] {return m_req_running == false;};
-        m_req_stop_condition.wait_for(lk, duration<double>(2.), req_predicate);
-
-        if (m_req_running == false) {
-            m_request_reader_thread->join();
-        }
-        else {
-            // wait_for timed out. To avoid hanging, on an attempt to join, we exit.
-            exit(1);
-        }
-
-        delete m_request_reader_thread;
-        delete m_in_req_c;
+    if (!force_stop_and_wait(2.)) {
+        // 'wait_for' timed out. To avoid hanging, we exit.
+        exit(1);
     }
-    else {
-        std::unique_lock<std::mutex> lk1(m_req_stop_mutex);
-        std::unique_lock<std::mutex> lk2(m_rep_stop_mutex);
-        stop();
-        m_in_req_c->unblock();
-        m_in_rep_c->unblock();
-        auto req_predicate = [&]{return m_req_running == false;};
-        m_req_stop_condition.wait_for(lk1, duration<double>(2.), req_predicate);
-        auto rep_predicate = [&]{return m_rep_running == false;};
-        m_rep_stop_condition.wait_for(lk2, duration<double>(2.), rep_predicate);
 
-        if (m_req_running == false) {
-            m_request_reader_thread->join();
-        }
-        else {
-            // wait_for timed out. To avoid hanging, on an attempt to join, we exit.
-            exit(1);
-        }
+    delete m_request_reader_thread;
+    delete m_in_req_c;
 
-        if (m_rep_running == false) {
-            m_reply_reader_thread->join();
-        }
-        else {
-            // wait_for timed out. To avoid hanging, on an attempt to join, we exit.
-            exit(1);
-        }
-
+    if (!is_local_instance(m_process_instance_id)) {
         delete m_reply_reader_thread;
-        delete m_request_reader_thread;
         delete m_in_rep_c;
-        delete m_in_req_c;
     }
 }
 
@@ -139,7 +132,7 @@ void Process_message_reader::request_reader_function()
 
     m_req_running = true;
 
-    while (m_status != STOPPING) {
+    while (m_state != STOPPING) {
         s_tl_current_message = nullptr;
 
         // if there is an interprocess barrier and m_in_req_c has reached the barrier's sequence,
@@ -190,7 +183,7 @@ void Process_message_reader::request_reader_function()
 
         if (is_local_instance(m->receiver_instance_id)) {
 
-            if (m_status == FULL_FUNCTIONALITY) {
+            if (m_state == FULL_FUNCTIONALITY) {
                 auto it = s_mproc->m_local_pointer_of_instance_id.find(m->receiver_instance_id);
 
                 // If addressed to a specified local receiver, this may only be an RPC call,
@@ -235,7 +228,9 @@ void Process_message_reader::request_reader_function()
 
             // this is an interprocess event message.
 
-            if (m_status == FULL_FUNCTIONALITY) {
+            if ((m_state == FULL_FUNCTIONALITY) ||
+                (s_coord && m->message_type_id > detail::base_of_messages_handled_by_coordinator))
+            {
 
                 lock_guard<recursive_mutex> sl(s_mproc->m_handlers_mutex);
                     
@@ -244,7 +239,6 @@ void Process_message_reader::request_reader_function()
                 auto it_mt = s_mproc->m_active_handlers.find(m->message_type_id);
                 if (it_mt != s_mproc->m_active_handlers.end()) {
 
-                    
                     instance_id_type sids[] = {
                         m->sender_instance_id,
                         any_remote,
@@ -259,7 +253,6 @@ void Process_message_reader::request_reader_function()
                             }
                         }
                     }
-
                 }
             }
 
@@ -284,9 +277,16 @@ void Process_message_reader::request_reader_function()
 
     m_in_req_c->done_reading();
 
-    std::lock_guard<std::mutex> lk(m_req_stop_mutex);
+    std::lock_guard<std::mutex> lk(m_stop_mutex);
     m_req_running = false;
-    m_req_stop_condition.notify_one();
+    m_stop_condition.notify_one();
+
+    if (m_in_rep_c) {
+        // There will be no further requests, thus no need to read for replies either.
+        // If we are here, the reader's state is STOPPING and there cannot be a pending
+        // reply, thus the reply ring must be manually unblocked.
+        m_in_rep_c->unblock();
+    }
 }
 
 
@@ -307,7 +307,7 @@ void Process_message_reader::local_request_reader_function()
 
     m_req_running = true;
 
-    while (m_status != STOPPING) {
+    while (m_state != STOPPING) {
         s_tl_current_message = nullptr;
         Message_prefix* m = m_in_req_c->fetch_message();
 
@@ -366,7 +366,7 @@ void Process_message_reader::local_request_reader_function()
         {
             // this is an event message.
 
-            if (m_status == FULL_FUNCTIONALITY) {
+            if (m_state == FULL_FUNCTIONALITY) {
                 
                 lock_guard<recursive_mutex> sl(s_mproc->m_handlers_mutex);
 
@@ -396,9 +396,9 @@ void Process_message_reader::local_request_reader_function()
 
     m_in_req_c->done_reading();
 
-    std::lock_guard<std::mutex> lk(m_req_stop_mutex);
+    std::lock_guard<std::mutex> lk(m_stop_mutex);
     m_req_running = false;
-    m_req_stop_condition.notify_one();
+    m_stop_condition.notify_one();
 }
 
 
@@ -410,7 +410,7 @@ void Process_message_reader::reply_reader_function()
 
     m_rep_running = true;
 
-    while (m_status != STOPPING) {
+    while (m_state != STOPPING) {
         s_tl_current_message = nullptr;
         Message_prefix* m = m_in_rep_c->fetch_message();
         s_tl_current_message = m;
@@ -429,7 +429,7 @@ void Process_message_reader::reply_reader_function()
 
         if (is_local_instance(m->receiver_instance_id)) {
 
-            if ((m_status == FULL_FUNCTIONALITY) ||
+            if ((m_state == FULL_FUNCTIONALITY) ||
                 (m->receiver_instance_id == s_coord_id && s_coord) ||
                 (m->sender_instance_id   == s_coord_id) )
             {
@@ -465,9 +465,9 @@ void Process_message_reader::reply_reader_function()
         }
     }
 
-    std::lock_guard<std::mutex> lk(m_rep_stop_mutex);
+    std::lock_guard<std::mutex> lk(m_stop_mutex);
     m_rep_running = false;
-    m_rep_stop_condition.notify_one();
+    m_stop_condition.notify_one();
 }
 
 
