@@ -31,19 +31,19 @@ namespace sintra {
 
 
 template<typename RT, typename OBJECT_T, typename... Args>
-constexpr static RT resolve_rt(RT(OBJECT_T::*v)(Args...)) {  }
+constexpr static RT resolve_rt(RT(OBJECT_T::*)(Args...)) {  }
 
 
 template<typename RT, typename OBJECT_T, typename... Args>
-constexpr static OBJECT_T resolve_object_type(RT(OBJECT_T::*v)(Args...)) {  }
+constexpr static OBJECT_T resolve_object_type(RT(OBJECT_T::*)(Args...)) {  }
 
 
 template<typename RT, typename OBJECT_T, typename... Args>
-constexpr static RT resolve_rt(RT(OBJECT_T::*v)(Args...) const) {  }
+constexpr static RT resolve_rt(RT(OBJECT_T::*)(Args...) const) {  }
 
 
 template<typename RT, typename OBJECT_T, typename... Args>
-constexpr static OBJECT_T resolve_object_type(RT(OBJECT_T::*v)(Args...) const) {  }
+constexpr static OBJECT_T resolve_object_type(RT(OBJECT_T::*)(Args...) const) {  }
 
 
 template<
@@ -52,7 +52,7 @@ template<
     typename OBJECT_T,
     typename... Args
 >
-constexpr static TYPE_CONTAINER<Args...> resolve_args(RT(OBJECT_T::*v)(Args...)) {  }
+constexpr static TYPE_CONTAINER<Args...> resolve_args(RT(OBJECT_T::*)(Args...)) {  }
 
 
 template<
@@ -61,7 +61,7 @@ template<
     typename OBJECT_T,
     typename... Args
 >
-constexpr static TYPE_CONTAINER<Args...> resolve_args(RT(OBJECT_T::*v)(Args...) const) {  }
+constexpr static TYPE_CONTAINER<Args...> resolve_args(RT(OBJECT_T::*)(Args...) const) {  }
 
 
 template<
@@ -69,32 +69,32 @@ template<
     typename RT,
     typename... Args
 >
-constexpr static TYPE_CONTAINER<Args...> resolve_args(RT(*v)(Args...)) {  }
+constexpr static TYPE_CONTAINER<Args...> resolve_args(RT(*)(Args...)) {  }
 
 
 template<typename RT, typename OBJECT_T, typename ARG_T>
-constexpr static ARG_T resolve_single_arg(RT(OBJECT_T::*v)(const ARG_T&) const) {  }
+constexpr static ARG_T resolve_single_arg(RT(OBJECT_T::*)(const ARG_T&) const) {  }
 
 
 template<typename RT, typename OBJECT_T, typename ARG_T>
-constexpr static ARG_T resolve_single_arg(RT(OBJECT_T::*v)(ARG_T) const) {  }
+constexpr static ARG_T resolve_single_arg(RT(OBJECT_T::*)(ARG_T) const) {  }
 
 
 template<typename RT, typename ARG_T>
-constexpr static ARG_T resolve_single_arg(RT(*v)(ARG_T)) {  }
+constexpr static ARG_T resolve_single_arg(RT(*)(ARG_T)) {  }
 
 
 template <typename LAMBDA_T>
 constexpr static decltype(resolve_single_arg(&LAMBDA_T::operator()))
-resolve_single_functor_arg(const LAMBDA_T& lt) {}
+resolve_single_functor_arg(const LAMBDA_T&) {}
 
 
 template<typename VAR_T, typename OBJECT_T>
-constexpr static VAR_T resolve_var_type(VAR_T OBJECT_T::*v) {}
+constexpr static VAR_T resolve_var_type(VAR_T OBJECT_T::*) {}
 
 
 template<typename VAR_T, typename OBJECT_T>
-constexpr static OBJECT_T resolve_object_type(VAR_T OBJECT_T::*v) {}
+constexpr static OBJECT_T resolve_object_type(VAR_T OBJECT_T::*) {}
 
 } // namespace sintra
 
