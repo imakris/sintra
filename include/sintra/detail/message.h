@@ -606,7 +606,6 @@ struct Message_ring_R: Ring_R<char>
         m_id(id)
     {}
 
-    using Ring_R::unblock;
 
     void done_reading()
     {
@@ -621,7 +620,7 @@ struct Message_ring_R: Ring_R<char>
         // if all the messages in the reading buffer have been read
         if (m_range.begin == m_range.end) {
             // if this is not an uninitialised state
-            if (m_range.begin) {
+            if (m_reading) {
                 // finalise the reading
                 done_reading_new_data();
             }
@@ -653,16 +652,12 @@ struct Message_ring_R: Ring_R<char>
         return reading_sequence() - (m_range.end - m_range.begin);
     }
 
-    int get_sleeping_readers() const
-    {
-        return m_control->sleeping_readers.load();
-    }
 
 public:
-    const uint64_t m_id;
+    const uint64_t  m_id;
 
 protected:
-    Range<char> m_range;
+    Range<char>     m_range;
 };
 
 

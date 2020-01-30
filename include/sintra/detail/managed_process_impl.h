@@ -50,15 +50,8 @@ static void s_signal_handler(int sig)
 {
     s_mproc->emit_remote<Managed_process::terminated_abnormally>(sig);
 
-    if (s_coord) {
-        for (auto& reader : s_mproc->m_readers) {
-            reader.force_stop_and_wait(2.);
-        }
-    }
-    else {
-        for (auto& reader : s_mproc->m_readers) {
-            reader.stop_and_abandon();
-        }
+    for (auto& reader : s_mproc->m_readers) {
+        reader.stop_and_wait(2.);
     }
 
     raise(sig);
@@ -141,14 +134,12 @@ void Process_group<T, ID>::barrier()
 
     auto flush_seq = Coordinator::rpc_barrier(s_coord_id, id());
 
-    // if the coordinator is not local, we must flush the it's channel
+    // if the coordinator is not local, we must flush its channel
     // (i.e. all messages on the coordinator's channel must be processed before proceeding further)
     if (!s_coord) {
-
-        if (s_mproc->m_readers.front().get_request_reading_sequence() < flush_seq) {
-
+        auto rs = s_mproc->m_readers.front().get_request_reading_sequence();
+        if (rs < flush_seq) {
             std::unique_lock<mutex> flush_lock(s_mproc->m_flush_sequence_mutex);
-
             s_mproc->m_flush_sequence.push_back(flush_seq);
             while (!s_mproc->m_flush_sequence.empty() &&
                 s_mproc->m_flush_sequence.front() <= flush_seq)
@@ -156,7 +147,6 @@ void Process_group<T, ID>::barrier()
                 s_mproc->m_flush_sequence_condition.wait(flush_lock);
             }
         }
-
     }
 }
 
@@ -203,8 +193,10 @@ Managed_process::Managed_process():
 inline
 Managed_process::~Managed_process()
 {
+    // the coordinating process will be removing its readers whenever
+    // they are unpublished - when they are all done, the process may exit
     if (s_coord) {
-        s_coord->wait_until_all_other_processes_are_done();
+        wait_until_all_readers_are_done();
     }
 
     assert(m_state <= PAUSED); // i.e. paused or stopped
@@ -423,14 +415,14 @@ Managed process options:
     activate(unpublished_handler, Typed_instance_id<Coordinator>(s_coord_id));
 
     if (coordinator_is_local) {
-        auto cr_handler = [this](const Managed_process::terminated_abnormally& msg)
+        auto cr_handler = [](const Managed_process::terminated_abnormally& msg)
         {
             s_coord->unpublish_transceiver(msg.sender_instance_id);
         };
         activate<Managed_process>(cr_handler, any_remote);
     }
     else {
-        auto cr_handler = [this](const Managed_process::terminated_abnormally& msg)
+        auto cr_handler = [](const Managed_process::terminated_abnormally& msg)
         {
             // if the unpublished transceiver is the coordinator process, we have to stop.
             if (process_of(s_coord_id) == msg.sender_instance_id) {
@@ -526,9 +518,10 @@ void Managed_process::branch()
         process_group_membership<Externally_coordinated>() = true;
     }
 
-
     m_branched = true;
 
+    // assign_name requires that all processes are instantiated, in order
+    // to receive the instance_published event
     All_processes::barrier();
 
     assign_name(std::string("sintra_process_") + to_string(m_pid));
@@ -599,7 +592,7 @@ void Managed_process::stop()
         return;
 
     for (auto& i : m_readers) {
-        i.stop_and_abandon();
+        i.stop_nowait();
     }
 
     m_state = STOPPED;
@@ -689,6 +682,16 @@ function<void()> Managed_process::call_on_availability(Named_instance<T> transce
     };
 
     return ret;
+}
+
+
+inline
+void Managed_process::wait_until_all_readers_are_done()
+{
+    unique_lock<mutex> lock(m_num_active_readers_mutex);
+    while (m_num_active_readers != 0) {
+        m_num_active_readers_condition.wait(lock);
+    }
 }
 
 

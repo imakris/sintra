@@ -64,6 +64,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 namespace sintra {
 
 
+using std::atomic_flag;
 using std::condition_variable;
 using std::deque;
 using std::function;
@@ -284,11 +285,15 @@ struct Managed_process: Derived_transceiver<Managed_process>
     // will be reading the process of the coordinator.
     list<Process_message_reader>        m_readers;
 
+    int                                 m_num_active_readers = 0;
+    mutex                               m_num_active_readers_mutex;
+    condition_variable                  m_num_active_readers_condition;
+    void wait_until_all_readers_are_done();
+
     // This signal will be sent BEFORE the coordinator sends instance_unpublished
     // for this process. It is meant to notify crash guards about the reason of the
     // instance_unpublished event, which will follow shortly after.
     SINTRA_SIGNAL_EXPLICIT(terminated_abnormally, int status);
-
 
     spinlocked_umap<tn_type, list<function<void()>>>
                                         m_queued_availability_calls;
@@ -298,7 +303,6 @@ struct Managed_process: Derived_transceiver<Managed_process>
     // TODO: FIXME: The recursive can be easily avoided. Implement an additional
     // activation path.
     recursive_mutex                     m_handlers_mutex;
-
 
     // Calls f when the specified transceiver becomes available.
     // if the transceiver is available, f is invoked immediately.
@@ -312,6 +316,7 @@ struct Managed_process: Derived_transceiver<Managed_process>
 
     handler_registry_type               m_active_handlers;
 };
+
 
 } // namespace sintra
 
