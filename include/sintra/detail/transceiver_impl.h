@@ -355,18 +355,7 @@ Transceiver::activate(
     const SLOT_T& rcv_slot,
     Named_instance<SENDER_T> sender)
 {
-    auto iid = Typed_instance_id<SENDER_T>(get_instance_id(std::move(sender)));
-   
-    //obtain activation lock
-
-    lock_guard<recursive_mutex> sl(s_mproc->m_handlers_mutex);
-
-    /*
-    //if the transceiver is available, activate
-    if (iid.id != invalid_instance_id) {
-        return activate(rcv_slot, iid);   // successful activation
-    }
-    */
+    lock_guard<recursive_mutex> sl(s_mproc->m_handlers_mutex); //obtain activation lock
 
     // make an entry in the deactivators list first - it must be captured below
     m_deactivators.emplace_back();
@@ -575,14 +564,13 @@ template <
 typename RPCTC::r_type
 Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
 {
-    if (is_local_instance(instance_id))
-    {
+    if (is_local_instance(instance_id)) {
         // if the instance is local, then it has already been registered in the instance_map
         // of this particular type. this will only find the object and call it.
         auto it = get_instance_to_object_map<RPCTC>().find(instance_id);
         assert(it != get_instance_to_object_map<RPCTC>().end());
         return (it->second->*RPCTC::mf())(args...);
-    }
+    }    
 
     using return_type = typename MESSAGE_T::return_type;
     using return_message_type = Message<Enclosure<return_type>, void, not_defined_type_id>;
@@ -644,7 +632,7 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
     s_mproc->deactivate_return_handler(function_instance_id);
 
     if (!success) {
-        // until an abort mechanism is implemented, this is unreachable.
+        // This should be unreachable, until an abort mechanism is implemented.
         throw runtime_error("RPC failed");
     }
 
