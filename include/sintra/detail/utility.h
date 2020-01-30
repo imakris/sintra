@@ -32,6 +32,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <stdexcept>
 #include <string>
 #include <unordered_set>
+#include <chrono>
 
 
 #ifdef _WIN32
@@ -123,14 +124,18 @@ bool spawn_detached(const char* prog, const char **argv)
         pipe2(ready_pipe, O_CLOEXEC);
 
         pid_t grandchild_pid = fork();
+
         if (grandchild_pid == 0) {
             IGNORE_SIGPIPE
             close(ready_pipe[0]);
 
             // copy argv, to be no longer dependent on pages that have not been copied yet
             auto prog_copy = strdup(prog);
-            auto argv_copy = (const char **)strdup((char*)argv);
-            for (size_t i = 0; argv[i] != 0; i++) {
+            int argc = 0;
+            while (argv[argc]) { argc++; }
+            auto argv_copy = new char* [argc+1]; // +1 for null terminator
+            argv_copy[argc] = nullptr;
+            for (int i = 0; i < argc; i++) {
                 argv_copy[i] = strdup(argv[i]);
             }
 
@@ -138,7 +143,13 @@ bool spawn_detached(const char* prog, const char **argv)
             write(ready_pipe[1], &rv, sizeof(int));                     // read in (1)
 
             // proceed with the new program
-            ::execv(prog, (char* const*)argv);
+            ::execv(prog_copy, (char* const*)argv_copy);
+
+            free(prog_copy);
+            for (int i = 0; i < argc; i++) {
+                free(argv_copy[i]);
+            }
+            delete[] argv_copy;
 
             // execv failed
             rv = -1;
@@ -195,6 +206,10 @@ struct Instantiator
 
     std::function<void()> m_deinstantiator;
 };
+
+
+
+#define SINTRA_TEST_DELAY(ms)  std::this_thread::sleep_for(std::chrono::milliseconds(ms));
 
 
 
