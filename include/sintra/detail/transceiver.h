@@ -216,8 +216,6 @@ public:
 
     list<function<void()>> m_deactivators;
 
-    map< type_id_type, map< string, function<void()> > > m_pending_actions;
-
     using handler_deactivator = std::function<void()>;
 
     template<typename MESSAGE_T, typename HT>
