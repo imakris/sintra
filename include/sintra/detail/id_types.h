@@ -142,8 +142,10 @@ uint64_t flag_most_significant_bits(uint64_t v)
 constexpr uint64_t pid_mask =
     flag_most_significant_bits(uint64_t(1) << num_transceiver_index_bits);
 
-constexpr uint64_t max_process_index = (1ull << (num_process_index_bits - 1)) - 1;
-constexpr uint64_t max_transceiver_index = (1ull << (num_transceiver_index_bits - 1)) - 1;
+static_assert(num_process_index_bits < 16);
+constexpr int max_process_index =       int(uint64_t(1) << (num_process_index_bits     - 1)) - 1;
+
+constexpr uint64_t max_transceiver_index = (uint64_t(1) << (num_transceiver_index_bits - 1)) - 1;
 
 constexpr uint64_t all_remote_processess_wildcard = (max_process_index << 1);
 constexpr uint64_t all_processes_wildcard = all_remote_processess_wildcard | 1;
