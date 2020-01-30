@@ -30,9 +30,10 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 // Ring reading policies
 // =====================
 
-// Reading will go to sleep if there is nothing to read. This means that the loop will
-// be driven by a condition variable and an interprocess mutex, which may have some impact
-// in performance.
+// The reading thread will yield if there is nothing to read. This means that the loop will
+// be driven by OS-level interprocess synchronization, which may have some impact
+// in performance. However, in single-processor systems, this policy will perform much
+// better than the others.
 
 #define SINTRA_RING_READING_POLICY_ALWAYS_SLEEP     0
 
@@ -63,8 +64,9 @@ namespace sintra {
     // the second the transceiver in the process. This variable configures the number of bits
     // allocated to the process index part and consequently the number of bits of transceiver
     // part as well.
+    // NOTE: This value affects the size of Ring::Control exponentially.
     // see definition of instance_id_type
-    constexpr int       num_process_index_bits              = 10;
+    constexpr int       num_process_index_bits              = 8;
 
     // The reason for setting such restriction is that the coordinator has to keep track of all
     // globally visible (public) transceivers. If a process is misbehaving and allocates public
@@ -78,7 +80,7 @@ namespace sintra {
     // This is a time value in seconds that the hybrid reading policy algorithm will try to approach
     // while spinning.
     // If any policy other than SINTRA_RING_READING_POLICY_HYBRID is used, the value is irrelevant.
-    constexpr double    spin_before_sleep                   = 1.;   // secs
+    constexpr double    spin_before_sleep                   = 0.01;   // secs
 }
 
 
