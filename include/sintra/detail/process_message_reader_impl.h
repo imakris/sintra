@@ -36,6 +36,10 @@ namespace sintra {
 using std::thread;
 
 
+inline bool thread_local tl_is_req_thread = false;
+inline function<void()> thread_local tl_post_handler_function = nullptr;
+
+
 inline
 Process_message_reader::Process_message_reader(instance_id_type process_instance_id):
     m_state(FULL_FUNCTIONALITY),
@@ -60,39 +64,56 @@ Process_message_reader::Process_message_reader(instance_id_type process_instance
 inline
 void Process_message_reader::wait_until_ready()
 {
-    while (!m_in_req_c->get_sleeping_readers()) {}
+    while (!m_req_running) {}
 
     if (!is_local_instance(m_process_instance_id)) {
-        while (!m_in_rep_c->get_sleeping_readers()) {}
+        while (!m_rep_running) {}
     }
 }
 
 
 inline
-void Process_message_reader::stop_and_abandon()
-{
+void Process_message_reader::stop_nowait()
+{    
     m_state = STOPPING;
     m_in_req_c->done_reading();
+    m_in_req_c->unblock_local();
 
-    if (!is_local_instance(m_process_instance_id)) {
-        m_in_rep_c->done_reading();
+    // The purpose of the lambda below is the following scenario:
+    // 1. This function is called from a handler, thus from within the request
+    //    reading function.
+    // 2. The very same handler also calls some RPC, whose reply is sent through
+    //    the reply ring, in the corresponding thread.
+    // If we force the reply ring to exit, there will be no ring to get the
+    // reply from, leading to a deadlock. Thus if the function is determined
+    // to be called from within the request reading thread, forcing the reply
+    // reading thread to exit will happen only after the request reading loop
+    // exits.
+    auto force_exit_reply_ring = [this]() {
+        if (!is_local_instance(m_process_instance_id)) {
+            m_in_rep_c->done_reading();
+            m_in_rep_c->unblock_local();
+        }
+    };
+
+    if (!tl_is_req_thread) {
+        force_exit_reply_ring();
+    }
+    else {
+        tl_post_handler_function = force_exit_reply_ring;
     }
 }
 
 
 inline
-bool Process_message_reader::force_stop_and_wait(double waiting_period)
+bool Process_message_reader::stop_and_wait(double waiting_period)
 {
     std::unique_lock<std::mutex> lk(m_stop_mutex);
-    m_state = STOPPING;
-    m_in_req_c->unblock();
+    stop_nowait();
 
-    if (!is_local_instance(m_process_instance_id)) {
-        m_in_rep_c->unblock();
-    }
-
-    auto predicate = [&] {return !m_req_running && !m_rep_running; };
-    m_stop_condition.wait_for(lk, std::chrono::duration<double>(waiting_period), predicate);
+    m_stop_condition.wait_for(lk, std::chrono::duration<double>(waiting_period),
+        [&]() { return !m_rep_running && (!tl_is_req_thread ? !m_rep_running : true); }
+    );
 
     return !(m_req_running || m_rep_running);
 }
@@ -101,7 +122,7 @@ bool Process_message_reader::force_stop_and_wait(double waiting_period)
 inline
 Process_message_reader::~Process_message_reader()
 {
-    if (!force_stop_and_wait(2.)) {
+    if (!stop_and_wait(2.)) {
         // 'wait_for' timed out. To avoid hanging, we exit.
         exit(1);
     }
@@ -130,6 +151,13 @@ void Process_message_reader::request_reader_function()
 {
     install_signal_handler();
 
+    tl_is_req_thread = true;
+
+    s_mproc->m_num_active_readers_mutex.lock();
+    s_mproc->m_num_active_readers++;
+    s_mproc->m_num_active_readers_mutex.unlock();
+
+    m_in_req_c->start_reading();
     m_req_running = true;
 
     while (m_state != STOPPING) {
@@ -137,12 +165,16 @@ void Process_message_reader::request_reader_function()
 
         // if there is an interprocess barrier and m_in_req_c has reached the barrier's sequence,
         // then the barrier is good to go.
-        while (!s_mproc->m_flush_sequence.empty() &&
-            m_in_req_c->get_message_reading_sequence() >= s_mproc->m_flush_sequence.front())
-        {
-            lock_guard<mutex> lk(s_mproc->m_flush_sequence_mutex);
-            s_mproc->m_flush_sequence.pop_front();
-            s_mproc->m_flush_sequence_condition.notify_one();
+        if (!s_mproc->m_flush_sequence.empty()) {
+            auto reading_sequence = m_in_req_c->get_message_reading_sequence();
+            while (reading_sequence >= s_mproc->m_flush_sequence.front()) {
+                lock_guard<mutex> lk(s_mproc->m_flush_sequence_mutex);
+                s_mproc->m_flush_sequence.pop_front();
+                s_mproc->m_flush_sequence_condition.notify_one();
+                if (s_mproc->m_flush_sequence.empty()) {
+                    break;
+                }
+            }
         }
 
         Message_prefix* m = m_in_req_c->fetch_message();
@@ -200,8 +232,7 @@ void Process_message_reader::request_reader_function()
                         assert(false); // same here  // FIXME: IMPLEMENT
                     }
                     else {
-                        // just call the handler
-                        (*it2->second)(*m);
+                        (*it2->second)(*m); // call the handler
                     }
                 }
             }
@@ -218,8 +249,7 @@ void Process_message_reader::request_reader_function()
                     assert(false); // same here  // FIXME: IMPLEMENT
                 }
                 else {
-                    // just call the handler
-                    (*it2->second)(*m);
+                    (*it2->second)(*m); // call the handler
                 }
             }
         }
@@ -273,20 +303,24 @@ void Process_message_reader::request_reader_function()
                 s_mproc->m_out_req_c->relay(*m);
             }
         }
+
+        if (tl_post_handler_function) {
+            tl_post_handler_function();
+            tl_post_handler_function = nullptr;
+        }
+
     }
 
     m_in_req_c->done_reading();
 
+    s_mproc->m_num_active_readers_mutex.lock();
+    s_mproc->m_num_active_readers--;
+    s_mproc->m_num_active_readers_mutex.unlock();
+    s_mproc->m_num_active_readers_condition.notify_all();
+
     std::lock_guard<std::mutex> lk(m_stop_mutex);
     m_req_running = false;
     m_stop_condition.notify_one();
-
-    if (m_in_rep_c) {
-        // There will be no further requests, thus no need to read for replies either.
-        // If we are here, the reader's state is STOPPING and there cannot be a pending
-        // reply, thus the reply ring must be manually unblocked.
-        m_in_rep_c->unblock();
-    }
 }
 
 
@@ -295,6 +329,8 @@ inline
 void Process_message_reader::local_request_reader_function()
 {
     install_signal_handler();
+
+    tl_is_req_thread = true;
 
     // - There should be no requests to remote transceivers in this function.
     // - RPC calls to lolal transceivers are serviced like regular functions,
@@ -305,6 +341,11 @@ void Process_message_reader::local_request_reader_function()
     //   However, if the coordinator is remote, a local reader is irrelevant,
     //   and if it is local, ring RPC is also irrelevant.
 
+    s_mproc->m_num_active_readers_mutex.lock();
+    s_mproc->m_num_active_readers++;
+    s_mproc->m_num_active_readers_mutex.unlock();
+
+    m_in_req_c->start_reading();
     m_req_running = true;
 
     while (m_state != STOPPING) {
@@ -396,6 +437,11 @@ void Process_message_reader::local_request_reader_function()
 
     m_in_req_c->done_reading();
 
+    s_mproc->m_num_active_readers_mutex.lock();
+    s_mproc->m_num_active_readers--;
+    s_mproc->m_num_active_readers_mutex.unlock();
+    s_mproc->m_num_active_readers_condition.notify_all();
+
     std::lock_guard<std::mutex> lk(m_stop_mutex);
     m_req_running = false;
     m_stop_condition.notify_one();
@@ -408,6 +454,11 @@ void Process_message_reader::reply_reader_function()
 {
     install_signal_handler();
 
+    s_mproc->m_num_active_readers_mutex.lock();
+    s_mproc->m_num_active_readers++;
+    s_mproc->m_num_active_readers_mutex.unlock();
+
+    m_in_rep_c->start_reading();
     m_rep_running = true;
 
     while (m_state != STOPPING) {
@@ -464,6 +515,13 @@ void Process_message_reader::reply_reader_function()
             }
         }
     }
+
+    m_in_rep_c->done_reading();
+
+    s_mproc->m_num_active_readers_mutex.lock();
+    s_mproc->m_num_active_readers--;
+    s_mproc->m_num_active_readers_mutex.unlock();
+    s_mproc->m_num_active_readers_condition.notify_all();
 
     std::lock_guard<std::mutex> lk(m_stop_mutex);
     m_rep_running = false;

@@ -41,8 +41,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <boost/interprocess/detail/os_file_functions.hpp>
 #include <boost/interprocess/file_mapping.hpp>
 #include <boost/interprocess/mapped_region.hpp>
-#include <boost/interprocess/sync/interprocess_condition.hpp>
-#include <boost/interprocess/sync/scoped_lock.hpp>
+#include <boost/interprocess/sync/interprocess_mutex.hpp>
+#include <boost/interprocess/sync/interprocess_semaphore.hpp>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -59,6 +59,7 @@ namespace sintra {
 
 
 using std::atomic;
+using std::atomic_flag;
 using std::error_code;
 using std::string;
 using std::stringstream;
@@ -70,7 +71,7 @@ namespace ipc = boost::interprocess;
 
 /*
 
-This is an implementation of an interprocess mutex-free circular ring buffer,
+This is an implementation of an interprocess circular ring buffer,
 accessed by a single writer and multiple concurrent readers.
 
 Concepts
@@ -100,7 +101,7 @@ Concepts
    is always handled atomically and on its whole, thus this is a SWAR technique.
    Before a write operation, the writer checks if the operation is on the same octile
    as the previous write operation, and only if it is not, it will have to check if
-   the octile intended to be written is being read. If it is, the writer will livelock.
+   the octile intended to be written is being read. If it is, the writer will block.
    An advantage of this method is that, unless there is contention, the writer will
    not even have to access the shared control variable more than 8 times in a full loop.
    That is because once the writer has reached a certain octile, it is guaranteed
@@ -112,7 +113,7 @@ Limitations
    255. This limit could easily be increased to 16383, if the ring was partitioned
    in quarters, rather than octiles. In this case though, the maximum trailing segment
    of a reader would not exceed 1/2 of the size of the ringbuffer, which would be
-   a tradeoff to memory efficiency.
+   a substantial tradeoff to memory efficiency.
 
 2. For code simplicity, the writer may not write more data than the size of an octile in
    a single operation. This limitation is not absolutely necessary, but removing it
@@ -124,13 +125,11 @@ Remarks
 1. Sequence counters are of type uint64_t and count indefinitely, but overflowing a
    uint64_t is practically not going to be an issue during the lifetime of this code.
 
-2. Strictly speaking, this data structure is not lock-free. It could be, if the read
-   and write functions would return when the operation is not possible.
-   It is also not even mutex-free, unless the reading policy is
-   SINTRA_RING_READING_POLICY_ALWAYS_SPIN (see below), which is generally not a good
-   policy for generic usage. The default policy is SINTRA_RING_READING_POLICY_HYBRID,
-   which spins for a predefined amount of time, before it goes to sleep, using a mutex
-   and a condition variable.
+2. The default reading policy is SINTRA_RING_READING_POLICY_HYBRID, which causes the
+   reader to spin for a specified period of time, before it goes to sleep, waiting on
+   a semaphore. This policy was found to work adequately well in most cases.
+   Nevertheless, performance of reading policies is not portable. It depends on
+   usage, hardware and OS.
 
 3. The choice of omp_get_wtime() for timing is because it was measured to work at least
    2x faster than comparable functions from std::chrono. This might not be the case
@@ -223,6 +222,50 @@ struct Range
 
 
 class ring_acquisition_failure_exception {};
+
+
+
+// A binary semaphore, which is only meant to be used in the context of
+// this file, with semantics relevant to the ring's synchronization algorithm.
+struct sintra_ring_semaphore : ipc::interprocess_semaphore
+{
+    sintra_ring_semaphore() : ipc::interprocess_semaphore(0) {}
+
+    // This post is used when all waiting readers are woken up,
+    // i.e. when writing new data, or unlblocking globally.
+    void post_ordered()
+    {
+        if (unordered.load()) { // post_unordered() was already called
+            unordered = false;
+        }
+        else
+        if (!posted.test_and_set(std::memory_order_acquire)) { // if not posted
+            post();
+        }
+    }
+
+    // This is used in operations where only a single reader is woken up,
+    // while the rest must be left in their current state.
+    void post_unordered()
+    {
+        if (!posted.test_and_set(std::memory_order_acquire)) { // if not posted
+            post();
+            unordered = true;
+        }
+    }
+
+    // Regular semaphore wait(), returning true if the post responsible for the wakeup
+    // was unordered and there was no call to post_ordered in-between.
+    bool wait()
+    {
+        ipc::interprocess_semaphore::wait();
+        posted.clear(std::memory_order_release);
+        return unordered.load();
+    }
+private:
+    atomic_flag     posted      = ATOMIC_FLAG_INIT;
+    atomic<bool>    unordered   = false;
+};
 
 
 
@@ -404,8 +447,6 @@ protected:
     T*                                  m_data                          = nullptr;
     string                              m_data_filename;
     bool                                m_remove_files_on_destruction   = false;
-
-    friend struct Managed_process;
 };
 
 
@@ -437,41 +478,82 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         // If my understanding is correct, and the implementation is also correct, the use of
         // atomics should be fine for that purpose. [see N3337 29.4]
 
-        atomic<size_t>                  num_attached;
+        atomic<size_t>                  num_attached = 0;
 
         // The index of the nth element written to the ringbuffer.
-        atomic<sequence_counter_type>   leading_sequence;
+        atomic<sequence_counter_type>   leading_sequence = 0;
 
         // An 8-byte integer, with each byte corresponding to an octile of the ring
         // and representing the number of readers currently accessing it.
         // This imposes a limit of maximum 255 readers per ring.
-        atomic<uint64_t>                read_access;
+        atomic<uint64_t>                read_access = 0;
 
         // Used to avoid accidentally having multiple writers on the same ring
         ipc::interprocess_mutex         ownership_mutex;
 
-
-        ipc::interprocess_mutex         condition_mutex;
-        ipc::interprocess_condition     dirty_condition;
-
 #if SINTRA_RING_READING_POLICY != SINTRA_RING_READING_POLICY_ALWAYS_SPIN
-        atomic<int>                     sleeping_readers;
+
+        // The following synchronization structures may only be accessed between lock()/unlock().
+
+        // An array (pool) of semaphores which may be used to synchronize writing operations.
+        sintra_ring_semaphore           dirty_semaphores[max_process_index];
+
+        // A stack of indices to the dirty_semaphores array, with the semaphores which are
+        // free and ready for use. Initially all semaphores are ready.
+        int                             ready_stack[max_process_index];
+        int                             num_ready = max_process_index;
+
+        // A stack of indices to the dirty_semaphores array, with semaphores which have been
+        // allocated to a reader from the ready_stack, and are either blocking, or are about
+        // to block, or were previously blocking but have not been moved to another stack yet.
+        int                             sleeping_stack[max_process_index];
+        int                             num_sleeping = 0;
+
+        // A stack of indices to the dirty_semaphores array, with semaphores which have been
+        // posted out of order, i.e. after unblocking a reader locally.
+        // To avoid a costly operation of moving a random element out of the stack, when a
+        // semaphore is posted out-of-order, its index remains in the sleeping_stack, yet
+        // the semaphore itself is flagged to avoid being reposted. Once an in-order post()
+        // operation occurs, where all semaphores are posted (e.g. when writing), these indices
+        // will be unflagged and placed back to the ready_stack.
+        int                             unordered_stack[max_process_index];
+        int                             num_unordered = 0;
+
+        atomic_flag                     spinlock_flag = ATOMIC_FLAG_INIT;
 #endif
 
-        Control():
-            num_attached(0)
-        ,   leading_sequence(0)
-#if SINTRA_RING_READING_POLICY != SINTRA_RING_READING_POLICY_ALWAYS_SPIN
-        ,   sleeping_readers(0)
-#endif
+
+        Control()
         {
-            read_access = 0;
+#if SINTRA_RING_READING_POLICY != SINTRA_RING_READING_POLICY_ALWAYS_SPIN
+            for (int i = 0; i < max_process_index; i++) { ready_stack   [i]  =  i; }
+            for (int i = 0; i < max_process_index; i++) { sleeping_stack[i]  = -1; }
+            for (int i = 0; i < max_process_index; i++) { unordered_stack[i] = -1; }
+#endif
+
             // See the 'Note' in N4713 32.5 [Lock-free property], Par. 4.
             // The program is only valid if the conditions below are true.
+            
+            // On a second read... quoting the aforementioned note from the draft:
+            //
+            // "Operations that are lock-free should also be address-free. That is, atomic operations on the
+            // same memory location via two different addresses will communicate atomically. The implementation
+            // should not depend on any per-process state. This restriction enables communication by memory
+            // that is mapped into a process more than once and by memory that is shared between two processes."
+            //
+            // ...so if they are not lock-free, could it be that they are not address-free?
+            // My guess is that the author's intention was to stress that atomic operations are address-free
+            // either way. Nevertheless, these assertions are just to be on the safe side.
+
             assert(num_attached.is_lock_free());        // size_t
             assert(leading_sequence.is_lock_free());    // sequence_counter_type
-            assert(sleeping_readers.is_lock_free());    // int
         }
+
+
+#if SINTRA_RING_READING_POLICY != SINTRA_RING_READING_POLICY_ALWAYS_SPIN
+        void lock()   { while (spinlock_flag.test_and_set(std::memory_order_acquire)) {} }
+        void unlock() { spinlock_flag.clear(std::memory_order_release); }
+#endif
     };
 
 
@@ -576,13 +658,13 @@ private:
         }
     }
 
+
+private:
     region_ptr_type                     m_control_region    = nullptr;
     string                              m_control_filename;
-
+    
 protected:
     Control*                            m_control           = nullptr;
-
-    friend struct Managed_process;
 };
 
 
@@ -620,9 +702,9 @@ struct Ring_R: Ring<T, true>
     Ring_R(const string& directory, const string& data_filename,
         size_t num_elements, size_t max_trailing_elements = 0)
     :
-        Ring<T, true>::Ring(directory, data_filename, num_elements),
-        m_max_trailing_elements(max_trailing_elements),
-        m_unblocked(false)
+        Ring<T, true>::Ring(directory, data_filename, num_elements)
+    ,   m_max_trailing_elements(max_trailing_elements)
+    ,   c(*this->m_control)
     {
         // num_elements must be a multiple of 8
         assert(num_elements % 8 == 0);
@@ -631,10 +713,9 @@ struct Ring_R: Ring<T, true>
         assert(max_trailing_elements <= 3 * num_elements / 4);
     }
 
+
     ~Ring_R()
     {
-        //this->m_control->read_access -= uint64_t(1) << (8 * m_trailing_octile);
-
         if (m_reading) {
             done_reading();
         }
@@ -647,8 +728,9 @@ struct Ring_R: Ring<T, true>
     }
 
 
-    // start reading up to num_trailing_elements elements behind the leading sequence.
-    // When data is no longer being accessed, the caller should call done_reading(), to prevent blocking the writer
+    // Start reading up to num_trailing_elements elements behind the leading sequence.
+    // When data is no longer being accessed, the caller should call done_reading(),
+    // to prevent blocking the writer.
     Range<T> start_reading(size_t num_trailing_elements)
     {
         bool f = false;
@@ -656,22 +738,29 @@ struct Ring_R: Ring<T, true>
 
         assert(num_trailing_elements <= m_max_trailing_elements);
 
-        // this prevents the writer from progressing beyond the end of the octile that succeeds the one it is currently on
+        // this prevents the writer from progressing beyond the end of the octile that
+        // succeeds the one it is currently on
         uint64_t access_mask = 0x0101010101010101;
-        this->m_control->read_access += access_mask;
+        c.read_access += access_mask;
 
-        // reading out the leading sequence atomically, ensures that the return range will not exceed num_trailing_elements
-        auto leading_sequence = this->m_control->leading_sequence.load();
+        // reading out the leading sequence atomically, ensures that the return range
+        // will not exceed num_trailing_elements
+        auto leading_sequence = c.leading_sequence.load();
 
-        auto range_first_sequence = std::max(int64_t(0), int64_t(leading_sequence) - int64_t(num_trailing_elements));
-        m_trailing_octile = (8 * ((range_first_sequence - m_max_trailing_elements) % this->m_num_elements)) / this->m_num_elements;
+        auto range_first_sequence =
+            std::max(int64_t(0), int64_t(leading_sequence) - int64_t(num_trailing_elements));
 
-        access_mask -= uint64_t(1) << (8 * m_trailing_octile);
-        this->m_control->read_access -= access_mask;
+        m_trailing_octile =
+            (8 * ((range_first_sequence - m_max_trailing_elements) % this->m_num_elements)) /
+            this->m_num_elements;
+
+        access_mask   -= uint64_t(1) << (8 * m_trailing_octile);
+        c.read_access -= access_mask;
 
         Range<T> ret;
-        ret.begin = this->m_data + std::max(int64_t(0), int64_t(range_first_sequence)) % this->m_num_elements;
-        ret.end = ret.begin + leading_sequence - range_first_sequence;
+        ret.begin = this->m_data +
+            std::max(int64_t(0), int64_t(range_first_sequence)) % this->m_num_elements;
+        ret.end   = ret.begin + leading_sequence - range_first_sequence;
 
         assert(ret.end >= ret.begin);
         assert(ret.begin >= this->m_data);
@@ -688,18 +777,14 @@ struct Ring_R: Ring<T, true>
     void done_reading()
     {
         if (m_reading) {
-            this->m_control->read_access -= uint64_t(1) << (8 * m_trailing_octile);
+            c.read_access -= uint64_t(1) << (8 * m_trailing_octile);
             m_reading_sequence = m_trailing_octile = 0;
             m_reading = false;
         }
     }
 
 
-
     sequence_counter_type reading_sequence() const { return m_reading_sequence; }
-
-
-
 
 
     // Returns a range with the elements succeeding the current reader's reading sequence,
@@ -709,75 +794,51 @@ struct Ring_R: Ring<T, true>
     const Range<T> wait_for_new_data()
     {
 
-#if SINTRA_RING_READING_POLICY == SINTRA_RING_READING_POLICY_ALWAYS_SLEEP
+#if SINTRA_RING_READING_POLICY == SINTRA_RING_READING_POLICY_ALWAYS_SPIN
 
-        ipc::scoped_lock<ipc::interprocess_mutex> lock(m_control->condition_mutex);
-        while (m_reading_sequence == m_control->leading_sequence.load() && !m_unblocked) {
+        while (m_reading_sequence == c.leading_sequence.load() ) {}
 
-            m_control->sleeping_readers++;
+#else // SINTRA_RING_READING_POLICY_HYBRID or SINTRA_RING_READING_POLICY_ALWAYS_SLEEP
 
-            if (m_reading_sequence == m_control->leading_sequence.load() && !m_unblocked) {
-                m_control->dirty_condition.wait(lock);
-            }
+#if SINTRA_RING_READING_POLICY == SINTRA_RING_READING_POLICY_HYBRID
 
-            m_control->sleeping_readers--;
-        }
-
-#elif SINTRA_RING_READING_POLICY == SINTRA_RING_READING_POLICY_ALWAYS_SPIN
-
-        while (m_reading_sequence == m_control->leading_sequence.load() && !m_unblocked) {}
-
-#elif SINTRA_RING_READING_POLICY == SINTRA_RING_READING_POLICY_HYBRID
-
-        // if there is nothing to read
-        if (m_reading_sequence == this->m_control->leading_sequence.load()) {
-
-            double time_limit = omp_get_wtime() + spin_before_sleep * 0.5;
-            size_t sc = 0;
-            size_t sc_limit = 40; // initial spin count limit, to reduce the calls to omp_get_wtime
-
-            while (m_reading_sequence == this->m_control->leading_sequence.load() && !m_unblocked) {
-
-                if (sc++ > sc_limit) {
-
-                    double tmp = omp_get_wtime();
-                    if (tmp < time_limit) {
-                        time_limit = tmp + spin_before_sleep * 0.5;
-                        sc = 0;
-                        sc_limit *= 2;
-                        continue;
-                    }
-
-                    // if sufficient repetitions (=time) have taken place, go to sleep
-
-                    // the lock has to precede the 'if' block, to prevent a missed notification.
-                    ipc::scoped_lock<ipc::interprocess_mutex> lock(this->m_control->condition_mutex);
-
-                    this->m_control->sleeping_readers++;
-
-                    if (m_reading_sequence == this->m_control->leading_sequence.load() &&
-                        !m_unblocked)
-                    {
-                        this->m_control->dirty_condition.wait(lock);
-                    }
-
-                    this->m_control->sleeping_readers--;
-                }
-            }
-        }
-
-#else
-
-#error No reading policy is defined
+        double tl = omp_get_wtime() + spin_before_sleep * 0.5;
+        while (m_reading_sequence == c.leading_sequence.load() && omp_get_wtime() < tl) {}
 
 #endif
-        Range<T> ret;
 
-        if (m_unblocked) {
-            return ret;
+        c.lock();
+        m_sleepy_index = -1;
+        if (m_reading_sequence == c.leading_sequence.load()) {
+            m_sleepy_index = c.ready_stack[--c.num_ready];
+            c.sleeping_stack[c.num_sleeping++] = m_sleepy_index;
+        }
+        c.unlock();
+
+        if (m_sleepy_index >= 0) {
+            if (c.dirty_semaphores[m_sleepy_index].wait()) { // unordered
+                c.lock();
+                c.unordered_stack[c.num_unordered++] = m_sleepy_index;
+            }
+            else { // ordered
+                c.lock();
+                c.ready_stack[c.num_ready++] = m_sleepy_index;
+            }
+            m_sleepy_index = -1;
+            c.unlock();
         }
 
-        auto num_range_elements = size_t(this->m_control->leading_sequence.load() - m_reading_sequence);
+#endif
+
+        Range<T> ret;
+
+        auto num_range_elements = size_t(c.leading_sequence.load() - m_reading_sequence);
+
+        if (num_range_elements == 0) {
+            // this may happen if the loop was unblocked, either locally with unblock_local(),
+            // ore remotely by the writer, with unblock_global();
+            return ret;
+        }
 
         ret.begin = this->m_data + (m_reading_sequence % this->m_num_elements);
         ret.end   = ret.begin + num_range_elements;
@@ -791,38 +852,42 @@ struct Ring_R: Ring<T, true>
     void done_reading_new_data()
     {
         size_t new_trailing_octile =
-            (8 * ((m_reading_sequence - m_max_trailing_elements) % this->m_num_elements)) / this->m_num_elements;
+            (8 * ((m_reading_sequence - m_max_trailing_elements) % this->m_num_elements)) /
+            this->m_num_elements;
 
         if (new_trailing_octile != m_trailing_octile) {
             auto diff =
                 (uint64_t(1) << (8 * new_trailing_octile)) -
                 (uint64_t(1) << (8 *   m_trailing_octile));
-            this->m_control->read_access += diff;
+            c.read_access += diff;
             m_trailing_octile = new_trailing_octile;
         }
     }
 
 
-    // If start_reading_new_data() is either sleeping or spinning, it will force it to return a nullptr
-    // and 0 elements.
-    void unblock()
+    // If start_reading_new_data() is either sleeping or spinning on a different thread,
+    // this call will force it to return a nullptr and 0 elements.
+    // Only the local reader instance will be affected.
+    void unblock_local()
     {
-        // TODO: this implementation is a bit odd... it's acquiring an INTERPROCESS lock
-        // "just in case" the other thread is sleeping.
-        // On the other hand, it's simple enough, for a call that should only go to the very end.
-
-        ipc::scoped_lock<ipc::interprocess_mutex> lock(this->m_control->condition_mutex);
-        m_unblocked = true;
-        this->m_control->dirty_condition.notify_all();
+#if SINTRA_RING_READING_POLICY != SINTRA_RING_READING_POLICY_ALWAYS_SPIN
+        c.lock();
+        if (m_sleepy_index >= 0) {
+            c.dirty_semaphores[m_sleepy_index].post_unordered();
+        }
+        c.unlock();
+#endif
     }
 
+
 protected:
-    const size_t m_max_trailing_elements;
-    sequence_counter_type m_reading_sequence = 0;
-    size_t m_trailing_octile = 0;
-    
-    atomic<bool> m_reading = false;
-    atomic<bool> m_unblocked;
+    const size_t                        m_max_trailing_elements;
+    sequence_counter_type               m_reading_sequence          = 0;
+    size_t                              m_trailing_octile           = 0;
+    atomic<bool>                        m_reading = false;
+    int                                 m_sleepy_index              = -1;
+
+    typename Ring<T, true>::Control&    c;
 };
 
 
@@ -847,16 +912,18 @@ template <typename T>
 struct Ring_W: Ring<T, false>
 {
     Ring_W(const string& directory, const string& data_filename, size_t num_elements):
-        Ring<T, false>::Ring(directory, data_filename, num_elements)
+        Ring<T, false>::Ring(directory, data_filename, num_elements),
+        c(*this->m_control)
     {
-        if (!this->m_control->ownership_mutex.try_lock()) {
+        if (!c.ownership_mutex.try_lock()) {
             throw ring_acquisition_failure_exception();
         }
     }
 
     ~Ring_W()
     {
-        this->m_control->ownership_mutex.unlock();
+        unblock_global();
+        c.ownership_mutex.unlock();
     }
 
 
@@ -910,29 +977,26 @@ struct Ring_W: Ring<T, false>
         // after the next line, any comparison of the form:
         // m_reading_sequence == m_control->leading_sequence
         // on the reader will keep failing until done_reading() is called
-        this->m_control->leading_sequence.store(m_pending_new_sequence);
 
-#if SINTRA_RING_READING_POLICY == SINTRA_RING_READING_POLICY_ALWAYS_SLEEP
+#if SINTRA_RING_READING_POLICY != SINTRA_RING_READING_POLICY_ALWAYS_SPIN
 
-        {
-            ipc::scoped_lock<ipc::interprocess_mutex> lock(m_control->condition_mutex);
-            m_control->dirty_condition.notify_all();
+        c.lock();
+        assert(m_writing_thread == std::this_thread::get_id());
+
+        // the next statement must be inside the lock, becasue leading_sequence
+        // is also used to signal explicit unblocks. Otherwise a separate
+        // variable would be required.
+        c.leading_sequence.store(m_pending_new_sequence);
+
+        for (int i = 0; i < c.num_sleeping; i++) {
+            c.dirty_semaphores[c.sleeping_stack[i]].post_ordered();
         }
+        c.num_sleeping = 0;
 
-#elif SINTRA_RING_READING_POLICY == SINTRA_RING_READING_POLICY_ALWAYS_SPIN
-
-        // nothing to do...
-
-#elif SINTRA_RING_READING_POLICY == SINTRA_RING_READING_POLICY_HYBRID
-
-        if (this->m_control->sleeping_readers.load()) {
-            ipc::scoped_lock<ipc::interprocess_mutex> lock(this->m_control->condition_mutex);
-            this->m_control->dirty_condition.notify_all();
+        while (c.num_unordered) {
+            c.ready_stack[c.num_ready++] = c.unordered_stack[--c.num_unordered];
         }
-
-#else
-
-#error No reading policy is defined
+        c.unlock();
 
 #endif
 
@@ -940,14 +1004,37 @@ struct Ring_W: Ring<T, false>
     }
 
 
-    // This functions allows a writer to read the ring's readable data, without locking.
+
+    // If start_reading_new_data() is either sleeping or spinning, it will force it
+    // to return a nullptr and 0 elements. This will affects any process or thread
+    // reading from this ring.
+    void unblock_global()
+    {
+#if SINTRA_RING_READING_POLICY != SINTRA_RING_READING_POLICY_ALWAYS_SPIN
+        c.lock();
+        for (int i = 0; i < c.num_sleeping; i++) {
+            c.dirty_semaphores[c.sleeping_stack[i]].post_ordered();
+        }
+        c.num_sleeping = 0;
+
+        while (c.num_unordered) {   
+            c.ready_stack[c.num_ready++] = c.unordered_stack[--c.num_unordered];
+        }
+        c.unlock();
+#endif
+    }
+
+
+    // This function allows a writer to read the ring's readable data, without locking.
     Range<T> get_readable_range()
     {
-        auto leading_sequence = this->m_control->leading_sequence.load();
-        auto range_first_sequence = std::max(int64_t(0), int64_t(leading_sequence) - int64_t(3 * this->m_num_elements / 4));
+        auto leading_sequence = c.leading_sequence.load();
+        auto range_first_sequence =
+            std::max(int64_t(0), int64_t(leading_sequence) - int64_t(3 * this->m_num_elements / 4));
 
         Range<T> ret;
-        ret.begin = this->m_data + std::max(int64_t(0), int64_t(range_first_sequence)) % this->m_num_elements;
+        ret.begin = this->m_data +
+            std::max(int64_t(0), int64_t(range_first_sequence)) % this->m_num_elements;
         ret.end = ret.begin + leading_sequence - range_first_sequence;
 
         return ret;
@@ -977,7 +1064,7 @@ private:
 
             // if anyone is reading the octile range of the write operation,
             // wait (spin) to prevent an overwrite
-            while (this->m_control->read_access & range_mask) {}
+            while (c.read_access & range_mask) {}
 
             m_octile = new_octile;
         }
@@ -988,6 +1075,8 @@ private:
     atomic<thread::id>          m_writing_thread;
     size_t                      m_octile                    = 0;
     sequence_counter_type       m_pending_new_sequence      = 0;
+
+    typename Ring<T, false>::Control& c;
 };
 
 

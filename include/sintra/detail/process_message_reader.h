@@ -35,6 +35,7 @@ namespace sintra {
 
 
 using std::atomic;
+using std::atomic_flag;
 using std::string;
 using std::thread;
 using std::mutex;
@@ -63,6 +64,12 @@ static inline thread_local Message_prefix* s_tl_current_message = nullptr;
 
 struct Process_message_reader
 {
+    enum State
+    {
+        FULL_FUNCTIONALITY,
+        COORDINATOR_ONLY,
+        STOPPING
+    };
 
     inline
     Process_message_reader(instance_id_type process_instance_id);
@@ -75,11 +82,11 @@ struct Process_message_reader
 
 
     inline
-    bool force_stop_and_wait(double waiting_period);  // waiting period in seconds
+    void stop_nowait();
 
 
     inline
-    void stop_and_abandon();
+    bool stop_and_wait(double waiting_period);  // waiting period in seconds
 
 
     // This implementation of the following functions assumes the following:
@@ -116,18 +123,11 @@ struct Process_message_reader
 
     sequence_counter_type get_request_reading_sequence() const
     { 
-        return m_in_req_c->reading_sequence();
+        return m_in_req_c->get_message_reading_sequence();
     }
 
 
 private:
-
-    enum State
-    {
-        FULL_FUNCTIONALITY,
-        COORDINATOR_ONLY,
-        STOPPING
-    };
 
     atomic<State>           m_state                 = FULL_FUNCTIONALITY;
 
@@ -143,10 +143,7 @@ private:
     atomic<bool>            m_rep_running           = false;
     mutex                   m_stop_mutex;
     condition_variable      m_stop_condition;
-
-
 };
-
 
 
 }

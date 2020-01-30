@@ -186,10 +186,6 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
 
     // if it is a Managed_process is being unpublished, more cleanup is required
     if (iid == process_iid) {
-        //Message_prefix* m = s_tl_current_message;
-        //instance_id_type process_id = m ? m->sender_instance_id : s_mproc->m_instance_id;
-
-        lock_guard<mutex> lock(m_all_other_processes_done_mutex);
 
         // remove all name lookup entries resolving to the unpublished process
         for (auto it = s_mproc->m_instance_id_of_assigned_name.begin();
@@ -211,9 +207,6 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
             m_processes_of_group[group].erase(process_iid);
         }
         m_groups_of_process.erase(process_iid);
-        if (m_processes_of_group[Externally_coordinated::id()].size() == 0) {
-            m_all_other_processes_done_condition.notify_all();
-        }
 
         // remove all group associations of unpublished process
         auto groups_it = m_groups_of_process.find(iid);
@@ -233,7 +226,7 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
             }
         );
         if (it != s_mproc->m_readers.end()) {
-            it->stop_and_abandon();
+            it->stop_nowait();
         }
     }
 
@@ -315,20 +308,6 @@ bool Coordinator::add_process_into_group(instance_id_type process_id, type_id_ty
     m_groups_of_process[process_id].insert(process_group_id);
     return true;
 }
-
-
-
-inline
-void Coordinator::wait_until_all_other_processes_are_done()
-{
-    // if the coordinator lives in this process, we have to postpone destruction until
-    // every other process is finished.
-    unique_lock<mutex> lock(m_all_other_processes_done_mutex);
-    while (m_processes_of_group[Externally_coordinated::id()].size() != 0) {
-        m_all_other_processes_done_condition.wait(lock);
-    }
-}
-
 
 
 } // sintra

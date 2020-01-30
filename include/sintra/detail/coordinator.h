@@ -52,7 +52,6 @@ private:
     ~Coordinator();
 
     bool add_process_into_group(instance_id_type process_id, type_id_type process_group_id);
-    void wait_until_all_other_processes_are_done();
 
     // EXPORTED FOR RPC
     type_id_type resolve_type(const string& pretty_name);
@@ -91,10 +90,6 @@ private:
     >                                           m_transceiver_registry;
 
     mutex                                       m_publish_mutex;
-
-    mutex                                       m_all_other_processes_done_mutex;
-    condition_variable                          m_all_other_processes_done_condition;
-
 
     spinlocked_umap<
         type_id_type,
