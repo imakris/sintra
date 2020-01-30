@@ -58,7 +58,7 @@ template <
     >
 >
 auto call_function_with_fusion_vector_args_sfb(
-    const TFunction& f, const TVector& t,
+    const TFunction& f, const TVector&,
     const Args&... args) -> decltype(f(args...))
 {
     return f(args...);
@@ -108,7 +108,7 @@ template <
         size<TVector>::type::value == 0
     >
 >
-auto call_function_with_fusion_vector_args(const TFunction& f, const TVector& t) -> decltype(f())
+auto call_function_with_fusion_vector_args(const TFunction& f, const TVector&) -> decltype(f())
 {
     // the function is called without arguments
     return f();
@@ -202,7 +202,7 @@ template <
 auto call_function_with_fusion_vector_args(
     TObj& obj,
     TFunction f,
-    const TVector& t) -> decltype((obj.*f)())
+    const TVector&) -> decltype((obj.*f)())
 {
     // the function is called without arguments
     return (obj.*f)();
