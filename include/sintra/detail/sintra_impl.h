@@ -35,18 +35,6 @@ using std::string;
 using std::vector;
 
 
-namespace detail {
-
-    inline
-    void branch() { }
-    template <typename ...Args>
-    void branch(const Process_descriptor& first, Args&&... rest)
-    {
-        s_branch_vector.push_back(first);
-        detail::branch(rest...);
-    }
-}
-
 
 
 // Single-process version
@@ -66,7 +54,7 @@ void start(int argc, char* argv[], int(*entry)())
 
 // Multiple-process version
 template <typename ...Args>
-void start(int argc, char* argv[], const Process_descriptor& first, Args&&... rest)
+void start(int argc, char* argv[], Args&&... args)
 {
 
 #ifndef _WIN32
@@ -79,9 +67,7 @@ void start(int argc, char* argv[], const Process_descriptor& first, Args&&... re
 
     s_mproc = new Managed_process;
     s_mproc->init(argc, argv);
-
-    s_branch_vector.clear();
-    detail::branch(first, rest...);
+    s_branch_vector = decltype(s_branch_vector){ std::forward<Args>(args)... };
     s_mproc->branch();
     s_mproc->start();
 
