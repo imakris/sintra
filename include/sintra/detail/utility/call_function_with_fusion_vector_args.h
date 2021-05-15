@@ -185,8 +185,9 @@ auto call_function_with_fusion_vector_args(TObj& obj, const TFunction& f, const 
     // TODO: implement a static assertion for the statement that follows, to provide the message
     // in the compiler output.
 
-    // if the compiler complains here, make sure that the function you are trying to call has
-    // no non-const references
+    // if the compiler complains here, make sure that none of the function arguments is either
+    // - a non-const reference
+    // - a non-POD and non STL container object
     return call_function_with_fusion_vector_args_mfb(obj, f, t, at_c<0>(t));
 }
 
