@@ -27,6 +27,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define SINTRA_COORDINATOR_IMPL_H
 
 
+#include <functional>
 #include <iostream>
 #include <mutex>
 
@@ -43,9 +44,65 @@ using std::string;
 using std::unique_lock;
 
 
+
+
+// EXPORTED EXCLUSIVELY FOR RPC
+sequence_counter_type Process_group::barrier(
+    const string& barrier_name)
+{
+    std::unique_lock basic_lock(m_call_mutex);
+    instance_id_type caller_piid = s_tl_current_message->sender_instance_id;
+    if (m_process_ids.find(caller_piid) == m_process_ids.end()) {
+        throw std::logic_error("The caller is not a member of the process group.");
+    }
+
+    Barrier& b = m_barriers[barrier_name];
+    b.m.lock(); // main barrier lock
+    basic_lock.unlock();
+    
+    if (b.processes_pending.empty()) {
+        // new or reused barrier (may have failed previously)
+        b.processes_pending = m_process_ids;
+        b.failed = false;
+        b.common_function_iid = make_instance_id();
+    }
+
+    b.processes_pending.erase(caller_piid);
+
+    if (b.processes_pending.size() == 0) {
+        auto additional_pids = m_process_ids;
+        additional_pids.erase(caller_piid);
+
+        assert(s_tl_common_function_iid == invalid_instance_id);
+        assert(s_tl_additional_piids_size == 0);
+        assert(additional_pids.size() < max_process_index);
+        s_tl_additional_piids_size = 0;
+        for (auto& e : additional_pids) {
+            s_tl_additional_piids[s_tl_additional_piids_size++] = e;
+        }
+
+        s_tl_common_function_iid = b.common_function_iid;
+        b.m.unlock();
+        m_barriers.erase(barrier_name);
+        return s_mproc->m_out_req_c->get_leading_sequence();
+    }
+    else {
+        std::pair<deferral, function<void()> > ret;
+        ret.first.new_fiid = b.common_function_iid;
+        ret.second = [&](){ b.m.unlock(); };
+        throw ret;
+    }
+}
+
+
+
+
+
+
+
 inline
 Coordinator::Coordinator():
-    Derived_transceiver<Coordinator>("", make_instance_id())
+    Derived_transceiver<Coordinator>("", make_service_instance_id())
 {
     // Leave it empty. The coordinator is constructed within the Mnanaged_process
     // constructor, while still building the basic infrastructure.
@@ -92,20 +149,80 @@ instance_id_type Coordinator::resolve_instance(const string& assigned_name)
 
 
 
-// EXPORTED FOR RPC
+// EXPORTED EXCLUSIVELY FOR RPC
+instance_id_type Coordinator::wait_for_instance(const string& assigned_name)
+{
+    // This works similarly to a barrier. The difference is that
+    // a barrier operates in a defined set of process instances, whereas
+    // waiting on an instance is not restricted.
+    // A caller waiting for an instance will be unblocked when the
+    // instance is created and will not block at all if it exists already.
+    // Waiting for an instance does not influence creation/deletion of
+    // the instance, thus using it for synchronization may not always be
+    // applicable.
+
+    m_publish_mutex.lock();
+    instance_id_type caller_piid = s_tl_current_message->sender_instance_id;
+
+    auto iid = resolve_instance(assigned_name);
+    if (iid != invalid_instance_id) {
+        m_publish_mutex.unlock();
+        return iid;
+    }
+
+    m_instances_waited[assigned_name].insert(caller_piid);
+
+    instance_id_type common_function_iid;
+    auto it = m_instances_waited_common_iids.find(assigned_name);
+    if (it != m_instances_waited_common_iids.end()) {
+        common_function_iid = it->second;
+    }
+    else {
+        common_function_iid = m_instances_waited_common_iids[assigned_name] = make_instance_id();
+    }
+
+    std::pair<deferral, std::function<void()>> ret;
+    ret.first.new_fiid = common_function_iid;
+    ret.second = [&](){
+        m_publish_mutex.unlock();
+    };
+    throw ret;
+}
+
+
+
+// EXPORTED EXCLUSIVELY FOR RPC
 inline
-bool Coordinator::publish_transceiver(type_id_type tid, instance_id_type iid, const string& assigned_name)
+instance_id_type Coordinator::publish_transceiver(type_id_type tid, instance_id_type iid, const string& assigned_name)
 {
     lock_guard<mutex> lock(m_publish_mutex);
 
     // empty strings are not valid names
     if (assigned_name.empty()) {
-        return false;
+        return invalid_instance_id;
     }
 
     auto process_iid = process_of(iid);
     auto pr_it = m_transceiver_registry.find(process_iid);
     auto entry = tn_type{ tid, assigned_name };
+
+    auto true_sequence = [&](){
+        emit_global<instance_published>(tid, iid, assigned_name);
+        assert(s_tl_additional_piids_size == 0);
+        assert(s_tl_common_function_iid == invalid_instance_id);
+        assert(m_instances_waited[assigned_name].size() < max_process_index);
+
+        s_tl_additional_piids_size = 0;
+        for (auto& e : m_instances_waited[assigned_name]) {
+            s_tl_additional_piids[s_tl_additional_piids_size++] = e;
+        }
+
+
+        s_tl_common_function_iid = m_instances_waited_common_iids[assigned_name];        
+        m_instances_waited.erase(assigned_name);
+        m_instances_waited_common_iids.erase(assigned_name);
+        return iid;
+    };
 
     if (pr_it != m_transceiver_registry.end()) { // the transceiver's process is known
         
@@ -113,41 +230,39 @@ bool Coordinator::publish_transceiver(type_id_type tid, instance_id_type iid, co
 
         // observe the limit of transceivers per process
         if (pr.size() >= max_public_transceivers_per_proc) {
-            return false;
+            return invalid_instance_id;
         }
 
         // the transceiver must not have been already published
         if (pr.find(iid) != pr.end()) {
-            return false;
+            return invalid_instance_id;
         }
 
         // the assigned_name should not be taken
         if (resolve_instance(assigned_name) != invalid_instance_id) {
-            return false;
+            return invalid_instance_id;
         }
 
         s_mproc->m_instance_id_of_assigned_name[entry.name] = iid;
         pr[iid] = entry;
 
-        emit_global<instance_published>(tid, iid, assigned_name);
-        return true;
+        return true_sequence();
     }
     else
     if (iid == process_iid) { // the transceiver is a Managed_process
 
         // the assigned_name should not be taken
         if (resolve_instance(assigned_name) != invalid_instance_id) {
-            return false;
+            return invalid_instance_id;
         }
 
         s_mproc->m_instance_id_of_assigned_name[entry.name] = iid;
         m_transceiver_registry[iid][iid] = entry;
 
-        emit_global<instance_published>(tid, iid, assigned_name);
-        return true;
+        return true_sequence();
     }
     else {
-        return false;
+        return invalid_instance_id;
     }
 }
 
@@ -202,31 +317,26 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
         // remove the unpublished process's registry entry
         m_transceiver_registry.erase(pr_it);
 
-        // remove the process from all groups it was member of
-        for (auto group : m_groups_of_process[process_iid]) {
-            m_processes_of_group[group].erase(process_iid);
+        lock_guard<mutex> lock(m_groups_mutex);
+
+        for (auto& group_entry : m_groups) {
+            group_entry.second.remove_process(process_iid);
         }
+
         m_groups_of_process.erase(process_iid);
 
         // remove all group associations of unpublished process
         auto groups_it = m_groups_of_process.find(iid);
         if (groups_it != m_groups_of_process.end()) {
-            for (auto& group : groups_it->second) {
-                m_processes_of_group.erase(group);
-                m_group_sizes[group]--;
-            }
             m_groups_of_process.erase(groups_it);
         }
 
-        // and finally, if the process was being read, stop reading from it
-        // [ remove_if cannot be used here, 'operator =' is not available ]
-        auto it = std::find_if(s_mproc->m_readers.begin(), s_mproc->m_readers.end(),
-            [&](const Process_message_reader& reader) {
-                return reader.get_process_instance_id() == process_iid;
+        //// and finally, if the process was being read, stop reading from it
+        if (iid != s_mproc_id) {
+            auto it = s_mproc->m_readers.find(process_iid);
+            if (it != s_mproc->m_readers.end()) {
+                it->second.stop_nowait();
             }
-        );
-        if (it != s_mproc->m_readers.end()) {
-            it->stop_nowait();
         }
     }
 
@@ -238,47 +348,26 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
 
 
 // EXPORTED FOR RPC
-inline
-sequence_counter_type Coordinator::barrier(type_id_type process_group_id)
+instance_id_type Coordinator::make_process_group(
+    const string& name,
+    const unordered_set<instance_id_type>& member_process_ids)
 {
-    m_barrier_mutex.lock();
+    lock_guard<mutex> lock(m_groups_mutex);
 
-    auto &b = m_barriers[process_group_id];
-    unique_lock<mutex> lock(b.m);
-
-    m_barrier_mutex.unlock();
-
-    if (++b.processes_reached == m_group_sizes[process_group_id]) {
-        b.processes_reached = 0;
-        b.flush_sequence = s_mproc->m_out_req_c->get_leading_sequence();
-        lock.unlock();
-        b.cv.notify_all();
-    }
-    else {
-        do {
-            // this code might be reached either if the other processes have
-            // not called barrier, or if the group size has not been set (yet).
-            b.cv.wait(lock);
-        }
-        while (b.processes_reached);
+    // check if it exists
+    if (m_groups.count(name)) {
+        return invalid_instance_id;
     }
 
-    return b.flush_sequence;
-}
+    m_groups[name].set(member_process_ids);
+    auto ret = m_groups[name].m_instance_id;
 
+    for (auto& e : member_process_ids) {
+        m_groups_of_process[e].insert(ret);
+    }
 
-
-// EXPORTED FOR RPC
-inline
-bool Coordinator::add_this_process_into_group(type_id_type process_group_id)
-{
-    if (s_mproc->m_branched)
-        return false;
-
-    Message_prefix* m = s_tl_current_message;
-    instance_id_type process_id = m ? m->sender_instance_id : s_mproc->m_instance_id;
-    add_process_into_group(process_id, process_group_id);
-    return true;
+    m_groups[name].assign_name(name);
+    return ret;
 }
 
 
@@ -289,26 +378,6 @@ void Coordinator::print(const string& str)
 {
     cout << str;
 }
-
-
-
-inline
-void Coordinator::set_group_size(type_id_type process_group_id, size_t size)
-{
-    m_group_sizes[process_group_id] = (uint32_t)size;
-    m_barriers[process_group_id].cv.notify_all();
-}
-
-
-
-inline
-bool Coordinator::add_process_into_group(instance_id_type process_id, type_id_type process_group_id)
-{
-    m_processes_of_group[process_group_id].insert(process_id);
-    m_groups_of_process[process_id].insert(process_group_id);
-    return true;
-}
-
 
 } // sintra
 

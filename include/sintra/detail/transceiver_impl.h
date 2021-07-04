@@ -30,6 +30,9 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <type_traits>
 #include <memory>
 
+#include "exception_conversions.h"
+#include "exception_conversions_impl.h"
+
 
 namespace sintra {
 
@@ -80,10 +83,11 @@ void Transceiver::construct(const string& name/* = ""*/, uint64_t instance_id/* 
             throw runtime_error("Transceiver name assignment failed.");
         }
     }
-
+    /*
     activate(
         &Transceiver::instance_invalidated_handler,
         Typed_instance_id<void>(any_local_or_remote) );
+    */
 }
 
 
@@ -146,28 +150,6 @@ void Transceiver::destroy()
 }
 
 
-
-inline
-void Transceiver::instance_invalidated_handler(const instance_invalidated& msg)
-{
-    lock_guard<mutex> sl(m_return_handlers_mutex);
-
-    auto it = m_active_return_handlers.begin();
-    while (it != m_active_return_handlers.end()) {
-        if (it->second.instance_id == msg.sender_instance_id) {
-            // if this transceiver is waiting on an rpc call to a function
-            // of the transceiver being invalidated, the call will fail.
-            it->second.failure_handler();
-            it = m_active_return_handlers.erase(it);
-        }
-        else {
-            ++it;
-        }
-    }
-}
-
-
-
 template<typename MESSAGE_T, typename HT>
 Transceiver::handler_deactivator
 Transceiver::activate_impl(
@@ -217,12 +199,13 @@ Transceiver::activate_impl(
     }
 
     *deactivator_it = [=, &ms] () {
-            msm_it->second.erase(mid_sid_it);
-            if (msm_it->second.empty()) {
-                ms.erase(msm_it);
-            }
-            m_deactivators.erase(deactivator_it);
-        };
+        lock_guard<recursive_mutex> sl(s_mproc->m_handlers_mutex);
+        msm_it->second.erase(mid_sid_it);
+        if (msm_it->second.empty()) {
+            ms.erase(msm_it);
+        }
+        m_deactivators.erase(deactivator_it);
+    };
 
     return m_deactivators.back();
 }
@@ -466,56 +449,144 @@ auto& Transceiver::get_instance_to_object_map()
 }
 
 
-
 template <typename R_MESSAGE_T, typename MESSAGE_T, typename OBJECT_T>
 void Transceiver::finalize_rpc_write(
-    R_MESSAGE_T* placed_msg, const MESSAGE_T& msg, const OBJECT_T* obj)
+    R_MESSAGE_T* placed_rep_msg,
+    const MESSAGE_T& req_msg,
+    const OBJECT_T* ref_obj,
+    type_id_type ex_tid)
 {
-    placed_msg->sender_instance_id = obj->m_instance_id;
-    placed_msg->receiver_instance_id = msg.sender_instance_id;
-    placed_msg->function_instance_id = msg.function_instance_id;
-    placed_msg->message_type_id = not_defined_type_id;
+    finalize_rpc_write(placed_rep_msg, req_msg.sender_instance_id, req_msg.function_instance_id, ref_obj, ex_tid);
+}
+
+template <typename R_MESSAGE_T, typename OBJECT_T>
+void Transceiver::finalize_rpc_write(
+    R_MESSAGE_T* placed_rep_msg,
+    instance_id_type receiver_iid,
+    instance_id_type function_iid,
+    const OBJECT_T* ref_obj,
+    type_id_type ex_tid)
+{
+    placed_rep_msg->sender_instance_id   = ref_obj->m_instance_id;
+    placed_rep_msg->receiver_instance_id = receiver_iid;
+    placed_rep_msg->function_instance_id = function_iid;
+    placed_rep_msg->message_type_id      = ex_tid;
+
+    assert(placed_rep_msg->receiver_instance_id != 0);
+
     s_mproc->m_out_rep_c->done_writing();
 }
 
 
+template <typename T>
+struct Void_filter
+{
+    std::function<T()> f;
+    T result;
+    void call() { result = f(); }
+};
+
+template <>
+struct Void_filter<void_placeholder_t>
+{
+    std::function<void()> f;
+    void_placeholder_t result;
+    void call() { f(); }
+};
+
+
+template<typename T> struct unvoid       { using type = T;                  };
+template<>           struct unvoid<void> { using type = void_placeholder_t; };
+
 
 template <
     typename RPCTC,
-    typename MESSAGE_T,
-    typename /* = void*/,
-    typename /* = enable_if_t<is_same< typename RPCTC::r_type, void>::value> */
+    typename MESSAGE_T
 >
 void Transceiver::rpc_handler(Message_prefix& untyped_msg)
 {
+    using r_type = typename unvoid<typename RPCTC::r_type>::type;
+
     MESSAGE_T& msg = (MESSAGE_T&)untyped_msg;
     typename RPCTC::o_type* obj = get_instance_to_object_map<RPCTC>()[untyped_msg.receiver_instance_id];
-    using return_message_type = Message<Enclosure<typename RPCTC::r_type>, void, not_defined_type_id>;
+    using return_message_type = Message<Enclosure<r_type>, void, not_defined_type_id>;
     static auto once = return_message_type::id();
     (void)(once); // suppress unused variable warning
-    call_function_with_fusion_vector_args(*obj, RPCTC::mf(), msg);
-    return_message_type* placed_msg = s_mproc->m_out_rep_c->write<return_message_type>(0);
-    finalize_rpc_write(placed_msg, msg, obj);
-}
 
+    type_id_type etid = not_defined_type_id;
+    const char* what = "";
+    size_t what_size = 0;
 
+    // allocate string and copy exception information
+    auto asacei = [](const char* e_what) -> const char*
+    {
+        char* what = 0;
+        size_t what_size = strlen(e_what)+1;
+        what = new char[what_size];
+        strncpy_s(what, what_size, e_what, what_size);
+        return what;
+    };
 
-template <
-    typename RPCTC,
-    typename MESSAGE_T,
-    typename /* = enable_if_t<!is_same< typename RPCTC::r_type, void>::value> */
->
-void Transceiver::rpc_handler(Message_prefix& untyped_msg)
-{
-    MESSAGE_T& msg = (MESSAGE_T&)untyped_msg;
-    typename RPCTC::o_type* obj = get_instance_to_object_map<RPCTC>()[untyped_msg.receiver_instance_id];
-    using return_message_type = Message<Enclosure<typename RPCTC::r_type>, void, not_defined_type_id>;
-    static auto once = return_message_type::id();
-    (void)(once); // suppress unused variable warning
-    typename RPCTC::r_type ret = call_function_with_fusion_vector_args(*obj, RPCTC::mf(), msg);
-    return_message_type* placed_msg =
-        s_mproc->m_out_rep_c->write<return_message_type>(vb_size(ret), ret);
-    finalize_rpc_write(placed_msg, msg, obj);
+    auto vf = Void_filter<r_type>{
+        [&](){return call_function_with_fusion_vector_args(*obj, RPCTC::mf(), msg);}
+    };
+
+    try {
+        vf.call();
+    }
+    catch(std::pair<deferral, function<void()> > &d) {
+
+        // The point for returning a function in addition to the deferral, is that
+        // we would most likely have to synchronize with the actual return, in order
+        // to prevent that the final result is written before the deferral.
+        // The function, in this case, would unlock a mutex (which is the case for
+        // the barrier implementation), or something similar.
+
+        deferral* placed_msg = s_mproc->m_out_rep_c->write<deferral>(0, d.first);
+        finalize_rpc_write(placed_msg, msg, obj, (type_id_type)detail::reserved_id::deferral);
+        d.second();
+        return;
+    }
+    catch(std::invalid_argument  &e) { etid = (type_id_type)detail::reserved_id::std_invalid_argument; what = asacei(e.what()); }
+    catch(std::domain_error      &e) { etid = (type_id_type)detail::reserved_id::std_domain_error;     what = asacei(e.what()); }
+    catch(std::length_error      &e) { etid = (type_id_type)detail::reserved_id::std_length_error;     what = asacei(e.what()); }
+    catch(std::out_of_range      &e) { etid = (type_id_type)detail::reserved_id::std_out_of_range;     what = asacei(e.what()); }
+    catch(std::range_error       &e) { etid = (type_id_type)detail::reserved_id::std_range_error;      what = asacei(e.what()); }
+    catch(std::overflow_error    &e) { etid = (type_id_type)detail::reserved_id::std_overflow_error;   what = asacei(e.what()); }
+    catch(std::underflow_error   &e) { etid = (type_id_type)detail::reserved_id::std_underflow_error;  what = asacei(e.what()); }
+    catch(std::ios_base::failure &e) { etid = (type_id_type)detail::reserved_id::std_ios_base_failure; what = asacei(e.what()); }
+    catch(std::logic_error       &e) { etid = (type_id_type)detail::reserved_id::std_logic_error;      what = asacei(e.what()); }
+    catch(std::runtime_error     &e) { etid = (type_id_type)detail::reserved_id::std_runtime_error;    what = asacei(e.what()); }
+    catch(std::exception         &e) { etid = (type_id_type)detail::reserved_id::std_exception;        what = asacei(e.what()); }
+    catch(...)                       { etid = (type_id_type)detail::reserved_id::unknown_exception;    what = asacei(
+        "An exception was thrown whose type is not serialized by sintra");
+    }
+
+    if (etid == not_defined_type_id) { // normal return
+
+        // additional return recipients, assumed to be waiting
+        if (s_tl_common_function_iid != invalid_instance_id) {
+
+            // NOTE: For the recipients in this loop, this will be the second time the function returns,
+            // assuming they have already received a deferral.
+            for (size_t i = 0; i < s_tl_additional_piids_size; i++) {
+                return_message_type* placed_msg = s_mproc->m_out_rep_c->write<return_message_type>(vb_size(vf.result), vf.result);
+                finalize_rpc_write(placed_msg, s_tl_additional_piids[i], s_tl_common_function_iid, obj, not_defined_type_id);
+            }
+
+            s_tl_additional_piids_size = 0;
+            s_tl_common_function_iid = invalid_instance_id;
+        }
+
+        // the normal return
+        return_message_type* placed_msg = s_mproc->m_out_rep_c->write<return_message_type>(vb_size(vf.result), vf.result);
+        finalize_rpc_write(placed_msg, msg, obj, etid);
+    }
+    else {
+        exception* placed_msg = s_mproc->m_out_rep_c->write<exception>(vb_size(string(what)), string(what));
+        finalize_rpc_write(placed_msg, msg, obj, etid);
+        delete [] what;
+    }
 }
 
 
@@ -525,7 +596,7 @@ template <
     typename RT,
     typename OBJECT_T,
     typename... FArgs,      // The argument types of the exported member function
-    typename... RArgs       // The artument types used by the caller
+    typename... RArgs       // The argument types used by the caller
 >
 RT Transceiver::rpc(
     RT(OBJECT_T::* /*resolution dummy arg*/)(FArgs...),
@@ -564,45 +635,72 @@ template <
 typename RPCTC::r_type
 Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
 {
-    if (is_local_instance(instance_id)) {
+    if (instance_id == invalid_instance_id) {
+        throw std::runtime_error("Attempted to make an RPC call using an invalid instance ID.");
+    }
+
+    if (RPCTC::may_be_called_directly && is_local_instance(instance_id)) {
         // if the instance is local, then it has already been registered in the instance_map
         // of this particular type. this will only find the object and call it.
         auto it = get_instance_to_object_map<RPCTC>().find(instance_id);
         assert(it != get_instance_to_object_map<RPCTC>().end());
         return (it->second->*RPCTC::mf())(args...);
-    }    
+    }
 
     using return_type = typename MESSAGE_T::return_type;
     using return_message_type = Message<Enclosure<return_type>, void, not_defined_type_id>;
 
-    mutex               keep_waiting_mutex;
-    condition_variable  keep_waiting_condition;
-    bool                keep_waiting = true;
-    bool                success = false;
-
+    Outstanding_rpc_control orpcc;
+    orpcc.remote_instance = instance_id;
     Unserialized_Enclosure<return_type> rm_body;
+    
+    type_id_type ex_tid = not_defined_type_id;
+    std::string ex_what;
+
+    instance_id_type function_instance_id = invalid_instance_id;
+
     Return_handler rh;
-    rh.success_handler = [&] (const Message_prefix& msg) {
+    rh.return_handler = [&] (const Message_prefix& msg) {
         const auto& returned_message = (const return_message_type&)(msg);
-        lock_guard<mutex> sl(keep_waiting_mutex);
+        lock_guard<mutex> sl(orpcc.keep_waiting_mutex);
         rm_body = returned_message;
-        success = true;
-        keep_waiting = false;
-        keep_waiting_condition.notify_all();
+        orpcc.success = true;
+        orpcc.keep_waiting = false;
+        orpcc.keep_waiting_condition.notify_all();
     };
-    rh.failure_handler = [&] () {
-        lock_guard<mutex> sl(keep_waiting_mutex);
-        success = false;
-        keep_waiting = false;
-        keep_waiting_condition.notify_all();
+    rh.exception_handler = [&] (const Message_prefix& msg) {
+        const auto& returned_message = (const exception&)(msg);
+        lock_guard<mutex> sl(orpcc.keep_waiting_mutex);
+        orpcc.success = false;
+        ex_tid = returned_message.exception_type_id;
+        ex_what = returned_message.what;
+        orpcc.keep_waiting = false;
+        orpcc.keep_waiting_condition.notify_all();
     };
-    rh.instance_id = instance_id;
+    rh.deferral_handler = [&] (const Message_prefix& msg) {
 
+        const auto& returned_message = (const deferral&)(msg);
+        lock_guard<mutex> sl(orpcc.keep_waiting_mutex);
+        // the 'success' variable here is irrelevant
 
-    auto function_instance_id = s_mproc->activate_return_handler(rh);
+        // if the new_id differs, then replace it
+        assert(returned_message.new_fiid != function_instance_id);
+        s_mproc->replace_return_handler_id(function_instance_id, returned_message.new_fiid);
+        //}
+
+        // replaces the placement of the handler (message instance id)
+        // with the one received by the remote call
+        // and keeps waiting until the final result arrives,
+        // which will be identified with the replaced message instance id
+    };
+
 
     // block until reading thread either receives results or the call fails
-    unique_lock<mutex> sl(keep_waiting_mutex);
+    unique_lock<mutex> sl(orpcc.keep_waiting_mutex);
+
+    rh.instance_id = instance_id;
+    function_instance_id = s_mproc->activate_return_handler(rh);
+
 
     // write the message for the rpc call into the communication ring
     static auto once = MESSAGE_T::id();
@@ -613,27 +711,53 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
     msg->function_instance_id = function_instance_id;
     s_mproc->m_out_req_c->done_writing();
 
+    {
+        unique_lock<mutex> orpclock(s_outstanding_rpcs_mutex);
+        s_outstanding_rpcs.insert(&orpcc);
+    }
+
     //    _       .//'
     //   (_).  .//'                          TODO: for an asynchronous implementation, cut here
-    // -- _  ::: --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --
+    // -- _  O|| --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --
     //   (_)'  '\\.
     //            '\\.
 
-    while (keep_waiting) {
+    while (orpcc.keep_waiting) {
         // TODO: FIXME
         // If one of the processes supplying results crashes without notice or blocks,
         // this will deadlock. We need to put a time limit, implement recovery and test it.
-        //  use wait_for, rather than wait - but not just yet -
-        keep_waiting_condition.wait(sl);
+        // use wait_for, rather than wait - but not just yet -
+
+        //1. put the mutex in a process wide mutex list
+        //2. the condition in the while should also check for thread termination
+        //3. wait_for
+
+        // if it fails throw exception.
+
+
+        orpcc.keep_waiting_condition.wait(sl);
     }
+
+    {
+        unique_lock<mutex> orpclock(s_outstanding_rpcs_mutex);
+        s_outstanding_rpcs.erase(&orpcc);
+    }
+
+
     sl.unlock();
 
     // we can now disable the return message handler
     s_mproc->deactivate_return_handler(function_instance_id);
 
-    if (!success) {
-        // This should be unreachable, until an abort mechanism is implemented.
-        throw runtime_error("RPC failed");
+    if (!orpcc.success) {
+        if (ex_tid != not_defined_type_id) {
+            // interprocess exception
+            string_to_exception(ex_tid, ex_what);
+        }
+        else {
+            // rpc failure
+            throw std::runtime_error("RPC failed");
+        }
     }
 
     return rm_body.get_value();
@@ -645,20 +769,31 @@ inline
 instance_id_type
 Transceiver::activate_return_handler(const Return_handler &rh)
 {
-    instance_id_type message_instance_id = make_instance_id();
+    instance_id_type function_instance_id = make_instance_id();
     lock_guard<mutex> sl(m_return_handlers_mutex);
-    m_active_return_handlers[message_instance_id] = rh;
-    return message_instance_id;
+    m_active_return_handlers[function_instance_id] = rh;
+    return function_instance_id;
 }
 
 
 
 inline
 void
-Transceiver::deactivate_return_handler(instance_id_type message_instance_id)
+Transceiver::deactivate_return_handler(instance_id_type function_instance_id)
 {
     lock_guard<mutex> sl(m_return_handlers_mutex);
-    m_active_return_handlers.erase(message_instance_id);
+    m_active_return_handlers.erase(function_instance_id);
+}
+
+
+inline
+void
+Transceiver::replace_return_handler_id(instance_id_type old_id, instance_id_type new_id)
+{
+    lock_guard<mutex> sl(m_return_handlers_mutex);
+    auto node_handler = m_active_return_handlers.extract(old_id);
+    node_handler.key() = new_id;
+    m_active_return_handlers.insert(std::move(node_handler));
 }
 
 

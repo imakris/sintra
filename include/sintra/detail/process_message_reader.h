@@ -30,6 +30,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "globals.h"
 #include "message.h"
 
+#include <set>
+
 
 namespace sintra {
 
@@ -59,15 +61,23 @@ using std::condition_variable;
 
 
 static inline thread_local Message_prefix* s_tl_current_message = nullptr;
+static inline thread_local instance_id_type s_tl_common_function_iid = invalid_instance_id;
 
+static inline thread_local instance_id_type s_tl_additional_piids[max_process_index];
+static inline thread_local size_t s_tl_additional_piids_size = 0;
+
+// This exists because it may occur that there are multiple outstanding RPC calls
+// from different threads.
+static inline mutex s_outstanding_rpcs_mutex;
+static inline std::set<Outstanding_rpc_control*> s_outstanding_rpcs;
 
 
 struct Process_message_reader
 {
     enum State
     {
-        FULL_FUNCTIONALITY,
-        COORDINATOR_ONLY,
+        NORMAL_MODE,  // full functionality
+        SERVICE_MODE, // only basic functionality
         STOPPING
     };
 
@@ -78,7 +88,7 @@ struct Process_message_reader
     ~Process_message_reader();
 
 
-    void pause() { m_state = COORDINATOR_ONLY; }
+    void pause() { m_state = SERVICE_MODE; }
 
 
     inline
@@ -103,10 +113,6 @@ struct Process_message_reader
 
 
     inline
-    void local_request_reader_function();
-
-
-    inline
     void reply_reader_function();
 
 
@@ -126,10 +132,11 @@ struct Process_message_reader
         return m_in_req_c->get_message_reading_sequence();
     }
 
+    State state() const {return m_state;}
 
 private:
 
-    atomic<State>           m_state                 = FULL_FUNCTIONALITY;
+    atomic<State>           m_state                 = NORMAL_MODE;
 
     instance_id_type        m_process_instance_id;
 
