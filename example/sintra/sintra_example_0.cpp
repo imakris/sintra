@@ -1,5 +1,5 @@
 //
-// Sintra library, example #1
+// Sintra library, example 0
 //
 // This program demonstrates simple point to point process communication, using one executable.
 // A multi-process single executable program requires a call to init_and_branch() in its main thread
@@ -24,7 +24,7 @@ using namespace sintra;
 
 int process_1()
 {
-    barrier(); // ensures that the slots receiving the messages have been activated.
+    barrier("1st barrier"); // ensures that the slots receiving the messages have been activated.
 
     // send some messages
     world() << "good morning";
@@ -32,7 +32,7 @@ int process_1()
     world() << "good afternoon" << "good evening" << "good night";
     world() << 2 << 3 << 4;
 
-    barrier(); // ensures that the messages have been received and processed
+    barrier("2nd barrier"); // ensures that the messages have been received and processed
 
     return 0;
 }
@@ -46,8 +46,8 @@ int process_2()
 
     activate_slot(string_slot);
 
-    barrier(); // ensures that the slots receiving the messages have been activated.
-    barrier(); // ensures that the messages have been received and processed
+    barrier("1st barrier"); // ensures that the slots receiving the messages have been activated.
+    barrier("2nd barrier"); // ensures that the messages have been received and processed
 
     return 0;
 }
@@ -62,20 +62,20 @@ int process_3()
 
     activate_slot(int_slot);
 
-    barrier(); // ensures that the slots receiving the messages have been activated.
-    barrier(); // ensures that the messages have been received and processed
+    barrier("1st barrier"); // ensures that the slots receiving the messages have been activated.
+    barrier("2nd barrier"); // ensures that the messages have been received and processed
 
     return 0;
 }
 
 
+
 int main(int argc, char* argv[])
 {
-    start(argc, argv,
-        Process_descriptor(process_1)
-    ,   Process_descriptor(process_2)
-    ,   Process_descriptor(process_3)
-    );
+    init(argc, argv, process_1, process_2, process_3);
+
+    // when finalize() returns, messaging will no longer work.
+    finalize();
 
     if (process_index() == 0) {
         do {
