@@ -297,17 +297,22 @@ constexpr bool args_require_varbuffer =
 // be used by the recipient.
 struct Message_prefix
 {
-    // used by the serializer
+    // used by the serializer as a basic corruption check
     const uint64_t magic                    = message_magic;
 
     // used by the serializer, set in constructor
     uint32_t bytes_to_next_message          = 0;
 
-    // this is a cross-process type id. It is set in message constructor. 
-    type_id_type message_type_id            = invalid_type_id;
+    union {
+        // This is a cross-process type id. It is set in message constructor.
+        type_id_type message_type_id        = invalid_type_id;
 
-    // only instantiated in function messages, to associate the return messages to the original.
-    // when this is set, the message_type_id is no longer relevant and will be ignored.
+        // Only relevant in RPC return messages.
+        type_id_type exception_type_id;
+    };
+
+    // Only instantiated in RPC messages, to associate the return messages with the original.
+    // When this is set, the message_type_id becomes irrelevant.
     instance_id_type function_instance_id   = invalid_instance_id;
 
     // used by the serializer, set in communicators
@@ -315,11 +320,6 @@ struct Message_prefix
 
     // used by the serializer, set in communicators
     instance_id_type receiver_instance_id   = invalid_instance_id;
-
-    // FIXME: Find a good way to exclude function_instance_id, as it is only relevant
-    // to some types of messages and should be optional. There are many ways to do it, but none of
-    // what has been considered and/or tried so far would leave the external interface of the
-    // library completely unaffected, which should not happen.
 };
 
 template <typename T>
@@ -487,7 +487,7 @@ struct Message: public Message_prefix, public T
     SINTRA_SIGNAL_BASE(name, invalid_type_id, __VA_ARGS__)
 
 #define SINTRA_SIGNAL_EXPLICIT(name, ...)                                       \
-    SINTRA_SIGNAL_BASE(name, sintra::detail::reserved_id::name, __VA_ARGS__)
+    SINTRA_SIGNAL_BASE(name, (type_id_type)sintra::detail::reserved_id::name, __VA_ARGS__)
 
 
 
@@ -619,9 +619,9 @@ struct Message_ring_R: Ring_R<char>
     {
         // if all the messages in the reading buffer have been read
         if (m_range.begin == m_range.end) {
-            // if this is not an uninitialised state
+            // if this is not an uninitialized state
             if (m_reading) {
-                // finalise the reading
+                // finalize the reading
                 done_reading_new_data();
             }
             else {
@@ -637,13 +637,20 @@ struct Message_ring_R: Ring_R<char>
             m_range = range;
         }
 
+        bool f = false;
+        while (!m_reading_lock.compare_exchange_strong(f, true)) { f = false; }
+
+        //m_reading_lock
         if (!m_reading) {
+            m_reading_lock = false;
             return nullptr;
         }
 
         Message_prefix* ret = (Message_prefix*)m_range.begin;
         assert(ret->magic == message_magic);
         m_range.begin += ret->bytes_to_next_message;
+
+        m_reading_lock = false;
         return ret;
     }
 

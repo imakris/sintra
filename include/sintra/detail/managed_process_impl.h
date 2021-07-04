@@ -51,7 +51,8 @@ static void s_signal_handler(int sig)
     s_mproc->emit_remote<Managed_process::terminated_abnormally>(sig);
 
     for (auto& reader : s_mproc->m_readers) {
-        reader.stop_and_wait(2.);
+        // waiting here is pointless, we are single-threaded
+        reader.second.stop_nowait();
     }
 
     raise(sig);
@@ -97,6 +98,9 @@ sintra::type_id_type get_type_id()
     return tid;
 }
 
+// helper
+template <typename T>
+sintra::type_id_type get_type_id(const T&) {return get_type_id<T>();}
 
 
 template <typename>
@@ -122,44 +126,7 @@ sintra::instance_id_type get_instance_id(std::string&& assigned_name)
 
 
 
-template <typename T, type_id_type ID>
-void Process_group<T, ID>::barrier()
-{
-    if (!process_group_membership<T>()) {
-        throw sintra_logic_error("The process is not a member of that group.");
-    }
 
-    // this mutex protects from matching multiple threads on the same process group's barrier
-    std::lock_guard<mutex> barrier_lock(m_barrier_mutex);
-
-    auto flush_seq = Coordinator::rpc_barrier(s_coord_id, id());
-
-    // if the coordinator is not local, we must flush its channel
-    // (i.e. all messages on the coordinator's channel must be processed before proceeding further)
-    if (!s_coord) {
-        auto rs = s_mproc->m_readers.front().get_request_reading_sequence();
-        if (rs < flush_seq) {
-            std::unique_lock<mutex> flush_lock(s_mproc->m_flush_sequence_mutex);
-            s_mproc->m_flush_sequence.push_back(flush_seq);
-            while (!s_mproc->m_flush_sequence.empty() &&
-                s_mproc->m_flush_sequence.front() <= flush_seq)
-            {
-                s_mproc->m_flush_sequence_condition.wait(flush_lock);
-            }
-        }
-    }
-}
-
-
-
-template <typename T, type_id_type ID /* = 0*/>
-void Process_group<T, ID>::enroll()
-{
-    if (!Coordinator::rpc_add_this_process_into_group(s_coord_id, id() ) ) {
-        throw std::runtime_error("Attempted to enroll into a process group after branching.");
-    }
-    process_group_membership<T>() = true;
-}
 
 
 
@@ -196,7 +163,7 @@ Managed_process::~Managed_process()
     // the coordinating process will be removing its readers whenever
     // they are unpublished - when they are all done, the process may exit
     if (s_coord) {
-        wait_until_all_readers_are_done();
+        wait_until_all_external_readers_are_done();
     }
 
     assert(m_state <= PAUSED); // i.e. paused or stopped
@@ -234,7 +201,6 @@ Managed_process::~Managed_process()
 }
 
 
-
 inline
 void Managed_process::init(int argc, char* argv[])
 {
@@ -270,7 +236,7 @@ void Managed_process::init(int argc, char* argv[])
                     break;
                 case 'a':
                     branch_index_arg    = optarg;
-                    s_branch_index     = boost::lexical_cast<decltype(s_branch_index)>(optarg);
+                    s_branch_index      = boost::lexical_cast<decltype(s_branch_index)>(optarg);
                     if (s_branch_index < 1) {
                         throw -1;
                     }
@@ -318,10 +284,9 @@ Managed process options:
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 m_time_instantiated.time_since_epoch()
             ).count();
-        m_directory = obtain_swarm_directory();
         coordinator_is_local = true;
 
-        // NOTE: leave m_branch_index uninitialised. The supervisor does not have an entry
+        // NOTE: leave m_branch_index uninitialized. The supervisor does not have an entry
     }
     else {
         if (coordinator_id_arg.empty() || (branch_index_arg.empty() && instance_id_arg.empty()) ) {
@@ -329,46 +294,46 @@ Managed process options:
             assert(!"if the binary was not invoked manually, this is definitely a bug.");
             exit(1);
         }
-        else {
-            if (!branch_index_arg.empty()) {
-                assert(s_branch_index < max_process_index - 1);
-                assert(m_instance_id != 0);
 
-                if (instance_id_arg.empty()) {
-                    // If branch_index is specified, the explicit instance_id may not, thus
-                    // we need to make a process instance id based on the branch_index.
-                    // Transceiver IDs start from 2 (0 is invalid, 1 is the first process)
-                    m_instance_id = make_process_instance_id(s_branch_index + 2);
-                }
-
-                s_mproc_id = m_instance_id;
-
-                m_directory = obtain_swarm_directory();
-            }
- 
+        if (!branch_index_arg.empty()) {
+            assert(s_branch_index < max_process_index - 1);
         }
+
+        assert(m_instance_id != 0);
+
+        if (instance_id_arg.empty()) {
+            // If branch_index is specified, the explicit instance_id may not, thus
+            // we need to make a process instance id based on the branch_index.
+            // Transceiver IDs start from 2 (0 is invalid, 1 is the first process)
+            m_instance_id = make_process_instance_id(s_branch_index + 2);
+        }
+
+        s_mproc_id = m_instance_id;
     }
+    m_directory = obtain_swarm_directory();
 
     m_out_req_c = new Message_ring_W(m_directory, "req", m_instance_id);
     m_out_rep_c = new Message_ring_W(m_directory, "rep", m_instance_id);
 
-    if (!coordinator_is_local) {
-        m_readers.emplace_back(process_of(s_coord_id));
-        m_readers.back().wait_until_ready();
+    if (coordinator_is_local) {
+        s_coord = new Coordinator;
+        s_coord_id = s_coord->m_instance_id;
+
+        {
+            lock_guard<mutex> lock(s_coord->m_publish_mutex);
+            s_coord->m_transceiver_registry[s_mproc_id];
+        }
     }
+
+    assert(!m_readers.count(process_of(s_coord_id)));
+    auto it = m_readers.emplace(process_of(s_coord_id), process_of(s_coord_id));
+    assert(it.second == true);
+    it.first->second.wait_until_ready();
 
     // Up to this point, there was no infrastructure for a proper construction
     // of Transceiver base.
 
     this->Derived_transceiver<Managed_process>::construct("", m_instance_id);
-
-    if (coordinator_is_local) {
-        s_coord = new Coordinator;
-        s_coord_id = s_coord->m_instance_id;
-        s_coord->add_process_into_group(m_instance_id, All_processes::id());
-    }
-
-    process_group_membership<All_processes>() = true;
 
     auto published_handler = [this](const Coordinator::instance_published& msg)
     {
@@ -392,8 +357,10 @@ Managed process options:
         auto iid = msg.instance_id;
         auto process_iid = process_of(iid);
         if (iid == process_iid) {
+
             // the unpublished transceiver was a process, thus we should
             // remove all transceiver records who are known to live in it.
+
             for (auto it = m_instance_id_of_assigned_name.begin(); it != m_instance_id_of_assigned_name.end();) {
                 if (process_of(it->second) == iid) {
                     it = m_instance_id_of_assigned_name.erase(it);
@@ -402,6 +369,8 @@ Managed process options:
                     ++it;
                 }
             }
+
+            s_mproc->unblock_rpc(iid);
         }
 
         // if the unpublished transceiver is the coordinator process, we have to stop.
@@ -411,8 +380,10 @@ Managed process options:
         }
     };
 
-    activate(published_handler, Typed_instance_id<Coordinator>(s_coord_id));
-    activate(unpublished_handler, Typed_instance_id<Coordinator>(s_coord_id));
+    if (!s_coord) {
+        activate(published_handler,   Typed_instance_id<Coordinator>(s_coord_id));
+        activate(unpublished_handler, Typed_instance_id<Coordinator>(s_coord_id));
+    }
 
     if (coordinator_is_local) {
         auto cr_handler = [](const Managed_process::terminated_abnormally& msg)
@@ -432,21 +403,28 @@ Managed process options:
         };
         activate<Managed_process>(cr_handler, any_remote);
     }
+
+    m_start_stop_mutex.lock();
+
+    m_state = RUNNING;
+    m_start_stop_mutex.unlock();
 }
 
 
 
 inline
-void Managed_process::branch()
+bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
 {
     using namespace sintra;
     using std::to_string;
 
+    std::vector<instance_id_type> failed_spawns;
+
     if (s_coord) {
 
         // 1. prepare the command line for each invocation
-        auto it = s_branch_vector.begin();
-        for (int i = 1; it != s_branch_vector.end(); it++, i++) {
+        auto it = branch_vector.begin();
+        for (int i = 1; it != branch_vector.end(); it++, i++) {
             it->sintra_options.push_back("--swarm_id");
             it->sintra_options.push_back(to_string(m_swarm_id));
             if (it->entry.m_binary_name.empty()) {
@@ -454,28 +432,19 @@ void Managed_process::branch()
                 it->sintra_options.push_back("--branch_index");
                 it->sintra_options.push_back(to_string(i));
             }
-            auto assigned_instance_id = make_process_instance_id();
+            it->assigned_instance_id = make_process_instance_id();
             it->sintra_options.push_back("--instance_id");
-            it->sintra_options.push_back(to_string(assigned_instance_id));
+            it->sintra_options.push_back(to_string(it->assigned_instance_id));
             it->sintra_options.push_back("--coordinator_id");
             it->sintra_options.push_back(to_string(s_coord_id));
-
-            s_coord->add_process_into_group(assigned_instance_id, All_processes::id());
-            s_coord->add_process_into_group(assigned_instance_id, Externally_coordinated::id());
-
-            s_coord->set_group_size(All_processes::id(),          s_branch_vector.size() + 1);
-            s_coord->set_group_size(Externally_coordinated::id(), s_branch_vector.size()    );
-
-            // create the readers. The next line will start the reader threads,
-            // which might take some time. At this stage, we do not have to wait
-            // until they are ready for messages.
-            m_readers.emplace_back(assigned_instance_id);
         }
 
+
         // 2. spawn
-        it = s_branch_vector.begin();
-        auto readers_it = m_readers.begin();
-        for (int i = 0; it != s_branch_vector.end(); readers_it++, it++, i++) {
+        std::unordered_set<instance_id_type> successfully_spawned;
+        it = branch_vector.begin();
+        //auto readers_it = m_readers.begin();
+        for (int i = 0; it != branch_vector.end(); it++, i++) {
 
             std::vector<std::string> all_args = {it->entry.m_binary_name.c_str()};
             all_args.insert(all_args.end(), it->sintra_options.begin(), it->sintra_options.end());
@@ -486,20 +455,53 @@ void Managed_process::branch()
                 argv[i] = all_args[i].c_str();
             }
             argv[all_args.size()] = 0;
+            assert(!m_readers.count(process_of(it->assigned_instance_id)));
+            auto eit = m_readers.emplace(it->assigned_instance_id, it->assigned_instance_id);
+            assert(eit.second == true);
 
             // Before spawning the new process, we have to assure that the
             // corresponding reading threads are up and running.
-            readers_it->wait_until_ready();
+            eit.first->second.wait_until_ready();
 
-            spawn_detached(it->entry.m_binary_name.c_str(), argv);
+            bool success = spawn_detached(it->entry.m_binary_name.c_str(), argv);
+            if (!success) {
+                failed_spawns.push_back(it->assigned_instance_id);
+                std::cerr << "failed to launch " << it->entry.m_binary_name << std::endl;
+
+                //m_readers.pop_back();
+                m_readers.erase(it->assigned_instance_id);
+            }
+            else {
+                successfully_spawned.insert(it->assigned_instance_id);
+
+                // Create an entry in the coordinator's transceiver registry.
+                // This is essential for the implementation of publish_transceiver()
+                {
+                    lock_guard<mutex> lock(s_coord->m_publish_mutex);
+                    s_coord->m_transceiver_registry[it->assigned_instance_id];
+                }
+
+                // create the readers. The next line will start the reader threads,
+                // which might take some time. At this stage, we do not have to wait
+                // until they are ready for messages.
+                //m_readers.emplace_back(std::move(reader));
+            }
 
             delete [] argv;
         }
 
+        auto all_processes = successfully_spawned;
+        all_processes.insert(m_instance_id);
+
+        m_group_all      = s_coord->make_process_group("_sintra_all_processes", all_processes);
+        m_group_external = s_coord->make_process_group("_sintra_external_processes", successfully_spawned);
+        
         s_branch_index = 0;
     }
     else {
-        Process_descriptor& own_pd = s_branch_vector[s_branch_index-1];
+        assert(s_branch_index != -1);
+        assert(branch_vector.size() > s_branch_index-1);
+        Process_descriptor& own_pd = branch_vector[s_branch_index-1];
         if (own_pd.entry.m_entry_function != nullptr) {
             m_entry_function = own_pd.entry.m_entry_function;
         }
@@ -515,18 +517,34 @@ void Managed_process::branch()
         // the supervisor, which is its own coordinator, will do that too (loop comm)
         //m_peers->read_from(m_coordinator_id);
 
-        process_group_membership<Externally_coordinated>() = true;
-    }
+        m_group_all      = Coordinator::rpc_wait_for_instance(s_coord_id, "_sintra_all_processes");
+        m_group_external = Coordinator::rpc_wait_for_instance(s_coord_id, "_sintra_external_processes");
 
-    m_branched = true;
+    }
 
     // assign_name requires that all processes are instantiated, in order
     // to receive the instance_published event
-    All_processes::barrier();
+    bool all_started = Process_group::rpc_barrier(m_group_all, UIBS);
+    if (!all_started) {
+        return false;
+    }
 
     assign_name(std::string("sintra_process_") + to_string(m_pid));
-}
 
+    m_entry_function();
+
+    // Calling deactivate_all() is definitely wrong for the coordinator process.
+    // For the rest, it is probably harmless.
+    // The point of calling this here is to prevent running a handler
+    // while the process is not in a state capable of running a handler (e.g. during destruction).
+    // It is the responsibility of the library user to handle this situation properly, but
+    // there might just be too many expectations from the user.
+    if (!s_coord) {
+        s_mproc->deactivate_all();
+    }
+
+    return true;
+}
 
 
  //////////////////////////////////////////////////////////////////////////
@@ -535,27 +553,6 @@ void Managed_process::branch()
 //////   \//////   \//////   \//////   \//////   \//////   \//////   \//////
  ////     \////     \////     \////     \////     \////     \////     \////
   //       \//       \//       \//       \//       \//       \//       \//
-
-
-inline
-void Managed_process::start(int(*entry_function)())
-{
-    m_start_stop_mutex.lock();
-
-    m_state = RUNNING;
-    m_start_stop_mutex.unlock();
-
-    if (!entry_function) {
-        m_entry_function();
-    }
-    else {
-        m_readers.emplace_back(s_mproc_id);
-        m_readers.back().wait_until_ready();
-        entry_function();
-    }
-
-    pause();
-}
 
 
 
@@ -571,8 +568,8 @@ void Managed_process::pause()
     if (m_state <= PAUSED)
         return;
 
-    for (auto& i : m_readers) {
-        i.pause();
+    for (auto& ri : m_readers) {
+        ri.second.pause();
     }
 
     m_state = PAUSED;
@@ -591,8 +588,8 @@ void Managed_process::stop()
     if (m_state == STOPPED)
         return;
 
-    for (auto& i : m_readers) {
-        i.stop_nowait();
+    for (auto& ri : m_readers) {
+        ri.second.stop_nowait();
     }
 
     m_state = STOPPED;
@@ -686,14 +683,63 @@ function<void()> Managed_process::call_on_availability(Named_instance<T> transce
 
 
 inline
-void Managed_process::wait_until_all_readers_are_done()
+void Managed_process::wait_until_all_external_readers_are_done()
 {
     unique_lock<mutex> lock(m_num_active_readers_mutex);
-    while (m_num_active_readers != 0) {
+    while (m_num_active_readers > 2) {
         m_num_active_readers_condition.wait(lock);
     }
 }
 
+
+inline
+void Managed_process::flush(instance_id_type process_id, sequence_counter_type flush_sequence)
+{
+    assert(is_process(process_id));
+
+    auto it = m_readers.find(process_id);
+    if (it == m_readers.end()) {
+        throw std::logic_error(
+            "attempted to flush the channel of a process which is not being read"
+        );
+    }
+    auto& reader = it->second;
+    auto rs = reader.get_request_reading_sequence();
+    if (rs < flush_sequence) {
+        std::unique_lock<mutex> flush_lock(m_flush_sequence_mutex);
+        m_flush_sequence.push_back(flush_sequence);
+        while (!m_flush_sequence.empty() &&
+            m_flush_sequence.front() <= flush_sequence)
+        {
+            m_flush_sequence_condition.wait(flush_lock);
+        }
+    }
+}
+
+
+inline
+size_t Managed_process::unblock_rpc(instance_id_type process_instance_id)
+{
+    assert(!process_instance_id || is_process(process_instance_id));
+    size_t ret = 0;
+    unique_lock<mutex> ol(s_outstanding_rpcs_mutex);
+    if (!s_outstanding_rpcs.empty()) {
+
+        for (auto& c : s_outstanding_rpcs) {
+            unique_lock<mutex> il(c->keep_waiting_mutex);
+
+            if (process_instance_id != invalid_instance_id &&
+                process_of(c->remote_instance) == process_instance_id)
+            {
+                c->success = false;
+                c->keep_waiting = false;
+                c->keep_waiting_condition.notify_one();
+                ret++;
+            }
+        }
+    }
+    return ret;
+}
 
 
 } // sintra

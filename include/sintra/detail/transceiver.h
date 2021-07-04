@@ -32,6 +32,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "message.h"
 #include "spinlocked_containers.h"
 
+#include <condition_variable>
 #include <functional>
 #include <list>
 #include <map>
@@ -45,6 +46,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 namespace sintra {
 
 
+using std::condition_variable;
 using std::function;
 using std::is_base_of;
 using std::is_const;
@@ -207,12 +209,15 @@ protected:
 
 public:
 
+    SINTRA_SIGNAL_EXPLICIT(
+        exception,
+        message_string what
+    )
 
-    SINTRA_SIGNAL_EXPLICIT(instance_invalidated);
-
-    inline
-    void instance_invalidated_handler(const instance_invalidated& msg);
-
+    SINTRA_SIGNAL_EXPLICIT(
+        deferral,
+        instance_id_type new_fiid
+    )
 
     list<function<void()>> m_deactivators;
 
@@ -328,6 +333,7 @@ public:
         typename MF,
         MF m,
         type_id_type ID,
+        bool MAY_BE_CALLED_DIRECTLY,
         typename RT = decltype(resolve_rt(m)),
         typename OBJECT_T = decltype(resolve_object_type(m))
     >
@@ -337,7 +343,8 @@ public:
         using r_type = RT;
         using o_type = OBJECT_T;
         const static MF mf() { return m; };
-        enum { id = ID };
+        static constexpr type_id_type id = ID;
+        static constexpr bool may_be_called_directly = MAY_BE_CALLED_DIRECTLY;
     };
 
 
@@ -413,22 +420,37 @@ public:
 
     template <typename R_MESSAGE_T, typename MESSAGE_T, typename OBJECT_T>
     static void finalize_rpc_write(
-        R_MESSAGE_T* placed_msg, const MESSAGE_T& msg, const OBJECT_T* obj);
+        R_MESSAGE_T* placed_rep_msg,
+        const MESSAGE_T& req_msg,
+        const OBJECT_T* ref_obj,
+        type_id_type ex_tid);
+
+
+    // This overload is meant to be directly used in special cases,
+    // e.g. when returning to multiple recipients.
+    // In this version the receiver and function instance ids are explicitly specified,
+    // rather than deduced from the message, thus they override what might already be
+    // specified in the message.
+    template <typename R_MESSAGE_T, typename OBJECT_T>
+    static void finalize_rpc_write(
+        R_MESSAGE_T* placed_rep_msg,
+        instance_id_type receiver_iid,
+        instance_id_type function_iid,
+        const OBJECT_T* ref_obj,
+        type_id_type ex_tid);
+
+    //template <
+    //    typename RPCTC,
+    //    typename MESSAGE_T,
+    //    typename = void,
+    //    typename = enable_if_t<is_same< typename RPCTC::r_type, void>::value>
+    //>
+    //static void rpc_handler(Message_prefix& untyped_msg);
 
 
     template <
         typename RPCTC,
-        typename MESSAGE_T,
-        typename = void,
-        typename = enable_if_t<is_same< typename RPCTC::r_type, void>::value>
-    >
-    static void rpc_handler(Message_prefix& untyped_msg);
-
-
-    template <
-        typename RPCTC,
-        typename MESSAGE_T,
-        typename = enable_if_t<!is_same< typename RPCTC::r_type, void>::value>
+        typename MESSAGE_T
     >
     static void rpc_handler(Message_prefix& untyped_msg);
 
@@ -438,7 +460,7 @@ public:
         typename RT,
         typename OBJECT_T,
         typename... FArgs,      // The argument types of the exported member function
-        typename... RArgs        // The artument types used by the caller
+        typename... RArgs        // The argument types used by the caller
     >
     static RT rpc(
         RT(OBJECT_T::* /*resolution dummy arg*/)(FArgs...),
@@ -470,8 +492,9 @@ public:
 
     struct Return_handler
     {
-        function<void(const Message_prefix&)>   success_handler;
-        function<void()>                        failure_handler;
+        function<void(const Message_prefix&)>   return_handler;
+        function<void(const Message_prefix&)>   exception_handler;
+        function<void(const Message_prefix&)>   deferral_handler;
         instance_id_type                        instance_id = 0;
     };
 
@@ -480,8 +503,10 @@ public:
     instance_id_type activate_return_handler(const Return_handler &rh);
 
     inline
-    void deactivate_return_handler(instance_id_type message_instance_id);
+    void deactivate_return_handler(instance_id_type function_instance_id);
 
+    // useful for deferred
+    void replace_return_handler_id(instance_id_type old_id, instance_id_type new_id);
 
 
     template <typename RPCTC, typename MT>
@@ -495,7 +520,7 @@ public:
 
 
 
-#define SINTRA_RPC_IMPL(m, mfp, id)                                                             \
+#define SINTRA_RPC_IMPL(m, mfp, id, mbcd)                                                       \
     void rpc_assertion_##m() {                                                                  \
         static_assert(std::is_same_v<                                                           \
             std::remove_pointer_t<decltype(this)>,                                              \
@@ -503,7 +528,7 @@ public:
             "This Transceiver is not derived correctly."                                        \
         );                                                                                      \
     }                                                                                           \
-    using m ## _mftc = RPCTC_d<decltype(mfp), mfp, id>;                                         \
+    using m ## _mftc = RPCTC_d<decltype(mfp), mfp, id, mbcd>;                                   \
     Instantiator m ## _itt = export_rpc<m ## _mftc>(mfp);                                       \
                                                                                                 \
     template<typename... Args>                                                                  \
@@ -512,49 +537,30 @@ public:
         return rpc<m ## _mftc>(mfp, instance_id, args...);                                      \
     }
 
-
-#if 0 //defined(__GNUG__)
-
-    // This is probably exploiting a bug of GCC, which circumvents the need for
-    // TRANSCEIVER_PROLOGUE(name) inside any class deriving from Transceiver that uses RPC.
-
+    
+    // Exports a member function for RPC.
     #define SINTRA_RPC(m)                                                                       \
-        typedef auto otr_ ## m ## _function() -> decltype(*this);                               \
-        using otr_ ## m = std::remove_reference<decltype(((otr_ ## m ## _function*)0)())>::type;\
-        SINTRA_RPC_IMPL(m, &otr_ ## m :: m, invalid_type_id)
+        SINTRA_RPC_IMPL(m, &Transceiver_type :: m, invalid_type_id, true)
 
+    // Exports a member function for RPC, provided that an ID is already reserved for a function
+    // with that name. This is only meant to be used internally.
     #define SINTRA_RPC_EXPLICIT(m)                                                              \
-        typedef auto otr_ ## m ## _function() -> decltype(*this);                               \
-        using otr_ ## m = std::remove_reference<decltype(((otr_ ## m ## _function*)0)())>::type;\
-        SINTRA_RPC_IMPL(m, &otr_ ## m :: m, sintra::detail::reserved_id::m)
+        SINTRA_RPC_IMPL(m, &Transceiver_type :: m, (type_id_type)sintra::detail::reserved_id::m, true)
 
-#elif 0 //(_MSC_VER >= 1900) // && (_MSC_VER < 1999)
+    // Exports a member function exclusively for RPC use. This implies that the function is
+    // written in a way that makes no sense to call it directly. For example, this could be the
+    // case if it performs some collective operation (i.e. an operation that involves multiple
+    // processes, such as process barriers and scatter/gather), or returns asynchronously.
+    // Functions which are meant to be used exclusively via RPC, will not take a direct-call
+    // shortcut when called within the same process, but will instead use the RPC mechanism
+    // in all cases.
+    #define SINTRA_RPC_ONLY(m)                                                                  \
+        SINTRA_RPC_IMPL(m, &Transceiver_type :: m, invalid_type_id, false)
 
-    // And this is probably exploiting another bug, this time of of MSVC, which
-    // also circumvents the need for TRANSCEIVER_PROLOGUE(name) inside the class definition.
-
-    #define SINTRA_RPC(m)                                                                       \
-        template <typename = void> void otr_ ## m ## _function () {}                            \
-        using otr_ ## m = decltype ( resolve_object_type(& otr_ ## m ## _function<>) );         \
-        SINTRA_RPC_IMPL(m, &otr_ ## m :: m, invalid_type_id)
-
-    #define SINTRA_RPC_EXPLICIT(m)                                                              \
-        template <typename = void> void otr_ ## m ## _function () {}                            \
-        using otr_ ## m = decltype ( resolve_object_type(& otr_ ## m ## _function<>) );         \
-        SINTRA_RPC_IMPL(m, &otr_ ## m :: m, sintra::detail::reserved_id::m)
-
-#else
-
-    // However, this is probably the right way to go, strictly abiding to C++,
-    // which unfortunately requires TRANSCEIVER_PROLOGUE(name) in the class definition.
-
-    #define SINTRA_RPC(m)                                                                       \
-        SINTRA_RPC_IMPL(m, &Transceiver_type :: m, invalid_type_id)
-
-    #define SINTRA_RPC_EXPLICIT(m)                                                              \
-        SINTRA_RPC_IMPL(m, &Transceiver_type :: m, sintra::detail::reserved_id::m)
-
-#endif
+    // Exports a member function exclusively for RPC, provided that an ID is already reserved for
+    // a function with that name. This is only meant to be used internally.
+    #define SINTRA_RPC_ONLY_EXPLICIT(m)                                                         \
+        SINTRA_RPC_IMPL(m, &Transceiver_type :: m, (type_id_type)sintra::detail::reserved_id::m, false)
 
   //\       //\       //\       //\       //\       //\       //\       //
  ////\     ////\     ////\     ////\     ////\     ////\     ////\     ////
@@ -572,7 +578,7 @@ private:
     // lifetime ends with the end of the call.
     // They are assigned in pairs, to handle successful and failed calls.
     mutex m_return_handlers_mutex;
-    spinlocked_umap<instance_id_type, Return_handler> m_active_return_handlers;
+    unordered_map<instance_id_type, Return_handler> m_active_return_handlers;
 
 
     instance_id_type            m_instance_id       = invalid_instance_id;
@@ -687,6 +693,22 @@ private:
         return 0;
     }
     int itidi = type_initializer(); // initialize the initialize_type_id
+};
+
+
+
+struct Outstanding_rpc_control
+{
+    mutex               keep_waiting_mutex;
+    condition_variable  keep_waiting_condition;
+
+    // this is set before the rpc is written to the ring, in rpc_impl.
+    // It is meant to identify the remote instance, in case it
+    // crashes, in order to unblock the local caller.
+    instance_id_type    remote_instance = invalid_instance_id;
+
+    bool                keep_waiting = true;
+    bool                success = false;
 };
 
 

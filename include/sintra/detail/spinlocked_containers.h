@@ -126,9 +126,12 @@ struct spinlocked
     auto size()  const noexcept                    {locker l(m_sl); return m_c.size();            }
 
     operator CT<Args...>() const                   {locker l(m_sl); return m_c;                   }
-    auto operator=(const CT<Args...>& x)           {locker l(m_sl); return m_c.operator=(x.m_c);  }
-    auto operator=(CT<Args...>&& x)                {locker l(m_sl); return m_c.operator=(x.m_c);  }
+    auto operator=(const CT<Args...>& x)           {locker l(m_sl); return m_c.operator=(x);      }
+    auto operator=(CT<Args...>&& x)                {locker l(m_sl); return m_c.operator=(x);      }
 
+
+    //auto operator=(const CT<Args...>& x)           {locker l(m_sl); return m_c.operator=(x.m_c);  }
+    //auto operator=(CT<Args...>&& x)                {locker l(m_sl); return m_c.operator=(x.m_c);  }
 
     reference operator[] (size_type p)             {locker l(m_sl); return m_c[p];                }
     const_reference operator[] (size_type p) const {locker l(m_sl); return m_c[p];                }

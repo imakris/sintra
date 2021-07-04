@@ -44,6 +44,75 @@ using std::string;
 using std::unordered_set;
 
 
+
+struct Process_group: Derived_transceiver<Process_group>
+{
+
+    Process_group():
+        Derived_transceiver<Process_group>("", make_service_instance_id())
+    {
+    }
+
+
+    void set(const unordered_set<instance_id_type>& member_process_ids);
+
+    // barriers are deferred functions and return twice (this refers to the implementation,
+    // which is transparent to the caller - for the caller they only return once).
+    // the first returns 0 if it is expected to fail, or a serial number, if it is expected
+    // to succeed.
+    // once completed, a message is sent, that should be picked up and read only by the
+    // processes waiting on the barrier. This message would contain
+    // - the serial number, for identification purposes
+    // - the sequence counter (i.e. at which ring sequence was the barrier completed)
+    sequence_counter_type barrier(const string& barrier_name);
+
+
+    struct Barrier
+    {
+        mutex                                   m;
+        condition_variable                      cv;
+        unordered_set<instance_id_type>         processes_pending;
+        //sequence_counter_type                   flush_sequence = 0;
+        bool                                    failed = false;
+        instance_id_type                        common_function_iid = invalid_instance_id;
+    };
+
+    unordered_map<string, Barrier>              m_barriers;
+    unordered_set<instance_id_type>             m_process_ids;
+
+    mutex m_call_mutex;
+    SINTRA_RPC_ONLY_EXPLICIT(barrier)
+
+private:
+    void add_process(instance_id_type process_iid);
+    void remove_process(instance_id_type process_iid);
+
+    friend struct Coordinator;
+};
+
+void Process_group::set(const unordered_set<instance_id_type>& member_process_ids)
+{
+    std::lock_guard lock(m_call_mutex);
+    m_process_ids = unordered_set<instance_id_type>(
+        member_process_ids.begin(), member_process_ids.end()
+    );
+}
+
+void Process_group::add_process(instance_id_type process_iid)
+{
+    std::lock_guard lock(m_call_mutex);
+    m_process_ids.insert(process_iid);
+}
+
+
+void Process_group::remove_process(instance_id_type process_iid)
+{
+    std::lock_guard lock(m_call_mutex);
+    m_process_ids.erase(process_iid);
+}
+
+
+
 struct Coordinator: public Derived_transceiver<Coordinator>
 {
 
@@ -51,67 +120,70 @@ private:
     Coordinator();
     ~Coordinator();
 
-    bool add_process_into_group(instance_id_type process_id, type_id_type process_group_id);
-
     // EXPORTED FOR RPC
     type_id_type resolve_type(const string& pretty_name);
     instance_id_type resolve_instance(const string& assigned_name);
 
-    bool publish_transceiver(
+    instance_id_type wait_for_instance(const string& assigned_name);
+
+    instance_id_type publish_transceiver(
         type_id_type type_id, instance_id_type instance_id, const string& assigned_name);
     bool unpublish_transceiver(instance_id_type instance_id);
 
-    // blocks until all processes identified by process_group_id have called the function
-    // returns the leading sequence of the coordinator process' request ring when the barrier
-    // is complete.
-    sequence_counter_type barrier(type_id_type process_group_id);
-    bool add_this_process_into_group(type_id_type process_group_id);
+    //bool add_process_into_group(instance_id_type process_id, type_id_type process_group_id);
+
+
+    instance_id_type make_process_group(
+        const string& name,
+        const unordered_set<instance_id_type>& member_process_ids);
+
+
+    // Blocks until all processes identified by process_group_id have called the function.
+    // num_absences may be used by a caller to specify that it is aware that other callers will
+    // not make it to the barrier, thus prevent a deadlock.
+    // NOTE: If more than one callers are aware of the absence of some other caller, only one
+    // of them may notify of its absence.
+    // Returns the leading sequence of the coordinator process' request ring.
+
+
     void print(const string& str);
 
-    void set_group_size(type_id_type process_group_id, size_t size);
 
-    struct Barrier
-    {
-        mutex                       m;
-        condition_variable          cv;
-        uint32_t                    processes_reached = 0;
-        sequence_counter_type       flush_sequence = 0;
-    };
+    mutex                                       m_publish_mutex;
+    mutex                                       m_groups_mutex;
 
-    spinlocked_umap<type_id_type, Barrier >     m_barriers;
-    mutex                                       m_barrier_mutex;
-
-    spinlocked_umap<
+    // access only after acquiring m_publish_mutex
+    map<
         instance_id_type,                       // process instance id
-        spinlocked_umap<
+        map<
             instance_id_type,                   // transceiver instance id (within the process)
             tn_type                             // type id and assigned name
         >
     >                                           m_transceiver_registry;
 
-    mutex                                       m_publish_mutex;
-
-    spinlocked_umap<
-        type_id_type,
-        spinlocked_uset< instance_id_type >
-    >                                           m_processes_of_group;
-    spinlocked_umap<
+    // access only after acquiring m_groups_mutex
+    map<
         instance_id_type,
-        spinlocked_uset< type_id_type >
+        spinlocked_uset< instance_id_type >
     >                                           m_groups_of_process;
+    map<string, Process_group>                  m_groups;
 
-    spinlocked_umap<
-        type_id_type,
-        uint32_t
-    >                                           m_group_sizes;
+
+    // access only after acquiring m_publish_mutex
+    // (currently, only inside publish_transceiver() )
+    map<
+        string,
+        unordered_set<instance_id_type>
+    >                                           m_instances_waited;
+    map<string, instance_id_type>               m_instances_waited_common_iids;
 
 public:
     SINTRA_RPC_EXPLICIT(resolve_type)  
     SINTRA_RPC_EXPLICIT(resolve_instance)
-    SINTRA_RPC_EXPLICIT(publish_transceiver)
+    SINTRA_RPC_ONLY_EXPLICIT(wait_for_instance)
+    SINTRA_RPC_ONLY_EXPLICIT(publish_transceiver)
     SINTRA_RPC_EXPLICIT(unpublish_transceiver)
-    SINTRA_RPC_EXPLICIT(barrier)
-    SINTRA_RPC_EXPLICIT(add_this_process_into_group)
+    SINTRA_RPC_EXPLICIT(make_process_group)
     SINTRA_RPC_EXPLICIT(print)
 
     SINTRA_SIGNAL_EXPLICIT(instance_published,

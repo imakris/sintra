@@ -30,13 +30,13 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <iomanip>
 #include <limits>
 #include <string>
 #include <thread>
 #include "fich.h"  // #include <filesystem> compatibility helper
-
-#include <omp.h>
+#include "get_wtime.h"
 
 #include <boost/interprocess/detail/os_file_functions.hpp>
 #include <boost/interprocess/file_mapping.hpp>
@@ -53,6 +53,9 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #endif
 #include <Windows.h>
 #endif
+
+
+#include "id_types.h"
 
 
 namespace sintra {
@@ -139,7 +142,7 @@ Remarks
 
 
 using sequence_counter_type = uint64_t;
-
+constexpr auto invalid_sequence = ~sequence_counter_type(0);
 
 // helpers
 inline
@@ -232,7 +235,7 @@ struct sintra_ring_semaphore : ipc::interprocess_semaphore
     sintra_ring_semaphore() : ipc::interprocess_semaphore(0) {}
 
     // This post is used when all waiting readers are woken up,
-    // i.e. when writing new data, or unlblocking globally.
+    // i.e. when writing new data, or unblocking globally.
     void post_ordered()
     {
         if (unordered.load()) { // post_unordered() was already called
@@ -305,6 +308,9 @@ struct Ring_data
         if (!c2 || !attach()) {
             throw ring_acquisition_failure_exception();
         }
+
+        std::hash<string> hasher;
+        m_data_filename_hash = hasher(m_data_filename);
     }
 
 
@@ -446,8 +452,19 @@ protected:
 
     T*                                  m_data                          = nullptr;
     string                              m_data_filename;
+    size_t                              m_data_filename_hash            = 0;
     bool                                m_remove_files_on_destruction   = false;
+
+    template <typename RingT1, typename RingT2>
+    friend bool has_same_mapping(const RingT1& r1, const RingT2& r2);
 };
+
+
+template <typename RingT1, typename RingT2>
+bool has_same_mapping(const RingT1& r1, const RingT2& r2)
+{
+    return r1.m_data_filename_hash == r2.m_data_filename_hash;
+}
 
 
 
@@ -465,6 +482,16 @@ protected:
 //////   \//////   \//////   \//////   \//////   \//////   \//////   \//////
  ////     \////     \////     \////     \////     \////     \////     \////
   //       \//       \//       \//       \//       \//       \//       \//
+
+
+
+template <typename T>
+struct cache_line_sized_t
+{
+    T       v;
+    uint8_t padding[assumed_cache_line_size - sizeof(T)];
+};
+
 
 
 
@@ -487,6 +514,22 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         // and representing the number of readers currently accessing it.
         // This imposes a limit of maximum 255 readers per ring.
         atomic<uint64_t>                read_access = 0;
+
+
+
+        // NOTE: ONLY RELEVANT FOR TRACKING PURPOSES
+        // It should always be equal to the sum of the value of the bytes of read_access.
+        atomic<uint32_t>                num_readers = 0;
+
+        cache_line_sized_t<sequence_counter_type>
+                                        reading_sequences[max_process_index];
+
+
+        int                             free_rs_stack[max_process_index];
+        int                             num_free_rs = max_process_index;
+
+
+
 
         // Used to avoid accidentally having multiple writers on the same ring
         ipc::interprocess_mutex         ownership_mutex;
@@ -530,6 +573,10 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
             for (int i = 0; i < max_process_index; i++) { sleeping_stack[i]  = -1; }
             for (int i = 0; i < max_process_index; i++) { unordered_stack[i] = -1; }
 #endif
+
+            for (int i = 0; i < max_process_index; i++) { reading_sequences[i].v = invalid_sequence; }
+            for (int i = 0; i < max_process_index; i++) { free_rs_stack[i] = i; }
+
 
             // See the 'Note' in N4713 32.5 [Lock-free property], Par. 4.
             // The program is only valid if the conditions below are true.
@@ -716,9 +763,7 @@ struct Ring_R: Ring<T, true>
 
     ~Ring_R()
     {
-        if (m_reading) {
-            done_reading();
-        }
+        done_reading();
     }
 
 
@@ -734,7 +779,9 @@ struct Ring_R: Ring<T, true>
     Range<T> start_reading(size_t num_trailing_elements)
     {
         bool f = false;
-        while (!m_reading.compare_exchange_strong(f, true)) { f = false; }
+        while (!m_reading_lock.compare_exchange_strong(f, true)) { f = false; }
+
+        m_reading = true;
 
         assert(num_trailing_elements <= m_max_trailing_elements);
 
@@ -765,10 +812,18 @@ struct Ring_R: Ring<T, true>
         assert(ret.end >= ret.begin);
         assert(ret.begin >= this->m_data);
 
+
+
+        // allocate reading sequence
+        m_rs_index = c.free_rs_stack[--c.num_free_rs];
+        m_reading_sequence = &c.reading_sequences[m_rs_index].v;
+
+
         // advance to the leading sequence that was read in the beginning
         // this way the function will work orthogonally to wait_for_new_data()
-        m_reading_sequence = leading_sequence;
+        *m_reading_sequence = leading_sequence;
 
+        m_reading_lock = false;
         return ret;
     }
 
@@ -776,16 +831,22 @@ struct Ring_R: Ring<T, true>
     // this reading ring will no longer block the writer
     void done_reading()
     {
+        bool f = false;
+        while (!m_reading_lock.compare_exchange_strong(f, true)) { f = false; }
         if (m_reading) {
             c.read_access -= uint64_t(1) << (8 * m_trailing_octile);
-            m_reading_sequence = m_trailing_octile = 0;
+            *m_reading_sequence = m_trailing_octile = 0;
             m_reading = false;
+
+            // release reading sequence
+            c.free_rs_stack[c.num_free_rs++] = m_rs_index;
+            m_rs_index = -1;
+            m_reading_sequence = &s_zero_rs;
         }
+        m_reading_lock = false;
     }
 
-
-    sequence_counter_type reading_sequence() const { return m_reading_sequence; }
-
+    sequence_counter_type reading_sequence() const { return *m_reading_sequence; }
 
     // Returns a range with the elements succeeding the current reader's reading sequence,
     // and sets the reading sequence to the current leading sequence
@@ -796,20 +857,20 @@ struct Ring_R: Ring<T, true>
 
 #if SINTRA_RING_READING_POLICY == SINTRA_RING_READING_POLICY_ALWAYS_SPIN
 
-        while (m_reading_sequence == c.leading_sequence.load() ) {}
+        while (*m_reading_sequence == c.leading_sequence.load() ) {}
 
 #else // SINTRA_RING_READING_POLICY_HYBRID or SINTRA_RING_READING_POLICY_ALWAYS_SLEEP
 
 #if SINTRA_RING_READING_POLICY == SINTRA_RING_READING_POLICY_HYBRID
 
-        double tl = omp_get_wtime() + spin_before_sleep * 0.5;
-        while (m_reading_sequence == c.leading_sequence.load() && omp_get_wtime() < tl) {}
+        double tl = get_wtime() + spin_before_sleep * 0.5;
+        while (*m_reading_sequence == c.leading_sequence.load() && get_wtime() < tl) {}
 
 #endif
 
         c.lock();
         m_sleepy_index = -1;
-        if (m_reading_sequence == c.leading_sequence.load()) {
+        if (*m_reading_sequence == c.leading_sequence.load()) {
             m_sleepy_index = c.ready_stack[--c.num_ready];
             c.sleeping_stack[c.num_sleeping++] = m_sleepy_index;
         }
@@ -832,7 +893,7 @@ struct Ring_R: Ring<T, true>
 
         Range<T> ret;
 
-        auto num_range_elements = size_t(c.leading_sequence.load() - m_reading_sequence);
+        auto num_range_elements = size_t(c.leading_sequence.load() - *m_reading_sequence);
 
         if (num_range_elements == 0) {
             // this may happen if the loop was unblocked, either locally with unblock_local(),
@@ -840,9 +901,9 @@ struct Ring_R: Ring<T, true>
             return ret;
         }
 
-        ret.begin = this->m_data + (m_reading_sequence % this->m_num_elements);
+        ret.begin = this->m_data + (*m_reading_sequence % this->m_num_elements);
         ret.end   = ret.begin + num_range_elements;
-        m_reading_sequence += num_range_elements;
+        *m_reading_sequence += num_range_elements;
         return ret;
     }
 
@@ -852,7 +913,7 @@ struct Ring_R: Ring<T, true>
     void done_reading_new_data()
     {
         size_t new_trailing_octile =
-            (8 * ((m_reading_sequence - m_max_trailing_elements) % this->m_num_elements)) /
+            (8 * ((*m_reading_sequence - m_max_trailing_elements) % this->m_num_elements)) /
             this->m_num_elements;
 
         if (new_trailing_octile != m_trailing_octile) {
@@ -882,10 +943,14 @@ struct Ring_R: Ring<T, true>
 
 protected:
     const size_t                        m_max_trailing_elements;
-    sequence_counter_type               m_reading_sequence          = 0;
+    sequence_counter_type*              m_reading_sequence          = &s_zero_rs;
     size_t                              m_trailing_octile           = 0;
     atomic<bool>                        m_reading = false;
+    atomic<bool>                        m_reading_lock = false;
     int                                 m_sleepy_index              = -1;
+    int                                 m_rs_index                  = -1;
+
+    inline static sequence_counter_type s_zero_rs = 0;
 
     typename Ring<T, true>::Control&    c;
 };
@@ -906,6 +971,9 @@ protected:
 //////   \//////   \//////   \//////   \//////   \//////   \//////   \//////
  ////     \////     \////     \////     \////     \////     \////     \////
   //       \//       \//       \//       \//       \//       \//       \//
+
+
+struct void_placeholder_t{};
 
 
 template <typename T>
@@ -956,6 +1024,20 @@ struct Ring_W: Ring<T, false>
     }
 
 
+    // handles void
+    void_placeholder_t* write(size_t num_extra_elements, void_placeholder_t& obj)
+    {
+        auto num_elements = num_extra_elements;
+
+        void_placeholder_t* write_location = (void_placeholder_t*) prepare_write(num_elements);
+
+        // write (copy) the message
+        *(write_location) = obj;
+
+        return write_location;
+    }
+
+
     // The specialised version, for constructing an arbitrary type object in-place into the ring
     // sizeof(T2) must be a multiple of sizeof(T)
     template <typename T2, typename... Args>
@@ -983,7 +1065,7 @@ struct Ring_W: Ring<T, false>
         c.lock();
         assert(m_writing_thread == std::this_thread::get_id());
 
-        // the next statement must be inside the lock, becasue leading_sequence
+        // the next statement must be inside the lock, because leading_sequence
         // is also used to signal explicit unblocks. Otherwise a separate
         // variable would be required.
         c.leading_sequence.store(m_pending_new_sequence);

@@ -37,24 +37,54 @@ using std::vector;
 
 
 
-// Single-process version
 inline
-void start(int argc, char* argv[], int(*entry)())
+std::vector<Process_descriptor> make_branches(std::vector<Process_descriptor>& v)
 {
-    s_mproc = new Managed_process;
-    s_mproc->init(argc, argv);
+    return v;
+}
 
-    s_branch_vector.clear();
-    s_mproc->start(entry);
 
-    delete s_mproc;
+template <typename ...Args>
+std::vector<Process_descriptor> make_branches(std::vector<Process_descriptor>& v, int multiplicity, Process_descriptor pd, Args&&... rest)
+{
+    for (int i=0; i<multiplicity; i++) {
+        v.push_back(pd);
+    }
+    return make_branches(v, std::forward<Args>(rest)...);
+}
+
+
+template <typename ...Args>
+std::vector<Process_descriptor> make_branches(int multiplicity, const Process_descriptor& pd, Args&&... rest)
+{
+    std::vector<Process_descriptor> v;
+    return make_branches(v, multiplicity, pd, std::forward<Args>(rest)...);
+}
+
+
+template <typename ...Args>
+std::vector<Process_descriptor> make_branches(std::vector<Process_descriptor>& v, Process_descriptor pd, Args&&... rest)
+{
+    v.push_back(pd);
+    return make_branches(v, std::forward<Args>(rest)...);
+}
+
+
+template <typename ...Args>
+std::vector<Process_descriptor> make_branches(const Process_descriptor& pd, Args&&... rest)
+{
+    std::vector<Process_descriptor> v;
+    return make_branches(v, pd, std::forward<Args>(rest)...);
 }
 
 
 
-// Multiple-process version
-template <typename ...Args>
-void start(int argc, char* argv[], Args&&... args)
+
+
+
+
+inline
+void init(int argc, char* argv[], std::vector<Process_descriptor> v = std::vector<Process_descriptor>())
 {
 
 #ifndef _WIN32
@@ -65,37 +95,41 @@ void start(int argc, char* argv[], Args&&... args)
     setsid();
 #endif
 
+    static bool once = false;
+    assert(!once); // init() may only be run once.
+    once = true;
+
     s_mproc = new Managed_process;
     s_mproc->init(argc, argv);
-    s_branch_vector = decltype(s_branch_vector){ std::forward<Args>(args)... };
-    s_mproc->branch();
-    s_mproc->start();
+    s_mproc->branch(v);
+}
 
+
+
+template<typename... Args>
+void init(int argc, char* argv[], Args&&... args)
+{
+#ifndef NDEBUG
+    auto cache_line_size = get_cache_line_size();
+    if (assumed_cache_line_size != cache_line_size) {
+        std::cerr << "WARNING: assumed_cache_line_size is set to " << assumed_cache_line_size
+            << ", but on this system it is actually " << cache_line_size << "." << std::endl;
+    }
+#endif
+
+    init(argc, argv, make_branches(std::forward<Args>(args)...));
+}
+
+
+inline
+void finalize()
+{
+    assert(s_mproc); // the process must be initialized
+
+    s_mproc->pause();
     delete s_mproc;
 }
 
-
-
-inline
-void stop()
-{
-    s_mproc->stop();
-}
-
-
-inline
-bool running()
-{
-    return s_mproc->m_state == Managed_process::RUNNING;
-}
-
-
-
-inline
-void wait_for_stop()
-{
-    s_mproc->wait_for_stop();
-}
 
 
 inline
@@ -106,10 +140,20 @@ int process_index()
 
 
 // This is a convenience function.
-template <typename PROCESS_GROUP_T>
-void barrier()
+bool barrier(const std::string& barrier_name, const std::string& group_name)
 {
-    PROCESS_GROUP_T::barrier();
+    auto flush_seq = Process_group::rpc_barrier(group_name, barrier_name);
+    if (flush_seq == invalid_sequence) {
+        return false;
+    }
+
+    // if the coordinator is not local, we must flush its channel
+    // (i.e. all messages on the coordinator's channel must be processed before proceeding further)
+    if (!s_coord) {
+        s_mproc->flush(process_of(s_coord_id), flush_seq);
+    }
+
+    return true;
 }
 
 
@@ -117,6 +161,13 @@ template <typename FT, typename SENDER_T>
 auto activate_slot(const FT& slot_function, Typed_instance_id<SENDER_T> sender_id)
 {
     return s_mproc->activate(slot_function, sender_id);
+}
+
+
+inline
+void deactivate_all_slots()
+{
+    s_mproc->deactivate_all();
 }
 
 
@@ -176,7 +227,12 @@ struct Console
 
     ~Console()
     {
-        Coordinator::rpc_print(s_coord_id, m_oss.str());
+        try {
+            Coordinator::rpc_print(s_coord_id, m_oss.str());
+        }
+        catch (...) {
+            // failure to print, is silent.
+        }
     }
 
     template <typename T>

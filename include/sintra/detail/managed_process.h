@@ -47,7 +47,6 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <list>
 #include <map>
 #include <mutex>
-#include <omp.h>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -76,6 +75,14 @@ using std::thread;
 using std::vector;
 
 
+string uibs_impl(const char *file, int line)
+{
+    return std::string(file) + ":" + std::to_string(line);
+};
+
+#define UIBS uibs_impl(__FILE__, __LINE__)
+
+
 
 struct Entry_descriptor
 {
@@ -102,7 +109,8 @@ struct Process_descriptor
     Entry_descriptor entry;
     vector<string> sintra_options;
     vector<string> user_options;
-    int num_children; // quota
+    int num_children = 0; // quota
+    instance_id_type assigned_instance_id = invalid_instance_id;
 
     Process_descriptor(
         const Entry_descriptor& aentry,
@@ -114,69 +122,42 @@ struct Process_descriptor
         num_children(anum_children)
     {
     }
+    Process_descriptor(
+        const string& binary_path,
+        const vector<string>& auser_options = vector<string>(),
+        int anum_children = 0)
+    :
+        entry(binary_path),
+        user_options(auser_options),
+        num_children(anum_children)
+    {
+    }
+    Process_descriptor(
+        const char* binary_path,
+        const vector<string>& auser_options = vector<string>(),
+        int anum_children = 0)
+    :
+        entry(binary_path),
+        user_options(auser_options),
+        num_children(anum_children)
+    {
+    }
 
+    Process_descriptor(int(*entry_function)())
+    :
+        entry(entry_function)
+    {
+    }
+
+    friend struct Managed_process;
 };
 
 
 // Branch indices have the following meaning:
 // -1: No branching has taken place - this variable is not relevant
-//  0: The process that branched
-// >0: A spawned process
+//  0: The starter process, with the coordinator.
+// >0: A spawned process.
 static inline uint32_t s_branch_index = -1;
-
-static inline vector<Process_descriptor> s_branch_vector;
-
-
-
- //////////////////////////////////////////////////////////////////////////
-///// BEGIN PROCESS GROUP //////////////////////////////////////////////////
-////////////////////////////////////////////////////////////////////////////
-//////    //////    //////    //////    //////    //////    //////    //////
- ////      ////      ////      ////      ////      ////      ////      ////
-  //        //        //        //        //        //        //        //
-
-
-
-template <typename T>
-bool& process_group_membership()
-{
-    static bool m = false;
-    return m;
-}
-
-
-template <typename T, type_id_type ID = 0>
-struct Process_group
-{
-    static inline type_id_type id()
-    {
-        static type_id_type tid = ID ? make_type_id(ID) : sintra::get_type_id<Process_group>();
-        return tid;
-    }
-
-    static mutex m_barrier_mutex;
-    static void barrier();
-    static void enroll();
-};
-
-
-
-template <typename T, type_id_type ID>
-mutex Process_group<T, ID>::m_barrier_mutex;
-
-
-// default process groups
-struct All_processes            : Process_group<All_processes> {};
-struct Externally_coordinated   : Process_group<Externally_coordinated> {};
-
-
-  //        //        //        //        //        //        //        //
- ////      ////      ////      ////      ////      ////      ////      ////
-//////    //////    //////    //////    //////    //////    //////    //////
-////////////////////////////////////////////////////////////////////////////
-///// END PROCESS GROUP ////////////////////////////////////////////////////
- //////////////////////////////////////////////////////////////////////////
-
 
 
 template <typename T>
@@ -187,22 +168,16 @@ template <typename = void>
 sintra::instance_id_type get_instance_id(string&& assigned_name);
 
 
-
 struct Managed_process: Derived_transceiver<Managed_process>
 {
     Managed_process();
     ~Managed_process();
 
+    bool branch(vector<Process_descriptor>& branch_vector);
+
     void init(int argc, char* argv[]);
-    void branch();
 
-    // Starts the readers and calls the supplied function on its own thread.
-    // If the supplied function returns, the function will pause() (see below)
-    // Calling start when the process is paused (possibly with a different
-    // function) will resume the execution.
-    void start(int(*entry_function)() = nullptr);
-
-    // Pauses the process. When called, the readers threads will keep running,
+    // Pauses the process. Once called, reader threads will continue running,
     // but in a mode where only messages originating from the coordinator are
     // processed.
     void pause();
@@ -237,8 +212,8 @@ struct Managed_process: Derived_transceiver<Managed_process>
     enum State
     {
         STOPPED, // ring threads have been stopped
-        PAUSED,  // rings answer to COORDINATOR_ONLY
-        RUNNING  // rings in FULL_FUNCTIONALITY
+        PAUSED,  // rings answer to SERVICE_MODE
+        RUNNING  // rings in NORMAL_MODE
     };
 
     State                               m_state;
@@ -256,8 +231,6 @@ struct Managed_process: Derived_transceiver<Managed_process>
 
     atomic<bool>                        m_must_stop;
     condition_variable                  m_termination_condition;
-
-    bool                                m_branched = false;
 
     uint64_t                            m_swarm_id;
     string                              m_directory;
@@ -281,14 +254,21 @@ struct Managed_process: Derived_transceiver<Managed_process>
     std::chrono::time_point<std::chrono::system_clock>
                                         m_time_instantiated;
 
-    // if the coordinator is not local to the process, the first reader in the list
-    // will be reading the process of the coordinator.
-    list<Process_message_reader>        m_readers;
+    map<
+        instance_id_type,
+        Process_message_reader
+    >                                   m_readers;
 
     int                                 m_num_active_readers = 0;
     mutex                               m_num_active_readers_mutex;
     condition_variable                  m_num_active_readers_condition;
-    void wait_until_all_readers_are_done();
+    void wait_until_all_external_readers_are_done();
+
+    void flush(instance_id_type process_id, sequence_counter_type flush_sequence);
+
+
+    size_t unblock_rpc(instance_id_type process_instance_id = invalid_instance_id);
+
 
     // This signal will be sent BEFORE the coordinator sends instance_unpublished
     // for this process. It is meant to notify crash guards about the reason of the
@@ -297,7 +277,7 @@ struct Managed_process: Derived_transceiver<Managed_process>
 
     spinlocked_umap<tn_type, list<function<void()>>>
                                         m_queued_availability_calls;
-    
+
     mutex                               m_availability_mutex;
 
     // TODO: FIXME: The recursive can be easily avoided. Implement an additional
@@ -315,6 +295,10 @@ struct Managed_process: Derived_transceiver<Managed_process>
     condition_variable                  m_flush_sequence_condition;
 
     handler_registry_type               m_active_handlers;
+
+    // standard process groups
+    instance_id_type                    m_group_all      = invalid_instance_id;
+    instance_id_type                    m_group_external = invalid_instance_id;
 };
 
 

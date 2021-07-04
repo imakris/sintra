@@ -33,6 +33,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <atomic>
 #include <cassert>
 #include <cstdint>
+#include <mutex>
 
 
 namespace sintra {
@@ -52,25 +53,44 @@ constexpr type_id_type        not_defined_type_id = ~0ull;
 
 namespace detail {
 
-    enum reserved_id
+    enum class reserved_id: type_id_type
     {
         invalid_type_id = invalid_type_id,
 
         // EXPLICITLY DEFINED RPC
         resolve_type,
         resolve_instance,
+        wait_for_instance,
         publish_transceiver,
         unpublish_transceiver,
-        barrier,
-        add_this_process_into_group,
+        make_process_group,
         print,
+        barrier,
 
         // EXPLICITLY DEFINED SIGNALS
-        instance_invalidated, // sent by Transceiver on destruction
+        //instance_invalidated, // sent by Transceiver on destruction
         instance_published,   // sent by Coordinator when a transceiver is named
                               // and can be subsequently looked up by its name.
         instance_unpublished, // sent by Coordinator, always before the
                               // Transceiver sends instance_invalidated
+
+        // SPECIAL MESSAGE IDENTIFIERS
+        exception,
+        deferral,
+
+        // EXCEPTION TYPES
+        std_invalid_argument,
+        std_domain_error,
+        std_length_error,
+        std_out_of_range,
+        std_range_error,
+        std_overflow_error,
+        std_underflow_error,
+        std_ios_base_failure,
+        std_logic_error,
+        std_runtime_error,
+        std_exception,
+        unknown_exception,
 
         // EXPLICITLY DEFINED SIGNALS HANDLED BY COORDINATOR
         base_of_messages_handled_by_coordinator = 0x80000000,
@@ -83,14 +103,14 @@ namespace detail {
 inline
 type_id_type make_type_id()
 {
-    static atomic<uint64_t> counter(detail::reserved_id::num_reserved_type_ids);
+    static atomic<uint64_t> counter((type_id_type)detail::reserved_id::num_reserved_type_ids);
     return ++counter;
 }
 
 inline
 type_id_type make_type_id(uint64_t v)
 {
-    assert(v <= detail::reserved_id::num_reserved_type_ids || v == not_defined_type_id);
+    assert(v <= (type_id_type)detail::reserved_id::num_reserved_type_ids || v == not_defined_type_id);
     assert(v > 0);
     return v;
 }
@@ -145,15 +165,15 @@ constexpr uint64_t pid_mask =
 static_assert(num_process_index_bits < 16);
 constexpr int max_process_index =       int(uint64_t(1) << (num_process_index_bits     - 1)) - 1;
 
-constexpr uint64_t max_transceiver_index = (uint64_t(1) << (num_transceiver_index_bits - 1)) - 1;
-
+constexpr uint64_t max_instance_index = (uint64_t(1) << (num_transceiver_index_bits - 1)) - 1;
+constexpr uint64_t num_reserved_service_instances = 0x1000;
 constexpr uint64_t all_remote_processess_wildcard = (max_process_index << 1);
 constexpr uint64_t all_processes_wildcard = all_remote_processess_wildcard | 1;
-constexpr uint64_t all_transceivers_except_mproc_wildcard = (max_transceiver_index << 1);
+constexpr uint64_t all_transceivers_except_mproc_wildcard = (max_instance_index << 1);
 constexpr uint64_t all_transceivers_wildcard = all_transceivers_except_mproc_wildcard | 1;
 
 
-
+inline
 instance_id_type get_instance_id_type(uint64_t process_index, uint64_t transceiver_index)
 {
     return (process_index << num_transceiver_index_bits) | transceiver_index;
@@ -205,13 +225,29 @@ constexpr instance_id_type invalid_instance_id   = 0;
 inline
 instance_id_type make_instance_id()
 {
-    // 1 is always the transceiver index of the local Managed_process,
-    // thus other transceivers start from 2
-    static atomic<uint64_t> transceiver_index_counter(2);
-    assert(transceiver_index_counter < max_transceiver_index);
-    return (s_mproc_id & pid_mask) | transceiver_index_counter++;
+    static atomic<uint64_t> instance_index_counter(2+num_reserved_service_instances);
+    assert(instance_index_counter < max_instance_index);
+    return (s_mproc_id & pid_mask) | instance_index_counter++;
 }
 
+
+inline
+instance_id_type make_service_instance_id()
+{
+    // 1 is always the transceiver index of the local Managed_process,
+    // thus other transceivers start from 2
+    static atomic<uint64_t> instance_index_counter(2);
+    assert(instance_index_counter < 2+num_reserved_service_instances);
+    return (s_mproc_id & pid_mask) | instance_index_counter++;
+}
+
+
+instance_id_type is_service_instance(instance_id_type instance_id)
+{
+    return
+        (instance_id & ~pid_mask) >=2 &&
+        (instance_id & ~pid_mask) < (2+num_reserved_service_instances);
+}
 
 
 inline

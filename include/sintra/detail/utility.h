@@ -85,6 +85,43 @@ struct Adaptive_function
 
 
 
+inline 
+size_t get_cache_line_size()
+{
+#ifdef _WIN32
+
+    size_t line_size = 0;
+    DWORD buffer_size = 0;
+    DWORD i = 0;
+    SYSTEM_LOGICAL_PROCESSOR_INFORMATION * buffer = 0;
+
+    GetLogicalProcessorInformation(0, &buffer_size);
+    buffer = (SYSTEM_LOGICAL_PROCESSOR_INFORMATION *)malloc(buffer_size);
+    GetLogicalProcessorInformation(&buffer[0], &buffer_size);
+
+    for (i = 0; i != buffer_size / sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION); ++i) {
+        // assuming all cache levels have the same line size...
+        if (buffer[i].Relationship == RelationCache && buffer[i].Cache.Level == 1) {
+            line_size = buffer[i].Cache.LineSize;
+            break;
+        }
+    }
+
+    free(buffer);
+    return line_size;
+
+#else
+
+    // TODO: implement
+    return 0x40;
+
+#endif
+}
+
+
+
+
+
 inline
 bool spawn_detached(const char* prog, const char **argv)
 {
@@ -185,14 +222,6 @@ bool spawn_detached(const char* prog, const char **argv)
 
 
 
-struct sintra_logic_error_impl: public std::logic_error {
-    sintra_logic_error_impl(const char *file, int line, const std::string& s):
-        std::logic_error(std::string(file) + ":" + std::to_string(line) + ": " + s) {}
-};
-
-#define sintra_logic_error(s) sintra_logic_error_impl(__FILE__, __LINE__, (s))
-
-
 struct Instantiator
 {
     Instantiator(std::function<void()>&& deinstantiator):
@@ -206,10 +235,6 @@ struct Instantiator
 
     std::function<void()> m_deinstantiator;
 };
-
-
-
-#define SINTRA_TEST_DELAY(ms)  std::this_thread::sleep_for(std::chrono::milliseconds(ms));
 
 
 

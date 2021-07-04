@@ -38,7 +38,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define SINTRA_RING_READING_POLICY_ALWAYS_SLEEP     0
 
 
-// Using this policy, the reader will livelock while waiting for data. As a concequence, this
+// Using this policy, the reader will livelock while waiting for data. As a consequence, this
 // policy does not require locking on either reading or writing.
 // NOTE: It needs to be used with care and only when necessary, to avoid wasting CPU resources.
 
@@ -57,6 +57,9 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #define SINTRA_RING_READING_POLICY SINTRA_RING_READING_POLICY_HYBRID
 
+#ifndef __clang__ 
+#define SINTRA_USE_OMP_GET_WTIME
+#endif
 
 namespace sintra {
 
@@ -81,6 +84,11 @@ namespace sintra {
     // while spinning.
     // If any policy other than SINTRA_RING_READING_POLICY_HYBRID is used, the value is irrelevant.
     constexpr double    spin_before_sleep                   = 0.01;   // secs
+
+    // Whenever control data is read and written in an array by multiple threads, the layout used
+	// should not cause cache invalidations (false sharing). This setting is architecture specific,
+	// but it's not really that different among different x86 CPUs.
+    constexpr size_t assumed_cache_line_size                = 0x40;
 }
 
 
