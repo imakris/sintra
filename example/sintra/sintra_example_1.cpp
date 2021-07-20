@@ -4,12 +4,9 @@
 // This example demonstrates the usage of the interprocess console.
 //
 // In this example, there are 2 user processes, that send ping-pong messages
-// to each other. Whenever a ping/pong message is received, an message is sent
+// to each other. Whenever a ping/pong message is received, a message is sent
 // to the interprocess console. A third process is observing the other two and
 // reports the ping-pong rate.
-// 
-// Removing the console messages in the ping-pong processes should normally
-// have a substantial effect in performance (they are currently commented out).
 //
 
 #include <sintra/sintra.h>
@@ -50,7 +47,6 @@ void wait_for_stop()
 int process_1()
 {
     activate_slot([=] (Ping) {
-        //console() << "received ping, sending pong \n";
         world() << Pong();
     });
     barrier("ping-pong slot activation barrier");
@@ -63,7 +59,6 @@ int process_1()
 int process_2()
 {
     activate_slot([=] (Pong) {
-        //console() << "received pong, sending ping \n";
         world() << Ping();
     });
     barrier("ping-pong slot activation barrier");

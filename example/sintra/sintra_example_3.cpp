@@ -8,10 +8,6 @@
 // Two of them reply with a message of the opposite type of what they are
 // handling. The third is an observer that is counting the cycles.
 // 
-// Removing the console messages in the ping-pong processes should
-// normally have a substantial effect in performance (in this example,
-// they are commented out).
-//
 
 #include <sintra/sintra.h>
 #include <iostream>
@@ -31,12 +27,10 @@ int main(int argc, char* argv[])
     init(argc, argv);
 
     auto ping_slot = [](Ping) {
-        //console() << "received ping, sending pong \n";
         world() << Pong();
     };
 
     auto pong_slot = [](Pong) {
-        //console() << "received pong, sending ping \n";
         world() << Ping();
     };
 

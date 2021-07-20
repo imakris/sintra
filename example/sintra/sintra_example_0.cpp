@@ -2,7 +2,7 @@
 // Sintra library, example 0
 //
 // This program demonstrates simple point to point process communication, using one executable.
-// A multi-process single executable program requires a call to init_and_branch() in its main thread
+// A multi-process single executable program requires a call to init() in its main thread
 // which initializes the sintra library, spawns the process swarm and starts the multi-process
 // execution.
 //
