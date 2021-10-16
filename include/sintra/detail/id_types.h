@@ -66,6 +66,7 @@ namespace detail {
         make_process_group,
         print,
         barrier,
+        enable_recovery,
 
         // EXPLICITLY DEFINED SIGNALS
         //instance_invalidated, // sent by Transceiver on destruction
@@ -241,7 +242,7 @@ instance_id_type make_service_instance_id()
     return (s_mproc_id & pid_mask) | instance_index_counter++;
 }
 
-
+inline
 instance_id_type is_service_instance(instance_id_type instance_id)
 {
     return
