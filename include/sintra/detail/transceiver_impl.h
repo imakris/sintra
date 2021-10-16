@@ -68,6 +68,10 @@ Transceiver::~Transceiver()
 template <typename/* = void*/>
 void Transceiver::construct(const string& name/* = ""*/, uint64_t instance_id/* = 0*/)
 {
+    if (!s_mproc) {
+        throw runtime_error("Failed to create a Transceiver. Sintra is possibly not initialized.");
+    }
+
     m_instance_id = instance_id ? instance_id : make_instance_id();
 
     if (m_instance_id == invalid_instance_id) {
