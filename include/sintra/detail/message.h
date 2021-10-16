@@ -31,10 +31,10 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "utility.h"
 
 #include <cstdint>
+#include <sstream>
 #include <type_traits>
 
 #include <boost/fusion/container/vector.hpp>
-#include <boost/type_index.hpp>
 
 
 
@@ -471,22 +471,22 @@ struct Message: public Message_prefix, public T
 
 
 
-#define SINTRA_SIGNAL_BASE(name, idv, ...)                                      \
-    void inheritance_assertion_##name() {                                       \
-        static_assert(std::is_same_v<                                           \
-            std::remove_pointer_t<decltype(this)>,                              \
-            Transceiver_type>,                                                  \
-            "This Transceiver is not derived correctly."                        \
-        );                                                                      \
-    }                                                                           \
-    _DEFINE_STRUCT(_sm_body_type_##name, __VA_ARGS__)                           \
-    using name = Message<_sm_body_type_##name, void, idv, Transceiver_type>;    \
+#define SINTRA_SIGNAL_BASE(name, idv, ...)                                              \
+    void inheritance_assertion_##name() {                                               \
+        static_assert(std::is_same_v<                                                   \
+            std::remove_pointer_t<decltype(this)>,                                      \
+            Transceiver_type>,                                                          \
+            "This Transceiver is not derived correctly."                                \
+        );                                                                              \
+    }                                                                                   \
+    _DEFINE_STRUCT(_sm_body_type_##name, __VA_ARGS__)                                   \
+    using name = sintra::Message<_sm_body_type_##name, void, idv, Transceiver_type>;    \
 
 
-#define SINTRA_SIGNAL(name, ...)                                                \
-    SINTRA_SIGNAL_BASE(name, invalid_type_id, __VA_ARGS__)
+#define SINTRA_SIGNAL(name, ...)                                                        \
+    SINTRA_SIGNAL_BASE(name, sintra::invalid_type_id, __VA_ARGS__)
 
-#define SINTRA_SIGNAL_EXPLICIT(name, ...)                                       \
+#define SINTRA_SIGNAL_EXPLICIT(name, ...)                                               \
     SINTRA_SIGNAL_BASE(name, (type_id_type)sintra::detail::reserved_id::name, __VA_ARGS__)
 
 
