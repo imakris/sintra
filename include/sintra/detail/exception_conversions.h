@@ -68,6 +68,7 @@ template <
 >
 std::pair<type_id_type, std::string> exception_to_string(const T& ex);
 
+inline
 void string_to_exception(type_id_type exception_type, const char* str, size_t num_chars);
 
 }
