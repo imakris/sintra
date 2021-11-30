@@ -590,7 +590,7 @@ struct Unserialized_Enclosure<T, true, false>: Enclosure <T, true, false>
   //       \//       \//       \//       \//       \//       \//       \//
 
 
-
+inline
 std::string get_base_filename(const string& prefix, uint64_t id)
 {
     std::stringstream stream;
