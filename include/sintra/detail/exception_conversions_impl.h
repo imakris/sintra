@@ -132,6 +132,7 @@ std::bad_variant_access   -> std::exception
 
 */
 
+inline
 void string_to_exception(type_id_type exception_type, const std::string& str)
 {
     static unordered_map<type_id_type, void(*)(const std::string&)> ex_map = {
