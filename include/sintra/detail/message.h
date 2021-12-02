@@ -416,58 +416,58 @@ struct Message: public Message_prefix, public T
 
 
 /* internal helpers */
-#define _VA_NARGS_GLUE(x, y) x y
-#define _VA_NARGS_RETURN_COUNT(                                         \
+#define VA_NARGS_GLUE_(x, y) x y
+#define VA_NARGS_RETURN_COUNT_(                                         \
     _1_ , _2_ , _3_ , _4_ , _5_ , _6_ , _7_ , _8_,                      \
     _9_ ,_10_, _11_, _12_, _13_, _14_, _15_, _16_, count, ...) count
-#define _VA_NARGS_EXPAND(args) _VA_NARGS_RETURN_COUNT args
-#define _VA_NARGS_COUNT_MAX16(...) _VA_NARGS_EXPAND((__VA_ARGS__,       \
+#define VA_NARGS_EXPAND_(args) VA_NARGS_RETURN_COUNT_ args
+#define VA_NARGS_COUNT_MAX16_(...) VA_NARGS_EXPAND_((__VA_ARGS__,       \
     16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0))
 
-#define _VA_NARGS_OVERLOAD_MACRO2(name, count) name##count
-#define _VA_NARGS_OVERLOAD_MACRO1(name, count) _VA_NARGS_OVERLOAD_MACRO2(name, count)
-#define _VA_NARGS_OVERLOAD_MACRO(name,  count) _VA_NARGS_OVERLOAD_MACRO1(name, count)
+#define VA_NARGS_OVERLOAD_MACRO2_(name, count) name##count
+#define VA_NARGS_OVERLOAD_MACRO1_(name, count) VA_NARGS_OVERLOAD_MACRO2_(name, count)
+#define VA_NARGS_OVERLOAD_MACRO_(name,  count) VA_NARGS_OVERLOAD_MACRO1_(name, count)
 
 /* expose for re-use */
 #define VA_NARGS_CALL_OVERLOAD(name, ...) \
-    _VA_NARGS_GLUE(_VA_NARGS_OVERLOAD_MACRO(name, _VA_NARGS_COUNT_MAX16(__VA_ARGS__)),(__VA_ARGS__))
+    VA_NARGS_GLUE_(VA_NARGS_OVERLOAD_MACRO_(name, VA_NARGS_COUNT_MAX16_(__VA_ARGS__)),(__VA_ARGS__))
 
 /* overloads */
-#define _VA_DEFINE_STRUCT1( v) \
+#define VA_DEFINE_STRUCT_1( v) \
     struct v { };
-#define _VA_DEFINE_STRUCT2( v,a) \
+#define VA_DEFINE_STRUCT_2( v,a) \
     struct v { a; };
-#define _VA_DEFINE_STRUCT3( v,a,b) \
+#define VA_DEFINE_STRUCT_3( v,a,b) \
     struct v { a;b; };
-#define _VA_DEFINE_STRUCT4( v,a,b,c) \
+#define VA_DEFINE_STRUCT_4( v,a,b,c) \
     struct v { a;b;c; };
-#define _VA_DEFINE_STRUCT5( v,a,b,c,d) \
+#define VA_DEFINE_STRUCT_5( v,a,b,c,d) \
     struct v { a;b;c;d; };
-#define _VA_DEFINE_STRUCT6( v,a,b,c,d,e) \
+#define VA_DEFINE_STRUCT_6( v,a,b,c,d,e) \
     struct v { a;b;c;d;e; };
-#define _VA_DEFINE_STRUCT7( v,a,b,c,d,e,f) \
+#define VA_DEFINE_STRUCT_7( v,a,b,c,d,e,f) \
     struct v { a;b;c;d;e;f; };
-#define _VA_DEFINE_STRUCT8( v,a,b,c,d,e,f,g) \
+#define VA_DEFINE_STRUCT_8( v,a,b,c,d,e,f,g) \
     struct v { a;b;c;d;e;f;g; };
-#define _VA_DEFINE_STRUCT9( v,a,b,c,d,e,f,g,h) \
+#define VA_DEFINE_STRUCT_9( v,a,b,c,d,e,f,g,h) \
     struct v { a;b;c;d;e;f;g;h; };
-#define _VA_DEFINE_STRUCT10(v,a,b,c,d,e,f,g,h,i) \
+#define VA_DEFINE_STRUCT_10(v,a,b,c,d,e,f,g,h,i) \
     struct v { a;b;c;d;e;f;g;h;i; };
-#define _VA_DEFINE_STRUCT11(v,a,b,c,d,e,f,g,h,i,j) \
+#define VA_DEFINE_STRUCT_11(v,a,b,c,d,e,f,g,h,i,j) \
     struct v { a;b;c;d;e;f;g;h;i;j; };
-#define _VA_DEFINE_STRUCT12(v,a,b,c,d,e,f,g,h,i,j,k) \
+#define VA_DEFINE_STRUCT_12(v,a,b,c,d,e,f,g,h,i,j,k) \
     struct v { a;b;c;d;e;f;g;h;i;j;k; };
-#define _VA_DEFINE_STRUCT13(v,a,b,c,d,e,f,g,h,i,j,k,l) \
+#define VA_DEFINE_STRUCT_13(v,a,b,c,d,e,f,g,h,i,j,k,l) \
     struct v { a;b;c;d;e;f;g;h;i;j;k;l; };
-#define _VA_DEFINE_STRUCT14(v,a,b,c,d,e,f,g,h,i,j,k,l,m) \
+#define VA_DEFINE_STRUCT_14(v,a,b,c,d,e,f,g,h,i,j,k,l,m) \
     struct v { a;b;c;d;e;f;g;h;i;j;k;l;m; };
-#define _VA_DEFINE_STRUCT15(v,a,b,c,d,e,f,g,h,i,j,k,l,m,n) \
+#define VA_DEFINE_STRUCT_15(v,a,b,c,d,e,f,g,h,i,j,k,l,m,n) \
     struct v { a;b;c;d;e;f;g;h;i;j;k;l;m;n; };
-#define _VA_DEFINE_STRUCT16(v,a,b,c,d,e,f,g,h,i,j,k,l,m,n,o) \
+#define VA_DEFINE_STRUCT_16(v,a,b,c,d,e,f,g,h,i,j,k,l,m,n,o) \
     struct v { a;b;c;d;e;f;g;h;i;j;k;l;m;n;o; };
 
 /* reusable macro */
-#define _DEFINE_STRUCT(...) VA_NARGS_CALL_OVERLOAD(_VA_DEFINE_STRUCT, __VA_ARGS__)
+#define DEFINE_STRUCT_(...) VA_NARGS_CALL_OVERLOAD(VA_DEFINE_STRUCT_, __VA_ARGS__)
 
 
 
@@ -479,8 +479,8 @@ struct Message: public Message_prefix, public T
             "This Transceiver is not derived correctly."                                \
         );                                                                              \
     }                                                                                   \
-    _DEFINE_STRUCT(_sm_body_type_##name, __VA_ARGS__)                                   \
-    using name = sintra::Message<_sm_body_type_##name, void, idv, Transceiver_type>;    \
+    DEFINE_STRUCT_(sm_body_type_##name, __VA_ARGS__)                                    \
+    using name = sintra::Message<sm_body_type_##name, void, idv, Transceiver_type>;     \
 
 
 #define SINTRA_SIGNAL(name, ...)                                                        \
