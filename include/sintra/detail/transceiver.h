@@ -39,7 +39,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <mutex>
 #include <unordered_map>
 
-#include <boost/bind.hpp>
+#include <boost/bind/bind.hpp>
 #include <boost/type_traits.hpp>
 
 
@@ -499,7 +499,7 @@ public:
     };
 
 
-    inline
+    template<typename=void>
     instance_id_type activate_return_handler(const Return_handler &rh);
 
     inline
@@ -529,10 +529,10 @@ public:
         );                                                                                      \
     }                                                                                           \
     using m ## _mftc = RPCTC_d<decltype(mfp), mfp, id, mbcd>;                                   \
-    Instantiator m ## _itt = export_rpc<m ## _mftc>(mfp);                                       \
+    sintra::Instantiator m ## _itt = export_rpc<m ## _mftc>(mfp);                               \
                                                                                                 \
     template<typename... Args>                                                                  \
-    static auto rpc_ ## m (Resolvable_instance_id instance_id, Args&&... args)                  \
+    static auto rpc_ ## m (sintra::Resolvable_instance_id instance_id, Args&&... args)          \
     {                                                                                           \
         return rpc<m ## _mftc>(mfp, instance_id, args...);                                      \
     }
@@ -540,7 +540,7 @@ public:
     
     // Exports a member function for RPC.
     #define SINTRA_RPC(m)                                                                       \
-        SINTRA_RPC_IMPL(m, &Transceiver_type :: m, invalid_type_id, true)
+        SINTRA_RPC_IMPL(m, &Transceiver_type :: m, sintra::invalid_type_id, true)
 
     // Exports a member function for RPC, provided that an ID is already reserved for a function
     // with that name. This is only meant to be used internally.
@@ -554,12 +554,12 @@ public:
     // Functions which are meant to be used exclusively via RPC, will not take a direct-call
     // shortcut when called within the same process, but will instead use the RPC mechanism
     // in all cases.
-    #define SINTRA_RPC_ONLY(m)                                                                  \
-        SINTRA_RPC_IMPL(m, &Transceiver_type :: m, invalid_type_id, false)
+    #define SINTRA_RPC_STRICT(m)                                                                  \
+        SINTRA_RPC_IMPL(m, &Transceiver_type :: m, sintra::invalid_type_id, false)
 
     // Exports a member function exclusively for RPC, provided that an ID is already reserved for
     // a function with that name. This is only meant to be used internally.
-    #define SINTRA_RPC_ONLY_EXPLICIT(m)                                                         \
+    #define SINTRA_RPC_STRICT_EXPLICIT(m)                                                         \
         SINTRA_RPC_IMPL(m, &Transceiver_type :: m, (type_id_type)sintra::detail::reserved_id::m, false)
 
   //\       //\       //\       //\       //\       //\       //\       //

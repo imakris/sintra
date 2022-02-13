@@ -120,16 +120,65 @@ size_t get_cache_line_size()
 
 
 
+// C++ vector of strings to C style null terminated array of pointers
+// conversion utility
+struct cstring_vector
+{
+    cstring_vector(const std::vector<std::string>& v_in):
+        m_size(v_in.size())
+    {
+        m_v = new const char*[m_size+1];
+        for (size_t i = 0; i < m_size; i++) {
+            m_v[i] = v_in[i].c_str();
+        }
+        m_v[m_size] = 0;
+    }
+
+    ~cstring_vector()
+    {
+        delete [] m_v;
+    }
+
+    const char* const* v() const { return m_v; }
+    size_t size() const { return m_size; }
+
+private:
+    const char** m_v = nullptr;
+    const size_t m_size = 0;
+};
+
 
 
 inline
-bool spawn_detached(const char* prog, const char **argv)
+bool spawn_detached(const char* prog, const char * const*argv)
 {
 
 #ifdef _WIN32
+    if (prog==nullptr || argv==nullptr) {
+        return false;
+    }
 
-    return _spawnv(P_DETACH, prog, argv) != -1;
+    char full_path[_MAX_PATH];
+    if( _fullpath(full_path, prog, _MAX_PATH ) != NULL ) {
 
+        size_t argv_size=0;
+        for (size_t i=0; argv[i] != nullptr; i++) {
+            argv_size++;
+        }
+
+        const char** argv_with_prog = new const char*[argv_size+2];
+        argv_with_prog[0] = full_path;
+
+        for (size_t i=0; i!=argv_size; i++) {
+            argv_with_prog[i+1] = argv[i];
+        }
+        argv_with_prog[argv_size+1] = nullptr;
+        auto ret = _spawnv(P_DETACH, prog, argv_with_prog) != -1;
+        delete [] argv_with_prog;
+        return ret;
+    }
+
+    return false;
 #else
 
     // 1. we fork to obtain an inbetween process

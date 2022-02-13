@@ -28,21 +28,28 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
 #include "transceiver_impl.h"
-
+#include <memory>
 
 namespace sintra {
 
 
 using std::thread;
+using std::unique_ptr;
 
 
 inline bool thread_local tl_is_req_thread = false;
-inline function<void()> thread_local tl_post_handler_function = nullptr;
 
+// This did not work correctly on mingw 11.2.0, thus we shall not use inline thread_local
+// non-POD objects as they seem to be poorly implemented (January 2022).
+// The problem here was related to the library implementation, not to the compiler.
+//inline thread_local function<void()> tl_post_handler_function = nullptr;
+
+// We can use a thread_local raw pointer instead.
+inline thread_local function<void()>* tl_post_handler_function = nullptr;
 
 inline
 Process_message_reader::Process_message_reader(instance_id_type process_instance_id):
-    m_state(NORMAL_MODE),
+    m_reader_state(READER_NORMAL),
     m_process_instance_id(process_instance_id)
 {
     m_in_req_c = new Message_ring_R(s_mproc->m_directory, "req", m_process_instance_id);
@@ -63,49 +70,48 @@ void Process_message_reader::wait_until_ready()
 
 
 
-
-
-
-
-
-
 inline
 void Process_message_reader::stop_nowait()
 {    
-    m_state = STOPPING;
+    m_reader_state = READER_STOPPING;
 
     m_in_req_c->done_reading();
     m_in_req_c->unblock_local();
-
-
 
     // if there are outstanding RPC calls waiting for reply, they should be
     // unblocked (and fail), to avoid a deadlock
     s_mproc->unblock_rpc();
 
 
-    // The purpose of the lambda below is the following scenario:
-    // 1. This function is called from a handler, thus from within the request
-    //    reading function.
-    // 2. The very same handler also calls some RPC, whose reply is sent through
-    //    the reply ring, in the corresponding thread.
-    // If we force the reply ring to exit, there will be no ring to get the
-    // reply from, leading to a deadlock. Thus if the function is determined
-    // to be called from within the request reading thread, forcing the reply
-    // reading thread to exit will happen only after the request reading loop
-    // exits.
-    auto force_exit_reply_ring = [this]() {
+    if (!tl_is_req_thread) {
         m_in_rep_c->done_reading();
         m_in_rep_c->unblock_local();
-    };
-
-    if (!tl_is_req_thread) {
-        force_exit_reply_ring();
     }
     else {
-        tl_post_handler_function = force_exit_reply_ring;
+        // The purpose of the lambda below is the following scenario:
+        // 1. This function is called from a handler, thus from within the request
+        //    reading function.
+        // 2. The very same handler also calls some RPC, whose reply is sent through
+        //    the reply ring, in the corresponding thread.
+        // If we force the reply ring to exit, there will be no ring to get the
+        // reply from, leading to a deadlock. Thus if the function is determined
+        // to be called from within the request reading thread, forcing the reply
+        // reading thread to exit will happen only after the request reading loop
+        // exits.
+
+        if (tl_post_handler_function) {
+            delete tl_post_handler_function;
+        }
+
+        tl_post_handler_function = new
+            function<void()>([this]() {
+                m_in_rep_c->done_reading();
+                m_in_rep_c->unblock_local();
+            }
+        );
     }
 }
+
 
 
 inline
@@ -172,7 +178,7 @@ void Process_message_reader::request_reader_function()
     m_in_req_c->start_reading();
     m_req_running = true;
 
-    while (m_state != STOPPING) {
+    while (m_reader_state != READER_STOPPING) {
         s_tl_current_message = nullptr;
 
         // if there is an interprocess barrier and m_in_req_c has reached the barrier's sequence,
@@ -210,16 +216,16 @@ void Process_message_reader::request_reader_function()
             // If addressed to a specified local receiver, this may only be an RPC call,
             // thus the receiver must exist.
             assert(
-                m_state == NORMAL_MODE ?
+                m_reader_state == READER_NORMAL ?
                     s_mproc->m_local_pointer_of_instance_id.find(m->receiver_instance_id) !=
                     s_mproc->m_local_pointer_of_instance_id.end()
                 :
                     true
             );
 
-            if (m_state == NORMAL_MODE ||
-                is_service_instance(m->receiver_instance_id) && s_coord ||
-                (m->sender_instance_id   == s_coord_id) )
+            if ((m_reader_state == READER_NORMAL) ||
+                (is_service_instance(m->receiver_instance_id) && s_coord) ||
+                (m->sender_instance_id == s_coord_id) )
             {
                 // If addressed to a specified local receiver, this may only be an RPC call,
                 // thus the named receiver must exist.
@@ -235,15 +241,18 @@ void Process_message_reader::request_reader_function()
 
             // this is an interprocess event message.
 
-            if ((m_state == NORMAL_MODE) ||
+            if ((m_reader_state == READER_NORMAL) ||
                 (s_coord && m->message_type_id > (type_id_type)detail::reserved_id::base_of_messages_handled_by_coordinator))
             {
                 lock_guard<recursive_mutex> sl(s_mproc->m_handlers_mutex);
                     
                 // [ NEW IMPLEMENTATION - NOT COVERED ]
                 // find handlers that operate with this type of message in this process
-                auto it_mt = s_mproc->m_active_handlers.find(m->message_type_id);
-                if (it_mt != s_mproc->m_active_handlers.end()) {
+
+                auto& active_handlers = s_mproc->m_active_handlers;
+                auto it_mt = active_handlers.find(m->message_type_id);
+
+                if (it_mt != active_handlers.end()) {
 
                     instance_id_type sids[] = {
                         m->sender_instance_id,
@@ -281,7 +290,8 @@ void Process_message_reader::request_reader_function()
         }
 
         if (tl_post_handler_function) {
-            tl_post_handler_function();
+            (*tl_post_handler_function)();
+            delete tl_post_handler_function;
             tl_post_handler_function = nullptr;
         }
     }
@@ -296,6 +306,13 @@ void Process_message_reader::request_reader_function()
     std::lock_guard<std::mutex> lk(m_stop_mutex);
     m_req_running = false;
     m_stop_condition.notify_one();
+
+    // could not use unique_ptr or a static std::function, due to the funny behaviour
+    // of mingw - even if the function object was destroyed here explicitly.
+    if (tl_post_handler_function) {
+        delete tl_post_handler_function;
+        tl_post_handler_function = nullptr;
+    }
 }
 
 
@@ -312,7 +329,7 @@ void Process_message_reader::reply_reader_function()
     m_in_rep_c->start_reading();
     m_rep_running = true;
 
-    while (m_state != STOPPING) {
+    while (m_reader_state != READER_STOPPING) {
         s_tl_current_message = nullptr;
         Message_prefix* m = m_in_rep_c->fetch_message();
         s_tl_current_message = m;
@@ -330,11 +347,10 @@ void Process_message_reader::reply_reader_function()
 
         if (is_local_instance(m->receiver_instance_id)) {
 
-            if ((m_state == NORMAL_MODE) ||
+            if ((m_reader_state == READER_NORMAL) ||
                 (m->receiver_instance_id == s_coord_id && s_coord) ||
                 (m->sender_instance_id   == s_coord_id) )
             {
-
                 auto it = s_mproc->m_local_pointer_of_instance_id.find(m->receiver_instance_id);
 
                 if (it != s_mproc->m_local_pointer_of_instance_id.end()) {

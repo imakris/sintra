@@ -26,6 +26,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #ifndef SINTRA_CONFIG_H
 #define SINTRA_CONFIG_H
 
+#include <cstddef>
 
 // Ring reading policies
 // =====================
@@ -88,7 +89,7 @@ namespace sintra {
     // Whenever control data is read and written in an array by multiple threads, the layout used
 	// should not cause cache invalidations (false sharing). This setting is architecture specific,
 	// but it's not really that different among different x86 CPUs.
-    constexpr size_t assumed_cache_line_size                = 0x40;
+    constexpr size_t    assumed_cache_line_size             = 0x40;
 }
 
 

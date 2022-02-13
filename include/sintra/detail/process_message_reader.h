@@ -76,9 +76,9 @@ struct Process_message_reader
 {
     enum State
     {
-        NORMAL_MODE,  // full functionality
-        SERVICE_MODE, // only basic functionality
-        STOPPING
+        READER_NORMAL,      // full functionality
+        READER_SERVICE,     // only basic functionality
+        READER_STOPPING
     };
 
     inline
@@ -88,7 +88,7 @@ struct Process_message_reader
     ~Process_message_reader();
 
 
-    void pause() { m_state = SERVICE_MODE; }
+    void pause() { m_reader_state = READER_SERVICE; }
 
 
     inline
@@ -132,11 +132,11 @@ struct Process_message_reader
         return m_in_req_c->get_message_reading_sequence();
     }
 
-    State state() const {return m_state;}
+    State state() const {return m_reader_state;}
 
 private:
 
-    atomic<State>           m_state                 = NORMAL_MODE;
+    atomic<State>           m_reader_state          = READER_NORMAL;
 
     instance_id_type        m_process_instance_id;
 

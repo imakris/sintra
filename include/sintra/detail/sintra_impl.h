@@ -79,12 +79,13 @@ std::vector<Process_descriptor> make_branches(const Process_descriptor& pd, Args
 
 
 
-
+inline
+bool finalize();
 
 
 
 inline
-void init(int argc, char* argv[], std::vector<Process_descriptor> v = std::vector<Process_descriptor>())
+void init(int argc, const char* const* argv, std::vector<Process_descriptor> v = std::vector<Process_descriptor>())
 {
 
 #ifndef _WIN32
@@ -99,15 +100,32 @@ void init(int argc, char* argv[], std::vector<Process_descriptor> v = std::vecto
     assert(!once); // init() may only be run once.
     once = true;
 
+    struct Cleanup_guard
+    {
+        Cleanup_guard(std::function<void()> f) {m_f = f;}
+        ~Cleanup_guard() {m_f();}
+        std::function<void()> m_f;
+    };
+
+    static Cleanup_guard cleanup_guard([&]() {
+        if (s_mproc) {
+            //assert(!"sintra::finalize was not called!");
+            finalize();
+        }
+    });
+
     s_mproc = new Managed_process;
     s_mproc->init(argc, argv);
-    s_mproc->branch(v);
+    if (!v.empty()) {
+        s_mproc->branch(v);
+    }
+    s_mproc->go();
 }
 
 
 
 template<typename... Args>
-void init(int argc, char* argv[], Args&&... args)
+void init(int argc, const char* const* argv, Args&&... args)
 {
 #ifndef NDEBUG
     auto cache_line_size = get_cache_line_size();
@@ -121,13 +139,47 @@ void init(int argc, char* argv[], Args&&... args)
 }
 
 
+
 inline
-void finalize()
+bool finalize()
 {
-    assert(s_mproc); // the process must be initialized
+    if (!s_mproc) {
+        // Sintra was not initialized, or it has already been finalized.
+        // Either way, this call will have no effect.
+        return false;
+    }
 
     s_mproc->pause();
     delete s_mproc;
+    s_mproc = nullptr;
+    return true;
+}
+
+
+
+inline
+size_t spawn_swarm_process(const std::string& binary_name, vector<string> args= {}, size_t multiplicity = 1)
+{
+    size_t ret = 0;
+    auto piid = make_process_instance_id();
+
+    args.insert(args.end(), {
+        "--swarm_id",       std::to_string(s_mproc->m_swarm_id),
+        "--instance_id",    std::to_string(piid),
+        "--coordinator_id", std::to_string(s_coord_id)
+    });
+
+    Managed_process::Spawn_swarm_process_args spawn_args;
+    spawn_args.binary_name = binary_name;
+    spawn_args.args = args;
+
+    for (size_t i=0; i<multiplicity; i++) {
+        spawn_args.piid = piid;
+        if (s_mproc->spawn_swarm_process(spawn_args)) {
+            ret++;
+        }
+    }
+    return ret;
 }
 
 
@@ -140,6 +192,7 @@ int process_index()
 
 
 // This is a convenience function.
+inline
 bool barrier(const std::string& barrier_name, const std::string& group_name)
 {
     auto flush_seq = Process_group::rpc_barrier(group_name, barrier_name);

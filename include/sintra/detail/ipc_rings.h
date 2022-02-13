@@ -35,7 +35,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <limits>
 #include <string>
 #include <thread>
-#include "fich.h"  // #include <filesystem> compatibility helper
+#include <filesystem>
 #include "get_wtime.h"
 
 #include <boost/interprocess/detail/os_file_functions.hpp>
@@ -93,9 +93,9 @@ Concepts
    The size of this trailing part is constant throughout the lifetime of the reader
    and must not exceed 3/4 of the buffer's size.
 
-5. The buffer's data region is mapped to virtual memory twice concecutively, to
+5. The buffer's data region is mapped to virtual memory twice consecutively, to
    allow the buffer's wrapping being handled natively. This is an optimization
-   technique which is sometimes called "the magic ring buffer".
+   technique which is sometimes referred to as "the magic ring buffer".
 
 6. A conceptual segmentation of the buffer's region into 8 octiles, allows
    handling the data structure atomically, and in a cache-friendly way.
@@ -136,7 +136,7 @@ Remarks
 
 3. The choice of omp_get_wtime() for timing is because it was measured to work at least
    2x faster than comparable functions from std::chrono. This might not be the case
-   in all systems.
+   across different systems.
 
 */
 
@@ -529,8 +529,6 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         int                             num_free_rs = max_process_index;
 
 
-
-
         // Used to avoid accidentally having multiple writers on the same ring
         ipc::interprocess_mutex         ownership_mutex;
 
@@ -648,9 +646,23 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         }
     }
 
-    
+
     sequence_counter_type get_leading_sequence() const { return m_control->leading_sequence.load(); }
 
+
+    T* get_element_from_sequence(sequence_counter_type sequence) const
+    {
+        auto leading_sequence = m_control->leading_sequence.load();
+        if (sequence < this->m_num_elements) {
+            return this->m_data + sequence;
+        }
+        auto first_sequence = leading_sequence - this->m_num_elements - 1;
+        if (sequence < first_sequence || sequence > leading_sequence) {
+            return nullptr;
+        }
+
+        return this->m_data + std::max(int64_t(0), int64_t(sequence)) % this->m_num_elements;
+    }
 
 private:
     using region_ptr_type = ipc::mapped_region*;
@@ -797,13 +809,6 @@ struct Ring_R: Ring<T, true>
         auto range_first_sequence =
             std::max(int64_t(0), int64_t(leading_sequence) - int64_t(num_trailing_elements));
 
-        m_trailing_octile =
-            (8 * ((range_first_sequence - m_max_trailing_elements) % this->m_num_elements)) /
-            this->m_num_elements;
-
-        access_mask   -= uint64_t(1) << (8 * m_trailing_octile);
-        c.read_access -= access_mask;
-
         Range<T> ret;
         ret.begin = this->m_data +
             std::max(int64_t(0), int64_t(range_first_sequence)) % this->m_num_elements;
@@ -812,12 +817,16 @@ struct Ring_R: Ring<T, true>
         assert(ret.end >= ret.begin);
         assert(ret.begin >= this->m_data);
 
+        m_trailing_octile =
+            (8 * ((range_first_sequence - m_max_trailing_elements) % this->m_num_elements)) /
+            this->m_num_elements;
 
+        access_mask   -= uint64_t(1) << (8 * m_trailing_octile);
+        c.read_access -= access_mask;
 
         // allocate reading sequence
         m_rs_index = c.free_rs_stack[--c.num_free_rs];
         m_reading_sequence = &c.reading_sequences[m_rs_index].v;
-
 
         // advance to the leading sequence that was read in the beginning
         // this way the function will work orthogonally to wait_for_new_data()
@@ -941,6 +950,9 @@ struct Ring_R: Ring<T, true>
     }
 
 
+    sequence_counter_type get_reading_sequence() const { return *m_reading_sequence; }
+
+
 protected:
     const size_t                        m_max_trailing_elements;
     sequence_counter_type*              m_reading_sequence          = &s_zero_rs;
@@ -1007,38 +1019,7 @@ struct Ring_W: Ring<T, false>
     }
 
 
-    // The specialised version, writing (copying) an arbitrary type object into the ring
-    // sizeof(T2) must be a multiple of sizeof(T)
-    template <typename T2>
-    T2* write(size_t num_extra_elements, T2&& obj)
-    {
-        assert(sizeof(T2) % sizeof(T) == 0);
-        auto num_elements = sizeof(T2)/sizeof(T)+num_extra_elements;
-
-        T2* write_location = (T2*) prepare_write(num_elements);
-
-        // write (copy) the message
-        *(write_location) = obj;
-
-        return write_location;
-    }
-
-
-    // handles void
-    void_placeholder_t* write(size_t num_extra_elements, void_placeholder_t& obj)
-    {
-        auto num_elements = num_extra_elements;
-
-        void_placeholder_t* write_location = (void_placeholder_t*) prepare_write(num_elements);
-
-        // write (copy) the message
-        *(write_location) = obj;
-
-        return write_location;
-    }
-
-
-    // The specialised version, for constructing an arbitrary type object in-place into the ring
+    // The specialized version, for constructing an arbitrary type object in-place into the ring
     // sizeof(T2) must be a multiple of sizeof(T)
     template <typename T2, typename... Args>
     T2* write(size_t num_extra_elements, Args... args)
@@ -1049,11 +1030,10 @@ struct Ring_W: Ring<T, false>
         T2* write_location = (T2*) prepare_write(num_elements);
 
         // write (construct) the message
-        return new (write_location) T2(args...);
+        return new (write_location) T2{args...};
     }
 
-
-    void done_writing()
+    sequence_counter_type done_writing()
     {
         // update sequence
         // after the next line, any comparison of the form:
@@ -1080,15 +1060,18 @@ struct Ring_W: Ring<T, false>
         }
         c.unlock();
 
+#else
+        c.leading_sequence.store(m_pending_new_sequence);
 #endif
 
         m_writing_thread = thread::id();
+        return m_pending_new_sequence;
     }
 
 
 
     // If start_reading_new_data() is either sleeping or spinning, it will force it
-    // to return a nullptr and 0 elements. This will affects any process or thread
+    // to return a nullptr and 0 elements. This will affect any process or thread
     // reading from this ring.
     void unblock_global()
     {
@@ -1170,6 +1153,27 @@ private:
 ///// END Ring_W ///////////////////////////////////////////////////////////
  //////////////////////////////////////////////////////////////////////////
 
+
+ //////////////////////////////////////////////////////////////////////////
+///// BEGIN Local_Ring_W ///////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////
+//////   \//////   \//////   \//////   \//////   \//////   \//////   \//////
+ ////     \////     \////     \////     \////     \////     \////     \////
+  //       \//       \//       \//       \//       \//       \//       \//
+
+template <typename T>
+struct Local_Ring_W : Ring_W<T>
+{
+    using Ring_W<T>::Ring_W;
+};
+
+
+//\       //\       //\       //\       //\       //\       //\       //
+////\     ////\     ////\     ////\     ////\     ////\     ////\     ////
+//////\   //////\   //////\   //////\   //////\   //////\   //////\   //////
+////////////////////////////////////////////////////////////////////////////
+///// END Local_Ring_W /////////////////////////////////////////////////////
+ //////////////////////////////////////////////////////////////////////////
 
 } // namespace sintra
 

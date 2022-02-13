@@ -33,6 +33,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <mutex>
 
 #include <boost/lexical_cast.hpp>
+#include <boost/algorithm/string/join.hpp>
+#include <boost/type_index/ctti_type_index.hpp>
 
 #ifdef _WIN32
     #include "third_party/getopt.h"
@@ -48,11 +50,19 @@ namespace sintra {
 inline
 static void s_signal_handler(int sig)
 {
-    s_mproc->emit_remote<Managed_process::terminated_abnormally>(sig);
+    if (!s_mproc->m_out_req_c) {
+        // This means that we crashed before even having been able to initialize.
+        // We have no rings to emit to, so that's all there is to do.
+        // This code should ideally be unreachable.
+        assert(false);
+    }
+    else {
+        s_mproc->emit_remote<Managed_process::terminated_abnormally>(sig);
 
-    for (auto& reader : s_mproc->m_readers) {
-        // waiting here is pointless, we are single-threaded
-        reader.second.stop_nowait();
+        for (auto& reader : s_mproc->m_readers) {
+            // waiting here is pointless, we are single-threaded
+            reader.second.stop_nowait();
+        }
     }
 
     raise(sig);
@@ -79,7 +89,7 @@ void install_signal_handler()
 template <typename T>
 sintra::type_id_type get_type_id()
 {
-    const std::string pretty_name = boost::typeindex::type_id<T>().pretty_name();
+    const std::string pretty_name = boost::typeindex::ctti_type_index::template type_id<T>().pretty_name();
     auto it = s_mproc->m_type_id_of_type_name.find(pretty_name);
     if (it != s_mproc->m_type_id_of_type_name.end()) {
         return it->second;
@@ -133,7 +143,7 @@ sintra::instance_id_type get_instance_id(std::string&& assigned_name)
 inline
 Managed_process::Managed_process():
     Derived_transceiver<Managed_process>((void*)0),
-    m_state(STOPPED),
+    m_communication_state(COMMUNICATION_STOPPED),
     m_must_stop(false),
     m_swarm_id(0),
     m_last_message_sequence(0),
@@ -166,7 +176,7 @@ Managed_process::~Managed_process()
         wait_until_all_external_readers_are_done();
     }
 
-    assert(m_state <= PAUSED); // i.e. paused or stopped
+    assert(m_communication_state <= COMMUNICATION_PAUSED); // i.e. paused or stopped
 
     // this is called explicitly, in order to inform the coordinator of the destruction early.
     // it would not be possible to communicate it after the channels were closed.
@@ -201,8 +211,61 @@ Managed_process::~Managed_process()
 }
 
 
+
+// returns the argc/argv as a vector of strings
 inline
-void Managed_process::init(int argc, char* argv[])
+std::vector<std::string> argc_argv_to_vector(int argc, const char* const* argv)
+{
+    std::vector<std::string> ret;
+    for (int i = 0; i < argc; i++) {
+        ret.push_back(argv[i]);
+    }
+    return ret;
+}
+
+
+
+struct Filtered_args
+{
+    vector<string> remained;
+    vector<string> extracted;
+};
+
+
+
+inline
+Filtered_args filter_option(
+    std::vector<std::string> in_args, std::string in_option, unsigned int num_args
+)
+{
+    Filtered_args ret;
+    bool found = false;
+    for (auto& e : in_args) {
+        if (!found) {
+            if (e == in_option) {
+                found = true;
+                ret.extracted.push_back(e);
+                continue;
+            }
+            ret.remained.push_back(e);
+        }
+        else {
+            if (num_args) {
+                ret.extracted.push_back(e);
+                num_args--;
+            }
+            else {
+                ret.remained.push_back(e);
+            }
+        }
+    }
+    return ret;
+}
+
+
+
+inline
+void Managed_process::init(int argc, const char* const* argv)
 {
     m_binary_name = argv[0];
 
@@ -211,20 +274,37 @@ void Managed_process::init(int argc, char* argv[])
     std::string swarm_id_arg;
     std::string instance_id_arg;
     std::string coordinator_id_arg;
+    std::string recovery_arg;
+
+    size_t recovery_occurrence_value = 0;
+    auto fa = filter_option(argc_argv_to_vector(argc, argv), "--recovery_occurrence", 1);
+
+    if (fa.extracted.size() == 2) {
+        try {
+            recovery_occurrence_value =  std::stoul(fa.extracted[1]);
+        }
+        catch (...) {
+            assert(!"not implemented");
+        }
+    }
+
+    m_recovery_cmd = boost::algorithm::join(fa.remained, " ") + " --recovery_occurrence " +
+        std::to_string(recovery_occurrence_value+1);
 
     try {
         while (true) {
             static struct ::option long_options[] = {
-                {"help",            no_argument,        &help_arg,  'h' },
-                {"branch_index",    required_argument,  0,          'a' },
-                {"swarm_id",        required_argument,  0,          'b' },
-                {"instance_id",     required_argument,  0,          'c' },
-                {"coordinator_id",  required_argument,  0,          'd' },
+                {"help",                no_argument,        &help_arg,  'h' },
+                {"branch_index",        required_argument,  0,          'a' },
+                {"swarm_id",            required_argument,  0,          'b' },
+                {"instance_id",         required_argument,  0,          'c' },
+                {"coordinator_id",      required_argument,  0,          'd' },
+                {"recovery_occurrence", required_argument,  0,          'e' },
                 {0, 0, 0, 0}
             };
 
             int option_index = 0;
-            int c = getopt_long(argc, argv, "ha:b:c:d:", long_options, &option_index);
+            int c = getopt_long(argc, (char*const*)argv, "ha:b:c:d:e:", long_options, &option_index);
 
             if (c == -1)
                 break;
@@ -235,23 +315,27 @@ void Managed_process::init(int argc, char* argv[])
                         throw -1;
                     break;
                 case 'a':
-                    branch_index_arg    = optarg;
-                    s_branch_index      = boost::lexical_cast<decltype(s_branch_index)>(optarg);
+                    branch_index_arg        = optarg;
+                    s_branch_index          = boost::lexical_cast<decltype(s_branch_index)>(optarg);
                     if (s_branch_index < 1) {
                         throw -1;
                     }
                     break;
                 case 'b':
-                    swarm_id_arg        = optarg;
-                    m_swarm_id          = boost::lexical_cast<decltype(m_swarm_id     )>(optarg);
+                    swarm_id_arg            = optarg;
+                    m_swarm_id              = boost::lexical_cast<decltype(m_swarm_id)>(optarg);
                     break;
                 case 'c':
-                    instance_id_arg     = optarg;
-                    m_instance_id       = boost::lexical_cast<decltype(m_instance_id  )>(optarg);
+                    instance_id_arg         = optarg;
+                    m_instance_id           = boost::lexical_cast<decltype(m_instance_id)>(optarg);
                     break;
                 case 'd':
-                    coordinator_id_arg  = optarg;
-                    s_coord_id         = boost::lexical_cast<decltype(s_coord_id    )>(optarg);
+                    coordinator_id_arg      = optarg;
+                    s_coord_id              = boost::lexical_cast<decltype(s_coord_id)>(optarg);
+                    break;
+                case 'e':
+                    recovery_arg            = optarg;
+                    s_recovery_occurrence   = boost::lexical_cast<decltype(s_recovery_occurrence)>(optarg);
                     break;
                 case '?':
                     /* getopt_long already printed an error message. */
@@ -264,14 +348,17 @@ void Managed_process::init(int argc, char* argv[])
     catch(...) {
         cout << R"(
 Managed process options:
-  --help                (optional) produce help message and exit
-  --branch_index arg    used by the coordinator process, when it invokes itself
-                        with a different entry index. It must be 1 or greater.
-  --swarm_id arg        unique identifier of the swarm that is being joined
-  --instance_id arg     the instance id of this process, that was assigned by
-                        the supervisor
-  --coordinator_id arg  the instance id of the coordinator that this process
-                        should refer to
+  --help                   (optional) produce help message and exit
+  --branch_index arg       used by the coordinator process, when it invokes
+                           itself
+                           with a different entry index. It must be 1 or
+                           greater.
+  --swarm_id arg           unique identifier of the swarm that is being joined
+  --instance_id arg        the instance id assigned to the new process
+  --coordinator_id arg     the instance id of the coordinator that this
+                           process should refer to
+  --recovery_occurrence arg (optional) number of times the process recovered an
+                           abnormal termination.
 )";
         exit(1);
     }
@@ -286,7 +373,8 @@ Managed process options:
             ).count();
         coordinator_is_local = true;
 
-        // NOTE: leave m_branch_index uninitialized. The supervisor does not have an entry
+        // NOTE: leave s_branch_index uninitialized. The coordinating process does
+        // not have an entry
     }
     else {
         if (coordinator_id_arg.empty() || (branch_index_arg.empty() && instance_id_arg.empty()) ) {
@@ -389,6 +477,31 @@ Managed process options:
         auto cr_handler = [](const Managed_process::terminated_abnormally& msg)
         {
             s_coord->unpublish_transceiver(msg.sender_instance_id);
+
+            s_coord->recover_if_required(msg.sender_instance_id);
+
+            /*
+            
+            There is a problem here:
+            We reach this code in the ring reader of the process that crashed.
+            The message is then relayed to the coordinator ring
+            but the coordinating process reads its own ring too
+            which will cause this to be handled twice... which is wrong
+
+            a fix would be to simply reject the message here, in one of the two cases
+            but this is not the only case that such a problem could occur. It thus needs a better solution.
+            Also, this solution would require declaring some thread-local stuff, otherwise
+            knowing whether we are reading the coordinator is impossible.
+
+            maybe an alternative would be that the coordinating process does not handle such messages
+            unless they are originating from its own ring. This would however require this to be checked
+            in the message loop, which would make it slower for ALL processes - maybe not a good idea.
+
+            another possible alternative (that requires more thought) is that the coordinating process
+            does not read its own ring. There might be several corner cases which won't work.
+
+            */
+
         };
         activate<Managed_process>(cr_handler, any_remote);
     }
@@ -406,8 +519,57 @@ Managed process options:
 
     m_start_stop_mutex.lock();
 
-    m_state = RUNNING;
+    m_communication_state = COMMUNICATION_RUNNING;
     m_start_stop_mutex.unlock();
+}
+
+
+
+inline
+bool Managed_process::spawn_swarm_process(
+    const Spawn_swarm_process_args& s )
+{
+    assert(s_coord);
+    std::vector<instance_id_type> failed_spawns, successful_spawns;
+    auto args = s.args;
+    args.insert(args.end(), {"--recovery_occurrence", std::to_string(s.occurrence)} );
+
+    cstring_vector cargs(args);
+
+    assert(!m_readers.count(process_of(s.piid)));
+    auto eit = m_readers.emplace(s.piid, s.piid);
+    assert(eit.second == true);
+
+    // Before spawning the new process, we have to assure that the
+    // corresponding reading threads are up and running.
+    eit.first->second.wait_until_ready();
+
+    bool success = spawn_detached(s.binary_name.c_str(), cargs.v());
+
+    if (success) {
+        // Create an entry in the coordinator's transceiver registry.
+        // This is essential for the implementation of publish_transceiver()
+        {
+            lock_guard<mutex> lock(s_coord->m_publish_mutex);
+            s_coord->m_transceiver_registry[s.piid];
+        }
+
+        // create the readers. The next line will start the reader threads,
+        // which might take some time. At this stage, we do not have to wait
+        // until they are ready for messages.
+        //m_readers.emplace_back(std::move(reader));
+
+        m_cached_spawns[s.piid] = s;
+        m_cached_spawns[s.piid].occurrence++;
+    }
+    else {
+        std::cerr << "failed to launch " << s.binary_name << std::endl;
+
+        //m_readers.pop_back();
+        m_readers.erase(s.piid);
+    }
+
+    return success;
 }
 
 
@@ -415,30 +577,29 @@ Managed process options:
 inline
 bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
 {
+    // this function may only be called when a group of processes start.
+    assert(!branch_vector.empty());
+
     using namespace sintra;
     using std::to_string;
-
-    std::vector<instance_id_type> failed_spawns;
 
     if (s_coord) {
 
         // 1. prepare the command line for each invocation
         auto it = branch_vector.begin();
         for (int i = 1; it != branch_vector.end(); it++, i++) {
-            it->sintra_options.push_back("--swarm_id");
-            it->sintra_options.push_back(to_string(m_swarm_id));
+
+            auto& options = it->sintra_options;
             if (it->entry.m_binary_name.empty()) {
                 it->entry.m_binary_name = m_binary_name;
-                it->sintra_options.push_back("--branch_index");
-                it->sintra_options.push_back(to_string(i));
+                options.insert(options.end(), { "--branch_index", to_string(i) });
             }
-            it->assigned_instance_id = make_process_instance_id();
-            it->sintra_options.push_back("--instance_id");
-            it->sintra_options.push_back(to_string(it->assigned_instance_id));
-            it->sintra_options.push_back("--coordinator_id");
-            it->sintra_options.push_back(to_string(s_coord_id));
+            options.insert(options.end(), {
+                "--swarm_id",       to_string(m_swarm_id),
+                "--instance_id",    to_string(it->assigned_instance_id = make_process_instance_id()),
+                "--coordinator_id", to_string(s_coord_id)
+            });
         }
-
 
         // 2. spawn
         std::unordered_set<instance_id_type> successfully_spawned;
@@ -450,44 +611,9 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
             all_args.insert(all_args.end(), it->sintra_options.begin(), it->sintra_options.end());
             all_args.insert(all_args.end(), it->user_options.begin(), it->user_options.end());
 
-            const char** argv = new const char*[all_args.size()+1];
-            for (size_t i = 0; i < all_args.size(); i++) {
-                argv[i] = all_args[i].c_str();
-            }
-            argv[all_args.size()] = 0;
-            assert(!m_readers.count(process_of(it->assigned_instance_id)));
-            auto eit = m_readers.emplace(it->assigned_instance_id, it->assigned_instance_id);
-            assert(eit.second == true);
-
-            // Before spawning the new process, we have to assure that the
-            // corresponding reading threads are up and running.
-            eit.first->second.wait_until_ready();
-
-            bool success = spawn_detached(it->entry.m_binary_name.c_str(), argv);
-            if (!success) {
-                failed_spawns.push_back(it->assigned_instance_id);
-                std::cerr << "failed to launch " << it->entry.m_binary_name << std::endl;
-
-                //m_readers.pop_back();
-                m_readers.erase(it->assigned_instance_id);
-            }
-            else {
+            if (spawn_swarm_process({it->entry.m_binary_name, all_args, it->assigned_instance_id})) {
                 successfully_spawned.insert(it->assigned_instance_id);
-
-                // Create an entry in the coordinator's transceiver registry.
-                // This is essential for the implementation of publish_transceiver()
-                {
-                    lock_guard<mutex> lock(s_coord->m_publish_mutex);
-                    s_coord->m_transceiver_registry[it->assigned_instance_id];
-                }
-
-                // create the readers. The next line will start the reader threads,
-                // which might take some time. At this stage, we do not have to wait
-                // until they are ready for messages.
-                //m_readers.emplace_back(std::move(reader));
             }
-
-            delete [] argv;
         }
 
         auto all_processes = successfully_spawned;
@@ -495,12 +621,12 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
 
         m_group_all      = s_coord->make_process_group("_sintra_all_processes", all_processes);
         m_group_external = s_coord->make_process_group("_sintra_external_processes", successfully_spawned);
-        
+
         s_branch_index = 0;
     }
     else {
         assert(s_branch_index != -1);
-        assert(branch_vector.size() > s_branch_index-1);
+        assert( (ptrdiff_t)branch_vector.size() > s_branch_index-1);
         Process_descriptor& own_pd = branch_vector[s_branch_index-1];
         if (own_pd.entry.m_entry_function != nullptr) {
             m_entry_function = own_pd.entry.m_entry_function;
@@ -510,26 +636,25 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
             exit(1);
         }
 
-        //m_coordinator links to the coordinator
-        // what happens here:
-        // the comm will try to start reading from the ring of m_coordinator_id
-        // its write channel is already available
-        // the supervisor, which is its own coordinator, will do that too (loop comm)
-        //m_peers->read_from(m_coordinator_id);
-
         m_group_all      = Coordinator::rpc_wait_for_instance(s_coord_id, "_sintra_all_processes");
         m_group_external = Coordinator::rpc_wait_for_instance(s_coord_id, "_sintra_external_processes");
-
     }
 
-    // assign_name requires that all processes are instantiated, in order
+    // assign_name requires that all group processes are instantiated, in order
     // to receive the instance_published event
     bool all_started = Process_group::rpc_barrier(m_group_all, UIBS);
     if (!all_started) {
         return false;
     }
 
-    assign_name(std::string("sintra_process_") + to_string(m_pid));
+    return true;
+}
+
+
+inline
+void Managed_process::go()
+{
+    assign_name(std::string("sintra_process_") + std::to_string(m_pid));
 
     m_entry_function();
 
@@ -542,9 +667,8 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
     if (!s_coord) {
         s_mproc->deactivate_all();
     }
-
-    return true;
 }
+
 
 
  //////////////////////////////////////////////////////////////////////////
@@ -565,14 +689,14 @@ void Managed_process::pause()
     // explicitly from one of the handlers, or from the entry function itself.
     // If called when the process is already paused, this should not have any
     // side effects.
-    if (m_state <= PAUSED)
+    if (m_communication_state <= COMMUNICATION_PAUSED)
         return;
 
     for (auto& ri : m_readers) {
         ri.second.pause();
     }
 
-    m_state = PAUSED;
+    m_communication_state = COMMUNICATION_PAUSED;
     m_start_stop_condition.notify_all();
 }
 
@@ -585,14 +709,14 @@ void Managed_process::stop()
     // stop() might be called explicitly from one of the handlers, or from the
     // entry function. If called when the process is already stopped, this
     // should not have any side effects.
-    if (m_state == STOPPED)
+    if (m_communication_state == COMMUNICATION_STOPPED)
         return;
 
     for (auto& ri : m_readers) {
         ri.second.stop_nowait();
     }
 
-    m_state = STOPPED;
+    m_communication_state = COMMUNICATION_STOPPED;
     m_start_stop_condition.notify_all();
 }
 
@@ -602,7 +726,7 @@ inline
 void Managed_process::wait_for_stop()
 {
     std::unique_lock<mutex> start_stop_lock(m_start_stop_mutex);
-    while (m_state == RUNNING) {
+    while (m_communication_state == COMMUNICATION_RUNNING) {
         m_start_stop_condition.wait(start_stop_lock);
     }
 }

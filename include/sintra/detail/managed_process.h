@@ -75,6 +75,7 @@ using std::thread;
 using std::vector;
 
 
+inline
 string uibs_impl(const char *file, int line)
 {
     return std::string(file) + ":" + std::to_string(line);
@@ -157,7 +158,11 @@ struct Process_descriptor
 // -1: No branching has taken place - this variable is not relevant
 //  0: The starter process, with the coordinator.
 // >0: A spawned process.
-static inline uint32_t s_branch_index = -1;
+static inline int32_t s_branch_index = -1;
+
+
+static inline uint32_t s_recovery_occurrence = 0;
+
 
 
 template <typename T>
@@ -173,9 +178,10 @@ struct Managed_process: Derived_transceiver<Managed_process>
     Managed_process();
     ~Managed_process();
 
-    bool branch(vector<Process_descriptor>& branch_vector);
 
-    void init(int argc, char* argv[]);
+    void init(int argc, const char* const* argv);
+    bool branch(vector<Process_descriptor>& branch_vector);
+    void go();
 
     // Pauses the process. Once called, reader threads will continue running,
     // but in a mode where only messages originating from the coordinator are
@@ -187,6 +193,8 @@ struct Managed_process: Derived_transceiver<Managed_process>
 
 
     void wait_for_stop();
+
+    void enable_recovery();
 
 
     Message_ring_W*                     m_out_req_c = nullptr;
@@ -209,14 +217,14 @@ struct Managed_process: Derived_transceiver<Managed_process>
 
     // START/STOP
 
-    enum State
+    enum Communication_state
     {
-        STOPPED, // ring threads have been stopped
-        PAUSED,  // rings answer to SERVICE_MODE
-        RUNNING  // rings in NORMAL_MODE
+        COMMUNICATION_STOPPED,  // ring threads are stopped
+        COMMUNICATION_PAUSED,   // rings answer to SERVICE_MODE
+        COMMUNICATION_RUNNING   // rings in NORMAL_MODE
     };
 
-    State                               m_state;
+    Communication_state                 m_communication_state = COMMUNICATION_STOPPED;
     mutex                               m_start_stop_mutex;
     condition_variable                  m_start_stop_condition;
 
@@ -299,6 +307,27 @@ struct Managed_process: Derived_transceiver<Managed_process>
     // standard process groups
     instance_id_type                    m_group_all      = invalid_instance_id;
     instance_id_type                    m_group_external = invalid_instance_id;
+
+    // recovery
+    double                              m_average_runnning_time = std::numeric_limits<double>::max();
+    double                              m_last_running_time     = std::numeric_limits<double>::max();
+    uint32_t                            m_times_recovered       = 0;
+    bool                                m_recoverable           = false;
+    std::string                         m_recovery_cmd;
+
+
+    struct Spawn_swarm_process_args
+    {
+        std::string                 binary_name;
+        std::vector<std::string>    args;
+        instance_id_type            piid;
+        uint32_t                    occurrence = 0;
+    };
+
+
+    bool spawn_swarm_process( const Spawn_swarm_process_args& ssp_args );
+
+    map<instance_id_type, Spawn_swarm_process_args> m_cached_spawns;
 };
 
 

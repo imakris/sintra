@@ -134,7 +134,7 @@ void Transceiver::destroy()
 
         // If the message ring threads are not running, attempting rpc would deadlock,
         // which must be prevented. This is a likely scenario on an emergency exit.
-        if (s_mproc->m_state >= Managed_process::PAUSED) {
+        if (s_mproc->m_communication_state >= Managed_process::COMMUNICATION_PAUSED) {
             auto success = Coordinator::rpc_unpublish_transceiver(s_coord_id, m_instance_id);
             // TODO: FIXME: there is still no implementation to handle failure
             assert(success);
@@ -311,6 +311,7 @@ Transceiver::activate(
     Typed_instance_id<SENDER_T> sender_id,
     decltype(m_deactivators)::iterator* deactivator_it_ptr)
 {
+    using namespace boost::placeholders;
     auto handler =
         function<typename MESSAGE_T::return_type(const MESSAGE_T&)>(
             boost::bind(v, static_cast<OBJECT_T*>(this), _1));
@@ -486,7 +487,7 @@ template <typename T>
 struct Void_filter
 {
     std::function<T()> f;
-    T result;
+    T result = {};
     void call() { result = f(); }
 };
 
@@ -494,7 +495,7 @@ template <>
 struct Void_filter<void_placeholder_t>
 {
     std::function<void()> f;
-    void_placeholder_t result;
+    void_placeholder_t result = {};
     void call() { f(); }
 };
 
@@ -519,7 +520,6 @@ void Transceiver::rpc_handler(Message_prefix& untyped_msg)
 
     type_id_type etid = not_defined_type_id;
     const char* what = "";
-    size_t what_size = 0;
 
     // allocate string and copy exception information
     auto asacei = [](const char* e_what) -> const char*
@@ -705,7 +705,6 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
     rh.instance_id = instance_id;
     function_instance_id = s_mproc->activate_return_handler(rh);
 
-
     // write the message for the rpc call into the communication ring
     static auto once = MESSAGE_T::id();
     (void)(once); // suppress unused variable warning
@@ -769,7 +768,7 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
 
 
 
-inline
+template<typename>
 instance_id_type
 Transceiver::activate_return_handler(const Return_handler &rh)
 {

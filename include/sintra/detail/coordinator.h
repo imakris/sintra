@@ -81,7 +81,7 @@ struct Process_group: Derived_transceiver<Process_group>
     unordered_set<instance_id_type>             m_process_ids;
 
     mutex m_call_mutex;
-    SINTRA_RPC_ONLY_EXPLICIT(barrier)
+    SINTRA_RPC_STRICT_EXPLICIT(barrier)
 
 private:
     void add_process(instance_id_type process_iid);
@@ -90,6 +90,8 @@ private:
     friend struct Coordinator;
 };
 
+
+inline
 void Process_group::set(const unordered_set<instance_id_type>& member_process_ids)
 {
     std::lock_guard lock(m_call_mutex);
@@ -98,6 +100,8 @@ void Process_group::set(const unordered_set<instance_id_type>& member_process_id
     );
 }
 
+
+inline
 void Process_group::add_process(instance_id_type process_iid)
 {
     std::lock_guard lock(m_call_mutex);
@@ -105,6 +109,7 @@ void Process_group::add_process(instance_id_type process_iid)
 }
 
 
+inline
 void Process_group::remove_process(instance_id_type process_iid)
 {
     std::lock_guard lock(m_call_mutex);
@@ -138,6 +143,9 @@ private:
         const unordered_set<instance_id_type>& member_process_ids);
 
 
+    void enable_recovery(instance_id_type piid);
+    void recover_if_required(instance_id_type piid);
+
     // Blocks until all processes identified by process_group_id have called the function.
     // num_absences may be used by a caller to specify that it is aware that other callers will
     // not make it to the barrier, thus prevent a deadlock.
@@ -145,10 +153,9 @@ private:
     // of them may notify of its absence.
     // Returns the leading sequence of the coordinator process' request ring.
 
-
     void print(const string& str);
 
-
+    mutex                                       m_type_resolution_mutex;
     mutex                                       m_publish_mutex;
     mutex                                       m_groups_mutex;
 
@@ -177,14 +184,17 @@ private:
     >                                           m_instances_waited;
     map<string, instance_id_type>               m_instances_waited_common_iids;
 
+    set<instance_id_type>                       m_requested_recovery;
+
 public:
     SINTRA_RPC_EXPLICIT(resolve_type)  
     SINTRA_RPC_EXPLICIT(resolve_instance)
-    SINTRA_RPC_ONLY_EXPLICIT(wait_for_instance)
-    SINTRA_RPC_ONLY_EXPLICIT(publish_transceiver)
+    SINTRA_RPC_STRICT_EXPLICIT(wait_for_instance)
+    SINTRA_RPC_STRICT_EXPLICIT(publish_transceiver)
     SINTRA_RPC_EXPLICIT(unpublish_transceiver)
     SINTRA_RPC_EXPLICIT(make_process_group)
     SINTRA_RPC_EXPLICIT(print)
+    SINTRA_RPC_EXPLICIT(enable_recovery)
 
     SINTRA_SIGNAL_EXPLICIT(instance_published,
         type_id_type type_id, instance_id_type instance_id, message_string assigned_name)
