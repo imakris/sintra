@@ -82,10 +82,8 @@ struct variable_buffer
 
     variable_buffer() {}
 
-    variable_buffer(const variable_buffer& v)
-    {
-        *this = v;
-    }
+    variable_buffer(const variable_buffer&) = default;
+    variable_buffer& operator=(const variable_buffer&) = default;
 
     template <typename TC, typename T = typename TC::iterator::value_type>
     variable_buffer(const TC& container);

@@ -45,8 +45,8 @@ using std::unique_lock;
 
 
 
-
 // EXPORTED EXCLUSIVELY FOR RPC
+inline
 sequence_counter_type Process_group::barrier(
     const string& barrier_name)
 {
@@ -82,6 +82,7 @@ sequence_counter_type Process_group::barrier(
         }
 
         s_tl_common_function_iid = b.common_function_iid;
+        basic_lock.lock();
         b.m.unlock();
         m_barriers.erase(barrier_name);
         return s_mproc->m_out_req_c->get_leading_sequence();
@@ -93,10 +94,6 @@ sequence_counter_type Process_group::barrier(
         throw ret;
     }
 }
-
-
-
-
 
 
 
@@ -123,6 +120,7 @@ Coordinator::~Coordinator()
 inline
 type_id_type Coordinator::resolve_type(const string& pretty_name)
 {
+    lock_guard<mutex> lock(m_type_resolution_mutex);
     auto it = s_mproc->m_type_id_of_type_name.find(pretty_name);
     if (it != s_mproc->m_type_id_of_type_name.end()) {
         return it->second;
@@ -150,6 +148,7 @@ instance_id_type Coordinator::resolve_instance(const string& assigned_name)
 
 
 // EXPORTED EXCLUSIVELY FOR RPC
+inline
 instance_id_type Coordinator::wait_for_instance(const string& assigned_name)
 {
     // This works similarly to a barrier. The difference is that
@@ -348,6 +347,7 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
 
 
 // EXPORTED FOR RPC
+inline
 instance_id_type Coordinator::make_process_group(
     const string& name,
     const unordered_set<instance_id_type>& member_process_ids)
@@ -378,6 +378,34 @@ void Coordinator::print(const string& str)
 {
     cout << str;
 }
+
+
+
+// EXPORTED FOR RPC
+inline
+void Coordinator::enable_recovery(instance_id_type piid)
+{
+    // enable crash recovery for the calling process
+    assert(is_process(piid));
+    m_requested_recovery.insert(piid);
+}
+
+inline
+void Coordinator::recover_if_required(instance_id_type piid)
+{
+    assert(is_process(piid));
+    if (m_requested_recovery.count(piid)) {
+        // respawn
+        auto& s = s_mproc->m_cached_spawns[piid];
+        s_mproc->spawn_swarm_process(s);
+    }
+    else {
+        // remove traces
+        // ... [implement]
+    }
+}
+
+
 
 } // sintra
 

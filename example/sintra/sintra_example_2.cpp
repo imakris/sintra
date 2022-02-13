@@ -32,11 +32,12 @@
 // 2008: Beijing
 // An RPC exception was thrown: string too long
 // An RPC exception was thrown: RPC failed
-// An RPC exception was thrown: Attempted to make an RPC call using an invalid instance ID.
+// An RPC exception was thrown: Attempted to make an RPC call using an
+// invalid instance ID.
 //
-// nevertheless, the output is not really deterministic, as it depends on the
-// timing of the call that will cause process_1 to crash. I.e. 'Sydney' and
-// 'Athens' might theoretically not show at all.
+// nevertheless, the output is not really deterministic, as it depends on
+// the timing of the call that will cause process_1 to crash, thus 'Sydney'
+// and 'Athens' might theoretically not show at all.
 //
 
 #include <sintra/sintra.h>
@@ -82,7 +83,7 @@ struct Remotely_accessible: Derived_transceiver<Remotely_accessible>
     // This statement will have a similar effect, with the difference that the function
     // will always use the RPC mechanism, regardless of whether the instance is local to
     // the process.
-    //SINTRA_RPC_ONLY(append)
+    //SINTRA_RPC_STRICT(append)
 };
 
 
