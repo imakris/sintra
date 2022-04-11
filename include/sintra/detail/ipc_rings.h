@@ -935,7 +935,7 @@ struct Ring_R: Ring<T, true>
     }
 
 
-    // If start_reading_new_data() is either sleeping or spinning on a different thread,
+    // If wait_for_new_data() is either sleeping or spinning on a different thread,
     // this call will force it to return a nullptr and 0 elements.
     // Only the local reader instance will be affected.
     void unblock_local()
@@ -1070,7 +1070,7 @@ struct Ring_W: Ring<T, false>
 
 
 
-    // If start_reading_new_data() is either sleeping or spinning, it will force it
+    // If wait_for_new_data() is either sleeping or spinning, it will force it
     // to return a nullptr and 0 elements. This will affect any process or thread
     // reading from this ring.
     void unblock_global()
