@@ -524,10 +524,15 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         cache_line_sized_t<sequence_counter_type>
                                         reading_sequences[max_process_index];
 
+        // --- Reader Sequence Stack Management ---
+        // This lock protects free_rs_stack and num_free_rs during acquisition/release
+        atomic_flag                     rs_stack_spinlock = ATOMIC_FLAG_INIT;
+        void rs_stack_lock()   { while (rs_stack_spinlock.test_and_set(std::memory_order_acquire)) {} }
+        void rs_stack_unlock() { rs_stack_spinlock.clear(std::memory_order_release); }
 
         int                             free_rs_stack[max_process_index];
-        int                             num_free_rs = max_process_index;
-
+        atomic<int>                     num_free_rs;
+        // --- End Reader Sequence Stack Management ---
 
         // Used to avoid accidentally having multiple writers on the same ring
         ipc::interprocess_mutex         ownership_mutex;
@@ -592,6 +597,7 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
 
             assert(num_attached.is_lock_free());        // size_t
             assert(leading_sequence.is_lock_free());    // sequence_counter_type
+            num_free_rs.store(max_process_index, std::memory_order_relaxed);
         }
 
 
@@ -797,6 +803,24 @@ struct Ring_R: Ring<T, true>
 
         assert(num_trailing_elements <= m_max_trailing_elements);
 
+        // --- START: Acquire Reader Slot (Locked Section) ---
+        c.rs_stack_lock();
+
+        if (c.num_free_rs.load(std::memory_order_acquire) <= 0) {
+             c.rs_stack_unlock();
+             m_reading = false;
+             m_reading_lock = false;
+             throw std::runtime_error("Sintra Ring: Maximum number of readers reached.");
+        }
+
+        int current_num_free = c.num_free_rs.fetch_sub(1, std::memory_order_relaxed) - 1;
+        m_rs_index = c.free_rs_stack[current_num_free];
+
+        c.rs_stack_unlock();
+        // --- END: Acquire Reader Slot ---
+
+        m_reading_sequence = &c.reading_sequences[m_rs_index].v;
+
         // this prevents the writer from progressing beyond the end of the octile that
         // succeeds the one it is currently on
         uint64_t access_mask = 0x0101010101010101;
@@ -824,10 +848,6 @@ struct Ring_R: Ring<T, true>
         access_mask   -= uint64_t(1) << (8 * m_trailing_octile);
         c.read_access -= access_mask;
 
-        // allocate reading sequence
-        m_rs_index = c.free_rs_stack[--c.num_free_rs];
-        m_reading_sequence = &c.reading_sequences[m_rs_index].v;
-
         // advance to the leading sequence that was read in the beginning
         // this way the function will work orthogonally to wait_for_new_data()
         *m_reading_sequence = leading_sequence;
@@ -846,9 +866,23 @@ struct Ring_R: Ring<T, true>
             c.read_access -= uint64_t(1) << (8 * m_trailing_octile);
             *m_reading_sequence = m_trailing_octile = 0;
             m_reading = false;
+            assert(m_rs_index >= 0 && m_rs_index < max_process_index);
 
-            // release reading sequence
-            c.free_rs_stack[c.num_free_rs++] = m_rs_index;
+            // --- START: Release Reader Slot (Locked Section) ---
+            c.rs_stack_lock();
+
+#ifndef NDEBUG
+            assert(c.num_free_rs.load(std::memory_order_acquire) < max_process_index &&
+                "Error: free_rs_stack overflow detected in done_reading!");
+#endif
+
+            int index_to_write = c.num_free_rs.load(std::memory_order_relaxed);
+            c.free_rs_stack[index_to_write] = m_rs_index;
+            c.num_free_rs.fetch_add(1, std::memory_order_release);
+
+            c.rs_stack_unlock();
+            // --- END: Release Reader Slot ---
+
             m_rs_index = -1;
             m_reading_sequence = &s_zero_rs;
         }
