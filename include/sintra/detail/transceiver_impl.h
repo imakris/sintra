@@ -29,6 +29,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <type_traits>
 #include <memory>
+#include <cstring>
 
 #include "exception_conversions.h"
 #include "exception_conversions_impl.h"
@@ -527,7 +528,8 @@ void Transceiver::rpc_handler(Message_prefix& untyped_msg)
         char* what = 0;
         size_t what_size = strlen(e_what)+1;
         what = new char[what_size];
-        strncpy_s(what, what_size, e_what, what_size);
+        strncpy(what, e_what, what_size);
+        what[what_size - 1] = '\0';
         return what;
     };
 
