@@ -73,6 +73,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *  • The snapshot remains valid until overwritten; i.e., until the writer
  *    advances far enough that the reader’s trailing guard octile would be
  *    surpassed and reclaimed by the writer.
+ *  • start_reading() must be paired with done_reading().
+ *    Calling start_reading() again, while a snapshot is active, throws.
  *
  * READER CAP
  * ----------
@@ -81,11 +83,23 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *      max_process_index; and the octile guard uses an 8×1-byte pattern which
  *      caps actively guarded readers at 255.
  *
+ * READER EVICTION (WHEN ENABLED)
+ * ------------------------------
+ *  • If SINTRA_ENABLE_SLOW_READER_EVICTION is defined, the writer can evict
+ *    a reader that is blocking its progress.
+ *  • A reader is considered "slow" if it holds a guard and its last-read
+ *    sequence is more than one full ring buffer's length behind the writer.
+ *  • Eviction forcefully clears the reader's guard and sets its status to
+ *    EVICTED. The reader's next call to start_reading() will throw a
+ *    ring_reader_evicted_exception, forcing it to re-attach.
+ *
  * LIFECYCLE & CLEANUP
  * -------------------
  *  • Two files exist: a data file (double-mapped) and a control file
  *    (atomics, semaphores, per-reader state).
  *  • Any process may create; subsequent processes attach.
+ *  • Each Ring_R object acquires a unique "reader slot" upon construction and
+ *    releases it upon destruction, ensuring no leaks (RAII).
  *  • The *last* detaching process removes BOTH files.
  *
  * PLATFORM MAPPING OVERVIEW
@@ -99,7 +113,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *      - Release the reservation and immediately map the file twice contiguously,
  *        expecting the OS to reuse the address.
  *  • Linux / POSIX:
- *      - Reserve a 2× span with mmap(NULL, 2*size, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS,…).
+ *      - Reserve a 2× span with mmap(NULL, 2*size, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS, ...).
  *      - Map the file TWICE into that span using MAP_FIXED (by design replaces
  *        the reservation). Do NOT use MAP_FIXED_NOREPLACE for this step.
  *      - Use ptr = mem (mmap returns a page-aligned address).
@@ -116,20 +130,23 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "id_types.h"    // ID and type aliases as used by the project
 
 // ─── STL / stdlib ────────────────────────────────────────────────────────────
-#include <atomic>
-#include <cstdint>
-#include <string>
-#include <thread>
-#include <filesystem>
-#include <cstring>       // std::strlen
-#include <cstdio>        // std::FILE, std::fprintf
-#include <cassert>
-#include <vector>
 #include <algorithm>     // std::reverse
+#include <array>
+#include <atomic>
+#include <cassert>
+#include <cstdio>        // std::FILE, std::fprintf
+#include <cstring>       // std::strlen
+#include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <limits>
 #include <mutex>         // std::once_flag, std::call_once
+#include <stdexcept>
+#include <string>
 #include <system_error>
+#include <thread>
+#include <utility>
+#include <vector>
 
 // ─── Boost.Interprocess ──────────────────────────────────────────────────────
 #include <boost/interprocess/detail/os_file_functions.hpp>
@@ -151,6 +168,15 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
   #include <sys/mman.h>  // ::mmap, ::munmap, MAP_FIXED, MAP_NOSYNC (if available)
   #include <unistd.h>    // ::sysconf
 #endif
+
+
+// Enables the writer to forcefully evict readers that are too slow.
+#define SINTRA_ENABLE_SLOW_READER_EVICTION
+
+// If eviction is enabled, this is the number of spin-wait cycles the writer
+// will perform before triggering an eviction scan.
+#define SINTRA_EVICTION_SPIN_THRESHOLD 10000000
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -228,7 +254,7 @@ static inline void sintra_warn_if_cacheline_mismatch_linux(size_t assumed_cache_
  * Ensure the directory exists and is a directory. If a same-named regular file
  * exists, remove it and create a directory in its place.
  */
-inline bool check_or_create_directory(const std::string& dir_name)
+static inline bool check_or_create_directory(const std::string& dir_name)
 {
     std::error_code ec;
     fs::path ps(dir_name);
@@ -245,11 +271,24 @@ inline bool check_or_create_directory(const std::string& dir_name)
 /**
  * Remove a directory tree. Returns true if anything was removed.
  */
-inline bool remove_directory(const std::string& dir_name)
+static inline bool remove_directory(const std::string& dir_name)
 {
     std::error_code ec;
     auto removed = fs::remove_all(dir_name.c_str(), ec);
     return !!removed;
+}
+
+
+static inline size_t mod_pos_i64(int64_t x, size_t m) {
+    const int64_t mm = static_cast<int64_t>(m);
+    int64_t r = x % mm;
+    if (r < 0) r += mm;
+    return static_cast<size_t>(r);
+}
+
+
+static inline size_t mod_u64(uint64_t x, size_t m) {
+    return static_cast<size_t>(x % static_cast<uint64_t>(m));
 }
 
 //==============================================================================
@@ -321,7 +360,16 @@ struct Range {
 // Small helper types
 //==============================================================================
 
-class ring_acquisition_failure_exception {};
+class ring_acquisition_failure_exception : public std::runtime_error {
+public:
+    ring_acquisition_failure_exception() : std::runtime_error("Failed to acquire ring buffer.") {}
+};
+
+
+class ring_reader_evicted_exception : public std::runtime_error {
+public:
+    ring_reader_evicted_exception() : std::runtime_error("Ring reader was evicted by the writer due to being too slow.") {}
+};
 
 // A binary semaphore tailored for the ring’s reader wakeup policy.
 struct sintra_ring_semaphore : ipc::interprocess_semaphore
@@ -360,6 +408,15 @@ private:
     std::atomic_flag posted = ATOMIC_FLAG_INIT;
     std::atomic<bool> unordered{false};
 };
+
+
+ //////////////////////////////////////////////////////////////////////////
+///// BEGIN Ring_data //////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////
+//////   \//////   \//////   \//////   \//////   \//////   \//////   \//////
+ ////     \////     \////     \////     \////     \////     \////     \////
+  //       \//       \//       \//       \//       \//       \//       \//
+
 
 //==============================================================================
 // Ring_data: file-backed data region with “magic” double mapping
@@ -635,95 +692,109 @@ bool has_same_mapping(const RingT1& r1, const RingT2& r2)
 template <typename T, bool READ_ONLY_DATA>
 struct Ring: Ring_data<T, READ_ONLY_DATA>
 {
+    enum Reader_status : uint8_t {
+        READER_STATE_INACTIVE = 0,
+        READER_STATE_ACTIVE   = 1,
+        READER_STATE_EVICTED  = 2
+    };
+
     // Helper: pad to a cache line to reduce false sharing in Control arrays.
-    template <typename U>
     struct cache_line_sized_t {
-        U       v;
-        uint8_t padding[assumed_cache_line_size - sizeof(U)];
+        struct Payload {
+            std::atomic<sequence_counter_type> v;
+            std::atomic<uint8_t> status{READER_STATE_INACTIVE};
+            std::atomic<uint8_t> trailing_octile{0};
+            std::atomic<uint8_t> has_guard{0};
+        };
+
+        Payload data;
+        std::array<uint8_t, (assumed_cache_line_size - sizeof(Payload))> padding{};
+
+        static_assert(sizeof(Payload) <= assumed_cache_line_size,
+                      "The payload of cache_line_sized_t exceeds the assumed cache line size.");
     };
 
     /**
      * Shared control block. All fields that are concurrently modified are atomic.
      * NOTE: Atomics are chosen such that they are address-free and (ideally) lock-free.
      */
-struct Control
-{
-    // This struct is always instantiated in a memory region which is shared among processes.
-    // The atomics below are used for *cross-process* communication, including in a
-    // double-mapped (“magic ring”) region. See the detailed note & lock-free checks
-    // in Control() about address-free atomics (N4713 [atomics.lockfree]).
-    std::atomic<size_t>                  num_attached{0};
+    struct Control
+    {
+        // This struct is always instantiated in a memory region which is shared among processes.
+        // The atomics below are used for *cross-process* communication, including in a
+        // double-mapped (“magic ring”) region. See the detailed note & lock-free checks
+        // in Control() about address-free atomics (N4713 [atomics.lockfree]).
+        std::atomic<size_t>                  num_attached{0};
 
-    // The sequence number of the NEXT element to be written (published by the writer).
-    // Publish semantics: after writing data, the writer calls done_writing(), which
-    // atomically stores this value; the last written element is (leading_sequence - 1).
-    std::atomic<sequence_counter_type>   leading_sequence{0};
+        // The sequence number of the NEXT element to be written (published by the writer).
+        // Publish semantics: after writing data, the writer calls done_writing(), which
+        // atomically stores this value; the last written element is (leading_sequence - 1).
+        std::atomic<sequence_counter_type>   leading_sequence{0};
 
-    // Octile read guards:
-    //   An 8-byte integer where each *byte* corresponds to one octile of the ring
-    //   (the ring is conceptually split into 8 equal parts). Each byte is a reader
-    //   counter for that octile. While a reader holds a snapshot that trails into a
-    //   given octile, it increments that byte to keep the writer from reclaiming it.
-    //
-    // Reader cap:
-    //   Because each byte is an 8-bit counter, this imposes a hard limit of 255
-    //   concurrently-guarding readers per octile. Combined with control-array sizing,
-    //   the effective maximum readers is min(255, max_process_index).
-    std::atomic<uint64_t>                read_access{0};
+        // Octile read guards:
+        //   An 8-byte integer where each *byte* corresponds to one octile of the ring
+        //   (the ring is conceptually split into 8 equal parts). Each byte is a reader
+        //   counter for that octile. While a reader holds a snapshot that trails into a
+        //   given octile, it increments that byte to keep the writer from reclaiming it.
+        //
+        // Reader cap:
+        //   Because each byte is an 8-bit counter, this imposes a hard limit of 255
+        //   concurrently-guarding readers per octile. Combined with control-array sizing,
+        //   the effective maximum readers is min(255, max_process_index).
+        std::atomic<uint64_t>                read_access{0};
 
-    // NOTE: ONLY RELEVANT FOR TRACKING / DIAGNOSTICS
-    // Should equal the sum of the eight bytes in read_access. Not used for correctness.
-    std::atomic<uint32_t>                num_readers{0};
+        // NOTE: ONLY RELEVANT FOR TRACKING / DIAGNOSTICS
+        // Should equal the sum of the eight bytes in read_access. Not used for correctness.
+        std::atomic<uint32_t>                num_readers{0};
 
-    // Per-reader currently visible (snapshot) sequence. Cache-line sized to minimize
-    // false sharing between reader slots. A reader sets its slot to the snapshot head
-    // and advances it as it consumes ranges.
-    cache_line_sized_t<sequence_counter_type>
-                                             reading_sequences[max_process_index];
+        // Per-reader currently visible (snapshot) sequence. Cache-line sized to minimize
+        // false sharing between reader slots. A reader sets its slot to the snapshot head
+        // and advances it as it consumes ranges.
+        cache_line_sized_t                   reading_sequences[max_process_index];
 
-    // --- Reader Sequence Stack Management ------------------------------------
-    // Protects free_rs_stack and num_free_rs during slot acquisition/release.
-    std::atomic_flag                     rs_stack_spinlock = ATOMIC_FLAG_INIT;
-    void rs_stack_lock()   { while (rs_stack_spinlock.test_and_set(std::memory_order_acquire)) {} }
-    void rs_stack_unlock() { rs_stack_spinlock.clear(std::memory_order_release); }
+        // --- Reader Sequence Stack Management ------------------------------------
+        // Protects free_rs_stack and num_free_rs during slot acquisition/release.
+        std::atomic_flag                     rs_stack_spinlock = ATOMIC_FLAG_INIT;
+        void rs_stack_lock()   { while (rs_stack_spinlock.test_and_set(std::memory_order_acquire)) {} }
+        void rs_stack_unlock() { rs_stack_spinlock.clear(std::memory_order_release); }
 
-    // Freelist of reader-slot indices into reading_sequences[].
-    int                                  free_rs_stack[max_process_index]{};
-    std::atomic<int>                     num_free_rs{0};
-    // --- End Reader Sequence Stack Management --------------------------------
+        // Freelist of reader-slot indices into reading_sequences[].
+        int                                  free_rs_stack[max_process_index]{};
+        std::atomic<int>                     num_free_rs{0};
+        // --- End Reader Sequence Stack Management --------------------------------
 
-    // Used to avoid accidentally having multiple writers on the same ring
-    // across processes. Only one writer may hold this at a time.
-    ipc::interprocess_mutex              ownership_mutex;
+        // Used to avoid accidentally having multiple writers on the same ring
+        // across processes. Only one writer may hold this at a time.
+        ipc::interprocess_mutex              ownership_mutex;
 
 #if SINTRA_RING_READING_POLICY != SINTRA_RING_READING_POLICY_ALWAYS_SPIN
-    // The following synchronization structures may only be accessed between lock()/unlock().
+        // The following synchronization structures may only be accessed between lock()/unlock().
 
-    // An array (pool) of semaphores to synchronize reader wakeups. The writer posts these
-    // on publish; readers may also be unblocked locally in an “unordered” fashion.
-    sintra_ring_semaphore                dirty_semaphores[max_process_index];
+        // An array (pool) of semaphores to synchronize reader wakeups. The writer posts these
+        // on publish; readers may also be unblocked locally in an “unordered” fashion.
+        sintra_ring_semaphore                dirty_semaphores[max_process_index];
 
-    // A stack of indices into dirty_semaphores[] that are free/ready for use.
-    // Initially all semaphores are ready.
-    int                                  ready_stack[max_process_index]{};
-    int                                  num_ready = max_process_index;
+        // A stack of indices into dirty_semaphores[] that are free/ready for use.
+        // Initially all semaphores are ready.
+        int                                  ready_stack[max_process_index]{};
+        int                                  num_ready = max_process_index;
 
-    // A stack of indices allocated to readers that are blocking / about to block /
-    // or were blocking and not yet redistributed.
-    int                                  sleeping_stack[max_process_index]{};
-    int                                  num_sleeping = 0;
+        // A stack of indices allocated to readers that are blocking / about to block /
+        // or were blocking and not yet redistributed.
+        int                                  sleeping_stack[max_process_index]{};
+        int                                  num_sleeping = 0;
 
-    // A stack of indices that were posted “out of order” (e.g., after a local unblock).
-    // To avoid O(n) removals from sleeping_stack, unordered posts leave the index in
-    // sleeping_stack but flag the semaphore to avoid re-posting; the next ordered post
-    // (e.g., on publish) drains unordered items back to ready_stack.
-    int                                  unordered_stack[max_process_index]{};
-    int                                  num_unordered = 0;
+        // A stack of indices that were posted “out of order” (e.g., after a local unblock).
+        // To avoid O(n) removals from sleeping_stack, unordered posts leave the index in
+        // sleeping_stack but flag the semaphore to avoid re-posting; the next ordered post
+        // (e.g., on publish) drains unordered items back to ready_stack.
+        int                                  unordered_stack[max_process_index]{};
+        int                                  num_unordered = 0;
 
-    // Spinlock guarding the ready/sleeping/unordered stacks.
-    std::atomic_flag                     spinlock_flag = ATOMIC_FLAG_INIT;
-    void lock()   { while (spinlock_flag.test_and_set(std::memory_order_acquire)) {} }
-    void unlock() { spinlock_flag.clear(std::memory_order_release); }
+        // Spinlock guarding the ready/sleeping/unordered stacks.
+        std::atomic_flag                     spinlock_flag = ATOMIC_FLAG_INIT;
+        void lock()   { while (spinlock_flag.test_and_set(std::memory_order_acquire)) {} }
+        void unlock() { spinlock_flag.clear(std::memory_order_release); }
 #endif
 
 
@@ -735,7 +806,7 @@ struct Control
             for (int i = 0; i < max_process_index; i++) { unordered_stack[i] = -1; }
 #endif
 
-            for (int i = 0; i < max_process_index; i++) { reading_sequences[i].v = invalid_sequence; }
+            for (int i = 0; i < max_process_index; i++) { reading_sequences[i].data.v = invalid_sequence; }
             for (int i = 0; i < max_process_index; i++) { free_rs_stack[i] = i; }
 
 
@@ -759,6 +830,9 @@ struct Control
 
             num_free_rs.store(max_process_index, std::memory_order_relaxed);
         }
+
+        static_assert(max_process_index <= 255,
+                      "max_process_index must be <= 255 because read_access uses 8-bit octile counters.");
     };
 
     Ring(const std::string& directory,
@@ -807,24 +881,26 @@ struct Control
     }
 
     sequence_counter_type get_leading_sequence() const {
-        return m_control->leading_sequence.load();
+        return m_control->leading_sequence.load(std::memory_order_acquire);
     }
 
     /**
      * Map a sequence number to the in-memory element pointer.
      * Returns nullptr if the sequence is out of the readable historical window.
      */
-    T* get_element_from_sequence(sequence_counter_type sequence) const
+    T* get_element_from_sequence(sequence_counter_type seq) const
     {
-        auto leading_sequence = m_control->leading_sequence.load();
-        if (sequence < this->m_num_elements) {
-            return this->m_data + sequence;
-        }
-        auto first_sequence = leading_sequence - this->m_num_elements - 1;
-        if (sequence < first_sequence || sequence > leading_sequence) {
+        const auto leading = m_control->leading_sequence.load(std::memory_order_acquire);
+        if (leading == 0) return nullptr; // nothing published yet
+
+        const auto last_published = leading - 1;
+        const auto ring = this->m_num_elements;
+
+        const auto first_valid = (leading > ring) ? (leading - ring) : 0;
+        if (seq < first_valid || seq > last_published) {
             return nullptr;
         }
-        return this->m_data + std::max<int64_t>(0, int64_t(sequence)) % this->m_num_elements;
+        return this->m_data + static_cast<size_t>(seq % ring);
     }
 
 private:
@@ -911,23 +987,58 @@ protected:
 template <typename T>
 struct Ring_R : Ring<T, true>
 {
+    // =========================================================================
+    // MODIFIED CONSTRUCTOR: Acquires a reader slot for the object's lifetime.
+    // =========================================================================
     Ring_R(const std::string& directory,
            const std::string& data_filename,
            size_t             num_elements,
            size_t             max_trailing_elements = 0)
-    :
+        :
         Ring<T, true>::Ring(directory, data_filename, num_elements),
         m_max_trailing_elements(max_trailing_elements),
         c(*this->m_control)
     {
-        // Enforce octile model (see "CONSTRAINTS & RECOMMENDATIONS" above).
         assert(num_elements % 8 == 0);
-
-        // Reader trailing window must fit within 3/4 of the ring (leaves guard).
         assert(max_trailing_elements <= 3 * num_elements / 4);
+
+        // Acquire a reader slot from the freelist. This happens ONCE per Ring_R object.
+        c.rs_stack_lock();
+        if (c.num_free_rs.load(std::memory_order_acquire) <= 0) {
+            c.rs_stack_unlock();
+            throw ring_acquisition_failure_exception(); // No slots available.
+        }
+        int current_num_free = c.num_free_rs.fetch_sub(1, std::memory_order_relaxed) - 1;
+        m_rs_index = c.free_rs_stack[current_num_free];
+        c.rs_stack_unlock();
+
+        // Mark our slot as ACTIVE.
+        c.reading_sequences[m_rs_index].data.status.store(Ring<T, true>::READER_STATE_ACTIVE, std::memory_order_release);
+        m_reading_sequence = &c.reading_sequences[m_rs_index].data.v;
     }
 
-    ~Ring_R() { done_reading(); }
+
+    // =========================================================================
+    // MODIFIED DESTRUCTOR: Releases the reader slot.
+    // =========================================================================
+    ~Ring_R()
+    {
+        // Ensure any active read guard is released.
+        if (m_reading) {
+            done_reading();
+        }
+
+        // Return the reader slot to the freelist and mark as inactive.
+        if (m_rs_index != -1) {
+            c.reading_sequences[m_rs_index].data.status.store(Ring<T, true>::READER_STATE_INACTIVE, std::memory_order_release);
+
+            c.rs_stack_lock();
+            int idx = c.num_free_rs.load(std::memory_order_relaxed);
+            c.free_rs_stack[idx] = m_rs_index;
+            c.num_free_rs.fetch_add(1, std::memory_order_release);
+            c.rs_stack_unlock();
+        }
+    }
 
     // Convenience overload
     Range<T> start_reading() { return start_reading(m_max_trailing_elements); }
@@ -944,49 +1055,55 @@ struct Ring_R : Ring<T, true>
         bool f = false;
         while (!m_reading_lock.compare_exchange_strong(f, true)) { f = false; }
 
+        if (m_reading) {
+            m_reading_lock = false;
+            throw std::logic_error("Sintra Ring: Cannot call start_reading() again before calling done_reading().");
+        }
+
+#ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
+        if (c.reading_sequences[m_rs_index].data.status.load() == Ring<T, true>::READER_STATE_EVICTED) {
+            m_reading_lock = false;
+            throw ring_reader_evicted_exception();
+        }
+#endif
         m_reading = true;
         assert(num_trailing_elements <= m_max_trailing_elements);
 
-        // Acquire a reader slot from the freelist (bounded by max_process_index).
-        c.rs_stack_lock();
-        if (c.num_free_rs.load(std::memory_order_acquire) <= 0) {
-            c.rs_stack_unlock();
-            m_reading = false;
-            m_reading_lock = false;
-            throw std::runtime_error("Sintra Ring: Maximum number of readers reached.");
-        }
-        int current_num_free = c.num_free_rs.fetch_sub(1, std::memory_order_relaxed) - 1;
-        m_rs_index = c.free_rs_stack[current_num_free];
-        c.rs_stack_unlock();
-
-        m_reading_sequence = &c.reading_sequences[m_rs_index].v;
+        // This function NO LONGER acquires m_rs_index. It uses the one from the constructor.
 
         // Conservatively guard all octiles first (set all 8 bytes to +1)
         uint64_t access_mask = 0x0101010101010101ULL;
-        c.read_access += access_mask;
+        c.read_access.fetch_add(access_mask, std::memory_order_acq_rel);
 
         // Atomic snapshot of the published head
-        auto leading_sequence = c.leading_sequence.load();
+        auto leading_sequence = c.leading_sequence.load(std::memory_order_acquire);
 
         auto range_first_sequence =
             std::max<int64_t>(0, int64_t(leading_sequence) - int64_t(num_trailing_elements));
 
         Range<T> ret;
         ret.begin = this->m_data +
-            std::max<int64_t>(0, int64_t(range_first_sequence)) % this->m_num_elements;
+            mod_u64(static_cast<uint64_t>(std::max<int64_t>(0, int64_t(range_first_sequence))), this->m_num_elements);
+
         ret.end   = ret.begin + (leading_sequence - range_first_sequence);
 
-        // Determine which single trailing octile we truly need to guard…
-        m_trailing_octile =
-            (8 * ((range_first_sequence - m_max_trailing_elements) % this->m_num_elements)) /
-            this->m_num_elements;
+        // Determine which single trailing octile we truly need to guard
+        size_t trailing_idx = mod_pos_i64(int64_t(range_first_sequence) - int64_t(m_max_trailing_elements), this->m_num_elements);
 
-        // …and remove the redundant 7 guards.
+        m_trailing_octile = (8 * trailing_idx) / this->m_num_elements;
+
+        // publish the octile index to our shared slot for the writer to see.
+        c.reading_sequences[m_rs_index].data.trailing_octile.store(
+            static_cast<uint8_t>(m_trailing_octile), std::memory_order_relaxed);
+
+        c.reading_sequences[m_rs_index].data.has_guard.store(1, std::memory_order_release);
+
+        // ...and remove the redundant 7 guards.
         access_mask   -= uint64_t(1) << (8 * m_trailing_octile);
-        c.read_access -= access_mask;
+        c.read_access.fetch_sub(access_mask, std::memory_order_acq_rel);
 
         // Advance reader to snapshot head
-        *m_reading_sequence = leading_sequence;
+        m_reading_sequence->store(leading_sequence);
 
         m_reading_lock = false;
         return ret;
@@ -1002,30 +1119,16 @@ struct Ring_R : Ring<T, true>
         bool f = false;
         while (!m_reading_lock.compare_exchange_strong(f, true)) { f = false; }
         if (m_reading) {
-            c.read_access -= uint64_t(1) << (8 * m_trailing_octile);
-            *m_reading_sequence = m_trailing_octile = 0;
+            c.read_access.fetch_sub(uint64_t(1) << (8 * m_trailing_octile), std::memory_order_acq_rel);
+            c.reading_sequences[m_rs_index].data.has_guard.store(0, std::memory_order_release);
             m_reading = false;
-
-            // Return the reader slot to the freelist
-            assert(m_rs_index >= 0 && m_rs_index < max_process_index);
-            c.rs_stack_lock();
-#ifndef NDEBUG
-            assert(c.num_free_rs.load(std::memory_order_acquire) < max_process_index &&
-                "free_rs_stack overflow in done_reading()");
-#endif
-            int idx = c.num_free_rs.load(std::memory_order_relaxed);
-            c.free_rs_stack[idx] = m_rs_index;
-            c.num_free_rs.fetch_add(1, std::memory_order_release);
-            c.rs_stack_unlock();
-
-            m_rs_index = -1;
-            m_reading_sequence = &s_zero_rs;
         }
+
         m_reading_lock = false;
     }
 
-    sequence_counter_type reading_sequence() const { return *m_reading_sequence; }
-    sequence_counter_type get_reading_sequence() const { return *m_reading_sequence; }
+    sequence_counter_type reading_sequence()     const { return m_reading_sequence->load(); }
+    sequence_counter_type get_reading_sequence() const { return m_reading_sequence->load(); }
 
     /**
      * Block until new data is available (or until unblocked) and return the new
@@ -1035,18 +1138,18 @@ struct Ring_R : Ring<T, true>
     const Range<T> wait_for_new_data()
     {
 #if SINTRA_RING_READING_POLICY == SINTRA_RING_READING_POLICY_ALWAYS_SPIN
-        while (*m_reading_sequence == c.leading_sequence.load()) {}
+        while (m_reading_sequence->load() == c.leading_sequence.load()) {}
 
 #else // HYBRID or ALWAYS_SLEEP
     #if SINTRA_RING_READING_POLICY == SINTRA_RING_READING_POLICY_HYBRID
         double tl = get_wtime() + spin_before_sleep * 0.5;
-        while (*m_reading_sequence == c.leading_sequence.load() && get_wtime() < tl) {}
+        while (m_reading_sequence->load() == c.leading_sequence.load() && get_wtime() < tl) {}
     #endif
 
         // Transition to sleeping if still no data
         c.lock();
         m_sleepy_index = -1;
-        if (*m_reading_sequence == c.leading_sequence.load()) {
+        if (m_reading_sequence->load() == c.leading_sequence.load()) {
             m_sleepy_index = c.ready_stack[--c.num_ready];
             c.sleeping_stack[c.num_sleeping++] = m_sleepy_index;
         }
@@ -1067,17 +1170,18 @@ struct Ring_R : Ring<T, true>
         }
 #endif
 
-        Range<T> ret;
-        auto num_range_elements = size_t(c.leading_sequence.load() - *m_reading_sequence);
+        auto num_range_elements =
+            size_t(c.leading_sequence.load(std::memory_order_acquire) - m_reading_sequence->load());
 
+        Range<T> ret;
         if (num_range_elements == 0) {
             // Could happen if we were explicitly unblocked
             return ret;
         }
 
-        ret.begin = this->m_data + (*m_reading_sequence % this->m_num_elements);
+        ret.begin = this->m_data + mod_u64(m_reading_sequence->load(), this->m_num_elements);
         ret.end   = ret.begin + num_range_elements;
-        *m_reading_sequence += num_range_elements;
+        m_reading_sequence->fetch_add(num_range_elements);  // +=
         return ret;
     }
 
@@ -1087,15 +1191,16 @@ struct Ring_R : Ring<T, true>
      */
     void done_reading_new_data()
     {
-        size_t new_trailing_octile =
-            (8 * ((*m_reading_sequence - m_max_trailing_elements) % this->m_num_elements)) /
-            this->m_num_elements;
+        size_t t_idx = mod_pos_i64(int64_t(m_reading_sequence->load()) - int64_t(m_max_trailing_elements), this->m_num_elements);
+        size_t new_trailing_octile = (8 * t_idx) / this->m_num_elements;
 
         if (new_trailing_octile != m_trailing_octile) {
             auto diff =
                 (uint64_t(1) << (8 * new_trailing_octile)) -
                 (uint64_t(1) << (8 *   m_trailing_octile));
-            c.read_access += diff;
+            c.read_access.fetch_add(diff, std::memory_order_acq_rel);
+            c.reading_sequences[m_rs_index].data.trailing_octile.store(
+                static_cast<uint8_t>(new_trailing_octile), std::memory_order_relaxed);
             m_trailing_octile = new_trailing_octile;
         }
     }
@@ -1116,15 +1221,15 @@ struct Ring_R : Ring<T, true>
     }
 
 private:
-    const size_t               m_max_trailing_elements;
-    sequence_counter_type*     m_reading_sequence       = &s_zero_rs;
-    size_t                     m_trailing_octile        = 0;
-    std::atomic<bool>          m_reading                = false;
-    std::atomic<bool>          m_reading_lock           = false;
-    int                        m_sleepy_index           = -1;
-    int                        m_rs_index               = -1;
+    const size_t                        m_max_trailing_elements;
+    std::atomic<sequence_counter_type>* m_reading_sequence      = &s_zero_rs;
+    size_t                              m_trailing_octile       = 0;
+    std::atomic<bool>                   m_reading               = false;
+    std::atomic<bool>                   m_reading_lock          = false;
+    int                                 m_sleepy_index          = -1;
+    int                                 m_rs_index              = -1;
 
-    inline static sequence_counter_type s_zero_rs = 0;
+    inline static std::atomic<sequence_counter_type> s_zero_rs{0};
 
     typename Ring<T, true>::Control& c;
 };
@@ -1259,15 +1364,13 @@ struct Ring_W : Ring<T, false>
      */
     Range<T> get_readable_range()
     {
-        auto leading_sequence = c.leading_sequence.load();
-        auto range_first_sequence =
-            std::max<int64_t>(0, int64_t(leading_sequence) - int64_t(3 * this->m_num_elements / 4));
+        const auto leading = c.leading_sequence.load(std::memory_order_acquire);
+        const auto ring = this->m_num_elements;
+        const auto range_first = (leading > (3*ring/4)) ? (leading - (3*ring/4)) : 0;
 
         Range<T> ret;
-        ret.begin = this->m_data +
-            std::max<int64_t>(0, int64_t(range_first_sequence)) % this->m_num_elements;
-        ret.end = ret.begin + (leading_sequence - range_first_sequence);
-
+        ret.begin = this->m_data + mod_u64(range_first, ring);
+        ret.end   = ret.begin + (leading - range_first);
         return ret;
     }
 
@@ -1298,8 +1401,47 @@ private:
         // Only check when crossing to a new octile (fast path otherwise)
         if (m_octile != new_octile) {
             auto range_mask = (uint64_t(0xff) << (8 * new_octile));
-            while (c.read_access & range_mask) {
+            uint64_t spin_count = 0; // Counter for the busy-wait
+            while (c.read_access.load(std::memory_order_acquire) & range_mask) {
                 // Busy-wait until the target octile is unguarded
+#ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
+                if (++spin_count > SINTRA_EVICTION_SPIN_THRESHOLD) {
+                    // Writer is stuck. Time to find and evict the slow reader(s).
+                    // This is a slow path, taken only in exceptional circumstances.
+
+                    // The sequence number that marks a reader as "too far behind".
+                    // Any reader with a sequence older than this is a candidate for eviction.
+                    // A safe threshold is one full ring buffer behind the writer's current head.
+                    sequence_counter_type eviction_threshold = (m_pending_new_sequence > this->m_num_elements) ?
+                                                                   (m_pending_new_sequence - this->m_num_elements) : 0;
+
+                    for (int i = 0; i < max_process_index; ++i) {
+                        // Check if this reader slot is active
+                        if (c.reading_sequences[i].data.status.load(std::memory_order_acquire)
+                            == Ring<T, false>::READER_STATE_ACTIVE)
+                        {
+                            sequence_counter_type reader_seq =
+                                c.reading_sequences[i].data.v.load(std::memory_order_acquire);
+
+                            if (reader_seq < eviction_threshold) {
+                                // Evict only if the reader currently holds a guard
+                                uint8_t expected = 1;
+                                if (c.reading_sequences[i].data.has_guard.compare_exchange_strong(
+                                        expected, uint8_t{0}, std::memory_order_acq_rel))
+                                {
+                                    c.reading_sequences[i].data.status.store(
+                                        Ring<T, false>::READER_STATE_EVICTED, std::memory_order_release);
+
+                                    size_t evicted_reader_octile =
+                                        c.reading_sequences[i].data.trailing_octile.load(std::memory_order_relaxed);
+                                    c.read_access.fetch_sub(uint64_t(1) << (8 * evicted_reader_octile), std::memory_order_acq_rel);
+                                }
+                            }
+                        }
+                    }
+                    spin_count = 0; // Reset spin count after an eviction pass
+                }
+#endif
             }
             m_octile = new_octile;
         }
@@ -1347,6 +1489,114 @@ struct Local_Ring_W : Ring_W<T>
 ////////////////////////////////////////////////////////////////////////////
 ///// END Local_Ring_W /////////////////////////////////////////////////////
  //////////////////////////////////////////////////////////////////////////
+
+ //////////////////////////////////////////////////////////////////////////
+///// BEGIN Convenience Utilities //////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////
+//////   \//////   \//////   \//////   \//////   \//////   \//////   \//////
+ ////     \////     \////     \////     \////     \////     \////     \////
+  //       \//       \//       \//       \//       \//       \//       \//
+
+
+
+#if __cplusplus >= 202002L
+#define SINTRA_NODISCARD [[nodiscard]]
+#else
+#define SINTRA_NODISCARD
+#endif
+
+// RAII snapshot: calls reader.done_reading() iff start_reading() succeeded.
+template <class Reader>
+class SINTRA_NODISCARD Ring_R_snapshot {
+public:
+    using element_t = typename Reader::element_t;
+
+    Ring_R_snapshot() = default;
+    Ring_R_snapshot(Reader& reader, Range<element_t> rg) noexcept
+        : m_reader(&reader), m_range(rg), m_active(true) {}
+
+    Ring_R_snapshot(const Ring_R_snapshot&) = delete;
+    Ring_R_snapshot& operator=(const Ring_R_snapshot&) = delete;
+
+    Ring_R_snapshot(Ring_R_snapshot&& other) noexcept
+        : m_reader(other.m_reader), m_range(other.m_range), m_active(other.m_active) {
+        other.m_reader = nullptr;
+        other.m_active = false;
+    }
+
+    Ring_R_snapshot& operator=(Ring_R_snapshot&& other) noexcept {
+        if (this != &other) {
+            if (m_active && m_reader) { m_reader->done_reading(); }
+            m_reader       = other.m_reader;
+            m_range        = other.m_range;
+            m_active       = other.m_active;
+            other.m_reader = nullptr;
+            other.m_active = false;
+        }
+        return *this;
+    }
+
+    ~Ring_R_snapshot() noexcept {
+        if (m_active && m_reader) { m_reader->done_reading(); }
+    }
+
+    SINTRA_NODISCARD explicit operator bool() const noexcept {
+        return m_active && m_range.begin && m_range.end && (m_range.end > m_range.begin);
+    }
+
+    SINTRA_NODISCARD Range<element_t> range() const noexcept { return m_range; }
+    SINTRA_NODISCARD element_t*       begin() const noexcept { return m_range.begin; }
+    SINTRA_NODISCARD element_t*       end()   const noexcept { return m_range.end; }
+
+    // If caller finished early, prevent done_reading() in dtor.
+    void dismiss() noexcept { m_active = false; }
+
+private:
+    Reader*          m_reader = nullptr;
+    Range<element_t> m_range{};
+    bool             m_active = false;
+};
+
+// Throwing helper: propagates exceptions from start_reading(...)
+template <class Reader, class... Args>
+SINTRA_NODISCARD inline Ring_R_snapshot<Reader>
+make_snapshot(Reader& reader, Args&&... args) {
+    auto rg = reader.start_reading(std::forward<Args>(args)...);
+    return Ring_R_snapshot<Reader>(reader, rg);
+}
+
+// Optional error code for reporting/logging at call sites.
+enum class Ring_R_snapshot_error : uint8_t { none, evicted, exception };
+
+// Nothrow helper: returns {snapshot, error}; never logs by itself.
+template <class Reader, class... Args>
+SINTRA_NODISCARD inline std::pair<Ring_R_snapshot<Reader>, Ring_R_snapshot_error>
+try_snapshot_e(Reader& reader, Args&&... args) noexcept
+{
+    try {
+        auto rg = reader.start_reading(std::forward<Args>(args)...);
+        return std::pair<Ring_R_snapshot<Reader>, Ring_R_snapshot_error>(
+            Ring_R_snapshot<Reader>(reader, rg), Ring_R_snapshot_error::none);
+    }
+    catch (const ring_reader_evicted_exception&) {
+        return std::pair<Ring_R_snapshot<Reader>, Ring_R_snapshot_error>(
+            Ring_R_snapshot<Reader>{}, Ring_R_snapshot_error::evicted);
+    }
+    catch (...) {
+        return std::pair<Ring_R_snapshot<Reader>, Ring_R_snapshot_error>(
+            Ring_R_snapshot<Reader>{}, Ring_R_snapshot_error::exception);
+    }
+}
+
+
+
+  //\       //\       //\       //\       //\       //\       //\       //
+ ////\     ////\     ////\     ////\     ////\     ////\     ////\     ////
+//////\   //////\   //////\   //////\   //////\   //////\   //////\   //////
+////////////////////////////////////////////////////////////////////////////
+///// END Convenience Utilities ////////////////////////////////////////////
+ //////////////////////////////////////////////////////////////////////////
+
 
 } // namespace sintra
 
