@@ -173,7 +173,8 @@ void install_signal_handler()
         if (previous != SIG_ERR) {
             slot.previous = previous;
             slot.has_previous = true;
-        } else {
+        }
+        else {
             slot.has_previous = false;
         }
     }
@@ -204,7 +205,8 @@ void install_signal_handler()
 #endif
         if (sigaction(slot.sig, &sa, &slot.previous) == 0) {
             slot.has_previous = true;
-        } else {
+        }
+        else {
             slot.has_previous = false;
         }
     }

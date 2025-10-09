@@ -32,7 +32,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 namespace sintra {
 
-using type_id_type = uint64_t;
+using type_id_type     = uint64_t;
 using instance_id_type = uint64_t;
 
 
@@ -47,21 +47,21 @@ public:
         return state;
     }
 
-    Managed_process*& managed_process_ref() noexcept { return m_managed_process; }
-    Coordinator*& coordinator_ref() noexcept { return m_coordinator; }
-    instance_id_type& managed_process_id_ref() noexcept { return m_managed_process_id; }
-    instance_id_type& coordinator_id_ref() noexcept { return m_coordinator_id; }
+    Managed_process*& managed_process_ref()     noexcept { return m_managed_process;    }
+    Coordinator*& coordinator_ref()             noexcept { return m_coordinator;        }
+    instance_id_type& managed_process_id_ref()  noexcept { return m_managed_process_id; }
+    instance_id_type& coordinator_id_ref()      noexcept { return m_coordinator_id;     }
 
-    Managed_process* managed_process() const noexcept { return m_managed_process; }
-    Coordinator* coordinator() const noexcept { return m_coordinator; }
+    Managed_process* managed_process()    const noexcept { return m_managed_process;    }
+    Coordinator* coordinator()            const noexcept { return m_coordinator;        }
     instance_id_type managed_process_id() const noexcept { return m_managed_process_id; }
-    instance_id_type coordinator_id() const noexcept { return m_coordinator_id; }
+    instance_id_type coordinator_id()     const noexcept { return m_coordinator_id;     }
 
 private:
-    Managed_process*   m_managed_process = nullptr;
-    Coordinator*       m_coordinator     = nullptr;
-    instance_id_type   m_managed_process_id = 0;
-    instance_id_type   m_coordinator_id     = 0;
+    Managed_process*   m_managed_process      = nullptr;
+    Coordinator*       m_coordinator          = nullptr;
+    instance_id_type   m_managed_process_id   = 0;
+    instance_id_type   m_coordinator_id       = 0;
 };
 
 #define s_mproc    sintra::runtime_state::instance().managed_process_ref()

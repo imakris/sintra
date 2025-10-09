@@ -234,12 +234,15 @@ void custom_terminate_handler() {
         auto eptr = std::current_exception();
         if (eptr) {
             std::rethrow_exception(eptr);
-        } else {
+        }
+        else {
             std::fprintf(stderr, "terminate called without an active exception\n");
         }
-    } catch (const std::exception& e) {
+    }
+    catch (const std::exception& e) {
         std::fprintf(stderr, "Uncaught exception: %s\n", e.what());
-    } catch (...) {
+    }
+    catch (...) {
         std::fprintf(stderr, "Uncaught exception of unknown type\n");
     }
 
@@ -273,7 +276,8 @@ int main(int argc, char* argv[])
 
         try {
             std::filesystem::remove_all(shared_dir);
-        } catch (const std::exception& e) {
+        }
+        catch (const std::exception& e) {
             std::fprintf(stderr, "Warning: failed to remove temp directory %s: %s\n", shared_dir.string().c_str(), e.what());
         }
         return (status == "ok") ? 0 : 1;
