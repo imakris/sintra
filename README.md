@@ -59,7 +59,7 @@ struct Remotely_accessible: sintra::Derived_transceiver<Remotely_accessible>
 };
 ```
 
-### Handling a Remote Exception
+### Handle a Remote Exception
 
 ```cpp
 // Remote exceptions thrown inside append() propagate back across the process boundary.
