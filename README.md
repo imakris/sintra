@@ -46,11 +46,11 @@ sintra::activate_slot([](const Ping&) {
 });
 ```
 
-### Expose a transceiver method for RPC
+### Export a transceiver method for RPC
 
 ```cpp
-struct Remotely_accessible
-    : sintra::Derived_transceiver<Remotely_accessible> {
+struct Remotely_accessible: sintra::Derived_transceiver<Remotely_accessible>
+{
     std::string append(const std::string& s, int v) {
         return std::to_string(v) + ": " + s;
     }
@@ -59,13 +59,14 @@ struct Remotely_accessible
 };
 ```
 
-### Call the remote method and surface its exceptions
+### Handling a Remote Exception
 
 ```cpp
 // Remote exceptions thrown inside append() propagate back across the process boundary.
 try {
     sintra::console() << Remotely_accessible::rpc_append("instance", "Hi", 42) << '\n';
-} catch (const std::exception& e) {
+}
+catch (const std::exception& e) {
     sintra::console() << "Remote RPC failed in callee: " << e.what() << '\n';
 }
 ```
