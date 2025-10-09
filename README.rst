@@ -11,6 +11,23 @@ The library was initially written to provide a message dispatch mechanism for VI
 Sintra is a header-only library.
 It has dependencies on header-only boost libraries (interprocess, type_index, fusion, atomic, bind).
 
+Testing
+-------
+
+The integration tests under ``tests/`` use Boost.Interprocess primitives that
+are distributed with the main Boost development packages.  Ensure the
+following system dependencies are installed before configuring the project:
+
+* ``libboost-all-dev`` (Debian/Ubuntu) or the equivalent Boost development
+  headers on your platform.
+
+Once the dependencies are available, the new pub/sub regression test from the
+latest commit can be built and executed with::
+
+   cmake -S . -B build
+   cmake --build build
+   ctest --test-dir build
+
 It will need a C++17 compiler.
 
 Usage
