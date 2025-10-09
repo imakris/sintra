@@ -1,0 +1,257 @@
+#include <sintra/sintra.h>
+
+#include <algorithm>
+#include <chrono>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#ifdef _WIN32
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
+
+namespace {
+
+constexpr std::string_view kEnvSharedDir = "SINTRA_TEST_SHARED_DIR";
+
+std::filesystem::path get_shared_directory()
+{
+    const char* value = std::getenv(kEnvSharedDir.data());
+    if (!value) {
+        throw std::runtime_error("SINTRA_TEST_SHARED_DIR is not set");
+    }
+    return std::filesystem::path(value);
+}
+
+void set_shared_directory_env(const std::filesystem::path& dir)
+{
+#ifdef _WIN32
+    _putenv_s(kEnvSharedDir.data(), dir.string().c_str());
+#else
+    setenv(kEnvSharedDir.data(), dir.string().c_str(), 1);
+#endif
+}
+
+std::filesystem::path ensure_shared_directory()
+{
+    const char* value = std::getenv(kEnvSharedDir.data());
+    if (value) {
+        return std::filesystem::path(value);
+    }
+
+    auto base = std::filesystem::temp_directory_path() / "sintra_tests";
+    std::filesystem::create_directories(base);
+
+    auto unique_suffix = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                             std::chrono::high_resolution_clock::now().time_since_epoch())
+                             .count();
+#ifdef _WIN32
+    unique_suffix ^= static_cast<long long>(_getpid());
+#else
+    unique_suffix ^= static_cast<long long>(getpid());
+#endif
+
+    std::ostringstream oss;
+    oss << "basic_pubsub_" << unique_suffix;
+    auto dir = base / oss.str();
+    std::filesystem::create_directories(dir);
+    set_shared_directory_env(dir);
+    return dir;
+}
+
+void write_strings(const std::filesystem::path& file, const std::vector<std::string>& values)
+{
+    std::ofstream out(file, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        throw std::runtime_error("failed to open " + file.string() + " for writing");
+    }
+    for (const auto& value : values) {
+        out << value << '\n';
+    }
+}
+
+void write_ints(const std::filesystem::path& file, const std::vector<int>& values)
+{
+    std::ofstream out(file, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        throw std::runtime_error("failed to open " + file.string() + " for writing");
+    }
+    for (int value : values) {
+        out << value << '\n';
+    }
+}
+
+std::vector<std::string> read_strings(const std::filesystem::path& file)
+{
+    std::vector<std::string> values;
+    std::ifstream in(file, std::ios::binary);
+    if (!in) {
+        return values;
+    }
+    std::string line;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+        values.push_back(line);
+    }
+    return values;
+}
+
+std::vector<int> read_ints(const std::filesystem::path& file)
+{
+    std::vector<int> values;
+    std::ifstream in(file, std::ios::binary);
+    if (!in) {
+        return values;
+    }
+    std::string line;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+        if (!line.empty()) {
+            values.push_back(std::stoi(line));
+        }
+    }
+    return values;
+}
+
+void write_result(const std::filesystem::path& dir,
+                  bool ok,
+                  const std::vector<std::string>& strings,
+                  const std::vector<int>& ints)
+{
+    std::ofstream out(dir / "result.txt", std::ios::binary | std::ios::trunc);
+    if (!out) {
+        throw std::runtime_error("failed to open result file");
+    }
+    out << (ok ? "ok" : "fail") << '\n';
+    if (!ok) {
+        out << "strings:";
+        for (const auto& value : strings) {
+            out << ' ' << value;
+        }
+        out << "\nints:";
+        for (int value : ints) {
+            out << ' ' << value;
+        }
+        out << '\n';
+    }
+}
+
+bool has_branch_flag(int argc, char* argv[])
+{
+    for (int i = 0; i < argc; ++i) {
+        if (std::string_view(argv[i]) == "--branch_index") {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::vector<std::string> g_received_strings;
+std::vector<int> g_received_ints;
+
+int process_sender()
+{
+    sintra::barrier("slots-ready");
+
+    sintra::world() << std::string("good morning");
+    sintra::world() << std::string("good afternoon");
+    sintra::world() << std::string("good evening");
+    sintra::world() << std::string("good night");
+
+    sintra::world() << 1;
+    sintra::world() << 2;
+    sintra::world() << 3;
+    sintra::world() << 4;
+
+    sintra::barrier("messages-done");
+    sintra::barrier("write-phase");
+
+    const auto shared_dir = get_shared_directory();
+    const auto strings = read_strings(shared_dir / "strings.txt");
+    const auto ints = read_ints(shared_dir / "ints.txt");
+
+    const std::vector<std::string> expected_strings{
+        "good morning", "good afternoon", "good evening", "good night"};
+    const std::vector<int> expected_ints{1, 2, 3, 4};
+
+    const bool ok = (strings == expected_strings) && (ints == expected_ints);
+    write_result(shared_dir, ok, strings, ints);
+    return 0;
+}
+
+int process_string_receiver()
+{
+    auto string_slot = [](const std::string& value) {
+        g_received_strings.push_back(value);
+    };
+    sintra::activate_slot(string_slot);
+
+    sintra::barrier("slots-ready");
+    sintra::barrier("messages-done");
+
+    const auto shared_dir = get_shared_directory();
+    write_strings(shared_dir / "strings.txt", g_received_strings);
+
+    sintra::barrier("write-phase");
+    return 0;
+}
+
+int process_int_receiver()
+{
+    auto int_slot = [](int value) {
+        g_received_ints.push_back(value);
+    };
+    sintra::activate_slot(int_slot);
+
+    sintra::barrier("slots-ready");
+    sintra::barrier("messages-done");
+
+    const auto shared_dir = get_shared_directory();
+    write_ints(shared_dir / "ints.txt", g_received_ints);
+
+    sintra::barrier("write-phase");
+    return 0;
+}
+
+} // namespace
+
+int main(int argc, char* argv[])
+{
+    const bool is_spawned = has_branch_flag(argc, argv);
+    const auto shared_dir = ensure_shared_directory();
+
+    std::vector<sintra::Process_descriptor> processes;
+    processes.emplace_back(process_sender);
+    processes.emplace_back(process_string_receiver);
+    processes.emplace_back(process_int_receiver);
+
+    sintra::init(argc, argv, processes);
+    sintra::finalize();
+
+    if (!is_spawned) {
+        const auto result_path = shared_dir / "result.txt";
+        if (!std::filesystem::exists(result_path)) {
+            return 1;
+        }
+
+        std::ifstream in(result_path, std::ios::binary);
+        std::string status;
+        in >> status;
+
+        std::filesystem::remove_all(shared_dir);
+        return (status == "ok") ? 0 : 1;
+    }
+
+    return 0;
+}
