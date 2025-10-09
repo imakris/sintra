@@ -140,15 +140,14 @@ static void s_signal_handler(int sig)
         if (slot->previous.sa_handler == SIG_IGN) {
             return;
         }
-        if ((slot->previous.sa_flags & SA_SIGINFO) &&
-            slot->previous.sa_sigaction &&
-            slot->previous.sa_sigaction != SIG_DFL &&
-            slot->previous.sa_sigaction != SIG_IGN) {
+
+        if ((slot->previous.sa_flags & SA_SIGINFO) && slot->previous.sa_sigaction) {
             slot->previous.sa_sigaction(sig, nullptr, nullptr);
             return;
         }
-        if (slot->previous.sa_handler != SIG_DFL) {
-            reinterpret_cast<void (*)(int)>(slot->previous.sa_handler)(sig);
+
+        if (slot->previous.sa_handler && slot->previous.sa_handler != SIG_DFL) {
+            slot->previous.sa_handler(sig);
             return;
         }
     }
