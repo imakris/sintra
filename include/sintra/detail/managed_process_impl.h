@@ -50,21 +50,29 @@ namespace sintra {
 inline
 static void s_signal_handler(int sig)
 {
+    if (!s_mproc) {
+        // Nothing to report if the managed process has already been destroyed.
+        signal(sig, SIG_DFL);
+        raise(sig);
+        return;
+    }
+
     if (!s_mproc->m_out_req_c) {
-        // This means that we crashed before even having been able to initialize.
-        // We have no rings to emit to, so that's all there is to do.
-        // This code should ideally be unreachable.
-        assert(false);
-    }
-    else {
-        s_mproc->emit_remote<Managed_process::terminated_abnormally>(sig);
-
-        for (auto& reader : s_mproc->m_readers) {
-            // waiting here is pointless, we are single-threaded
-            reader.second.stop_nowait();
-        }
+        // This means that we crashed before even having been able to initialize,
+        // or we are already shutting down and can no longer communicate.
+        signal(sig, SIG_DFL);
+        raise(sig);
+        return;
     }
 
+    s_mproc->emit_remote<Managed_process::terminated_abnormally>(sig);
+
+    for (auto& reader : s_mproc->m_readers) {
+        // waiting here is pointless, we are single-threaded
+        reader.second.stop_nowait();
+    }
+
+    signal(sig, SIG_DFL);
     raise(sig);
 }
 
