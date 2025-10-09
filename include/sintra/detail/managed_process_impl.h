@@ -29,8 +29,13 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "utility.h"
 
+#include <array>
 #include <chrono>
+#include <csignal>
 #include <mutex>
+#ifndef _WIN32
+#include <signal.h>
+#endif
 
 #include <boost/lexical_cast.hpp>
 #include <boost/algorithm/string/join.hpp>
@@ -45,35 +50,115 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 namespace sintra {
 
+namespace {
+
+#ifdef _WIN32
+    struct signal_slot {
+        int sig;
+        void (__cdecl* previous)(int) = SIG_DFL;
+        bool has_previous = false;
+    };
+
+    inline std::array<signal_slot, 6>& signal_slots()
+    {
+        static std::array<signal_slot, 6> slots {{
+            {SIGABRT}, {SIGFPE}, {SIGILL}, {SIGINT}, {SIGSEGV}, {SIGTERM}
+        }};
+        return slots;
+    }
+#else
+    struct signal_slot {
+        int sig;
+        struct sigaction previous {};
+        bool has_previous = false;
+    };
+
+    inline std::array<signal_slot, 6>& signal_slots()
+    {
+        static std::array<signal_slot, 6> slots {{
+            {SIGABRT}, {SIGFPE}, {SIGILL}, {SIGINT}, {SIGSEGV}, {SIGTERM}
+        }};
+        return slots;
+    }
+
+    inline std::array<char, 64 * 1024>& alt_stack_storage()
+    {
+        static std::array<char, 64 * 1024> storage {};
+        return storage;
+    }
+
+    inline bool& alt_stack_installed()
+    {
+        static bool installed = false;
+        return installed;
+    }
+#endif
+
+    inline signal_slot* find_slot(std::array<signal_slot, 6>& slots, int sig)
+    {
+        for (auto& candidate : slots) {
+            if (candidate.sig == sig) {
+                return &candidate;
+            }
+        }
+        return nullptr;
+    }
+}
+
 
 
 inline
 static void s_signal_handler(int sig)
 {
-    if (!s_mproc) {
-        // Nothing to report if the managed process has already been destroyed.
-        signal(sig, SIG_DFL);
-        raise(sig);
+    auto& slots = signal_slots();
+
+    if (s_mproc && s_mproc->m_out_req_c) {
+        s_mproc->emit_remote<Managed_process::terminated_abnormally>(sig);
+
+        for (auto& reader : s_mproc->m_readers) {
+            reader.second.stop_nowait();
+        }
+    }
+
+#ifdef _WIN32
+    if (auto* slot = find_slot(slots, sig); slot && slot->has_previous) {
+        auto prev = slot->previous;
+        if (prev == SIG_IGN) {
+            return;
+        }
+        if (prev == SIG_DFL) {
+            std::signal(sig, SIG_DFL);
+            std::raise(sig);
+            return;
+        }
+        prev(sig);
         return;
     }
-
-    if (!s_mproc->m_out_req_c) {
-        // This means that we crashed before even having been able to initialize,
-        // or we are already shutting down and can no longer communicate.
-        signal(sig, SIG_DFL);
-        raise(sig);
-        return;
+    std::raise(sig);
+#else
+    if (auto* slot = find_slot(slots, sig); slot && slot->has_previous) {
+        if (slot->previous.sa_handler == SIG_IGN) {
+            return;
+        }
+        if ((slot->previous.sa_flags & SA_SIGINFO) &&
+            slot->previous.sa_sigaction &&
+            slot->previous.sa_sigaction != SIG_DFL &&
+            slot->previous.sa_sigaction != SIG_IGN) {
+            slot->previous.sa_sigaction(sig, nullptr, nullptr);
+            return;
+        }
+        if (slot->previous.sa_handler != SIG_DFL) {
+            reinterpret_cast<void (*)(int)>(slot->previous.sa_handler)(sig);
+            return;
+        }
     }
 
-    s_mproc->emit_remote<Managed_process::terminated_abnormally>(sig);
-
-    for (auto& reader : s_mproc->m_readers) {
-        // waiting here is pointless, we are single-threaded
-        reader.second.stop_nowait();
-    }
-
-    signal(sig, SIG_DFL);
+    struct sigaction dfl {};
+    dfl.sa_handler = SIG_DFL;
+    sigemptyset(&dfl.sa_mask);
+    sigaction(sig, &dfl, nullptr);
     raise(sig);
+#endif
 }
 
 
@@ -81,17 +166,51 @@ static void s_signal_handler(int sig)
 inline
 void install_signal_handler()
 {
-    // synchronous (traps)
-    signal(SIGABRT, s_signal_handler);
-    signal(SIGFPE,  s_signal_handler);
-    signal(SIGILL,  s_signal_handler);
-    signal(SIGSEGV, s_signal_handler);
+    auto& slots = signal_slots();
 
-    // asynchronous
-    signal(SIGINT, s_signal_handler);
-    signal(SIGTERM, s_signal_handler);
+#ifdef _WIN32
+    for (auto& slot : slots) {
+        auto previous = std::signal(slot.sig, s_signal_handler);
+        if (previous != SIG_ERR) {
+            slot.previous = previous;
+            slot.has_previous = true;
+        } else {
+            slot.has_previous = false;
+        }
+    }
+#else
+    auto& storage = alt_stack_storage();
+    auto& installed = alt_stack_installed();
+    if (!installed) {
+        stack_t ss {};
+        ss.ss_sp = storage.data();
+        ss.ss_size = storage.size();
+        ss.ss_flags = 0;
+        if (sigaltstack(&ss, nullptr) == 0) {
+            installed = true;
+        }
+    }
+
+    for (auto& slot : slots) {
+        struct sigaction sa {};
+        sigemptyset(&sa.sa_mask);
+        sa.sa_sigaction = +[](int sig, siginfo_t* info, void* ctx) {
+            (void)info;
+            (void)ctx;
+            s_signal_handler(sig);
+        };
+        sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+#ifdef SA_RESTART
+        sa.sa_flags |= SA_RESTART;
+#endif
+        if (sigaction(slot.sig, &sa, &slot.previous) == 0) {
+            slot.has_previous = true;
+        } else {
+            slot.has_previous = false;
+        }
+    }
+#endif
 }
-
 
 
 template <typename T>

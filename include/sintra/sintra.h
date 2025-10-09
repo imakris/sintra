@@ -64,6 +64,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "detail/transceiver.h"
 #include "detail/transceiver_impl.h"
 
+// NOTE: Sintra installs handlers for SIGABRT, SIGFPE, SIGILL, SIGINT, SIGSEGV, and SIGTERM.
+// Existing handlers are chained where possible.
 
 namespace sintra {
 
