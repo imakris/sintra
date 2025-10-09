@@ -39,42 +39,35 @@ using instance_id_type = uint64_t;
 struct Managed_process;
 struct Coordinator;
 
-#if 0
+class runtime_state {
+public:
+    static runtime_state& instance() noexcept
+    {
+        static runtime_state state;
+        return state;
+    }
 
-// MSVC may under some circumstances generate wrong code with static inline data.
-// When it's fixed, this block can replace the one below.
-// Tested with MSVC 17.0.2 and 16.11.7
+    Managed_process*& managed_process_ref() noexcept { return m_managed_process; }
+    Coordinator*& coordinator_ref() noexcept { return m_coordinator; }
+    instance_id_type& managed_process_id_ref() noexcept { return m_managed_process_id; }
+    instance_id_type& coordinator_id_ref() noexcept { return m_coordinator_id; }
 
-static inline Managed_process* s_mproc = nullptr;
-static inline Coordinator* s_coord = nullptr;
-static inline instance_id_type s_mproc_id = 0;
-static inline instance_id_type s_coord_id = 0;
+    Managed_process* managed_process() const noexcept { return m_managed_process; }
+    Coordinator* coordinator() const noexcept { return m_coordinator; }
+    instance_id_type managed_process_id() const noexcept { return m_managed_process_id; }
+    instance_id_type coordinator_id() const noexcept { return m_coordinator_id; }
 
-#else
+private:
+    Managed_process*   m_managed_process = nullptr;
+    Coordinator*       m_coordinator     = nullptr;
+    instance_id_type   m_managed_process_id = 0;
+    instance_id_type   m_coordinator_id     = 0;
+};
 
-// The purpose of this macro is to declare and define static data in a header-only library
-
-#define DECLARE_STATIC_VARIABLE(type, name, ...)                \
-    template <typename T = void>                                \
-    struct name##_struct                                        \
-    {                                                           \
-        static type s;                                          \
-    };                                                          \
-    template <typename T> type name##_struct<T>::s __VA_ARGS__; \
-    using name = name##_struct<void>;
-
-
-DECLARE_STATIC_VARIABLE(Managed_process*, mproc, = nullptr)
-DECLARE_STATIC_VARIABLE(Coordinator*, coord, = nullptr)
-DECLARE_STATIC_VARIABLE(instance_id_type, mproc_id, = 0)
-DECLARE_STATIC_VARIABLE(instance_id_type, coord_id, = 0)
-
-#define s_mproc mproc::s
-#define s_coord coord::s
-#define s_mproc_id mproc_id::s
-#define s_coord_id coord_id::s
-
-#endif
+#define s_mproc    sintra::runtime_state::instance().managed_process_ref()
+#define s_coord    sintra::runtime_state::instance().coordinator_ref()
+#define s_mproc_id sintra::runtime_state::instance().managed_process_id_ref()
+#define s_coord_id sintra::runtime_state::instance().coordinator_id_ref()
 
 }
 

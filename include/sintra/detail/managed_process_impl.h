@@ -442,7 +442,7 @@ void Managed_process::init(int argc, const char* const* argv)
                     break;
                 case 'a':
                     branch_index_arg        = optarg;
-                    s_branch_index          = boost::lexical_cast<decltype(s_branch_index)>(optarg);
+                    s_branch_index          = boost::lexical_cast<int32_t>(optarg);
                     if (s_branch_index < 1) {
                         throw -1;
                     }
@@ -457,11 +457,11 @@ void Managed_process::init(int argc, const char* const* argv)
                     break;
                 case 'd':
                     coordinator_id_arg      = optarg;
-                    s_coord_id              = boost::lexical_cast<decltype(s_coord_id)>(optarg);
+                    s_coord_id              = boost::lexical_cast<instance_id_type>(optarg);
                     break;
                 case 'e':
                     recovery_arg            = optarg;
-                    s_recovery_occurrence   = boost::lexical_cast<decltype(s_recovery_occurrence)>(optarg);
+                    s_recovery_occurrence   = boost::lexical_cast<uint32_t>(optarg);
                     break;
                 case '?':
                     /* getopt_long already printed an error message. */
