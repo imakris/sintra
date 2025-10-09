@@ -56,9 +56,7 @@ Process_message_reader::Process_message_reader(instance_id_type process_instance
     m_in_req_c = new Message_ring_R(s_mproc->m_directory, "req", m_process_instance_id);
     m_in_rep_c = new Message_ring_R(s_mproc->m_directory, "rep", m_process_instance_id);
     m_request_reader_thread = new thread([&] () { request_reader_function(); });
-    m_request_reader_thread->detach();
     m_reply_reader_thread   = new thread([&] () { reply_reader_function();   });
-    m_reply_reader_thread->detach();
 }
 
 
@@ -160,11 +158,14 @@ Process_message_reader::~Process_message_reader()
         // 'wait_for' timed out. To avoid hanging, we exit.
         // If we get here, something must have probably gone wrong.
         // Weird things might happen while exiting.
-        exit(1);
+        if (std::uncaught_exceptions() == 0) exit(1);
     }
 
+    if (m_request_reader_thread->joinable()) m_request_reader_thread->join();
     delete m_request_reader_thread;
     delete m_in_req_c;
+
+    if (m_reply_reader_thread->joinable()) m_reply_reader_thread->join();
     delete m_reply_reader_thread;
     delete m_in_rep_c;
 }
