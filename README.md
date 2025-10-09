@@ -1,13 +1,11 @@
-Sintra
-======
+# Sintra
 
-.. image:: https://github.com/imakris/sintra/actions/workflows/main.yml/badge.svg?branch=master&job=Build%20and%20Test%20on%20ubuntu-latest
-   :target: https://github.com/imakris/sintra/actions/workflows/main.yml
-   :alt: Linux build status
+[![Linux build status](https://github.com/imakris/sintra/actions/workflows/main.yml/badge.svg?branch=master&job=Build%20and%20Test%20on%20ubuntu-latest)](https://github.com/imakris/sintra/actions/workflows/main.yml)
+[![Windows build status](https://github.com/imakris/sintra/actions/workflows/main.yml/badge.svg?branch=master&job=Build%20and%20Test%20on%20windows-latest)](https://github.com/imakris/sintra/actions/workflows/main.yml)
 
-.. image:: https://github.com/imakris/sintra/actions/workflows/main.yml/badge.svg?branch=master&job=Build%20and%20Test%20on%20windows-latest
-   :target: https://github.com/imakris/sintra/actions/workflows/main.yml
-   :alt: Windows build status
+![Header-only](https://img.shields.io/badge/header--only-yes-lightgrey)
+![C++17](https://img.shields.io/badge/C%2B%2B-17-blue)
+![License: BSD-2-Clause](https://img.shields.io/badge/license-BSD--2--Clause-green)
 
 Sintra is a modern C++ library for building type-safe interprocess communication layers.
 It provides a common language for sending signals, broadcasting events, and invoking
@@ -15,8 +13,7 @@ remote procedures across process boundaries without resorting to fragile string-
 protocols. The library focuses on expressiveness and safety, making it easier to
 coordinate modular applications, daemons, and tools that need to communicate reliably.
 
-What makes Sintra useful
-------------------------
+## Key features
 
 * **Type-safe APIs across processes** – interfaces are expressed as C++ types, so
   mismatched payloads are detected at compile time instead of surfacing as runtime
@@ -33,28 +30,18 @@ Typical use cases include plugin hosts coordinating work with out-of-process plu
 GUI front-ends that need to communicate with background services, and distributed test
 harnesses that must keep multiple workers in sync while exchanging strongly typed data.
 
-Getting started
----------------
+## Getting started
 
-1. Add the ``include/`` directory to your project's include path.
+1. Add the `include/` directory to your project's include path.
 2. Ensure that a C++17 compliant compiler is used (GCC, Clang, or MSVC are supported).
-3. Make the following Boost header-only libraries available: ``interprocess``,
-   ``type_index``, ``fusion``, ``atomic``, and ``bind``.
-4. Explore the ``example/`` directory to see how to set up signal buses, channels, and
+3. Make the following Boost header-only libraries available: `interprocess`,
+   `type_index`, `fusion`, `atomic`, and `bind`.
+4. Explore the `example/` directory to see how to set up signal buses, channels, and
    remote call endpoints.
 
 Because everything ships as headers, Sintra works well in monorepos or projects that
 prefer vendoring dependencies as git submodules or fetching them during configuration.
 
-Development workflow
---------------------
-
-Continuous integration builds the project on Linux and Windows through the
-``main.yml`` GitHub Actions workflow (see the badge above). The workflow configures the
-project with CMake, builds it in Release mode, and runs the accompanying tests to ensure
-that both the messaging layer and the examples stay healthy.
-
-License
--------
+## License
 
 The source code is licensed under the Simplified BSD License.
