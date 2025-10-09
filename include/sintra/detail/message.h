@@ -32,6 +32,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <cstdint>
 #include <sstream>
+#include <string>
 #include <type_traits>
 
 #include <boost/fusion/container/vector.hpp>
@@ -167,6 +168,11 @@ size_t vb_size(const T& v, Args&&... args)
     return ret;
 }
 
+
+using std::string;
+
+struct void_placeholder_t
+{};
 
 using message_string = typed_variable_buffer<string>;
 
