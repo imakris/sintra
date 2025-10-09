@@ -168,6 +168,31 @@ constexpr uint64_t all_processes_wildcard = all_remote_processess_wildcard | 1;
 constexpr uint64_t all_transceivers_except_mproc_wildcard = (max_instance_index << 1);
 constexpr uint64_t all_transceivers_wildcard = all_transceivers_except_mproc_wildcard | 1;
 
+struct decomposed_instance_id {
+    uint32_t process;
+    uint32_t transceiver;
+    uint32_t process_complement;
+    uint32_t transceiver_complement;
+};
+
+[[nodiscard]] constexpr decomposed_instance_id decompose_instance(instance_id_type instance) noexcept
+{
+    constexpr uint64_t transceiver_mask = (uint64_t(1) << num_transceiver_index_bits) - 1;
+    const auto process = static_cast<uint32_t>(instance >> num_transceiver_index_bits);
+    const auto transceiver = static_cast<uint32_t>(instance & transceiver_mask);
+    return {
+        process,
+        transceiver,
+        static_cast<uint32_t>(~process),
+        static_cast<uint32_t>(~transceiver)
+    };
+}
+
+[[nodiscard]] constexpr instance_id_type compose_instance(uint32_t process, uint32_t transceiver) noexcept
+{
+    return (instance_id_type(process) << num_transceiver_index_bits) | instance_id_type(transceiver);
+}
+
 
 inline
 instance_id_type get_instance_id_type(uint64_t process_index, uint64_t transceiver_index)
