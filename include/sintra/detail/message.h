@@ -431,38 +431,22 @@ struct Message: public Message_prefix, public T
     VA_NARGS_GLUE_(VA_NARGS_OVERLOAD_MACRO_(name, VA_NARGS_COUNT_MAX16_(__VA_ARGS__)),(__VA_ARGS__))
 
 /* overloads */
-#define VA_DEFINE_STRUCT_1( v) \
-    struct v { };
-#define VA_DEFINE_STRUCT_2( v,a) \
-    struct v { a; };
-#define VA_DEFINE_STRUCT_3( v,a,b) \
-    struct v { a;b; };
-#define VA_DEFINE_STRUCT_4( v,a,b,c) \
-    struct v { a;b;c; };
-#define VA_DEFINE_STRUCT_5( v,a,b,c,d) \
-    struct v { a;b;c;d; };
-#define VA_DEFINE_STRUCT_6( v,a,b,c,d,e) \
-    struct v { a;b;c;d;e; };
-#define VA_DEFINE_STRUCT_7( v,a,b,c,d,e,f) \
-    struct v { a;b;c;d;e;f; };
-#define VA_DEFINE_STRUCT_8( v,a,b,c,d,e,f,g) \
-    struct v { a;b;c;d;e;f;g; };
-#define VA_DEFINE_STRUCT_9( v,a,b,c,d,e,f,g,h) \
-    struct v { a;b;c;d;e;f;g;h; };
-#define VA_DEFINE_STRUCT_10(v,a,b,c,d,e,f,g,h,i) \
-    struct v { a;b;c;d;e;f;g;h;i; };
-#define VA_DEFINE_STRUCT_11(v,a,b,c,d,e,f,g,h,i,j) \
-    struct v { a;b;c;d;e;f;g;h;i;j; };
-#define VA_DEFINE_STRUCT_12(v,a,b,c,d,e,f,g,h,i,j,k) \
-    struct v { a;b;c;d;e;f;g;h;i;j;k; };
-#define VA_DEFINE_STRUCT_13(v,a,b,c,d,e,f,g,h,i,j,k,l) \
-    struct v { a;b;c;d;e;f;g;h;i;j;k;l; };
-#define VA_DEFINE_STRUCT_14(v,a,b,c,d,e,f,g,h,i,j,k,l,m) \
-    struct v { a;b;c;d;e;f;g;h;i;j;k;l;m; };
-#define VA_DEFINE_STRUCT_15(v,a,b,c,d,e,f,g,h,i,j,k,l,m,n) \
-    struct v { a;b;c;d;e;f;g;h;i;j;k;l;m;n; };
-#define VA_DEFINE_STRUCT_16(v,a,b,c,d,e,f,g,h,i,j,k,l,m,n,o) \
-    struct v { a;b;c;d;e;f;g;h;i;j;k;l;m;n;o; };
+#define VA_DEFINE_STRUCT_1( v)                                  struct v { };
+#define VA_DEFINE_STRUCT_2( v,a)                                struct v { a; };
+#define VA_DEFINE_STRUCT_3( v,a,b)                              struct v { a;b; };
+#define VA_DEFINE_STRUCT_4( v,a,b,c)                            struct v { a;b;c; };
+#define VA_DEFINE_STRUCT_5( v,a,b,c,d)                          struct v { a;b;c;d; };
+#define VA_DEFINE_STRUCT_6( v,a,b,c,d,e)                        struct v { a;b;c;d;e; };
+#define VA_DEFINE_STRUCT_7( v,a,b,c,d,e,f)                      struct v { a;b;c;d;e;f; };
+#define VA_DEFINE_STRUCT_8( v,a,b,c,d,e,f,g)                    struct v { a;b;c;d;e;f;g; };
+#define VA_DEFINE_STRUCT_9( v,a,b,c,d,e,f,g,h)                  struct v { a;b;c;d;e;f;g;h; };
+#define VA_DEFINE_STRUCT_10(v,a,b,c,d,e,f,g,h,i)                struct v { a;b;c;d;e;f;g;h;i; };
+#define VA_DEFINE_STRUCT_11(v,a,b,c,d,e,f,g,h,i,j)              struct v { a;b;c;d;e;f;g;h;i;j; };
+#define VA_DEFINE_STRUCT_12(v,a,b,c,d,e,f,g,h,i,j,k)            struct v { a;b;c;d;e;f;g;h;i;j;k; };
+#define VA_DEFINE_STRUCT_13(v,a,b,c,d,e,f,g,h,i,j,k,l)          struct v { a;b;c;d;e;f;g;h;i;j;k;l; };
+#define VA_DEFINE_STRUCT_14(v,a,b,c,d,e,f,g,h,i,j,k,l,m)        struct v { a;b;c;d;e;f;g;h;i;j;k;l;m; };
+#define VA_DEFINE_STRUCT_15(v,a,b,c,d,e,f,g,h,i,j,k,l,m,n)      struct v { a;b;c;d;e;f;g;h;i;j;k;l;m;n; };
+#define VA_DEFINE_STRUCT_16(v,a,b,c,d,e,f,g,h,i,j,k,l,m,n,o)	struct v { a;b;c;d;e;f;g;h;i;j;k;l;m;n;o; };
 
 /* reusable macro */
 #define DEFINE_STRUCT_(...) VA_NARGS_CALL_OVERLOAD(VA_DEFINE_STRUCT_, __VA_ARGS__)

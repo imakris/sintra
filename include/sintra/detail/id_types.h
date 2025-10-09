@@ -26,7 +26,6 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #ifndef SINTRA_ID_TYPES_H
 #define SINTRA_ID_TYPES_H
 
-
 #include "config.h"
 #include "globals.h"
 
@@ -38,9 +37,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 namespace sintra {
 
-
 using std::atomic;
-
 
 
 // type id
@@ -104,7 +101,8 @@ namespace detail {
 inline
 type_id_type make_type_id()
 {
-    static atomic<uint64_t> counter((type_id_type)detail::reserved_id::num_reserved_type_ids);
+    static_assert(sizeof(type_id_type) == 8, "type_id_type must be 64-bit");
+    static atomic<type_id_type> counter((type_id_type)detail::reserved_id::num_reserved_type_ids);
     return ++counter;
 }
 
@@ -117,10 +115,7 @@ type_id_type make_type_id(uint64_t v)
 }
 
 
-
-
 /*
-
 
 instance id
 ===========
@@ -209,7 +204,6 @@ uint64_t get_transceiver_complement(instance_id_type instance_id)
 }
 
 
-
 constexpr instance_id_type any_local_or_remote   =
     (all_processes_wildcard         << num_transceiver_index_bits) | all_transceivers_wildcard;
 constexpr instance_id_type any_remote            =
@@ -217,10 +211,6 @@ constexpr instance_id_type any_remote            =
 constexpr instance_id_type any_local             =
     (                          1ull << num_transceiver_index_bits) | all_transceivers_wildcard;
 constexpr instance_id_type invalid_instance_id   = 0;
-
-
-
-
 
 
 inline
@@ -242,6 +232,7 @@ instance_id_type make_service_instance_id()
     return (s_mproc_id & pid_mask) | instance_index_counter++;
 }
 
+
 inline
 instance_id_type is_service_instance(instance_id_type instance_id)
 {
@@ -262,14 +253,12 @@ instance_id_type make_process_instance_id()
 }
 
 
-
 inline
 instance_id_type make_process_instance_id(uint32_t process_index)
 {
     assert(process_index>0 && process_index <= max_process_index);
     return get_instance_id_type(process_index, 1);
 }
-
 
 
 // returns true if iid refers to one local instance
@@ -283,7 +272,6 @@ bool is_local_instance(instance_id_type iid)
         // explicitly specified process index match
         (process_index == get_process_index(s_mproc_id));
 }
-
 
 
 // returns true if iid refers to one or multiple local instances
@@ -300,7 +288,6 @@ bool is_local(instance_id_type iid)
 }
 
 
-
 inline
 bool is_process(instance_id_type iid)
 {
@@ -309,7 +296,6 @@ bool is_process(instance_id_type iid)
 
     return (iid & (~pid_mask)) == 1;
 }
-
 
 
 inline
