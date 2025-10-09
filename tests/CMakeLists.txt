@@ -3,6 +3,11 @@ target_link_libraries(sintra_basic_pubsub_test PRIVATE sintra)
 
 add_test(NAME sintra.basic_pubsub COMMAND sintra_basic_pubsub_test)
 
+add_executable(sintra_ping_pong_test ping_pong_test.cpp)
+target_link_libraries(sintra_ping_pong_test PRIVATE sintra)
+
+add_test(NAME sintra.ping_pong COMMAND sintra_ping_pong_test)
+
 add_executable(sintra_rpc_append_test rpc_append_test.cpp)
 target_link_libraries(sintra_rpc_append_test PRIVATE sintra)
 
