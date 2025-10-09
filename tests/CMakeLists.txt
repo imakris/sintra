@@ -2,3 +2,8 @@ add_executable(sintra_basic_pubsub_test basic_pub_sub.cpp)
 target_link_libraries(sintra_basic_pubsub_test PRIVATE sintra)
 
 add_test(NAME sintra.basic_pubsub COMMAND sintra_basic_pubsub_test)
+
+add_executable(sintra_rpc_append_test rpc_append_test.cpp)
+target_link_libraries(sintra_rpc_append_test PRIVATE sintra)
+
+add_test(NAME sintra.rpc_append COMMAND sintra_rpc_append_test)
