@@ -26,13 +26,14 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #ifndef SINTRA_UTILITY_H
 #define SINTRA_UTILITY_H
 
+#include <chrono>
+#include <cstdlib>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <string>
 #include <unordered_set>
-#include <chrono>
 
 
 #ifdef _WIN32
@@ -252,7 +253,7 @@ bool spawn_detached(const char* prog, const char * const*argv)
         close(ready_pipe[1]);
         read(ready_pipe[0], &rv, sizeof(int));                          // (1)
         close(ready_pipe[0]);
-        ::_exit(rv == 0? grandchild_pid : rv);
+        ::_exit(rv == 0 ? EXIT_SUCCESS : EXIT_FAILURE);
     }
 
     if (child_pid == -1) {
@@ -260,8 +261,16 @@ bool spawn_detached(const char* prog, const char * const*argv)
         return false;
     }
 
-    ::waitpid(child_pid, &rv, 0);
-    return rv == 0;
+    int status = 0;
+    if (::waitpid(child_pid, &status, 0) == -1) {
+        return false;
+    }
+
+    if (WIFEXITED(status)) {
+        return WEXITSTATUS(status) == 0;
+    }
+
+    return false;
 
     #undef IGNORE_SIGPIPE
 
