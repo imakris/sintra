@@ -1,11 +1,11 @@
 Sintra
 ======
 
-.. image:: https://github.com/imakris/sintra/actions/workflows/main.yml/badge.svg?branch=main&job=Build%20and%20Test%20on%20ubuntu-latest
+.. image:: https://github.com/imakris/sintra/actions/workflows/main.yml/badge.svg?branch=master&job=Build%20and%20Test%20on%20ubuntu-latest
    :target: https://github.com/imakris/sintra/actions/workflows/main.yml
    :alt: Linux build status
 
-.. image:: https://github.com/imakris/sintra/actions/workflows/main.yml/badge.svg?branch=main&job=Build%20and%20Test%20on%20windows-latest
+.. image:: https://github.com/imakris/sintra/actions/workflows/main.yml/badge.svg?branch=mastr&job=Build%20and%20Test%20on%20windows-latest
    :target: https://github.com/imakris/sintra/actions/workflows/main.yml
    :alt: Windows build status
 
