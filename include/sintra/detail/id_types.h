@@ -170,25 +170,25 @@ constexpr uint64_t all_transceivers_wildcard = all_transceivers_except_mproc_wil
 
 struct decomposed_instance_id {
     uint32_t process;
-    uint32_t transceiver;
+    uint64_t transceiver;
     uint32_t process_complement;
-    uint32_t transceiver_complement;
+    uint64_t transceiver_complement;
 };
 
 [[nodiscard]] constexpr decomposed_instance_id decompose_instance(instance_id_type instance) noexcept
 {
     constexpr uint64_t transceiver_mask = (uint64_t(1) << num_transceiver_index_bits) - 1;
     const auto process = static_cast<uint32_t>(instance >> num_transceiver_index_bits);
-    const auto transceiver = static_cast<uint32_t>(instance & transceiver_mask);
+    const auto transceiver = static_cast<uint64_t>(instance & transceiver_mask);
     return {
         process,
         transceiver,
         static_cast<uint32_t>(~process),
-        static_cast<uint32_t>(~transceiver)
+        static_cast<uint64_t>(~transceiver)
     };
 }
 
-[[nodiscard]] constexpr instance_id_type compose_instance(uint32_t process, uint32_t transceiver) noexcept
+[[nodiscard]] constexpr instance_id_type compose_instance(uint32_t process, uint64_t transceiver) noexcept
 {
     return (instance_id_type(process) << num_transceiver_index_bits) | instance_id_type(transceiver);
 }
@@ -197,35 +197,35 @@ struct decomposed_instance_id {
 inline
 instance_id_type get_instance_id_type(uint64_t process_index, uint64_t transceiver_index)
 {
-    return (process_index << num_transceiver_index_bits) | transceiver_index;
+    return compose_instance(static_cast<uint32_t>(process_index), static_cast<uint64_t>(transceiver_index));
 };
 
 
 inline
 uint64_t get_process_index(instance_id_type instance_id)
 {
-    return instance_id >> num_transceiver_index_bits;
+    return decompose_instance(instance_id).process;
 }
 
 
 inline
 uint64_t get_transceiver_index(instance_id_type instance_id)
 {
-    return instance_id & (~pid_mask);
+    return decompose_instance(instance_id).transceiver;
 }
 
 
 inline
 uint64_t get_process_complement(instance_id_type instance_id)
 {
-    return ~instance_id >> num_transceiver_index_bits;
+    return decompose_instance(instance_id).process_complement;
 }
 
 
 inline
 uint64_t get_transceiver_complement(instance_id_type instance_id)
 {
-    return ~instance_id & (~pid_mask);
+    return decompose_instance(instance_id).transceiver_complement;
 }
 
 
@@ -243,7 +243,9 @@ instance_id_type make_instance_id()
 {
     static atomic<uint64_t> instance_index_counter(2+num_reserved_service_instances);
     assert(instance_index_counter < max_instance_index);
-    return (s_mproc_id & pid_mask) | instance_index_counter++;
+    auto d = decompose_instance(s_mproc_id);
+    const auto index = static_cast<uint64_t>(instance_index_counter++);
+    return compose_instance(d.process, index);
 }
 
 
@@ -254,7 +256,9 @@ instance_id_type make_service_instance_id()
     // thus other transceivers start from 2
     static atomic<uint64_t> instance_index_counter(2);
     assert(instance_index_counter < 2+num_reserved_service_instances);
-    return (s_mproc_id & pid_mask) | instance_index_counter++;
+    auto d = decompose_instance(s_mproc_id);
+    const auto index = static_cast<uint64_t>(instance_index_counter++);
+    return compose_instance(d.process, index);
 }
 
 
@@ -274,7 +278,8 @@ instance_id_type make_process_instance_id()
     // thus process indices start from 2
     static atomic<uint64_t> process_index_counter(2);
     assert(process_index_counter <= max_process_index);
-    return get_instance_id_type(process_index_counter++, 1);
+    const auto index = static_cast<uint32_t>(process_index_counter++);
+    return compose_instance(index, 1ull);
 }
 
 
@@ -282,7 +287,7 @@ inline
 instance_id_type make_process_instance_id(uint32_t process_index)
 {
     assert(process_index>0 && process_index <= max_process_index);
-    return get_instance_id_type(process_index, 1);
+    return compose_instance(process_index, 1ull);
 }
 
 
@@ -290,7 +295,8 @@ instance_id_type make_process_instance_id(uint32_t process_index)
 inline
 bool is_local_instance(instance_id_type iid)
 {
-    auto process_index = get_process_index(iid);
+    const auto di = decompose_instance(iid);
+    const auto process_index = di.process;
     return
         // local process wildcard, always matches
         (process_index == 1) ||
@@ -303,11 +309,12 @@ bool is_local_instance(instance_id_type iid)
 inline
 bool is_local(instance_id_type iid)
 {
-    auto process_index = get_process_index(iid);
+    const auto di = decompose_instance(iid);
+    const auto process_index = di.process;
     return
         is_local_instance(iid) ||
         // complement of explicitly specified process, matches this process implicitly
-        (process_index > max_process_index && get_process_complement(process_index) != get_process_index(s_mproc_id)) ||
+        (process_index > max_process_index && ((~static_cast<uint64_t>(process_index)) >> num_transceiver_index_bits) != get_process_index(s_mproc_id)) ||
         // all processes wildcard, always matches
         (process_index == all_processes_wildcard);
 }
@@ -316,18 +323,19 @@ bool is_local(instance_id_type iid)
 inline
 bool is_process(instance_id_type iid)
 {
-    // it was not meant to be matched implicitly
-    assert (get_process_index(iid) > 0 && get_process_index(iid) <= max_process_index);
+    const auto di = decompose_instance(iid);
+    assert (di.process > 0 && di.process <= max_process_index);
 
-    return (iid & (~pid_mask)) == 1;
+    return di.transceiver == 1;
 }
 
 
 inline
 instance_id_type process_of(instance_id_type iid)
 {
-    assert(get_process_index(iid) > 0 && get_process_index(iid) <= max_process_index);
-    return (iid & pid_mask) | 1;
+    const auto di = decompose_instance(iid);
+    assert(di.process > 0 && di.process <= max_process_index);
+    return compose_instance(di.process, 1ull);
 }
 
 
