@@ -103,11 +103,15 @@ void init(int argc, const char* const* argv, std::vector<Process_descriptor> v =
     struct Cleanup_guard
     {
         Cleanup_guard(std::function<void()> f) {m_f = f;}
-        ~Cleanup_guard() {m_f();}
+        ~Cleanup_guard() {
+            std::fprintf(stderr, "Cleanup_guard destructor executing (after main exit)\n");
+            m_f();
+            std::fprintf(stderr, "Cleanup_guard destructor completed successfully\n");
+        }
         std::function<void()> m_f;
     };
 
-    static Cleanup_guard cleanup_guard([&]() {
+    static Cleanup_guard cleanup_guard([]() {
         if (s_mproc) {
             //assert(!"sintra::finalize was not called!");
             finalize();
@@ -143,15 +147,21 @@ void init(int argc, const char* const* argv, Args&&... args)
 inline
 bool finalize()
 {
+    std::fprintf(stderr, "finalize() called, s_mproc=%p\n", static_cast<void*>(s_mproc));
+
     if (!s_mproc) {
         // Sintra was not initialized, or it has already been finalized.
         // Either way, this call will have no effect.
+        std::fprintf(stderr, "finalize() early exit: s_mproc is null\n");
         return false;
     }
 
+    std::fprintf(stderr, "finalize() pausing managed process\n");
     s_mproc->pause();
+    std::fprintf(stderr, "finalize() deleting managed process\n");
     delete s_mproc;
     s_mproc = nullptr;
+    std::fprintf(stderr, "finalize() completed successfully\n");
     return true;
 }
 

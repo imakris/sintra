@@ -226,8 +226,30 @@ int process_int_receiver()
 
 } // namespace
 
+void custom_terminate_handler() {
+    std::fprintf(stderr, "std::terminate called!\n");
+    std::fprintf(stderr, "Uncaught exceptions: %d\n", std::uncaught_exceptions());
+
+    try {
+        auto eptr = std::current_exception();
+        if (eptr) {
+            std::rethrow_exception(eptr);
+        } else {
+            std::fprintf(stderr, "terminate called without an active exception\n");
+        }
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "Uncaught exception: %s\n", e.what());
+    } catch (...) {
+        std::fprintf(stderr, "Uncaught exception of unknown type\n");
+    }
+
+    std::abort();
+}
+
 int main(int argc, char* argv[])
 {
+    std::set_terminate(custom_terminate_handler);
+
     const bool is_spawned = has_branch_flag(argc, argv);
     const auto shared_dir = ensure_shared_directory();
 
@@ -249,9 +271,14 @@ int main(int argc, char* argv[])
         std::string status;
         in >> status;
 
-        std::filesystem::remove_all(shared_dir);
+        try {
+            std::filesystem::remove_all(shared_dir);
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "Warning: failed to remove temp directory %s: %s\n", shared_dir.string().c_str(), e.what());
+        }
         return (status == "ok") ? 0 : 1;
     }
 
     return 0;
 }
+
