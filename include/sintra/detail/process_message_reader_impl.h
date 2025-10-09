@@ -29,6 +29,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "transceiver_impl.h"
 #include <memory>
+#include <cstdio>
 
 namespace sintra {
 
@@ -133,7 +134,21 @@ bool Process_message_reader::stop_and_wait(double waiting_period)
         );
     }
 
-    assert(!m_req_running && !m_rep_running);
+    if (m_req_running || m_rep_running) {
+        m_in_req_c->done_reading();
+        m_in_req_c->unblock_local();
+        m_in_rep_c->done_reading();
+        m_in_rep_c->unblock_local();
+        m_stop_condition.wait_for(lk, std::chrono::duration<double>(1.0),
+            [&]() { return !(m_req_running || m_rep_running); }
+        );
+        if (m_req_running || m_rep_running) {
+            std::fprintf(stderr,
+                "Process_message_reader::stop_and_wait timeout: pid=%llu req_running=%d rep_running=%d\n",
+                static_cast<unsigned long long>(m_process_instance_id),
+                m_req_running.load(), m_rep_running.load());
+        }
+    }
     return !(m_req_running || m_rep_running);
 }
 
@@ -199,6 +214,14 @@ void Process_message_reader::request_reader_function()
         s_tl_current_message = m;
         if (m == nullptr) {
             break;
+        }
+        if (m_reader_state == READER_STOPPING) {
+            std::fprintf(stderr,
+                "request_reader_function(pid=%llu) processing message while stopping: type=%llu sender=%llu receiver=%llu\n",
+                static_cast<unsigned long long>(m_process_instance_id),
+                static_cast<unsigned long long>(m->message_type_id),
+                static_cast<unsigned long long>(m->sender_instance_id),
+                static_cast<unsigned long long>(m->receiver_instance_id));
         }
 
         // Only the process with the coordinator's instance is allowed to send messages on
@@ -304,6 +327,10 @@ void Process_message_reader::request_reader_function()
     s_mproc->m_num_active_readers_condition.notify_all();
 
     std::lock_guard<std::mutex> lk(m_stop_mutex);
+    if (m_reader_state == READER_STOPPING) {
+        std::fprintf(stderr, "request_reader_function(pid=%llu) exiting normally after stop.\n",
+            static_cast<unsigned long long>(m_process_instance_id));
+    }
     m_req_running = false;
     m_stop_condition.notify_one();
 
