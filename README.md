@@ -30,6 +30,60 @@ Typical use cases include plugin hosts coordinating work with out-of-process plu
 GUI front-ends that need to communicate with background services, and distributed test
 harnesses that must keep multiple workers in sync while exchanging strongly typed data.
 
+## Quick communication snapshots
+
+### Broadcast a Ping and listen from another process
+
+```cpp
+// Sender process: announce a shared struct Ping to everyone listening.
+sintra::world() << Ping{};
+
+// Receiver process: register a slot so cross-process Pings show up locally.
+sintra::activate_slot([](const Ping&) {
+    sintra::console() << "Received Ping from another process" << '\n';
+});
+```
+
+### Expose a transceiver method for RPC
+
+```cpp
+struct Remotely_accessible
+    : sintra::Derived_transceiver<Remotely_accessible> {
+    std::string append(const std::string& s, int v) {
+        return std::to_string(v) + ": " + s;
+    }
+
+    SINTRA_RPC(append); // generates Remotely_accessible::rpc_append(...)
+};
+```
+
+### Call the remote method and surface its exceptions
+
+```cpp
+// Remote exceptions thrown inside append() propagate back across the process boundary.
+try {
+    sintra::console() << Remotely_accessible::rpc_append("instance", "Hi", 42) << '\n';
+} catch (const std::exception& e) {
+    sintra::console() << "Remote RPC failed in callee: " << e.what() << '\n';
+}
+```
+
+### Observe abnormal exits from managed peers
+
+```cpp
+sintra::activate<sintra::Managed_process>(
+    [](const sintra::Managed_process::terminated_abnormally& crash) {
+        sintra::console()
+            << "Process "
+            << sintra::process_of(crash.sender_instance_id)
+            << " crashed with status " << crash.status << '\n';
+    },
+    sintra::any_remote);
+```
+
+Only the `Managed_process::terminated_abnormally` signal corresponds to a crash; the
+same channel also delivers normal lifecycle updates for managed peers.
+
 ## Getting started
 
 1. Add the `include/` directory to your project's include path.
