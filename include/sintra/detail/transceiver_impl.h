@@ -525,11 +525,15 @@ void Transceiver::rpc_handler(Message_prefix& untyped_msg)
     // allocate string and copy exception information
     auto asacei = [](const char* e_what) -> const char*
     {
-        char* what = 0;
-        size_t what_size = strlen(e_what)+1;
-        what = new char[what_size];
-        strncpy(what, e_what, what_size);
-        what[what_size - 1] = '\0';
+        if (!e_what) {
+            char* what = new char[1];
+            what[0] = '\0';
+            return what;
+        }
+
+        const size_t what_size = std::strlen(e_what) + 1;
+        char* what = new char[what_size];
+        std::memcpy(what, e_what, what_size);
         return what;
     };
 
