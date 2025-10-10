@@ -1,0 +1,361 @@
+#!/usr/bin/env python3
+"""
+Sintra Test Runner with Timeout and Repetition Support
+
+This script runs Sintra tests multiple times with proper timeout handling
+to detect non-deterministic failures caused by OS scheduling issues.
+
+Usage:
+    python run_tests.py [options]
+
+Options:
+    --repetitions N     Number of times to run each test (default: 100)
+    --timeout SECONDS   Timeout per test run in seconds (default: 5)
+    --test NAME         Run only specific test (e.g., sintra_ping_pong_test)
+    --build-dir PATH    Path to build directory (default: ../build-ninja2)
+    --config CONFIG     Build configuration Debug/Release (default: Debug)
+    --verbose           Show detailed output for each test run
+"""
+
+import argparse
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import List, Tuple, Optional
+
+class Color:
+    """ANSI color codes for terminal output"""
+    GREEN = '\033[92m'
+    RED = '\033[91m'
+    YELLOW = '\033[93m'
+    BLUE = '\033[94m'
+    RESET = '\033[0m'
+    BOLD = '\033[1m'
+
+def format_duration(seconds: float) -> str:
+    """Format duration in human-readable format"""
+    if seconds < 1:
+        return f"{seconds*1000:.0f}ms"
+    return f"{seconds:.2f}s"
+
+class TestResult:
+    """Result of a single test run"""
+    def __init__(self, success: bool, duration: float, output: str = "", error: str = ""):
+        self.success = success
+        self.duration = duration
+        self.output = output
+        self.error = error
+
+class TestRunner:
+    """Manages test execution with timeout and repetition"""
+
+    def __init__(self, build_dir: Path, config: str, timeout: float, verbose: bool):
+        self.build_dir = build_dir
+        self.config = config
+        self.timeout = timeout
+        self.verbose = verbose
+
+        # Determine test directory - check both with and without config subdirectory
+        test_dir_with_config = build_dir / 'tests' / config
+        test_dir_simple = build_dir / 'tests'
+
+        if test_dir_with_config.exists():
+            self.test_dir = test_dir_with_config
+        else:
+            self.test_dir = test_dir_simple
+
+        # Kill any existing sintra processes for a clean start
+        self._kill_all_sintra_processes()
+
+    def find_tests(self, test_name: Optional[str] = None) -> List[Path]:
+        """Find all test executables"""
+        if not self.test_dir.exists():
+            print(f"{Color.RED}Test directory not found: {self.test_dir}{Color.RESET}")
+            return []
+
+        # List of test executables to run (excluding recovery test)
+        test_names = [
+            'sintra_basic_pubsub_test',
+            'sintra_ping_pong_test',
+            'sintra_ping_pong_multi_test',
+            'sintra_rpc_append_test',
+            # 'sintra_recovery_test',  # Disabled - not yet implemented
+        ]
+
+        if test_name:
+            test_names = [name for name in test_names if test_name in name]
+
+        tests = []
+        for name in test_names:
+            if sys.platform == 'win32':
+                test_path = self.test_dir / f"{name}.exe"
+            else:
+                test_path = self.test_dir / name
+
+            if test_path.exists():
+                tests.append(test_path)
+            else:
+                print(f"{Color.YELLOW}Warning: Test not found: {test_path}{Color.RESET}")
+
+        return tests
+
+    def run_test_once(self, test_path: Path) -> TestResult:
+        """Run a single test with timeout and proper cleanup"""
+        process = None
+        try:
+            start_time = time.time()
+
+            # Use Popen for better process control
+            process = subprocess.Popen(
+                [str(test_path)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                cwd=test_path.parent
+            )
+
+            # Wait with timeout
+            try:
+                stdout, stderr = process.communicate(timeout=self.timeout)
+                duration = time.time() - start_time
+
+                success = (process.returncode == 0)
+                return TestResult(
+                    success=success,
+                    duration=duration,
+                    output=stdout,
+                    error=stderr
+                )
+
+            except subprocess.TimeoutExpired:
+                # Kill the process tree on timeout
+                self._kill_process_tree(process.pid)
+                duration = self.timeout
+
+                # Try to get any output
+                try:
+                    stdout, stderr = process.communicate(timeout=1)
+                except:
+                    stdout, stderr = "", ""
+
+                return TestResult(
+                    success=False,
+                    duration=duration,
+                    output=stdout,
+                    error=f"Test timed out after {self.timeout}s\n{stderr}"
+                )
+
+        except Exception as e:
+            if process:
+                self._kill_process_tree(process.pid)
+            return TestResult(
+                success=False,
+                duration=0,
+                error=f"Exception: {str(e)}"
+            )
+
+    def _kill_process_tree(self, pid: int):
+        """Kill a process and all its children"""
+        try:
+            if sys.platform == 'win32':
+                # On Windows, use taskkill to kill process tree
+                subprocess.run(
+                    ['taskkill', '/F', '/T', '/PID', str(pid)],
+                    capture_output=True,
+                    timeout=5
+                )
+            else:
+                # On Unix, kill process group
+                import signal
+                os.killpg(os.getpgid(pid), signal.SIGKILL)
+        except Exception as e:
+            # Log but don't fail if cleanup fails
+            print(f"\n{Color.YELLOW}Warning: Failed to kill process {pid}: {e}{Color.RESET}")
+            pass
+
+    def _kill_all_sintra_processes(self):
+        """Kill all existing sintra processes to ensure clean start"""
+        try:
+            if sys.platform == 'win32':
+                # Kill all sintra test processes
+                test_names = [
+                    'sintra_basic_pubsub_test.exe',
+                    'sintra_ping_pong_test.exe',
+                    'sintra_ping_pong_multi_test.exe',
+                    'sintra_rpc_append_test.exe',
+                    'sintra_recovery_test.exe',
+                ]
+                for name in test_names:
+                    subprocess.run(
+                        ['taskkill', '/F', '/IM', name],
+                        capture_output=True,
+                        timeout=5
+                    )
+            else:
+                # On Unix, use pkill
+                subprocess.run(['pkill', '-9', 'sintra'], capture_output=True, timeout=5)
+        except Exception:
+            # Ignore errors - processes may not exist
+            pass
+
+    def run_test_multiple(self, test_path: Path, repetitions: int) -> Tuple[int, int, List[TestResult]]:
+        """Run a test multiple times and collect results"""
+        test_name = test_path.stem
+
+        print(f"\n{Color.BOLD}{Color.BLUE}Running: {test_name}{Color.RESET}")
+        print(f"  Repetitions: {repetitions}, Timeout: {self.timeout}s")
+        print(f"  Progress: ", end='', flush=True)
+
+        results = []
+        passed = 0
+        failed = 0
+
+        for i in range(repetitions):
+            result = self.run_test_once(test_path)
+            results.append(result)
+
+            if result.success:
+                passed += 1
+                print(f"{Color.GREEN}.{Color.RESET}", end='', flush=True)
+            else:
+                failed += 1
+                print(f"{Color.RED}F{Color.RESET}", end='', flush=True)
+
+            # Print newline every 50 tests for readability
+            if (i + 1) % 50 == 0:
+                print(f" [{i + 1}/{repetitions}]", end='', flush=True)
+                if i + 1 < repetitions:
+                    print("\n            ", end='', flush=True)
+
+        print()  # Final newline
+
+        return passed, failed, results
+
+    def print_summary(self, test_path: Path, passed: int, failed: int, results: List[TestResult]):
+        """Print summary statistics for a test"""
+        test_name = test_path.stem
+        total = passed + failed
+        pass_rate = (passed / total * 100) if total > 0 else 0
+
+        # Calculate duration statistics
+        durations = [r.duration for r in results]
+        avg_duration = sum(durations) / len(durations) if durations else 0
+        min_duration = min(durations) if durations else 0
+        max_duration = max(durations) if durations else 0
+
+        if failed == 0:
+            status = f"{Color.GREEN}PASS{Color.RESET}"
+        else:
+            status = f"{Color.RED}FAIL{Color.RESET}"
+
+        print(f"  {Color.BOLD}Result: {status}{Color.RESET}")
+        print(f"  Passed: {Color.GREEN}{passed}{Color.RESET} / Failed: {Color.RED}{failed}{Color.RESET} / Total: {total}")
+        print(f"  Pass Rate: {pass_rate:.1f}%")
+        print(f"  Duration: avg={format_duration(avg_duration)}, min={format_duration(min_duration)}, max={format_duration(max_duration)}")
+
+        # Print details of failures if verbose or if there are failures
+        if failed > 0 and (self.verbose or failed <= 5):
+            print(f"\n  {Color.YELLOW}Failure Details:{Color.RESET}")
+            failure_count = 0
+            for i, result in enumerate(results):
+                if not result.success:
+                    failure_count += 1
+                    print(f"    Run #{i+1}: {result.error[:100]}")
+                    if self.verbose and result.output:
+                        print(f"      stdout: {result.output[:200]}")
+                    if self.verbose and result.error:
+                        print(f"      stderr: {result.error[:200]}")
+
+                    if failure_count >= 5 and not self.verbose:
+                        remaining = failed - failure_count
+                        if remaining > 0:
+                            print(f"    ... and {remaining} more failures (use --verbose to see all)")
+                        break
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Run Sintra tests with timeout and repetition support',
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument('--repetitions', type=int, default=100,
+                        help='Number of times to run each test (default: 100)')
+    parser.add_argument('--timeout', type=float, default=5.0,
+                        help='Timeout per test run in seconds (default: 5)')
+    parser.add_argument('--test', type=str, default=None,
+                        help='Run only specific test (e.g., ping_pong)')
+    parser.add_argument('--build-dir', type=str, default='../build-ninja2',
+                        help='Path to build directory (default: ../build-ninja2)')
+    parser.add_argument('--config', type=str, default='Debug',
+                        choices=['Debug', 'Release'],
+                        help='Build configuration (default: Debug)')
+    parser.add_argument('--verbose', action='store_true',
+                        help='Show detailed output for each test run')
+
+    args = parser.parse_args()
+
+    # Resolve build directory
+    script_dir = Path(__file__).parent
+    build_dir = (script_dir / args.build_dir).resolve()
+
+    if not build_dir.exists():
+        print(f"{Color.RED}Error: Build directory not found: {build_dir}{Color.RESET}")
+        print(f"Please build the project first or specify correct --build-dir")
+        return 1
+
+    print(f"{Color.BOLD}Sintra Test Runner{Color.RESET}")
+    print(f"Build directory: {build_dir}")
+    print(f"Configuration: {args.config}")
+    print(f"Repetitions per test: {args.repetitions}")
+    print(f"Timeout per test: {args.timeout}s")
+    print("=" * 70)
+
+    runner = TestRunner(build_dir, args.config, args.timeout, args.verbose)
+    tests = runner.find_tests(args.test)
+
+    if not tests:
+        print(f"{Color.RED}No tests found to run{Color.RESET}")
+        return 1
+
+    print(f"Found {len(tests)} test(s) to run")
+
+    # Run all tests
+    all_results = {}
+    total_passed = 0
+    total_failed = 0
+
+    start_time = time.time()
+
+    for test_path in tests:
+        passed, failed, results = runner.run_test_multiple(test_path, args.repetitions)
+        runner.print_summary(test_path, passed, failed, results)
+
+        all_results[test_path.stem] = (passed, failed, results)
+        total_passed += passed
+        total_failed += failed
+
+    total_duration = time.time() - start_time
+
+    # Print overall summary
+    print("\n" + "=" * 70)
+    print(f"{Color.BOLD}Overall Summary{Color.RESET}")
+    print(f"Total Tests: {len(tests)}")
+    print(f"Total Runs: {total_passed + total_failed}")
+    print(f"Total Passed: {Color.GREEN}{total_passed}{Color.RESET}")
+    print(f"Total Failed: {Color.RED}{total_failed}{Color.RESET}")
+
+    if total_failed == 0:
+        print(f"\n{Color.BOLD}{Color.GREEN}ALL TESTS PASSED!{Color.RESET}")
+        exit_code = 0
+    else:
+        print(f"\n{Color.BOLD}{Color.RED}SOME TESTS FAILED!{Color.RESET}")
+        exit_code = 1
+
+    print(f"Total Duration: {format_duration(total_duration)}")
+    print("=" * 70)
+
+    return exit_code
+
+if __name__ == '__main__':
+    sys.exit(main())
