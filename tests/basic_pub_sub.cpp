@@ -39,6 +39,15 @@ void set_shared_directory_env(const std::filesystem::path& dir)
 #endif
 }
 
+void clear_shared_directory_env()
+{
+#ifdef _WIN32
+    _putenv_s(kEnvSharedDir.data(), "");
+#else
+    unsetenv(kEnvSharedDir.data());
+#endif
+}
+
 std::filesystem::path ensure_shared_directory()
 {
     const char* value = std::getenv(kEnvSharedDir.data());
@@ -157,36 +166,71 @@ bool has_branch_flag(int argc, char* argv[])
     return false;
 }
 
+constexpr int kRepetitions = 32;
+
+std::string barrier_name(const char* base, int iteration)
+{
+    std::ostringstream oss;
+    oss << base << '-' << iteration;
+    return oss.str();
+}
+
+std::filesystem::path iteration_file(const std::filesystem::path& dir,
+                                     const std::string& prefix,
+                                     int iteration)
+{
+    std::ostringstream oss;
+    oss << prefix << '_' << iteration << ".txt";
+    return dir / oss.str();
+}
+
 std::vector<std::string> g_received_strings;
 std::vector<int> g_received_ints;
 
 int process_sender()
 {
-    sintra::barrier("slots-ready");
-
-    sintra::world() << std::string("good morning");
-    sintra::world() << std::string("good afternoon");
-    sintra::world() << std::string("good evening");
-    sintra::world() << std::string("good night");
-
-    sintra::world() << 1;
-    sintra::world() << 2;
-    sintra::world() << 3;
-    sintra::world() << 4;
-
-    sintra::barrier("messages-done");
-    sintra::barrier("write-phase");
-
     const auto shared_dir = get_shared_directory();
-    const auto strings = read_strings(shared_dir / "strings.txt");
-    const auto ints = read_ints(shared_dir / "ints.txt");
 
     const std::vector<std::string> expected_strings{
         "good morning", "good afternoon", "good evening", "good night"};
     const std::vector<int> expected_ints{1, 2, 3, 4};
 
-    const bool ok = (strings == expected_strings) && (ints == expected_ints);
-    write_result(shared_dir, ok, strings, ints);
+    bool overall_ok = true;
+    std::vector<std::string> failing_strings;
+    std::vector<int> failing_ints;
+
+    for (int iteration = 0; iteration < kRepetitions; ++iteration) {
+        const auto slots_ready = barrier_name("slots-ready", iteration);
+        const auto messages_done = barrier_name("messages-done", iteration);
+        const auto write_phase = barrier_name("write-phase", iteration);
+
+        sintra::barrier(slots_ready);
+
+        sintra::world() << std::string("good morning");
+        sintra::world() << std::string("good afternoon");
+        sintra::world() << std::string("good evening");
+        sintra::world() << std::string("good night");
+
+        sintra::world() << 1;
+        sintra::world() << 2;
+        sintra::world() << 3;
+        sintra::world() << 4;
+
+        sintra::barrier(messages_done);
+        sintra::barrier(write_phase);
+
+        const auto strings = read_strings(iteration_file(shared_dir, "strings", iteration));
+        const auto ints = read_ints(iteration_file(shared_dir, "ints", iteration));
+
+        const bool iteration_ok = (strings == expected_strings) && (ints == expected_ints);
+        if (!iteration_ok && overall_ok) {
+            overall_ok = false;
+            failing_strings = strings;
+            failing_ints = ints;
+        }
+    }
+
+    write_result(shared_dir, overall_ok, failing_strings, failing_ints);
     return 0;
 }
 
@@ -197,13 +241,23 @@ int process_string_receiver()
     };
     sintra::activate_slot(string_slot);
 
-    sintra::barrier("slots-ready");
-    sintra::barrier("messages-done");
-
     const auto shared_dir = get_shared_directory();
-    write_strings(shared_dir / "strings.txt", g_received_strings);
 
-    sintra::barrier("write-phase");
+    for (int iteration = 0; iteration < kRepetitions; ++iteration) {
+        g_received_strings.clear();
+
+        const auto slots_ready = barrier_name("slots-ready", iteration);
+        const auto messages_done = barrier_name("messages-done", iteration);
+        const auto write_phase = barrier_name("write-phase", iteration);
+
+        sintra::barrier(slots_ready);
+        sintra::barrier(messages_done);
+
+        write_strings(iteration_file(shared_dir, "strings", iteration), g_received_strings);
+
+        sintra::barrier(write_phase);
+    }
+
     return 0;
 }
 
@@ -214,13 +268,23 @@ int process_int_receiver()
     };
     sintra::activate_slot(int_slot);
 
-    sintra::barrier("slots-ready");
-    sintra::barrier("messages-done");
-
     const auto shared_dir = get_shared_directory();
-    write_ints(shared_dir / "ints.txt", g_received_ints);
 
-    sintra::barrier("write-phase");
+    for (int iteration = 0; iteration < kRepetitions; ++iteration) {
+        g_received_ints.clear();
+
+        const auto slots_ready = barrier_name("slots-ready", iteration);
+        const auto messages_done = barrier_name("messages-done", iteration);
+        const auto write_phase = barrier_name("write-phase", iteration);
+
+        sintra::barrier(slots_ready);
+        sintra::barrier(messages_done);
+
+        write_ints(iteration_file(shared_dir, "ints", iteration), g_received_ints);
+
+        sintra::barrier(write_phase);
+    }
+
     return 0;
 }
 
@@ -254,6 +318,7 @@ int main(int argc, char* argv[])
     std::set_terminate(custom_terminate_handler);
 
     const bool is_spawned = has_branch_flag(argc, argv);
+
     const auto shared_dir = ensure_shared_directory();
 
     std::vector<sintra::Process_descriptor> processes;
@@ -264,25 +329,31 @@ int main(int argc, char* argv[])
     sintra::init(argc, argv, processes);
     sintra::finalize();
 
+    int result = 0;
     if (!is_spawned) {
         const auto result_path = shared_dir / "result.txt";
         if (!std::filesystem::exists(result_path)) {
-            return 1;
+            result = 1;
         }
-
-        std::ifstream in(result_path, std::ios::binary);
-        std::string status;
-        in >> status;
+        else {
+            std::ifstream in(result_path, std::ios::binary);
+            std::string status;
+            in >> status;
+            result = (status == "ok") ? 0 : 1;
+        }
 
         try {
             std::filesystem::remove_all(shared_dir);
         }
         catch (const std::exception& e) {
-            std::fprintf(stderr, "Warning: failed to remove temp directory %s: %s\n", shared_dir.string().c_str(), e.what());
+            std::fprintf(stderr,
+                         "Warning: failed to remove temp directory %s: %s\n",
+                         shared_dir.string().c_str(),
+                         e.what());
         }
-        return (status == "ok") ? 0 : 1;
     }
 
-    return 0;
+    clear_shared_directory_env();
+    return result;
 }
 
