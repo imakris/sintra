@@ -1348,8 +1348,12 @@ struct Ring_R : Ring<T, true>
 
     /**
      * Release the snapshot. You MUST call this when you are done reading the
-     * current view, otherwise you will impede the writer’s progress (and
+     * current view, otherwise you will impede the writer's progress (and
      * potentially other readers).
+     *
+     * SHUTDOWN MODE: If called with m_reading == false, this signals the reader
+     * to stop waiting for new data. This is used during shutdown to unblock
+     * reader threads that may be waiting in wait_for_new_data().
      */
     void done_reading()
     {
@@ -1359,6 +1363,12 @@ struct Ring_R : Ring<T, true>
             c.read_access.fetch_sub(uint64_t(1) << (8 * m_trailing_octile), std::memory_order_acq_rel);
             c.reading_sequences[m_rs_index].data.has_guard.store(0, std::memory_order_release);
             m_reading = false;
+        }
+        else {
+            // done_reading() called without active snapshot => shutdown signal
+            m_stopping.store(true, std::memory_order_release);
+            // Wake the reader thread if it's blocked in wait_for_new_data()
+            unblock_local();
         }
 
         m_reading_lock = false;
@@ -1371,22 +1381,45 @@ struct Ring_R : Ring<T, true>
      * Block until new data is available (or until unblocked) and return the new
      * readable range. After consuming the returned range, call
      * done_reading_new_data() to update the trailing guard if needed.
+     *
+     * SHUTDOWN BEHAVIOR: If m_stopping is set, returns an empty range immediately
+     * without blocking. This allows reader threads to exit gracefully during shutdown.
      */
     const Range<T> wait_for_new_data()
     {
+        // Check for shutdown signal before blocking
+        if (m_stopping.load(std::memory_order_acquire)) {
+            return Range<T>{};  // Return empty range to signal shutdown
+        }
+
 #if SINTRA_RING_READING_POLICY == SINTRA_RING_READING_POLICY_ALWAYS_SPIN
-        while (m_reading_sequence->load() == c.leading_sequence.load()) {}
+        while (m_reading_sequence->load() == c.leading_sequence.load()) {
+            // Check for shutdown during spin
+            if (m_stopping.load(std::memory_order_acquire)) {
+                return Range<T>{};
+            }
+        }
 
 #else // HYBRID or ALWAYS_SLEEP
     #if SINTRA_RING_READING_POLICY == SINTRA_RING_READING_POLICY_HYBRID
         double tl = get_wtime() + spin_before_sleep * 0.5;
-        while (m_reading_sequence->load() == c.leading_sequence.load() && get_wtime() < tl) {}
+        while (m_reading_sequence->load() == c.leading_sequence.load() && get_wtime() < tl) {
+            // Check for shutdown during spin phase
+            if (m_stopping.load(std::memory_order_acquire)) {
+                return Range<T>{};
+            }
+        }
     #endif
 
         // Transition to sleeping if still no data
         c.lock();
         m_sleepy_index = -1;
         if (m_reading_sequence->load() == c.leading_sequence.load()) {
+            // Check for shutdown before registering as sleeping
+            if (m_stopping.load(std::memory_order_acquire)) {
+                c.unlock();
+                return Range<T>{};
+            }
             m_sleepy_index = c.ready_stack[--c.num_ready];
             c.sleeping_stack[c.num_sleeping++] = m_sleepy_index;
         }
@@ -1404,6 +1437,11 @@ struct Ring_R : Ring<T, true>
                 c.unlock();
             }
             m_sleepy_index = -1;
+
+            // Check for shutdown after waking from semaphore
+            if (m_stopping.load(std::memory_order_acquire)) {
+                return Range<T>{};
+            }
         }
 #endif
 
@@ -1469,6 +1507,7 @@ protected:
 private:
     int                                 m_sleepy_index          = -1;
     int                                 m_rs_index              = -1;
+    std::atomic<bool>                   m_stopping              = false;
 
     inline static std::atomic<sequence_counter_type> s_zero_rs{0};
 
