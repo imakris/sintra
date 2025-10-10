@@ -37,8 +37,6 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <signal.h>
 #endif
 
-#include <boost/lexical_cast.hpp>
-#include <boost/algorithm/string/join.hpp>
 #include <boost/type_index/ctti_type_index.hpp>
 
 #ifdef _WIN32
@@ -360,6 +358,30 @@ struct Filtered_args
 };
 
 
+inline std::string join_strings(const std::vector<std::string>& parts, const std::string& delimiter)
+{
+    if (parts.empty()) {
+        return std::string();
+    }
+
+    std::string result;
+    size_t total_size = delimiter.size() * (parts.size() - 1);
+    for (const auto& part : parts) {
+        total_size += part.size();
+    }
+    result.reserve(total_size);
+
+    auto it = parts.begin();
+    result += *it++;
+    for (; it != parts.end(); ++it) {
+        result += delimiter;
+        result += *it;
+    }
+
+    return result;
+}
+
+
 
 inline
 Filtered_args filter_option(
@@ -416,7 +438,7 @@ void Managed_process::init(int argc, const char* const* argv)
         }
     }
 
-    m_recovery_cmd = boost::algorithm::join(fa.remained, " ") + " --recovery_occurrence " +
+    m_recovery_cmd = join_strings(fa.remained, " ") + " --recovery_occurrence " +
         std::to_string(recovery_occurrence_value+1);
 
     try {
@@ -444,26 +466,26 @@ void Managed_process::init(int argc, const char* const* argv)
                     break;
                 case 'a':
                     branch_index_arg        = optarg;
-                    s_branch_index          = boost::lexical_cast<int32_t>(optarg);
+                    s_branch_index          = static_cast<int32_t>(std::stol(optarg));
                     if (s_branch_index < 1) {
                         throw -1;
                     }
                     break;
                 case 'b':
                     swarm_id_arg            = optarg;
-                    m_swarm_id              = boost::lexical_cast<decltype(m_swarm_id)>(optarg);
+                    m_swarm_id              = static_cast<decltype(m_swarm_id)>(std::stoull(optarg));
                     break;
                 case 'c':
                     instance_id_arg         = optarg;
-                    m_instance_id           = boost::lexical_cast<decltype(m_instance_id)>(optarg);
+                    m_instance_id           = static_cast<decltype(m_instance_id)>(std::stoull(optarg));
                     break;
                 case 'd':
                     coordinator_id_arg      = optarg;
-                    s_coord_id              = boost::lexical_cast<instance_id_type>(optarg);
+                    s_coord_id              = static_cast<instance_id_type>(std::stoull(optarg));
                     break;
                 case 'e':
                     recovery_arg            = optarg;
-                    s_recovery_occurrence   = boost::lexical_cast<uint32_t>(optarg);
+                    s_recovery_occurrence   = static_cast<uint32_t>(std::stoul(optarg));
                     break;
                 case '?':
                     /* getopt_long already printed an error message. */
