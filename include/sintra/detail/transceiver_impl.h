@@ -312,10 +312,10 @@ Transceiver::activate(
     Typed_instance_id<SENDER_T> sender_id,
     decltype(m_deactivators)::iterator* deactivator_it_ptr)
 {
-    using namespace boost::placeholders;
-    auto handler =
-        function<typename MESSAGE_T::return_type(const MESSAGE_T&)>(
-            boost::bind(v, static_cast<OBJECT_T*>(this), _1));
+    auto handler = function<typename MESSAGE_T::return_type(const MESSAGE_T&)>(
+        [this, v](const MESSAGE_T& message) {
+            return (static_cast<OBJECT_T*>(this)->*v)(message);
+        });
 
     constexpr bool sender_capability =
         is_same_v    < SENDER_T, void > ||                        // generic sender (e.g. any_local)
