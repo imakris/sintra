@@ -52,7 +52,6 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <thread>
 #include <type_traits>
 
-#include <boost/atomic.hpp>
 #include <boost/interprocess/detail/os_thread_functions.hpp>
 
 
