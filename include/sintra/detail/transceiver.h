@@ -37,10 +37,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <list>
 #include <map>
 #include <mutex>
+#include <type_traits>
 #include <unordered_map>
-
-#include <boost/bind/bind.hpp>
-#include <boost/type_traits.hpp>
 
 
 namespace sintra {
