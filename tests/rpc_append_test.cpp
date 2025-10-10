@@ -39,6 +39,15 @@ void set_shared_directory_env(const std::filesystem::path& dir)
 #endif
 }
 
+void clear_shared_directory_env()
+{
+#ifdef _WIN32
+    _putenv_s(kEnvSharedDir.data(), "");
+#else
+    unsetenv(kEnvSharedDir.data());
+#endif
+}
+
 std::filesystem::path ensure_shared_directory()
 {
     const char* value = std::getenv(kEnvSharedDir.data());
@@ -94,6 +103,15 @@ std::vector<std::string> read_lines(const std::filesystem::path& file)
     return values;
 }
 
+constexpr int kRepetitions = 32;
+
+std::string barrier_name(const char* base, int iteration)
+{
+    std::ostringstream oss;
+    oss << base << '-' << iteration;
+    return oss.str();
+}
+
 struct Remotely_accessible : sintra::Derived_transceiver<Remotely_accessible> {
     std::string append(const std::string& s, int v)
     {
@@ -111,15 +129,15 @@ int process_owner()
     Remotely_accessible ra;
     ra.assign_name("instance name");
 
-    sintra::barrier("object-ready");
-    sintra::barrier("calls-finished");
+    for (int iteration = 0; iteration < kRepetitions; ++iteration) {
+        sintra::barrier(barrier_name("object-ready", iteration));
+        sintra::barrier(barrier_name("calls-finished", iteration));
+    }
     return 0;
 }
 
 int process_client()
 {
-    sintra::barrier("object-ready");
-
     struct Test_case {
         std::string city;
         int year;
@@ -134,23 +152,30 @@ int process_client()
     };
 
     std::vector<std::string> successes;
+    successes.reserve(cases.size() * kRepetitions);
     std::vector<std::string> failures;
-
-    for (const auto& tc : cases) {
-        try {
-            auto value = Remotely_accessible::rpc_append("instance name", tc.city, tc.year);
-            successes.push_back(value);
-        }
-        catch (const std::exception& e) {
-            failures.push_back(e.what());
-        }
-    }
+    failures.reserve(kRepetitions);
 
     const auto shared_dir = get_shared_directory();
+
+    for (int iteration = 0; iteration < kRepetitions; ++iteration) {
+        sintra::barrier(barrier_name("object-ready", iteration));
+
+        for (const auto& tc : cases) {
+            try {
+                auto value = Remotely_accessible::rpc_append("instance name", tc.city, tc.year);
+                successes.push_back(value);
+            }
+            catch (const std::exception& e) {
+                failures.push_back(e.what());
+            }
+        }
+
+        sintra::barrier(barrier_name("calls-finished", iteration));
+    }
+
     write_lines(shared_dir / "rpc_success.txt", successes);
     write_lines(shared_dir / "rpc_failures.txt", failures);
-
-    sintra::barrier("calls-finished");
     return 0;
 }
 
@@ -161,6 +186,7 @@ int main(int argc, char* argv[])
     const bool is_spawned = std::any_of(argv, argv + argc, [](const char* arg) {
         return std::string_view(arg) == "--branch_index";
     });
+
     const auto shared_dir = ensure_shared_directory();
 
     std::vector<sintra::Process_descriptor> processes;
@@ -170,6 +196,7 @@ int main(int argc, char* argv[])
     sintra::init(argc, argv, processes);
     sintra::finalize();
 
+    int result = 0;
     if (!is_spawned) {
         const auto success_path = shared_dir / "rpc_success.txt";
         const auto failure_path = shared_dir / "rpc_failures.txt";
@@ -177,17 +204,31 @@ int main(int argc, char* argv[])
         const auto successes = read_lines(success_path);
         const auto failures = read_lines(failure_path);
 
-        const std::vector<std::string> expected_successes = {
+        const std::vector<std::string> expected_successes_single = {
             "2000: Sydney",
             "2004: Athens",
             "2008: Beijing",
         };
-        const std::vector<std::string> expected_failures = {
+        const std::vector<std::string> expected_failures_single = {
             "string too long",
         };
 
+        std::vector<std::string> expected_successes;
+        expected_successes.reserve(expected_successes_single.size() * kRepetitions);
+        std::vector<std::string> expected_failures;
+        expected_failures.reserve(expected_failures_single.size() * kRepetitions);
+
+        for (int i = 0; i < kRepetitions; ++i) {
+            expected_successes.insert(expected_successes.end(),
+                                      expected_successes_single.begin(),
+                                      expected_successes_single.end());
+            expected_failures.insert(expected_failures.end(),
+                                     expected_failures_single.begin(),
+                                     expected_failures_single.end());
+        }
+
         if (successes != expected_successes || failures != expected_failures) {
-            return 1;
+            result = 1;
         }
 
         try {
@@ -198,5 +239,6 @@ int main(int argc, char* argv[])
         }
     }
 
-    return 0;
+    clear_shared_directory_env();
+    return result;
 }
