@@ -955,6 +955,7 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
 
         // Used to avoid accidentally having multiple writers on the same ring
         // across processes. Only one writer may hold this at a time.
+        std::atomic<uint32_t>                writer_pid{0};
         ipc::interprocess_mutex              ownership_mutex;
 
 #if SINTRA_RING_READING_POLICY != SINTRA_RING_READING_POLICY_ALWAYS_SPIN
@@ -998,6 +999,8 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
 
             for (int i = 0; i < max_process_index; i++) { reading_sequences[i].data.v = invalid_sequence; }
             for (int i = 0; i < max_process_index; i++) { free_rs_stack[i] = i; }
+
+            writer_pid.store(0, std::memory_order_relaxed);
 
 
             // See the 'Note' in N4713 32.5 [Lock-free property], Par. 4.
@@ -1559,10 +1562,14 @@ struct Ring_W : Ring<T, false>
     : Ring<T, false>::Ring(directory, data_filename, num_elements),
       c(*this->m_control)
     {
+        ensure_writer_mutex_consistency();
+
         // Single writer across processes
         if (!c.ownership_mutex.try_lock()) {
             throw ring_acquisition_failure_exception();
         }
+
+        c.writer_pid.store(get_current_pid(), std::memory_order_release);
     }
 
     ~Ring_W()
@@ -1570,6 +1577,7 @@ struct Ring_W : Ring<T, false>
         // Wake any sleeping readers to avoid deadlocks during teardown
         unblock_global();
         c.ownership_mutex.unlock();
+        c.writer_pid.store(0, std::memory_order_release);
     }
 
     /**
@@ -1686,6 +1694,42 @@ struct Ring_W : Ring<T, false>
     }
 
 private:
+    void ensure_writer_mutex_consistency()
+    {
+#ifdef _WIN32
+        constexpr uint32_t recovery_sentinel = std::numeric_limits<uint32_t>::max();
+
+        for (;;) {
+            uint32_t observed = c.writer_pid.load(std::memory_order_acquire);
+            if (observed == 0) {
+                return;
+            }
+            if (observed == recovery_sentinel) {
+                std::this_thread::yield();
+                continue;
+            }
+            if (is_process_alive(observed)) {
+                return;
+            }
+
+            uint32_t expected = observed;
+            if (c.writer_pid.compare_exchange_strong(
+                    expected,
+                    recovery_sentinel,
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire))
+            {
+                c.ownership_mutex.~interprocess_mutex();
+                new (&c.ownership_mutex) ipc::interprocess_mutex();
+                c.writer_pid.store(0, std::memory_order_release);
+                return;
+            }
+        }
+#else
+        (void)c;
+#endif
+    }
+
     /**
      * Reserve space for a write of num_elements_to_write elements.
      * Precondition: num_elements_to_write <= ring_size/8 (single octile).
