@@ -104,12 +104,14 @@ void Process_message_reader::stop_nowait()
             delete tl_post_handler_function;
         }
 
-        tl_post_handler_function = new
-            function<void()>([this]() {
-                m_in_rep_c->done_reading();
-                m_in_rep_c->request_stop();
+        auto* rep_ring = m_in_rep_c;
+        tl_post_handler_function = new function<void()>([rep_ring]() {
+            if (!rep_ring) {
+                return;
             }
-        );
+            rep_ring->done_reading();
+            rep_ring->request_stop();
+        });
     }
 }
 
