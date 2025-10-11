@@ -1366,9 +1366,7 @@ struct Ring_R : Ring<T, true>
         }
         else {
             // done_reading() called without active snapshot => shutdown signal
-            m_stopping.store(true, std::memory_order_release);
-            // Wake the reader thread if it's blocked in wait_for_new_data()
-            unblock_local();
+            request_stop();
         }
 
         m_reading_lock = false;
@@ -1426,6 +1424,15 @@ struct Ring_R : Ring<T, true>
         c.unlock();
 
         if (m_sleepy_index >= 0) {
+            // Shutdown could have been signaled after we registered but before waiting.
+            if (m_stopping.load(std::memory_order_acquire)) {
+                c.lock();
+                if (m_sleepy_index >= 0) {
+                    c.dirty_semaphores[m_sleepy_index].post_unordered();
+                }
+                c.unlock();
+            }
+
             if (c.dirty_semaphores[m_sleepy_index].wait()) { // unordered wake
                 c.lock();
                 c.unordered_stack[c.num_unordered++] = m_sleepy_index;
@@ -1493,6 +1500,12 @@ struct Ring_R : Ring<T, true>
         }
         c.unlock();
 #endif
+    }
+
+    void request_stop()
+    {
+        m_stopping.store(true, std::memory_order_release);
+        unblock_local();
     }
 
 private:
