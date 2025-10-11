@@ -48,6 +48,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 namespace sintra {
 
+inline std::once_flag signal_handler_once_flag;
+
 namespace {
 
 #ifdef _WIN32
@@ -163,8 +165,7 @@ static void s_signal_handler(int sig)
 inline
 void install_signal_handler()
 {
-    static std::once_flag handler_once;
-    std::call_once(handler_once, []() {
+    std::call_once(signal_handler_once_flag, []() {
         auto& slots = signal_slots();
 
 #ifdef _WIN32
