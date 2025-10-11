@@ -1697,31 +1697,81 @@ private:
     void ensure_writer_mutex_consistency()
     {
 #ifdef _WIN32
-        constexpr uint32_t recovery_sentinel = std::numeric_limits<uint32_t>::max();
+        constexpr uint32_t recovery_flag = 0x80000000u;
+        constexpr uint32_t recovery_pid_mask = recovery_flag - 1;
+        constexpr uint32_t legacy_recovery_sentinel = std::numeric_limits<uint32_t>::max();
+        static_assert(recovery_flag != 0, "Recovery flag must reserve a representable bit");
+        const uint32_t self_pid = get_current_pid();
+
+        // Reuse the high bit of writer_pid to encode recovery ownership without
+        // changing the shared-memory layout. Windows PIDs are strictly less than
+        // 2^31, so masking with recovery_pid_mask preserves the real PID value.
+        auto encode_recovery_value = [&](uint32_t pid) {
+            return recovery_flag | (pid & recovery_pid_mask);
+        };
+
+        auto extract_recovering_pid = [&](uint32_t value) -> uint32_t {
+            if ((value & recovery_flag) == 0) {
+                return 0;
+            }
+
+            uint32_t pid = value & recovery_pid_mask;
+            if (value == legacy_recovery_sentinel && pid == recovery_pid_mask) {
+                // Old layout used 0xFFFFFFFF as a sentinel without encoding a PID.
+                // Treat it as unknown so we can reclaim it.
+                return 0;
+            }
+            return pid;
+        };
+
+        auto finalize_recovery = [&]() {
+            c.ownership_mutex.~interprocess_mutex();
+            new (&c.ownership_mutex) ipc::interprocess_mutex();
+            c.writer_pid.store(0, std::memory_order_release);
+        };
 
         for (;;) {
             uint32_t observed = c.writer_pid.load(std::memory_order_acquire);
             if (observed == 0) {
                 return;
             }
-            if (observed == recovery_sentinel) {
-                std::this_thread::yield();
-                continue;
-            }
             if (is_process_alive(observed)) {
                 return;
             }
+            if ((observed & recovery_flag) != 0) {
+                uint32_t recovering_pid = extract_recovering_pid(observed);
+                if (recovering_pid == self_pid) {
+                    finalize_recovery();
+                    return;
+                }
 
-            uint32_t expected = observed;
+                if (recovering_pid != 0 && is_process_alive(recovering_pid)) {
+                    std::this_thread::yield();
+                    continue;
+                }
+
+                uint32_t expected = observed;
+                if (!c.writer_pid.compare_exchange_strong(
+                        expected,
+                        encode_recovery_value(self_pid),
+                        std::memory_order_acq_rel,
+                        std::memory_order_acquire))
+                {
+                    continue;
+                }
+
+                finalize_recovery();
+                return;
+            }
+
+            uint32_t expected_writer = observed;
             if (c.writer_pid.compare_exchange_strong(
-                    expected,
-                    recovery_sentinel,
+                    expected_writer,
+                    encode_recovery_value(self_pid),
                     std::memory_order_acq_rel,
                     std::memory_order_acquire))
             {
-                c.ownership_mutex.~interprocess_mutex();
-                new (&c.ownership_mutex) ipc::interprocess_mutex();
-                c.writer_pid.store(0, std::memory_order_release);
+                finalize_recovery();
                 return;
             }
         }
