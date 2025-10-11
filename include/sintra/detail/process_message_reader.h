@@ -30,6 +30,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "globals.h"
 #include "message.h"
 
+#include <memory>
 #include <set>
 
 
@@ -68,8 +69,17 @@ static inline thread_local size_t s_tl_additional_piids_size = 0;
 
 // This exists because it may occur that there are multiple outstanding RPC calls
 // from different threads.
-static inline mutex s_outstanding_rpcs_mutex;
-static inline std::set<Outstanding_rpc_control*> s_outstanding_rpcs;
+inline mutex& s_outstanding_rpcs_mutex()
+{
+    static mutex& m = *new mutex();
+    return m;
+}
+
+inline std::set<Outstanding_rpc_control*>& s_outstanding_rpcs()
+{
+    static auto& set_ref = *new std::set<Outstanding_rpc_control*>();
+    return set_ref;
+}
 
 
 struct Process_message_reader
@@ -140,8 +150,8 @@ private:
 
     instance_id_type        m_process_instance_id;
 
-    Message_ring_R*         m_in_req_c              = nullptr;
-    Message_ring_R*         m_in_rep_c              = nullptr;
+    std::shared_ptr<Message_ring_R> m_in_req_c;
+    std::shared_ptr<Message_ring_R> m_in_rep_c;
 
     thread*                 m_request_reader_thread = nullptr;
     thread*                 m_reply_reader_thread   = nullptr;

@@ -21,6 +21,41 @@ This document records all technical findings, observed issues, attempted fixes, 
 
 ---
 
+## Windows Recovery Hang Investigation (2024-07-05)
+
+### Symptom Snapshot
+
+- `recovery_test` respawns the crashing child on Windows, but the recovered instance stalls before any user code in `main()` executes.
+- Other executables (`basic_pubsub`, `ping_pong`) continue to pass on both Linux and Windows, so the regression is isolated to the recovery path.
+- Linux runs of `recovery_test` succeed, which points to a Windows-specific interaction.
+
+### Observed State
+
+- The respawned "crasher" process never prints the early debug messages in `main()`—it hangs while entering the function body shown at line 302 of `tests/recovery_test.cpp`.【F:tests/recovery_test.cpp†L303-L357】
+- Coordinator and watchdog processes park in their normal waiting loops, while their message reader threads block inside `Ring_R::wait_for_new_data()` as expected when no messages arrive.
+
+### Plausible Root Causes
+
+1. **Static Initializer Contention** – The request reader threads install signal handlers via a translation-unit `inline std::once_flag` shared across the program.【F:include/sintra/detail/managed_process_impl.h†L41-L99】【F:include/sintra/detail/managed_process_impl.h†L122-L154】If the recovered process launches helper threads before the CRT finishes initializing the `once_flag`, the MSVC/GNU mingw runtime could deadlock waiting for static initialization to complete.
+2. **Stale Shared Memory Semaphores** – A respawn might inherit semaphore names whose owning process (the crasher) died while holding them. Boost.Interprocess on Windows can leave kernel objects in a signaled/unsignaled limbo until all handles are closed, so a thread touching those during C runtime startup could block.
+3. **CreateProcess Handle Leakage** – The respawn path passes inherited handles for shared memory and pipes. If any handle duplication happens during teardown, the new process can inherit blocked synchronization primitives and stall before `main()` when the runtime enumerates CRT init segments.
+
+### Suggested Debugging Steps
+
+1. **Instrument CRT Entry** – Add `__declspec(dllexport)` hooks for `mainCRTStartup` or use a TLS callback to print progress before `main()`. If the log fires, the stall sits between CRT and user code.
+2. **Trace Static Initialization** – Temporarily replace the `inline` `std::once_flag` with a function-local static accessor (e.g., `static std::once_flag& flag(){ static std::once_flag f; return f; }`) to rule out TU ordering issues without changing semantics.【F:include/sintra/detail/managed_process_impl.h†L41-L99】
+3. **Semaphore Health Check** – Before spawning the recovered process, enumerate and close orphaned named semaphores/mutexes (e.g., via `boost::interprocess::named_semaphore::remove`). If the hang disappears, focus on cleanup paths.
+4. **WinDbg !locks / !ntsdexts.locks** – Attach to the stuck process before `main()` and inspect loader and CRT locks. This can confirm whether static constructor guards or loader locks are in play.
+5. **Process Monitor Trace** – Capture `CreateProcess` and shared memory object access during the crash/restart loop to see if the new process repeatedly opens the same kernel object handles and stalls on `WaitForSingleObject` before reaching `main()`.
+
+### Interim Mitigations
+
+- Delay reader-thread start until after `sintra::init()` returns in the recovered process to avoid touching shared state during CRT init.
+- Force removal of all named IPC primitives in the coordinator before respawning children, ensuring the new instance starts from clean objects.
+- As a diagnostic, disable signal handler installation on Windows by wrapping the call in a compile-time flag; if the hang persists, the root cause lies in IPC recovery rather than handler setup.
+
+---
+
 ## Timeline of Investigation
 
 ### Phase 1: Test Infrastructure Setup
