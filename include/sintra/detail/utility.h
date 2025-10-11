@@ -174,7 +174,7 @@ bool spawn_detached(const char* prog, const char * const*argv)
             argv_with_prog[i+1] = argv[i];
         }
         argv_with_prog[argv_size+1] = nullptr;
-        auto ret = _spawnv(P_DETACH, prog, argv_with_prog) != -1;
+        auto ret = _spawnv(P_DETACH, full_path, argv_with_prog) != -1;
         delete [] argv_with_prog;
         return ret;
     }
