@@ -1,0 +1,1236 @@
+/*
+
+
+    if (s.occurrence > 0) {
+        std::fprintf(stderr, "[SPAWN] Waiting for ring files to appear (occurrence=%u)\n", s.occurrence);
+        std::fflush(stderr);
+        bool ready = false;
+        for (int attempt = 1; attempt <= 30; ++attempt) {
+            if (ring_files_ready(s.occurrence)) {
+                ready = true;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        if (!ready) {
+            std::fprintf(stderr, "[SPAWN] WARNING: ring files still missing after wait (occurrence=%u)\n", s.occurrence);
+            std::fflush(stderr);
+        }
+    }
+
+/*
+Copyright 2017 Ioannis Makris
+
+Redistribution and use in source and binary forms, with or without modification,
+are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+this list of conditions and the following disclaimer in the documentation and/or
+other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+*/
+
+#ifndef SINTRA_MANAGED_PROCESS_IMPL_H
+#define SINTRA_MANAGED_PROCESS_IMPL_H
+
+
+#include "utility.h"
+
+#include <array>
+#include <chrono>
+#include <csignal>
+#include <mutex>
+#include <filesystem>
+#include <sstream>
+#ifndef _WIN32
+#include <signal.h>
+#endif
+
+#include <boost/lexical_cast.hpp>
+#include <boost/algorithm/string/join.hpp>
+#include <boost/type_index/ctti_type_index.hpp>
+
+#ifdef _WIN32
+    #include "third_party/getopt.h"
+#else
+    #include <getopt.h>
+#endif
+
+
+namespace sintra {
+
+namespace {
+
+#ifdef _WIN32
+    struct signal_slot {
+        int sig;
+        void (__cdecl* previous)(int) = SIG_DFL;
+        bool has_previous = false;
+    };
+
+    inline std::array<signal_slot, 6>& signal_slots()
+    {
+        static std::array<signal_slot, 6> slots {{
+            {SIGABRT}, {SIGFPE}, {SIGILL}, {SIGINT}, {SIGSEGV}, {SIGTERM}
+        }};
+        return slots;
+    }
+#else
+    struct signal_slot {
+        int sig;
+        struct sigaction previous {};
+        bool has_previous = false;
+    };
+
+    inline std::array<signal_slot, 6>& signal_slots()
+    {
+        static std::array<signal_slot, 6> slots {{
+            {SIGABRT}, {SIGFPE}, {SIGILL}, {SIGINT}, {SIGSEGV}, {SIGTERM}
+        }};
+        return slots;
+    }
+
+    inline std::array<char, 64 * 1024>& alt_stack_storage()
+    {
+        static std::array<char, 64 * 1024> storage {};
+        return storage;
+    }
+
+    inline bool& alt_stack_installed()
+    {
+        static bool installed = false;
+        return installed;
+    }
+#endif
+
+    inline signal_slot* find_slot(std::array<signal_slot, 6>& slots, int sig)
+    {
+        for (auto& candidate : slots) {
+            if (candidate.sig == sig) {
+                return &candidate;
+            }
+        }
+        return nullptr;
+    }
+}
+
+
+
+inline
+static void s_signal_handler(int sig)
+{
+    auto& slots = signal_slots();
+
+    if (s_mproc && s_mproc->m_out_req_c) {
+        s_mproc->emit_remote<Managed_process::terminated_abnormally>(sig);
+
+        for (auto& reader : s_mproc->m_readers) {
+            reader.second.stop_nowait();
+        }
+    }
+
+#ifdef _WIN32
+    if (auto* slot = find_slot(slots, sig); slot && slot->has_previous) {
+        auto prev = slot->previous;
+        if (prev == SIG_IGN) {
+            return;
+        }
+        if (prev == SIG_DFL) {
+            std::signal(sig, SIG_DFL);
+            std::raise(sig);
+            return;
+        }
+        prev(sig);
+        return;
+    }
+    std::raise(sig);
+#else
+    if (auto* slot = find_slot(slots, sig); slot && slot->has_previous) {
+        if (slot->previous.sa_handler == SIG_IGN) {
+            return;
+        }
+
+        if ((slot->previous.sa_flags & SA_SIGINFO) && slot->previous.sa_sigaction) {
+            slot->previous.sa_sigaction(sig, nullptr, nullptr);
+            return;
+        }
+
+        if (slot->previous.sa_handler && slot->previous.sa_handler != SIG_DFL) {
+            slot->previous.sa_handler(sig);
+            return;
+        }
+    }
+
+    struct sigaction dfl {};
+    dfl.sa_handler = SIG_DFL;
+    sigemptyset(&dfl.sa_mask);
+    sigaction(sig, &dfl, nullptr);
+    raise(sig);
+#endif
+}
+
+
+
+inline
+void install_signal_handler()
+{
+    static std::once_flag handler_once;
+    std::call_once(handler_once, []() {
+        auto& slots = signal_slots();
+
+#ifdef _WIN32
+        for (auto& slot : slots) {
+            auto previous = std::signal(slot.sig, s_signal_handler);
+            if (previous != SIG_ERR) {
+                slot.has_previous = previous != s_signal_handler;
+                slot.previous = slot.has_previous ? previous : SIG_DFL;
+            }
+            else {
+                slot.has_previous = false;
+            }
+        }
+#else
+        auto& storage = alt_stack_storage();
+        auto& installed = alt_stack_installed();
+        if (!installed) {
+            stack_t ss {};
+            ss.ss_sp = storage.data();
+            ss.ss_size = storage.size();
+            ss.ss_flags = 0;
+            if (sigaltstack(&ss, nullptr) == 0) {
+                installed = true;
+            }
+        }
+
+        for (auto& slot : slots) {
+            struct sigaction sa {};
+            sigemptyset(&sa.sa_mask);
+            sa.sa_sigaction = +[](int sig, siginfo_t* info, void* ctx) {
+                (void)info;
+                (void)ctx;
+                s_signal_handler(sig);
+            };
+            sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+#ifdef SA_RESTART
+            sa.sa_flags |= SA_RESTART;
+#endif
+            if (sigaction(slot.sig, &sa, &slot.previous) == 0) {
+                slot.has_previous = slot.previous.sa_handler != s_signal_handler;
+                if (!slot.has_previous) {
+                    slot.previous.sa_handler = SIG_DFL;
+                }
+            }
+            else {
+                slot.has_previous = false;
+            }
+        }
+#endif
+    });
+}
+
+
+template <typename T>
+sintra::type_id_type get_type_id()
+{
+    const std::string pretty_name = boost::typeindex::ctti_type_index::template type_id<T>().pretty_name();
+    auto it = s_mproc->m_type_id_of_type_name.find(pretty_name);
+    if (it != s_mproc->m_type_id_of_type_name.end()) {
+        return it->second;
+    }
+
+    // Caution the Coordinator call will refer to the map that is being assigned,
+    // if the Coordinator is local. Do not be tempted to simplify the temporary,
+    // because depending on the order of evaluation, it may or it may not work.
+    auto tid = Coordinator::rpc_resolve_type(s_coord_id, pretty_name);
+
+    // if it is not invalid, cache it
+    if (tid != invalid_type_id) {
+        s_mproc->m_type_id_of_type_name[pretty_name] = tid;
+    }
+
+    return tid;
+}
+
+// helper
+template <typename T>
+sintra::type_id_type get_type_id(const T&) {return get_type_id<T>();}
+
+
+template <typename>
+sintra::instance_id_type get_instance_id(std::string&& assigned_name)
+{
+    auto it = s_mproc->m_instance_id_of_assigned_name.find(assigned_name);
+    if (it != s_mproc->m_instance_id_of_assigned_name.end()) {
+        return it->second;
+    }
+
+    // Caution the Coordinator call will refer to the map that is being assigned,
+    // if the Coordinator is local. Do not be tempted to simplify the temporary,
+    // because depending on the order of evaluation, it may or it may not work.
+    auto iid = Coordinator::rpc_resolve_instance(s_coord_id, assigned_name);
+
+    // if it is not invalid, cache it
+    if (iid != invalid_instance_id) {
+        s_mproc->m_instance_id_of_assigned_name[assigned_name] = iid;
+    }
+
+    return iid;
+}
+
+
+
+
+
+
+
+inline
+Managed_process::Managed_process():
+    Derived_transceiver<Managed_process>((void*)0),
+    m_communication_state(COMMUNICATION_STOPPED),
+    m_must_stop(false),
+    m_swarm_id(0),
+    m_last_message_sequence(0),
+    m_check_sequence(0),
+    m_message_stats_reference_time(0.),
+    m_messages_accepted_since_reference_time(0),
+    m_messages_rejected_since_reference_time(0),
+    m_total_sequences_missed(0)
+{
+    assert(s_mproc == nullptr);
+    s_mproc = this;
+
+    m_pid = ipc::ipcdetail::get_current_process_id();
+
+    install_signal_handler();
+
+    // NOTE: Do not be tempted to use get_current_process_creation_time from boost::interprocess,
+    // it is only implemented for Windows.
+    m_time_instantiated = std::chrono::system_clock::now();
+}
+
+
+
+inline
+Managed_process::~Managed_process()
+{
+    // the coordinating process will be removing its readers whenever
+    // they are unpublished - when they are all done, the process may exit
+    if (s_coord) {
+        wait_until_all_external_readers_are_done();
+    }
+
+    assert(m_communication_state <= COMMUNICATION_PAUSED); // i.e. paused or stopped
+
+    // this is called explicitly, in order to inform the coordinator of the destruction early.
+    // it would not be possible to communicate it after the channels were closed.
+    this->Derived_transceiver<Managed_process>::destroy();
+
+    // no more reading
+    m_readers.clear();
+
+    // no more writing
+    if (m_out_req_c) {
+        delete m_out_req_c;
+        m_out_req_c = nullptr;
+    }
+
+    if (m_out_rep_c) {
+        delete m_out_rep_c;
+        m_out_rep_c = nullptr;
+    }
+
+    if (s_coord) {
+
+        // now it's safe to delete the Coordinator.
+        delete s_coord;
+        s_coord = 0;
+
+        // removes the swarm directory
+        remove_directory(m_directory);
+    }
+
+    s_mproc = nullptr;
+    s_mproc_id = 0;
+}
+
+
+
+// returns the argc/argv as a vector of strings
+inline
+std::vector<std::string> argc_argv_to_vector(int argc, const char* const* argv)
+{
+    std::vector<std::string> ret;
+    for (int i = 0; i < argc; i++) {
+        ret.push_back(argv[i]);
+    }
+    return ret;
+}
+
+
+
+struct Filtered_args
+{
+    vector<string> remained;
+    vector<string> extracted;
+};
+
+
+
+inline
+Filtered_args filter_option(
+    std::vector<std::string> in_args, std::string in_option, unsigned int num_args
+)
+{
+    Filtered_args ret;
+    bool found = false;
+    for (auto& e : in_args) {
+        if (!found) {
+            if (e == in_option) {
+                found = true;
+                ret.extracted.push_back(e);
+                continue;
+            }
+            ret.remained.push_back(e);
+        }
+        else {
+            if (num_args) {
+                ret.extracted.push_back(e);
+                num_args--;
+            }
+            else {
+                ret.remained.push_back(e);
+            }
+        }
+    }
+    return ret;
+}
+
+
+
+inline
+void Managed_process::init(int argc, const char* const* argv)
+{
+    std::fprintf(stderr, "[INIT] init() started, pid=%d\n", ipc::ipcdetail::get_current_process_id());
+    m_binary_name = argv[0];
+
+    int help_arg = 0;
+    std::string branch_index_arg;
+    std::string swarm_id_arg;
+    std::string instance_id_arg;
+    std::string coordinator_id_arg;
+    std::string recovery_arg;
+
+    size_t recovery_occurrence_value = 0;
+    auto fa = filter_option(argc_argv_to_vector(argc, argv), "--recovery_occurrence", 1);
+
+    if (fa.extracted.size() == 2) {
+        try {
+            recovery_occurrence_value =  std::stoul(fa.extracted[1]);
+        }
+        catch (...) {
+            assert(!"not implemented");
+        }
+    }
+
+    m_recovery_cmd = boost::algorithm::join(fa.remained, " ") + " --recovery_occurrence " +
+        std::to_string(recovery_occurrence_value+1);
+
+    try {
+        while (true) {
+            static struct ::option long_options[] = {
+                {"help",                no_argument,        &help_arg,  'h' },
+                {"branch_index",        required_argument,  0,          'a' },
+                {"swarm_id",            required_argument,  0,          'b' },
+                {"instance_id",         required_argument,  0,          'c' },
+                {"coordinator_id",      required_argument,  0,          'd' },
+                {"recovery_occurrence", required_argument,  0,          'e' },
+                {0, 0, 0, 0}
+            };
+
+            int option_index = 0;
+            int c = getopt_long(argc, (char*const*)argv, "ha:b:c:d:e:", long_options, &option_index);
+
+            if (c == -1)
+                break;
+
+            switch (c) {
+                case 'h':
+                    if (long_options[option_index].flag != 0)
+                        throw -1;
+                    break;
+                case 'a':
+                    branch_index_arg        = optarg;
+                    s_branch_index          = boost::lexical_cast<int32_t>(optarg);
+                    if (s_branch_index < 1) {
+                        throw -1;
+                    }
+                    break;
+                case 'b':
+                    swarm_id_arg            = optarg;
+                    m_swarm_id              = boost::lexical_cast<decltype(m_swarm_id)>(optarg);
+                    break;
+                case 'c':
+                    instance_id_arg         = optarg;
+                    m_instance_id           = boost::lexical_cast<decltype(m_instance_id)>(optarg);
+                    break;
+                case 'd':
+                    coordinator_id_arg      = optarg;
+                    s_coord_id              = boost::lexical_cast<instance_id_type>(optarg);
+                    break;
+                case 'e':
+                    recovery_arg            = optarg;
+                    s_recovery_occurrence   = boost::lexical_cast<uint32_t>(optarg);
+                    break;
+                case '?':
+                    /* getopt_long already printed an error message. */
+                    break;
+                default :
+                    throw -1;
+            }
+        }
+    }
+    catch(...) {
+        cout << R"(
+Managed process options:
+  --help                   (optional) produce help message and exit
+  --branch_index arg       used by the coordinator process, when it invokes
+                           itself
+                           with a different entry index. It must be 1 or
+                           greater.
+  --swarm_id arg           unique identifier of the swarm that is being joined
+  --instance_id arg        the instance id assigned to the new process
+  --coordinator_id arg     the instance id of the coordinator that this
+                           process should refer to
+  --recovery_occurrence arg (optional) number of times the process recovered an
+                           abnormal termination.
+)";
+        exit(1);
+    }
+
+    bool coordinator_is_local = false;
+    if (swarm_id_arg.empty()) {
+        s_mproc_id = m_instance_id = make_process_instance_id();
+
+        m_swarm_id = 
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                m_time_instantiated.time_since_epoch()
+            ).count();
+        coordinator_is_local = true;
+
+        // NOTE: leave s_branch_index uninitialized. The coordinating process does
+        // not have an entry
+    }
+    else {
+        if (coordinator_id_arg.empty() || (branch_index_arg.empty() && instance_id_arg.empty()) ) {
+
+            assert(!"if the binary was not invoked manually, this is definitely a bug.");
+            exit(1);
+        }
+
+        if (!branch_index_arg.empty()) {
+            assert(s_branch_index < max_process_index - 1);
+        }
+
+        assert(m_instance_id != 0);
+
+        if (instance_id_arg.empty()) {
+            // If branch_index is specified, the explicit instance_id may not, thus
+            // we need to make a process instance id based on the branch_index.
+            // Transceiver IDs start from 2 (0 is invalid, 1 is the first process)
+            m_instance_id = make_process_instance_id(s_branch_index + 2);
+        }
+
+        s_mproc_id = m_instance_id;
+    }
+    m_directory = obtain_swarm_directory();
+
+    std::fprintf(stderr, "[INIT] About to create message rings, pid=%d\n", ipc::ipcdetail::get_current_process_id());
+    m_out_req_c = new Message_ring_W(m_directory, "req", m_instance_id, s_recovery_occurrence);
+    m_out_rep_c = new Message_ring_W(m_directory, "rep", m_instance_id, s_recovery_occurrence);
+    std::fprintf(stderr, "[INIT] Created message rings, pid=%d\n", ipc::ipcdetail::get_current_process_id());
+
+    if (coordinator_is_local) {
+        std::fprintf(stderr, "[INIT] Creating coordinator, pid=%d\n", ipc::ipcdetail::get_current_process_id());
+        s_coord = new Coordinator;
+        s_coord_id = s_coord->m_instance_id;
+
+        {
+            lock_guard<mutex> lock(s_coord->m_publish_mutex);
+            s_coord->m_transceiver_registry[s_mproc_id];
+        }
+        std::fprintf(stderr, "[INIT] Created coordinator, pid=%d\n", ipc::ipcdetail::get_current_process_id());
+    }
+
+    std::fprintf(stderr, "[INIT] About to create coordinator reader and wait, pid=%d\n", ipc::ipcdetail::get_current_process_id());
+    assert(!m_readers.count(process_of(s_coord_id)));
+    auto it = m_readers.emplace(process_of(s_coord_id), process_of(s_coord_id));
+    assert(it.second == true);
+    it.first->second.wait_until_ready();
+    std::fprintf(stderr, "[INIT] Coordinator reader ready, pid=%d\n", ipc::ipcdetail::get_current_process_id());
+
+    // Up to this point, there was no infrastructure for a proper construction
+    // of Transceiver base.
+
+    this->Derived_transceiver<Managed_process>::construct("", m_instance_id);
+
+    auto published_handler = [this](const Coordinator::instance_published& msg)
+    {
+        tn_type tn = {msg.type_id, msg.assigned_name};
+        lock_guard<mutex> lock(m_availability_mutex);
+
+        auto it = m_queued_availability_calls.find(tn);
+        if (it != m_queued_availability_calls.end()) {
+            while (!it->second.empty()) {
+                // each function call, which is a lambda defined inside 
+                // call_on_availability(), clears itself from the list as well.
+                it->second.front()();
+            }
+            m_queued_availability_calls.erase(it);
+        }
+    };
+
+
+    auto unpublished_handler = [this](const Coordinator::instance_unpublished& msg)
+    {
+        auto iid = msg.instance_id;
+        auto process_iid = process_of(iid);
+        if (iid == process_iid) {
+
+            // the unpublished transceiver was a process, thus we should
+            // remove all transceiver records who are known to live in it.
+
+            for (auto it = m_instance_id_of_assigned_name.begin(); it != m_instance_id_of_assigned_name.end();) {
+                if (process_of(it->second) == iid) {
+                    it = m_instance_id_of_assigned_name.erase(it);
+                }
+                else {
+                    ++it;
+                }
+            }
+
+            s_mproc->unblock_rpc(iid);
+        }
+
+        // if the unpublished transceiver is the coordinator process, we have to stop.
+        if (process_of(s_coord_id) == msg.instance_id) {
+            stop();
+            exit(0);
+        }
+    };
+
+    if (!s_coord) {
+        activate(published_handler,   Typed_instance_id<Coordinator>(s_coord_id));
+        activate(unpublished_handler, Typed_instance_id<Coordinator>(s_coord_id));
+    }
+
+    if (coordinator_is_local) {
+        auto cr_handler = [](const Managed_process::terminated_abnormally& msg)
+        {
+            std::fprintf(stderr, "[RECOVERY] Process piid=%llu crashed (status=%d)\n",
+                static_cast<unsigned long long>(msg.sender_instance_id), msg.status);
+            std::fflush(stderr);
+
+            std::fprintf(stderr, "[RECOVERY] m_readers.count(piid) = %zu before unpublish\n",
+                s_mproc->m_readers.count(msg.sender_instance_id));
+            std::fflush(stderr);
+
+            std::fprintf(stderr, "[RECOVERY] m_readers.count(process_of(piid)) = %zu before unpublish\n",
+                s_mproc->m_readers.count(process_of(msg.sender_instance_id)));
+            std::fflush(stderr);
+
+            s_coord->unpublish_transceiver(msg.sender_instance_id);
+
+            std::fprintf(stderr, "[RECOVERY] m_readers.count(piid) = %zu after unpublish\n",
+                s_mproc->m_readers.count(msg.sender_instance_id));
+            std::fflush(stderr);
+
+            std::fprintf(stderr, "[RECOVERY] m_readers.count(process_of(piid)) = %zu after unpublish\n",
+                s_mproc->m_readers.count(process_of(msg.sender_instance_id)));
+            std::fflush(stderr);
+
+            s_coord->recover_if_required(msg.sender_instance_id);
+
+            /*
+            
+            There is a problem here:
+            We reach this code in the ring reader of the process that crashed.
+            The message is then relayed to the coordinator ring
+            but the coordinating process reads its own ring too
+            which will cause this to be handled twice... which is wrong
+
+            a fix would be to simply reject the message here, in one of the two cases
+            but this is not the only case that such a problem could occur. It thus needs a better solution.
+            Also, this solution would require declaring some thread-local stuff, otherwise
+            knowing whether we are reading the coordinator is impossible.
+
+            maybe an alternative would be that the coordinating process does not handle such messages
+            unless they are originating from its own ring. This would however require this to be checked
+            in the message loop, which would make it slower for ALL processes - maybe not a good idea.
+
+            another possible alternative (that requires more thought) is that the coordinating process
+            does not read its own ring. There might be several corner cases which won't work.
+
+            */
+
+        };
+        activate<Managed_process>(cr_handler, any_remote);
+    }
+    else {
+        auto cr_handler = [](const Managed_process::terminated_abnormally& msg)
+        {
+            // if the unpublished transceiver is the coordinator process, we have to stop.
+            if (process_of(s_coord_id) == msg.sender_instance_id) {
+                s_mproc->stop();
+                exit(1);
+            }
+        };
+        activate<Managed_process>(cr_handler, any_remote);
+    }
+
+    m_start_stop_mutex.lock();
+
+    m_communication_state = COMMUNICATION_RUNNING;
+    m_start_stop_mutex.unlock();
+
+    std::fprintf(stderr, "[INIT] init() completed, pid=%d\n", ipc::ipcdetail::get_current_process_id());
+}
+
+
+
+inline
+bool Managed_process::spawn_swarm_process(
+    const Spawn_swarm_process_args& s )
+{
+    assert(s_coord);
+    std::vector<instance_id_type> failed_spawns, successful_spawns;
+    auto args = s.args;
+    args.insert(args.end(), {"--recovery_occurrence", std::to_string(s.occurrence)} );
+
+    cstring_vector cargs(args);
+
+    std::fprintf(stderr, "[SPAWN] spawn_swarm_process piid=%llu, m_readers.count=%zu\n",
+        static_cast<unsigned long long>(s.piid), m_readers.count(process_of(s.piid)));
+    std::fprintf(stderr, "[SPAWN] Args count: %zu, checking for --shared_dir...\n", args.size());
+    for (size_t i = 0; i < args.size(); ++i) {
+        if (args[i] == "--shared_dir") {
+            std::fprintf(stderr, "[SPAWN] Found --shared_dir at index %zu: %s\n",
+                i, i + 1 < args.size() ? args[i + 1].c_str() : "<missing>");
+            break;
+        }
+    }
+
+    // If there's an existing reader (from a crashed process), erase it now.
+    // IMPORTANT: We're being called FROM within the request reader thread of the crashed process
+    // (via the crash signal handler), so we CANNOT call stop_and_wait or try to join threads.
+    // We just stop them and let the destructor handle cleanup.
+    auto existing_reader = m_readers.find(process_of(s.piid));
+    if (existing_reader != m_readers.end()) {
+        std::fprintf(stderr, "[SPAWN] Found old reader for piid=%llu (state=%d), erasing now...\n",
+            static_cast<unsigned long long>(s.piid),
+            static_cast<int>(existing_reader->second.state()));
+        std::fflush(stderr);
+
+        // Just signal stop - don't wait since we're IN the reader thread
+        existing_reader->second.stop_nowait();
+        std::fprintf(stderr, "[SPAWN] Called stop_nowait() on existing reader\n");
+        std::fflush(stderr);
+
+        // Erase will call destructor, which will attempt to join threads.
+        // The destructor needs to detect if it's being called from within a reader thread.
+        m_readers.erase(existing_reader);
+
+        std::fprintf(stderr, "[SPAWN] Successfully erased old reader for piid=%llu\n",
+            static_cast<unsigned long long>(s.piid));
+        std::fflush(stderr);
+
+        // CRITICAL: Reset the ring files for recovery.
+        // This clears the semaphores, resets sequences, unlocks mutexes, etc.
+        std::fprintf(stderr, "[SPAWN] Resetting rings for recovery...\n");
+        std::fflush(stderr);
+        try {
+            Message_ring_R temp_req(m_directory, "req", s.piid, 0);
+            temp_req.force_reset_for_recovery();
+            std::fprintf(stderr, "[SPAWN] Reset req ring (reader side)\n");
+            std::fflush(stderr);
+        } catch (...) {
+            std::fprintf(stderr, "[SPAWN] WARNING: Failed to reset req ring (reader)\n");
+            std::fflush(stderr);
+        }
+        try {
+            Message_ring_R temp_rep(m_directory, "rep", s.piid, 0);
+            temp_rep.force_reset_for_recovery();
+            std::fprintf(stderr, "[SPAWN] Reset rep ring (reader side)\n");
+            std::fflush(stderr);
+        } catch (...) {
+            std::fprintf(stderr, "[SPAWN] WARNING: Failed to reset rep ring (reader)\n");
+            std::fflush(stderr);
+        }
+
+        // CRITICAL: Also reset the WRITER state for the coordinator's output rings!
+        // The coordinator writes TO these rings, and after recovery the writer state
+        // (m_pending_new_sequence, m_octile, m_writing_thread) must be reset.
+        std::fprintf(stderr, "[SPAWN] Resetting writer state for coordinator's output rings...\n");
+        std::fflush(stderr);
+        if (m_out_req_c) {
+            m_out_req_c->force_reset_for_recovery();
+        }
+        if (m_out_rep_c) {
+            m_out_rep_c->force_reset_for_recovery();
+        }
+    }
+
+    // Wait a bit for the detached request thread from the crashed process to finish.
+    // That thread was detached in the destructor and may still be running.
+    // We need to give it time to exit before we create a new reader.
+    std::fprintf(stderr, "[SPAWN] Waiting 500ms for detached thread to exit...\n");
+    std::fflush(stderr);
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+    std::fprintf(stderr, "[SPAWN] Starting retry loop to create new reader for piid=%llu...\n",
+        static_cast<unsigned long long>(s.piid));
+    std::fflush(stderr);
+
+    bool reader_created = false;
+    map<instance_id_type, Process_message_reader>::iterator reader_it = m_readers.end();
+
+    for (int attempt = 1; attempt <= 15 && !reader_created; ++attempt) {
+        if (attempt > 1) {
+            std::fprintf(stderr, "[SPAWN] Attempt %d: Waiting 200ms before retry...\n", attempt);
+            std::fflush(stderr);
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
+
+        std::fprintf(stderr, "[SPAWN] Attempt %d: About to call m_readers.emplace()...\n", attempt);
+        std::fflush(stderr);
+
+        try {
+            // CRITICAL FIX: m_readers is keyed by process ID, not instance ID!
+            // Must use process_of(s.piid) as the key, matching how coordinator reader is keyed.
+            // CRITICAL FIX 2: Always pass occurrence=0 to reuse the same ring files after recovery.
+            // The crashed process's ring files are reset via force_reset_for_recovery(), so we
+            // don't need new files - we reuse the existing ones.
+            auto [it, inserted] = m_readers.emplace(
+                std::piecewise_construct,
+                std::forward_as_tuple(process_of(s.piid)),
+                std::forward_as_tuple(s.piid, 0 /* always reuse occurrence=0 ring files */)
+            );
+
+            std::fprintf(stderr, "[SPAWN] Attempt %d: m_readers.emplace() returned, inserted=%d\n",
+                attempt, inserted ? 1 : 0);
+            std::fflush(stderr);
+
+            if (inserted) {
+                reader_it = it;
+                reader_created = true;
+                std::fprintf(stderr, "[SPAWN] Attempt %d: Successfully created reader!\n", attempt);
+                std::fflush(stderr);
+            }
+            else {
+                std::fprintf(stderr, "[SPAWN] Attempt %d: emplace failed (key already exists?)\n", attempt);
+                std::fflush(stderr);
+                break; // Should not happen, but don't retry
+            }
+        }
+        catch (const std::exception& e) {
+            std::fprintf(stderr, "[SPAWN] Attempt %d: Exception during emplace: %s\n", attempt, e.what());
+            std::fflush(stderr);
+            if (attempt == 15) {
+                std::fprintf(stderr, "[SPAWN] All 15 attempts failed, rethrowing exception\n");
+                std::fflush(stderr);
+                throw;
+            }
+        }
+        catch (...) {
+            std::fprintf(stderr, "[SPAWN] Attempt %d: Unknown exception during emplace\n", attempt);
+            std::fflush(stderr);
+            if (attempt == 15) {
+                std::fprintf(stderr, "[SPAWN] All 15 attempts failed, rethrowing exception\n");
+                std::fflush(stderr);
+                throw;
+            }
+        }
+    }
+
+    if (!reader_created) {
+        std::fprintf(stderr, "[SPAWN] ERROR: Failed to create reader after all attempts\n");
+        std::fflush(stderr);
+        return false;
+    }
+    assert(reader_it != m_readers.end());
+
+    // Before spawning the new process, we have to assure that the
+    // corresponding reading threads are up and running.
+    std::fprintf(stderr, "[SPAWN] Calling wait_until_ready for piid=%llu...\n",
+        static_cast<unsigned long long>(s.piid));
+    std::fflush(stderr);
+
+    reader_it->second.wait_until_ready();
+
+    std::fprintf(stderr, "[SPAWN] wait_until_ready completed for piid=%llu\n",
+        static_cast<unsigned long long>(s.piid));
+    std::fflush(stderr);
+
+    bool success = spawn_detached(s.binary_name.c_str(), cargs.v());
+
+    if (success) {
+        std::fprintf(stderr, "[SPAWN] Successfully spawned process piid=%llu (occurrence=%u)\n",
+            static_cast<unsigned long long>(s.piid), s.occurrence);
+
+        // Create an entry in the coordinator's transceiver registry.
+        // This is essential for the implementation of publish_transceiver()
+        {
+            lock_guard<mutex> lock(s_coord->m_publish_mutex);
+            s_coord->m_transceiver_registry[s.piid];
+        }
+
+        // create the readers. The next line will start the reader threads,
+        // which might take some time. At this stage, we do not have to wait
+        // until they are ready for messages.
+        //m_readers.emplace_back(std::move(reader));
+
+        m_cached_spawns[s.piid] = s;
+        m_cached_spawns[s.piid].occurrence++;
+    }
+    else {
+        std::fprintf(stderr, "[SPAWN] FAILED to launch %s\n", s.binary_name.c_str());
+
+        //m_readers.pop_back();
+        // CRITICAL FIX: Erase by process ID, not instance ID (matching the emplace key)
+        m_readers.erase(process_of(s.piid));
+    }
+
+    return success;
+}
+
+
+
+inline
+bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
+{
+    // this function may only be called when a group of processes start.
+    assert(!branch_vector.empty());
+
+    using namespace sintra;
+    using std::to_string;
+
+    std::fprintf(stderr, "[BRANCH] branch() called, s_coord=%d, s_branch_index=%d, vector.size()=%zu, recovery_occurrence=%u\n",
+        s_coord ? 1 : 0, s_branch_index, branch_vector.size(), s_recovery_occurrence);
+
+    if (s_coord) {
+
+        // 1. prepare the command line for each invocation
+        auto it = branch_vector.begin();
+        for (int i = 1; it != branch_vector.end(); it++, i++) {
+
+            auto& options = it->sintra_options;
+            if (it->entry.m_binary_name.empty()) {
+                it->entry.m_binary_name = m_binary_name;
+                options.insert(options.end(), { "--branch_index", to_string(i) });
+            }
+            options.insert(options.end(), {
+                "--swarm_id",       to_string(m_swarm_id),
+                "--instance_id",    to_string(it->assigned_instance_id = make_process_instance_id()),
+                "--coordinator_id", to_string(s_coord_id)
+            });
+        }
+
+        // 2. spawn
+        std::unordered_set<instance_id_type> successfully_spawned;
+        it = branch_vector.begin();
+        //auto readers_it = m_readers.begin();
+        for (int i = 0; it != branch_vector.end(); it++, i++) {
+
+            std::vector<std::string> all_args = {it->entry.m_binary_name.c_str()};
+            all_args.insert(all_args.end(), it->sintra_options.begin(), it->sintra_options.end());
+            all_args.insert(all_args.end(), it->user_options.begin(), it->user_options.end());
+
+            if (spawn_swarm_process({it->entry.m_binary_name, all_args, it->assigned_instance_id})) {
+                successfully_spawned.insert(it->assigned_instance_id);
+            }
+        }
+
+        auto all_processes = successfully_spawned;
+        all_processes.insert(m_instance_id);
+
+        m_group_all      = s_coord->make_process_group("_sintra_all_processes", all_processes);
+        m_group_external = s_coord->make_process_group("_sintra_external_processes", successfully_spawned);
+
+        s_branch_index = 0;
+    }
+    else {
+        assert(s_branch_index != -1);
+        assert( (ptrdiff_t)branch_vector.size() > s_branch_index-1);
+        Process_descriptor& own_pd = branch_vector[s_branch_index-1];
+        if (own_pd.entry.m_entry_function != nullptr) {
+            m_entry_function = own_pd.entry.m_entry_function;
+        }
+        else {
+            assert(!"if the binary was not invoked manually, this is definitely a bug.");
+            exit(1);
+        }
+
+        m_group_all      = Coordinator::rpc_wait_for_instance(s_coord_id, "_sintra_all_processes");
+        m_group_external = Coordinator::rpc_wait_for_instance(s_coord_id, "_sintra_external_processes");
+    }
+
+    // assign_name requires that all group processes are instantiated, in order
+    // to receive the instance_published event
+    bool all_started = Process_group::rpc_barrier(m_group_all, UIBS);
+    if (!all_started) {
+        return false;
+    }
+
+    return true;
+}
+
+
+inline
+void Managed_process::go()
+{
+    assign_name(std::string("sintra_process_") + std::to_string(m_pid));
+
+    m_entry_function();
+
+    // Calling deactivate_all() is definitely wrong for the coordinator process.
+    // For the rest, it is probably harmless.
+    // The point of calling this here is to prevent running a handler
+    // while the process is not in a state capable of running a handler (e.g. during destruction).
+    // It is the responsibility of the library user to handle this situation properly, but
+    // there might just be too many expectations from the user.
+    if (!s_coord) {
+        s_mproc->deactivate_all();
+    }
+}
+
+
+
+ //////////////////////////////////////////////////////////////////////////
+///// BEGIN START/STOP /////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////
+//////   \//////   \//////   \//////   \//////   \//////   \//////   \//////
+ ////     \////     \////     \////     \////     \////     \////     \////
+  //       \//       \//       \//       \//       \//       \//       \//
+
+
+
+inline
+void Managed_process::pause()
+{
+    std::lock_guard<mutex> start_stop_lock(m_start_stop_mutex);
+
+    // pause() might be called when the entry function finishes execution,
+    // explicitly from one of the handlers, or from the entry function itself.
+    // If called when the process is already paused, this should not have any
+    // side effects.
+    if (m_communication_state <= COMMUNICATION_PAUSED)
+        return;
+
+    for (auto& ri : m_readers) {
+        ri.second.pause();
+    }
+
+    m_communication_state = COMMUNICATION_PAUSED;
+    m_start_stop_condition.notify_all();
+}
+
+
+inline
+void Managed_process::stop()
+{
+    std::lock_guard<mutex> start_stop_lock(m_start_stop_mutex);
+
+    // stop() might be called explicitly from one of the handlers, or from the
+    // entry function. If called when the process is already stopped, this
+    // should not have any side effects.
+    if (m_communication_state == COMMUNICATION_STOPPED)
+        return;
+
+    for (auto& ri : m_readers) {
+        ri.second.stop_nowait();
+    }
+
+    m_communication_state = COMMUNICATION_STOPPED;
+    m_start_stop_condition.notify_all();
+}
+
+
+
+inline
+void Managed_process::wait_for_stop()
+{
+    std::unique_lock<mutex> start_stop_lock(m_start_stop_mutex);
+    while (m_communication_state == COMMUNICATION_RUNNING) {
+        m_start_stop_condition.wait(start_stop_lock);
+    }
+}
+
+
+  //\       //\       //\       //\       //\       //\       //\       //
+ ////\     ////\     ////\     ////\     ////\     ////\     ////\     ////
+//////\   //////\   //////\   //////\   //////\   //////\   //////\   //////
+////////////////////////////////////////////////////////////////////////////
+///// END START/STOP ///////////////////////////////////////////////////////
+ //////////////////////////////////////////////////////////////////////////
+
+
+
+inline
+std::string Managed_process::obtain_swarm_directory()
+{
+    std::string sintra_directory = fs::temp_directory_path().string() + "/sintra/";
+    if (!check_or_create_directory(sintra_directory)) {
+        throw std::runtime_error("access to a working directory failed");
+    }
+
+    std::stringstream stream;
+    stream << std::hex << m_swarm_id;
+    auto swarm_directory = sintra_directory + stream.str();
+    if (!check_or_create_directory(swarm_directory)) {
+        throw std::runtime_error("access to a working directory failed");
+    }
+
+    return swarm_directory;
+}
+
+
+
+// Calls f when the specified transceiver becomes available.
+// if the transceiver is available, f is invoked immediately.
+template <typename T>
+function<void()> Managed_process::call_on_availability(Named_instance<T> transceiver, function<void()> f)
+{
+    lock_guard<mutex> lock(m_availability_mutex);
+
+    auto iid = Typed_instance_id<T>(get_instance_id(std::move(transceiver)));
+
+    //if the transceiver is available, call f and skip the queue
+    if (iid.id != invalid_instance_id) {
+        f();
+
+        // it's done - there is nothing to disable, thus returning an empty function.
+        return []() {};
+    }
+
+    tn_type tn = { get_type_id<T>(), transceiver };
+
+    // insert an empty function, in order to be able to capture the iterator within it
+    m_queued_availability_calls[tn].emplace_back();
+    auto f_it = std::prev(m_queued_availability_calls[tn].end());
+
+    // this is the abort call
+    auto ret = Adaptive_function([this, tn, f_it]() {
+        m_queued_availability_calls[tn].erase(f_it);
+        });
+
+    // and this is the actual call, which besides calling f, also neutralizes the
+    // returned abort calls and deletes its entry from the call queue.
+    *f_it = [this, f, ret, tn, f_it]() mutable {
+        f();
+
+        // neutralize abort calls. Calling abort using the function returned
+        // by call_on_availability() from now on would have no effect.
+        ret.set([]() {});
+
+        // erase the current lambda from the list
+        m_queued_availability_calls[tn].erase(f_it);
+    };
+
+    return ret;
+}
+
+
+inline
+void Managed_process::wait_until_all_external_readers_are_done()
+{
+    unique_lock<mutex> lock(m_num_active_readers_mutex);
+    while (m_num_active_readers > 2) {
+        m_num_active_readers_condition.wait(lock);
+    }
+}
+
+
+inline
+void Managed_process::enable_recovery()
+{
+    if (!s_mproc) {
+        return;
+    }
+    if (s_coord) {
+        s_coord->enable_recovery(m_instance_id);
+    }
+    else {
+        Coordinator::rpc_enable_recovery(s_coord_id, m_instance_id);
+    }
+}
+
+
+inline
+void Managed_process::flush(instance_id_type process_id, sequence_counter_type flush_sequence)
+{
+    assert(is_process(process_id));
+
+    auto it = m_readers.find(process_id);
+    if (it == m_readers.end()) {
+        throw std::logic_error(
+            "attempted to flush the channel of a process which is not being read"
+        );
+    }
+    auto& reader = it->second;
+    auto rs = reader.get_request_reading_sequence();
+    if (rs < flush_sequence) {
+        std::unique_lock<mutex> flush_lock(m_flush_sequence_mutex);
+        m_flush_sequence.push_back(flush_sequence);
+        while (!m_flush_sequence.empty() &&
+            m_flush_sequence.front() <= flush_sequence)
+        {
+            m_flush_sequence_condition.wait(flush_lock);
+        }
+    }
+}
+
+
+inline
+size_t Managed_process::unblock_rpc(instance_id_type process_instance_id)
+{
+    assert(!process_instance_id || is_process(process_instance_id));
+    size_t ret = 0;
+    unique_lock<mutex> ol(s_outstanding_rpcs_mutex);
+    if (!s_outstanding_rpcs.empty()) {
+
+        for (auto& c : s_outstanding_rpcs) {
+            unique_lock<mutex> il(c->keep_waiting_mutex);
+
+            if (process_instance_id != invalid_instance_id &&
+                process_of(c->remote_instance) == process_instance_id)
+            {
+                c->success = false;
+                c->keep_waiting = false;
+                c->keep_waiting_condition.notify_one();
+                ret++;
+            }
+        }
+    }
+    return ret;
+}
+
+
+} // sintra
+
+
+#endif
+
+
+
