@@ -955,6 +955,7 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
 
         // Used to avoid accidentally having multiple writers on the same ring
         // across processes. Only one writer may hold this at a time.
+        std::atomic<uint32_t>                writer_pid{0};
         ipc::interprocess_mutex              ownership_mutex;
 
 #if SINTRA_RING_READING_POLICY != SINTRA_RING_READING_POLICY_ALWAYS_SPIN
@@ -998,6 +999,8 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
 
             for (int i = 0; i < max_process_index; i++) { reading_sequences[i].data.v = invalid_sequence; }
             for (int i = 0; i < max_process_index; i++) { free_rs_stack[i] = i; }
+
+            writer_pid.store(0, std::memory_order_relaxed);
 
 
             // See the 'Note' in N4713 32.5 [Lock-free property], Par. 4.
@@ -1357,19 +1360,37 @@ struct Ring_R : Ring<T, true>
      */
     void done_reading()
     {
-        bool f = false;
-        while (!m_reading_lock.compare_exchange_strong(f, true)) { f = false; }
+        // Fast path: if no snapshot is active, there is nothing to release.  This
+        // happens frequently when shutdown unblocks a reader that is idle in
+        // wait_for_new_data().  In that case we simply propagate the stop signal
+        // without touching the local lock, avoiding spurious atomic operations
+        // against partially torn down objects during crash recovery.
+        if (!m_reading.load(std::memory_order_acquire)) {
+            request_stop();
+            return;
+        }
+
+        bool expected = false;
+        while (!m_reading_lock.compare_exchange_strong(
+                    expected,
+                    true,
+                    std::memory_order_acquire,
+                    std::memory_order_relaxed))
+        {
+            expected = false;
+        }
+
         if (m_reading) {
             c.read_access.fetch_sub(uint64_t(1) << (8 * m_trailing_octile), std::memory_order_acq_rel);
             c.reading_sequences[m_rs_index].data.has_guard.store(0, std::memory_order_release);
-            m_reading = false;
+            m_reading.store(false, std::memory_order_release);
         }
         else {
             // done_reading() called without active snapshot => shutdown signal
             request_stop();
         }
 
-        m_reading_lock = false;
+        m_reading_lock.store(false, std::memory_order_release);
     }
 
     sequence_counter_type reading_sequence()     const { return m_reading_sequence->load(); }
@@ -1559,10 +1580,14 @@ struct Ring_W : Ring<T, false>
     : Ring<T, false>::Ring(directory, data_filename, num_elements),
       c(*this->m_control)
     {
+        ensure_writer_mutex_consistency();
+
         // Single writer across processes
         if (!c.ownership_mutex.try_lock()) {
             throw ring_acquisition_failure_exception();
         }
+
+        c.writer_pid.store(get_current_pid(), std::memory_order_release);
     }
 
     ~Ring_W()
@@ -1570,6 +1595,7 @@ struct Ring_W : Ring<T, false>
         // Wake any sleeping readers to avoid deadlocks during teardown
         unblock_global();
         c.ownership_mutex.unlock();
+        c.writer_pid.store(0, std::memory_order_release);
     }
 
     /**
@@ -1686,6 +1712,92 @@ struct Ring_W : Ring<T, false>
     }
 
 private:
+    void ensure_writer_mutex_consistency()
+    {
+#ifdef _WIN32
+        constexpr uint32_t recovery_flag = 0x80000000u;
+        constexpr uint32_t recovery_pid_mask = recovery_flag - 1;
+        constexpr uint32_t legacy_recovery_sentinel = std::numeric_limits<uint32_t>::max();
+        static_assert(recovery_flag != 0, "Recovery flag must reserve a representable bit");
+        const uint32_t self_pid = get_current_pid();
+
+        // Reuse the high bit of writer_pid to encode recovery ownership without
+        // changing the shared-memory layout. Windows PIDs are strictly less than
+        // 2^31, so masking with recovery_pid_mask preserves the real PID value.
+        auto encode_recovery_value = [&](uint32_t pid) {
+            return recovery_flag | (pid & recovery_pid_mask);
+        };
+
+        auto extract_recovering_pid = [&](uint32_t value) -> uint32_t {
+            if ((value & recovery_flag) == 0) {
+                return 0;
+            }
+
+            uint32_t pid = value & recovery_pid_mask;
+            if (value == legacy_recovery_sentinel && pid == recovery_pid_mask) {
+                // Old layout used 0xFFFFFFFF as a sentinel without encoding a PID.
+                // Treat it as unknown so we can reclaim it.
+                return 0;
+            }
+            return pid;
+        };
+
+        auto finalize_recovery = [&]() {
+            c.ownership_mutex.~interprocess_mutex();
+            new (&c.ownership_mutex) ipc::interprocess_mutex();
+            c.writer_pid.store(0, std::memory_order_release);
+        };
+
+        for (;;) {
+            uint32_t observed = c.writer_pid.load(std::memory_order_acquire);
+            if (observed == 0) {
+                return;
+            }
+            if (is_process_alive(observed)) {
+                return;
+            }
+            if ((observed & recovery_flag) != 0) {
+                uint32_t recovering_pid = extract_recovering_pid(observed);
+                if (recovering_pid == self_pid) {
+                    finalize_recovery();
+                    return;
+                }
+
+                if (recovering_pid != 0 && is_process_alive(recovering_pid)) {
+                    std::this_thread::yield();
+                    continue;
+                }
+
+                uint32_t expected = observed;
+                if (!c.writer_pid.compare_exchange_strong(
+                        expected,
+                        encode_recovery_value(self_pid),
+                        std::memory_order_acq_rel,
+                        std::memory_order_acquire))
+                {
+                    continue;
+                }
+
+                finalize_recovery();
+                return;
+            }
+
+            uint32_t expected_writer = observed;
+            if (c.writer_pid.compare_exchange_strong(
+                    expected_writer,
+                    encode_recovery_value(self_pid),
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire))
+            {
+                finalize_recovery();
+                return;
+            }
+        }
+#else
+        (void)c;
+#endif
+    }
+
     /**
      * Reserve space for a write of num_elements_to_write elements.
      * Precondition: num_elements_to_write <= ring_size/8 (single octile).

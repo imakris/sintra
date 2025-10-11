@@ -721,8 +721,8 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
     s_mproc->m_out_req_c->done_writing();
 
     {
-        unique_lock<mutex> orpclock(s_outstanding_rpcs_mutex);
-        s_outstanding_rpcs.insert(&orpcc);
+        unique_lock<mutex> orpclock(s_outstanding_rpcs_mutex());
+        s_outstanding_rpcs().insert(&orpcc);
     }
 
     //    _       .//'
@@ -748,8 +748,8 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
     }
 
     {
-        unique_lock<mutex> orpclock(s_outstanding_rpcs_mutex);
-        s_outstanding_rpcs.erase(&orpcc);
+        unique_lock<mutex> orpclock(s_outstanding_rpcs_mutex());
+        s_outstanding_rpcs().erase(&orpcc);
     }
 
 

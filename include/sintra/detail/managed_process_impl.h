@@ -48,7 +48,11 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 namespace sintra {
 
-inline std::once_flag signal_handler_once_flag;
+inline std::once_flag& signal_handler_once_flag()
+{
+    static std::once_flag flag;
+    return flag;
+}
 
 namespace {
 
@@ -179,7 +183,7 @@ void Managed_process::enable_recovery()
 inline
 void install_signal_handler()
 {
-    std::call_once(signal_handler_once_flag, []() {
+    std::call_once(signal_handler_once_flag(), []() {
         auto& slots = signal_slots();
 
 #ifdef _WIN32
@@ -1029,10 +1033,10 @@ size_t Managed_process::unblock_rpc(instance_id_type process_instance_id)
 {
     assert(!process_instance_id || is_process(process_instance_id));
     size_t ret = 0;
-    unique_lock<mutex> ol(s_outstanding_rpcs_mutex);
-    if (!s_outstanding_rpcs.empty()) {
+    unique_lock<mutex> ol(s_outstanding_rpcs_mutex());
+    if (!s_outstanding_rpcs().empty()) {
 
-        for (auto& c : s_outstanding_rpcs) {
+        for (auto& c : s_outstanding_rpcs()) {
             unique_lock<mutex> il(c->keep_waiting_mutex);
 
             if (process_instance_id != invalid_instance_id &&
