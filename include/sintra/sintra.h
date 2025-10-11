@@ -88,6 +88,11 @@ auto activate_slot(
 
 void deactivate_all_slots();
 
+
+// Enable automatic process recovery for the calling process.
+// When enabled, the coordinator will automatically restart the process if it crashes.
+void enable_recovery();
+
 } // namespace sintra
 
 

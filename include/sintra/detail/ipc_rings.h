@@ -657,7 +657,7 @@ private:
                 return false; // size mismatch => refuse to map
             }
 
-            // NOTE: On Windows, Boost’s "page size" here is the allocation granularity.
+            // NOTE: On Windows, Boost's "page size" here is the allocation granularity.
             size_t page_size = ipc::mapped_region::get_page_size();
 
             // Enforce the “multiple of page/granularity” constraint explicitly.

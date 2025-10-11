@@ -18,8 +18,7 @@ target_link_libraries(sintra_rpc_append_test PRIVATE sintra)
 
 add_test(NAME sintra.rpc_append COMMAND sintra_rpc_append_test)
 
-# Recovery test disabled - feature not yet fully implemented
-# add_executable(sintra_recovery_test recovery_test.cpp)
-# target_link_libraries(sintra_recovery_test PRIVATE sintra)
-# add_test(NAME sintra.recovery COMMAND sintra_recovery_test)
+add_executable(sintra_recovery_test recovery_test.cpp)
+target_link_libraries(sintra_recovery_test PRIVATE sintra)
+add_test(NAME sintra.recovery COMMAND sintra_recovery_test)
 
