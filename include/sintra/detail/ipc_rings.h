@@ -1360,19 +1360,37 @@ struct Ring_R : Ring<T, true>
      */
     void done_reading()
     {
-        bool f = false;
-        while (!m_reading_lock.compare_exchange_strong(f, true)) { f = false; }
+        // Fast path: if no snapshot is active, there is nothing to release.  This
+        // happens frequently when shutdown unblocks a reader that is idle in
+        // wait_for_new_data().  In that case we simply propagate the stop signal
+        // without touching the local lock, avoiding spurious atomic operations
+        // against partially torn down objects during crash recovery.
+        if (!m_reading.load(std::memory_order_acquire)) {
+            request_stop();
+            return;
+        }
+
+        bool expected = false;
+        while (!m_reading_lock.compare_exchange_strong(
+                    expected,
+                    true,
+                    std::memory_order_acquire,
+                    std::memory_order_relaxed))
+        {
+            expected = false;
+        }
+
         if (m_reading) {
             c.read_access.fetch_sub(uint64_t(1) << (8 * m_trailing_octile), std::memory_order_acq_rel);
             c.reading_sequences[m_rs_index].data.has_guard.store(0, std::memory_order_release);
-            m_reading = false;
+            m_reading.store(false, std::memory_order_release);
         }
         else {
             // done_reading() called without active snapshot => shutdown signal
             request_stop();
         }
 
-        m_reading_lock = false;
+        m_reading_lock.store(false, std::memory_order_release);
     }
 
     sequence_counter_type reading_sequence()     const { return m_reading_sequence->load(); }
