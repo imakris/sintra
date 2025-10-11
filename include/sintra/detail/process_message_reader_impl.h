@@ -77,7 +77,7 @@ void Process_message_reader::stop_nowait()
     m_reader_state = READER_STOPPING;
 
     m_in_req_c->done_reading();
-    m_in_req_c->unblock_local();
+    m_in_req_c->request_stop();
 
     // if there are outstanding RPC calls waiting for reply, they should be
     // unblocked (and fail), to avoid a deadlock
@@ -86,7 +86,7 @@ void Process_message_reader::stop_nowait()
 
     if (!tl_is_req_thread) {
         m_in_rep_c->done_reading();
-        m_in_rep_c->unblock_local();
+        m_in_rep_c->request_stop();
     }
     else {
         // The purpose of the lambda below is the following scenario:
@@ -107,7 +107,7 @@ void Process_message_reader::stop_nowait()
         tl_post_handler_function = new
             function<void()>([this]() {
                 m_in_rep_c->done_reading();
-                m_in_rep_c->unblock_local();
+                m_in_rep_c->request_stop();
             }
         );
     }
@@ -136,9 +136,9 @@ bool Process_message_reader::stop_and_wait(double waiting_period)
 
     if (m_req_running || m_rep_running) {
         m_in_req_c->done_reading();
-        m_in_req_c->unblock_local();
+        m_in_req_c->request_stop();
         m_in_rep_c->done_reading();
-        m_in_rep_c->unblock_local();
+        m_in_rep_c->request_stop();
         m_stop_condition.wait_for(lk, std::chrono::duration<double>(1.0),
             [&]() { return !(m_req_running || m_rep_running); }
         );
