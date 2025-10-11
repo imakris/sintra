@@ -163,52 +163,58 @@ static void s_signal_handler(int sig)
 inline
 void install_signal_handler()
 {
-    auto& slots = signal_slots();
+    static std::once_flag handler_once;
+    std::call_once(handler_once, []() {
+        auto& slots = signal_slots();
 
 #ifdef _WIN32
-    for (auto& slot : slots) {
-        auto previous = std::signal(slot.sig, s_signal_handler);
-        if (previous != SIG_ERR) {
-            slot.previous = previous;
-            slot.has_previous = true;
+        for (auto& slot : slots) {
+            auto previous = std::signal(slot.sig, s_signal_handler);
+            if (previous != SIG_ERR) {
+                slot.has_previous = previous != s_signal_handler;
+                slot.previous = slot.has_previous ? previous : SIG_DFL;
+            }
+            else {
+                slot.has_previous = false;
+            }
         }
-        else {
-            slot.has_previous = false;
-        }
-    }
 #else
-    auto& storage = alt_stack_storage();
-    auto& installed = alt_stack_installed();
-    if (!installed) {
-        stack_t ss {};
-        ss.ss_sp = storage.data();
-        ss.ss_size = storage.size();
-        ss.ss_flags = 0;
-        if (sigaltstack(&ss, nullptr) == 0) {
-            installed = true;
+        auto& storage = alt_stack_storage();
+        auto& installed = alt_stack_installed();
+        if (!installed) {
+            stack_t ss {};
+            ss.ss_sp = storage.data();
+            ss.ss_size = storage.size();
+            ss.ss_flags = 0;
+            if (sigaltstack(&ss, nullptr) == 0) {
+                installed = true;
+            }
         }
-    }
 
-    for (auto& slot : slots) {
-        struct sigaction sa {};
-        sigemptyset(&sa.sa_mask);
-        sa.sa_sigaction = +[](int sig, siginfo_t* info, void* ctx) {
-            (void)info;
-            (void)ctx;
-            s_signal_handler(sig);
-        };
-        sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+        for (auto& slot : slots) {
+            struct sigaction sa {};
+            sigemptyset(&sa.sa_mask);
+            sa.sa_sigaction = +[](int sig, siginfo_t* info, void* ctx) {
+                (void)info;
+                (void)ctx;
+                s_signal_handler(sig);
+            };
+            sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
 #ifdef SA_RESTART
-        sa.sa_flags |= SA_RESTART;
+            sa.sa_flags |= SA_RESTART;
 #endif
-        if (sigaction(slot.sig, &sa, &slot.previous) == 0) {
-            slot.has_previous = true;
+            if (sigaction(slot.sig, &sa, &slot.previous) == 0) {
+                slot.has_previous = slot.previous.sa_handler != s_signal_handler;
+                if (!slot.has_previous) {
+                    slot.previous.sa_handler = SIG_DFL;
+                }
+            }
+            else {
+                slot.has_previous = false;
+            }
         }
-        else {
-            slot.has_previous = false;
-        }
-    }
 #endif
+    });
 }
 
 
