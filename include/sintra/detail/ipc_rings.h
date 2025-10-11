@@ -956,6 +956,7 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         // Used to avoid accidentally having multiple writers on the same ring
         // across processes. Only one writer may hold this at a time.
         std::atomic<uint32_t>                writer_pid{0};
+        std::atomic<uint32_t>                writer_recovery_pid{0};
         ipc::interprocess_mutex              ownership_mutex;
 
 #if SINTRA_RING_READING_POLICY != SINTRA_RING_READING_POLICY_ALWAYS_SPIN
@@ -1001,6 +1002,7 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
             for (int i = 0; i < max_process_index; i++) { free_rs_stack[i] = i; }
 
             writer_pid.store(0, std::memory_order_relaxed);
+            writer_recovery_pid.store(0, std::memory_order_relaxed);
 
 
             // See the 'Note' in N4713 32.5 [Lock-free property], Par. 4.
@@ -1578,6 +1580,7 @@ struct Ring_W : Ring<T, false>
         unblock_global();
         c.ownership_mutex.unlock();
         c.writer_pid.store(0, std::memory_order_release);
+        c.writer_recovery_pid.store(0, std::memory_order_release);
     }
 
     /**
@@ -1698,32 +1701,101 @@ private:
     {
 #ifdef _WIN32
         constexpr uint32_t recovery_sentinel = std::numeric_limits<uint32_t>::max();
+        const uint32_t self_pid = get_current_pid();
+
+        auto release_recovery_claim = [&](uint32_t pid) {
+            if (pid == self_pid) {
+                uint32_t expected = self_pid;
+                c.writer_recovery_pid.compare_exchange_strong(
+                    expected,
+                    uint32_t{0},
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire);
+            }
+        };
+
+        auto finalize_recovery = [&]() {
+            c.ownership_mutex.~interprocess_mutex();
+            new (&c.ownership_mutex) ipc::interprocess_mutex();
+            c.writer_pid.store(0, std::memory_order_release);
+            c.writer_recovery_pid.store(0, std::memory_order_release);
+        };
 
         for (;;) {
             uint32_t observed = c.writer_pid.load(std::memory_order_acquire);
             if (observed == 0) {
+                release_recovery_claim(c.writer_recovery_pid.load(std::memory_order_acquire));
                 return;
             }
             if (observed == recovery_sentinel) {
-                std::this_thread::yield();
-                continue;
+                uint32_t recovering_pid = c.writer_recovery_pid.load(std::memory_order_acquire);
+                if (recovering_pid == self_pid) {
+                    finalize_recovery();
+                    return;
+                }
+
+                if (recovering_pid != 0 && is_process_alive(recovering_pid)) {
+                    std::this_thread::yield();
+                    continue;
+                }
+
+                uint32_t expected = recovering_pid;
+                if (!c.writer_recovery_pid.compare_exchange_strong(
+                        expected,
+                        self_pid,
+                        std::memory_order_acq_rel,
+                        std::memory_order_acquire))
+                {
+                    continue;
+                }
+
+                finalize_recovery();
+                return;
             }
             if (is_process_alive(observed)) {
+                release_recovery_claim(c.writer_recovery_pid.load(std::memory_order_acquire));
                 return;
             }
 
-            uint32_t expected = observed;
+            uint32_t recovering_pid = c.writer_recovery_pid.load(std::memory_order_acquire);
+            if (recovering_pid != 0 && recovering_pid != self_pid) {
+                if (is_process_alive(recovering_pid)) {
+                    std::this_thread::yield();
+                    continue;
+                }
+
+                uint32_t expected = recovering_pid;
+                if (!c.writer_recovery_pid.compare_exchange_strong(
+                        expected,
+                        self_pid,
+                        std::memory_order_acq_rel,
+                        std::memory_order_acquire))
+                {
+                    continue;
+                }
+            } else if (recovering_pid == 0) {
+                uint32_t expected = 0;
+                if (!c.writer_recovery_pid.compare_exchange_strong(
+                        expected,
+                        self_pid,
+                        std::memory_order_acq_rel,
+                        std::memory_order_acquire))
+                {
+                    continue;
+                }
+            }
+
+            uint32_t expected_writer = observed;
             if (c.writer_pid.compare_exchange_strong(
-                    expected,
+                    expected_writer,
                     recovery_sentinel,
                     std::memory_order_acq_rel,
                     std::memory_order_acquire))
             {
-                c.ownership_mutex.~interprocess_mutex();
-                new (&c.ownership_mutex) ipc::interprocess_mutex();
-                c.writer_pid.store(0, std::memory_order_release);
+                finalize_recovery();
                 return;
             }
+            release_recovery_claim(c.writer_recovery_pid.load(std::memory_order_acquire));
         }
 #else
         (void)c;
