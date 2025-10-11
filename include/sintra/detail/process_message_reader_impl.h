@@ -53,8 +53,10 @@ Process_message_reader::Process_message_reader(instance_id_type process_instance
     m_reader_state(READER_NORMAL),
     m_process_instance_id(process_instance_id)
 {
-    m_in_req_c = new Message_ring_R(s_mproc->m_directory, "req", m_process_instance_id, occurrence);
-    m_in_rep_c = new Message_ring_R(s_mproc->m_directory, "rep", m_process_instance_id, occurrence);
+    m_in_req_c = std::make_shared<Message_ring_R>(
+        s_mproc->m_directory, "req", m_process_instance_id, occurrence);
+    m_in_rep_c = std::make_shared<Message_ring_R>(
+        s_mproc->m_directory, "rep", m_process_instance_id, occurrence);
     m_request_reader_thread = new thread([&] () { request_reader_function(); });
     m_request_reader_thread->detach();
     m_reply_reader_thread   = new thread([&] () { reply_reader_function();   });
@@ -104,7 +106,7 @@ void Process_message_reader::stop_nowait()
             delete tl_post_handler_function;
         }
 
-        auto* rep_ring = m_in_rep_c;
+        auto rep_ring = m_in_rep_c;
         tl_post_handler_function = new function<void()>([rep_ring]() {
             if (!rep_ring) {
                 return;
@@ -166,9 +168,9 @@ Process_message_reader::~Process_message_reader()
     }
 
     delete m_request_reader_thread;
-    delete m_in_req_c;
+    m_in_req_c.reset();
     delete m_reply_reader_thread;
-    delete m_in_rep_c;
+    m_in_rep_c.reset();
 }
 
 

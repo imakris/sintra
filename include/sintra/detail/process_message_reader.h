@@ -30,6 +30,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "globals.h"
 #include "message.h"
 
+#include <memory>
 #include <set>
 
 
@@ -149,8 +150,8 @@ private:
 
     instance_id_type        m_process_instance_id;
 
-    Message_ring_R*         m_in_req_c              = nullptr;
-    Message_ring_R*         m_in_rep_c              = nullptr;
+    std::shared_ptr<Message_ring_R> m_in_req_c;
+    std::shared_ptr<Message_ring_R> m_in_rep_c;
 
     thread*                 m_request_reader_thread = nullptr;
     thread*                 m_reply_reader_thread   = nullptr;
