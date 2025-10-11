@@ -579,18 +579,21 @@ struct Unserialized_Enclosure<T, true, false>: Enclosure <T, true, false>
 
 
 inline
-std::string get_base_filename(const string& prefix, uint64_t id)
+std::string get_base_filename(const string& prefix, uint64_t id, uint32_t occurrence = 0)
 {
     std::stringstream stream;
     stream << std::hex << id;
+    if (occurrence > 0) {
+        stream << "_occ" << std::dec << occurrence;
+    }
     return prefix + stream.str();
 }
 
 
 struct Message_ring_R: Ring_R<char>
 {
-    Message_ring_R(const string& directory, const string& prefix, uint64_t id):
-        Ring_R(directory, get_base_filename(prefix, id), message_ring_size),
+    Message_ring_R(const string& directory, const string& prefix, uint64_t id, uint32_t occurrence = 0):
+        Ring_R(directory, get_base_filename(prefix, id, occurrence), message_ring_size),
         m_id(id)
     {}
 
@@ -659,8 +662,8 @@ protected:
 
 struct Message_ring_W: public Ring_W<char>
 {
-    Message_ring_W(const string& directory, const string& prefix, uint64_t id) :
-        Ring_W(directory, get_base_filename(prefix, id), message_ring_size),
+    Message_ring_W(const string& directory, const string& prefix, uint64_t id, uint32_t occurrence = 0) :
+        Ring_W(directory, get_base_filename(prefix, id, occurrence), message_ring_size),
         m_id(id)
     {}
 

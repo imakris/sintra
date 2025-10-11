@@ -82,7 +82,7 @@ struct Process_message_reader
     };
 
     inline
-    Process_message_reader(instance_id_type process_instance_id);
+    Process_message_reader(instance_id_type process_instance_id, uint32_t occurrence = 0);
 
     inline
     ~Process_message_reader();

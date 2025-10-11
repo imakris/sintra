@@ -234,6 +234,13 @@ void deactivate_all_slots()
 }
 
 
+inline
+void enable_recovery()
+{
+    s_mproc->enable_recovery();
+}
+
+
 
 template <instance_id_type LOCALITY>
 struct Maildrop
@@ -324,3 +331,4 @@ using console = Console;
 
 
 #endif
+

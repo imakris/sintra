@@ -48,6 +48,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 namespace sintra {
 
+inline std::once_flag signal_handler_once_flag;
+
 namespace {
 
 #ifdef _WIN32
@@ -129,6 +131,11 @@ static void s_signal_handler(int sig)
             std::raise(sig);
             return;
         }
+        // Prevent infinite recursion: don't call ourselves
+        if (prev == s_signal_handler) {
+            // Just return and let the original signal terminate the process
+            return;
+        }
         prev(sig);
         return;
     }
@@ -159,56 +166,70 @@ static void s_signal_handler(int sig)
 }
 
 
+inline
+void Managed_process::enable_recovery()
+{
+    // Mark this process as recoverable in the coordinator
+    // so that abnormal termination triggers a respawn.
+    Coordinator::rpc_enable_recovery(s_coord_id, process_of(m_instance_id));
+    m_recoverable = true;
+}
+
 
 inline
 void install_signal_handler()
 {
-    auto& slots = signal_slots();
+    std::call_once(signal_handler_once_flag, []() {
+        auto& slots = signal_slots();
 
 #ifdef _WIN32
-    for (auto& slot : slots) {
-        auto previous = std::signal(slot.sig, s_signal_handler);
-        if (previous != SIG_ERR) {
-            slot.previous = previous;
-            slot.has_previous = true;
+        for (auto& slot : slots) {
+            auto previous = std::signal(slot.sig, s_signal_handler);
+            if (previous != SIG_ERR) {
+                slot.has_previous = previous != s_signal_handler;
+                slot.previous = slot.has_previous ? previous : SIG_DFL;
+            }
+            else {
+                slot.has_previous = false;
+            }
         }
-        else {
-            slot.has_previous = false;
-        }
-    }
 #else
-    auto& storage = alt_stack_storage();
-    auto& installed = alt_stack_installed();
-    if (!installed) {
-        stack_t ss {};
-        ss.ss_sp = storage.data();
-        ss.ss_size = storage.size();
-        ss.ss_flags = 0;
-        if (sigaltstack(&ss, nullptr) == 0) {
-            installed = true;
+        auto& storage = alt_stack_storage();
+        auto& installed = alt_stack_installed();
+        if (!installed) {
+            stack_t ss {};
+            ss.ss_sp = storage.data();
+            ss.ss_size = storage.size();
+            ss.ss_flags = 0;
+            if (sigaltstack(&ss, nullptr) == 0) {
+                installed = true;
+            }
         }
-    }
 
-    for (auto& slot : slots) {
-        struct sigaction sa {};
-        sigemptyset(&sa.sa_mask);
-        sa.sa_sigaction = +[](int sig, siginfo_t* info, void* ctx) {
-            (void)info;
-            (void)ctx;
-            s_signal_handler(sig);
-        };
-        sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+        for (auto& slot : slots) {
+            struct sigaction sa {};
+            sigemptyset(&sa.sa_mask);
+            sa.sa_sigaction = +[](int sig, siginfo_t* info, void* ctx) {
+                (void)info;
+                (void)ctx;
+                s_signal_handler(sig);
+            };
+            sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
 #ifdef SA_RESTART
-        sa.sa_flags |= SA_RESTART;
+            sa.sa_flags |= SA_RESTART;
 #endif
-        if (sigaction(slot.sig, &sa, &slot.previous) == 0) {
-            slot.has_previous = true;
+            if (sigaction(slot.sig, &sa, &slot.previous) == 0) {
+                slot.has_previous = slot.previous.sa_handler != s_signal_handler;
+                if (!slot.has_previous) {
+                    slot.previous.sa_handler = SIG_DFL;
+                }
+            }
+            else {
+                slot.has_previous = false;
+            }
         }
-        else {
-            slot.has_previous = false;
-        }
-    }
 #endif
+    });
 }
 
 
@@ -550,8 +571,8 @@ Managed process options:
     }
     m_directory = obtain_swarm_directory();
 
-    m_out_req_c = new Message_ring_W(m_directory, "req", m_instance_id);
-    m_out_rep_c = new Message_ring_W(m_directory, "rep", m_instance_id);
+    m_out_req_c = new Message_ring_W(m_directory, "req", m_instance_id, s_recovery_occurrence);
+    m_out_rep_c = new Message_ring_W(m_directory, "rep", m_instance_id, s_recovery_occurrence);
 
     if (coordinator_is_local) {
         s_coord = new Coordinator;
@@ -686,8 +707,18 @@ bool Managed_process::spawn_swarm_process(
 
     cstring_vector cargs(args);
 
-    assert(!m_readers.count(process_of(s.piid)));
-    auto eit = m_readers.emplace(s.piid, s.piid);
+    // If a reader for this process id exists (from a previous crashed instance),
+    // stop it and remove it before creating a fresh one for recovery.
+    if (auto existing = m_readers.find(s.piid); existing != m_readers.end()) {
+        existing->second.stop_and_wait(1.0);
+        m_readers.erase(existing);
+    }
+
+    auto eit = m_readers.emplace(
+        std::piecewise_construct,
+        std::forward_as_tuple(s.piid),
+        std::forward_as_tuple(s.piid, s.occurrence)
+    );
     assert(eit.second == true);
 
     // Before spawning the new process, we have to assure that the
@@ -792,9 +823,11 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
 
     // assign_name requires that all group processes are instantiated, in order
     // to receive the instance_published event
-    bool all_started = Process_group::rpc_barrier(m_group_all, UIBS);
-    if (!all_started) {
-        return false;
+    if (s_recovery_occurrence == 0) {
+        bool all_started = Process_group::rpc_barrier(m_group_all, UIBS);
+        if (!all_started) {
+            return false;
+        }
     }
 
     return true;
@@ -1020,5 +1053,9 @@ size_t Managed_process::unblock_rpc(instance_id_type process_instance_id)
 
 
 #endif
+
+
+
+
 
 

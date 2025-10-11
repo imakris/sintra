@@ -181,6 +181,15 @@ int process_watchdog()
 
 int process_crasher()
 {
+    // Early diagnostic to confirm entry on recovery occurrences
+    std::fprintf(stderr, "[CRASHER] start occ=%u pid=%lu\n",
+        (unsigned)sintra::s_recovery_occurrence,
+#ifdef _WIN32
+        (unsigned long)_getpid()
+#else
+        (unsigned long)getpid()
+#endif
+    );
     if (g_shared_dir.empty()) {
         if (const char* shared_dir_env = std::getenv("SINTRA_TEST_SHARED_DIR")) {
             g_shared_dir = shared_dir_env;
@@ -291,6 +300,13 @@ std::string get_arg_value(int argc, char* argv[], const std::string& arg_name)
 
 int main(int argc, char* argv[])
 {
+    // Enable debug logging for all processes
+#ifdef _WIN32
+    _putenv_s("SINTRA_DEBUG", "1");
+#else
+    setenv("SINTRA_DEBUG", "1", 1);
+#endif
+
     // Log main() entry to file immediately
     {
         const char* shared_dir_env = std::getenv("SINTRA_TEST_SHARED_DIR");
@@ -397,7 +413,12 @@ int main(int argc, char* argv[])
         std::string status;
         in >> status;
 
-        std::filesystem::remove_all(shared_dir);
+        // Best effort cleanup - ignore failures (files may still be in use)
+        std::error_code ec;
+        std::filesystem::remove_all(shared_dir, ec);
+        if (ec) {
+            std::fprintf(stderr, "[MAIN] Cleanup warning: %s\n", ec.message().c_str());
+        }
         return (status == "ok") ? 0 : 1;
     }
 
