@@ -39,6 +39,10 @@ struct spinlock
     {
         locker(spinlock& sl): m_sl(sl) { m_sl.lock();   }
         ~locker()                      { m_sl.unlock(); }
+        locker(const locker&) = delete;
+        locker& operator=(const locker&) = delete;
+        locker(locker&&) = delete;
+        locker& operator=(locker&&) = delete;
         spinlock& m_sl;
     };
 
