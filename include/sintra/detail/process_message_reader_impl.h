@@ -30,6 +30,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "transceiver_impl.h"
 #include <memory>
 #include <cstdio>
+#include <utility>
 
 namespace sintra {
 
@@ -40,13 +41,10 @@ using std::unique_ptr;
 
 inline bool thread_local tl_is_req_thread = false;
 
-// This did not work correctly on mingw 11.2.0, thus we shall not use inline thread_local
-// non-POD objects as they seem to be poorly implemented (January 2022).
-// The problem here was related to the library implementation, not to the compiler.
-//inline thread_local function<void()> tl_post_handler_function = nullptr;
-
-// We can use a thread_local raw pointer instead.
-inline thread_local function<void()>* tl_post_handler_function = nullptr;
+// Historical note: mingw 11.2.0 had issues with inline thread_local non-POD objects
+// (January 2022). We now store the callable directly and rely on the fixed runtime
+// behaviour to avoid manual allocation.
+inline thread_local function<void()> tl_post_handler_function;
 
 inline
 Process_message_reader::Process_message_reader(instance_id_type process_instance_id, uint32_t occurrence):
@@ -102,18 +100,14 @@ void Process_message_reader::stop_nowait()
         // reading thread to exit will happen only after the request reading loop
         // exits.
 
-        if (tl_post_handler_function) {
-            delete tl_post_handler_function;
-        }
-
         auto rep_ring = m_in_rep_c;
-        tl_post_handler_function = new function<void()>([rep_ring]() {
+        tl_post_handler_function = [rep_ring]() {
             if (!rep_ring) {
                 return;
             }
             rep_ring->done_reading();
             rep_ring->request_stop();
-        });
+        };
     }
 }
 
@@ -321,9 +315,9 @@ void Process_message_reader::request_reader_function()
         }
 
         if (tl_post_handler_function) {
-            (*tl_post_handler_function)();
-            delete tl_post_handler_function;
-            tl_post_handler_function = nullptr;
+            auto post_handler = std::move(tl_post_handler_function);
+            tl_post_handler_function = {};
+            post_handler();
         }
     }
 
@@ -342,11 +336,8 @@ void Process_message_reader::request_reader_function()
     m_req_running = false;
     m_stop_condition.notify_one();
 
-    // could not use unique_ptr or a static std::function, due to the funny behaviour
-    // of mingw - even if the function object was destroyed here explicitly.
     if (tl_post_handler_function) {
-        delete tl_post_handler_function;
-        tl_post_handler_function = nullptr;
+        tl_post_handler_function = {};
     }
 }
 
