@@ -135,6 +135,8 @@ class TestRunner:
         if parent_dir != self.test_dir and parent_dir.exists():
             candidate_dirs.append(parent_dir)
 
+        print(f"{Color.YELLOW}DEBUG: Candidate directories for CTest discovery: {candidate_dirs}{Color.RESET}")
+
         seen_ctest_files: Set[Path] = set()
         for directory in candidate_dirs:
             ctest_file = directory / 'CTestTestfile.cmake'
@@ -188,9 +190,13 @@ class TestRunner:
                 if 'barrier' not in test_label.lower():
                     continue
 
+                print(f"{Color.YELLOW}DEBUG: Found barrier test: label='{test_label}', token='{executable_token}', directory='{directory}'{Color.RESET}")
+
                 executable_path = Path(executable_token)
                 if not executable_path.is_absolute():
-                    executable_path = (directory / executable_path).resolve()
+                    executable_path = (directory / executable_token).resolve()
+
+                print(f"{Color.YELLOW}DEBUG: Resolved path: {executable_path}, exists: {executable_path.exists()}{Color.RESET}")
 
                 barrier_paths.append(executable_path)
 
@@ -207,6 +213,8 @@ class TestRunner:
         process = None
         try:
             start_time = time.time()
+
+            print(f"{Color.YELLOW}DEBUG: Executing test: {test_path}, exists: {test_path.exists()}, cwd: {test_path.parent}{Color.RESET}")
 
             # Use Popen for better process control
             process = subprocess.Popen(
