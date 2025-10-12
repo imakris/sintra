@@ -82,6 +82,7 @@ int main(int argc, char* argv[])
     if (!is_spawned) {
         sintra::barrier("barrier-stress-done", "_sintra_all_processes");
     }
+
     sintra::finalize();
 
     auto end = std::chrono::steady_clock::now();

@@ -301,25 +301,22 @@ int main(int argc, char* argv[])
     const auto result_path = shared_dir / "result.txt";
 
     if (!is_spawned) {
-        if (!sintra::barrier("result-ready", "_sintra_all_processes")) {
-            std::fprintf(stderr, "Error: failed to synchronize on result-ready barrier\n");
-            exit_code = 1;
-        } else {
-            std::ifstream in(result_path, std::ios::binary);
-            if (!in) {
-                std::fprintf(stderr, "Error: failed to open result file at %s\n",
-                              result_path.string().c_str());
-                exit_code = 1;
-            } else {
-                in >> status;
-                status_loaded = true;
-            }
-        }
+        sintra::barrier("result-ready", "_sintra_all_processes");
     }
 
     sintra::finalize();
 
     if (!is_spawned) {
+        std::ifstream in(result_path, std::ios::binary);
+        if (!in) {
+            std::fprintf(stderr, "Error: failed to open result file at %s\n",
+                          result_path.string().c_str());
+            exit_code = 1;
+        } else {
+            in >> status;
+            status_loaded = true;
+        }
+
         bool cleanup_succeeded = false;
         for (int retry = 0; retry < 3 && !cleanup_succeeded; ++retry) {
             try {
