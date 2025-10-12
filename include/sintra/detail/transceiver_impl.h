@@ -652,9 +652,11 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
     if (RPCTC::may_be_called_directly && is_local_instance(instance_id)) {
         // if the instance is local, then it has already been registered in the instance_map
         // of this particular type. this will only find the object and call it.
-        auto it = get_instance_to_object_map<RPCTC>().find(instance_id);
-        assert(it != get_instance_to_object_map<RPCTC>().end());
-        return (it->second->*RPCTC::mf())(args...);
+        auto& instance_map = get_instance_to_object_map<RPCTC>();
+        auto it = instance_map.find(instance_id);
+        if (it != instance_map.end() && it->second != nullptr) {
+            return (it->second->*RPCTC::mf())(args...);
+        }
     }
 
     using return_type = typename MESSAGE_T::return_type;
