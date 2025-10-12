@@ -1,0 +1,82 @@
+// Barrier Stress Test
+// Attempts to expose race conditions and timing issues in barrier implementation
+
+#include <sintra/sintra.h>
+
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <random>
+#include <thread>
+
+constexpr std::size_t kProcessCount = 4;
+constexpr std::size_t kIterations = 500;  // Many iterations to increase chance of races
+
+std::atomic<int> worker_failures{0};
+std::atomic<int> coordinator_failures{0};
+
+int worker_process(std::uint32_t worker_index)
+{
+    using namespace sintra;
+
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<> delay_dist(0, 5);  // 0-5 microseconds
+
+    try {
+        for (std::uint32_t iter = 0; iter < kIterations; ++iter) {
+            // Add random tiny delay to increase chance of race conditions
+            if (delay_dist(gen) == 0) {
+                std::this_thread::sleep_for(std::chrono::microseconds(1));
+            }
+
+            // Call barrier
+            auto seq = barrier("stress-barrier");
+
+            // Verify sequence is valid (non-zero)
+            if (seq == 0) {
+                std::fprintf(stderr, "Worker %u iter %u: got sequence 0!\n",
+                            worker_index, iter);
+                worker_failures++;
+            }
+        }
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "Worker %u exception: %s\n", worker_index, e.what());
+        return 1;
+    }
+
+    return 0;
+}
+
+int worker0_process() { return worker_process(0); }
+int worker1_process() { return worker_process(1); }
+int worker2_process() { return worker_process(2); }
+int worker3_process() { return worker_process(3); }
+
+int main(int argc, char* argv[])
+{
+    std::vector<sintra::Process_descriptor> processes;
+    processes.emplace_back(worker0_process);
+    processes.emplace_back(worker1_process);
+    processes.emplace_back(worker2_process);
+    processes.emplace_back(worker3_process);
+
+    auto start = std::chrono::steady_clock::now();
+
+    sintra::init(argc, argv, processes);
+    sintra::finalize();
+
+    auto end = std::chrono::steady_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+
+    std::printf("Barrier stress test completed in %lld ms\n", duration.count());
+    std::printf("Worker failures: %d\n", worker_failures.load());
+    std::printf("Coordinator failures: %d\n", coordinator_failures.load());
+
+    if (worker_failures > 0 || coordinator_failures > 0) {
+        std::fprintf(stderr, "TEST FAILED: Detected failures\n");
+        return 1;
+    }
+
+    return 0;
+}
