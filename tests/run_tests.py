@@ -19,9 +19,8 @@ Options:
 """
 
 import argparse
+import json
 import os
-import re
-import shlex
 import subprocess
 import sys
 import time
@@ -126,85 +125,86 @@ class TestRunner:
         return self.test_dir / name
 
     def _discover_barrier_test_paths(self) -> List[Path]:
-        """Locate barrier-related tests by inspecting CTest metadata or filesystem."""
-        barrier_paths: List[Path] = []
-        ctest_pattern = re.compile(r"add_test\((.*?)\)", re.DOTALL)
+        """Locate barrier-related tests using CTest metadata with robust fallbacks."""
 
-        candidate_dirs = [self.test_dir]
-        parent_dir = self.test_dir.parent
-        if parent_dir != self.test_dir and parent_dir.exists():
-            candidate_dirs.append(parent_dir)
+        try:
+            test_dir_resolved = self.test_dir.resolve()
+        except OSError:
+            test_dir_resolved = self.test_dir
 
-        print(f"{Color.YELLOW}DEBUG: Candidate directories for CTest discovery: {candidate_dirs}{Color.RESET}")
+        def resolve_candidate(raw: Path) -> Optional[Path]:
+            if raw.is_absolute():
+                candidate = raw
+            else:
+                candidate = (self.build_dir / raw).resolve()
 
-        seen_ctest_files: Set[Path] = set()
-        for directory in candidate_dirs:
-            ctest_file = directory / 'CTestTestfile.cmake'
-            if not ctest_file.exists() or ctest_file in seen_ctest_files:
-                continue
-            seen_ctest_files.add(ctest_file)
             try:
-                contents = ctest_file.read_text()
-            except OSError as exc:
-                print(f"{Color.YELLOW}Warning: Failed to read {ctest_file}: {exc}{Color.RESET}")
-                continue
+                resolved = candidate.resolve()
+            except OSError:
+                resolved = candidate
 
-            for match in ctest_pattern.finditer(contents):
-                raw_arguments = match.group(1)
+            if resolved.exists() and (resolved == test_dir_resolved or test_dir_resolved in resolved.parents):
+                return resolved
 
-                tokens: List[str] = []
-                cleaned_parts: List[str] = []
-                for line in raw_arguments.splitlines():
-                    stripped = line.split('#', 1)[0].strip()
-                    if stripped:
-                        cleaned_parts.append(stripped)
+            fallback = self.test_dir / candidate.name
+            if fallback.exists():
+                try:
+                    return fallback.resolve()
+                except OSError:
+                    return fallback
+            return None
 
-                if cleaned_parts:
-                    try:
-                        tokens = shlex.split(" ".join(cleaned_parts), posix=True)
-                    except ValueError as exc:
-                        print(f"{Color.YELLOW}Warning: Failed to parse add_test entry in {ctest_file}: {exc}{Color.RESET}")
-                        continue
+        barrier_paths: List[Path] = []
+        seen: Set[Path] = set()
 
-                if not tokens:
+        ctest_cmd = ['ctest', '--show-only=json-v1']
+        if self.config:
+            ctest_cmd.extend(['-C', self.config])
+
+        try:
+            ctest_output = subprocess.run(
+                ctest_cmd,
+                cwd=self.build_dir,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout
+            ctest_info = json.loads(ctest_output)
+        except FileNotFoundError:
+            print(f"{Color.YELLOW}Warning: ctest not found; falling back to filesystem discovery for barrier tests.{Color.RESET}")
+            ctest_info = None
+        except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+            print(f"{Color.YELLOW}Warning: Failed to inspect tests via ctest: {exc}. Using filesystem fallback.{Color.RESET}")
+            ctest_info = None
+
+        if ctest_info:
+            for test_entry in ctest_info.get('tests', []):
+                name = test_entry.get('name', '')
+                command = test_entry.get('command', [])
+                if not command:
                     continue
 
-                test_label: Optional[str] = None
-                executable_token: Optional[str] = None
-
-                upper_tokens = [token.upper() for token in tokens]
-                if "NAME" in upper_tokens and "COMMAND" in upper_tokens:
-                    name_index = upper_tokens.index("NAME")
-                    command_index = upper_tokens.index("COMMAND")
-                    if name_index + 1 < len(tokens):
-                        test_label = tokens[name_index + 1]
-                    if command_index + 1 < len(tokens):
-                        executable_token = tokens[command_index + 1]
-                elif len(tokens) >= 2:
-                    test_label = tokens[0]
-                    executable_token = tokens[1]
-
-                if not test_label or not executable_token:
+                if 'barrier' not in name.lower() and not any('barrier' in str(arg).lower() for arg in command):
                     continue
 
-                if 'barrier' not in test_label.lower():
+                candidate = resolve_candidate(Path(command[0]))
+                if not candidate:
                     continue
 
-                print(f"{Color.YELLOW}DEBUG: Found barrier test: label='{test_label}', token='{executable_token}', directory='{directory}'{Color.RESET}")
+                if candidate not in seen:
+                    barrier_paths.append(candidate)
+                    seen.add(candidate)
 
-                executable_path = Path(executable_token)
-                if not executable_path.is_absolute():
-                    executable_path = (directory / executable_token).resolve()
-
-                print(f"{Color.YELLOW}DEBUG: Resolved path: {executable_path}, exists: {executable_path.exists()}{Color.RESET}")
-
-                barrier_paths.append(executable_path)
-
-        if not barrier_paths and self.test_dir.exists():
-            # Fallback: scan for barrier executables in the test directory
+        if self.test_dir.exists():
             for candidate in self.test_dir.glob('sintra_barrier*_test*'):
                 if candidate.is_file():
-                    barrier_paths.append(candidate)
+                    try:
+                        resolved = candidate.resolve()
+                    except OSError:
+                        resolved = candidate
+                    if resolved not in seen:
+                        barrier_paths.append(candidate)
+                        seen.add(resolved)
 
         return barrier_paths
 
@@ -213,8 +213,6 @@ class TestRunner:
         process = None
         try:
             start_time = time.time()
-
-            print(f"{Color.YELLOW}DEBUG: Executing test: {test_path}, exists: {test_path.exists()}, cwd: {test_path.parent}{Color.RESET}")
 
             # Use Popen for better process control
             process = subprocess.Popen(
