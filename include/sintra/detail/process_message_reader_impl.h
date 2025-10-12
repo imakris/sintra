@@ -213,11 +213,21 @@ void Process_message_reader::request_reader_function()
         // then the barrier is good to go.
         {
             auto reading_sequence = m_in_req_c->get_message_reading_sequence();
-            std::unique_lock<std::mutex> flush_lock(s_mproc->m_flush_sequence_mutex);
-            while (!s_mproc->m_flush_sequence.empty() &&
-                   reading_sequence >= s_mproc->m_flush_sequence.front()) {
-                s_mproc->m_flush_sequence.pop_front();
+            size_t notifications = 0;
+            // Guard all access to the shared flush sequence with the managed process mutex.
+            // Copy the number of pending notifications so we can release the lock before
+            // signalling waiters, keeping the critical section small.
+            {
+                std::unique_lock<std::mutex> flush_lock(s_mproc->m_flush_sequence_mutex);
+                while (!s_mproc->m_flush_sequence.empty() &&
+                       reading_sequence >= s_mproc->m_flush_sequence.front()) {
+                    s_mproc->m_flush_sequence.pop_front();
+                    ++notifications;
+                }
+            }
+            while (notifications > 0) {
                 s_mproc->m_flush_sequence_condition.notify_one();
+                --notifications;
             }
         }
 
