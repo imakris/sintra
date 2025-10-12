@@ -30,6 +30,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "transceiver_impl.h"
 #include <memory>
 #include <cstdio>
+#include <functional>
 #include <utility>
 
 namespace sintra {
@@ -37,6 +38,7 @@ namespace sintra {
 
 using std::thread;
 using std::unique_ptr;
+using std::function;
 
 
 inline bool thread_local tl_is_req_thread = false;
