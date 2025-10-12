@@ -203,6 +203,11 @@ private:
     virtual int no()=0;
 };
 
+template <typename...>
+struct always_false: std::false_type
+{};
+
+
 template <
     typename T,
     bool =
@@ -212,7 +217,11 @@ template <
 >
 struct transformer
 {
-    using type = int; //PORT - THIS LINE IS WRONG
+    static_assert(
+        always_false<T>::value,
+        "Unsupported message argument type. Provide a POD, Sintra_message_element, or variable_buffer-compatible type."
+    );
+    using type = void;
 };
 
 
