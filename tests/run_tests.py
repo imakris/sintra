@@ -219,12 +219,18 @@ class TestRunner:
                 for name in test_names:
                     subprocess.run(
                         ['taskkill', '/F', '/IM', name],
-                        capture_output=True,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
                         timeout=5
                     )
             else:
-                # On Unix, use pkill
-                subprocess.run(['pkill', '-9', 'sintra'], capture_output=True, timeout=5)
+                # On Unix, use pkill. Redirect output to DEVNULL to avoid hanging.
+                subprocess.run(
+                    ['pkill', '-9', 'sintra'],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5
+                )
         except Exception:
             # Ignore errors - processes may not exist
             pass
