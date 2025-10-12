@@ -283,6 +283,16 @@ Transceiver::activate_impl(
 
     auto message_type_id = MESSAGE_T::id();
 
+    using Handler_function = function<typename MESSAGE_T::return_type(const MESSAGE_T&)>;
+    Handler_function normalized_handler(std::forward<HT>(handler));
+
+    auto wrapper_lambda = [handler_fn = std::move(normalized_handler)](const Message_prefix& prefix) mutable
+    {
+        handler_fn(static_cast<const MESSAGE_T&>(prefix));
+    };
+
+    function<void(const Message_prefix&)> wrapper(wrapper_lambda);
+
     lock_guard<recursive_mutex> sl(s_mproc->m_handlers_mutex);
 
     auto& ms  = s_mproc->m_active_handlers[message_type_id];
@@ -293,18 +303,13 @@ Transceiver::activate_impl(
 
         // There was no record for this sender_id, thus we have to make one.
 
-        msm_it = ms.emplace(
-            sender_id,
-            list<function<void(const Message_prefix&)>> {
-                (function<void(const Message_prefix&)>&) handler
-            }
-        ).first;
+        list<function<void(const Message_prefix&)>> handler_list;
+        handler_list.emplace_back(wrapper);
+        msm_it = ms.emplace(sender_id, std::move(handler_list)).first;
         mid_sid_it = msm_it->second.begin();
     }
     else {
-        mid_sid_it = msm_it->second.emplace(msm_it->second.end(),
-            (function<void(const Message_prefix&)>&) handler
-        );
+        mid_sid_it = msm_it->second.emplace(msm_it->second.end(), wrapper);
     }
 
     decltype(m_deactivators)::iterator deactivator_it;
@@ -714,7 +719,7 @@ void Transceiver::rpc_handler(Message_prefix& untyped_msg)
         // The function, in this case, would unlock a mutex (which is the case for
         // the barrier implementation), or something similar.
 
-        deferral* placed_msg = s_mproc->m_out_rep_c->write<deferral>(0, d.first);
+        deferral* placed_msg = s_mproc->m_out_rep_c->write<deferral>(0, d.first.new_fiid);
         finalize_rpc_write(placed_msg, msg, obj, (type_id_type)detail::reserved_id::deferral);
         d.second();
         return;
