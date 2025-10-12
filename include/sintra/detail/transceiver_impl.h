@@ -31,9 +31,11 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <memory>
 #include <cstring>
 #include <string>
+#include <stdexcept>
 
 #include "exception_conversions.h"
 #include "exception_conversions_impl.h"
+#include "process_message_reader.h"
 
 
 namespace sintra {
@@ -574,9 +576,16 @@ void Transceiver::finalize_rpc_write(
     R_MESSAGE_T* placed_rep_msg,
     const MESSAGE_T& req_msg,
     const OBJECT_T* ref_obj,
-    type_id_type ex_tid)
+    type_id_type ex_tid,
+    instance_id_type fallback_sender_iid)
 {
-    finalize_rpc_write(placed_rep_msg, req_msg.sender_instance_id, req_msg.function_instance_id, ref_obj, ex_tid);
+    finalize_rpc_write(
+        placed_rep_msg,
+        req_msg.sender_instance_id,
+        req_msg.function_instance_id,
+        ref_obj,
+        ex_tid,
+        fallback_sender_iid);
 }
 
 template <typename R_MESSAGE_T, typename OBJECT_T>
@@ -585,9 +594,30 @@ void Transceiver::finalize_rpc_write(
     instance_id_type receiver_iid,
     instance_id_type function_iid,
     const OBJECT_T* ref_obj,
-    type_id_type ex_tid)
+    type_id_type ex_tid,
+    instance_id_type fallback_sender_iid)
 {
-    placed_rep_msg->sender_instance_id   = ref_obj->m_instance_id;
+    instance_id_type sender_iid = invalid_instance_id;
+
+    if (ref_obj) {
+        sender_iid = ref_obj->m_instance_id;
+    }
+    else if (fallback_sender_iid != invalid_instance_id) {
+        sender_iid = fallback_sender_iid;
+    }
+    else if (s_tl_current_message) {
+        sender_iid = s_tl_current_message->receiver_instance_id;
+    }
+    else if (s_mproc) {
+        sender_iid = s_mproc->m_instance_id;
+    }
+
+    if (sender_iid == invalid_instance_id) {
+        assert(s_mproc);
+        sender_iid = s_mproc->m_instance_id;
+    }
+
+    placed_rep_msg->sender_instance_id   = sender_iid;
     placed_rep_msg->receiver_instance_id = receiver_iid;
     placed_rep_msg->function_instance_id = function_iid;
     placed_rep_msg->message_type_id      = ex_tid;
@@ -783,7 +813,9 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
         // if the instance is local, then it has already been registered in the instance_map
         // of this particular type. this will only find the object and call it.
         auto it = get_instance_to_object_map<RPCTC>().find(instance_id);
-        assert(it != get_instance_to_object_map<RPCTC>().end());
+        if (it == get_instance_to_object_map<RPCTC>().end()) {
+            throw std::runtime_error("Local RPC target no longer available - it may have been shut down.");
+        }
         auto* object = it->second;
         auto guard = object->try_acquire_rpc_execution();
         if (!guard) {

@@ -421,7 +421,8 @@ public:
         R_MESSAGE_T* placed_rep_msg,
         const MESSAGE_T& req_msg,
         const OBJECT_T* ref_obj,
-        type_id_type ex_tid);
+        type_id_type ex_tid,
+        instance_id_type fallback_sender_iid = invalid_instance_id);
 
 
     // This overload is meant to be directly used in special cases,
@@ -435,7 +436,8 @@ public:
         instance_id_type receiver_iid,
         instance_id_type function_iid,
         const OBJECT_T* ref_obj,
-        type_id_type ex_tid);
+        type_id_type ex_tid,
+        instance_id_type fallback_sender_iid = invalid_instance_id);
 
     //template <
     //    typename RPCTC,
