@@ -103,6 +103,10 @@ int main(int argc, char* argv[])
         world() << Stop();
     }
 
+    // Ensure all processes (including the coordinator) have observed the stop
+    // signal and completed their shutdown work before finalizing Sintra.
+    barrier("example-1-finished", "_sintra_all_processes");
+
     // after finalize() returns, messaging no longer works.
     finalize();
 
