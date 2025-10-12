@@ -1464,39 +1464,41 @@ struct Ring_R : Ring<T, true>
 
         // Transition to sleeping if still no data
         c.lock();
-        m_sleepy_index = -1;
+        m_sleepy_index.store(-1, std::memory_order_relaxed);
         if (m_reading_sequence->load() == c.leading_sequence.load()) {
             // Check for shutdown before registering as sleeping
             if (m_stopping.load(std::memory_order_acquire)) {
                 c.unlock();
                 return Range<T>{};
             }
-            m_sleepy_index = c.ready_stack[--c.num_ready];
-            c.sleeping_stack[c.num_sleeping++] = m_sleepy_index;
+            int sleepy = c.ready_stack[--c.num_ready];
+            m_sleepy_index.store(sleepy, std::memory_order_release);
+            c.sleeping_stack[c.num_sleeping++] = sleepy;
         }
         c.unlock();
 
-        if (m_sleepy_index >= 0) {
+        int sleepy_index = m_sleepy_index.load(std::memory_order_acquire);
+        if (sleepy_index >= 0) {
             // Shutdown could have been signaled after we registered but before waiting.
             if (m_stopping.load(std::memory_order_acquire)) {
                 c.lock();
-                if (m_sleepy_index >= 0) {
-                    c.dirty_semaphores[m_sleepy_index].post_unordered();
+                if (m_sleepy_index.load(std::memory_order_acquire) >= 0) {
+                    c.dirty_semaphores[sleepy_index].post_unordered();
                 }
                 c.unlock();
             }
 
-            if (c.dirty_semaphores[m_sleepy_index].wait()) { // unordered wake
+            if (c.dirty_semaphores[sleepy_index].wait()) { // unordered wake
                 c.lock();
-                c.unordered_stack[c.num_unordered++] = m_sleepy_index;
+                c.unordered_stack[c.num_unordered++] = sleepy_index;
                 c.unlock();
             }
             else {
                 c.lock();
-                c.ready_stack[c.num_ready++] = m_sleepy_index;
+                c.ready_stack[c.num_ready++] = sleepy_index;
                 c.unlock();
             }
-            m_sleepy_index = -1;
+            m_sleepy_index.store(-1, std::memory_order_release);
 
             // Check for shutdown after waking from semaphore
             if (m_stopping.load(std::memory_order_acquire)) {
@@ -1548,8 +1550,9 @@ struct Ring_R : Ring<T, true>
     {
 #if SINTRA_RING_READING_POLICY != SINTRA_RING_READING_POLICY_ALWAYS_SPIN
         c.lock();
-        if (m_sleepy_index >= 0) {
-            c.dirty_semaphores[m_sleepy_index].post_unordered();
+        int sleepy = m_sleepy_index.load(std::memory_order_acquire);
+        if (sleepy >= 0) {
+            c.dirty_semaphores[sleepy].post_unordered();
         }
         c.unlock();
 #endif
@@ -1571,7 +1574,7 @@ protected:
     std::atomic<bool>                   m_reading_lock          = false;
 
 private:
-    int                                 m_sleepy_index          = -1;
+    std::atomic<int>                    m_sleepy_index          = -1;
     int                                 m_rs_index              = -1;
     std::atomic<bool>                   m_stopping              = false;
 
