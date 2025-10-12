@@ -47,6 +47,7 @@ using std::shared_ptr;
 using std::string;
 using std::is_same_v;
 using std::is_base_of_v;
+using std::unique_lock;
 
 
 
@@ -73,6 +74,14 @@ void Transceiver::construct(const string& name/* = ""*/, uint64_t instance_id/* 
         throw runtime_error("Failed to create a Transceiver. Sintra is possibly not initialized.");
     }
 
+    {
+        unique_lock<mutex> lock(m_rpc_lifecycle_mutex);
+        m_accepting_rpc_calls = true;
+        m_active_rpc_calls = 0;
+        m_rpc_shutdown_requested = false;
+        m_rpc_shutdown_complete = false;
+    }
+
     m_instance_id = instance_id ? instance_id : make_instance_id();
 
     if (m_instance_id == invalid_instance_id) {
@@ -95,6 +104,108 @@ void Transceiver::construct(const string& name/* = ""*/, uint64_t instance_id/* 
     */
 }
 
+
+
+inline
+Transceiver::Rpc_execution_guard::Rpc_execution_guard(Transceiver* owner):
+    m_owner(owner)
+{}
+
+
+inline
+Transceiver::Rpc_execution_guard::Rpc_execution_guard(Rpc_execution_guard&& other) noexcept:
+    m_owner(other.m_owner)
+{
+    other.m_owner = nullptr;
+}
+
+
+inline
+Transceiver::Rpc_execution_guard&
+Transceiver::Rpc_execution_guard::operator=(Rpc_execution_guard&& other) noexcept
+{
+    if (this != &other) {
+        if (m_owner) {
+            m_owner->release_rpc_execution();
+        }
+        m_owner = other.m_owner;
+        other.m_owner = nullptr;
+    }
+    return *this;
+}
+
+
+inline
+Transceiver::Rpc_execution_guard::~Rpc_execution_guard()
+{
+    if (m_owner) {
+        m_owner->release_rpc_execution();
+    }
+}
+
+
+inline
+Transceiver::Rpc_execution_guard
+Transceiver::try_acquire_rpc_execution()
+{
+    unique_lock<mutex> lock(m_rpc_lifecycle_mutex);
+    if (!m_accepting_rpc_calls) {
+        return {};
+    }
+
+    ++m_active_rpc_calls;
+    return Rpc_execution_guard(this);
+}
+
+
+inline
+void
+Transceiver::release_rpc_execution()
+{
+    unique_lock<mutex> lock(m_rpc_lifecycle_mutex);
+    assert(m_active_rpc_calls);
+
+    --m_active_rpc_calls;
+    const bool should_notify = m_rpc_shutdown_requested && m_active_rpc_calls == 0;
+
+    lock.unlock();
+
+    if (should_notify) {
+        m_rpc_lifecycle_condition.notify_all();
+    }
+}
+
+
+inline
+void
+Transceiver::stop_accepting_rpc_calls_and_wait()
+{
+    ensure_rpc_shutdown();
+}
+
+
+inline
+void
+Transceiver::ensure_rpc_shutdown()
+{
+    unique_lock<mutex> lock(m_rpc_lifecycle_mutex);
+
+    if (m_rpc_shutdown_complete) {
+        return;
+    }
+
+    if (!m_rpc_shutdown_requested) {
+        m_rpc_shutdown_requested = true;
+        m_accepting_rpc_calls = false;
+        m_rpc_lifecycle_condition.wait(lock, [&]() { return m_active_rpc_calls == 0; });
+        m_rpc_shutdown_complete = true;
+        lock.unlock();
+        m_rpc_lifecycle_condition.notify_all();
+        return;
+    }
+
+    m_rpc_lifecycle_condition.wait(lock, [&]() { return m_rpc_shutdown_complete; });
+}
 
 
 template <typename/* = void*/>
@@ -126,6 +237,8 @@ void Transceiver::destroy()
         // itself being destroyed.
         return;
     }
+
+    stop_accepting_rpc_calls_and_wait();
 
     if (this != s_mproc) {
         deactivate_all();
@@ -514,7 +627,35 @@ void Transceiver::rpc_handler(Message_prefix& untyped_msg)
     using r_type = typename unvoid<typename RPCTC::r_type>::type;
 
     MESSAGE_T& msg = (MESSAGE_T&)untyped_msg;
-    typename RPCTC::o_type* obj = get_instance_to_object_map<RPCTC>()[untyped_msg.receiver_instance_id];
+    auto& instance_map = get_instance_to_object_map<RPCTC>();
+    typename RPCTC::o_type* obj = nullptr;
+
+    if (auto it = instance_map.find(untyped_msg.receiver_instance_id);
+        it != instance_map.end())
+    {
+        obj = it->second;
+    }
+
+    auto send_unavailable_response = [&](const std::string& reason)
+    {
+        auto* placed_msg = s_mproc->m_out_rep_c->write<exception>(vb_size(reason), reason);
+        placed_msg->sender_instance_id = untyped_msg.receiver_instance_id;
+        placed_msg->receiver_instance_id = msg.sender_instance_id;
+        placed_msg->function_instance_id = msg.function_instance_id;
+        placed_msg->exception_type_id = (type_id_type)detail::reserved_id::std_runtime_error;
+        s_mproc->m_out_rep_c->done_writing();
+    };
+
+    if (!obj) {
+        send_unavailable_response("RPC target is no longer available.");
+        return;
+    }
+
+    auto execution_guard = obj->try_acquire_rpc_execution();
+    if (!execution_guard) {
+        send_unavailable_response("RPC target is shutting down.");
+        return;
+    }
     using return_message_type = Message<Enclosure<r_type>, void, not_defined_type_id>;
     static auto once = return_message_type::id();
     (void)(once); // suppress unused variable warning
@@ -654,7 +795,12 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
         // of this particular type. this will only find the object and call it.
         auto it = get_instance_to_object_map<RPCTC>().find(instance_id);
         assert(it != get_instance_to_object_map<RPCTC>().end());
-        return (it->second->*RPCTC::mf())(args...);
+        auto* object = it->second;
+        auto guard = object->try_acquire_rpc_execution();
+        if (!guard) {
+            throw std::runtime_error("Attempted to call an RPC on a target that is shutting down.");
+        }
+        return (object->*RPCTC::mf())(args...);
     }
 
     using return_type = typename MESSAGE_T::return_type;
@@ -814,7 +960,10 @@ Transceiver::export_rpc_impl()
     warn_about_reference_return<typename RPCTC::r_type>();
     warn_about_reference_args<MT>();
 
-    get_instance_to_object_map<RPCTC>()[m_instance_id] = static_cast<typename RPCTC::o_type*>(this);
+    auto* self = static_cast<typename RPCTC::o_type*>(this);
+    const auto instance_id = m_instance_id;
+
+    get_instance_to_object_map<RPCTC>()[instance_id] = self;
 
     uint64_t test = MT::id();
 
@@ -824,7 +973,10 @@ Transceiver::export_rpc_impl()
         &RPCTC_o_type::template rpc_handler<RPCTC, MT>;
     (void)(once); // suppress unused variable warning
 
-    return [&] () {get_instance_to_object_map<RPCTC>().erase(m_instance_id); };
+    return [self, instance_id]() {
+        self->ensure_rpc_shutdown();
+        get_instance_to_object_map<RPCTC>().erase(instance_id);
+    };
 }
 
 

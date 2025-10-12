@@ -570,6 +570,29 @@ public:
 
 private:
 
+    class Rpc_execution_guard
+    {
+    public:
+        Rpc_execution_guard() = default;
+        explicit Rpc_execution_guard(Transceiver* owner);
+        Rpc_execution_guard(Rpc_execution_guard&& other) noexcept;
+        Rpc_execution_guard& operator=(Rpc_execution_guard&& other) noexcept;
+        ~Rpc_execution_guard();
+
+        explicit operator bool() const { return m_owner != nullptr; }
+
+    private:
+        Rpc_execution_guard(const Rpc_execution_guard&) = delete;
+        Rpc_execution_guard& operator=(const Rpc_execution_guard&) = delete;
+
+        Transceiver* m_owner = nullptr;
+    };
+
+    Rpc_execution_guard try_acquire_rpc_execution();
+    void release_rpc_execution();
+    void stop_accepting_rpc_calls_and_wait();
+    void ensure_rpc_shutdown();
+
     // Handlers of return messages (i.e. messages delivering the results of function messages).
     // Note that the key is an instance_id_type, rather than a type_id_type.
     // Those message handlers identify with particular function message invocations, and their
@@ -577,6 +600,13 @@ private:
     // They are assigned in pairs, to handle successful and failed calls.
     mutex m_return_handlers_mutex;
     unordered_map<instance_id_type, Return_handler> m_active_return_handlers;
+
+    mutex               m_rpc_lifecycle_mutex;
+    condition_variable  m_rpc_lifecycle_condition;
+    size_t              m_active_rpc_calls = 0;
+    bool                m_accepting_rpc_calls = true;
+    bool                m_rpc_shutdown_requested = false;
+    bool                m_rpc_shutdown_complete = false;
 
 
     instance_id_type            m_instance_id       = invalid_instance_id;
