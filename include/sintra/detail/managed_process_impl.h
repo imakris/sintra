@@ -107,10 +107,10 @@ namespace {
         return pipefd;
     }
 
-    inline bool& signal_dispatcher_started()
+    inline std::once_flag& signal_dispatcher_once_flag()
     {
-        static bool started = false;
-        return started;
+        static std::once_flag flag;
+        return flag;
     }
 
     inline void signal_dispatch_loop()
@@ -152,26 +152,23 @@ namespace {
 
     inline void ensure_signal_dispatcher()
     {
-        if (signal_dispatcher_started()) {
-            return;
-        }
+        std::call_once(signal_dispatcher_once_flag(), []() {
+            int pipefd_local[2];
+            if (::pipe(pipefd_local) != 0) {
+                return;
+            }
 
-        int pipefd_local[2];
-        if (::pipe(pipefd_local) != 0) {
-            return;
-        }
+            int flags = ::fcntl(pipefd_local[1], F_GETFL, 0);
+            if (flags != -1) {
+                ::fcntl(pipefd_local[1], F_SETFL, flags | O_NONBLOCK);
+            }
 
-        int flags = ::fcntl(pipefd_local[1], F_GETFL, 0);
-        if (flags != -1) {
-            ::fcntl(pipefd_local[1], F_SETFL, flags | O_NONBLOCK);
-        }
+            auto& pipefd = signal_pipe();
+            pipefd[0] = pipefd_local[0];
+            pipefd[1] = pipefd_local[1];
 
-        auto& pipefd = signal_pipe();
-        pipefd[0] = pipefd_local[0];
-        pipefd[1] = pipefd_local[1];
-
-        std::thread(signal_dispatch_loop).detach();
-        signal_dispatcher_started() = true;
+            std::thread(signal_dispatch_loop).detach();
+        });
     }
 #endif
 
@@ -431,6 +428,19 @@ Managed_process::~Managed_process()
         // removes the swarm directory
         remove_directory(m_directory);
     }
+
+#ifndef _WIN32
+    // Close the signal dispatch pipe to allow the dispatch thread to exit cleanly
+    auto& pipefd = signal_pipe();
+    if (pipefd[1] != -1) {
+        ::close(pipefd[1]);
+        pipefd[1] = -1;
+    }
+    if (pipefd[0] != -1) {
+        ::close(pipefd[0]);
+        pipefd[0] = -1;
+    }
+#endif
 
     s_mproc = nullptr;
     s_mproc_id = 0;
