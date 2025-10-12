@@ -141,6 +141,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <filesystem>
 #include <functional>
 #include <limits>
+#include <memory>
 #include <mutex>         // std::once_flag, std::call_once
 #include <stdexcept>
 #include <string>
@@ -692,30 +693,37 @@ private:
             ::VirtualFree(mem, 0, MEM_RELEASE);
 
             // Map twice back-to-back at the chosen address.
-            m_data_region_0 = new ipc::mapped_region(file, data_rights, 0,
-                m_data_region_size, ptr, map_extra_options);
-            m_data_region_1 = new ipc::mapped_region(file, data_rights, 0,
-                0, ((char*)m_data_region_0->get_address()) + m_data_region_size, map_extra_options);
-            m_data = (T*)m_data_region_0->get_address();
+            std::unique_ptr<ipc::mapped_region> region0;
+            std::unique_ptr<ipc::mapped_region> region1;
+            try {
+                region0.reset(new ipc::mapped_region(file, data_rights, 0,
+                    m_data_region_size, ptr, map_extra_options));
+                region1.reset(new ipc::mapped_region(file, data_rights, 0,
+                    0, ((char*)region0->get_address()) + m_data_region_size, map_extra_options));
+            }
+            catch (...) {
+                return false;
+            }
 
             // Basic sanity checks (compile-time asserts are not practical here).
 #ifndef NDEBUG
-            assert(m_data_region_0->get_address() == ptr);
-            assert(m_data_region_1->get_address() == ptr + m_data_region_size);
-            assert(m_data_region_0->get_size() == m_data_region_size);
-            assert(m_data_region_1->get_size() == m_data_region_size);
+            assert(region0->get_address() == ptr);
+            assert(region1->get_address() == ptr + m_data_region_size);
+            assert(region0->get_size() == m_data_region_size);
+            assert(region1->get_size() == m_data_region_size);
 #else
-            if (m_data_region_0->get_address() != ptr ||
-                m_data_region_1->get_address() != (ptr + m_data_region_size) ||
-                m_data_region_0->get_size() != m_data_region_size ||
-                m_data_region_1->get_size() != m_data_region_size)
+            if (region0->get_address() != ptr ||
+                region1->get_address() != (ptr + m_data_region_size) ||
+                region0->get_size() != m_data_region_size ||
+                region1->get_size() != m_data_region_size)
             {
-                delete m_data_region_0; m_data_region_0 = nullptr;
-                delete m_data_region_1; m_data_region_1 = nullptr;
-                m_data = nullptr;
                 return false;
             }
 #endif
+
+            m_data_region_0 = region0.release();
+            m_data_region_1 = region1.release();
+            m_data = (T*)m_data_region_0->get_address();
 
 #else
             // ── POSIX/Linux path ───────────────────────────────────────────────
@@ -748,15 +756,30 @@ private:
                 m_data = (T*)m_data_region_0->get_address();
 
                 // Sanity — the two mappings must be exactly adjacent.
+#ifndef NDEBUG
                 assert(m_data_region_0->get_address() == ptr);
                 assert(m_data_region_1->get_address() == ptr + m_data_region_size);
                 assert(m_data_region_0->get_size() == m_data_region_size);
                 assert(m_data_region_1->get_size() == m_data_region_size);
+#else
+                if (m_data_region_0->get_address() != ptr ||
+                    m_data_region_1->get_address() != ptr + m_data_region_size ||
+                    m_data_region_0->get_size() != m_data_region_size ||
+                    m_data_region_1->get_size() != m_data_region_size)
+                {
+                    delete m_data_region_0; m_data_region_0 = nullptr;
+                    delete m_data_region_1; m_data_region_1 = nullptr;
+                    m_data = nullptr;
+                    ::munmap(mem, m_data_region_size * 2);
+                    return false;
+                }
+#endif
             }
             catch (...) {
                 // IMPORTANT: unmap the whole reserved span on ANY failure.
                 if (m_data_region_0) { delete m_data_region_0; m_data_region_0 = nullptr; }
                 if (m_data_region_1) { delete m_data_region_1; m_data_region_1 = nullptr; }
+                m_data = nullptr;
                 ::munmap(mem, m_data_region_size * 2);
                 return false;
             }
