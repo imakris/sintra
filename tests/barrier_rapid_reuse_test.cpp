@@ -73,6 +73,7 @@ int main(int argc, char* argv[])
     if (!is_spawned) {
         sintra::barrier("barrier-rapid-reuse-done", "_sintra_all_processes");
     }
+
     sintra::finalize();
 
     std::printf("Barrier rapid reuse test completed\n");
