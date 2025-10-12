@@ -269,7 +269,7 @@ struct Managed_process: Derived_transceiver<Managed_process>
     int                                 m_num_active_readers = 0;
     mutex                               m_num_active_readers_mutex;
     condition_variable                  m_num_active_readers_condition;
-    void wait_until_all_external_readers_are_done();
+    void wait_until_all_external_readers_are_done(int extra_allowed_readers = 0);
 
     void flush(instance_id_type process_id, sequence_counter_type flush_sequence);
 
