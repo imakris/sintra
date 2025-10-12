@@ -24,7 +24,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import List, Tuple, Optional, Set
+from typing import List, Tuple, Optional
 
 class Color:
     """ANSI color codes for terminal output"""
@@ -77,7 +77,7 @@ class TestRunner:
             print(f"{Color.RED}Test directory not found: {self.test_dir}{Color.RESET}")
             return []
 
-        # Simple list of test names
+        # List of test executables to run
         test_names = [
             'sintra_basic_pubsub_test',
             'sintra_ping_pong_test',
@@ -102,6 +102,8 @@ class TestRunner:
 
             if test_path.exists():
                 tests.append(test_path)
+            else:
+                print(f"{Color.YELLOW}Warning: Test not found: {test_path}{Color.RESET}")
 
         return tests
 
@@ -112,13 +114,12 @@ class TestRunner:
             start_time = time.time()
 
             # Use Popen for better process control
-            # NOTE: Don't set cwd - use the build directory like CTest does
             process = subprocess.Popen(
                 [str(test_path)],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                cwd=self.build_dir
+                cwd=test_path.parent
             )
 
             # Wait with timeout
@@ -191,21 +192,15 @@ class TestRunner:
         """Kill all existing sintra processes to ensure clean start"""
         try:
             if sys.platform == 'win32':
-                process_names: Set[str] = set()
-                if self.test_dir.exists():
-                    for exe in self.test_dir.glob('sintra_*_test.exe'):
-                        process_names.add(exe.name)
-                if not process_names:
-                    process_names.update({
-                        'sintra_basic_pubsub_test.exe',
-                        'sintra_ping_pong_test.exe',
-                        'sintra_ping_pong_multi_test.exe',
-                        'sintra_rpc_append_test.exe',
-                        'sintra_recovery_test.exe',
-                        'sintra_barrier_flush_test.exe',
-                    })
-
-                for name in sorted(process_names):
+                # Kill all sintra test processes
+                test_names = [
+                    'sintra_basic_pubsub_test.exe',
+                    'sintra_ping_pong_test.exe',
+                    'sintra_ping_pong_multi_test.exe',
+                    'sintra_rpc_append_test.exe',
+                    'sintra_recovery_test.exe',
+                ]
+                for name in test_names:
                     subprocess.run(
                         ['taskkill', '/F', '/IM', name],
                         capture_output=True,
