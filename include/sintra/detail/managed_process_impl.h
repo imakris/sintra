@@ -33,8 +33,12 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <chrono>
 #include <csignal>
 #include <mutex>
+#include <thread>
 #ifndef _WIN32
 #include <signal.h>
+#include <cerrno>
+#include <fcntl.h>
+#include <unistd.h>
 #endif
 
 #include <boost/type_index/ctti_type_index.hpp>
@@ -96,6 +100,79 @@ namespace {
         static bool installed = false;
         return installed;
     }
+
+    inline int (&signal_pipe())[2]
+    {
+        static int pipefd[2] = {-1, -1};
+        return pipefd;
+    }
+
+    inline bool& signal_dispatcher_started()
+    {
+        static bool started = false;
+        return started;
+    }
+
+    inline void signal_dispatch_loop()
+    {
+        auto& pipefd = signal_pipe();
+
+        while (true) {
+            int sig_number = 0;
+            ssize_t bytes_read = ::read(pipefd[0], &sig_number, sizeof(sig_number));
+
+            if (bytes_read == sizeof(sig_number)) {
+                auto* mproc = s_mproc;
+                if (mproc && mproc->m_out_req_c) {
+                    mproc->emit_remote<Managed_process::terminated_abnormally>(sig_number);
+
+                    for (auto& reader : mproc->m_readers) {
+                        reader.second.stop_nowait();
+                    }
+                }
+                continue;
+            }
+
+            if (bytes_read == -1) {
+                if (errno == EINTR) {
+                    continue;
+                }
+
+                if (errno == EAGAIN) {
+                    std::this_thread::yield();
+                    continue;
+                }
+            }
+
+            // Either the write end was closed (bytes_read == 0) or an unrecoverable
+            // error occurred. Exit the loop to allow the thread to finish.
+            break;
+        }
+    }
+
+    inline void ensure_signal_dispatcher()
+    {
+        if (signal_dispatcher_started()) {
+            return;
+        }
+
+        int pipefd_local[2];
+        if (::pipe(pipefd_local) != 0) {
+            return;
+        }
+
+        int flags = ::fcntl(pipefd_local[1], F_GETFL, 0);
+        if (flags != -1) {
+            ::fcntl(pipefd_local[1], F_SETFL, flags | O_NONBLOCK);
+        }
+
+        auto& pipefd = signal_pipe();
+        pipefd[0] = pipefd_local[0];
+        pipefd[1] = pipefd_local[1];
+
+        std::thread(signal_dispatch_loop).detach();
+        signal_dispatcher_started() = true;
+    }
 #endif
 
     inline signal_slot* find_slot(std::array<signal_slot, 6>& slots, int sig)
@@ -116,6 +193,7 @@ static void s_signal_handler(int sig)
 {
     auto& slots = signal_slots();
 
+#ifdef _WIN32
     if (s_mproc && s_mproc->m_out_req_c) {
         s_mproc->emit_remote<Managed_process::terminated_abnormally>(sig);
 
@@ -123,6 +201,14 @@ static void s_signal_handler(int sig)
             reader.second.stop_nowait();
         }
     }
+#else
+    auto& pipefd = signal_pipe();
+    if (pipefd[1] != -1) {
+        int sig_number = sig;
+        ssize_t result = ::write(pipefd[1], &sig_number, sizeof(sig_number));
+        (void)result;
+    }
+#endif
 
 #ifdef _WIN32
     if (auto* slot = find_slot(slots, sig); slot && slot->has_previous) {
@@ -209,6 +295,8 @@ void install_signal_handler()
                 installed = true;
             }
         }
+
+        ensure_signal_dispatcher();
 
         for (auto& slot : slots) {
             struct sigaction sa {};
