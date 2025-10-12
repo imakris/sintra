@@ -495,9 +495,17 @@ Managed_process::Managed_process():
 inline
 Managed_process::~Managed_process()
 {
-    // the coordinating process will be removing its readers whenever
-    // they are unpublished - when they are all done, the process may exit
+    // The coordinating process will be removing its readers whenever
+    // they are unpublished - when they are all done, the process may exit.
+    //
+    // Previously we waited for readers to report completion before asking
+    // them to stop.  On Linux this could deadlock during shutdown because
+    // the reader threads were still blocked on their rings, so the
+    // m_num_active_readers counter never reached the expected value and the
+    // destructor blocked forever.  Stop the readers first so they can wake
+    // up, decrement the counter and unblock the wait.
     if (s_coord) {
+        stop();
         wait_until_all_external_readers_are_done();
     }
 
