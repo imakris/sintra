@@ -1165,13 +1165,14 @@ function<void()> Managed_process::call_on_availability(Named_instance<T> transce
     // and this is the actual call, which besides calling f, also neutralizes the
     // returned abort calls and marks this entry as completed.
     *f_it = [this, f, ret, mark_completed]() mutable {
-        std::unique_lock<std::mutex> lock(m_availability_mutex, std::defer_lock);
-        bool owns_lock = lock.try_lock();
-        bool completed = mark_completed(false);
-        if (owns_lock) {
-            lock.unlock();
+        bool completed = false;
+        {
+            std::lock_guard<std::mutex> lock(m_availability_mutex);
+            completed = mark_completed(false);
         }
-
+        // Release the mutex before invoking the callback so user code can
+        // safely register additional availability handlers without
+        // encountering recursive locking.
         if (!completed) {
             return;
         }
