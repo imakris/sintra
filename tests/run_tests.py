@@ -15,7 +15,7 @@ Options:
     --build-dir PATH                Path to build directory (default: ../build-ninja2)
     --config CONFIG                 Build configuration Debug/Release (default: Debug)
     --verbose                       Show detailed output for each test run
-    --abort_on_stalled_processes    Abort test run instead of killing stalled processes (for debugging)
+    --kill_stalled_processes        Kill stalled processes instead of aborting (default: abort)
 """
 
 import argparse
@@ -52,12 +52,12 @@ class TestResult:
 class TestRunner:
     """Manages test execution with timeout and repetition"""
 
-    def __init__(self, build_dir: Path, config: str, timeout: float, verbose: bool, abort_on_stall: bool = False):
+    def __init__(self, build_dir: Path, config: str, timeout: float, verbose: bool, kill_on_stall: bool = False):
         self.build_dir = build_dir
         self.config = config
         self.timeout = timeout
         self.verbose = verbose
-        self.abort_on_stall = abort_on_stall
+        self.kill_on_stall = kill_on_stall
 
         # Determine test directory - check both with and without config subdirectory
         test_dir_with_config = build_dir / 'tests' / config
@@ -134,13 +134,13 @@ class TestRunner:
             except subprocess.TimeoutExpired:
                 duration = self.timeout
 
-                if self.abort_on_stall:
-                    # Abort without killing - leave process running for debugging
+                if not self.kill_on_stall:
+                    # Abort without killing - leave process running for debugging (default behavior)
                     print(f"\n{Color.RED}Process stalled (PID {process.pid}). Aborting test run for debugging.{Color.RESET}")
                     print(f"{Color.YELLOW}Attach debugger to PID {process.pid} to investigate.{Color.RESET}")
                     sys.exit(2)
 
-                # Kill the process tree on timeout
+                # Kill the process tree on timeout (only if --kill_stalled_processes was specified)
                 self._kill_process_tree(process.pid)
 
                 # Try to get any output
@@ -331,8 +331,8 @@ def main():
                         help='Show detailed output for each test run')
     parser.add_argument('--adaptive', action='store_true',
                         help='Use adaptive soak test with exponential batches and early stopping')
-    parser.add_argument('--abort_on_stalled_processes', action='store_true',
-                        help='Abort test run instead of killing stalled processes (for debugging)')
+    parser.add_argument('--kill_stalled_processes', action='store_true',
+                        help='Kill stalled processes instead of aborting (default: abort for debugging)')
 
     args = parser.parse_args()
 
@@ -352,7 +352,7 @@ def main():
     print(f"Timeout per test: {args.timeout}s")
     print("=" * 70)
 
-    runner = TestRunner(build_dir, args.config, args.timeout, args.verbose, args.abort_on_stalled_processes)
+    runner = TestRunner(build_dir, args.config, args.timeout, args.verbose, args.kill_stalled_processes)
     tests = runner.find_tests(args.test)
 
     if not tests:
