@@ -72,8 +72,11 @@ void Process_message_reader::wait_until_ready()
 {
     std::unique_lock<std::mutex> lk(m_ready_mutex);
     m_ready_condition.wait(lk, [&]() {
-        return m_req_running.load(std::memory_order_acquire) &&
-               m_rep_running.load(std::memory_order_acquire);
+        const bool req_started = m_req_running.load(std::memory_order_acquire);
+        const bool rep_started = m_rep_running.load(std::memory_order_acquire);
+        const bool stopping =
+            m_reader_state.load(std::memory_order_acquire) == READER_STOPPING;
+        return (req_started && rep_started) || stopping;
     });
 }
 
@@ -81,8 +84,9 @@ void Process_message_reader::wait_until_ready()
 
 inline
 void Process_message_reader::stop_nowait()
-{    
-    m_reader_state = READER_STOPPING;
+{
+    m_reader_state.store(READER_STOPPING, std::memory_order_release);
+    m_ready_condition.notify_all();
 
     m_in_req_c->done_reading();
     m_in_req_c->request_stop();
@@ -344,16 +348,19 @@ void Process_message_reader::request_reader_function()
     s_mproc->m_num_active_readers_mutex.unlock();
     s_mproc->m_num_active_readers_condition.notify_all();
 
-    std::lock(m_stop_mutex, m_ready_mutex);
-    std::lock_guard<std::mutex> stop_lock(m_stop_mutex, std::adopt_lock);
-    std::lock_guard<std::mutex> ready_lock(m_ready_mutex, std::adopt_lock);
     if (m_reader_state == READER_STOPPING) {
         std::fprintf(stderr, "request_reader_function(pid=%llu) exiting normally after stop.\n",
             static_cast<unsigned long long>(m_process_instance_id));
     }
-    m_req_running.store(false, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> ready_lock(m_ready_mutex);
+        m_req_running.store(false, std::memory_order_release);
+    }
     m_ready_condition.notify_all();
-    m_stop_condition.notify_one();
+    {
+        std::lock_guard<std::mutex> stop_lock(m_stop_mutex);
+        m_stop_condition.notify_one();
+    }
 
     // could not use unique_ptr or a static std::function, due to the funny behaviour
     // of mingw - even if the function object was destroyed here explicitly.
@@ -455,12 +462,15 @@ void Process_message_reader::reply_reader_function()
     s_mproc->m_num_active_readers_mutex.unlock();
     s_mproc->m_num_active_readers_condition.notify_all();
 
-    std::lock(m_stop_mutex, m_ready_mutex);
-    std::lock_guard<std::mutex> stop_lock(m_stop_mutex, std::adopt_lock);
-    std::lock_guard<std::mutex> ready_lock(m_ready_mutex, std::adopt_lock);
-    m_rep_running.store(false, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> ready_lock(m_ready_mutex);
+        m_rep_running.store(false, std::memory_order_release);
+    }
     m_ready_condition.notify_all();
-    m_stop_condition.notify_one();
+    {
+        std::lock_guard<std::mutex> stop_lock(m_stop_mutex);
+        m_stop_condition.notify_one();
+    }
 }
 
 
