@@ -74,6 +74,12 @@ int main(int argc, char* argv[])
 {
     init(argc, argv, process_1, process_2, process_3);
 
+    // Wait for every process (including the coordinator) to finish before tearing
+    // down the Sintra runtime.  Without this rendezvous the coordinator could
+    // finalize while workers are still completing their startup handshake,
+    // leaving them blocked on RPCs that will never be serviced.
+    barrier("example-0-finished", "_sintra_all_processes");
+
     // when finalize() returns, messaging will no longer work.
     finalize();
 

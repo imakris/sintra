@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstdio>
 #include <random>
+#include <string_view>
 #include <thread>
 
 constexpr std::size_t kProcessCount = 4;
@@ -14,6 +15,16 @@ constexpr std::size_t kIterations = 500;  // Many iterations to increase chance 
 
 std::atomic<int> worker_failures{0};
 std::atomic<int> coordinator_failures{0};
+
+bool has_branch_flag(int argc, char* argv[])
+{
+    for (int i = 0; i < argc; ++i) {
+        if (std::string_view(argv[i]) == "--branch_index") {
+            return true;
+        }
+    }
+    return false;
+}
 
 int worker_process(std::uint32_t worker_index)
 {
@@ -45,6 +56,7 @@ int worker_process(std::uint32_t worker_index)
         return 1;
     }
 
+    sintra::barrier("barrier-stress-done", "_sintra_all_processes");
     return 0;
 }
 
@@ -55,6 +67,8 @@ int worker3_process() { return worker_process(3); }
 
 int main(int argc, char* argv[])
 {
+    const bool is_spawned = has_branch_flag(argc, argv);
+
     std::vector<sintra::Process_descriptor> processes;
     processes.emplace_back(worker0_process);
     processes.emplace_back(worker1_process);
@@ -64,6 +78,10 @@ int main(int argc, char* argv[])
     auto start = std::chrono::steady_clock::now();
 
     sintra::init(argc, argv, processes);
+
+    if (!is_spawned) {
+        sintra::barrier("barrier-stress-done", "_sintra_all_processes");
+    }
     sintra::finalize();
 
     auto end = std::chrono::steady_clock::now();
