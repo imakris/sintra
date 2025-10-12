@@ -96,6 +96,12 @@ int worker1_process()
 int main(int argc, char* argv[])
 {
     sintra::init(argc, argv, coordinator_process, worker0_process, worker1_process);
+
+    // Keep the coordinator alive until every worker has completed the final
+    // synchronization round.  This mirrors the behaviour exercised in the
+    // associated test suite and prevents premature shutdowns.
+    sintra::barrier("example-5-finished", "_sintra_all_processes");
+
     sintra::finalize();
     return 0;
 }

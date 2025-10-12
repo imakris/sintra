@@ -5,8 +5,12 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <cstdint>
 #include <cstdio>
+#include <mutex>
 #include <random>
+#include <string_view>
 #include <thread>
 
 constexpr std::size_t kProcessCount = 4;
@@ -14,6 +18,21 @@ constexpr std::size_t kIterations = 500;  // Many iterations to increase chance 
 
 std::atomic<int> worker_failures{0};
 std::atomic<int> coordinator_failures{0};
+
+struct Worker_done
+{
+    std::uint32_t worker_index;
+};
+
+bool has_branch_flag(int argc, char* argv[])
+{
+    for (int i = 0; i < argc; ++i) {
+        if (std::string_view(argv[i]) == "--branch_index") {
+            return true;
+        }
+    }
+    return false;
+}
 
 int worker_process(std::uint32_t worker_index)
 {
@@ -45,6 +64,7 @@ int worker_process(std::uint32_t worker_index)
         return 1;
     }
 
+    sintra::world() << Worker_done{worker_index};
     return 0;
 }
 
@@ -55,6 +75,8 @@ int worker3_process() { return worker_process(3); }
 
 int main(int argc, char* argv[])
 {
+    const bool is_spawned = has_branch_flag(argc, argv);
+
     std::vector<sintra::Process_descriptor> processes;
     processes.emplace_back(worker0_process);
     processes.emplace_back(worker1_process);
@@ -64,6 +86,42 @@ int main(int argc, char* argv[])
     auto start = std::chrono::steady_clock::now();
 
     sintra::init(argc, argv, processes);
+
+    if (!is_spawned) {
+        std::mutex completion_mutex;
+        std::condition_variable completion_cv;
+        std::size_t completed_workers = 0;
+        bool timed_out = false;
+
+        [[maybe_unused]] auto guard = sintra::activate_slot(
+            [&](const Worker_done&) {
+                std::lock_guard<std::mutex> lock(completion_mutex);
+                ++completed_workers;
+                if (completed_workers >= kProcessCount) {
+                    completion_cv.notify_one();
+                }
+            });
+
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+        std::unique_lock<std::mutex> lock(completion_mutex);
+        if (!completion_cv.wait_until(
+                lock,
+                deadline,
+                [&] { return completed_workers >= kProcessCount; })) {
+            timed_out = true;
+            std::fprintf(stderr, "Coordinator timed out waiting for workers to finish\n");
+            coordinator_failures.fetch_add(1, std::memory_order_relaxed);
+        }
+        lock.unlock();
+
+        sintra::deactivate_all_slots();
+
+        if (timed_out) {
+            sintra::finalize();
+            return 1;
+        }
+    }
+
     sintra::finalize();
 
     auto end = std::chrono::steady_clock::now();
