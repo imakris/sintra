@@ -34,8 +34,6 @@ int process_1()
 
     barrier("2nd barrier"); // ensures that the messages have been received and processed
 
-    barrier("example-0-finished", "_sintra_all_processes");
-
     return 0;
 }
 
@@ -50,8 +48,6 @@ int process_2()
 
     barrier("1st barrier"); // ensures that the slots receiving the messages have been activated.
     barrier("2nd barrier"); // ensures that the messages have been received and processed
-
-    barrier("example-0-finished", "_sintra_all_processes");
 
     return 0;
 }
@@ -68,8 +64,6 @@ int process_3()
 
     barrier("1st barrier"); // ensures that the slots receiving the messages have been activated.
     barrier("2nd barrier"); // ensures that the messages have been received and processed
-
-    barrier("example-0-finished", "_sintra_all_processes");
 
     return 0;
 }
