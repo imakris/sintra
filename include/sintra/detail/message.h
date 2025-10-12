@@ -353,6 +353,12 @@ struct Message: public Message_prefix, public T
     using exporter = EXPORTER;
 
 
+    Message(const Message&) = default;
+    Message(Message&&) = default;
+    Message& operator=(const Message&) = default;
+    Message& operator=(Message&&) = default;
+
+
     static type_id_type id()
     {
         static type_id_type tid = ID ? make_type_id(ID) : get_type_id<Message>();
