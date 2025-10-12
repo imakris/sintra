@@ -158,7 +158,7 @@ class TestRunner:
                     success=False,
                     duration=duration,
                     output=stdout,
-                    error=f"Test timed out after {self.timeout}s\n{stderr}"
+                    error=f"Test timed out after {self.timeout}s and was terminated.\n{stderr}"
                 )
 
         except Exception as e:
@@ -174,10 +174,12 @@ class TestRunner:
         """Kill a process and all its children"""
         try:
             if sys.platform == 'win32':
-                # On Windows, use taskkill to kill process tree
+                # On Windows, use taskkill to kill process tree.
+                # Redirect output to DEVNULL to avoid hanging.
                 subprocess.run(
                     ['taskkill', '/F', '/T', '/PID', str(pid)],
-                    capture_output=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
                     timeout=5
                 )
             else:
