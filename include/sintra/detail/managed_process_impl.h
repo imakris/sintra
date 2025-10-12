@@ -1099,12 +1099,12 @@ function<void()> Managed_process::call_on_availability(Named_instance<T> transce
     // and this is the actual call, which besides calling f, also neutralizes the
     // returned abort calls and marks this entry as completed.
     *f_it = [this, f, ret, mark_completed]() mutable {
-        std::unique_lock<std::mutex> lock(m_availability_mutex, std::defer_lock);
-        bool owns_lock = lock.try_lock();
+        // published_handler() invokes queued callbacks while holding
+        // m_availability_mutex, so the state update is expected to run under
+        // that lock. Re-locking the same std::mutex from this thread is
+        // undefined behaviour, therefore we simply operate on the shared state
+        // and rely on the caller for synchronization.
         bool completed = mark_completed(false);
-        if (owns_lock) {
-            lock.unlock();
-        }
 
         if (!completed) {
             return;
