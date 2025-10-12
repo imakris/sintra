@@ -27,11 +27,15 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define SINTRA_COORDINATOR_IMPL_H
 
 
+#include "coordinator.h"
+#include "managed_process.h"
+
+#include <cassert>
 #include <functional>
 #include <iostream>
 #include <mutex>
-
-#include "managed_process.h"
+#include <stdexcept>
+#include <utility>
 
 
 namespace sintra {

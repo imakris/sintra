@@ -27,11 +27,18 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define SINTRA_TRANSCEIVER_IMPL_H
 
 
-#include <type_traits>
-#include <memory>
+#include "coordinator.h"
+#include "managed_process.h"
+#include "transceiver.h"
+
+#include <cassert>
 #include <cstring>
-#include <string>
+#include <iterator>
+#include <memory>
 #include <stdexcept>
+#include <string>
+#include <type_traits>
+#include <utility>
 
 #include "exception_conversions.h"
 #include "exception_conversions_impl.h"
