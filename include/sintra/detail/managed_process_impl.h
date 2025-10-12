@@ -37,6 +37,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <functional>
+#include <utility>
 #ifndef _WIN32
 #include <signal.h>
 #include <cerrno>
@@ -56,6 +58,9 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
 namespace sintra {
+
+extern thread_local bool tl_is_req_thread;
+extern thread_local std::function<void()> tl_post_handler_function;
 
 inline std::once_flag& signal_handler_once_flag()
 {
@@ -503,10 +508,23 @@ Managed_process::~Managed_process()
     // the reader threads were still blocked on their rings, so the
     // m_num_active_readers counter never reached the expected value and the
     // destructor blocked forever.  Stop the readers first so they can wake
-    // up, decrement the counter and unblock the wait.
+    // up, decrement the counter and unblock the wait.  When invoked from a
+    // request reader thread, make sure the deferred reply-ring shutdown runs
+    // before waiting and allow for the current thread in the count so we do
+    // not deadlock on ourselves.
     if (s_coord) {
         stop();
-        wait_until_all_external_readers_are_done();
+
+        const bool called_from_request_reader = tl_is_req_thread;
+        if (called_from_request_reader && tl_post_handler_function) {
+            auto post_handler = std::move(tl_post_handler_function);
+            tl_post_handler_function = {};
+            if (post_handler) {
+                post_handler();
+            }
+        }
+
+        wait_until_all_external_readers_are_done(called_from_request_reader ? 1 : 0);
     }
 
     assert(m_communication_state <= COMMUNICATION_PAUSED); // i.e. paused or stopped
@@ -1241,10 +1259,10 @@ function<void()> Managed_process::call_on_availability(Named_instance<T> transce
 
 
 inline
-void Managed_process::wait_until_all_external_readers_are_done()
+void Managed_process::wait_until_all_external_readers_are_done(int extra_allowed_readers)
 {
     unique_lock<mutex> lock(m_num_active_readers_mutex);
-    while (m_num_active_readers > 2) {
+    while (m_num_active_readers > 2 + extra_allowed_readers) {
         m_num_active_readers_condition.wait(lock);
     }
 }
