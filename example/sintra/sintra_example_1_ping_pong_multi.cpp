@@ -52,6 +52,7 @@ int process_1()
     barrier("ping-pong slot activation barrier");
 
     wait_for_stop();
+    barrier("example-1-finished", "_sintra_all_processes");
     return 0;
 }
 
@@ -67,6 +68,7 @@ int process_2()
     world() << Ping();
 
     wait_for_stop();
+    barrier("example-1-finished", "_sintra_all_processes");
     return 0;
 }
 
@@ -89,6 +91,7 @@ int process_3()
     barrier("ping-pong slot activation barrier");
 
     wait_for_stop();
+    barrier("example-1-finished", "_sintra_all_processes");
     return 0;
 }
 
