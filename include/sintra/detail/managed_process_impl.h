@@ -30,7 +30,6 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "utility.h"
 
 #include <array>
-#include <atomic>
 #include <chrono>
 #include <csignal>
 #include <list>
@@ -110,10 +109,10 @@ namespace {
         return pipefd;
     }
 
-    inline std::atomic<unsigned int>& pending_signal_mask()
+    inline std::array<volatile sig_atomic_t, 6>& pending_signal_flags()
     {
-        static std::atomic<unsigned int> mask {0};
-        return mask;
+        static std::array<volatile sig_atomic_t, 6> flags {};
+        return flags;
     }
 
     inline std::once_flag& signal_dispatcher_once_flag()
@@ -147,14 +146,11 @@ namespace {
 
     inline void drain_pending_signals()
     {
-        auto mask = pending_signal_mask().exchange(0U, std::memory_order_acq_rel);
-        if (mask == 0U) {
-            return;
-        }
-
         auto& slots = signal_slots();
+        auto& pending_flags = pending_signal_flags();
         for (std::size_t idx = 0; idx < slots.size(); ++idx) {
-            if ((mask & (1U << idx)) != 0U) {
+            if (pending_flags[idx]) {
+                pending_flags[idx] = 0;
                 dispatch_signal_number(slots[idx].sig);
             }
         }
@@ -270,7 +266,7 @@ static void s_signal_handler(int sig)
         if (!delivered && (last_errno == EAGAIN || last_errno == EINTR)) {
             auto index = signal_index(sig);
             if (index < slots.size()) {
-                pending_signal_mask().fetch_or(1U << index, std::memory_order_release);
+                pending_signal_flags()[index] = 1;
             }
         }
     }
