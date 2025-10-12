@@ -139,6 +139,7 @@ int process_ping_responder()
     sintra::barrier("ping-pong-slot-activation");
 
     wait_for_stop();
+    sintra::barrier("ping-pong-finished");
     return 0;
 }
 
@@ -152,6 +153,7 @@ int process_pong_responder()
     sintra::world() << Ping();
 
     wait_for_stop();
+    sintra::barrier("ping-pong-finished");
     return 0;
 }
 
@@ -180,6 +182,7 @@ int process_monitor()
 
     const auto shared_dir = get_shared_directory();
     write_count(shared_dir / "ping_count.txt", counter.load(std::memory_order_relaxed));
+    sintra::barrier("ping-pong-finished");
     return 0;
 }
 
@@ -198,6 +201,9 @@ int main(int argc, char* argv[])
     processes.emplace_back(process_monitor);
 
     sintra::init(argc, argv, processes);
+    if (!is_spawned) {
+        sintra::barrier("ping-pong-finished");
+    }
     sintra::finalize();
 
     if (!is_spawned) {

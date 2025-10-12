@@ -261,6 +261,10 @@ int main(int argc, char* argv[])
     processes.emplace_back(worker1_process);
 
     sintra::init(argc, argv, processes);
+
+    if (!is_spawned) {
+        sintra::barrier("barrier-flush-done");
+    }
     sintra::finalize();
 
     if (!is_spawned) {

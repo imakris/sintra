@@ -6,11 +6,22 @@
 
 #include <atomic>
 #include <cstdio>
+#include <string_view>
 
 constexpr std::size_t kProcessCount = 3;
 constexpr std::size_t kIterations = 1000;
 
 std::atomic<int> failures{0};
+
+bool has_branch_flag(int argc, char* argv[])
+{
+    for (int i = 0; i < argc; ++i) {
+        if (std::string_view(argv[i]) == "--branch_index") {
+            return true;
+        }
+    }
+    return false;
+}
 
 int worker_process(std::uint32_t worker_index)
 {
@@ -40,6 +51,7 @@ int worker_process(std::uint32_t worker_index)
         return 1;
     }
 
+    barrier("barrier-rapid-reuse-done");
     return 0;
 }
 
@@ -49,12 +61,18 @@ int worker2_process() { return worker_process(2); }
 
 int main(int argc, char* argv[])
 {
+    const bool is_spawned = has_branch_flag(argc, argv);
+
     std::vector<sintra::Process_descriptor> processes;
     processes.emplace_back(worker0_process);
     processes.emplace_back(worker1_process);
     processes.emplace_back(worker2_process);
 
     sintra::init(argc, argv, processes);
+
+    if (!is_spawned) {
+        sintra::barrier("barrier-rapid-reuse-done");
+    }
     sintra::finalize();
 
     std::printf("Barrier rapid reuse test completed\n");

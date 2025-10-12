@@ -188,6 +188,9 @@ int main(int argc, char* argv[])
     processes.emplace_back(process_client);
 
     sintra::init(argc, argv, processes);
+    if (!is_spawned) {
+        sintra::barrier("calls-finished");
+    }
     sintra::finalize();
 
     if (!is_spawned) {
