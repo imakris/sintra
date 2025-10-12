@@ -21,6 +21,7 @@ Options:
 import argparse
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -127,7 +128,7 @@ class TestRunner:
     def _discover_barrier_test_paths(self) -> List[Path]:
         """Locate barrier-related tests by inspecting CTest metadata or filesystem."""
         barrier_paths: List[Path] = []
-        ctest_pattern = re.compile(r"add_test\(([^\s]+)\s+\"([^\"]+)\"\)")
+        ctest_pattern = re.compile(r"add_test\((.*?)\)", re.DOTALL)
 
         candidate_dirs = [self.test_dir]
         parent_dir = self.test_dir.parent
@@ -147,10 +148,51 @@ class TestRunner:
                 continue
 
             for match in ctest_pattern.finditer(contents):
-                test_label = match.group(1)
-                executable = match.group(2)
-                if 'barrier' in test_label.lower():
-                    barrier_paths.append(Path(executable))
+                raw_arguments = match.group(1)
+
+                tokens: List[str] = []
+                cleaned_parts: List[str] = []
+                for line in raw_arguments.splitlines():
+                    stripped = line.split('#', 1)[0].strip()
+                    if stripped:
+                        cleaned_parts.append(stripped)
+
+                if cleaned_parts:
+                    try:
+                        tokens = shlex.split(" ".join(cleaned_parts), posix=True)
+                    except ValueError as exc:
+                        print(f"{Color.YELLOW}Warning: Failed to parse add_test entry in {ctest_file}: {exc}{Color.RESET}")
+                        continue
+
+                if not tokens:
+                    continue
+
+                test_label: Optional[str] = None
+                executable_token: Optional[str] = None
+
+                upper_tokens = [token.upper() for token in tokens]
+                if "NAME" in upper_tokens and "COMMAND" in upper_tokens:
+                    name_index = upper_tokens.index("NAME")
+                    command_index = upper_tokens.index("COMMAND")
+                    if name_index + 1 < len(tokens):
+                        test_label = tokens[name_index + 1]
+                    if command_index + 1 < len(tokens):
+                        executable_token = tokens[command_index + 1]
+                elif len(tokens) >= 2:
+                    test_label = tokens[0]
+                    executable_token = tokens[1]
+
+                if not test_label or not executable_token:
+                    continue
+
+                if 'barrier' not in test_label.lower():
+                    continue
+
+                executable_path = Path(executable_token)
+                if not executable_path.is_absolute():
+                    executable_path = (directory / executable_path).resolve()
+
+                barrier_paths.append(executable_path)
 
         if not barrier_paths and self.test_dir.exists():
             # Fallback: scan for barrier executables in the test directory
