@@ -1,3 +1,22 @@
+//
+// Sintra Multi-Process Ping-Pong Test
+//
+// This test validates multi-process ping-pong messaging.
+// It corresponds to example_1 and tests the following features:
+// - Message passing between separate processes
+// - Slot activation in different processes
+// - Barriers for synchronization
+// - Stop signal to coordinate shutdown
+// - Message throughput measurement
+//
+// Test structure:
+// - Process 1 (ping responder): Responds to Ping with Pong
+// - Process 2 (pong responder): Responds to Pong with Ping (initiates cycle)
+// - Process 3 (monitor): Counts Ping messages and sends Stop after target count
+//
+// The test verifies that 500 ping-pong exchanges occur correctly across processes.
+//
+
 #include <sintra/sintra.h>
 
 #include <atomic>

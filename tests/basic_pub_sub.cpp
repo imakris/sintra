@@ -1,3 +1,22 @@
+//
+// Sintra Basic Pub/Sub Test
+//
+// This test validates the basic publish/subscribe messaging functionality of Sintra.
+// It corresponds to example_0 and tests the following features:
+// - Multi-process communication using a single executable
+// - Type-safe message passing (strings and integers)
+// - Slot activation for handling different message types
+// - Barrier synchronization between processes
+//
+// Test structure:
+// - Process 1 (sender): Sends string and integer messages to all receivers
+// - Process 2 (string receiver): Receives and records string messages
+// - Process 3 (int receiver): Receives and records integer messages
+//
+// The test verifies that all sent messages are correctly received by checking
+// the recorded messages against expected values.
+//
+
 #include <sintra/sintra.h>
 
 #include <algorithm>

@@ -219,14 +219,6 @@ void Process_message_reader::request_reader_function()
         if (m == nullptr) {
             break;
         }
-        if (m_reader_state == READER_STOPPING) {
-            std::fprintf(stderr,
-                "request_reader_function(pid=%llu) processing message while stopping: type=%llu sender=%llu receiver=%llu\n",
-                static_cast<unsigned long long>(m_process_instance_id),
-                static_cast<unsigned long long>(m->message_type_id),
-                static_cast<unsigned long long>(m->sender_instance_id),
-                static_cast<unsigned long long>(m->receiver_instance_id));
-        }
 
         // Only the process with the coordinator's instance is allowed to send messages on
         // someone else's behalf (for relay purposes).
@@ -335,10 +327,6 @@ void Process_message_reader::request_reader_function()
     s_mproc->m_num_active_readers_condition.notify_all();
 
     std::lock_guard<std::mutex> lk(m_stop_mutex);
-    if (m_reader_state == READER_STOPPING) {
-        std::fprintf(stderr, "request_reader_function(pid=%llu) exiting normally after stop.\n",
-            static_cast<unsigned long long>(m_process_instance_id));
-    }
     m_req_running = false;
     m_stop_condition.notify_one();
 

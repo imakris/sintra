@@ -75,13 +75,13 @@ class TestRunner:
             print(f"{Color.RED}Test directory not found: {self.test_dir}{Color.RESET}")
             return []
 
-        # List of test executables to run (excluding recovery test)
+        # List of test executables to run
         test_names = [
             'sintra_basic_pubsub_test',
             'sintra_ping_pong_test',
             'sintra_ping_pong_multi_test',
             'sintra_rpc_append_test',
-            # 'sintra_recovery_test',  # Disabled - not yet implemented
+            'sintra_recovery_test',
         ]
 
         if test_name:
@@ -233,6 +233,34 @@ class TestRunner:
 
         return passed, failed, results
 
+    def run_full_test_suite_once(self, tests: List[Path], repetitions: int):
+        """Run all tests with given repetitions, return results per test"""
+        test_results = {}
+        total_runs = 0
+        total_passed = 0
+
+        for test_path in tests:
+            test_name = test_path.stem
+            test_passed = 0
+            test_failed = 0
+            successful_durations = []
+
+            for _ in range(repetitions):
+                result = self.run_test_once(test_path)
+                total_runs += 1
+                if result.success:
+                    test_passed += 1
+                    total_passed += 1
+                    successful_durations.append(result.duration)
+                else:
+                    test_failed += 1
+
+            avg_duration = sum(successful_durations) / len(successful_durations) if successful_durations else 0
+            test_results[test_name] = (test_passed, test_failed, avg_duration)
+
+        all_pass = total_runs == total_passed
+        return all_pass, total_passed, total_runs, test_results
+
     def print_summary(self, test_path: Path, passed: int, failed: int, results: List[TestResult]):
         """Print summary statistics for a test"""
         test_name = test_path.stem
@@ -292,6 +320,8 @@ def main():
                         help='Build configuration (default: Debug)')
     parser.add_argument('--verbose', action='store_true',
                         help='Show detailed output for each test run')
+    parser.add_argument('--adaptive', action='store_true',
+                        help='Use adaptive soak test with exponential batches and early stopping')
 
     args = parser.parse_args()
 
@@ -320,42 +350,111 @@ def main():
 
     print(f"Found {len(tests)} test(s) to run")
 
-    # Run all tests
-    all_results = {}
-    total_passed = 0
-    total_failed = 0
-
     start_time = time.time()
 
-    for test_path in tests:
-        passed, failed, results = runner.run_test_multiple(test_path, args.repetitions)
-        runner.print_summary(test_path, passed, failed, results)
+    if args.adaptive:
+        # Adaptive soak test: run full suite with exponentially increasing batch sizes
+        # Each batch runs the full suite, accumulating results
+        accumulated_results = {test.stem: {'passed': 0, 'failed': 0, 'durations': []} for test in tests}
 
-        all_results[test_path.stem] = (passed, failed, results)
-        total_passed += passed
-        total_failed += failed
+        batch_size = 2
+        total_reps_so_far = 0
+        max_reps_per_test = args.repetitions
+        all_passed = True
 
-    total_duration = time.time() - start_time
+        while total_reps_so_far < max_reps_per_test:
+            # Calculate how many reps to run in this batch
+            remaining = max_reps_per_test - total_reps_so_far
+            current_batch = min(batch_size, remaining)
 
-    # Print overall summary
-    print("\n" + "=" * 70)
-    print(f"{Color.BOLD}Overall Summary{Color.RESET}")
-    print(f"Total Tests: {len(tests)}")
-    print(f"Total Runs: {total_passed + total_failed}")
-    print(f"Total Passed: {Color.GREEN}{total_passed}{Color.RESET}")
-    print(f"Total Failed: {Color.RED}{total_failed}{Color.RESET}")
+            all_pass, passed, total, test_results = runner.run_full_test_suite_once(tests, current_batch)
+            total_reps_so_far += current_batch
 
-    if total_failed == 0:
-        print(f"\n{Color.BOLD}{Color.GREEN}ALL TESTS PASSED!{Color.RESET}")
-        exit_code = 0
+            # Accumulate results
+            for test_name, (test_passed, test_failed, avg_duration) in test_results.items():
+                accumulated_results[test_name]['passed'] += test_passed
+                accumulated_results[test_name]['failed'] += test_failed
+                accumulated_results[test_name]['durations'].append(avg_duration)
+
+            # Early stopping conditions
+            if not all_pass:
+                all_passed = False
+                fail_rate = 100.0 - (passed / total * 100 if total > 0 else 0)
+                if fail_rate >= 100 and total_reps_so_far >= 2:
+                    break
+                elif fail_rate >= 30 and total_reps_so_far >= 4:
+                    break
+                elif fail_rate >= 10 and total_reps_so_far >= 16:
+                    break
+
+            # Double the batch size for next round
+            batch_size *= 2
+
+        # Print final results
+        print("\n" + "=" * 80)
+        print(f"{'Test':<40} {'Pass rate':<20} {'Avg runtime (s)':>15}")
+        print("=" * 80)
+
+        for test_name in sorted(accumulated_results.keys()):
+            passed = accumulated_results[test_name]['passed']
+            failed = accumulated_results[test_name]['failed']
+            total = passed + failed
+            pass_rate = (passed / total * 100) if total > 0 else 0
+
+            durations = accumulated_results[test_name]['durations']
+            avg_duration = sum(durations) / len(durations) if durations else 0
+
+            pass_rate_str = f"{passed}/{total} ({pass_rate:6.2f}%)"
+            print(f"{test_name:<40} {pass_rate_str:<20} {avg_duration:>15.2f}")
+
+        print("=" * 80)
+
+        total_duration = time.time() - start_time
+        print(f"Total duration: {format_duration(total_duration)}")
+        print()
+
+        if all_passed:
+            print(f"{Color.GREEN}PASSED{Color.RESET}")
+            return 0
+        else:
+            print(f"{Color.RED}FAILED{Color.RESET}")
+            return 1
+
     else:
-        print(f"\n{Color.BOLD}{Color.RED}SOME TESTS FAILED!{Color.RESET}")
-        exit_code = 1
+        # Original test mode: run each test multiple times
+        all_results = {}
+        total_passed = 0
+        total_failed = 0
 
-    print(f"Total Duration: {format_duration(total_duration)}")
-    print("=" * 70)
+        for test_path in tests:
+            passed, failed, results = runner.run_test_multiple(test_path, args.repetitions)
+            runner.print_summary(test_path, passed, failed, results)
 
-    return exit_code
+            all_results[test_path.stem] = (passed, failed, results)
+            total_passed += passed
+            total_failed += failed
+
+        total_duration = time.time() - start_time
+
+        # Print overall summary
+        print("\n" + "=" * 70)
+        print(f"{Color.BOLD}Overall Summary{Color.RESET}")
+        print(f"Total Tests: {len(tests)}")
+        print(f"Total Runs: {total_passed + total_failed}")
+        print(f"Total Passed: {Color.GREEN}{total_passed}{Color.RESET}")
+        print(f"Total Failed: {Color.RED}{total_failed}{Color.RESET}")
+
+        if total_failed == 0:
+            print(f"\n{Color.BOLD}{Color.GREEN}ALL TESTS PASSED!{Color.RESET}")
+            exit_code = 0
+        else:
+            print(f"\n{Color.BOLD}{Color.RED}SOME TESTS FAILED!{Color.RESET}")
+            exit_code = 1
+
+        print(f"Total Duration: {format_duration(total_duration)}")
+        print("=" * 70)
+
+        return exit_code
 
 if __name__ == '__main__':
     sys.exit(main())
