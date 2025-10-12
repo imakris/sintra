@@ -37,3 +37,7 @@ add_test(NAME sintra.recovery COMMAND sintra_recovery_test)
 add_executable(sintra_barrier_flush_test barrier_flush_test.cpp)
 target_link_libraries(sintra_barrier_flush_test PRIVATE ${SINTRA_TEST_TARGET})
 add_test(NAME sintra.barrier_flush COMMAND sintra_barrier_flush_test)
+
+add_executable(sintra_spawn_detached_test spawn_detached_test.cpp)
+target_link_libraries(sintra_spawn_detached_test PRIVATE ${SINTRA_TEST_TARGET})
+add_test(NAME sintra.spawn_detached COMMAND sintra_spawn_detached_test)

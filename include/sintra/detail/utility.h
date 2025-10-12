@@ -39,6 +39,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #ifdef _WIN32
     #include <process.h>
 #else
+    #include <atomic>
+    #include <cerrno>
     #include <cstring>
     #include <fcntl.h>
     #include <sys/wait.h>
@@ -150,6 +152,123 @@ private:
 
 
 
+namespace detail {
+
+#ifndef _WIN32
+
+using pipe2_fn = int(*)(int[2], int);
+using write_fn = ssize_t(*)(int, const void*, size_t);
+using read_fn = ssize_t(*)(int, void*, size_t);
+
+inline std::atomic<pipe2_fn>& pipe2_override()
+{
+    static std::atomic<pipe2_fn> fn{nullptr};
+    return fn;
+}
+
+inline std::atomic<write_fn>& write_override()
+{
+    static std::atomic<write_fn> fn{nullptr};
+    return fn;
+}
+
+inline std::atomic<read_fn>& read_override()
+{
+    static std::atomic<read_fn> fn{nullptr};
+    return fn;
+}
+
+inline int call_pipe2(int pipefd[2], int flags)
+{
+    if (auto override = pipe2_override().load(std::memory_order_acquire)) {
+        return override(pipefd, flags);
+    }
+    return ::pipe2(pipefd, flags);
+}
+
+inline ssize_t call_write(int fd, const void* buf, size_t count)
+{
+    if (auto override = write_override().load(std::memory_order_acquire)) {
+        return override(fd, buf, count);
+    }
+    return ::write(fd, buf, count);
+}
+
+inline ssize_t call_read(int fd, void* buf, size_t count)
+{
+    if (auto override = read_override().load(std::memory_order_acquire)) {
+        return override(fd, buf, count);
+    }
+    return ::read(fd, buf, count);
+}
+
+inline bool write_fully(int fd, const void* buf, size_t count)
+{
+    const char* ptr = static_cast<const char*>(buf);
+    size_t total_written = 0;
+    while (total_written < count) {
+        ssize_t rv = call_write(fd, ptr + total_written, count - total_written);
+        if (rv < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return false;
+        }
+        if (rv == 0) {
+            return false;
+        }
+        total_written += static_cast<size_t>(rv);
+    }
+    return true;
+}
+
+inline bool read_fully(int fd, void* buf, size_t count)
+{
+    char* ptr = static_cast<char*>(buf);
+    size_t total_read = 0;
+    while (total_read < count) {
+        ssize_t rv = call_read(fd, ptr + total_read, count - total_read);
+        if (rv < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return false;
+        }
+        if (rv == 0) {
+            return false;
+        }
+        total_read += static_cast<size_t>(rv);
+    }
+    return true;
+}
+
+#endif // !_WIN32
+
+} // namespace detail
+
+#ifndef _WIN32
+
+namespace testing {
+
+inline detail::pipe2_fn set_pipe2_override(detail::pipe2_fn fn)
+{
+    return detail::pipe2_override().exchange(fn, std::memory_order_acq_rel);
+}
+
+inline detail::write_fn set_write_override(detail::write_fn fn)
+{
+    return detail::write_override().exchange(fn, std::memory_order_acq_rel);
+}
+
+inline detail::read_fn set_read_override(detail::read_fn fn)
+{
+    return detail::read_override().exchange(fn, std::memory_order_acq_rel);
+}
+
+} // namespace testing
+
+#endif // !_WIN32
+
 inline
 bool spawn_detached(const char* prog, const char * const*argv)
 {
@@ -200,21 +319,25 @@ bool spawn_detached(const char* prog, const char * const*argv)
         signal_ignored.sa_handler = SIG_IGN;\
         ::sigaction(SIGPIPE, &signal_ignored, 0);
 
-    int rv = 0;
+    int rv = -1;
     pid_t child_pid = fork();
     if (child_pid == 0) {
 
         IGNORE_SIGPIPE
         ::setsid();
 
-        int ready_pipe[2];
-        pipe2(ready_pipe, O_CLOEXEC);
+        int ready_pipe[2] = {-1, -1};
+        if (detail::call_pipe2(ready_pipe, O_CLOEXEC) == -1) {
+            ::_exit(EXIT_FAILURE);
+        }
 
         pid_t grandchild_pid = fork();
 
         if (grandchild_pid == 0) {
             IGNORE_SIGPIPE
-            close(ready_pipe[0]);
+            if (ready_pipe[0] >= 0) {
+                close(ready_pipe[0]);
+            }
 
             // copy argv, to be no longer dependent on pages that have not been copied yet
             auto prog_copy = strdup(prog);
@@ -226,8 +349,15 @@ bool spawn_detached(const char* prog, const char * const*argv)
                 argv_copy[i] = strdup(argv[i]);
             }
 
-            // allow the parent (child) process to exit
-            write(ready_pipe[1], &rv, sizeof(int));                     // read in (1)
+            // allow the parent (child) process to exit. The write is retried on EINTR
+            // so the parent only proceeds once the grandchild is ready to exec.
+            int status = 0;
+            if (!detail::write_fully(ready_pipe[1], &status, sizeof(int))) {
+                if (ready_pipe[1] >= 0) {
+                    close(ready_pipe[1]);
+                }
+                ::_exit(EXIT_FAILURE);
+            }
 
             // proceed with the new program
             ::execv(prog_copy, (char* const*)argv_copy);
@@ -238,10 +368,12 @@ bool spawn_detached(const char* prog, const char * const*argv)
             }
             delete[] argv_copy;
 
-            // execv failed
-            rv = -1;
-            write(ready_pipe[1], &rv, sizeof(int));                     // read in (1)
-            close(ready_pipe[1]);
+            // execv failed; propagate the failure back to the parent process via the pipe.
+            status = -1;
+            detail::write_fully(ready_pipe[1], &status, sizeof(int));   // best effort
+            if (ready_pipe[1] >= 0) {
+                close(ready_pipe[1]);
+            }
             ::_exit(1);
         }
         else
@@ -250,9 +382,15 @@ bool spawn_detached(const char* prog, const char * const*argv)
             IGNORE_SIGPIPE
             rv = -1;
         }
-        close(ready_pipe[1]);
-        read(ready_pipe[0], &rv, sizeof(int));                          // (1)
-        close(ready_pipe[0]);
+        if (ready_pipe[1] >= 0) {
+            close(ready_pipe[1]);
+        }
+        if (ready_pipe[0] >= 0) {
+            if (!detail::read_fully(ready_pipe[0], &rv, sizeof(int))) {
+                rv = -1;
+            }
+            close(ready_pipe[0]);
+        }
         ::_exit(rv == 0 ? EXIT_SUCCESS : EXIT_FAILURE);
     }
 
