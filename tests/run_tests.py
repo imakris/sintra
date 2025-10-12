@@ -145,7 +145,7 @@ class TestRunner:
                     error=stderr
                 )
 
-            except subprocess.TimeoutExpired:
+            except subprocess.TimeoutExpired as e:
                 duration = self.timeout
 
                 if self.preserve_on_timeout:
@@ -156,11 +156,10 @@ class TestRunner:
                 # Kill the process tree on timeout
                 self._kill_process_tree(process.pid)
 
-                # Try to get any output
-                try:
-                    stdout, stderr = process.communicate(timeout=1)
-                except:
-                    stdout, stderr = "", ""
+                # Get partial output from the exception object itself.
+                # This avoids a second communicate() call which can hang.
+                stdout = e.stdout if e.stdout else ""
+                stderr = e.stderr if e.stderr else ""
 
                 return TestResult(
                     success=False,
