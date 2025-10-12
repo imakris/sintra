@@ -30,10 +30,14 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "ipc_rings.h"
 #include "utility.h"
 
+#include <cassert>
 #include <cstdint>
+#include <limits>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <type_traits>
+#include <utility>
 
 #include <boost/fusion/container/vector.hpp>
 
@@ -105,12 +109,28 @@ public:
     template <typename CT = typename T::iterator::value_type>
     operator T() const
     {
+        static_assert(
+            std::is_trivially_copyable_v<CT>,
+            "typed_variable_buffer requires trivially copyable value types."
+        );
         assert(offset_in_bytes);
         assert((num_bytes % sizeof(CT)) == 0);
 
-        CT* typed_data = (CT*)((char*)this+offset_in_bytes);
+        const auto* typed_data = reinterpret_cast<const CT*>(
+            reinterpret_cast<const char*>(this) + offset_in_bytes);
+        assert(
+            (reinterpret_cast<std::uintptr_t>(typed_data) % alignof(CT)) == 0 &&
+            "typed_variable_buffer storage must be properly aligned."
+        );
         size_t num_elements = num_bytes / sizeof(CT);
         return T(typed_data, typed_data + num_elements);
+    }
+
+    size_t size_bytes() const { return num_bytes; }
+    size_t data_offset_bytes() const { return offset_in_bytes; }
+    const void* data_address() const
+    {
+        return reinterpret_cast<const char*>(this) + offset_in_bytes;
     }
 };
 
@@ -128,58 +148,78 @@ struct is_variable_buffer_argument
 {};
 
 
-inline
-size_t vb_size()
+namespace detail
 {
-    return 0;
+
+inline size_t align_up_size(size_t value, size_t alignment)
+{
+    if (alignment <= 1) {
+        return value;
+    }
+
+    const size_t remainder = value % alignment;
+    if (remainder == 0) {
+        return value;
+    }
+
+    const size_t padding = alignment - remainder;
+    if (padding > (std::numeric_limits<size_t>::max() - value)) {
+        throw std::overflow_error("variable_buffer alignment overflow");
+    }
+
+    return value + padding;
 }
 
+template <typename T, typename = void>
+struct has_value_type: std::false_type
+{};
 
-template <
-    typename T,
-    typename = enable_if_t<
-        !is_convertible< typename remove_reference<T>::type, variable_buffer>::value
-    >,
-    typename... Args
->
-size_t vb_size(const T& v, Args&&... args);
+template <typename T>
+struct has_value_type<T, std::void_t<typename std::decay_t<T>::value_type>>: std::true_type
+{};
 
-
-template <
-    typename T, typename = void,
-    typename = enable_if_t<
-        is_convertible< typename remove_reference<T>::type, variable_buffer>::value
-    >,
-    typename... Args
->
-size_t vb_size(const T& v, Args&&... args);
-
-
-template <
-    typename T,
-    typename /*= typename enable_if_t<
-        !is_convertible< typename remove_reference<T>::type, variable_buffer>::value
-    > */,
-    typename... Args
->
-size_t vb_size(const T&, Args&&... args)
+inline size_t accumulate_vb_size(size_t offset)
 {
-    auto ret = vb_size(args...);
-    return ret;
+    return offset;
 }
 
-
-template <
-    typename T, typename /* = void*/,
-    typename /* = typename enable_if_t<
-        is_convertible< typename remove_reference<T>::type, variable_buffer>::value
-    >*/,
-    typename... Args
->
-size_t vb_size(const T& v, Args&&... args)
+template <typename T, typename... Args>
+size_t accumulate_vb_size(size_t offset, const T& value, Args&&... args)
 {
-    auto ret = v.size() * sizeof(typename T::iterator::value_type) + vb_size(args...);
-    return ret;
+    using decayed = typename std::remove_reference<T>::type;
+
+    if constexpr (
+        std::is_convertible_v<decayed, variable_buffer> &&
+        has_value_type<decayed>::value)
+    {
+        using value_type = typename decayed::value_type;
+        static_assert(
+            std::is_trivially_copyable_v<value_type>,
+            "variable_buffer payloads must be trivially copyable."
+        );
+
+        const size_t data_bytes = value.size() * sizeof(value_type);
+        offset = align_up_size(offset, alignof(value_type)) + data_bytes;
+        return accumulate_vb_size(offset, std::forward<Args>(args)...);
+    }
+    else {
+        return accumulate_vb_size(offset, std::forward<Args>(args)...);
+    }
+}
+
+} // namespace detail
+
+
+template <typename MESSAGE_T, typename... Args>
+size_t vb_size(Args&&... args)
+{
+    const size_t base_size = sizeof(MESSAGE_T);
+    const size_t final_offset = detail::accumulate_vb_size(
+        base_size,
+        std::forward<Args>(args)...);
+
+    assert(final_offset >= base_size);
+    return final_offset - base_size;
 }
 
 
