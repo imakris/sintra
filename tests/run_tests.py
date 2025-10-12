@@ -19,7 +19,6 @@ Options:
 """
 
 import argparse
-import json
 import os
 import subprocess
 import sys
@@ -78,135 +77,33 @@ class TestRunner:
             print(f"{Color.RED}Test directory not found: {self.test_dir}{Color.RESET}")
             return []
 
-        manual_test_names = [
+        # Simple list of test names
+        test_names = [
             'sintra_basic_pubsub_test',
             'sintra_ping_pong_test',
             'sintra_ping_pong_multi_test',
             'sintra_rpc_append_test',
             'sintra_recovery_test',
+            'sintra_barrier_flush_test',
+            'sintra_barrier_stress_test',
+            'sintra_variable_buffer_alignment_test',
+            'sintra_spawn_detached_test',
         ]
 
         if test_name:
-            manual_test_names = [name for name in manual_test_names if test_name in name]
+            test_names = [name for name in test_names if test_name in name]
 
-        tests: List[Path] = []
-        seen: Set[Path] = set()
+        tests = []
+        for name in test_names:
+            if sys.platform == 'win32':
+                test_path = self.test_dir / f"{name}.exe"
+            else:
+                test_path = self.test_dir / name
 
-        def add_candidate(path: Path):
-            try:
-                resolved = path.resolve()
-            except FileNotFoundError:
-                resolved = path
-            if resolved not in seen:
-                tests.append(path)
-                seen.add(resolved)
-
-        for name in manual_test_names:
-            test_path = self._build_test_path(name)
             if test_path.exists():
-                add_candidate(test_path)
-            else:
-                print(f"{Color.YELLOW}Warning: Test not found: {test_path}{Color.RESET}")
-
-        for barrier_test in self._discover_barrier_test_paths():
-            if barrier_test.exists():
-                add_candidate(barrier_test)
-            else:
-                print(f"{Color.YELLOW}Warning: Barrier test not found: {barrier_test}{Color.RESET}")
-
-        if test_name:
-            tests = [path for path in tests if test_name in path.stem]
+                tests.append(test_path)
 
         return tests
-
-    def _build_test_path(self, name: str) -> Path:
-        if sys.platform == 'win32':
-            return self.test_dir / f"{name}.exe"
-        return self.test_dir / name
-
-    def _discover_barrier_test_paths(self) -> List[Path]:
-        """Locate barrier-related tests using CTest metadata with robust fallbacks."""
-
-        try:
-            test_dir_resolved = self.test_dir.resolve()
-        except OSError:
-            test_dir_resolved = self.test_dir
-
-        def resolve_candidate(raw: Path) -> Optional[Path]:
-            if raw.is_absolute():
-                candidate = raw
-            else:
-                candidate = (self.build_dir / raw).resolve()
-
-            try:
-                resolved = candidate.resolve()
-            except OSError:
-                resolved = candidate
-
-            if resolved.exists() and (resolved == test_dir_resolved or test_dir_resolved in resolved.parents):
-                return resolved
-
-            fallback = self.test_dir / candidate.name
-            if fallback.exists():
-                try:
-                    return fallback.resolve()
-                except OSError:
-                    return fallback
-            return None
-
-        barrier_paths: List[Path] = []
-        seen: Set[Path] = set()
-
-        ctest_cmd = ['ctest', '--show-only=json-v1']
-        if self.config:
-            ctest_cmd.extend(['-C', self.config])
-
-        try:
-            ctest_output = subprocess.run(
-                ctest_cmd,
-                cwd=self.build_dir,
-                capture_output=True,
-                text=True,
-                check=True,
-            ).stdout
-            ctest_info = json.loads(ctest_output)
-        except FileNotFoundError:
-            print(f"{Color.YELLOW}Warning: ctest not found; falling back to filesystem discovery for barrier tests.{Color.RESET}")
-            ctest_info = None
-        except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
-            print(f"{Color.YELLOW}Warning: Failed to inspect tests via ctest: {exc}. Using filesystem fallback.{Color.RESET}")
-            ctest_info = None
-
-        if ctest_info:
-            for test_entry in ctest_info.get('tests', []):
-                name = test_entry.get('name', '')
-                command = test_entry.get('command', [])
-                if not command:
-                    continue
-
-                if 'barrier' not in name.lower() and not any('barrier' in str(arg).lower() for arg in command):
-                    continue
-
-                candidate = resolve_candidate(Path(command[0]))
-                if not candidate:
-                    continue
-
-                if candidate not in seen:
-                    barrier_paths.append(candidate)
-                    seen.add(candidate)
-
-        if self.test_dir.exists():
-            for candidate in self.test_dir.glob('sintra_barrier*_test*'):
-                if candidate.is_file():
-                    try:
-                        resolved = candidate.resolve()
-                    except OSError:
-                        resolved = candidate
-                    if resolved not in seen:
-                        barrier_paths.append(candidate)
-                        seen.add(resolved)
-
-        return barrier_paths
 
     def run_test_once(self, test_path: Path) -> TestResult:
         """Run a single test with timeout and proper cleanup"""
@@ -215,12 +112,13 @@ class TestRunner:
             start_time = time.time()
 
             # Use Popen for better process control
+            # NOTE: Don't set cwd - use the build directory like CTest does
             process = subprocess.Popen(
                 [str(test_path)],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                cwd=test_path.parent
+                cwd=self.build_dir
             )
 
             # Wait with timeout
