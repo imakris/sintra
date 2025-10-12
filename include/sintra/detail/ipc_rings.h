@@ -392,12 +392,30 @@ static inline bool check_or_create_directory(const std::string& dir_name)
 
 /**
  * Remove a directory tree. Returns true if anything was removed.
+ * Uses retry logic to handle filesystem delays on Windows.
  */
 static inline bool remove_directory(const std::string& dir_name)
 {
     std::error_code ec;
     auto removed = fs::remove_all(dir_name.c_str(), ec);
-    return !!removed;
+
+    // If the first attempt succeeded or the directory doesn't exist, we're done
+    if (!ec || ec == std::errc::no_such_file_or_directory) {
+        return !!removed;
+    }
+
+    // Retry up to 3 times with delays to handle filesystem locks/delays on Windows
+    for (int retry = 0; retry < 3; ++retry) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        ec.clear();
+        removed = fs::remove_all(dir_name.c_str(), ec);
+        if (!ec || ec == std::errc::no_such_file_or_directory) {
+            return !!removed;
+        }
+    }
+
+    // After retries failed, return false (cleanup failed but don't crash)
+    return false;
 }
 
 
