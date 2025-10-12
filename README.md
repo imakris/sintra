@@ -106,6 +106,17 @@ procedure calls, and the managed-process recovery path. They are defined in the
 `tests/` directory and can be executed locally by configuring the project with
 `cmake` and running `ctest` from the build tree.
 
+### Operational guidance for `spawn_detached`
+
+The `sintra::spawn_detached` helper launches helper processes by way of a
+double-fork sequence and an anonymous pipe handshake. When the helper cannot
+create the pipe (for example because all file descriptors are exhausted) or is
+unable to report readiness through the pipe, the function now returns `false`.
+Callers should treat a `false` return value as a hard failure, log the error, and
+optionally retry after freeing resources. The handshake guarantees that a
+successful return means the grandchild has executed `execv` and relinquished the
+pipe, so spurious successes caused by early crashes are prevented.
+
 Continuous integration runs on both Linux and Windows through GitHub Actions.
 Each workflow build compiles the project in Release mode, executes the `ctest`
 suite, and then repeatedly stress-tests the recovery and basic pub/sub binaries
