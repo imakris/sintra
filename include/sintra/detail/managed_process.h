@@ -285,6 +285,9 @@ struct Managed_process: Derived_transceiver<Managed_process>
     spinlocked_umap<tn_type, list<function<void()>>>
                                         m_queued_availability_calls;
 
+    // Guards access to queued availability callbacks.  The corresponding
+    // implementation releases this lock before invoking user callbacks to
+    // avoid reentrancy issues.
     mutex                               m_availability_mutex;
 
     // TODO: FIXME: The recursive can be easily avoided. Implement an additional
