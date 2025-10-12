@@ -230,12 +230,10 @@ namespace {
 
 
 
+#ifdef _WIN32
 inline
 static void s_signal_handler(int sig)
 {
-    auto& slots = signal_slots();
-
-#ifdef _WIN32
     if (s_mproc && s_mproc->m_out_req_c) {
         s_mproc->emit_remote<Managed_process::terminated_abnormally>(sig);
 
@@ -243,7 +241,20 @@ static void s_signal_handler(int sig)
             reader.second.stop_nowait();
         }
     }
+
+    // On Windows, forcefully terminate the process to avoid deadlock during shutdown.
+    // Reader threads may be blocked on semaphores, and Windows shutdown waits for
+    // all threads to exit. Since this is a crashing process (signal handler was called),
+    // we don't need graceful shutdown - the coordinator will detect the death and
+    // respawn if recovery is enabled. Mutex recovery will handle any abandoned locks.
+    TerminateProcess(GetCurrentProcess(), 1);
+}
 #else
+inline
+static void s_signal_handler(int sig, siginfo_t* info, void* ctx)
+{
+    auto& slots = signal_slots();
+
     auto& pipefd = signal_pipe();
     if (pipefd[1] != -1) {
         int sig_number = sig;
@@ -274,23 +285,14 @@ static void s_signal_handler(int sig)
             }
         }
     }
-#endif
 
-#ifdef _WIN32
-    // On Windows, forcefully terminate the process to avoid deadlock during shutdown.
-    // Reader threads may be blocked on semaphores, and Windows shutdown waits for
-    // all threads to exit. Since this is a crashing process (signal handler was called),
-    // we don't need graceful shutdown - the coordinator will detect the death and
-    // respawn if recovery is enabled. Mutex recovery will handle any abandoned locks.
-    TerminateProcess(GetCurrentProcess(), 1);
-#else
     if (auto* slot = find_slot(slots, sig); slot && slot->has_previous) {
         if (slot->previous.sa_handler == SIG_IGN) {
             return;
         }
 
         if ((slot->previous.sa_flags & SA_SIGINFO) && slot->previous.sa_sigaction) {
-            slot->previous.sa_sigaction(sig, nullptr, nullptr);
+            slot->previous.sa_sigaction(sig, info, ctx);
             return;
         }
 
@@ -305,8 +307,8 @@ static void s_signal_handler(int sig)
     sigemptyset(&dfl.sa_mask);
     sigaction(sig, &dfl, nullptr);
     raise(sig);
-#endif
 }
+#endif
 
 
 inline
@@ -354,17 +356,13 @@ void install_signal_handler()
         for (auto& slot : slots) {
             struct sigaction sa {};
             sigemptyset(&sa.sa_mask);
-            sa.sa_sigaction = +[](int sig, siginfo_t* info, void* ctx) {
-                (void)info;
-                (void)ctx;
-                s_signal_handler(sig);
-            };
+            sa.sa_sigaction = s_signal_handler;
             sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
 #ifdef SA_RESTART
             sa.sa_flags |= SA_RESTART;
 #endif
             if (sigaction(slot.sig, &sa, &slot.previous) == 0) {
-                slot.has_previous = slot.previous.sa_handler != s_signal_handler;
+                slot.has_previous = slot.previous.sa_sigaction != s_signal_handler;
                 if (!slot.has_previous) {
                     slot.previous.sa_handler = SIG_DFL;
                 }
