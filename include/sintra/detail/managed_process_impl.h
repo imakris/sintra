@@ -30,6 +30,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "utility.h"
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <csignal>
 #include <list>
@@ -109,10 +110,54 @@ namespace {
         return pipefd;
     }
 
+    inline std::atomic<unsigned int>& pending_signal_mask()
+    {
+        static std::atomic<unsigned int> mask {0};
+        return mask;
+    }
+
     inline std::once_flag& signal_dispatcher_once_flag()
     {
         static std::once_flag flag;
         return flag;
+    }
+
+    inline std::size_t signal_index(int sig)
+    {
+        auto& slots = signal_slots();
+        for (std::size_t idx = 0; idx < slots.size(); ++idx) {
+            if (slots[idx].sig == sig) {
+                return idx;
+            }
+        }
+        return slots.size();
+    }
+
+    inline void dispatch_signal_number(int sig_number)
+    {
+        auto* mproc = s_mproc;
+        if (mproc && mproc->m_out_req_c) {
+            mproc->emit_remote<Managed_process::terminated_abnormally>(sig_number);
+
+            for (auto& reader : mproc->m_readers) {
+                reader.second.stop_nowait();
+            }
+        }
+    }
+
+    inline void drain_pending_signals()
+    {
+        auto mask = pending_signal_mask().exchange(0U, std::memory_order_acq_rel);
+        if (mask == 0U) {
+            return;
+        }
+
+        auto& slots = signal_slots();
+        for (std::size_t idx = 0; idx < slots.size(); ++idx) {
+            if ((mask & (1U << idx)) != 0U) {
+                dispatch_signal_number(slots[idx].sig);
+            }
+        }
     }
 
     inline void signal_dispatch_loop()
@@ -124,27 +169,25 @@ namespace {
             ssize_t bytes_read = ::read(pipefd[0], &sig_number, sizeof(sig_number));
 
             if (bytes_read == sizeof(sig_number)) {
-                auto* mproc = s_mproc;
-                if (mproc && mproc->m_out_req_c) {
-                    mproc->emit_remote<Managed_process::terminated_abnormally>(sig_number);
-
-                    for (auto& reader : mproc->m_readers) {
-                        reader.second.stop_nowait();
-                    }
-                }
+                dispatch_signal_number(sig_number);
+                drain_pending_signals();
                 continue;
             }
 
             if (bytes_read == -1) {
                 if (errno == EINTR) {
+                    drain_pending_signals();
                     continue;
                 }
 
                 if (errno == EAGAIN) {
                     std::this_thread::yield();
+                    drain_pending_signals();
                     continue;
                 }
             }
+
+            drain_pending_signals();
 
             // Either the write end was closed (bytes_read == 0) or an unrecoverable
             // error occurred. Exit the loop to allow the thread to finish.
@@ -204,8 +247,32 @@ static void s_signal_handler(int sig)
     auto& pipefd = signal_pipe();
     if (pipefd[1] != -1) {
         int sig_number = sig;
-        ssize_t result = ::write(pipefd[1], &sig_number, sizeof(sig_number));
-        (void)result;
+        int last_errno = 0;
+        bool delivered = false;
+        constexpr int max_attempts = 4;
+        for (int attempt = 0; attempt < max_attempts; ++attempt) {
+            ssize_t result = ::write(pipefd[1], &sig_number, sizeof(sig_number));
+            if (result == sizeof(sig_number)) {
+                delivered = true;
+                break;
+            }
+
+            if (result == -1) {
+                last_errno = errno;
+                if (last_errno == EINTR || last_errno == EAGAIN) {
+                    continue;
+                }
+            }
+
+            break;
+        }
+
+        if (!delivered && (last_errno == EAGAIN || last_errno == EINTR)) {
+            auto index = signal_index(sig);
+            if (index < slots.size()) {
+                pending_signal_mask().fetch_or(1U << index, std::memory_order_release);
+            }
+        }
     }
 #endif
 
