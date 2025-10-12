@@ -45,3 +45,7 @@ add_test(NAME sintra.variable_buffer_alignment COMMAND sintra_variable_buffer_al
 add_executable(sintra_spawn_detached_test spawn_detached_test.cpp)
 target_link_libraries(sintra_spawn_detached_test PRIVATE ${SINTRA_TEST_TARGET})
 add_test(NAME sintra.spawn_detached COMMAND sintra_spawn_detached_test)
+
+add_executable(sintra_barrier_stress_test barrier_stress_test.cpp)
+target_link_libraries(sintra_barrier_stress_test PRIVATE ${SINTRA_TEST_TARGET})
+add_test(NAME sintra.barrier_stress COMMAND sintra_barrier_stress_test)
