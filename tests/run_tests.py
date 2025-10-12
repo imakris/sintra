@@ -15,7 +15,7 @@ Options:
     --build-dir PATH                Path to build directory (default: ../build-ninja2)
     --config CONFIG                 Build configuration Debug/Release (default: Debug)
     --verbose                       Show detailed output for each test run
-    --kill_stalled_processes        Kill stalled processes instead of aborting (default: abort)
+    --preserve-stalled-processes    Keep stalled processes running for debugging (default: terminate)
 """
 
 import argparse
@@ -52,12 +52,13 @@ class TestResult:
 class TestRunner:
     """Manages test execution with timeout and repetition"""
 
-    def __init__(self, build_dir: Path, config: str, timeout: float, verbose: bool, kill_on_stall: bool = False):
+    def __init__(self, build_dir: Path, config: str, timeout: float, verbose: bool,
+                 preserve_on_timeout: bool = False):
         self.build_dir = build_dir
         self.config = config
         self.timeout = timeout
         self.verbose = verbose
-        self.kill_on_stall = kill_on_stall
+        self.preserve_on_timeout = preserve_on_timeout
 
         # Determine test directory - check both with and without config subdirectory
         test_dir_with_config = build_dir / 'tests' / config
@@ -114,13 +115,22 @@ class TestRunner:
             start_time = time.time()
 
             # Use Popen for better process control
-            process = subprocess.Popen(
-                [str(test_path)],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                cwd=test_path.parent
-            )
+            popen_kwargs = {
+                'stdout': subprocess.PIPE,
+                'stderr': subprocess.PIPE,
+                'text': True,
+                'cwd': test_path.parent,
+            }
+
+            if sys.platform == 'win32':
+                creationflags = 0
+                if hasattr(subprocess, 'CREATE_NEW_PROCESS_GROUP'):
+                    creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
+                popen_kwargs['creationflags'] = creationflags
+            else:
+                popen_kwargs['start_new_session'] = True
+
+            process = subprocess.Popen([str(test_path)], **popen_kwargs)
 
             # Wait with timeout
             try:
@@ -138,13 +148,12 @@ class TestRunner:
             except subprocess.TimeoutExpired:
                 duration = self.timeout
 
-                if not self.kill_on_stall:
-                    # Abort without killing - leave process running for debugging (default behavior)
-                    print(f"\n{Color.RED}Process stalled (PID {process.pid}). Aborting test run for debugging.{Color.RESET}")
-                    print(f"{Color.YELLOW}Attach debugger to PID {process.pid} to investigate.{Color.RESET}")
+                if self.preserve_on_timeout:
+                    print(f"\n{Color.RED}Process stalled (PID {process.pid}). Preserving for debugging as requested.{Color.RESET}")
+                    print(f"{Color.YELLOW}Attach a debugger to PID {process.pid} or terminate it manually when done.{Color.RESET}")
                     sys.exit(2)
 
-                # Kill the process tree on timeout (only if --kill_stalled_processes was specified)
+                # Kill the process tree on timeout
                 self._kill_process_tree(process.pid)
 
                 # Try to get any output
@@ -182,7 +191,15 @@ class TestRunner:
             else:
                 # On Unix, kill process group
                 import signal
-                os.killpg(os.getpgid(pid), signal.SIGKILL)
+                try:
+                    pgid = os.getpgid(pid)
+                except ProcessLookupError:
+                    pgid = None
+
+                if pgid is not None:
+                    os.killpg(pgid, signal.SIGKILL)
+                else:
+                    os.kill(pid, signal.SIGKILL)
         except Exception as e:
             # Log but don't fail if cleanup fails
             print(f"\n{Color.YELLOW}Warning: Failed to kill process {pid}: {e}{Color.RESET}")
@@ -333,8 +350,9 @@ def main():
                         help='Build configuration (default: Debug)')
     parser.add_argument('--verbose', action='store_true',
                         help='Show detailed output for each test run')
-    parser.add_argument('--kill_stalled_processes', action='store_true',
-                        help='Kill stalled processes instead of aborting (default: abort for debugging)')
+    parser.add_argument('--preserve-stalled-processes', action='store_true',
+                        help='Leave stalled test processes running for debugging instead of terminating them')
+    parser.add_argument('--kill_stalled_processes', action='store_true', help=argparse.SUPPRESS)
 
     args = parser.parse_args()
 
@@ -354,7 +372,11 @@ def main():
     print(f"Timeout per test: {args.timeout}s")
     print("=" * 70)
 
-    runner = TestRunner(build_dir, args.config, args.timeout, args.verbose, args.kill_stalled_processes)
+    if args.kill_stalled_processes:
+        print(f"{Color.YELLOW}Warning: --kill_stalled_processes is deprecated; stalled tests are killed by default.{Color.RESET}")
+
+    preserve_on_timeout = args.preserve_stalled_processes
+    runner = TestRunner(build_dir, args.config, args.timeout, args.verbose, preserve_on_timeout)
     tests = runner.find_tests(args.test)
 
     if not tests:
