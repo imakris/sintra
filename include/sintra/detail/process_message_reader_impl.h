@@ -38,6 +38,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 namespace sintra {
 
+void install_signal_handler();
+
 
 using std::thread;
 using std::unique_ptr;

@@ -35,6 +35,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <memory>
 #include <mutex>
 #include <set>
+#include <thread>
 
 
 namespace sintra {
@@ -43,9 +44,11 @@ namespace sintra {
 using std::atomic;
 using std::atomic_flag;
 using std::string;
-using std::thread;
 using std::mutex;
 using std::condition_variable;
+using std::thread;
+
+struct Outstanding_rpc_control;
 
 // Note: this should be a specialization of Message_reader (which does not exist), but for the sake
 // of simplicity and code coverage, the Message_reader was not implemented.
