@@ -30,6 +30,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <type_traits>
 #include <memory>
 #include <cstring>
+#include <string>
 
 #include "exception_conversions.h"
 #include "exception_conversions_impl.h"
@@ -661,21 +662,11 @@ void Transceiver::rpc_handler(Message_prefix& untyped_msg)
     (void)(once); // suppress unused variable warning
 
     type_id_type etid = not_defined_type_id;
-    const char* what = "";
+    string what;
 
-    // allocate string and copy exception information
-    auto asacei = [](const char* e_what) -> const char*
+    auto to_exception_string = [](const char* e_what) -> string
     {
-        if (!e_what) {
-            char* what = new char[1];
-            what[0] = '\0';
-            return what;
-        }
-
-        const size_t what_size = std::strlen(e_what) + 1;
-        char* what = new char[what_size];
-        std::memcpy(what, e_what, what_size);
-        return what;
+        return e_what ? string(e_what) : string();
     };
 
     auto vf = Void_filter<r_type>{
@@ -698,19 +689,18 @@ void Transceiver::rpc_handler(Message_prefix& untyped_msg)
         d.second();
         return;
     }
-    catch(std::invalid_argument  &e) { etid = (type_id_type)detail::reserved_id::std_invalid_argument; what = asacei(e.what()); }
-    catch(std::domain_error      &e) { etid = (type_id_type)detail::reserved_id::std_domain_error;     what = asacei(e.what()); }
-    catch(std::length_error      &e) { etid = (type_id_type)detail::reserved_id::std_length_error;     what = asacei(e.what()); }
-    catch(std::out_of_range      &e) { etid = (type_id_type)detail::reserved_id::std_out_of_range;     what = asacei(e.what()); }
-    catch(std::range_error       &e) { etid = (type_id_type)detail::reserved_id::std_range_error;      what = asacei(e.what()); }
-    catch(std::overflow_error    &e) { etid = (type_id_type)detail::reserved_id::std_overflow_error;   what = asacei(e.what()); }
-    catch(std::underflow_error   &e) { etid = (type_id_type)detail::reserved_id::std_underflow_error;  what = asacei(e.what()); }
-    catch(std::ios_base::failure &e) { etid = (type_id_type)detail::reserved_id::std_ios_base_failure; what = asacei(e.what()); }
-    catch(std::logic_error       &e) { etid = (type_id_type)detail::reserved_id::std_logic_error;      what = asacei(e.what()); }
-    catch(std::runtime_error     &e) { etid = (type_id_type)detail::reserved_id::std_runtime_error;    what = asacei(e.what()); }
-    catch(std::exception         &e) { etid = (type_id_type)detail::reserved_id::std_exception;        what = asacei(e.what()); }
-    catch(...)                       { etid = (type_id_type)detail::reserved_id::unknown_exception;    what = asacei(
-        "An exception was thrown whose type is not serialized by sintra");
+    catch(std::invalid_argument  &e) { etid = (type_id_type)detail::reserved_id::std_invalid_argument; what = to_exception_string(e.what()); }
+    catch(std::domain_error      &e) { etid = (type_id_type)detail::reserved_id::std_domain_error;     what = to_exception_string(e.what()); }
+    catch(std::length_error      &e) { etid = (type_id_type)detail::reserved_id::std_length_error;     what = to_exception_string(e.what()); }
+    catch(std::out_of_range      &e) { etid = (type_id_type)detail::reserved_id::std_out_of_range;     what = to_exception_string(e.what()); }
+    catch(std::range_error       &e) { etid = (type_id_type)detail::reserved_id::std_range_error;      what = to_exception_string(e.what()); }
+    catch(std::overflow_error    &e) { etid = (type_id_type)detail::reserved_id::std_overflow_error;   what = to_exception_string(e.what()); }
+    catch(std::underflow_error   &e) { etid = (type_id_type)detail::reserved_id::std_underflow_error;  what = to_exception_string(e.what()); }
+    catch(std::ios_base::failure &e) { etid = (type_id_type)detail::reserved_id::std_ios_base_failure; what = to_exception_string(e.what()); }
+    catch(std::logic_error       &e) { etid = (type_id_type)detail::reserved_id::std_logic_error;      what = to_exception_string(e.what()); }
+    catch(std::runtime_error     &e) { etid = (type_id_type)detail::reserved_id::std_runtime_error;    what = to_exception_string(e.what()); }
+    catch(std::exception         &e) { etid = (type_id_type)detail::reserved_id::std_exception;        what = to_exception_string(e.what()); }
+    catch(...)                       { etid = (type_id_type)detail::reserved_id::unknown_exception;    what = "An exception was thrown whose type is not serialized by sintra";
     }
 
     if (etid == not_defined_type_id) { // normal return
@@ -734,9 +724,8 @@ void Transceiver::rpc_handler(Message_prefix& untyped_msg)
         finalize_rpc_write(placed_msg, msg, obj, etid);
     }
     else {
-        exception* placed_msg = s_mproc->m_out_rep_c->write<exception>(vb_size(string(what)), string(what));
+        exception* placed_msg = s_mproc->m_out_rep_c->write<exception>(vb_size(what), what);
         finalize_rpc_write(placed_msg, msg, obj, etid);
-        delete [] what;
     }
 }
 
