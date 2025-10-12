@@ -41,6 +41,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <signal.h>
 #include <cerrno>
 #include <fcntl.h>
+#include <sched.h>
+#include <time.h>
 #include <unistd.h>
 #endif
 
@@ -116,6 +118,12 @@ namespace {
         return mask;
     }
 
+    inline std::atomic<uint32_t>& dispatched_signal_counter()
+    {
+        static std::atomic<uint32_t> counter {0};
+        return counter;
+    }
+
     inline std::once_flag& signal_dispatcher_once_flag()
     {
         static std::once_flag flag;
@@ -142,6 +150,22 @@ namespace {
             for (auto& reader : mproc->m_readers) {
                 reader.second.stop_nowait();
             }
+
+            dispatched_signal_counter().fetch_add(1, std::memory_order_release);
+        }
+    }
+
+    inline void wait_for_signal_dispatch(uint32_t expected_count)
+    {
+        const uint32_t target = expected_count + 1;
+        timespec ts;
+        ts.tv_sec = 0;
+        ts.tv_nsec = 1'000'000; // 1 millisecond
+        for (int spin = 0; spin < 200; ++spin) {
+            if (dispatched_signal_counter().load(std::memory_order_acquire) >= target) {
+                return;
+            }
+            ::nanosleep(&ts, nullptr);
         }
     }
 
@@ -255,6 +279,13 @@ static void s_signal_handler(int sig, siginfo_t* info, void* ctx)
 {
     auto& slots = signal_slots();
 
+    auto* mproc = s_mproc;
+    const bool should_wait_for_dispatch = mproc && mproc->m_out_req_c;
+    uint32_t dispatched_before = 0;
+    if (should_wait_for_dispatch) {
+        dispatched_before = dispatched_signal_counter().load(std::memory_order_relaxed);
+    }
+
     auto& pipefd = signal_pipe();
     if (pipefd[1] != -1) {
         int sig_number = sig;
@@ -284,6 +315,10 @@ static void s_signal_handler(int sig, siginfo_t* info, void* ctx)
                 pending_signal_mask().fetch_or(1U << index, std::memory_order_release);
             }
         }
+    }
+
+    if (should_wait_for_dispatch) {
+        wait_for_signal_dispatch(dispatched_before);
     }
 
     if (auto* slot = find_slot(slots, sig); slot && slot->has_previous) {
