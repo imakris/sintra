@@ -81,10 +81,15 @@ sequence_counter_type Process_group::barrier(
             s_tl_additional_piids[s_tl_additional_piids_size++] = e;
         }
 
-        s_tl_common_function_iid = b.common_function_iid;
-        basic_lock.lock();
+        const auto current_common_fiid = b.common_function_iid;
+        s_tl_common_function_iid = current_common_fiid;
         b.m.unlock();
-        m_barriers.erase(barrier_name);
+
+        basic_lock.lock();
+        auto it = m_barriers.find(barrier_name);
+        if (it != m_barriers.end() && it->second.common_function_iid == current_common_fiid) {
+            m_barriers.erase(it);
+        }
         return s_mproc->m_out_req_c->get_leading_sequence();
     }
     else {
