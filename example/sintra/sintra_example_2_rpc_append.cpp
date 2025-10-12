@@ -145,6 +145,12 @@ int process_2()
 int main(int argc, char* argv[])
 {
     init(argc, argv, process_1, process_2);
+
+    // Wait for both processes to finish all RPC traffic before shutting down the
+    // coordinator.  This avoids tearing down the runtime while remote calls are
+    // still in flight.
+    barrier("example-2-finished", "_sintra_all_processes");
+
     finalize();
 
     if (process_index() == 0) {
