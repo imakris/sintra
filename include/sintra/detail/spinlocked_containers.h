@@ -45,6 +45,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 
@@ -78,49 +79,109 @@ struct spinlocked
     struct scoped_access
     {
         scoped_access(spinlock& sl, CT<Args...>& c)
-            : m_lock(sl)
-            , m_c(c)
-        {}
+            : m_sl(&sl)
+            , m_c(&c)
+        {
+            m_sl->lock();
+        }
+
+        ~scoped_access()
+        {
+            release();
+        }
 
         scoped_access(const scoped_access&) = delete;
         scoped_access& operator=(const scoped_access&) = delete;
 
-        scoped_access(scoped_access&&) = default;
-        scoped_access& operator=(scoped_access&&) = default;
+        scoped_access(scoped_access&& other) noexcept
+            : m_sl(std::exchange(other.m_sl, nullptr))
+            , m_c(std::exchange(other.m_c, nullptr))
+        {}
 
-        iterator begin() noexcept { return m_c.begin(); }
-        iterator end() noexcept { return m_c.end(); }
+        scoped_access& operator=(scoped_access&& other) noexcept
+        {
+            if (this != &other)
+            {
+                release();
+                m_sl = std::exchange(other.m_sl, nullptr);
+                m_c  = std::exchange(other.m_c, nullptr);
+            }
+            return *this;
+        }
 
-        auto erase(iterator it) { return m_c.erase(it); }
+        iterator begin() noexcept { return m_c->begin(); }
+        iterator end() noexcept { return m_c->end(); }
 
-        CT<Args...>& get() noexcept { return m_c; }
+        auto erase(iterator it) { return m_c->erase(it); }
+
+        CT<Args...>& get() noexcept { return *m_c; }
 
     private:
-        locker         m_lock;
-        CT<Args...>&   m_c;
+        void release() noexcept
+        {
+            if (m_sl)
+            {
+                m_sl->unlock();
+                m_sl = nullptr;
+                m_c = nullptr;
+            }
+        }
+
+        spinlock*      m_sl;
+        CT<Args...>*   m_c;
     };
 
     struct const_scoped_access
     {
         const_scoped_access(spinlock& sl, const CT<Args...>& c)
-            : m_lock(sl)
-            , m_c(c)
-        {}
+            : m_sl(&sl)
+            , m_c(&c)
+        {
+            m_sl->lock();
+        }
+
+        ~const_scoped_access()
+        {
+            release();
+        }
 
         const_scoped_access(const const_scoped_access&) = delete;
         const_scoped_access& operator=(const const_scoped_access&) = delete;
 
-        const_scoped_access(const_scoped_access&&) = default;
-        const_scoped_access& operator=(const_scoped_access&&) = default;
+        const_scoped_access(const_scoped_access&& other) noexcept
+            : m_sl(std::exchange(other.m_sl, nullptr))
+            , m_c(std::exchange(other.m_c, nullptr))
+        {}
 
-        const_iterator begin() const noexcept { return m_c.begin(); }
-        const_iterator end() const noexcept { return m_c.end(); }
+        const_scoped_access& operator=(const_scoped_access&& other) noexcept
+        {
+            if (this != &other)
+            {
+                release();
+                m_sl = std::exchange(other.m_sl, nullptr);
+                m_c  = std::exchange(other.m_c, nullptr);
+            }
+            return *this;
+        }
 
-        const CT<Args...>& get() const noexcept { return m_c; }
+        const_iterator begin() const noexcept { return m_c->begin(); }
+        const_iterator end() const noexcept { return m_c->end(); }
+
+        const CT<Args...>& get() const noexcept { return *m_c; }
 
     private:
-        locker               m_lock;
-        const CT<Args...>&   m_c;
+        void release() noexcept
+        {
+            if (m_sl)
+            {
+                m_sl->unlock();
+                m_sl = nullptr;
+                m_c = nullptr;
+            }
+        }
+
+        spinlock*            m_sl;
+        const CT<Args...>*   m_c;
     };
 
     reference back() noexcept                      {locker l(m_sl); return m_c.back();            }
