@@ -12,6 +12,7 @@
 #include <random>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 constexpr std::size_t kProcessCount = 4;
 constexpr std::size_t kIterations = 500;  // Many iterations to increase chance of races
@@ -23,7 +24,6 @@ struct Worker_done
 {
     std::uint32_t worker_index;
 };
-
 bool has_branch_flag(int argc, char* argv[])
 {
     for (int i = 0; i < argc; ++i) {
@@ -121,7 +121,6 @@ int main(int argc, char* argv[])
             return 1;
         }
     }
-
     sintra::finalize();
 
     auto end = std::chrono::steady_clock::now();

@@ -15,7 +15,7 @@ Options:
     --build-dir PATH                Path to build directory (default: ../build-ninja2)
     --config CONFIG                 Build configuration Debug/Release (default: Debug)
     --verbose                       Show detailed output for each test run
-    --kill_stalled_processes        Kill stalled processes instead of aborting (default: abort)
+    --preserve-stalled-processes    Keep stalled processes running for debugging (default: terminate)
 """
 
 import argparse
@@ -52,12 +52,13 @@ class TestResult:
 class TestRunner:
     """Manages test execution with timeout and repetition"""
 
-    def __init__(self, build_dir: Path, config: str, timeout: float, verbose: bool, kill_on_stall: bool = False):
+    def __init__(self, build_dir: Path, config: str, timeout: float, verbose: bool,
+                 preserve_on_timeout: bool = False):
         self.build_dir = build_dir
         self.config = config
         self.timeout = timeout
         self.verbose = verbose
-        self.kill_on_stall = kill_on_stall
+        self.preserve_on_timeout = preserve_on_timeout
 
         # Determine test directory - check both with and without config subdirectory
         test_dir_with_config = build_dir / 'tests' / config
@@ -114,13 +115,22 @@ class TestRunner:
             start_time = time.time()
 
             # Use Popen for better process control
-            process = subprocess.Popen(
-                [str(test_path)],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                cwd=test_path.parent
-            )
+            popen_kwargs = {
+                'stdout': subprocess.PIPE,
+                'stderr': subprocess.PIPE,
+                'text': True,
+                'cwd': test_path.parent,
+            }
+
+            if sys.platform == 'win32':
+                creationflags = 0
+                if hasattr(subprocess, 'CREATE_NEW_PROCESS_GROUP'):
+                    creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
+                popen_kwargs['creationflags'] = creationflags
+            else:
+                popen_kwargs['start_new_session'] = True
+
+            process = subprocess.Popen([str(test_path)], **popen_kwargs)
 
             # Wait with timeout
             try:
@@ -138,13 +148,12 @@ class TestRunner:
             except subprocess.TimeoutExpired:
                 duration = self.timeout
 
-                if not self.kill_on_stall:
-                    # Abort without killing - leave process running for debugging (default behavior)
-                    print(f"\n{Color.RED}Process stalled (PID {process.pid}). Aborting test run for debugging.{Color.RESET}")
-                    print(f"{Color.YELLOW}Attach debugger to PID {process.pid} to investigate.{Color.RESET}")
+                if self.preserve_on_timeout:
+                    print(f"\n{Color.RED}Process stalled (PID {process.pid}). Preserving for debugging as requested.{Color.RESET}")
+                    print(f"{Color.YELLOW}Attach a debugger to PID {process.pid} or terminate it manually when done.{Color.RESET}")
                     sys.exit(2)
 
-                # Kill the process tree on timeout (only if --kill_stalled_processes was specified)
+                # Kill the process tree on timeout
                 self._kill_process_tree(process.pid)
 
                 # Try to get any output
@@ -182,7 +191,15 @@ class TestRunner:
             else:
                 # On Unix, kill process group
                 import signal
-                os.killpg(os.getpgid(pid), signal.SIGKILL)
+                try:
+                    pgid = os.getpgid(pid)
+                except ProcessLookupError:
+                    pgid = None
+
+                if pgid is not None:
+                    os.killpg(pgid, signal.SIGKILL)
+                else:
+                    os.kill(pid, signal.SIGKILL)
         except Exception as e:
             # Log but don't fail if cleanup fails
             print(f"\n{Color.YELLOW}Warning: Failed to kill process {pid}: {e}{Color.RESET}")
@@ -333,10 +350,9 @@ def main():
                         help='Build configuration (default: Debug)')
     parser.add_argument('--verbose', action='store_true',
                         help='Show detailed output for each test run')
-    parser.add_argument('--adaptive', action='store_true',
-                        help='Use adaptive soak test with exponential batches and early stopping')
-    parser.add_argument('--kill_stalled_processes', action='store_true',
-                        help='Kill stalled processes instead of aborting (default: abort for debugging)')
+    parser.add_argument('--preserve-stalled-processes', action='store_true',
+                        help='Leave stalled test processes running for debugging instead of terminating them')
+    parser.add_argument('--kill_stalled_processes', action='store_true', help=argparse.SUPPRESS)
 
     args = parser.parse_args()
 
@@ -356,7 +372,11 @@ def main():
     print(f"Timeout per test: {args.timeout}s")
     print("=" * 70)
 
-    runner = TestRunner(build_dir, args.config, args.timeout, args.verbose, args.kill_stalled_processes)
+    if args.kill_stalled_processes:
+        print(f"{Color.YELLOW}Warning: --kill_stalled_processes is deprecated; stalled tests are killed by default.{Color.RESET}")
+
+    preserve_on_timeout = args.preserve_stalled_processes
+    runner = TestRunner(build_dir, args.config, args.timeout, args.verbose, preserve_on_timeout)
     tests = runner.find_tests(args.test)
 
     if not tests:
@@ -367,109 +387,72 @@ def main():
 
     start_time = time.time()
 
-    if args.adaptive:
-        # Adaptive soak test: run full suite with exponentially increasing batch sizes
-        # Each batch runs the full suite, accumulating results
-        accumulated_results = {test.stem: {'passed': 0, 'failed': 0, 'durations': []} for test in tests}
+    # Adaptive soak test: run full suite with exponentially increasing batch sizes
+    # Each batch runs the full suite, accumulating results
+    accumulated_results = {test.stem: {'passed': 0, 'failed': 0, 'durations': []} for test in tests}
 
-        batch_size = 2
-        total_reps_so_far = 0
-        max_reps_per_test = args.repetitions
-        all_passed = True
+    batch_size = 1
+    total_reps_so_far = 0
+    max_reps_per_test = args.repetitions
+    all_passed = True
 
-        while total_reps_so_far < max_reps_per_test:
-            # Calculate how many reps to run in this batch
-            remaining = max_reps_per_test - total_reps_so_far
-            current_batch = min(batch_size, remaining)
+    while total_reps_so_far < max_reps_per_test:
+        # Calculate how many reps to run in this batch
+        remaining = max_reps_per_test - total_reps_so_far
+        current_batch = min(batch_size, remaining)
 
-            all_pass, passed, total, test_results = runner.run_full_test_suite_once(tests, current_batch)
-            total_reps_so_far += current_batch
+        all_pass, passed, total, test_results = runner.run_full_test_suite_once(tests, current_batch)
+        total_reps_so_far += current_batch
 
-            # Accumulate results
-            for test_name, (test_passed, test_failed, avg_duration) in test_results.items():
-                accumulated_results[test_name]['passed'] += test_passed
-                accumulated_results[test_name]['failed'] += test_failed
-                accumulated_results[test_name]['durations'].append(avg_duration)
+        # Accumulate results
+        for test_name, (test_passed, test_failed, avg_duration) in test_results.items():
+            accumulated_results[test_name]['passed'] += test_passed
+            accumulated_results[test_name]['failed'] += test_failed
+            accumulated_results[test_name]['durations'].append(avg_duration)
 
-            # Early stopping conditions
-            if not all_pass:
-                all_passed = False
-                fail_rate = 100.0 - (passed / total * 100 if total > 0 else 0)
-                if fail_rate >= 100 and total_reps_so_far >= 2:
-                    break
-                elif fail_rate >= 30 and total_reps_so_far >= 4:
-                    break
-                elif fail_rate >= 10 and total_reps_so_far >= 16:
-                    break
+        # Early stopping conditions
+        if not all_pass:
+            all_passed = False
+            fail_rate = 100.0 - (passed / total * 100 if total > 0 else 0)
+            if fail_rate >= 100 and total_reps_so_far >= 2:
+                break
+            elif fail_rate >= 30 and total_reps_so_far >= 4:
+                break
+            elif fail_rate >= 10 and total_reps_so_far >= 16:
+                break
 
-            # Double the batch size for next round
-            batch_size *= 2
+        # Double the batch size for next round
+        batch_size *= 2
 
-        # Print final results
-        print("\n" + "=" * 80)
-        print(f"{'Test':<40} {'Pass rate':<20} {'Avg runtime (s)':>15}")
-        print("=" * 80)
+    # Print final results
+    print("\n" + "=" * 80)
+    print(f"{'Test':<40} {'Pass rate':<20} {'Avg runtime (s)':>15}")
+    print("=" * 80)
 
-        for test_name in sorted(accumulated_results.keys()):
-            passed = accumulated_results[test_name]['passed']
-            failed = accumulated_results[test_name]['failed']
-            total = passed + failed
-            pass_rate = (passed / total * 100) if total > 0 else 0
+    for test_name in sorted(accumulated_results.keys()):
+        passed = accumulated_results[test_name]['passed']
+        failed = accumulated_results[test_name]['failed']
+        total = passed + failed
+        pass_rate = (passed / total * 100) if total > 0 else 0
 
-            durations = accumulated_results[test_name]['durations']
-            avg_duration = sum(durations) / len(durations) if durations else 0
+        durations = accumulated_results[test_name]['durations']
+        avg_duration = sum(durations) / len(durations) if durations else 0
 
-            pass_rate_str = f"{passed}/{total} ({pass_rate:6.2f}%)"
-            print(f"{test_name:<40} {pass_rate_str:<20} {avg_duration:>15.2f}")
+        pass_rate_str = f"{passed}/{total} ({pass_rate:6.2f}%)"
+        print(f"{test_name:<40} {pass_rate_str:<20} {avg_duration:>15.2f}")
 
-        print("=" * 80)
+    print("=" * 80)
 
-        total_duration = time.time() - start_time
-        print(f"Total duration: {format_duration(total_duration)}")
-        print()
+    total_duration = time.time() - start_time
+    print(f"Total duration: {format_duration(total_duration)}")
+    print()
 
-        if all_passed:
-            print(f"{Color.GREEN}PASSED{Color.RESET}")
-            return 0
-        else:
-            print(f"{Color.RED}FAILED{Color.RESET}")
-            return 1
-
+    if all_passed:
+        print(f"{Color.GREEN}PASSED{Color.RESET}")
+        return 0
     else:
-        # Original test mode: run each test multiple times
-        all_results = {}
-        total_passed = 0
-        total_failed = 0
-
-        for test_path in tests:
-            passed, failed, results = runner.run_test_multiple(test_path, args.repetitions)
-            runner.print_summary(test_path, passed, failed, results)
-
-            all_results[test_path.stem] = (passed, failed, results)
-            total_passed += passed
-            total_failed += failed
-
-        total_duration = time.time() - start_time
-
-        # Print overall summary
-        print("\n" + "=" * 70)
-        print(f"{Color.BOLD}Overall Summary{Color.RESET}")
-        print(f"Total Tests: {len(tests)}")
-        print(f"Total Runs: {total_passed + total_failed}")
-        print(f"Total Passed: {Color.GREEN}{total_passed}{Color.RESET}")
-        print(f"Total Failed: {Color.RED}{total_failed}{Color.RESET}")
-
-        if total_failed == 0:
-            print(f"\n{Color.BOLD}{Color.GREEN}ALL TESTS PASSED!{Color.RESET}")
-            exit_code = 0
-        else:
-            print(f"\n{Color.BOLD}{Color.RED}SOME TESTS FAILED!{Color.RESET}")
-            exit_code = 1
-
-        print(f"Total Duration: {format_duration(total_duration)}")
-        print("=" * 70)
-
-        return exit_code
+        print(f"{Color.RED}FAILED{Color.RESET}")
+        return 1
 
 if __name__ == '__main__':
     sys.exit(main())
