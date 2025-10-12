@@ -135,12 +135,32 @@ template <typename T>
 inline auto variable_buffer_payload_size(
     const T& v,
     enable_if_t<
+        is_base_of<
+            variable_buffer,
+            typename remove_cv<typename remove_reference<T>::type>::type
+        >::value,
+        int
+    >* = nullptr)
+{
+    return static_cast<const variable_buffer&>(v).num_bytes;
+}
+
+
+template <typename T>
+inline auto variable_buffer_payload_size(
+    const T& v,
+    enable_if_t<
+        !is_base_of<
+            variable_buffer,
+            typename remove_cv<typename remove_reference<T>::type>::type
+        >::value &&
         is_convertible<const T&, const variable_buffer&>::value,
         int
     >* = nullptr)
 {
-    const variable_buffer& base = v;
-    return base.num_bytes;
+    using container_type = typename remove_reference<T>::type;
+    using value_type = typename container_type::value_type;
+    return v.size() * sizeof(value_type);
 }
 
 
