@@ -81,6 +81,7 @@ class TestRunner:
         # List of test executables to run
         test_names = [
             'sintra_dummy_test',
+            'sintra_hanging_test',
         ]
 
         if test_name:
@@ -354,13 +355,11 @@ def main():
     args = parser.parse_args()
 
     # Resolve build directory
-    # Use os.path.abspath as it's more robust than Path.resolve() which can hang on some filesystems
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    build_dir_str = os.path.abspath(os.path.join(script_dir, args.build_dir))
-    build_dir = Path(build_dir_str)
+    script_dir = Path(__file__).parent
+    build_dir = (script_dir / args.build_dir).resolve()
 
-    if not os.path.exists(build_dir_str):
-        print(f"{Color.RED}Error: Build directory not found: {build_dir_str}{Color.RESET}")
+    if not build_dir.exists():
+        print(f"{Color.RED}Error: Build directory not found: {build_dir}{Color.RESET}")
         print(f"Please build the project first or specify correct --build-dir")
         return 1
 
