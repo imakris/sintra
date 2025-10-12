@@ -397,7 +397,10 @@ static inline bool remove_directory(const std::string& dir_name)
 {
     std::error_code ec;
     auto removed = fs::remove_all(dir_name.c_str(), ec);
-    return !!removed;
+    if (ec) {
+        return false;
+    }
+    return removed > 0;
 }
 
 
