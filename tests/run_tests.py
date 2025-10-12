@@ -24,7 +24,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Set
 
 class Color:
     """ANSI color codes for terminal output"""
@@ -77,31 +77,48 @@ class TestRunner:
             print(f"{Color.RED}Test directory not found: {self.test_dir}{Color.RESET}")
             return []
 
-        # List of test executables to run
-        test_names = [
+        manual_test_names = [
             'sintra_basic_pubsub_test',
             'sintra_ping_pong_test',
             'sintra_ping_pong_multi_test',
             'sintra_rpc_append_test',
             'sintra_recovery_test',
+            'sintra_barrier_flush_test',
+            'sintra_variable_buffer_alignment_test',
+            'sintra_spawn_detached_test',
         ]
 
         if test_name:
-            test_names = [name for name in test_names if test_name in name]
+            manual_test_names = [name for name in manual_test_names if test_name in name]
 
-        tests = []
-        for name in test_names:
-            if sys.platform == 'win32':
-                test_path = self.test_dir / f"{name}.exe"
-            else:
-                test_path = self.test_dir / name
+        tests: List[Path] = []
+        seen: Set[Path] = set()
 
+        def add_candidate(path: Path):
+            try:
+                resolved = path.resolve()
+            except FileNotFoundError:
+                resolved = path
+            if resolved not in seen:
+                tests.append(path)
+                seen.add(resolved)
+
+        for name in manual_test_names:
+            test_path = self._build_test_path(name)
             if test_path.exists():
-                tests.append(test_path)
+                add_candidate(test_path)
             else:
                 print(f"{Color.YELLOW}Warning: Test not found: {test_path}{Color.RESET}")
 
+        if test_name:
+            tests = [path for path in tests if test_name in path.stem]
+
         return tests
+
+    def _build_test_path(self, name: str) -> Path:
+        if sys.platform == 'win32':
+            return self.test_dir / f"{name}.exe"
+        return self.test_dir / name
 
     def run_test_once(self, test_path: Path) -> TestResult:
         """Run a single test with timeout and proper cleanup"""
@@ -188,15 +205,23 @@ class TestRunner:
         """Kill all existing sintra processes to ensure clean start"""
         try:
             if sys.platform == 'win32':
-                # Kill all sintra test processes
-                test_names = [
-                    'sintra_basic_pubsub_test.exe',
-                    'sintra_ping_pong_test.exe',
-                    'sintra_ping_pong_multi_test.exe',
-                    'sintra_rpc_append_test.exe',
-                    'sintra_recovery_test.exe',
-                ]
-                for name in test_names:
+                process_names: Set[str] = set()
+                if self.test_dir.exists():
+                    for exe in self.test_dir.glob('sintra_*_test.exe'):
+                        process_names.add(exe.name)
+                if not process_names:
+                    process_names.update({
+                        'sintra_basic_pubsub_test.exe',
+                        'sintra_ping_pong_test.exe',
+                        'sintra_ping_pong_multi_test.exe',
+                        'sintra_rpc_append_test.exe',
+                        'sintra_recovery_test.exe',
+                        'sintra_barrier_flush_test.exe',
+                        'sintra_variable_buffer_alignment_test.exe',
+                        'sintra_spawn_detached_test.exe',
+                    })
+
+                for name in sorted(process_names):
                     subprocess.run(
                         ['taskkill', '/F', '/IM', name],
                         capture_output=True,
