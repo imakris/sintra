@@ -33,3 +33,7 @@ add_test(NAME sintra.rpc_append COMMAND sintra_rpc_append_test)
 add_executable(sintra_recovery_test recovery_test.cpp)
 target_link_libraries(sintra_recovery_test PRIVATE ${SINTRA_TEST_TARGET})
 add_test(NAME sintra.recovery COMMAND sintra_recovery_test)
+
+add_executable(sintra_barrier_flush_test barrier_flush_test.cpp)
+target_link_libraries(sintra_barrier_flush_test PRIVATE ${SINTRA_TEST_TARGET})
+add_test(NAME sintra.barrier_flush COMMAND sintra_barrier_flush_test)

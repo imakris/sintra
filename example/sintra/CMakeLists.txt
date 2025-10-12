@@ -15,3 +15,6 @@ target_link_libraries(sintra_example_3_single_process PRIVATE sintra)
 
 add_executable(sintra_example_4_recovery sintra_example_4_recovery.cpp)
 target_link_libraries(sintra_example_4_recovery PRIVATE sintra)
+
+add_executable(sintra_example_5_barrier_flush sintra_example_5_barrier_flush.cpp)
+target_link_libraries(sintra_example_5_barrier_flush PRIVATE sintra)
