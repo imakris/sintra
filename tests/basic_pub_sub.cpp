@@ -215,6 +215,8 @@ int process_sender()
 
     const bool ok = (strings == expected_strings) && (ints == expected_ints);
     write_result(shared_dir, ok, strings, ints);
+
+    sintra::barrier("result-ready", "_sintra_all_processes");
     return 0;
 }
 
@@ -232,6 +234,7 @@ int process_string_receiver()
     write_strings(shared_dir / "strings.txt", g_received_strings);
 
     sintra::barrier("write-phase");
+    sintra::barrier("result-ready", "_sintra_all_processes");
     return 0;
 }
 
@@ -249,6 +252,7 @@ int process_int_receiver()
     write_ints(shared_dir / "ints.txt", g_received_ints);
 
     sintra::barrier("write-phase");
+    sintra::barrier("result-ready", "_sintra_all_processes");
     return 0;
 }
 
@@ -290,21 +294,32 @@ int main(int argc, char* argv[])
     processes.emplace_back(process_int_receiver);
 
     sintra::init(argc, argv, processes);
+
+    int exit_code = 0;
+    std::string status;
+    bool status_loaded = false;
+    const auto result_path = shared_dir / "result.txt";
+
+    if (!is_spawned) {
+        if (!sintra::barrier("result-ready", "_sintra_all_processes")) {
+            std::fprintf(stderr, "Error: failed to synchronize on result-ready barrier\n");
+            exit_code = 1;
+        } else {
+            std::ifstream in(result_path, std::ios::binary);
+            if (!in) {
+                std::fprintf(stderr, "Error: failed to open result file at %s\n",
+                              result_path.string().c_str());
+                exit_code = 1;
+            } else {
+                in >> status;
+                status_loaded = true;
+            }
+        }
+    }
+
     sintra::finalize();
 
     if (!is_spawned) {
-        const auto result_path = shared_dir / "result.txt";
-        if (!std::filesystem::exists(result_path)) {
-            std::fprintf(stderr, "Error: result file not found at %s\n", result_path.string().c_str());
-            return 1;
-        }
-
-        std::ifstream in(result_path, std::ios::binary);
-        std::string status;
-        in >> status;
-        in.close();
-
-        // Attempt cleanup with retries to handle filesystem delays
         bool cleanup_succeeded = false;
         for (int retry = 0; retry < 3 && !cleanup_succeeded; ++retry) {
             try {
@@ -315,13 +330,18 @@ int main(int argc, char* argv[])
                 if (retry < 2) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 } else {
-                    std::fprintf(stderr, "Warning: failed to remove temp directory %s after 3 attempts: %s\n",
-                                shared_dir.string().c_str(), e.what());
+                    std::fprintf(stderr,
+                                  "Warning: failed to remove temp directory %s after 3 attempts: %s\n",
+                                  shared_dir.string().c_str(), e.what());
                 }
             }
         }
 
-        return (status == "ok") ? 0 : 1;
+        if (exit_code == 0 && status_loaded) {
+            exit_code = (status == "ok") ? 0 : 1;
+        }
+
+        return exit_code;
     }
 
     return 0;
