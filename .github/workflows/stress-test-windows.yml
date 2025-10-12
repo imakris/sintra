@@ -5,7 +5,10 @@ on:
     workflows: ["Build - Windows"]
     types:
       - completed
-    branches: [ '*' ]
+
+permissions:
+  actions: read
+  contents: read
 
 jobs:
   stress-test:
@@ -16,12 +19,17 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
 
-      - name: Configure CMake
-        run: cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
-
-      - name: Build
-        run: cmake --build build --config Release
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-build-${{ github.event.workflow_run.head_sha }}
+          path: build/
+          github-token: ${{ github.token }}
+          run-id: ${{ github.event.workflow_run.id }}
+          if-no-artifact-found: error
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -31,5 +39,5 @@ jobs:
       - name: Run stress tests with run_tests.py
         shell: bash
         run: |
-          cd sintra/tests
-          python run_tests.py --repetitions 10 --timeout 30 --kill_stalled_processes --build-dir ../../build --config Release
+          cd tests
+          python run_tests.py --repetitions 10 --timeout 30 --kill_stalled_processes --build-dir ../build --config Release
