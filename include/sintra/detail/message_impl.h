@@ -27,19 +27,25 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define SINTRA_MESSAGE_IMPL_H
 
 
+#include <cassert>
+#include <cstdint>
 #include <limits>
+#include <memory>
 #include <stdexcept>
+#include <type_traits>
 
 
 namespace sintra {
 
 
-using std::copy;
-
-
 template <typename TC, typename T>
 variable_buffer::variable_buffer(const TC& container)
 {
+    static_assert(
+        std::is_trivially_copyable_v<T>,
+        "variable_buffer requires trivially copyable element types."
+    );
+
     const size_t element_count = container.size();
 
     if (element_count > (std::numeric_limits<size_t>::max() / sizeof(T))) {
@@ -52,18 +58,34 @@ variable_buffer::variable_buffer(const TC& container)
         throw std::runtime_error("sintra::variable_buffer overflow: payload exceeds 32-bit limit");
     }
 
-    const uint32_t current_offset = *S::tl_pbytes_to_next_message;
+    const size_t current_offset = static_cast<size_t>(*S::tl_pbytes_to_next_message);
+    const size_t aligned_offset = detail::align_up_size(current_offset, alignof(T));
 
-    if (num_bytes > (std::numeric_limits<uint32_t>::max() - current_offset)) {
+    if (aligned_offset > std::numeric_limits<uint32_t>::max()) {
+        throw std::runtime_error("sintra::variable_buffer overflow: aligned offset exceeds representable range");
+    }
+
+    if (num_bytes > (std::numeric_limits<size_t>::max() - aligned_offset)) {
         throw std::runtime_error("sintra::variable_buffer overflow: message span exceeds representable range");
     }
 
-    char* data = S::tl_message_start_address + current_offset;
-    copy(container.begin(), container.end(), (T*)data);
+    const size_t span_end = aligned_offset + num_bytes;
+    if (span_end > std::numeric_limits<uint32_t>::max()) {
+        throw std::runtime_error("sintra::variable_buffer overflow: message span exceeds representable range");
+    }
 
-    offset_in_bytes =
-        current_offset - ((char*)this - S::tl_message_start_address);
-    *S::tl_pbytes_to_next_message = current_offset + static_cast<uint32_t>(num_bytes);
+    char* data = S::tl_message_start_address + aligned_offset;
+    assert(
+        (reinterpret_cast<std::uintptr_t>(data) % alignof(T)) == 0 &&
+        "variable_buffer storage must satisfy alignment requirements."
+    );
+
+    std::uninitialized_copy(container.begin(), container.end(), reinterpret_cast<T*>(data));
+
+    const size_t self_offset = static_cast<size_t>(
+        reinterpret_cast<char*>(this) - S::tl_message_start_address);
+    offset_in_bytes = aligned_offset - self_offset;
+    *S::tl_pbytes_to_next_message = static_cast<uint32_t>(span_end);
 }
 
 
