@@ -1408,8 +1408,13 @@ struct Ring_R : Ring<T, true>
         }
 
         if (m_reading) {
-            c.read_access.fetch_sub(uint64_t(1) << (8 * m_trailing_octile), std::memory_order_acq_rel);
-            c.reading_sequences[m_rs_index].data.has_guard.store(0, std::memory_order_release);
+            uint8_t expected = 1;
+            if (c.reading_sequences[m_rs_index].data.has_guard.compare_exchange_strong(
+                    expected, uint8_t{0}, std::memory_order_acq_rel))
+            {
+                c.read_access.fetch_sub(
+                    uint64_t(1) << (8 * m_trailing_octile), std::memory_order_acq_rel);
+            }
             m_reading.store(false, std::memory_order_release);
         }
         else {
