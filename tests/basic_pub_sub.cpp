@@ -300,6 +300,10 @@ int main(int argc, char* argv[])
     bool status_loaded = false;
     const auto result_path = shared_dir / "result.txt";
 
+    if (!is_spawned) {
+        sintra::barrier("result-ready", "_sintra_all_processes");
+    }
+
     sintra::finalize();
 
     if (!is_spawned) {
