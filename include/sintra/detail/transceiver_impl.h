@@ -540,7 +540,7 @@ void Transceiver::send(Args&&... args)
     static auto once = MESSAGE_T::id();
     (void)(once); // suppress unused variable warning
 
-    MESSAGE_T* msg = s_mproc->m_out_req_c->write<MESSAGE_T>(vb_size(args...), args...);
+    MESSAGE_T* msg = s_mproc->m_out_req_c->write<MESSAGE_T>(vb_size<MESSAGE_T>(args...), args...);
     msg->sender_instance_id = m_instance_id;
     msg->receiver_instance_id = LOCALITY;
     s_mproc->m_out_req_c->done_writing();
@@ -674,7 +674,7 @@ void Transceiver::rpc_handler(Message_prefix& untyped_msg)
 
     auto send_unavailable_response = [&](const std::string& reason)
     {
-        auto* placed_msg = s_mproc->m_out_rep_c->write<exception>(vb_size(reason), reason);
+        auto* placed_msg = s_mproc->m_out_rep_c->write<exception>(vb_size<exception>(reason), reason);
         placed_msg->sender_instance_id = untyped_msg.receiver_instance_id;
         placed_msg->receiver_instance_id = msg.sender_instance_id;
         placed_msg->function_instance_id = msg.function_instance_id;
@@ -746,7 +746,7 @@ void Transceiver::rpc_handler(Message_prefix& untyped_msg)
             // NOTE: For the recipients in this loop, this will be the second time the function returns,
             // assuming they have already received a deferral.
             for (size_t i = 0; i < s_tl_additional_piids_size; i++) {
-                return_message_type* placed_msg = s_mproc->m_out_rep_c->write<return_message_type>(vb_size(vf.result), vf.result);
+                return_message_type* placed_msg = s_mproc->m_out_rep_c->write<return_message_type>(vb_size<return_message_type>(vf.result), vf.result);
                 finalize_rpc_write(placed_msg, s_tl_additional_piids[i], s_tl_common_function_iid, obj, not_defined_type_id);
             }
 
@@ -755,11 +755,11 @@ void Transceiver::rpc_handler(Message_prefix& untyped_msg)
         }
 
         // the normal return
-        return_message_type* placed_msg = s_mproc->m_out_rep_c->write<return_message_type>(vb_size(vf.result), vf.result);
+        return_message_type* placed_msg = s_mproc->m_out_rep_c->write<return_message_type>(vb_size<return_message_type>(vf.result), vf.result);
         finalize_rpc_write(placed_msg, msg, obj, etid);
     }
     else {
-        exception* placed_msg = s_mproc->m_out_rep_c->write<exception>(vb_size(what), what);
+        exception* placed_msg = s_mproc->m_out_rep_c->write<exception>(vb_size<exception>(what), what);
         finalize_rpc_write(placed_msg, msg, obj, etid);
     }
 }
@@ -886,7 +886,7 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
     // write the message for the rpc call into the communication ring
     static auto once = MESSAGE_T::id();
     (void)(once); // suppress unused variable warning
-    MESSAGE_T* msg = s_mproc->m_out_req_c->write<MESSAGE_T>(vb_size(args...), args...);
+    MESSAGE_T* msg = s_mproc->m_out_req_c->write<MESSAGE_T>(vb_size<MESSAGE_T>(args...), args...);
     msg->sender_instance_id = s_mproc->m_instance_id;
     msg->receiver_instance_id = instance_id;
     msg->function_instance_id = function_instance_id;
