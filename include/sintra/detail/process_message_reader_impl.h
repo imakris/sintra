@@ -31,6 +31,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <atomic>
 #include <condition_variable>
 #include <cstdio>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <utility>
@@ -40,6 +41,7 @@ namespace sintra {
 
 using std::thread;
 using std::unique_ptr;
+using std::function;
 
 
 inline bool thread_local tl_is_req_thread = false;
