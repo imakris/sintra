@@ -24,14 +24,21 @@ struct AlignmentPayload
     sintra::typed_variable_buffer<std::vector<double>> doubles;
 };
 
-using AlignmentMessage = sintra::Message<AlignmentPayload, void, 0xA11E71Dull>;
-
 bool is_aligned(const void* ptr, std::size_t alignment)
 {
     return (reinterpret_cast<std::uintptr_t>(ptr) % alignment) == 0;
 }
 
 } // namespace
+
+using AlignmentMessage = sintra::Message<AlignmentPayload, void, 0xA11E71Dull>;
+
+// Stub for standalone test - not used since ID is non-zero
+template<>
+sintra::type_id_type sintra::get_type_id<AlignmentMessage>()
+{
+    return 0xA11E71Dull;
+}
 
 int main()
 {
