@@ -125,25 +125,12 @@ static void s_signal_handler(int sig)
     }
 
 #ifdef _WIN32
-    if (auto* slot = find_slot(slots, sig); slot && slot->has_previous) {
-        auto prev = slot->previous;
-        if (prev == SIG_IGN) {
-            return;
-        }
-        if (prev == SIG_DFL) {
-            std::signal(sig, SIG_DFL);
-            std::raise(sig);
-            return;
-        }
-        // Prevent infinite recursion: don't call ourselves
-        if (prev == s_signal_handler) {
-            // Just return and let the original signal terminate the process
-            return;
-        }
-        prev(sig);
-        return;
-    }
-    std::raise(sig);
+    // On Windows, forcefully terminate the process to avoid deadlock during shutdown.
+    // Reader threads may be blocked on semaphores, and Windows shutdown waits for
+    // all threads to exit. Since this is a crashing process (signal handler was called),
+    // we don't need graceful shutdown - the coordinator will detect the death and
+    // respawn if recovery is enabled. Mutex recovery will handle any abandoned locks.
+    TerminateProcess(GetCurrentProcess(), 1);
 #else
     if (auto* slot = find_slot(slots, sig); slot && slot->has_previous) {
         if (slot->previous.sa_handler == SIG_IGN) {
