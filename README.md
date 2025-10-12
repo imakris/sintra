@@ -97,6 +97,19 @@ sintra::activate<sintra::Managed_process>(
 Because everything ships as headers, Sintra works well in monorepos or projects that
 prefer vendoring dependencies as git submodules or fetching them during configuration.
 
+## Tests and continuous integration
+
+The library ships with a small suite of integration tests that exercise the
+publish/subscribe bus, ping-pong channels (single and multi-producer), remote
+procedure calls, and the managed-process recovery path. They are defined in the
+`tests/` directory and can be executed locally by configuring the project with
+`cmake` and running `ctest` from the build tree.
+
+Continuous integration runs on both Linux and Windows through GitHub Actions.
+Each workflow build compiles the project in Release mode, executes the `ctest`
+suite, and then repeatedly stress-tests the recovery and basic pub/sub binaries
+to catch intermittent issues.
+
 ## License
 
 The source code is licensed under the Simplified BSD License.
