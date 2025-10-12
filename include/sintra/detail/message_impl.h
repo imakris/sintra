@@ -27,6 +27,10 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define SINTRA_MESSAGE_IMPL_H
 
 
+#include <limits>
+#include <stdexcept>
+
+
 namespace sintra {
 
 
@@ -36,13 +40,30 @@ using std::copy;
 template <typename TC, typename T>
 variable_buffer::variable_buffer(const TC& container)
 {
-    num_bytes = container.size() * sizeof(T);
-    char* data = S::tl_message_start_address + *S::tl_pbytes_to_next_message;
+    const size_t element_count = container.size();
+
+    if (element_count > (std::numeric_limits<size_t>::max() / sizeof(T))) {
+        throw std::runtime_error("sintra::variable_buffer overflow: container too large");
+    }
+
+    num_bytes = element_count * sizeof(T);
+
+    if (num_bytes > std::numeric_limits<uint32_t>::max()) {
+        throw std::runtime_error("sintra::variable_buffer overflow: payload exceeds 32-bit limit");
+    }
+
+    const uint32_t current_offset = *S::tl_pbytes_to_next_message;
+
+    if (num_bytes > (std::numeric_limits<uint32_t>::max() - current_offset)) {
+        throw std::runtime_error("sintra::variable_buffer overflow: message span exceeds representable range");
+    }
+
+    char* data = S::tl_message_start_address + current_offset;
     copy(container.begin(), container.end(), (T*)data);
 
     offset_in_bytes =
-        *S::tl_pbytes_to_next_message - ((char*)this - S::tl_message_start_address);
-    *S::tl_pbytes_to_next_message += (uint32_t)num_bytes;
+        current_offset - ((char*)this - S::tl_message_start_address);
+    *S::tl_pbytes_to_next_message = current_offset + static_cast<uint32_t>(num_bytes);
 }
 
 
