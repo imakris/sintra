@@ -1,9 +1,9 @@
 # Sintra
 
-[![Build - Linux](https://github.com/imakris/sintra/actions/workflows/linux.yml/badge.svg?branch=master&job=build)](https://github.com/imakris/sintra/actions/workflows/linux.yml)
-[![Build - Windows](https://github.com/imakris/sintra/actions/workflows/windows.yml/badge.svg?branch=master&job=build)](https://github.com/imakris/sintra/actions/workflows/windows.yml)
-[![Stress Test - Linux](https://github.com/imakris/sintra/actions/workflows/linux.yml/badge.svg?branch=master&job=stress-test)](https://github.com/imakris/sintra/actions/workflows/linux.yml)
-[![Stress Test - Windows](https://github.com/imakris/sintra/actions/workflows/windows.yml/badge.svg?branch=master&job=stress-test)](https://github.com/imakris/sintra/actions/workflows/windows.yml) 
+[![Build - Linux](https://github.com/imakris/sintra/actions/workflows/build-linux.yml/badge.svg?branch=master)](https://github.com/imakris/sintra/actions/workflows/build-linux.yml)
+[![Build - Windows](https://github.com/imakris/sintra/actions/workflows/build-windows.yml/badge.svg?branch=master)](https://github.com/imakris/sintra/actions/workflows/build-windows.yml)
+[![Stress Test - Linux](https://github.com/imakris/sintra/actions/workflows/stress-test-linux.yml/badge.svg?branch=master)](https://github.com/imakris/sintra/actions/workflows/stress-test-linux.yml)
+[![Stress Test - Windows](https://github.com/imakris/sintra/actions/workflows/stress-test-windows.yml/badge.svg?branch=master)](https://github.com/imakris/sintra/actions/workflows/stress-test-windows.yml) 
 
 ![Header-only](https://img.shields.io/badge/header--only-yes-lightgrey)
 ![C++17](https://img.shields.io/badge/C%2B%2B-17-blue)
