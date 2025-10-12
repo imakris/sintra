@@ -20,3 +20,10 @@ jobs:
 
       - name: Build
         run: cmake --build build --config Release
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build-${{ github.sha }}
+          path: build/
+          retention-days: 1
