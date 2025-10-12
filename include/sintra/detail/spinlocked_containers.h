@@ -45,6 +45,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 
@@ -134,14 +135,14 @@ struct spinlocked
     auto emplace(FArgs&&... args)
     {
         locker l(this->m_sl);
-        return this->m_c.emplace(args...);
+        return this->m_c.emplace(std::forward<FArgs>(args)...);
     }
 
     template <class... FArgs>
     auto emplace_hint(const_iterator hint, FArgs&&... args)
     {
         locker l(this->m_sl);
-        return this->m_c.emplace_hint(hint, args...);
+        return this->m_c.emplace_hint(hint, std::forward<FArgs>(args)...);
     }
 
     bool empty() const noexcept                    {locker l(m_sl); return m_c.empty();           }
@@ -149,33 +150,29 @@ struct spinlocked
     const_iterator end() const noexcept            {locker l(m_sl); return m_c.end();             }
 
     template <typename... FArgs>
-    auto erase(FArgs&... v)                        {locker l(m_sl); return m_c.erase(v...);       }
-    template <typename... FArgs>
-    auto erase(FArgs&&... v)                       {locker l(m_sl); return m_c.erase(v...);       }
+    auto erase(FArgs&&... v)                       {locker l(m_sl); return m_c.erase(std::forward<FArgs>(v)...);       }
 
     template <typename... FArgs>
-    iterator find(const FArgs&... v)               {locker l(m_sl); return m_c.find(v...);        }
+    auto find(FArgs&&... v)                        {locker l(m_sl); return m_c.find(std::forward<FArgs>(v)...);        }
     template <typename... FArgs>
-    const_iterator find(const FArgs&&... v) const  {locker l(m_sl); return m_c.find(v...);        }
+    auto find(FArgs&&... v) const                  {locker l(m_sl); return m_c.find(std::forward<FArgs>(v)...);        }
 
     reference front() noexcept                     {locker l(m_sl); return m_c.front();           }
     const_reference front() const noexcept         {locker l(m_sl); return m_c.front();           }
 
     template <typename... FArgs>
-    auto insert(const FArgs&... v)                 {locker l(m_sl); return m_c.insert(v...);      }
-    template <typename... FArgs>
-    auto insert(FArgs&&... v)                      {locker l(m_sl); return m_c.insert(v...);      }
+    auto insert(FArgs&&... v)                      {locker l(m_sl); return m_c.insert(std::forward<FArgs>(v)...);      }
 
     auto pop_front()                               {locker l(m_sl); return m_c.pop_front();       }
 
     template <typename... FArgs>
-    auto push_back(const FArgs&... v)              {locker l(m_sl); return m_c.push_back(v...);   }
+    auto push_back(FArgs&&... v)                   {locker l(m_sl); return m_c.push_back(std::forward<FArgs>(v)...);   }
 
     auto size()  const noexcept                    {locker l(m_sl); return m_c.size();            }
 
     operator CT<Args...>() const                   {locker l(m_sl); return m_c;                   }
     auto operator=(const CT<Args...>& x)           {locker l(m_sl); return m_c.operator=(x);      }
-    auto operator=(CT<Args...>&& x)                {locker l(m_sl); return m_c.operator=(x);      }
+    auto operator=(CT<Args...>&& x)                {locker l(m_sl); return m_c.operator=(std::move(x));      }
 
 
     //auto operator=(const CT<Args...>& x)           {locker l(m_sl); return m_c.operator=(x.m_c);  }
@@ -217,13 +214,13 @@ struct spinlocked_map: detail::spinlocked<map, Key, T>
     using locker = spinlock::locker;
 
     template <typename... FArgs>
-    auto lower_bound(const FArgs&... v) {
+    auto lower_bound(FArgs&&... v) {
         locker l(this->m_sl);
-        return this->m_c.lower_bound(v...);
+        return this->m_c.lower_bound(std::forward<FArgs>(v)...);
     }
 
     T& operator[] (const Key& k)                   {locker l(this->m_sl); return this->m_c[k];    }
-    T& operator[] (Key&& k)                        {locker l(this->m_sl); return this->m_c[k];    }
+    T& operator[] (Key&& k)                        {locker l(this->m_sl); return this->m_c[std::move(k)];    }
 };
 
 
@@ -232,7 +229,7 @@ struct spinlocked_umap: detail::spinlocked<unordered_map, Key, T>
 {
     using locker = spinlock::locker;
     T& operator[] (const Key& k)                   {locker l(this->m_sl); return this->m_c[k];    }
-    T& operator[] (Key&& k)                        {locker l(this->m_sl); return this->m_c[k];    }
+    T& operator[] (Key&& k)                        {locker l(this->m_sl); return this->m_c[std::move(k)];    }
 };
 
 
