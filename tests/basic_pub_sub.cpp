@@ -24,10 +24,12 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <random>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #ifdef _WIN32
@@ -68,6 +70,7 @@ std::filesystem::path ensure_shared_directory()
     auto base = std::filesystem::temp_directory_path() / "sintra_tests";
     std::filesystem::create_directories(base);
 
+    // Generate a highly unique suffix combining timestamp, PID, and random number
     auto unique_suffix = std::chrono::duration_cast<std::chrono::nanoseconds>(
                              std::chrono::high_resolution_clock::now().time_since_epoch())
                              .count();
@@ -76,6 +79,12 @@ std::filesystem::path ensure_shared_directory()
 #else
     unique_suffix ^= static_cast<long long>(getpid());
 #endif
+
+    // Add random component to prevent collisions in rapid test iterations
+    std::random_device rd;
+    std::mt19937_64 gen(rd());
+    std::uniform_int_distribution<uint64_t> dis;
+    unique_suffix ^= static_cast<long long>(dis(gen));
 
     std::ostringstream oss;
     oss << "basic_pubsub_" << unique_suffix;
@@ -286,19 +295,32 @@ int main(int argc, char* argv[])
     if (!is_spawned) {
         const auto result_path = shared_dir / "result.txt";
         if (!std::filesystem::exists(result_path)) {
+            std::fprintf(stderr, "Error: result file not found at %s\n", result_path.string().c_str());
             return 1;
         }
 
         std::ifstream in(result_path, std::ios::binary);
         std::string status;
         in >> status;
+        in.close();
 
-        try {
-            std::filesystem::remove_all(shared_dir);
+        // Attempt cleanup with retries to handle filesystem delays
+        bool cleanup_succeeded = false;
+        for (int retry = 0; retry < 3 && !cleanup_succeeded; ++retry) {
+            try {
+                std::filesystem::remove_all(shared_dir);
+                cleanup_succeeded = true;
+            }
+            catch (const std::exception& e) {
+                if (retry < 2) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                } else {
+                    std::fprintf(stderr, "Warning: failed to remove temp directory %s after 3 attempts: %s\n",
+                                shared_dir.string().c_str(), e.what());
+                }
+            }
         }
-        catch (const std::exception& e) {
-            std::fprintf(stderr, "Warning: failed to remove temp directory %s: %s\n", shared_dir.string().c_str(), e.what());
-        }
+
         return (status == "ok") ? 0 : 1;
     }
 
