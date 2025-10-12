@@ -119,13 +119,40 @@ template <typename T>
 struct is_variable_buffer_argument
     : std::integral_constant<
         bool,
-        is_convertible<T, variable_buffer>::value ||
+        is_convertible<
+            typename remove_reference<T>::type,
+            variable_buffer
+        >::value ||
         is_base_of<
             variable_buffer,
             typename remove_cv<typename remove_reference<T>::type>::type
         >::value
     >
 {};
+
+
+template <typename T>
+inline auto variable_buffer_payload_size(
+    const T& v,
+    enable_if_t<
+        is_convertible<const T&, const variable_buffer&>::value,
+        int
+    >* = nullptr)
+{
+    const variable_buffer& base = v;
+    return base.num_bytes;
+}
+
+
+template <typename T>
+inline auto variable_buffer_payload_size(
+    const typed_variable_buffer<T>& v,
+    void* = nullptr)
+{
+    using container_type = T;
+    const container_type container = static_cast<container_type>(v);
+    return container.size() * sizeof(typename container_type::value_type);
+}
 
 
 inline
@@ -138,7 +165,7 @@ size_t vb_size()
 template <
     typename T,
     typename = enable_if_t<
-        !is_convertible< typename remove_reference<T>::type, variable_buffer>::value
+        !is_variable_buffer_argument<typename remove_reference<T>::type>::value
     >,
     typename... Args
 >
@@ -148,7 +175,7 @@ size_t vb_size(const T& v, Args&&... args);
 template <
     typename T, typename = void,
     typename = enable_if_t<
-        is_convertible< typename remove_reference<T>::type, variable_buffer>::value
+        is_variable_buffer_argument<typename remove_reference<T>::type>::value
     >,
     typename... Args
 >
@@ -158,7 +185,7 @@ size_t vb_size(const T& v, Args&&... args);
 template <
     typename T,
     typename /*= typename enable_if_t<
-        !is_convertible< typename remove_reference<T>::type, variable_buffer>::value
+        !is_variable_buffer_argument<typename remove_reference<T>::type>::value
     > */,
     typename... Args
 >
@@ -172,13 +199,13 @@ size_t vb_size(const T&, Args&&... args)
 template <
     typename T, typename /* = void*/,
     typename /* = typename enable_if_t<
-        is_convertible< typename remove_reference<T>::type, variable_buffer>::value
+        is_variable_buffer_argument<typename remove_reference<T>::type>::value
     >*/,
     typename... Args
 >
 size_t vb_size(const T& v, Args&&... args)
 {
-    auto ret = v.size() * sizeof(typename T::iterator::value_type) + vb_size(args...);
+    auto ret = variable_buffer_payload_size(v) + vb_size(args...);
     return ret;
 }
 
@@ -281,6 +308,7 @@ struct serializable_type_impl
         serializable_type_impl<SEQ_T, I + 1, J, Args..., transformed_type>;
     using type = typename aggregate_type::type;
     static constexpr bool has_variable_buffers = aggregate_type::has_variable_buffers ||
+        is_variable_buffer_argument<arg_type>::value ||
         !is_same<
             typename remove_reference<arg_type        >::type,
             typename remove_reference<transformed_type>::type
@@ -526,8 +554,8 @@ struct Message: public Message_prefix, public T
 
 template <
     typename T,
-    bool = is_convertible<T, variable_buffer>::value,
-    bool = is_pod<T>::value
+    bool = is_variable_buffer_argument<typename remove_reference<T>::type>::value,
+    bool = is_pod<typename remove_reference<T>::type>::value
 >
 struct Enclosure
 {
@@ -553,15 +581,16 @@ template <typename T>
 struct Enclosure<T, true, false>
 {
     T get_value() const { return value; }
-    typed_variable_buffer<typename remove_reference<T>::type> value;
+    using stored_type = typename transformer<typename remove_reference<T>::type>::type;
+    stored_type value;
 };
 
 
 
 template <
     typename T,
-    bool C1 = is_convertible<T, variable_buffer>::value,
-    bool C2 = is_pod<T>::value
+    bool C1 = is_variable_buffer_argument<typename remove_reference<T>::type>::value,
+    bool C2 = is_pod<typename remove_reference<T>::type>::value
 >
 struct Unserialized_Enclosure: Enclosure <T, C1, C2>
 {
