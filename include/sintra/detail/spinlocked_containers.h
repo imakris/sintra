@@ -75,6 +75,54 @@ struct spinlocked
     using size_type         = typename CT<Args...>::size_type;
     using locker            = spinlock::locker;
 
+    struct scoped_access
+    {
+        scoped_access(spinlock& sl, CT<Args...>& c)
+            : m_lock(sl)
+            , m_c(c)
+        {}
+
+        scoped_access(const scoped_access&) = delete;
+        scoped_access& operator=(const scoped_access&) = delete;
+
+        scoped_access(scoped_access&&) = default;
+        scoped_access& operator=(scoped_access&&) = default;
+
+        iterator begin() noexcept { return m_c.begin(); }
+        iterator end() noexcept { return m_c.end(); }
+
+        auto erase(iterator it) { return m_c.erase(it); }
+
+        CT<Args...>& get() noexcept { return m_c; }
+
+    private:
+        locker         m_lock;
+        CT<Args...>&   m_c;
+    };
+
+    struct const_scoped_access
+    {
+        const_scoped_access(spinlock& sl, const CT<Args...>& c)
+            : m_lock(sl)
+            , m_c(c)
+        {}
+
+        const_scoped_access(const const_scoped_access&) = delete;
+        const_scoped_access& operator=(const const_scoped_access&) = delete;
+
+        const_scoped_access(const_scoped_access&&) = default;
+        const_scoped_access& operator=(const_scoped_access&&) = default;
+
+        const_iterator begin() const noexcept { return m_c.begin(); }
+        const_iterator end() const noexcept { return m_c.end(); }
+
+        const CT<Args...>& get() const noexcept { return m_c; }
+
+    private:
+        locker               m_lock;
+        const CT<Args...>&   m_c;
+    };
+
     reference back() noexcept                      {locker l(m_sl); return m_c.back();            }
     const_reference back() const noexcept          {locker l(m_sl); return m_c.back();            }
     iterator begin() noexcept                      {locker l(m_sl); return m_c.begin();           }
@@ -135,6 +183,9 @@ struct spinlocked
 
     reference operator[] (size_type p)             {locker l(m_sl); return m_c[p];                }
     const_reference operator[] (size_type p) const {locker l(m_sl); return m_c[p];                }
+
+    scoped_access scoped() noexcept                {return scoped_access(m_sl, m_c);              }
+    const_scoped_access scoped() const noexcept    {return const_scoped_access(m_sl, m_c);        }
 
 protected:
     CT<Args...>         m_c;
