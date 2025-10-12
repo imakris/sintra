@@ -47,6 +47,7 @@ using std::is_base_of;
 using std::is_convertible;
 using std::is_pod;
 using std::is_same;
+using std::remove_cv;
 using std::remove_reference;
 
 
@@ -112,6 +113,19 @@ public:
         return T(typed_data, typed_data + num_elements);
     }
 };
+
+
+template <typename T>
+struct is_variable_buffer_argument
+    : std::integral_constant<
+        bool,
+        is_convertible<T, variable_buffer>::value ||
+        is_base_of<
+            variable_buffer,
+            typename remove_cv<typename remove_reference<T>::type>::type
+        >::value
+    >
+{};
 
 
 inline
@@ -213,7 +227,7 @@ template <
     bool =
         is_pod<T>::value ||
         is_base_of<Sintra_message_element, T>::value,
-    bool = is_convertible<T, variable_buffer>::value
+    bool = is_variable_buffer_argument<T>::value
 >
 struct transformer
 {
@@ -235,7 +249,13 @@ struct transformer<T, true, IRRELEVANT>
 template <typename T>
 struct transformer<T, false, true>
 {
-    using type = typed_variable_buffer<T>;
+    using decayed_type = typename remove_reference<T>::type;
+    using bare_type = typename remove_cv<decayed_type>::type;
+    using type = typename std::conditional<
+        is_base_of<variable_buffer, bare_type>::value,
+        decayed_type,
+        typed_variable_buffer<bare_type>
+    >::type;
 };
 
 
