@@ -132,7 +132,7 @@ int process_owner()
     ra.assign_name("instance name");
 
     sintra::barrier("object-ready");
-    sintra::barrier("calls-finished");
+    sintra::barrier("calls-finished", "_sintra_all_processes");
     return 0;
 }
 
@@ -170,7 +170,7 @@ int process_client()
     write_lines(shared_dir / "rpc_success.txt", successes);
     write_lines(shared_dir / "rpc_failures.txt", failures);
 
-    sintra::barrier("calls-finished");
+    sintra::barrier("calls-finished", "_sintra_all_processes");
     return 0;
 }
 
@@ -189,7 +189,7 @@ int main(int argc, char* argv[])
 
     sintra::init(argc, argv, processes);
     if (!is_spawned) {
-        sintra::barrier("calls-finished");
+        sintra::barrier("calls-finished", "_sintra_all_processes");
     }
     sintra::finalize();
 

@@ -51,7 +51,7 @@ int worker_process(std::uint32_t worker_index)
         return 1;
     }
 
-    barrier("barrier-rapid-reuse-done");
+    barrier("barrier-rapid-reuse-done", "_sintra_all_processes");
     return 0;
 }
 
@@ -71,7 +71,7 @@ int main(int argc, char* argv[])
     sintra::init(argc, argv, processes);
 
     if (!is_spawned) {
-        sintra::barrier("barrier-rapid-reuse-done");
+        sintra::barrier("barrier-rapid-reuse-done", "_sintra_all_processes");
     }
     sintra::finalize();
 

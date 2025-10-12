@@ -56,7 +56,7 @@ int worker_process(std::uint32_t worker_index)
         return 1;
     }
 
-    sintra::barrier("barrier-stress-done");
+    sintra::barrier("barrier-stress-done", "_sintra_all_processes");
     return 0;
 }
 
@@ -80,7 +80,7 @@ int main(int argc, char* argv[])
     sintra::init(argc, argv, processes);
 
     if (!is_spawned) {
-        sintra::barrier("barrier-stress-done");
+        sintra::barrier("barrier-stress-done", "_sintra_all_processes");
     }
     sintra::finalize();
 

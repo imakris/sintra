@@ -216,7 +216,7 @@ int process_sender()
     const bool ok = (strings == expected_strings) && (ints == expected_ints);
     write_result(shared_dir, ok, strings, ints);
 
-    sintra::barrier("result-ready");
+    sintra::barrier("result-ready", "_sintra_all_processes");
     return 0;
 }
 
@@ -234,7 +234,7 @@ int process_string_receiver()
     write_strings(shared_dir / "strings.txt", g_received_strings);
 
     sintra::barrier("write-phase");
-    sintra::barrier("result-ready");
+    sintra::barrier("result-ready", "_sintra_all_processes");
     return 0;
 }
 
@@ -252,7 +252,7 @@ int process_int_receiver()
     write_ints(shared_dir / "ints.txt", g_received_ints);
 
     sintra::barrier("write-phase");
-    sintra::barrier("result-ready");
+    sintra::barrier("result-ready", "_sintra_all_processes");
     return 0;
 }
 
@@ -301,7 +301,7 @@ int main(int argc, char* argv[])
     const auto result_path = shared_dir / "result.txt";
 
     if (!is_spawned) {
-        if (!sintra::barrier("result-ready")) {
+        if (!sintra::barrier("result-ready", "_sintra_all_processes")) {
             std::fprintf(stderr, "Error: failed to synchronize on result-ready barrier\n");
             exit_code = 1;
         } else {
