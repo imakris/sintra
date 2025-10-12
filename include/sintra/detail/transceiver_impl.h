@@ -30,9 +30,11 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <type_traits>
 #include <memory>
 #include <cstring>
+#include <stdexcept>
 
 #include "exception_conversions.h"
 #include "exception_conversions_impl.h"
+#include "process_message_reader.h"
 
 
 namespace sintra {
@@ -460,9 +462,16 @@ void Transceiver::finalize_rpc_write(
     R_MESSAGE_T* placed_rep_msg,
     const MESSAGE_T& req_msg,
     const OBJECT_T* ref_obj,
-    type_id_type ex_tid)
+    type_id_type ex_tid,
+    instance_id_type fallback_sender_iid)
 {
-    finalize_rpc_write(placed_rep_msg, req_msg.sender_instance_id, req_msg.function_instance_id, ref_obj, ex_tid);
+    finalize_rpc_write(
+        placed_rep_msg,
+        req_msg.sender_instance_id,
+        req_msg.function_instance_id,
+        ref_obj,
+        ex_tid,
+        fallback_sender_iid);
 }
 
 template <typename R_MESSAGE_T, typename OBJECT_T>
@@ -471,9 +480,30 @@ void Transceiver::finalize_rpc_write(
     instance_id_type receiver_iid,
     instance_id_type function_iid,
     const OBJECT_T* ref_obj,
-    type_id_type ex_tid)
+    type_id_type ex_tid,
+    instance_id_type fallback_sender_iid)
 {
-    placed_rep_msg->sender_instance_id   = ref_obj->m_instance_id;
+    instance_id_type sender_iid = invalid_instance_id;
+
+    if (ref_obj) {
+        sender_iid = ref_obj->m_instance_id;
+    }
+    else if (fallback_sender_iid != invalid_instance_id) {
+        sender_iid = fallback_sender_iid;
+    }
+    else if (s_tl_current_message) {
+        sender_iid = s_tl_current_message->receiver_instance_id;
+    }
+    else if (s_mproc) {
+        sender_iid = s_mproc->m_instance_id;
+    }
+
+    if (sender_iid == invalid_instance_id) {
+        assert(s_mproc);
+        sender_iid = s_mproc->m_instance_id;
+    }
+
+    placed_rep_msg->sender_instance_id   = sender_iid;
     placed_rep_msg->receiver_instance_id = receiver_iid;
     placed_rep_msg->function_instance_id = function_iid;
     placed_rep_msg->message_type_id      = ex_tid;
@@ -514,7 +544,28 @@ void Transceiver::rpc_handler(Message_prefix& untyped_msg)
     using r_type = typename unvoid<typename RPCTC::r_type>::type;
 
     MESSAGE_T& msg = (MESSAGE_T&)untyped_msg;
-    typename RPCTC::o_type* obj = get_instance_to_object_map<RPCTC>()[untyped_msg.receiver_instance_id];
+    typename RPCTC::o_type* obj = nullptr;
+
+    {
+        auto& instance_map = get_instance_to_object_map<RPCTC>();
+        auto it = instance_map.find(untyped_msg.receiver_instance_id);
+        if (it != instance_map.end()) {
+            obj = it->second;
+        }
+    }
+
+    if (!obj) {
+        auto [exception_tid, what] = exception_to_string(std::runtime_error(
+            "Attempted to call RPC on an unpublished instance."));
+        exception* placed_msg = s_mproc->m_out_rep_c->write<exception>(vb_size(what), what);
+        finalize_rpc_write(
+            placed_msg,
+            msg,
+            static_cast<const typename RPCTC::o_type*>(nullptr),
+            exception_tid,
+            msg.receiver_instance_id);
+        return;
+    }
     using return_message_type = Message<Enclosure<r_type>, void, not_defined_type_id>;
     static auto once = return_message_type::id();
     (void)(once); // suppress unused variable warning
