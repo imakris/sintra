@@ -27,6 +27,7 @@
 #include <random>
 #include <sstream>
 #include <stdexcept>
+#include <system_error>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -301,8 +302,26 @@ int main(int argc, char* argv[])
     const auto result_path = shared_dir / "result.txt";
 
     if (!is_spawned) {
-        if (!sintra::barrier("result-ready", "_sintra_all_processes")) {
-            std::fprintf(stderr, "Error: failed to synchronize on result-ready barrier\n");
+        constexpr auto kResultWaitTimeout = std::chrono::seconds(5);
+        constexpr auto kResultPollInterval = std::chrono::milliseconds(20);
+
+        const auto deadline = std::chrono::steady_clock::now() + kResultWaitTimeout;
+        bool result_ready = false;
+        while (std::chrono::steady_clock::now() < deadline) {
+            std::error_code ec;
+            const auto size = std::filesystem::file_size(result_path, ec);
+            if (!ec && size > 0) {
+                result_ready = true;
+                break;
+            }
+
+            std::this_thread::sleep_for(kResultPollInterval);
+        }
+
+        if (!result_ready) {
+            std::fprintf(stderr,
+                          "Error: result file was not produced within the timeout at %s\n",
+                          result_path.string().c_str());
             exit_code = 1;
         } else {
             std::ifstream in(result_path, std::ios::binary);
