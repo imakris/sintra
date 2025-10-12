@@ -394,20 +394,27 @@ void Process_message_reader::reply_reader_function()
                 if (it != s_mproc->m_local_pointer_of_instance_id.end()) {
                     auto &return_handlers = it->second->m_active_return_handlers;
 
-                    it->second->m_return_handlers_mutex.lock();
-                    auto it2 = return_handlers.find(m->function_instance_id);
-                    it->second->m_return_handlers_mutex.unlock();
+                    Return_handler handler_copy;
+                    bool have_handler = false;
+                    {
+                        std::lock_guard<std::mutex> guard(it->second->m_return_handlers_mutex);
+                        auto it2 = return_handlers.find(m->function_instance_id);
+                        if (it2 != return_handlers.end()) {
+                            handler_copy = it2->second;
+                            have_handler = true;
+                        }
+                    }
 
-                    if (it2 != return_handlers.end()) {
+                    if (have_handler) {
                         if (m->exception_type_id == not_defined_type_id) {
-                            it2->second.return_handler(*m);
+                            handler_copy.return_handler(*m);
                         }
                         else
                         if (m->exception_type_id != (type_id_type)detail::reserved_id::deferral) {
-                            it2->second.exception_handler(*m);
+                            handler_copy.exception_handler(*m);
                         }
                         else {
-                            it2->second.deferral_handler(*m);
+                            handler_copy.deferral_handler(*m);
                         }
                     }
                     else {
