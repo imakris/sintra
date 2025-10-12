@@ -201,7 +201,10 @@ void Process_message_reader::request_reader_function()
     s_mproc->m_num_active_readers_mutex.unlock();
 
     m_in_req_c->start_reading();
-    m_req_running.store(true, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> ready_guard(m_ready_mutex);
+        m_req_running.store(true, std::memory_order_release);
+    }
     m_ready_condition.notify_all();
 
     while (m_reader_state != READER_STOPPING) {
@@ -341,7 +344,9 @@ void Process_message_reader::request_reader_function()
     s_mproc->m_num_active_readers_mutex.unlock();
     s_mproc->m_num_active_readers_condition.notify_all();
 
-    std::lock_guard<std::mutex> lk(m_stop_mutex);
+    std::lock(m_stop_mutex, m_ready_mutex);
+    std::lock_guard<std::mutex> stop_lock(m_stop_mutex, std::adopt_lock);
+    std::lock_guard<std::mutex> ready_lock(m_ready_mutex, std::adopt_lock);
     if (m_reader_state == READER_STOPPING) {
         std::fprintf(stderr, "request_reader_function(pid=%llu) exiting normally after stop.\n",
             static_cast<unsigned long long>(m_process_instance_id));
@@ -370,7 +375,10 @@ void Process_message_reader::reply_reader_function()
     s_mproc->m_num_active_readers_mutex.unlock();
 
     m_in_rep_c->start_reading();
-    m_rep_running.store(true, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> ready_guard(m_ready_mutex);
+        m_rep_running.store(true, std::memory_order_release);
+    }
     m_ready_condition.notify_all();
 
     while (m_reader_state != READER_STOPPING) {
@@ -447,7 +455,9 @@ void Process_message_reader::reply_reader_function()
     s_mproc->m_num_active_readers_mutex.unlock();
     s_mproc->m_num_active_readers_condition.notify_all();
 
-    std::lock_guard<std::mutex> lk(m_stop_mutex);
+    std::lock(m_stop_mutex, m_ready_mutex);
+    std::lock_guard<std::mutex> stop_lock(m_stop_mutex, std::adopt_lock);
+    std::lock_guard<std::mutex> ready_lock(m_ready_mutex, std::adopt_lock);
     m_rep_running.store(false, std::memory_order_release);
     m_ready_condition.notify_all();
     m_stop_condition.notify_one();
