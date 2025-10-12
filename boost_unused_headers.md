@@ -24,7 +24,6 @@ config/platform/wasm.hpp
 config/requires_threads.hpp
 config/warning_disable.hpp
 fusion/container/vector/detail/cpp03/vector_n.hpp
-intrusive/detail/hash_mix.hpp
 mpl/aux_/preprocessed/bcc/advance_backward.hpp
 mpl/aux_/preprocessed/bcc/advance_forward.hpp
 mpl/aux_/preprocessed/bcc/and.hpp

@@ -7,7 +7,8 @@ import os
 import re
 from collections import deque
 
-INCLUDE_RE = re.compile(r"#\s*include\s*[<\"]boost/(.+?)[>\"]")
+BOOST_INCLUDE_RE = re.compile(r"#\s*include\s*[<\"]boost/(.+?)[>\"]")
+INCLUDE_RE = re.compile(r"#\s*include\s*(?P<delim>[<\"])(?P<path>[^\">]+)[>\"]")
 
 
 def collect_project_includes(project_root: str) -> set[str]:
@@ -22,7 +23,7 @@ def collect_project_includes(project_root: str) -> set[str]:
             path = os.path.join(base, name)
             try:
                 with open(path, "r", encoding="utf-8", errors="ignore") as handle:
-                    for match in INCLUDE_RE.finditer(handle.read()):
+                    for match in BOOST_INCLUDE_RE.finditer(handle.read()):
                         includes.add(match.group(1))
             except OSError:
                 pass
@@ -47,7 +48,16 @@ def resolve_reachable_headers(boost_root: str, seeds: set[str]) -> set[str]:
         except OSError:
             continue
         for match in INCLUDE_RE.finditer(contents):
-            queue.append(match.group(1))
+            include_path = match.group("path").strip().replace("\\", "/")
+            if include_path.startswith("boost/"):
+                queue.append(include_path[len("boost/"):])
+                continue
+
+            if match.group("delim") == '"':
+                current_dir = os.path.dirname(header)
+                resolved = os.path.normpath(os.path.join(current_dir, include_path))
+                if not os.path.isabs(resolved) and not resolved.startswith(".."):
+                    queue.append(resolved)
     return reachable
 
 

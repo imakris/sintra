@@ -416,6 +416,7 @@ intrusive/detail/generic_hook.hpp
 intrusive/detail/get_value_traits.hpp
 intrusive/detail/has_member_function_callable_with.hpp
 intrusive/detail/hash_combine.hpp
+intrusive/detail/hash_mix.hpp
 intrusive/detail/hook_traits.hpp
 intrusive/detail/iiterator.hpp
 intrusive/detail/is_stateful_value_traits.hpp
