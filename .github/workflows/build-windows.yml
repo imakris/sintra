@@ -24,6 +24,6 @@ jobs:
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: windows-build-${{ github.sha }}
+          name: windows-build-${{ github.event.pull_request.head.sha || github.sha }}
           path: build/
           retention-days: 1
