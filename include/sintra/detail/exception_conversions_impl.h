@@ -27,16 +27,29 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define SINTRA_EXCEPTION_CONVERSION_IMPL_H
 
 
-#include <system_error>
-#include <regex>
-#include <typeinfo>
+#include "exception_conversions.h"
+#include "message.h"
+
+#include <filesystem>
 #include <future>
 #include <optional>
+#include <regex>
+#include <stdexcept>
+#include <string>
+#include <system_error>
+#include <typeinfo>
+#include <unordered_map>
+#include <utility>
 
 #include <boost/type_index/ctti_type_index.hpp>
 
 
 namespace sintra {
+
+namespace fs = std::filesystem;
+
+using std::string;
+using std::unordered_map;
 
 template <
     typename T,
