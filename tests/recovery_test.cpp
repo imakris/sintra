@@ -1,3 +1,25 @@
+//
+// Sintra Process Recovery Test
+//
+// This test validates the process recovery mechanism of Sintra.
+// It corresponds to example_4 and tests the following features:
+// - enable_recovery() to mark a process for automatic restart
+// - Automatic process respawn by the coordinator after crashes
+// - Recovery occurrence tracking (s_recovery_occurrence)
+// - Coordination between original and recovered processes
+// - Mutex recovery after process crash
+//
+// Test structure:
+// - Process 1 (watchdog): Waits for a Stop signal and validates recovery occurred
+// - Process 2 (crasher): Deliberately crashes on first run, completes on second run
+//
+// The test verifies that:
+// - The crasher process is automatically restarted after crashing
+// - The recovered process can detect it's running after recovery
+// - Communication works correctly after recovery
+// - The test completes successfully with the recovered process
+//
+
 #include <sintra/sintra.h>
 #include <sintra/detail/managed_process.h>
 

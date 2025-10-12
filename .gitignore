@@ -1,5 +1,11 @@
 # Build artifacts
 /build/
+/build-*/
+/out/
 
 # Visual Studio workspace files
 /.vs/
+
+# Temporary debug output files
+*.txt
+!CMakeLists.txt

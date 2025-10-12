@@ -1,3 +1,23 @@
+//
+// Sintra RPC Append Test
+//
+// This test validates Remote Procedure Call (RPC) functionality of Sintra.
+// It corresponds to example_2 and tests the following features:
+// - Transceiver derivatives with exported RPC methods
+// - Named instances accessible across processes
+// - RPC calls using instance names
+// - Exception propagation across process boundaries
+// - Successful and failed RPC invocations
+//
+// Test structure:
+// - Process 1 (owner): Creates and names a Remotely_accessible object
+// - Process 2 (client): Makes RPC calls to the named object
+//
+// The test verifies that:
+// - Successful RPC calls return correct values
+// - RPC calls that trigger exceptions propagate the exception correctly
+//
+
 #include <sintra/sintra.h>
 
 #include <algorithm>

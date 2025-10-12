@@ -1,3 +1,23 @@
+//
+// Sintra Single-Process Ping-Pong Test
+//
+// This test validates single-process message dispatch functionality.
+// It corresponds to example_3 and tests the following features:
+// - Message passing within a single process (no worker processes)
+// - Multiple slots responding to different message types
+// - High-frequency message throughput
+// - Timeout-based test completion
+//
+// Test structure:
+// - Three slots all within the coordinator process:
+//   1. ping_slot: Responds to Ping with Pong
+//   2. pong_slot: Responds to Pong with Ping
+//   3. benchmarking_slot: Counts messages and triggers completion
+//
+// The test sends an initial Ping and waits for 1000 ping-pong cycles
+// to complete within a 5-second timeout.
+//
+
 #include <sintra/sintra.h>
 
 #include <atomic>
