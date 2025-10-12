@@ -362,11 +362,13 @@ def main():
     args = parser.parse_args()
 
     # Resolve build directory
-    script_dir = Path(__file__).parent
-    build_dir = (script_dir / args.build_dir).resolve()
+    # Use os.path.abspath as it's more robust than Path.resolve() which can hang on some filesystems
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    build_dir_str = os.path.abspath(os.path.join(script_dir, args.build_dir))
+    build_dir = Path(build_dir_str)
 
-    if not build_dir.exists():
-        print(f"{Color.RED}Error: Build directory not found: {build_dir}{Color.RESET}")
+    if not os.path.exists(build_dir_str):
+        print(f"{Color.RED}Error: Build directory not found: {build_dir_str}{Color.RESET}")
         print(f"Please build the project first or specify correct --build-dir")
         return 1
 
