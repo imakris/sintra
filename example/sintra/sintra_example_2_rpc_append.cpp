@@ -118,7 +118,6 @@ int process_1()
 
     // ensure that ra still exists
     barrier("2nd barrier");
-    barrier("example-2-finished", "_sintra_all_processes");
     return 0;
 }
 
@@ -138,7 +137,6 @@ int process_2()
 
     // ensure that the remotely accessible instance still exists
     barrier("2nd barrier");
-    barrier("example-2-finished", "_sintra_all_processes");
 
     return 0;
 }

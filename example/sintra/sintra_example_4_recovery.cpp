@@ -57,7 +57,6 @@ int process_observer()
 
     deactivate_all_slots();
     console() << "[Observer] Exiting normally\n";
-    barrier("example-4-finished", "_sintra_all_processes");
     return 0;
 }
 
@@ -92,7 +91,6 @@ int process_worker()
         world() << Done();
 
         console() << "[Worker] Done signal sent, exiting normally\n";
-        barrier("example-4-finished", "_sintra_all_processes");
         return 0;
     }
 }

@@ -63,7 +63,6 @@ int coordinator_process()
 
     barrier("barrier-flush-done");
     std::cout << "Completed " << kIterations << " synchronized iterations.\n";
-    barrier("example-5-finished", "_sintra_all_processes");
     return 0;
 }
 
@@ -79,7 +78,6 @@ int worker_process(std::uint32_t worker_index)
     }
 
     barrier("barrier-flush-done");
-    barrier("example-5-finished", "_sintra_all_processes");
     return 0;
 }
 
