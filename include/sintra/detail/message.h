@@ -421,8 +421,14 @@ struct Message: public Message_prefix, public T
 
     static type_id_type id()
     {
-        static type_id_type tid = ID ? make_type_id(ID) : get_type_id<Message>();
-        return tid;
+        if constexpr (ID != 0) {
+            static const type_id_type tid = make_type_id(ID);
+            return tid;
+        }
+        else {
+            static const type_id_type tid = get_type_id<Message>();
+            return tid;
+        }
     }
 
 
