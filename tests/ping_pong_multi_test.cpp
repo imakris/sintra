@@ -201,6 +201,11 @@ int main(int argc, char* argv[])
     processes.emplace_back(process_monitor);
 
     sintra::init(argc, argv, processes);
+
+    if (!is_spawned) {
+        sintra::barrier("ping-pong-finished", "_sintra_all_processes");
+    }
+
     sintra::finalize();
 
     if (!is_spawned) {

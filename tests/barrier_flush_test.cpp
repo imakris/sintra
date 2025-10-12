@@ -262,6 +262,10 @@ int main(int argc, char* argv[])
 
     sintra::init(argc, argv, processes);
 
+    if (!is_spawned) {
+        sintra::barrier("barrier-flush-done", "_sintra_all_processes");
+    }
+
     sintra::finalize();
 
     if (!is_spawned) {
