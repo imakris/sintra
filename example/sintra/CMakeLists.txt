@@ -1,0 +1,17 @@
+# Sintra Examples
+# These examples demonstrate core Sintra functionality and correspond 1:1 with tests
+
+add_executable(sintra_example_0_basic_pubsub sintra_example_0_basic_pubsub.cpp)
+target_link_libraries(sintra_example_0_basic_pubsub PRIVATE sintra)
+
+add_executable(sintra_example_1_ping_pong_multi sintra_example_1_ping_pong_multi.cpp)
+target_link_libraries(sintra_example_1_ping_pong_multi PRIVATE sintra)
+
+add_executable(sintra_example_2_rpc_append sintra_example_2_rpc_append.cpp)
+target_link_libraries(sintra_example_2_rpc_append PRIVATE sintra)
+
+add_executable(sintra_example_3_single_process sintra_example_3_single_process.cpp)
+target_link_libraries(sintra_example_3_single_process PRIVATE sintra)
+
+add_executable(sintra_example_4_recovery sintra_example_4_recovery.cpp)
+target_link_libraries(sintra_example_4_recovery PRIVATE sintra)
