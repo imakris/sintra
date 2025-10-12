@@ -753,16 +753,23 @@ Managed process options:
     auto published_handler = [this](const Coordinator::instance_published& msg)
     {
         tn_type tn = {msg.type_id, msg.assigned_name};
-        lock_guard<mutex> lock(m_availability_mutex);
+        std::unique_lock<mutex> lock(m_availability_mutex);
 
         auto it = m_queued_availability_calls.find(tn);
-        if (it != m_queued_availability_calls.end()) {
-            while (!it->second.empty()) {
-                // each function call, which is a lambda defined inside
-                // call_on_availability(), clears itself from the list as well.
-                it->second.front()();
+        while (it != m_queued_availability_calls.end()) {
+            if (it->second.empty()) {
+                m_queued_availability_calls.erase(it);
+                break;
             }
-            m_queued_availability_calls.erase(it);
+
+            // Each function clears itself from the list. Unlock the mutex before
+            // invoking it so the callback can safely manipulate availability
+            // handlers without encountering recursive locking.
+            auto call = it->second.front();
+            lock.unlock();
+            call();
+            lock.lock();
+            it = m_queued_availability_calls.find(tn);
         }
     };
 
