@@ -40,7 +40,12 @@ else()
     target_link_libraries(sintra INTERFACE OpenMP::OpenMP_CXX)
 endif()
 
+option(SINTRA_BUILD_EXAMPLES "Build Sintra examples" ON)
 option(SINTRA_BUILD_TESTS "Build Sintra tests" ON)
+
+if(SINTRA_BUILD_EXAMPLES)
+    add_subdirectory(example/sintra)
+endif()
 
 if(SINTRA_BUILD_TESTS)
     enable_testing()

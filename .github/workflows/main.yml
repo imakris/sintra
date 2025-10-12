@@ -2,9 +2,9 @@ name: Build and Test
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ '*' ]  # Trigger on all branches
   pull_request:
-    branches: [ main, master ]
+    branches: [ '*' ]
 
 jobs:
   build-and-test:
@@ -12,6 +12,7 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest]
+      fail-fast: false  # Continue other jobs if one fails
 
     runs-on: ${{ matrix.os }}
 
@@ -26,4 +27,49 @@ jobs:
         run: cmake --build build --config Release
 
       - name: Run tests
-        run: ctest --test-dir build -C Release --output-on-failure
+        run: ctest --test-dir build -C Release --output-on-failure --timeout 60
+
+  stress-test:
+    name: Stress Test on ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+      fail-fast: false
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure CMake
+        run: cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Run recovery stress test (10 repetitions)
+        shell: bash
+        run: |
+          cd build/tests
+          for i in {1..10}; do
+            echo "=== Recovery test run $i/10 ==="
+            if [ "$RUNNER_OS" == "Windows" ]; then
+              ./Release/sintra_recovery_test.exe || exit 1
+            else
+              ./sintra_recovery_test || exit 1
+            fi
+          done
+
+      - name: Run basic_pubsub stress test (10 repetitions)
+        shell: bash
+        run: |
+          cd build/tests
+          for i in {1..10}; do
+            echo "=== Basic pub/sub test run $i/10 ==="
+            if [ "$RUNNER_OS" == "Windows" ]; then
+              timeout 30 ./Release/sintra_basic_pubsub_test.exe || exit 1
+            else
+              timeout 30 ./sintra_basic_pubsub_test || exit 1
+            fi
+          done
