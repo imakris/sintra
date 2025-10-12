@@ -30,7 +30,10 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "globals.h"
 #include "message.h"
 
+#include <atomic>
+#include <condition_variable>
 #include <memory>
+#include <mutex>
 #include <set>
 
 
@@ -158,6 +161,8 @@ private:
     
     atomic<bool>            m_req_running           = false;
     atomic<bool>            m_rep_running           = false;
+    mutex                   m_ready_mutex;
+    condition_variable      m_ready_condition;
     mutex                   m_stop_mutex;
     condition_variable      m_stop_condition;
 };
