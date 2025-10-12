@@ -29,7 +29,6 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <type_traits>
 #include <memory>
-#include <cstring>
 #include <string>
 
 #include "exception_conversions.h"
