@@ -32,6 +32,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <array>
 #include <chrono>
 #include <csignal>
+#include <list>
+#include <memory>
 #include <mutex>
 #include <thread>
 #ifndef _WIN32
@@ -691,7 +693,7 @@ Managed process options:
         auto it = m_queued_availability_calls.find(tn);
         if (it != m_queued_availability_calls.end()) {
             while (!it->second.empty()) {
-                // each function call, which is a lambda defined inside 
+                // each function call, which is a lambda defined inside
                 // call_on_availability(), clears itself from the list as well.
                 it->second.front()();
             }
@@ -1053,25 +1055,63 @@ function<void()> Managed_process::call_on_availability(Named_instance<T> transce
     tn_type tn = { get_type_id<T>(), transceiver };
 
     // insert an empty function, in order to be able to capture the iterator within it
-    m_queued_availability_calls[tn].emplace_back();
-    auto f_it = std::prev(m_queued_availability_calls[tn].end());
+    auto& call_list = m_queued_availability_calls[tn];
+    call_list.emplace_back();
+    auto f_it = std::prev(call_list.end());
+
+    struct availability_call_state {
+        bool active = true;
+        decltype(call_list.begin()) iterator;
+    };
+
+    auto state = std::make_shared<availability_call_state>();
+    state->iterator = f_it;
+
+    auto mark_completed = [this, tn, state](bool erase_empty_entry) -> bool {
+        if (!state->active) {
+            state->iterator = decltype(state->iterator){};
+            return false;
+        }
+
+        auto queue_it = m_queued_availability_calls.find(tn);
+        if (queue_it == m_queued_availability_calls.end()) {
+            state->active = false;
+            state->iterator = decltype(state->iterator){};
+            return false;
+        }
+
+        auto call_it = state->iterator;
+        queue_it->second.erase(call_it);
+        if (erase_empty_entry && queue_it->second.empty()) {
+            m_queued_availability_calls.erase(queue_it);
+        }
+        state->active = false;
+        state->iterator = decltype(state->iterator){};
+        return true;
+    };
 
     // this is the abort call
-    auto ret = Adaptive_function([this, tn, f_it]() {
-        m_queued_availability_calls[tn].erase(f_it);
-        });
+    auto ret = Adaptive_function([this, state, mark_completed]() {
+        std::lock_guard<std::mutex> lock(m_availability_mutex);
+        mark_completed(true);
+    });
 
     // and this is the actual call, which besides calling f, also neutralizes the
-    // returned abort calls and deletes its entry from the call queue.
-    *f_it = [this, f, ret, tn, f_it]() mutable {
-        f();
+    // returned abort calls and marks this entry as completed.
+    *f_it = [this, f, ret, mark_completed]() mutable {
+        std::unique_lock<std::mutex> lock(m_availability_mutex, std::defer_lock);
+        bool owns_lock = lock.try_lock();
+        bool completed = mark_completed(false);
+        if (owns_lock) {
+            lock.unlock();
+        }
 
-        // neutralize abort calls. Calling abort using the function returned
-        // by call_on_availability() from now on would have no effect.
+        if (!completed) {
+            return;
+        }
+
         ret.set([]() {});
-
-        // erase the current lambda from the list
-        m_queued_availability_calls[tn].erase(f_it);
+        f();
     };
 
     return ret;
