@@ -85,8 +85,8 @@ struct spinlocked
         scoped_access(const scoped_access&) = delete;
         scoped_access& operator=(const scoped_access&) = delete;
 
-        scoped_access(scoped_access&&) = default;
-        scoped_access& operator=(scoped_access&&) = default;
+        scoped_access(scoped_access&&) = delete;
+        scoped_access& operator=(scoped_access&&) = delete;
 
         iterator begin() noexcept { return m_c.begin(); }
         iterator end() noexcept { return m_c.end(); }
@@ -110,8 +110,8 @@ struct spinlocked
         const_scoped_access(const const_scoped_access&) = delete;
         const_scoped_access& operator=(const const_scoped_access&) = delete;
 
-        const_scoped_access(const_scoped_access&&) = default;
-        const_scoped_access& operator=(const_scoped_access&&) = default;
+        const_scoped_access(const_scoped_access&&) = delete;
+        const_scoped_access& operator=(const_scoped_access&&) = delete;
 
         const_iterator begin() const noexcept { return m_c.begin(); }
         const_iterator end() const noexcept { return m_c.end(); }
