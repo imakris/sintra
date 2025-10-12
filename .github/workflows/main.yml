@@ -48,28 +48,13 @@ jobs:
       - name: Build
         run: cmake --build build --config Release
 
-      - name: Run recovery stress test (10 repetitions)
-        shell: bash
-        run: |
-          cd build/tests
-          for i in {1..10}; do
-            echo "=== Recovery test run $i/10 ==="
-            if [ "$RUNNER_OS" == "Windows" ]; then
-              ./Release/sintra_recovery_test.exe || exit 1
-            else
-              ./sintra_recovery_test || exit 1
-            fi
-          done
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
 
-      - name: Run basic_pubsub stress test (10 repetitions)
+      - name: Run stress tests with run_tests.py
         shell: bash
         run: |
-          cd build/tests
-          for i in {1..10}; do
-            echo "=== Basic pub/sub test run $i/10 ==="
-            if [ "$RUNNER_OS" == "Windows" ]; then
-              timeout 30 ./Release/sintra_basic_pubsub_test.exe || exit 1
-            else
-              timeout 30 ./sintra_basic_pubsub_test || exit 1
-            fi
-          done
+          cd sintra/tests
+          python run_tests.py --repetitions 10 --timeout 30 --kill_stalled_processes --build-dir ../../build --config Release
