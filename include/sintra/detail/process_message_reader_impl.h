@@ -394,7 +394,7 @@ void Process_message_reader::reply_reader_function()
                 if (it != s_mproc->m_local_pointer_of_instance_id.end()) {
                     auto &return_handlers = it->second->m_active_return_handlers;
 
-                    Return_handler handler_copy;
+                    Transceiver::Return_handler handler_copy;
                     bool have_handler = false;
                     {
                         std::lock_guard<std::mutex> guard(it->second->m_return_handlers_mutex);
