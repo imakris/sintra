@@ -1,8 +1,7 @@
 # Sintra
 
-| Linux | Windows |
-| :--- | :--- |
-| [![Linux build status](https://github.com/imakris/sintra/actions/workflows/main.yml/badge.svg?branch=master&job=Build%20and%20Test%20on%20ubuntu-latest)](https://github.com/imakris/sintra/actions/workflows/main.yml) |[![Windows build status](https://github.com/imakris/sintra/actions/workflows/main.yml/badge.svg?branch=master&job=Build%20and%20Test%20on%20windows-latest)](https://github.com/imakris/sintra/actions/workflows/main.yml) | 
+[![Build & Test - Linux](https://github.com/imakris/sintra/actions/workflows/linux.yml/badge.svg?branch=master)](https://github.com/imakris/sintra/actions/workflows/linux.yml)
+[![Build & Test - Windows](https://github.com/imakris/sintra/actions/workflows/windows.yml/badge.svg?branch=master)](https://github.com/imakris/sintra/actions/workflows/windows.yml) 
 
 ![Header-only](https://img.shields.io/badge/header--only-yes-lightgrey)
 ![C++17](https://img.shields.io/badge/C%2B%2B-17-blue)

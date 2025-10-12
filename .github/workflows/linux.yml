@@ -1,20 +1,15 @@
-name: Build and Test
+name: Build & Test - Linux
 
 on:
   push:
-    branches: [ '*' ]  # Trigger on all branches
+    branches: [ '*' ]
   pull_request:
     branches: [ '*' ]
 
 jobs:
   build-and-test:
-    name: Build and Test on ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-      fail-fast: false  # Continue other jobs if one fails
-
-    runs-on: ${{ matrix.os }}
+    name: Build and Test
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
@@ -30,13 +25,8 @@ jobs:
         run: ctest --test-dir build -C Release --output-on-failure --timeout 60
 
   stress-test:
-    name: Stress Test on ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-      fail-fast: false
-
-    runs-on: ${{ matrix.os }}
+    name: Stress Test
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
