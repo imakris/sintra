@@ -31,6 +31,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <exception>
 #include <string>
 #include <type_traits>
+#include <utility>
 
 #include "globals.h"
 

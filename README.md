@@ -104,7 +104,15 @@ The library ships with a small suite of integration tests that exercise the
 publish/subscribe bus, ping-pong channels (single and multi-producer), remote
 procedure calls, and the managed-process recovery path. They are defined in the
 `tests/` directory and can be executed locally by configuring the project with
-`cmake` and running `ctest` from the build tree.
+`cmake` and running `ctest` from the build tree. For longer stress runs that
+mirror the CI configuration, invoke
+
+```
+python tests/run_tests.py --repetitions 10 --timeout 30 --kill_stalled_processes --build-dir build --config Release
+```
+
+after building; the script repeatedly launches the compiled test binaries and
+handles timeouts or stalled processes.
 
 ### Operational guidance for `spawn_detached`
 
@@ -118,9 +126,11 @@ successful return means the grandchild has executed `execv` and relinquished the
 pipe, so spurious successes caused by early crashes are prevented.
 
 Continuous integration runs on both Linux and Windows through GitHub Actions.
-Each workflow build compiles the project in Release mode, executes the `ctest`
-suite, and then repeatedly stress-tests the recovery and basic pub/sub binaries
-to catch intermittent issues.
+Each build workflow compiles the project in Release mode and publishes the
+artifacts. A follow-up stress-test workflow triggers when the build completes,
+downloads the artifacts, makes the bundled test executables runnable, and then
+executes `tests/run_tests.py --repetitions 10 --timeout 30 --kill_stalled_processes`
+to shake out intermittent issues.
 
 ## License
 
