@@ -104,7 +104,7 @@ struct Process_message_reader
     ~Process_message_reader();
 
 
-    void pause() { m_reader_state = READER_SERVICE; }
+    void pause() { m_reader_state.store(READER_SERVICE, std::memory_order_release); }
 
 
     inline
@@ -148,7 +148,7 @@ struct Process_message_reader
         return m_in_req_c->get_message_reading_sequence();
     }
 
-    State state() const {return m_reader_state;}
+    State state() const { return m_reader_state.load(std::memory_order_acquire); }
 
 private:
 

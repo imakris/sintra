@@ -132,35 +132,39 @@ bool Process_message_reader::stop_and_wait(double waiting_period)
     std::unique_lock<std::mutex> lk(m_stop_mutex);
     stop_nowait();
 
-    m_stop_condition.wait_for(lk, std::chrono::duration<double>(waiting_period),
-        [&]() { return !(m_req_running || m_rep_running); }
-    );
+    auto no_readers = [&]() {
+        const bool req_running = m_req_running.load(std::memory_order_acquire);
+        const bool rep_running = m_rep_running.load(std::memory_order_acquire);
+        return !(req_running || rep_running);
+    };
 
-    if (m_req_running || m_rep_running) {
+    m_stop_condition.wait_for(
+        lk, std::chrono::duration<double>(waiting_period), no_readers);
+
+    if (!no_readers()) {
         // We might get here, if the coordinator is gone already.
         // In this case, we unblock pending RPC calls and do some more waiting.
         s_mproc->unblock_rpc(m_process_instance_id);
-        m_stop_condition.wait_for(lk, std::chrono::duration<double>(waiting_period),
-            [&]() { return !(m_req_running || m_rep_running); }
-        );
+        m_stop_condition.wait_for(
+            lk, std::chrono::duration<double>(waiting_period), no_readers);
     }
 
-    if (m_req_running || m_rep_running) {
+    if (!no_readers()) {
         m_in_req_c->done_reading();
         m_in_req_c->request_stop();
         m_in_rep_c->done_reading();
         m_in_rep_c->request_stop();
-        m_stop_condition.wait_for(lk, std::chrono::duration<double>(1.0),
-            [&]() { return !(m_req_running || m_rep_running); }
-        );
-        if (m_req_running || m_rep_running) {
+        m_stop_condition.wait_for(
+            lk, std::chrono::duration<double>(1.0), no_readers);
+        if (!no_readers()) {
             std::fprintf(stderr,
                 "Process_message_reader::stop_and_wait timeout: pid=%llu req_running=%d rep_running=%d\n",
                 static_cast<unsigned long long>(m_process_instance_id),
-                m_req_running.load(), m_rep_running.load());
+                m_req_running.load(std::memory_order_acquire),
+                m_rep_running.load(std::memory_order_acquire));
         }
     }
-    return !(m_req_running || m_rep_running);
+    return no_readers();
 }
 
 
@@ -208,7 +212,11 @@ void Process_message_reader::request_reader_function()
     }
     m_ready_condition.notify_all();
 
-    while (m_reader_state != READER_STOPPING) {
+    while (true) {
+        const State reader_state = m_reader_state.load(std::memory_order_acquire);
+        if (reader_state == READER_STOPPING) {
+            break;
+        }
         s_tl_current_message = nullptr;
 
         // if there is an interprocess barrier and m_in_req_c has reached the barrier's sequence,
@@ -254,14 +262,14 @@ void Process_message_reader::request_reader_function()
             // If addressed to a specified local receiver, this may only be an RPC call,
             // thus the receiver must exist.
             assert(
-                m_reader_state == READER_NORMAL ?
+                reader_state == READER_NORMAL ?
                     s_mproc->m_local_pointer_of_instance_id.find(m->receiver_instance_id) !=
                     s_mproc->m_local_pointer_of_instance_id.end()
                 :
                     true
             );
 
-            if ((m_reader_state == READER_NORMAL) ||
+            if ((reader_state == READER_NORMAL) ||
                 (is_service_instance(m->receiver_instance_id) && s_coord) ||
                 (m->sender_instance_id == s_coord_id) )
             {
@@ -279,7 +287,7 @@ void Process_message_reader::request_reader_function()
 
             // this is an interprocess event message.
 
-            if ((m_reader_state == READER_NORMAL) ||
+            if ((reader_state == READER_NORMAL) ||
                 (s_coord && m->message_type_id > (type_id_type)detail::reserved_id::base_of_messages_handled_by_coordinator))
             {
                 // Avoid double-handling on the coordinator: when the coordinator is
@@ -346,7 +354,7 @@ void Process_message_reader::request_reader_function()
     s_mproc->m_num_active_readers_condition.notify_all();
 
     std::lock_guard<std::mutex> lk(m_stop_mutex);
-    if (m_reader_state == READER_STOPPING) {
+    if (m_reader_state.load(std::memory_order_acquire) == READER_STOPPING) {
         std::fprintf(stderr, "request_reader_function(pid=%llu) exiting normally after stop.\n",
             static_cast<unsigned long long>(m_process_instance_id));
     }
@@ -377,7 +385,11 @@ void Process_message_reader::reply_reader_function()
     }
     m_ready_condition.notify_all();
 
-    while (m_reader_state != READER_STOPPING) {
+    while (true) {
+        const State reader_state = m_reader_state.load(std::memory_order_acquire);
+        if (reader_state == READER_STOPPING) {
+            break;
+        }
         s_tl_current_message = nullptr;
         Message_prefix* m = m_in_rep_c->fetch_message();
         s_tl_current_message = m;
@@ -395,7 +407,7 @@ void Process_message_reader::reply_reader_function()
 
         if (is_local_instance(m->receiver_instance_id)) {
 
-            if ((m_reader_state == READER_NORMAL) ||
+            if ((reader_state == READER_NORMAL) ||
                 (m->receiver_instance_id == s_coord_id && s_coord) ||
                 (m->sender_instance_id   == s_coord_id) )
             {

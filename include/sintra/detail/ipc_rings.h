@@ -1259,7 +1259,7 @@ struct Ring_R : Ring<T, true>
     ~Ring_R()
     {
         // Ensure any active read guard is released.
-        if (m_reading) {
+        if (m_reading.load(std::memory_order_acquire)) {
             done_reading();
         }
 
@@ -1305,7 +1305,7 @@ struct Ring_R : Ring<T, true>
         bool f = false;
         while (!m_reading_lock.compare_exchange_strong(f, true)) { f = false; }
 
-        if (m_reading) {
+        if (m_reading.load(std::memory_order_acquire)) {
             m_reading_lock = false;
             throw std::logic_error(
                 "Sintra Ring: Cannot call start_reading() again before calling done_reading().");
@@ -1317,7 +1317,7 @@ struct Ring_R : Ring<T, true>
             throw ring_reader_evicted_exception();
         }
 #endif
-        m_reading = true;
+        m_reading.store(true, std::memory_order_release);
 
         // NOTE: Readers may only snapshot up to m_max_trailing_elements (typically 3/4 of the ring).
         // If this fires, you probably called start_reading()/try_snapshot_e(reader, N) with N larger than
@@ -1407,7 +1407,7 @@ struct Ring_R : Ring<T, true>
             expected = false;
         }
 
-        if (m_reading) {
+        if (m_reading.load(std::memory_order_acquire)) {
             uint8_t expected = 1;
             if (c.reading_sequences[m_rs_index].data.has_guard.compare_exchange_strong(
                     expected, uint8_t{0}, std::memory_order_acq_rel))
