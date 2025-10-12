@@ -173,7 +173,7 @@ int coordinator_process()
         barrier("barrier-flush-iteration");
     }
 
-    barrier("barrier-flush-done");
+    barrier("barrier-flush-done", "_sintra_all_processes");
     deactivate_all_slots();
 
     const auto shared_dir = get_shared_directory();
@@ -192,7 +192,7 @@ int worker_process(std::uint32_t worker_index)
         barrier("barrier-flush-iteration");
     }
 
-    barrier("barrier-flush-done");
+    barrier("barrier-flush-done", "_sintra_all_processes");
     return 0;
 }
 
@@ -263,7 +263,7 @@ int main(int argc, char* argv[])
     sintra::init(argc, argv, processes);
 
     if (!is_spawned) {
-        sintra::barrier("barrier-flush-done");
+        sintra::barrier("barrier-flush-done", "_sintra_all_processes");
     }
     sintra::finalize();
 
