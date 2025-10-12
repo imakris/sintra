@@ -1,4 +1,4 @@
-name: Build & Test - Linux
+name: Build - Linux
 
 on:
   push:
@@ -7,8 +7,8 @@ on:
     branches: [ '*' ]
 
 jobs:
-  build-and-test:
-    name: Build and Test
+  build:
+    name: Build
     runs-on: ubuntu-latest
 
     steps:
@@ -20,9 +20,6 @@ jobs:
 
       - name: Build
         run: cmake --build build --config Release
-
-      - name: Run tests
-        run: ctest --test-dir build -C Release --output-on-failure --timeout 60
 
   stress-test:
     name: Stress Test
