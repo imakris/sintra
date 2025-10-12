@@ -72,8 +72,10 @@ void Process_message_reader::wait_until_ready()
 {
     std::unique_lock<std::mutex> lk(m_ready_mutex);
     m_ready_condition.wait(lk, [&]() {
-        return m_req_running.load(std::memory_order_acquire) &&
-               m_rep_running.load(std::memory_order_acquire);
+        const bool req_started = m_req_running.load(std::memory_order_acquire);
+        const bool rep_started = m_rep_running.load(std::memory_order_acquire);
+        const bool stopping = m_reader_state.load(std::memory_order_acquire) == READER_STOPPING;
+        return (req_started && rep_started) || stopping;
     });
 }
 
@@ -81,8 +83,9 @@ void Process_message_reader::wait_until_ready()
 
 inline
 void Process_message_reader::stop_nowait()
-{    
-    m_reader_state = READER_STOPPING;
+{
+    m_reader_state.store(READER_STOPPING, std::memory_order_release);
+    m_ready_condition.notify_all();
 
     m_in_req_c->done_reading();
     m_in_req_c->request_stop();
@@ -197,7 +200,10 @@ void Process_message_reader::request_reader_function()
     s_mproc->m_num_active_readers_mutex.unlock();
 
     m_in_req_c->start_reading();
-    m_req_running.store(true, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> ready_guard(m_ready_mutex);
+        m_req_running.store(true, std::memory_order_release);
+    }
     m_ready_condition.notify_all();
 
     while (m_reader_state != READER_STOPPING) {
@@ -355,7 +361,10 @@ void Process_message_reader::reply_reader_function()
     s_mproc->m_num_active_readers_mutex.unlock();
 
     m_in_rep_c->start_reading();
-    m_rep_running.store(true, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> ready_guard(m_ready_mutex);
+        m_rep_running.store(true, std::memory_order_release);
+    }
     m_ready_condition.notify_all();
 
     while (m_reader_state != READER_STOPPING) {
