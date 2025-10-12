@@ -211,15 +211,13 @@ void Process_message_reader::request_reader_function()
 
         // if there is an interprocess barrier and m_in_req_c has reached the barrier's sequence,
         // then the barrier is good to go.
-        if (!s_mproc->m_flush_sequence.empty()) {
+        {
             auto reading_sequence = m_in_req_c->get_message_reading_sequence();
-            while (reading_sequence >= s_mproc->m_flush_sequence.front()) {
-                lock_guard<mutex> lk(s_mproc->m_flush_sequence_mutex);
+            std::unique_lock<std::mutex> flush_lock(s_mproc->m_flush_sequence_mutex);
+            while (!s_mproc->m_flush_sequence.empty() &&
+                   reading_sequence >= s_mproc->m_flush_sequence.front()) {
                 s_mproc->m_flush_sequence.pop_front();
                 s_mproc->m_flush_sequence_condition.notify_one();
-                if (s_mproc->m_flush_sequence.empty()) {
-                    break;
-                }
             }
         }
 
