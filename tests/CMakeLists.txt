@@ -50,3 +50,5 @@ add_executable(sintra_spawn_detached_test spawn_detached_test.cpp)
 target_link_libraries(sintra_spawn_detached_test PRIVATE ${SINTRA_TEST_TARGET})
 add_test(NAME sintra.spawn_detached COMMAND sintra_spawn_detached_test)
 
+add_executable(sintra_dummy_test dummy_test.cpp)
+add_test(NAME sintra.dummy COMMAND sintra_dummy_test)
