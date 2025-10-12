@@ -711,9 +711,10 @@ Managed process options:
             // the unpublished transceiver was a process, thus we should
             // remove all transceiver records who are known to live in it.
 
-            for (auto it = m_instance_id_of_assigned_name.begin(); it != m_instance_id_of_assigned_name.end();) {
+            auto name_map = m_instance_id_of_assigned_name.scoped();
+            for (auto it = name_map.begin(); it != name_map.end();) {
                 if (process_of(it->second) == iid) {
-                    it = m_instance_id_of_assigned_name.erase(it);
+                    it = name_map.erase(it);
                 }
                 else {
                     ++it;

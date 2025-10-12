@@ -302,11 +302,11 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
     if (iid == process_iid) {
 
         // remove all name lookup entries resolving to the unpublished process
-        for (auto it = s_mproc->m_instance_id_of_assigned_name.begin();
-            it != s_mproc->m_instance_id_of_assigned_name.end(); )
+        auto name_map = s_mproc->m_instance_id_of_assigned_name.scoped();
+        for (auto it = name_map.begin(); it != name_map.end(); )
         {
             if (process_of(it->second) == process_iid) {
-                s_mproc->m_instance_id_of_assigned_name.erase(it++);
+                it = name_map.erase(it);
             }
             else {
                 ++it;
