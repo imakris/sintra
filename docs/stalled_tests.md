@@ -55,7 +55,14 @@ The applied fix introduces an explicit draining handshake with the coordinator.�
 process announces that it is leaving before it pauses, which lets the coordinator
 exclude it from new barriers and drop it from any barrier already in progress.【F:include/sintra/detail/coordinator_impl.h†L68-L200】【F:include/sintra/detail/coordinator_impl.h†L460-L483】 Once the
 acknowledgement returns, the process unpublishes its transceivers while communication is
-still in the normal state and only then pauses the readers.【F:include/sintra/detail/sintra_impl.h†L159-L166】 This breaks the circular
-wait described above: barriers complete without the draining processes, and the
-transceivers never attempt a blocking RPC after the readers have switched to service
+still in the normal state and only then pauses the readers.【F:include/sintra/detail/sintra_impl.h†L159-L166】 This should break the circular
+wait described above: barriers ought to complete without the draining processes, and the
+transceivers should never attempt a blocking RPC after the readers have switched to service
 mode.【F:include/sintra/detail/transceiver_impl.h†L263-L288】
+
+## Status after re-running the Release suite via `run_tests.py`
+
+The Release build driven through the Python test harness on 2025-10-13 still times out on
+the multi-process scenarios even with the draining handshake in place. The runner reports
+failures for the barrier-heavy tests while single-process binaries finish immediately, which
+shows that the library changes have not yet resolved the original stall under this driver.【38b950†L1-L19】
