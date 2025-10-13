@@ -81,7 +81,15 @@ class TestRunner:
         # List of test executables to run
         test_names = [
             'sintra_dummy_test',
-            'sintra_hanging_test',
+            'sintra_basic_pubsub_test',
+            'sintra_ping_pong_test',
+            'sintra_ping_pong_multi_test',
+            'sintra_rpc_append_test',
+            'sintra_recovery_test',
+            'sintra_barrier_flush_test',
+            'sintra_barrier_stress_test',
+            'sintra_variable_buffer_alignment_test',
+            'sintra_spawn_detached_test'
         ]
 
         if test_name:
