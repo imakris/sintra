@@ -31,8 +31,9 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "resolve_type.h"
 #include "transceiver.h"
 
-#include <mutex>
 #include <condition_variable>
+#include <mutex>
+#include <vector>
 
 
 namespace sintra {
@@ -78,6 +79,12 @@ struct Process_group: Derived_transceiver<Process_group>
         instance_id_type                        common_function_iid = invalid_instance_id;
     };
 
+    struct Barrier_completion
+    {
+        instance_id_type                        common_function_iid = invalid_instance_id;
+        std::vector<instance_id_type>           recipients;
+    };
+
     unordered_map<string, Barrier>              m_barriers;
     unordered_set<instance_id_type>             m_process_ids;
 
@@ -85,7 +92,11 @@ struct Process_group: Derived_transceiver<Process_group>
     SINTRA_RPC_STRICT_EXPLICIT(barrier)
 
 public:
-    void drop_from_inflight_barriers(instance_id_type process_iid);
+    void drop_from_inflight_barriers(
+        instance_id_type process_iid,
+        std::vector<Barrier_completion>& completions);
+    void emit_barrier_completions(
+        const std::vector<Barrier_completion>& completions);
 
 private:
     void add_process(instance_id_type process_iid);
@@ -138,7 +149,7 @@ private:
     instance_id_type publish_transceiver(
         type_id_type type_id, instance_id_type instance_id, const string& assigned_name);
     bool unpublish_transceiver(instance_id_type instance_id);
-    bool begin_process_draining(instance_id_type process_iid);
+    sequence_counter_type begin_process_draining(instance_id_type process_iid);
     void unpublish_transceiver_notify(instance_id_type transceiver_iid);
 
     //bool add_process_into_group(instance_id_type process_id, type_id_type process_group_id);

@@ -13,16 +13,17 @@ coordinated execution:
 
 Calling `sintra::finalize()` now performs the following steps:
 
-1. **Announce draining.** The process issues
+1. **Announce draining and quiesce.** The process issues
    `Coordinator::begin_process_draining` (or the RPC equivalent) while normal
    communication is still available. The coordinator records the new state,
-   removes the caller from in-flight barriers, and acknowledges the transition.
-   Once this call returns, other processes will never wait for the caller in a
-   barrier again.【F:include/sintra/detail/sintra_impl.h†L148-L166】【F:include/sintra/detail/coordinator_impl.h†L460-L483】
+   removes the caller from in-flight barriers, and returns the coordinator ring
+   sequence that covers all messages accepted so far. Remote processes flush
+   that sequence before proceeding, guaranteeing that all outstanding traffic is
+   visible before teardown continues.【F:include/sintra/detail/sintra_impl.h†L148-L170】【F:include/sintra/detail/coordinator_impl.h†L55-L195】【F:include/sintra/detail/coordinator_impl.h†L455-L481】
 2. **Unpublish under normal communication.** With the coordinator aware of the
-   shutdown, the process deactivates handlers and unpublishes its transceivers
-   before pausing the message readers. This keeps the synchronous unpublish
-   path free of shutdown races.【F:include/sintra/detail/sintra_impl.h†L159-L166】
+   shutdown and the channel quiesced, the process deactivates handlers and
+   unpublishes its transceivers before pausing the message readers. This keeps
+   the synchronous unpublish path free of shutdown races.【F:include/sintra/detail/sintra_impl.h†L162-L170】
 3. **Pause and destroy.** The process switches its readers to service mode,
    completes teardown, and releases all Sintra resources.【F:include/sintra/detail/sintra_impl.h†L162-L166】
 

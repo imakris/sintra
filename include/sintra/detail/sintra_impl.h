@@ -151,10 +151,13 @@ bool finalize()
         return false;
     }
 
-    const bool draining_announced = s_coord
+    const auto flush_seq = s_coord
         ? s_coord->begin_process_draining(s_mproc_id)
         : Coordinator::rpc_begin_process_draining(s_coord_id, s_mproc_id);
-    (void)draining_announced;
+
+    if (!s_coord && flush_seq != invalid_sequence) {
+        s_mproc->flush(process_of(s_coord_id), flush_seq);
+    }
 
     s_mproc->deactivate_all();
     s_mproc->unpublish_all_transceivers();
