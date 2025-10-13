@@ -1375,6 +1375,32 @@ inline void Managed_process::flush(instance_id_type process_id, sequence_counter
 }
 
 
+inline void Managed_process::run_after_current_handler(function<void()> task)
+{
+    if (!task) {
+        return;
+    }
+
+    if (!tl_is_req_thread) {
+        task();
+        return;
+    }
+
+    if (!tl_post_handler_function) {
+        tl_post_handler_function = std::move(task);
+        return;
+    }
+
+    auto previous = std::move(tl_post_handler_function);
+    tl_post_handler_function = [prev = std::move(previous), task = std::move(task)]() mutable {
+        if (prev) {
+            prev();
+        }
+        task();
+    };
+}
+
+
 inline
 size_t Managed_process::unblock_rpc(instance_id_type process_instance_id)
 {

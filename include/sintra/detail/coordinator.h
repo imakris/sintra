@@ -27,10 +27,13 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define SINTRA_COORDINATOR_H
 
 
+#include "id_types.h"
 #include "resolvable_instance.h"
 #include "resolve_type.h"
 #include "transceiver.h"
 
+#include <array>
+#include <atomic>
 #include <condition_variable>
 #include <mutex>
 #include <vector>
@@ -208,8 +211,7 @@ private:
 
     set<instance_id_type>                       m_requested_recovery;
 
-    mutable mutex                               m_draining_mutex;
-    unordered_set<instance_id_type>             m_draining_processes;
+    std::array<std::atomic<uint8_t>, max_process_index + 1> m_draining_process_states{};
 
 public:
     SINTRA_RPC_EXPLICIT(resolve_type)
