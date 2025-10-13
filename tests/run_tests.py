@@ -263,34 +263,6 @@ class TestRunner:
 
         return passed, failed, results
 
-    def run_full_test_suite_once(self, tests: List[Path], repetitions: int):
-        """Run all tests with given repetitions, return results per test"""
-        test_results = {}
-        total_runs = 0
-        total_passed = 0
-
-        for test_path in tests:
-            test_name = test_path.stem
-            test_passed = 0
-            test_failed = 0
-            successful_durations = []
-
-            for _ in range(repetitions):
-                result = self.run_test_once(test_path)
-                total_runs += 1
-                if result.success:
-                    test_passed += 1
-                    total_passed += 1
-                    successful_durations.append(result.duration)
-                else:
-                    test_failed += 1
-
-            avg_duration = sum(successful_durations) / len(successful_durations) if successful_durations else 0
-            test_results[test_name] = (test_passed, test_failed, avg_duration)
-
-        all_pass = total_runs == total_passed
-        return all_pass, total_passed, total_runs, test_results
-
     def print_summary(self, test_path: Path, passed: int, failed: int, results: List[TestResult]):
         """Print summary statistics for a test"""
         test_name = test_path.stem
@@ -388,40 +360,40 @@ def main():
     start_time = time.time()
 
     # Adaptive soak test: run full suite with exponentially increasing batch sizes
-    # Each batch runs the full suite, accumulating results
     accumulated_results = {test.stem: {'passed': 0, 'failed': 0, 'durations': []} for test in tests}
-
-    batch_size = 1
     total_reps_so_far = 0
     max_reps_per_test = args.repetitions
     all_passed = True
+    batch_size = 1
 
     while total_reps_so_far < max_reps_per_test:
-        # Calculate how many reps to run in this batch
-        remaining = max_reps_per_test - total_reps_so_far
-        current_batch = min(batch_size, remaining)
+        reps_in_this_round = min(batch_size, max_reps_per_test - total_reps_so_far)
+        print(f"\n{Color.BLUE}--- Running Round: {reps_in_this_round} repetition(s) ---{Color.RESET}")
 
-        all_pass, passed, total, test_results = runner.run_full_test_suite_once(tests, current_batch)
-        total_reps_so_far += current_batch
+        for i in range(reps_in_this_round):
+            print(f"  Repetition {i + 1}/{reps_in_this_round}: ", end="", flush=True)
+            for test_path in tests:
+                test_name = test_path.stem
+                result = runner.run_test_once(test_path)
 
-        # Accumulate results
-        for test_name, (test_passed, test_failed, avg_duration) in test_results.items():
-            accumulated_results[test_name]['passed'] += test_passed
-            accumulated_results[test_name]['failed'] += test_failed
-            accumulated_results[test_name]['durations'].append(avg_duration)
+                accumulated_results[test_name]['durations'].append(result.duration)
 
-        # Early stopping conditions
-        if not all_pass:
-            all_passed = False
-            fail_rate = 100.0 - (passed / total * 100 if total > 0 else 0)
-            if fail_rate >= 100 and total_reps_so_far >= 2:
-                break
-            elif fail_rate >= 30 and total_reps_so_far >= 4:
-                break
-            elif fail_rate >= 10 and total_reps_so_far >= 16:
-                break
+                if result.success:
+                    accumulated_results[test_name]['passed'] += 1
+                    print(f"{Color.GREEN}.{Color.RESET}", end="", flush=True)
+                else:
+                    accumulated_results[test_name]['failed'] += 1
+                    all_passed = False
+                    print(f"{Color.RED}F{Color.RESET}", end="", flush=True)
 
-        # Double the batch size for next round
+            print() # Newline after round
+            if not all_passed:
+                break # Stop all rounds
+
+        total_reps_so_far += reps_in_this_round
+        if not all_passed:
+            break
+
         batch_size *= 2
 
     # Print final results
