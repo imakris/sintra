@@ -36,6 +36,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <mutex>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 
 namespace sintra {
@@ -46,6 +47,7 @@ using std::lock_guard;
 using std::mutex;
 using std::string;
 using std::unique_lock;
+using std::vector;
 
 
 
@@ -67,6 +69,16 @@ sequence_counter_type Process_group::barrier(
     if (b.processes_pending.empty()) {
         // new or reused barrier (may have failed previously)
         b.processes_pending = m_process_ids;
+        if (s_coord) {
+            for (auto it = b.processes_pending.begin(); it != b.processes_pending.end(); ) {
+                if (static_cast<Coordinator*>(s_coord)->is_process_draining(*it)) {
+                    it = b.processes_pending.erase(it);
+                }
+                else {
+                    ++it;
+                }
+            }
+        }
         b.failed = false;
         b.common_function_iid = make_instance_id();
     }
@@ -107,13 +119,116 @@ sequence_counter_type Process_group::barrier(
 
 
 inline
+sequence_counter_type Process_group::release_process_from_barriers(instance_id_type process_iid)
+{
+    sequence_counter_type max_sequence = 0;
+    vector<string> barrier_names;
+
+    {
+        lock_guard<mutex> lock(m_call_mutex);
+        barrier_names.reserve(m_barriers.size());
+        for (auto& entry : m_barriers) {
+            if (entry.second.processes_pending.find(process_iid) != entry.second.processes_pending.end()) {
+                barrier_names.emplace_back(entry.first);
+            }
+        }
+    }
+
+    if (barrier_names.empty()) {
+        return s_mproc->m_out_req_c->get_leading_sequence();
+    }
+
+    Message_prefix synthetic_message{};
+    synthetic_message.sender_instance_id = process_iid;
+    synthetic_message.receiver_instance_id = instance_id();
+
+    Message_prefix* saved_message = s_tl_current_message;
+
+    for (const auto& barrier_name : barrier_names) {
+        bool still_pending = false;
+        {
+            lock_guard<mutex> lock(m_call_mutex);
+            auto it = m_barriers.find(barrier_name);
+            if (it != m_barriers.end() &&
+                it->second.processes_pending.find(process_iid) != it->second.processes_pending.end()) {
+                still_pending = true;
+            }
+        }
+
+        if (!still_pending) {
+            continue;
+        }
+
+        Message_prefix* previous = s_tl_current_message;
+        s_tl_current_message = &synthetic_message;
+
+        try {
+            auto seq = barrier(barrier_name);
+            if (seq > max_sequence) {
+                max_sequence = seq;
+            }
+        }
+        catch (std::pair<deferral, function<void()>>& deferred) {
+            deferred.second();
+        }
+
+        s_tl_current_message = previous;
+    }
+
+    s_tl_current_message = saved_message;
+
+    if (max_sequence == 0) {
+        max_sequence = s_mproc->m_out_req_c->get_leading_sequence();
+    }
+
+    return max_sequence;
+}
+
+
+inline
 Coordinator::Coordinator():
     Derived_transceiver<Coordinator>("", make_service_instance_id())
 {
+    for (auto& state : m_process_states) {
+        state.store(static_cast<uint8_t>(process_state::active), std::memory_order_relaxed);
+    }
     // Leave it empty. The coordinator is constructed within the Mnanaged_process
     // constructor, while still building the basic infrastructure.
 }
 
+
+
+inline
+size_t Coordinator::state_index(instance_id_type piid) const
+{
+    auto idx = get_process_index(piid);
+    if (idx == 0 || idx > max_process_index) {
+        return process_state_capacity; // invalid
+    }
+    return static_cast<size_t>(idx);
+}
+
+
+inline
+void Coordinator::set_process_state(instance_id_type piid, process_state state)
+{
+    auto idx = state_index(piid);
+    if (idx >= process_state_capacity) {
+        return;
+    }
+    m_process_states[idx].store(static_cast<uint8_t>(state), std::memory_order_release);
+}
+
+
+inline
+bool Coordinator::is_process_draining(instance_id_type piid) const
+{
+    auto idx = state_index(piid);
+    if (idx >= process_state_capacity) {
+        return false;
+    }
+    return m_process_states[idx].load(std::memory_order_acquire) == static_cast<uint8_t>(process_state::draining);
+}
 
 
 inline
@@ -237,7 +352,7 @@ instance_id_type Coordinator::publish_transceiver(type_id_type tid, instance_id_
     };
 
     if (pr_it != m_transceiver_registry.end()) { // the transceiver's process is known
-        
+
         auto& pr = pr_it->second; // process registry
 
         // observe the limit of transceivers per process
@@ -258,6 +373,8 @@ instance_id_type Coordinator::publish_transceiver(type_id_type tid, instance_id_
         s_mproc->m_instance_id_of_assigned_name[entry.name] = iid;
         pr[iid] = entry;
 
+        set_process_state(process_iid, process_state::active);
+
         return true_sequence();
     }
     else
@@ -270,6 +387,8 @@ instance_id_type Coordinator::publish_transceiver(type_id_type tid, instance_id_
 
         s_mproc->m_instance_id_of_assigned_name[entry.name] = iid;
         m_transceiver_registry[iid][iid] = entry;
+
+        set_process_state(process_iid, process_state::active);
 
         return true_sequence();
     }
@@ -390,6 +509,33 @@ inline
 void Coordinator::print(const string& str)
 {
     cout << str;
+}
+
+
+
+// EXPORTED FOR RPC
+inline
+sequence_counter_type Coordinator::begin_process_draining(instance_id_type process_iid)
+{
+    set_process_state(process_iid, process_state::draining);
+
+    sequence_counter_type max_sequence = 0;
+
+    {
+        lock_guard<mutex> lock(m_groups_mutex);
+        for (auto& entry : m_groups) {
+            auto seq = entry.second.release_process_from_barriers(process_iid);
+            if (seq > max_sequence) {
+                max_sequence = seq;
+            }
+        }
+    }
+
+    if (max_sequence == 0) {
+        max_sequence = s_mproc->m_out_req_c->get_leading_sequence();
+    }
+
+    return max_sequence;
 }
 
 

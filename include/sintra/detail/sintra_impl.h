@@ -156,6 +156,18 @@ bool finalize()
         return false;
     }
 
+    std::fprintf(stderr, "finalize() initiating draining handshake\n");
+    auto flush_sequence = Coordinator::rpc_begin_process_draining(s_coord_id, s_mproc_id);
+    std::fprintf(stderr, "finalize() flushing coordinator traffic up to %llu\n",
+        static_cast<unsigned long long>(flush_sequence));
+    s_mproc->flush(process_of(s_coord_id), flush_sequence);
+
+    std::fprintf(stderr, "finalize() deactivating handlers\n");
+    s_mproc->deactivate_all();
+
+    std::fprintf(stderr, "finalize() unpublishing transceivers\n");
+    s_mproc->unpublish_all_transceivers();
+
     std::fprintf(stderr, "finalize() pausing managed process\n");
     s_mproc->pause();
     std::fprintf(stderr, "finalize() deleting managed process\n");

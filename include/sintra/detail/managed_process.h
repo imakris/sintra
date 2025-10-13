@@ -186,9 +186,11 @@ struct Managed_process: Derived_transceiver<Managed_process>
     // but in a mode where only messages originating from the coordinator are
     // processed.
     void pause();
-
+    
     // Stops the readers and causes their threads to exit.
     void stop();
+
+    void unpublish_all_transceivers();
 
 
     void wait_for_stop();

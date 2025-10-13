@@ -30,6 +30,10 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "resolvable_instance.h"
 #include "resolve_type.h"
 #include "transceiver.h"
+#include "message.h"
+
+#include <array>
+#include <atomic>
 
 #include <mutex>
 #include <condition_variable>
@@ -79,6 +83,8 @@ struct Process_group: Derived_transceiver<Process_group>
 
     unordered_map<string, Barrier>              m_barriers;
     unordered_set<instance_id_type>             m_process_ids;
+
+    sequence_counter_type release_process_from_barriers(instance_id_type process_iid);
 
     mutex m_call_mutex;
     SINTRA_RPC_STRICT_EXPLICIT(barrier)
@@ -155,6 +161,18 @@ private:
 
     void print(const string& str);
 
+    enum class process_state : uint8_t
+    {
+        active = 0,
+        draining = 1
+    };
+
+    static constexpr size_t process_state_capacity = max_process_index + 1;
+
+    size_t state_index(instance_id_type piid) const;
+    void set_process_state(instance_id_type piid, process_state state);
+    sequence_counter_type begin_process_draining(instance_id_type process_iid);
+
     mutex                                       m_type_resolution_mutex;
     mutex                                       m_publish_mutex;
     mutex                                       m_groups_mutex;
@@ -191,6 +209,8 @@ private:
 
     set<instance_id_type>                       m_requested_recovery;
 
+    std::array<std::atomic<uint8_t>, process_state_capacity> m_process_states;
+
 public:
     SINTRA_RPC_EXPLICIT(resolve_type)  
     SINTRA_RPC_EXPLICIT(resolve_instance)
@@ -200,6 +220,9 @@ public:
     SINTRA_RPC_EXPLICIT(make_process_group)
     SINTRA_RPC_EXPLICIT(print)
     SINTRA_RPC_EXPLICIT(enable_recovery)
+    SINTRA_RPC_STRICT_EXPLICIT(begin_process_draining)
+
+    bool is_process_draining(instance_id_type piid) const;
 
     SINTRA_SIGNAL_EXPLICIT(instance_published,
         type_id_type type_id, instance_id_type instance_id, message_string assigned_name)

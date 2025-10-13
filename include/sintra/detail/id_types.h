@@ -62,6 +62,7 @@ namespace detail {
         unpublish_transceiver,
         make_process_group,
         print,
+        begin_process_draining,
         barrier,
         enable_recovery,
 

@@ -38,6 +38,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <vector>
 #include <thread>
 #include <utility>
 #ifndef _WIN32
@@ -1135,8 +1136,33 @@ void Managed_process::go()
 }
 
 
+inline
+void Managed_process::unpublish_all_transceivers()
+{
+    std::vector<Transceiver*> local_transceivers;
 
- //////////////////////////////////////////////////////////////////////////
+    {
+        auto scoped = m_local_pointer_of_instance_id.scoped();
+        local_transceivers.reserve(scoped.get().size());
+        for (auto& entry : scoped) {
+            auto* transceiver_ptr = entry.second;
+            if (!transceiver_ptr || transceiver_ptr == this || transceiver_ptr == s_coord) {
+                continue;
+            }
+            local_transceivers.push_back(transceiver_ptr);
+        }
+    }
+
+    for (auto* transceiver_ptr : local_transceivers) {
+        if (transceiver_ptr) {
+            transceiver_ptr->destroy();
+        }
+    }
+}
+
+
+
+//////////////////////////////////////////////////////////////////////////
 ///// BEGIN START/STOP /////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////
 //////   \//////   \//////   \//////   \//////   \//////   \//////   \//////
