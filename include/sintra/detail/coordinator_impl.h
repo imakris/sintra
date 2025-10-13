@@ -64,24 +64,11 @@ sequence_counter_type Process_group::barrier(
     Barrier& b = m_barriers[barrier_name];
     b.m.lock(); // main barrier lock
 
-    unordered_set<instance_id_type> member_snapshot;
     if (b.processes_pending.empty()) {
-        member_snapshot = m_process_ids;
-    }
-
-    basic_lock.unlock();
-
-    if (b.processes_pending.empty()) {
-        // new or reused barrier (may have failed previously)
-        b.processes_pending = std::move(member_snapshot);
-        b.processes_arrived.clear();
-        b.failed = false;
-        b.common_function_iid = make_instance_id();
+        b.processes_pending = m_process_ids;
 
         if (auto* coord = s_coord) {
-            for (auto it = b.processes_pending.begin();
-                 it != b.processes_pending.end(); )
-            {
+            for (auto it = b.processes_pending.begin(); it != b.processes_pending.end(); ) {
                 if (coord->is_process_draining(*it)) {
                     it = b.processes_pending.erase(it);
                 }
@@ -90,7 +77,13 @@ sequence_counter_type Process_group::barrier(
                 }
             }
         }
+
+        b.processes_arrived.clear();
+        b.failed = false;
+        b.common_function_iid = make_instance_id();
     }
+
+    basic_lock.unlock();
 
     b.processes_arrived.insert(caller_piid);
     b.processes_pending.erase(caller_piid);
@@ -135,6 +128,7 @@ inline void Process_group::drop_from_inflight_barriers(
 
     for (auto barrier_it = m_barriers.begin(); barrier_it != m_barriers.end(); ) {
         auto& barrier = barrier_it->second;
+        const auto barrier_name = barrier_it->first;
         std::unique_lock barrier_lock(barrier.m);
 
         const bool touched_pending = barrier.processes_pending.erase(process_iid) > 0;
@@ -151,6 +145,7 @@ inline void Process_group::drop_from_inflight_barriers(
         }
 
         Barrier_completion completion;
+        completion.barrier_name = barrier_name;
         completion.common_function_iid = barrier.common_function_iid;
         completion.recipients.assign(
             barrier.processes_arrived.begin(),
@@ -498,13 +493,7 @@ inline sequence_counter_type Coordinator::begin_process_draining(instance_id_typ
         }
     }
 
-    struct Pending_completion
-    {
-        std::string group_name;
-        std::vector<Process_group::Barrier_completion> completions;
-    };
-
-    std::vector<Pending_completion> pending_completions;
+    std::vector<Deferred_group_barrier_completions> pending_completions;
     pending_completions.reserve(groups_to_notify.size());
 
     for (auto& reference : groups_to_notify) {
@@ -515,24 +504,72 @@ inline sequence_counter_type Coordinator::begin_process_draining(instance_id_typ
         std::vector<Process_group::Barrier_completion> completions;
         reference.group->drop_from_inflight_barriers(process_iid, completions);
         if (!completions.empty()) {
-            pending_completions.push_back({reference.name, std::move(completions)});
+            Deferred_group_barrier_completions queued;
+            queued.group_name = reference.name;
+            queued.completions = std::move(completions);
+            pending_completions.push_back(std::move(queued));
         }
     }
 
-    if (!pending_completions.empty() && s_mproc) {
-        s_mproc->run_after_current_handler(
-            [this, pending = std::move(pending_completions)]() mutable {
-                for (auto& entry : pending) {
-                    std::lock_guard<mutex> groups_lock(m_groups_mutex);
-                    auto it = m_groups.find(entry.group_name);
-                    if (it != m_groups.end()) {
-                        it->second.emit_barrier_completions(entry.completions);
-                    }
-                }
-            });
+    if (!pending_completions.empty()) {
+        {
+            std::lock_guard<std::mutex> queue_lock(m_deferred_completions_mutex);
+            for (auto& entry : pending_completions) {
+                m_deferred_barrier_completions.push_back(std::move(entry));
+            }
+        }
+
+        if (s_mproc && !m_deferred_completion_pump_pending.exchange(true, std::memory_order_acq_rel)) {
+            s_mproc->run_after_current_handler([this]() { pump_deferred_barrier_completions(); });
+        }
     }
 
     return s_mproc->m_out_req_c->get_leading_sequence();
+}
+
+
+inline void Coordinator::pump_deferred_barrier_completions()
+{
+    std::vector<Deferred_group_barrier_completions> ready;
+    {
+        std::lock_guard<std::mutex> queue_lock(m_deferred_completions_mutex);
+        if (m_deferred_barrier_completions.empty()) {
+            m_deferred_completion_pump_pending.store(false, std::memory_order_release);
+            return;
+        }
+
+        ready.swap(m_deferred_barrier_completions);
+        m_deferred_completion_pump_pending.store(false, std::memory_order_release);
+    }
+
+    std::lock_guard<mutex> groups_lock(m_groups_mutex);
+    for (auto& entry : ready) {
+        auto group_it = m_groups.find(entry.group_name);
+        if (group_it == m_groups.end()) {
+            continue;
+        }
+
+        auto& group = group_it->second;
+        std::vector<Process_group::Barrier_completion> valid;
+        valid.reserve(entry.completions.size());
+
+        {
+            std::lock_guard call_lock(group.m_call_mutex);
+            for (auto& completion : entry.completions) {
+                auto barrier_it = group.m_barriers.find(completion.barrier_name);
+                if (barrier_it != group.m_barriers.end() &&
+                    barrier_it->second.common_function_iid != completion.common_function_iid) {
+                    continue;
+                }
+
+                valid.push_back(std::move(completion));
+            }
+        }
+
+        if (!valid.empty()) {
+            group.emit_barrier_completions(valid);
+        }
+    }
 }
 
 
