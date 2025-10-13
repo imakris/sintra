@@ -10,7 +10,9 @@
 //
 
 #include <sintra/sintra.h>
+#include <chrono>
 #include <iostream>
+#include <thread>
 
 
 using namespace std;
@@ -98,8 +100,9 @@ int main(int argc, char* argv[])
     init(argc, argv, process_1, process_2, process_3);
 
     if (process_index() == 0) {
-        cout << "Press ENTER to stop the ping-pong" << "\n\n";
-        while (cin.get() != '\n') {}
+        using namespace std::chrono_literals;
+        std::this_thread::sleep_for(3s);
+        console() << "Stopping ping-pong after a short demonstration\n";
         world() << Stop();
     }
 
@@ -109,13 +112,6 @@ int main(int argc, char* argv[])
 
     // after finalize() returns, messaging no longer works.
     finalize();
-
-    if (process_index() == 0) {
-        do {
-            cout << '\n' << "Press ENTER to continue...";
-        }
-        while (cin.get() != '\n');
-    }
 
     return 0;
 }

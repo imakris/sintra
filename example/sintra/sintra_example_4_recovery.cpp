@@ -107,14 +107,7 @@ int main(int argc, char* argv[])
     finalize();
 
     if (process_index() == 0) {
-        cout << "\nRecovery demonstration complete!\n";
-        cout << "The worker process crashed on its first run, was automatically\n";
-        cout << "restarted by the coordinator, and completed successfully on its\n";
-        cout << "second run.\n\n";
-
-        do {
-            cout << "Press ENTER to continue...";
-        } while (cin.get() != '\n');
+        cout << "\nRecovery demonstration complete.\n";
     }
 
     return 0;
