@@ -199,8 +199,12 @@ inline
 Coordinator::Coordinator():
     Derived_transceiver<Coordinator>("", make_service_instance_id())
 {
-    // Leave it empty. The coordinator is constructed within the Mnanaged_process
-    // constructor, while still building the basic infrastructure.
+    // The coordinator is constructed within the Managed_process constructor, while still
+    // building the basic infrastructure. Ensure draining state starts cleared so the
+    // atomics are initialised before any loads occur.
+    for (auto& draining_state : m_draining_process_states) {
+        draining_state.store(0, std::memory_order_relaxed);
+    }
 }
 
 
