@@ -51,14 +51,14 @@ Repeating the experiment with other multi-process tests shows the same pattern, 
 explains why every test that relies on `_sintra_all_processes` times out under the
 runner.【ccfb4e†L1-L9】
 
-The applied fix introduces an explicit draining handshake with the coordinator.【F:include/sintra/detail/sintra_impl.h†L148-L166】【F:include/sintra/detail/coordinator_impl.h†L68-L200】【F:include/sintra/detail/coordinator_impl.h†L460-L483】 Each
+The applied fix introduces an explicit draining handshake with the coordinator.【F:include/sintra/detail/sintra_impl.h†L148-L170】【F:include/sintra/detail/coordinator_impl.h†L55-L195】【F:include/sintra/detail/coordinator_impl.h†L455-L481】 Each
 process announces that it is leaving before it pauses, which lets the coordinator
-exclude it from new barriers and drop it from any barrier already in progress.【F:include/sintra/detail/coordinator_impl.h†L68-L200】【F:include/sintra/detail/coordinator_impl.h†L460-L483】 Once the
-acknowledgement returns, the process unpublishes its transceivers while communication is
-still in the normal state and only then pauses the readers.【F:include/sintra/detail/sintra_impl.h†L159-L166】 This should break the circular
-wait described above: barriers ought to complete without the draining processes, and the
-transceivers should never attempt a blocking RPC after the readers have switched to service
-mode.【F:include/sintra/detail/transceiver_impl.h†L263-L288】
+exclude it from new barriers and drop it from any barrier already in progress.【F:include/sintra/detail/coordinator_impl.h†L55-L195】【F:include/sintra/detail/coordinator_impl.h†L455-L481】 The acknowledgement carries a flush sequence so the caller
+can drain the coordinator’s channel before it continues tearing down.【F:include/sintra/detail/sintra_impl.h†L148-L170】 After the channel is quiesced, the process
+unpublishes its transceivers while communication is still in the normal state and only
+then pauses the readers.【F:include/sintra/detail/sintra_impl.h†L162-L170】 This should break the circular wait described above: barriers ought to
+complete without the draining processes, and the transceivers should never attempt a
+blocking RPC after the readers have switched to service mode.【F:include/sintra/detail/transceiver_impl.h†L263-L288】
 
 ## Status after re-running the Release suite via `run_tests.py`
 
