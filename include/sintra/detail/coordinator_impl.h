@@ -214,21 +214,29 @@ instance_id_type Coordinator::publish_transceiver(type_id_type tid, instance_id_
     auto pr_it = m_transceiver_registry.find(process_iid);
     auto entry = tn_type{ tid, assigned_name };
 
-    auto true_sequence = [&](){
+    auto true_sequence = [&]() {
         emit_global<instance_published>(tid, iid, assigned_name);
         assert(s_tl_additional_piids_size == 0);
         assert(s_tl_common_function_iid == invalid_instance_id);
-        assert(m_instances_waited[assigned_name].size() < max_process_index);
 
         s_tl_additional_piids_size = 0;
-        for (auto& e : m_instances_waited[assigned_name]) {
-            s_tl_additional_piids[s_tl_additional_piids_size++] = e;
+
+        if (auto waited_node = m_instances_waited.extract(assigned_name)) {
+            auto waiters = std::move(waited_node.mapped());
+
+            assert(waiters.size() < max_process_index);
+            for (auto& e : waiters) {
+                s_tl_additional_piids[s_tl_additional_piids_size++] = e;
+            }
         }
 
+        if (auto common_node = m_instances_waited_common_iids.extract(assigned_name)) {
+            s_tl_common_function_iid = common_node.mapped();
+        }
+        else {
+            s_tl_common_function_iid = invalid_instance_id;
+        }
 
-        s_tl_common_function_iid = m_instances_waited_common_iids[assigned_name];        
-        m_instances_waited.erase(assigned_name);
-        m_instances_waited_common_iids.erase(assigned_name);
         return iid;
     };
 
