@@ -221,10 +221,8 @@ instance_id_type Coordinator::publish_transceiver(type_id_type tid, instance_id_
 
         s_tl_additional_piids_size = 0;
 
-        auto waited_it = m_instances_waited.find(assigned_name);
-        if (waited_it != m_instances_waited.end()) {
-            auto waiters = std::move(waited_it->second);
-            m_instances_waited.erase(waited_it);
+        if (auto waited_node = m_instances_waited.extract(assigned_name)) {
+            auto waiters = std::move(waited_node.mapped());
 
             assert(waiters.size() < max_process_index);
             for (auto& e : waiters) {
@@ -232,10 +230,8 @@ instance_id_type Coordinator::publish_transceiver(type_id_type tid, instance_id_
             }
         }
 
-        auto common_it = m_instances_waited_common_iids.find(assigned_name);
-        if (common_it != m_instances_waited_common_iids.end()) {
-            s_tl_common_function_iid = common_it->second;
-            m_instances_waited_common_iids.erase(common_it);
+        if (auto common_node = m_instances_waited_common_iids.extract(assigned_name)) {
+            s_tl_common_function_iid = common_node.mapped();
         }
         else {
             s_tl_common_function_iid = invalid_instance_id;
