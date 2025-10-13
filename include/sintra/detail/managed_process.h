@@ -272,6 +272,7 @@ struct Managed_process: Derived_transceiver<Managed_process>
     void wait_until_all_external_readers_are_done(int extra_allowed_readers = 0);
 
     void flush(instance_id_type process_id, sequence_counter_type flush_sequence);
+    void run_after_current_handler(function<void()> task);
 
 
     size_t unblock_rpc(instance_id_type process_instance_id = invalid_instance_id);
