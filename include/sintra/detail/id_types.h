@@ -64,6 +64,7 @@ namespace detail {
         print,
         barrier,
         enable_recovery,
+        begin_process_draining,
 
         // EXPLICITLY DEFINED SIGNALS
         //instance_invalidated, // sent by Transceiver on destruction
@@ -71,6 +72,7 @@ namespace detail {
                               // and can be subsequently looked up by its name.
         instance_unpublished, // sent by Coordinator, always before the
                               // Transceiver sends instance_invalidated
+        unpublish_transceiver_notify,
 
         // SPECIAL MESSAGE IDENTIFIERS
         exception,

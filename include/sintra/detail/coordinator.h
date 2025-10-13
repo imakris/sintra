@@ -72,6 +72,7 @@ struct Process_group: Derived_transceiver<Process_group>
         mutex                                   m;
         condition_variable                      cv;
         unordered_set<instance_id_type>         processes_pending;
+        unordered_set<instance_id_type>         processes_arrived;
         //sequence_counter_type                   flush_sequence = 0;
         bool                                    failed = false;
         instance_id_type                        common_function_iid = invalid_instance_id;
@@ -82,6 +83,9 @@ struct Process_group: Derived_transceiver<Process_group>
 
     mutex m_call_mutex;
     SINTRA_RPC_STRICT_EXPLICIT(barrier)
+
+public:
+    void drop_from_inflight_barriers(instance_id_type process_iid);
 
 private:
     void add_process(instance_id_type process_iid);
@@ -134,6 +138,8 @@ private:
     instance_id_type publish_transceiver(
         type_id_type type_id, instance_id_type instance_id, const string& assigned_name);
     bool unpublish_transceiver(instance_id_type instance_id);
+    bool begin_process_draining(instance_id_type process_iid);
+    void unpublish_transceiver_notify(instance_id_type transceiver_iid);
 
     //bool add_process_into_group(instance_id_type process_id, type_id_type process_group_id);
 
@@ -191,15 +197,21 @@ private:
 
     set<instance_id_type>                       m_requested_recovery;
 
+    mutable mutex                               m_draining_mutex;
+    unordered_set<instance_id_type>             m_draining_processes;
+
 public:
-    SINTRA_RPC_EXPLICIT(resolve_type)  
+    SINTRA_RPC_EXPLICIT(resolve_type)
     SINTRA_RPC_EXPLICIT(resolve_instance)
     SINTRA_RPC_STRICT_EXPLICIT(wait_for_instance)
     SINTRA_RPC_STRICT_EXPLICIT(publish_transceiver)
     SINTRA_RPC_EXPLICIT(unpublish_transceiver)
+    SINTRA_RPC_STRICT_EXPLICIT(begin_process_draining)
     SINTRA_RPC_EXPLICIT(make_process_group)
     SINTRA_RPC_EXPLICIT(print)
     SINTRA_RPC_EXPLICIT(enable_recovery)
+
+    bool is_process_draining(instance_id_type process_iid) const;
 
     SINTRA_SIGNAL_EXPLICIT(instance_published,
         type_id_type type_id, instance_id_type instance_id, message_string assigned_name)
@@ -208,6 +220,7 @@ public:
 
     friend struct Managed_process;
     friend struct Transceiver;
+    friend bool finalize();
 };
 
 }
