@@ -119,6 +119,19 @@ Coordinator::Coordinator():
 inline
 Coordinator::~Coordinator()
 {
+    {
+        lock_guard<mutex> publish_lock(m_publish_mutex);
+        m_transceiver_registry.clear();
+        m_instances_waited.clear();
+        m_instances_waited_common_iids.clear();
+    }
+
+    {
+        lock_guard<mutex> groups_lock(m_groups_mutex);
+        m_groups_of_process.clear();
+        m_groups.clear();
+    }
+
     s_coord     = nullptr;
     s_coord_id  = 0;
 }
