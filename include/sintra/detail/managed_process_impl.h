@@ -33,11 +33,12 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <functional>
 #include <list>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
-#include <functional>
 #include <utility>
 #ifndef _WIN32
 #include <signal.h>
@@ -49,13 +50,6 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #endif
 
 #include <boost/type_index/ctti_type_index.hpp>
-
-#ifdef _WIN32
-    #include "third_party/getopt.h"
-#else
-    #include <getopt.h>
-#endif
-
 
 namespace sintra {
 
@@ -657,7 +651,6 @@ void Managed_process::init(int argc, const char* const* argv)
 {
     m_binary_name = argv[0];
 
-    int help_arg = 0;
     std::string branch_index_arg;
     std::string swarm_id_arg;
     std::string instance_id_arg;
@@ -679,57 +672,116 @@ void Managed_process::init(int argc, const char* const* argv)
     m_recovery_cmd = join_strings(fa.remained, " ") + " --recovery_occurrence " +
         std::to_string(recovery_occurrence_value+1);
 
+    auto option_value = [&](const std::string& arg, const char* long_name, char short_name, bool requires_value, int& index) -> std::optional<std::string> {
+        const std::string long_prefix = std::string(long_name) + "=";
+
+        if (arg == long_name) {
+            if (!requires_value) {
+                return std::string();
+            }
+            if (index + 1 >= argc) {
+                throw 1;
+            }
+            return std::string(argv[++index]);
+        }
+
+        if (requires_value && arg.rfind(long_prefix, 0) == 0) {
+            return arg.substr(long_prefix.size());
+        }
+
+        if (short_name != '\0' && arg.size() >= 2 && arg[0] == '-' && arg[1] == short_name) {
+            if (!requires_value) {
+                return std::string();
+            }
+
+            if (arg.size() > 2) {
+                if (arg[2] == '=') {
+                    return arg.substr(3);
+                }
+                return arg.substr(2);
+            }
+
+            if (index + 1 >= argc) {
+                throw 1;
+            }
+            return std::string(argv[++index]);
+        }
+
+        return std::nullopt;
+    };
+
     try {
-        while (true) {
-            static struct ::option long_options[] = {
-                {"help",                no_argument,        &help_arg,  'h' },
-                {"branch_index",        required_argument,  0,          'a' },
-                {"swarm_id",            required_argument,  0,          'b' },
-                {"instance_id",         required_argument,  0,          'c' },
-                {"coordinator_id",      required_argument,  0,          'd' },
-                {"recovery_occurrence", required_argument,  0,          'e' },
-                {0, 0, 0, 0}
-            };
+        for (int i = 1; i < argc; ++i) {
+            std::string arg = argv[i];
 
-            int option_index = 0;
-            int c = getopt_long(argc, (char*const*)argv, "ha:b:c:d:e:", long_options, &option_index);
+            if (arg == "--help" || arg == "-h") {
+                throw 1;
+            }
 
-            if (c == -1)
-                break;
+            if (auto value = option_value(arg, "--branch_index", 'a', true, i)) {
+                try {
+                    branch_index_arg = *value;
+                    s_branch_index = static_cast<int32_t>(std::stol(*value));
+                }
+                catch (...) {
+                    throw 1;
+                }
 
-            switch (c) {
-                case 'h':
-                    if (long_options[option_index].flag != 0)
-                        throw -1;
-                    break;
-                case 'a':
-                    branch_index_arg        = optarg;
-                    s_branch_index          = static_cast<int32_t>(std::stol(optarg));
-                    if (s_branch_index < 1) {
-                        throw -1;
-                    }
-                    break;
-                case 'b':
-                    swarm_id_arg            = optarg;
-                    m_swarm_id              = static_cast<decltype(m_swarm_id)>(std::stoull(optarg));
-                    break;
-                case 'c':
-                    instance_id_arg         = optarg;
-                    m_instance_id           = static_cast<decltype(m_instance_id)>(std::stoull(optarg));
-                    break;
-                case 'd':
-                    coordinator_id_arg      = optarg;
-                    s_coord_id              = static_cast<instance_id_type>(std::stoull(optarg));
-                    break;
-                case 'e':
-                    recovery_arg            = optarg;
-                    s_recovery_occurrence   = static_cast<uint32_t>(std::stoul(optarg));
-                    break;
-                case '?':
-                    /* getopt_long already printed an error message. */
-                    break;
-                default :
-                    throw -1;
+                if (s_branch_index < 1) {
+                    throw 1;
+                }
+
+                continue;
+            }
+
+            if (auto value = option_value(arg, "--swarm_id", 'b', true, i)) {
+                try {
+                    swarm_id_arg = *value;
+                    m_swarm_id = static_cast<decltype(m_swarm_id)>(std::stoull(*value));
+                }
+                catch (...) {
+                    throw 1;
+                }
+                continue;
+            }
+
+            if (auto value = option_value(arg, "--instance_id", 'c', true, i)) {
+                try {
+                    instance_id_arg = *value;
+                    m_instance_id = static_cast<decltype(m_instance_id)>(std::stoull(*value));
+                }
+                catch (...) {
+                    throw 1;
+                }
+                continue;
+            }
+
+            if (auto value = option_value(arg, "--coordinator_id", 'd', true, i)) {
+                try {
+                    coordinator_id_arg = *value;
+                    s_coord_id = static_cast<instance_id_type>(std::stoull(*value));
+                }
+                catch (...) {
+                    throw 1;
+                }
+                continue;
+            }
+
+            if (auto value = option_value(arg, "--recovery_occurrence", 'e', true, i)) {
+                try {
+                    recovery_arg = *value;
+                    s_recovery_occurrence = static_cast<uint32_t>(std::stoul(*value));
+                }
+                catch (...) {
+                    throw 1;
+                }
+                continue;
+            }
+
+            if (!arg.empty() && arg[0] == '-') {
+                // Ignore unknown options so the examples can run under environments
+                // that inject additional debugger flags (e.g. Visual Studio).
+                continue;
             }
         }
     }
