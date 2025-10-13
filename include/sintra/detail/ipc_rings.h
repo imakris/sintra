@@ -1693,7 +1693,8 @@ struct Ring_W : Ring<T, false>
     {
 #if SINTRA_RING_READING_POLICY != SINTRA_RING_READING_POLICY_ALWAYS_SPIN
         c.lock();
-        assert(m_writing_thread == std::this_thread::get_id());
+        assert(m_writing_thread.load(std::memory_order_relaxed) ==
+               std::this_thread::get_id());
         c.leading_sequence.store(m_pending_new_sequence);
         // Wake sleeping readers in a deterministic order
         for (int i = 0; i < c.num_sleeping; i++) {
@@ -1846,9 +1847,14 @@ private:
         assert(num_elements_to_write <= this->m_num_elements / 8);
 
         // Enforce exclusive writer (cheap fast-path loop)
-        while (m_writing_thread != std::this_thread::get_id()) {
+        while (m_writing_thread.load(std::memory_order_relaxed) !=
+               std::this_thread::get_id()) {
             auto invalid = std::thread::id();
-            m_writing_thread.compare_exchange_strong(invalid, std::this_thread::get_id());
+            m_writing_thread.compare_exchange_strong(
+                invalid,
+                std::this_thread::get_id(),
+                std::memory_order_acq_rel,
+                std::memory_order_acquire);
         }
 
         const size_t index = mod_u64(m_pending_new_sequence, this->m_num_elements);
