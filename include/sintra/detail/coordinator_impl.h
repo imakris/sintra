@@ -178,15 +178,12 @@ instance_id_type Coordinator::wait_for_instance(const string& assigned_name)
         return iid;
     }
 
-    m_instances_waited[assigned_name].insert(caller_piid);
+    auto& waited_info = m_instances_waited[assigned_name];
+    waited_info.waiters.insert(caller_piid);
 
-    instance_id_type common_function_iid;
-    auto it = m_instances_waited_common_iids.find(assigned_name);
-    if (it != m_instances_waited_common_iids.end()) {
-        common_function_iid = it->second;
-    }
-    else {
-        common_function_iid = m_instances_waited_common_iids[assigned_name] = make_instance_id();
+    instance_id_type common_function_iid = waited_info.common_function_iid;
+    if (common_function_iid == invalid_instance_id) {
+        common_function_iid = waited_info.common_function_iid = make_instance_id();
     }
 
     std::pair<deferral, std::function<void()>> ret;
@@ -214,21 +211,28 @@ instance_id_type Coordinator::publish_transceiver(type_id_type tid, instance_id_
     auto pr_it = m_transceiver_registry.find(process_iid);
     auto entry = tn_type{ tid, assigned_name };
 
-    auto true_sequence = [&](){
+    auto true_sequence = [&]() {
         emit_global<instance_published>(tid, iid, assigned_name);
         assert(s_tl_additional_piids_size == 0);
         assert(s_tl_common_function_iid == invalid_instance_id);
-        assert(m_instances_waited[assigned_name].size() < max_process_index);
 
         s_tl_additional_piids_size = 0;
-        for (auto& e : m_instances_waited[assigned_name]) {
-            s_tl_additional_piids[s_tl_additional_piids_size++] = e;
+
+        instance_id_type notified_common_fiid = invalid_instance_id;
+
+        if (auto waited_node = m_instances_waited.extract(assigned_name)) {
+            auto waited_info = std::move(waited_node.mapped());
+
+            assert(waited_info.waiters.size() < max_process_index);
+            for (auto& e : waited_info.waiters) {
+                s_tl_additional_piids[s_tl_additional_piids_size++] = e;
+            }
+
+            notified_common_fiid = waited_info.common_function_iid;
         }
 
+        s_tl_common_function_iid = notified_common_fiid;
 
-        s_tl_common_function_iid = m_instances_waited_common_iids[assigned_name];        
-        m_instances_waited.erase(assigned_name);
-        m_instances_waited_common_iids.erase(assigned_name);
         return iid;
     };
 
