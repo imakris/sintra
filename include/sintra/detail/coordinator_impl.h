@@ -426,9 +426,10 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
 
         m_groups_of_process.erase(process_iid);
 
-        {
-            lock_guard<mutex> draining_lock(m_draining_mutex);
-            m_draining_processes.erase(process_iid);
+        const auto draining_index = get_process_index(process_iid);
+        if (draining_index > 0 && draining_index <= static_cast<uint64_t>(max_process_index)) {
+            const auto slot = static_cast<size_t>(draining_index);
+            m_draining_process_states[slot].store(0, std::memory_order_release);
         }
 
         // remove all group associations of unpublished process
@@ -454,9 +455,10 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
 
 inline sequence_counter_type Coordinator::begin_process_draining(instance_id_type process_iid)
 {
-    {
-        lock_guard<mutex> draining_lock(m_draining_mutex);
-        m_draining_processes.insert(process_iid);
+    const auto draining_index = get_process_index(process_iid);
+    if (draining_index > 0 && draining_index <= static_cast<uint64_t>(max_process_index)) {
+        const auto slot = static_cast<size_t>(draining_index);
+        m_draining_process_states[slot].store(1, std::memory_order_release);
     }
 
     std::vector<Process_group*> groups_to_notify;
@@ -468,14 +470,30 @@ inline sequence_counter_type Coordinator::begin_process_draining(instance_id_typ
         }
     }
 
+    std::vector<std::pair<Process_group*, std::vector<Process_group::Barrier_completion>>> pending_completions;
+    pending_completions.reserve(groups_to_notify.size());
+
     for (auto* group : groups_to_notify) {
-        if (group) {
-            std::vector<Process_group::Barrier_completion> completions;
-            group->drop_from_inflight_barriers(process_iid, completions);
-            if (!completions.empty()) {
-                group->emit_barrier_completions(completions);
-            }
+        if (!group) {
+            continue;
         }
+
+        std::vector<Process_group::Barrier_completion> completions;
+        group->drop_from_inflight_barriers(process_iid, completions);
+        if (!completions.empty()) {
+            pending_completions.emplace_back(group, std::move(completions));
+        }
+    }
+
+    if (!pending_completions.empty() && s_mproc) {
+        s_mproc->run_after_current_handler(
+            [pending = std::move(pending_completions)]() mutable {
+                for (auto& entry : pending) {
+                    if (entry.first) {
+                        entry.first->emit_barrier_completions(entry.second);
+                    }
+                }
+            });
     }
 
     return s_mproc->m_out_req_c->get_leading_sequence();
@@ -484,8 +502,13 @@ inline sequence_counter_type Coordinator::begin_process_draining(instance_id_typ
 
 inline bool Coordinator::is_process_draining(instance_id_type process_iid) const
 {
-    lock_guard<mutex> draining_lock(m_draining_mutex);
-    return m_draining_processes.find(process_iid) != m_draining_processes.end();
+    const auto draining_index = get_process_index(process_iid);
+    if (draining_index == 0 || draining_index > static_cast<uint64_t>(max_process_index)) {
+        return false;
+    }
+
+    const auto slot = static_cast<size_t>(draining_index);
+    return m_draining_process_states[slot].load(std::memory_order_acquire) != 0;
 }
 
 
