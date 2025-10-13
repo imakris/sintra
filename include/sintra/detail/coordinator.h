@@ -36,6 +36,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <atomic>
 #include <condition_variable>
 #include <mutex>
+#include <unordered_set>
 #include <vector>
 
 
@@ -84,6 +85,7 @@ struct Process_group: Derived_transceiver<Process_group>
 
     struct Barrier_completion
     {
+        std::string                             barrier_name;
         instance_id_type                        common_function_iid = invalid_instance_id;
         std::vector<instance_id_type>           recipients;
     };
@@ -154,6 +156,7 @@ private:
     bool unpublish_transceiver(instance_id_type instance_id);
     sequence_counter_type begin_process_draining(instance_id_type process_iid);
     void unpublish_transceiver_notify(instance_id_type transceiver_iid);
+    void pump_deferred_barrier_completions();
 
     //bool add_process_into_group(instance_id_type process_id, type_id_type process_group_id);
 
@@ -212,6 +215,16 @@ private:
     set<instance_id_type>                       m_requested_recovery;
 
     std::array<std::atomic<uint8_t>, max_process_index + 1> m_draining_process_states{};
+
+    struct Deferred_group_barrier_completions
+    {
+        std::string group_name;
+        std::vector<Process_group::Barrier_completion> completions;
+    };
+
+    mutable std::mutex                          m_deferred_completions_mutex;
+    std::vector<Deferred_group_barrier_completions> m_deferred_barrier_completions;
+    std::atomic<bool>                           m_deferred_completion_pump_pending{false};
 
 public:
     SINTRA_RPC_EXPLICIT(resolve_type)

@@ -63,19 +63,12 @@ sequence_counter_type Process_group::barrier(
 
     Barrier& b = m_barriers[barrier_name];
     b.m.lock(); // main barrier lock
-    basic_lock.unlock();
 
     if (b.processes_pending.empty()) {
-        // new or reused barrier (may have failed previously)
         b.processes_pending = m_process_ids;
-        b.processes_arrived.clear();
-        b.failed = false;
-        b.common_function_iid = make_instance_id();
 
         if (auto* coord = s_coord) {
-            for (auto it = b.processes_pending.begin();
-                 it != b.processes_pending.end(); )
-            {
+            for (auto it = b.processes_pending.begin(); it != b.processes_pending.end(); ) {
                 if (coord->is_process_draining(*it)) {
                     it = b.processes_pending.erase(it);
                 }
@@ -84,7 +77,13 @@ sequence_counter_type Process_group::barrier(
                 }
             }
         }
+
+        b.processes_arrived.clear();
+        b.failed = false;
+        b.common_function_iid = make_instance_id();
     }
+
+    basic_lock.unlock();
 
     b.processes_arrived.insert(caller_piid);
     b.processes_pending.erase(caller_piid);
@@ -129,6 +128,7 @@ inline void Process_group::drop_from_inflight_barriers(
 
     for (auto barrier_it = m_barriers.begin(); barrier_it != m_barriers.end(); ) {
         auto& barrier = barrier_it->second;
+        const auto barrier_name = barrier_it->first;
         std::unique_lock barrier_lock(barrier.m);
 
         const bool touched_pending = barrier.processes_pending.erase(process_iid) > 0;
@@ -145,6 +145,7 @@ inline void Process_group::drop_from_inflight_barriers(
         }
 
         Barrier_completion completion;
+        completion.barrier_name = barrier_name;
         completion.common_function_iid = barrier.common_function_iid;
         completion.recipients.assign(
             barrier.processes_arrived.begin(),
@@ -199,8 +200,12 @@ inline
 Coordinator::Coordinator():
     Derived_transceiver<Coordinator>("", make_service_instance_id())
 {
-    // Leave it empty. The coordinator is constructed within the Mnanaged_process
-    // constructor, while still building the basic infrastructure.
+    // The coordinator is constructed within the Managed_process constructor, while still
+    // building the basic infrastructure. Ensure draining state starts cleared so the
+    // atomics are initialised before any loads occur.
+    for (auto& draining_state : m_draining_process_states) {
+        draining_state.store(0, std::memory_order_relaxed);
+    }
 }
 
 
@@ -347,6 +352,12 @@ instance_id_type Coordinator::publish_transceiver(type_id_type tid, instance_id_
         s_mproc->m_instance_id_of_assigned_name[entry.name] = iid;
         pr[iid] = entry;
 
+        const auto draining_index = get_process_index(process_iid);
+        if (draining_index > 0 && draining_index <= static_cast<uint64_t>(max_process_index)) {
+            const auto slot = static_cast<size_t>(draining_index);
+            m_draining_process_states[slot].store(0, std::memory_order_release);
+        }
+
         return true_sequence();
     }
     else
@@ -359,6 +370,12 @@ instance_id_type Coordinator::publish_transceiver(type_id_type tid, instance_id_
 
         s_mproc->m_instance_id_of_assigned_name[entry.name] = iid;
         m_transceiver_registry[iid][iid] = entry;
+
+        const auto draining_index = get_process_index(process_iid);
+        if (draining_index > 0 && draining_index <= static_cast<uint64_t>(max_process_index)) {
+            const auto slot = static_cast<size_t>(draining_index);
+            m_draining_process_states[slot].store(0, std::memory_order_release);
+        }
 
         return true_sequence();
     }
@@ -461,42 +478,98 @@ inline sequence_counter_type Coordinator::begin_process_draining(instance_id_typ
         m_draining_process_states[slot].store(1, std::memory_order_release);
     }
 
-    std::vector<Process_group*> groups_to_notify;
+    struct Group_reference
+    {
+        std::string name;
+        Process_group* group = nullptr;
+    };
+
+    std::vector<Group_reference> groups_to_notify;
     {
         lock_guard<mutex> lock(m_groups_mutex);
         groups_to_notify.reserve(m_groups.size());
         for (auto& entry : m_groups) {
-            groups_to_notify.push_back(&entry.second);
+            groups_to_notify.push_back({entry.first, &entry.second});
         }
     }
 
-    std::vector<std::pair<Process_group*, std::vector<Process_group::Barrier_completion>>> pending_completions;
+    std::vector<Deferred_group_barrier_completions> pending_completions;
     pending_completions.reserve(groups_to_notify.size());
 
-    for (auto* group : groups_to_notify) {
-        if (!group) {
+    for (auto& reference : groups_to_notify) {
+        if (!reference.group) {
             continue;
         }
 
         std::vector<Process_group::Barrier_completion> completions;
-        group->drop_from_inflight_barriers(process_iid, completions);
+        reference.group->drop_from_inflight_barriers(process_iid, completions);
         if (!completions.empty()) {
-            pending_completions.emplace_back(group, std::move(completions));
+            Deferred_group_barrier_completions queued;
+            queued.group_name = reference.name;
+            queued.completions = std::move(completions);
+            pending_completions.push_back(std::move(queued));
         }
     }
 
-    if (!pending_completions.empty() && s_mproc) {
-        s_mproc->run_after_current_handler(
-            [pending = std::move(pending_completions)]() mutable {
-                for (auto& entry : pending) {
-                    if (entry.first) {
-                        entry.first->emit_barrier_completions(entry.second);
-                    }
-                }
-            });
+    if (!pending_completions.empty()) {
+        {
+            std::lock_guard<std::mutex> queue_lock(m_deferred_completions_mutex);
+            for (auto& entry : pending_completions) {
+                m_deferred_barrier_completions.push_back(std::move(entry));
+            }
+        }
+
+        if (s_mproc && !m_deferred_completion_pump_pending.exchange(true, std::memory_order_acq_rel)) {
+            s_mproc->run_after_current_handler([this]() { pump_deferred_barrier_completions(); });
+        }
     }
 
     return s_mproc->m_out_req_c->get_leading_sequence();
+}
+
+
+inline void Coordinator::pump_deferred_barrier_completions()
+{
+    std::vector<Deferred_group_barrier_completions> ready;
+    {
+        std::lock_guard<std::mutex> queue_lock(m_deferred_completions_mutex);
+        if (m_deferred_barrier_completions.empty()) {
+            m_deferred_completion_pump_pending.store(false, std::memory_order_release);
+            return;
+        }
+
+        ready.swap(m_deferred_barrier_completions);
+        m_deferred_completion_pump_pending.store(false, std::memory_order_release);
+    }
+
+    std::lock_guard<mutex> groups_lock(m_groups_mutex);
+    for (auto& entry : ready) {
+        auto group_it = m_groups.find(entry.group_name);
+        if (group_it == m_groups.end()) {
+            continue;
+        }
+
+        auto& group = group_it->second;
+        std::vector<Process_group::Barrier_completion> valid;
+        valid.reserve(entry.completions.size());
+
+        {
+            std::lock_guard call_lock(group.m_call_mutex);
+            for (auto& completion : entry.completions) {
+                auto barrier_it = group.m_barriers.find(completion.barrier_name);
+                if (barrier_it != group.m_barriers.end() &&
+                    barrier_it->second.common_function_iid != completion.common_function_iid) {
+                    continue;
+                }
+
+                valid.push_back(std::move(completion));
+            }
+        }
+
+        if (!valid.empty()) {
+            group.emit_barrier_completions(valid);
+        }
+    }
 }
 
 
