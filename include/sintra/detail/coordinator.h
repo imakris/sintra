@@ -36,6 +36,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <atomic>
 #include <condition_variable>
 #include <mutex>
+#include <unordered_set>
 #include <vector>
 
 
