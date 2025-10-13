@@ -83,12 +83,5 @@ int main(int argc, char* argv[])
     // when finalize() returns, messaging will no longer work.
     finalize();
 
-    if (process_index() == 0) {
-        do {
-            cout << '\n' << "Press ENTER to continue...";
-        }
-        while (cin.get() != '\n');
-    }
-
     return 0;
 }
