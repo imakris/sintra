@@ -35,6 +35,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <csignal>
 #include <functional>
 #include <list>
+#include <vector>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -927,6 +928,13 @@ Managed process options:
     }
 
     if (coordinator_is_local) {
+        auto unpublish_notify_handler = [](const Managed_process::unpublish_transceiver_notify& msg)
+        {
+            if (s_coord) {
+                s_coord->unpublish_transceiver_notify(msg.transceiver_instance_id);
+            }
+        };
+
         auto cr_handler = [](const Managed_process::terminated_abnormally& msg)
         {
             s_coord->unpublish_transceiver(msg.sender_instance_id);
@@ -956,6 +964,7 @@ Managed process options:
             */
 
         };
+        activate<Managed_process>(unpublish_notify_handler, any_remote);
         activate<Managed_process>(cr_handler, any_remote);
     }
     else {
@@ -1320,8 +1329,29 @@ void Managed_process::wait_until_all_external_readers_are_done(int extra_allowed
 }
 
 
-inline
-void Managed_process::flush(instance_id_type process_id, sequence_counter_type flush_sequence)
+inline void Managed_process::unpublish_all_transceivers()
+{
+    std::vector<Transceiver*> to_destroy;
+    to_destroy.reserve(m_local_pointer_of_instance_id.size());
+
+    for (auto& entry : m_local_pointer_of_instance_id) {
+        auto iid = entry.first;
+        auto* transceiver = entry.second;
+        if (!transceiver || iid == m_instance_id) {
+            continue;
+        }
+
+        to_destroy.push_back(transceiver);
+    }
+
+    for (auto* transceiver : to_destroy) {
+        if (transceiver) {
+            transceiver->destroy();
+        }
+    }
+}
+
+inline void Managed_process::flush(instance_id_type process_id, sequence_counter_type flush_sequence)
 {
     assert(is_process(process_id));
 

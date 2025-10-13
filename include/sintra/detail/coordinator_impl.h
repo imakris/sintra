@@ -36,6 +36,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <mutex>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 
 namespace sintra {
@@ -63,18 +64,33 @@ sequence_counter_type Process_group::barrier(
     Barrier& b = m_barriers[barrier_name];
     b.m.lock(); // main barrier lock
     basic_lock.unlock();
-    
+
     if (b.processes_pending.empty()) {
         // new or reused barrier (may have failed previously)
         b.processes_pending = m_process_ids;
+        b.processes_arrived.clear();
         b.failed = false;
         b.common_function_iid = make_instance_id();
+
+        if (auto* coord = s_coord) {
+            for (auto it = b.processes_pending.begin();
+                 it != b.processes_pending.end(); )
+            {
+                if (coord->is_process_draining(*it)) {
+                    it = b.processes_pending.erase(it);
+                }
+                else {
+                    ++it;
+                }
+            }
+        }
     }
 
+    b.processes_arrived.insert(caller_piid);
     b.processes_pending.erase(caller_piid);
 
     if (b.processes_pending.size() == 0) {
-        auto additional_pids = m_process_ids;
+        auto additional_pids = b.processes_arrived;
         additional_pids.erase(caller_piid);
 
         assert(s_tl_common_function_iid == invalid_instance_id);
@@ -104,6 +120,79 @@ sequence_counter_type Process_group::barrier(
     }
 }
 
+
+inline void Process_group::drop_from_inflight_barriers(
+    instance_id_type process_iid,
+    std::vector<Barrier_completion>& completions)
+{
+    std::lock_guard basic_lock(m_call_mutex);
+
+    for (auto barrier_it = m_barriers.begin(); barrier_it != m_barriers.end(); ) {
+        auto& barrier = barrier_it->second;
+        std::unique_lock barrier_lock(barrier.m);
+
+        const bool touched_pending = barrier.processes_pending.erase(process_iid) > 0;
+        const bool touched_arrived = barrier.processes_arrived.erase(process_iid) > 0;
+
+        if (!touched_pending && !touched_arrived) {
+            ++barrier_it;
+            continue;
+        }
+
+        if (!barrier.processes_pending.empty()) {
+            ++barrier_it;
+            continue;
+        }
+
+        Barrier_completion completion;
+        completion.common_function_iid = barrier.common_function_iid;
+        completion.recipients.assign(
+            barrier.processes_arrived.begin(),
+            barrier.processes_arrived.end());
+
+        if (touched_arrived) {
+            completion.recipients.push_back(process_iid);
+        }
+
+        barrier.processes_arrived.clear();
+        barrier.common_function_iid = invalid_instance_id;
+
+        barrier_lock.unlock();
+
+        barrier_it = m_barriers.erase(barrier_it);
+        completions.push_back(std::move(completion));
+    }
+}
+
+inline void Process_group::emit_barrier_completions(
+    const std::vector<Barrier_completion>& completions)
+{
+    using return_message_type = Message<Enclosure<sequence_counter_type>, void, not_defined_type_id>;
+
+    for (const auto& completion : completions) {
+        if (completion.common_function_iid == invalid_instance_id) {
+            continue;
+        }
+
+        if (completion.recipients.empty()) {
+            continue;
+        }
+
+        const auto flush_sequence = s_mproc->m_out_req_c->get_leading_sequence();
+
+        for (auto recipient : completion.recipients) {
+            auto* placed_msg = s_mproc->m_out_rep_c->write<return_message_type>(
+                vb_size<return_message_type>(flush_sequence), flush_sequence);
+
+            Transceiver::finalize_rpc_write(
+                placed_msg,
+                recipient,
+                completion.common_function_iid,
+                this,
+                not_defined_type_id);
+        }
+    }
+}
 
 
 inline
@@ -337,6 +426,11 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
 
         m_groups_of_process.erase(process_iid);
 
+        {
+            lock_guard<mutex> draining_lock(m_draining_mutex);
+            m_draining_processes.erase(process_iid);
+        }
+
         // remove all group associations of unpublished process
         auto groups_it = m_groups_of_process.find(iid);
         if (groups_it != m_groups_of_process.end()) {
@@ -355,6 +449,49 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
     emit_global<instance_unpublished>(tn.type_id, iid, tn.name);
 
     return true;
+}
+
+
+inline sequence_counter_type Coordinator::begin_process_draining(instance_id_type process_iid)
+{
+    {
+        lock_guard<mutex> draining_lock(m_draining_mutex);
+        m_draining_processes.insert(process_iid);
+    }
+
+    std::vector<Process_group*> groups_to_notify;
+    {
+        lock_guard<mutex> lock(m_groups_mutex);
+        groups_to_notify.reserve(m_groups.size());
+        for (auto& entry : m_groups) {
+            groups_to_notify.push_back(&entry.second);
+        }
+    }
+
+    for (auto* group : groups_to_notify) {
+        if (group) {
+            std::vector<Process_group::Barrier_completion> completions;
+            group->drop_from_inflight_barriers(process_iid, completions);
+            if (!completions.empty()) {
+                group->emit_barrier_completions(completions);
+            }
+        }
+    }
+
+    return s_mproc->m_out_req_c->get_leading_sequence();
+}
+
+
+inline bool Coordinator::is_process_draining(instance_id_type process_iid) const
+{
+    lock_guard<mutex> draining_lock(m_draining_mutex);
+    return m_draining_processes.find(process_iid) != m_draining_processes.end();
+}
+
+
+inline void Coordinator::unpublish_transceiver_notify(instance_id_type transceiver_iid)
+{
+    unpublish_transceiver(transceiver_iid);
 }
 
 
