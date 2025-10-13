@@ -153,11 +153,5 @@ int main(int argc, char* argv[])
 
     finalize();
 
-    if (process_index() == 0) {
-        do {
-            cout << '\n' << "Press ENTER to continue...";
-        } while (cin.get() != '\n');
-    }
-
     return 0;
 }

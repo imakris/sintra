@@ -28,7 +28,7 @@ using namespace sintra;
 struct Ping {};
 struct Pong {};
 
-static double timeout_in_seconds = 10.0;
+static double timeout_in_seconds = 2.0;
 
 int main(int argc, char* argv[])
 {
