@@ -63,11 +63,17 @@ sequence_counter_type Process_group::barrier(
 
     Barrier& b = m_barriers[barrier_name];
     b.m.lock(); // main barrier lock
+
+    unordered_set<instance_id_type> member_snapshot;
+    if (b.processes_pending.empty()) {
+        member_snapshot = m_process_ids;
+    }
+
     basic_lock.unlock();
 
     if (b.processes_pending.empty()) {
         // new or reused barrier (may have failed previously)
-        b.processes_pending = m_process_ids;
+        b.processes_pending = std::move(member_snapshot);
         b.processes_arrived.clear();
         b.failed = false;
         b.common_function_iid = make_instance_id();
@@ -351,6 +357,12 @@ instance_id_type Coordinator::publish_transceiver(type_id_type tid, instance_id_
         s_mproc->m_instance_id_of_assigned_name[entry.name] = iid;
         pr[iid] = entry;
 
+        const auto draining_index = get_process_index(process_iid);
+        if (draining_index > 0 && draining_index <= static_cast<uint64_t>(max_process_index)) {
+            const auto slot = static_cast<size_t>(draining_index);
+            m_draining_process_states[slot].store(0, std::memory_order_release);
+        }
+
         return true_sequence();
     }
     else
@@ -363,6 +375,12 @@ instance_id_type Coordinator::publish_transceiver(type_id_type tid, instance_id_
 
         s_mproc->m_instance_id_of_assigned_name[entry.name] = iid;
         m_transceiver_registry[iid][iid] = entry;
+
+        const auto draining_index = get_process_index(process_iid);
+        if (draining_index > 0 && draining_index <= static_cast<uint64_t>(max_process_index)) {
+            const auto slot = static_cast<size_t>(draining_index);
+            m_draining_process_states[slot].store(0, std::memory_order_release);
+        }
 
         return true_sequence();
     }
@@ -465,36 +483,50 @@ inline sequence_counter_type Coordinator::begin_process_draining(instance_id_typ
         m_draining_process_states[slot].store(1, std::memory_order_release);
     }
 
-    std::vector<Process_group*> groups_to_notify;
+    struct Group_reference
+    {
+        std::string name;
+        Process_group* group = nullptr;
+    };
+
+    std::vector<Group_reference> groups_to_notify;
     {
         lock_guard<mutex> lock(m_groups_mutex);
         groups_to_notify.reserve(m_groups.size());
         for (auto& entry : m_groups) {
-            groups_to_notify.push_back(&entry.second);
+            groups_to_notify.push_back({entry.first, &entry.second});
         }
     }
 
-    std::vector<std::pair<Process_group*, std::vector<Process_group::Barrier_completion>>> pending_completions;
+    struct Pending_completion
+    {
+        std::string group_name;
+        std::vector<Process_group::Barrier_completion> completions;
+    };
+
+    std::vector<Pending_completion> pending_completions;
     pending_completions.reserve(groups_to_notify.size());
 
-    for (auto* group : groups_to_notify) {
-        if (!group) {
+    for (auto& reference : groups_to_notify) {
+        if (!reference.group) {
             continue;
         }
 
         std::vector<Process_group::Barrier_completion> completions;
-        group->drop_from_inflight_barriers(process_iid, completions);
+        reference.group->drop_from_inflight_barriers(process_iid, completions);
         if (!completions.empty()) {
-            pending_completions.emplace_back(group, std::move(completions));
+            pending_completions.push_back({reference.name, std::move(completions)});
         }
     }
 
     if (!pending_completions.empty() && s_mproc) {
         s_mproc->run_after_current_handler(
-            [pending = std::move(pending_completions)]() mutable {
+            [this, pending = std::move(pending_completions)]() mutable {
                 for (auto& entry : pending) {
-                    if (entry.first) {
-                        entry.first->emit_barrier_completions(entry.second);
+                    std::lock_guard<mutex> groups_lock(m_groups_mutex);
+                    auto it = m_groups.find(entry.group_name);
+                    if (it != m_groups.end()) {
+                        it->second.emit_barrier_completions(entry.completions);
                     }
                 }
             });
