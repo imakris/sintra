@@ -147,21 +147,21 @@ void init(int argc, const char* const* argv, Args&&... args)
 inline
 bool finalize()
 {
-    std::fprintf(stderr, "finalize() called, s_mproc=%p\n", static_cast<void*>(s_mproc));
-
     if (!s_mproc) {
-        // Sintra was not initialized, or it has already been finalized.
-        // Either way, this call will have no effect.
-        std::fprintf(stderr, "finalize() early exit: s_mproc is null\n");
         return false;
     }
 
-    std::fprintf(stderr, "finalize() pausing managed process\n");
+    const bool draining_announced = s_coord
+        ? s_coord->begin_process_draining(s_mproc_id)
+        : Coordinator::rpc_begin_process_draining(s_coord_id, s_mproc_id);
+    (void)draining_announced;
+
+    s_mproc->deactivate_all();
+    s_mproc->unpublish_all_transceivers();
+
     s_mproc->pause();
-    std::fprintf(stderr, "finalize() deleting managed process\n");
     delete s_mproc;
     s_mproc = nullptr;
-    std::fprintf(stderr, "finalize() completed successfully\n");
     return true;
 }
 

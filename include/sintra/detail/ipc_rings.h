@@ -140,6 +140,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <fstream>
 #include <limits>
 #include <memory>
 #include <mutex>         // std::once_flag, std::call_once
@@ -307,7 +308,40 @@ static inline uint32_t get_current_pid()
 
 static inline bool is_process_alive(uint32_t pid)
 {
-    return pid && (::kill(static_cast<pid_t>(pid), 0) == 0 || errno != ESRCH);
+    if (!pid) {
+        return false;
+    }
+
+    if (::kill(static_cast<pid_t>(pid), 0) != 0) {
+        return errno != ESRCH;
+    }
+
+    // Treat zombies as dead so scavenging logic can release their slots.
+    // /proc/<pid>/stat contains the execution state character right after the
+    // process name (enclosed in parentheses).  A state of 'Z' means zombie and
+    // 'X' means the process is dead but not yet reaped.  Both should be
+    // considered not alive for our purposes.
+    std::ifstream stat_file;
+    stat_file.open(std::string("/proc/") + std::to_string(pid) + "/stat");
+    if (!stat_file.is_open()) {
+        return true;
+    }
+
+    std::string stat_line;
+    std::getline(stat_file, stat_line);
+
+    auto closing_paren = stat_line.rfind(')');
+    if (closing_paren == std::string::npos) {
+        return true;
+    }
+
+    auto state_pos = stat_line.find_first_not_of(' ', closing_paren + 1);
+    if (state_pos == std::string::npos) {
+        return true;
+    }
+
+    char state = stat_line[state_pos];
+    return state != 'Z' && state != 'X';
 }
 #endif
 

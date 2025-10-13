@@ -281,6 +281,7 @@ struct Managed_process: Derived_transceiver<Managed_process>
     // for this process. It is meant to notify crash guards about the reason of the
     // instance_unpublished event, which will follow shortly after.
     SINTRA_SIGNAL_EXPLICIT(terminated_abnormally, int status);
+    SINTRA_SIGNAL_EXPLICIT(unpublish_transceiver_notify, instance_id_type transceiver_instance_id);
 
     spinlocked_umap<tn_type, list<function<void()>>>
                                         m_queued_availability_calls;
@@ -298,6 +299,8 @@ struct Managed_process: Derived_transceiver<Managed_process>
     // if the transceiver is available, f is invoked immediately.
     template <typename T>
     function<void()> call_on_availability(Named_instance<T> transceiver, function<void()> f);
+
+    void unpublish_all_transceivers();
 
 
     deque<sequence_counter_type>        m_flush_sequence;
