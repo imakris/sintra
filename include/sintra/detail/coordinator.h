@@ -178,11 +178,16 @@ private:
 
     // access only after acquiring m_publish_mutex
     // (currently, only inside publish_transceiver() )
+    struct waited_instance_info
+    {
+        unordered_set<instance_id_type> waiters;
+        instance_id_type                common_function_iid = invalid_instance_id;
+    };
+
     map<
         string,
-        unordered_set<instance_id_type>
+        waited_instance_info
     >                                           m_instances_waited;
-    map<string, instance_id_type>               m_instances_waited_common_iids;
 
     set<instance_id_type>                       m_requested_recovery;
 
