@@ -2,6 +2,17 @@ cmake_minimum_required(VERSION 3.16)
 
 project(sintra LANGUAGES CXX)
 
+# Force Debug build by default
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Debug CACHE STRING "Choose the type of build." FORCE)
+    set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release" "MinSizeRel" "RelWithDebInfo")
+endif()
+
+# For MSVC multi-config generators, set debug as default
+if(CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_CONFIGURATION_TYPES "Debug;Release" CACHE STRING "" FORCE)
+endif()
+
 # Check if vendored Boost headers exist
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/boost/boost/version.hpp")
     set(SINTRA_USE_VENDORED_BOOST_DEFAULT ON)
@@ -45,6 +56,19 @@ add_library(sintra INTERFACE)
 target_include_directories(sintra INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(sintra INTERFACE cxx_std_17)
 target_link_libraries(sintra INTERFACE Boost::boost)
+
+# ALWAYS compile with debug symbols and disable optimizations for debugging
+if(MSVC)
+    target_compile_options(sintra INTERFACE
+        /Zi          # Full debug info
+        /Od          # Disable optimizations
+        /RTC1        # Runtime checks
+        /MDd         # Debug runtime library
+    )
+    target_link_options(sintra INTERFACE /DEBUG:FULL)
+else()
+    target_compile_options(sintra INTERFACE -g -O0)
+endif()
 
 # OpenMP support - optional for timing
 option(SINTRA_DISABLE_OPENMP "Disable OpenMP dependency (uses chrono for timing)" OFF)

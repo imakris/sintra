@@ -219,27 +219,10 @@ void Process_message_reader::request_reader_function()
         }
         s_tl_current_message = nullptr;
 
-        // if there is an interprocess barrier and m_in_req_c has reached the barrier's sequence,
-        // then the barrier is good to go.
-        {
-            auto reading_sequence = m_in_req_c->get_message_reading_sequence();
-            size_t notifications = 0;
-            // Guard all access to the shared flush sequence with the managed process mutex.
-            // Copy the number of pending notifications so we can release the lock before
-            // signalling waiters, keeping the critical section small.
-            {
-                std::unique_lock<std::mutex> flush_lock(s_mproc->m_flush_sequence_mutex);
-                while (!s_mproc->m_flush_sequence.empty() &&
-                       reading_sequence >= s_mproc->m_flush_sequence.front()) {
-                    s_mproc->m_flush_sequence.pop_front();
-                    ++notifications;
-                }
-            }
-            while (notifications > 0) {
-                s_mproc->m_flush_sequence_condition.notify_one();
-                --notifications;
-            }
-        }
+        // NOTE: Barrier completion messages (and the corresponding flush tokens)
+        // travel on the *reply* ring. Do not drain m_flush_sequence in the
+        // request reader. The reply reader thread is responsible for popping
+        // tokens when the *reply* reading sequence reaches them.
 
         Message_prefix* m = m_in_req_c->fetch_message();
         s_tl_current_message = m;
@@ -258,6 +241,15 @@ void Process_message_reader::request_reader_function()
         assert(m->message_type_id != not_defined_type_id);
 
         if (is_local_instance(m->receiver_instance_id)) {
+            // If the coordinator is local and this request targets a *service* instance
+            // (e.g., Coordinator), relay it to the coordinator's ring and *skip* local
+            // dispatch to avoid double-processing (local dispatch + relay).
+            if (s_coord && !has_same_mapping(*m_in_req_c, *s_mproc->m_out_req_c) &&
+                is_service_instance(m->receiver_instance_id))
+            {
+                s_mproc->m_out_req_c->relay(*m);
+                continue;
+            }
 
             // If addressed to a specified local receiver, this may only be an RPC call,
             // thus the receiver must exist.
@@ -391,6 +383,27 @@ void Process_message_reader::reply_reader_function()
             break;
         }
         s_tl_current_message = nullptr;
+
+        // Check if reply ring has reached any pending flush sequences.
+        // Barrier completions are RPC responses sent on the reply ring, so
+        // flush tokens for barriers refer to reply ring sequences.
+        {
+            auto reading_sequence = m_in_rep_c->get_message_reading_sequence();
+            size_t notifications = 0;
+            {
+                std::unique_lock<std::mutex> flush_lock(s_mproc->m_flush_sequence_mutex);
+                while (!s_mproc->m_flush_sequence.empty() &&
+                       reading_sequence >= s_mproc->m_flush_sequence.front()) {
+                    s_mproc->m_flush_sequence.pop_front();
+                    ++notifications;
+                }
+            }
+            while (notifications > 0) {
+                s_mproc->m_flush_sequence_condition.notify_one();
+                --notifications;
+            }
+        }
+
         Message_prefix* m = m_in_rep_c->fetch_message();
         s_tl_current_message = m;
 

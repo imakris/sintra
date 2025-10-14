@@ -917,8 +917,11 @@ Managed process options:
 
         // if the unpublished transceiver is the coordinator process, we have to stop.
         if (process_of(s_coord_id) == msg.instance_id) {
-            stop();
-            exit(0);
+            // Coordinator process has unpublished - pause communication outside the handler
+            // to avoid reentrancy into barrier machinery.
+            s_mproc->run_after_current_handler([]{
+                s_mproc->stop(); // idempotent
+            });
         }
     };
 
@@ -970,10 +973,14 @@ Managed process options:
     else {
         auto cr_handler = [](const Managed_process::terminated_abnormally& msg)
         {
-            // if the unpublished transceiver is the coordinator process, we have to stop.
+            // Remote coordinator crashed: fail outstanding RPCs and pause communication
             if (process_of(s_coord_id) == msg.sender_instance_id) {
-                s_mproc->stop();
-                exit(1);
+                // 1) Wake any RPCs waiting on the coordinator so they fail fast.
+                s_mproc->unblock_rpc(process_of(s_coord_id));
+                // 2) Pause communication *after* this handler completes to avoid reentrancy.
+                s_mproc->run_after_current_handler([]{
+                    s_mproc->stop(); // idempotent
+                });
             }
         };
         activate<Managed_process>(cr_handler, any_remote);
@@ -1362,7 +1369,10 @@ inline void Managed_process::flush(instance_id_type process_id, sequence_counter
         );
     }
     auto& reader = it->second;
-    auto rs = reader.get_request_reading_sequence();
+
+    // Barrier completion messages are RPC responses sent on the reply ring.
+    // Check the reply reading sequence, not the request reading sequence.
+    auto rs = reader.get_reply_reading_sequence();
     if (rs < flush_sequence) {
         std::unique_lock<mutex> flush_lock(m_flush_sequence_mutex);
         m_flush_sequence.push_back(flush_sequence);
