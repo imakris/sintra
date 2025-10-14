@@ -731,7 +731,6 @@ struct Message_ring_R: Ring_R<char>
         return reading_sequence() - (m_range.end - m_range.begin);
     }
 
-
 public:
     const uint64_t  m_id;
 
