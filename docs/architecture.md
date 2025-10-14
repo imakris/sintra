@@ -44,24 +44,24 @@ Sintra's IPC foundation is a **double-mapped circular buffer** ("magic ring"), w
 
 ```
 ┌────────────────────────────────────────────────────────────┐
-│ Ring_data<T, READ_ONLY>                                     │
+│ Ring_data<T, READ_ONLY>                                    │
 │ ┌────────────────────────────────────────────────────────┐ │
 │ │ File: <name>_data                                      │ │
-│ │ - Double-mapped shared memory region (2× mapping)     │ │
-│ │ - Elements stored contiguously                        │ │
-│ │ - Mapping trick: Same physical memory appears twice   │ │
-│ │   at consecutive virtual addresses                    │ │
+│ │ - Double-mapped shared memory region (2× mapping)      │ │
+│ │ - Elements stored contiguously                         │ │
+│ │ - Mapping trick: Same physical memory appears twice    │ │
+│ │   at consecutive virtual addresses                     │ │
 │ └────────────────────────────────────────────────────────┘ │
-│                                                              │
+│                                                            │
 │ Ring<T, READ_ONLY> : Ring_data<T, READ_ONLY>               │
 │ ┌────────────────────────────────────────────────────────┐ │
 │ │ File: <name>_data_control                              │ │
-│ │ - Control block with atomics                          │ │
-│ │ - leading_sequence: Published write head              │ │
-│ │ - read_access: 8-byte octile guard bitmap             │ │
-│ │ - reading_sequences[max_process_index]: Per-reader    │ │
-│ │   sequence tracking and status                        │ │
-│ │ - Semaphores for reader wakeup (hybrid policy)        │ │
+│ │ - Control block with atomics                           │ │
+│ │ - leading_sequence: Published write head               │ │
+│ │ - read_access: 8-byte octile guard bitmap              │ │
+│ │ - reading_sequences[max_process_index]: Per-reader     │ │
+│ │   sequence tracking and status                         │ │
+│ │ - Semaphores for reader wakeup (hybrid policy)         │ │
 │ └────────────────────────────────────────────────────────┘ │
 └────────────────────────────────────────────────────────────┘
 
@@ -127,8 +127,8 @@ Process A (pid=1)                    Process B (pid=2)
 │ m_out_req_c  ─────────────────────>│ reader[A].req  │
 │ m_out_rep_c  ─────────────────────>│ reader[A].rep  │
 │                 │                 │                 │
-│ reader[B].req <─────────────────────  m_out_req_c  │
-│ reader[B].rep <─────────────────────  m_out_rep_c  │
+│ reader[B].req <─────────────────────  m_out_req_c   │
+│ reader[B].rep <─────────────────────  m_out_rep_c   │
 └─────────────────┘                 └─────────────────┘
 ```
 
@@ -178,13 +178,13 @@ The `Coordinator` is a **special transceiver** that runs in process index 0 (the
 
 ```cpp
 struct Process_group : Derived_transceiver<Process_group> {
-    unordered_map<string, Barrier>  m_barriers;
-    unordered_set<instance_id_type> m_process_ids;
-    mutex                            m_call_mutex;
+    unordered_map<string, Barrier>      m_barriers;
+    unordered_set<instance_id_type>     m_process_ids;
+    mutex                               m_call_mutex;
 
     struct Barrier {
         mutex                           m;
-        condition_variable             cv;
+        condition_variable              cv;
         unordered_set<instance_id_type> processes_pending;
         unordered_set<instance_id_type> processes_arrived;
         instance_id_type                common_function_iid;
@@ -257,44 +257,44 @@ m_publish_mutex → m_groups_mutex → m_call_mutex → b.m → atomics
 ### Shutdown Sequence (sintra::finalize)
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│ 1. Announce Draining                                        │
+┌────────────────────────────────────────────────────────────┐
+│ 1. Announce Draining                                       │
 │    ┌─────────────────────────────────────────────────────┐ │
-│    │ Coordinator::begin_process_draining(my_pid)        │ │
-│    │ → Sets m_draining_process_states[my_slot] = 1     │ │
-│    │ → Drops process from in-flight barriers           │ │
-│    │ → Returns flush sequence (reply ring watermark)   │ │
+│    │ Coordinator::begin_process_draining(my_pid)         │ │
+│    │ → Sets m_draining_process_states[my_slot] = 1       │ │
+│    │ → Drops process from in-flight barriers             │ │
+│    │ → Returns flush sequence (reply ring watermark)     │ │
 │    └─────────────────────────────────────────────────────┘ │
-├─────────────────────────────────────────────────────────────┤
-│ 2. Flush Coordinator Channel                                │
+├────────────────────────────────────────────────────────────┤
+│ 2. Flush Coordinator Channel                               │
 │    ┌─────────────────────────────────────────────────────┐ │
-│    │ flush(coordinator_pid, flush_sequence)             │ │
-│    │ → Waits until coordinator's reply ring            │ │
-│    │   sequence >= flush_sequence                      │ │
-│    │ → Guarantees all barrier completions are visible  │ │
+│    │ flush(coordinator_pid, flush_sequence)              │ │
+│    │ → Waits until coordinator's reply ring              │ │
+│    │   sequence >= flush_sequence                        │ │
+│    │ → Guarantees all barrier completions are visible    │ │
 │    └─────────────────────────────────────────────────────┘ │
-├─────────────────────────────────────────────────────────────┤
-│ 3. Unpublish (Normal Communication Still Active)            │
+├────────────────────────────────────────────────────────────┤
+│ 3. Unpublish (Normal Communication Still Active)           │
 │    ┌─────────────────────────────────────────────────────┐ │
-│    │ unpublish_all_transceivers()                       │ │
-│    │ → Sends unpublish RPCs while communication works  │ │
-│    │ → Coordinator removes from registry              │ │
+│    │ unpublish_all_transceivers()                        │ │
+│    │ → Sends unpublish RPCs while communication works    │ │
+│    │ → Coordinator removes from registry                 │ │
 │    └─────────────────────────────────────────────────────┘ │
-├─────────────────────────────────────────────────────────────┤
-│ 4. Pause Readers                                             │
+├────────────────────────────────────────────────────────────┤
+│ 4. Pause Readers                                           │
 │    ┌─────────────────────────────────────────────────────┐ │
-│    │ pause()                                            │ │
-│    │ → Switches readers to SERVICE_MODE                │ │
-│    │ → Only coordinator messages processed            │ │
+│    │ pause()                                             │ │
+│    │ → Switches readers to SERVICE_MODE                  │ │
+│    │ → Only coordinator messages processed               │ │
 │    └─────────────────────────────────────────────────────┘ │
-├─────────────────────────────────────────────────────────────┤
-│ 5. Stop and Cleanup                                          │
+├────────────────────────────────────────────────────────────┤
+│ 5. Stop and Cleanup                                        │
 │    ┌─────────────────────────────────────────────────────┐ │
-│    │ stop()                                             │ │
-│    │ → Joins reader threads                            │ │
-│    │ → Releases resources                              │ │
+│    │ stop()                                              │ │
+│    │ → Joins reader threads                              │ │
+│    │ → Releases resources                                │ │
 │    └─────────────────────────────────────────────────────┘ │
-└─────────────────────────────────────────────────────────────┘
+└────────────────────────────────────────────────────────────┘
 ```
 
 ### Draining State Management
@@ -341,26 +341,26 @@ Completions are emitted via `run_after_current_handler` to avoid re-entrancy.
 
 ```
 Caller (Process A)                Coordinator           Callee (Process B)
-     │                                  │                      │
-     │ 1. rpc_foo(target, args)        │                      │
-     ├──────────────────────────────────>                     │
-     │   Write to m_out_req_c           │                      │
-     │   Common fiid = make_instance_id()│                     │
      │                                   │                      │
-     │                                   │  2. Reader sees msg │
+     │ 1. rpc_foo(target, args)          │                      │
+     ├─────────────────────────────────> │                      │
+     │   Write to m_out_req_c            │                      │
+     │   Common fiid = make_instance_id()│                      │
+     │                                   │                      │
+     │                                   │  2. Reader sees msg  │
      │                                   │ <────────────────────┤
      │                                   │   Dispatch to target │
      │                                   │                      │
-     │                                   │ 3. Execute foo()    │
+     │                                   │ 3. Execute foo()     │
      │                                   │  <───────────────────┤
      │                                   │   Return value       │
      │                                   │                      │
-     │ 4. Reply arrives                 │                      │
-     │<──────────────────────────────────────────────────────────┤
+     │ 4. Reply arrives                  │                      │
+     │<─────────────────────────────────────────────────────────┤
      │   Reads from B's m_out_rep_c      │   Write to m_out_rep_c
-     │   Match common_fiid              │                      │
+     │   Match common_fiid               │                      │
      │                                   │                      │
-     │ 5. Return to caller              │                      │
+     │ 5. Return to caller               │                      │
      └───                                │                      │
 ```
 
@@ -368,14 +368,14 @@ Caller (Process A)                Coordinator           Callee (Process B)
 
 ```
 Process A          Process B          Process C (Coordinator with group)
-     │                  │                       │
-     │ barrier("sync")  │                       │
-     ├──────────────────────────────────────────>
+     │                   │                       │
+     │ barrier("sync")   │                       │
+     ├─────────────────────────────────────────> │
      │  RPC call         │                       │ First arrival:
      │                   │                       │ - Snapshot membership
      │                   │                       │ - Filter draining
      │                  barrier("sync")          │ - Create pending set
-     │                   ├───────────────────────>
+     │                   ├─────────────────────> │
      │                   │                       │ Subsequent arrival:
      │                   │                       │ - Add to arrived
      │                   │                       │ - Remove from pending
@@ -387,9 +387,9 @@ Process A          Process B          Process C (Coordinator with group)
      │                  <completion msg>         │
      │                   │<──────────────────────┤
      │                   │                       │
-     │ Returns with     │ Returns with          │
-     │ flush_seq        │ flush_seq             │
-     └──                └──                      └──
+     │ Returns with      │ Returns with          │
+     │ flush_seq         │ flush_seq             │
+     └──                 └──                     └──
 ```
 
 **Flush Sequence**: The watermark returned from a barrier tells the caller which sequence to wait for before proceeding. This ensures all messages (including the barrier completion itself) are visible.
@@ -510,25 +510,3 @@ for (auto recipient : completion.recipients) {
 
 **Version**: 2025-10-14 (Updated with shutdown race fixes)
 **Maintainer**: Ioannis Makris
-
-## Recent Updates (2025-10-14)
-
-All critical shutdown race conditions and RPC correctness issues have been resolved:
-- ✅ Request-side flush token consumption removed
-- ✅ Shutdown-aware RPC error handling in teardown paths
-- ✅ Watchdog pattern for `finalize()` RPC timeout (eliminates UAF)
-- ✅ Documentation clarified on return vs per-recipient flush tokens
-- ✅ RPC registration lock ordering fixed (insert before per-RPC mutex)
-- ✅ RPC deregistration lock ordering fixed (release per-RPC mutex before erase)
-- ✅ Predicate-based wait in RPC to prevent lost wakeups
-- ✅ Mutex/notify_all race condition fixed (notify inside lock to prevent UAF)
-- ✅ Gated barrier() exception tolerance (only during non-RUNNING states)
-- ✅ Service message double-processing prevention (relay-only for local coordinator)
-
-**Testing Results** (200-rep soak test):
-- **rpc_append_test**: 100% pass rate ✅
-- **basic_pubsub_test**: 98.55% pass rate (minor message-loss race remains)
-- **All other tests**: 100% pass rate ✅
-- **No hangs or crashes**: All failures are fast and clean ✅
-
-See `barriers_and_shutdown.md` for shutdown details.
