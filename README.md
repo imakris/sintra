@@ -86,6 +86,65 @@ sintra::activate<sintra::Managed_process>(
 ```
 
 
+## Threading Model and Barriers
+
+### Asynchronous Message Dispatch
+
+Sintra uses **dedicated reader threads** to process incoming messages from shared memory ring buffers. When a message arrives:
+1. A reader thread reads the message from the ring buffer
+2. The reader thread invokes registered slot callbacks **asynchronously**
+3. Slot callbacks execute on the reader thread, not the main thread
+
+**Critical implication**: If your slot callbacks modify shared data structures (e.g., pushing to a `std::vector`), you **must protect them with synchronization primitives** (mutexes, atomics, etc.) to avoid data races with your main thread.
+
+### Barrier Semantics
+
+The `sintra::barrier()` function synchronizes **process control flow** across multiple processes—it ensures all participating processes have reached the barrier point. However:
+
+**Barriers do NOT guarantee that pub/sub messages have been fully processed by slot callbacks.**
+
+After all processes pass a barrier:
+- All processes have reached that point in their execution
+- Messages sent *before* the barrier have been *written* to ring buffers
+- **BUT**: Reader threads may still be invoking slot callbacks
+
+If you need to ensure messages are processed before proceeding, you must implement explicit synchronization:
+
+```cpp
+// Pattern 1: Explicit wait with condition variable (see example_5_barrier_flush.cpp)
+std::mutex mutex;
+std::condition_variable cv;
+size_t received_count = 0;
+
+sintra::activate_slot([&](const Message& msg) {
+    std::lock_guard<std::mutex> lock(mutex);
+    // Process message...
+    ++received_count;
+    cv.notify_one();
+});
+
+// Wait for expected count BEFORE barrier
+std::unique_lock<std::mutex> lock(mutex);
+cv.wait(lock, [&]{ return received_count == expected_count; });
+lock.unlock();
+
+sintra::barrier("my-barrier");  // Now safe - messages are processed
+```
+
+```cpp
+// Pattern 2: Bounded wait with timeout (simpler but less precise)
+sintra::barrier("messages-sent");
+
+// Give reader threads time to process
+auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+while (received_count < expected_count &&
+       std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+}
+```
+
+**Key takeaway**: Always protect shared data accessed by both slot callbacks and your main thread with mutexes or other synchronization primitives.
+
 ## Getting started
 
 1. Add the `include/` directory to your project's include path.

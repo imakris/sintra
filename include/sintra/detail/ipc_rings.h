@@ -167,6 +167,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
   #define WIN32_LEAN_AND_MEAN
   #endif
   #include <Windows.h>   // ::VirtualAlloc, granularity details (via Boost)
+  #include <timeapi.h>   // ::timeBeginPeriod, ::timeEndPeriod (for ADAPTIVE_SPIN)
 #else
   #include <sys/mman.h>  // ::mmap, ::munmap, MAP_FIXED, MAP_NOSYNC (if available)
   #include <unistd.h>    // ::sysconf
