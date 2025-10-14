@@ -292,7 +292,9 @@ void Transceiver::destroy()
             s_mproc->m_instance_id_of_assigned_name.erase(m_cache_iterator);
         }
     }
-    else
+
+    // Always remove from local pointer map (for both published and unpublished transceivers)
+    // to prevent stale pointers when unpublish_all_transceivers() is called during finalize().
     if (m_instance_id != s_coord_id) {
         s_mproc->m_local_pointer_of_instance_id.erase(m_instance_id);
     }
@@ -1026,8 +1028,10 @@ Transceiver::export_rpc_impl()
         &RPCTC_o_type::template rpc_handler<RPCTC, MT>;
     (void)(once); // suppress unused variable warning
 
-    return [self, instance_id]() {
-        self->ensure_rpc_shutdown();
+    return [instance_id]() {
+        // Note: do NOT call ensure_rpc_shutdown() here - the transceiver may already
+        // be destroyed by the time this cleanup lambda is invoked during finalize().
+        // RPC shutdown is handled by the transceiver's destructor (via destroy()).
         get_instance_to_object_map<RPCTC>().erase(instance_id);
     };
 }
