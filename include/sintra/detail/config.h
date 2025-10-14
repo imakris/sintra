@@ -56,7 +56,16 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define SINTRA_RING_READING_POLICY_HYBRID           2
 
 
-#define SINTRA_RING_READING_POLICY SINTRA_RING_READING_POLICY_HYBRID
+// Three-phase adaptive waiting policy:
+// Phase 1: Fast spin (50μs) for ultra-low latency
+// Phase 2: Precision sleep cycles (1ms) for moderate latency with low CPU
+// Phase 3: True blocking sleep (semaphore) for no CPU burn on stalls
+// Memory barriers ensure cache coherency even with stale shared memory.
+
+#define SINTRA_RING_READING_POLICY_ADAPTIVE_SPIN    3
+
+
+#define SINTRA_RING_READING_POLICY SINTRA_RING_READING_POLICY_ADAPTIVE_SPIN
 
 #ifndef __clang__ 
 #define SINTRA_USE_OMP_GET_WTIME
@@ -81,10 +90,21 @@ namespace sintra {
     // process to send messages arbitrarily large could compromise stability.
     constexpr int       max_message_length                  = 4096;
 
-    // This is a time value in seconds that the hybrid reading policy algorithm will try to approach
-    // while spinning.
-    // If any policy other than SINTRA_RING_READING_POLICY_HYBRID is used, the value is irrelevant.
-    constexpr double    spin_before_sleep                   = 0.01;   // secs
+    // HYBRID policy: Time value in seconds that the hybrid reading policy algorithm will try to
+    // approach while spinning before transitioning to semaphore-based sleep.
+    constexpr double    spin_before_sleep                   = 0.01;   // secs (10ms, actual ~5ms)
+
+    // ADAPTIVE_SPIN policy: Fast spin duration before transitioning to precision sleep.
+    // This should be very short to catch immediate responses with minimal latency.
+    constexpr double    fast_spin_duration                  = 0.00005; // secs (50μs)
+
+    // ADAPTIVE_SPIN policy: Precision sleep cycle duration.
+    // Uses high-resolution sleep (timeBeginPeriod on Windows, nanosleep on Linux).
+    constexpr double    precision_sleep_cycle               = 0.001;   // secs (1ms)
+
+    // ADAPTIVE_SPIN policy: Total time to spend in precision sleep phase before
+    // transitioning to true blocking sleep (semaphore wait).
+    constexpr double    precision_sleep_duration            = 1.0;     // secs (1000ms)
 
     // Whenever control data is read and written in an array by multiple threads, the layout used
 	// should not cause cache invalidations (false sharing). This setting is architecture specific,
