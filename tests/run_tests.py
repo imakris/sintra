@@ -139,18 +139,32 @@ class TestRunner:
                 duration = time.time() - start_time
 
                 success = (process.returncode == 0)
+                error_msg = stderr
+
+                if not success:
+                    # Categorize failure type for better diagnostics
+                    if process.returncode < 0 or process.returncode > 128:
+                        # Unix signal (negative) or Windows crash code (large positive like 0xC0000005)
+                        error_msg = f"CRASH: Process terminated abnormally (exit code {process.returncode})\n{stderr}"
+                    elif duration < 0.1:
+                        # Exited almost immediately - likely crash or early abort
+                        error_msg = f"EARLY EXIT: Process exited with code {process.returncode} after {duration:.3f}s (possible crash)\n{stderr}"
+                    else:
+                        # Normal test failure
+                        error_msg = f"TEST FAILED: Exit code {process.returncode} after {duration:.2f}s\n{stderr}"
+
                 return TestResult(
                     success=success,
                     duration=duration,
                     output=stdout,
-                    error=stderr
+                    error=error_msg
                 )
 
             except subprocess.TimeoutExpired as e:
                 duration = self.timeout
 
                 if self.preserve_on_timeout:
-                    print(f"\n{Color.RED}Process stalled (PID {process.pid}). Preserving for debugging as requested.{Color.RESET}")
+                    print(f"\n{Color.RED}TIMEOUT: Process exceeded timeout of {self.timeout}s (PID {process.pid}). Preserving for debugging as requested.{Color.RESET}")
                     print(f"{Color.YELLOW}Attach a debugger to PID {process.pid} or terminate it manually when done.{Color.RESET}")
                     sys.exit(2)
 
@@ -166,7 +180,7 @@ class TestRunner:
                     success=False,
                     duration=duration,
                     output=stdout,
-                    error=f"Test timed out after {self.timeout}s and was terminated.\n{stderr}"
+                    error=f"TIMEOUT: Test exceeded {self.timeout}s and was terminated.\n{stderr}"
                 )
 
         except Exception as e:
