@@ -46,6 +46,36 @@ using std::unique_ptr;
 using std::function;
 
 
+// ============================================================================
+// Defensive utilities for zero-copy + deferral safety
+// ============================================================================
+// These helpers provide a safe way to clone ring messages when storing
+// references in deferred work. While the current implementation executes
+// deferred work before advancing the ring, future code might capture message
+// pointers in lambdas that outlive the ring's read cycle.
+//
+// Usage: If you need to capture a message pointer for deferred execution:
+//   auto cloned = sintra_clone_message(m);
+//   run_after_current_handler([buf = std::move(cloned)]() {
+//       auto* msg = reinterpret_cast<const Message_prefix*>(buf.get());
+//       // safely access msg
+//   });
+
+inline size_t sintra_message_total_size(const Message_prefix* m)
+{
+    return static_cast<size_t>(m->bytes_to_next_message);
+}
+
+inline std::unique_ptr<std::byte[]> sintra_clone_message(const Message_prefix* m)
+{
+    const size_t n = sintra_message_total_size(m);
+    auto buf = std::unique_ptr<std::byte[]>(new std::byte[n]);
+    std::memcpy(buf.get(), reinterpret_cast<const void*>(m), n);
+    return buf;
+}
+// ============================================================================
+
+
 inline bool thread_local tl_is_req_thread = false;
 
 // Historical note: mingw 11.2.0 had issues with inline thread_local non-POD objects

@@ -4,6 +4,10 @@ if(SINTRA_TESTS_DISABLE_OPENMP)
     target_include_directories(sintra_for_tests INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
     target_compile_features(sintra_for_tests INTERFACE cxx_std_17)
     target_link_libraries(sintra_for_tests INTERFACE Boost::boost)
+    # Link winmm on Windows for timeBeginPeriod/timeEndPeriod (ADAPTIVE_SPIN policy)
+    if(WIN32)
+        target_link_libraries(sintra_for_tests INTERFACE winmm)
+    endif()
     # No OpenMP linkage for tests - will use chrono-based timing
     # ALWAYS compile with debug symbols and disable optimizations
     if(MSVC)
@@ -52,6 +56,9 @@ add_test(NAME sintra.barrier_flush COMMAND sintra_barrier_flush_test)
 
 add_executable(sintra_barrier_stress_test barrier_stress_test.cpp)
 target_link_libraries(sintra_barrier_stress_test PRIVATE ${SINTRA_TEST_TARGET})
+if(WIN32)
+    target_link_libraries(sintra_barrier_stress_test PRIVATE winmm)
+endif()
 add_test(NAME sintra.barrier_stress COMMAND sintra_barrier_stress_test)
 
 add_executable(sintra_variable_buffer_alignment_test variable_buffer_alignment_test.cpp)

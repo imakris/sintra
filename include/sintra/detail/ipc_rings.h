@@ -1483,6 +1483,84 @@ struct Ring_R : Ring<T, true>
             if (m_stopping.load(std::memory_order_acquire)) {
                 return Range<T>{};
             }
+            // CRITICAL: Force memory barrier to refresh cache lines
+            // This ensures we see updated control structures even when processes
+            // are killed without running destructors (shared memory persistence bug)
+            std::atomic_thread_fence(std::memory_order_acquire);
+        }
+
+#elif SINTRA_RING_READING_POLICY == SINTRA_RING_READING_POLICY_ADAPTIVE_SPIN
+        // Phase 1: Fast spin for ultra-low latency (~50μs)
+        double fast_spin_end = get_wtime() + fast_spin_duration;
+        while (m_reading_sequence->load() == c.leading_sequence.load() && get_wtime() < fast_spin_end) {
+            if (m_stopping.load(std::memory_order_acquire)) {
+                return Range<T>{};
+            }
+            std::atomic_thread_fence(std::memory_order_acquire);
+        }
+
+        // Phase 2: Precision sleep cycles (1ms) for moderate latency with low CPU
+        if (m_reading_sequence->load() == c.leading_sequence.load()) {
+#ifdef _WIN32
+            ::timeBeginPeriod(1);
+#endif
+            double precision_sleep_end = get_wtime() + precision_sleep_duration;
+            while (m_reading_sequence->load() == c.leading_sequence.load() && get_wtime() < precision_sleep_end) {
+                if (m_stopping.load(std::memory_order_acquire)) {
+#ifdef _WIN32
+                    ::timeEndPeriod(1);
+#endif
+                    return Range<T>{};
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                std::atomic_thread_fence(std::memory_order_acquire);
+            }
+#ifdef _WIN32
+            ::timeEndPeriod(1);
+#endif
+        }
+
+        // Phase 3: True blocking sleep (semaphore wait) if still no data after precision sleep
+        if (m_reading_sequence->load() == c.leading_sequence.load()) {
+            c.lock();
+            m_sleepy_index.store(-1, std::memory_order_relaxed);
+            if (m_reading_sequence->load() == c.leading_sequence.load()) {
+                if (m_stopping.load(std::memory_order_acquire)) {
+                    c.unlock();
+                    return Range<T>{};
+                }
+                int sleepy = c.ready_stack[--c.num_ready];
+                m_sleepy_index.store(sleepy, std::memory_order_release);
+                c.sleeping_stack[c.num_sleeping++] = sleepy;
+            }
+            c.unlock();
+
+            int sleepy_index = m_sleepy_index.load(std::memory_order_acquire);
+            if (sleepy_index >= 0) {
+                if (m_stopping.load(std::memory_order_acquire)) {
+                    c.lock();
+                    if (m_sleepy_index.load(std::memory_order_acquire) >= 0) {
+                        c.dirty_semaphores[sleepy_index].post_unordered();
+                    }
+                    c.unlock();
+                }
+
+                if (c.dirty_semaphores[sleepy_index].wait()) {
+                    c.lock();
+                    c.unordered_stack[c.num_unordered++] = sleepy_index;
+                    c.unlock();
+                }
+                else {
+                    c.lock();
+                    c.ready_stack[c.num_ready++] = sleepy_index;
+                    c.unlock();
+                }
+                m_sleepy_index.store(-1, std::memory_order_release);
+
+                if (m_stopping.load(std::memory_order_acquire)) {
+                    return Range<T>{};
+                }
+            }
         }
 
 #else // HYBRID or ALWAYS_SLEEP
