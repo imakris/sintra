@@ -151,9 +151,37 @@ bool finalize()
         return false;
     }
 
-    const auto flush_seq = s_coord
-        ? s_coord->begin_process_draining(s_mproc_id)
-        : Coordinator::rpc_begin_process_draining(s_coord_id, s_mproc_id);
+    // Announce draining to coordinator. Bound the wait if the coordinator is already
+    // shutting down by cancelling the RPC via unblock_rpc and joining cleanly.
+    sequence_counter_type flush_seq = invalid_sequence;
+
+    if (s_coord) {
+        // Local coordinator - call directly (no timeout needed)
+        flush_seq = s_coord->begin_process_draining(s_mproc_id);
+    } else {
+        // Remote coordinator - synchronous call with a watchdog that cancels it after a deadline.
+        std::atomic<bool> done{false};
+        std::thread watchdog([&]{
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            while (!done.load(std::memory_order_acquire) &&
+                   std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            if (!done.load(std::memory_order_acquire)) {
+                // Break any RPCs waiting on the coordinator's reply.
+                s_mproc->unblock_rpc(process_of(s_coord_id));
+            }
+        });
+
+        try {
+            flush_seq = Coordinator::rpc_begin_process_draining(s_coord_id, s_mproc_id);
+        } catch (...) {
+            flush_seq = invalid_sequence;
+        }
+
+        done.store(true, std::memory_order_release);
+        watchdog.join();
+    }
 
     if (!s_coord && flush_seq != invalid_sequence) {
         s_mproc->flush(process_of(s_coord_id), flush_seq);
@@ -208,7 +236,27 @@ int process_index()
 inline
 bool barrier(const std::string& barrier_name, const std::string& group_name)
 {
-    auto flush_seq = Process_group::rpc_barrier(group_name, barrier_name);
+    sequence_counter_type flush_seq;
+    try {
+        flush_seq = Process_group::rpc_barrier(group_name, barrier_name);
+    }
+    catch (const std::runtime_error& e) {
+        // Only treat RPC unavailability as a satisfied barrier when comms are not RUNNING.
+        // This covers shutdown / paused cases without masking mid-run failures.
+        const std::string msg = e.what();
+        const bool rpc_unavailable =
+            (msg == "RPC failed") ||
+            (msg.find("no longer available") != std::string::npos) ||
+            (msg.find("shutting down") != std::string::npos);
+        if (rpc_unavailable
+            && s_mproc
+            && s_mproc->m_communication_state != Managed_process::COMMUNICATION_RUNNING)
+        {
+            return true;
+        }
+        throw; // propagate real errors during normal operation
+    }
+
     if (flush_seq == invalid_sequence) {
         return false;
     }

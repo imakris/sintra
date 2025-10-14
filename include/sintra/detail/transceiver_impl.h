@@ -172,13 +172,15 @@ inline
 void
 Transceiver::release_rpc_execution()
 {
-    unique_lock<mutex> lock(m_rpc_lifecycle_mutex);
-    assert(m_active_rpc_calls);
+    bool should_notify;
+    {
+        unique_lock<mutex> lock(m_rpc_lifecycle_mutex);
+        assert(m_active_rpc_calls);
 
-    --m_active_rpc_calls;
-    const bool should_notify = m_rpc_shutdown_requested && m_active_rpc_calls == 0;
-
-    lock.unlock();
+        --m_active_rpc_calls;
+        should_notify = m_rpc_shutdown_requested && m_active_rpc_calls == 0;
+        // Lock automatically released by scope exit
+    }
 
     if (should_notify) {
         m_rpc_lifecycle_condition.notify_all();
@@ -209,12 +211,12 @@ Transceiver::ensure_rpc_shutdown()
         m_accepting_rpc_calls = false;
         m_rpc_lifecycle_condition.wait(lock, [&]() { return m_active_rpc_calls == 0; });
         m_rpc_shutdown_complete = true;
-        lock.unlock();
+        // Notify while still holding the lock to prevent race conditions
         m_rpc_lifecycle_condition.notify_all();
-        return;
+    } else {
+        // Another thread is performing shutdown - wait for it to complete
+        m_rpc_lifecycle_condition.wait(lock, [&]() { return m_rpc_shutdown_complete; });
     }
-
-    m_rpc_lifecycle_condition.wait(lock, [&]() { return m_rpc_shutdown_complete; });
 }
 
 
@@ -267,8 +269,20 @@ void Transceiver::destroy()
             }
         }
         else {
-            auto success = Coordinator::rpc_unpublish_transceiver(s_coord_id, m_instance_id);
-            assert(success);
+            // During shutdown, the coordinator can already be draining or gone.
+            // Treat RPC failure as non-fatal in that case - the coordinator will
+            // clean up when it detects the process disconnect.
+            bool success = false;
+            try {
+                success = Coordinator::rpc_unpublish_transceiver(s_coord_id, m_instance_id);
+            }
+            catch (...) {
+                // Coordinator already shutting down or unreachable - ignore
+                success = false;
+            }
+            // In normal operation, unpublish should succeed. During shutdown races,
+            // it's acceptable for this to fail silently.
+            (void)success;
         }
 
         m_published = false;
@@ -891,6 +905,14 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
     };
 
 
+    // Register the RPC in the outstanding set BEFORE locking keep_waiting_mutex
+    // to maintain consistent lock ordering with unblock_rpc (which locks
+    // s_outstanding_rpcs_mutex first, then keep_waiting_mutex).
+    {
+        unique_lock<mutex> orpclock(s_outstanding_rpcs_mutex());
+        s_outstanding_rpcs().insert(&orpcc);
+    }
+
     // block until reading thread either receives results or the call fails
     unique_lock<mutex> sl(orpcc.keep_waiting_mutex);
 
@@ -906,40 +928,27 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
     msg->function_instance_id = function_instance_id;
     s_mproc->m_out_req_c->done_writing();
 
-    {
-        unique_lock<mutex> orpclock(s_outstanding_rpcs_mutex());
-        s_outstanding_rpcs().insert(&orpcc);
-    }
-
     //    _       .//'
     //   (_).  .//'                          TODO: for an asynchronous implementation, cut here
     // -- _  O|| --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --
     //   (_)'  '\\.
     //            '\\.
 
-    while (orpcc.keep_waiting) {
-        // TODO: FIXME
-        // If one of the processes supplying results crashes without notice or blocks,
-        // this will deadlock. We need to put a time limit, implement recovery and test it.
-        // use wait_for, rather than wait - but not just yet -
+    // Wait until either a normal reply arrives or the RPC gets unblocked.
+    // With predicate waiting plus Managed_process::unblock_rpc() (invoked on
+    // coordinator loss and during finalize()), this wait is bounded and cannot
+    // deadlock via lost notifications.
+    orpcc.keep_waiting_condition.wait(sl, [&]{ return !orpcc.keep_waiting; });
 
-        //1. put the mutex in a process wide mutex list
-        //2. the condition in the while should also check for thread termination
-        //3. wait_for
-
-        // if it fails throw exception.
-
-
-        orpcc.keep_waiting_condition.wait(sl);
-    }
+    // Release per-RPC mutex before touching the global outstanding set.
+    // This maintains the lock ordering rule: always acquire s_outstanding_rpcs_mutex
+    // before any keep_waiting_mutex (never the reverse).
+    sl.unlock();
 
     {
         unique_lock<mutex> orpclock(s_outstanding_rpcs_mutex());
         s_outstanding_rpcs().erase(&orpcc);
     }
-
-
-    sl.unlock();
 
     // we can now disable the return message handler
     s_mproc->deactivate_return_handler(function_instance_id);

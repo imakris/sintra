@@ -64,20 +64,17 @@ sequence_counter_type Process_group::barrier(
     Barrier& b = m_barriers[barrier_name];
     b.m.lock(); // main barrier lock
 
-    unordered_set<instance_id_type> member_snapshot;
-    if (b.processes_pending.empty()) {
-        member_snapshot = m_process_ids;
-    }
-
-    basic_lock.unlock();
-
+    // Atomically snapshot membership and filter draining processes while holding m_call_mutex.
+    // This ensures a consistent view: no process can be added/removed or change draining state
+    // between the membership snapshot and the draining filter.
     if (b.processes_pending.empty()) {
         // new or reused barrier (may have failed previously)
-        b.processes_pending = std::move(member_snapshot);
+        b.processes_pending = m_process_ids;
         b.processes_arrived.clear();
         b.failed = false;
         b.common_function_iid = make_instance_id();
 
+        // Filter out draining processes while still holding m_call_mutex for atomicity
         if (auto* coord = s_coord) {
             for (auto it = b.processes_pending.begin();
                  it != b.processes_pending.end(); )
@@ -92,10 +89,15 @@ sequence_counter_type Process_group::barrier(
         }
     }
 
+    // Now safe to release m_call_mutex - barrier state is consistent and other threads
+    // need to be able to arrive at the barrier concurrently
+    basic_lock.unlock();
+
     b.processes_arrived.insert(caller_piid);
     b.processes_pending.erase(caller_piid);
 
     if (b.processes_pending.size() == 0) {
+        // Last arrival
         auto additional_pids = b.processes_arrived;
         additional_pids.erase(caller_piid);
 
@@ -111,14 +113,19 @@ sequence_counter_type Process_group::barrier(
         s_tl_common_function_iid = current_common_fiid;
         b.m.unlock();
 
+        // Re-lock m_call_mutex to safely erase from m_barriers
         basic_lock.lock();
         auto it = m_barriers.find(barrier_name);
         if (it != m_barriers.end() && it->second.common_function_iid == current_common_fiid) {
             m_barriers.erase(it);
         }
-        return s_mproc->m_out_req_c->get_leading_sequence();
+        // basic_lock will unlock m_call_mutex on return
+        // Use reply ring watermark (m_out_rep_c) since barrier completion messages
+        // are sent on the reply channel. Get it at return time for the calling process.
+        return s_mproc->m_out_rep_c->get_leading_sequence();
     }
     else {
+        // Not last arrival - throw deferral to block until barrier completes
         std::pair<deferral, function<void()> > ret;
         ret.first.new_fiid = b.common_function_iid;
         ret.second = [&](){ b.m.unlock(); };
@@ -184,9 +191,12 @@ inline void Process_group::emit_barrier_completions(
             continue;
         }
 
-        const auto flush_sequence = s_mproc->m_out_req_c->get_leading_sequence();
-
+        // Get per-recipient flush token: compute it INSIDE the loop so each recipient
+        // gets a watermark that's valid for their specific message write time.
+        // This prevents hangs where a global token is ahead of some recipient's channel.
         for (auto recipient : completion.recipients) {
+            const auto flush_sequence = s_mproc->m_out_rep_c->get_leading_sequence();
+
             auto* placed_msg = s_mproc->m_out_rep_c->write<return_message_type>(
                 vb_size<return_message_type>(flush_sequence), flush_sequence);
 
@@ -205,9 +215,9 @@ inline
 Coordinator::Coordinator():
     Derived_transceiver<Coordinator>("", make_service_instance_id())
 {
-    // The coordinator is constructed within the Managed_process constructor, while still
-    // building the basic infrastructure. Ensure draining state starts cleared so the
-    // atomics are initialised before any loads occur.
+    // Pre-initialize/ all draining states to 0 (ACTIVE) so that concurrent reads from
+    // barrier paths are safe without additional locking. The array is fixed-size and
+    // never grows, eliminating data races from container mutation.
     for (auto& draining_state : m_draining_process_states) {
         draining_state.store(0, std::memory_order_relaxed);
     }
@@ -357,11 +367,8 @@ instance_id_type Coordinator::publish_transceiver(type_id_type tid, instance_id_
         s_mproc->m_instance_id_of_assigned_name[entry.name] = iid;
         pr[iid] = entry;
 
-        const auto draining_index = get_process_index(process_iid);
-        if (draining_index > 0 && draining_index <= static_cast<uint64_t>(max_process_index)) {
-            const auto slot = static_cast<size_t>(draining_index);
-            m_draining_process_states[slot].store(0, std::memory_order_release);
-        }
+        // Do NOT reset draining state here - only reset when publishing a NEW PROCESS (Managed_process),
+        // not when publishing a regular transceiver. Resetting here could interfere with shutdown.
 
         return true_sequence();
     }
@@ -376,6 +383,8 @@ instance_id_type Coordinator::publish_transceiver(type_id_type tid, instance_id_
         s_mproc->m_instance_id_of_assigned_name[entry.name] = iid;
         m_transceiver_registry[iid][iid] = entry;
 
+        // Reset draining state to 0 (ACTIVE) when publishing a Managed_process.
+        // This handles recovery/restart scenarios where the process slot might still be marked as draining.
         const auto draining_index = get_process_index(process_iid);
         if (draining_index > 0 && draining_index <= static_cast<uint64_t>(max_process_index)) {
             const auto slot = static_cast<size_t>(draining_index);
@@ -440,6 +449,15 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
         // remove the unpublished process's registry entry
         m_transceiver_registry.erase(pr_it);
 
+        // CRITICAL: Mark as draining BEFORE removing from groups to prevent barriers
+        // from including this process. This handles both graceful shutdown (where
+        // begin_process_draining was already called) and crash scenarios (where it wasn't).
+        const auto draining_index = get_process_index(process_iid);
+        if (draining_index > 0 && draining_index <= static_cast<uint64_t>(max_process_index)) {
+            const auto slot = static_cast<size_t>(draining_index);
+            m_draining_process_states[slot].store(1, std::memory_order_release);
+        }
+
         lock_guard<mutex> lock(m_groups_mutex);
 
         for (auto& group_entry : m_groups) {
@@ -448,11 +466,9 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
 
         m_groups_of_process.erase(process_iid);
 
-        const auto draining_index = get_process_index(process_iid);
-        if (draining_index > 0 && draining_index <= static_cast<uint64_t>(max_process_index)) {
-            const auto slot = static_cast<size_t>(draining_index);
-            m_draining_process_states[slot].store(0, std::memory_order_release);
-        }
+        // Keep the draining bit set; it will be re-initialized to 0 (ACTIVE)
+        // when a new process is published into this slot. This prevents the race
+        // where resetting too early allows concurrent barriers to include a dying process.
 
         // remove all group associations of unpublished process
         auto groups_it = m_groups_of_process.find(iid);
@@ -530,9 +546,14 @@ inline sequence_counter_type Coordinator::begin_process_draining(instance_id_typ
                     }
                 }
             });
+
+        // Note: No explicit event-loop "pump" is required here; queued completions
+        // run via run_after_current_handler() and the request loop's post-handler hook.
     }
 
-    return s_mproc->m_out_req_c->get_leading_sequence();
+    // Use reply ring watermark (m_out_rep_c) since barrier completion messages
+    // are sent on the reply channel. Get it at return time for the draining process.
+    return s_mproc->m_out_rep_c->get_leading_sequence();
 }
 
 

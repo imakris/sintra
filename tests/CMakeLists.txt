@@ -5,6 +5,18 @@ if(SINTRA_TESTS_DISABLE_OPENMP)
     target_compile_features(sintra_for_tests INTERFACE cxx_std_17)
     target_link_libraries(sintra_for_tests INTERFACE Boost::boost)
     # No OpenMP linkage for tests - will use chrono-based timing
+    # ALWAYS compile with debug symbols and disable optimizations
+    if(MSVC)
+        target_compile_options(sintra_for_tests INTERFACE
+            /Zi          # Full debug info
+            /Od          # Disable optimizations
+            /RTC1        # Runtime checks
+            /MDd         # Debug runtime library
+        )
+        target_link_options(sintra_for_tests INTERFACE /DEBUG:FULL)
+    else()
+        target_compile_options(sintra_for_tests INTERFACE -g -O0)
+    endif()
     set(SINTRA_TEST_TARGET sintra_for_tests)
 else()
     set(SINTRA_TEST_TARGET sintra)
