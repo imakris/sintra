@@ -266,11 +266,10 @@ instance_id_type make_service_instance_id()
 
 
 inline
-instance_id_type is_service_instance(instance_id_type instance_id)
+bool is_service_instance(instance_id_type instance_id)
 {
-    return
-        (instance_id & ~pid_mask) >=2 &&
-        (instance_id & ~pid_mask) < (2+num_reserved_service_instances);
+    const auto idx = (instance_id & ~pid_mask);
+    return idx >= 2 && idx < (2 + num_reserved_service_instances);
 }
 
 

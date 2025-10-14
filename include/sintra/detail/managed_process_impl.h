@@ -1427,6 +1427,7 @@ size_t Managed_process::unblock_rpc(instance_id_type process_instance_id)
             {
                 c->success = false;
                 c->keep_waiting = false;
+                c->cancelled = true;
                 c->keep_waiting_condition.notify_one();
                 ret++;
             }
