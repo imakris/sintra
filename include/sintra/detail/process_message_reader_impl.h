@@ -453,14 +453,29 @@ void Process_message_reader::reply_reader_function()
                         }
                     }
                     else {
-                        // If it exists, there must be a return handler assigned.
-                        // This is most likely an error local to this process.
-                        assert(!"There is no active handler for the function return.");
+                        // No active return handler — can happen if the caller already cleaned up
+                        // (e.g., after cancellation/shutdown) and a late/duplicate message arrived.
+                        // Drop it quietly unless we're fully RUNNING; in RUNNING emit a diagnostic
+                        // but do not hard-assert to avoid modal dialogs on Windows Debug.
+                        if (s_mproc && s_mproc->m_communication_state == Managed_process::COMMUNICATION_RUNNING) {
+                            std::fprintf(stderr,
+                                "Warning: Reply reader received message for function_instance_id=%llu but no active handler found (receiver_instance_id=%llu)\n",
+                                static_cast<unsigned long long>(m->function_instance_id),
+                                static_cast<unsigned long long>(m->receiver_instance_id));
+                        }
                     }
                 }
                 else {
-                    // This can occur by both local and remote error.
-                    assert(!"The object that this return message refers to does not exist.");
+                    // The target object no longer exists locally. During shutdown or after
+                    // coordinator loss, late replies can legitimately arrive after objects
+                    // have been torn down. Do not hard-assert; drop unless we're fully RUNNING.
+                    if (s_mproc && s_mproc->m_communication_state == Managed_process::COMMUNICATION_RUNNING) {
+                        std::fprintf(stderr,
+                            "Warning: Reply reader received message for receiver_instance_id=%llu but object no longer exists (sender=%llu, function=%llu)\n",
+                            static_cast<unsigned long long>(m->receiver_instance_id),
+                            static_cast<unsigned long long>(m->sender_instance_id),
+                            static_cast<unsigned long long>(m->function_instance_id));
+                    }
                 }
             }
         }

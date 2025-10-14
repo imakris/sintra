@@ -897,8 +897,10 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
 
         // if the new_id differs, then replace it
         assert(returned_message.new_fiid != function_instance_id);
+        // Move the active return handler from the temporary id to the final id
         s_mproc->replace_return_handler_id(function_instance_id, returned_message.new_fiid);
-        //}
+        // Keep the caller-side handle in sync so that later cleanup removes the correct entry
+        function_instance_id = returned_message.new_fiid;
 
         // replaces the placement of the handler (message instance id)
         // with the one received by the remote call
