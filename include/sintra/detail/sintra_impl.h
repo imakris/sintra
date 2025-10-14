@@ -240,6 +240,13 @@ bool barrier(const std::string& barrier_name, const std::string& group_name)
     try {
         flush_seq = Process_group::rpc_barrier(group_name, barrier_name);
     }
+    catch (const rpc_cancelled&) {
+        // Cancelled due to shutdown/paused comms: treat as satisfied when not RUNNING
+        if (s_mproc && s_mproc->m_communication_state != Managed_process::COMMUNICATION_RUNNING) {
+            return true;
+        }
+        throw; // unexpected while RUNNING
+    }
     catch (const std::runtime_error& e) {
         // Only treat RPC unavailability as a satisfied barrier when comms are not RUNNING.
         // This covers shutdown / paused cases without masking mid-run failures.

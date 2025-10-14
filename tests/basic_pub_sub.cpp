@@ -31,6 +31,7 @@
 #include <string_view>
 #include <thread>
 #include <vector>
+#include <mutex>
 
 #ifdef _WIN32
 #include <process.h>
@@ -187,6 +188,8 @@ bool has_branch_flag(int argc, char* argv[])
 
 std::vector<std::string> g_received_strings;
 std::vector<int> g_received_ints;
+std::mutex g_received_strings_mutex;
+std::mutex g_received_ints_mutex;
 
 int process_sender()
 {
@@ -223,6 +226,7 @@ int process_sender()
 int process_string_receiver()
 {
     auto string_slot = [](const std::string& value) {
+        std::lock_guard<std::mutex> _lg(g_received_strings_mutex);
         g_received_strings.push_back(value);
     };
     sintra::activate_slot(string_slot);
@@ -230,8 +234,20 @@ int process_string_receiver()
     sintra::barrier("slots-ready");
     sintra::barrier("messages-done");
 
+    // Ensure all expected messages are processed before writing (avoid race)
+    constexpr size_t kExpectedStrings = 4;
+    auto deadline_s = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (true) {
+        size_t sz;
+        { std::lock_guard<std::mutex> _lg(g_received_strings_mutex); sz = g_received_strings.size(); }
+        if (sz >= kExpectedStrings || std::chrono::steady_clock::now() >= deadline_s) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
     const auto shared_dir = get_shared_directory();
-    write_strings(shared_dir / "strings.txt", g_received_strings);
+    { std::vector<std::string> snapshot;
+      { std::lock_guard<std::mutex> _lg(g_received_strings_mutex); snapshot = g_received_strings; }
+      write_strings(shared_dir / "strings.txt", snapshot); }
 
     sintra::barrier("write-phase");
     sintra::barrier("result-ready", "_sintra_all_processes");
@@ -241,6 +257,7 @@ int process_string_receiver()
 int process_int_receiver()
 {
     auto int_slot = [](int value) {
+        std::lock_guard<std::mutex> _lg2(g_received_ints_mutex);
         g_received_ints.push_back(value);
     };
     sintra::activate_slot(int_slot);
@@ -248,8 +265,20 @@ int process_int_receiver()
     sintra::barrier("slots-ready");
     sintra::barrier("messages-done");
 
+    // Ensure all expected messages are processed before writing (avoid race)
+    constexpr size_t kExpectedInts = 4;
+    auto deadline_i = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (true) {
+        size_t sz;
+        { std::lock_guard<std::mutex> _lg2(g_received_ints_mutex); sz = g_received_ints.size(); }
+        if (sz >= kExpectedInts || std::chrono::steady_clock::now() >= deadline_i) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
     const auto shared_dir = get_shared_directory();
-    write_ints(shared_dir / "ints.txt", g_received_ints);
+    { std::vector<int> snapshot;
+      { std::lock_guard<std::mutex> _lg2(g_received_ints_mutex); snapshot = g_received_ints; }
+      write_ints(shared_dir / "ints.txt", snapshot); }
 
     sintra::barrier("write-phase");
     sintra::barrier("result-ready", "_sintra_all_processes");

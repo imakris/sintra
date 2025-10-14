@@ -959,8 +959,12 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
             string_to_exception(ex_tid, ex_what);
         }
         else {
-            // rpc failure
-            throw std::runtime_error("RPC failed");
+            // rpc failure (distinguish between cancelled vs. other failures)
+            if (orpcc.cancelled) {
+                throw rpc_cancelled("rpc cancelled");
+            } else {
+                throw std::runtime_error("RPC failed");
+            }
         }
     }
 

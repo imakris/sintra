@@ -726,6 +726,10 @@ private:
 };
 
 
+// Typed exception: thrown when an RPC is unblocked/cancelled (e.g., coordinator loss)
+struct rpc_cancelled : std::runtime_error {
+    explicit rpc_cancelled(const char* what_arg) : std::runtime_error(what_arg) {}
+};
 
 struct Outstanding_rpc_control
 {
@@ -739,6 +743,7 @@ struct Outstanding_rpc_control
 
     bool                keep_waiting = true;
     bool                success = false;
+    bool                cancelled = false;
 };
 
 
