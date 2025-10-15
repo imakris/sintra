@@ -2,14 +2,15 @@
 
 [![Build - Linux](https://github.com/imakris/sintra/actions/workflows/build-linux.yml/badge.svg)](https://github.com/imakris/sintra/actions/workflows/build-linux.yml)
 [![Stress Test - Linux](https://github.com/imakris/sintra/actions/workflows/stress-test-linux.yml/badge.svg)](https://github.com/imakris/sintra/actions/workflows/stress-test-linux.yml)
-[![FreeBSD Build](https://api.cirrus-ci.com/github/imakris/sintra.svg?task=FreeBSD%20Build)](https://cirrus-ci.com/github/imakris/sintra)
-[![FreeBSD Tests](https://api.cirrus-ci.com/github/imakris/sintra.svg?task=FreeBSD%20Tests)](https://cirrus-ci.com/github/imakris/sintra)
 
 [![Build - Windows](https://github.com/imakris/sintra/actions/workflows/build-windows.yml/badge.svg)](https://github.com/imakris/sintra/actions/workflows/build-windows.yml)
 [![Stress Test - Windows](https://github.com/imakris/sintra/actions/workflows/stress-test-windows.yml/badge.svg)](https://github.com/imakris/sintra/actions/workflows/stress-test-windows.yml)
 
 [![Build - macOS](https://github.com/imakris/sintra/actions/workflows/build-macos.yml/badge.svg)](https://github.com/imakris/sintra/actions/workflows/build-macos.yml)
 [![Stress Test - macOS](https://github.com/imakris/sintra/actions/workflows/stress-test-macos.yml/badge.svg)](https://github.com/imakris/sintra/actions/workflows/stress-test-macos.yml)
+
+[![FreeBSD Build](https://api.cirrus-ci.com/github/imakris/sintra.svg?task=FreeBSD%20Build)](https://cirrus-ci.com/github/imakris/sintra)
+[![FreeBSD Tests](https://api.cirrus-ci.com/github/imakris/sintra.svg?task=FreeBSD%20Tests)](https://cirrus-ci.com/github/imakris/sintra)
 
 ![Header-only](https://img.shields.io/badge/header--only-yes-lightgrey)
 ![C++17](https://img.shields.io/badge/C%2B%2B-17-blue)
