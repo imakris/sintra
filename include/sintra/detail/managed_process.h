@@ -308,6 +308,10 @@ struct Managed_process: Derived_transceiver<Managed_process>
     mutex                               m_flush_sequence_mutex;
     condition_variable                  m_flush_sequence_condition;
 
+    // Synchronization for delivery_fence barriers: wait for request reader to advance
+    mutex                               m_reading_sync_mutex;
+    condition_variable                  m_reading_sync_cv;
+
     handler_registry_type               m_active_handlers;
 
     // standard process groups

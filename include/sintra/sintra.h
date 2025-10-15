@@ -70,6 +70,16 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 namespace sintra {
 
 
+// Tag types for barrier synchronization modes
+struct rendezvous_t { explicit rendezvous_t() = default; };
+struct delivery_fence_t { explicit delivery_fence_t() = default; };
+struct processing_fence_t { explicit processing_fence_t() = default; };
+
+// Tag constants
+inline constexpr rendezvous_t rendezvous{};
+inline constexpr delivery_fence_t delivery_fence{};
+inline constexpr processing_fence_t processing_fence{};
+
 
 // Blocks the calling thread of the calling process, until at least one thread of each processes
 // in the the specified process group has called barrier().
@@ -77,7 +87,15 @@ namespace sintra {
 // threads from other processes in the same group, in undefined matching order.
 // Note that this is an interprocess synchronization mechanism. When it is sought to synchronize
 // threads as well as processes, an additional thread synchronization mechanism must be used.
+//
+// Barrier modes:
+// - rendezvous: Pure application barrier - just synchronize progress, no message delivery guarantees
+// - delivery_fence: Ensure incoming messages are delivered before barrier (default for safety)
+// - processing_fence: Wait for message handlers to complete (future - expensive)
 bool barrier(const std::string& barrier_name, const std::string& group_name = "_sintra_external_processes");
+bool barrier(rendezvous_t, const std::string& barrier_name, const std::string& group_name = "_sintra_external_processes");
+bool barrier(delivery_fence_t, const std::string& barrier_name, const std::string& group_name = "_sintra_external_processes");
+bool barrier(processing_fence_t, const std::string& barrier_name, const std::string& group_name = "_sintra_external_processes");
 
 
 template <typename FT, typename SENDER_T = void>

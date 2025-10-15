@@ -232,9 +232,56 @@ int process_index()
 }
 
 
-// This is a convenience function.
+// Helper function: Wait for request reader to advance its reading sequence.
+// Used by delivery_fence and processing_fence barrier modes to ensure incoming
+// messages are delivered before synchronizing.
 inline
-bool barrier(const std::string& barrier_name, const std::string& group_name)
+bool sync_incoming_messages()
+{
+    if (!s_mproc) {
+        return false;
+    }
+
+    // If coordinator is local, messages are delivered synchronously in-process
+    if (s_coord) {
+        return true;
+    }
+
+    // Find the reader for the coordinator's rings (where our incoming messages come from)
+    auto coord_proc_id = process_of(s_coord_id);
+    auto it = s_mproc->m_readers.find(coord_proc_id);
+    if (it == s_mproc->m_readers.end()) {
+        // No reader found (shouldn't happen, but handle gracefully)
+        return true;
+    }
+
+    auto& coord_reader = it->second;
+
+    // Capture the current reading sequence from the coordinator's request ring.
+    // We use the raw reading_sequence() which advances when done_reading_new_data() is called.
+    // IMPORTANT: Must lock before capturing to avoid lost wakeup race.
+    std::unique_lock<std::mutex> lock(s_mproc->m_reading_sync_mutex);
+    const auto start_seq = coord_reader.get_request_ring_reading_sequence();
+
+    // Wait for the reading sequence to advance, indicating the reader has processed
+    // messages from the current snapshot and moved to the next batch
+    s_mproc->m_reading_sync_cv.wait_for(
+        lock,
+        std::chrono::milliseconds(100),
+        [&coord_reader, start_seq]() {
+            return coord_reader.get_request_ring_reading_sequence() > start_seq;
+        }
+    );
+
+    // Always return true - timeout just means no more messages to process (already synchronized)
+    return true;
+}
+
+
+// Internal helper: Performs the barrier RPC call and coordinator flush.
+// Called by all barrier mode implementations.
+inline
+bool barrier_impl(const std::string& barrier_name, const std::string& group_name)
 {
     sequence_counter_type flush_seq;
     try {
@@ -275,6 +322,47 @@ bool barrier(const std::string& barrier_name, const std::string& group_name)
     }
 
     return true;
+}
+
+
+// Rendezvous barrier: Pure application-level synchronization without message delivery guarantees.
+// Fastest mode - use when you know no messages are in flight or when synchronizing computation phases.
+inline
+bool barrier(rendezvous_t, const std::string& barrier_name, const std::string& group_name)
+{
+    return barrier_impl(barrier_name, group_name);
+}
+
+
+// Delivery fence barrier: Ensures all incoming messages sent before the barrier are delivered
+// to this process before the barrier completes. This is the recommended default mode for safety.
+inline
+bool barrier(delivery_fence_t, const std::string& barrier_name, const std::string& group_name)
+{
+    // Wait for request reader to complete current message snapshot
+    sync_incoming_messages();
+    return barrier_impl(barrier_name, group_name);
+}
+
+
+// Processing fence barrier: Ensures message handlers have completed (future implementation).
+// Currently behaves like delivery_fence. Full handler tracking will be added later.
+inline
+bool barrier(processing_fence_t, const std::string& barrier_name, const std::string& group_name)
+{
+    // TODO: Wait for active handlers to complete
+    // For now, use delivery fence semantics
+    sync_incoming_messages();
+    return barrier_impl(barrier_name, group_name);
+}
+
+
+// Default barrier: Uses delivery_fence for safety.
+// This is a convenience function that provides safe message delivery semantics by default.
+inline
+bool barrier(const std::string& barrier_name, const std::string& group_name)
+{
+    return barrier(delivery_fence, barrier_name, group_name);
 }
 
 

@@ -254,7 +254,17 @@ void Process_message_reader::request_reader_function()
         // request reader. The reply reader thread is responsible for popping
         // tokens when the *reply* reading sequence reaches them.
 
+        // Detect when the reading sequence advances (indicating done_reading_new_data() was called)
+        // to notify delivery_fence barriers waiting for message processing to complete
+        auto seq_before = m_in_req_c->reading_sequence();
         Message_prefix* m = m_in_req_c->fetch_message();
+        auto seq_after = m_in_req_c->reading_sequence();
+
+        if (seq_after != seq_before) {
+            // Reading sequence advanced - notify any waiting delivery_fence barriers
+            s_mproc->m_reading_sync_cv.notify_all();
+        }
+
         s_tl_current_message = m;
         if (m == nullptr) {
             break;
