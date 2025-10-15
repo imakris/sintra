@@ -77,6 +77,7 @@ inline std::unique_ptr<std::byte[]> sintra_clone_message(const Message_prefix* m
 
 
 inline bool thread_local tl_is_req_thread = false;
+inline thread_local Process_message_reader* tl_current_request_reader = nullptr;
 
 // Historical note: mingw 11.2.0 had issues with inline thread_local non-POD objects
 // (January 2022). We now store the callable directly and rely on the fixed runtime
@@ -118,6 +119,14 @@ void Process_message_reader::stop_nowait()
 {
     m_reader_state.store(READER_STOPPING, std::memory_order_release);
     m_ready_condition.notify_all();
+
+    {
+        std::lock_guard<std::mutex> lk(m_delivery_mutex);
+        m_request_delivery_sequence.store(
+            m_in_req_c ? m_in_req_c->get_message_reading_sequence() : 0,
+            std::memory_order_release);
+    }
+    m_delivery_condition.notify_all();
 
     m_in_req_c->done_reading();
     m_in_req_c->request_stop();
@@ -230,6 +239,15 @@ void Process_message_reader::request_reader_function()
     install_signal_handler();
 
     tl_is_req_thread = true;
+    tl_current_request_reader = this;
+
+    auto publish_request_progress = [&](sequence_counter_type seq) {
+        {
+            std::lock_guard<std::mutex> lk(m_delivery_mutex);
+            m_request_delivery_sequence.store(seq, std::memory_order_release);
+        }
+        m_delivery_condition.notify_all();
+    };
 
     s_mproc->m_num_active_readers_mutex.lock();
     s_mproc->m_num_active_readers++;
@@ -241,6 +259,8 @@ void Process_message_reader::request_reader_function()
         m_req_running.store(true, std::memory_order_release);
     }
     m_ready_condition.notify_all();
+
+    publish_request_progress(m_in_req_c->get_message_reading_sequence());
 
     while (true) {
         const State reader_state = m_reader_state.load(std::memory_order_acquire);
@@ -366,6 +386,8 @@ void Process_message_reader::request_reader_function()
             tl_post_handler_function = {};
             post_handler();
         }
+
+        publish_request_progress(m_in_req_c->get_message_reading_sequence());
     }
 
     m_in_req_c->done_reading();
@@ -384,9 +406,44 @@ void Process_message_reader::request_reader_function()
     m_ready_condition.notify_all();
     m_stop_condition.notify_one();
 
+    publish_request_progress(m_in_req_c->get_message_reading_sequence());
+
+    tl_current_request_reader = nullptr;
+
     if (tl_post_handler_function) {
         tl_post_handler_function = {};
     }
+}
+
+
+
+inline
+void Process_message_reader::wait_for_request_delivery(sequence_counter_type target_sequence)
+{
+    if (target_sequence == invalid_sequence) {
+        return;
+    }
+
+    if (tl_current_request_reader == this) {
+        // Already on this reader thread; avoid self-deadlock. The handler will
+        // resume the read loop once it returns, at which point the reader will
+        // progress naturally beyond the target sequence.
+        return;
+    }
+
+    if (m_request_delivery_sequence.load(std::memory_order_acquire) >= target_sequence) {
+        return;
+    }
+
+    std::unique_lock<std::mutex> lk(m_delivery_mutex);
+    m_delivery_condition.wait(lk, [&]() {
+        const auto observed = m_request_delivery_sequence.load(std::memory_order_acquire);
+        if (observed >= target_sequence) {
+            return true;
+        }
+        const auto state = m_reader_state.load(std::memory_order_acquire);
+        return state != READER_NORMAL;
+    });
 }
 
 

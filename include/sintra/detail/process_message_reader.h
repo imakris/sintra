@@ -164,6 +164,13 @@ struct Process_message_reader
         return m_in_req_c->get_message_reading_sequence();
     }
 
+    sequence_counter_type get_request_leading_sequence() const
+    {
+        return m_in_req_c->get_leading_sequence();
+    }
+
+    void wait_for_request_delivery(sequence_counter_type target_sequence);
+
     sequence_counter_type get_reply_reading_sequence() const
     {
         return m_in_rep_c->get_message_reading_sequence();
@@ -189,6 +196,10 @@ private:
     condition_variable      m_ready_condition;
     mutex                   m_stop_mutex;
     condition_variable      m_stop_condition;
+
+    std::atomic<sequence_counter_type> m_request_delivery_sequence{0};
+    mutable std::mutex      m_delivery_mutex;
+    std::condition_variable m_delivery_condition;
 };
 
 
