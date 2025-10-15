@@ -29,47 +29,12 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <mutex>
 
 
 namespace sintra {
-
-namespace detail {
-
-struct ProcessingFenceTick final
-{
-    std::uint64_t cookie;
-};
-
-inline std::mutex& processingFenceMutex()
-{
-    static std::mutex mutex;
-    return mutex;
-}
-
-inline std::condition_variable& processingFenceCondition()
-{
-    static std::condition_variable condition;
-    return condition;
-}
-
-inline std::atomic<std::uint64_t>& processingFenceLastCookie()
-{
-    static std::atomic<std::uint64_t> value{0};
-    return value;
-}
-
-inline std::atomic<std::uint64_t>& processingFenceNextCookie()
-{
-    static std::atomic<std::uint64_t> value{0};
-    return value;
-}
-
-} // namespace detail
-
 
 using std::ostringstream;
 using std::string;
@@ -166,15 +131,6 @@ void init(int argc, const char* const* argv, std::vector<Process_descriptor> v =
     }
     s_mproc->go();
 
-    auto processing_fence_handler = [](const detail::ProcessingFenceTick& tick) {
-        auto& last = detail::processingFenceLastCookie();
-        const std::uint64_t previous = last.load(std::memory_order_relaxed);
-        if (tick.cookie > previous) {
-            last.store(tick.cookie, std::memory_order_release);
-        }
-        detail::processingFenceCondition().notify_all();
-    };
-    s_mproc->activate(processing_fence_handler, Typed_instance_id<void>(any_local_or_remote));
 }
 
 
@@ -339,23 +295,7 @@ inline void wait_for_processing_quiescence()
         return;
     }
 
-    const std::uint64_t cookie =
-        detail::processingFenceNextCookie().fetch_add(1, std::memory_order_acq_rel) + 1;
-
-    using Tick_message = Message<Enclosure<detail::ProcessingFenceTick>>;
-    using Sender = Managed_process::Transceiver_type;
-
-    s_mproc->send<Tick_message, any_local_or_remote, Sender>(
-        detail::ProcessingFenceTick{cookie});
-
-    std::unique_lock<std::mutex> lock(detail::processingFenceMutex());
-    detail::processingFenceCondition().wait_for(
-        lock,
-        std::chrono::seconds(1),
-        [&] {
-            return detail::processingFenceLastCookie().load(std::memory_order_acquire) >= cookie ||
-                   s_mproc->m_communication_state != Managed_process::COMMUNICATION_RUNNING;
-        });
+    s_mproc->wait_for_delivery_fence();
 }
 
 
