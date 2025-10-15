@@ -862,9 +862,13 @@ Managed process options:
     {
         std::lock_guard<std::mutex> readers_lock(m_readers_mutex);
         assert(!m_readers.count(process_of(s_coord_id)));
-        auto it = m_readers.emplace(process_of(s_coord_id), process_of(s_coord_id));
-        assert(it.second == true);
-        it.first->second.wait_until_ready();
+        auto progress = std::make_shared<Process_message_reader::Delivery_progress>();
+        auto [reader_it, inserted] = m_readers.emplace(
+            std::piecewise_construct,
+            std::forward_as_tuple(process_of(s_coord_id)),
+            std::forward_as_tuple(process_of(s_coord_id), progress, 0u));
+        assert(inserted == true);
+        reader_it->second.wait_until_ready();
     }
 
     // Up to this point, there was no infrastructure for a proper construction
@@ -1023,10 +1027,11 @@ bool Managed_process::spawn_swarm_process(
             m_readers.erase(existing);
         }
 
+        auto progress = std::make_shared<Process_message_reader::Delivery_progress>();
         auto eit = m_readers.emplace(
             std::piecewise_construct,
             std::forward_as_tuple(s.piid),
-            std::forward_as_tuple(s.piid, s.occurrence)
+            std::forward_as_tuple(s.piid, progress, s.occurrence)
         );
         assert(eit.second == true);
 
@@ -1436,11 +1441,11 @@ inline void Managed_process::run_after_current_handler(function<void()> task)
 inline
 void Managed_process::wait_for_delivery_fence()
 {
-    std::vector<Process_message_reader::Delivery_waiter> waiters;
+    std::vector<Process_message_reader::Delivery_target> targets;
 
     {
         std::lock_guard<std::mutex> readers_lock(m_readers_mutex);
-        waiters.reserve(m_readers.size() * 2);
+        targets.reserve(m_readers.size() * 2);
 
         for (auto& [process_id, reader] : m_readers) {
             (void)process_id;
@@ -1449,26 +1454,68 @@ void Managed_process::wait_for_delivery_fence()
             }
 
             const auto req_target = reader.get_request_leading_sequence();
-            auto req_waiter = reader.prepare_delivery_wait(
+            auto req_target_info = reader.prepare_delivery_target(
                 Process_message_reader::Delivery_stream::Request,
                 req_target);
-            if (req_waiter.valid()) {
-                waiters.emplace_back(std::move(req_waiter));
+            if (req_target_info.wait_needed) {
+                targets.emplace_back(std::move(req_target_info));
             }
 
             const auto rep_target = reader.get_reply_leading_sequence();
-            auto rep_waiter = reader.prepare_delivery_wait(
+            auto rep_target_info = reader.prepare_delivery_target(
                 Process_message_reader::Delivery_stream::Reply,
                 rep_target);
-            if (rep_waiter.valid()) {
-                waiters.emplace_back(std::move(rep_waiter));
+            if (rep_target_info.wait_needed) {
+                targets.emplace_back(std::move(rep_target_info));
             }
         }
     }
 
-    for (auto& waiter : waiters) {
-        waiter.wait();
+    if (targets.empty()) {
+        return;
     }
+
+    auto all_targets_satisfied = [&]() {
+        for (const auto& target : targets) {
+            const auto progress = target.progress;
+            if (!progress) {
+                continue;
+            }
+
+            const auto observed = (target.stream == Process_message_reader::Delivery_stream::Request)
+                ? progress->request_sequence.load(std::memory_order_acquire)
+                : progress->reply_sequence.load(std::memory_order_acquire);
+
+            if (observed >= target.target) {
+                continue;
+            }
+
+            const auto stopped = (target.stream == Process_message_reader::Delivery_stream::Request)
+                ? progress->request_stopped.load(std::memory_order_acquire)
+                : progress->reply_stopped.load(std::memory_order_acquire);
+
+            if (stopped) {
+                continue;
+            }
+
+            return false;
+        }
+
+        return true;
+    };
+
+    if (all_targets_satisfied()) {
+        return;
+    }
+
+    std::unique_lock<std::mutex> lk(m_delivery_mutex);
+    m_delivery_condition.wait(lk, all_targets_satisfied);
+}
+
+
+inline void Managed_process::notify_delivery_progress()
+{
+    m_delivery_condition.notify_all();
 }
 
 
