@@ -1788,15 +1788,7 @@ inline void Managed_process::wake_all_delivery_waiters()
         return;
     }
 
-    std::vector<Delivery_waiter*> waiters_snapshot;
-    waiters_snapshot.reserve(m_delivery_waiters.size());
     for (auto* waiter : m_delivery_waiters) {
-        waiters_snapshot.push_back(waiter);
-    }
-
-    waiters_lock.unlock();
-
-    for (auto* waiter : waiters_snapshot) {
         if (!waiter) {
             continue;
         }
