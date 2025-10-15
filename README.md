@@ -91,60 +91,34 @@ sintra::activate<sintra::Managed_process>(
 
 ### Asynchronous Message Dispatch
 
-Sintra uses **dedicated reader threads** to process incoming messages from shared memory ring buffers. When a message arrives:
-1. A reader thread reads the message from the ring buffer
-2. The reader thread invokes registered slot callbacks **asynchronously**
-3. Slot callbacks execute on the reader thread, not the main thread
+Sintra uses **dedicated reader threads** to process incoming messages from shared memory rings. When a message arrives:
+1. A reader thread pulls the message from the ring buffer.
+2. The reader thread invokes the matching slot or RPC handler **asynchronously**.
+3. Handlers (and their post-handler continuations) execute on the reader thread, not the thread that published the message or called the barrier.
 
-**Critical implication**: If your slot callbacks modify shared data structures (e.g., pushing to a `std::vector`), you **must protect them with synchronization primitives** (mutexes, atomics, etc.) to avoid data races with your main thread.
+**Concurrency reminder:** Slot handlers that touch shared state must still synchronize with other threads in your process (via mutexes, atomics, etc.). The barriers described below coordinate *when* handlers run; they do not eliminate the need for thread-safe data structures.
 
 ### Barrier Semantics
 
-The `sintra::barrier()` function synchronizes **process control flow** across multiple processes—it ensures all participating processes have reached the barrier point. However:
+`sintra::barrier()` coordinates progress across processes and comes in three flavors that trade off strength for cost. The template defaults to `delivery_fence_t`, so a plain `barrier("name")` is already stronger than a bare rendezvous.
 
-**Barriers do NOT guarantee that pub/sub messages have been fully processed by slot callbacks.**
+| Mode | Call form | What it guarantees when the function returns |
+| --- | --- | --- |
+| **Rendezvous** | `barrier<sintra::rendezvous_t>(name)` | Every participant has reached the barrier. No guarantees about outstanding messages. |
+| **Delivery fence (default)** | `barrier(name)` or `barrier<sintra::delivery_fence_t>(name)` | All pre-barrier messages have been **fetched** by the local reader thread and are queued for handling. Their handlers may still be running. |
+| **Processing fence** | `barrier(sintra::processing_fence_t{}, name)` | All handlers for messages published before the barrier have **completed** (including per-handler continuations) on every participant. |
 
-After all processes pass a barrier:
-- All processes have reached that point in their execution
-- Messages sent *before* the barrier have been *written* to ring buffers
-- **BUT**: Reader threads may still be invoking slot callbacks
-
-If you need to ensure messages are processed before proceeding, you must implement explicit synchronization:
-
-```cpp
-// Pattern 1: Explicit wait with condition variable (see example_5_barrier_flush.cpp)
-std::mutex mutex;
-std::condition_variable cv;
-size_t received_count = 0;
-
-sintra::activate_slot([&](const Message& msg) {
-    std::lock_guard<std::mutex> lock(mutex);
-    // Process message...
-    ++received_count;
-    cv.notify_one();
-});
-
-// Wait for expected count BEFORE barrier
-std::unique_lock<std::mutex> lock(mutex);
-cv.wait(lock, [&]{ return received_count == expected_count; });
-lock.unlock();
-
-sintra::barrier("my-barrier");  // Now safe - messages are processed
-```
+Delivery fences cost the same as rendezvous plus a short wait for readers to catch up. Processing fences add a single control message per process and an extra rendezvous so you can observe handler side effects deterministically.
 
 ```cpp
-// Pattern 2: Bounded wait with timeout (simpler but less precise)
-sintra::barrier("messages-sent");
+// Wait until everyone reaches the same point and any prior messages are queued locally.
+sintra::barrier("phase-1"); // delivery fence
 
-// Give reader threads time to process
-auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-while (received_count < expected_count &&
-       std::chrono::steady_clock::now() < deadline) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-}
+// Later: ensure the side effects from earlier messages are visible before reading shared data.
+sintra::barrier(sintra::processing_fence_t{}, "apply-updates");
 ```
 
-**Key takeaway**: Always protect shared data accessed by both slot callbacks and your main thread with mutexes or other synchronization primitives.
+Processing fences are safe to call from any thread, including handlers themselves: if the current thread is the reader, the fence returns immediately. When coordination between threads inside the same process is also required, combine Sintra barriers with standard threading primitives.
 
 ## Getting started
 
