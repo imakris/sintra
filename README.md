@@ -1,8 +1,9 @@
 # Sintra
 
 [![Build - Linux](https://github.com/imakris/sintra/actions/workflows/build-linux.yml/badge.svg)](https://github.com/imakris/sintra/actions/workflows/build-linux.yml)
-[![Build - Windows](https://github.com/imakris/sintra/actions/workflows/build-windows.yml/badge.svg)](https://github.com/imakris/sintra/actions/workflows/build-windows.yml)
 [![Stress Test - Linux](https://github.com/imakris/sintra/actions/workflows/stress-test-linux.yml/badge.svg)](https://github.com/imakris/sintra/actions/workflows/stress-test-linux.yml)
+
+[![Build - Windows](https://github.com/imakris/sintra/actions/workflows/build-windows.yml/badge.svg)](https://github.com/imakris/sintra/actions/workflows/build-windows.yml)
 [![Stress Test - Windows](https://github.com/imakris/sintra/actions/workflows/stress-test-windows.yml/badge.svg)](https://github.com/imakris/sintra/actions/workflows/stress-test-windows.yml) 
 
 ![Header-only](https://img.shields.io/badge/header--only-yes-lightgrey)
