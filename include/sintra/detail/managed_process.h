@@ -273,9 +273,11 @@ struct Managed_process: Derived_transceiver<Managed_process>
 
     void flush(instance_id_type process_id, sequence_counter_type flush_sequence);
     void wait_for_incoming_delivery();
+    void notify_delivery_progress();
     void wait_for_handler_quiescence();
     void on_handler_start();
     void on_handler_complete();
+    size_t current_handler_depth() const;
     void run_after_current_handler(function<void()> task);
 
 
@@ -315,6 +317,10 @@ struct Managed_process: Derived_transceiver<Managed_process>
     std::atomic<size_t>                 m_active_handler_count{0};
     mutex                               m_active_handler_mutex;
     condition_variable                  m_active_handler_condition;
+
+    std::mutex                          m_delivery_progress_mutex;
+    std::condition_variable             m_delivery_progress_condition;
+    std::atomic<uint64_t>               m_delivery_progress_epoch{0};
 
     handler_registry_type               m_active_handlers;
 

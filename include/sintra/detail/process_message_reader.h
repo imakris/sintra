@@ -202,6 +202,9 @@ private:
 };
 
 
+Process_message_reader* current_message_reader();
+
+
 }
 
 

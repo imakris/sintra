@@ -57,6 +57,10 @@ namespace sintra {
 extern thread_local bool tl_is_req_thread;
 extern thread_local std::function<void()> tl_post_handler_function;
 
+namespace detail {
+    inline thread_local size_t g_active_handler_depth = 0;
+}
+
 inline std::once_flag& signal_handler_once_flag()
 {
     static std::once_flag flag;
@@ -1414,14 +1418,21 @@ inline void Managed_process::wait_for_incoming_delivery()
         return;
     }
 
-    auto backoff = std::chrono::microseconds(50);
-    const auto max_backoff = std::chrono::milliseconds(5);
+    uint64_t observed_epoch = m_delivery_progress_epoch.load(std::memory_order_acquire);
+    std::unique_lock<std::mutex> lock(m_delivery_progress_mutex);
+    auto* active_reader = current_message_reader();
 
     while (true) {
+        lock.unlock();
+
         bool complete = true;
         for (const auto& snapshot : snapshots) {
             auto* reader = snapshot.reader;
             if (!reader) {
+                continue;
+            }
+
+            if (reader == active_reader) {
                 continue;
             }
 
@@ -1445,19 +1456,26 @@ inline void Managed_process::wait_for_incoming_delivery()
             return;
         }
 
-        std::this_thread::sleep_for(backoff);
-        if (backoff < max_backoff) {
-            backoff += backoff;
-            if (backoff > max_backoff) {
-                backoff = max_backoff;
-            }
-        }
+        lock.lock();
+        m_delivery_progress_condition.wait(lock, [&]() {
+            return m_delivery_progress_epoch.load(std::memory_order_acquire) != observed_epoch ||
+                   m_communication_state != COMMUNICATION_RUNNING;
+        });
+        observed_epoch = m_delivery_progress_epoch.load(std::memory_order_acquire);
     }
+}
+
+
+inline void Managed_process::notify_delivery_progress()
+{
+    m_delivery_progress_epoch.fetch_add(1, std::memory_order_acq_rel);
+    m_delivery_progress_condition.notify_all();
 }
 
 
 inline void Managed_process::on_handler_start()
 {
+    detail::g_active_handler_depth += 1;
     m_active_handler_count.fetch_add(1, std::memory_order_acq_rel);
 }
 
@@ -1465,20 +1483,23 @@ inline void Managed_process::on_handler_start()
 inline void Managed_process::on_handler_complete()
 {
     auto previous = m_active_handler_count.fetch_sub(1, std::memory_order_acq_rel);
-    if (previous == 1) {
-        std::lock_guard<std::mutex> lock(m_active_handler_mutex);
-        m_active_handler_condition.notify_all();
-    }
+    assert(previous > 0);
+    assert(detail::g_active_handler_depth > 0);
+    detail::g_active_handler_depth -= 1;
+    m_active_handler_condition.notify_all();
 }
 
 
 inline void Managed_process::wait_for_handler_quiescence()
 {
-    auto backoff = std::chrono::microseconds(50);
-    const auto max_backoff = std::chrono::milliseconds(5);
+    const size_t local_depth = current_handler_depth();
+    std::unique_lock<std::mutex> lock(m_active_handler_mutex);
 
     while (true) {
-        if (m_active_handler_count.load(std::memory_order_acquire) == 0) {
+        lock.unlock();
+
+        const size_t active = m_active_handler_count.load(std::memory_order_acquire);
+        if (active <= local_depth) {
             return;
         }
 
@@ -1486,20 +1507,18 @@ inline void Managed_process::wait_for_handler_quiescence()
             return;
         }
 
-        std::unique_lock<std::mutex> lock(m_active_handler_mutex);
-        if (m_active_handler_count.load(std::memory_order_acquire) == 0) {
-            return;
-        }
-
-        m_active_handler_condition.wait_for(lock, backoff);
-
-        if (backoff < max_backoff) {
-            backoff += backoff;
-            if (backoff > max_backoff) {
-                backoff = max_backoff;
-            }
-        }
+        lock.lock();
+        m_active_handler_condition.wait(lock, [&]() {
+            return m_active_handler_count.load(std::memory_order_acquire) <= local_depth ||
+                   m_communication_state != COMMUNICATION_RUNNING;
+        });
     }
+}
+
+
+inline size_t Managed_process::current_handler_depth() const
+{
+    return detail::g_active_handler_depth;
 }
 
 

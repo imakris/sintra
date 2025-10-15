@@ -41,6 +41,14 @@ namespace sintra {
 void install_signal_handler();
 
 
+inline thread_local Process_message_reader* s_tl_active_reader = nullptr;
+
+inline Process_message_reader* current_message_reader()
+{
+    return s_tl_active_reader;
+}
+
+
 namespace {
 
 struct Handler_activity_scope
@@ -58,6 +66,40 @@ struct Handler_activity_scope
             s_mproc->on_handler_complete();
         }
     }
+};
+
+struct Delivery_progress_guard
+{
+    explicit Delivery_progress_guard(Managed_process* process)
+        : m_process(process)
+    {}
+
+    ~Delivery_progress_guard()
+    {
+        if (m_process) {
+            m_process->notify_delivery_progress();
+        }
+    }
+
+private:
+    Managed_process* m_process = nullptr;
+};
+
+struct Active_reader_scope
+{
+    explicit Active_reader_scope(Process_message_reader* reader)
+        : m_previous(s_tl_active_reader)
+    {
+        s_tl_active_reader = reader;
+    }
+
+    ~Active_reader_scope()
+    {
+        s_tl_active_reader = m_previous;
+    }
+
+private:
+    Process_message_reader* m_previous = nullptr;
 };
 
 } // namespace
@@ -282,6 +324,9 @@ void Process_message_reader::request_reader_function()
             break;
         }
 
+        Active_reader_scope reader_scope(this);
+        Delivery_progress_guard notify_guard{s_mproc};
+
         // Only the process with the coordinator's instance is allowed to send messages on
         // someone else's behalf (for relay purposes).
         // TODO: If some process not being part of the core set of processes sends nonsense,
@@ -467,6 +512,9 @@ void Process_message_reader::reply_reader_function()
         if (m == nullptr) {
             break;
         }
+
+        Active_reader_scope reader_scope(this);
+        Delivery_progress_guard notify_guard{s_mproc};
 
         // Only the process with the coordinator's instance is allowed to send messages on
         // someone else's behalf (for relay purposes).
