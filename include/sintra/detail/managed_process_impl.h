@@ -1383,6 +1383,7 @@ inline void Managed_process::flush(instance_id_type process_id, sequence_counter
 {
     assert(is_process(process_id));
 
+    Process_message_reader* reader = nullptr;
     sequence_counter_type rs = invalid_sequence;
     {
         std::shared_lock<std::shared_mutex> readers_lock(m_readers_mutex);
@@ -1395,16 +1396,29 @@ inline void Managed_process::flush(instance_id_type process_id, sequence_counter
 
         // Barrier completion messages are RPC responses sent on the reply ring.
         // Check the reply reading sequence, not the request reading sequence.
-        rs = it->second.get_reply_reading_sequence();
+        reader = &it->second;
+        rs = reader->get_reply_reading_sequence();
     }
-    if (rs < flush_sequence) {
-        std::unique_lock<mutex> flush_lock(m_flush_sequence_mutex);
-        m_flush_sequence.push_back(flush_sequence);
-        while (!m_flush_sequence.empty() &&
-            m_flush_sequence.front() <= flush_sequence)
-        {
-            m_flush_sequence_condition.wait(flush_lock);
-        }
+
+    if (rs >= flush_sequence) {
+        return;
+    }
+
+    std::unique_lock<mutex> flush_lock(m_flush_sequence_mutex);
+    m_flush_sequence.push_back(flush_sequence);
+
+    while (reader->get_reply_reading_sequence() < flush_sequence &&
+           m_communication_state == COMMUNICATION_RUNNING)
+    {
+        m_flush_sequence_condition.wait_for(
+            flush_lock,
+            std::chrono::milliseconds(500));
+    }
+
+    while (!m_flush_sequence.empty() &&
+           m_flush_sequence.front() <= flush_sequence)
+    {
+        m_flush_sequence.pop_front();
     }
 }
 
