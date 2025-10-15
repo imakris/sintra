@@ -27,6 +27,10 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define SINTRA_IMPL_H
 
 
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <cstdint>
 #include <cstdio>
 #include <mutex>
 
@@ -34,15 +38,36 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 namespace sintra {
 
 namespace detail {
-inline void report_processing_fence_placeholder()
+
+struct ProcessingFenceTick final
 {
-    static std::once_flag warned;
-    std::call_once(warned, []() {
-        std::fprintf(stderr,
-            "sintra: barrier<processing_fence_t> falls back to delivery semantics; "
-            "processing fences require handler tracking that is not yet implemented.\n");
-    });
+    std::uint64_t cookie;
+};
+
+inline std::mutex& processingFenceMutex()
+{
+    static std::mutex mutex;
+    return mutex;
 }
+
+inline std::condition_variable& processingFenceCondition()
+{
+    static std::condition_variable condition;
+    return condition;
+}
+
+inline std::atomic<std::uint64_t>& processingFenceLastCookie()
+{
+    static std::atomic<std::uint64_t> value{0};
+    return value;
+}
+
+inline std::atomic<std::uint64_t>& processingFenceNextCookie()
+{
+    static std::atomic<std::uint64_t> value{0};
+    return value;
+}
+
 } // namespace detail
 
 
@@ -140,6 +165,16 @@ void init(int argc, const char* const* argv, std::vector<Process_descriptor> v =
         s_mproc->branch(v);
     }
     s_mproc->go();
+
+    auto processing_fence_handler = [](const detail::ProcessingFenceTick& tick) {
+        auto& last = detail::processingFenceLastCookie();
+        const std::uint64_t previous = last.load(std::memory_order_relaxed);
+        if (tick.cookie > previous) {
+            last.store(tick.cookie, std::memory_order_release);
+        }
+        detail::processingFenceCondition().notify_all();
+    };
+    s_mproc->activate(processing_fence_handler, Typed_instance_id<void>(any_local_or_remote));
 }
 
 
@@ -295,6 +330,35 @@ bool barrier<rendezvous_t>(const std::string& barrier_name, const std::string& g
 }
 
 
+inline void wait_for_processing_quiescence()
+{
+    if (!s_mproc ||
+        s_mproc->m_communication_state != Managed_process::COMMUNICATION_RUNNING ||
+        on_request_reader_thread())
+    {
+        return;
+    }
+
+    const std::uint64_t cookie =
+        detail::processingFenceNextCookie().fetch_add(1, std::memory_order_acq_rel) + 1;
+
+    using Tick_message = Message<Enclosure<detail::ProcessingFenceTick>>;
+    using Sender = Managed_process::Transceiver_type;
+
+    s_mproc->send<Tick_message, any_local_or_remote, Sender>(
+        detail::ProcessingFenceTick{cookie});
+
+    std::unique_lock<std::mutex> lock(detail::processingFenceMutex());
+    detail::processingFenceCondition().wait_for(
+        lock,
+        std::chrono::seconds(1),
+        [&] {
+            return detail::processingFenceLastCookie().load(std::memory_order_acquire) >= cookie ||
+                   s_mproc->m_communication_state != Managed_process::COMMUNICATION_RUNNING;
+        });
+}
+
+
 // Specialization for delivery_fence_t - ensures message delivery before barrier
 template<>
 inline
@@ -324,12 +388,18 @@ template<>
 inline
 bool barrier<processing_fence_t>(const std::string& barrier_name, const std::string& group_name)
 {
-    detail::report_processing_fence_placeholder();
+    const bool rendezvous_completed = barrier<rendezvous_t>(barrier_name, group_name);
+    if (!rendezvous_completed) {
+        return false;
+    }
 
-    // Without explicit handler-tracking signals we can only guarantee delivery
-    // semantics.  Fall back to the delivery fence so callers continue to make
-    // forward progress while we design the stronger fence.
-    return barrier<delivery_fence_t>(barrier_name, group_name);
+    wait_for_processing_quiescence();
+
+    const std::string processing_phase_name = barrier_name + "/processing";
+    const bool quiescent_rendezvous =
+        barrier<rendezvous_t>(processing_phase_name, group_name);
+
+    return quiescent_rendezvous;
 }
 
 
