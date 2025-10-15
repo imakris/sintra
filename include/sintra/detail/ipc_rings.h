@@ -172,6 +172,13 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
   #include <sys/mman.h>  // ::mmap, ::munmap, MAP_FIXED, MAP_NOSYNC (if available)
   #include <unistd.h>    // ::sysconf
   #include <signal.h>    // ::kill
+  #if defined(__FreeBSD__)
+    #include <sys/types.h>
+    #include <sys/sysctl.h>
+    #include <sys/user.h>
+  #elif defined(__APPLE__)
+    #include <libproc.h>
+  #endif
 #endif
 
 
@@ -317,6 +324,39 @@ static inline bool is_process_alive(uint32_t pid)
         return errno != ESRCH;
     }
 
+#if defined(__FreeBSD__)
+    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, static_cast<int>(pid)};
+    struct kinfo_proc kip;
+    std::memset(&kip, 0, sizeof(kip));
+    size_t len = sizeof(kip);
+    if (::sysctl(mib, 4, &kip, &len, nullptr, 0) != 0) {
+        return true;
+    }
+
+    if (len == 0) {
+        return false;
+    }
+
+    switch (kip.ki_stat) {
+        case SZOMB:
+#ifdef SDEAD
+        case SDEAD:
+#endif
+            return false;
+        default:
+            return true;
+    }
+#elif defined(__APPLE__)
+    struct proc_bsdinfo bsd_info;
+    std::memset(&bsd_info, 0, sizeof(bsd_info));
+    int result = ::proc_pidinfo(static_cast<int>(pid), PROC_PIDTBSDINFO, 0, &bsd_info, sizeof(bsd_info));
+    if (result <= 0 || static_cast<size_t>(result) < sizeof(bsd_info)) {
+        return true;
+    }
+
+    constexpr int kProcStatusZombie = 5; // corresponds to SZOMB in <sys/proc.h>
+    return bsd_info.pbi_status != kProcStatusZombie;
+#else
     // Treat zombies as dead so scavenging logic can release their slots.
     // /proc/<pid>/stat contains the execution state character right after the
     // process name (enclosed in parentheses).  A state of 'Z' means zombie and
@@ -343,6 +383,7 @@ static inline bool is_process_alive(uint32_t pid)
 
     char state = stat_line[state_pos];
     return state != 'Z' && state != 'X';
+#endif
 }
 #endif
 
