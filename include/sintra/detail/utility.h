@@ -185,12 +185,72 @@ inline std::atomic<read_fn>& read_override()
     return fn;
 }
 
+inline int system_pipe2(int pipefd[2], int flags)
+{
+#if defined(__linux__) || defined(__FreeBSD__) || defined(__DragonFly__) || defined(__NetBSD__) || defined(__OpenBSD__)
+    // Linux and the BSD family provide pipe2(), so behaviour matches the
+    // original implementation exactly on those platforms.
+    return ::pipe2(pipefd, flags);
+#else
+    // Platforms such as macOS do not expose pipe2().  We emulate the subset of
+    // behaviour we rely on (O_CLOEXEC and O_NONBLOCK) by combining pipe() with
+    // fcntl().
+    //
+    // Unlike the native pipe2(), these flag changes are not atomic with the
+    // file descriptor creation, so another thread could briefly observe the
+    // descriptors without O_CLOEXEC applied.  This is a known limitation of
+    // the traditional pipe()+fcntl() fallback that affects every consumer on
+    // such platforms, so we document it here instead of silently claiming full
+    // equivalence.
+    if (flags & ~(O_CLOEXEC | O_NONBLOCK)) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (::pipe(pipefd) == -1) {
+        return -1;
+    }
+
+    const auto set_flag = [&](int fd, int cmd, int value) {
+        int current = ::fcntl(fd, cmd == F_SETFD ? F_GETFD : F_GETFL);
+        if (current == -1) {
+            return -1;
+        }
+        return ::fcntl(fd, cmd, current | value);
+    };
+
+    if (flags & O_CLOEXEC) {
+        if (set_flag(pipefd[0], F_SETFD, FD_CLOEXEC) == -1 ||
+            set_flag(pipefd[1], F_SETFD, FD_CLOEXEC) == -1) {
+            int saved_errno = errno;
+            ::close(pipefd[0]);
+            ::close(pipefd[1]);
+            errno = saved_errno;
+            return -1;
+        }
+    }
+
+    if (flags & O_NONBLOCK) {
+        if (set_flag(pipefd[0], F_SETFL, O_NONBLOCK) == -1 ||
+            set_flag(pipefd[1], F_SETFL, O_NONBLOCK) == -1) {
+            int saved_errno = errno;
+            ::close(pipefd[0]);
+            ::close(pipefd[1]);
+            errno = saved_errno;
+            return -1;
+        }
+    }
+
+    return 0;
+#endif
+}
+
 inline int call_pipe2(int pipefd[2], int flags)
 {
     if (auto override = pipe2_override().load(std::memory_order_acquire)) {
         return override(pipefd, flags);
     }
-    return ::pipe2(pipefd, flags);
+    return system_pipe2(pipefd, flags);
 }
 
 inline ssize_t call_write(int fd, const void* buf, size_t count)
