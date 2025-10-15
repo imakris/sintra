@@ -125,11 +125,21 @@ sequence_counter_type Process_group::barrier(
         return s_mproc->m_out_rep_c->get_leading_sequence();
     }
     else {
-        // Not last arrival - throw deferral to block until barrier completes
-        std::pair<deferral, function<void()> > ret;
-        ret.first.new_fiid = b.common_function_iid;
-        ret.second = [&](){ b.m.unlock(); };
-        throw ret;
+        // Not last arrival - emit a deferral message now and return without a normal reply
+        auto* current_message = s_tl_current_message;
+        assert(current_message);
+
+        deferral* placed_msg = s_mproc->m_out_rep_c->write<deferral>(0, b.common_function_iid);
+        Transceiver::finalize_rpc_write(
+            placed_msg,
+            current_message->sender_instance_id,
+            current_message->function_instance_id,
+            this,
+            (type_id_type)detail::reserved_id::deferral);
+
+        mark_rpc_reply_deferred();
+        b.m.unlock();
+        return 0;
     }
 }
 
@@ -295,12 +305,20 @@ instance_id_type Coordinator::wait_for_instance(const string& assigned_name)
         common_function_iid = waited_info.common_function_iid = make_instance_id();
     }
 
-    std::pair<deferral, std::function<void()>> ret;
-    ret.first.new_fiid = common_function_iid;
-    ret.second = [&](){
-        m_publish_mutex.unlock();
-    };
-    throw ret;
+    auto* current_message = s_tl_current_message;
+    assert(current_message);
+
+    deferral* placed_msg = s_mproc->m_out_rep_c->write<deferral>(0, common_function_iid);
+    Transceiver::finalize_rpc_write(
+        placed_msg,
+        current_message->sender_instance_id,
+        current_message->function_instance_id,
+        this,
+        (type_id_type)detail::reserved_id::deferral);
+
+    mark_rpc_reply_deferred();
+    m_publish_mutex.unlock();
+    return invalid_instance_id;
 }
 
 

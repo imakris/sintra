@@ -51,6 +51,33 @@ Calling `sintra::finalize()` now performs the following steps:
   where a global watermark might be ahead of a recipient's channel.
   *(Process_group::barrier in coordinator_impl.h)*
 
+### Deferral replies without exceptions
+
+- **Direct deferral emission:** Earlier versions bubbled a `std::pair<deferral,
+  function<void()>>` through `Transceiver::rpc_handler` to signal that a caller
+  had to block until the barrier finished. The handler caught the pair, wrote
+  the deferral message, executed the cleanup callback (typically unlocking the
+  barrier mutex), and then suppressed the normal reply. The current code keeps
+  the same semantics but eliminates the throw/catch round-trip: `Process_group::
+  barrier()` now writes the deferral immediately, marks the RPC as deferred via
+  a thread-local flag, and simply returns. `Transceiver::rpc_handler()` checks
+  the flag right after invoking the target and skips the standard reply path
+  when the callee already produced one. *(Process_group::barrier in
+  coordinator_impl.h, Transceiver::rpc_handler in transceiver_impl.h, and
+  helpers in process_message_reader.h)*
+- **Why this is valid:** The callee still holds the barrier mutex until after
+  the deferral message is enqueued, ensuring the same ordering guarantees the
+  callback used to enforce. The shared `finalize_rpc_write()` helper continues
+  to populate sender/receiver metadata, so the transport layer observes an
+  identical message stream. No exception crosses the RPC boundary, meaning less
+  overhead on hot paths and a simpler control flow that is easier to audit.
+- **Practical difference from the previous patch:** Instead of stashing a
+  "pending deferral" structure that the dispatcher flushed later, the current
+  version emits the deferral synchronously and records only a single bit of
+  thread-local state. This removes the need for auxiliary storage and reduces
+  the number of code paths involved in a deferred reply while preserving the
+  observable behaviour for both callers and the coordinator.
+
 ### Draining state lifecycle
 
 - **Setting the draining bit:** The draining bit is set in two scenarios:

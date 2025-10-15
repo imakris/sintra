@@ -72,6 +72,22 @@ static inline thread_local instance_id_type s_tl_common_function_iid = invalid_i
 
 static inline thread_local instance_id_type s_tl_additional_piids[max_process_index];
 static inline thread_local size_t s_tl_additional_piids_size = 0;
+static inline thread_local bool s_tl_rpc_reply_deferred = false;
+
+inline void clear_rpc_reply_deferred()
+{
+    s_tl_rpc_reply_deferred = false;
+}
+
+inline void mark_rpc_reply_deferred()
+{
+    s_tl_rpc_reply_deferred = true;
+}
+
+inline bool rpc_reply_is_deferred()
+{
+    return s_tl_rpc_reply_deferred;
+}
 
 // This exists because it may occur that there are multiple outstanding RPC calls
 // from different threads.
