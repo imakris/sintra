@@ -41,6 +41,7 @@
 //
 
 #include <sintra/sintra.h>
+#include <cstdlib>
 #include <iostream>
 
 
@@ -59,7 +60,7 @@ struct Remotely_accessible: Derived_transceiver<Remotely_accessible>
         else
         if (v == 2020) {
             // crash
-            *((int*)0) = 0;
+            std::abort();
         }
         return to_string(v) + ": " + s;
     }
