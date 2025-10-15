@@ -1645,12 +1645,20 @@ struct Ring_R : Ring<T, true>
         size_t new_trailing_octile = (8 * t_idx) / this->m_num_elements;
 
         if (new_trailing_octile != m_trailing_octile) {
-            auto diff =
-                (uint64_t(1) << (8 * new_trailing_octile)) -
-                (uint64_t(1) << (8 *   m_trailing_octile));
-            c.read_access.fetch_add(diff, std::memory_order_acq_rel);
+            // The trailing guard lives in a packed 8-bit counter. Moving it from one
+            // octile to another requires incrementing the new byte *and* decrementing
+            // the old byte. The previous single fetch_add() attempted to do both via a
+            // single subtraction of bitmasks, but that underflowed the low byte and
+            // never incremented the target byte (e.g. 0x0100 - 0x0001 == 0x00FF).
+            // Performing the transfer in two explicit steps ensures the guard never
+            // disappears in the window between operations.
+            const uint64_t new_mask = uint64_t(1) << (8 * new_trailing_octile);
+            const uint64_t old_mask = uint64_t(1) << (8 * m_trailing_octile);
+
+            c.read_access.fetch_add(new_mask, std::memory_order_acq_rel);
             c.reading_sequences[m_rs_index].data.trailing_octile.store(
                 static_cast<uint8_t>(new_trailing_octile), std::memory_order_relaxed);
+            c.read_access.fetch_sub(old_mask, std::memory_order_acq_rel);
             m_trailing_octile = new_trailing_octile;
         }
     }
