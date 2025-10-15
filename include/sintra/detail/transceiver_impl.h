@@ -738,21 +738,10 @@ void Transceiver::rpc_handler(Message_prefix& untyped_msg)
         [&](){return call_function_with_fusion_vector_args(*obj, RPCTC::mf(), msg);}
     };
 
+    clear_rpc_reply_deferred();
+
     try {
         vf.call();
-    }
-    catch(std::pair<deferral, function<void()> > &d) {
-
-        // The point for returning a function in addition to the deferral, is that
-        // we would most likely have to synchronize with the actual return, in order
-        // to prevent that the final result is written before the deferral.
-        // The function, in this case, would unlock a mutex (which is the case for
-        // the barrier implementation), or something similar.
-
-        deferral* placed_msg = s_mproc->m_out_rep_c->write<deferral>(0, d.first.new_fiid);
-        finalize_rpc_write(placed_msg, msg, obj, (type_id_type)detail::reserved_id::deferral);
-        d.second();
-        return;
     }
     catch(std::invalid_argument  &e) { etid = (type_id_type)detail::reserved_id::std_invalid_argument; what = to_exception_string(e.what()); }
     catch(std::domain_error      &e) { etid = (type_id_type)detail::reserved_id::std_domain_error;     what = to_exception_string(e.what()); }
@@ -769,6 +758,11 @@ void Transceiver::rpc_handler(Message_prefix& untyped_msg)
     }
 
     if (etid == not_defined_type_id) { // normal return
+
+        if (rpc_reply_is_deferred()) {
+            clear_rpc_reply_deferred();
+            return;
+        }
 
         // additional return recipients, assumed to be waiting
         if (s_tl_common_function_iid != invalid_instance_id) {
