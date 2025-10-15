@@ -265,6 +265,7 @@ struct Managed_process: Derived_transceiver<Managed_process>
         instance_id_type,
         Process_message_reader
     >                                   m_readers;
+    mutable mutex                       m_readers_mutex;
 
     int                                 m_num_active_readers = 0;
     mutex                               m_num_active_readers_mutex;

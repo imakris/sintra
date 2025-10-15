@@ -496,6 +496,7 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
 
         //// and finally, if the process was being read, stop reading from it
         if (iid != s_mproc_id) {
+            std::lock_guard<std::mutex> readers_lock(s_mproc->m_readers_mutex);
             auto it = s_mproc->m_readers.find(process_iid);
             if (it != s_mproc->m_readers.end()) {
                 it->second.stop_nowait();

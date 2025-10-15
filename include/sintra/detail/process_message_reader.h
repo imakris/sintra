@@ -169,12 +169,41 @@ struct Process_message_reader
         return m_in_req_c->get_leading_sequence();
     }
 
-    void wait_for_request_delivery(sequence_counter_type target_sequence);
+    sequence_counter_type get_reply_leading_sequence() const
+    {
+        return m_in_rep_c->get_leading_sequence();
+    }
 
     sequence_counter_type get_reply_reading_sequence() const
     {
         return m_in_rep_c->get_message_reading_sequence();
     }
+
+    struct Delivery_state
+    {
+        mutable std::mutex mutex;
+        std::condition_variable condition;
+        std::atomic<sequence_counter_type> sequence{invalid_sequence};
+        std::atomic<bool> shutting_down{false};
+    };
+
+    enum class Delivery_stream
+    {
+        Request,
+        Reply
+    };
+
+    struct Delivery_waiter
+    {
+        void wait() const;
+        bool valid() const { return wait_needed && static_cast<bool>(state); }
+
+        std::shared_ptr<Delivery_state> state;
+        sequence_counter_type target = invalid_sequence;
+        bool wait_needed = false;
+    };
+
+    Delivery_waiter prepare_delivery_wait(Delivery_stream stream, sequence_counter_type target_sequence) const;
 
     State state() const { return m_reader_state.load(std::memory_order_acquire); }
 
@@ -187,6 +216,9 @@ private:
     std::shared_ptr<Message_ring_R> m_in_req_c;
     std::shared_ptr<Message_ring_R> m_in_rep_c;
 
+    std::shared_ptr<Delivery_state>  m_request_delivery_state = std::make_shared<Delivery_state>();
+    std::shared_ptr<Delivery_state>  m_reply_delivery_state   = std::make_shared<Delivery_state>();
+
     thread*                 m_request_reader_thread = nullptr;
     thread*                 m_reply_reader_thread   = nullptr;
     
@@ -197,9 +229,6 @@ private:
     mutex                   m_stop_mutex;
     condition_variable      m_stop_condition;
 
-    std::atomic<sequence_counter_type> m_request_delivery_sequence{0};
-    mutable std::mutex      m_delivery_mutex;
-    std::condition_variable m_delivery_condition;
 };
 
 

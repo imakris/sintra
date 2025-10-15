@@ -147,6 +147,7 @@ namespace {
         if (mproc && mproc->m_out_req_c) {
             mproc->emit_remote<Managed_process::terminated_abnormally>(sig_number);
 
+            std::lock_guard<std::mutex> readers_lock(mproc->m_readers_mutex);
             for (auto& reader : mproc->m_readers) {
                 reader.second.stop_nowait();
             }
@@ -261,6 +262,7 @@ static void s_signal_handler(int sig)
     if (s_mproc && s_mproc->m_out_req_c) {
         s_mproc->emit_remote<Managed_process::terminated_abnormally>(sig);
 
+        std::lock_guard<std::mutex> readers_lock(s_mproc->m_readers_mutex);
         for (auto& reader : s_mproc->m_readers) {
             reader.second.stop_nowait();
         }
@@ -529,7 +531,10 @@ Managed_process::~Managed_process()
     this->Derived_transceiver<Managed_process>::destroy();
 
     // no more reading
-    m_readers.clear();
+    {
+        std::lock_guard<std::mutex> readers_lock(m_readers_mutex);
+        m_readers.clear();
+    }
 
     // no more writing
     if (m_out_req_c) {
@@ -854,10 +859,13 @@ Managed process options:
         }
     }
 
-    assert(!m_readers.count(process_of(s_coord_id)));
-    auto it = m_readers.emplace(process_of(s_coord_id), process_of(s_coord_id));
-    assert(it.second == true);
-    it.first->second.wait_until_ready();
+    {
+        std::lock_guard<std::mutex> readers_lock(m_readers_mutex);
+        assert(!m_readers.count(process_of(s_coord_id)));
+        auto it = m_readers.emplace(process_of(s_coord_id), process_of(s_coord_id));
+        assert(it.second == true);
+        it.first->second.wait_until_ready();
+    }
 
     // Up to this point, there was no infrastructure for a proper construction
     // of Transceiver base.
@@ -1005,23 +1013,27 @@ bool Managed_process::spawn_swarm_process(
 
     cstring_vector cargs(args);
 
-    // If a reader for this process id exists (from a previous crashed instance),
-    // stop it and remove it before creating a fresh one for recovery.
-    if (auto existing = m_readers.find(s.piid); existing != m_readers.end()) {
-        existing->second.stop_and_wait(1.0);
-        m_readers.erase(existing);
+    {
+        std::lock_guard<std::mutex> readers_lock(m_readers_mutex);
+
+        // If a reader for this process id exists (from a previous crashed instance),
+        // stop it and remove it before creating a fresh one for recovery.
+        if (auto existing = m_readers.find(s.piid); existing != m_readers.end()) {
+            existing->second.stop_and_wait(1.0);
+            m_readers.erase(existing);
+        }
+
+        auto eit = m_readers.emplace(
+            std::piecewise_construct,
+            std::forward_as_tuple(s.piid),
+            std::forward_as_tuple(s.piid, s.occurrence)
+        );
+        assert(eit.second == true);
+
+        // Before spawning the new process, we have to assure that the
+        // corresponding reading threads are up and running.
+        eit.first->second.wait_until_ready();
     }
-
-    auto eit = m_readers.emplace(
-        std::piecewise_construct,
-        std::forward_as_tuple(s.piid),
-        std::forward_as_tuple(s.piid, s.occurrence)
-    );
-    assert(eit.second == true);
-
-    // Before spawning the new process, we have to assure that the
-    // corresponding reading threads are up and running.
-    eit.first->second.wait_until_ready();
 
     bool success = spawn_detached(s.binary_name.c_str(), cargs.v());
 
@@ -1045,6 +1057,7 @@ bool Managed_process::spawn_swarm_process(
         std::cerr << "failed to launch " << s.binary_name << std::endl;
 
         //m_readers.pop_back();
+        std::lock_guard<std::mutex> readers_lock(m_readers_mutex);
         m_readers.erase(s.piid);
     }
 
@@ -1173,8 +1186,11 @@ void Managed_process::pause()
     if (m_communication_state <= COMMUNICATION_PAUSED)
         return;
 
-    for (auto& ri : m_readers) {
-        ri.second.pause();
+    {
+        std::lock_guard<std::mutex> readers_lock(m_readers_mutex);
+        for (auto& ri : m_readers) {
+            ri.second.pause();
+        }
     }
 
     m_communication_state = COMMUNICATION_PAUSED;
@@ -1193,8 +1209,11 @@ void Managed_process::stop()
     if (m_communication_state == COMMUNICATION_STOPPED)
         return;
 
-    for (auto& ri : m_readers) {
-        ri.second.stop_nowait();
+    {
+        std::lock_guard<std::mutex> readers_lock(m_readers_mutex);
+        for (auto& ri : m_readers) {
+            ri.second.stop_nowait();
+        }
     }
 
     m_communication_state = COMMUNICATION_STOPPED;
@@ -1362,17 +1381,20 @@ inline void Managed_process::flush(instance_id_type process_id, sequence_counter
 {
     assert(is_process(process_id));
 
-    auto it = m_readers.find(process_id);
-    if (it == m_readers.end()) {
-        throw std::logic_error(
-            "attempted to flush the channel of a process which is not being read"
-        );
-    }
-    auto& reader = it->second;
+    sequence_counter_type rs = invalid_sequence;
+    {
+        std::lock_guard<std::mutex> readers_lock(m_readers_mutex);
+        auto it = m_readers.find(process_id);
+        if (it == m_readers.end()) {
+            throw std::logic_error(
+                "attempted to flush the channel of a process which is not being read"
+            );
+        }
 
-    // Barrier completion messages are RPC responses sent on the reply ring.
-    // Check the reply reading sequence, not the request reading sequence.
-    auto rs = reader.get_reply_reading_sequence();
+        // Barrier completion messages are RPC responses sent on the reply ring.
+        // Check the reply reading sequence, not the request reading sequence.
+        rs = it->second.get_reply_reading_sequence();
+    }
     if (rs < flush_sequence) {
         std::unique_lock<mutex> flush_lock(m_flush_sequence_mutex);
         m_flush_sequence.push_back(flush_sequence);
@@ -1414,23 +1436,38 @@ inline void Managed_process::run_after_current_handler(function<void()> task)
 inline
 void Managed_process::wait_for_delivery_fence()
 {
-    std::vector<std::pair<Process_message_reader*, sequence_counter_type>> targets;
-    targets.reserve(m_readers.size());
+    std::vector<Process_message_reader::Delivery_waiter> waiters;
 
-    for (auto& [process_id, reader] : m_readers) {
-        (void)process_id;
-        if (reader.state() != Process_message_reader::READER_NORMAL) {
-            continue;
+    {
+        std::lock_guard<std::mutex> readers_lock(m_readers_mutex);
+        waiters.reserve(m_readers.size() * 2);
+
+        for (auto& [process_id, reader] : m_readers) {
+            (void)process_id;
+            if (reader.state() != Process_message_reader::READER_NORMAL) {
+                continue;
+            }
+
+            const auto req_target = reader.get_request_leading_sequence();
+            auto req_waiter = reader.prepare_delivery_wait(
+                Process_message_reader::Delivery_stream::Request,
+                req_target);
+            if (req_waiter.valid()) {
+                waiters.emplace_back(std::move(req_waiter));
+            }
+
+            const auto rep_target = reader.get_reply_leading_sequence();
+            auto rep_waiter = reader.prepare_delivery_wait(
+                Process_message_reader::Delivery_stream::Reply,
+                rep_target);
+            if (rep_waiter.valid()) {
+                waiters.emplace_back(std::move(rep_waiter));
+            }
         }
-        const auto target = reader.get_request_leading_sequence();
-        targets.emplace_back(&reader, target);
     }
 
-    for (auto& [reader, target] : targets) {
-        if (!reader) {
-            continue;
-        }
-        reader->wait_for_request_delivery(target);
+    for (auto& waiter : waiters) {
+        waiter.wait();
     }
 }
 

@@ -35,6 +35,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <cstring>
 #include <iterator>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -243,7 +244,13 @@ bool Transceiver::assign_name(const string& name)
 template <typename/* = void*/>
 void Transceiver::destroy()
 {
-    if (!s_mproc || !s_coord_id || s_mproc->m_readers.empty()) {
+    bool no_readers = true;
+    if (s_mproc && s_coord_id) {
+        std::lock_guard<std::mutex> readers_lock(s_mproc->m_readers_mutex);
+        no_readers = s_mproc->m_readers.empty();
+    }
+
+    if (!s_mproc || !s_coord_id || no_readers) {
         // If the process is not running, there is nothing to facilitate the basic
         // functionality of a Transceiver object. This can happen if the process object is
         // itself being destroyed.
