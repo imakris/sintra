@@ -315,7 +315,8 @@ bool barrier<processing_fence_t>(const std::string& barrier_name, const std::str
 }
 
 
-// Primary template with default mode = rendezvous_t
+// Primary template for unsupported modes falls back to rendezvous_t.
+// Note: when no explicit mode is specified, the default is delivery_fence_t.
 template<typename BarrierMode>
 inline
 bool barrier(const std::string& barrier_name, const std::string& group_name)

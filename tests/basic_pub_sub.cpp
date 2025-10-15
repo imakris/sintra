@@ -204,7 +204,7 @@ int process_sender()
     sintra::world() << 3;
     sintra::world() << 4;
 
-    sintra::barrier<sintra::processing_fence_t>("messages-done");
+    sintra::barrier("messages-done");
     sintra::barrier("write-phase");
 
     const auto shared_dir = get_shared_directory();
@@ -236,7 +236,7 @@ int process_string_receiver()
 
     // After this barrier, we know all messages have been sent and processed
     // by the reader thread, so g_received_strings contains all messages
-    sintra::barrier<sintra::processing_fence_t>("messages-done");
+    sintra::barrier("messages-done");
 
     const auto shared_dir = get_shared_directory();
     write_strings(shared_dir / "strings.txt", g_received_strings);
@@ -260,7 +260,7 @@ int process_int_receiver()
 
     // After this barrier, we know all messages have been sent and processed
     // by the reader thread, so g_received_ints contains all messages
-    sintra::barrier<sintra::processing_fence_t>("messages-done");
+    sintra::barrier("messages-done");
 
     const auto shared_dir = get_shared_directory();
     write_ints(shared_dir / "ints.txt", g_received_ints);
