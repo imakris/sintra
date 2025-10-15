@@ -1385,6 +1385,124 @@ inline void Managed_process::flush(instance_id_type process_id, sequence_counter
 }
 
 
+inline void Managed_process::wait_for_incoming_delivery()
+{
+    struct Reader_snapshot
+    {
+        Process_message_reader* reader = nullptr;
+        sequence_counter_type   request_target = 0;
+        sequence_counter_type   reply_target = 0;
+    };
+
+    std::vector<Reader_snapshot> snapshots;
+    snapshots.reserve(m_readers.size());
+
+    for (auto& entry : m_readers) {
+        auto& reader = entry.second;
+        if (reader.state() == Process_message_reader::READER_STOPPING) {
+            continue;
+        }
+
+        snapshots.push_back(Reader_snapshot{
+            &reader,
+            reader.get_request_leading_sequence(),
+            reader.get_reply_leading_sequence()
+        });
+    }
+
+    if (snapshots.empty()) {
+        return;
+    }
+
+    auto backoff = std::chrono::microseconds(50);
+    const auto max_backoff = std::chrono::milliseconds(5);
+
+    while (true) {
+        bool complete = true;
+        for (const auto& snapshot : snapshots) {
+            auto* reader = snapshot.reader;
+            if (!reader) {
+                continue;
+            }
+
+            if (reader->state() == Process_message_reader::READER_STOPPING) {
+                continue;
+            }
+
+            if (reader->get_request_reading_sequence() < snapshot.request_target ||
+                reader->get_reply_reading_sequence() < snapshot.reply_target)
+            {
+                complete = false;
+                break;
+            }
+        }
+
+        if (complete) {
+            return;
+        }
+
+        if (m_communication_state != COMMUNICATION_RUNNING) {
+            return;
+        }
+
+        std::this_thread::sleep_for(backoff);
+        if (backoff < max_backoff) {
+            backoff += backoff;
+            if (backoff > max_backoff) {
+                backoff = max_backoff;
+            }
+        }
+    }
+}
+
+
+inline void Managed_process::on_handler_start()
+{
+    m_active_handler_count.fetch_add(1, std::memory_order_acq_rel);
+}
+
+
+inline void Managed_process::on_handler_complete()
+{
+    auto previous = m_active_handler_count.fetch_sub(1, std::memory_order_acq_rel);
+    if (previous == 1) {
+        std::lock_guard<std::mutex> lock(m_active_handler_mutex);
+        m_active_handler_condition.notify_all();
+    }
+}
+
+
+inline void Managed_process::wait_for_handler_quiescence()
+{
+    auto backoff = std::chrono::microseconds(50);
+    const auto max_backoff = std::chrono::milliseconds(5);
+
+    while (true) {
+        if (m_active_handler_count.load(std::memory_order_acquire) == 0) {
+            return;
+        }
+
+        if (m_communication_state != COMMUNICATION_RUNNING) {
+            return;
+        }
+
+        std::unique_lock<std::mutex> lock(m_active_handler_mutex);
+        if (m_active_handler_count.load(std::memory_order_acquire) == 0) {
+            return;
+        }
+
+        m_active_handler_condition.wait_for(lock, backoff);
+
+        if (backoff < max_backoff) {
+            backoff += backoff;
+            if (backoff > max_backoff) {
+                backoff = max_backoff;
+            }
+        }
+    }
+}
+
+
 inline void Managed_process::run_after_current_handler(function<void()> task)
 {
     if (!task) {

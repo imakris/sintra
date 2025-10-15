@@ -284,10 +284,16 @@ template<>
 inline
 bool barrier<delivery_fence_t>(const std::string& barrier_name, const std::string& group_name)
 {
-    // TODO: IMPLEMENT
-    (void)barrier_name;
-    (void)group_name;
-    return false;
+    if (!barrier<rendezvous_t>(barrier_name, group_name)) {
+        return false;
+    }
+
+    if (!s_mproc) {
+        return false;
+    }
+
+    s_mproc->wait_for_incoming_delivery();
+    return true;
 }
 
 
@@ -296,10 +302,16 @@ template<>
 inline
 bool barrier<processing_fence_t>(const std::string& barrier_name, const std::string& group_name)
 {
-    // TODO: IMPLEMENT
-    (void)barrier_name;
-    (void)group_name;
-    return false;
+    if (!barrier<delivery_fence_t>(barrier_name, group_name)) {
+        return false;
+    }
+
+    if (!s_mproc) {
+        return false;
+    }
+
+    s_mproc->wait_for_handler_quiescence();
+    return true;
 }
 
 

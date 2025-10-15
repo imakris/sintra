@@ -41,6 +41,28 @@ namespace sintra {
 void install_signal_handler();
 
 
+namespace {
+
+struct Handler_activity_scope
+{
+    Handler_activity_scope()
+    {
+        if (s_mproc) {
+            s_mproc->on_handler_start();
+        }
+    }
+
+    ~Handler_activity_scope()
+    {
+        if (s_mproc) {
+            s_mproc->on_handler_complete();
+        }
+    }
+};
+
+} // namespace
+
+
 using std::thread;
 using std::unique_ptr;
 using std::function;
@@ -301,7 +323,10 @@ void Process_message_reader::request_reader_function()
                 // if the receiver  registered handler, call the handler
                 auto it = Transceiver::get_rpc_handler_map().find(m->message_type_id);
                 assert(it != Transceiver::get_rpc_handler_map().end()); // this would be a library error
-                (*it->second)(*m); // call the handler
+                {
+                    Handler_activity_scope activity;
+                    (*it->second)(*m); // call the handler
+                }
             }
         }
         else
@@ -335,6 +360,7 @@ void Process_message_reader::request_reader_function()
                             auto shl = it_mt->second.find(sid);
                             if (shl != it_mt->second.end()) {
                                 for (auto& e : shl->second) {
+                                    Handler_activity_scope activity;
                                     e(*m);
                                 }
                             }
@@ -364,6 +390,7 @@ void Process_message_reader::request_reader_function()
         if (tl_post_handler_function) {
             auto post_handler = std::move(tl_post_handler_function);
             tl_post_handler_function = {};
+            Handler_activity_scope activity;
             post_handler();
         }
     }
@@ -471,6 +498,7 @@ void Process_message_reader::reply_reader_function()
                     }
 
                     if (have_handler) {
+                        Handler_activity_scope activity;
                         if (m->exception_type_id == not_defined_type_id) {
                             handler_copy.return_handler(*m);
                         }

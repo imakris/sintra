@@ -32,7 +32,7 @@ int process_1()
     world() << "good afternoon" << "good evening" << "good night";
     world() << 2 << 3 << 4;
 
-    barrier("2nd barrier"); // ensures that the messages have been received and processed
+    barrier<processing_fence_t>("2nd barrier"); // ensures that the messages have been received and processed
 
     return 0;
 }
@@ -47,7 +47,7 @@ int process_2()
     activate_slot(string_slot);
 
     barrier("1st barrier"); // ensures that the slots receiving the messages have been activated.
-    barrier("2nd barrier"); // ensures that the messages have been received and processed
+    barrier<processing_fence_t>("2nd barrier"); // ensures that the messages have been received and processed
 
     return 0;
 }
@@ -63,7 +63,7 @@ int process_3()
     activate_slot(int_slot);
 
     barrier("1st barrier"); // ensures that the slots receiving the messages have been activated.
-    barrier("2nd barrier"); // ensures that the messages have been received and processed
+    barrier<processing_fence_t>("2nd barrier"); // ensures that the messages have been received and processed
 
     return 0;
 }

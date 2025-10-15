@@ -169,6 +169,16 @@ struct Process_message_reader
         return m_in_rep_c->get_message_reading_sequence();
     }
 
+    sequence_counter_type get_request_leading_sequence() const
+    {
+        return m_in_req_c->get_leading_sequence();
+    }
+
+    sequence_counter_type get_reply_leading_sequence() const
+    {
+        return m_in_rep_c->get_leading_sequence();
+    }
+
     State state() const { return m_reader_state.load(std::memory_order_acquire); }
 
 private:

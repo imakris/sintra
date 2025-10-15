@@ -272,6 +272,10 @@ struct Managed_process: Derived_transceiver<Managed_process>
     void wait_until_all_external_readers_are_done(int extra_allowed_readers = 0);
 
     void flush(instance_id_type process_id, sequence_counter_type flush_sequence);
+    void wait_for_incoming_delivery();
+    void wait_for_handler_quiescence();
+    void on_handler_start();
+    void on_handler_complete();
     void run_after_current_handler(function<void()> task);
 
 
@@ -307,6 +311,10 @@ struct Managed_process: Derived_transceiver<Managed_process>
     deque<sequence_counter_type>        m_flush_sequence;
     mutex                               m_flush_sequence_mutex;
     condition_variable                  m_flush_sequence_condition;
+
+    std::atomic<size_t>                 m_active_handler_count{0};
+    mutex                               m_active_handler_mutex;
+    condition_variable                  m_active_handler_condition;
 
     handler_registry_type               m_active_handlers;
 
