@@ -36,6 +36,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <iterator>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -246,7 +247,7 @@ void Transceiver::destroy()
 {
     bool no_readers = true;
     if (s_mproc && s_coord_id) {
-        std::lock_guard<std::mutex> readers_lock(s_mproc->m_readers_mutex);
+        std::shared_lock<std::shared_mutex> readers_lock(s_mproc->m_readers_mutex);
         no_readers = s_mproc->m_readers.empty();
     }
 

@@ -470,9 +470,15 @@ Process_message_reader::Delivery_target Process_message_reader::prepare_delivery
         return target;
     }
 
+    const auto strong_progress = target.progress.lock();
+    if (!strong_progress) {
+        // Reader was destroyed after we captured the target; no wait necessary.
+        return target;
+    }
+
     const auto observed = (stream == Delivery_stream::Request)
-        ? progress->request_sequence.load(std::memory_order_acquire)
-        : progress->reply_sequence.load(std::memory_order_acquire);
+        ? strong_progress->request_sequence.load(std::memory_order_acquire)
+        : strong_progress->reply_sequence.load(std::memory_order_acquire);
 
     if (observed >= target_sequence) {
         return target;

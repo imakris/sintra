@@ -39,6 +39,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <shared_mutex>
 #include <thread>
 #include <utility>
 #ifndef _WIN32
@@ -147,7 +148,7 @@ namespace {
         if (mproc && mproc->m_out_req_c) {
             mproc->emit_remote<Managed_process::terminated_abnormally>(sig_number);
 
-            std::lock_guard<std::mutex> readers_lock(mproc->m_readers_mutex);
+            std::shared_lock<std::shared_mutex> readers_lock(mproc->m_readers_mutex);
             for (auto& reader : mproc->m_readers) {
                 reader.second.stop_nowait();
             }
@@ -262,7 +263,7 @@ static void s_signal_handler(int sig)
     if (s_mproc && s_mproc->m_out_req_c) {
         s_mproc->emit_remote<Managed_process::terminated_abnormally>(sig);
 
-        std::lock_guard<std::mutex> readers_lock(s_mproc->m_readers_mutex);
+        std::shared_lock<std::shared_mutex> readers_lock(s_mproc->m_readers_mutex);
         for (auto& reader : s_mproc->m_readers) {
             reader.second.stop_nowait();
         }
@@ -532,7 +533,7 @@ Managed_process::~Managed_process()
 
     // no more reading
     {
-        std::lock_guard<std::mutex> readers_lock(m_readers_mutex);
+        std::unique_lock<std::shared_mutex> readers_lock(m_readers_mutex);
         m_readers.clear();
     }
 
@@ -860,7 +861,7 @@ Managed process options:
     }
 
     {
-        std::lock_guard<std::mutex> readers_lock(m_readers_mutex);
+        std::unique_lock<std::shared_mutex> readers_lock(m_readers_mutex);
         assert(!m_readers.count(process_of(s_coord_id)));
         auto progress = std::make_shared<Process_message_reader::Delivery_progress>();
         auto [reader_it, inserted] = m_readers.emplace(
@@ -1018,7 +1019,7 @@ bool Managed_process::spawn_swarm_process(
     cstring_vector cargs(args);
 
     {
-        std::lock_guard<std::mutex> readers_lock(m_readers_mutex);
+        std::unique_lock<std::shared_mutex> readers_lock(m_readers_mutex);
 
         // If a reader for this process id exists (from a previous crashed instance),
         // stop it and remove it before creating a fresh one for recovery.
@@ -1062,7 +1063,7 @@ bool Managed_process::spawn_swarm_process(
         std::cerr << "failed to launch " << s.binary_name << std::endl;
 
         //m_readers.pop_back();
-        std::lock_guard<std::mutex> readers_lock(m_readers_mutex);
+        std::unique_lock<std::shared_mutex> readers_lock(m_readers_mutex);
         m_readers.erase(s.piid);
     }
 
@@ -1192,7 +1193,7 @@ void Managed_process::pause()
         return;
 
     {
-        std::lock_guard<std::mutex> readers_lock(m_readers_mutex);
+        std::shared_lock<std::shared_mutex> readers_lock(m_readers_mutex);
         for (auto& ri : m_readers) {
             ri.second.pause();
         }
@@ -1215,7 +1216,7 @@ void Managed_process::stop()
         return;
 
     {
-        std::lock_guard<std::mutex> readers_lock(m_readers_mutex);
+        std::shared_lock<std::shared_mutex> readers_lock(m_readers_mutex);
         for (auto& ri : m_readers) {
             ri.second.stop_nowait();
         }
@@ -1388,7 +1389,7 @@ inline void Managed_process::flush(instance_id_type process_id, sequence_counter
 
     sequence_counter_type rs = invalid_sequence;
     {
-        std::lock_guard<std::mutex> readers_lock(m_readers_mutex);
+        std::shared_lock<std::shared_mutex> readers_lock(m_readers_mutex);
         auto it = m_readers.find(process_id);
         if (it == m_readers.end()) {
             throw std::logic_error(
@@ -1444,7 +1445,7 @@ void Managed_process::wait_for_delivery_fence()
     std::vector<Process_message_reader::Delivery_target> targets;
 
     {
-        std::lock_guard<std::mutex> readers_lock(m_readers_mutex);
+        std::shared_lock<std::shared_mutex> readers_lock(m_readers_mutex);
         targets.reserve(m_readers.size() * 2);
 
         for (auto& [process_id, reader] : m_readers) {
@@ -1477,8 +1478,10 @@ void Managed_process::wait_for_delivery_fence()
 
     auto all_targets_satisfied = [&]() {
         for (const auto& target : targets) {
-            const auto progress = target.progress;
+            auto progress = target.progress.lock();
             if (!progress) {
+                // Reader was replaced or destroyed; treat as satisfied because
+                // no further progress is possible on the captured stream.
                 continue;
             }
 

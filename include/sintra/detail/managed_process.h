@@ -47,6 +47,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <list>
 #include <map>
 #include <mutex>
+#include <shared_mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -265,7 +266,7 @@ struct Managed_process: Derived_transceiver<Managed_process>
         instance_id_type,
         Process_message_reader
     >                                   m_readers;
-    mutable mutex                       m_readers_mutex;
+    mutable std::shared_mutex           m_readers_mutex;
     mutable mutex                       m_delivery_mutex;
     condition_variable                  m_delivery_condition;
 
