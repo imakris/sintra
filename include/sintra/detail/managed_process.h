@@ -269,6 +269,7 @@ struct Managed_process: Derived_transceiver<Managed_process>
     mutable std::shared_mutex           m_readers_mutex;
     mutable mutex                       m_delivery_mutex;
     condition_variable                  m_delivery_condition;
+    std::atomic<uint32_t>               m_delivery_waiter_count {0};
 
     int                                 m_num_active_readers = 0;
     mutex                               m_num_active_readers_mutex;

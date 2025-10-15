@@ -1532,6 +1532,21 @@ void Managed_process::wait_for_fence(Process_message_reader::Fence_mode mode)
         return;
     }
 
+    struct Waiter_guard {
+        explicit Waiter_guard(std::atomic<uint32_t>& counter)
+            : m_counter(counter)
+        {
+            m_counter.fetch_add(1, std::memory_order_acq_rel);
+        }
+
+        ~Waiter_guard()
+        {
+            m_counter.fetch_sub(1, std::memory_order_acq_rel);
+        }
+
+        std::atomic<uint32_t>& m_counter;
+    } guard(m_delivery_waiter_count);
+
     std::unique_lock<std::mutex> lk(m_delivery_mutex);
     m_delivery_condition.wait(lk, all_targets_satisfied);
 }
@@ -1539,7 +1554,9 @@ void Managed_process::wait_for_fence(Process_message_reader::Fence_mode mode)
 
 inline void Managed_process::notify_delivery_progress()
 {
-    m_delivery_condition.notify_all();
+    if (m_delivery_waiter_count.load(std::memory_order_acquire) > 0) {
+        m_delivery_condition.notify_all();
+    }
 }
 
 
