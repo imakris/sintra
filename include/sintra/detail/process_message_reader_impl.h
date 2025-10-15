@@ -129,12 +129,14 @@ void Process_message_reader::stop_nowait()
 
     if (auto progress = m_delivery_progress) {
         const auto req_seq = m_in_req_c ? m_in_req_c->get_message_reading_sequence() : invalid_sequence;
-        progress->request_sequence.store(req_seq, std::memory_order_release);
-        progress->request_stopped.store(true, std::memory_order_release);
+        progress->request.delivered.store(req_seq, std::memory_order_release);
+        progress->request.processed.store(req_seq, std::memory_order_release);
+        progress->request.stopped.store(true, std::memory_order_release);
 
         const auto rep_seq = m_in_rep_c ? m_in_rep_c->get_message_reading_sequence() : invalid_sequence;
-        progress->reply_sequence.store(rep_seq, std::memory_order_release);
-        progress->reply_stopped.store(true, std::memory_order_release);
+        progress->reply.delivered.store(rep_seq, std::memory_order_release);
+        progress->reply.processed.store(rep_seq, std::memory_order_release);
+        progress->reply.stopped.store(true, std::memory_order_release);
 
         if (s_mproc) {
             s_mproc->notify_delivery_progress();
@@ -256,14 +258,25 @@ void Process_message_reader::request_reader_function()
 
     auto progress = m_delivery_progress;
     if (progress) {
-        progress->request_stopped.store(false, std::memory_order_release);
+        progress->request.stopped.store(false, std::memory_order_release);
     }
 
-    auto publish_request_progress = [progress](sequence_counter_type seq) {
+    auto publish_request_delivery = [progress](sequence_counter_type seq) {
         if (!progress) {
             return;
         }
-        const auto previous = progress->request_sequence.exchange(
+        const auto previous = progress->request.delivered.exchange(
+            seq, std::memory_order_acq_rel);
+        if (previous != seq && s_mproc) {
+            s_mproc->notify_delivery_progress();
+        }
+    };
+
+    auto publish_request_processing = [progress](sequence_counter_type seq) {
+        if (!progress) {
+            return;
+        }
+        const auto previous = progress->request.processed.exchange(
             seq, std::memory_order_acq_rel);
         if (previous != seq && s_mproc) {
             s_mproc->notify_delivery_progress();
@@ -281,7 +294,9 @@ void Process_message_reader::request_reader_function()
     }
     m_ready_condition.notify_all();
 
-    publish_request_progress(m_in_req_c->get_message_reading_sequence());
+    const auto initial_sequence = m_in_req_c->get_message_reading_sequence();
+    publish_request_delivery(initial_sequence);
+    publish_request_processing(initial_sequence);
 
     while (true) {
         const State reader_state = m_reader_state.load(std::memory_order_acquire);
@@ -300,6 +315,8 @@ void Process_message_reader::request_reader_function()
         if (m == nullptr) {
             break;
         }
+
+        publish_request_delivery(m_in_req_c->get_message_reading_sequence());
 
         // Only the process with the coordinator's instance is allowed to send messages on
         // someone else's behalf (for relay purposes).
@@ -408,7 +425,7 @@ void Process_message_reader::request_reader_function()
             post_handler();
         }
 
-        publish_request_progress(m_in_req_c->get_message_reading_sequence());
+        publish_request_processing(m_in_req_c->get_message_reading_sequence());
     }
 
     m_in_req_c->done_reading();
@@ -429,8 +446,9 @@ void Process_message_reader::request_reader_function()
 
     if (progress) {
         const auto seq = m_in_req_c->get_message_reading_sequence();
-        progress->request_sequence.store(seq, std::memory_order_release);
-        progress->request_stopped.store(true, std::memory_order_release);
+        progress->request.delivered.store(seq, std::memory_order_release);
+        progress->request.processed.store(seq, std::memory_order_release);
+        progress->request.stopped.store(true, std::memory_order_release);
     }
     if (s_mproc) {
         s_mproc->notify_delivery_progress();
@@ -447,12 +465,14 @@ void Process_message_reader::request_reader_function()
 
 
 inline
-Process_message_reader::Delivery_target Process_message_reader::prepare_delivery_target(
+Process_message_reader::Delivery_target Process_message_reader::prepare_fence_target(
     Delivery_stream stream,
+    Fence_mode mode,
     sequence_counter_type target_sequence) const
 {
     Delivery_target target;
     target.stream = stream;
+    target.mode = mode;
     target.target = target_sequence;
 
     if (target_sequence == invalid_sequence) {
@@ -476,9 +496,13 @@ Process_message_reader::Delivery_target Process_message_reader::prepare_delivery
         return target;
     }
 
-    const auto observed = (stream == Delivery_stream::Request)
-        ? strong_progress->request_sequence.load(std::memory_order_acquire)
-        : strong_progress->reply_sequence.load(std::memory_order_acquire);
+    const auto& stream_state = (stream == Delivery_stream::Request)
+        ? strong_progress->request
+        : strong_progress->reply;
+
+    const auto observed = (mode == Fence_mode::Delivery)
+        ? stream_state.delivered.load(std::memory_order_acquire)
+        : stream_state.processed.load(std::memory_order_acquire);
 
     if (observed >= target_sequence) {
         return target;
@@ -501,14 +525,25 @@ void Process_message_reader::reply_reader_function()
 
     auto progress = m_delivery_progress;
     if (progress) {
-        progress->reply_stopped.store(false, std::memory_order_release);
+        progress->reply.stopped.store(false, std::memory_order_release);
     }
 
-    auto publish_reply_progress = [progress](sequence_counter_type seq) {
+    auto publish_reply_delivery = [progress](sequence_counter_type seq) {
         if (!progress) {
             return;
         }
-        const auto previous = progress->reply_sequence.exchange(
+        const auto previous = progress->reply.delivered.exchange(
+            seq, std::memory_order_acq_rel);
+        if (previous != seq && s_mproc) {
+            s_mproc->notify_delivery_progress();
+        }
+    };
+
+    auto publish_reply_processing = [progress](sequence_counter_type seq) {
+        if (!progress) {
+            return;
+        }
+        const auto previous = progress->reply.processed.exchange(
             seq, std::memory_order_acq_rel);
         if (previous != seq && s_mproc) {
             s_mproc->notify_delivery_progress();
@@ -522,7 +557,9 @@ void Process_message_reader::reply_reader_function()
     }
     m_ready_condition.notify_all();
 
-    publish_reply_progress(m_in_rep_c->get_message_reading_sequence());
+    const auto initial_sequence = m_in_rep_c->get_message_reading_sequence();
+    publish_reply_delivery(initial_sequence);
+    publish_reply_processing(initial_sequence);
 
     while (true) {
         const State reader_state = m_reader_state.load(std::memory_order_acquire);
@@ -557,6 +594,8 @@ void Process_message_reader::reply_reader_function()
         if (m == nullptr) {
             break;
         }
+
+        publish_reply_delivery(m_in_rep_c->get_message_reading_sequence());
 
         // Only the process with the coordinator's instance is allowed to send messages on
         // someone else's behalf (for relay purposes).
@@ -637,7 +676,7 @@ void Process_message_reader::reply_reader_function()
             }
         }
 
-        publish_reply_progress(m_in_rep_c->get_message_reading_sequence());
+        publish_reply_processing(m_in_rep_c->get_message_reading_sequence());
     }
 
     m_in_rep_c->done_reading();
@@ -652,10 +691,12 @@ void Process_message_reader::reply_reader_function()
     m_ready_condition.notify_all();
     m_stop_condition.notify_one();
 
-    publish_reply_progress(m_in_rep_c->get_message_reading_sequence());
+    const auto final_sequence = m_in_rep_c->get_message_reading_sequence();
+    publish_reply_delivery(final_sequence);
+    publish_reply_processing(final_sequence);
 
     if (progress) {
-        progress->reply_stopped.store(true, std::memory_order_release);
+        progress->reply.stopped.store(true, std::memory_order_release);
     }
     if (s_mproc) {
         s_mproc->notify_delivery_progress();

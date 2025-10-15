@@ -118,10 +118,15 @@ struct Process_message_reader
 
     struct Delivery_progress
     {
-        std::atomic<sequence_counter_type> request_sequence{invalid_sequence};
-        std::atomic<sequence_counter_type> reply_sequence{invalid_sequence};
-        std::atomic<bool> request_stopped{false};
-        std::atomic<bool> reply_stopped{false};
+        struct Stream_state
+        {
+            std::atomic<sequence_counter_type> delivered{invalid_sequence};
+            std::atomic<sequence_counter_type> processed{invalid_sequence};
+            std::atomic<bool> stopped{false};
+        };
+
+        Stream_state request;
+        Stream_state reply;
     };
 
     using Delivery_progress_ptr = std::shared_ptr<Delivery_progress>;
@@ -133,10 +138,17 @@ struct Process_message_reader
         Reply
     };
 
+    enum class Fence_mode
+    {
+        Delivery,
+        Processing
+    };
+
     struct Delivery_target
     {
         Delivery_progress_weak_ptr progress;
         Delivery_stream stream = Delivery_stream::Request;
+        Fence_mode mode = Fence_mode::Delivery;
         sequence_counter_type target = invalid_sequence;
         bool wait_needed = false;
     };
@@ -209,7 +221,10 @@ struct Process_message_reader
         return m_in_rep_c->get_message_reading_sequence();
     }
 
-    Delivery_target prepare_delivery_target(Delivery_stream stream, sequence_counter_type target_sequence) const;
+    Delivery_target prepare_fence_target(
+        Delivery_stream stream,
+        Fence_mode mode,
+        sequence_counter_type target_sequence) const;
 
     Delivery_progress_ptr delivery_progress() const { return m_delivery_progress; }
 

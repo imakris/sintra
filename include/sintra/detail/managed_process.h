@@ -279,6 +279,8 @@ struct Managed_process: Derived_transceiver<Managed_process>
     void run_after_current_handler(function<void()> task);
 
     void wait_for_delivery_fence();
+    void wait_for_processing_fence();
+    void wait_for_fence(Process_message_reader::Fence_mode mode);
     void notify_delivery_progress();
 
 

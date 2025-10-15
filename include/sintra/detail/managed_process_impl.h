@@ -1442,6 +1442,20 @@ inline void Managed_process::run_after_current_handler(function<void()> task)
 inline
 void Managed_process::wait_for_delivery_fence()
 {
+    wait_for_fence(Process_message_reader::Fence_mode::Delivery);
+}
+
+
+inline
+void Managed_process::wait_for_processing_fence()
+{
+    wait_for_fence(Process_message_reader::Fence_mode::Processing);
+}
+
+
+inline
+void Managed_process::wait_for_fence(Process_message_reader::Fence_mode mode)
+{
     std::vector<Process_message_reader::Delivery_target> targets;
 
     {
@@ -1455,16 +1469,18 @@ void Managed_process::wait_for_delivery_fence()
             }
 
             const auto req_target = reader.get_request_leading_sequence();
-            auto req_target_info = reader.prepare_delivery_target(
+            auto req_target_info = reader.prepare_fence_target(
                 Process_message_reader::Delivery_stream::Request,
+                mode,
                 req_target);
             if (req_target_info.wait_needed) {
                 targets.emplace_back(std::move(req_target_info));
             }
 
             const auto rep_target = reader.get_reply_leading_sequence();
-            auto rep_target_info = reader.prepare_delivery_target(
+            auto rep_target_info = reader.prepare_fence_target(
                 Process_message_reader::Delivery_stream::Reply,
+                mode,
                 rep_target);
             if (rep_target_info.wait_needed) {
                 targets.emplace_back(std::move(rep_target_info));
@@ -1485,17 +1501,22 @@ void Managed_process::wait_for_delivery_fence()
                 continue;
             }
 
-            const auto observed = (target.stream == Process_message_reader::Delivery_stream::Request)
-                ? progress->request_sequence.load(std::memory_order_acquire)
-                : progress->reply_sequence.load(std::memory_order_acquire);
+            const auto observed = [&]() {
+                const auto& stream_state = (target.stream == Process_message_reader::Delivery_stream::Request)
+                    ? progress->request
+                    : progress->reply;
+                return (target.mode == Process_message_reader::Fence_mode::Delivery)
+                    ? stream_state.delivered.load(std::memory_order_acquire)
+                    : stream_state.processed.load(std::memory_order_acquire);
+            }();
 
             if (observed >= target.target) {
                 continue;
             }
 
             const auto stopped = (target.stream == Process_message_reader::Delivery_stream::Request)
-                ? progress->request_stopped.load(std::memory_order_acquire)
-                : progress->reply_stopped.load(std::memory_order_acquire);
+                ? progress->request.stopped.load(std::memory_order_acquire)
+                : progress->reply.stopped.load(std::memory_order_acquire);
 
             if (stopped) {
                 continue;
