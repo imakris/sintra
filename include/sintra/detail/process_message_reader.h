@@ -49,6 +49,7 @@ using std::condition_variable;
 using std::thread;
 
 struct Outstanding_rpc_control;
+struct Process_message_reader;
 
 // Note: this should be a specialization of Message_reader (which does not exist), but for the sake
 // of simplicity and code coverage, the Message_reader was not implemented.
@@ -69,6 +70,8 @@ struct Outstanding_rpc_control;
 
 static inline thread_local Message_prefix* s_tl_current_message = nullptr;
 static inline thread_local instance_id_type s_tl_common_function_iid = invalid_instance_id;
+
+static inline thread_local Process_message_reader* s_tl_current_request_reader = nullptr;
 
 static inline thread_local instance_id_type s_tl_additional_piids[max_process_index];
 static inline thread_local size_t s_tl_additional_piids_size = 0;
@@ -113,8 +116,35 @@ struct Process_message_reader
         READER_STOPPING
     };
 
+    struct Delivery_progress
+    {
+        std::atomic<sequence_counter_type> request_sequence{invalid_sequence};
+        std::atomic<sequence_counter_type> reply_sequence{invalid_sequence};
+        std::atomic<bool> request_stopped{false};
+        std::atomic<bool> reply_stopped{false};
+    };
+
+    using Delivery_progress_ptr = std::shared_ptr<Delivery_progress>;
+    using Delivery_progress_weak_ptr = std::weak_ptr<Delivery_progress>;
+
+    enum class Delivery_stream
+    {
+        Request,
+        Reply
+    };
+
+    struct Delivery_target
+    {
+        Delivery_progress_weak_ptr progress;
+        Delivery_stream stream = Delivery_stream::Request;
+        sequence_counter_type target = invalid_sequence;
+        bool wait_needed = false;
+    };
+
     inline
-    Process_message_reader(instance_id_type process_instance_id, uint32_t occurrence = 0);
+    Process_message_reader(instance_id_type process_instance_id,
+        Delivery_progress_ptr delivery_progress,
+        uint32_t occurrence = 0);
 
     inline
     ~Process_message_reader();
@@ -164,10 +194,24 @@ struct Process_message_reader
         return m_in_req_c->get_message_reading_sequence();
     }
 
+    sequence_counter_type get_request_leading_sequence() const
+    {
+        return m_in_req_c->get_leading_sequence();
+    }
+
+    sequence_counter_type get_reply_leading_sequence() const
+    {
+        return m_in_rep_c->get_leading_sequence();
+    }
+
     sequence_counter_type get_reply_reading_sequence() const
     {
         return m_in_rep_c->get_message_reading_sequence();
     }
+
+    Delivery_target prepare_delivery_target(Delivery_stream stream, sequence_counter_type target_sequence) const;
+
+    Delivery_progress_ptr delivery_progress() const { return m_delivery_progress; }
 
     State state() const { return m_reader_state.load(std::memory_order_acquire); }
 
@@ -180,6 +224,8 @@ private:
     std::shared_ptr<Message_ring_R> m_in_req_c;
     std::shared_ptr<Message_ring_R> m_in_rep_c;
 
+    Delivery_progress_ptr            m_delivery_progress;
+
     thread*                 m_request_reader_thread = nullptr;
     thread*                 m_reply_reader_thread   = nullptr;
     
@@ -189,6 +235,7 @@ private:
     condition_variable      m_ready_condition;
     mutex                   m_stop_mutex;
     condition_variable      m_stop_condition;
+
 };
 
 

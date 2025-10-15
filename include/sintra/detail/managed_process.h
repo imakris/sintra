@@ -47,6 +47,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <list>
 #include <map>
 #include <mutex>
+#include <shared_mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -265,6 +266,9 @@ struct Managed_process: Derived_transceiver<Managed_process>
         instance_id_type,
         Process_message_reader
     >                                   m_readers;
+    mutable std::shared_mutex           m_readers_mutex;
+    mutable mutex                       m_delivery_mutex;
+    condition_variable                  m_delivery_condition;
 
     int                                 m_num_active_readers = 0;
     mutex                               m_num_active_readers_mutex;
@@ -273,6 +277,9 @@ struct Managed_process: Derived_transceiver<Managed_process>
 
     void flush(instance_id_type process_id, sequence_counter_type flush_sequence);
     void run_after_current_handler(function<void()> task);
+
+    void wait_for_delivery_fence();
+    void notify_delivery_progress();
 
 
     size_t unblock_rpc(instance_id_type process_instance_id = invalid_instance_id);
