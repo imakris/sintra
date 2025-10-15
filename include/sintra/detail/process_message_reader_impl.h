@@ -77,7 +77,6 @@ inline std::unique_ptr<std::byte[]> sintra_clone_message(const Message_prefix* m
 
 
 inline bool thread_local tl_is_req_thread = false;
-inline thread_local Process_message_reader* tl_current_request_reader = nullptr;
 
 // Historical note: mingw 11.2.0 had issues with inline thread_local non-POD objects
 // (January 2022). We now store the callable directly and rely on the fixed runtime
@@ -85,10 +84,18 @@ inline thread_local Process_message_reader* tl_current_request_reader = nullptr;
 inline thread_local function<void()> tl_post_handler_function;
 
 inline
-Process_message_reader::Process_message_reader(instance_id_type process_instance_id, uint32_t occurrence):
+Process_message_reader::Process_message_reader(
+    instance_id_type process_instance_id,
+    Delivery_progress_ptr delivery_progress,
+    uint32_t occurrence):
     m_reader_state(READER_NORMAL),
-    m_process_instance_id(process_instance_id)
+    m_process_instance_id(process_instance_id),
+    m_delivery_progress(std::move(delivery_progress))
 {
+    if (!m_delivery_progress) {
+        m_delivery_progress = std::make_shared<Delivery_progress>();
+    }
+
     m_in_req_c = std::make_shared<Message_ring_R>(
         s_mproc->m_directory, "req", m_process_instance_id, occurrence);
     m_in_rep_c = std::make_shared<Message_ring_R>(
@@ -120,24 +127,18 @@ void Process_message_reader::stop_nowait()
     m_reader_state.store(READER_STOPPING, std::memory_order_release);
     m_ready_condition.notify_all();
 
-    if (auto state = m_request_delivery_state) {
-        const auto seq = m_in_req_c ? m_in_req_c->get_message_reading_sequence() : invalid_sequence;
-        {
-            std::lock_guard<std::mutex> lk(state->mutex);
-            state->sequence.store(seq, std::memory_order_release);
-        }
-        state->shutting_down.store(true, std::memory_order_release);
-        state->condition.notify_all();
-    }
+    if (auto progress = m_delivery_progress) {
+        const auto req_seq = m_in_req_c ? m_in_req_c->get_message_reading_sequence() : invalid_sequence;
+        progress->request_sequence.store(req_seq, std::memory_order_release);
+        progress->request_stopped.store(true, std::memory_order_release);
 
-    if (auto reply_state = m_reply_delivery_state) {
-        const auto seq = m_in_rep_c ? m_in_rep_c->get_message_reading_sequence() : invalid_sequence;
-        {
-            std::lock_guard<std::mutex> lk(reply_state->mutex);
-            reply_state->sequence.store(seq, std::memory_order_release);
+        const auto rep_seq = m_in_rep_c ? m_in_rep_c->get_message_reading_sequence() : invalid_sequence;
+        progress->reply_sequence.store(rep_seq, std::memory_order_release);
+        progress->reply_stopped.store(true, std::memory_order_release);
+
+        if (s_mproc) {
+            s_mproc->notify_delivery_progress();
         }
-        reply_state->shutting_down.store(true, std::memory_order_release);
-        reply_state->condition.notify_all();
     }
 
     m_in_req_c->done_reading();
@@ -251,18 +252,22 @@ void Process_message_reader::request_reader_function()
     install_signal_handler();
 
     tl_is_req_thread = true;
-    tl_current_request_reader = this;
+    s_tl_current_request_reader = this;
 
-    auto request_state = m_request_delivery_state;
-    auto publish_request_progress = [state = request_state](sequence_counter_type seq) {
-        if (!state) {
+    auto progress = m_delivery_progress;
+    if (progress) {
+        progress->request_stopped.store(false, std::memory_order_release);
+    }
+
+    auto publish_request_progress = [progress](sequence_counter_type seq) {
+        if (!progress) {
             return;
         }
-        {
-            std::lock_guard<std::mutex> lk(state->mutex);
-            state->sequence.store(seq, std::memory_order_release);
+        const auto previous = progress->request_sequence.exchange(
+            seq, std::memory_order_acq_rel);
+        if (previous != seq && s_mproc) {
+            s_mproc->notify_delivery_progress();
         }
-        state->condition.notify_all();
     };
 
     s_mproc->m_num_active_readers_mutex.lock();
@@ -422,14 +427,17 @@ void Process_message_reader::request_reader_function()
     m_ready_condition.notify_all();
     m_stop_condition.notify_one();
 
-    publish_request_progress(m_in_req_c->get_message_reading_sequence());
-
-    if (request_state) {
-        request_state->shutting_down.store(true, std::memory_order_release);
-        request_state->condition.notify_all();
+    if (progress) {
+        const auto seq = m_in_req_c->get_message_reading_sequence();
+        progress->request_sequence.store(seq, std::memory_order_release);
+        progress->request_stopped.store(true, std::memory_order_release);
+    }
+    if (s_mproc) {
+        s_mproc->notify_delivery_progress();
     }
 
-    tl_current_request_reader = nullptr;
+    s_tl_current_request_reader = nullptr;
+    tl_is_req_thread = false;
 
     if (tl_post_handler_function) {
         tl_post_handler_function = {};
@@ -439,58 +447,39 @@ void Process_message_reader::request_reader_function()
 
 
 inline
-Process_message_reader::Delivery_waiter Process_message_reader::prepare_delivery_wait(
+Process_message_reader::Delivery_target Process_message_reader::prepare_delivery_target(
     Delivery_stream stream,
     sequence_counter_type target_sequence) const
 {
-    Delivery_waiter waiter;
-    waiter.target = target_sequence;
+    Delivery_target target;
+    target.stream = stream;
+    target.target = target_sequence;
 
     if (target_sequence == invalid_sequence) {
-        return waiter;
+        return target;
     }
 
-    const auto state_ptr = (stream == Delivery_stream::Request)
-        ? m_request_delivery_state
-        : m_reply_delivery_state;
-
-    waiter.state = state_ptr;
-    if (!state_ptr) {
-        return waiter;
+    auto progress = m_delivery_progress;
+    if (!progress) {
+        return target;
     }
 
-    if (stream == Delivery_stream::Request && tl_current_request_reader == this) {
-        return waiter;
+    target.progress = progress;
+
+    if (stream == Delivery_stream::Request && s_tl_current_request_reader == this) {
+        return target;
     }
 
-    const auto observed = state_ptr->sequence.load(std::memory_order_acquire);
+    const auto observed = (stream == Delivery_stream::Request)
+        ? progress->request_sequence.load(std::memory_order_acquire)
+        : progress->reply_sequence.load(std::memory_order_acquire);
+
     if (observed >= target_sequence) {
-        return waiter;
+        return target;
     }
 
-    waiter.wait_needed = true;
-    return waiter;
-}
-
-
-inline
-void Process_message_reader::Delivery_waiter::wait() const
-{
-    if (!wait_needed || !state) {
-        return;
-    }
-
-    if (state->sequence.load(std::memory_order_acquire) >= target) {
-        return;
-    }
-
-    std::unique_lock<std::mutex> lk(state->mutex);
-    state->condition.wait(lk, [&]() {
-        if (state->sequence.load(std::memory_order_acquire) >= target) {
-            return true;
-        }
-        return state->shutting_down.load(std::memory_order_acquire);
-    });
+    target.wait_needed = true;
+    return target;
 }
 
 
@@ -504,16 +493,20 @@ void Process_message_reader::reply_reader_function()
     s_mproc->m_num_active_readers++;
     s_mproc->m_num_active_readers_mutex.unlock();
 
-    auto reply_state = m_reply_delivery_state;
-    auto publish_reply_progress = [state = reply_state](sequence_counter_type seq) {
-        if (!state) {
+    auto progress = m_delivery_progress;
+    if (progress) {
+        progress->reply_stopped.store(false, std::memory_order_release);
+    }
+
+    auto publish_reply_progress = [progress](sequence_counter_type seq) {
+        if (!progress) {
             return;
         }
-        {
-            std::lock_guard<std::mutex> lk(state->mutex);
-            state->sequence.store(seq, std::memory_order_release);
+        const auto previous = progress->reply_sequence.exchange(
+            seq, std::memory_order_acq_rel);
+        if (previous != seq && s_mproc) {
+            s_mproc->notify_delivery_progress();
         }
-        state->condition.notify_all();
     };
 
     m_in_rep_c->start_reading();
@@ -655,9 +648,11 @@ void Process_message_reader::reply_reader_function()
 
     publish_reply_progress(m_in_rep_c->get_message_reading_sequence());
 
-    if (reply_state) {
-        reply_state->shutting_down.store(true, std::memory_order_release);
-        reply_state->condition.notify_all();
+    if (progress) {
+        progress->reply_stopped.store(true, std::memory_order_release);
+    }
+    if (s_mproc) {
+        s_mproc->notify_delivery_progress();
     }
 }
 
