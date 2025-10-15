@@ -232,9 +232,22 @@ int process_index()
 }
 
 
-// This is a convenience function.
+// Barrier mode tags
+struct rendezvous_t {};
+struct delivery_fence_t {};
+struct processing_fence_t {};
+
+
+// Template barrier with default mode = rendezvous_t
+template<typename BarrierMode = rendezvous_t>
 inline
-bool barrier(const std::string& barrier_name, const std::string& group_name)
+bool barrier(const std::string& barrier_name, const std::string& group_name = "_sintra_all_processes");
+
+
+// Specialization for rendezvous_t - current working implementation
+template<>
+inline
+bool barrier<rendezvous_t>(const std::string& barrier_name, const std::string& group_name)
 {
     sequence_counter_type flush_seq;
     try {
@@ -275,6 +288,30 @@ bool barrier(const std::string& barrier_name, const std::string& group_name)
     }
 
     return true;
+}
+
+
+// Specialization for delivery_fence_t - ensures message delivery before barrier
+template<>
+inline
+bool barrier<delivery_fence_t>(const std::string& barrier_name, const std::string& group_name)
+{
+    // TODO: IMPLEMENT
+    (void)barrier_name;
+    (void)group_name;
+    return false;
+}
+
+
+// Specialization for processing_fence_t - ensures message processing before barrier
+template<>
+inline
+bool barrier<processing_fence_t>(const std::string& barrier_name, const std::string& group_name)
+{
+    // TODO: IMPLEMENT
+    (void)barrier_name;
+    (void)group_name;
+    return false;
 }
 
 
