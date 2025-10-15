@@ -38,6 +38,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <vector>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <optional>
 #include <thread>
 #include <utility>
@@ -54,8 +55,15 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 namespace sintra {
 
+class Managed_process;
+
 extern thread_local bool tl_is_req_thread;
 extern thread_local std::function<void()> tl_post_handler_function;
+
+namespace detail {
+    inline thread_local Managed_process* g_active_handler_owner = nullptr;
+    inline thread_local size_t g_active_handler_depth = 0;
+}
 
 inline std::once_flag& signal_handler_once_flag()
 {
@@ -147,6 +155,7 @@ namespace {
         if (mproc && mproc->m_out_req_c) {
             mproc->emit_remote<Managed_process::terminated_abnormally>(sig_number);
 
+            std::shared_lock<std::shared_mutex> readers_lock(mproc->m_readers_mutex);
             for (auto& reader : mproc->m_readers) {
                 reader.second.stop_nowait();
             }
@@ -261,6 +270,7 @@ static void s_signal_handler(int sig)
     if (s_mproc && s_mproc->m_out_req_c) {
         s_mproc->emit_remote<Managed_process::terminated_abnormally>(sig);
 
+        std::shared_lock<std::shared_mutex> readers_lock(s_mproc->m_readers_mutex);
         for (auto& reader : s_mproc->m_readers) {
             reader.second.stop_nowait();
         }
@@ -529,7 +539,10 @@ Managed_process::~Managed_process()
     this->Derived_transceiver<Managed_process>::destroy();
 
     // no more reading
-    m_readers.clear();
+    {
+        std::unique_lock<std::shared_mutex> readers_lock(m_readers_mutex);
+        m_readers.clear();
+    }
 
     // no more writing
     if (m_out_req_c) {
@@ -854,10 +867,17 @@ Managed process options:
         }
     }
 
-    assert(!m_readers.count(process_of(s_coord_id)));
-    auto it = m_readers.emplace(process_of(s_coord_id), process_of(s_coord_id));
-    assert(it.second == true);
-    it.first->second.wait_until_ready();
+    Process_message_reader* coordinator_reader = nullptr;
+    {
+        std::unique_lock<std::shared_mutex> readers_lock(m_readers_mutex);
+        assert(!m_readers.count(process_of(s_coord_id)));
+        auto it = m_readers.emplace(process_of(s_coord_id), process_of(s_coord_id));
+        assert(it.second == true);
+        coordinator_reader = &it.first->second;
+    }
+    if (coordinator_reader) {
+        coordinator_reader->wait_until_ready();
+    }
 
     // Up to this point, there was no infrastructure for a proper construction
     // of Transceiver base.
@@ -1005,23 +1025,31 @@ bool Managed_process::spawn_swarm_process(
 
     cstring_vector cargs(args);
 
-    // If a reader for this process id exists (from a previous crashed instance),
-    // stop it and remove it before creating a fresh one for recovery.
-    if (auto existing = m_readers.find(s.piid); existing != m_readers.end()) {
-        existing->second.stop_and_wait(1.0);
-        m_readers.erase(existing);
-    }
+    Process_message_reader* new_reader = nullptr;
+    {
+        std::unique_lock<std::shared_mutex> readers_lock(m_readers_mutex);
 
-    auto eit = m_readers.emplace(
-        std::piecewise_construct,
-        std::forward_as_tuple(s.piid),
-        std::forward_as_tuple(s.piid, s.occurrence)
-    );
-    assert(eit.second == true);
+        // If a reader for this process id exists (from a previous crashed instance),
+        // stop it and remove it before creating a fresh one for recovery.
+        if (auto existing = m_readers.find(s.piid); existing != m_readers.end()) {
+            existing->second.stop_and_wait(1.0);
+            m_readers.erase(existing);
+        }
+
+        auto eit = m_readers.emplace(
+            std::piecewise_construct,
+            std::forward_as_tuple(s.piid),
+            std::forward_as_tuple(s.piid, s.occurrence)
+        );
+        assert(eit.second == true);
+        new_reader = &eit.first->second;
+    }
 
     // Before spawning the new process, we have to assure that the
     // corresponding reading threads are up and running.
-    eit.first->second.wait_until_ready();
+    if (new_reader) {
+        new_reader->wait_until_ready();
+    }
 
     bool success = spawn_detached(s.binary_name.c_str(), cargs.v());
 
@@ -1045,6 +1073,7 @@ bool Managed_process::spawn_swarm_process(
         std::cerr << "failed to launch " << s.binary_name << std::endl;
 
         //m_readers.pop_back();
+        std::unique_lock<std::shared_mutex> readers_lock(m_readers_mutex);
         m_readers.erase(s.piid);
     }
 
@@ -1173,12 +1202,24 @@ void Managed_process::pause()
     if (m_communication_state <= COMMUNICATION_PAUSED)
         return;
 
-    for (auto& ri : m_readers) {
-        ri.second.pause();
+    std::vector<Process_message_reader*> readers;
+    {
+        std::shared_lock<std::shared_mutex> readers_lock(m_readers_mutex);
+        readers.reserve(m_readers.size());
+        for (auto& ri : m_readers) {
+            readers.push_back(&ri.second);
+        }
+    }
+
+    for (auto* reader : readers) {
+        if (reader) {
+            reader->pause();
+        }
     }
 
     m_communication_state = COMMUNICATION_PAUSED;
     m_start_stop_condition.notify_all();
+    wake_all_delivery_waiters();
 }
 
 
@@ -1193,12 +1234,24 @@ void Managed_process::stop()
     if (m_communication_state == COMMUNICATION_STOPPED)
         return;
 
-    for (auto& ri : m_readers) {
-        ri.second.stop_nowait();
+    std::vector<Process_message_reader*> readers;
+    {
+        std::shared_lock<std::shared_mutex> readers_lock(m_readers_mutex);
+        readers.reserve(m_readers.size());
+        for (auto& ri : m_readers) {
+            readers.push_back(&ri.second);
+        }
+    }
+
+    for (auto* reader : readers) {
+        if (reader) {
+            reader->stop_nowait();
+        }
     }
 
     m_communication_state = COMMUNICATION_STOPPED;
     m_start_stop_condition.notify_all();
+    wake_all_delivery_waiters();
 }
 
 
@@ -1362,17 +1415,20 @@ inline void Managed_process::flush(instance_id_type process_id, sequence_counter
 {
     assert(is_process(process_id));
 
-    auto it = m_readers.find(process_id);
-    if (it == m_readers.end()) {
-        throw std::logic_error(
-            "attempted to flush the channel of a process which is not being read"
-        );
-    }
-    auto& reader = it->second;
+    sequence_counter_type rs = 0;
+    {
+        std::shared_lock<std::shared_mutex> readers_lock(m_readers_mutex);
+        auto it = m_readers.find(process_id);
+        if (it == m_readers.end()) {
+            throw std::logic_error(
+                "attempted to flush the channel of a process which is not being read"
+            );
+        }
 
-    // Barrier completion messages are RPC responses sent on the reply ring.
-    // Check the reply reading sequence, not the request reading sequence.
-    auto rs = reader.get_reply_reading_sequence();
+        // Barrier completion messages are RPC responses sent on the reply ring.
+        // Check the reply reading sequence, not the request reading sequence.
+        rs = it->second.get_reply_reading_sequence();
+    }
     if (rs < flush_sequence) {
         std::unique_lock<mutex> flush_lock(m_flush_sequence_mutex);
         m_flush_sequence.push_back(flush_sequence);
@@ -1382,6 +1438,265 @@ inline void Managed_process::flush(instance_id_type process_id, sequence_counter
             m_flush_sequence_condition.wait(flush_lock);
         }
     }
+}
+
+
+inline void Managed_process::wait_for_incoming_delivery()
+{
+    Delivery_waiter waiter;
+    auto* active_reader = current_message_reader();
+
+    {
+        std::shared_lock<std::shared_mutex> readers_lock(m_readers_mutex);
+        waiter.targets.reserve(m_readers.size());
+
+        for (auto& entry : m_readers) {
+            auto& reader = entry.second;
+            if (&reader == active_reader) {
+                continue;
+            }
+
+            if (reader.state() == Process_message_reader::READER_STOPPING) {
+                continue;
+            }
+
+            Delivery_waiter::Target target;
+            target.process_id = entry.first;
+            target.request_target = reader.get_request_leading_sequence();
+            target.reply_target = reader.get_reply_leading_sequence();
+
+            const bool already_caught_up =
+                reader.get_request_reading_sequence() >= target.request_target &&
+                reader.get_reply_reading_sequence() >= target.reply_target;
+
+            if (!already_caught_up) {
+                waiter.targets.push_back(target);
+            }
+        }
+    }
+
+    if (waiter.targets.empty()) {
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> waiters_lock(m_delivery_waiters_mutex);
+        waiter.registration = m_delivery_waiters.insert(m_delivery_waiters.end(), &waiter);
+        waiter.linked = true;
+        m_delivery_waiter_count.fetch_add(1, std::memory_order_acq_rel);
+    }
+
+    std::unique_lock<std::mutex> waiter_lock(waiter.mutex);
+    if (refresh_delivery_waiter(&waiter)) {
+        waiter.complete = true;
+    }
+
+    while (!waiter.complete && m_communication_state == COMMUNICATION_RUNNING) {
+        waiter.cv.wait(waiter_lock, [&]() {
+            return waiter.complete || m_communication_state != COMMUNICATION_RUNNING;
+        });
+
+        if (!waiter.complete && m_communication_state == COMMUNICATION_RUNNING) {
+            if (refresh_delivery_waiter(&waiter)) {
+                waiter.complete = true;
+            }
+        }
+    }
+
+    waiter_lock.unlock();
+
+    {
+        std::lock_guard<std::mutex> waiters_lock(m_delivery_waiters_mutex);
+        if (waiter.linked) {
+            m_delivery_waiters.erase(waiter.registration);
+            waiter.linked = false;
+            m_delivery_waiter_count.fetch_sub(1, std::memory_order_acq_rel);
+        }
+    }
+}
+
+
+inline bool Managed_process::refresh_delivery_waiter(Delivery_waiter* waiter)
+{
+    if (!waiter) {
+        return true;
+    }
+
+    std::shared_lock<std::shared_mutex> readers_lock(m_readers_mutex);
+    bool complete = true;
+
+    for (auto& target : waiter->targets) {
+        if (target.complete) {
+            continue;
+        }
+
+        auto it = m_readers.find(target.process_id);
+        if (it == m_readers.end()) {
+            target.complete = true;
+            continue;
+        }
+
+        auto& reader = it->second;
+        if (reader.state() == Process_message_reader::READER_STOPPING) {
+            target.complete = true;
+            continue;
+        }
+
+        const bool caught_up =
+            reader.get_request_reading_sequence() >= target.request_target &&
+            reader.get_reply_reading_sequence() >= target.reply_target;
+
+        if (caught_up) {
+            target.complete = true;
+            continue;
+        }
+
+        complete = false;
+    }
+
+    return complete;
+}
+
+
+inline void Managed_process::notify_delivery_progress(Process_message_reader* reader)
+{
+    (void)reader;
+
+    if (m_delivery_waiter_count.load(std::memory_order_acquire) == 0) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> waiters_lock(m_delivery_waiters_mutex);
+    for (auto it = m_delivery_waiters.begin(); it != m_delivery_waiters.end();) {
+        auto* waiter = *it;
+        if (!waiter) {
+            it = m_delivery_waiters.erase(it);
+            m_delivery_waiter_count.fetch_sub(1, std::memory_order_acq_rel);
+            continue;
+        }
+
+        std::unique_lock<std::mutex> waiter_lock(waiter->mutex);
+        if (waiter->complete) {
+            ++it;
+            continue;
+        }
+
+        if (refresh_delivery_waiter(waiter)) {
+            waiter->complete = true;
+            waiter_lock.unlock();
+            waiter->cv.notify_all();
+
+            waiter->linked = false;
+            it = m_delivery_waiters.erase(it);
+            m_delivery_waiter_count.fetch_sub(1, std::memory_order_acq_rel);
+        }
+        else {
+            ++it;
+        }
+    }
+}
+
+
+inline void Managed_process::wake_all_delivery_waiters()
+{
+    if (m_delivery_waiter_count.load(std::memory_order_acquire) == 0) {
+        return;
+    }
+
+    std::unique_lock<std::mutex> waiters_lock(m_delivery_waiters_mutex);
+    if (m_delivery_waiters.empty()) {
+        return;
+    }
+
+    std::vector<Delivery_waiter*> waiters_snapshot;
+    waiters_snapshot.reserve(m_delivery_waiters.size());
+    for (auto* waiter : m_delivery_waiters) {
+        waiters_snapshot.push_back(waiter);
+    }
+
+    waiters_lock.unlock();
+
+    for (auto* waiter : waiters_snapshot) {
+        if (!waiter) {
+            continue;
+        }
+
+        std::lock_guard<std::mutex> waiter_guard(waiter->mutex);
+        waiter->cv.notify_all();
+    }
+}
+
+
+inline void Managed_process::on_handler_start()
+{
+    if (detail::g_active_handler_depth == 0) {
+        detail::g_active_handler_owner = this;
+    } else {
+        assert(detail::g_active_handler_owner == this &&
+               "message handlers must not migrate across Managed_process instances");
+    }
+
+    detail::g_active_handler_depth += 1;
+    m_active_handler_count.fetch_add(1, std::memory_order_acq_rel);
+}
+
+
+inline void Managed_process::on_handler_complete()
+{
+    auto previous = m_active_handler_count.fetch_sub(1, std::memory_order_acq_rel);
+    assert(previous > 0);
+    assert(detail::g_active_handler_depth > 0);
+    assert(detail::g_active_handler_owner == this &&
+           "message handlers must complete on the thread that started them");
+
+    detail::g_active_handler_depth -= 1;
+    if (detail::g_active_handler_depth == 0) {
+        detail::g_active_handler_owner = nullptr;
+    }
+
+    m_active_handler_condition.notify_all();
+}
+
+
+inline void Managed_process::wait_for_handler_quiescence()
+{
+    // Processing fences must not spin while they wait for other handlers to
+    // retire. Rely on a condition variable that gets poked by
+    // on_handler_complete(), which runs as part of the reader loop.
+    const size_t local_depth = current_handler_depth();
+    std::unique_lock<std::mutex> lock(m_active_handler_mutex);
+
+    while (true) {
+        lock.unlock();
+
+        const size_t active = m_active_handler_count.load(std::memory_order_acquire);
+        if (active <= local_depth) {
+            return;
+        }
+
+        if (m_communication_state != COMMUNICATION_RUNNING) {
+            return;
+        }
+
+        lock.lock();
+        m_active_handler_condition.wait(lock, [&]() {
+            return m_active_handler_count.load(std::memory_order_acquire) <= local_depth ||
+                   m_communication_state != COMMUNICATION_RUNNING;
+        });
+    }
+}
+
+
+inline size_t Managed_process::current_handler_depth() const
+{
+    if (detail::g_active_handler_owner != this) {
+        // Either we are outside a handler or the caller resumed execution on a
+        // foreign thread. In both cases treat the depth as zero so the fence waits
+        // for every outstanding handler.
+        return 0;
+    }
+
+    return detail::g_active_handler_depth;
 }
 
 

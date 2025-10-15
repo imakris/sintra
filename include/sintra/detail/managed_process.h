@@ -47,6 +47,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <list>
 #include <map>
 #include <mutex>
+#include <shared_mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -265,6 +266,7 @@ struct Managed_process: Derived_transceiver<Managed_process>
         instance_id_type,
         Process_message_reader
     >                                   m_readers;
+    mutable std::shared_mutex           m_readers_mutex;
 
     int                                 m_num_active_readers = 0;
     mutex                               m_num_active_readers_mutex;
@@ -272,6 +274,13 @@ struct Managed_process: Derived_transceiver<Managed_process>
     void wait_until_all_external_readers_are_done(int extra_allowed_readers = 0);
 
     void flush(instance_id_type process_id, sequence_counter_type flush_sequence);
+    void wait_for_incoming_delivery();
+    void notify_delivery_progress(Process_message_reader* reader = nullptr);
+    void wake_all_delivery_waiters();
+    void wait_for_handler_quiescence();
+    void on_handler_start();
+    void on_handler_complete();
+    size_t current_handler_depth() const;
     void run_after_current_handler(function<void()> task);
 
 
@@ -307,6 +316,34 @@ struct Managed_process: Derived_transceiver<Managed_process>
     deque<sequence_counter_type>        m_flush_sequence;
     mutex                               m_flush_sequence_mutex;
     condition_variable                  m_flush_sequence_condition;
+
+    struct Delivery_waiter
+    {
+        struct Target
+        {
+            instance_id_type     process_id = invalid_instance_id;
+            sequence_counter_type request_target = 0;
+            sequence_counter_type reply_target = 0;
+            bool                  complete = false;
+        };
+
+        std::mutex                      mutex;
+        std::condition_variable         cv;
+        std::vector<Target>             targets;
+        bool                            complete = false;
+        bool                            linked = false;
+        std::list<Delivery_waiter*>::iterator registration;
+    };
+
+    bool refresh_delivery_waiter(Delivery_waiter* waiter);
+
+    std::list<Delivery_waiter*>         m_delivery_waiters;
+    std::mutex                          m_delivery_waiters_mutex;
+    std::atomic<size_t>                 m_delivery_waiter_count{0};
+
+    std::atomic<size_t>                 m_active_handler_count{0};
+    mutex                               m_active_handler_mutex;
+    condition_variable                  m_active_handler_condition;
 
     handler_registry_type               m_active_handlers;
 
