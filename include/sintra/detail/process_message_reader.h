@@ -125,6 +125,7 @@ struct Process_message_reader
     };
 
     using Delivery_progress_ptr = std::shared_ptr<Delivery_progress>;
+    using Delivery_progress_weak_ptr = std::weak_ptr<Delivery_progress>;
 
     enum class Delivery_stream
     {
@@ -134,7 +135,7 @@ struct Process_message_reader
 
     struct Delivery_target
     {
-        Delivery_progress_ptr progress;
+        Delivery_progress_weak_ptr progress;
         Delivery_stream stream = Delivery_stream::Request;
         sequence_counter_type target = invalid_sequence;
         bool wait_needed = false;

@@ -27,7 +27,23 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define SINTRA_IMPL_H
 
 
+#include <cstdio>
+#include <mutex>
+
+
 namespace sintra {
+
+namespace detail {
+inline void report_processing_fence_placeholder()
+{
+    static std::once_flag warned;
+    std::call_once(warned, []() {
+        std::fprintf(stderr,
+            "sintra: barrier<processing_fence_t> falls back to delivery semantics; "
+            "processing fences require handler tracking that is not yet implemented.\n");
+    });
+}
+} // namespace detail
 
 
 using std::ostringstream;
@@ -308,16 +324,12 @@ template<>
 inline
 bool barrier<processing_fence_t>(const std::string& barrier_name, const std::string& group_name)
 {
-    const bool delivered = barrier<delivery_fence_t>(barrier_name, group_name);
-    if (!delivered) {
-        return false;
-    }
+    detail::report_processing_fence_placeholder();
 
-    // Future enhancement: track active handler execution across request-reader
-    // threads (e.g., with per-thread in-flight counters) and wait until they
-    // reach zero here. That additional signal would upgrade the fence from
-    // "delivered" to "processed".
-    return true;
+    // Without explicit handler-tracking signals we can only guarantee delivery
+    // semantics.  Fall back to the delivery fence so callers continue to make
+    // forward progress while we design the stronger fence.
+    return barrier<delivery_fence_t>(barrier_name, group_name);
 }
 
 

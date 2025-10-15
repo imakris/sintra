@@ -74,7 +74,7 @@ namespace sintra {
 // Barrier mode tags
 struct rendezvous_t {};
 struct delivery_fence_t {};
-struct processing_fence_t {};
+struct processing_fence_t {}; // Placeholder: currently falls back to delivery semantics with a runtime warning.
 
 // Blocks the calling thread of the calling process, until at least one thread of each processes
 // in the the specified process group has called barrier(). By default this operates as a
