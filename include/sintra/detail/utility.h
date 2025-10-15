@@ -185,12 +185,60 @@ inline std::atomic<read_fn>& read_override()
     return fn;
 }
 
+inline int system_pipe2(int pipefd[2], int flags)
+{
+#if defined(__linux__) || defined(__FreeBSD__) || defined(__DragonFly__) || defined(__NetBSD__) || defined(__OpenBSD__)
+    return ::pipe2(pipefd, flags);
+#else
+    if (flags & ~(O_CLOEXEC | O_NONBLOCK)) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (::pipe(pipefd) == -1) {
+        return -1;
+    }
+
+    const auto set_flag = [&](int fd, int cmd, int value) {
+        int current = ::fcntl(fd, cmd == F_SETFD ? F_GETFD : F_GETFL);
+        if (current == -1) {
+            return -1;
+        }
+        return ::fcntl(fd, cmd, current | value);
+    };
+
+    if (flags & O_CLOEXEC) {
+        if (set_flag(pipefd[0], F_SETFD, FD_CLOEXEC) == -1 ||
+            set_flag(pipefd[1], F_SETFD, FD_CLOEXEC) == -1) {
+            int saved_errno = errno;
+            ::close(pipefd[0]);
+            ::close(pipefd[1]);
+            errno = saved_errno;
+            return -1;
+        }
+    }
+
+    if (flags & O_NONBLOCK) {
+        if (set_flag(pipefd[0], F_SETFL, O_NONBLOCK) == -1 ||
+            set_flag(pipefd[1], F_SETFL, O_NONBLOCK) == -1) {
+            int saved_errno = errno;
+            ::close(pipefd[0]);
+            ::close(pipefd[1]);
+            errno = saved_errno;
+            return -1;
+        }
+    }
+
+    return 0;
+#endif
+}
+
 inline int call_pipe2(int pipefd[2], int flags)
 {
     if (auto override = pipe2_override().load(std::memory_order_acquire)) {
         return override(pipefd, flags);
     }
-    return ::pipe2(pipefd, flags);
+    return system_pipe2(pipefd, flags);
 }
 
 inline ssize_t call_write(int fd, const void* buf, size_t count)
