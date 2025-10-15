@@ -27,7 +27,23 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define SINTRA_IMPL_H
 
 
+#include <cstdio>
+#include <mutex>
+
+
 namespace sintra {
+
+namespace detail {
+inline void report_processing_fence_placeholder()
+{
+    static std::once_flag warned;
+    std::call_once(warned, []() {
+        std::fprintf(stderr,
+            "sintra: barrier<processing_fence_t> falls back to delivery semantics; "
+            "processing fences require handler tracking that is not yet implemented.\n");
+    });
+}
+} // namespace detail
 
 
 using std::ostringstream;
@@ -284,10 +300,22 @@ template<>
 inline
 bool barrier<delivery_fence_t>(const std::string& barrier_name, const std::string& group_name)
 {
-    // TODO: IMPLEMENT
-    (void)barrier_name;
-    (void)group_name;
-    return false;
+    const bool rendezvous_completed = barrier<rendezvous_t>(barrier_name, group_name);
+    if (!rendezvous_completed) {
+        return false;
+    }
+
+    if (!s_mproc) {
+        return true;
+    }
+
+    // Snapshot remote leading sequences AFTER the rendezvous has completed and
+    // the coordinator's reply watermark has been flushed locally. The request
+    // readers will then block until their per-ring read cursors reach the
+    // captured sequences, guaranteeing that every message published before the
+    // barrier was invoked has been fetched locally.
+    s_mproc->wait_for_delivery_fence();
+    return true;
 }
 
 
@@ -296,10 +324,12 @@ template<>
 inline
 bool barrier<processing_fence_t>(const std::string& barrier_name, const std::string& group_name)
 {
-    // TODO: IMPLEMENT
-    (void)barrier_name;
-    (void)group_name;
-    return false;
+    detail::report_processing_fence_placeholder();
+
+    // Without explicit handler-tracking signals we can only guarantee delivery
+    // semantics.  Fall back to the delivery fence so callers continue to make
+    // forward progress while we design the stronger fence.
+    return barrier<delivery_fence_t>(barrier_name, group_name);
 }
 
 

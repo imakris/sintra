@@ -34,6 +34,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <functional>
 #include <iostream>
 #include <mutex>
+#include <shared_mutex>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -496,6 +497,7 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
 
         //// and finally, if the process was being read, stop reading from it
         if (iid != s_mproc_id) {
+            std::shared_lock<std::shared_mutex> readers_lock(s_mproc->m_readers_mutex);
             auto it = s_mproc->m_readers.find(process_iid);
             if (it != s_mproc->m_readers.end()) {
                 it->second.stop_nowait();
