@@ -1492,70 +1492,62 @@ void Managed_process::wait_for_fence(Process_message_reader::Fence_mode mode)
         return;
     }
 
-    auto all_targets_satisfied = [&]() {
-        for (const auto& target : targets) {
-            auto progress = target.progress.lock();
-            if (!progress) {
-                // Reader was replaced or destroyed; treat as satisfied because
-                // no further progress is possible on the captured stream.
-                continue;
-            }
-
-            const auto observed = [&]() {
-                const auto& stream_state = (target.stream == Process_message_reader::Delivery_stream::Request)
-                    ? progress->request
-                    : progress->reply;
-                return (target.mode == Process_message_reader::Fence_mode::Delivery)
-                    ? stream_state.delivered.load(std::memory_order_acquire)
-                    : stream_state.processed.load(std::memory_order_acquire);
-            }();
-
-            if (observed >= target.target) {
-                continue;
-            }
-
-            const auto stopped = (target.stream == Process_message_reader::Delivery_stream::Request)
-                ? progress->request.stopped.load(std::memory_order_acquire)
-                : progress->reply.stopped.load(std::memory_order_acquire);
-
-            if (stopped) {
-                continue;
-            }
-
-            return false;
+    auto target_satisfied = [](const Process_message_reader::Delivery_target& target,
+                                const Process_message_reader::Delivery_progress_ptr& progress) {
+        if (!progress) {
+            return true;
         }
 
-        return true;
+        const auto& stream_state = (target.stream == Process_message_reader::Delivery_stream::Request)
+            ? progress->request
+            : progress->reply;
+
+        const auto observed = (target.mode == Process_message_reader::Fence_mode::Delivery)
+            ? stream_state.delivered.load(std::memory_order_acquire)
+            : stream_state.processed.load(std::memory_order_acquire);
+
+        if (observed >= target.target) {
+            return true;
+        }
+
+        if (stream_state.stopped.load(std::memory_order_acquire)) {
+            return true;
+        }
+
+        return false;
     };
 
-    if (all_targets_satisfied()) {
-        return;
-    }
-
-    struct Waiter_guard {
-        explicit Waiter_guard(std::atomic<uint32_t>& counter)
-            : m_counter(counter)
-        {
-            m_counter.fetch_add(1, std::memory_order_acq_rel);
+    for (auto& target : targets) {
+        auto progress = target.progress;
+        if (!progress) {
+            continue;
         }
 
-        ~Waiter_guard()
-        {
-            m_counter.fetch_sub(1, std::memory_order_acq_rel);
+        auto satisfied = [&]() {
+            return target_satisfied(target, progress);
+        };
+
+        if (satisfied()) {
+            continue;
         }
 
-        std::atomic<uint32_t>& m_counter;
-    } guard(m_delivery_waiter_count);
+        struct Waiter_guard {
+            explicit Waiter_guard(std::atomic<uint32_t>& counter)
+                : m_counter(counter)
+            {
+                m_counter.fetch_add(1, std::memory_order_acq_rel);
+            }
 
-    std::unique_lock<std::mutex> lk(m_delivery_mutex);
-    m_delivery_condition.wait(lk, all_targets_satisfied);
-}
+            ~Waiter_guard()
+            {
+                m_counter.fetch_sub(1, std::memory_order_acq_rel);
+            }
 
+            std::atomic<uint32_t>& m_counter;
+        } guard(progress->waiter_count);
 
-inline void Managed_process::notify_delivery_progress()
-{
-    if (m_delivery_waiter_count.load(std::memory_order_acquire) > 0) {
-        m_delivery_condition.notify_all();
+        std::unique_lock<std::mutex> lk(progress->wait_mutex);
+        progress->wait_condition.wait(lk, satisfied);
     }
 }
 

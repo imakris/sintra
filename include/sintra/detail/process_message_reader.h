@@ -127,10 +127,20 @@ struct Process_message_reader
 
         Stream_state request;
         Stream_state reply;
+
+        std::atomic<uint32_t> waiter_count{0};
+        std::mutex             wait_mutex;
+        std::condition_variable wait_condition;
+
+        void notify_waiters()
+        {
+            if (waiter_count.load(std::memory_order_acquire) > 0) {
+                wait_condition.notify_all();
+            }
+        }
     };
 
     using Delivery_progress_ptr = std::shared_ptr<Delivery_progress>;
-    using Delivery_progress_weak_ptr = std::weak_ptr<Delivery_progress>;
 
     enum class Delivery_stream
     {
@@ -146,7 +156,7 @@ struct Process_message_reader
 
     struct Delivery_target
     {
-        Delivery_progress_weak_ptr progress;
+        Delivery_progress_ptr progress;
         Delivery_stream stream = Delivery_stream::Request;
         Fence_mode mode = Fence_mode::Delivery;
         sequence_counter_type target = invalid_sequence;

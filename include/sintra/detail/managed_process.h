@@ -267,9 +267,6 @@ struct Managed_process: Derived_transceiver<Managed_process>
         Process_message_reader
     >                                   m_readers;
     mutable std::shared_mutex           m_readers_mutex;
-    mutable mutex                       m_delivery_mutex;
-    condition_variable                  m_delivery_condition;
-    std::atomic<uint32_t>               m_delivery_waiter_count {0};
 
     int                                 m_num_active_readers = 0;
     mutex                               m_num_active_readers_mutex;
@@ -282,7 +279,6 @@ struct Managed_process: Derived_transceiver<Managed_process>
     void wait_for_delivery_fence();
     void wait_for_processing_fence();
     void wait_for_fence(Process_message_reader::Fence_mode mode);
-    void notify_delivery_progress();
 
 
     size_t unblock_rpc(instance_id_type process_instance_id = invalid_instance_id);

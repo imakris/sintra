@@ -138,9 +138,7 @@ void Process_message_reader::stop_nowait()
         progress->reply.processed.store(rep_seq, std::memory_order_release);
         progress->reply.stopped.store(true, std::memory_order_release);
 
-        if (s_mproc) {
-            s_mproc->notify_delivery_progress();
-        }
+        progress->notify_waiters();
     }
 
     m_in_req_c->done_reading();
@@ -267,8 +265,8 @@ void Process_message_reader::request_reader_function()
         }
         const auto previous = progress->request.delivered.exchange(
             seq, std::memory_order_acq_rel);
-        if (previous != seq && s_mproc) {
-            s_mproc->notify_delivery_progress();
+        if (previous != seq) {
+            progress->notify_waiters();
         }
     };
 
@@ -278,8 +276,8 @@ void Process_message_reader::request_reader_function()
         }
         const auto previous = progress->request.processed.exchange(
             seq, std::memory_order_acq_rel);
-        if (previous != seq && s_mproc) {
-            s_mproc->notify_delivery_progress();
+        if (previous != seq) {
+            progress->notify_waiters();
         }
     };
 
@@ -449,9 +447,7 @@ void Process_message_reader::request_reader_function()
         progress->request.delivered.store(seq, std::memory_order_release);
         progress->request.processed.store(seq, std::memory_order_release);
         progress->request.stopped.store(true, std::memory_order_release);
-    }
-    if (s_mproc) {
-        s_mproc->notify_delivery_progress();
+        progress->notify_waiters();
     }
 
     s_tl_current_request_reader = nullptr;
@@ -479,26 +475,20 @@ Process_message_reader::Delivery_target Process_message_reader::prepare_fence_ta
         return target;
     }
 
+    if (stream == Delivery_stream::Request && s_tl_current_request_reader == this) {
+        return target;
+    }
+
     auto progress = m_delivery_progress;
     if (!progress) {
         return target;
     }
 
-    target.progress = progress;
-
-    if (stream == Delivery_stream::Request && s_tl_current_request_reader == this) {
-        return target;
-    }
-
-    const auto strong_progress = target.progress.lock();
-    if (!strong_progress) {
-        // Reader was destroyed after we captured the target; no wait necessary.
-        return target;
-    }
+    target.progress = std::move(progress);
 
     const auto& stream_state = (stream == Delivery_stream::Request)
-        ? strong_progress->request
-        : strong_progress->reply;
+        ? target.progress->request
+        : target.progress->reply;
 
     const auto observed = (mode == Fence_mode::Delivery)
         ? stream_state.delivered.load(std::memory_order_acquire)
@@ -534,8 +524,8 @@ void Process_message_reader::reply_reader_function()
         }
         const auto previous = progress->reply.delivered.exchange(
             seq, std::memory_order_acq_rel);
-        if (previous != seq && s_mproc) {
-            s_mproc->notify_delivery_progress();
+        if (previous != seq) {
+            progress->notify_waiters();
         }
     };
 
@@ -545,8 +535,8 @@ void Process_message_reader::reply_reader_function()
         }
         const auto previous = progress->reply.processed.exchange(
             seq, std::memory_order_acq_rel);
-        if (previous != seq && s_mproc) {
-            s_mproc->notify_delivery_progress();
+        if (previous != seq) {
+            progress->notify_waiters();
         }
     };
 
@@ -697,9 +687,7 @@ void Process_message_reader::reply_reader_function()
 
     if (progress) {
         progress->reply.stopped.store(true, std::memory_order_release);
-    }
-    if (s_mproc) {
-        s_mproc->notify_delivery_progress();
+        progress->notify_waiters();
     }
 }
 
