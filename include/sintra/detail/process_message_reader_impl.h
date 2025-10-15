@@ -78,6 +78,13 @@ inline std::unique_ptr<std::byte[]> sintra_clone_message(const Message_prefix* m
 
 inline bool thread_local tl_is_req_thread = false;
 
+// Expose reader-thread check to other translation units
+inline bool on_request_reader_thread() { return tl_is_req_thread; }
+
+// Track the request reading sequence from the previous iteration to detect changes.
+// Uses the existing ring sequence instead of maintaining a separate epoch counter.
+inline thread_local sequence_counter_type tl_prev_req_reading_seq = 0;
+
 // Historical note: mingw 11.2.0 had issues with inline thread_local non-POD objects
 // (January 2022). We now store the callable directly and rely on the fixed runtime
 // behaviour to avoid manual allocation.
@@ -254,16 +261,16 @@ void Process_message_reader::request_reader_function()
         // request reader. The reply reader thread is responsible for popping
         // tokens when the *reply* reading sequence reaches them.
 
-        // Detect when the reading sequence advances (indicating done_reading_new_data() was called)
-        // to notify delivery_fence barriers waiting for message processing to complete
-        auto seq_before = m_in_req_c->reading_sequence();
-        Message_prefix* m = m_in_req_c->fetch_message();
-        auto seq_after = m_in_req_c->reading_sequence();
-
-        if (seq_after != seq_before) {
-            // Reading sequence advanced - notify any waiting delivery_fence barriers
+        // Detect when messages are processed by tracking the reading sequence across iterations.
+        // get_message_reading_sequence() advances with each message (not just at batch boundaries).
+        auto current_seq = m_in_req_c->get_message_reading_sequence();
+        if (current_seq != tl_prev_req_reading_seq) {
+            tl_prev_req_reading_seq = current_seq;
+            // Notify any waiting delivery_fence barriers that progress has been made
             s_mproc->m_reading_sync_cv.notify_all();
         }
+
+        Message_prefix* m = m_in_req_c->fetch_message();
 
         s_tl_current_message = m;
         if (m == nullptr) {

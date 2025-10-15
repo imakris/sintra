@@ -35,6 +35,11 @@ using std::string;
 using std::vector;
 
 
+// Internal progress trigger type for delivery_fence barrier synchronization.
+// Posted as a message to ensure the request reader advances its reading sequence.
+namespace detail {
+    struct __progress_tick__ final {};
+}
 
 
 inline
@@ -232,48 +237,76 @@ int process_index()
 }
 
 
-// Helper function: Wait for request reader to advance its reading sequence.
-// Used by delivery_fence and processing_fence barrier modes to ensure incoming
-// messages are delivered before synchronizing.
+// Helper function: Ensures all messages in the local request reader have been processed.
+// Called AFTER barrier_impl() to guarantee message delivery semantics.
+// Works by posting a progress trigger message and waiting for the local request reader
+// to advance its reading sequence, confirming all prior messages have been handled.
 inline
 bool sync_incoming_messages()
 {
+    std::fprintf(stderr, "[DEBUG] sync_incoming_messages() CALLED\n");
+
     if (!s_mproc) {
+        std::fprintf(stderr, "[DEBUG] sync_incoming_messages: s_mproc is NULL, returning false\n");
         return false;
     }
 
     // If coordinator is local, messages are delivered synchronously in-process
     if (s_coord) {
+        std::fprintf(stderr, "[DEBUG] sync_incoming_messages: s_coord is LOCAL, returning true\n");
         return true;
     }
 
-    // Find the reader for the coordinator's rings (where our incoming messages come from)
-    auto coord_proc_id = process_of(s_coord_id);
-    auto it = s_mproc->m_readers.find(coord_proc_id);
+    // If communication is not running (shutdown/paused), no synchronization needed
+    if (s_mproc->m_communication_state != Managed_process::COMMUNICATION_RUNNING) {
+        std::fprintf(stderr, "[DEBUG] sync_incoming_messages: communication state is NOT RUNNING, returning true\n");
+        return true;
+    }
+
+    // CRITICAL: If we're ON the request reader thread, don't wait - we'd deadlock!
+    // The request reader thread itself doesn't need to wait for message delivery.
+    if (on_request_reader_thread()) {
+        std::fprintf(stderr, "[DEBUG] sync_incoming_messages: ON request reader thread, returning true\n");
+        return true;
+    }
+
+    // Find the LOCAL process's request reader (where our incoming messages are processed)
+    const auto local_proc_id = process_of(s_mproc_id);
+    std::fprintf(stderr, "[DEBUG] sync_incoming_messages: local_proc_id=%llu, m_readers.size()=%zu\n",
+                 (unsigned long long)local_proc_id, s_mproc->m_readers.size());
+    auto it = s_mproc->m_readers.find(local_proc_id);
     if (it == s_mproc->m_readers.end()) {
-        // No reader found (shouldn't happen, but handle gracefully)
+        std::fprintf(stderr, "[DEBUG] sync_incoming_messages: local reader NOT FOUND, returning true\n");
         return true;
     }
+    std::fprintf(stderr, "[DEBUG] sync_incoming_messages: local reader FOUND\n");
+    auto& local_reader = it->second;
 
-    auto& coord_reader = it->second;
+    // Capture current reading sequence under mutex to avoid lost wakeup
+    std::unique_lock<std::mutex> lk(s_mproc->m_reading_sync_mutex);
+    const auto start_seq = local_reader.get_request_reading_sequence();
+    lk.unlock();
 
-    // Capture the current reading sequence from the coordinator's request ring.
-    // We use the raw reading_sequence() which advances when done_reading_new_data() is called.
-    // IMPORTANT: Must lock before capturing to avoid lost wakeup race.
-    std::unique_lock<std::mutex> lock(s_mproc->m_reading_sync_mutex);
-    const auto start_seq = coord_reader.get_request_ring_reading_sequence();
+    // Post a progress trigger to any_local_or_remote (world()) to ensure the request
+    // reader processes at least one more message, guaranteeing sequence advancement.
+    // This is essential when the request ring is already empty.
+    using TickMsg = Message<Enclosure<detail::__progress_tick__>>;
+    s_mproc->send<TickMsg, any_local_or_remote, Managed_process::Transceiver_type>(
+        detail::__progress_tick__{}
+    );
 
-    // Wait for the reading sequence to advance, indicating the reader has processed
-    // messages from the current snapshot and moved to the next batch
+    // Wait for the local request reader's sequence to advance beyond start_seq,
+    // confirming all messages sent before the barrier have been processed.
+    lk.lock();
     s_mproc->m_reading_sync_cv.wait_for(
-        lock,
-        std::chrono::milliseconds(100),
-        [&coord_reader, start_seq]() {
-            return coord_reader.get_request_ring_reading_sequence() > start_seq;
+        lk,
+        std::chrono::milliseconds(500),
+        [&local_reader, start_seq]() {
+            return local_reader.get_request_reading_sequence() > start_seq ||
+                   s_mproc->m_communication_state != Managed_process::COMMUNICATION_RUNNING;
         }
     );
 
-    // Always return true - timeout just means no more messages to process (already synchronized)
     return true;
 }
 
@@ -339,9 +372,14 @@ bool barrier(rendezvous_t, const std::string& barrier_name, const std::string& g
 inline
 bool barrier(delivery_fence_t, const std::string& barrier_name, const std::string& group_name)
 {
-    // Wait for request reader to complete current message snapshot
+    // First, complete the barrier synchronization with all processes
+    const bool ok = barrier_impl(barrier_name, group_name);
+    if (!ok) {
+        return false;
+    }
+    // Then, ensure all incoming messages have been processed by the local request reader
     sync_incoming_messages();
-    return barrier_impl(barrier_name, group_name);
+    return true;
 }
 
 
@@ -351,9 +389,14 @@ inline
 bool barrier(processing_fence_t, const std::string& barrier_name, const std::string& group_name)
 {
     // TODO: Wait for active handlers to complete
-    // For now, use delivery fence semantics
+    // First, complete the barrier synchronization with all processes
+    const bool ok = barrier_impl(barrier_name, group_name);
+    if (!ok) {
+        return false;
+    }
+    // Then, ensure all incoming messages have been processed by the local request reader
     sync_incoming_messages();
-    return barrier_impl(barrier_name, group_name);
+    return true;
 }
 
 

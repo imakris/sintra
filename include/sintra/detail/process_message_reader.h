@@ -89,6 +89,9 @@ inline bool rpc_reply_is_deferred()
     return s_tl_rpc_reply_deferred;
 }
 
+// Returns true iff the caller is the request reader thread.
+bool on_request_reader_thread();
+
 // This exists because it may occur that there are multiple outstanding RPC calls
 // from different threads.
 inline mutex& s_outstanding_rpcs_mutex()
@@ -167,11 +170,6 @@ struct Process_message_reader
     sequence_counter_type get_reply_reading_sequence() const
     {
         return m_in_rep_c->get_message_reading_sequence();
-    }
-
-    sequence_counter_type get_request_ring_reading_sequence() const
-    {
-        return m_in_req_c->reading_sequence();
     }
 
     State state() const { return m_reader_state.load(std::memory_order_acquire); }
