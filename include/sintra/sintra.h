@@ -74,12 +74,13 @@ namespace sintra {
 // Barrier mode tags
 struct rendezvous_t {};
 struct delivery_fence_t {};
-struct processing_fence_t {}; // Placeholder: currently falls back to delivery semantics with a runtime warning.
+struct processing_fence_t {};
 
 // Blocks the calling thread of the calling process, until at least one thread of each processes
 // in the the specified process group has called barrier(). By default this operates as a
 // delivery fence, guaranteeing that all messages published before the barrier have been fetched
-// by the local request readers.
+// by the local request readers. Use processing_fence_t when the handlers for those messages must
+// also have completed before the barrier returns.
 // If multiple threads in each process call barrier(), they will take turns matching corresponding
 // threads from other processes in the same group, in undefined matching order.
 // Note that this is an interprocess synchronization mechanism. When it is sought to synchronize

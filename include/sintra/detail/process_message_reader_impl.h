@@ -78,6 +78,11 @@ inline std::unique_ptr<std::byte[]> sintra_clone_message(const Message_prefix* m
 
 inline bool thread_local tl_is_req_thread = false;
 
+inline bool on_request_reader_thread()
+{
+    return tl_is_req_thread;
+}
+
 // Historical note: mingw 11.2.0 had issues with inline thread_local non-POD objects
 // (January 2022). We now store the callable directly and rely on the fixed runtime
 // behaviour to avoid manual allocation.
