@@ -52,6 +52,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <string>
 #include <thread>
 #include <type_traits>
+#include <unordered_map>
 
 #include <boost/interprocess/detail/os_thread_functions.hpp>
 
@@ -73,6 +74,7 @@ using std::mutex;
 using std::string;
 using std::thread;
 using std::vector;
+using std::unordered_map;
 
 
 inline
@@ -324,7 +326,10 @@ struct Managed_process: Derived_transceiver<Managed_process>
             instance_id_type     process_id = invalid_instance_id;
             sequence_counter_type request_target = 0;
             sequence_counter_type reply_target = 0;
+            Delivery_waiter*      owner = nullptr;
+            Process_message_reader* reader = nullptr;
             bool                  complete = false;
+            bool                  indexed = false;
         };
 
         std::mutex                      mutex;
@@ -336,9 +341,14 @@ struct Managed_process: Derived_transceiver<Managed_process>
     };
 
     bool refresh_delivery_waiter(Delivery_waiter* waiter);
+    void attach_delivery_waiter_targets_locked(Delivery_waiter& waiter);
+    void detach_delivery_waiter_targets_locked(Delivery_waiter& waiter);
+    bool detach_delivery_targets_for_reader(Process_message_reader* reader);
 
     std::list<Delivery_waiter*>         m_delivery_waiters;
     std::mutex                          m_delivery_waiters_mutex;
+    std::unordered_map<Process_message_reader*, std::vector<Delivery_waiter::Target*>>
+                                         m_delivery_waiter_targets;
     std::atomic<size_t>                 m_delivery_waiter_count{0};
 
     std::atomic<size_t>                 m_active_handler_count{0};

@@ -29,15 +29,16 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "utility.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <csignal>
 #include <functional>
 #include <list>
-#include <vector>
 #include <memory>
 #include <mutex>
+#include <vector>
 #include <shared_mutex>
 #include <optional>
 #include <thread>
@@ -1026,6 +1027,7 @@ bool Managed_process::spawn_swarm_process(
     cstring_vector cargs(args);
 
     Process_message_reader* new_reader = nullptr;
+    bool notify_detached_waiters = false;
     {
         std::unique_lock<std::shared_mutex> readers_lock(m_readers_mutex);
 
@@ -1033,6 +1035,7 @@ bool Managed_process::spawn_swarm_process(
         // stop it and remove it before creating a fresh one for recovery.
         if (auto existing = m_readers.find(s.piid); existing != m_readers.end()) {
             existing->second.stop_and_wait(1.0);
+            notify_detached_waiters |= detach_delivery_targets_for_reader(&existing->second);
             m_readers.erase(existing);
         }
 
@@ -1043,6 +1046,10 @@ bool Managed_process::spawn_swarm_process(
         );
         assert(eit.second == true);
         new_reader = &eit.first->second;
+    }
+
+    if (notify_detached_waiters) {
+        notify_delivery_progress(nullptr);
     }
 
     // Before spawning the new process, we have to assure that the
@@ -1073,8 +1080,18 @@ bool Managed_process::spawn_swarm_process(
         std::cerr << "failed to launch " << s.binary_name << std::endl;
 
         //m_readers.pop_back();
-        std::unique_lock<std::shared_mutex> readers_lock(m_readers_mutex);
-        m_readers.erase(s.piid);
+        bool detached = false;
+        {
+            std::unique_lock<std::shared_mutex> readers_lock(m_readers_mutex);
+            if (auto it = m_readers.find(s.piid); it != m_readers.end()) {
+                detached = detach_delivery_targets_for_reader(&it->second);
+                m_readers.erase(it);
+            }
+        }
+
+        if (detached) {
+            notify_delivery_progress(nullptr);
+        }
     }
 
     return success;
@@ -1446,9 +1463,10 @@ inline void Managed_process::wait_for_incoming_delivery()
     Delivery_waiter waiter;
     auto* active_reader = current_message_reader();
 
+    std::vector<Delivery_waiter::Target> pending_targets;
     {
         std::shared_lock<std::shared_mutex> readers_lock(m_readers_mutex);
-        waiter.targets.reserve(m_readers.size());
+        pending_targets.reserve(m_readers.size());
 
         for (auto& entry : m_readers) {
             auto& reader = entry.second;
@@ -1464,25 +1482,30 @@ inline void Managed_process::wait_for_incoming_delivery()
             target.process_id = entry.first;
             target.request_target = reader.get_request_leading_sequence();
             target.reply_target = reader.get_reply_leading_sequence();
+            target.reader = &reader;
+            target.owner = &waiter;
 
             const bool already_caught_up =
                 reader.get_request_reading_sequence() >= target.request_target &&
                 reader.get_reply_reading_sequence() >= target.reply_target;
 
             if (!already_caught_up) {
-                waiter.targets.push_back(target);
+                pending_targets.push_back(target);
             }
         }
     }
 
-    if (waiter.targets.empty()) {
+    if (pending_targets.empty()) {
         return;
     }
+
+    waiter.targets = std::move(pending_targets);
 
     {
         std::lock_guard<std::mutex> waiters_lock(m_delivery_waiters_mutex);
         waiter.registration = m_delivery_waiters.insert(m_delivery_waiters.end(), &waiter);
         waiter.linked = true;
+        attach_delivery_waiter_targets_locked(waiter);
         m_delivery_waiter_count.fetch_add(1, std::memory_order_acq_rel);
     }
 
@@ -1508,11 +1531,89 @@ inline void Managed_process::wait_for_incoming_delivery()
     {
         std::lock_guard<std::mutex> waiters_lock(m_delivery_waiters_mutex);
         if (waiter.linked) {
+            detach_delivery_waiter_targets_locked(waiter);
             m_delivery_waiters.erase(waiter.registration);
             waiter.linked = false;
             m_delivery_waiter_count.fetch_sub(1, std::memory_order_acq_rel);
         }
     }
+}
+
+
+inline void Managed_process::attach_delivery_waiter_targets_locked(Delivery_waiter& waiter)
+{
+    for (auto& target : waiter.targets) {
+        if (!target.reader) {
+            continue;
+        }
+
+        target.owner = &waiter;
+        target.indexed = true;
+
+        auto& bucket = m_delivery_waiter_targets[target.reader];
+        bucket.push_back(&target);
+    }
+}
+
+
+inline void Managed_process::detach_delivery_waiter_targets_locked(Delivery_waiter& waiter)
+{
+    for (auto& target : waiter.targets) {
+        if (!target.indexed) {
+            continue;
+        }
+
+        auto* reader = target.reader;
+        if (reader) {
+            auto it = m_delivery_waiter_targets.find(reader);
+            if (it != m_delivery_waiter_targets.end()) {
+                auto& bucket = it->second;
+                bucket.erase(std::remove(bucket.begin(), bucket.end(), &target), bucket.end());
+                if (bucket.empty()) {
+                    m_delivery_waiter_targets.erase(it);
+                }
+            }
+        }
+
+        target.reader = nullptr;
+        target.indexed = false;
+        target.owner = nullptr;
+    }
+}
+
+
+inline bool Managed_process::detach_delivery_targets_for_reader(Process_message_reader* reader)
+{
+    if (!reader) {
+        return false;
+    }
+
+    bool impacted = false;
+    {
+        std::lock_guard<std::mutex> waiters_lock(m_delivery_waiters_mutex);
+        auto it = m_delivery_waiter_targets.find(reader);
+        if (it == m_delivery_waiter_targets.end()) {
+            return false;
+        }
+
+        auto bucket = std::move(it->second);
+        m_delivery_waiter_targets.erase(it);
+
+        for (auto* target : bucket) {
+            if (!target) {
+                continue;
+            }
+
+            if (target->owner) {
+                impacted = true;
+            }
+
+            target->reader = nullptr;
+            target->indexed = false;
+        }
+    }
+
+    return impacted;
 }
 
 
@@ -1530,21 +1631,26 @@ inline bool Managed_process::refresh_delivery_waiter(Delivery_waiter* waiter)
             continue;
         }
 
-        auto it = m_readers.find(target.process_id);
-        if (it == m_readers.end()) {
-            target.complete = true;
-            continue;
+        Process_message_reader* reader = target.reader;
+        if (!reader) {
+            auto it = m_readers.find(target.process_id);
+            if (it == m_readers.end()) {
+                target.complete = true;
+                continue;
+            }
+
+            reader = &it->second;
+            target.reader = reader;
         }
 
-        auto& reader = it->second;
-        if (reader.state() == Process_message_reader::READER_STOPPING) {
+        if (reader->state() == Process_message_reader::READER_STOPPING) {
             target.complete = true;
             continue;
         }
 
         const bool caught_up =
-            reader.get_request_reading_sequence() >= target.request_target &&
-            reader.get_reply_reading_sequence() >= target.reply_target;
+            reader->get_request_reading_sequence() >= target.request_target &&
+            reader->get_reply_reading_sequence() >= target.reply_target;
 
         if (caught_up) {
             target.complete = true;
@@ -1560,39 +1666,113 @@ inline bool Managed_process::refresh_delivery_waiter(Delivery_waiter* waiter)
 
 inline void Managed_process::notify_delivery_progress(Process_message_reader* reader)
 {
-    (void)reader;
-
     if (m_delivery_waiter_count.load(std::memory_order_acquire) == 0) {
         return;
     }
 
-    std::lock_guard<std::mutex> waiters_lock(m_delivery_waiters_mutex);
-    for (auto it = m_delivery_waiters.begin(); it != m_delivery_waiters.end();) {
-        auto* waiter = *it;
+    std::vector<Delivery_waiter*> candidates;
+    {
+        std::lock_guard<std::mutex> waiters_lock(m_delivery_waiters_mutex);
+        if (reader) {
+            auto it = m_delivery_waiter_targets.find(reader);
+            if (it == m_delivery_waiter_targets.end()) {
+                return;
+            }
+
+            candidates.reserve(it->second.size());
+            for (auto* target : it->second) {
+                if (!target || !target->owner) {
+                    continue;
+                }
+                candidates.push_back(target->owner);
+            }
+        }
+        else {
+            candidates.reserve(m_delivery_waiters.size());
+            for (auto* waiter : m_delivery_waiters) {
+                if (waiter) {
+                    candidates.push_back(waiter);
+                }
+            }
+        }
+    }
+
+    if (candidates.empty()) {
+        return;
+    }
+
+    std::sort(candidates.begin(), candidates.end());
+    candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
+
+    std::vector<Delivery_waiter*> completed;
+    std::vector<Delivery_waiter::Target*> finished_targets;
+
+    for (auto* waiter : candidates) {
         if (!waiter) {
-            it = m_delivery_waiters.erase(it);
-            m_delivery_waiter_count.fetch_sub(1, std::memory_order_acq_rel);
             continue;
         }
 
         std::unique_lock<std::mutex> waiter_lock(waiter->mutex);
         if (waiter->complete) {
-            ++it;
             continue;
         }
 
         if (refresh_delivery_waiter(waiter)) {
             waiter->complete = true;
+            for (auto& target : waiter->targets) {
+                if (target.indexed && target.reader) {
+                    finished_targets.push_back(&target);
+                }
+            }
+            completed.push_back(waiter);
             waiter_lock.unlock();
-            waiter->cv.notify_all();
-
-            waiter->linked = false;
-            it = m_delivery_waiters.erase(it);
-            m_delivery_waiter_count.fetch_sub(1, std::memory_order_acq_rel);
+            waiter->cv.notify_one();
         }
         else {
-            ++it;
+            for (auto& target : waiter->targets) {
+                if (target.indexed && target.complete && target.reader) {
+                    finished_targets.push_back(&target);
+                }
+            }
         }
+    }
+
+    std::sort(finished_targets.begin(), finished_targets.end());
+    finished_targets.erase(std::unique(finished_targets.begin(), finished_targets.end()), finished_targets.end());
+
+    std::lock_guard<std::mutex> waiters_lock(m_delivery_waiters_mutex);
+
+    for (auto* target : finished_targets) {
+        if (!target) {
+            continue;
+        }
+
+        if (!target->reader) {
+            continue;
+        }
+
+        auto it = m_delivery_waiter_targets.find(target->reader);
+        if (it != m_delivery_waiter_targets.end()) {
+            auto& bucket = it->second;
+            bucket.erase(std::remove(bucket.begin(), bucket.end(), target), bucket.end());
+            if (bucket.empty()) {
+                m_delivery_waiter_targets.erase(it);
+            }
+        }
+
+        target->reader = nullptr;
+        target->indexed = false;
+    }
+
+    for (auto* waiter : completed) {
+        if (!waiter || !waiter->linked) {
+            continue;
+        }
+
+        detach_delivery_waiter_targets_locked(*waiter);
+        m_delivery_waiters.erase(waiter->registration);
+        waiter->linked = false;
+        m_delivery_waiter_count.fetch_sub(1, std::memory_order_acq_rel);
     }
 }
 
