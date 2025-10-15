@@ -61,6 +61,10 @@ if(WIN32)
 endif()
 add_test(NAME sintra.barrier_stress COMMAND sintra_barrier_stress_test)
 
+add_executable(sintra_processing_fence_test processing_fence_test.cpp)
+target_link_libraries(sintra_processing_fence_test PRIVATE ${SINTRA_TEST_TARGET})
+add_test(NAME sintra.processing_fence COMMAND sintra_processing_fence_test)
+
 add_executable(sintra_variable_buffer_alignment_test variable_buffer_alignment_test.cpp)
 target_link_libraries(sintra_variable_buffer_alignment_test PRIVATE ${SINTRA_TEST_TARGET})
 add_test(NAME sintra.variable_buffer_alignment COMMAND sintra_variable_buffer_alignment_test)
