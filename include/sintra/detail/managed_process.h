@@ -318,8 +318,8 @@ struct Managed_process: Derived_transceiver<Managed_process>
     handler_registry_type               m_active_handlers;
 
     // standard process groups
-    instance_id_type                    m_group_all      = invalid_instance_id;
-    instance_id_type                    m_group_external = invalid_instance_id;
+    instance_id_type                    m_group_all             = invalid_instance_id;
+    instance_id_type                    m_group_external        = invalid_instance_id;
 
     // recovery
     double                              m_average_runnning_time = std::numeric_limits<double>::max();
@@ -331,10 +331,10 @@ struct Managed_process: Derived_transceiver<Managed_process>
 
     struct Spawn_swarm_process_args
     {
-        std::string                 binary_name;
-        std::vector<std::string>    args;
-        instance_id_type            piid;
-        uint32_t                    occurrence = 0;
+        std::string                     binary_name;
+        std::vector<std::string>        args;
+        instance_id_type                piid;
+        uint32_t                        occurrence = 0;
     };
 
 

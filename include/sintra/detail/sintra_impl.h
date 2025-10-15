@@ -42,7 +42,6 @@ using std::vector;
 
 
 
-
 inline
 std::vector<Process_descriptor> make_branches(std::vector<Process_descriptor>& v)
 {
@@ -130,7 +129,6 @@ void init(int argc, const char* const* argv, std::vector<Process_descriptor> v =
         s_mproc->branch(v);
     }
     s_mproc->go();
-
 }
 
 
@@ -165,7 +163,8 @@ bool finalize()
     if (s_coord) {
         // Local coordinator - call directly (no timeout needed)
         flush_seq = s_coord->begin_process_draining(s_mproc_id);
-    } else {
+    }
+    else {
         // Remote coordinator - synchronous call with a watchdog that cancels it after a deadline.
         std::atomic<bool> done{false};
         std::thread watchdog([&]{
@@ -182,7 +181,8 @@ bool finalize()
 
         try {
             flush_seq = Coordinator::rpc_begin_process_draining(s_coord_id, s_mproc_id);
-        } catch (...) {
+        }
+        catch (...) {
             flush_seq = invalid_sequence;
         }
 

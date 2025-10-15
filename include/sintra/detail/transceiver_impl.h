@@ -215,7 +215,8 @@ Transceiver::ensure_rpc_shutdown()
         m_rpc_shutdown_complete = true;
         // Notify while still holding the lock to prevent race conditions
         m_rpc_lifecycle_condition.notify_all();
-    } else {
+    }
+    else {
         // Another thread is performing shutdown - wait for it to complete
         m_rpc_lifecycle_condition.wait(lock, [&]() { return m_rpc_shutdown_complete; });
     }
@@ -645,13 +646,16 @@ void Transceiver::finalize_rpc_write(
     if (ref_obj) {
         sender_iid = ref_obj->m_instance_id;
     }
-    else if (fallback_sender_iid != invalid_instance_id) {
+    else
+    if (fallback_sender_iid != invalid_instance_id) {
         sender_iid = fallback_sender_iid;
     }
-    else if (s_tl_current_message) {
+    else
+    if (s_tl_current_message) {
         sender_iid = s_tl_current_message->receiver_instance_id;
     }
-    else if (s_mproc) {
+    else
+    if (s_mproc) {
         sender_iid = s_mproc->m_instance_id;
     }
 
@@ -968,7 +972,8 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
             // rpc failure (distinguish between cancelled vs. other failures)
             if (orpcc.cancelled) {
                 throw rpc_cancelled("rpc cancelled");
-            } else {
+            }
+            else {
                 throw std::runtime_error("RPC failed");
             }
         }

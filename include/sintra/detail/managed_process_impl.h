@@ -464,10 +464,6 @@ sintra::instance_id_type get_instance_id(std::string&& assigned_name)
 
 
 
-
-
-
-
 inline
 Managed_process::Managed_process():
     Derived_transceiver<Managed_process>((void*)0),

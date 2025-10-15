@@ -220,24 +220,24 @@ struct Process_message_reader
 
 private:
 
-    atomic<State>           m_reader_state          = READER_NORMAL;
+    atomic<State>                       m_reader_state              = READER_NORMAL;
 
-    instance_id_type        m_process_instance_id;
+    instance_id_type                    m_process_instance_id;
 
-    std::shared_ptr<Message_ring_R> m_in_req_c;
-    std::shared_ptr<Message_ring_R> m_in_rep_c;
+    std::shared_ptr<Message_ring_R>     m_in_req_c;
+    std::shared_ptr<Message_ring_R>     m_in_rep_c;
 
-    Delivery_progress_ptr            m_delivery_progress;
+    Delivery_progress_ptr               m_delivery_progress;
 
-    thread*                 m_request_reader_thread = nullptr;
-    thread*                 m_reply_reader_thread   = nullptr;
+    thread*                             m_request_reader_thread     = nullptr;
+    thread*                             m_reply_reader_thread       = nullptr;
     
-    atomic<bool>            m_req_running           = false;
-    atomic<bool>            m_rep_running           = false;
-    mutex                   m_ready_mutex;
-    condition_variable      m_ready_condition;
-    mutex                   m_stop_mutex;
-    condition_variable      m_stop_condition;
+    atomic<bool>                        m_req_running               = false;
+    atomic<bool>                        m_rep_running               = false;
+    mutex                               m_ready_mutex;
+    condition_variable                  m_ready_condition;
+    mutex                               m_stop_mutex;
+    condition_variable                  m_stop_condition;
 
 };
 
