@@ -226,6 +226,8 @@ int process_string_receiver()
 {
     // Slot handler runs on reader thread, modifies g_received_strings
     auto string_slot = [](const std::string& value) {
+        // Artificial delay to expose dual-ring race condition
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
         g_received_strings.push_back(value);
     };
     sintra::activate_slot(string_slot);
@@ -248,6 +250,8 @@ int process_int_receiver()
 {
     // Slot handler runs on reader thread, modifies g_received_ints
     auto int_slot = [](int value) {
+        // Artificial delay to expose dual-ring race condition
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
         g_received_ints.push_back(value);
     };
     sintra::activate_slot(int_slot);
