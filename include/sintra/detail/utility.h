@@ -49,6 +49,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
     #include <atomic>
     #include <cerrno>
     #include <cstring>
+    #include <signal.h>
     #include <fcntl.h>
     #include <sys/wait.h>
     #include <unistd.h>
