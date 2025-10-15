@@ -1412,6 +1412,30 @@ inline void Managed_process::run_after_current_handler(function<void()> task)
 
 
 inline
+void Managed_process::wait_for_delivery_fence()
+{
+    std::vector<std::pair<Process_message_reader*, sequence_counter_type>> targets;
+    targets.reserve(m_readers.size());
+
+    for (auto& [process_id, reader] : m_readers) {
+        (void)process_id;
+        if (reader.state() != Process_message_reader::READER_NORMAL) {
+            continue;
+        }
+        const auto target = reader.get_request_leading_sequence();
+        targets.emplace_back(&reader, target);
+    }
+
+    for (auto& [reader, target] : targets) {
+        if (!reader) {
+            continue;
+        }
+        reader->wait_for_request_delivery(target);
+    }
+}
+
+
+inline
 size_t Managed_process::unblock_rpc(instance_id_type process_instance_id)
 {
     assert(!process_instance_id || is_process(process_instance_id));
