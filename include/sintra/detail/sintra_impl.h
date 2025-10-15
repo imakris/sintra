@@ -232,18 +232,6 @@ int process_index()
 }
 
 
-// Barrier mode tags
-struct rendezvous_t {};
-struct delivery_fence_t {};
-struct processing_fence_t {};
-
-
-// Template barrier with default mode = rendezvous_t
-template<typename BarrierMode = rendezvous_t>
-inline
-bool barrier(const std::string& barrier_name, const std::string& group_name = "_sintra_all_processes");
-
-
 // Specialization for rendezvous_t - current working implementation
 template<>
 inline
@@ -312,6 +300,15 @@ bool barrier<processing_fence_t>(const std::string& barrier_name, const std::str
     (void)barrier_name;
     (void)group_name;
     return false;
+}
+
+
+// Primary template with default mode = rendezvous_t
+template<typename BarrierMode>
+inline
+bool barrier(const std::string& barrier_name, const std::string& group_name)
+{
+    return barrier<rendezvous_t>(barrier_name, group_name);
 }
 
 

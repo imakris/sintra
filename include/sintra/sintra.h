@@ -71,12 +71,18 @@ namespace sintra {
 
 
 
+// Barrier mode tags
+struct rendezvous_t {};
+struct delivery_fence_t {};
+struct processing_fence_t {};
+
 // Blocks the calling thread of the calling process, until at least one thread of each processes
 // in the the specified process group has called barrier().
 // If multiple threads in each process call barrier(), they will take turns matching corresponding
 // threads from other processes in the same group, in undefined matching order.
 // Note that this is an interprocess synchronization mechanism. When it is sought to synchronize
 // threads as well as processes, an additional thread synchronization mechanism must be used.
+template<typename BarrierMode = rendezvous_t>
 bool barrier(const std::string& barrier_name, const std::string& group_name = "_sintra_external_processes");
 
 
