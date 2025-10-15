@@ -30,6 +30,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "coordinator.h"
 #include "managed_process.h"
 #include "transceiver.h"
+#include "pending_deferral.h"
 
 #include <cassert>
 #include <cstring>
@@ -738,6 +739,8 @@ void Transceiver::rpc_handler(Message_prefix& untyped_msg)
         [&](){return call_function_with_fusion_vector_args(*obj, RPCTC::mf(), msg);}
     };
 
+    detail::reset_pending_deferral();
+
     try {
         vf.call();
     }
@@ -769,6 +772,17 @@ void Transceiver::rpc_handler(Message_prefix& untyped_msg)
     }
 
     if (etid == not_defined_type_id) { // normal return
+
+        instance_id_type deferred_fiid = invalid_instance_id;
+        std::function<void()> deferred_cleanup;
+        if (detail::consume_pending_deferral(deferred_fiid, deferred_cleanup)) {
+            deferral* placed_msg = s_mproc->m_out_rep_c->write<deferral>(0, deferred_fiid);
+            finalize_rpc_write(placed_msg, msg, obj, (type_id_type)detail::reserved_id::deferral);
+            if (deferred_cleanup) {
+                deferred_cleanup();
+            }
+            return;
+        }
 
         // additional return recipients, assumed to be waiting
         if (s_tl_common_function_iid != invalid_instance_id) {

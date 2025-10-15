@@ -29,6 +29,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "coordinator.h"
 #include "managed_process.h"
+#include "pending_deferral.h"
 
 #include <cassert>
 #include <functional>
@@ -125,11 +126,12 @@ sequence_counter_type Process_group::barrier(
         return s_mproc->m_out_rep_c->get_leading_sequence();
     }
     else {
-        // Not last arrival - throw deferral to block until barrier completes
-        std::pair<deferral, function<void()> > ret;
-        ret.first.new_fiid = b.common_function_iid;
-        ret.second = [&](){ b.m.unlock(); };
-        throw ret;
+        // Not last arrival - defer the RPC until the barrier completes
+        detail::set_pending_deferral(
+            b.common_function_iid,
+            [&]() { b.m.unlock(); }
+        );
+        return 0;
     }
 }
 
@@ -295,12 +297,11 @@ instance_id_type Coordinator::wait_for_instance(const string& assigned_name)
         common_function_iid = waited_info.common_function_iid = make_instance_id();
     }
 
-    std::pair<deferral, std::function<void()>> ret;
-    ret.first.new_fiid = common_function_iid;
-    ret.second = [&](){
-        m_publish_mutex.unlock();
-    };
-    throw ret;
+    detail::set_pending_deferral(
+        common_function_iid,
+        [&]() { m_publish_mutex.unlock(); }
+    );
+    return invalid_instance_id;
 }
 
 
