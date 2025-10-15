@@ -2,8 +2,6 @@
 
 [![Build - Linux](https://github.com/imakris/sintra/actions/workflows/build-linux.yml/badge.svg)](https://github.com/imakris/sintra/actions/workflows/build-linux.yml)
 [![Stress Test - Linux](https://github.com/imakris/sintra/actions/workflows/stress-test-linux.yml/badge.svg)](https://github.com/imakris/sintra/actions/workflows/stress-test-linux.yml)
-[![FreeBSD Build](https://api.cirrus-ci.com/github/imakris/sintra.svg?task=FreeBSD%20Build)](https://cirrus-ci.com/github/imakris/sintra)
-[![FreeBSD Tests](https://api.cirrus-ci.com/github/imakris/sintra.svg?task=FreeBSD%20Tests)](https://cirrus-ci.com/github/imakris/sintra)
 
 [![Build - Windows](https://github.com/imakris/sintra/actions/workflows/build-windows.yml/badge.svg)](https://github.com/imakris/sintra/actions/workflows/build-windows.yml)
 [![Stress Test - Windows](https://github.com/imakris/sintra/actions/workflows/stress-test-windows.yml/badge.svg)](https://github.com/imakris/sintra/actions/workflows/stress-test-windows.yml)
