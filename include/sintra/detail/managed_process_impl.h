@@ -54,10 +54,13 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 namespace sintra {
 
+class Managed_process;
+
 extern thread_local bool tl_is_req_thread;
 extern thread_local std::function<void()> tl_post_handler_function;
 
 namespace detail {
+    inline thread_local Managed_process* g_active_handler_owner = nullptr;
     inline thread_local size_t g_active_handler_depth = 0;
 }
 
@@ -1418,6 +1421,10 @@ inline void Managed_process::wait_for_incoming_delivery()
         return;
     }
 
+    // A delivery fence needs to coordinate with message reader threads without busy
+    // waiting. Track an epoch that the readers bump after each message so we can
+    // block on a condition variable and only wake when fresh progress has been
+    // observed.
     uint64_t observed_epoch = m_delivery_progress_epoch.load(std::memory_order_acquire);
     std::unique_lock<std::mutex> lock(m_delivery_progress_mutex);
     auto* active_reader = current_message_reader();
@@ -1475,6 +1482,13 @@ inline void Managed_process::notify_delivery_progress()
 
 inline void Managed_process::on_handler_start()
 {
+    if (detail::g_active_handler_depth == 0) {
+        detail::g_active_handler_owner = this;
+    } else {
+        assert(detail::g_active_handler_owner == this &&
+               "message handlers must not migrate across Managed_process instances");
+    }
+
     detail::g_active_handler_depth += 1;
     m_active_handler_count.fetch_add(1, std::memory_order_acq_rel);
 }
@@ -1485,13 +1499,23 @@ inline void Managed_process::on_handler_complete()
     auto previous = m_active_handler_count.fetch_sub(1, std::memory_order_acq_rel);
     assert(previous > 0);
     assert(detail::g_active_handler_depth > 0);
+    assert(detail::g_active_handler_owner == this &&
+           "message handlers must complete on the thread that started them");
+
     detail::g_active_handler_depth -= 1;
+    if (detail::g_active_handler_depth == 0) {
+        detail::g_active_handler_owner = nullptr;
+    }
+
     m_active_handler_condition.notify_all();
 }
 
 
 inline void Managed_process::wait_for_handler_quiescence()
 {
+    // Processing fences must not spin while they wait for other handlers to
+    // retire. Rely on a condition variable that gets poked by
+    // on_handler_complete(), which runs as part of the reader loop.
     const size_t local_depth = current_handler_depth();
     std::unique_lock<std::mutex> lock(m_active_handler_mutex);
 
@@ -1518,6 +1542,13 @@ inline void Managed_process::wait_for_handler_quiescence()
 
 inline size_t Managed_process::current_handler_depth() const
 {
+    if (detail::g_active_handler_owner != this) {
+        // Either we are outside a handler or the caller resumed execution on a
+        // foreign thread. In both cases treat the depth as zero so the fence waits
+        // for every outstanding handler.
+        return 0;
+    }
+
     return detail::g_active_handler_depth;
 }
 
