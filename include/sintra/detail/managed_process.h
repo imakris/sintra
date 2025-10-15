@@ -34,7 +34,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "resolve_type.h"
 #include "spinlocked_containers.h"
 #include "transceiver.h"
-#include "utility/call_function_with_fusion_vector_args.h"
+#include "call_function_with_fusion_vector_args.h"
 
 #include <algorithm>
 #include <atomic>
