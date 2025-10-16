@@ -5,15 +5,7 @@ env:
   CIRRUS_CLONE_DEPTH: 1
 
 freebsd_build_task:
-  name: "FreeBSD Build"
-  install_script:
-    - pkg install -y cmake
-  build_script:
-    - cmake -S . -B build
-    - cmake --build build
-
-freebsd_test_task:
-  name: "FreeBSD Tests"
+  name: "FreeBSD Build & Test"
   install_script:
     - pkg install -y cmake
   build_script:
