@@ -99,7 +99,10 @@ if(SINTRA_CI_TESTS)
 endif()
 
 if(CMAKE_SYSTEM_NAME MATCHES "FreeBSD")
-    set(_sintra_trace_env "SINTRA_TRACE_SYNC=1")
+    set(_sintra_trace_env
+        "SINTRA_TRACE_SYNC=1"
+        "SINTRA_TRACE_SCOPE=managed.*,swarm.*,spawn.*,reader.*,barrier.*,test.*,coordinator.*"
+    )
     set_property(TEST sintra.dummy APPEND PROPERTY ENVIRONMENT "${_sintra_trace_env}")
     foreach(test_name IN LISTS SINTRA_CI_TESTS)
         set_property(TEST "${test_name}" APPEND PROPERTY ENVIRONMENT "${_sintra_trace_env}")
