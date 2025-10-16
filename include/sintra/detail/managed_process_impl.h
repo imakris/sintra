@@ -1156,14 +1156,45 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
             exit(1);
         }
 
-        m_group_all      = Coordinator::rpc_wait_for_instance(s_coord_id, "_sintra_all_processes");
+        detail::trace_sync("branch.worker.wait_group", [&](auto& os) {
+            os << "instance=" << m_instance_id
+               << " swarm=" << m_swarm_id
+               << " name=_sintra_all_processes";
+        });
+        m_group_all = Coordinator::rpc_wait_for_instance(s_coord_id, "_sintra_all_processes");
+        detail::trace_sync("branch.worker.got_group", [&](auto& os) {
+            os << "instance=" << m_instance_id
+               << " swarm=" << m_swarm_id
+               << " name=_sintra_all_processes";
+        });
+        detail::trace_sync("branch.worker.wait_group", [&](auto& os) {
+            os << "instance=" << m_instance_id
+               << " swarm=" << m_swarm_id
+               << " name=_sintra_external_processes";
+        });
         m_group_external = Coordinator::rpc_wait_for_instance(s_coord_id, "_sintra_external_processes");
+        detail::trace_sync("branch.worker.got_group", [&](auto& os) {
+            os << "instance=" << m_instance_id
+               << " swarm=" << m_swarm_id
+               << " name=_sintra_external_processes";
+        });
     }
 
     // assign_name requires that all group processes are instantiated, in order
     // to receive the instance_published event
     if (s_recovery_occurrence == 0) {
+        detail::trace_sync("branch.barrier.enter", [&](auto& os) {
+            os << "instance=" << m_instance_id
+               << " swarm=" << m_swarm_id
+               << " group=_sintra_all_processes";
+        });
         bool all_started = Process_group::rpc_barrier(m_group_all, UIBS);
+        detail::trace_sync("branch.barrier.exit", [&](auto& os) {
+            os << "instance=" << m_instance_id
+               << " swarm=" << m_swarm_id
+               << " group=_sintra_all_processes"
+               << " success=" << all_started;
+        });
         if (!all_started) {
             return false;
         }
