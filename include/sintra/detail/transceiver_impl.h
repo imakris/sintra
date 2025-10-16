@@ -929,6 +929,17 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
     rh.instance_id = instance_id;
     function_instance_id = s_mproc->activate_return_handler(rh);
 
+    const bool is_join_group_rpc =
+        MESSAGE_T::id() == static_cast<type_id_type>(detail::reserved_id::join_and_wait_group);
+
+    if (is_join_group_rpc) {
+        detail::trace_sync("rpc.join.activate", [&](auto& os) {
+            os << "caller=" << s_mproc->m_instance_id
+               << " target=" << instance_id
+               << " fiid=" << function_instance_id;
+        });
+    }
+
     // write the message for the rpc call into the communication ring
     static auto once = MESSAGE_T::id();
     (void)(once); // suppress unused variable warning
@@ -937,6 +948,14 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
     msg->receiver_instance_id = instance_id;
     msg->function_instance_id = function_instance_id;
     s_mproc->m_out_req_c->done_writing();
+
+    if (is_join_group_rpc) {
+        detail::trace_sync("rpc.join.sent", [&](auto& os) {
+            os << "caller=" << s_mproc->m_instance_id
+               << " target=" << instance_id
+               << " fiid=" << function_instance_id;
+        });
+    }
 
     //    _       .//'
     //   (_).  .//'                          TODO: for an asynchronous implementation, cut here
@@ -949,6 +968,16 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
     // coordinator loss and during finalize()), this wait is bounded and cannot
     // deadlock via lost notifications.
     orpcc.keep_waiting_condition.wait(sl, [&]{ return !orpcc.keep_waiting; });
+
+    if (is_join_group_rpc) {
+        detail::trace_sync("rpc.join.unblocked", [&](auto& os) {
+            os << "caller=" << s_mproc->m_instance_id
+               << " target=" << instance_id
+               << " fiid=" << function_instance_id
+               << " success=" << orpcc.success
+               << " cancelled=" << orpcc.cancelled;
+        });
+    }
 
     // Release per-RPC mutex before touching the global outstanding set.
     // This maintains the lock ordering rule: always acquire s_outstanding_rpcs_mutex
@@ -971,12 +1000,34 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
         else {
             // rpc failure (distinguish between cancelled vs. other failures)
             if (orpcc.cancelled) {
+                if (is_join_group_rpc) {
+                    detail::trace_sync("rpc.join.cancelled", [&](auto& os) {
+                        os << "caller=" << s_mproc->m_instance_id
+                           << " target=" << instance_id
+                           << " fiid=" << function_instance_id;
+                    });
+                }
                 throw rpc_cancelled("rpc cancelled");
             }
             else {
+                if (is_join_group_rpc) {
+                    detail::trace_sync("rpc.join.error", [&](auto& os) {
+                        os << "caller=" << s_mproc->m_instance_id
+                           << " target=" << instance_id
+                           << " fiid=" << function_instance_id;
+                    });
+                }
                 throw std::runtime_error("RPC failed");
             }
         }
+    }
+
+    if (is_join_group_rpc) {
+        detail::trace_sync("rpc.join.reply", [&](auto& os) {
+            os << "caller=" << s_mproc->m_instance_id
+               << " target=" << instance_id
+               << " fiid=" << function_instance_id;
+        });
     }
 
     return rm_body.get_value();

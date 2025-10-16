@@ -1173,6 +1173,13 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
                     m_instance_id);
 
                 if (group_instance == invalid_instance_id) {
+                    detail::trace_sync("branch.worker.resolve_group", [&](auto& os) {
+                        os << "instance=" << m_instance_id
+                           << " swarm=" << m_swarm_id
+                           << " name=" << group_name
+                           << " coord=" << s_coord_id;
+                    });
+
                     group_instance = Coordinator::rpc_resolve_instance(s_coord_id, group_name);
                 }
 
@@ -1663,6 +1670,23 @@ size_t Managed_process::unblock_rpc(instance_id_type process_instance_id)
             if (process_instance_id != invalid_instance_id &&
                 process_of(c->remote_instance) == process_instance_id)
             {
+                detail::trace_sync("rpc.unblock", [&](auto& os) {
+                    os << "target_process=" << process_instance_id
+                       << " remote_instance=" << c->remote_instance;
+                });
+
+                c->success = false;
+                c->keep_waiting = false;
+                c->cancelled = true;
+                c->keep_waiting_condition.notify_one();
+                ret++;
+            }
+            else if (process_instance_id == invalid_instance_id) {
+                detail::trace_sync("rpc.unblock", [&](auto& os) {
+                    os << "target_process=ALL"
+                       << " remote_instance=" << c->remote_instance;
+                });
+
                 c->success = false;
                 c->keep_waiting = false;
                 c->cancelled = true;

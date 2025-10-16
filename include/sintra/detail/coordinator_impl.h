@@ -801,11 +801,20 @@ instance_id_type Coordinator::make_process_group(
     }
 
     const auto swarm_id = s_mproc ? s_mproc->m_swarm_id : 0u;
+    const auto expected_members = static_cast<uint32_t>(member_process_ids.size());
     detail::reset_bootstrap_group_state(
         swarm_id,
         name,
-        static_cast<uint32_t>(member_process_ids.size()),
+        expected_members,
         coordinator_in_group ? s_coord_id : invalid_instance_id);
+
+    detail::trace_sync("coordinator.group.make", [&](auto& os) {
+        os << "swarm=" << swarm_id
+           << " name=" << name
+           << " expected=" << expected_members
+           << " coordinator_in_group=" << coordinator_in_group
+           << " members=" << member_process_ids.size();
+    });
 
     return ret;
 }
@@ -818,9 +827,24 @@ inline instance_id_type Coordinator::join_and_wait_group(
     auto* state = detail::ensure_bootstrap_group_state(swarm_id, group_name);
 
     std::unique_lock<std::mutex> state_lock(state->m);
-    state->cv.wait(state_lock, [&] {
-        return state->initialized;
-    });
+    if (!state->initialized) {
+        detail::trace_sync("coordinator.group.await_init", [&](auto& os) {
+            os << "swarm=" << swarm_id
+               << " name=" << group_name
+               << " member=" << member_id;
+        });
+
+        state->cv.wait(state_lock, [&] {
+            return state->initialized;
+        });
+
+        detail::trace_sync("coordinator.group.init_ready", [&](auto& os) {
+            os << "swarm=" << swarm_id
+               << " name=" << group_name
+               << " member=" << member_id
+               << " expected=" << state->expected;
+        });
+    }
 
     uint32_t joined_after_insert = state->joined.load(std::memory_order_acquire);
     if (state->members.insert(member_id).second) {
@@ -863,6 +887,13 @@ inline instance_id_type Coordinator::join_and_wait_group(
     };
 
     if (!ready_predicate()) {
+        detail::trace_sync("coordinator.group.wait_ready", [&](auto& os) {
+            os << "swarm=" << swarm_id
+               << " name=" << group_name
+               << " member=" << member_id
+               << " joined=" << state->joined.load(std::memory_order_acquire)
+               << " expected=" << expected;
+        });
         state->cv.wait(state_lock, ready_predicate);
     }
 
@@ -875,6 +906,17 @@ inline instance_id_type Coordinator::join_and_wait_group(
                << " name=" << group_name
                << " joined=" << final_joined
                << " expected=" << final_expected;
+        });
+    }
+    else {
+        detail::trace_sync("coordinator.group.not_ready", [&](auto& os) {
+            os << "swarm=" << swarm_id
+               << " name=" << group_name
+               << " member=" << member_id
+               << " joined=" << final_joined
+               << " expected=" << final_expected
+               << " terminating="
+               << static_cast<int>(s_mproc ? s_mproc->m_communication_state : Managed_process::COMMUNICATION_RUNNING);
         });
     }
     state->cv.notify_all();
