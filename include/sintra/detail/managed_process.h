@@ -46,6 +46,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <float.h>
 #include <list>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <shared_mutex>
 #include <stdexcept>
@@ -242,6 +243,16 @@ struct Managed_process: Derived_transceiver<Managed_process>
 
     uint64_t                            m_swarm_id;
     string                              m_directory;
+
+    struct Group_bootstrap_block;
+    std::unique_ptr<ipc::file_mapping>  m_group_bootstrap_file;
+    std::unique_ptr<ipc::mapped_region> m_group_bootstrap_region;
+    Group_bootstrap_block*              m_group_bootstrap = nullptr;
+
+    void initialize_group_bootstrap(bool coordinator_is_local);
+    void reset_group_bootstrap();
+    void publish_group_bootstrap(uint32_t members_count);
+    bool wait_for_group_bootstrap(uint32_t expected_members);
 
     inline
     string obtain_swarm_directory();

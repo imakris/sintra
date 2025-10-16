@@ -28,17 +28,21 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
 #include "utility.h"
+#include "ipc_atomic.h"
 
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <cstring>
+#include <fstream>
 #include <functional>
 #include <list>
 #include <vector>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <system_error>
 #include <shared_mutex>
 #include <thread>
 #include <utility>
@@ -49,6 +53,9 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <sched.h>
 #include <time.h>
 #include <unistd.h>
+#if defined(__FreeBSD__)
+#include <sys/mman.h>
+#endif
 #endif
 
 #include <boost/type_index/ctti_type_index.hpp>
@@ -414,6 +421,130 @@ void install_signal_handler()
 }
 
 
+struct Managed_process::Group_bootstrap_block
+{
+    uint32_t published = 0;
+    uint32_t members = 0;
+    uint64_t epoch = 0;
+};
+
+
+inline void Managed_process::initialize_group_bootstrap(bool coordinator_is_local)
+{
+    if (m_group_bootstrap) {
+        if (coordinator_is_local) {
+            reset_group_bootstrap();
+        }
+        return;
+    }
+
+    namespace ipc = boost::interprocess;
+
+    const auto bootstrap_path = fs::path(m_directory) / "bootstrap_group";
+
+    if (coordinator_is_local) {
+        std::ofstream file(bootstrap_path, std::ios::binary | std::ios::trunc);
+        if (!file) {
+            throw std::runtime_error("failed to create group bootstrap control file");
+        }
+
+        Group_bootstrap_block zero{};
+        file.write(reinterpret_cast<const char*>(&zero), sizeof(zero));
+        file.close();
+    }
+    else {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+        while (true) {
+            std::error_code ec;
+            const bool exists = fs::exists(bootstrap_path, ec);
+            const auto size = exists ? fs::file_size(bootstrap_path, ec) : 0;
+            if (exists && !ec && size >= sizeof(Group_bootstrap_block)) {
+                break;
+            }
+
+            if (std::chrono::steady_clock::now() >= deadline) {
+                throw std::runtime_error("timed out waiting for group bootstrap control file");
+            }
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+
+    m_group_bootstrap_file = std::make_unique<ipc::file_mapping>(
+        bootstrap_path.string().c_str(),
+        ipc::read_write);
+
+    m_group_bootstrap_region = std::make_unique<ipc::mapped_region>(
+        *m_group_bootstrap_file,
+        ipc::read_write,
+        0,
+        sizeof(Group_bootstrap_block));
+
+    m_group_bootstrap = static_cast<Group_bootstrap_block*>(m_group_bootstrap_region->get_address());
+
+    if (coordinator_is_local) {
+        std::memset(m_group_bootstrap, 0, sizeof(Group_bootstrap_block));
+        reset_group_bootstrap();
+    }
+}
+
+
+inline void Managed_process::reset_group_bootstrap()
+{
+    if (!m_group_bootstrap) {
+        return;
+    }
+
+    m_group_bootstrap->members = 0;
+    m_group_bootstrap->epoch = 0;
+    sintra::ipc::store_release(m_group_bootstrap->published, 0u);
+
+#if defined(__FreeBSD__)
+    ::msync(m_group_bootstrap, sizeof(*m_group_bootstrap), MS_ASYNC | MS_INVALIDATE);
+#endif
+}
+
+
+inline void Managed_process::publish_group_bootstrap(uint32_t members_count)
+{
+    if (!m_group_bootstrap) {
+        return;
+    }
+
+    m_group_bootstrap->members = members_count;
+    sintra::ipc::store_release(m_group_bootstrap->published, 1u);
+    sintra::ipc::fetch_add_release(m_group_bootstrap->epoch, 1u);
+
+#if defined(__FreeBSD__)
+    ::msync(m_group_bootstrap, sizeof(*m_group_bootstrap), MS_ASYNC | MS_INVALIDATE);
+#endif
+}
+
+
+inline bool Managed_process::wait_for_group_bootstrap(uint32_t /*expected_members*/)
+{
+    if (!m_group_bootstrap) {
+        return true;
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+
+    while (sintra::ipc::load_acquire(m_group_bootstrap->published) == 0u) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            return false;
+        }
+
+        std::this_thread::yield();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    // Ensure the coordinator's member count is visible before continuing.
+    (void)sintra::ipc::load_acquire(m_group_bootstrap->members);
+
+    return true;
+}
+
+
 template <typename T>
 sintra::type_id_type get_type_id()
 {
@@ -543,6 +674,10 @@ Managed_process::~Managed_process()
         delete m_out_rep_c;
         m_out_rep_c = nullptr;
     }
+
+    m_group_bootstrap_region.reset();
+    m_group_bootstrap_file.reset();
+    m_group_bootstrap = nullptr;
 
     if (s_coord) {
 
@@ -843,6 +978,8 @@ Managed process options:
     }
     m_directory = obtain_swarm_directory();
 
+    initialize_group_bootstrap(coordinator_is_local);
+
     m_out_req_c = new Message_ring_W(m_directory, "req", m_instance_id, s_recovery_occurrence);
     m_out_rep_c = new Message_ring_W(m_directory, "rep", m_instance_id, s_recovery_occurrence);
 
@@ -1078,6 +1215,7 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
     using std::to_string;
 
     if (s_coord) {
+        reset_group_bootstrap();
 
         // 1. prepare the command line for each invocation
         auto it = branch_vector.begin();
@@ -1116,11 +1254,19 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
         m_group_all      = s_coord->make_process_group("_sintra_all_processes", all_processes);
         m_group_external = s_coord->make_process_group("_sintra_external_processes", successfully_spawned);
 
+        publish_group_bootstrap(static_cast<uint32_t>(all_processes.size()));
+
         s_branch_index = 0;
     }
     else {
         assert(s_branch_index != -1);
         assert( (ptrdiff_t)branch_vector.size() > s_branch_index-1);
+
+        const uint32_t expected_members = static_cast<uint32_t>(branch_vector.size() + 1);
+        if (!wait_for_group_bootstrap(expected_members)) {
+            return false;
+        }
+
         Process_descriptor& own_pd = branch_vector[s_branch_index-1];
         if (own_pd.entry.m_entry_function != nullptr) {
             m_entry_function = own_pd.entry.m_entry_function;
