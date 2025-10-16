@@ -10,6 +10,12 @@
 #include <string_view>
 #include <thread>
 
+#ifdef _WIN32
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
+
 constexpr std::size_t kProcessCount = 4;
 constexpr std::size_t kIterations = 500;  // Many iterations to increase chance of races
 
@@ -30,8 +36,15 @@ int worker_process(std::uint32_t worker_index)
 {
     using namespace sintra;
 
-    std::random_device rd;
-    std::mt19937 gen(rd());
+    const auto now = static_cast<unsigned>(
+        std::chrono::high_resolution_clock::now().time_since_epoch().count());
+#ifdef _WIN32
+    const auto pid = static_cast<unsigned>(_getpid());
+#else
+    const auto pid = static_cast<unsigned>(getpid());
+#endif
+    std::seed_seq seed{now, pid, static_cast<unsigned>(worker_index)};
+    std::mt19937 gen(seed);
     std::uniform_int_distribution<> delay_dist(0, 5);  // 0-5 microseconds
 
     try {

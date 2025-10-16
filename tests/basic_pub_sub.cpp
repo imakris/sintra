@@ -20,11 +20,11 @@
 #include <sintra/sintra.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
-#include <random>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -70,7 +70,7 @@ std::filesystem::path ensure_shared_directory()
     auto base = std::filesystem::temp_directory_path() / "sintra_tests";
     std::filesystem::create_directories(base);
 
-    // Generate a highly unique suffix combining timestamp, PID, and random number
+    // Generate a highly unique suffix combining timestamp, PID, and a monotonic counter
     auto unique_suffix = std::chrono::duration_cast<std::chrono::nanoseconds>(
                              std::chrono::high_resolution_clock::now().time_since_epoch())
                              .count();
@@ -80,11 +80,8 @@ std::filesystem::path ensure_shared_directory()
     unique_suffix ^= static_cast<long long>(getpid());
 #endif
 
-    // Add random component to prevent collisions in rapid test iterations
-    std::random_device rd;
-    std::mt19937_64 gen(rd());
-    std::uniform_int_distribution<uint64_t> dis;
-    unique_suffix ^= static_cast<long long>(dis(gen));
+    static std::atomic<long long> counter{0};
+    unique_suffix ^= counter.fetch_add(1, std::memory_order_relaxed);
 
     std::ostringstream oss;
     oss << "basic_pubsub_" << unique_suffix;
