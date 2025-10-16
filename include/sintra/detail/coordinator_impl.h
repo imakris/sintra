@@ -666,6 +666,16 @@ instance_id_type Coordinator::make_process_group(
         auto& group = it->second;
         const auto ret = group.m_instance_id;
 
+        if (group.m_published) {
+            // Remove the stale publication from the coordinator registry so we
+            // can safely re-announce the group with its refreshed membership.
+            // Without this, the subsequent assign_name() call would see the
+            // name as still in-use and the workers waiting on
+            // _sintra_all_processes would continue to block indefinitely.
+            unpublish_transceiver(ret);
+            group.m_published = false;
+        }
+
         // Capture the existing membership before overwriting it so we can
         // update reverse lookups. Using a copy keeps the critical section
         // straightforward and avoids holding the group's lock longer than
@@ -694,12 +704,13 @@ instance_id_type Coordinator::make_process_group(
             m_groups_of_process[member].insert(ret);
         }
 
-        // If the group was previously unpublished (for instance after the
-        // coordinator restarted), re-attempt to publish its name so waiters
-        // can resolve it again. assign_name() is idempotent when the name is
-        // already published, so calling it unconditionally keeps the logic
-        // simple.
-        group.assign_name(name);
+        // Publish the refreshed group name so that any processes waiting on it
+        // observe the updated membership immediately.
+        if (!group.assign_name(name)) {
+            detail::trace_sync("coordinator.group_assign_failed", [&](auto& os) {
+                os << "name=" << name << " instance=" << ret;
+            });
+        }
 
         return ret;
     }
