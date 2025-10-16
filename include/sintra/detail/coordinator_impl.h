@@ -661,19 +661,58 @@ instance_id_type Coordinator::make_process_group(
 {
     lock_guard<mutex> lock(m_groups_mutex);
 
-    // check if it exists
-    if (m_groups.count(name)) {
-        return invalid_instance_id;
+    auto it = m_groups.find(name);
+    if (it != m_groups.end()) {
+        auto& group = it->second;
+        const auto ret = group.m_instance_id;
+
+        // Capture the existing membership before overwriting it so we can
+        // update reverse lookups. Using a copy keeps the critical section
+        // straightforward and avoids holding the group's lock longer than
+        // necessary when we update `m_groups_of_process` below.
+        const auto previous_members = group.m_process_ids;
+
+        group.set(member_process_ids);
+
+        // Remove associations that are no longer part of the group.
+        for (const auto& member : previous_members) {
+            if (member_process_ids.find(member) != member_process_ids.end()) {
+                continue;
+            }
+
+            auto map_it = m_groups_of_process.find(member);
+            if (map_it != m_groups_of_process.end()) {
+                map_it->second.erase(ret);
+                if (map_it->second.empty()) {
+                    m_groups_of_process.erase(map_it);
+                }
+            }
+        }
+
+        // Add (or confirm) associations for the new membership set.
+        for (const auto& member : member_process_ids) {
+            m_groups_of_process[member].insert(ret);
+        }
+
+        // If the group was previously unpublished (for instance after the
+        // coordinator restarted), re-attempt to publish its name so waiters
+        // can resolve it again. assign_name() is idempotent when the name is
+        // already published, so calling it unconditionally keeps the logic
+        // simple.
+        group.assign_name(name);
+
+        return ret;
     }
 
-    m_groups[name].set(member_process_ids);
-    auto ret = m_groups[name].m_instance_id;
+    auto& group = m_groups[name];
+    group.set(member_process_ids);
+    const auto ret = group.m_instance_id;
 
-    for (auto& e : member_process_ids) {
-        m_groups_of_process[e].insert(ret);
+    for (const auto& member : member_process_ids) {
+        m_groups_of_process[member].insert(ret);
     }
 
-    m_groups[name].assign_name(name);
+    group.assign_name(name);
     return ret;
 }
 
