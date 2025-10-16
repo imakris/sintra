@@ -242,6 +242,7 @@ struct Managed_process: Derived_transceiver<Managed_process>
 
     uint64_t                            m_swarm_id;
     string                              m_directory;
+    bool                                m_coordinator_is_local = false;
 
     inline
     string obtain_swarm_directory();
