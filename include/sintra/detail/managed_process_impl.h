@@ -1166,6 +1166,12 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
             });
 
             try {
+                detail::trace_sync("branch.worker.join_rpc", [&](auto& os) {
+                    os << "instance=" << m_instance_id
+                       << " swarm=" << m_swarm_id
+                       << " name=" << group_name
+                       << " coord=" << s_coord_id;
+                });
                 auto group_instance = Coordinator::rpc_join_and_wait_group(
                     s_coord_id,
                     m_swarm_id,
