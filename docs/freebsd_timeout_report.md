@@ -25,3 +25,15 @@
 
 ## Summary for Handoff
 The failure is isolated to the swarm bootstrap barrier: workers never learn that `_sintra_all_processes` has been published, so they block indefinitely and every multi-process test times out. Focus further debugging on how coordinator group publications propagate across processes on FreeBSD, ensuring proper synchronization primitives and visibility of shared-memory updates.
+
+## Follow-up Experiment: Atomic Publication + RPC Polling
+- Added a shared `ipc_atomic` helper and switched `Transceiver::mark_published` / `mark_unpublished` to use release-store semantics so workers can acquire-load the publication flag reliably across processes.【F:include/sintra/detail/ipc_atomic.h†L1-L32】【F:include/sintra/detail/transceiver.h†L615-L626】
+- Updated `Coordinator::make_process_group` to unpublish old group instances, refresh membership, and rely on the new atomic publication helpers before returning the refreshed group id.【F:include/sintra/detail/coordinator_impl.h†L658-L705】
+- Replaced the blocking `rpc_wait_for_instance` call in the branch startup path with a short polling loop that repeatedly invokes `rpc_resolve_instance` until the coordinator advertises the `_sintra_*` group, preserving the existing trace breadcrumbs.【F:include/sintra/detail/managed_process_impl.h†L1159-L1185】
+- Linux sanity checks still pass instantly after these changes (e.g., `ctest --test-dir build --output-on-failure -R sintra.basic_pubsub --timeout 30` completes in ≈0.5 s).【452c1b†L1-L11】
+- FreeBSD runs, however, continue to log `branch.worker.wait_group` without the matching `branch.worker.got_group` event before hitting the 120 s harness timeout, implying that `rpc_resolve_instance` never observes the coordinator’s publication in that environment.
+
+## Outstanding Questions for Further Handoff
+1. Why does the coordinator-side `publish_transceiver` update still fail to propagate to `rpc_resolve_instance` on FreeBSD even with atomic stores? We may need to instrument that path to confirm whether `assign_name` succeeds or whether the publication cache is being cleared prematurely.
+2. Could the per-process cache (`m_instance_id_of_assigned_name`) be wiped during swarm startup on FreeBSD (e.g., due to coordinator detaching from shared memory), preventing the new polling loop from ever seeing the assigned name? Adding explicit traces in `publish_transceiver` after the map update would confirm.
+3. As a follow-up diagnostic, we could expose a one-off RPC that dumps the coordinator’s `m_instance_id_of_assigned_name` contents when the worker is stuck, verifying whether the entry is missing or merely invisible to RPC callers.
