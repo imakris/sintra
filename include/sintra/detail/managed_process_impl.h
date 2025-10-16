@@ -28,6 +28,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
 #include "utility.h"
+#include "debug_log.h"
 
 #include <array>
 #include <atomic>
@@ -848,6 +849,12 @@ Managed process options:
               << " coordinator_local="
               << (coordinator_is_local ? "true" : "false")
               << " swarm_id=" << m_swarm_id << std::endl;
+    detail::trace_sync("managed.init", [&](auto& os) {
+        os << "instance=" << m_instance_id
+           << " coordinator_local=" << coordinator_is_local
+           << " swarm=" << m_swarm_id
+           << " binary=" << m_binary_name;
+    });
     m_directory = obtain_swarm_directory();
 
     m_out_req_c = new Message_ring_W(m_directory, "req", m_instance_id, s_recovery_occurrence);
@@ -1042,9 +1049,21 @@ bool Managed_process::spawn_swarm_process(
         // Before spawning the new process, we have to assure that the
         // corresponding reading threads are up and running.
         eit.first->second.wait_until_ready();
+        detail::trace_sync("spawn.reader_ready", [&](auto& os) {
+            os << "parent_instance=" << m_instance_id
+               << " child_instance=" << s.piid
+               << " occurrence=" << s.occurrence;
+        });
     }
 
     bool success = spawn_detached(s.binary_name.c_str(), cargs.v());
+    detail::trace_sync("spawn.exec", [&](auto& os) {
+        os << "parent_instance=" << m_instance_id
+           << " child_instance=" << s.piid
+           << " occurrence=" << s.occurrence
+           << " success=" << success
+           << " binary=" << s.binary_name;
+    });
 
     if (success) {
         // Create an entry in the coordinator's transceiver registry.
@@ -1263,6 +1282,11 @@ std::string Managed_process::obtain_swarm_directory()
     auto swarm_directory = sintra_directory + stream.str();
 
     if (m_coordinator_is_local) {
+        detail::trace_sync("swarm.prepare", [&](auto& os) {
+            os << "instance=" << m_instance_id
+               << " swarm=" << m_swarm_id
+               << " path=" << swarm_directory;
+        });
         std::error_code cleanup_ec;
         std::cerr << "[Managed_process] coordinator preparing swarm directory '"
                   << swarm_directory << "'" << std::endl;
@@ -1275,6 +1299,11 @@ std::string Managed_process::obtain_swarm_directory()
         }
         std::cerr << "[Managed_process] coordinator cleared swarm directory"
                   << std::endl;
+        detail::trace_sync("swarm.cleared", [&](auto& os) {
+            os << "instance=" << m_instance_id
+               << " swarm=" << m_swarm_id
+               << " path=" << swarm_directory;
+        });
     }
 
     if (!check_or_create_directory(swarm_directory)) {
@@ -1284,6 +1313,11 @@ std::string Managed_process::obtain_swarm_directory()
     std::cerr << "[Managed_process] process " << m_instance_id
               << " using swarm directory '" << swarm_directory << "'"
               << std::endl;
+    detail::trace_sync("swarm.using", [&](auto& os) {
+        os << "instance=" << m_instance_id
+           << " swarm=" << m_swarm_id
+           << " path=" << swarm_directory;
+    });
     return swarm_directory;
 }
 

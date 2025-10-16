@@ -28,6 +28,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
 #include "transceiver_impl.h"
+#include "debug_log.h"
 #include <atomic>
 #include <condition_variable>
 #include <cstdio>
@@ -109,6 +110,12 @@ Process_message_reader::Process_message_reader(
     m_request_reader_thread->detach();
     m_reply_reader_thread   = new thread([&] () { reply_reader_function();   });
     m_reply_reader_thread->detach();
+
+    detail::trace_sync("reader.spawn", [&](auto& os) {
+        os << "owner=" << s_mproc_id
+           << " remote_instance=" << m_process_instance_id
+           << " occurrence=" << occurrence;
+    });
 }
 
 
@@ -121,6 +128,13 @@ void Process_message_reader::wait_until_ready()
         const bool rep_started = m_rep_running.load(std::memory_order_acquire);
         const bool stopping = m_reader_state.load(std::memory_order_acquire) == READER_STOPPING;
         return (req_started && rep_started) || stopping;
+    });
+    detail::trace_sync("reader.ready", [&](auto& os) {
+        os << "owner=" << s_mproc_id
+           << " remote_instance=" << m_process_instance_id
+           << " req_started=" << m_req_running.load(std::memory_order_acquire)
+           << " rep_started=" << m_rep_running.load(std::memory_order_acquire)
+           << " state=" << static_cast<int>(m_reader_state.load(std::memory_order_acquire));
     });
 }
 
@@ -258,6 +272,10 @@ void Process_message_reader::request_reader_function()
 
     tl_is_req_thread = true;
     s_tl_current_request_reader = this;
+    detail::trace_sync("ring.req.enter", [&](auto& os) {
+        os << "owner=" << s_mproc_id
+           << " remote_instance=" << m_process_instance_id;
+    });
 
     auto progress = m_delivery_progress;
     if (progress) {
@@ -285,6 +303,11 @@ void Process_message_reader::request_reader_function()
         m_req_running.store(true, std::memory_order_release);
     }
     m_ready_condition.notify_all();
+    detail::trace_sync("ring.req.start", [&](auto& os) {
+        os << "owner=" << s_mproc_id
+           << " remote_instance=" << m_process_instance_id
+           << " seq=" << m_in_req_c->get_message_reading_sequence();
+    });
 
     publish_request_progress(m_in_req_c->get_message_reading_sequence());
 
@@ -303,8 +326,21 @@ void Process_message_reader::request_reader_function()
         Message_prefix* m = m_in_req_c->fetch_message();
         s_tl_current_message = m;
         if (m == nullptr) {
+            detail::trace_sync("ring.req.stop", [&](auto& os) {
+                os << "owner=" << s_mproc_id
+                   << " remote_instance=" << m_process_instance_id;
+            });
             break;
         }
+
+        detail::trace_sync("ring.req.message", [&](auto& os) {
+            os << "owner=" << s_mproc_id
+               << " remote_instance=" << m_process_instance_id
+               << " sender=" << m->sender_instance_id
+               << " receiver=" << m->receiver_instance_id
+               << " type=" << m->message_type_id
+               << " seq=" << m_in_req_c->get_message_reading_sequence();
+        });
 
         // Only the process with the coordinator's instance is allowed to send messages on
         // someone else's behalf (for relay purposes).
@@ -431,6 +467,10 @@ void Process_message_reader::request_reader_function()
     m_req_running.store(false, std::memory_order_release);
     m_ready_condition.notify_all();
     m_stop_condition.notify_one();
+    detail::trace_sync("ring.req.exit", [&](auto& os) {
+        os << "owner=" << s_mproc_id
+           << " remote_instance=" << m_process_instance_id;
+    });
 
     if (progress) {
         const auto seq = m_in_req_c->get_message_reading_sequence();
@@ -500,6 +540,11 @@ void Process_message_reader::reply_reader_function()
 {
     install_signal_handler();
 
+    detail::trace_sync("ring.rep.enter", [&](auto& os) {
+        os << "owner=" << s_mproc_id
+           << " remote_instance=" << m_process_instance_id;
+    });
+
     s_mproc->m_num_active_readers_mutex.lock();
     s_mproc->m_num_active_readers++;
     s_mproc->m_num_active_readers_mutex.unlock();
@@ -526,6 +571,11 @@ void Process_message_reader::reply_reader_function()
         m_rep_running.store(true, std::memory_order_release);
     }
     m_ready_condition.notify_all();
+    detail::trace_sync("ring.rep.start", [&](auto& os) {
+        os << "owner=" << s_mproc_id
+           << " remote_instance=" << m_process_instance_id
+           << " seq=" << m_in_rep_c->get_message_reading_sequence();
+    });
 
     publish_reply_progress(m_in_rep_c->get_message_reading_sequence());
 
@@ -560,8 +610,21 @@ void Process_message_reader::reply_reader_function()
         s_tl_current_message = m;
 
         if (m == nullptr) {
+            detail::trace_sync("ring.rep.stop", [&](auto& os) {
+                os << "owner=" << s_mproc_id
+                   << " remote_instance=" << m_process_instance_id;
+            });
             break;
         }
+
+        detail::trace_sync("ring.rep.message", [&](auto& os) {
+            os << "owner=" << s_mproc_id
+               << " remote_instance=" << m_process_instance_id
+               << " sender=" << m->sender_instance_id
+               << " receiver=" << m->receiver_instance_id
+               << " type=" << m->message_type_id
+               << " seq=" << m_in_rep_c->get_message_reading_sequence();
+        });
 
         // Only the process with the coordinator's instance is allowed to send messages on
         // someone else's behalf (for relay purposes).
@@ -665,6 +728,11 @@ void Process_message_reader::reply_reader_function()
     if (s_mproc) {
         s_mproc->notify_delivery_progress();
     }
+
+    detail::trace_sync("ring.rep.exit", [&](auto& os) {
+        os << "owner=" << s_mproc_id
+           << " remote_instance=" << m_process_instance_id;
+    });
 }
 
 

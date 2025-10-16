@@ -29,6 +29,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "coordinator.h"
 #include "managed_process.h"
+#include "debug_log.h"
 
 #include <cassert>
 #include <functional>
@@ -65,6 +66,15 @@ sequence_counter_type Process_group::barrier(
     Barrier& b = m_barriers[barrier_name];
     b.m.lock(); // main barrier lock
 
+    detail::trace_sync("barrier.lock", [&](auto& os) {
+        os << "name=" << barrier_name
+           << " caller=" << caller_piid
+           << " coordinator=" << s_coord_id
+           << " local_instance=" << s_mproc_id
+           << " pending_before=" << b.processes_pending.size()
+           << " arrived_before=" << b.processes_arrived.size();
+    });
+
     // Atomically snapshot membership and filter draining processes while holding m_call_mutex.
     // This ensures a consistent view: no process can be added/removed or change draining state
     // between the membership snapshot and the draining filter.
@@ -88,6 +98,12 @@ sequence_counter_type Process_group::barrier(
                 }
             }
         }
+
+        detail::trace_sync("barrier.snapshot", [&](auto& os) {
+            os << "name=" << barrier_name
+               << " caller=" << caller_piid
+               << " membership=" << b.processes_pending.size();
+        });
     }
 
     // Now safe to release m_call_mutex - barrier state is consistent and other threads
@@ -96,6 +112,14 @@ sequence_counter_type Process_group::barrier(
 
     b.processes_arrived.insert(caller_piid);
     b.processes_pending.erase(caller_piid);
+
+    detail::trace_sync("barrier.arrive", [&](auto& os) {
+        os << "name=" << barrier_name
+           << " caller=" << caller_piid
+           << " pending_remaining=" << b.processes_pending.size()
+           << " arrived=" << b.processes_arrived.size()
+           << " common_fiid=" << b.common_function_iid;
+    });
 
     if (b.processes_pending.size() == 0) {
         // Last arrival
@@ -113,6 +137,14 @@ sequence_counter_type Process_group::barrier(
         const auto current_common_fiid = b.common_function_iid;
         s_tl_common_function_iid = current_common_fiid;
         b.m.unlock();
+
+        detail::trace_sync("barrier.complete", [&](auto& os) {
+            os << "name=" << barrier_name
+               << " caller=" << caller_piid
+               << " recipients=" << additional_pids.size() + 1
+               << " common_fiid=" << current_common_fiid
+               << " reply_seq=" << s_mproc->m_out_rep_c->get_leading_sequence();
+        });
 
         // Re-lock m_call_mutex to safely erase from m_barriers
         basic_lock.lock();
@@ -140,6 +172,12 @@ sequence_counter_type Process_group::barrier(
 
         mark_rpc_reply_deferred();
         b.m.unlock();
+        detail::trace_sync("barrier.defer", [&](auto& os) {
+            os << "name=" << barrier_name
+               << " caller=" << caller_piid
+               << " pending_remaining=" << b.processes_pending.size()
+               << " common_fiid=" << b.common_function_iid;
+        });
         return 0;
     }
 }
@@ -154,6 +192,13 @@ inline void Process_group::drop_from_inflight_barriers(
     for (auto barrier_it = m_barriers.begin(); barrier_it != m_barriers.end(); ) {
         auto& barrier = barrier_it->second;
         std::unique_lock barrier_lock(barrier.m);
+
+        detail::trace_sync("barrier.drop", [&](auto& os) {
+            os << "name=" << barrier_it->first
+               << " removing=" << process_iid
+               << " pending_before=" << barrier.processes_pending.size()
+               << " arrived_before=" << barrier.processes_arrived.size();
+        });
 
         const bool touched_pending = barrier.processes_pending.erase(process_iid) > 0;
         const bool touched_arrived = barrier.processes_arrived.erase(process_iid) > 0;
@@ -178,6 +223,13 @@ inline void Process_group::drop_from_inflight_barriers(
             completion.recipients.push_back(process_iid);
         }
 
+        detail::trace_sync("barrier.drop.complete", [&](auto& os) {
+            os << "name=" << barrier_it->first
+               << " removing=" << process_iid
+               << " recipients=" << completion.recipients.size()
+               << " common_fiid=" << completion.common_function_iid;
+        });
+
         barrier.processes_arrived.clear();
         barrier.common_function_iid = invalid_instance_id;
 
@@ -201,6 +253,11 @@ inline void Process_group::emit_barrier_completions(
         if (completion.recipients.empty()) {
             continue;
         }
+
+        detail::trace_sync("barrier.emit", [&](auto& os) {
+            os << "common_fiid=" << completion.common_function_iid
+               << " recipients=" << completion.recipients.size();
+        });
 
         // Get per-recipient flush token: compute it INSIDE the loop so each recipient
         // gets a watermark that's valid for their specific message write time.

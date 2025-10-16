@@ -97,3 +97,11 @@ if(SINTRA_CI_TESTS)
     # letting CTest terminate any individual binary after two minutes.
     set_tests_properties(${SINTRA_CI_TESTS} PROPERTIES TIMEOUT 120)
 endif()
+
+if(CMAKE_SYSTEM_NAME MATCHES "FreeBSD")
+    set(_sintra_trace_env "SINTRA_TRACE_SYNC=1")
+    set_property(TEST sintra.dummy APPEND PROPERTY ENVIRONMENT "${_sintra_trace_env}")
+    foreach(test_name IN LISTS SINTRA_CI_TESTS)
+        set_property(TEST "${test_name}" APPEND PROPERTY ENVIRONMENT "${_sintra_trace_env}")
+    endforeach()
+endif()
