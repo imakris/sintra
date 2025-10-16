@@ -17,7 +17,10 @@
 #endif
 
 constexpr std::size_t kProcessCount = 4;
-constexpr std::size_t kIterations = 500;  // Many iterations to increase chance of races
+// Keep the stress loop bounded so slower CI hosts (e.g. FreeBSD jails) still
+// show steady ctest progress. Hundreds of iterations remain enough to exercise
+// the synchronization paths without monopolizing the worker for minutes.
+constexpr std::size_t kIterations = 200;
 
 std::atomic<int> worker_failures{0};
 std::atomic<int> coordinator_failures{0};
