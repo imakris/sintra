@@ -1156,50 +1156,71 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
             exit(1);
         }
 
-        auto wait_for_named_group = [&](const char* assigned_name) {
-            using namespace std::chrono_literals;
-            constexpr auto poll_interval = std::chrono::milliseconds(1);
+        auto join_group = [&](const char* assigned_name) -> instance_id_type {
+            const std::string group_name{assigned_name};
 
             detail::trace_sync("branch.worker.wait_group", [&](auto& os) {
                 os << "instance=" << m_instance_id
                    << " swarm=" << m_swarm_id
-                   << " name=" << assigned_name;
+                   << " name=" << group_name;
             });
 
-            while (true) {
-                auto iid = Coordinator::rpc_resolve_instance(s_coord_id, assigned_name);
-                if (iid != invalid_instance_id) {
-                    detail::trace_sync("branch.worker.got_group", [&](auto& os) {
-                        os << "instance=" << m_instance_id
-                           << " swarm=" << m_swarm_id
-                           << " name=" << assigned_name;
-                    });
-                    return iid;
+            try {
+                auto group_instance = Coordinator::rpc_join_and_wait_group(
+                    s_coord_id,
+                    m_swarm_id,
+                    group_name,
+                    m_instance_id);
+
+                if (group_instance == invalid_instance_id) {
+                    group_instance = Coordinator::rpc_resolve_instance(s_coord_id, group_name);
                 }
 
-                std::this_thread::sleep_for(poll_interval);
+                detail::trace_sync("branch.worker.got_group", [&](auto& os) {
+                    os << "instance=" << m_instance_id
+                       << " swarm=" << m_swarm_id
+                       << " name=" << group_name
+                       << " instance=" << group_instance;
+                });
+
+                return group_instance;
+            }
+            catch (const rpc_cancelled&) {
+                if (m_communication_state != COMMUNICATION_RUNNING) {
+                    detail::trace_sync("branch.worker.cancelled_group", [&](auto& os) {
+                        os << "instance=" << m_instance_id
+                           << " swarm=" << m_swarm_id
+                           << " name=" << group_name;
+                    });
+                    return invalid_instance_id;
+                }
+                throw;
             }
         };
 
-        m_group_all = wait_for_named_group("_sintra_all_processes");
-        m_group_external = wait_for_named_group("_sintra_external_processes");
+        m_group_all = join_group("_sintra_all_processes");
+        m_group_external = join_group("_sintra_external_processes");
     }
 
     // assign_name requires that all group processes are instantiated, in order
     // to receive the instance_published event
     if (s_recovery_occurrence == 0) {
-        detail::trace_sync("branch.barrier.enter", [&](auto& os) {
-            os << "instance=" << m_instance_id
-               << " swarm=" << m_swarm_id
-               << " group=_sintra_all_processes";
-        });
-        bool all_started = Process_group::rpc_barrier(m_group_all, UIBS);
-        detail::trace_sync("branch.barrier.exit", [&](auto& os) {
-            os << "instance=" << m_instance_id
-               << " swarm=" << m_swarm_id
-               << " group=_sintra_all_processes"
-               << " success=" << all_started;
-        });
+        bool all_started = true;
+        if (m_group_all != invalid_instance_id) {
+            detail::trace_sync("branch.barrier.enter", [&](auto& os) {
+                os << "instance=" << m_instance_id
+                   << " swarm=" << m_swarm_id
+                   << " group=_sintra_all_processes";
+            });
+            all_started = Process_group::rpc_barrier(m_group_all, UIBS);
+            detail::trace_sync("branch.barrier.exit", [&](auto& os) {
+                os << "instance=" << m_instance_id
+                   << " swarm=" << m_swarm_id
+                   << " group=_sintra_all_processes"
+                   << " success=" << all_started;
+            });
+        }
+
         if (!all_started) {
             return false;
         }
