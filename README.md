@@ -9,8 +9,7 @@
 [![Build - macOS](https://github.com/imakris/sintra/actions/workflows/build-macos.yml/badge.svg)](https://github.com/imakris/sintra/actions/workflows/build-macos.yml)
 [![Stress Test - macOS](https://github.com/imakris/sintra/actions/workflows/stress-test-macos.yml/badge.svg)](https://github.com/imakris/sintra/actions/workflows/stress-test-macos.yml)
 
-[![FreeBSD Build](https://api.cirrus-ci.com/github/imakris/sintra.svg?task=FreeBSD%20Build)](https://cirrus-ci.com/github/imakris/sintra)
-[![FreeBSD Tests](https://api.cirrus-ci.com/github/imakris/sintra.svg?task=FreeBSD%20Tests)](https://cirrus-ci.com/github/imakris/sintra)
+[![FreeBSD Build & Test](https://api.cirrus-ci.com/github/imakris/sintra.svg?task=FreeBSD%20Build%20%26%20Test)](https://cirrus-ci.com/github/imakris/sintra)
 
 ![Header-only](https://img.shields.io/badge/header--only-yes-lightgrey)
 ![C++17](https://img.shields.io/badge/C%2B%2B-17-blue)
