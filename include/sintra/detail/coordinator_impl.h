@@ -667,7 +667,7 @@ instance_id_type Coordinator::make_process_group(
     if (it != m_groups.end()) {
         auto& group = it->second;
         previous_group_instance = group.m_instance_id;
-        previous_group_published = group.m_published;
+        previous_group_published = group.is_published();
 
         const auto previous_members = group.m_process_ids;
         for (const auto& member : previous_members) {

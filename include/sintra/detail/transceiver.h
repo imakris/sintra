@@ -31,7 +31,9 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "id_types.h"
 #include "message.h"
 #include "spinlocked_containers.h"
+#include "ipc_atomic.h"
 
+#include <atomic>
 #include <condition_variable>
 #include <functional>
 #include <list>
@@ -611,7 +613,19 @@ private:
 
 
     instance_id_type            m_instance_id       = invalid_instance_id;
-    bool                        m_published         = false;
+    bool is_published() const noexcept {
+        return ipc_atomic::load_acquire(m_published);
+    }
+
+    void mark_published() noexcept {
+        ipc_atomic::store_release(m_published, true);
+    }
+
+    void mark_unpublished() noexcept {
+        ipc_atomic::store_release(m_published, false);
+    }
+
+    std::atomic<bool>           m_published{false};
 
     spinlocked_umap<string, instance_id_type>::iterator m_cache_iterator;
 

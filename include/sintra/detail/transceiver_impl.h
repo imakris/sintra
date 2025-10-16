@@ -228,7 +228,7 @@ bool Transceiver::assign_name(const string& name)
 {
     initialize_type_id();
     if (Coordinator::rpc_publish_transceiver(s_coord_id, m_type_id, m_instance_id, name)) {
-        m_published = true;
+        mark_published();
 
         if (!s_coord) {
             auto cache_entry = make_pair(name, m_instance_id);
@@ -265,7 +265,7 @@ void Transceiver::destroy()
         deactivate_all();
     }
 
-    if (m_published) {
+    if (is_published()) {
 
         // If the message ring threads are not running, attempting rpc would deadlock,
         // which must be prevented. This is a likely scenario on an emergency exit.
@@ -294,7 +294,7 @@ void Transceiver::destroy()
             (void)success;
         }
 
-        m_published = false;
+        mark_unpublished();
 
         // if the coordinator is local, it would be deleted already in the unpublish call
         if (!s_coord) {
