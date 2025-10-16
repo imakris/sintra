@@ -1156,28 +1156,33 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
             exit(1);
         }
 
-        detail::trace_sync("branch.worker.wait_group", [&](auto& os) {
-            os << "instance=" << m_instance_id
-               << " swarm=" << m_swarm_id
-               << " name=_sintra_all_processes";
-        });
-        m_group_all = Coordinator::rpc_wait_for_instance(s_coord_id, "_sintra_all_processes");
-        detail::trace_sync("branch.worker.got_group", [&](auto& os) {
-            os << "instance=" << m_instance_id
-               << " swarm=" << m_swarm_id
-               << " name=_sintra_all_processes";
-        });
-        detail::trace_sync("branch.worker.wait_group", [&](auto& os) {
-            os << "instance=" << m_instance_id
-               << " swarm=" << m_swarm_id
-               << " name=_sintra_external_processes";
-        });
-        m_group_external = Coordinator::rpc_wait_for_instance(s_coord_id, "_sintra_external_processes");
-        detail::trace_sync("branch.worker.got_group", [&](auto& os) {
-            os << "instance=" << m_instance_id
-               << " swarm=" << m_swarm_id
-               << " name=_sintra_external_processes";
-        });
+        auto wait_for_named_group = [&](const char* assigned_name) {
+            using namespace std::chrono_literals;
+            constexpr auto poll_interval = std::chrono::milliseconds(1);
+
+            detail::trace_sync("branch.worker.wait_group", [&](auto& os) {
+                os << "instance=" << m_instance_id
+                   << " swarm=" << m_swarm_id
+                   << " name=" << assigned_name;
+            });
+
+            while (true) {
+                auto iid = Coordinator::rpc_resolve_instance(s_coord_id, assigned_name);
+                if (iid != invalid_instance_id) {
+                    detail::trace_sync("branch.worker.got_group", [&](auto& os) {
+                        os << "instance=" << m_instance_id
+                           << " swarm=" << m_swarm_id
+                           << " name=" << assigned_name;
+                    });
+                    return iid;
+                }
+
+                std::this_thread::sleep_for(poll_interval);
+            }
+        };
+
+        m_group_all = wait_for_named_group("_sintra_all_processes");
+        m_group_external = wait_for_named_group("_sintra_external_processes");
     }
 
     // assign_name requires that all group processes are instantiated, in order
