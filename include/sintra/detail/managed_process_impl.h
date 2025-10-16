@@ -34,12 +34,14 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <chrono>
 #include <csignal>
 #include <functional>
+#include <iostream>
 #include <list>
 #include <vector>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
+#include <system_error>
 #include <thread>
 #include <utility>
 #ifndef _WIN32
@@ -841,6 +843,11 @@ Managed process options:
 
         s_mproc_id = m_instance_id;
     }
+    m_coordinator_is_local = coordinator_is_local;
+    std::cerr << "[Managed_process] instantiated process " << m_instance_id
+              << " coordinator_local="
+              << (coordinator_is_local ? "true" : "false")
+              << " swarm_id=" << m_swarm_id << std::endl;
     m_directory = obtain_swarm_directory();
 
     m_out_req_c = new Message_ring_W(m_directory, "req", m_instance_id, s_recovery_occurrence);
@@ -1254,10 +1261,29 @@ std::string Managed_process::obtain_swarm_directory()
     std::stringstream stream;
     stream << std::hex << m_swarm_id;
     auto swarm_directory = sintra_directory + stream.str();
+
+    if (m_coordinator_is_local) {
+        std::error_code cleanup_ec;
+        std::cerr << "[Managed_process] coordinator preparing swarm directory '"
+                  << swarm_directory << "'" << std::endl;
+        fs::remove_all(fs::path(swarm_directory), cleanup_ec);
+        if (cleanup_ec) {
+            std::ostringstream message;
+            message << "failed to clear previous swarm directory '"
+                    << swarm_directory << "': " << cleanup_ec.message();
+            throw std::runtime_error(message.str());
+        }
+        std::cerr << "[Managed_process] coordinator cleared swarm directory"
+                  << std::endl;
+    }
+
     if (!check_or_create_directory(swarm_directory)) {
         throw std::runtime_error("access to a working directory failed");
     }
 
+    std::cerr << "[Managed_process] process " << m_instance_id
+              << " using swarm directory '" << swarm_directory << "'"
+              << std::endl;
     return swarm_directory;
 }
 
