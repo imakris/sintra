@@ -54,7 +54,18 @@ if(NOT TARGET Boost::boost)
     )
 endif()
 
+file(GLOB_RECURSE SINTRA_PUBLIC_HEADERS CONFIGURE_DEPENDS
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/*.h)
+
 add_library(sintra INTERFACE)
+if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.23)
+    target_sources(sintra INTERFACE
+        FILE_SET sintra_headers TYPE HEADERS BASE_DIRS
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            FILES ${SINTRA_PUBLIC_HEADERS})
+else()
+    set_property(TARGET sintra PROPERTY INTERFACE_SOURCES ${SINTRA_PUBLIC_HEADERS})
+endif()
 target_include_directories(sintra INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(sintra INTERFACE cxx_std_17)
 target_link_libraries(sintra INTERFACE Boost::boost Threads::Threads)
