@@ -1,10 +1,10 @@
 #include <sintra/sintra.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
-#include <random>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -63,12 +63,11 @@ std::filesystem::path ensure_shared_directory()
     const auto pid = static_cast<long long>(getpid());
 #endif
 
-    std::random_device rd;
-    std::mt19937_64 gen(rd());
-    std::uniform_int_distribution<long long> dis;
+    static std::atomic<long long> counter{0};
+    const auto unique = counter.fetch_add(1, std::memory_order_relaxed);
 
     std::ostringstream oss;
-    oss << "run_" << now << '_' << pid << '_' << dis(gen);
+    oss << "run_" << now << '_' << pid << '_' << unique;
 
     auto dir = base / oss.str();
     std::filesystem::create_directories(dir);
