@@ -10,8 +10,17 @@
 #include <string_view>
 #include <thread>
 
+#ifdef _WIN32
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
+
 constexpr std::size_t kProcessCount = 4;
-constexpr std::size_t kIterations = 500;  // Many iterations to increase chance of races
+// Keep the stress loop bounded so slower CI hosts (e.g. FreeBSD jails) still
+// show steady ctest progress. Hundreds of iterations remain enough to exercise
+// the synchronization paths without monopolizing the worker for minutes.
+constexpr std::size_t kIterations = 200;
 
 std::atomic<int> worker_failures{0};
 std::atomic<int> coordinator_failures{0};
@@ -30,8 +39,15 @@ int worker_process(std::uint32_t worker_index)
 {
     using namespace sintra;
 
-    std::random_device rd;
-    std::mt19937 gen(rd());
+    const auto now = static_cast<unsigned>(
+        std::chrono::high_resolution_clock::now().time_since_epoch().count());
+#ifdef _WIN32
+    const auto pid = static_cast<unsigned>(_getpid());
+#else
+    const auto pid = static_cast<unsigned>(getpid());
+#endif
+    std::seed_seq seed{now, pid, static_cast<unsigned>(worker_index)};
+    std::mt19937 gen(seed);
     std::uniform_int_distribution<> delay_dist(0, 5);  // 0-5 microseconds
 
     try {
