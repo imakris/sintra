@@ -20,6 +20,8 @@
 
 #include <sintra/sintra.h>
 
+#include "test_trace.h"
+
 #include <atomic>
 #include <chrono>
 #include <future>
@@ -29,7 +31,11 @@ struct Pong {};
 
 int main(int argc, char* argv[])
 {
+    using sintra::test_trace::trace;
+
+    trace("test.ping_pong.main", [&](auto& os) { os << "event=init.begin"; });
     sintra::init(argc, argv);
+    trace("test.ping_pong.main", [&](auto& os) { os << "event=init.end"; });
 
     constexpr int kTargetPingCount = 1000;
     std::atomic<int> ping_count{0};
@@ -38,16 +44,20 @@ int main(int argc, char* argv[])
     auto done_future = done_promise.get_future();
 
     auto ping_slot = [&](Ping) {
+        trace("test.ping_pong.slot", [&](auto& os) { os << "type=Ping handler=ping"; });
         if (done.load(std::memory_order_acquire)) {
             return;
         }
+        trace("test.ping_pong.slot", [&](auto& os) { os << "type=Ping action=send_pong"; });
         sintra::world() << Pong();
     };
 
     auto pong_slot = [&](Pong) {
+        trace("test.ping_pong.slot", [&](auto& os) { os << "type=Pong handler=pong"; });
         if (done.load(std::memory_order_acquire)) {
             return;
         }
+        trace("test.ping_pong.slot", [&](auto& os) { os << "type=Pong action=send_ping"; });
         sintra::world() << Ping();
     };
 
@@ -56,9 +66,11 @@ int main(int argc, char* argv[])
             return;
         }
         int count = ping_count.fetch_add(1, std::memory_order_relaxed) + 1;
+        trace("test.ping_pong.slot", [&](auto& os) { os << "type=Ping handler=benchmark count=" << count; });
         if (count >= kTargetPingCount) {
             bool expected = false;
             if (done.compare_exchange_strong(expected, true)) {
+                trace("test.ping_pong.slot", [&](auto& os) { os << "type=Ping handler=benchmark event=complete"; });
                 done_promise.set_value();
             }
         }
@@ -68,15 +80,27 @@ int main(int argc, char* argv[])
     sintra::activate_slot(pong_slot);
     sintra::activate_slot(benchmarking_slot);
 
+    trace("test.ping_pong.main", [&](auto& os) { os << "event=send_initial_ping"; });
     sintra::world() << Ping();
 
+    trace("test.ping_pong.main", [&](auto& os) { os << "event=wait.begin"; });
     const auto wait_status = done_future.wait_for(std::chrono::seconds(5));
+    trace("test.ping_pong.main", [&](auto& os) {
+        os << "event=wait.end status="
+           << (wait_status == std::future_status::ready ? "ready" : "timeout");
+    });
     if (wait_status != std::future_status::ready) {
+        trace("test.ping_pong.main", [&](auto& os) { os << "event=finalize.begin"; });
         sintra::finalize();
+        trace("test.ping_pong.main", [&](auto& os) { os << "event=finalize.end"; });
         return 1;
     }
 
+    trace("test.ping_pong.main", [&](auto& os) { os << "event=finalize.begin"; });
     sintra::finalize();
+    trace("test.ping_pong.main", [&](auto& os) { os << "event=finalize.end"; });
 
-    return ping_count.load(std::memory_order_relaxed) == kTargetPingCount ? 0 : 1;
+    const bool success = ping_count.load(std::memory_order_relaxed) == kTargetPingCount;
+    trace("test.ping_pong.main", [&](auto& os) { os << "event=exit success=" << success; });
+    return success ? 0 : 1;
 }

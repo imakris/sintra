@@ -19,6 +19,8 @@
 
 #include <sintra/sintra.h>
 
+#include "test_trace.h"
+
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -37,6 +39,8 @@
 #endif
 
 namespace {
+
+using sintra::test_trace::trace;
 
 struct Ping {};
 struct Pong {};
@@ -111,20 +115,25 @@ int read_count(const std::filesystem::path& file)
 
 void wait_for_stop()
 {
+    trace("test.ping_pong_multi.wait_for_stop", [&](auto& os) { os << "event=start"; });
     static std::mutex stop_mutex;
     std::condition_variable cv;
     bool done = false;
 
     sintra::activate_slot([&](Stop) {
+        trace("test.ping_pong_multi.wait_for_stop", [&](auto& os) { os << "event=stop_received"; });
         std::lock_guard<std::mutex> lk(stop_mutex);
         done = true;
         cv.notify_one();
     });
 
+    trace("test.ping_pong_multi.wait_for_stop", [&](auto& os) { os << "event=barrier.enter name=stop-slot-ready"; });
     sintra::barrier("stop-slot-ready");
+    trace("test.ping_pong_multi.wait_for_stop", [&](auto& os) { os << "event=barrier.exit name=stop-slot-ready"; });
 
     std::unique_lock<std::mutex> lk(stop_mutex);
     cv.wait(lk, [&] { return done; });
+    trace("test.ping_pong_multi.wait_for_stop", [&](auto& os) { os << "event=wait.complete"; });
 
     sintra::deactivate_all_slots();
 }
@@ -133,27 +142,40 @@ constexpr int kTargetPingCount = 500;
 
 int process_ping_responder()
 {
+    trace("test.ping_pong_multi.ping", [&](auto& os) { os << "event=start"; });
     sintra::activate_slot([](Ping) {
+        trace("test.ping_pong_multi.ping", [&](auto& os) { os << "event=handle_ping action=send_pong"; });
         sintra::world() << Pong();
     });
+    trace("test.ping_pong_multi.ping", [&](auto& os) { os << "event=barrier.enter name=slot-activation"; });
     sintra::barrier("ping-pong-slot-activation");
+    trace("test.ping_pong_multi.ping", [&](auto& os) { os << "event=barrier.exit name=slot-activation"; });
 
     wait_for_stop();
+    trace("test.ping_pong_multi.ping", [&](auto& os) { os << "event=barrier.enter name=finished"; });
     sintra::barrier("ping-pong-finished", "_sintra_all_processes");
+    trace("test.ping_pong_multi.ping", [&](auto& os) { os << "event=barrier.exit name=finished"; });
     return 0;
 }
 
 int process_pong_responder()
 {
+    trace("test.ping_pong_multi.pong", [&](auto& os) { os << "event=start"; });
     sintra::activate_slot([](Pong) {
+        trace("test.ping_pong_multi.pong", [&](auto& os) { os << "event=handle_pong action=send_ping"; });
         sintra::world() << Ping();
     });
+    trace("test.ping_pong_multi.pong", [&](auto& os) { os << "event=barrier.enter name=slot-activation"; });
     sintra::barrier("ping-pong-slot-activation");
+    trace("test.ping_pong_multi.pong", [&](auto& os) { os << "event=barrier.exit name=slot-activation"; });
 
+    trace("test.ping_pong_multi.pong", [&](auto& os) { os << "event=send_initial_ping"; });
     sintra::world() << Ping();
 
     wait_for_stop();
+    trace("test.ping_pong_multi.pong", [&](auto& os) { os << "event=barrier.enter name=finished"; });
     sintra::barrier("ping-pong-finished", "_sintra_all_processes");
+    trace("test.ping_pong_multi.pong", [&](auto& os) { os << "event=barrier.exit name=finished"; });
     return 0;
 }
 
@@ -162,27 +184,35 @@ int process_monitor()
     static std::atomic<int> counter{0};
     static std::atomic<bool> stop_sent{false};
 
+    trace("test.ping_pong_multi.monitor", [&](auto& os) { os << "event=start"; });
+
     auto monitor_slot = [](Ping) {
         if (stop_sent.load(std::memory_order_acquire)) {
             return;
         }
         int count = counter.fetch_add(1, std::memory_order_relaxed) + 1;
+        trace("test.ping_pong_multi.monitor", [&](auto& os) { os << "event=handle_ping count=" << count; });
         if (count >= kTargetPingCount) {
             bool expected = false;
             if (stop_sent.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+                trace("test.ping_pong_multi.monitor", [&](auto& os) { os << "event=send_stop"; });
                 sintra::world() << Stop();
             }
         }
     };
 
     sintra::activate_slot(monitor_slot);
+    trace("test.ping_pong_multi.monitor", [&](auto& os) { os << "event=barrier.enter name=slot-activation"; });
     sintra::barrier("ping-pong-slot-activation");
+    trace("test.ping_pong_multi.monitor", [&](auto& os) { os << "event=barrier.exit name=slot-activation"; });
 
     wait_for_stop();
 
     const auto shared_dir = get_shared_directory();
     write_count(shared_dir / "ping_count.txt", counter.load(std::memory_order_relaxed));
+    trace("test.ping_pong_multi.monitor", [&](auto& os) { os << "event=barrier.enter name=finished"; });
     sintra::barrier("ping-pong-finished", "_sintra_all_processes");
+    trace("test.ping_pong_multi.monitor", [&](auto& os) { os << "event=barrier.exit name=finished"; });
     return 0;
 }
 
@@ -190,9 +220,11 @@ int process_monitor()
 
 int main(int argc, char* argv[])
 {
+    using sintra::test_trace::trace;
     const bool is_spawned = std::any_of(argv, argv + argc, [](const char* arg) {
         return std::string_view(arg) == "--branch_index";
     });
+    trace("test.ping_pong_multi.main", [&](auto& os) { os << "event=start is_spawned=" << is_spawned; });
     const auto shared_dir = ensure_shared_directory();
 
     std::vector<sintra::Process_descriptor> processes;
@@ -200,25 +232,34 @@ int main(int argc, char* argv[])
     processes.emplace_back(process_pong_responder);
     processes.emplace_back(process_monitor);
 
+    trace("test.ping_pong_multi.main", [&](auto& os) { os << "event=init.begin"; });
     sintra::init(argc, argv, processes);
+    trace("test.ping_pong_multi.main", [&](auto& os) { os << "event=init.end"; });
 
     if (!is_spawned) {
+        trace("test.ping_pong_multi.main", [&](auto& os) { os << "event=barrier.enter name=finished"; });
         sintra::barrier("ping-pong-finished", "_sintra_all_processes");
+        trace("test.ping_pong_multi.main", [&](auto& os) { os << "event=barrier.exit name=finished"; });
     }
 
+    trace("test.ping_pong_multi.main", [&](auto& os) { os << "event=finalize.begin"; });
     sintra::finalize();
+    trace("test.ping_pong_multi.main", [&](auto& os) { os << "event=finalize.end"; });
 
     if (!is_spawned) {
         const auto path = shared_dir / "ping_count.txt";
         const int count = read_count(path);
         bool ok = (count == kTargetPingCount);
+        trace("test.ping_pong_multi.main", [&](auto& os) { os << "event=verify count=" << count << " expected=" << kTargetPingCount; });
         try {
             std::filesystem::remove_all(shared_dir);
         }
         catch (...) {
         }
+        trace("test.ping_pong_multi.main", [&](auto& os) { os << "event=exit success=" << ok; });
         return ok ? 0 : 1;
     }
 
+    trace("test.ping_pong_multi.main", [&](auto& os) { os << "event=exit spawned"; });
     return 0;
 }

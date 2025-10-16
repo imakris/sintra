@@ -20,6 +20,8 @@
 
 #include <sintra/sintra.h>
 
+#include "test_trace.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
@@ -38,6 +40,8 @@
 #endif
 
 namespace {
+
+using sintra::test_trace::trace;
 
 constexpr std::string_view kEnvSharedDir = "SINTRA_TEST_SHARED_DIR";
 
@@ -128,17 +132,25 @@ struct Remotely_accessible : sintra::Derived_transceiver<Remotely_accessible> {
 
 int process_owner()
 {
+    trace("test.rpc_append.owner", [&](auto& os) { os << "event=start"; });
     Remotely_accessible ra;
     ra.assign_name("instance name");
 
+    trace("test.rpc_append.owner", [&](auto& os) { os << "event=barrier.enter name=object-ready"; });
     sintra::barrier("object-ready");
+    trace("test.rpc_append.owner", [&](auto& os) { os << "event=barrier.exit name=object-ready"; });
+    trace("test.rpc_append.owner", [&](auto& os) { os << "event=barrier.enter name=calls-finished"; });
     sintra::barrier("calls-finished", "_sintra_all_processes");
+    trace("test.rpc_append.owner", [&](auto& os) { os << "event=barrier.exit name=calls-finished"; });
     return 0;
 }
 
 int process_client()
 {
+    trace("test.rpc_append.client", [&](auto& os) { os << "event=start"; });
+    trace("test.rpc_append.client", [&](auto& os) { os << "event=barrier.enter name=object-ready"; });
     sintra::barrier("object-ready");
+    trace("test.rpc_append.client", [&](auto& os) { os << "event=barrier.exit name=object-ready"; });
 
     struct Test_case {
         std::string city;
@@ -158,10 +170,19 @@ int process_client()
 
     for (const auto& tc : cases) {
         try {
+            trace("test.rpc_append.client", [&](auto& os) {
+                os << "event=rpc.call city=" << tc.city << " year=" << tc.year;
+            });
             auto value = Remotely_accessible::rpc_append("instance name", tc.city, tc.year);
+            trace("test.rpc_append.client", [&](auto& os) {
+                os << "event=rpc.success result=" << value;
+            });
             successes.push_back(value);
         }
         catch (const std::exception& e) {
+            trace("test.rpc_append.client", [&](auto& os) {
+                os << "event=rpc.failure message=" << e.what();
+            });
             failures.push_back(e.what());
         }
     }
@@ -169,8 +190,14 @@ int process_client()
     const auto shared_dir = get_shared_directory();
     write_lines(shared_dir / "rpc_success.txt", successes);
     write_lines(shared_dir / "rpc_failures.txt", failures);
+    trace("test.rpc_append.client", [&](auto& os) {
+        os << "event=wrote_results success_count=" << successes.size()
+           << " failure_count=" << failures.size();
+    });
 
+    trace("test.rpc_append.client", [&](auto& os) { os << "event=barrier.enter name=calls-finished"; });
     sintra::barrier("calls-finished", "_sintra_all_processes");
+    trace("test.rpc_append.client", [&](auto& os) { os << "event=barrier.exit name=calls-finished"; });
     return 0;
 }
 
@@ -178,22 +205,30 @@ int process_client()
 
 int main(int argc, char* argv[])
 {
+    using sintra::test_trace::trace;
     const bool is_spawned = std::any_of(argv, argv + argc, [](const char* arg) {
         return std::string_view(arg) == "--branch_index";
     });
+    trace("test.rpc_append.main", [&](auto& os) { os << "event=start is_spawned=" << is_spawned; });
     const auto shared_dir = ensure_shared_directory();
 
     std::vector<sintra::Process_descriptor> processes;
     processes.emplace_back(process_owner);
     processes.emplace_back(process_client);
 
+    trace("test.rpc_append.main", [&](auto& os) { os << "event=init.begin"; });
     sintra::init(argc, argv, processes);
+    trace("test.rpc_append.main", [&](auto& os) { os << "event=init.end"; });
 
     if (!is_spawned) {
+        trace("test.rpc_append.main", [&](auto& os) { os << "event=barrier.enter name=calls-finished"; });
         sintra::barrier("calls-finished", "_sintra_all_processes");
+        trace("test.rpc_append.main", [&](auto& os) { os << "event=barrier.exit name=calls-finished"; });
     }
 
+    trace("test.rpc_append.main", [&](auto& os) { os << "event=finalize.begin"; });
     sintra::finalize();
+    trace("test.rpc_append.main", [&](auto& os) { os << "event=finalize.end"; });
 
     if (!is_spawned) {
         const auto success_path = shared_dir / "rpc_success.txt";
@@ -211,7 +246,13 @@ int main(int argc, char* argv[])
             "string too long",
         };
 
-        if (successes != expected_successes || failures != expected_failures) {
+        const bool ok = (successes == expected_successes) && (failures == expected_failures);
+        trace("test.rpc_append.main", [&](auto& os) {
+            os << "event=verify success_count=" << successes.size()
+               << " failure_count=" << failures.size()
+               << " result=" << ok;
+        });
+        if (!ok) {
             return 1;
         }
 
@@ -223,5 +264,6 @@ int main(int argc, char* argv[])
         }
     }
 
+    trace("test.rpc_append.main", [&](auto& os) { os << "event=exit"; });
     return 0;
 }

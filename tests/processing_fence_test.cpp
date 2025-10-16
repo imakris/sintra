@@ -1,5 +1,7 @@
 #include <sintra/sintra.h>
 
+#include "test_trace.h"
+
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
@@ -18,6 +20,8 @@
 #endif
 
 namespace {
+
+using sintra::test_trace::trace;
 
 struct Work_message
 {
@@ -95,18 +99,24 @@ int controller_process()
 {
     using namespace sintra;
 
+    trace("test.processing_fence.controller", [&](auto& os) { os << "event=start"; });
     const auto shared_dir = get_shared_directory();
     const auto flag_path = shared_dir / "handler_done.txt";
     const auto result_path = shared_dir / "result.txt";
 
     const std::string group = "_sintra_external_processes";
+    trace("test.processing_fence.controller", [&](auto& os) { os << "event=barrier.enter name=setup"; });
     barrier("processing-fence-setup", group);
+    trace("test.processing_fence.controller", [&](auto& os) { os << "event=barrier.exit name=setup"; });
 
+    trace("test.processing_fence.controller", [&](auto& os) { os << "event=send_work"; });
     world() << Work_message{};
 
     const auto start = std::chrono::steady_clock::now();
+    trace("test.processing_fence.controller", [&](auto& os) { os << "event=barrier.enter name=processing"; });
     const bool barrier_result = barrier<processing_fence_t>(
         "processing-fence", group);
+    trace("test.processing_fence.controller", [&](auto& os) { os << "event=barrier.exit name=processing result=" << barrier_result; });
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - start);
 
@@ -117,8 +127,15 @@ int controller_process()
     out << elapsed.count() << '\n';
     out << (handler_done ? "done" : "pending") << '\n';
 
+    trace("test.processing_fence.controller", [&](auto& os) { os << "event=barrier.enter name=done"; });
     barrier("processing-fence-test-done", "_sintra_all_processes");
+    trace("test.processing_fence.controller", [&](auto& os) { os << "event=barrier.exit name=done"; });
 
+    trace("test.processing_fence.controller", [&](auto& os) {
+        os << "event=finish barrier_result=" << barrier_result
+           << " handler_done=" << handler_done
+           << " elapsed_ms=" << elapsed.count();
+    });
     return (barrier_result && handler_done) ? 0 : 1;
 }
 
@@ -126,6 +143,7 @@ int worker_process()
 {
     using namespace sintra;
 
+    trace("test.processing_fence.worker", [&](auto& os) { os << "event=start"; });
     const auto shared_dir = get_shared_directory();
     const auto flag_path = shared_dir / "handler_done.txt";
 
@@ -133,13 +151,20 @@ int worker_process()
         std::this_thread::sleep_for(kHandlerDelay);
         std::ofstream out(flag_path, std::ios::binary | std::ios::trunc);
         out << "done";
+        trace("test.processing_fence.worker", [&](auto& os) { os << "event=handler.write"; });
     };
     activate_slot(slot);
 
     const std::string group = "_sintra_external_processes";
+    trace("test.processing_fence.worker", [&](auto& os) { os << "event=barrier.enter name=setup"; });
     barrier("processing-fence-setup", group);
+    trace("test.processing_fence.worker", [&](auto& os) { os << "event=barrier.exit name=setup"; });
+    trace("test.processing_fence.worker", [&](auto& os) { os << "event=barrier.enter name=processing"; });
     barrier<processing_fence_t>("processing-fence", group);
+    trace("test.processing_fence.worker", [&](auto& os) { os << "event=barrier.exit name=processing"; });
+    trace("test.processing_fence.worker", [&](auto& os) { os << "event=barrier.enter name=done"; });
     barrier("processing-fence-test-done", "_sintra_all_processes");
+    trace("test.processing_fence.worker", [&](auto& os) { os << "event=barrier.exit name=done"; });
 
     return 0;
 }
@@ -148,7 +173,9 @@ int worker_process()
 
 int main(int argc, char* argv[])
 {
+    using sintra::test_trace::trace;
     const bool is_spawned = has_branch_flag(argc, argv);
+    trace("test.processing_fence.main", [&](auto& os) { os << "event=start is_spawned=" << is_spawned; });
     const auto shared_dir = ensure_shared_directory();
     const auto flag_path = shared_dir / "handler_done.txt";
     const auto result_path = shared_dir / "result.txt";
@@ -162,11 +189,17 @@ int main(int argc, char* argv[])
     processes.emplace_back(controller_process);
     processes.emplace_back(worker_process);
 
+    trace("test.processing_fence.main", [&](auto& os) { os << "event=init.begin"; });
     sintra::init(argc, argv, processes);
+    trace("test.processing_fence.main", [&](auto& os) { os << "event=init.end"; });
     if (!is_spawned) {
+        trace("test.processing_fence.main", [&](auto& os) { os << "event=barrier.enter name=done"; });
         sintra::barrier("processing-fence-test-done", "_sintra_all_processes");
+        trace("test.processing_fence.main", [&](auto& os) { os << "event=barrier.exit name=done"; });
     }
+    trace("test.processing_fence.main", [&](auto& os) { os << "event=finalize.begin"; });
     sintra::finalize();
+    trace("test.processing_fence.main", [&](auto& os) { os << "event=finalize.end"; });
 
     if (!is_spawned) {
         std::ifstream in(result_path, std::ios::binary);
@@ -186,10 +219,18 @@ int main(int argc, char* argv[])
         const bool elapsed_ok = elapsed_ms >= expected_ms;
         const bool done_ok = (done_state == "done");
         const bool success = (status == "ok") && elapsed_ok && done_ok;
+        trace("test.processing_fence.main", [&](auto& os) {
+            os << "event=verify status=" << status
+               << " elapsed=" << elapsed_ms
+               << " handler=" << done_state
+               << " success=" << success;
+        });
 
         cleanup_directory(shared_dir);
+        trace("test.processing_fence.main", [&](auto& os) { os << "event=exit success=" << success; });
         return success ? 0 : 1;
     }
 
+    trace("test.processing_fence.main", [&](auto& os) { os << "event=exit spawned"; });
     return 0;
 }

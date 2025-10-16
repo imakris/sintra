@@ -3,6 +3,8 @@
 
 #include <sintra/sintra.h>
 
+#include "test_trace.h"
+
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -15,6 +17,8 @@
 #else
 #include <unistd.h>
 #endif
+
+using sintra::test_trace::trace;
 
 constexpr std::size_t kMaxProcessCount = 4;
 // Keep the stress loop bounded so slower CI hosts (e.g. FreeBSD jails) still
@@ -67,6 +71,7 @@ int worker_process(std::uint32_t worker_index)
 {
     using namespace sintra;
 
+    trace("test.barrier_stress.worker", [&](auto& os) { os << "event=start worker=" << worker_index; });
     const auto now = static_cast<unsigned>(
         std::chrono::high_resolution_clock::now().time_since_epoch().count());
 #ifdef _WIN32
@@ -86,7 +91,18 @@ int worker_process(std::uint32_t worker_index)
             }
 
             // Call barrier
+            if (iter == 0 || iter == kIterations / 2 || iter + 1 == kIterations) {
+                trace("test.barrier_stress.worker", [&](auto& os) {
+                    os << "event=barrier.enter worker=" << worker_index << " iter=" << iter;
+                });
+            }
             auto seq = barrier("stress-barrier");
+            if (iter == 0 || iter == kIterations / 2 || iter + 1 == kIterations) {
+                trace("test.barrier_stress.worker", [&](auto& os) {
+                    os << "event=barrier.exit worker=" << worker_index
+                       << " iter=" << iter << " seq=" << seq;
+                });
+            }
 
             // Verify sequence is valid (non-zero)
             if (seq == 0) {
@@ -100,7 +116,9 @@ int worker_process(std::uint32_t worker_index)
         return 1;
     }
 
+    trace("test.barrier_stress.worker", [&](auto& os) { os << "event=barrier.enter name=done worker=" << worker_index; });
     sintra::barrier("barrier-stress-done", "_sintra_all_processes");
+    trace("test.barrier_stress.worker", [&](auto& os) { os << "event=barrier.exit name=done worker=" << worker_index; });
     return 0;
 }
 
@@ -112,8 +130,10 @@ int worker3_process() { return worker_process(3); }
 int main(int argc, char* argv[])
 {
     const bool is_spawned = has_branch_flag(argc, argv);
+    trace("test.barrier_stress.main", [&](auto& os) { os << "event=start is_spawned=" << is_spawned; });
 
     const std::size_t process_count = detect_process_count();
+    trace("test.barrier_stress.main", [&](auto& os) { os << "event=fanout count=" << process_count; });
 
     using WorkerFn = int (*)();
     static constexpr WorkerFn kWorkers[] = {
@@ -135,13 +155,19 @@ int main(int argc, char* argv[])
 
     auto start = std::chrono::steady_clock::now();
 
+    trace("test.barrier_stress.main", [&](auto& os) { os << "event=init.begin"; });
     sintra::init(argc, argv, processes);
+    trace("test.barrier_stress.main", [&](auto& os) { os << "event=init.end"; });
 
     if (!is_spawned) {
+        trace("test.barrier_stress.main", [&](auto& os) { os << "event=barrier.enter name=done"; });
         sintra::barrier("barrier-stress-done", "_sintra_all_processes");
+        trace("test.barrier_stress.main", [&](auto& os) { os << "event=barrier.exit name=done"; });
     }
 
+    trace("test.barrier_stress.main", [&](auto& os) { os << "event=finalize.begin"; });
     sintra::finalize();
+    trace("test.barrier_stress.main", [&](auto& os) { os << "event=finalize.end"; });
 
     auto end = std::chrono::steady_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
@@ -152,8 +178,15 @@ int main(int argc, char* argv[])
 
     if (worker_failures > 0 || coordinator_failures > 0) {
         std::fprintf(stderr, "TEST FAILED: Detected failures\n");
+        trace("test.barrier_stress.main", [&](auto& os) {
+            os << "event=exit success=0 worker_failures=" << worker_failures.load()
+               << " coordinator_failures=" << coordinator_failures.load();
+        });
         return 1;
     }
 
+    trace("test.barrier_stress.main", [&](auto& os) {
+        os << "event=exit success=1 duration_ms=" << duration.count();
+    });
     return 0;
 }

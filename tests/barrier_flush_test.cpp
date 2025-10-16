@@ -12,6 +12,8 @@
 
 #include <sintra/sintra.h>
 
+#include "test_trace.h"
+
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -36,6 +38,8 @@
 #endif
 
 namespace {
+
+using sintra::test_trace::trace;
 
 constexpr std::size_t kWorkerCount = 2;
 constexpr std::size_t kIterations  = 128;
@@ -138,11 +142,15 @@ int coordinator_process()
 {
     using namespace sintra;
 
+    trace("test.barrier_flush.coordinator", [&](auto& os) { os << "event=start"; });
     Coordinator_state state;
     bool success = true;
     std::string failure_reason;
 
     activate_slot([&](const Iteration_marker&) {
+        trace("test.barrier_flush.coordinator", [&](auto& os) {
+            os << "event=iteration_marker count=" << state.messages_in_iteration;
+        });
         std::lock_guard<std::mutex> lock(state.mutex);
         if (state.messages_in_iteration >= kWorkerCount) {
             state.too_many_messages = true;
@@ -153,10 +161,13 @@ int coordinator_process()
         state.cv.notify_one();
     });
 
+    trace("test.barrier_flush.coordinator", [&](auto& os) { os << "event=barrier.enter name=ready"; });
     barrier("barrier-flush-ready");
+    trace("test.barrier_flush.coordinator", [&](auto& os) { os << "event=barrier.exit name=ready"; });
 
     for (std::size_t iteration = 0; iteration < kIterations; ++iteration) {
         std::unique_lock<std::mutex> lock(state.mutex);
+        trace("test.barrier_flush.coordinator", [&](auto& os) { os << "event=wait.iteration index=" << iteration; });
         state.cv.wait(lock, [&] {
             return state.messages_in_iteration == kWorkerCount || state.too_many_messages;
         });
@@ -168,14 +179,26 @@ int coordinator_process()
         state.too_many_messages = false;
         lock.unlock();
 
+        trace("test.barrier_flush.coordinator", [&](auto& os) {
+            os << "event=barrier.enter name=iteration index=" << iteration;
+        });
         barrier("barrier-flush-iteration");
+        trace("test.barrier_flush.coordinator", [&](auto& os) {
+            os << "event=barrier.exit name=iteration index=" << iteration;
+        });
     }
 
+    trace("test.barrier_flush.coordinator", [&](auto& os) { os << "event=barrier.enter name=done"; });
     barrier("barrier-flush-done", "_sintra_all_processes");
+    trace("test.barrier_flush.coordinator", [&](auto& os) { os << "event=barrier.exit name=done"; });
     deactivate_all_slots();
 
     const auto shared_dir = get_shared_directory();
     write_result(shared_dir, success, kIterations, state.total_messages, failure_reason);
+    trace("test.barrier_flush.coordinator", [&](auto& os) {
+        os << "event=finish success=" << success
+           << " total=" << state.total_messages;
+    });
     return success ? 0 : 1;
 }
 
@@ -183,14 +206,30 @@ int worker_process(std::uint32_t worker_index)
 {
     using namespace sintra;
 
+    trace("test.barrier_flush.worker", [&](auto& os) { os << "event=start worker=" << worker_index; });
+    trace("test.barrier_flush.worker", [&](auto& os) { os << "event=barrier.enter name=ready worker=" << worker_index; });
     barrier("barrier-flush-ready");
+    trace("test.barrier_flush.worker", [&](auto& os) { os << "event=barrier.exit name=ready worker=" << worker_index; });
 
     for (std::uint32_t iteration = 0; iteration < kIterations; ++iteration) {
+        trace("test.barrier_flush.worker", [&](auto& os) {
+            os << "event=send marker iteration=" << iteration << " worker=" << worker_index;
+        });
         world() << Iteration_marker{worker_index, iteration};
+        trace("test.barrier_flush.worker", [&](auto& os) {
+            os << "event=barrier.enter name=iteration worker=" << worker_index
+               << " iteration=" << iteration;
+        });
         barrier("barrier-flush-iteration");
+        trace("test.barrier_flush.worker", [&](auto& os) {
+            os << "event=barrier.exit name=iteration worker=" << worker_index
+               << " iteration=" << iteration;
+        });
     }
 
+    trace("test.barrier_flush.worker", [&](auto& os) { os << "event=barrier.enter name=done worker=" << worker_index; });
     barrier("barrier-flush-done", "_sintra_all_processes");
+    trace("test.barrier_flush.worker", [&](auto& os) { os << "event=barrier.exit name=done worker=" << worker_index; });
     return 0;
 }
 
@@ -248,9 +287,11 @@ void cleanup_directory_with_retries(const std::filesystem::path& dir)
 
 int main(int argc, char* argv[])
 {
+    using sintra::test_trace::trace;
     std::set_terminate(custom_terminate_handler);
 
     const bool is_spawned = has_branch_flag(argc, argv);
+    trace("test.barrier_flush.main", [&](auto& os) { os << "event=start is_spawned=" << is_spawned; });
     const auto shared_dir = ensure_shared_directory();
 
     std::vector<sintra::Process_descriptor> processes;
@@ -258,13 +299,19 @@ int main(int argc, char* argv[])
     processes.emplace_back(worker0_process);
     processes.emplace_back(worker1_process);
 
+    trace("test.barrier_flush.main", [&](auto& os) { os << "event=init.begin"; });
     sintra::init(argc, argv, processes);
+    trace("test.barrier_flush.main", [&](auto& os) { os << "event=init.end"; });
 
     if (!is_spawned) {
+        trace("test.barrier_flush.main", [&](auto& os) { os << "event=barrier.enter name=done"; });
         sintra::barrier("barrier-flush-done", "_sintra_all_processes");
+        trace("test.barrier_flush.main", [&](auto& os) { os << "event=barrier.exit name=done"; });
     }
 
+    trace("test.barrier_flush.main", [&](auto& os) { os << "event=finalize.begin"; });
     sintra::finalize();
+    trace("test.barrier_flush.main", [&](auto& os) { os << "event=finalize.end"; });
 
     if (!is_spawned) {
         const auto result_path = shared_dir / "barrier_flush_result.txt";
@@ -293,22 +340,23 @@ int main(int argc, char* argv[])
 
         cleanup_directory_with_retries(shared_dir);
 
-        if (status != "ok") {
-            std::fprintf(stderr, "Barrier flush test reported failure: %s\n", reason.c_str());
-            return 1;
-        }
-        if (iterations_completed != kIterations) {
-            std::fprintf(stderr, "Expected %zu iterations, got %zu\n",
-                         kIterations, iterations_completed);
-            return 1;
-        }
         const std::size_t expected_messages = kWorkerCount * kIterations;
-        if (total_messages != expected_messages) {
-            std::fprintf(stderr, "Expected %zu total messages, got %zu\n",
-                         expected_messages, total_messages);
+        bool ok = (status == "ok") &&
+                  (iterations_completed == kIterations) &&
+                  (total_messages == expected_messages) &&
+                  reason.empty();
+        trace("test.barrier_flush.main", [&](auto& os) {
+            os << "event=verify status=" << status
+               << " iterations=" << iterations_completed
+               << " total=" << total_messages
+               << " success=" << ok
+               << " reason=" << reason;
+        });
+        if (!ok) {
             return 1;
         }
     }
 
+    trace("test.barrier_flush.main", [&](auto& os) { os << "event=exit"; });
     return 0;
 }

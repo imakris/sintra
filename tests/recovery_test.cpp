@@ -23,6 +23,8 @@
 #include <sintra/sintra.h>
 #include <sintra/detail/managed_process.h>
 
+#include "test_trace.h"
+
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -45,6 +47,8 @@
 #endif
 
 namespace {
+
+using sintra::test_trace::trace;
 
 struct Stop {};
 
@@ -164,6 +168,7 @@ void append_line(const std::filesystem::path& file, const std::string& value)
 
 int process_watchdog()
 {
+    trace("test.recovery.watchdog", [&](auto& os) { os << "event=start"; });
     std::fprintf(stderr, "[WATCHDOG] Starting watchdog process\n");
     const auto shared_dir = get_shared_directory();
     const auto result_path = shared_dir / "result.txt";
@@ -174,6 +179,7 @@ int process_watchdog()
     bool stop_received = false;
 
     sintra::activate_slot([&](const Stop&) {
+        trace("test.recovery.watchdog", [&](auto& os) { os << "event=stop"; });
         std::fprintf(stderr, "[WATCHDOG] Received Stop message!\n");
         std::lock_guard<std::mutex> lk(stop_mutex);
         stop_received = true;
@@ -186,6 +192,7 @@ int process_watchdog()
     const bool signalled = stop_cv.wait_for(
         lk, std::chrono::seconds(60), [&]{ return stop_received; });
     sintra::deactivate_all_slots();
+    trace("test.recovery.watchdog", [&](auto& os) { os << "event=wait_complete signalled=" << signalled; });
 
     std::fprintf(stderr, "[WATCHDOG] Wait complete, signalled=%d\n", signalled);
     bool ok = false;
@@ -198,11 +205,15 @@ int process_watchdog()
     std::ofstream out(result_path, std::ios::binary | std::ios::trunc);
     out << (ok ? "ok\n" : "fail\n");
     std::fprintf(stderr, "[WATCHDOG] Result: %s\n", ok ? "ok" : "fail");
+    trace("test.recovery.watchdog", [&](auto& os) { os << "event=exit success=" << ok; });
     return 0;
 }
 
 int process_crasher()
 {
+    trace("test.recovery.crasher", [&](auto& os) {
+        os << "event=start occurrence=" << sintra::s_recovery_occurrence;
+    });
     // Early diagnostic to confirm entry on recovery occurrences
     std::fprintf(stderr, "[CRASHER] start occ=%u pid=%lu\n",
         (unsigned)sintra::s_recovery_occurrence,
@@ -255,6 +266,7 @@ int process_crasher()
     }
 
     sintra::enable_recovery();
+    trace("test.recovery.crasher", [&](auto& os) { os << "event=recovery_enabled"; });
 
 #if defined(_MSC_VER)
     // Suppress the CRT abort dialog so the crash propagates automatically in Debug builds.
@@ -286,6 +298,7 @@ int process_crasher()
     append_line(runs_path, "run");
 
     if (occurrence == 0) {
+        trace("test.recovery.crasher", [&](auto& os) { os << "event=first_run_abort"; });
         log << "First run - about to abort!" << std::endl;
         log.close();
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -294,7 +307,9 @@ int process_crasher()
 
     log << "Second+ run - sending Stop" << std::endl;
     log.close();
+    trace("test.recovery.crasher", [&](auto& os) { os << "event=send_stop"; });
     sintra::world() << Stop{};
+    trace("test.recovery.crasher", [&](auto& os) { os << "event=exit"; });
     return 0;
 }
 
@@ -322,6 +337,8 @@ std::string get_arg_value(int argc, char* argv[], const std::string& arg_name)
 
 int main(int argc, char* argv[])
 {
+    using sintra::test_trace::trace;
+    trace("test.recovery.main", [&](auto& os) { os << "event=start argc=" << argc; });
     // Enable debug logging for all processes
 #ifdef _WIN32
     _putenv_s("SINTRA_DEBUG", "1");
@@ -366,6 +383,10 @@ int main(int argc, char* argv[])
     const auto shared_dir = ensure_shared_directory();
 
     std::fprintf(stderr, "[MAIN] Using shared_dir: %s\n", shared_dir.string().c_str());
+    trace("test.recovery.main", [&](auto& os) {
+        os << "event=setup is_spawned=" << is_spawned
+           << " shared_dir=" << shared_dir.string();
+    });
     g_shared_dir = shared_dir.string();
     write_ready_marker("coordinator");
     {
@@ -397,7 +418,9 @@ int main(int argc, char* argv[])
                   << std::endl;
     }
 
+    trace("test.recovery.main", [&](auto& os) { os << "event=init.begin"; });
     sintra::init(argc, argv, processes);
+    trace("test.recovery.main", [&](auto& os) { os << "event=init.end"; });
 
     {
         std::ofstream state_log(shared_dir / "state.log", std::ios::app);
@@ -424,6 +447,7 @@ int main(int argc, char* argv[])
     }
 
     sintra::finalize();
+    trace("test.recovery.main", [&](auto& os) { os << "event=finalize"; });
 
     if (!is_spawned) {
         const auto result_path = shared_dir / "result.txt";
@@ -441,8 +465,11 @@ int main(int argc, char* argv[])
         if (ec) {
             std::fprintf(stderr, "[MAIN] Cleanup warning: %s\n", ec.message().c_str());
         }
-        return (status == "ok") ? 0 : 1;
+        const bool success = (status == "ok");
+        trace("test.recovery.main", [&](auto& os) { os << "event=exit success=" << success; });
+        return success ? 0 : 1;
     }
 
+    trace("test.recovery.main", [&](auto& os) { os << "event=exit spawned"; });
     return 0;
 }

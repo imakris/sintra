@@ -19,6 +19,8 @@
 
 #include <sintra/sintra.h>
 
+#include "test_trace.h"
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -187,22 +189,39 @@ bool has_branch_flag(int argc, char* argv[])
 std::vector<std::string> g_received_strings;
 std::vector<int> g_received_ints;
 
+using sintra::test_trace::trace;
+
 int process_sender()
 {
+    trace("test.basic_pubsub.sender", [&](auto& os) { os << "event=start"; });
+    trace("test.basic_pubsub.sender", [&](auto& os) { os << "event=barrier.enter name=slots-ready"; });
     sintra::barrier("slots-ready");
+    trace("test.basic_pubsub.sender", [&](auto& os) { os << "event=barrier.exit name=slots-ready"; });
 
+    trace("test.basic_pubsub.sender", [&](auto& os) { os << "event=send value=good_morning"; });
     sintra::world() << std::string("good morning");
+    trace("test.basic_pubsub.sender", [&](auto& os) { os << "event=send value=good_afternoon"; });
     sintra::world() << std::string("good afternoon");
+    trace("test.basic_pubsub.sender", [&](auto& os) { os << "event=send value=good_evening"; });
     sintra::world() << std::string("good evening");
+    trace("test.basic_pubsub.sender", [&](auto& os) { os << "event=send value=good_night"; });
     sintra::world() << std::string("good night");
 
+    trace("test.basic_pubsub.sender", [&](auto& os) { os << "event=send value=1"; });
     sintra::world() << 1;
+    trace("test.basic_pubsub.sender", [&](auto& os) { os << "event=send value=2"; });
     sintra::world() << 2;
+    trace("test.basic_pubsub.sender", [&](auto& os) { os << "event=send value=3"; });
     sintra::world() << 3;
+    trace("test.basic_pubsub.sender", [&](auto& os) { os << "event=send value=4"; });
     sintra::world() << 4;
 
+    trace("test.basic_pubsub.sender", [&](auto& os) { os << "event=barrier.enter name=messages-done"; });
     sintra::barrier("messages-done");
+    trace("test.basic_pubsub.sender", [&](auto& os) { os << "event=barrier.exit name=messages-done"; });
+    trace("test.basic_pubsub.sender", [&](auto& os) { os << "event=barrier.enter name=write-phase"; });
     sintra::barrier("write-phase");
+    trace("test.basic_pubsub.sender", [&](auto& os) { os << "event=barrier.exit name=write-phase"; });
 
     const auto shared_dir = get_shared_directory();
     const auto strings = read_strings(shared_dir / "strings.txt");
@@ -215,55 +234,79 @@ int process_sender()
     const bool ok = (strings == expected_strings) && (ints == expected_ints);
     write_result(shared_dir, ok, strings, ints);
 
+    trace("test.basic_pubsub.sender", [&](auto& os) { os << "event=barrier.enter name=result-ready"; });
     sintra::barrier("result-ready", "_sintra_all_processes");
+    trace("test.basic_pubsub.sender", [&](auto& os) { os << "event=barrier.exit name=result-ready"; });
     return 0;
 }
 
 int process_string_receiver()
 {
+    trace("test.basic_pubsub.string_receiver", [&](auto& os) { os << "event=start"; });
     // Slot handler runs on reader thread, modifies g_received_strings
     auto string_slot = [](const std::string& value) {
         // Artificial delay to expose dual-ring race condition
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        trace("test.basic_pubsub.string_slot", [&](auto& os) { os << "event=handle value=" << value; });
         g_received_strings.push_back(value);
     };
     sintra::activate_slot(string_slot);
 
+    trace("test.basic_pubsub.string_receiver", [&](auto& os) { os << "event=barrier.enter name=slots-ready"; });
     sintra::barrier("slots-ready");
+    trace("test.basic_pubsub.string_receiver", [&](auto& os) { os << "event=barrier.exit name=slots-ready"; });
 
     // After this barrier, we know all messages have been sent and processed
     // by the reader thread, so g_received_strings contains all messages
+    trace("test.basic_pubsub.string_receiver", [&](auto& os) { os << "event=barrier.enter name=messages-done"; });
     sintra::barrier("messages-done");
+    trace("test.basic_pubsub.string_receiver", [&](auto& os) { os << "event=barrier.exit name=messages-done size=" << g_received_strings.size(); });
 
     const auto shared_dir = get_shared_directory();
     write_strings(shared_dir / "strings.txt", g_received_strings);
+    trace("test.basic_pubsub.string_receiver", [&](auto& os) { os << "event=wrote strings size=" << g_received_strings.size(); });
 
+    trace("test.basic_pubsub.string_receiver", [&](auto& os) { os << "event=barrier.enter name=write-phase"; });
     sintra::barrier("write-phase");
+    trace("test.basic_pubsub.string_receiver", [&](auto& os) { os << "event=barrier.exit name=write-phase"; });
+    trace("test.basic_pubsub.string_receiver", [&](auto& os) { os << "event=barrier.enter name=result-ready"; });
     sintra::barrier("result-ready", "_sintra_all_processes");
+    trace("test.basic_pubsub.string_receiver", [&](auto& os) { os << "event=barrier.exit name=result-ready"; });
     return 0;
 }
 
 int process_int_receiver()
 {
+    trace("test.basic_pubsub.int_receiver", [&](auto& os) { os << "event=start"; });
     // Slot handler runs on reader thread, modifies g_received_ints
     auto int_slot = [](int value) {
         // Artificial delay to expose dual-ring race condition
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        trace("test.basic_pubsub.int_slot", [&](auto& os) { os << "event=handle value=" << value; });
         g_received_ints.push_back(value);
     };
     sintra::activate_slot(int_slot);
 
+    trace("test.basic_pubsub.int_receiver", [&](auto& os) { os << "event=barrier.enter name=slots-ready"; });
     sintra::barrier("slots-ready");
+    trace("test.basic_pubsub.int_receiver", [&](auto& os) { os << "event=barrier.exit name=slots-ready"; });
 
     // After this barrier, we know all messages have been sent and processed
     // by the reader thread, so g_received_ints contains all messages
+    trace("test.basic_pubsub.int_receiver", [&](auto& os) { os << "event=barrier.enter name=messages-done"; });
     sintra::barrier("messages-done");
+    trace("test.basic_pubsub.int_receiver", [&](auto& os) { os << "event=barrier.exit name=messages-done size=" << g_received_ints.size(); });
 
     const auto shared_dir = get_shared_directory();
     write_ints(shared_dir / "ints.txt", g_received_ints);
+    trace("test.basic_pubsub.int_receiver", [&](auto& os) { os << "event=wrote ints size=" << g_received_ints.size(); });
 
+    trace("test.basic_pubsub.int_receiver", [&](auto& os) { os << "event=barrier.enter name=write-phase"; });
     sintra::barrier("write-phase");
+    trace("test.basic_pubsub.int_receiver", [&](auto& os) { os << "event=barrier.exit name=write-phase"; });
+    trace("test.basic_pubsub.int_receiver", [&](auto& os) { os << "event=barrier.enter name=result-ready"; });
     sintra::barrier("result-ready", "_sintra_all_processes");
+    trace("test.basic_pubsub.int_receiver", [&](auto& os) { os << "event=barrier.exit name=result-ready"; });
     return 0;
 }
 
@@ -297,6 +340,7 @@ int main(int argc, char* argv[])
     std::set_terminate(custom_terminate_handler);
 
     const bool is_spawned = has_branch_flag(argc, argv);
+    trace("test.basic_pubsub.main", [&](auto& os) { os << "event=start is_spawned=" << is_spawned; });
     const auto shared_dir = ensure_shared_directory();
 
     std::vector<sintra::Process_descriptor> processes;
@@ -304,7 +348,9 @@ int main(int argc, char* argv[])
     processes.emplace_back(process_string_receiver);
     processes.emplace_back(process_int_receiver);
 
+    trace("test.basic_pubsub.main", [&](auto& os) { os << "event=init.begin"; });
     sintra::init(argc, argv, processes);
+    trace("test.basic_pubsub.main", [&](auto& os) { os << "event=init.end"; });
 
     int exit_code = 0;
     std::string status;
@@ -312,10 +358,14 @@ int main(int argc, char* argv[])
     const auto result_path = shared_dir / "result.txt";
 
     if (!is_spawned) {
+        trace("test.basic_pubsub.main", [&](auto& os) { os << "event=barrier.enter name=result-ready"; });
         sintra::barrier("result-ready", "_sintra_all_processes");
+        trace("test.basic_pubsub.main", [&](auto& os) { os << "event=barrier.exit name=result-ready"; });
     }
 
+    trace("test.basic_pubsub.main", [&](auto& os) { os << "event=finalize.begin"; });
     sintra::finalize();
+    trace("test.basic_pubsub.main", [&](auto& os) { os << "event=finalize.end"; });
 
     if (!is_spawned) {
         std::ifstream in(result_path, std::ios::binary);
@@ -349,9 +399,11 @@ int main(int argc, char* argv[])
             exit_code = (status == "ok") ? 0 : 1;
         }
 
+        trace("test.basic_pubsub.main", [&](auto& os) { os << "event=exit code=" << exit_code; });
         return exit_code;
     }
 
+    trace("test.basic_pubsub.main", [&](auto& os) { os << "event=exit spawned"; });
     return 0;
 }
 
