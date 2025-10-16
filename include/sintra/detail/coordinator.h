@@ -35,6 +35,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <array>
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
 #include <mutex>
 #include <unordered_set>
 #include <vector>
@@ -163,6 +164,17 @@ private:
         const string& name,
         const unordered_set<instance_id_type>& member_process_ids);
 
+    bool join_and_wait_group(
+        std::uint64_t swarm_id,
+        const string& group_name,
+        instance_id_type member_id,
+        std::uint32_t expected_members_hint);
+
+    void prepare_group_join_state(
+        std::uint64_t swarm_id,
+        const string& group_name,
+        const unordered_set<instance_id_type>& members);
+
 
     void enable_recovery(instance_id_type piid);
     void recover_if_required(instance_id_type piid);
@@ -222,6 +234,7 @@ public:
     SINTRA_RPC_EXPLICIT(unpublish_transceiver)
     SINTRA_RPC_STRICT_EXPLICIT(begin_process_draining)
     SINTRA_RPC_EXPLICIT(make_process_group)
+    SINTRA_RPC_STRICT_EXPLICIT(join_and_wait_group)
     SINTRA_RPC_EXPLICIT(print)
     SINTRA_RPC_EXPLICIT(enable_recovery)
 

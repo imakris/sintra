@@ -42,10 +42,12 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <system_error>
 #include <shared_mutex>
 #include <thread>
 #include <utility>
+#include <unordered_set>
 #ifndef _WIN32
 #include <signal.h>
 #include <cerrno>
@@ -520,25 +522,46 @@ inline void Managed_process::publish_group_bootstrap(uint32_t members_count)
 }
 
 
-inline bool Managed_process::wait_for_group_bootstrap(uint32_t /*expected_members*/)
+inline bool Managed_process::wait_for_group_bootstrap(uint32_t expected_members)
 {
-    if (!m_group_bootstrap) {
-        return true;
+    if (m_group_bootstrap) {
+        const auto observation_deadline =
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(50);
+
+        while (sintra::ipc_sync::load_acquire(m_group_bootstrap->published) == 0u) {
+            if (std::chrono::steady_clock::now() >= observation_deadline) {
+                break;
+            }
+
+            std::this_thread::yield();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+
+        // Optionally sample the published member count for diagnostics.
+        (void)sintra::ipc_sync::load_acquire(m_group_bootstrap->members);
     }
 
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
-
-    while (sintra::ipc_sync::load_acquire(m_group_bootstrap->published) == 0u) {
-        if (std::chrono::steady_clock::now() >= deadline) {
+    while (true) {
+        bool ready = false;
+        try {
+            ready = Coordinator::rpc_join_and_wait_group(
+                s_coord_id,
+                m_swarm_id,
+                std::string("_sintra_all_processes"),
+                s_mproc_id,
+                expected_members);
+        }
+        catch (const rpc_cancelled&) {
             return false;
+        }
+
+        if (ready) {
+            break;
         }
 
         std::this_thread::yield();
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-
-    // Ensure the coordinator's member count is visible before continuing.
-    (void)sintra::ipc_sync::load_acquire(m_group_bootstrap->members);
 
     return true;
 }
@@ -1252,6 +1275,8 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
 
         m_group_all      = s_coord->make_process_group("_sintra_all_processes", all_processes);
         m_group_external = s_coord->make_process_group("_sintra_external_processes", successfully_spawned);
+
+        s_coord->prepare_group_join_state(m_swarm_id, "_sintra_all_processes", all_processes);
 
         publish_group_bootstrap(static_cast<uint32_t>(all_processes.size()));
 

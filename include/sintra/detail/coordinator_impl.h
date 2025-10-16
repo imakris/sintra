@@ -30,12 +30,18 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "coordinator.h"
 #include "managed_process.h"
 
+#include <atomic>
 #include <cassert>
+#include <condition_variable>
+#include <cstdint>
 #include <functional>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <shared_mutex>
 #include <stdexcept>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -48,6 +54,45 @@ using std::lock_guard;
 using std::mutex;
 using std::string;
 using std::unique_lock;
+
+
+namespace coordinator_join {
+
+struct Group_join_state {
+    uint32_t expected = 0;
+    std::atomic<uint32_t> joined{0};
+    std::mutex mutex;
+    std::unordered_set<instance_id_type> members;
+    bool initialized = false;
+};
+
+inline std::mutex& group_join_states_mutex()
+{
+    static std::mutex m;
+    return m;
+}
+
+inline std::unordered_map<std::uint64_t, std::unique_ptr<Group_join_state>>& group_join_states()
+{
+    static std::unordered_map<std::uint64_t, std::unique_ptr<Group_join_state>> states;
+    return states;
+}
+
+inline std::uint64_t make_group_join_key(std::uint64_t swarm_id, const std::string& name)
+{
+    constexpr std::uint64_t basis = 1469598103934665603ull;
+    constexpr std::uint64_t prime = 1099511628211ull;
+
+    std::uint64_t hash = basis ^ (swarm_id * prime);
+    hash *= prime;
+    for (unsigned char c : name) {
+        hash ^= c;
+        hash *= prime;
+    }
+    return hash;
+}
+
+} // namespace coordinator_join
 
 
 
@@ -618,6 +663,96 @@ instance_id_type Coordinator::make_process_group(
 
     m_groups[name].assign_name(name);
     return ret;
+}
+
+
+inline void Coordinator::prepare_group_join_state(
+    std::uint64_t swarm_id,
+    const string& group_name,
+    const unordered_set<instance_id_type>& members)
+{
+    const auto key = coordinator_join::make_group_join_key(swarm_id, group_name);
+    const auto expected = static_cast<uint32_t>(members.size());
+    const bool coordinator_is_member = members.find(m_instance_id) != members.end();
+
+    {
+        std::lock_guard states_lock(coordinator_join::group_join_states_mutex());
+        auto& slot = coordinator_join::group_join_states()[key];
+        if (!slot) {
+            slot = std::make_unique<coordinator_join::Group_join_state>();
+        }
+        auto* state = slot.get();
+        std::lock_guard state_lock(state->mutex);
+
+        if (!state->initialized) {
+            state->members.clear();
+            state->joined.store(0, std::memory_order_relaxed);
+            state->initialized = true;
+        }
+
+        state->expected = expected;
+
+        if (coordinator_is_member &&
+            state->members.insert(m_instance_id).second)
+        {
+            state->joined.fetch_add(1, std::memory_order_acq_rel);
+        }
+    }
+}
+
+
+inline bool Coordinator::join_and_wait_group(
+    std::uint64_t swarm_id,
+    const string& group_name,
+    instance_id_type member_id,
+    std::uint32_t expected_members_hint)
+{
+    const auto key = coordinator_join::make_group_join_key(swarm_id, group_name);
+    coordinator_join::Group_join_state* state = nullptr;
+    bool ready = false;
+
+    {
+        std::lock_guard states_lock(coordinator_join::group_join_states_mutex());
+        auto& slot = coordinator_join::group_join_states()[key];
+        if (!slot) {
+            slot = std::make_unique<coordinator_join::Group_join_state>();
+        }
+        state = slot.get();
+
+        std::lock_guard state_lock(state->mutex);
+        if (!state->initialized) {
+            state->members.clear();
+            state->joined.store(0, std::memory_order_relaxed);
+            state->initialized = true;
+        }
+
+        if (state->expected == 0) {
+            state->expected = expected_members_hint;
+        }
+
+        if (state->expected > 0 &&
+            state->members.insert(m_instance_id).second)
+        {
+            state->joined.fetch_add(1, std::memory_order_acq_rel);
+        }
+
+        if (state->members.insert(member_id).second) {
+            const auto joined_after =
+                state->joined.fetch_add(1, std::memory_order_acq_rel) + 1;
+            ready = (state->expected != 0 && joined_after >= state->expected);
+        }
+        else {
+            ready = (state->expected == 0) ||
+                (state->joined.load(std::memory_order_acquire) >= state->expected);
+        }
+
+        if (state->expected == 0) {
+            ready = true;
+        }
+
+    }
+
+    return ready;
 }
 
 
