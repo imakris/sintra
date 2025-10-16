@@ -28,6 +28,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
 #include "utility.h"
+#include "ipc_atomic.h"
 
 #include <array>
 #include <atomic>
@@ -422,9 +423,9 @@ void install_signal_handler()
 
 struct Managed_process::Group_bootstrap_block
 {
-    std::atomic<uint32_t> published{0};
-    std::atomic<uint32_t> members{0};
-    std::atomic<uint64_t> epoch{0};
+    uint32_t published{0};
+    uint32_t members{0};
+    uint64_t epoch{0};
 };
 
 
@@ -493,9 +494,9 @@ inline void Managed_process::reset_group_bootstrap()
         return;
     }
 
-    m_group_bootstrap->members.store(0u, std::memory_order_relaxed);
-    m_group_bootstrap->epoch.store(0u, std::memory_order_relaxed);
-    m_group_bootstrap->published.store(0u, std::memory_order_release);
+    sintra::ipc_sync::store_release(m_group_bootstrap->members, 0u);
+    sintra::ipc_sync::store_release(m_group_bootstrap->epoch, uint64_t{0});
+    sintra::ipc_sync::store_release(m_group_bootstrap->published, 0u);
 
 #if defined(__FreeBSD__)
     ::msync(static_cast<void*>(m_group_bootstrap), sizeof(*m_group_bootstrap), MS_ASYNC | MS_INVALIDATE);
@@ -509,9 +510,9 @@ inline void Managed_process::publish_group_bootstrap(uint32_t members_count)
         return;
     }
 
-    m_group_bootstrap->members.store(members_count, std::memory_order_relaxed);
-    m_group_bootstrap->epoch.fetch_add(1u, std::memory_order_release);
-    m_group_bootstrap->published.store(1u, std::memory_order_release);
+    sintra::ipc_sync::store_release(m_group_bootstrap->members, members_count);
+    sintra::ipc_sync::fetch_add_release(m_group_bootstrap->epoch, uint64_t{1});
+    sintra::ipc_sync::store_release(m_group_bootstrap->published, 1u);
 
 #if defined(__FreeBSD__)
     ::msync(static_cast<void*>(m_group_bootstrap), sizeof(*m_group_bootstrap), MS_ASYNC | MS_INVALIDATE);
@@ -527,7 +528,7 @@ inline bool Managed_process::wait_for_group_bootstrap(uint32_t /*expected_member
 
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
 
-    while (m_group_bootstrap->published.load(std::memory_order_acquire) == 0u) {
+    while (sintra::ipc_sync::load_acquire(m_group_bootstrap->published) == 0u) {
         if (std::chrono::steady_clock::now() >= deadline) {
             return false;
         }
@@ -537,7 +538,7 @@ inline bool Managed_process::wait_for_group_bootstrap(uint32_t /*expected_member
     }
 
     // Ensure the coordinator's member count is visible before continuing.
-    (void)m_group_bootstrap->members.load(std::memory_order_acquire);
+    (void)sintra::ipc_sync::load_acquire(m_group_bootstrap->members);
 
     return true;
 }
