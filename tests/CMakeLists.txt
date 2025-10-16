@@ -29,6 +29,7 @@ endif()
 add_executable(sintra_dummy_test dummy_test.cpp)
 add_test(NAME sintra.dummy COMMAND sintra_dummy_test)
 set_tests_properties(sintra.dummy PROPERTIES FIXTURES_SETUP sintra_ready)
+set_tests_properties(sintra.dummy PROPERTIES TIMEOUT 20)
 
 add_executable(sintra_basic_pubsub_test basic_pub_sub.cpp)
 target_link_libraries(sintra_basic_pubsub_test PRIVATE ${SINTRA_TEST_TARGET})
@@ -92,4 +93,7 @@ add_test(NAME sintra.hanging COMMAND sintra_hanging_test)
 
 if(SINTRA_CI_TESTS)
     set_tests_properties(${SINTRA_CI_TESTS} PROPERTIES FIXTURES_REQUIRED sintra_ready)
+    # Guarantee the CI driver sees forward progress even if a test wedges by
+    # letting CTest terminate any individual binary after two minutes.
+    set_tests_properties(${SINTRA_CI_TESTS} PROPERTIES TIMEOUT 120)
 endif()
