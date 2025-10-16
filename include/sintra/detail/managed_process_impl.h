@@ -28,7 +28,6 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
 #include "utility.h"
-#include "ipc_atomic.h"
 
 #include <array>
 #include <atomic>
@@ -423,9 +422,9 @@ void install_signal_handler()
 
 struct Managed_process::Group_bootstrap_block
 {
-    uint32_t published = 0;
-    uint32_t members = 0;
-    uint64_t epoch = 0;
+    std::atomic<uint32_t> published{0};
+    std::atomic<uint32_t> members{0};
+    std::atomic<uint64_t> epoch{0};
 };
 
 
@@ -448,8 +447,8 @@ inline void Managed_process::initialize_group_bootstrap(bool coordinator_is_loca
             throw std::runtime_error("failed to create group bootstrap control file");
         }
 
-        Group_bootstrap_block zero{};
-        file.write(reinterpret_cast<const char*>(&zero), sizeof(zero));
+        std::array<char, sizeof(Group_bootstrap_block)> zero{};
+        file.write(zero.data(), static_cast<std::streamsize>(zero.size()));
         file.close();
     }
     else {
@@ -483,7 +482,6 @@ inline void Managed_process::initialize_group_bootstrap(bool coordinator_is_loca
     m_group_bootstrap = static_cast<Group_bootstrap_block*>(m_group_bootstrap_region->get_address());
 
     if (coordinator_is_local) {
-        std::memset(m_group_bootstrap, 0, sizeof(Group_bootstrap_block));
         reset_group_bootstrap();
     }
 }
@@ -495,12 +493,12 @@ inline void Managed_process::reset_group_bootstrap()
         return;
     }
 
-    m_group_bootstrap->members = 0;
-    m_group_bootstrap->epoch = 0;
-    sintra::ipc::store_release(m_group_bootstrap->published, 0u);
+    m_group_bootstrap->members.store(0u, std::memory_order_relaxed);
+    m_group_bootstrap->epoch.store(0u, std::memory_order_relaxed);
+    m_group_bootstrap->published.store(0u, std::memory_order_release);
 
 #if defined(__FreeBSD__)
-    ::msync(m_group_bootstrap, sizeof(*m_group_bootstrap), MS_ASYNC | MS_INVALIDATE);
+    ::msync(static_cast<void*>(m_group_bootstrap), sizeof(*m_group_bootstrap), MS_ASYNC | MS_INVALIDATE);
 #endif
 }
 
@@ -511,12 +509,12 @@ inline void Managed_process::publish_group_bootstrap(uint32_t members_count)
         return;
     }
 
-    m_group_bootstrap->members = members_count;
-    sintra::ipc::store_release(m_group_bootstrap->published, 1u);
-    sintra::ipc::fetch_add_release(m_group_bootstrap->epoch, 1u);
+    m_group_bootstrap->members.store(members_count, std::memory_order_relaxed);
+    m_group_bootstrap->epoch.fetch_add(1u, std::memory_order_release);
+    m_group_bootstrap->published.store(1u, std::memory_order_release);
 
 #if defined(__FreeBSD__)
-    ::msync(m_group_bootstrap, sizeof(*m_group_bootstrap), MS_ASYNC | MS_INVALIDATE);
+    ::msync(static_cast<void*>(m_group_bootstrap), sizeof(*m_group_bootstrap), MS_ASYNC | MS_INVALIDATE);
 #endif
 }
 
@@ -529,7 +527,7 @@ inline bool Managed_process::wait_for_group_bootstrap(uint32_t /*expected_member
 
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
 
-    while (sintra::ipc::load_acquire(m_group_bootstrap->published) == 0u) {
+    while (m_group_bootstrap->published.load(std::memory_order_acquire) == 0u) {
         if (std::chrono::steady_clock::now() >= deadline) {
             return false;
         }
@@ -539,7 +537,7 @@ inline bool Managed_process::wait_for_group_bootstrap(uint32_t /*expected_member
     }
 
     // Ensure the coordinator's member count is visible before continuing.
-    (void)sintra::ipc::load_acquire(m_group_bootstrap->members);
+    (void)m_group_bootstrap->members.load(std::memory_order_acquire);
 
     return true;
 }
