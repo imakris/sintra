@@ -12,6 +12,7 @@
 
 #include <sintra/sintra.h>
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -21,7 +22,6 @@
 #include <filesystem>
 #include <fstream>
 #include <mutex>
-#include <random>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -85,10 +85,8 @@ std::filesystem::path ensure_shared_directory()
     unique_suffix ^= static_cast<long long>(getpid());
 #endif
 
-    std::random_device rd;
-    std::mt19937_64 gen(rd());
-    std::uniform_int_distribution<uint64_t> dis;
-    unique_suffix ^= static_cast<long long>(dis(gen));
+    static std::atomic<long long> counter{0};
+    unique_suffix ^= counter.fetch_add(1, std::memory_order_relaxed);
 
     std::ostringstream oss;
     oss << "barrier_flush_" << unique_suffix;
