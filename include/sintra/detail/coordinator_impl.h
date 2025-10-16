@@ -662,57 +662,31 @@ instance_id_type Coordinator::make_process_group(
     lock_guard<mutex> lock(m_groups_mutex);
 
     auto it = m_groups.find(name);
+    instance_id_type previous_group_instance = invalid_instance_id;
+    bool previous_group_published = false;
     if (it != m_groups.end()) {
         auto& group = it->second;
-        const auto ret = group.m_instance_id;
+        previous_group_instance = group.m_instance_id;
+        previous_group_published = group.m_published;
 
-        if (group.m_published) {
-            // Remove the stale publication from the coordinator registry so we
-            // can safely re-announce the group with its refreshed membership.
-            // Without this, the subsequent assign_name() call would see the
-            // name as still in-use and the workers waiting on
-            // _sintra_all_processes would continue to block indefinitely.
-            unpublish_transceiver(ret);
-            group.m_published = false;
-        }
-
-        // Capture the existing membership before overwriting it so we can
-        // update reverse lookups. Using a copy keeps the critical section
-        // straightforward and avoids holding the group's lock longer than
-        // necessary when we update `m_groups_of_process` below.
         const auto previous_members = group.m_process_ids;
-
-        group.set(member_process_ids);
-
-        // Remove associations that are no longer part of the group.
         for (const auto& member : previous_members) {
-            if (member_process_ids.find(member) != member_process_ids.end()) {
+            auto map_it = m_groups_of_process.find(member);
+            if (map_it == m_groups_of_process.end()) {
                 continue;
             }
 
-            auto map_it = m_groups_of_process.find(member);
-            if (map_it != m_groups_of_process.end()) {
-                map_it->second.erase(ret);
-                if (map_it->second.empty()) {
-                    m_groups_of_process.erase(map_it);
-                }
+            map_it->second.erase(previous_group_instance);
+            if (map_it->second.empty()) {
+                m_groups_of_process.erase(map_it);
             }
         }
 
-        // Add (or confirm) associations for the new membership set.
-        for (const auto& member : member_process_ids) {
-            m_groups_of_process[member].insert(ret);
-        }
+        m_groups.erase(it);
+    }
 
-        // Publish the refreshed group name so that any processes waiting on it
-        // observe the updated membership immediately.
-        if (!group.assign_name(name)) {
-            detail::trace_sync("coordinator.group_assign_failed", [&](auto& os) {
-                os << "name=" << name << " instance=" << ret;
-            });
-        }
-
-        return ret;
+    if (previous_group_published) {
+        unpublish_transceiver(previous_group_instance);
     }
 
     auto& group = m_groups[name];
@@ -723,7 +697,11 @@ instance_id_type Coordinator::make_process_group(
         m_groups_of_process[member].insert(ret);
     }
 
-    group.assign_name(name);
+    if (!group.assign_name(name)) {
+        detail::trace_sync("coordinator.group_assign_failed", [&](auto& os) {
+            os << "name=" << name << " instance=" << ret;
+        });
+    }
     return ret;
 }
 
