@@ -1,0 +1,27 @@
+# FreeBSD CI Timeout Investigation Report
+
+## Environment Context
+- Upstream Linux builds configure and run all tests successfully on this branch. For example, running `ctest --test-dir build --output-on-failure -R sintra.basic_pubsub` after a local GNU/Linux build passes in ~0.6 s.【acf0cc†L1-L11】
+- FreeBSD 14.2 Cirrus CI hosts expose two vCPUs and 4 GiB of RAM. They repeatedly hang whenever distributed tests spawn additional processes despite building successfully.
+
+## Observed Failure Pattern on FreeBSD
+- Every multi-process test (basic pub/sub, ping-pong, RPC append, recovery, barrier suites, processing fence) times out after the 120 s harness timeout while the single-process smoke tests continue to pass. The overall run therefore reports 27–36 % success.
+- Instrumentation shows that each worker process reaches `branch.worker.wait_group` for the `_sintra_all_processes` coordinator group and never logs the matching `branch.worker.got_group` or `branch.barrier.enter/exit` events. This means the worker is blocked during swarm initialization, before any user-level messages are exchanged.
+- Coordinator traces confirm that the coordinator process publishes the swarm directory, spawns children successfully, and creates the `_sintra_all_processes` group, but the children never observe the publication.
+- Because the wait happens at startup, every affected test consumes the full 120 s timeout, leading to >16 min total wall-clock time for the CI job.
+
+## Hypotheses About Root Cause
+1. **Process-group publication visibility:** The instrumentation strongly suggests that group membership updates made by the coordinator are not visible to other processes on FreeBSD. This could stem from:
+   - Shared-memory pages (likely POSIX `shm_open`/`mmap`) not being flushed correctly (`msync`/memory fences) when coordinator rewrites group slots.
+   - Missing cache coherence primitives (e.g., `std::atomic` with `memory_order_release`/`acquire`) around the publication or membership counters when running on a different libc/libpthread implementation.
+2. **File-system semantics:** The coordinator clears and recreates directories under `/tmp/sintra`. If FreeBSD’s `unlink`+`mkdir` race differs, children might open the ring buffers before the coordinator finalizes permissions or before the data becomes visible.
+3. **Process start ordering vs. scheduler:** With only two vCPUs, long-running `std::this_thread::sleep_for` or busy loops inside the coordinator could starve the branch threads that should deliver the group update notifications.
+
+## Suggested Next Steps
+- Audit `Coordinator::make_process_group` and related data structures to ensure all shared fields are updated with release semantics and read with acquire semantics. Investigate whether we need explicit `std::atomic_thread_fence` calls after republishing the group on BSD.
+- Add temporary logging directly around the point where the worker polls for `_sintra_all_processes` (likely `process_branch::wait_for_group`) to verify whether the shared-memory payload changes at all or remains at its initial sentinel values.
+- Create a reduced reproducer that repeatedly creates and joins a coordinator group on FreeBSD to narrow down the failing primitive without the full test harness.
+- If shared-memory visibility is the culprit, experiment with forcing `msync`/`__sync_synchronize()` after coordinator writes, or, as a diagnostic, place the control block in a memory-mapped file on a traditional filesystem to check whether the issue is tmpfs-specific on Cirrus FreeBSD images.
+
+## Summary for Handoff
+The failure is isolated to the swarm bootstrap barrier: workers never learn that `_sintra_all_processes` has been published, so they block indefinitely and every multi-process test times out. Focus further debugging on how coordinator group publications propagate across processes on FreeBSD, ensuring proper synchronization primitives and visibility of shared-memory updates.
