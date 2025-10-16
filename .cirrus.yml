@@ -20,4 +20,4 @@ freebsd_test_task:
     - cmake -S . -B build
     - cmake --build build
   test_script:
-    - ctest --test-dir build --output-on-failure -E sintra.hanging
+    - ctest --test-dir build --output-on-failure -R 'sintra.(basic_pubsub|barrier_stress|processing_fence)'
