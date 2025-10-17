@@ -23,6 +23,8 @@
 #include <sintra/sintra.h>
 #include <sintra/detail/managed_process.h>
 
+#include "test_watchdog.h"
+
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -328,6 +330,8 @@ int main(int argc, char* argv[])
 #else
     setenv("SINTRA_DEBUG", "1", 1);
 #endif
+
+    install_test_watchdog("recovery");
 
     // Log main() entry to file immediately
     {

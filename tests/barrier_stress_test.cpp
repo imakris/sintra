@@ -3,6 +3,8 @@
 
 #include <sintra/sintra.h>
 
+#include "test_watchdog.h"
+
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -83,6 +85,7 @@ int worker3_process() { return worker_process(3); }
 
 int main(int argc, char* argv[])
 {
+    install_test_watchdog("barrier_stress");
     const bool is_spawned = has_branch_flag(argc, argv);
 
     std::vector<sintra::Process_descriptor> processes;

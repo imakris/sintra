@@ -19,6 +19,8 @@
 
 #include <sintra/sintra.h>
 
+#include "test_watchdog.h"
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -295,6 +297,7 @@ void custom_terminate_handler() {
 int main(int argc, char* argv[])
 {
     std::set_terminate(custom_terminate_handler);
+    install_test_watchdog("basic_pubsub");
 
     const bool is_spawned = has_branch_flag(argc, argv);
     const auto shared_dir = ensure_shared_directory();

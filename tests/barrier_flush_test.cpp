@@ -12,6 +12,8 @@
 
 #include <sintra/sintra.h>
 
+#include "test_watchdog.h"
+
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -249,6 +251,7 @@ void cleanup_directory_with_retries(const std::filesystem::path& dir)
 int main(int argc, char* argv[])
 {
     std::set_terminate(custom_terminate_handler);
+    install_test_watchdog("barrier_flush");
 
     const bool is_spawned = has_branch_flag(argc, argv);
     const auto shared_dir = ensure_shared_directory();

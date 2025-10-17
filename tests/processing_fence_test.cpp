@@ -1,5 +1,7 @@
 #include <sintra/sintra.h>
 
+#include "test_watchdog.h"
+
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
@@ -148,6 +150,7 @@ int worker_process()
 
 int main(int argc, char* argv[])
 {
+    install_test_watchdog("processing_fence");
     const bool is_spawned = has_branch_flag(argc, argv);
     const auto shared_dir = ensure_shared_directory();
     const auto flag_path = shared_dir / "handler_done.txt";

@@ -20,6 +20,8 @@
 
 #include <sintra/sintra.h>
 
+#include "test_watchdog.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
@@ -178,6 +180,7 @@ int process_client()
 
 int main(int argc, char* argv[])
 {
+    install_test_watchdog("rpc_append");
     const bool is_spawned = std::any_of(argv, argv + argc, [](const char* arg) {
         return std::string_view(arg) == "--branch_index";
     });

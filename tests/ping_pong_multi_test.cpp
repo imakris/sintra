@@ -19,6 +19,8 @@
 
 #include <sintra/sintra.h>
 
+#include "test_watchdog.h"
+
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -190,6 +192,7 @@ int process_monitor()
 
 int main(int argc, char* argv[])
 {
+    install_test_watchdog("ping_pong_multi");
     const bool is_spawned = std::any_of(argv, argv + argc, [](const char* arg) {
         return std::string_view(arg) == "--branch_index";
     });

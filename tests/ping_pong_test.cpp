@@ -20,6 +20,8 @@
 
 #include <sintra/sintra.h>
 
+#include "test_watchdog.h"
+
 #include <atomic>
 #include <chrono>
 #include <future>
@@ -29,6 +31,7 @@ struct Pong {};
 
 int main(int argc, char* argv[])
 {
+    install_test_watchdog("ping_pong");
     sintra::init(argc, argv);
 
     constexpr int kTargetPingCount = 1000;
