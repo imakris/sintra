@@ -1200,15 +1200,6 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
             });
 
             try {
-                instance_id_type published_instance = invalid_instance_id;
-                while (published_instance == invalid_instance_id) {
-                    published_instance = Coordinator::rpc_resolve_instance(s_coord_id, group_name);
-                    if (published_instance != invalid_instance_id) {
-                        break;
-                    }
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                }
-
                 detail::trace_sync("branch.worker.join_rpc", [&](auto& os) {
                     os << "instance=" << m_instance_id
                        << " swarm=" << m_swarm_id
@@ -1266,14 +1257,14 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
                        << " recorded=" << recorded_instance;
                 });
 
-                detail::trace_sync("branch.worker.resolve_group", [&](auto& os) {
+                detail::trace_sync("branch.worker.wait_group_instance", [&](auto& os) {
                     os << "instance=" << m_instance_id
                        << " swarm=" << m_swarm_id
                        << " name=" << group_name
                        << " coord=" << s_coord_id;
                 });
 
-                auto group_instance = Coordinator::rpc_resolve_instance(s_coord_id, group_name);
+                auto group_instance = Coordinator::rpc_wait_for_instance(s_coord_id, group_name);
 
                 detail::trace_sync("branch.worker.got_group", [&](auto& os) {
                     os << "instance=" << m_instance_id
