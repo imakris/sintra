@@ -867,7 +867,22 @@ instance_id_type Coordinator::make_process_group(
     const unordered_set<instance_id_type>& member_process_ids)
 {
     instance_id_type ret = invalid_instance_id;
-    bool coordinator_in_group = false;
+
+    const auto swarm_id = s_mproc ? s_mproc->m_swarm_id : 0u;
+    const auto expected_members = static_cast<uint32_t>(member_process_ids.size());
+    const bool coordinator_in_group = member_process_ids.count(s_coord_id) != 0;
+
+    detail::trace_sync("coordinator.group.make.bootstrap", [&](auto& os) {
+        os << "name=" << name
+           << " expected=" << member_process_ids.size()
+           << " coordinator_in_group=" << static_cast<int>(coordinator_in_group);
+    });
+
+    detail::reset_bootstrap_group_state(
+        swarm_id,
+        name,
+        expected_members,
+        coordinator_in_group ? s_coord_id : invalid_instance_id);
 
     {
         lock_guard<mutex> lock(m_groups_mutex);
@@ -938,23 +953,7 @@ instance_id_type Coordinator::make_process_group(
                    << " instance=" << ret;
             });
         }
-
-        coordinator_in_group = member_process_ids.count(s_coord_id) != 0;
     }
-
-    detail::trace_sync("coordinator.group.make.bootstrap", [&](auto& os) {
-        os << "name=" << name
-           << " expected=" << member_process_ids.size()
-           << " coordinator_in_group=" << static_cast<int>(coordinator_in_group);
-    });
-
-    const auto swarm_id = s_mproc ? s_mproc->m_swarm_id : 0u;
-    const auto expected_members = static_cast<uint32_t>(member_process_ids.size());
-    detail::reset_bootstrap_group_state(
-        swarm_id,
-        name,
-        expected_members,
-        coordinator_in_group ? s_coord_id : invalid_instance_id);
 
     const auto members_snapshot = detail::format_instance_set(member_process_ids);
     detail::trace_sync("coordinator.group.make", [&](auto& os) {
