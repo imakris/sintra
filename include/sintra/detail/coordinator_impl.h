@@ -32,11 +32,20 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "debug_log.h"
 
 #include <cassert>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <functional>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <shared_mutex>
+#include <sstream>
 #include <stdexcept>
+#include <cstdint>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -49,6 +58,200 @@ using std::lock_guard;
 using std::mutex;
 using std::string;
 using std::unique_lock;
+
+
+
+namespace detail {
+
+struct Bootstrap_group_state
+{
+    uint32_t expected = 0;
+    std::atomic<uint32_t> joined{0};
+    std::mutex m;
+    std::condition_variable cv;
+    std::unordered_set<instance_id_type> members;
+    std::unordered_set<instance_id_type> accounted_absentees;
+    std::uint64_t swarm_id = 0;
+    std::string group_name;
+    bool initialized = false;
+};
+
+inline std::mutex& bootstrap_group_states_mutex()
+{
+    static std::mutex m;
+    return m;
+}
+
+inline std::unordered_map<std::uint64_t, std::unique_ptr<Bootstrap_group_state>>& bootstrap_group_states()
+{
+    static std::unordered_map<std::uint64_t, std::unique_ptr<Bootstrap_group_state>> states;
+    return states;
+}
+
+inline std::string format_instance_set(const std::unordered_set<instance_id_type>& members)
+{
+    std::ostringstream oss;
+    oss << '[';
+    bool first = true;
+    for (const auto member : members) {
+        if (!first) {
+            oss << ',';
+        }
+        first = false;
+        oss << member;
+    }
+    oss << ']';
+    return oss.str();
+}
+
+inline std::uint64_t bootstrap_group_key(std::uint64_t swarm_id, const std::string& name)
+{
+    std::uint64_t h = 1469598103934665603ull ^ (swarm_id * 1099511628211ull);
+    for (unsigned char c : name) {
+        h ^= c;
+        h *= 1099511628211ull;
+    }
+    return h;
+}
+
+inline Bootstrap_group_state* ensure_bootstrap_group_state(std::uint64_t swarm_id, const std::string& name)
+{
+    std::lock_guard<std::mutex> map_lock(bootstrap_group_states_mutex());
+    auto key = bootstrap_group_key(swarm_id, name);
+    auto& map = bootstrap_group_states();
+    auto& entry = map[key];
+    const bool created = !entry;
+    if (!entry) {
+        entry = std::make_unique<Bootstrap_group_state>();
+    }
+
+    if (created) {
+        detail::trace_sync("coordinator.group.ensure_state", [&](auto& os) {
+            os << "swarm=" << swarm_id
+               << " name=" << name;
+        });
+    }
+
+    return entry.get();
+}
+
+inline void reset_bootstrap_group_state(
+    std::uint64_t swarm_id,
+    const std::string& group_name,
+    uint32_t expected_members,
+    instance_id_type coordinator_member)
+{
+    auto* state = ensure_bootstrap_group_state(swarm_id, group_name);
+
+    uint32_t initial_joined = 0;
+    {
+        std::lock_guard<std::mutex> state_lock(state->m);
+        detail::trace_sync("coordinator.group.bootstrap_reset.begin", [&](auto& os) {
+            os << "swarm=" << swarm_id
+               << " name=" << group_name
+               << " expected=" << expected_members
+               << " coordinator=" << coordinator_member;
+        });
+
+        state->initialized = false;
+        state->expected = expected_members;
+        state->members.clear();
+        state->accounted_absentees.clear();
+        state->swarm_id = swarm_id;
+        state->group_name = group_name;
+
+        if (expected_members > 0 && coordinator_member != invalid_instance_id) {
+            state->members.insert(coordinator_member);
+            initial_joined = 1;
+        }
+
+        state->joined.store(initial_joined, std::memory_order_release);
+        state->initialized = true;
+
+        detail::trace_sync("coordinator.group.bootstrap_reset.end", [&](auto& os) {
+            os << "swarm=" << swarm_id
+               << " name=" << group_name
+               << " expected=" << expected_members
+               << " initial_joined=" << initial_joined
+               << " coordinator=" << coordinator_member;
+        });
+    }
+
+    state->cv.notify_all();
+
+    const auto members_snapshot = format_instance_set(state->members);
+    const auto absentees_snapshot = format_instance_set(state->accounted_absentees);
+    detail::trace_sync("coordinator.group.init", [&](auto& os) {
+        os << "swarm=" << swarm_id
+           << " name=" << group_name
+           << " expected=" << expected_members
+           << " initial_joined=" << initial_joined
+           << " coordinator=" << coordinator_member
+           << " members=" << members_snapshot
+           << " absentees=" << absentees_snapshot;
+    });
+}
+
+inline void account_bootstrap_absence(instance_id_type member_id, const char* reason)
+{
+    std::vector<Bootstrap_group_state*> states;
+    {
+        std::lock_guard<std::mutex> map_lock(bootstrap_group_states_mutex());
+        auto& map = bootstrap_group_states();
+        states.reserve(map.size());
+        for (auto& entry : map) {
+            states.push_back(entry.second.get());
+        }
+    }
+
+    for (auto* state : states) {
+        bool notify = false;
+        uint32_t expected_after = 0;
+        std::uint64_t swarm_id = 0;
+        std::string group_name;
+
+        {
+            std::unique_lock<std::mutex> state_lock(state->m);
+            if (!state->initialized) {
+                continue;
+            }
+
+            swarm_id = state->swarm_id;
+            group_name = state->group_name;
+
+            if (state->members.find(member_id) != state->members.end()) {
+                continue;
+            }
+
+            if (!state->accounted_absentees.insert(member_id).second) {
+                continue;
+            }
+
+            if (state->expected > 0) {
+                state->expected -= 1;
+            }
+            expected_after = state->expected;
+            notify = true;
+        }
+
+        if (notify) {
+            const auto members_snapshot = format_instance_set(state->members);
+            const auto absentees_snapshot = format_instance_set(state->accounted_absentees);
+            detail::trace_sync("coordinator.group.drop_absent", [&](auto& os) {
+                os << "swarm=" << swarm_id
+                   << " name=" << group_name
+                   << " member=" << member_id
+                   << " reason=" << reason
+                   << " expected=" << expected_after
+                   << " members=" << members_snapshot
+                   << " absentees=" << absentees_snapshot;
+            });
+            state->cv.notify_all();
+        }
+    }
+}
+
+} // namespace detail
 
 
 
@@ -534,6 +737,8 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
             m_draining_process_states[slot].store(1, std::memory_order_release);
         }
 
+        detail::account_bootstrap_absence(process_iid, "unpublish");
+
         lock_guard<mutex> lock(m_groups_mutex);
 
         for (auto& group_entry : m_groups) {
@@ -575,6 +780,8 @@ inline sequence_counter_type Coordinator::begin_process_draining(instance_id_typ
         const auto slot = static_cast<size_t>(draining_index);
         m_draining_process_states[slot].store(1, std::memory_order_release);
     }
+
+    detail::account_bootstrap_absence(process_iid, "drain");
 
     struct Group_reference
     {
@@ -659,51 +866,192 @@ instance_id_type Coordinator::make_process_group(
     const string& name,
     const unordered_set<instance_id_type>& member_process_ids)
 {
-    lock_guard<mutex> lock(m_groups_mutex);
+    instance_id_type ret = invalid_instance_id;
 
-    auto it = m_groups.find(name);
-    instance_id_type previous_group_instance = invalid_instance_id;
-    bool previous_group_published = false;
-    if (it != m_groups.end()) {
-        auto& group = it->second;
-        previous_group_instance = group.m_instance_id;
-        previous_group_published = group.is_published();
+    const auto swarm_id = s_mproc ? s_mproc->m_swarm_id : 0u;
+    const auto expected_members = static_cast<uint32_t>(member_process_ids.size());
+    const bool coordinator_in_group = member_process_ids.count(s_coord_id) != 0;
 
-        const auto previous_members = group.m_process_ids;
-        for (const auto& member : previous_members) {
-            auto map_it = m_groups_of_process.find(member);
-            if (map_it == m_groups_of_process.end()) {
-                continue;
+    detail::trace_sync("coordinator.group.make.bootstrap", [&](auto& os) {
+        os << "name=" << name
+           << " expected=" << member_process_ids.size()
+           << " coordinator_in_group=" << static_cast<int>(coordinator_in_group);
+    });
+
+    detail::reset_bootstrap_group_state(
+        swarm_id,
+        name,
+        expected_members,
+        coordinator_in_group ? s_coord_id : invalid_instance_id);
+
+    {
+        lock_guard<mutex> lock(m_groups_mutex);
+
+        detail::trace_sync("coordinator.group.make.lock_acquired", [&](auto& os) {
+            os << "name=" << name
+               << " requested_members=" << member_process_ids.size();
+        });
+
+        auto it = m_groups.find(name);
+        instance_id_type previous_group_instance = invalid_instance_id;
+        bool previous_group_published = false;
+        if (it != m_groups.end()) {
+            auto& group = it->second;
+            previous_group_instance = group.m_instance_id;
+            previous_group_published = group.is_published();
+
+            const auto previous_members = group.m_process_ids;
+            detail::trace_sync("coordinator.group.make.replace", [&](auto& os) {
+                os << "name=" << name
+                   << " old_instance=" << previous_group_instance
+                   << " published=" << static_cast<int>(previous_group_published)
+                   << " old_members=" << previous_members.size();
+            });
+            for (const auto& member : previous_members) {
+                auto map_it = m_groups_of_process.find(member);
+                if (map_it == m_groups_of_process.end()) {
+                    continue;
+                }
+
+                map_it->second.erase(previous_group_instance);
+                if (map_it->second.empty()) {
+                    m_groups_of_process.erase(map_it);
+                }
             }
 
-            map_it->second.erase(previous_group_instance);
-            if (map_it->second.empty()) {
-                m_groups_of_process.erase(map_it);
-            }
+            m_groups.erase(it);
         }
 
-        m_groups.erase(it);
-    }
+        if (previous_group_published) {
+            detail::trace_sync("coordinator.group.make.unpublish_prev", [&](auto& os) {
+                os << "name=" << name
+                   << " instance=" << previous_group_instance;
+            });
+            unpublish_transceiver(previous_group_instance);
+        }
 
-    if (previous_group_published) {
-        unpublish_transceiver(previous_group_instance);
-    }
-
-    auto& group = m_groups[name];
-    group.set(member_process_ids);
-    const auto ret = group.m_instance_id;
-
-    for (const auto& member : member_process_ids) {
-        m_groups_of_process[member].insert(ret);
-    }
-
-    if (!group.assign_name(name)) {
-        detail::trace_sync("coordinator.group_assign_failed", [&](auto& os) {
-            os << "name=" << name << " instance=" << ret;
+        auto& group = m_groups[name];
+        detail::trace_sync("coordinator.group.make.assign", [&](auto& os) {
+            os << "name=" << name
+               << " members=" << member_process_ids.size();
         });
+        group.set(member_process_ids);
+        ret = group.m_instance_id;
+
+        for (const auto& member : member_process_ids) {
+            m_groups_of_process[member].insert(ret);
+        }
+
+        if (!group.assign_name(name)) {
+            detail::trace_sync("coordinator.group_assign_failed", [&](auto& os) {
+                os << "name=" << name << " instance=" << ret;
+            });
+        }
+        else {
+            detail::trace_sync("coordinator.group.make.assigned", [&](auto& os) {
+                os << "name=" << name
+                   << " instance=" << ret;
+            });
+        }
     }
+
+    const auto members_snapshot = detail::format_instance_set(member_process_ids);
+    detail::trace_sync("coordinator.group.make", [&](auto& os) {
+        os << "swarm=" << swarm_id
+           << " name=" << name
+           << " expected=" << expected_members
+           << " coordinator_in_group=" << coordinator_in_group
+           << " members=" << member_process_ids.size()
+           << " member_ids=" << members_snapshot;
+    });
+
     return ret;
 }
+
+inline instance_id_type Coordinator::join_group(
+    std::uint64_t swarm_id,
+    const std::string& group_name,
+    instance_id_type member_id)
+{
+    auto* state = detail::ensure_bootstrap_group_state(swarm_id, group_name);
+
+    uint32_t joined_after_insert = state->joined.load(std::memory_order_acquire);
+    uint32_t expected = 0;
+    bool became_ready = false;
+    std::string members_snapshot;
+    std::string absentees_snapshot;
+
+    {
+        std::lock_guard<std::mutex> state_lock(state->m);
+
+        detail::trace_sync("coordinator.group.rpc_entry", [&](auto& os) {
+            os << "swarm=" << swarm_id
+               << " name=" << group_name
+               << " member=" << member_id
+               << " initialized=" << static_cast<int>(state->initialized)
+               << " expected=" << state->expected
+               << " joined=" << state->joined.load(std::memory_order_acquire);
+        });
+
+        if (!state->initialized) {
+            detail::trace_sync("coordinator.group.join.uninitialized", [&](auto& os) {
+                os << "swarm=" << swarm_id
+                   << " name=" << group_name
+                   << " member=" << member_id;
+            });
+        }
+
+        const bool inserted = state->members.insert(member_id).second;
+        state->accounted_absentees.erase(member_id);
+
+        joined_after_insert = state->joined.load(std::memory_order_acquire);
+        if (inserted) {
+            joined_after_insert = state->joined.fetch_add(1, std::memory_order_acq_rel) + 1;
+        }
+
+        expected = state->expected;
+        members_snapshot = detail::format_instance_set(state->members);
+        absentees_snapshot = detail::format_instance_set(state->accounted_absentees);
+
+        detail::trace_sync("coordinator.group.join", [&](auto& os) {
+            os << "swarm=" << swarm_id
+               << " name=" << group_name
+               << " member=" << member_id
+               << " joined=" << joined_after_insert
+               << " expected=" << expected
+               << " members=" << members_snapshot
+               << " absentees=" << absentees_snapshot;
+        });
+
+        became_ready = (expected > 0 && joined_after_insert >= expected);
+        if (became_ready) {
+            detail::trace_sync("coordinator.group.ready", [&](auto& os) {
+                os << "swarm=" << swarm_id
+                   << " name=" << group_name
+                   << " joined=" << joined_after_insert
+                   << " expected=" << expected
+                   << " members=" << members_snapshot
+                   << " absentees=" << absentees_snapshot;
+            });
+        }
+    }
+
+    state->cv.notify_all();
+
+    instance_id_type group_instance = invalid_instance_id;
+    {
+        lock_guard<mutex> groups_lock(m_groups_mutex);
+        auto it = m_groups.find(group_name);
+        if (it != m_groups.end()) {
+            group_instance = it->second.m_instance_id;
+        }
+    }
+
+    return group_instance;
+}
+
+
+
 
 
 

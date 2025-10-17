@@ -1139,8 +1139,42 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
         auto all_processes = successfully_spawned;
         all_processes.insert(m_instance_id);
 
-        m_group_all      = s_coord->make_process_group("_sintra_all_processes", all_processes);
+        detail::trace_sync("coordinator.swarm.group_plan", [&](auto& os) {
+            os << "instance=" << m_instance_id
+               << " swarm=" << m_swarm_id
+               << " spawned=" << successfully_spawned.size()
+               << " all_members=" << all_processes.size();
+        });
+
+        detail::trace_sync("coordinator.swarm.make_group.begin", [&](auto& os) {
+            os << "instance=" << m_instance_id
+               << " swarm=" << m_swarm_id
+               << " name=_sintra_all_processes"
+               << " members=" << all_processes.size();
+        });
+        m_group_all = s_coord->make_process_group("_sintra_all_processes", all_processes);
+        detail::trace_sync("coordinator.swarm.make_group.end", [&](auto& os) {
+            os << "instance=" << m_instance_id
+               << " swarm=" << m_swarm_id
+               << " name=_sintra_all_processes"
+               << " members=" << all_processes.size()
+               << " group_instance=" << m_group_all;
+        });
+
+        detail::trace_sync("coordinator.swarm.make_group.begin", [&](auto& os) {
+            os << "instance=" << m_instance_id
+               << " swarm=" << m_swarm_id
+               << " name=_sintra_external_processes"
+               << " members=" << successfully_spawned.size();
+        });
         m_group_external = s_coord->make_process_group("_sintra_external_processes", successfully_spawned);
+        detail::trace_sync("coordinator.swarm.make_group.end", [&](auto& os) {
+            os << "instance=" << m_instance_id
+               << " swarm=" << m_swarm_id
+               << " name=_sintra_external_processes"
+               << " members=" << successfully_spawned.size()
+               << " group_instance=" << m_group_external;
+        });
 
         s_branch_index = 0;
     }
@@ -1156,50 +1190,136 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
             exit(1);
         }
 
-        auto wait_for_named_group = [&](const char* assigned_name) {
-            using namespace std::chrono_literals;
-            constexpr auto poll_interval = std::chrono::milliseconds(1);
+        auto join_group = [&](const char* assigned_name) -> instance_id_type {
+            const std::string group_name{assigned_name};
 
             detail::trace_sync("branch.worker.wait_group", [&](auto& os) {
                 os << "instance=" << m_instance_id
                    << " swarm=" << m_swarm_id
-                   << " name=" << assigned_name;
+                   << " name=" << group_name;
             });
 
-            while (true) {
-                auto iid = Coordinator::rpc_resolve_instance(s_coord_id, assigned_name);
-                if (iid != invalid_instance_id) {
-                    detail::trace_sync("branch.worker.got_group", [&](auto& os) {
-                        os << "instance=" << m_instance_id
-                           << " swarm=" << m_swarm_id
-                           << " name=" << assigned_name;
-                    });
-                    return iid;
+            try {
+                instance_id_type published_instance = invalid_instance_id;
+                while (published_instance == invalid_instance_id) {
+                    published_instance = Coordinator::rpc_resolve_instance(s_coord_id, group_name);
+                    if (published_instance != invalid_instance_id) {
+                        break;
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 }
 
-                std::this_thread::sleep_for(poll_interval);
+                detail::trace_sync("branch.worker.join_rpc", [&](auto& os) {
+                    os << "instance=" << m_instance_id
+                       << " swarm=" << m_swarm_id
+                       << " name=" << group_name
+                       << " coord=" << s_coord_id;
+                });
+
+                const auto recorded_instance = Coordinator::rpc_join_group(
+                    s_coord_id,
+                    m_swarm_id,
+                    group_name,
+                    m_instance_id);
+
+                const std::string barrier_name = std::string("__swarm_join__/") + group_name;
+                sequence_counter_type barrier_flush_seq = invalid_sequence;
+                bool rendezvous_completed = false;
+                try {
+                    barrier_flush_seq = Process_group::rpc_barrier(group_name, barrier_name);
+                }
+                catch (const rpc_cancelled&) {
+                    if (m_communication_state != COMMUNICATION_RUNNING) {
+                        rendezvous_completed = true;
+                    }
+                    else {
+                        throw;
+                    }
+                }
+                catch (const std::runtime_error& e) {
+                    const std::string msg = e.what();
+                    const bool rpc_unavailable =
+                        (msg == "RPC failed") ||
+                        (msg.find("no longer available") != std::string::npos) ||
+                        (msg.find("shutting down") != std::string::npos);
+                    if (rpc_unavailable && m_communication_state != COMMUNICATION_RUNNING) {
+                        rendezvous_completed = true;
+                    }
+                    else {
+                        throw;
+                    }
+                }
+
+                if (barrier_flush_seq != invalid_sequence) {
+                    rendezvous_completed = true;
+                    if (!s_coord) {
+                        s_mproc->flush(process_of(s_coord_id), barrier_flush_seq);
+                    }
+                }
+
+                detail::trace_sync("branch.worker.barrier_join", [&](auto& os) {
+                    os << "instance=" << m_instance_id
+                       << " swarm=" << m_swarm_id
+                       << " name=" << group_name
+                       << " barrier=" << barrier_name
+                       << " completed=" << static_cast<int>(rendezvous_completed)
+                       << " recorded=" << recorded_instance;
+                });
+
+                detail::trace_sync("branch.worker.resolve_group", [&](auto& os) {
+                    os << "instance=" << m_instance_id
+                       << " swarm=" << m_swarm_id
+                       << " name=" << group_name
+                       << " coord=" << s_coord_id;
+                });
+
+                auto group_instance = Coordinator::rpc_resolve_instance(s_coord_id, group_name);
+
+                detail::trace_sync("branch.worker.got_group", [&](auto& os) {
+                    os << "instance=" << m_instance_id
+                       << " swarm=" << m_swarm_id
+                       << " name=" << group_name
+                       << " instance=" << group_instance;
+                });
+
+                return group_instance;
+            }
+            catch (const rpc_cancelled&) {
+                if (m_communication_state != COMMUNICATION_RUNNING) {
+                    detail::trace_sync("branch.worker.cancelled_group", [&](auto& os) {
+                        os << "instance=" << m_instance_id
+                           << " swarm=" << m_swarm_id
+                           << " name=" << group_name;
+                    });
+                    return invalid_instance_id;
+                }
+                throw;
             }
         };
 
-        m_group_all = wait_for_named_group("_sintra_all_processes");
-        m_group_external = wait_for_named_group("_sintra_external_processes");
+        m_group_all = join_group("_sintra_all_processes");
+        m_group_external = join_group("_sintra_external_processes");
     }
 
     // assign_name requires that all group processes are instantiated, in order
     // to receive the instance_published event
     if (s_recovery_occurrence == 0) {
-        detail::trace_sync("branch.barrier.enter", [&](auto& os) {
-            os << "instance=" << m_instance_id
-               << " swarm=" << m_swarm_id
-               << " group=_sintra_all_processes";
-        });
-        bool all_started = Process_group::rpc_barrier(m_group_all, UIBS);
-        detail::trace_sync("branch.barrier.exit", [&](auto& os) {
-            os << "instance=" << m_instance_id
-               << " swarm=" << m_swarm_id
-               << " group=_sintra_all_processes"
-               << " success=" << all_started;
-        });
+        bool all_started = true;
+        if (m_group_all != invalid_instance_id) {
+            detail::trace_sync("branch.barrier.enter", [&](auto& os) {
+                os << "instance=" << m_instance_id
+                   << " swarm=" << m_swarm_id
+                   << " group=_sintra_all_processes";
+            });
+            all_started = Process_group::rpc_barrier(m_group_all, UIBS);
+            detail::trace_sync("branch.barrier.exit", [&](auto& os) {
+                os << "instance=" << m_instance_id
+                   << " swarm=" << m_swarm_id
+                   << " group=_sintra_all_processes"
+                   << " success=" << all_started;
+            });
+        }
+
         if (!all_started) {
             return false;
         }
@@ -1642,6 +1762,23 @@ size_t Managed_process::unblock_rpc(instance_id_type process_instance_id)
             if (process_instance_id != invalid_instance_id &&
                 process_of(c->remote_instance) == process_instance_id)
             {
+                detail::trace_sync("rpc.unblock", [&](auto& os) {
+                    os << "target_process=" << process_instance_id
+                       << " remote_instance=" << c->remote_instance;
+                });
+
+                c->success = false;
+                c->keep_waiting = false;
+                c->cancelled = true;
+                c->keep_waiting_condition.notify_one();
+                ret++;
+            }
+            else if (process_instance_id == invalid_instance_id) {
+                detail::trace_sync("rpc.unblock", [&](auto& os) {
+                    os << "target_process=ALL"
+                       << " remote_instance=" << c->remote_instance;
+                });
+
                 c->success = false;
                 c->keep_waiting = false;
                 c->cancelled = true;
