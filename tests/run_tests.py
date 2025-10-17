@@ -87,7 +87,9 @@ class TestRunner:
             'sintra_rpc_append_test',
             'sintra_recovery_test',
             'sintra_barrier_flush_test',
+            'sintra_barrier_rapid_reuse_test',
             'sintra_barrier_stress_test',
+            'sintra_processing_fence_test',
             'sintra_variable_buffer_alignment_test',
             'sintra_spawn_detached_test'
         ]

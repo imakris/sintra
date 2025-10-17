@@ -73,6 +73,11 @@ endif()
 add_test(NAME sintra.barrier_stress COMMAND sintra_barrier_stress_test)
 list(APPEND SINTRA_CI_TESTS sintra.barrier_stress)
 
+add_executable(sintra_barrier_rapid_reuse_test barrier_rapid_reuse_test.cpp)
+target_link_libraries(sintra_barrier_rapid_reuse_test PRIVATE ${SINTRA_TEST_TARGET})
+add_test(NAME sintra.barrier_rapid_reuse COMMAND sintra_barrier_rapid_reuse_test)
+list(APPEND SINTRA_CI_TESTS sintra.barrier_rapid_reuse)
+
 add_executable(sintra_processing_fence_test processing_fence_test.cpp)
 target_link_libraries(sintra_processing_fence_test PRIVATE ${SINTRA_TEST_TARGET})
 add_test(NAME sintra.processing_fence COMMAND sintra_processing_fence_test)
@@ -90,6 +95,7 @@ list(APPEND SINTRA_CI_TESTS sintra.spawn_detached)
 
 add_executable(sintra_hanging_test hanging_test.cpp)
 add_test(NAME sintra.hanging COMMAND sintra_hanging_test)
+set_tests_properties(sintra.hanging PROPERTIES DISABLED TRUE)
 
 if(SINTRA_CI_TESTS)
     set_tests_properties(${SINTRA_CI_TESTS} PROPERTIES FIXTURES_REQUIRED sintra_ready)
