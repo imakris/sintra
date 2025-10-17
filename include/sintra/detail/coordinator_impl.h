@@ -209,6 +209,8 @@ inline void account_bootstrap_absence(instance_id_type member_id, const char* re
         uint32_t expected_after = 0;
         std::uint64_t swarm_id = 0;
         std::string group_name;
+        std::string members_snapshot;
+        std::string absentees_snapshot;
 
         {
             std::unique_lock<std::mutex> state_lock(state->m);
@@ -231,12 +233,12 @@ inline void account_bootstrap_absence(instance_id_type member_id, const char* re
                 state->expected -= 1;
             }
             expected_after = state->expected;
+            members_snapshot = format_instance_set(state->members);
+            absentees_snapshot = format_instance_set(state->accounted_absentees);
             notify = true;
         }
 
         if (notify) {
-            const auto members_snapshot = format_instance_set(state->members);
-            const auto absentees_snapshot = format_instance_set(state->accounted_absentees);
             detail::trace_sync("coordinator.group.drop_absent", [&](auto& os) {
                 os << "swarm=" << swarm_id
                    << " name=" << group_name
