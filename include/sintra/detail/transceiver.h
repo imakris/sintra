@@ -192,6 +192,8 @@ struct Transceiver
     template <typename = void>
     bool assign_name(const string& name);
 
+    bool is_published() const { return m_published; }
+
     template <typename = void>
     void destroy();
 
