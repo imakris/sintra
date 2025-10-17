@@ -34,6 +34,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <stdexcept>
 #include <string>
 #include <unordered_set>
+#include <utility>
+#include <vector>
 
 
 #ifdef _WIN32
@@ -135,14 +137,16 @@ size_t get_cache_line_size()
 // conversion utility
 struct cstring_vector
 {
-    cstring_vector(const std::vector<std::string>& v_in):
-        m_size(v_in.size())
+    explicit cstring_vector(const std::vector<std::string>& v_in)
+        : m_storage(v_in)
     {
-        m_v = new const char*[m_size+1];
-        for (size_t i = 0; i < m_size; i++) {
-            m_v[i] = v_in[i].c_str();
-        }
-        m_v[m_size] = 0;
+        initialize();
+    }
+
+    explicit cstring_vector(std::vector<std::string>&& v_in)
+        : m_storage(std::move(v_in))
+    {
+        initialize();
     }
 
     ~cstring_vector()
@@ -150,12 +154,27 @@ struct cstring_vector
         delete [] m_v;
     }
 
+    cstring_vector(const cstring_vector&) = delete;
+    cstring_vector& operator=(const cstring_vector&) = delete;
+    cstring_vector(cstring_vector&&) = delete;
+    cstring_vector& operator=(cstring_vector&&) = delete;
+
     const char* const* v() const { return m_v; }
-    size_t size() const { return m_size; }
+    size_t size() const { return m_storage.size(); }
 
 private:
+    void initialize()
+    {
+        const auto count = m_storage.size();
+        m_v = new const char*[count + 1];
+        for (size_t i = 0; i < count; ++i) {
+            m_v[i] = m_storage[i].c_str();
+        }
+        m_v[count] = nullptr;
+    }
+
+    std::vector<std::string> m_storage;
     const char** m_v = nullptr;
-    const size_t m_size = 0;
 };
 
 

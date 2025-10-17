@@ -1012,7 +1012,7 @@ bool Managed_process::spawn_swarm_process(
     auto args = s.args;
     args.insert(args.end(), {"--recovery_occurrence", std::to_string(s.occurrence)} );
 
-    cstring_vector cargs(args);
+    cstring_vector cargs(std::move(args));
 
     {
         std::unique_lock<std::shared_mutex> readers_lock(m_readers_mutex);
