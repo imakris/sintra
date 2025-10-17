@@ -1038,13 +1038,15 @@ inline instance_id_type Coordinator::join_group(
         }
     }
 
+    // FreeBSD bootstrap fix: avoid blocking the coordinator's request reader.
+    // Workers fall back to Coordinator::rpc_wait_for_instance when necessary.
     state->cv.notify_all();
 
     instance_id_type group_instance = invalid_instance_id;
     {
         lock_guard<mutex> groups_lock(m_groups_mutex);
         auto it = m_groups.find(group_name);
-        if (it != m_groups.end()) {
+        if (it != m_groups.end() && it->second.is_published()) {
             group_instance = it->second.m_instance_id;
         }
     }

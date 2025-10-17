@@ -1161,6 +1161,28 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
                << " group_instance=" << m_group_all;
         });
 
+        if (m_group_all != invalid_instance_id) {
+            const std::string bootstrap_barrier = "__swarm_join__/_sintra_all_processes";
+            try {
+                Process_group::rpc_barrier(m_group_all, bootstrap_barrier);
+            }
+            catch (const rpc_cancelled&) {
+                if (m_communication_state == COMMUNICATION_RUNNING) {
+                    throw;
+                }
+            }
+            catch (const std::runtime_error& e) {
+                const std::string msg = e.what();
+                const bool rpc_unavailable =
+                    (msg == "RPC failed") ||
+                    (msg.find("no longer available") != std::string::npos) ||
+                    (msg.find("shutting down") != std::string::npos);
+                if (!(rpc_unavailable && m_communication_state != COMMUNICATION_RUNNING)) {
+                    throw;
+                }
+            }
+        }
+
         detail::trace_sync("coordinator.swarm.make_group.begin", [&](auto& os) {
             os << "instance=" << m_instance_id
                << " swarm=" << m_swarm_id
@@ -1200,15 +1222,6 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
             });
 
             try {
-                instance_id_type published_instance = invalid_instance_id;
-                while (published_instance == invalid_instance_id) {
-                    published_instance = Coordinator::rpc_resolve_instance(s_coord_id, group_name);
-                    if (published_instance != invalid_instance_id) {
-                        break;
-                    }
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                }
-
                 detail::trace_sync("branch.worker.join_rpc", [&](auto& os) {
                     os << "instance=" << m_instance_id
                        << " swarm=" << m_swarm_id
@@ -1222,64 +1235,72 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
                     group_name,
                     m_instance_id);
 
-                const std::string barrier_name = std::string("__swarm_join__/") + group_name;
-                sequence_counter_type barrier_flush_seq = invalid_sequence;
-                bool rendezvous_completed = false;
-                try {
-                    barrier_flush_seq = Process_group::rpc_barrier(group_name, barrier_name);
-                }
-                catch (const rpc_cancelled&) {
-                    if (m_communication_state != COMMUNICATION_RUNNING) {
-                        rendezvous_completed = true;
-                    }
-                    else {
-                        throw;
-                    }
-                }
-                catch (const std::runtime_error& e) {
-                    const std::string msg = e.what();
-                    const bool rpc_unavailable =
-                        (msg == "RPC failed") ||
-                        (msg.find("no longer available") != std::string::npos) ||
-                        (msg.find("shutting down") != std::string::npos);
-                    if (rpc_unavailable && m_communication_state != COMMUNICATION_RUNNING) {
-                        rendezvous_completed = true;
-                    }
-                    else {
-                        throw;
-                    }
-                }
+                instance_id_type group_instance = recorded_instance;
+                if (group_instance == invalid_instance_id) {
+                    detail::trace_sync("branch.worker.wait_group_instance", [&](auto& os) {
+                        os << "instance=" << m_instance_id
+                           << " swarm=" << m_swarm_id
+                           << " name=" << group_name
+                           << " coord=" << s_coord_id;
+                    });
 
-                if (barrier_flush_seq != invalid_sequence) {
-                    rendezvous_completed = true;
-                    if (!s_coord) {
-                        s_mproc->flush(process_of(s_coord_id), barrier_flush_seq);
-                    }
+                    group_instance = Coordinator::rpc_wait_for_instance(s_coord_id, group_name);
                 }
-
-                detail::trace_sync("branch.worker.barrier_join", [&](auto& os) {
-                    os << "instance=" << m_instance_id
-                       << " swarm=" << m_swarm_id
-                       << " name=" << group_name
-                       << " barrier=" << barrier_name
-                       << " completed=" << static_cast<int>(rendezvous_completed)
-                       << " recorded=" << recorded_instance;
-                });
-
-                detail::trace_sync("branch.worker.resolve_group", [&](auto& os) {
-                    os << "instance=" << m_instance_id
-                       << " swarm=" << m_swarm_id
-                       << " name=" << group_name
-                       << " coord=" << s_coord_id;
-                });
-
-                auto group_instance = Coordinator::rpc_resolve_instance(s_coord_id, group_name);
 
                 detail::trace_sync("branch.worker.got_group", [&](auto& os) {
                     os << "instance=" << m_instance_id
                        << " swarm=" << m_swarm_id
                        << " name=" << group_name
-                       << " instance=" << group_instance;
+                       << " instance=" << group_instance
+                       << " recorded=" << recorded_instance;
+                });
+
+                bool rendezvous_completed = false;
+                sequence_counter_type barrier_flush_seq = invalid_sequence;
+                const std::string barrier_name = std::string("__swarm_join__/") + group_name;
+
+                if (group_instance != invalid_instance_id) {
+                    try {
+                        barrier_flush_seq = Process_group::rpc_barrier(group_instance, barrier_name);
+                    }
+                    catch (const rpc_cancelled&) {
+                        if (m_communication_state != COMMUNICATION_RUNNING) {
+                            rendezvous_completed = true;
+                        }
+                        else {
+                            throw;
+                        }
+                    }
+                    catch (const std::runtime_error& e) {
+                        const std::string msg = e.what();
+                        const bool rpc_unavailable =
+                            (msg == "RPC failed") ||
+                            (msg.find("no longer available") != std::string::npos) ||
+                            (msg.find("shutting down") != std::string::npos);
+                        if (rpc_unavailable && m_communication_state != COMMUNICATION_RUNNING) {
+                            rendezvous_completed = true;
+                        }
+                        else {
+                            throw;
+                        }
+                    }
+
+                    if (barrier_flush_seq != invalid_sequence) {
+                        rendezvous_completed = true;
+                        if (!s_coord) {
+                            s_mproc->flush(process_of(s_coord_id), barrier_flush_seq);
+                        }
+                    }
+                }
+
+                detail::trace_sync("branch.worker.barrier_join", [&](auto& os) {
+                        os << "instance=" << m_instance_id
+                           << " swarm=" << m_swarm_id
+                           << " name=" << group_name
+                           << " barrier=" << barrier_name
+                           << " completed=" << static_cast<int>(rendezvous_completed)
+                           << " recorded=" << recorded_instance
+                           << " instance=" << group_instance;
                 });
 
                 return group_instance;
