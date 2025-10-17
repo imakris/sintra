@@ -1139,8 +1139,42 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
         auto all_processes = successfully_spawned;
         all_processes.insert(m_instance_id);
 
-        m_group_all      = s_coord->make_process_group("_sintra_all_processes", all_processes);
+        detail::trace_sync("coordinator.swarm.group_plan", [&](auto& os) {
+            os << "instance=" << m_instance_id
+               << " swarm=" << m_swarm_id
+               << " spawned=" << successfully_spawned.size()
+               << " all_members=" << all_processes.size();
+        });
+
+        detail::trace_sync("coordinator.swarm.make_group.begin", [&](auto& os) {
+            os << "instance=" << m_instance_id
+               << " swarm=" << m_swarm_id
+               << " name=_sintra_all_processes"
+               << " members=" << all_processes.size();
+        });
+        m_group_all = s_coord->make_process_group("_sintra_all_processes", all_processes);
+        detail::trace_sync("coordinator.swarm.make_group.end", [&](auto& os) {
+            os << "instance=" << m_instance_id
+               << " swarm=" << m_swarm_id
+               << " name=_sintra_all_processes"
+               << " members=" << all_processes.size()
+               << " group_instance=" << m_group_all;
+        });
+
+        detail::trace_sync("coordinator.swarm.make_group.begin", [&](auto& os) {
+            os << "instance=" << m_instance_id
+               << " swarm=" << m_swarm_id
+               << " name=_sintra_external_processes"
+               << " members=" << successfully_spawned.size();
+        });
         m_group_external = s_coord->make_process_group("_sintra_external_processes", successfully_spawned);
+        detail::trace_sync("coordinator.swarm.make_group.end", [&](auto& os) {
+            os << "instance=" << m_instance_id
+               << " swarm=" << m_swarm_id
+               << " name=_sintra_external_processes"
+               << " members=" << successfully_spawned.size()
+               << " group_instance=" << m_group_external;
+        });
 
         s_branch_index = 0;
     }
