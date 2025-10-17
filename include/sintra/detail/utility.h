@@ -149,6 +149,38 @@ struct cstring_vector
         initialize_view();
     }
 
+    cstring_vector(const cstring_vector& other)
+        : m_storage(other.m_storage)
+    {
+        initialize_view();
+    }
+
+    cstring_vector(cstring_vector&& other) noexcept
+        : m_storage(std::move(other.m_storage))
+    {
+        initialize_view();
+        other.initialize_view();
+    }
+
+    cstring_vector& operator=(const cstring_vector& other)
+    {
+        if (this != &other) {
+            m_storage = other.m_storage;
+            initialize_view();
+        }
+        return *this;
+    }
+
+    cstring_vector& operator=(cstring_vector&& other) noexcept
+    {
+        if (this != &other) {
+            m_storage = std::move(other.m_storage);
+            initialize_view();
+            other.initialize_view();
+        }
+        return *this;
+    }
+
     const char* const* v() const { return m_view.data(); }
     size_t size() const { return m_storage.size(); }
 
