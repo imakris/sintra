@@ -149,8 +149,10 @@ namespace {
             mproc->emit_remote<Managed_process::terminated_abnormally>(sig_number);
 
             std::shared_lock<std::shared_mutex> readers_lock(mproc->m_readers_mutex);
-            for (auto& reader : mproc->m_readers) {
-                reader.second.stop_nowait();
+            for (auto& reader_entry : mproc->m_readers) {
+                if (auto& reader = reader_entry.second) {
+                    reader->stop_nowait();
+                }
             }
 
             dispatched_signal_counter().fetch_add(1, std::memory_order_release);
@@ -264,8 +266,10 @@ static void s_signal_handler(int sig)
         s_mproc->emit_remote<Managed_process::terminated_abnormally>(sig);
 
         std::shared_lock<std::shared_mutex> readers_lock(s_mproc->m_readers_mutex);
-        for (auto& reader : s_mproc->m_readers) {
-            reader.second.stop_nowait();
+        for (auto& reader_entry : s_mproc->m_readers) {
+            if (auto& reader = reader_entry.second) {
+                reader->stop_nowait();
+            }
         }
     }
 
@@ -860,12 +864,11 @@ Managed process options:
         std::unique_lock<std::shared_mutex> readers_lock(m_readers_mutex);
         assert(!m_readers.count(process_of(s_coord_id)));
         auto progress = std::make_shared<Process_message_reader::Delivery_progress>();
-        auto [reader_it, inserted] = m_readers.emplace(
-            std::piecewise_construct,
-            std::forward_as_tuple(process_of(s_coord_id)),
-            std::forward_as_tuple(process_of(s_coord_id), progress, 0u));
+        auto reader = std::make_shared<Process_message_reader>(
+            process_of(s_coord_id), progress, 0u);
+        auto [reader_it, inserted] = m_readers.emplace(process_of(s_coord_id), reader);
         assert(inserted == true);
-        reader_it->second.wait_until_ready();
+        reader->wait_until_ready();
     }
 
     // Up to this point, there was no infrastructure for a proper construction
@@ -1020,21 +1023,21 @@ bool Managed_process::spawn_swarm_process(
         // If a reader for this process id exists (from a previous crashed instance),
         // stop it and remove it before creating a fresh one for recovery.
         if (auto existing = m_readers.find(s.piid); existing != m_readers.end()) {
-            existing->second.stop_and_wait(1.0);
+            if (existing->second) {
+                existing->second->stop_and_wait(1.0);
+            }
             m_readers.erase(existing);
         }
 
         auto progress = std::make_shared<Process_message_reader::Delivery_progress>();
-        auto eit = m_readers.emplace(
-            std::piecewise_construct,
-            std::forward_as_tuple(s.piid),
-            std::forward_as_tuple(s.piid, progress, s.occurrence)
-        );
-        assert(eit.second == true);
+        auto reader = std::make_shared<Process_message_reader>(
+            s.piid, progress, s.occurrence);
+        auto [eit, inserted] = m_readers.emplace(s.piid, reader);
+        assert(inserted == true);
 
         // Before spawning the new process, we have to assure that the
         // corresponding reading threads are up and running.
-        eit.first->second.wait_until_ready();
+        reader->wait_until_ready();
     }
 
     bool success = spawn_detached(s.binary_name.c_str(), cargs.v());
@@ -1190,8 +1193,10 @@ void Managed_process::pause()
 
     {
         std::shared_lock<std::shared_mutex> readers_lock(m_readers_mutex);
-        for (auto& ri : m_readers) {
-            ri.second.pause();
+        for (auto& entry : m_readers) {
+            if (auto& reader = entry.second) {
+                reader->pause();
+            }
         }
     }
 
@@ -1213,8 +1218,10 @@ void Managed_process::stop()
 
     {
         std::shared_lock<std::shared_mutex> readers_lock(m_readers_mutex);
-        for (auto& ri : m_readers) {
-            ri.second.stop_nowait();
+        for (auto& entry : m_readers) {
+            if (auto& reader = entry.second) {
+                reader->stop_nowait();
+            }
         }
     }
 
@@ -1383,7 +1390,7 @@ inline void Managed_process::flush(instance_id_type process_id, sequence_counter
 {
     assert(is_process(process_id));
 
-    Process_message_reader* reader = nullptr;
+    std::shared_ptr<Process_message_reader> reader;
     sequence_counter_type rs = invalid_sequence;
     {
         std::shared_lock<std::shared_mutex> readers_lock(m_readers_mutex);
@@ -1396,7 +1403,12 @@ inline void Managed_process::flush(instance_id_type process_id, sequence_counter
 
         // Barrier completion messages are RPC responses sent on the reply ring.
         // Check the reply reading sequence, not the request reading sequence.
-        reader = &it->second;
+        reader = it->second;
+        if (!reader) {
+            throw std::logic_error(
+                "attempted to flush the channel of a process without an active reader"
+            );
+        }
         rs = reader->get_reply_reading_sequence();
     }
 
@@ -1458,8 +1470,13 @@ void Managed_process::wait_for_delivery_fence()
         std::shared_lock<std::shared_mutex> readers_lock(m_readers_mutex);
         targets.reserve(m_readers.size() * 2);
 
-        for (auto& [process_id, reader] : m_readers) {
+        for (auto& [process_id, reader_ptr] : m_readers) {
             (void)process_id;
+            if (!reader_ptr) {
+                continue;
+            }
+
+            auto& reader = *reader_ptr;
             if (reader.state() != Process_message_reader::READER_NORMAL) {
                 continue;
             }
