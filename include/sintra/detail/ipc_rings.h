@@ -143,6 +143,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <functional>
 #include <fstream>
 #include <iostream>
+#include <iomanip>
 #include <limits>
 #include <memory>
 #include <mutex>         // std::once_flag, std::call_once
@@ -175,6 +176,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
   #include <sys/mman.h>  // ::mmap, ::munmap, MAP_FIXED, MAP_NOSYNC (if available)
   #include <unistd.h>    // ::sysconf
   #include <signal.h>    // ::kill
+#include <pthread.h>
   #if defined(__FreeBSD__)
     #include <sys/types.h>
     #include <sys/sysctl.h>
@@ -227,6 +229,19 @@ inline void ring_trace(const char* tag, F&& formatter)
     formatter(oss);
     std::cerr << "[sintra] ring:" << tag << ' ' << oss.str() << std::endl;
 }
+
+#ifdef _WIN32
+inline uint64_t current_thread_token()
+{
+    return static_cast<uint64_t>(::GetCurrentThreadId());
+}
+#else
+inline uint64_t current_thread_token()
+{
+    return static_cast<uint64_t>(
+        reinterpret_cast<uintptr_t>(pthread_self()));
+}
+#endif
 
 } // namespace detail
 
@@ -1842,7 +1857,7 @@ struct Ring_W : Ring<T, false>
             m_pending_new_sequence -= num_src_elements;
             const size_t head = mod_u64(m_pending_new_sequence, this->m_num_elements);
             m_octile = (8 * head) / this->m_num_elements;
-            m_writing_thread = std::thread::id();
+            m_writing_token.store(0, std::memory_order_release);
             throw;
         }
     }
@@ -1865,7 +1880,7 @@ struct Ring_W : Ring<T, false>
             m_pending_new_sequence -= num_elements;
             const size_t head = mod_u64(m_pending_new_sequence, this->m_num_elements);
             m_octile = (8 * head) / this->m_num_elements;
-            m_writing_thread = std::thread::id();
+            m_writing_token.store(0, std::memory_order_release);
             throw;
         }
     }
@@ -1882,8 +1897,8 @@ struct Ring_W : Ring<T, false>
     {
 #if SINTRA_RING_READING_POLICY != SINTRA_RING_READING_POLICY_ALWAYS_SPIN
         c.lock();
-        assert(m_writing_thread.load(std::memory_order_relaxed) ==
-               std::this_thread::get_id());
+        assert(m_writing_token.load(std::memory_order_relaxed) ==
+               detail::current_thread_token());
         c.leading_sequence.store(m_pending_new_sequence);
         // Wake sleeping readers in a deterministic order
         for (int i = 0; i < c.num_sleeping; i++) {
@@ -1897,7 +1912,14 @@ struct Ring_W : Ring<T, false>
 #else
         c.leading_sequence.store(m_pending_new_sequence);
 #endif
-        m_writing_thread = std::thread::id();
+        if (detail::ring_trace_enabled()) {
+            detail::ring_trace("writer_release", [&](auto& os) {
+                os << "pid=" << get_current_pid()
+                   << " ring=" << static_cast<const void*>(this)
+                   << " sequence=" << m_pending_new_sequence;
+            });
+        }
+        m_writing_token.store(0, std::memory_order_release);
         return m_pending_new_sequence;
     }
 
@@ -2036,21 +2058,30 @@ private:
         assert(num_elements_to_write <= this->m_num_elements / 8);
 
         // Enforce exclusive writer (cheap fast-path loop)
-        const std::thread::id current_tid = std::this_thread::get_id();
+        const uint64_t current_token = detail::current_thread_token();
         const bool trace_wait = detail::ring_trace_enabled();
         bool reported_wait = false;
         while (true) {
-            std::thread::id owner = m_writing_thread.load(std::memory_order_relaxed);
-            if (owner == current_tid) {
+            uint64_t owner = m_writing_token.load(std::memory_order_acquire);
+            if (owner == current_token) {
                 break;
             }
-            if (owner == std::thread::id()) {
-                if (m_writing_thread.compare_exchange_strong(
-                        owner,
-                        current_tid,
+            if (owner == 0) {
+                uint64_t expected = 0;
+                if (m_writing_token.compare_exchange_strong(
+                        expected,
+                        current_token,
                         std::memory_order_acq_rel,
                         std::memory_order_acquire))
                 {
+                    if (trace_wait) {
+                        detail::ring_trace("writer_acquired", [&](auto& os) {
+                            os << "pid=" << get_current_pid()
+                               << " ring=" << static_cast<const void*>(this)
+                               << " token=0x" << std::hex << current_token << std::dec
+                               << " waited=" << reported_wait;
+                        });
+                    }
                     break;
                 }
                 continue;
@@ -2061,8 +2092,8 @@ private:
                 detail::ring_trace("wait_writer", [&](auto& os) {
                     os << "pid=" << get_current_pid()
                        << " ring=" << static_cast<const void*>(this)
-                       << " owner=" << owner
-                       << " current=" << current_tid
+                       << " owner=0x" << std::hex << owner << std::dec
+                       << " token=0x" << std::hex << current_token << std::dec
                        << " elements=" << num_elements_to_write;
                 });
             }
@@ -2073,10 +2104,10 @@ private:
         }
 
         if (trace_wait && reported_wait) {
-            detail::ring_trace("acquired_writer", [&](auto& os) {
+            detail::ring_trace("writer_wait_done", [&](auto& os) {
                 os << "pid=" << get_current_pid()
                    << " ring=" << static_cast<const void*>(this)
-                   << " current=" << current_tid;
+                   << " token=0x" << std::hex << current_token << std::dec;
             });
         }
 
@@ -2145,7 +2176,7 @@ private:
     }
 
 private:
-    std::atomic<std::thread::id>    m_writing_thread;
+    std::atomic<uint64_t>           m_writing_token{0};
     size_t                          m_octile                 = 0;
     sequence_counter_type           m_pending_new_sequence   = 0;
 
