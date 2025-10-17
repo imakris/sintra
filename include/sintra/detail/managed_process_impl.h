@@ -1161,6 +1161,28 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
                << " group_instance=" << m_group_all;
         });
 
+        if (m_group_all != invalid_instance_id) {
+            const std::string bootstrap_barrier = "__swarm_join__/_sintra_all_processes";
+            try {
+                Process_group::rpc_barrier(m_group_all, bootstrap_barrier);
+            }
+            catch (const rpc_cancelled&) {
+                if (m_communication_state == COMMUNICATION_RUNNING) {
+                    throw;
+                }
+            }
+            catch (const std::runtime_error& e) {
+                const std::string msg = e.what();
+                const bool rpc_unavailable =
+                    (msg == "RPC failed") ||
+                    (msg.find("no longer available") != std::string::npos) ||
+                    (msg.find("shutting down") != std::string::npos);
+                if (!(rpc_unavailable && m_communication_state != COMMUNICATION_RUNNING)) {
+                    throw;
+                }
+            }
+        }
+
         detail::trace_sync("coordinator.swarm.make_group.begin", [&](auto& os) {
             os << "instance=" << m_instance_id
                << " swarm=" << m_swarm_id
