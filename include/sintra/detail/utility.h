@@ -34,6 +34,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <stdexcept>
 #include <string>
 #include <unordered_set>
+#include <utility>
+#include <vector>
 
 
 #ifdef _WIN32
@@ -135,27 +137,33 @@ size_t get_cache_line_size()
 // conversion utility
 struct cstring_vector
 {
-    cstring_vector(const std::vector<std::string>& v_in):
-        m_size(v_in.size())
+    explicit cstring_vector(const std::vector<std::string>& v_in)
+        : m_storage(v_in)
     {
-        m_v = new const char*[m_size+1];
-        for (size_t i = 0; i < m_size; i++) {
-            m_v[i] = v_in[i].c_str();
-        }
-        m_v[m_size] = 0;
+        initialize_view();
     }
 
-    ~cstring_vector()
+    explicit cstring_vector(std::vector<std::string>&& v_in)
+        : m_storage(std::move(v_in))
     {
-        delete [] m_v;
+        initialize_view();
     }
 
-    const char* const* v() const { return m_v; }
-    size_t size() const { return m_size; }
+    const char* const* v() const { return m_view.data(); }
+    size_t size() const { return m_storage.size(); }
 
 private:
-    const char** m_v = nullptr;
-    const size_t m_size = 0;
+    void initialize_view()
+    {
+        m_view.resize(m_storage.size() + 1, nullptr);
+        for (size_t i = 0; i < m_storage.size(); ++i) {
+            m_view[i] = m_storage[i].c_str();
+        }
+        m_view.back() = nullptr;
+    }
+
+    std::vector<std::string> m_storage;
+    std::vector<const char*> m_view;
 };
 
 
