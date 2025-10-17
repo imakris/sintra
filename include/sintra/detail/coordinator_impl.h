@@ -500,7 +500,9 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
             std::shared_lock<std::shared_mutex> readers_lock(s_mproc->m_readers_mutex);
             auto it = s_mproc->m_readers.find(process_iid);
             if (it != s_mproc->m_readers.end()) {
-                it->second.stop_nowait();
+                if (auto& reader = it->second) {
+                    reader->stop_nowait();
+                }
             }
         }
     }
@@ -519,21 +521,6 @@ inline sequence_counter_type Coordinator::begin_process_draining(instance_id_typ
         m_draining_process_states[slot].store(1, std::memory_order_release);
     }
 
-    struct Group_reference
-    {
-        std::string name;
-        Process_group* group = nullptr;
-    };
-
-    std::vector<Group_reference> groups_to_notify;
-    {
-        lock_guard<mutex> lock(m_groups_mutex);
-        groups_to_notify.reserve(m_groups.size());
-        for (auto& entry : m_groups) {
-            groups_to_notify.push_back({entry.first, &entry.second});
-        }
-    }
-
     struct Pending_completion
     {
         std::string group_name;
@@ -541,17 +528,16 @@ inline sequence_counter_type Coordinator::begin_process_draining(instance_id_typ
     };
 
     std::vector<Pending_completion> pending_completions;
-    pending_completions.reserve(groups_to_notify.size());
+    {
+        lock_guard<mutex> lock(m_groups_mutex);
+        pending_completions.reserve(m_groups.size());
 
-    for (auto& reference : groups_to_notify) {
-        if (!reference.group) {
-            continue;
-        }
-
-        std::vector<Process_group::Barrier_completion> completions;
-        reference.group->drop_from_inflight_barriers(process_iid, completions);
-        if (!completions.empty()) {
-            pending_completions.push_back({reference.name, std::move(completions)});
+        for (auto& [name, group] : m_groups) {
+            std::vector<Process_group::Barrier_completion> completions;
+            group.drop_from_inflight_barriers(process_iid, completions);
+            if (!completions.empty()) {
+                pending_completions.push_back({name, std::move(completions)});
+            }
         }
     }
 
