@@ -209,6 +209,8 @@ inline void account_bootstrap_absence(instance_id_type member_id, const char* re
         uint32_t expected_after = 0;
         std::uint64_t swarm_id = 0;
         std::string group_name;
+        std::string members_snapshot;
+        std::string absentees_snapshot;
 
         {
             std::unique_lock<std::mutex> state_lock(state->m);
@@ -231,12 +233,12 @@ inline void account_bootstrap_absence(instance_id_type member_id, const char* re
                 state->expected -= 1;
             }
             expected_after = state->expected;
+            members_snapshot = format_instance_set(state->members);
+            absentees_snapshot = format_instance_set(state->accounted_absentees);
             notify = true;
         }
 
         if (notify) {
-            const auto members_snapshot = format_instance_set(state->members);
-            const auto absentees_snapshot = format_instance_set(state->accounted_absentees);
             detail::trace_sync("coordinator.group.drop_absent", [&](auto& os) {
                 os << "swarm=" << swarm_id
                    << " name=" << group_name
@@ -975,76 +977,76 @@ inline instance_id_type Coordinator::join_group(
 {
     auto* state = detail::ensure_bootstrap_group_state(swarm_id, group_name);
 
-    std::unique_lock<std::mutex> state_lock(state->m);
-    detail::trace_sync("coordinator.group.rpc_entry", [&](auto& os) {
-        os << "swarm=" << swarm_id
-           << " name=" << group_name
-           << " member=" << member_id
-           << " initialized=" << static_cast<int>(state->initialized)
-           << " expected=" << state->expected
-           << " joined=" << state->joined.load(std::memory_order_acquire);
-    });
+    uint32_t joined_after_insert = state->joined.load(std::memory_order_acquire);
+    uint32_t expected = 0;
+    bool became_ready = false;
+    std::string members_snapshot;
+    std::string absentees_snapshot;
 
-    if (!state->initialized) {
-        detail::trace_sync("coordinator.group.await_init", [&](auto& os) {
-            os << "swarm=" << swarm_id
-               << " name=" << group_name
-               << " member=" << member_id;
-        });
+    {
+        std::lock_guard<std::mutex> state_lock(state->m);
 
-        state->cv.wait(state_lock, [&] {
-            return state->initialized;
-        });
-
-        detail::trace_sync("coordinator.group.init_ready", [&](auto& os) {
+        detail::trace_sync("coordinator.group.rpc_entry", [&](auto& os) {
             os << "swarm=" << swarm_id
                << " name=" << group_name
                << " member=" << member_id
-               << " expected=" << state->expected;
+               << " initialized=" << static_cast<int>(state->initialized)
+               << " expected=" << state->expected
+               << " joined=" << state->joined.load(std::memory_order_acquire);
         });
-    }
 
-    const bool inserted = state->members.insert(member_id).second;
-    state->accounted_absentees.erase(member_id);
+        if (!state->initialized) {
+            detail::trace_sync("coordinator.group.join.uninitialized", [&](auto& os) {
+                os << "swarm=" << swarm_id
+                   << " name=" << group_name
+                   << " member=" << member_id;
+            });
+        }
 
-    uint32_t joined_after_insert = state->joined.load(std::memory_order_acquire);
-    if (inserted) {
-        joined_after_insert = state->joined.fetch_add(1, std::memory_order_acq_rel) + 1;
-    }
+        const bool inserted = state->members.insert(member_id).second;
+        state->accounted_absentees.erase(member_id);
 
-    const auto expected = state->expected;
-    const auto members_snapshot = detail::format_instance_set(state->members);
-    const auto absentees_snapshot = detail::format_instance_set(state->accounted_absentees);
+        joined_after_insert = state->joined.load(std::memory_order_acquire);
+        if (inserted) {
+            joined_after_insert = state->joined.fetch_add(1, std::memory_order_acq_rel) + 1;
+        }
 
-    detail::trace_sync("coordinator.group.join", [&](auto& os) {
-        os << "swarm=" << swarm_id
-           << " name=" << group_name
-           << " member=" << member_id
-           << " joined=" << joined_after_insert
-           << " expected=" << expected
-           << " members=" << members_snapshot
-           << " absentees=" << absentees_snapshot;
-    });
+        expected = state->expected;
+        members_snapshot = detail::format_instance_set(state->members);
+        absentees_snapshot = detail::format_instance_set(state->accounted_absentees);
 
-    if (expected > 0 && joined_after_insert >= expected) {
-        detail::trace_sync("coordinator.group.ready", [&](auto& os) {
+        detail::trace_sync("coordinator.group.join", [&](auto& os) {
             os << "swarm=" << swarm_id
                << " name=" << group_name
+               << " member=" << member_id
                << " joined=" << joined_after_insert
                << " expected=" << expected
                << " members=" << members_snapshot
                << " absentees=" << absentees_snapshot;
         });
+
+        became_ready = (expected > 0 && joined_after_insert >= expected);
+        if (became_ready) {
+            detail::trace_sync("coordinator.group.ready", [&](auto& os) {
+                os << "swarm=" << swarm_id
+                   << " name=" << group_name
+                   << " joined=" << joined_after_insert
+                   << " expected=" << expected
+                   << " members=" << members_snapshot
+                   << " absentees=" << absentees_snapshot;
+            });
+        }
     }
 
-    state_lock.unlock();
+    // FreeBSD bootstrap fix: avoid blocking the coordinator's request reader.
+    // Workers fall back to Coordinator::rpc_wait_for_instance when necessary.
     state->cv.notify_all();
 
     instance_id_type group_instance = invalid_instance_id;
     {
         lock_guard<mutex> groups_lock(m_groups_mutex);
         auto it = m_groups.find(group_name);
-        if (it != m_groups.end()) {
+        if (it != m_groups.end() && it->second.is_published()) {
             group_instance = it->second.m_instance_id;
         }
     }
