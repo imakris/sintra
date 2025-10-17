@@ -33,6 +33,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <vector>
 #include <unordered_set>
 
 
@@ -135,27 +136,21 @@ size_t get_cache_line_size()
 // conversion utility
 struct cstring_vector
 {
-    cstring_vector(const std::vector<std::string>& v_in):
-        m_size(v_in.size())
+    explicit cstring_vector(const std::vector<std::string>& v_in)
+        : m_strings(v_in.begin(), v_in.end()),
+          m_v(m_strings.size() + 1, nullptr)
     {
-        m_v = new const char*[m_size+1];
-        for (size_t i = 0; i < m_size; i++) {
-            m_v[i] = v_in[i].c_str();
+        for (std::size_t i = 0; i < m_strings.size(); ++i) {
+            m_v[i] = m_strings[i].c_str();
         }
-        m_v[m_size] = 0;
     }
 
-    ~cstring_vector()
-    {
-        delete [] m_v;
-    }
-
-    const char* const* v() const { return m_v; }
-    size_t size() const { return m_size; }
+    const char* const* v() const { return m_v.data(); }
+    std::size_t size() const { return m_strings.size(); }
 
 private:
-    const char** m_v = nullptr;
-    const size_t m_size = 0;
+    std::vector<std::string> m_strings;
+    std::vector<const char*> m_v;
 };
 
 
