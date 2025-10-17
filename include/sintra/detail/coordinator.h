@@ -163,7 +163,7 @@ private:
         const string& name,
         const unordered_set<instance_id_type>& member_process_ids);
 
-    instance_id_type join_and_wait_group(
+    instance_id_type join_group(
         std::uint64_t swarm_id,
         const std::string& group_name,
         instance_id_type member_id);
@@ -227,7 +227,7 @@ public:
     SINTRA_RPC_EXPLICIT(unpublish_transceiver)
     SINTRA_RPC_STRICT_EXPLICIT(begin_process_draining)
     SINTRA_RPC_EXPLICIT(make_process_group)
-    SINTRA_RPC_EXPLICIT(join_and_wait_group)
+    SINTRA_RPC_EXPLICIT(join_group)
     SINTRA_RPC_EXPLICIT(print)
     SINTRA_RPC_EXPLICIT(enable_recovery)
 

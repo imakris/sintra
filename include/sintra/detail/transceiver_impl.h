@@ -930,7 +930,7 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
     function_instance_id = s_mproc->activate_return_handler(rh);
 
     const bool is_join_group_rpc =
-        MESSAGE_T::id() == static_cast<type_id_type>(detail::reserved_id::join_and_wait_group);
+        MESSAGE_T::id() == static_cast<type_id_type>(detail::reserved_id::join_group);
 
     if (is_join_group_rpc) {
         detail::trace_sync("rpc.join.activate", [&](auto& os) {

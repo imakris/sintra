@@ -968,7 +968,7 @@ instance_id_type Coordinator::make_process_group(
     return ret;
 }
 
-inline instance_id_type Coordinator::join_and_wait_group(
+inline instance_id_type Coordinator::join_group(
     std::uint64_t swarm_id,
     const std::string& group_name,
     instance_id_type member_id)
@@ -984,6 +984,7 @@ inline instance_id_type Coordinator::join_and_wait_group(
            << " expected=" << state->expected
            << " joined=" << state->joined.load(std::memory_order_acquire);
     });
+
     if (!state->initialized) {
         detail::trace_sync("coordinator.group.await_init", [&](auto& os) {
             os << "swarm=" << swarm_id
@@ -1003,12 +1004,12 @@ inline instance_id_type Coordinator::join_and_wait_group(
         });
     }
 
+    const bool inserted = state->members.insert(member_id).second;
+    state->accounted_absentees.erase(member_id);
+
     uint32_t joined_after_insert = state->joined.load(std::memory_order_acquire);
-    if (state->members.insert(member_id).second) {
+    if (inserted) {
         joined_after_insert = state->joined.fetch_add(1, std::memory_order_acq_rel) + 1;
-    }
-    else {
-        joined_after_insert = state->joined.load(std::memory_order_acquire);
     }
 
     const auto expected = state->expected;
@@ -1025,86 +1026,19 @@ inline instance_id_type Coordinator::join_and_wait_group(
            << " absentees=" << absentees_snapshot;
     });
 
-    auto ready_predicate = [&]() {
-        if (!state->initialized) {
-            return false;
-        }
-
-        const auto expected_now = state->expected;
-        if (expected_now == 0) {
-            return true;
-        }
-
-        const auto joined_now = state->joined.load(std::memory_order_acquire);
-        if (joined_now >= expected_now) {
-            return true;
-        }
-
-        if (s_mproc && s_mproc->m_communication_state != Managed_process::COMMUNICATION_RUNNING) {
-            return true;
-        }
-
-        return false;
-    };
-
-    auto log_wait_state = [&](const char* stage) {
-        const auto expected_now = state->expected;
-        const auto joined_now = state->joined.load(std::memory_order_acquire);
-        const auto pending = expected_now > joined_now ? expected_now - joined_now : 0u;
-        const auto members_now = detail::format_instance_set(state->members);
-        const auto absentees_now = detail::format_instance_set(state->accounted_absentees);
-        detail::trace_sync("coordinator.group.wait_ready", [&](auto& os) {
-            os << "swarm=" << swarm_id
-               << " name=" << group_name
-               << " member=" << member_id
-               << " stage=" << stage
-               << " joined=" << joined_now
-               << " expected=" << expected_now
-               << " pending=" << pending
-               << " members=" << members_now
-               << " absentees=" << absentees_now;
-        });
-    };
-
-    if (!ready_predicate()) {
-        log_wait_state("start");
-        while (!state->cv.wait_for(state_lock, std::chrono::milliseconds(250), ready_predicate)) {
-            log_wait_state("tick");
-        }
-        log_wait_state("finish");
-    }
-
-    const auto final_expected = state->expected;
-    const auto final_joined = state->joined.load(std::memory_order_acquire);
-    const bool ready = final_expected == 0 || final_joined >= final_expected;
-    const auto final_members = detail::format_instance_set(state->members);
-    const auto final_absentees = detail::format_instance_set(state->accounted_absentees);
-    if (ready) {
+    if (expected > 0 && joined_after_insert >= expected) {
         detail::trace_sync("coordinator.group.ready", [&](auto& os) {
             os << "swarm=" << swarm_id
                << " name=" << group_name
-               << " joined=" << final_joined
-               << " expected=" << final_expected
-               << " members=" << final_members
-               << " absentees=" << final_absentees;
+               << " joined=" << joined_after_insert
+               << " expected=" << expected
+               << " members=" << members_snapshot
+               << " absentees=" << absentees_snapshot;
         });
     }
-    else {
-        detail::trace_sync("coordinator.group.not_ready", [&](auto& os) {
-            os << "swarm=" << swarm_id
-               << " name=" << group_name
-               << " member=" << member_id
-               << " joined=" << final_joined
-               << " expected=" << final_expected
-               << " terminating="
-               << static_cast<int>(s_mproc ? s_mproc->m_communication_state : Managed_process::COMMUNICATION_RUNNING)
-               << " members=" << final_members
-               << " absentees=" << final_absentees;
-        });
-    }
-    state->cv.notify_all();
 
     state_lock.unlock();
+    state->cv.notify_all();
 
     instance_id_type group_instance = invalid_instance_id;
     {
@@ -1115,16 +1049,9 @@ inline instance_id_type Coordinator::join_and_wait_group(
         }
     }
 
-    if (!ready && group_instance == invalid_instance_id) {
-        detail::trace_sync("coordinator.group.cancelled", [&](auto& os) {
-            os << "swarm=" << swarm_id
-               << " name=" << group_name
-               << " member=" << member_id;
-        });
-    }
-
     return group_instance;
 }
+
 
 
 

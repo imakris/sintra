@@ -61,7 +61,7 @@ namespace detail {
         publish_transceiver,
         unpublish_transceiver,
         make_process_group,
-        join_and_wait_group,
+        join_group,
         print,
         barrier,
         enable_recovery,

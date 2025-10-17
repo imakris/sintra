@@ -1206,22 +1206,65 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
                        << " name=" << group_name
                        << " coord=" << s_coord_id;
                 });
-                auto group_instance = Coordinator::rpc_join_and_wait_group(
+
+                const auto recorded_instance = Coordinator::rpc_join_group(
                     s_coord_id,
                     m_swarm_id,
                     group_name,
                     m_instance_id);
 
-                if (group_instance == invalid_instance_id) {
-                    detail::trace_sync("branch.worker.resolve_group", [&](auto& os) {
-                        os << "instance=" << m_instance_id
-                           << " swarm=" << m_swarm_id
-                           << " name=" << group_name
-                           << " coord=" << s_coord_id;
-                    });
-
-                    group_instance = Coordinator::rpc_resolve_instance(s_coord_id, group_name);
+                const std::string barrier_name = std::string("__swarm_join__/") + group_name;
+                sequence_counter_type barrier_flush_seq = invalid_sequence;
+                bool rendezvous_completed = false;
+                try {
+                    barrier_flush_seq = Process_group::rpc_barrier(group_name, barrier_name);
                 }
+                catch (const rpc_cancelled&) {
+                    if (m_communication_state != COMMUNICATION_RUNNING) {
+                        rendezvous_completed = true;
+                    }
+                    else {
+                        throw;
+                    }
+                }
+                catch (const std::runtime_error& e) {
+                    const std::string msg = e.what();
+                    const bool rpc_unavailable =
+                        (msg == "RPC failed") ||
+                        (msg.find("no longer available") != std::string::npos) ||
+                        (msg.find("shutting down") != std::string::npos);
+                    if (rpc_unavailable && m_communication_state != COMMUNICATION_RUNNING) {
+                        rendezvous_completed = true;
+                    }
+                    else {
+                        throw;
+                    }
+                }
+
+                if (barrier_flush_seq != invalid_sequence) {
+                    rendezvous_completed = true;
+                    if (!s_coord) {
+                        s_mproc->flush(process_of(s_coord_id), barrier_flush_seq);
+                    }
+                }
+
+                detail::trace_sync("branch.worker.barrier_join", [&](auto& os) {
+                    os << "instance=" << m_instance_id
+                       << " swarm=" << m_swarm_id
+                       << " name=" << group_name
+                       << " barrier=" << barrier_name
+                       << " completed=" << static_cast<int>(rendezvous_completed)
+                       << " recorded=" << recorded_instance;
+                });
+
+                detail::trace_sync("branch.worker.resolve_group", [&](auto& os) {
+                    os << "instance=" << m_instance_id
+                       << " swarm=" << m_swarm_id
+                       << " name=" << group_name
+                       << " coord=" << s_coord_id;
+                });
+
+                auto group_instance = Coordinator::rpc_resolve_instance(s_coord_id, group_name);
 
                 detail::trace_sync("branch.worker.got_group", [&](auto& os) {
                     os << "instance=" << m_instance_id
