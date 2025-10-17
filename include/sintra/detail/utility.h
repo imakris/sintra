@@ -35,6 +35,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <string>
 #include <vector>
 #include <unordered_set>
+#include <utility>
 
 
 #ifdef _WIN32
@@ -137,18 +138,54 @@ size_t get_cache_line_size()
 struct cstring_vector
 {
     explicit cstring_vector(const std::vector<std::string>& v_in)
-        : m_strings(v_in.begin(), v_in.end()),
-          m_v(m_strings.size() + 1, nullptr)
+        : m_strings(v_in.begin(), v_in.end())
     {
-        for (std::size_t i = 0; i < m_strings.size(); ++i) {
-            m_v[i] = m_strings[i].c_str();
+        rebuild_view();
+    }
+
+    cstring_vector(const cstring_vector& other)
+        : m_strings(other.m_strings)
+    {
+        rebuild_view();
+    }
+
+    cstring_vector& operator=(const cstring_vector& other)
+    {
+        if (this != &other) {
+            m_strings = other.m_strings;
+            rebuild_view();
         }
+        return *this;
+    }
+
+    cstring_vector(cstring_vector&& other) noexcept
+        : m_strings(std::move(other.m_strings))
+    {
+        rebuild_view();
+    }
+
+    cstring_vector& operator=(cstring_vector&& other) noexcept
+    {
+        if (this != &other) {
+            m_strings = std::move(other.m_strings);
+            rebuild_view();
+        }
+        return *this;
     }
 
     const char* const* v() const { return m_v.data(); }
     std::size_t size() const { return m_strings.size(); }
 
 private:
+    void rebuild_view()
+    {
+        m_v.resize(m_strings.size() + 1, nullptr);
+        for (std::size_t i = 0; i < m_strings.size(); ++i) {
+            m_v[i] = m_strings[i].c_str();
+        }
+        m_v.back() = nullptr;
+    }
+
     std::vector<std::string> m_strings;
     std::vector<const char*> m_v;
 };
