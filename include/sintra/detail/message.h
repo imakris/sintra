@@ -675,8 +675,17 @@ struct Message_ring_R: Ring_R<char>
 {
     Message_ring_R(const string& directory, const string& prefix, uint64_t id, uint32_t occurrence = 0):
         Ring_R(directory, get_base_filename(prefix, id, occurrence), message_ring_size),
-        m_id(id)
-    {}
+        m_id(id),
+        m_prefix(prefix)
+    {
+        const std::string scope = (prefix == "req") ? "ring.req.wait_data"
+                                                      : "ring.rep.wait_data";
+        this->configure_trace_context(
+            scope,
+            prefix,
+            s_mproc_id,
+            static_cast<instance_id_type>(id));
+    }
 
 
     void done_reading()
@@ -736,6 +745,7 @@ public:
 
 protected:
     Range<char>     m_range;
+    std::string     m_prefix;
 };
 
 
@@ -744,8 +754,17 @@ struct Message_ring_W: public Ring_W<char>
 {
     Message_ring_W(const string& directory, const string& prefix, uint64_t id, uint32_t occurrence = 0) :
         Ring_W(directory, get_base_filename(prefix, id, occurrence), message_ring_size),
-        m_id(id)
-    {}
+        m_id(id),
+        m_prefix(prefix)
+    {
+        const std::string scope = (prefix == "req") ? "ring.req.publish"
+                                                      : "ring.rep.publish";
+        this->configure_trace_context(
+            scope,
+            prefix,
+            s_mproc_id,
+            static_cast<instance_id_type>(id));
+    }
 
     Message_ring_W(const Message_ring_W&) = delete;
     const Message_ring_W& operator = (const Message_ring_W&) = delete;
@@ -758,6 +777,7 @@ struct Message_ring_W: public Ring_W<char>
 
 public:
     const uint64_t m_id;
+    std::string    m_prefix;
 };
 
 
