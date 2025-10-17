@@ -1272,13 +1272,13 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
                 }
 
                 detail::trace_sync("branch.worker.barrier_join", [&](auto& os) {
-                    os << "instance=" << m_instance_id
-                       << " swarm=" << m_swarm_id
-                       << " name=" << group_name
-                       << " barrier=" << barrier_name
-                       << " completed=" << static_cast<int>(rendezvous_completed)
-                       << " recorded=" << recorded_instance
-                       << " instance=" << group_instance;
+                        os << "instance=" << m_instance_id
+                           << " swarm=" << m_swarm_id
+                           << " name=" << group_name
+                           << " barrier=" << barrier_name
+                           << " completed=" << static_cast<int>(rendezvous_completed)
+                           << " recorded=" << recorded_instance
+                           << " instance=" << group_instance;
                 });
 
                 return group_instance;

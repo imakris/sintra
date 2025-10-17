@@ -1037,7 +1037,7 @@ inline instance_id_type Coordinator::join_group(
     }
 
     // FreeBSD bootstrap fix: avoid blocking the coordinator's request reader.
-    // Remaining joiners must be serviced by this same thread.
+    // Workers fall back to Coordinator::rpc_wait_for_instance when necessary.
     state->cv.notify_all();
 
     instance_id_type group_instance = invalid_instance_id;
