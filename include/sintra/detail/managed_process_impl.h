@@ -1133,14 +1133,71 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
             exit(1);
         }
 
-        m_group_all      = Coordinator::rpc_wait_for_instance(s_coord_id, "_sintra_all_processes");
-        m_group_external = Coordinator::rpc_wait_for_instance(s_coord_id, "_sintra_external_processes");
+        auto join_group = [&](const char* assigned_name) -> instance_id_type {
+            const std::string group_name{assigned_name};
+
+            try {
+                const auto recorded_instance = Coordinator::rpc_join_group(
+                    s_coord_id,
+                    m_swarm_id,
+                    group_name,
+                    m_instance_id);
+
+                instance_id_type group_instance = recorded_instance;
+                if (group_instance == invalid_instance_id) {
+                    group_instance = Coordinator::rpc_wait_for_instance(s_coord_id, group_name);
+                }
+
+                const std::string barrier_name = std::string("__swarm_join__/") + group_name;
+                sequence_counter_type barrier_flush_seq = invalid_sequence;
+
+                if (group_instance != invalid_instance_id) {
+                    try {
+                        barrier_flush_seq = Process_group::rpc_barrier(group_instance, barrier_name);
+                    }
+                    catch (const rpc_cancelled&) {
+                        if (m_communication_state == COMMUNICATION_RUNNING) {
+                            throw;
+                        }
+                    }
+                    catch (const std::runtime_error& e) {
+                        const std::string msg = e.what();
+                        const bool rpc_unavailable =
+                            (msg == "RPC failed") ||
+                            (msg.find("no longer available") != std::string::npos) ||
+                            (msg.find("shutting down") != std::string::npos);
+
+                        if (!(rpc_unavailable && m_communication_state != COMMUNICATION_RUNNING)) {
+                            throw;
+                        }
+                    }
+
+                    if (barrier_flush_seq != invalid_sequence && !s_coord) {
+                        s_mproc->flush(process_of(s_coord_id), barrier_flush_seq);
+                    }
+                }
+
+                return group_instance;
+            }
+            catch (const rpc_cancelled&) {
+                if (m_communication_state != COMMUNICATION_RUNNING) {
+                    return invalid_instance_id;
+                }
+                throw;
+            }
+        };
+
+        m_group_all = join_group("_sintra_all_processes");
+        m_group_external = join_group("_sintra_external_processes");
     }
 
     // assign_name requires that all group processes are instantiated, in order
     // to receive the instance_published event
     if (s_recovery_occurrence == 0) {
-        bool all_started = Process_group::rpc_barrier(m_group_all, UIBS);
+        bool all_started = true;
+        if (m_group_all != invalid_instance_id) {
+            all_started = Process_group::rpc_barrier(m_group_all, UIBS);
+        }
         if (!all_started) {
             return false;
         }

@@ -30,12 +30,19 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "coordinator.h"
 #include "managed_process.h"
 
+#include <atomic>
 #include <cassert>
+#include <condition_variable>
+#include <cstdint>
 #include <functional>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <shared_mutex>
 #include <stdexcept>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -48,6 +55,133 @@ using std::lock_guard;
 using std::mutex;
 using std::string;
 using std::unique_lock;
+
+namespace detail {
+
+struct Bootstrap_group_state
+{
+    uint32_t expected = 0;
+    std::atomic<uint32_t> joined{0};
+    std::mutex m;
+    std::condition_variable cv;
+    std::unordered_set<instance_id_type> members;
+    std::unordered_set<instance_id_type> accounted_absentees;
+    std::uint64_t swarm_id = 0;
+    std::string group_name;
+    bool initialized = false;
+};
+
+inline std::mutex& bootstrap_group_states_mutex()
+{
+    static std::mutex m;
+    return m;
+}
+
+inline std::unordered_map<std::uint64_t, std::unique_ptr<Bootstrap_group_state>>& bootstrap_group_states()
+{
+    static std::unordered_map<std::uint64_t, std::unique_ptr<Bootstrap_group_state>> states;
+    return states;
+}
+
+inline std::uint64_t bootstrap_group_key(std::uint64_t swarm_id, const std::string& name)
+{
+    std::uint64_t h = 1469598103934665603ull ^ (swarm_id * 1099511628211ull);
+    for (unsigned char c : name) {
+        h ^= c;
+        h *= 1099511628211ull;
+    }
+    return h;
+}
+
+inline Bootstrap_group_state* ensure_bootstrap_group_state(std::uint64_t swarm_id, const std::string& name)
+{
+    std::lock_guard<std::mutex> map_lock(bootstrap_group_states_mutex());
+    auto key = bootstrap_group_key(swarm_id, name);
+    auto& map = bootstrap_group_states();
+    auto& entry = map[key];
+    if (!entry) {
+        entry = std::make_unique<Bootstrap_group_state>();
+    }
+    return entry.get();
+}
+
+inline void reset_bootstrap_group_state(
+    std::uint64_t swarm_id,
+    const std::string& group_name,
+    uint32_t expected_members,
+    instance_id_type coordinator_member)
+{
+    auto* state = ensure_bootstrap_group_state(swarm_id, group_name);
+
+    uint32_t initial_joined = 0;
+    {
+        std::lock_guard<std::mutex> state_lock(state->m);
+        state->initialized = false;
+        state->expected = expected_members;
+        state->joined.store(0, std::memory_order_release);
+        state->members.clear();
+        state->accounted_absentees.clear();
+        state->swarm_id = swarm_id;
+        state->group_name = group_name;
+
+        if (expected_members > 0 && coordinator_member != invalid_instance_id) {
+            state->members.insert(coordinator_member);
+            initial_joined = 1;
+        }
+
+        state->joined.store(initial_joined, std::memory_order_release);
+        state->initialized = true;
+    }
+
+    state->cv.notify_all();
+}
+
+inline void account_bootstrap_absence(instance_id_type member_id)
+{
+    std::vector<Bootstrap_group_state*> states;
+    {
+        std::lock_guard<std::mutex> map_lock(bootstrap_group_states_mutex());
+        auto& map = bootstrap_group_states();
+        states.reserve(map.size());
+        for (auto& entry : map) {
+            states.push_back(entry.second.get());
+        }
+    }
+
+    for (auto* state : states) {
+        if (!state) {
+            continue;
+        }
+
+        bool notify = false;
+        {
+            std::unique_lock<std::mutex> state_lock(state->m);
+            if (!state->initialized) {
+                continue;
+            }
+
+            if (state->members.find(member_id) != state->members.end()) {
+                continue;
+            }
+
+            if (!state->accounted_absentees.insert(member_id).second) {
+                continue;
+            }
+
+            if (state->expected > 0) {
+                state->expected -= 1;
+            }
+
+            notify = true;
+        }
+
+        if (notify) {
+            state->cv.notify_all();
+        }
+    }
+}
+
+} // namespace detail
 
 
 
@@ -477,6 +611,8 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
             m_draining_process_states[slot].store(1, std::memory_order_release);
         }
 
+        detail::account_bootstrap_absence(process_iid);
+
         lock_guard<mutex> lock(m_groups_mutex);
 
         for (auto& group_entry : m_groups) {
@@ -520,6 +656,8 @@ inline sequence_counter_type Coordinator::begin_process_draining(instance_id_typ
         const auto slot = static_cast<size_t>(draining_index);
         m_draining_process_states[slot].store(1, std::memory_order_release);
     }
+
+    detail::account_bootstrap_absence(process_iid);
 
     struct Pending_completion
     {
@@ -588,24 +726,86 @@ instance_id_type Coordinator::make_process_group(
     const string& name,
     const unordered_set<instance_id_type>& member_process_ids)
 {
+    const auto swarm_id = s_mproc ? s_mproc->m_swarm_id : 0u;
+    const auto expected_members = static_cast<uint32_t>(member_process_ids.size());
+    const bool coordinator_in_group = member_process_ids.count(s_coord_id) != 0;
+
+    detail::reset_bootstrap_group_state(
+        swarm_id,
+        name,
+        expected_members,
+        coordinator_in_group ? s_coord_id : invalid_instance_id);
+
+    instance_id_type ret = invalid_instance_id;
+
     lock_guard<mutex> lock(m_groups_mutex);
 
-    // check if it exists
-    if (m_groups.count(name)) {
-        return invalid_instance_id;
+    auto it = m_groups.find(name);
+    if (it != m_groups.end()) {
+        auto& group = it->second;
+        const auto previous_instance = group.m_instance_id;
+        const bool was_published = group.is_published();
+
+        auto previous_members = group.m_process_ids;
+        for (const auto& member : previous_members) {
+            auto map_it = m_groups_of_process.find(member);
+            if (map_it == m_groups_of_process.end()) {
+                continue;
+            }
+            map_it->second.erase(previous_instance);
+            if (map_it->second.empty()) {
+                m_groups_of_process.erase(map_it);
+            }
+        }
+
+        m_groups.erase(it);
+
+        if (was_published) {
+            unpublish_transceiver(previous_instance);
+        }
     }
 
-    m_groups[name].set(member_process_ids);
-    auto ret = m_groups[name].m_instance_id;
+    auto& group = m_groups[name];
+    group.set(member_process_ids);
+    ret = group.m_instance_id;
 
-    for (auto& e : member_process_ids) {
-        m_groups_of_process[e].insert(ret);
+    for (const auto& member : member_process_ids) {
+        m_groups_of_process[member].insert(ret);
     }
 
-    m_groups[name].assign_name(name);
+    group.assign_name(name);
     return ret;
 }
 
+inline instance_id_type Coordinator::join_group(
+    std::uint64_t swarm_id,
+    const std::string& group_name,
+    instance_id_type member_id)
+{
+    auto* state = detail::ensure_bootstrap_group_state(swarm_id, group_name);
+
+    {
+        std::lock_guard<std::mutex> state_lock(state->m);
+        const bool inserted = state->members.insert(member_id).second;
+        state->accounted_absentees.erase(member_id);
+        if (inserted) {
+            state->joined.fetch_add(1, std::memory_order_acq_rel);
+        }
+    }
+
+    state->cv.notify_all();
+
+    instance_id_type group_instance = invalid_instance_id;
+    {
+        lock_guard<mutex> groups_lock(m_groups_mutex);
+        auto it = m_groups.find(group_name);
+        if (it != m_groups.end() && it->second.is_published()) {
+            group_instance = it->second.m_instance_id;
+        }
+    }
+
+    return group_instance;
+}
 
 
 // EXPORTED FOR RPC
