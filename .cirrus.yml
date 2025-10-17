@@ -20,4 +20,4 @@ freebsd_test_task:
     - cmake -S . -B build
     - cmake --build build
   test_script:
-    - env SINTRA_TRACE_SYNC=1 SINTRA_TRACE_SCOPE="managed.*,swarm.*,spawn.*,reader.*,branch.*,barrier.*,test.*,coordinator.*,rpc.*" ctest --test-dir build --output-on-failure -R sintra.basic_pubsub
+    - ctest --test-dir build --output-on-failure -R sintra.basic_pubsub
