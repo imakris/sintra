@@ -1519,13 +1519,85 @@ struct Ring_R : Ring<T, true>
     {
         // Check for shutdown signal before blocking
         if (m_stopping.load(std::memory_order_acquire)) {
+            if (!m_trace_scope.empty()) {
+                detail::trace_sync(m_trace_scope, [&](auto& os) {
+                    os << "owner=" << m_trace_owner
+                       << " peer=" << m_trace_peer
+                       << " label=" << m_trace_label
+                       << " stage=cancel"
+                       << " reason=precheck";
+                });
+            }
             return Range<T>{};  // Return empty range to signal shutdown
         }
 
+        double wait_start_time = 0.0;
+        double last_wait_tick  = 0.0;
+        bool   wait_logging    = false;
+
+        auto emit_wait_snapshot = [&](const char* stage, double now) {
+            if (m_trace_scope.empty()) {
+                return;
+            }
+
+            const auto leading = c.leading_sequence.load(std::memory_order_acquire);
+            const auto reading = m_reading_sequence->load(std::memory_order_acquire);
+            const auto pending = (leading > reading) ? (leading - reading) : 0u;
+            const double elapsed_ms = (wait_start_time > 0.0)
+                                        ? (now - wait_start_time) * 1000.0
+                                        : 0.0;
+
+            detail::trace_sync(m_trace_scope, [&](auto& os) {
+                os << "owner=" << m_trace_owner
+                   << " peer=" << m_trace_peer
+                   << " label=" << m_trace_label
+                   << " stage=" << stage
+                   << " elapsed_ms=" << static_cast<uint64_t>(elapsed_ms)
+                   << " leading=" << leading
+                   << " reading=" << reading
+                   << " pending=" << pending;
+            });
+        };
+
+        auto begin_wait_logging = [&]() {
+            if (wait_logging) {
+                return;
+            }
+            wait_logging = true;
+            wait_start_time = get_wtime();
+            last_wait_tick = wait_start_time;
+            emit_wait_snapshot("start", wait_start_time);
+        };
+
+        auto tick_wait_logging = [&]() {
+            if (!wait_logging || m_trace_scope.empty()) {
+                return;
+            }
+            const double now = get_wtime();
+            if ((now - last_wait_tick) * 1000.0 >= 100.0) {
+                last_wait_tick = now;
+                emit_wait_snapshot("tick", now);
+            }
+        };
+
+        auto finish_wait_logging = [&](const char* stage) {
+            if (!wait_logging) {
+                return;
+            }
+            wait_logging = false;
+            const double now = get_wtime();
+            emit_wait_snapshot(stage, now);
+            wait_start_time = 0.0;
+            last_wait_tick = 0.0;
+        };
+
 #if SINTRA_RING_READING_POLICY == SINTRA_RING_READING_POLICY_ALWAYS_SPIN
         while (m_reading_sequence->load() == c.leading_sequence.load()) {
+            begin_wait_logging();
+            tick_wait_logging();
             // Check for shutdown during spin
             if (m_stopping.load(std::memory_order_acquire)) {
+                finish_wait_logging("cancel");
                 return Range<T>{};
             }
             // CRITICAL: Force memory barrier to refresh cache lines
@@ -1538,7 +1610,10 @@ struct Ring_R : Ring<T, true>
         // Phase 1: Fast spin for ultra-low latency (~50μs)
         double fast_spin_end = get_wtime() + fast_spin_duration;
         while (m_reading_sequence->load() == c.leading_sequence.load() && get_wtime() < fast_spin_end) {
+            begin_wait_logging();
+            tick_wait_logging();
             if (m_stopping.load(std::memory_order_acquire)) {
+                finish_wait_logging("cancel");
                 return Range<T>{};
             }
             std::atomic_thread_fence(std::memory_order_acquire);
@@ -1546,15 +1621,18 @@ struct Ring_R : Ring<T, true>
 
         // Phase 2: Precision sleep cycles (1ms) for moderate latency with low CPU
         if (m_reading_sequence->load() == c.leading_sequence.load()) {
+            begin_wait_logging();
 #ifdef _WIN32
             ::timeBeginPeriod(1);
 #endif
             double precision_sleep_end = get_wtime() + precision_sleep_duration;
             while (m_reading_sequence->load() == c.leading_sequence.load() && get_wtime() < precision_sleep_end) {
+                tick_wait_logging();
                 if (m_stopping.load(std::memory_order_acquire)) {
 #ifdef _WIN32
                     ::timeEndPeriod(1);
 #endif
+                    finish_wait_logging("cancel");
                     return Range<T>{};
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -1570,8 +1648,10 @@ struct Ring_R : Ring<T, true>
             c.lock();
             m_sleepy_index.store(-1, std::memory_order_relaxed);
             if (m_reading_sequence->load() == c.leading_sequence.load()) {
+                begin_wait_logging();
                 if (m_stopping.load(std::memory_order_acquire)) {
                     c.unlock();
+                    finish_wait_logging("cancel");
                     return Range<T>{};
                 }
                 int sleepy = c.ready_stack[--c.num_ready];
@@ -1588,6 +1668,7 @@ struct Ring_R : Ring<T, true>
                         c.dirty_semaphores[sleepy_index].post_unordered();
                     }
                     c.unlock();
+                    finish_wait_logging("cancel");
                 }
 
                 if (c.dirty_semaphores[sleepy_index].wait()) {
@@ -1603,8 +1684,10 @@ struct Ring_R : Ring<T, true>
                 m_sleepy_index.store(-1, std::memory_order_release);
 
                 if (m_stopping.load(std::memory_order_acquire)) {
+                    finish_wait_logging("cancel");
                     return Range<T>{};
                 }
+                tick_wait_logging();
             }
         }
 
@@ -1612,8 +1695,11 @@ struct Ring_R : Ring<T, true>
     #if SINTRA_RING_READING_POLICY == SINTRA_RING_READING_POLICY_HYBRID
         double tl = get_wtime() + spin_before_sleep * 0.5;
         while (m_reading_sequence->load() == c.leading_sequence.load() && get_wtime() < tl) {
+            begin_wait_logging();
+            tick_wait_logging();
             // Check for shutdown during spin phase
             if (m_stopping.load(std::memory_order_acquire)) {
+                finish_wait_logging("cancel");
                 return Range<T>{};
             }
         }
@@ -1623,9 +1709,11 @@ struct Ring_R : Ring<T, true>
         c.lock();
         m_sleepy_index.store(-1, std::memory_order_relaxed);
         if (m_reading_sequence->load() == c.leading_sequence.load()) {
+            begin_wait_logging();
             // Check for shutdown before registering as sleeping
             if (m_stopping.load(std::memory_order_acquire)) {
                 c.unlock();
+                finish_wait_logging("cancel");
                 return Range<T>{};
             }
             int sleepy = c.ready_stack[--c.num_ready];
@@ -1643,6 +1731,7 @@ struct Ring_R : Ring<T, true>
                     c.dirty_semaphores[sleepy_index].post_unordered();
                 }
                 c.unlock();
+                finish_wait_logging("cancel");
             }
 
             if (c.dirty_semaphores[sleepy_index].wait()) { // unordered wake
@@ -1659,8 +1748,10 @@ struct Ring_R : Ring<T, true>
 
             // Check for shutdown after waking from semaphore
             if (m_stopping.load(std::memory_order_acquire)) {
+                finish_wait_logging("cancel");
                 return Range<T>{};
             }
+            tick_wait_logging();
         }
 #endif
 
@@ -1670,12 +1761,15 @@ struct Ring_R : Ring<T, true>
         Range<T> ret;
         if (num_range_elements == 0) {
             // Could happen if we were explicitly unblocked
+            finish_wait_logging("empty");
             return ret;
         }
 
         ret.begin = this->m_data + mod_u64(m_reading_sequence->load(), this->m_num_elements);
         ret.end   = ret.begin + num_range_elements;
         m_reading_sequence->fetch_add(num_range_elements);  // +=
+
+        finish_wait_logging("finish");
         return ret;
     }
 
@@ -1738,12 +1832,29 @@ protected:
     std::atomic<bool>                   m_reading               = false;
     std::atomic<bool>                   m_reading_lock          = false;
 
+    void configure_trace_context(
+        std::string scope,
+        std::string label,
+        instance_id_type owner,
+        instance_id_type peer)
+    {
+        m_trace_scope = std::move(scope);
+        m_trace_label = std::move(label);
+        m_trace_owner = owner;
+        m_trace_peer  = peer;
+    }
+
 private:
     std::atomic<int>                    m_sleepy_index          = -1;
     int                                 m_rs_index              = -1;
     std::atomic<bool>                   m_stopping              = false;
 
     inline static std::atomic<sequence_counter_type> s_zero_rs{0};
+
+    std::string       m_trace_scope;
+    std::string       m_trace_label;
+    instance_id_type  m_trace_owner = invalid_instance_id;
+    instance_id_type  m_trace_peer  = invalid_instance_id;
 
     typename Ring<T, true>::Control& c;
 };
@@ -1874,7 +1985,20 @@ struct Ring_W : Ring<T, false>
         c.leading_sequence.store(m_pending_new_sequence);
 #endif
         m_writing_thread = std::thread::id();
-        return m_pending_new_sequence;
+        const auto published_sequence = m_pending_new_sequence;
+
+        if (!m_trace_scope.empty()) {
+            const auto pending = published_sequence;
+            detail::trace_sync(m_trace_scope, [&](auto& os) {
+                os << "owner=" << m_trace_owner
+                   << " peer=" << m_trace_peer
+                   << " label=" << m_trace_label
+                   << " seq=" << published_sequence
+                   << " pending=" << pending;
+            });
+        }
+
+        return published_sequence;
     }
 
     /**
@@ -2166,6 +2290,25 @@ private:
     sequence_counter_type           m_pending_new_sequence   = 0;
 
     typename Ring<T, false>::Control& c;
+
+protected:
+    void configure_trace_context(
+        std::string scope,
+        std::string label,
+        instance_id_type owner,
+        instance_id_type peer)
+    {
+        m_trace_scope = std::move(scope);
+        m_trace_label = std::move(label);
+        m_trace_owner = owner;
+        m_trace_peer  = peer;
+    }
+
+private:
+    std::string       m_trace_scope;
+    std::string       m_trace_label;
+    instance_id_type  m_trace_owner = invalid_instance_id;
+    instance_id_type  m_trace_peer  = invalid_instance_id;
 };
 
 

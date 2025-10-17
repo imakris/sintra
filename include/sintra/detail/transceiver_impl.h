@@ -947,13 +947,14 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
     msg->sender_instance_id = s_mproc->m_instance_id;
     msg->receiver_instance_id = instance_id;
     msg->function_instance_id = function_instance_id;
-    s_mproc->m_out_req_c->done_writing();
+    const auto published_sequence = s_mproc->m_out_req_c->done_writing();
 
     if (is_join_group_rpc) {
         detail::trace_sync("rpc.join.sent", [&](auto& os) {
             os << "caller=" << s_mproc->m_instance_id
                << " target=" << instance_id
-               << " fiid=" << function_instance_id;
+               << " fiid=" << function_instance_id
+               << " seq=" << published_sequence;
         });
     }
 
