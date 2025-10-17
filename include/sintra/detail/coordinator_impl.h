@@ -1044,7 +1044,7 @@ inline instance_id_type Coordinator::join_group(
     {
         lock_guard<mutex> groups_lock(m_groups_mutex);
         auto it = m_groups.find(group_name);
-        if (it != m_groups.end()) {
+        if (it != m_groups.end() && it->second.is_published()) {
             group_instance = it->second.m_instance_id;
         }
     }
