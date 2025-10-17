@@ -728,13 +728,13 @@ instance_id_type Coordinator::make_process_group(
 {
     const auto swarm_id = s_mproc ? s_mproc->m_swarm_id : 0u;
     const auto expected_members = static_cast<uint32_t>(member_process_ids.size());
-    const bool coordinator_in_group = member_process_ids.count(s_coord_id) != 0;
+    const bool coordinator_in_group = s_mproc && member_process_ids.count(s_mproc_id) != 0;
 
     detail::reset_bootstrap_group_state(
         swarm_id,
         name,
         expected_members,
-        coordinator_in_group ? s_coord_id : invalid_instance_id);
+        coordinator_in_group ? s_mproc_id : invalid_instance_id);
 
     instance_id_type ret = invalid_instance_id;
 
