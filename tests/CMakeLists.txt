@@ -99,7 +99,7 @@ if(SINTRA_CI_TESTS)
 endif()
 
 if(CMAKE_SYSTEM_NAME MATCHES "FreeBSD")
-    set(_sintra_trace_scope "managed.*,swarm.*,spawn.*,reader.*,branch.*,barrier.*,test.*,coordinator.*,rpc.*")
+    set(_sintra_trace_scope "managed.*,swarm.*,spawn.*,reader.*,branch.*,barrier.*,test.*,coordinator.*,rpc.*,ring.*")
     set(_sintra_trace_env
         SINTRA_TRACE_SYNC=1
         "SINTRA_TRACE_SCOPE=${_sintra_trace_scope}"

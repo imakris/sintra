@@ -126,6 +126,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 // ─── Project config & utilities (kept as in original codebase) ───────────────
 #include "config.h"      // defines: assumed_cache_line_size, max_process_index,
                          //          SINTRA_RING_READING_POLICY*, etc.
+#include "debug_log.h"   // detail::trace_sync diagnostics hooks
 #include "get_wtime.h"   // high-res wall clock (used by hybrid reader policy)
 #include "id_types.h"    // ID and type aliases as used by the project
 
@@ -141,11 +142,13 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <filesystem>
 #include <functional>
 #include <fstream>
+#include <iomanip>
 #include <limits>
 #include <memory>
 #include <mutex>         // std::once_flag, std::call_once
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <thread>
 #include <utility>
@@ -2028,12 +2031,81 @@ private:
         // Only check when crossing to a new octile (fast path otherwise)
         if (m_octile != new_octile) {
             auto range_mask = (uint64_t(0xff) << (8 * new_octile));
+            const uint32_t self_pid = get_current_pid();
+            double wait_start = 0.0;
+            double last_snapshot = 0.0;
+            bool   emitted_snapshot = false;
+
+            auto emit_wait_snapshot = [&](std::string_view scope, double now) {
+                const double elapsed = now - wait_start;
+                const uint64_t read_access_snapshot = c.read_access.load(std::memory_order_acquire);
+
+                detail::trace_sync(scope, [&](auto& os) {
+                    const auto writer_pid_snapshot = c.writer_pid.load(std::memory_order_acquire);
+
+                    os << "ring=" << static_cast<const void*>(this)
+                       << " oct=" << new_octile
+                       << " waiter_pid=" << self_pid
+                       << " writer_pid=" << writer_pid_snapshot
+                       << " pending=" << m_pending_new_sequence
+                       << " wait_ms=" << std::fixed << std::setprecision(3) << (elapsed * 1000.0)
+                       << std::defaultfloat
+                       << " mask=0x" << std::hex << range_mask
+                       << " read_access=0x" << read_access_snapshot
+                       << std::dec;
+
+                    bool first = true;
+                    os << " holders=[";
+                    for (int i = 0; i < max_process_index; ++i) {
+                        auto& slot = c.reading_sequences[i].data;
+                        if (slot.status.load(std::memory_order_acquire) != Ring<T, false>::READER_STATE_ACTIVE) {
+                            continue;
+                        }
+                        if (!slot.has_guard.load(std::memory_order_acquire)) {
+                            continue;
+                        }
+                        const uint8_t trailing_oct = slot.trailing_octile.load(std::memory_order_relaxed);
+                        if (trailing_oct != new_octile) {
+                            continue;
+                        }
+
+                        if (!first) {
+                            os << ';';
+                        }
+                        first = false;
+
+                        os << "idx=" << i
+                           << ",pid=" << slot.owner_pid.load(std::memory_order_relaxed)
+                           << ",seq=" << slot.v.load(std::memory_order_acquire);
+                    }
+                    os << ']';
+                });
+            };
+
 #ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
             uint64_t spin_count = 0;
             const uint64_t spin_loop_budget = ring_detail::get_eviction_spin_loop_budget();
 #endif
             while (c.read_access.load(std::memory_order_acquire) & range_mask) {
-                // Busy-wait until the target octile is unguarded
+                const double now = get_wtime();
+                if (wait_start == 0.0) {
+                    wait_start = now;
+                    last_snapshot = now;
+                }
+
+                const double elapsed = now - wait_start;
+                const double since_last = now - last_snapshot;
+                constexpr double first_emit_delay_ms = 5.0;   // 5 ms before the first snapshot
+                constexpr double emit_interval_ms    = 100.0; // then every 100 ms
+
+                if (elapsed * 1000.0 >= first_emit_delay_ms &&
+                    (since_last * 1000.0 >= emit_interval_ms || !emitted_snapshot))
+                {
+                    last_snapshot = now;
+                    emitted_snapshot = true;
+                    emit_wait_snapshot("ring.wait_guard", now);
+                }
+
 #ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
                 if (++spin_count > spin_loop_budget) {
                     // Writer is stuck. Time to find and evict the slow reader(s).
@@ -2078,6 +2150,11 @@ private:
                 }
 #endif
             }
+
+            if (wait_start != 0.0 && emitted_snapshot) {
+                emit_wait_snapshot("ring.wait_guard.released", get_wtime());
+            }
+
             m_octile = new_octile;
         }
         return this->m_data + index;
