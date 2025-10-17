@@ -26,47 +26,55 @@ else()
     set(SINTRA_TEST_TARGET sintra)
 endif()
 
+set(SINTRA_TEST_SUPPORT_LIBS)
+if(NOT WIN32)
+    find_library(EXECINFO_LIB execinfo)
+    if(EXECINFO_LIB)
+        list(APPEND SINTRA_TEST_SUPPORT_LIBS ${EXECINFO_LIB})
+    endif()
+endif()
+
 add_executable(sintra_dummy_test dummy_test.cpp)
 add_test(NAME sintra.dummy COMMAND sintra_dummy_test)
 set_tests_properties(sintra.dummy PROPERTIES FIXTURES_SETUP sintra_ready)
 set_tests_properties(sintra.dummy PROPERTIES TIMEOUT 20)
 
 add_executable(sintra_basic_pubsub_test basic_pub_sub.cpp)
-target_link_libraries(sintra_basic_pubsub_test PRIVATE ${SINTRA_TEST_TARGET})
+target_link_libraries(sintra_basic_pubsub_test PRIVATE ${SINTRA_TEST_TARGET} ${SINTRA_TEST_SUPPORT_LIBS})
 
 add_test(NAME sintra.basic_pubsub COMMAND sintra_basic_pubsub_test)
 list(APPEND SINTRA_CI_TESTS sintra.basic_pubsub)
 
 add_executable(sintra_ping_pong_test ping_pong_test.cpp)
-target_link_libraries(sintra_ping_pong_test PRIVATE ${SINTRA_TEST_TARGET})
+target_link_libraries(sintra_ping_pong_test PRIVATE ${SINTRA_TEST_TARGET} ${SINTRA_TEST_SUPPORT_LIBS})
 
 add_test(NAME sintra.ping_pong COMMAND sintra_ping_pong_test)
 list(APPEND SINTRA_CI_TESTS sintra.ping_pong)
 
 add_executable(sintra_ping_pong_multi_test ping_pong_multi_test.cpp)
-target_link_libraries(sintra_ping_pong_multi_test PRIVATE ${SINTRA_TEST_TARGET})
+target_link_libraries(sintra_ping_pong_multi_test PRIVATE ${SINTRA_TEST_TARGET} ${SINTRA_TEST_SUPPORT_LIBS})
 
 add_test(NAME sintra.ping_pong_multi COMMAND sintra_ping_pong_multi_test)
 list(APPEND SINTRA_CI_TESTS sintra.ping_pong_multi)
 
 add_executable(sintra_rpc_append_test rpc_append_test.cpp)
-target_link_libraries(sintra_rpc_append_test PRIVATE ${SINTRA_TEST_TARGET})
+target_link_libraries(sintra_rpc_append_test PRIVATE ${SINTRA_TEST_TARGET} ${SINTRA_TEST_SUPPORT_LIBS})
 
 add_test(NAME sintra.rpc_append COMMAND sintra_rpc_append_test)
 list(APPEND SINTRA_CI_TESTS sintra.rpc_append)
 
 add_executable(sintra_recovery_test recovery_test.cpp)
-target_link_libraries(sintra_recovery_test PRIVATE ${SINTRA_TEST_TARGET})
+target_link_libraries(sintra_recovery_test PRIVATE ${SINTRA_TEST_TARGET} ${SINTRA_TEST_SUPPORT_LIBS})
 add_test(NAME sintra.recovery COMMAND sintra_recovery_test)
 list(APPEND SINTRA_CI_TESTS sintra.recovery)
 
 add_executable(sintra_barrier_flush_test barrier_flush_test.cpp)
-target_link_libraries(sintra_barrier_flush_test PRIVATE ${SINTRA_TEST_TARGET})
+target_link_libraries(sintra_barrier_flush_test PRIVATE ${SINTRA_TEST_TARGET} ${SINTRA_TEST_SUPPORT_LIBS})
 add_test(NAME sintra.barrier_flush COMMAND sintra_barrier_flush_test)
 list(APPEND SINTRA_CI_TESTS sintra.barrier_flush)
 
 add_executable(sintra_barrier_stress_test barrier_stress_test.cpp)
-target_link_libraries(sintra_barrier_stress_test PRIVATE ${SINTRA_TEST_TARGET})
+target_link_libraries(sintra_barrier_stress_test PRIVATE ${SINTRA_TEST_TARGET} ${SINTRA_TEST_SUPPORT_LIBS})
 if(WIN32)
     target_link_libraries(sintra_barrier_stress_test PRIVATE winmm)
 endif()
@@ -74,7 +82,7 @@ add_test(NAME sintra.barrier_stress COMMAND sintra_barrier_stress_test)
 list(APPEND SINTRA_CI_TESTS sintra.barrier_stress)
 
 add_executable(sintra_processing_fence_test processing_fence_test.cpp)
-target_link_libraries(sintra_processing_fence_test PRIVATE ${SINTRA_TEST_TARGET})
+target_link_libraries(sintra_processing_fence_test PRIVATE ${SINTRA_TEST_TARGET} ${SINTRA_TEST_SUPPORT_LIBS})
 add_test(NAME sintra.processing_fence COMMAND sintra_processing_fence_test)
 list(APPEND SINTRA_CI_TESTS sintra.processing_fence)
 
