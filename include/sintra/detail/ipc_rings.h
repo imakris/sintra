@@ -138,13 +138,16 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <cstdio>        // std::FILE, std::fprintf
 #include <cstring>       // std::strlen
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <functional>
 #include <fstream>
+#include <iostream>
 #include <limits>
 #include <memory>
 #include <mutex>         // std::once_flag, std::call_once
 #include <stdexcept>
+#include <sstream>
 #include <string>
 #include <system_error>
 #include <thread>
@@ -202,6 +205,30 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 // ─────────────────────────────────────────────────────────────────────────────
 
 namespace sintra {
+
+namespace detail {
+
+inline bool ring_trace_enabled()
+{
+    static bool enabled = []() {
+        const char* env = std::getenv("SINTRA_DEBUG_RING");
+        return env && *env;
+    }();
+    return enabled;
+}
+
+template <typename F>
+inline void ring_trace(const char* tag, F&& formatter)
+{
+    if (!ring_trace_enabled()) {
+        return;
+    }
+    std::ostringstream oss;
+    formatter(oss);
+    std::cerr << "[sintra] ring:" << tag << ' ' << oss.str() << std::endl;
+}
+
+} // namespace detail
 
 namespace fs  = std::filesystem;
 namespace ipc = boost::interprocess;
@@ -2009,14 +2036,48 @@ private:
         assert(num_elements_to_write <= this->m_num_elements / 8);
 
         // Enforce exclusive writer (cheap fast-path loop)
-        while (m_writing_thread.load(std::memory_order_relaxed) !=
-               std::this_thread::get_id()) {
-            auto invalid = std::thread::id();
-            m_writing_thread.compare_exchange_strong(
-                invalid,
-                std::this_thread::get_id(),
-                std::memory_order_acq_rel,
-                std::memory_order_acquire);
+        const std::thread::id current_tid = std::this_thread::get_id();
+        const bool trace_wait = detail::ring_trace_enabled();
+        bool reported_wait = false;
+        while (true) {
+            std::thread::id owner = m_writing_thread.load(std::memory_order_relaxed);
+            if (owner == current_tid) {
+                break;
+            }
+            if (owner == std::thread::id()) {
+                if (m_writing_thread.compare_exchange_strong(
+                        owner,
+                        current_tid,
+                        std::memory_order_acq_rel,
+                        std::memory_order_acquire))
+                {
+                    break;
+                }
+                continue;
+            }
+
+            if (trace_wait && !reported_wait) {
+                reported_wait = true;
+                detail::ring_trace("wait_writer", [&](auto& os) {
+                    os << "pid=" << get_current_pid()
+                       << " ring=" << static_cast<const void*>(this)
+                       << " owner=" << owner
+                       << " current=" << current_tid
+                       << " elements=" << num_elements_to_write;
+                });
+            }
+
+            if (trace_wait) {
+                std::this_thread::yield();
+            }
+        }
+
+        if (trace_wait && reported_wait) {
+            detail::ring_trace("acquired_writer", [&](auto& os) {
+                os << "pid=" << get_current_pid()
+                   << " ring=" << static_cast<const void*>(this)
+                   << " current=" << current_tid;
+            });
         }
 
         const size_t index = mod_u64(m_pending_new_sequence, this->m_num_elements);
