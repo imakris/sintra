@@ -246,6 +246,13 @@ sequence_counter_type Process_group::barrier(
         b.failed = false;
         b.common_function_iid = make_instance_id();
 
+        detail::bootstrap_trace("barrier_init", [&](auto& os) {
+            os << "swarm=" << (s_mproc ? s_mproc->m_swarm_id : 0)
+               << " name=" << barrier_name
+               << " caller=" << caller_piid
+               << " pending=" << b.processes_pending.size();
+        });
+
         // Filter out draining processes while still holding m_call_mutex for atomicity
         if (auto* coord = s_coord) {
             for (auto it = b.processes_pending.begin();
@@ -264,6 +271,13 @@ sequence_counter_type Process_group::barrier(
     // Now safe to release m_call_mutex - barrier state is consistent and other threads
     // need to be able to arrive at the barrier concurrently
     basic_lock.unlock();
+
+    detail::bootstrap_trace("barrier_arrive", [&](auto& os) {
+        os << "swarm=" << (s_mproc ? s_mproc->m_swarm_id : 0)
+           << " name=" << barrier_name
+           << " caller=" << caller_piid
+           << " pending_before=" << b.processes_pending.size();
+    });
 
     b.processes_arrived.insert(caller_piid);
     b.processes_pending.erase(caller_piid);
@@ -291,6 +305,13 @@ sequence_counter_type Process_group::barrier(
         if (it != m_barriers.end() && it->second.common_function_iid == current_common_fiid) {
             m_barriers.erase(it);
         }
+
+        detail::bootstrap_trace("barrier_complete", [&](auto& os) {
+            os << "swarm=" << (s_mproc ? s_mproc->m_swarm_id : 0)
+               << " name=" << barrier_name
+               << " caller=" << caller_piid
+               << " recipients=" << additional_pids.size();
+        });
         // basic_lock will unlock m_call_mutex on return
         // Use reply ring watermark (m_out_rep_c) since barrier completion messages
         // are sent on the reply channel. Get it at return time for the calling process.
@@ -311,6 +332,13 @@ sequence_counter_type Process_group::barrier(
 
         mark_rpc_reply_deferred();
         b.m.unlock();
+
+        detail::bootstrap_trace("barrier_deferred", [&](auto& os) {
+            os << "swarm=" << (s_mproc ? s_mproc->m_swarm_id : 0)
+               << " name=" << barrier_name
+               << " caller=" << caller_piid
+               << " remaining=" << b.processes_pending.size();
+        });
         return 0;
     }
 }
@@ -833,6 +861,7 @@ inline instance_id_type Coordinator::join_group(
             os << "swarm=" << swarm_id
                << " name=" << group_name
                << " member=" << member_id
+               << " inserted=" << inserted
                << " joined=" << state->joined.load(std::memory_order_acquire)
                << " expected=" << state->expected;
         });
