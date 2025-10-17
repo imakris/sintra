@@ -34,11 +34,13 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <cassert>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdlib>
 #include <functional>
 #include <iostream>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -105,6 +107,26 @@ inline Bootstrap_group_state* ensure_bootstrap_group_state(std::uint64_t swarm_i
     return entry.get();
 }
 
+inline bool bootstrap_trace_enabled()
+{
+    static bool enabled = []() {
+        const char* env = std::getenv("SINTRA_DEBUG_BOOTSTRAP");
+        return env && *env;
+    }();
+    return enabled;
+}
+
+template <typename F>
+inline void bootstrap_trace(const char* tag, F&& formatter)
+{
+    if (!bootstrap_trace_enabled()) {
+        return;
+    }
+    std::ostringstream oss;
+    formatter(oss);
+    std::cerr << "[sintra] bootstrap:" << tag << ' ' << oss.str() << std::endl;
+}
+
 inline void reset_bootstrap_group_state(
     std::uint64_t swarm_id,
     const std::string& group_name,
@@ -131,6 +153,14 @@ inline void reset_bootstrap_group_state(
 
         state->joined.store(initial_joined, std::memory_order_release);
         state->initialized = true;
+
+        bootstrap_trace("reset", [&](auto& os) {
+            os << "swarm=" << swarm_id
+               << " name=" << group_name
+               << " expected=" << expected_members
+               << " initial_joined=" << initial_joined
+               << " coordinator=" << coordinator_member;
+        });
     }
 
     state->cv.notify_all();
@@ -164,15 +194,22 @@ inline void account_bootstrap_absence(instance_id_type member_id)
                 continue;
             }
 
-            if (!state->accounted_absentees.insert(member_id).second) {
-                continue;
-            }
+        if (!state->accounted_absentees.insert(member_id).second) {
+            continue;
+        }
 
-            if (state->expected > 0) {
-                state->expected -= 1;
-            }
+        if (state->expected > 0) {
+            state->expected -= 1;
+        }
 
-            notify = true;
+        notify = true;
+
+        bootstrap_trace("absence", [&](auto& os) {
+            os << "swarm=" << state->swarm_id
+               << " name=" << state->group_name
+               << " member=" << member_id
+               << " remaining=" << state->expected;
+        });
         }
 
         if (notify) {
@@ -791,6 +828,14 @@ inline instance_id_type Coordinator::join_group(
         if (inserted) {
             state->joined.fetch_add(1, std::memory_order_acq_rel);
         }
+
+        detail::bootstrap_trace("join", [&](auto& os) {
+            os << "swarm=" << swarm_id
+               << " name=" << group_name
+               << " member=" << member_id
+               << " joined=" << state->joined.load(std::memory_order_acquire)
+               << " expected=" << state->expected;
+        });
     }
 
     state->cv.notify_all();
