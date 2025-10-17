@@ -621,6 +621,18 @@ instance_id_type Coordinator::make_process_group(
 }
 
 
+inline void Coordinator::join_group(const string& name, instance_id_type member_process_id)
+{
+    lock_guard<mutex> lock(m_groups_mutex);
+    auto it = m_groups.find(name);
+    if (it == m_groups.end()) {
+        throw std::logic_error("Process group does not exist.");
+    }
+
+    it->second.record_join(member_process_id);
+}
+
+
 
 // EXPORTED FOR RPC
 inline

@@ -35,6 +35,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <array>
 #include <atomic>
 #include <condition_variable>
+#include <stdexcept>
 #include <mutex>
 #include <unordered_set>
 #include <vector>
@@ -91,6 +92,8 @@ struct Process_group: Derived_transceiver<Process_group>
 
     unordered_map<string, Barrier>              m_barriers;
     unordered_set<instance_id_type>             m_process_ids;
+    unordered_set<instance_id_type>             m_joined_process_ids;
+    size_t                                      m_expected_members = 0;
 
     mutex m_call_mutex;
     SINTRA_RPC_STRICT_EXPLICIT(barrier)
@@ -105,6 +108,7 @@ public:
 private:
     void add_process(instance_id_type process_iid);
     void remove_process(instance_id_type process_iid);
+    void record_join(instance_id_type process_iid);
 
     friend struct Coordinator;
 };
@@ -117,6 +121,8 @@ void Process_group::set(const unordered_set<instance_id_type>& member_process_id
     m_process_ids = unordered_set<instance_id_type>(
         member_process_ids.begin(), member_process_ids.end()
     );
+    m_joined_process_ids.clear();
+    m_expected_members = m_process_ids.size();
 }
 
 
@@ -125,6 +131,7 @@ void Process_group::add_process(instance_id_type process_iid)
 {
     std::lock_guard lock(m_call_mutex);
     m_process_ids.insert(process_iid);
+    m_expected_members = m_process_ids.size();
 }
 
 
@@ -133,6 +140,19 @@ void Process_group::remove_process(instance_id_type process_iid)
 {
     std::lock_guard lock(m_call_mutex);
     m_process_ids.erase(process_iid);
+    m_joined_process_ids.erase(process_iid);
+    m_expected_members = m_process_ids.size();
+}
+
+
+inline
+void Process_group::record_join(instance_id_type process_iid)
+{
+    std::lock_guard lock(m_call_mutex);
+    if (m_process_ids.find(process_iid) == m_process_ids.end()) {
+        throw std::logic_error("The caller is not a member of the process group.");
+    }
+    m_joined_process_ids.insert(process_iid);
 }
 
 
@@ -162,6 +182,7 @@ private:
     instance_id_type make_process_group(
         const string& name,
         const unordered_set<instance_id_type>& member_process_ids);
+    void join_group(const string& name, instance_id_type member_process_id);
 
 
     void enable_recovery(instance_id_type piid);
@@ -222,6 +243,7 @@ public:
     SINTRA_RPC_EXPLICIT(unpublish_transceiver)
     SINTRA_RPC_STRICT_EXPLICIT(begin_process_draining)
     SINTRA_RPC_EXPLICIT(make_process_group)
+    SINTRA_RPC_EXPLICIT(join_group)
     SINTRA_RPC_EXPLICIT(print)
     SINTRA_RPC_EXPLICIT(enable_recovery)
 

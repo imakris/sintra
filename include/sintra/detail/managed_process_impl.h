@@ -1116,6 +1116,8 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
         m_group_all      = s_coord->make_process_group("_sintra_all_processes", all_processes);
         m_group_external = s_coord->make_process_group("_sintra_external_processes", successfully_spawned);
 
+        s_coord->join_group("_sintra_all_processes", m_instance_id);
+
         s_branch_index = 0;
     }
     else {
@@ -1132,11 +1134,19 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
 
         m_group_all      = Coordinator::rpc_wait_for_instance(s_coord_id, "_sintra_all_processes");
         m_group_external = Coordinator::rpc_wait_for_instance(s_coord_id, "_sintra_external_processes");
+
+        Coordinator::rpc_join_group(s_coord_id, "_sintra_all_processes", s_mproc_id);
     }
 
     // assign_name requires that all group processes are instantiated, in order
     // to receive the instance_published event
     if (s_recovery_occurrence == 0) {
+        const bool join_completed = Process_group::rpc_barrier(
+            m_group_all, "__swarm_join__");
+        if (!join_completed) {
+            return false;
+        }
+
         bool all_started = Process_group::rpc_barrier(m_group_all, UIBS);
         if (!all_started) {
             return false;
