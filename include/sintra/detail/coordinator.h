@@ -166,6 +166,7 @@ private:
         std::uint64_t swarm_id,
         const std::string& group_name,
         instance_id_type member_id);
+    bool unpublish_transceiver_locked(instance_id_type iid);
 
 
     void enable_recovery(instance_id_type piid);

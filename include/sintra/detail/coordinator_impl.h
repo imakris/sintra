@@ -143,6 +143,53 @@ inline void bootstrap_trace(const char* tag, F&& formatter)
     std::cerr << "[sintra] bootstrap:" << tag << ' ' << oss.str() << std::endl;
 }
 
+inline thread_local bool publish_mutex_owned_state = false;
+
+struct Publish_mutex_guard
+{
+    std::mutex& mutex;
+    bool owns = false;
+
+    explicit Publish_mutex_guard(std::mutex& m):
+        mutex(m),
+        owns(true)
+    {
+        mutex.lock();
+        publish_mutex_owned_state = true;
+    }
+
+    ~Publish_mutex_guard()
+    {
+        if (owns) {
+            publish_mutex_owned_state = false;
+            mutex.unlock();
+        }
+    }
+
+    void lock()
+    {
+        if (!owns) {
+            mutex.lock();
+            publish_mutex_owned_state = true;
+            owns = true;
+        }
+    }
+
+    void unlock()
+    {
+        if (owns) {
+            publish_mutex_owned_state = false;
+            mutex.unlock();
+            owns = false;
+        }
+    }
+};
+
+inline bool is_publish_mutex_owned()
+{
+    return publish_mutex_owned_state;
+}
+
 inline void reset_bootstrap_group_state(
     std::uint64_t swarm_id,
     const std::string& group_name,
@@ -522,12 +569,12 @@ instance_id_type Coordinator::wait_for_instance(const string& assigned_name)
     // the instance, thus using it for synchronization may not always be
     // applicable.
 
-    m_publish_mutex.lock();
+    detail::Publish_mutex_guard publish_guard(m_publish_mutex);
     instance_id_type caller_piid = s_tl_current_message->sender_instance_id;
 
     auto iid = resolve_instance(assigned_name);
     if (iid != invalid_instance_id) {
-        m_publish_mutex.unlock();
+        publish_guard.unlock();
         return iid;
     }
 
@@ -551,7 +598,7 @@ instance_id_type Coordinator::wait_for_instance(const string& assigned_name)
         (type_id_type)detail::reserved_id::deferral);
 
     mark_rpc_reply_deferred();
-    m_publish_mutex.unlock();
+    publish_guard.unlock();
     return invalid_instance_id;
 }
 
@@ -561,7 +608,7 @@ instance_id_type Coordinator::wait_for_instance(const string& assigned_name)
 inline
 instance_id_type Coordinator::publish_transceiver(type_id_type tid, instance_id_type iid, const string& assigned_name)
 {
-    lock_guard<mutex> lock(m_publish_mutex);
+    detail::Publish_mutex_guard publish_guard(m_publish_mutex);
 
     // empty strings are not valid names
     if (assigned_name.empty()) {
@@ -656,7 +703,12 @@ instance_id_type Coordinator::publish_transceiver(type_id_type tid, instance_id_
 inline
 bool Coordinator::unpublish_transceiver(instance_id_type iid)
 {
-    lock_guard<mutex> lock(m_publish_mutex);
+    detail::Publish_mutex_guard publish_guard(m_publish_mutex);
+    return unpublish_transceiver_locked(iid);
+}
+
+inline bool Coordinator::unpublish_transceiver_locked(instance_id_type iid)
+{
 
     // the process of the transceiver must have been registered
     auto process_iid = process_of(iid);
@@ -857,8 +909,14 @@ instance_id_type Coordinator::make_process_group(
         }
     }
 
-    if (previous_was_published) {
-        unpublish_transceiver(previous_instance);
+    if (previous_was_published && previous_instance != invalid_instance_id) {
+        if (detail::is_publish_mutex_owned()) {
+            unpublish_transceiver_locked(previous_instance);
+        }
+        else {
+            detail::Publish_mutex_guard publish_guard(m_publish_mutex);
+            unpublish_transceiver_locked(previous_instance);
+        }
     }
 
     detail::reset_bootstrap_group_state(
