@@ -250,7 +250,8 @@ sequence_counter_type Process_group::barrier(
             os << "swarm=" << (s_mproc ? s_mproc->m_swarm_id : 0)
                << " name=" << barrier_name
                << " caller=" << caller_piid
-               << " pending=" << b.processes_pending.size();
+               << " pending=" << b.processes_pending.size()
+               << " members=" << detail::format_instance_set(b.processes_pending);
         });
 
         // Filter out draining processes while still holding m_call_mutex for atomicity
@@ -272,12 +273,13 @@ sequence_counter_type Process_group::barrier(
     // need to be able to arrive at the barrier concurrently
     basic_lock.unlock();
 
-    detail::bootstrap_trace("barrier_arrive", [&](auto& os) {
-        os << "swarm=" << (s_mproc ? s_mproc->m_swarm_id : 0)
-           << " name=" << barrier_name
-           << " caller=" << caller_piid
-           << " pending_before=" << b.processes_pending.size();
-    });
+        detail::bootstrap_trace("barrier_arrive", [&](auto& os) {
+            os << "swarm=" << (s_mproc ? s_mproc->m_swarm_id : 0)
+               << " name=" << barrier_name
+               << " caller=" << caller_piid
+               << " pending_before=" << b.processes_pending.size()
+               << " pending_ids=" << detail::format_instance_set(b.processes_pending);
+        });
 
     b.processes_arrived.insert(caller_piid);
     b.processes_pending.erase(caller_piid);
@@ -337,7 +339,8 @@ sequence_counter_type Process_group::barrier(
             os << "swarm=" << (s_mproc ? s_mproc->m_swarm_id : 0)
                << " name=" << barrier_name
                << " caller=" << caller_piid
-               << " remaining=" << b.processes_pending.size();
+               << " remaining=" << b.processes_pending.size()
+               << " pending_ids=" << detail::format_instance_set(b.processes_pending);
         });
         return 0;
     }
