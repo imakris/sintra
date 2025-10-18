@@ -143,53 +143,6 @@ inline void bootstrap_trace(const char* tag, F&& formatter)
     std::cerr << "[sintra] bootstrap:" << tag << ' ' << oss.str() << std::endl;
 }
 
-inline thread_local bool publish_mutex_owned_state = false;
-
-struct Publish_mutex_guard
-{
-    std::mutex& mutex;
-    bool owns = false;
-
-    explicit Publish_mutex_guard(std::mutex& m):
-        mutex(m),
-        owns(true)
-    {
-        mutex.lock();
-        publish_mutex_owned_state = true;
-    }
-
-    ~Publish_mutex_guard()
-    {
-        if (owns) {
-            publish_mutex_owned_state = false;
-            mutex.unlock();
-        }
-    }
-
-    void lock()
-    {
-        if (!owns) {
-            mutex.lock();
-            publish_mutex_owned_state = true;
-            owns = true;
-        }
-    }
-
-    void unlock()
-    {
-        if (owns) {
-            publish_mutex_owned_state = false;
-            mutex.unlock();
-            owns = false;
-        }
-    }
-};
-
-inline bool is_publish_mutex_owned()
-{
-    return publish_mutex_owned_state;
-}
-
 inline void reset_bootstrap_group_state(
     std::uint64_t swarm_id,
     const std::string& group_name,
@@ -569,12 +522,12 @@ instance_id_type Coordinator::wait_for_instance(const string& assigned_name)
     // the instance, thus using it for synchronization may not always be
     // applicable.
 
-    detail::Publish_mutex_guard publish_guard(m_publish_mutex);
+    m_publish_mutex.lock();
     instance_id_type caller_piid = s_tl_current_message->sender_instance_id;
 
     auto iid = resolve_instance(assigned_name);
     if (iid != invalid_instance_id) {
-        publish_guard.unlock();
+        m_publish_mutex.unlock();
         return iid;
     }
 
@@ -598,7 +551,7 @@ instance_id_type Coordinator::wait_for_instance(const string& assigned_name)
         (type_id_type)detail::reserved_id::deferral);
 
     mark_rpc_reply_deferred();
-    publish_guard.unlock();
+    m_publish_mutex.unlock();
     return invalid_instance_id;
 }
 
@@ -608,7 +561,7 @@ instance_id_type Coordinator::wait_for_instance(const string& assigned_name)
 inline
 instance_id_type Coordinator::publish_transceiver(type_id_type tid, instance_id_type iid, const string& assigned_name)
 {
-    detail::Publish_mutex_guard publish_guard(m_publish_mutex);
+    lock_guard<mutex> lock(m_publish_mutex);
 
     // empty strings are not valid names
     if (assigned_name.empty()) {
@@ -703,13 +656,7 @@ instance_id_type Coordinator::publish_transceiver(type_id_type tid, instance_id_
 inline
 bool Coordinator::unpublish_transceiver(instance_id_type iid)
 {
-    detail::Publish_mutex_guard publish_guard(m_publish_mutex);
-    return unpublish_transceiver_locked(iid);
-}
-
-inline bool Coordinator::unpublish_transceiver_locked(instance_id_type iid)
-{
-
+    lock_guard<mutex> lock(m_publish_mutex);
     // the process of the transceiver must have been registered
     auto process_iid = process_of(iid);
     auto pr_it = m_transceiver_registry.find(process_iid);
@@ -881,44 +828,6 @@ instance_id_type Coordinator::make_process_group(
     const auto expected_members = static_cast<uint32_t>(member_process_ids.size());
     const bool coordinator_in_group = s_mproc && member_process_ids.count(s_mproc_id) != 0;
 
-    instance_id_type previous_instance = invalid_instance_id;
-    bool previous_was_published = false;
-
-    {
-        // Remove any stale group atomically. The actual unpublish happens later
-        // to avoid re-entering m_groups_mutex from unpublish_transceiver().
-        lock_guard<mutex> lock(m_groups_mutex);
-        auto it = m_groups.find(name);
-        if (it != m_groups.end()) {
-            auto& group = it->second;
-            previous_instance = group.m_instance_id;
-            previous_was_published = group.is_published();
-
-            for (const auto& member : group.m_process_ids) {
-                auto map_it = m_groups_of_process.find(member);
-                if (map_it == m_groups_of_process.end()) {
-                    continue;
-                }
-                map_it->second.erase(previous_instance);
-                if (map_it->second.empty()) {
-                    m_groups_of_process.erase(map_it);
-                }
-            }
-
-            m_groups.erase(it);
-        }
-    }
-
-    if (previous_was_published && previous_instance != invalid_instance_id) {
-        if (detail::is_publish_mutex_owned()) {
-            unpublish_transceiver_locked(previous_instance);
-        }
-        else {
-            detail::Publish_mutex_guard publish_guard(m_publish_mutex);
-            unpublish_transceiver_locked(previous_instance);
-        }
-    }
-
     detail::reset_bootstrap_group_state(
         swarm_id,
         name,
@@ -929,15 +838,43 @@ instance_id_type Coordinator::make_process_group(
 
     {
         lock_guard<mutex> lock(m_groups_mutex);
-        auto& group = m_groups[name];
-        group.set(member_process_ids);
-        ret = group.m_instance_id;
+        auto it = m_groups.find(name);
+        Process_group* group = nullptr;
+        unordered_set<instance_id_type> previous_members;
+
+        if (it != m_groups.end()) {
+            group = &it->second;
+            previous_members = group->m_process_ids;
+        }
+        else {
+            group = &m_groups[name];
+        }
+
+        ret = group->m_instance_id;
+
+        for (const auto& member : previous_members) {
+            if (member_process_ids.count(member)) {
+                continue;
+            }
+            auto map_it = m_groups_of_process.find(member);
+            if (map_it == m_groups_of_process.end()) {
+                continue;
+            }
+            map_it->second.erase(ret);
+            if (map_it->second.empty()) {
+                m_groups_of_process.erase(map_it);
+            }
+        }
 
         for (const auto& member : member_process_ids) {
             m_groups_of_process[member].insert(ret);
         }
 
-        group.assign_name(name);
+        group->set(member_process_ids);
+
+        if (!group->is_published()) {
+            group->assign_name(name);
+        }
     }
 
     return ret;
