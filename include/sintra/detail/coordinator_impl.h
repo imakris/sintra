@@ -107,6 +107,22 @@ inline Bootstrap_group_state* ensure_bootstrap_group_state(std::uint64_t swarm_i
     return entry.get();
 }
 
+inline std::string format_instance_set(const std::unordered_set<instance_id_type>& members)
+{
+    std::ostringstream oss;
+    oss << '[';
+    bool first = true;
+    for (auto member : members) {
+        if (!first) {
+            oss << ',';
+        }
+        first = false;
+        oss << member;
+    }
+    oss << ']';
+    return oss.str();
+}
+
 inline bool bootstrap_trace_enabled()
 {
     static bool enabled = []() {
@@ -277,8 +293,13 @@ sequence_counter_type Process_group::barrier(
             os << "swarm=" << (s_mproc ? s_mproc->m_swarm_id : 0)
                << " name=" << barrier_name
                << " caller=" << caller_piid
+<<<<<<< HEAD
                << " pending_before=" << b.processes_pending.size()
                << " pending_ids=" << detail::format_instance_set(b.processes_pending);
+=======
+               << " pending_before=" << b.processes_pending.size()
+               << " pending_ids=" << detail::format_instance_set(b.processes_pending);
+>>>>>>> 1f17d26 (Log pending members on bootstrap barrier events)
         });
 
     b.processes_arrived.insert(caller_piid);
