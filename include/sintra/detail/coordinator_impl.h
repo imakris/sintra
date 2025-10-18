@@ -829,6 +829,38 @@ instance_id_type Coordinator::make_process_group(
     const auto expected_members = static_cast<uint32_t>(member_process_ids.size());
     const bool coordinator_in_group = s_mproc && member_process_ids.count(s_mproc_id) != 0;
 
+    instance_id_type previous_instance = invalid_instance_id;
+    bool previous_was_published = false;
+
+    {
+        // Remove any stale group atomically. The actual unpublish happens later
+        // to avoid re-entering m_groups_mutex from unpublish_transceiver().
+        lock_guard<mutex> lock(m_groups_mutex);
+        auto it = m_groups.find(name);
+        if (it != m_groups.end()) {
+            auto& group = it->second;
+            previous_instance = group.m_instance_id;
+            previous_was_published = group.is_published();
+
+            for (const auto& member : group.m_process_ids) {
+                auto map_it = m_groups_of_process.find(member);
+                if (map_it == m_groups_of_process.end()) {
+                    continue;
+                }
+                map_it->second.erase(previous_instance);
+                if (map_it->second.empty()) {
+                    m_groups_of_process.erase(map_it);
+                }
+            }
+
+            m_groups.erase(it);
+        }
+    }
+
+    if (previous_was_published) {
+        unpublish_transceiver(previous_instance);
+    }
+
     detail::reset_bootstrap_group_state(
         swarm_id,
         name,
@@ -837,42 +869,19 @@ instance_id_type Coordinator::make_process_group(
 
     instance_id_type ret = invalid_instance_id;
 
-    lock_guard<mutex> lock(m_groups_mutex);
+    {
+        lock_guard<mutex> lock(m_groups_mutex);
+        auto& group = m_groups[name];
+        group.set(member_process_ids);
+        ret = group.m_instance_id;
 
-    auto it = m_groups.find(name);
-    if (it != m_groups.end()) {
-        auto& group = it->second;
-        const auto previous_instance = group.m_instance_id;
-        const bool was_published = group.is_published();
-
-        auto previous_members = group.m_process_ids;
-        for (const auto& member : previous_members) {
-            auto map_it = m_groups_of_process.find(member);
-            if (map_it == m_groups_of_process.end()) {
-                continue;
-            }
-            map_it->second.erase(previous_instance);
-            if (map_it->second.empty()) {
-                m_groups_of_process.erase(map_it);
-            }
+        for (const auto& member : member_process_ids) {
+            m_groups_of_process[member].insert(ret);
         }
 
-        m_groups.erase(it);
-
-        if (was_published) {
-            unpublish_transceiver(previous_instance);
-        }
+        group.assign_name(name);
     }
 
-    auto& group = m_groups[name];
-    group.set(member_process_ids);
-    ret = group.m_instance_id;
-
-    for (const auto& member : member_process_ids) {
-        m_groups_of_process[member].insert(ret);
-    }
-
-    group.assign_name(name);
     return ret;
 }
 
