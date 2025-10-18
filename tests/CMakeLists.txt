@@ -83,6 +83,11 @@ target_link_libraries(sintra_variable_buffer_alignment_test PRIVATE ${SINTRA_TES
 add_test(NAME sintra.variable_buffer_alignment COMMAND sintra_variable_buffer_alignment_test)
 list(APPEND SINTRA_CI_TESTS sintra.variable_buffer_alignment)
 
+add_executable(sintra_ipc_rings_tests ipc_rings_tests.cpp)
+target_link_libraries(sintra_ipc_rings_tests PRIVATE ${SINTRA_TEST_TARGET})
+add_test(NAME sintra.ipc_rings COMMAND sintra_ipc_rings_tests)
+list(APPEND SINTRA_CI_TESTS sintra.ipc_rings)
+
 add_executable(sintra_spawn_detached_test spawn_detached_test.cpp)
 target_link_libraries(sintra_spawn_detached_test PRIVATE ${SINTRA_TEST_TARGET})
 add_test(NAME sintra.spawn_detached COMMAND sintra_spawn_detached_test)

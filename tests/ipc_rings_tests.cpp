@@ -397,7 +397,7 @@ STRESS_TEST(stress_multi_reader_throughput)
             std::vector<uint64_t> buffer(chunk);
             uint64_t seq = 0;
             while (seq < total_messages) {
-                size_t count = std::min(chunk, total_messages - seq);
+                size_t count = std::min(chunk, static_cast<size_t>(total_messages - seq));
                 for (size_t i = 0; i < count; ++i) {
                     buffer[i] = seq + i;
                 }
