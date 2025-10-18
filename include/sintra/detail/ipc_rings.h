@@ -176,7 +176,6 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
   #include <sys/mman.h>  // ::mmap, ::munmap, MAP_FIXED, MAP_NOSYNC (if available)
   #include <unistd.h>    // ::sysconf
   #include <signal.h>    // ::kill
-#include <pthread.h>
   #if defined(__FreeBSD__)
     #include <sys/types.h>
     #include <sys/sysctl.h>
@@ -230,18 +229,23 @@ inline void ring_trace(const char* tag, F&& formatter)
     std::cerr << "[sintra] ring:" << tag << ' ' << oss.str() << std::endl;
 }
 
-#ifdef _WIN32
+inline std::thread::id current_thread_id()
+{
+    return std::this_thread::get_id();
+}
+
+inline uint64_t thread_token(const std::thread::id& id)
+{
+    if (id == std::thread::id()) {
+        return 0;
+    }
+    return static_cast<uint64_t>(std::hash<std::thread::id>{}(id));
+}
+
 inline uint64_t current_thread_token()
 {
-    return static_cast<uint64_t>(::GetCurrentThreadId());
+    return thread_token(current_thread_id());
 }
-#else
-inline uint64_t current_thread_token()
-{
-    return static_cast<uint64_t>(
-        reinterpret_cast<uintptr_t>(pthread_self()));
-}
-#endif
 
 } // namespace detail
 
@@ -1857,7 +1861,7 @@ struct Ring_W : Ring<T, false>
             m_pending_new_sequence -= num_src_elements;
             const size_t head = mod_u64(m_pending_new_sequence, this->m_num_elements);
             m_octile = (8 * head) / this->m_num_elements;
-            m_writing_token.store(0, std::memory_order_release);
+            m_writing_thread.store(std::thread::id(), std::memory_order_release);
             throw;
         }
     }
@@ -1880,7 +1884,7 @@ struct Ring_W : Ring<T, false>
             m_pending_new_sequence -= num_elements;
             const size_t head = mod_u64(m_pending_new_sequence, this->m_num_elements);
             m_octile = (8 * head) / this->m_num_elements;
-            m_writing_token.store(0, std::memory_order_release);
+            m_writing_thread.store(std::thread::id(), std::memory_order_release);
             throw;
         }
     }
@@ -1897,8 +1901,8 @@ struct Ring_W : Ring<T, false>
     {
 #if SINTRA_RING_READING_POLICY != SINTRA_RING_READING_POLICY_ALWAYS_SPIN
         c.lock();
-        assert(m_writing_token.load(std::memory_order_relaxed) ==
-               detail::current_thread_token());
+        auto current_id = detail::current_thread_id();
+        assert(m_writing_thread.load(std::memory_order_relaxed) == current_id);
         c.leading_sequence.store(m_pending_new_sequence);
         // Wake sleeping readers in a deterministic order
         for (int i = 0; i < c.num_sleeping; i++) {
@@ -1913,13 +1917,15 @@ struct Ring_W : Ring<T, false>
         c.leading_sequence.store(m_pending_new_sequence);
 #endif
         if (detail::ring_trace_enabled()) {
+            auto current_id = detail::current_thread_id();
             detail::ring_trace("writer_release", [&](auto& os) {
                 os << "pid=" << get_current_pid()
                    << " ring=" << static_cast<const void*>(this)
+                   << " token=0x" << std::hex << detail::thread_token(current_id) << std::dec
                    << " sequence=" << m_pending_new_sequence;
             });
         }
-        m_writing_token.store(0, std::memory_order_release);
+        m_writing_thread.store(std::thread::id(), std::memory_order_release);
         return m_pending_new_sequence;
     }
 
@@ -2058,19 +2064,20 @@ private:
         assert(num_elements_to_write <= this->m_num_elements / 8);
 
         // Enforce exclusive writer (cheap fast-path loop)
-        const uint64_t current_token = detail::current_thread_token();
+        const auto current_id = detail::current_thread_id();
         const bool trace_wait = detail::ring_trace_enabled();
+        const uint64_t current_token = trace_wait ? detail::thread_token(current_id) : 0;
         bool reported_wait = false;
         while (true) {
-            uint64_t owner = m_writing_token.load(std::memory_order_acquire);
-            if (owner == current_token) {
+            auto owner = m_writing_thread.load(std::memory_order_acquire);
+            if (owner == current_id) {
                 break;
             }
-            if (owner == 0) {
-                uint64_t expected = 0;
-                if (m_writing_token.compare_exchange_strong(
+            if (owner == std::thread::id()) {
+                std::thread::id expected;
+                if (m_writing_thread.compare_exchange_strong(
                         expected,
-                        current_token,
+                        current_id,
                         std::memory_order_acq_rel,
                         std::memory_order_acquire))
                 {
@@ -2089,10 +2096,11 @@ private:
 
             if (trace_wait && !reported_wait) {
                 reported_wait = true;
+                const uint64_t owner_token = detail::thread_token(owner);
                 detail::ring_trace("wait_writer", [&](auto& os) {
                     os << "pid=" << get_current_pid()
                        << " ring=" << static_cast<const void*>(this)
-                       << " owner=0x" << std::hex << owner << std::dec
+                       << " owner=0x" << std::hex << owner_token << std::dec
                        << " token=0x" << std::hex << current_token << std::dec
                        << " elements=" << num_elements_to_write;
                 });
@@ -2176,7 +2184,7 @@ private:
     }
 
 private:
-    std::atomic<uint64_t>           m_writing_token{0};
+    std::atomic<std::thread::id>    m_writing_thread{std::thread::id()};
     size_t                          m_octile                 = 0;
     sequence_counter_type           m_pending_new_sequence   = 0;
 
