@@ -382,7 +382,15 @@ def main():
     start_time = time.time()
 
     # Adaptive soak test: run full suite with exponentially increasing batch sizes
-    accumulated_results = {test.stem: {'passed': 0, 'failed': 0, 'durations': []} for test in tests}
+    accumulated_results = {
+        test.stem: {
+            'passed': 0,
+            'failed': 0,
+            'durations': [],
+            'failures': []
+        }
+        for test in tests
+    }
     total_reps_so_far = 0
     max_reps_per_test = args.repetitions
     all_passed = True
@@ -405,6 +413,7 @@ def main():
                     print(f"{Color.GREEN}.{Color.RESET}", end="", flush=True)
                 else:
                     accumulated_results[test_name]['failed'] += 1
+                    accumulated_results[test_name]['failures'].append(result)
                     all_passed = False
                     print(f"{Color.RED}F{Color.RESET}", end="", flush=True)
 
@@ -446,6 +455,27 @@ def main():
         return 0
     else:
         print(f"{Color.RED}FAILED{Color.RESET}")
+        print("\n" + "-" * 80)
+        print(f"{Color.BOLD}Detailed failure output{Color.RESET}")
+        print("-" * 80)
+
+        for test_name in sorted(accumulated_results.keys()):
+            failures = accumulated_results[test_name]['failures']
+            if not failures:
+                continue
+
+            print(f"\n{Color.BOLD}{test_name}{Color.RESET}")
+            for idx, failure in enumerate(failures, start=1):
+                print(f"  Failure #{idx}:")
+                if failure.error:
+                    print("    stderr/stdout summary:")
+                    for line in failure.error.rstrip().splitlines():
+                        print(f"      {line}")
+                if failure.output:
+                    print("    Captured stdout:")
+                    for line in failure.output.rstrip().splitlines():
+                        print(f"      {line}")
+
         return 1
 
 if __name__ == '__main__':
