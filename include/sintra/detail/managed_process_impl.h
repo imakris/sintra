@@ -1453,18 +1453,14 @@ inline void Managed_process::flush(instance_id_type process_id, sequence_counter
         std::shared_lock<std::shared_mutex> readers_lock(m_readers_mutex);
         auto it = m_readers.find(process_id);
         if (it == m_readers.end()) {
-            throw std::logic_error(
-                "attempted to flush the channel of a process which is not being read"
-            );
+            return;
         }
 
         // Barrier completion messages are RPC responses sent on the reply ring.
         // Check the reply reading sequence, not the request reading sequence.
         reader = it->second;
         if (!reader) {
-            throw std::logic_error(
-                "attempted to flush the channel of a process without an active reader"
-            );
+            return;
         }
         rs = reader->get_reply_reading_sequence();
     }
