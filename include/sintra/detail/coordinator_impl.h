@@ -283,6 +283,21 @@ sequence_counter_type Process_group::barrier(
                 }
             }
         }
+
+        if (barrier_name.rfind("__swarm_join__/", 0) == 0 && s_coord) {
+            const auto coordinator_pid = s_mproc_id;
+            if (coordinator_pid != invalid_instance_id) {
+                const bool removed = b.processes_pending.erase(coordinator_pid) > 0;
+                if (removed) {
+                    b.processes_arrived.insert(coordinator_pid);
+                    detail::bootstrap_trace("barrier_autojoin", [&](auto& os) {
+                        os << "swarm=" << (s_mproc ? s_mproc->m_swarm_id : 0)
+                           << " name=" << barrier_name
+                           << " coordinator=" << coordinator_pid;
+                    });
+                }
+            }
+        }
     }
 
     // Now safe to release m_call_mutex - barrier state is consistent and other threads
