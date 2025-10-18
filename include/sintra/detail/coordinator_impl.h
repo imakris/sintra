@@ -896,8 +896,8 @@ inline instance_id_type Coordinator::join_group(
     {
         std::lock_guard<std::mutex> state_lock(state->m);
         const bool inserted = state->members.insert(member_id).second;
-        state->accounted_absentees.erase(member_id);
-        if (inserted) {
+        const bool was_absent = state->accounted_absentees.erase(member_id) > 0;
+        if (inserted || was_absent) {
             state->joined.fetch_add(1, std::memory_order_acq_rel);
         }
 
@@ -906,6 +906,7 @@ inline instance_id_type Coordinator::join_group(
                << " name=" << group_name
                << " member=" << member_id
                << " inserted=" << inserted
+               << " was_absent=" << was_absent
                << " joined=" << state->joined.load(std::memory_order_acquire)
                << " expected=" << state->expected;
         });
