@@ -919,7 +919,6 @@ inline instance_id_type Coordinator::join_group(
     state->cv.notify_all();
 
     instance_id_type group_instance = invalid_instance_id;
-    std::string bootstrap_barrier_name = std::string("__swarm_join__/") + group_name;
     {
         lock_guard<mutex> groups_lock(m_groups_mutex);
         auto it = m_groups.find(group_name);
@@ -937,20 +936,6 @@ inline instance_id_type Coordinator::join_group(
                 group_instance = group.m_instance_id;
             }
         }
-    }
-
-    if (group_instance != invalid_instance_id && s_mproc) {
-        s_mproc->run_after_current_handler(
-            [barrier_name = std::move(bootstrap_barrier_name), group_instance]() mutable {
-                try {
-                    Process_group::rpc_barrier(group_instance, barrier_name);
-                }
-                catch (const std::exception& e) {
-                    detail::bootstrap_trace("coordinator_barrier_error", [&](auto& os) {
-                        os << "name=" << barrier_name << " error=" << e.what();
-                    });
-                }
-            });
     }
 
     return group_instance;
