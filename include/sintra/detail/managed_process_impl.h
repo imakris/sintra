@@ -1334,7 +1334,8 @@ function<void()> Managed_process::call_on_availability(Named_instance<T> transce
 {
     lock_guard<mutex> lock(m_availability_mutex);
 
-    auto iid = Typed_instance_id<T>(get_instance_id(std::move(transceiver)));
+    std::string transceiver_name = transceiver;
+    auto iid = Typed_instance_id<T>(get_instance_id(std::string(transceiver_name)));
 
     //if the transceiver is available, call f and skip the queue
     if (iid.id != invalid_instance_id) {
@@ -1344,7 +1345,7 @@ function<void()> Managed_process::call_on_availability(Named_instance<T> transce
         return []() {};
     }
 
-    tn_type tn = { get_type_id<T>(), transceiver };
+    tn_type tn = { get_type_id<T>(), std::move(transceiver_name) };
 
     // insert an empty function, in order to be able to capture the iterator within it
     auto& call_list = m_queued_availability_calls[tn];
