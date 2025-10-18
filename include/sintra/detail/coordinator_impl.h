@@ -289,18 +289,13 @@ sequence_counter_type Process_group::barrier(
     // need to be able to arrive at the barrier concurrently
     basic_lock.unlock();
 
-        detail::bootstrap_trace("barrier_arrive", [&](auto& os) {
-            os << "swarm=" << (s_mproc ? s_mproc->m_swarm_id : 0)
-               << " name=" << barrier_name
-               << " caller=" << caller_piid
-<<<<<<< HEAD
-               << " pending_before=" << b.processes_pending.size()
-               << " pending_ids=" << detail::format_instance_set(b.processes_pending);
-=======
-               << " pending_before=" << b.processes_pending.size()
-               << " pending_ids=" << detail::format_instance_set(b.processes_pending);
->>>>>>> 1f17d26 (Log pending members on bootstrap barrier events)
-        });
+    detail::bootstrap_trace("barrier_arrive", [&](auto& os) {
+        os << "swarm=" << (s_mproc ? s_mproc->m_swarm_id : 0)
+           << " name=" << barrier_name
+           << " caller=" << caller_piid
+           << " pending_before=" << b.processes_pending.size()
+           << " pending_ids=" << detail::format_instance_set(b.processes_pending);
+    });
 
     b.processes_arrived.insert(caller_piid);
     b.processes_pending.erase(caller_piid);
