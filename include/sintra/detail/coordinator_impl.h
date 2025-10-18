@@ -859,10 +859,11 @@ instance_id_type Coordinator::make_process_group(
 
     instance_id_type ret = invalid_instance_id;
 
+    Process_group* group = nullptr;
+    bool publish_needed = false;
     {
         lock_guard<mutex> lock(m_groups_mutex);
         auto it = m_groups.find(name);
-        Process_group* group = nullptr;
         unordered_set<instance_id_type> previous_members;
 
         if (it != m_groups.end()) {
@@ -894,10 +895,11 @@ instance_id_type Coordinator::make_process_group(
         }
 
         group->set(member_process_ids);
+        publish_needed = !group->is_published();
+    }
 
-        if (!group->is_published()) {
-            group->assign_name(name);
-        }
+    if (publish_needed && group) {
+        group->assign_name(name);
     }
 
     return ret;
