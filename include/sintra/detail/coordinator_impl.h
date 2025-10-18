@@ -921,8 +921,19 @@ inline instance_id_type Coordinator::join_group(
     {
         lock_guard<mutex> groups_lock(m_groups_mutex);
         auto it = m_groups.find(group_name);
-        if (it != m_groups.end() && it->second.is_published()) {
-            group_instance = it->second.m_instance_id;
+        if (it != m_groups.end()) {
+            auto& group = it->second;
+            bool inserted_member = false;
+            {
+                std::lock_guard group_lock(group.m_call_mutex);
+                inserted_member = group.m_process_ids.insert(member_id).second;
+            }
+            if (inserted_member) {
+                m_groups_of_process[member_id].insert(group.m_instance_id);
+            }
+            if (group.is_published()) {
+                group_instance = group.m_instance_id;
+            }
         }
     }
 
