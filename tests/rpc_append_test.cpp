@@ -65,7 +65,10 @@ std::filesystem::path ensure_shared_directory()
 {
     const char* value = std::getenv(kEnvSharedDir.data());
     if (value) {
-        return std::filesystem::path(value);
+        std::filesystem::path dir(value);
+        if (std::filesystem::exists(dir) && std::filesystem::is_directory(dir)) {
+            return dir;
+        }
     }
 
     auto base = std::filesystem::temp_directory_path() / "sintra_tests";
