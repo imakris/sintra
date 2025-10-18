@@ -26,14 +26,22 @@ import time
 from pathlib import Path
 from typing import List, Tuple, Optional
 
+
+def _color(code: str) -> str:
+    """Return ANSI color if stdout is a TTY and not disabled."""
+    if not sys.stdout.isatty() or os.environ.get("SINTRA_NO_COLOR"):
+        return ''
+    return code
+
+
 class Color:
     """ANSI color codes for terminal output"""
-    GREEN = '\033[92m'
-    RED = '\033[91m'
-    YELLOW = '\033[93m'
-    BLUE = '\033[94m'
-    RESET = '\033[0m'
-    BOLD = '\033[1m'
+    GREEN = _color('\033[92m')
+    RED = _color('\033[91m')
+    YELLOW = _color('\033[93m')
+    BLUE = _color('\033[94m')
+    RESET = _color('\033[0m')
+    BOLD = _color('\033[1m')
 
 def format_duration(seconds: float) -> str:
     """Format duration in human-readable format"""
