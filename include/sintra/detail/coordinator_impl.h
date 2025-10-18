@@ -263,7 +263,12 @@ sequence_counter_type Process_group::barrier(
     // between the membership snapshot and the draining filter.
     if (b.processes_pending.empty()) {
         // new or reused barrier (may have failed previously)
-        b.processes_pending = m_process_ids;
+        if (barrier_name.rfind("__swarm_join__/", 0) == 0 && !m_bootstrap_pending.empty()) {
+            b.processes_pending = m_bootstrap_pending;
+        }
+        else {
+            b.processes_pending = m_process_ids;
+        }
         b.processes_arrived.clear();
         b.failed = false;
         b.common_function_iid = make_instance_id();
@@ -340,6 +345,12 @@ sequence_counter_type Process_group::barrier(
 
         // Re-lock m_call_mutex to safely erase from m_barriers
         basic_lock.lock();
+        if (barrier_name.rfind("__swarm_join__/", 0) == 0) {
+            m_bootstrap_pending.erase(caller_piid);
+            for (auto recipient : additional_pids) {
+                m_bootstrap_pending.erase(recipient);
+            }
+        }
         auto it = m_barriers.find(barrier_name);
         if (it != m_barriers.end() && it->second.common_function_iid == current_common_fiid) {
             m_barriers.erase(it);
@@ -415,6 +426,12 @@ inline void Process_group::drop_from_inflight_barriers(
 
         if (touched_arrived) {
             completion.recipients.push_back(process_iid);
+        }
+
+        if (barrier_it->first.rfind("__swarm_join__/", 0) == 0) {
+            for (auto recipient : completion.recipients) {
+                m_bootstrap_pending.erase(recipient);
+            }
         }
 
         barrier.processes_arrived.clear();
@@ -919,87 +936,23 @@ inline instance_id_type Coordinator::join_group(
     state->cv.notify_all();
 
     instance_id_type group_instance = invalid_instance_id;
-    Process_group* scheduled_group = nullptr;
-    bool schedule_coordinator_bootstrap = false;
-    std::string bootstrap_barrier_name;
-
     {
         lock_guard<mutex> groups_lock(m_groups_mutex);
         auto it = m_groups.find(group_name);
         if (it != m_groups.end()) {
             auto& group = it->second;
-            scheduled_group = &group;
             bool inserted_member = false;
             {
                 std::lock_guard group_lock(group.m_call_mutex);
                 inserted_member = group.m_process_ids.insert(member_id).second;
+                group.m_bootstrap_pending.insert(member_id);
             }
             if (inserted_member) {
                 m_groups_of_process[member_id].insert(group.m_instance_id);
             }
             if (group.is_published()) {
                 group_instance = group.m_instance_id;
-                if (member_id != s_mproc_id &&
-                    group_instance != invalid_instance_id &&
-                    s_mproc)
-                {
-                    bool expected = false;
-                    if (group.m_coordinator_barrier_in_flight.compare_exchange_strong(
-                            expected,
-                            true,
-                            std::memory_order_acq_rel,
-                            std::memory_order_acquire))
-                    {
-                        schedule_coordinator_bootstrap = true;
-                        bootstrap_barrier_name = std::string("__swarm_join__/") + group_name;
-                    }
-                }
             }
-        }
-    }
-
-    if (schedule_coordinator_bootstrap) {
-        auto* coordinator_process = s_mproc;
-        if (!coordinator_process) {
-            if (scheduled_group) {
-                scheduled_group->m_coordinator_barrier_in_flight.store(false, std::memory_order_release);
-            }
-        }
-        else {
-            auto* group_for_reset = scheduled_group;
-            const auto group_instance_copy = group_instance;
-            auto barrier_name = std::move(bootstrap_barrier_name);
-
-            coordinator_process->run_after_current_handler(
-                [group_for_reset, group_instance_copy, barrier = std::move(barrier_name)]() mutable {
-                    struct Flag_reset {
-                        Process_group* group;
-                        ~Flag_reset()
-                        {
-                            if (group) {
-                                group->m_coordinator_barrier_in_flight.store(false, std::memory_order_release);
-                            }
-                        }
-                    } reset{group_for_reset};
-
-                    if (group_instance_copy == invalid_instance_id) {
-                        return;
-                    }
-
-                    try {
-                        Process_group::rpc_barrier(group_instance_copy, barrier);
-                    }
-                    catch (const std::exception& ex) {
-                        detail::bootstrap_trace("barrier_error", [&](auto& os) {
-                            os << "name=" << barrier << " what=" << ex.what();
-                        });
-                    }
-                    catch (...) {
-                        detail::bootstrap_trace("barrier_error", [&](auto& os) {
-                            os << "name=" << barrier << " what=<unknown>";
-                        });
-                    }
-                });
         }
     }
 
