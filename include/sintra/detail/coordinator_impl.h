@@ -895,18 +895,11 @@ inline instance_id_type Coordinator::join_group(
 
     {
         std::lock_guard<std::mutex> state_lock(state->m);
-        bool counted = false;
         const bool inserted = state->members.insert(member_id).second;
         const bool was_absent = state->accounted_absentees.erase(member_id) > 0;
-        if (inserted || was_absent) {
-            counted = true;
-            if (was_absent) {
-                state->expected += 1;
-            }
-        }
-        else {
-            // Stale state (e.g. absence not recorded). Force membership to be consistent
-            counted = true;
+        bool counted = inserted || was_absent;
+        if (!counted) {
+            counted = true; // stale state – force progress
         }
         if (counted) {
             state->joined.fetch_add(1, std::memory_order_acq_rel);
