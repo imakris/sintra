@@ -206,26 +206,32 @@ inline void account_bootstrap_absence(instance_id_type member_id)
                 continue;
             }
 
-            if (state->members.find(member_id) != state->members.end()) {
-                continue;
+            const auto member_it = state->members.find(member_id);
+            if (member_it != state->members.end()) {
+                state->members.erase(member_it);
+                state->joined.store(
+                    static_cast<uint32_t>(state->members.size()),
+                    std::memory_order_release);
+                state->accounted_absentees.insert(member_id);
+            }
+            else {
+                if (!state->accounted_absentees.insert(member_id).second) {
+                    continue;
+                }
             }
 
-        if (!state->accounted_absentees.insert(member_id).second) {
-            continue;
-        }
+            if (state->expected > 0) {
+                state->expected -= 1;
+            }
 
-        if (state->expected > 0) {
-            state->expected -= 1;
-        }
+            notify = true;
 
-        notify = true;
-
-        bootstrap_trace("absence", [&](auto& os) {
-            os << "swarm=" << state->swarm_id
-               << " name=" << state->group_name
-               << " member=" << member_id
-               << " remaining=" << state->expected;
-        });
+            bootstrap_trace("absence", [&](auto& os) {
+                os << "swarm=" << state->swarm_id
+                   << " name=" << state->group_name
+                   << " member=" << member_id
+                   << " remaining=" << state->expected;
+            });
         }
 
         if (notify) {
