@@ -984,9 +984,13 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
     struct cache_line_sized_t {
         struct Payload {
             std::atomic<sequence_counter_type> v;
-            std::atomic<uint8_t> status{READER_STATE_INACTIVE};
-            std::atomic<uint8_t> trailing_octile{0};
-            std::atomic<uint8_t> has_guard{0};
+            // NOTE: Windows' std::atomic<uint8_t> may fall back to a per-process lock,
+            // which is not "address free" and therefore unsafe for shared mappings.
+            // Use 32-bit atomics for cross-process coordination instead and store the
+            // 8-bit values in the low byte.
+            std::atomic<uint32_t> status{READER_STATE_INACTIVE};
+            std::atomic<uint32_t> trailing_octile{0};
+            std::atomic<uint32_t> has_guard{0};
             std::atomic<uint32_t> owner_pid{0};
         };
 
@@ -995,6 +999,8 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
 
         static_assert(sizeof(Payload) <= assumed_cache_line_size,
                       "The payload of cache_line_sized_t exceeds the assumed cache line size.");
+        static_assert(std::atomic<uint32_t>::is_always_lock_free,
+                      "32-bit atomics must be lock-free for shared control block");
     };
 
     /**
@@ -1074,12 +1080,13 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
                 bool dead = owner_unknown || !is_process_alive(pid);
 
                 if (dead) {
-                    uint8_t expected = 1;
+                    uint32_t expected = 1;
                     if (slot.has_guard.compare_exchange_strong(
-                            expected, uint8_t{0}, std::memory_order_acq_rel))
+                            expected, uint32_t{0}, std::memory_order_acq_rel))
                     {
-                        uint8_t oct = slot.trailing_octile.load(std::memory_order_relaxed);
-                        read_access.fetch_sub(uint64_t(1) << (8 * oct), std::memory_order_acq_rel);
+                        uint32_t oct = slot.trailing_octile.load(std::memory_order_relaxed);
+                        read_access.fetch_sub(uint64_t(1) << (8 * static_cast<uint8_t>(oct)),
+                                             std::memory_order_acq_rel);
                     }
 
                     slot.status.store(READER_STATE_INACTIVE, std::memory_order_release);
@@ -1463,8 +1470,8 @@ struct Ring_R : Ring<T, true>
 
             // Publish the octile index to our shared slot for the writer to see.
             c.reading_sequences[m_rs_index].data.trailing_octile.store(
-                trailing_octile, std::memory_order_relaxed);
-            c.reading_sequences[m_rs_index].data.has_guard.store(1, std::memory_order_release);
+                static_cast<uint32_t>(trailing_octile), std::memory_order_relaxed);
+            c.reading_sequences[m_rs_index].data.has_guard.store(1u, std::memory_order_release);
 
             auto confirmed_leading_sequence = c.leading_sequence.load(std::memory_order_acquire);
             auto confirmed_range_first_sequence = std::max<int64_t>(
@@ -1487,7 +1494,7 @@ struct Ring_R : Ring<T, true>
 
             // Trailing guard requirement changed between reads; drop and retry.
             c.read_access.fetch_sub(guard_mask, std::memory_order_acq_rel);
-            c.reading_sequences[m_rs_index].data.has_guard.store(0, std::memory_order_release);
+            c.reading_sequences[m_rs_index].data.has_guard.store(0u, std::memory_order_release);
         }
 
         m_reading_lock = false;
@@ -1526,9 +1533,9 @@ struct Ring_R : Ring<T, true>
         }
 
         if (m_reading.load(std::memory_order_acquire)) {
-            uint8_t expected = 1;
+            uint32_t expected = 1;
             if (c.reading_sequences[m_rs_index].data.has_guard.compare_exchange_strong(
-                    expected, uint8_t{0}, std::memory_order_acq_rel))
+                    expected, uint32_t{0}, std::memory_order_acq_rel))
             {
                 c.read_access.fetch_sub(
                     uint64_t(1) << (8 * m_trailing_octile), std::memory_order_acq_rel);
@@ -1740,7 +1747,7 @@ struct Ring_R : Ring<T, true>
 
             c.read_access.fetch_add(new_mask, std::memory_order_acq_rel);
             c.reading_sequences[m_rs_index].data.trailing_octile.store(
-                static_cast<uint8_t>(new_trailing_octile), std::memory_order_relaxed);
+                static_cast<uint32_t>(new_trailing_octile), std::memory_order_relaxed);
             c.read_access.fetch_sub(old_mask, std::memory_order_acq_rel);
             m_trailing_octile = new_trailing_octile;
         }
@@ -2151,16 +2158,18 @@ private:
 
                             if (reader_seq < eviction_threshold) {
                                 // Evict only if the reader currently holds a guard
-                                uint8_t expected = 1;
+                                uint32_t expected = 1;
                                 if (c.reading_sequences[i].data.has_guard.compare_exchange_strong(
-                                        expected, uint8_t{0}, std::memory_order_acq_rel))
+                                        expected, uint32_t{0}, std::memory_order_acq_rel))
                                 {
                                     c.reading_sequences[i].data.status.store(
                                         Ring<T, false>::READER_STATE_EVICTED, std::memory_order_release);
 
                                     size_t evicted_reader_octile =
                                         c.reading_sequences[i].data.trailing_octile.load(std::memory_order_relaxed);
-                                    c.read_access.fetch_sub(uint64_t(1) << (8 * evicted_reader_octile), std::memory_order_acq_rel);
+                                    c.read_access.fetch_sub(
+                                        uint64_t(1) << (8 * static_cast<uint8_t>(evicted_reader_octile)),
+                                        std::memory_order_acq_rel);
                                 }
                             }
                         }
