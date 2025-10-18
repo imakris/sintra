@@ -51,9 +51,15 @@ std::filesystem::path ensure_shared_directory()
     const char* value = std::getenv(kEnvSharedDir.data());
     if (value) {
         std::filesystem::path dir(value);
-        if (std::filesystem::exists(dir) && std::filesystem::is_directory(dir)) {
+        if (std::filesystem::exists(dir)) {
+            if (!std::filesystem::is_directory(dir)) {
+                throw std::runtime_error("processing fence test shared directory is not a directory");
+            }
             return dir;
         }
+
+        std::filesystem::create_directories(dir);
+        return dir;
     }
 
     auto base = std::filesystem::temp_directory_path() / "sintra_processing_fence";
