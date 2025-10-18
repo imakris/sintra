@@ -97,6 +97,7 @@ class TestRunner:
             'sintra_barrier_flush_test',
             'sintra_barrier_stress_test',
             'sintra_variable_buffer_alignment_test',
+            'sintra_ipc_rings_tests',
             'sintra_spawn_detached_test'
         ]
 
