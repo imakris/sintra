@@ -899,6 +899,9 @@ inline instance_id_type Coordinator::join_group(
         const bool was_absent = state->accounted_absentees.erase(member_id) > 0;
         if (inserted || was_absent) {
             state->joined.fetch_add(1, std::memory_order_acq_rel);
+            if (was_absent) {
+                state->expected += 1;
+            }
         }
 
         detail::bootstrap_trace("join", [&](auto& os) {
