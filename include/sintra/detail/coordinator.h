@@ -91,6 +91,7 @@ struct Process_group: Derived_transceiver<Process_group>
 
     unordered_map<string, Barrier>              m_barriers;
     unordered_set<instance_id_type>             m_process_ids;
+    std::unordered_set<instance_id_type>        m_bootstrap_pending;
 
     mutex m_call_mutex;
     SINTRA_RPC_STRICT_EXPLICIT(barrier)
@@ -117,6 +118,7 @@ void Process_group::set(const unordered_set<instance_id_type>& member_process_id
     m_process_ids = unordered_set<instance_id_type>(
         member_process_ids.begin(), member_process_ids.end()
     );
+    m_bootstrap_pending = m_process_ids;
 }
 
 
@@ -125,6 +127,7 @@ void Process_group::add_process(instance_id_type process_iid)
 {
     std::lock_guard lock(m_call_mutex);
     m_process_ids.insert(process_iid);
+    m_bootstrap_pending.insert(process_iid);
 }
 
 
@@ -133,6 +136,7 @@ void Process_group::remove_process(instance_id_type process_iid)
 {
     std::lock_guard lock(m_call_mutex);
     m_process_ids.erase(process_iid);
+    m_bootstrap_pending.erase(process_iid);
 }
 
 

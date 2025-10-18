@@ -263,7 +263,12 @@ sequence_counter_type Process_group::barrier(
     // between the membership snapshot and the draining filter.
     if (b.processes_pending.empty()) {
         // new or reused barrier (may have failed previously)
-        b.processes_pending = m_process_ids;
+        if (barrier_name.rfind("__swarm_join__/", 0) == 0 && !m_bootstrap_pending.empty()) {
+            b.processes_pending = m_bootstrap_pending;
+        }
+        else {
+            b.processes_pending = m_process_ids;
+        }
         b.processes_arrived.clear();
         b.failed = false;
         b.common_function_iid = make_instance_id();
@@ -340,6 +345,12 @@ sequence_counter_type Process_group::barrier(
 
         // Re-lock m_call_mutex to safely erase from m_barriers
         basic_lock.lock();
+        if (barrier_name.rfind("__swarm_join__/", 0) == 0) {
+            m_bootstrap_pending.erase(caller_piid);
+            for (auto recipient : additional_pids) {
+                m_bootstrap_pending.erase(recipient);
+            }
+        }
         auto it = m_barriers.find(barrier_name);
         if (it != m_barriers.end() && it->second.common_function_iid == current_common_fiid) {
             m_barriers.erase(it);
@@ -415,6 +426,12 @@ inline void Process_group::drop_from_inflight_barriers(
 
         if (touched_arrived) {
             completion.recipients.push_back(process_iid);
+        }
+
+        if (barrier_it->first.rfind("__swarm_join__/", 0) == 0) {
+            for (auto recipient : completion.recipients) {
+                m_bootstrap_pending.erase(recipient);
+            }
         }
 
         barrier.processes_arrived.clear();
@@ -928,6 +945,7 @@ inline instance_id_type Coordinator::join_group(
             {
                 std::lock_guard group_lock(group.m_call_mutex);
                 inserted_member = group.m_process_ids.insert(member_id).second;
+                group.m_bootstrap_pending.insert(member_id);
             }
             if (inserted_member) {
                 m_groups_of_process[member_id].insert(group.m_instance_id);
