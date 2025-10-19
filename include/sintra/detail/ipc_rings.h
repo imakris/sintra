@@ -1163,15 +1163,27 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
             }
         }
 
-        m_control->num_attached++;
+        // Multiple writers/readers may attach concurrently (e.g. stress tests spawn
+        // readers in parallel). num_attached is an interprocess atomic so we must use
+        // a fetch_add here; a plain ++ loses updates under contention and the final
+        // detacher would see an incorrect count and tear down the shared state while
+        // other processes still use it.
+        m_control->num_attached.fetch_add(1, std::memory_order_acq_rel);
     }
 
 
     ~Ring()
     {
-        // The *last* detaching process deletes both control and data files.
-        if (m_control->num_attached-- == 1) {
-            this->m_remove_files_on_destruction = true;
+        if (m_control) {
+            // The *last* detaching process deletes both control and data files. On
+            // platforms where Control wraps kernel semaphore handles (Windows/macOS)
+            // we must explicitly run the destructor once the final reference drops.
+            if (m_control->num_attached.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+#if defined(_WIN32) || defined(__APPLE__)
+                m_control->~Control();
+#endif
+                this->m_remove_files_on_destruction = true;
+            }
         }
 
         delete m_control_region;
