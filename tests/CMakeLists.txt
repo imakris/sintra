@@ -86,7 +86,7 @@ list(APPEND SINTRA_CI_TESTS sintra.variable_buffer_alignment)
 # IPC Rings tests - build 6 configurations: 3 reading policies × 2 build types
 # This ensures comprehensive testing of all policy/optimization combinations
 set(READING_POLICIES
-    "ADAPTIVE_SPIN:3"
+    "ADAPTIVE:3"
     "HYBRID:2"
     "ALWAYS_SPIN:1"
 )

@@ -62,10 +62,10 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 // Phase 3: True blocking sleep (semaphore) for no CPU burn on stalls
 // Memory barriers ensure cache coherency even with stale shared memory.
 
-#define SINTRA_RING_READING_POLICY_ADAPTIVE_SPIN    3
+#define SINTRA_RING_READING_POLICY_ADAPTIVE    3
 
 
-#define SINTRA_RING_READING_POLICY SINTRA_RING_READING_POLICY_ADAPTIVE_SPIN
+#define SINTRA_RING_READING_POLICY SINTRA_RING_READING_POLICY_ADAPTIVE
 
 #ifndef __clang__ 
 #define SINTRA_USE_OMP_GET_WTIME

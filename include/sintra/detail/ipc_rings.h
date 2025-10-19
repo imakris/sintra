@@ -1516,7 +1516,7 @@ struct Ring_R : Ring<T, true>
             }
         }
 
-#elif SINTRA_RING_READING_POLICY == SINTRA_RING_READING_POLICY_ADAPTIVE_SPIN
+#elif SINTRA_RING_READING_POLICY == SINTRA_RING_READING_POLICY_ADAPTIVE
         // Phase 1: Fast spin for ultra-low latency (~50μs)
         double fast_spin_end = get_wtime() + fast_spin_duration;
         while (m_reading_sequence->load(std::memory_order_acquire) == c.leading_sequence.load(std::memory_order_acquire) && get_wtime() < fast_spin_end) {

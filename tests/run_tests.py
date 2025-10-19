@@ -89,7 +89,13 @@ class TestRunner:
             'sintra_barrier_flush_test',
             'sintra_barrier_stress_test',
             'sintra_variable_buffer_alignment_test',
-            'sintra_ipc_rings_tests',
+            # IPC rings tests - 6 configurations: 3 policies × 2 build types
+            'sintra_ipc_rings_tests_release_adaptive',
+            'sintra_ipc_rings_tests_release_hybrid',
+            'sintra_ipc_rings_tests_release_always_spin',
+            'sintra_ipc_rings_tests_debug_adaptive',
+            'sintra_ipc_rings_tests_debug_hybrid',
+            'sintra_ipc_rings_tests_debug_always_spin',
             'sintra_spawn_detached_test'
         ]
 
