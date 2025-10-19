@@ -21,7 +21,14 @@
 
 // Tune eviction behaviour for faster unit tests before including the ring header.
 #define SINTRA_EVICTION_SPIN_THRESHOLD 0
+
+// Expose private members of the ring classes so tests can introspect internal
+// state and simulate races. This is confined to the test translation unit.
+#define private public
+#define protected public
 #include "sintra/detail/ipc_rings.h"
+#undef private
+#undef protected
 
 using namespace std::chrono_literals;
 
@@ -439,6 +446,71 @@ STRESS_TEST(stress_multi_reader_throughput)
             ASSERT_EQ(results[i], static_cast<uint64_t>(i));
         }
     }
+}
+
+TEST_CASE(test_eviction_guard_underflow_and_status_stickiness)
+{
+    Temp_ring_dir tmp("eviction_underflow");
+    auto ring_elements = pick_ring_elements<int>(64);
+    sintra::Ring_W<int> writer(tmp.str(), "ring_data", ring_elements);
+    (void)writer;
+
+    const size_t max_trailing = (ring_elements * 3) / 4;
+    sintra::Ring_R<int> reader(tmp.str(), "ring_data", ring_elements, max_trailing);
+
+    auto& control = reader.c;
+    auto& slot    = control.reading_sequences[reader.m_rs_index].data;
+
+    const sintra::sequence_counter_type base_sequence =
+        static_cast<sintra::sequence_counter_type>(max_trailing + ring_elements / 8);
+
+    control.leading_sequence.store(base_sequence, std::memory_order_release);
+    reader.m_reading_sequence->store(base_sequence, std::memory_order_release);
+    slot.v.store(base_sequence, std::memory_order_release);
+
+    control.read_access.store(0, std::memory_order_relaxed);
+    slot.has_guard.store(0, std::memory_order_relaxed);
+    slot.status.store(sintra::Ring<int, true>::READER_STATE_ACTIVE, std::memory_order_relaxed);
+    slot.trailing_octile.store(0, std::memory_order_relaxed);
+
+    // Acquire a snapshot and wait for the guard to be published.
+    auto snapshot = reader.start_reading(max_trailing);
+    (void)snapshot;
+    while (slot.has_guard.load(std::memory_order_acquire) == 0) {
+        std::this_thread::yield();
+    }
+
+    uint8_t  observed_octile = slot.trailing_octile.load(std::memory_order_relaxed);
+    uint64_t guard_mask      = uint64_t(1) << (8 * observed_octile);
+
+    // Simulate writer eviction.
+    uint8_t expected_guard = 1;
+    ASSERT_TRUE(slot.has_guard.compare_exchange_strong(
+        expected_guard, uint8_t{0}, std::memory_order_acq_rel));
+    control.read_access.fetch_sub(guard_mask, std::memory_order_acq_rel);
+    slot.status.store(sintra::Ring<int, true>::READER_STATE_EVICTED, std::memory_order_release);
+
+    // Streaming recovery path should reacquire the guard and restore ACTIVE status.
+    reader.done_reading_new_data();
+    ASSERT_EQ(
+        slot.status.load(std::memory_order_acquire),
+        static_cast<uint8_t>(sintra::Ring<int, true>::READER_STATE_ACTIVE));
+
+    // Release the snapshot and confirm the guard count remains sane.
+    reader.done_reading();
+    uint64_t read_access_value = control.read_access.load(std::memory_order_acquire);
+    uint8_t  final_guard_count =
+        static_cast<uint8_t>((read_access_value >> (8 * observed_octile)) & 0xffu);
+    uint8_t final_status = slot.status.load(std::memory_order_acquire);
+
+    control.read_access.store(0, std::memory_order_relaxed);
+    slot.status.store(sintra::Ring<int, true>::READER_STATE_ACTIVE, std::memory_order_relaxed);
+    slot.has_guard.store(0, std::memory_order_relaxed);
+
+    ASSERT_EQ(final_guard_count, 0u);
+    ASSERT_EQ(
+        final_status,
+        static_cast<uint8_t>(sintra::Ring<int, true>::READER_STATE_ACTIVE));
 }
 
 STRESS_TEST(stress_attach_detach_readers)
