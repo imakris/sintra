@@ -12,6 +12,8 @@ Options:
     --repetitions N                 Number of times to run each test (default: 100)
     --timeout SECONDS               Timeout per test run in seconds (default: 5)
     --test NAME                     Run only specific test (e.g., sintra_ping_pong_test)
+    --include PATTERN               Include only tests matching glob-style pattern (can be repeated)
+    --exclude PATTERN               Exclude tests matching glob-style pattern (can be repeated)
     --build-dir PATH                Path to build directory (default: ../build-ninja2)
     --config CONFIG                 Build configuration Debug/Release (default: Debug)
     --verbose                       Show detailed output for each test run
@@ -19,6 +21,7 @@ Options:
 """
 
 import argparse
+import fnmatch
 import os
 import subprocess
 import sys
@@ -72,7 +75,12 @@ class TestRunner:
         # Kill any existing sintra processes for a clean start
         self._kill_all_sintra_processes()
 
-    def find_test_suites(self, test_name: Optional[str] = None) -> dict:
+    def find_test_suites(
+        self,
+        test_name: Optional[str] = None,
+        include_patterns: Optional[List[str]] = None,
+        exclude_patterns: Optional[List[str]] = None,
+    ) -> dict:
         """Find all test executables organized by configuration suite"""
         if not self.test_dir.exists():
             print(f"{Color.RED}Test directory not found: {self.test_dir}{Color.RESET}")
@@ -110,10 +118,17 @@ class TestRunner:
                 if not normalized_name.endswith(suffix):
                     continue
 
-                if test_name and test_name not in normalized_name:
+                base_name = normalized_name[:-len(suffix)]
+
+                if not self._matches_filters(
+                    base_name,
+                    normalized_name,
+                    test_name,
+                    include_patterns,
+                    exclude_patterns,
+                ):
                     break
 
-                base_name = normalized_name[:-len(suffix)]
                 discovered_tests[config].append((base_name, entry))
                 break
 
@@ -126,13 +141,57 @@ class TestRunner:
             test_suites[config] = [path for _, path in tests]
 
         if not test_suites:
-            if test_name:
-                print(f"{Color.YELLOW}No tests found matching filter '{test_name}'.{Color.RESET}")
+            if any([test_name, include_patterns, exclude_patterns]):
+                filters = []
+                if test_name:
+                    filters.append(f"--test '{test_name}'")
+                if include_patterns:
+                    includes = ', '.join(include_patterns)
+                    filters.append(f"--include {includes}")
+                if exclude_patterns:
+                    excludes = ', '.join(exclude_patterns)
+                    filters.append(f"--exclude {excludes}")
+                filter_text = '; '.join(filters)
+                print(f"{Color.YELLOW}No tests found after applying filters: {filter_text}.{Color.RESET}")
             else:
                 print(f"{Color.RED}No test binaries found in {self.test_dir}.{Color.RESET}")
             return {}
 
         return test_suites
+
+    @staticmethod
+    def _matches_filters(
+        base_name: str,
+        normalized_name: str,
+        test_name: Optional[str],
+        include_patterns: Optional[List[str]],
+        exclude_patterns: Optional[List[str]],
+    ) -> bool:
+        """Determine if a test name should be included based on provided filters."""
+
+        candidate_names = [base_name, normalized_name]
+
+        if test_name and all(test_name not in name for name in candidate_names):
+            return False
+
+        if include_patterns:
+            include_match = any(
+                fnmatch.fnmatch(name, pattern)
+                for pattern in include_patterns
+                for name in candidate_names
+            )
+            if not include_match:
+                return False
+
+        if exclude_patterns:
+            if any(
+                fnmatch.fnmatch(name, pattern)
+                for pattern in exclude_patterns
+                for name in candidate_names
+            ):
+                return False
+
+        return True
 
     def run_test_once(self, test_path: Path) -> TestResult:
         """Run a single test with timeout and proper cleanup"""
@@ -391,6 +450,25 @@ class TestRunner:
                             print(f"    ... and {remaining} more failures (use --verbose to see all)")
                         break
 
+
+def _collect_patterns(raw_patterns: Optional[List[str]]) -> List[str]:
+    """Normalize include/exclude arguments into a flat list of glob patterns."""
+
+    if not raw_patterns:
+        return []
+
+    patterns: List[str] = []
+    for raw in raw_patterns:
+        if not raw:
+            continue
+        for item in raw.split(','):
+            item = item.strip()
+            if item:
+                patterns.append(item)
+
+    return patterns
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Run Sintra tests with timeout and repetition support',
@@ -401,7 +479,13 @@ def main():
     parser.add_argument('--timeout', type=float, default=5.0,
                         help='Timeout per test run in seconds (default: 5)')
     parser.add_argument('--test', type=str, default=None,
-                        help='Run only specific test (e.g., ping_pong)')
+                        help='Run only tests whose names include the provided substring (e.g., ping_pong)')
+    parser.add_argument('--include', action='append', default=None, metavar='PATTERN',
+                        help='Include only tests whose names match the given glob-style pattern. '
+                             'Can be repeated or include comma-separated patterns.')
+    parser.add_argument('--exclude', action='append', default=None, metavar='PATTERN',
+                        help='Exclude tests whose names match the given glob-style pattern. '
+                             'Can be repeated or include comma-separated patterns.')
     parser.add_argument('--build-dir', type=str, default='../build-ninja2',
                         help='Path to build directory (default: ../build-ninja2)')
     parser.add_argument('--config', type=str, default='Debug',
@@ -429,6 +513,14 @@ def main():
     print(f"Configuration: {args.config}")
     print(f"Repetitions per test: {args.repetitions}")
     print(f"Timeout per test: {args.timeout}s")
+    if args.test:
+        print(f"Substring filter (--test): {args.test}")
+    include_patterns = _collect_patterns(args.include)
+    exclude_patterns = _collect_patterns(args.exclude)
+    if include_patterns:
+        print(f"Include patterns: {', '.join(include_patterns)}")
+    if exclude_patterns:
+        print(f"Exclude patterns: {', '.join(exclude_patterns)}")
     print("=" * 70)
 
     if args.kill_stalled_processes:
@@ -436,7 +528,11 @@ def main():
 
     preserve_on_timeout = args.preserve_stalled_processes
     runner = TestRunner(build_dir, args.config, args.timeout, args.verbose, preserve_on_timeout)
-    test_suites = runner.find_test_suites(args.test)
+    test_suites = runner.find_test_suites(
+        test_name=args.test,
+        include_patterns=include_patterns,
+        exclude_patterns=exclude_patterns,
+    )
 
     if not test_suites:
         print(f"{Color.RED}No test suites found to run{Color.RESET}")
