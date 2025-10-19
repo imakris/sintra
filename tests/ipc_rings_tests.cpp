@@ -433,6 +433,94 @@ TEST_CASE(test_reader_eviction_does_not_underflow_octile_counter)
     ASSERT_EQ(0u, guard_count);
 }
 
+TEST_CASE(test_slow_reader_eviction_restores_status)
+{
+    Temp_ring_dir tmp("eviction_status");
+    const size_t ring_elements = pick_ring_elements<uint64_t>(128);
+    const size_t trailing_cap  = (ring_elements * 3) / 4;
+
+    sintra::Ring_R<uint64_t> reader(tmp.str(), "ring_data", ring_elements, trailing_cap);
+
+    auto& control = reader.c;
+    auto& slot    = control.reading_sequences[reader.m_rs_index].data;
+
+    const auto trailing_idx = sintra::mod_pos_i64(
+        static_cast<int64_t>(reader.m_reading_sequence->load(std::memory_order_relaxed)) -
+        static_cast<int64_t>(reader.m_max_trailing_elements),
+        reader.m_num_elements);
+    const auto trailing_octile = (8 * trailing_idx) / reader.m_num_elements;
+
+    reader.m_trailing_octile = static_cast<uint8_t>(trailing_octile);
+    slot.trailing_octile.store(static_cast<uint8_t>(trailing_octile), std::memory_order_relaxed);
+
+    const uint64_t guard_mask = uint64_t(1) << (8 * trailing_octile);
+    control.read_access.store(guard_mask, std::memory_order_relaxed);
+    slot.has_guard.store(1, std::memory_order_relaxed);
+    slot.status.store(sintra::Ring<uint64_t, true>::READER_STATE_ACTIVE, std::memory_order_relaxed);
+
+    slot.has_guard.store(0, std::memory_order_relaxed);
+    slot.status.store(sintra::Ring<uint64_t, true>::READER_STATE_EVICTED, std::memory_order_relaxed);
+    control.read_access.fetch_sub(guard_mask, std::memory_order_relaxed);
+
+    reader.done_reading_new_data();
+
+    auto restored_status = slot.status.load(std::memory_order_acquire);
+    ASSERT_EQ(sintra::Ring<uint64_t, true>::READER_STATE_ACTIVE, restored_status);
+}
+
+TEST_CASE(test_streaming_reader_status_not_restored_after_eviction)
+{
+    Temp_ring_dir tmp("streaming_eviction_state");
+    const size_t ring_elements = pick_ring_elements<uint32_t>(64);
+    const size_t trailing_cap  = (ring_elements * 3) / 4;
+
+    sintra::Ring_R<uint32_t> reader(tmp.str(), "ring_data", ring_elements, trailing_cap);
+    auto& control = reader.c;
+    auto& slot    = control.reading_sequences[reader.m_rs_index].data;
+
+    const auto initial_leading =
+        static_cast<sintra::sequence_counter_type>(trailing_cap + ring_elements / 8);
+    const auto initial_reading = initial_leading - static_cast<sintra::sequence_counter_type>(ring_elements / 8);
+
+    control.leading_sequence.store(initial_leading, std::memory_order_release);
+    reader.m_reading_sequence->store(initial_reading, std::memory_order_release);
+    slot.v.store(initial_reading, std::memory_order_release);
+    control.read_access.store(0, std::memory_order_relaxed);
+    slot.has_guard.store(0, std::memory_order_relaxed);
+    slot.status.store(sintra::Ring<uint32_t, true>::READER_STATE_ACTIVE, std::memory_order_relaxed);
+
+    auto first_range = reader.wait_for_new_data();
+    ASSERT_TRUE(first_range.end >= first_range.begin);
+    reader.done_reading_new_data();
+
+    const uint8_t guarded_octile = slot.trailing_octile.load(std::memory_order_acquire);
+    const uint64_t guard_mask     = uint64_t(1) << (8 * guarded_octile);
+
+    uint8_t expected = 1;
+    ASSERT_TRUE(slot.has_guard.compare_exchange_strong(
+        expected, uint8_t{0}, std::memory_order_acq_rel));
+    control.read_access.fetch_sub(guard_mask, std::memory_order_acq_rel);
+    slot.status.store(sintra::Ring<uint32_t, true>::READER_STATE_EVICTED, std::memory_order_release);
+
+    control.leading_sequence.fetch_add(ring_elements / 4, std::memory_order_release);
+    reader.m_reading_sequence->fetch_sub(ring_elements / 4, std::memory_order_release);
+    slot.v.fetch_sub(ring_elements / 4, std::memory_order_release);
+
+    auto second_range = reader.wait_for_new_data();
+    ASSERT_TRUE(second_range.end >= second_range.begin);
+    reader.done_reading_new_data();
+
+    ASSERT_EQ(
+        sintra::Ring<uint32_t, true>::READER_STATE_EVICTED,
+        slot.status.load(std::memory_order_acquire));
+
+    ASSERT_THROW(reader.start_reading(), sintra::ring_reader_evicted_exception);
+
+    slot.status.store(sintra::Ring<uint32_t, true>::READER_STATE_ACTIVE, std::memory_order_release);
+    control.read_access.store(0, std::memory_order_release);
+    slot.has_guard.store(0, std::memory_order_release);
+}
+
 STRESS_TEST(stress_multi_reader_throughput)
 {
     Temp_ring_dir tmp("stress_multi");
