@@ -975,7 +975,8 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         std::atomic<sequence_counter_type>   leading_sequence{0};
 
         // Monotonic counter incremented by writer.unblock_global() so readers can
-        // observe global wake-ups even if they were not yet registered as sleeping.
+        // observe durable global wake-ups even if they were not yet registered as
+        // sleeping when the unblock occurred.
         std::atomic<uint64_t>                global_unblock_sequence{0};
 
         // Octile read guards:
@@ -1530,35 +1531,21 @@ struct Ring_R : Ring<T, true>
             return Range<T>{};  // Return empty range to signal shutdown
         }
 
-        auto observe_global_unblock_no_data = [&]() -> bool {
-            if (m_reading_sequence->load(std::memory_order_acquire) !=
-                c.leading_sequence.load(std::memory_order_acquire))
-            {
-                return false;
-            }
-
-            const auto sequence_now =
-                c.global_unblock_sequence.load(std::memory_order_acquire);
-            if (sequence_now == m_seen_unblock_sequence) {
-                return false;
-            }
-
-            m_seen_unblock_sequence = sequence_now;
-            return true;
-        };
-
-        if (observe_global_unblock_no_data()) {
-            return Range<T>{};
-        }
-
 #if SINTRA_RING_READING_POLICY == SINTRA_RING_READING_POLICY_ALWAYS_SPIN
         while (m_reading_sequence->load() == c.leading_sequence.load()) {
             // Check for shutdown during spin
             if (m_stopping.load(std::memory_order_acquire)) {
                 return Range<T>{};
             }
-            if (observe_global_unblock_no_data()) {
-                return Range<T>{};
+            if (m_reading_sequence->load(std::memory_order_acquire) ==
+                c.leading_sequence.load(std::memory_order_acquire))
+            {
+                const auto sequence_now =
+                    c.global_unblock_sequence.load(std::memory_order_acquire);
+                if (sequence_now != m_seen_unblock_sequence) {
+                    m_seen_unblock_sequence = sequence_now;
+                    return Range<T>{};
+                }
             }
             // CRITICAL: Force memory barrier to refresh cache lines
             // This ensures we see updated control structures even when processes
@@ -1573,10 +1560,17 @@ struct Ring_R : Ring<T, true>
             if (m_stopping.load(std::memory_order_acquire)) {
                 return Range<T>{};
             }
-            std::atomic_thread_fence(std::memory_order_acquire);
-            if (observe_global_unblock_no_data()) {
-                return Range<T>{};
+            if (m_reading_sequence->load(std::memory_order_acquire) ==
+                c.leading_sequence.load(std::memory_order_acquire))
+            {
+                const auto sequence_now =
+                    c.global_unblock_sequence.load(std::memory_order_acquire);
+                if (sequence_now != m_seen_unblock_sequence) {
+                    m_seen_unblock_sequence = sequence_now;
+                    return Range<T>{};
+                }
             }
+            std::atomic_thread_fence(std::memory_order_acquire);
         }
 
         // Phase 2: Precision sleep cycles (1ms) for moderate latency with low CPU
@@ -1592,14 +1586,21 @@ struct Ring_R : Ring<T, true>
 #endif
                     return Range<T>{};
                 }
+                if (m_reading_sequence->load(std::memory_order_acquire) ==
+                    c.leading_sequence.load(std::memory_order_acquire))
+                {
+                    const auto sequence_now =
+                        c.global_unblock_sequence.load(std::memory_order_acquire);
+                    if (sequence_now != m_seen_unblock_sequence) {
+#ifdef _WIN32
+                        ::timeEndPeriod(1);
+#endif
+                        m_seen_unblock_sequence = sequence_now;
+                        return Range<T>{};
+                    }
+                }
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 std::atomic_thread_fence(std::memory_order_acquire);
-                if (observe_global_unblock_no_data()) {
-#ifdef _WIN32
-                    ::timeEndPeriod(1);
-#endif
-                    return Range<T>{};
-                }
             }
 #ifdef _WIN32
             ::timeEndPeriod(1);
@@ -1608,6 +1609,16 @@ struct Ring_R : Ring<T, true>
 
         // Phase 3: True blocking sleep (semaphore wait) if still no data after precision sleep
         if (m_reading_sequence->load() == c.leading_sequence.load()) {
+            if (m_reading_sequence->load(std::memory_order_acquire) ==
+                c.leading_sequence.load(std::memory_order_acquire))
+            {
+                const auto sequence_now =
+                    c.global_unblock_sequence.load(std::memory_order_acquire);
+                if (sequence_now != m_seen_unblock_sequence) {
+                    m_seen_unblock_sequence = sequence_now;
+                    return Range<T>{};
+                }
+            }
             c.lock();
             m_sleepy_index.store(-1, std::memory_order_relaxed);
             if (m_reading_sequence->load() == c.leading_sequence.load()) {
@@ -1619,17 +1630,26 @@ struct Ring_R : Ring<T, true>
                 m_sleepy_index.store(sleepy, std::memory_order_release);
                 c.sleeping_stack[c.num_sleeping++] = sleepy;
             }
-            if (observe_global_unblock_no_data()) {
-                const int sleepy = m_sleepy_index.load(std::memory_order_relaxed);
-                if (sleepy >= 0) {
-                    if (c.num_sleeping > 0 && c.sleeping_stack[c.num_sleeping - 1] == sleepy) {
-                        c.sleeping_stack[--c.num_sleeping] = -1;
+            if (m_reading_sequence->load(std::memory_order_acquire) ==
+                c.leading_sequence.load(std::memory_order_acquire))
+            {
+                const auto sequence_now =
+                    c.global_unblock_sequence.load(std::memory_order_acquire);
+                if (sequence_now != m_seen_unblock_sequence) {
+                    m_seen_unblock_sequence = sequence_now;
+                    const int sleepy = m_sleepy_index.load(std::memory_order_relaxed);
+                    if (sleepy >= 0) {
+                        if (c.num_sleeping > 0 &&
+                            c.sleeping_stack[c.num_sleeping - 1] == sleepy)
+                        {
+                            c.sleeping_stack[--c.num_sleeping] = -1;
+                        }
+                        c.ready_stack[c.num_ready++] = sleepy;
+                        m_sleepy_index.store(-1, std::memory_order_release);
                     }
-                    c.ready_stack[c.num_ready++] = sleepy;
-                    m_sleepy_index.store(-1, std::memory_order_release);
+                    c.unlock();
+                    return Range<T>{};
                 }
-                c.unlock();
-                return Range<T>{};
             }
             c.unlock();
 
@@ -1669,13 +1689,30 @@ struct Ring_R : Ring<T, true>
             if (m_stopping.load(std::memory_order_acquire)) {
                 return Range<T>{};
             }
-            if (observe_global_unblock_no_data()) {
-                return Range<T>{};
+            if (m_reading_sequence->load(std::memory_order_acquire) ==
+                c.leading_sequence.load(std::memory_order_acquire))
+            {
+                const auto sequence_now =
+                    c.global_unblock_sequence.load(std::memory_order_acquire);
+                if (sequence_now != m_seen_unblock_sequence) {
+                    m_seen_unblock_sequence = sequence_now;
+                    return Range<T>{};
+                }
             }
         }
     #endif
 
         // Transition to sleeping if still no data
+        if (m_reading_sequence->load(std::memory_order_acquire) ==
+            c.leading_sequence.load(std::memory_order_acquire))
+        {
+            const auto sequence_now =
+                c.global_unblock_sequence.load(std::memory_order_acquire);
+            if (sequence_now != m_seen_unblock_sequence) {
+                m_seen_unblock_sequence = sequence_now;
+                return Range<T>{};
+            }
+        }
         c.lock();
         m_sleepy_index.store(-1, std::memory_order_relaxed);
         if (m_reading_sequence->load() == c.leading_sequence.load()) {
@@ -1688,17 +1725,24 @@ struct Ring_R : Ring<T, true>
             m_sleepy_index.store(sleepy, std::memory_order_release);
             c.sleeping_stack[c.num_sleeping++] = sleepy;
         }
-        if (observe_global_unblock_no_data()) {
-            const int sleepy = m_sleepy_index.load(std::memory_order_relaxed);
-            if (sleepy >= 0) {
-                if (c.num_sleeping > 0 && c.sleeping_stack[c.num_sleeping - 1] == sleepy) {
-                    c.sleeping_stack[--c.num_sleeping] = -1;
+        if (m_reading_sequence->load(std::memory_order_acquire) ==
+            c.leading_sequence.load(std::memory_order_acquire))
+        {
+            const auto sequence_now =
+                c.global_unblock_sequence.load(std::memory_order_acquire);
+            if (sequence_now != m_seen_unblock_sequence) {
+                m_seen_unblock_sequence = sequence_now;
+                const int sleepy = m_sleepy_index.load(std::memory_order_relaxed);
+                if (sleepy >= 0) {
+                    if (c.num_sleeping > 0 && c.sleeping_stack[c.num_sleeping - 1] == sleepy) {
+                        c.sleeping_stack[--c.num_sleeping] = -1;
+                    }
+                    c.ready_stack[c.num_ready++] = sleepy;
+                    m_sleepy_index.store(-1, std::memory_order_release);
                 }
-                c.ready_stack[c.num_ready++] = sleepy;
-                m_sleepy_index.store(-1, std::memory_order_release);
+                c.unlock();
+                return Range<T>{};
             }
-            c.unlock();
-            return Range<T>{};
         }
         c.unlock();
 
@@ -1803,7 +1847,7 @@ private:
     const size_t                        m_max_trailing_elements;
     std::atomic<sequence_counter_type>* m_reading_sequence      = &s_zero_rs;
     size_t                              m_trailing_octile       = 0;
-    uint64_t                            m_seen_unblock_sequence {0};
+    uint64_t                            m_seen_unblock_sequence = 0;
 
 protected:
     std::atomic<bool>                   m_reading               = false;
