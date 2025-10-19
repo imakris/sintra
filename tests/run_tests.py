@@ -12,6 +12,8 @@ Options:
     --repetitions N                 Number of times to run each test (default: 100)
     --timeout SECONDS               Timeout per test run in seconds (default: 5)
     --test NAME                     Run only specific test (e.g., sintra_ping_pong_test)
+    --include PATTERN               Include only tests matching glob-style pattern (can be repeated)
+    --exclude PATTERN               Exclude tests matching glob-style pattern (can be repeated)
     --build-dir PATH                Path to build directory (default: ../build-ninja2)
     --config CONFIG                 Build configuration Debug/Release (default: Debug)
     --verbose                       Show detailed output for each test run
@@ -19,6 +21,7 @@ Options:
 """
 
 import argparse
+import fnmatch
 import os
 import subprocess
 import sys
@@ -72,26 +75,16 @@ class TestRunner:
         # Kill any existing sintra processes for a clean start
         self._kill_all_sintra_processes()
 
-    def find_test_suites(self, test_name: Optional[str] = None) -> dict:
+    def find_test_suites(
+        self,
+        test_name: Optional[str] = None,
+        include_patterns: Optional[List[str]] = None,
+        exclude_patterns: Optional[List[str]] = None,
+    ) -> dict:
         """Find all test executables organized by configuration suite"""
         if not self.test_dir.exists():
             print(f"{Color.RED}Test directory not found: {self.test_dir}{Color.RESET}")
             return {}
-
-        # Base test names (without configuration suffix)
-        base_test_names = [
-            'sintra_dummy_test',
-            'sintra_basic_pubsub_test',
-            'sintra_ping_pong_test',
-            'sintra_ping_pong_multi_test',
-            'sintra_rpc_append_test',
-            'sintra_recovery_test',
-            'sintra_barrier_flush_test',
-            'sintra_barrier_stress_test',
-            'sintra_variable_buffer_alignment_test',
-            'sintra_ipc_rings_tests',
-            'sintra_spawn_detached_test'
-        ]
 
         # 6 configurations: 3 policies × 2 build types
         configurations = [
@@ -103,30 +96,102 @@ class TestRunner:
             'debug_always_spin'
         ]
 
-        # Build test suites: dict mapping config -> list of test paths
-        test_suites = {}
-        for config in configurations:
-            suite_tests = []
-            for base_name in base_test_names:
-                full_name = f"{base_name}_{config}"
+        # Discover available tests dynamically so the runner adapts to new or removed binaries
+        discovered_tests = {config: [] for config in configurations}
 
-                if test_name and test_name not in full_name:
+        try:
+            directory_entries = sorted(self.test_dir.iterdir())
+        except OSError as exc:
+            print(f"{Color.RED}Failed to inspect test directory {self.test_dir}: {exc}{Color.RESET}")
+            return {}
+
+        for entry in directory_entries:
+            if not (entry.is_file() or entry.is_symlink()):
+                continue
+
+            normalized_name = entry.name
+            if sys.platform == 'win32' and normalized_name.lower().endswith('.exe'):
+                normalized_name = normalized_name[:-4]
+
+            for config in configurations:
+                suffix = f"_{config}"
+                if not normalized_name.endswith(suffix):
                     continue
 
-                if sys.platform == 'win32':
-                    test_path = self.test_dir / f"{full_name}.exe"
-                else:
-                    test_path = self.test_dir / full_name
+                base_name = normalized_name[:-len(suffix)]
 
-                if test_path.exists():
-                    suite_tests.append(test_path)
-                else:
-                    print(f"{Color.YELLOW}Warning: Test not found: {test_path}{Color.RESET}")
+                if not self._matches_filters(
+                    base_name,
+                    normalized_name,
+                    test_name,
+                    include_patterns,
+                    exclude_patterns,
+                ):
+                    break
 
-            if suite_tests:
-                test_suites[config] = suite_tests
+                discovered_tests[config].append((base_name, entry))
+                break
+
+        test_suites = {}
+        for config, tests in discovered_tests.items():
+            if not tests:
+                continue
+
+            tests.sort(key=lambda item: item[0])
+            test_suites[config] = [path for _, path in tests]
+
+        if not test_suites:
+            if any([test_name, include_patterns, exclude_patterns]):
+                filters = []
+                if test_name:
+                    filters.append(f"--test '{test_name}'")
+                if include_patterns:
+                    includes = ', '.join(include_patterns)
+                    filters.append(f"--include {includes}")
+                if exclude_patterns:
+                    excludes = ', '.join(exclude_patterns)
+                    filters.append(f"--exclude {excludes}")
+                filter_text = '; '.join(filters)
+                print(f"{Color.YELLOW}No tests found after applying filters: {filter_text}.{Color.RESET}")
+            else:
+                print(f"{Color.RED}No test binaries found in {self.test_dir}.{Color.RESET}")
+            return {}
 
         return test_suites
+
+    @staticmethod
+    def _matches_filters(
+        base_name: str,
+        normalized_name: str,
+        test_name: Optional[str],
+        include_patterns: Optional[List[str]],
+        exclude_patterns: Optional[List[str]],
+    ) -> bool:
+        """Determine if a test name should be included based on provided filters."""
+
+        candidate_names = [base_name, normalized_name]
+
+        if test_name and all(test_name not in name for name in candidate_names):
+            return False
+
+        if include_patterns:
+            include_match = any(
+                fnmatch.fnmatch(name, pattern)
+                for pattern in include_patterns
+                for name in candidate_names
+            )
+            if not include_match:
+                return False
+
+        if exclude_patterns:
+            if any(
+                fnmatch.fnmatch(name, pattern)
+                for pattern in exclude_patterns
+                for name in candidate_names
+            ):
+                return False
+
+        return True
 
     def run_test_once(self, test_path: Path) -> TestResult:
         """Run a single test with timeout and proper cleanup"""
@@ -385,6 +450,25 @@ class TestRunner:
                             print(f"    ... and {remaining} more failures (use --verbose to see all)")
                         break
 
+
+def _collect_patterns(raw_patterns: Optional[List[str]]) -> List[str]:
+    """Normalize include/exclude arguments into a flat list of glob patterns."""
+
+    if not raw_patterns:
+        return []
+
+    patterns: List[str] = []
+    for raw in raw_patterns:
+        if not raw:
+            continue
+        for item in raw.split(','):
+            item = item.strip()
+            if item:
+                patterns.append(item)
+
+    return patterns
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Run Sintra tests with timeout and repetition support',
@@ -395,7 +479,13 @@ def main():
     parser.add_argument('--timeout', type=float, default=5.0,
                         help='Timeout per test run in seconds (default: 5)')
     parser.add_argument('--test', type=str, default=None,
-                        help='Run only specific test (e.g., ping_pong)')
+                        help='Run only tests whose names include the provided substring (e.g., ping_pong)')
+    parser.add_argument('--include', action='append', default=None, metavar='PATTERN',
+                        help='Include only tests whose names match the given glob-style pattern. '
+                             'Can be repeated or include comma-separated patterns.')
+    parser.add_argument('--exclude', action='append', default=None, metavar='PATTERN',
+                        help='Exclude tests whose names match the given glob-style pattern. '
+                             'Can be repeated or include comma-separated patterns.')
     parser.add_argument('--build-dir', type=str, default='../build-ninja2',
                         help='Path to build directory (default: ../build-ninja2)')
     parser.add_argument('--config', type=str, default='Debug',
@@ -423,6 +513,14 @@ def main():
     print(f"Configuration: {args.config}")
     print(f"Repetitions per test: {args.repetitions}")
     print(f"Timeout per test: {args.timeout}s")
+    if args.test:
+        print(f"Substring filter (--test): {args.test}")
+    include_patterns = _collect_patterns(args.include)
+    exclude_patterns = _collect_patterns(args.exclude)
+    if include_patterns:
+        print(f"Include patterns: {', '.join(include_patterns)}")
+    if exclude_patterns:
+        print(f"Exclude patterns: {', '.join(exclude_patterns)}")
     print("=" * 70)
 
     if args.kill_stalled_processes:
@@ -430,7 +528,11 @@ def main():
 
     preserve_on_timeout = args.preserve_stalled_processes
     runner = TestRunner(build_dir, args.config, args.timeout, args.verbose, preserve_on_timeout)
-    test_suites = runner.find_test_suites(args.test)
+    test_suites = runner.find_test_suites(
+        test_name=args.test,
+        include_patterns=include_patterns,
+        exclude_patterns=exclude_patterns,
+    )
 
     if not test_suites:
         print(f"{Color.RED}No test suites found to run{Color.RESET}")
@@ -453,7 +555,10 @@ def main():
         suite_start_time = time.time()
 
         # Adaptive soak test for this suite
-        accumulated_results = {test.stem: {'passed': 0, 'failed': 0, 'durations': []} for test in tests}
+        accumulated_results = {
+            test.stem: {'passed': 0, 'failed': 0, 'durations': [], 'failures': []}
+            for test in tests
+        }
         total_reps_so_far = 0
         max_reps_per_test = args.repetitions
         suite_all_passed = True
@@ -471,13 +576,28 @@ def main():
 
                     accumulated_results[test_name]['durations'].append(result.duration)
 
+                    result_bucket = accumulated_results[test_name]
+
                     if result.success:
-                        accumulated_results[test_name]['passed'] += 1
+                        result_bucket['passed'] += 1
                         print(f"{Color.GREEN}.{Color.RESET}", end="", flush=True)
                     else:
-                        accumulated_results[test_name]['failed'] += 1
+                        result_bucket['failed'] += 1
                         suite_all_passed = False
                         overall_all_passed = False
+
+                        run_index = result_bucket['passed'] + result_bucket['failed']
+                        error_message = (result.error or '').strip()
+                        if error_message:
+                            first_line = error_message.splitlines()[0]
+                        else:
+                            first_line = 'No error output captured'
+
+                        result_bucket['failures'].append({
+                            'run': run_index,
+                            'message': first_line,
+                        })
+
                         print(f"{Color.RED}F{Color.RESET}", end="", flush=True)
 
                 print()
@@ -493,11 +613,28 @@ def main():
         # Print suite results
         suite_duration = time.time() - suite_start_time
         print(f"\n{Color.BOLD}Results for {config_name}:{Color.RESET}")
-        print("=" * 80)
-        print(f"{'Test':<40} {'Pass rate':<20} {'Avg runtime (s)':>15}")
-        print("=" * 80)
+        test_names = sorted(accumulated_results.keys())
+        test_col_width = max([len(name) for name in test_names] + [4]) + 2
+        passrate_col_width = 20
+        avg_runtime_col_width = 17
+        failures_col_width = 10
 
-        for test_name in sorted(accumulated_results.keys()):
+        header_fmt = (
+            f"{{:<{test_col_width}}}"
+            f" {{:>{passrate_col_width}}}"
+            f" {{:>{avg_runtime_col_width}}}"
+            f" {{:>{failures_col_width}}}"
+        )
+        row_fmt = header_fmt
+        table_width = (
+            test_col_width + passrate_col_width + avg_runtime_col_width + failures_col_width + 3
+        )
+
+        print("=" * table_width)
+        print(header_fmt.format('Test', 'Pass rate', 'Avg runtime (s)', 'Failures'))
+        print("=" * table_width)
+
+        for test_name in test_names:
             passed = accumulated_results[test_name]['passed']
             failed = accumulated_results[test_name]['failed']
             total = passed + failed
@@ -507,15 +644,32 @@ def main():
             avg_duration = sum(durations) / len(durations) if durations else 0
 
             pass_rate_str = f"{passed}/{total} ({pass_rate:6.2f}%)"
-            print(f"{test_name:<40} {pass_rate_str:<20} {avg_duration:>15.2f}")
+            failure_count = len(accumulated_results[test_name]['failures'])
+            avg_duration_str = f"{avg_duration:.2f}"
+            print(row_fmt.format(test_name, pass_rate_str, avg_duration_str, failure_count))
 
-        print("=" * 80)
+        print("=" * table_width)
         print(f"Suite duration: {format_duration(suite_duration)}")
 
         if suite_all_passed:
             print(f"Suite result: {Color.GREEN}PASSED{Color.RESET}")
         else:
             print(f"Suite result: {Color.RED}FAILED{Color.RESET}")
+            failing_tests = {
+                name: data['failures']
+                for name, data in accumulated_results.items()
+                if data['failures']
+            }
+
+            if failing_tests:
+                print(f"\n{Color.YELLOW}Failure summary:{Color.RESET}")
+                for test_name, failures in failing_tests.items():
+                    print(f"  {test_name}:")
+                    for failure in failures[:5]:
+                        print(f"    Run #{failure['run']}: {failure['message']}")
+                    if len(failures) > 5:
+                        remaining = len(failures) - 5
+                        print(f"    ... and {remaining} more failure(s)")
             print(f"\n{Color.RED}Stopping - suite {config_name} failed{Color.RESET}")
             break
 
