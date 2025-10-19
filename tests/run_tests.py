@@ -453,7 +453,15 @@ def main():
         suite_start_time = time.time()
 
         # Adaptive soak test for this suite
-        accumulated_results = {test.stem: {'passed': 0, 'failed': 0, 'durations': []} for test in tests}
+        accumulated_results = {
+            test.stem: {
+                'passed': 0,
+                'failed': 0,
+                'durations': [],
+                'failures': []
+            }
+            for test in tests
+        }
         total_reps_so_far = 0
         max_reps_per_test = args.repetitions
         suite_all_passed = True
@@ -471,11 +479,23 @@ def main():
 
                     accumulated_results[test_name]['durations'].append(result.duration)
 
+                    current_run_index = (
+                        accumulated_results[test_name]['passed']
+                        + accumulated_results[test_name]['failed']
+                        + 1
+                    )
+
                     if result.success:
                         accumulated_results[test_name]['passed'] += 1
                         print(f"{Color.GREEN}.{Color.RESET}", end="", flush=True)
                     else:
                         accumulated_results[test_name]['failed'] += 1
+                        accumulated_results[test_name]['failures'].append(
+                            {
+                                'run': current_run_index,
+                                'message': result.error.strip() or 'No error output'
+                            }
+                        )
                         suite_all_passed = False
                         overall_all_passed = False
                         print(f"{Color.RED}F{Color.RESET}", end="", flush=True)
@@ -494,20 +514,52 @@ def main():
         suite_duration = time.time() - suite_start_time
         print(f"\n{Color.BOLD}Results for {config_name}:{Color.RESET}")
         print("=" * 80)
-        print(f"{'Test':<40} {'Pass rate':<20} {'Avg runtime (s)':>15}")
+        test_name_width = max(
+            [len('Test')] + [len(name) for name in accumulated_results.keys()]
+        )
+
+        pass_rate_strings = {}
+        pass_rate_width = len('Pass rate')
+        for test_name, stats in accumulated_results.items():
+            passed = stats['passed']
+            failed = stats['failed']
+            total = passed + failed
+            pass_rate = (passed / total * 100) if total > 0 else 0
+            pass_rate_str = f"{passed}/{total} ({pass_rate:6.2f}%)"
+            pass_rate_strings[test_name] = pass_rate_str
+            pass_rate_width = max(pass_rate_width, len(pass_rate_str))
+
+        avg_runtime_header = 'Avg runtime (s)'
+        print(
+            f"{'Test':<{test_name_width}} "
+            f"{'Pass rate':<{pass_rate_width}} "
+            f"{avg_runtime_header:>15}"
+        )
         print("=" * 80)
 
         for test_name in sorted(accumulated_results.keys()):
-            passed = accumulated_results[test_name]['passed']
-            failed = accumulated_results[test_name]['failed']
-            total = passed + failed
-            pass_rate = (passed / total * 100) if total > 0 else 0
-
-            durations = accumulated_results[test_name]['durations']
+            stats = accumulated_results[test_name]
+            durations = stats['durations']
             avg_duration = sum(durations) / len(durations) if durations else 0
 
-            pass_rate_str = f"{passed}/{total} ({pass_rate:6.2f}%)"
-            print(f"{test_name:<40} {pass_rate_str:<20} {avg_duration:>15.2f}")
+            pass_rate_str = pass_rate_strings[test_name]
+            print(
+                f"{test_name:<{test_name_width}} "
+                f"{pass_rate_str:<{pass_rate_width}} "
+                f"{avg_duration:>15.2f}"
+            )
+
+            if stats['failures']:
+                print(f"    {Color.RED}Failures:{Color.RESET}")
+                for failure in stats['failures'][:5]:
+                    run_info = f"Run #{failure['run']}"
+                    message = failure['message']
+                    print(f"      - {run_info}: {message}")
+                remaining_failures = len(stats['failures']) - 5
+                if remaining_failures > 0:
+                    print(
+                        f"      ... and {remaining_failures} more (use --verbose for additional details)"
+                    )
 
         print("=" * 80)
         print(f"Suite duration: {format_duration(suite_duration)}")
