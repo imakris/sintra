@@ -740,143 +740,90 @@ private:
 
             ipc::map_options_t map_extra_options = 0;
 
-#ifdef _WIN32
-            // ── Windows path ───────────────────────────────────────────────────
-            // Uses retry logic to handle concurrent mapping races on Windows.
-            // When multiple threads in the same process try to map the same file
-            // simultaneously, Windows can fail with ERROR_INVALID_ADDRESS because
-            // the VirtualFree from one thread hasn't fully completed before another
-            // thread tries to map at a nearby address. Retrying with Sleep(0) yields
-            // the CPU and allows Windows to complete cleanup.
+            // Unified retry logic for all platforms.
+            // When multiple threads in the same process try to map the same file simultaneously,
+            // the OS can fail due to concurrent access to the virtual memory manager.
+            // Retrying with a CPU yield allows the OS to complete pending operations.
             constexpr int max_attach_attempts = 8;
+
             for (int attempt = 0; attempt < max_attach_attempts; ++attempt) {
-                // Reserve (2× + granularity) so we can round within the reservation.
-                void* mem = ::VirtualAlloc(nullptr,
-                                           m_data_region_size * 2 + page_size,
+                char* ptr = nullptr;
+
+#ifdef _WIN32
+                // ── Windows: VirtualAlloc → round → VirtualFree → map ──────────────
+                void* mem = ::VirtualAlloc(nullptr, m_data_region_size * 2 + page_size,
                                            MEM_RESERVE, PAGE_READWRITE);
-                if (!mem) {
-                    return false;
-                }
+                if (!mem) return false;
 
-                // Preserve historical layout: round to allocation granularity.
-                char* ptr = (char*)(
-                    (uintptr_t)((char*)mem + page_size) & ~((uintptr_t)page_size - 1)
-                );
-
-                // Free the reservation; we expect the OS to reuse the address immediately.
+                ptr = (char*)((uintptr_t)((char*)mem + page_size) & ~((uintptr_t)page_size - 1));
                 ::VirtualFree(mem, 0, MEM_RELEASE);
+#else
+                // ── POSIX: mmap PROT_NONE reservation ──────────────────────────────
+                void* mem = ::mmap(nullptr, m_data_region_size * 2,
+                                   PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                if (mem == MAP_FAILED) return false;
 
-                // Map twice back-to-back at the chosen address.
-                std::unique_ptr<ipc::mapped_region> region0;
-                std::unique_ptr<ipc::mapped_region> region1;
+                ptr = static_cast<char*>(mem);
+                assert((reinterpret_cast<uintptr_t>(ptr) % page_size) == 0 &&
+                       "mmap(PROT_NONE) base not page-aligned?");
+
+                #ifdef MAP_FIXED
+                map_extra_options |= MAP_FIXED;
+                #endif
+                #ifdef MAP_NOSYNC
+                map_extra_options |= MAP_NOSYNC;
+                #endif
+#endif
+                // ── Platform-independent: map twice back-to-back ───────────────────
+                std::unique_ptr<ipc::mapped_region> region0, region1;
+                bool mapping_failed = false;
+
                 try {
                     region0.reset(new ipc::mapped_region(file, data_rights, 0,
                         m_data_region_size, ptr, map_extra_options));
-                    region1.reset(new ipc::mapped_region(file, data_rights, 0,
-                        0, ((char*)region0->get_address()) + m_data_region_size, map_extra_options));
-                }
-                catch (const ipc::interprocess_exception& ex) {
-                    DWORD native_error = ex.get_native_error();
-                    if ((native_error == ERROR_INVALID_ADDRESS ||
-                         native_error == ERROR_INVALID_PARAMETER) &&
-                        attempt + 1 < max_attach_attempts) {
-                        ::Sleep(0);  // Yield CPU to allow Windows to complete cleanup
-                        continue;
-                    }
-                    return false;
+                    region1.reset(new ipc::mapped_region(file, data_rights, 0, 0,
+                        ((char*)region0->get_address()) + m_data_region_size, map_extra_options));
                 }
                 catch (...) {
-                    return false;
+                    mapping_failed = true;
                 }
 
-                // Basic sanity checks (compile-time asserts are not practical here).
-                bool layout_ok =
+                // ── Validate layout ─────────────────────────────────────────────────
+                bool layout_ok = !mapping_failed &&
+                    region0 && region1 &&
                     region0->get_address() == ptr &&
                     region1->get_address() == ptr + m_data_region_size &&
                     region0->get_size() == m_data_region_size &&
                     region1->get_size() == m_data_region_size;
 
-                if (!layout_ok) {
-                    if (attempt + 1 < max_attach_attempts) {
-                        ::Sleep(0);  // Yield CPU and retry
-                        continue;
-                    }
-                    // Only assert on the final attempt after all retries exhausted
-#ifndef NDEBUG
-                    assert(false && "Ring memory layout validation failed after all retry attempts");
-#endif
-                    return false;
+                if (layout_ok) {
+                    // Success!
+                    m_data_region_0 = region0.release();
+                    m_data_region_1 = region1.release();
+                    m_data = (T*)m_data_region_0->get_address();
+                    break;
                 }
 
-                m_data_region_0 = region0.release();
-                m_data_region_1 = region1.release();
-                m_data = (T*)m_data_region_0->get_address();
-                break;  // Success!
+                // ── Retry or fail ───────────────────────────────────────────────────
+                if (attempt + 1 < max_attach_attempts) {
+#ifdef _WIN32
+                    ::Sleep(0);
+#else
+                    std::this_thread::yield();
+#endif
+                    continue;
+                }
+
+                // Final attempt failed
+#ifndef NDEBUG
+                assert(false && "Ring memory layout validation failed after all retry attempts");
+#endif
+                return false;
             }
 
             if (!m_data_region_0) {
                 return false;
             }
-
-#else
-            // ── POSIX/Linux path ───────────────────────────────────────────────
-            // Reserve a PROT_NONE span large enough for both mappings (2×).
-            void* mem = ::mmap(nullptr, m_data_region_size * 2,
-                               PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-            if (mem == MAP_FAILED) {
-                return false;
-            }
-
-            // POSIX guarantees page alignment for mmap().
-            char* ptr = static_cast<char*>(mem);
-            assert((reinterpret_cast<uintptr_t>(ptr) % page_size) == 0 &&
-                   "mmap(PROT_NONE) base not page-aligned?");
-
-            // We will REPLACE the reservation with fixed mappings.
-            #ifdef MAP_FIXED
-            map_extra_options |= MAP_FIXED;   // NOTE: intentionally MAP_FIXED, not *_NOREPLACE
-            #endif
-            #ifdef MAP_NOSYNC
-            map_extra_options |= MAP_NOSYNC;
-            #endif
-
-            try {
-                m_data_region_0 = new ipc::mapped_region(
-                    file, data_rights, 0, m_data_region_size, ptr, map_extra_options);
-                m_data_region_1 = new ipc::mapped_region(
-                    file, data_rights, 0, 0,
-                    ((char*)m_data_region_0->get_address()) + m_data_region_size, map_extra_options);
-                m_data = (T*)m_data_region_0->get_address();
-
-                // Sanity — the two mappings must be exactly adjacent.
-#ifndef NDEBUG
-                assert(m_data_region_0->get_address() == ptr);
-                assert(m_data_region_1->get_address() == ptr + m_data_region_size);
-                assert(m_data_region_0->get_size() == m_data_region_size);
-                assert(m_data_region_1->get_size() == m_data_region_size);
-#else
-                if (m_data_region_0->get_address() != ptr ||
-                    m_data_region_1->get_address() != ptr + m_data_region_size ||
-                    m_data_region_0->get_size() != m_data_region_size ||
-                    m_data_region_1->get_size() != m_data_region_size)
-                {
-                    delete m_data_region_0; m_data_region_0 = nullptr;
-                    delete m_data_region_1; m_data_region_1 = nullptr;
-                    m_data = nullptr;
-                    ::munmap(mem, m_data_region_size * 2);
-                    return false;
-                }
-#endif
-            }
-            catch (...) {
-                // IMPORTANT: unmap the whole reserved span on ANY failure.
-                if (m_data_region_0) { delete m_data_region_0; m_data_region_0 = nullptr; }
-                if (m_data_region_1) { delete m_data_region_1; m_data_region_1 = nullptr; }
-                m_data = nullptr;
-                ::munmap(mem, m_data_region_size * 2);
-                return false;
-            }
-#endif // _WIN32 vs POSIX
 
 #if defined(__linux__) && defined(SINTRA_RUNTIME_CACHELINE_CHECK)
             // Warn ONCE per process if we detect a cache-line mismatch.
