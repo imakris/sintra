@@ -1162,13 +1162,23 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
 
     ~Ring()
     {
-        // The *last* detaching process deletes both control and data files.
-        if (m_control->num_attached-- == 1) {
-            this->m_remove_files_on_destruction = true;
+        if (m_control) {
+            // The *last* detaching process destroys the control block (to release
+            // OS resources such as named semaphores) and deletes both control and
+            // data files. On POSIX (Linux/FreeBSD), the semaphores live entirely
+            // in shared memory and require no explicit destruction, but on
+            // Windows and macOS they wrap kernel objects that must be closed.
+            if (m_control->num_attached.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+#if defined(_WIN32) || defined(__APPLE__)
+                m_control->~Control();
+#endif
+                this->m_remove_files_on_destruction = true;
+            }
         }
 
         delete m_control_region;
         m_control_region = nullptr;
+        m_control = nullptr;
 
         if (this->m_remove_files_on_destruction) {
             std::error_code ec;
