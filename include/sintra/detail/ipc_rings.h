@@ -580,26 +580,35 @@ struct sintra_ring_semaphore : ipc::interprocess_semaphore
 {
     sintra_ring_semaphore() : ipc::interprocess_semaphore(0) {}
 
-    // Always post. unordered is advisory only.
+    // Wakes all readers in an ordered fashion (used by writer after publishing).
     void post_ordered()
     {
-        unordered.store(false, std::memory_order_release);
-        this->post();
+        if (unordered.load(std::memory_order_acquire)) {
+            unordered.store(false, std::memory_order_release);
+        }
+        else if (!posted.test_and_set(std::memory_order_acquire)) {
+            this->post();
+        }
     }
 
+    // Wakes a single reader in an unordered fashion (used by local unblocks).
     void post_unordered()
     {
-        unordered.store(true, std::memory_order_release);
-        this->post();
+        if (!posted.test_and_set(std::memory_order_acquire)) {
+            unordered.store(true, std::memory_order_release);
+            this->post();
+        }
     }
 
-    // Returns true if the wakeup was unordered (best effort).
+    // Wait returns true if the wakeup was unordered and no ordered post happened since.
     bool wait()
     {
         ipc::interprocess_semaphore::wait();
+        posted.clear(std::memory_order_release);
         return unordered.exchange(false, std::memory_order_acq_rel);
     }
 private:
+    std::atomic_flag posted = ATOMIC_FLAG_INIT;
     std::atomic<bool> unordered{false};
 };
 
