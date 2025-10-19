@@ -764,6 +764,7 @@ private:
 #ifdef __APPLE__
                     std::fprintf(stderr, "[RING_DEBUG] mmap PROT_NONE failed on attempt %d: %s\n",
                                 attempt, std::strerror(errno));
+                    std::fflush(stderr);
 #endif
                     return false;
                 }
@@ -775,6 +776,7 @@ private:
 #ifdef __APPLE__
                 std::fprintf(stderr, "[RING_DEBUG] Attempt %d: Reserved %p - %p\n",
                             attempt, mem, (char*)mem + m_data_region_size * 2);
+                std::fflush(stderr);
 #endif
 
                 #ifdef MAP_FIXED
@@ -794,12 +796,14 @@ private:
 #ifdef __APPLE__
                     std::fprintf(stderr, "[RING_DEBUG] Attempt %d: region0 mapped at %p\n",
                                 attempt, region0->get_address());
+                    std::fflush(stderr);
 #endif
                     region1.reset(new ipc::mapped_region(file, data_rights, 0, 0,
                         ((char*)region0->get_address()) + m_data_region_size, map_extra_options));
 #ifdef __APPLE__
                     std::fprintf(stderr, "[RING_DEBUG] Attempt %d: region1 mapped at %p\n",
                                 attempt, region1->get_address());
+                    std::fflush(stderr);
 #endif
                 }
                 catch (const std::exception& ex) {
@@ -807,12 +811,14 @@ private:
 #ifdef __APPLE__
                     std::fprintf(stderr, "[RING_DEBUG] Attempt %d: mapping exception: %s\n",
                                 attempt, ex.what());
+                    std::fflush(stderr);
 #endif
                 }
                 catch (...) {
                     mapping_failed = true;
 #ifdef __APPLE__
                     std::fprintf(stderr, "[RING_DEBUG] Attempt %d: unknown mapping exception\n", attempt);
+                    std::fflush(stderr);
 #endif
                 }
 
@@ -828,6 +834,7 @@ private:
                     // Success! MAP_FIXED has replaced the PROT_NONE reservation.
 #ifdef __APPLE__
                     std::fprintf(stderr, "[RING_DEBUG] Attempt %d: SUCCESS\n", attempt);
+                    std::fflush(stderr);
 #endif
                     m_data_region_0 = region0.release();
                     m_data_region_1 = region1.release();
@@ -842,6 +849,7 @@ private:
                             attempt, mapping_failed,
                             region0 ? region0->get_address() : nullptr,
                             region1 ? region1->get_address() : nullptr);
+                std::fflush(stderr);
 #endif
 
                 // CRITICAL: Release the PROT_NONE reservation on POSIX.
@@ -851,6 +859,7 @@ private:
 #ifdef __APPLE__
                 std::fprintf(stderr, "[RING_DEBUG] Attempt %d: munmap returned %d (errno=%d)\n",
                             attempt, munmap_result, errno);
+                std::fflush(stderr);
 #endif
 #endif
 
@@ -866,6 +875,7 @@ private:
                 // Final attempt failed
 #ifdef __APPLE__
                 std::fprintf(stderr, "[RING_DEBUG] ALL ATTEMPTS FAILED\n");
+                std::fflush(stderr);
 #endif
 #ifndef NDEBUG
                 assert(false && "Ring memory layout validation failed after all retry attempts");
