@@ -169,13 +169,44 @@ class TestRunner:
                     print(f"{Color.YELLOW}Attach a debugger to PID {process.pid} or terminate it manually when done.{Color.RESET}")
                     sys.exit(2)
 
+                # Try to get output immediately before killing
+                stdout = ""
+                stderr = ""
+                try:
+                    # Try to read from pipes before killing (non-blocking if possible)
+                    import select
+                    import os
+                    if hasattr(select, 'select'):
+                        # Unix: check if data is available
+                        pass  # Will use communicate after kill
+                except:
+                    pass
+
                 # Kill the process tree on timeout
                 self._kill_process_tree(process.pid)
 
-                # Get partial output from the exception object itself.
-                # This avoids a second communicate() call which can hang.
-                stdout = e.stdout if e.stdout else ""
-                stderr = e.stderr if e.stderr else ""
+                # Try to get any buffered output after killing
+                try:
+                    stdout_data, stderr_data = process.communicate(timeout=1)
+                    stdout = stdout_data if stdout_data else ""
+                    stderr = stderr_data if stderr_data else ""
+                except:
+                    # Fall back to exception object
+                    stdout = e.stdout if e.stdout else ""
+                    stderr = e.stderr if e.stderr else ""
+
+                # DEBUGGING: Print stderr immediately to terminal for ipc_rings_tests
+                if 'ipc_rings' in str(test_path):
+                    print(f"\n{Color.RED}=== TIMEOUT DEBUG OUTPUT (ipc_rings_tests) ==={Color.RESET}")
+                    print(f"stdout length: {len(stdout)}")
+                    print(f"stderr length: {len(stderr)}")
+                    if stderr:
+                        print(f"{Color.YELLOW}stderr content:{Color.RESET}")
+                        print(stderr)
+                    if stdout:
+                        print(f"{Color.YELLOW}stdout content:{Color.RESET}")
+                        print(stdout)
+                    print(f"{Color.RED}=== END TIMEOUT DEBUG ==={Color.RESET}\n")
 
                 return TestResult(
                     success=False,
