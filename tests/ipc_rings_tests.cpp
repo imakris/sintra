@@ -21,7 +21,11 @@
 
 // Tune eviction behaviour for faster unit tests before including the ring header.
 #define SINTRA_EVICTION_SPIN_THRESHOLD 0
+#define private public
+#define protected public
 #include "sintra/detail/ipc_rings.h"
+#undef private
+#undef protected
 
 using namespace std::chrono_literals;
 
@@ -341,6 +345,92 @@ TEST_CASE(test_wait_for_new_data)
     for (size_t i = 0; i < payload.size(); ++i) {
         ASSERT_EQ(observed[i], payload[i]);
     }
+}
+
+TEST_CASE(test_reader_eviction_does_not_underflow_octile_counter)
+{
+    Temp_ring_dir tmp("guard_underflow");
+    const std::string ring_name = "ring_data";
+    const size_t ring_elements = pick_ring_elements<uint32_t>(64);
+    const size_t trailing_cap = (ring_elements * 3) / 4;
+
+    sintra::Ring_W<uint32_t> writer(tmp.str(), ring_name, ring_elements);
+    sintra::Ring_R<uint32_t> reader(tmp.str(), ring_name, ring_elements, trailing_cap);
+
+    const size_t block_elements = ring_elements / 8;
+    std::vector<uint32_t> block(block_elements);
+
+    auto write_block = [&](uint32_t seed) {
+        for (size_t i = 0; i < block_elements; ++i) {
+            block[i] = seed + static_cast<uint32_t>(i);
+        }
+        writer.write(block.data(), block.size());
+        writer.done_writing();
+    };
+
+    for (uint32_t i = 0; i < ring_elements * 2; ++i) {
+        write_block(i);
+    }
+
+    const int slot_index = reader.m_rs_index;
+    auto& slot = reader.c.reading_sequences[slot_index].data;
+
+    std::atomic<bool> guard_ready{false};
+
+    std::thread writer_thread([&]{
+        while (!guard_ready.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        for (int iter = 0; iter < static_cast<int>(ring_elements * 4); ++iter) {
+            write_block(1000u + static_cast<uint32_t>(iter));
+        }
+    });
+
+    std::thread reader_thread([&]{
+        reader.start_reading(trailing_cap);
+    });
+
+    uint8_t guarded_octile = 0;
+    auto guard_deadline = std::chrono::steady_clock::now() + 1s;
+    bool guard_observed = false;
+    while (std::chrono::steady_clock::now() < guard_deadline) {
+        if (slot.has_guard.load(std::memory_order_acquire)) {
+            guarded_octile = slot.trailing_octile.load(std::memory_order_relaxed);
+            guard_observed = true;
+            break;
+        }
+        std::this_thread::yield();
+    }
+    ASSERT_TRUE(guard_observed);
+
+    guard_ready.store(true, std::memory_order_release);
+
+    auto eviction_deadline = std::chrono::steady_clock::now() + 2s;
+    bool eviction_observed = false;
+    while (std::chrono::steady_clock::now() < eviction_deadline) {
+        auto status = slot.status.load(std::memory_order_acquire);
+        if (status == sintra::Ring<uint32_t, true>::READER_STATE_EVICTED) {
+            eviction_observed = true;
+            break;
+        }
+        std::this_thread::yield();
+    }
+    ASSERT_TRUE(eviction_observed);
+
+    reader_thread.join();
+
+    uint64_t read_access = reader.c.read_access.load(std::memory_order_acquire);
+    const uint64_t guard_mask = uint64_t(1) << (guarded_octile * 8);
+    uint8_t guard_count = static_cast<uint8_t>((read_access >> (guarded_octile * 8)) & 0xffu);
+
+    reader.c.read_access.fetch_add(guard_mask, std::memory_order_release);
+    slot.status.store(sintra::Ring<uint32_t, true>::READER_STATE_ACTIVE, std::memory_order_release);
+
+    writer_thread.join();
+
+    reader.done_reading();
+
+    ASSERT_EQ(0u, guard_count);
 }
 
 STRESS_TEST(stress_multi_reader_throughput)
