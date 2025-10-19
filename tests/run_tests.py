@@ -511,7 +511,6 @@ def main():
         # Print suite results
         suite_duration = time.time() - suite_start_time
         print(f"\n{Color.BOLD}Results for {config_name}:{Color.RESET}")
-        print("=" * 80)
         test_names = sorted(accumulated_results.keys())
         test_col_width = max([len(name) for name in test_names] + [4]) + 2
         passrate_col_width = 20
@@ -529,6 +528,7 @@ def main():
             test_col_width + passrate_col_width + avg_runtime_col_width + failures_col_width + 3
         )
 
+        print("=" * table_width)
         print(header_fmt.format('Test', 'Pass rate', 'Avg runtime (s)', 'Failures'))
         print("=" * table_width)
 
