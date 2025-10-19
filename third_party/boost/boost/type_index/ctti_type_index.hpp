@@ -26,10 +26,10 @@
 #include <boost/type_index/detail/compile_time_type_info.hpp>
 
 #if !defined(BOOST_TYPE_INDEX_INTERFACE_UNIT)
+#include <cstddef>
 #include <cstring>
 #include <type_traits>
 
-#include <boost/container_hash/hash.hpp>
 #endif
 
 #ifdef BOOST_HAS_PRAGMA_ONCE
@@ -205,7 +205,17 @@ inline std::string ctti_type_index::pretty_name() const {
 
 
 inline std::size_t ctti_type_index::hash_code() const noexcept {
-    return boost::hash_range(raw_name(), raw_name() + get_raw_name_length());
+    const char* first = raw_name();
+    const char* last = first + get_raw_name_length();
+    const std::size_t prime = static_cast<std::size_t>(1099511628211ull);
+    std::size_t hash = static_cast<std::size_t>(1469598103934665603ull);
+
+    for (const char* it = first; it != last; ++it) {
+        hash ^= static_cast<unsigned char>(*it);
+        hash *= prime;
+    }
+
+    return hash;
 }
 
 }} // namespace boost::typeindex

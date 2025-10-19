@@ -465,7 +465,7 @@ TEST_CASE(test_slow_reader_eviction_restores_status)
     reader.done_reading_new_data();
 
     auto restored_status = slot.status.load(std::memory_order_acquire);
-    ASSERT_EQ(sintra::Ring<uint64_t, true>::READER_STATE_ACTIVE, restored_status);
+    ASSERT_EQ((sintra::Ring<uint64_t, true>::READER_STATE_ACTIVE), restored_status);
 }
 
 TEST_CASE(test_streaming_reader_status_not_restored_after_eviction)
@@ -511,7 +511,7 @@ TEST_CASE(test_streaming_reader_status_not_restored_after_eviction)
     reader.done_reading_new_data();
 
     ASSERT_EQ(
-        sintra::Ring<uint32_t, true>::READER_STATE_EVICTED,
+        (sintra::Ring<uint32_t, true>::READER_STATE_EVICTED),
         slot.status.load(std::memory_order_acquire));
 
     ASSERT_THROW(reader.start_reading(), sintra::ring_reader_evicted_exception);

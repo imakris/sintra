@@ -40,6 +40,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <typeinfo>
 #include <unordered_map>
 #include <utility>
+#include <variant>
 
 #include <boost/type_index/ctti_type_index.hpp>
 
