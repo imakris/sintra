@@ -172,10 +172,15 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
   #include <sys/mman.h>  // ::mmap, ::munmap, MAP_FIXED, MAP_NOSYNC (if available)
   #include <unistd.h>    // ::sysconf
   #include <signal.h>    // ::kill
+  #include <pthread.h>
+  #if defined(__linux__)
+    #include <sys/syscall.h>
+  #endif
   #if defined(__FreeBSD__)
     #include <sys/types.h>
     #include <sys/sysctl.h>
     #include <sys/user.h>
+    #include <pthread_np.h>
   #elif defined(__APPLE__)
     #include <libproc.h>
   #endif
@@ -1830,13 +1835,37 @@ private:
 // Writer API
 //==============================================================================
 
-// Helper to get a unique thread index (trivial type) for atomic operations
-// std::atomic<std::thread::id> has issues on some platforms (macOS)
-inline uint32_t thread_index()
+// Helper to produce a cross-process unique token for the current thread.
+// Uses operating-system thread identifiers combined with the process id to
+// avoid collisions across processes while remaining trivially comparable.
+inline uint64_t thread_identity_token()
 {
-    static std::atomic<uint32_t> next{1};
-    thread_local uint32_t mine = next.fetch_add(1, std::memory_order_relaxed);
-    return mine;
+    const uint64_t pid = static_cast<uint64_t>(get_current_pid());
+    uint64_t       tid = 0;
+
+#ifdef _WIN32
+    tid = static_cast<uint64_t>(::GetCurrentThreadId());
+#elif defined(__APPLE__)
+    uint64_t tid64 = 0;
+    pthread_threadid_np(nullptr, &tid64);
+    tid = tid64;
+#elif defined(__linux__)
+    #ifdef SYS_gettid
+        tid = static_cast<uint64_t>(::syscall(SYS_gettid));
+    #else
+        tid = static_cast<uint64_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+    #endif
+#elif defined(__FreeBSD__)
+    tid = static_cast<uint64_t>(pthread_getthreadid_np());
+#else
+    tid = static_cast<uint64_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+#endif
+
+    uint64_t token = (pid << 32) ^ tid;
+    if (token == 0) {
+        token = (pid << 32) | tid | 1ull;
+    }
+    return token;
 }
 
 template <typename T>
@@ -1886,7 +1915,7 @@ struct Ring_W : Ring<T, false>
             m_pending_new_sequence -= num_src_elements;
             const size_t head = mod_u64(m_pending_new_sequence, this->m_num_elements);
             m_octile = (8 * head) / this->m_num_elements;
-            m_writing_thread_index.store(0, std::memory_order_release);
+            m_writing_thread_token.store(0, std::memory_order_release);
             throw;
         }
     }
@@ -1909,7 +1938,7 @@ struct Ring_W : Ring<T, false>
             m_pending_new_sequence -= num_elements;
             const size_t head = mod_u64(m_pending_new_sequence, this->m_num_elements);
             m_octile = (8 * head) / this->m_num_elements;
-            m_writing_thread_index.store(0, std::memory_order_release);
+            m_writing_thread_token.store(0, std::memory_order_release);
             throw;
         }
     }
@@ -1926,7 +1955,7 @@ struct Ring_W : Ring<T, false>
     {
 #if SINTRA_RING_READING_POLICY != SINTRA_RING_READING_POLICY_ALWAYS_SPIN
         c.lock();
-        assert(m_writing_thread_index.load(std::memory_order_relaxed) == thread_index());
+        assert(m_writing_thread_token.load(std::memory_order_relaxed) == thread_identity_token());
         c.leading_sequence.store(m_pending_new_sequence);
         // Wake sleeping readers in a deterministic order
         for (int i = 0; i < c.num_sleeping; i++) {
@@ -1940,7 +1969,7 @@ struct Ring_W : Ring<T, false>
 #else
         c.leading_sequence.store(m_pending_new_sequence);
 #endif
-        m_writing_thread_index.store(0, std::memory_order_release);
+        m_writing_thread_token.store(0, std::memory_order_release);
         return m_pending_new_sequence;
     }
 
@@ -2081,13 +2110,13 @@ private:
         assert(num_elements_to_write <= this->m_num_elements / 8);
 
         // Enforce exclusive writer (cheap fast-path loop)
-        // Use thread-local index (trivial type) for reliable atomic operations across all platforms
-        const uint32_t my_thread_idx = thread_index();
-        while (m_writing_thread_index.load(std::memory_order_relaxed) != my_thread_idx) {
-            uint32_t expected = 0;
-            m_writing_thread_index.compare_exchange_strong(
+        // Use a cross-process unique token for reliable atomic operations across all platforms
+        const uint64_t my_thread_token = thread_identity_token();
+        while (m_writing_thread_token.load(std::memory_order_relaxed) != my_thread_token) {
+            uint64_t expected = 0;
+            m_writing_thread_token.compare_exchange_strong(
                 expected,
-                my_thread_idx,
+                my_thread_token,
                 std::memory_order_acq_rel,
                 std::memory_order_acquire);
         }
@@ -2165,9 +2194,9 @@ private:
     }
 
 private:
-    // Use uint32_t (trivial type) instead of std::thread::id for reliable atomic operations
-    // std::atomic<std::thread::id> has platform-specific issues (broken on macOS)
-    std::atomic<uint32_t>           m_writing_thread_index   = {0};
+    // Cross-process unique token used to enforce single-threaded writer access.
+    // std::atomic<std::thread::id> has platform-specific issues (broken on macOS).
+    std::atomic<uint64_t>           m_writing_thread_token   = {0};
     size_t                          m_octile                 = 0;
     sequence_counter_type           m_pending_new_sequence   = 0;
 
