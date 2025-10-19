@@ -321,6 +321,15 @@ class TestRunner:
                     if self.verbose and result.error:
                         print(f"      stderr: {result.error[:200]}")
 
+                    # For ipc_rings_tests timeout, show full stderr for debugging
+                    if 'ipc_rings' in test_name and 'TIMEOUT' in result.error:
+                        print(f"\n  {Color.RED}FULL DEBUG OUTPUT (first timeout):{Color.RESET}")
+                        if result.error:
+                            print(result.error)
+                        if result.output:
+                            print(f"\n  stdout:\n{result.output}")
+                        break  # Only show first timeout in detail
+
                     if failure_count >= 5 and not self.verbose:
                         remaining = failed - failure_count
                         if remaining > 0:
