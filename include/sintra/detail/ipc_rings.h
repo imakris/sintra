@@ -1540,6 +1540,15 @@ struct Ring_R : Ring<T, true>
             return Range<T>{};  // Return empty range to signal shutdown
         }
 
+        auto confirm_still_no_data = [&]() -> std::pair<bool, sequence_counter_type> {
+            auto latest_reading = m_reading_sequence->load(std::memory_order_acquire);
+            auto latest_leading = c.leading_sequence.load(std::memory_order_acquire);
+            if (latest_leading == latest_reading) {
+                return {true, latest_reading};
+            }
+            return {false, latest_reading};
+        };
+
         auto maybe_return_due_to_unblock = [&](sequence_counter_type reading_now,
                                                sequence_counter_type leading_now) -> bool
         {
@@ -1550,7 +1559,12 @@ struct Ring_R : Ring<T, true>
                     m_sequence_guard_after_unblock = invalid_sequence;
                 }
                 else {
-                    return true;
+                    auto [still_empty, refreshed_reading] = confirm_still_no_data();
+                    if (still_empty) {
+                        m_sequence_guard_after_unblock = refreshed_reading;
+                        return true;
+                    }
+                    m_sequence_guard_after_unblock = invalid_sequence;
                 }
             }
 
@@ -1563,8 +1577,12 @@ struct Ring_R : Ring<T, true>
                 c.global_unblock_sequence.load(std::memory_order_acquire);
             if (unblock_sequence_now != m_seen_unblock_sequence) {
                 m_seen_unblock_sequence = unblock_sequence_now;
-                m_sequence_guard_after_unblock = reading_now;
-                return true;
+                auto [still_empty, refreshed_reading] = confirm_still_no_data();
+                if (still_empty) {
+                    m_sequence_guard_after_unblock = refreshed_reading;
+                    return true;
+                }
+                m_sequence_guard_after_unblock = invalid_sequence;
             }
 
             return false;
