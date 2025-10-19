@@ -78,21 +78,6 @@ class TestRunner:
             print(f"{Color.RED}Test directory not found: {self.test_dir}{Color.RESET}")
             return {}
 
-        # Base test names (without configuration suffix)
-        base_test_names = [
-            'sintra_dummy_test',
-            'sintra_basic_pubsub_test',
-            'sintra_ping_pong_test',
-            'sintra_ping_pong_multi_test',
-            'sintra_rpc_append_test',
-            'sintra_recovery_test',
-            'sintra_barrier_flush_test',
-            'sintra_barrier_stress_test',
-            'sintra_variable_buffer_alignment_test',
-            'sintra_ipc_rings_tests',
-            'sintra_spawn_detached_test'
-        ]
-
         # 6 configurations: 3 policies × 2 build types
         configurations = [
             'release_adaptive',
@@ -103,28 +88,49 @@ class TestRunner:
             'debug_always_spin'
         ]
 
-        # Build test suites: dict mapping config -> list of test paths
-        test_suites = {}
-        for config in configurations:
-            suite_tests = []
-            for base_name in base_test_names:
-                full_name = f"{base_name}_{config}"
+        # Discover available tests dynamically so the runner adapts to new or removed binaries
+        discovered_tests = {config: [] for config in configurations}
 
-                if test_name and test_name not in full_name:
+        try:
+            directory_entries = sorted(self.test_dir.iterdir())
+        except OSError as exc:
+            print(f"{Color.RED}Failed to inspect test directory {self.test_dir}: {exc}{Color.RESET}")
+            return {}
+
+        for entry in directory_entries:
+            if not (entry.is_file() or entry.is_symlink()):
+                continue
+
+            normalized_name = entry.name
+            if sys.platform == 'win32' and normalized_name.lower().endswith('.exe'):
+                normalized_name = normalized_name[:-4]
+
+            for config in configurations:
+                suffix = f"_{config}"
+                if not normalized_name.endswith(suffix):
                     continue
 
-                if sys.platform == 'win32':
-                    test_path = self.test_dir / f"{full_name}.exe"
-                else:
-                    test_path = self.test_dir / full_name
+                if test_name and test_name not in normalized_name:
+                    break
 
-                if test_path.exists():
-                    suite_tests.append(test_path)
-                else:
-                    print(f"{Color.YELLOW}Warning: Test not found: {test_path}{Color.RESET}")
+                base_name = normalized_name[:-len(suffix)]
+                discovered_tests[config].append((base_name, entry))
+                break
 
-            if suite_tests:
-                test_suites[config] = suite_tests
+        test_suites = {}
+        for config, tests in discovered_tests.items():
+            if not tests:
+                continue
+
+            tests.sort(key=lambda item: item[0])
+            test_suites[config] = [path for _, path in tests]
+
+        if not test_suites:
+            if test_name:
+                print(f"{Color.YELLOW}No tests found matching filter '{test_name}'.{Color.RESET}")
+            else:
+                print(f"{Color.RED}No test binaries found in {self.test_dir}.{Color.RESET}")
+            return {}
 
         return test_suites
 
