@@ -1508,6 +1508,19 @@ struct Ring_R : Ring<T, true>
             return Range<T>{};  // Return empty range to signal shutdown
         }
 
+#if SINTRA_RING_READING_POLICY != SINTRA_RING_READING_POLICY_ALWAYS_SPIN
+        auto replenish_ready_stack = [&]() -> bool {
+            if (c.num_ready == 0 && c.num_unordered > 0) {
+                while (c.num_unordered > 0) {
+                    const int idx = c.unordered_stack[--c.num_unordered];
+                    c.unordered_stack[c.num_unordered] = -1;
+                    c.ready_stack[c.num_ready++] = idx;
+                }
+            }
+            return c.num_ready > 0;
+        };
+#endif
+
 #if SINTRA_RING_READING_POLICY == SINTRA_RING_READING_POLICY_ALWAYS_SPIN
         while (m_reading_sequence->load(std::memory_order_acquire) == c.leading_sequence.load(std::memory_order_acquire)) {
             // Check for shutdown during spin
@@ -1556,8 +1569,8 @@ struct Ring_R : Ring<T, true>
 
         // Phase 3: True blocking sleep (semaphore wait) if still no data after precision sleep
         if (m_reading_sequence->load() == c.leading_sequence.load()) {
-            if (m_reading_sequence->load(std::memory_order_acquire) ==
-                c.leading_sequence.load(std::memory_order_acquire))
+            while (m_reading_sequence->load(std::memory_order_acquire) ==
+                   c.leading_sequence.load(std::memory_order_acquire))
             {
                 const uint64_t unblock_sequence_now =
                     c.global_unblock_sequence.load(std::memory_order_acquire);
@@ -1565,61 +1578,68 @@ struct Ring_R : Ring<T, true>
                     m_seen_unblock_sequence = unblock_sequence_now;
                     return Range<T>{};
                 }
-            }
 
-            c.lock();
-            m_sleepy_index.store(-1, std::memory_order_relaxed);
-            if (m_reading_sequence->load() == c.leading_sequence.load()) {
-                if (m_stopping.load(std::memory_order_acquire)) {
+                c.lock();
+                m_sleepy_index.store(-1, std::memory_order_relaxed);
+                if (m_reading_sequence->load() == c.leading_sequence.load()) {
+                    if (m_stopping.load(std::memory_order_acquire)) {
+                        c.unlock();
+                        return Range<T>{};
+                    }
+                    if (!replenish_ready_stack()) {
+                        c.unlock();
+                        std::this_thread::yield();
+                        continue;
+                    }
+                    int sleepy = c.ready_stack[--c.num_ready];
+                    m_sleepy_index.store(sleepy, std::memory_order_release);
+                    c.sleeping_stack[c.num_sleeping++] = sleepy;
+                }
+                const uint64_t unblock_sequence_after =
+                    c.global_unblock_sequence.load(std::memory_order_acquire);
+                if (unblock_sequence_after != m_seen_unblock_sequence) {
+                    m_seen_unblock_sequence = unblock_sequence_after;
+                    const int sleepy = m_sleepy_index.load(std::memory_order_relaxed);
+                    if (sleepy >= 0) {
+                        if (c.num_sleeping > 0 && c.sleeping_stack[c.num_sleeping - 1] == sleepy) {
+                            c.sleeping_stack[--c.num_sleeping] = -1;
+                        }
+                        c.ready_stack[c.num_ready++] = sleepy;
+                        m_sleepy_index.store(-1, std::memory_order_release);
+                    }
                     c.unlock();
                     return Range<T>{};
-                }
-                int sleepy = c.ready_stack[--c.num_ready];
-                m_sleepy_index.store(sleepy, std::memory_order_release);
-                c.sleeping_stack[c.num_sleeping++] = sleepy;
-            }
-            const uint64_t unblock_sequence_after =
-                c.global_unblock_sequence.load(std::memory_order_acquire);
-            if (unblock_sequence_after != m_seen_unblock_sequence) {
-                m_seen_unblock_sequence = unblock_sequence_after;
-                const int sleepy = m_sleepy_index.load(std::memory_order_relaxed);
-                if (sleepy >= 0) {
-                    if (c.num_sleeping > 0 && c.sleeping_stack[c.num_sleeping - 1] == sleepy) {
-                        c.sleeping_stack[--c.num_sleeping] = -1;
-                    }
-                    c.ready_stack[c.num_ready++] = sleepy;
-                    m_sleepy_index.store(-1, std::memory_order_release);
                 }
                 c.unlock();
-                return Range<T>{};
-            }
-            c.unlock();
 
-            int sleepy_index = m_sleepy_index.load(std::memory_order_acquire);
-            if (sleepy_index >= 0) {
-                if (m_stopping.load(std::memory_order_acquire)) {
-                    c.lock();
-                    if (m_sleepy_index.load(std::memory_order_acquire) >= 0) {
-                        c.dirty_semaphores[sleepy_index].post_unordered();
+                int sleepy_index = m_sleepy_index.load(std::memory_order_acquire);
+                if (sleepy_index >= 0) {
+                    if (m_stopping.load(std::memory_order_acquire)) {
+                        c.lock();
+                        if (m_sleepy_index.load(std::memory_order_acquire) >= 0) {
+                            c.dirty_semaphores[sleepy_index].post_unordered();
+                        }
+                        c.unlock();
                     }
-                    c.unlock();
+
+                    if (c.dirty_semaphores[sleepy_index].wait()) {
+                        c.lock();
+                        c.unordered_stack[c.num_unordered++] = sleepy_index;
+                        c.unlock();
+                    }
+                    else {
+                        c.lock();
+                        c.ready_stack[c.num_ready++] = sleepy_index;
+                        c.unlock();
+                    }
+                    m_sleepy_index.store(-1, std::memory_order_release);
+
+                    if (m_stopping.load(std::memory_order_acquire)) {
+                        return Range<T>{};
+                    }
                 }
 
-                if (c.dirty_semaphores[sleepy_index].wait()) {
-                    c.lock();
-                    c.unordered_stack[c.num_unordered++] = sleepy_index;
-                    c.unlock();
-                }
-                else {
-                    c.lock();
-                    c.ready_stack[c.num_ready++] = sleepy_index;
-                    c.unlock();
-                }
-                m_sleepy_index.store(-1, std::memory_order_release);
-
-                if (m_stopping.load(std::memory_order_acquire)) {
-                    return Range<T>{};
-                }
+                break;
             }
         }
 
@@ -1646,62 +1666,70 @@ struct Ring_R : Ring<T, true>
             }
         }
 
-        c.lock();
-        m_sleepy_index.store(-1, std::memory_order_relaxed);
-        if (m_reading_sequence->load() == c.leading_sequence.load()) {
-            // Check for shutdown before registering as sleeping
-            if (m_stopping.load(std::memory_order_acquire)) {
+        while (m_reading_sequence->load(std::memory_order_acquire) == c.leading_sequence.load(std::memory_order_acquire)) {
+            c.lock();
+            m_sleepy_index.store(-1, std::memory_order_relaxed);
+            if (m_reading_sequence->load() == c.leading_sequence.load()) {
+                // Check for shutdown before registering as sleeping
+                if (m_stopping.load(std::memory_order_acquire)) {
+                    c.unlock();
+                    return Range<T>{};
+                }
+                if (!replenish_ready_stack()) {
+                    c.unlock();
+                    std::this_thread::yield();
+                    continue;
+                }
+                int sleepy = c.ready_stack[--c.num_ready];
+                m_sleepy_index.store(sleepy, std::memory_order_release);
+                c.sleeping_stack[c.num_sleeping++] = sleepy;
+            }
+            const uint64_t unblock_sequence_after =
+                c.global_unblock_sequence.load(std::memory_order_acquire);
+            if (unblock_sequence_after != m_seen_unblock_sequence) {
+                m_seen_unblock_sequence = unblock_sequence_after;
+                const int sleepy = m_sleepy_index.load(std::memory_order_relaxed);
+                if (sleepy >= 0) {
+                    if (c.num_sleeping > 0 && c.sleeping_stack[c.num_sleeping - 1] == sleepy) {
+                        c.sleeping_stack[--c.num_sleeping] = -1;
+                    }
+                    c.ready_stack[c.num_ready++] = sleepy;
+                    m_sleepy_index.store(-1, std::memory_order_release);
+                }
                 c.unlock();
                 return Range<T>{};
-            }
-            int sleepy = c.ready_stack[--c.num_ready];
-            m_sleepy_index.store(sleepy, std::memory_order_release);
-            c.sleeping_stack[c.num_sleeping++] = sleepy;
-        }
-        const uint64_t unblock_sequence_after =
-            c.global_unblock_sequence.load(std::memory_order_acquire);
-        if (unblock_sequence_after != m_seen_unblock_sequence) {
-            m_seen_unblock_sequence = unblock_sequence_after;
-            const int sleepy = m_sleepy_index.load(std::memory_order_relaxed);
-            if (sleepy >= 0) {
-                if (c.num_sleeping > 0 && c.sleeping_stack[c.num_sleeping - 1] == sleepy) {
-                    c.sleeping_stack[--c.num_sleeping] = -1;
-                }
-                c.ready_stack[c.num_ready++] = sleepy;
-                m_sleepy_index.store(-1, std::memory_order_release);
             }
             c.unlock();
-            return Range<T>{};
-        }
-        c.unlock();
 
-        int sleepy_index = m_sleepy_index.load(std::memory_order_acquire);
-        if (sleepy_index >= 0) {
-            // Shutdown could have been signaled after we registered but before waiting.
-            if (m_stopping.load(std::memory_order_acquire)) {
-                c.lock();
-                if (m_sleepy_index.load(std::memory_order_acquire) >= 0) {
-                    c.dirty_semaphores[sleepy_index].post_unordered();
+            int sleepy_index = m_sleepy_index.load(std::memory_order_acquire);
+            if (sleepy_index >= 0) {
+                // Shutdown could have been signaled after we registered but before waiting.
+                if (m_stopping.load(std::memory_order_acquire)) {
+                    c.lock();
+                    if (m_sleepy_index.load(std::memory_order_acquire) >= 0) {
+                        c.dirty_semaphores[sleepy_index].post_unordered();
+                    }
+                    c.unlock();
                 }
-                c.unlock();
+
+                if (c.dirty_semaphores[sleepy_index].wait()) { // unordered wake
+                    c.lock();
+                    c.unordered_stack[c.num_unordered++] = sleepy_index;
+                    c.unlock();
+                }
+                else {
+                    c.lock();
+                    c.ready_stack[c.num_ready++] = sleepy_index;
+                    c.unlock();
+                }
+                m_sleepy_index.store(-1, std::memory_order_release);
+
+                if (m_stopping.load(std::memory_order_acquire)) {
+                    return Range<T>{};
+                }
             }
 
-            if (c.dirty_semaphores[sleepy_index].wait()) { // unordered wake
-                c.lock();
-                c.unordered_stack[c.num_unordered++] = sleepy_index;
-                c.unlock();
-            }
-            else {
-                c.lock();
-                c.ready_stack[c.num_ready++] = sleepy_index;
-                c.unlock();
-            }
-            m_sleepy_index.store(-1, std::memory_order_release);
-
-            // Check for shutdown after waking from semaphore
-            if (m_stopping.load(std::memory_order_acquire)) {
-                return Range<T>{};
-            }
+            break;
         }
 #endif
 
