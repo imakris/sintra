@@ -580,38 +580,26 @@ struct sintra_ring_semaphore : ipc::interprocess_semaphore
 {
     sintra_ring_semaphore() : ipc::interprocess_semaphore(0) {}
 
-    // Wakes all readers in an ordered fashion (used by writer after publishing).
+    // Always post. unordered is advisory only.
     void post_ordered()
     {
-        if (unordered.load()) {
-            unordered = false;
-        }
-        else
-        if (!posted.test_and_set(std::memory_order_acquire)) {
-            post();
-        }
+        unordered.store(false, std::memory_order_release);
+        this->post();
     }
 
-    // Wakes a single reader in an unordered fashion (used by local unblocks).
     void post_unordered()
     {
-        if (!posted.test_and_set(std::memory_order_acquire)) {
-            post();
-            unordered = true;
-        }
+        unordered.store(true, std::memory_order_release);
+        this->post();
     }
 
-    // Wait returns true if the wakeup was unordered and no ordered post happened since.
+    // Returns true if the wakeup was unordered (best effort).
     bool wait()
     {
         ipc::interprocess_semaphore::wait();
-        posted.clear(std::memory_order_release);
-        // Capture whether the wakeup was unordered (triggered by a local unblock)
-        // and reset the flag so subsequent ordered posts are not suppressed.
         return unordered.exchange(false, std::memory_order_acq_rel);
     }
 private:
-    std::atomic_flag posted = ATOMIC_FLAG_INIT;
     std::atomic<bool> unordered{false};
 };
 
@@ -754,54 +742,76 @@ private:
 
 #ifdef _WIN32
             // ── Windows path ───────────────────────────────────────────────────
-            // Reserve (2× + granularity) so we can round within the reservation.
-            void* mem = ::VirtualAlloc(nullptr,
-                                       m_data_region_size * 2 + page_size,
-                                       MEM_RESERVE, PAGE_READWRITE);
-            if (!mem) {
-                return false;
-            }
+            // Uses retry logic to handle filesystem delays and address reuse races on Windows.
+            constexpr int max_attach_attempts = 8;
+            for (int attempt = 0; attempt < max_attach_attempts; ++attempt) {
+                // Reserve (2× + granularity) so we can round within the reservation.
+                void* mem = ::VirtualAlloc(nullptr,
+                                           m_data_region_size * 2 + page_size,
+                                           MEM_RESERVE, PAGE_READWRITE);
+                if (!mem) {
+                    return false;
+                }
 
-            // Preserve historical layout: round to allocation granularity.
-            char* ptr = (char*)(
-                (uintptr_t)((char*)mem + page_size) & ~((uintptr_t)page_size - 1)
-            );
+                // Preserve historical layout: round to allocation granularity.
+                char* ptr = (char*)(
+                    (uintptr_t)((char*)mem + page_size) & ~((uintptr_t)page_size - 1)
+                );
 
-            // Free the reservation; we expect the OS to reuse the address immediately.
-            ::VirtualFree(mem, 0, MEM_RELEASE);
+                // Free the reservation; we expect the OS to reuse the address immediately.
+                ::VirtualFree(mem, 0, MEM_RELEASE);
 
-            // Map twice back-to-back at the chosen address.
-            std::unique_ptr<ipc::mapped_region> region0;
-            std::unique_ptr<ipc::mapped_region> region1;
-            try {
-                region0.reset(new ipc::mapped_region(file, data_rights, 0,
-                    m_data_region_size, ptr, map_extra_options));
-                region1.reset(new ipc::mapped_region(file, data_rights, 0,
-                    0, ((char*)region0->get_address()) + m_data_region_size, map_extra_options));
-            }
-            catch (...) {
-                return false;
-            }
+                // Map twice back-to-back at the chosen address.
+                std::unique_ptr<ipc::mapped_region> region0;
+                std::unique_ptr<ipc::mapped_region> region1;
+                try {
+                    region0.reset(new ipc::mapped_region(file, data_rights, 0,
+                        m_data_region_size, ptr, map_extra_options));
+                    region1.reset(new ipc::mapped_region(file, data_rights, 0,
+                        0, ((char*)region0->get_address()) + m_data_region_size, map_extra_options));
+                }
+                catch (const ipc::interprocess_exception& ex) {
+                    DWORD native_error = ex.get_native_error();
+                    if ((native_error == ERROR_INVALID_ADDRESS ||
+                         native_error == ERROR_INVALID_PARAMETER) &&
+                        attempt + 1 < max_attach_attempts) {
+                        ::Sleep(0);  // Yield CPU to let other processes release resources
+                        continue;
+                    }
+                    return false;
+                }
+                catch (...) {
+                    return false;
+                }
 
-            // Basic sanity checks (compile-time asserts are not practical here).
+                // Basic sanity checks (compile-time asserts are not practical here).
+                bool layout_ok =
+                    region0->get_address() == ptr &&
+                    region1->get_address() == ptr + m_data_region_size &&
+                    region0->get_size() == m_data_region_size &&
+                    region1->get_size() == m_data_region_size;
+
+                if (!layout_ok) {
+                    if (attempt + 1 < max_attach_attempts) {
+                        ::Sleep(0);  // Yield CPU and retry
+                        continue;
+                    }
+                    // Only assert on the final attempt after all retries exhausted
 #ifndef NDEBUG
-            assert(region0->get_address() == ptr);
-            assert(region1->get_address() == ptr + m_data_region_size);
-            assert(region0->get_size() == m_data_region_size);
-            assert(region1->get_size() == m_data_region_size);
-#else
-            if (region0->get_address() != ptr ||
-                region1->get_address() != (ptr + m_data_region_size) ||
-                region0->get_size() != m_data_region_size ||
-                region1->get_size() != m_data_region_size)
-            {
+                    assert(false && "Ring memory layout validation failed after all retry attempts");
+#endif
+                    return false;
+                }
+
+                m_data_region_0 = region0.release();
+                m_data_region_1 = region1.release();
+                m_data = (T*)m_data_region_0->get_address();
+                break;  // Success!
+            }
+
+            if (!m_data_region_0) {
                 return false;
             }
-#endif
-
-            m_data_region_0 = region0.release();
-            m_data_region_1 = region1.release();
-            m_data = (T*)m_data_region_0->get_address();
 
 #else
             // ── POSIX/Linux path ───────────────────────────────────────────────
@@ -1573,6 +1583,15 @@ struct Ring_R : Ring<T, true>
 #endif
                     return Range<T>{};
                 }
+                // Early exit on durable global unblock (no data pending)
+                const auto seq_now = c.global_unblock_sequence.load(std::memory_order_acquire);
+                if (seq_now != m_seen_unblock_sequence) {
+                    m_seen_unblock_sequence = seq_now;
+#ifdef _WIN32
+                    ::timeEndPeriod(1);
+#endif
+                    return Range<T>{};
+                }
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 std::atomic_thread_fence(std::memory_order_acquire);
             }
@@ -1753,25 +1772,42 @@ struct Ring_R : Ring<T, true>
      */
     void done_reading_new_data()
     {
-        size_t t_idx = mod_pos_i64(int64_t(m_reading_sequence->load()) - int64_t(m_max_trailing_elements), this->m_num_elements);
-        size_t new_trailing_octile = (8 * t_idx) / this->m_num_elements;
+        const size_t t_idx = mod_pos_i64(
+            int64_t(m_reading_sequence->load(std::memory_order_acquire)) -
+            int64_t(m_max_trailing_elements),
+            this->m_num_elements);
+
+        const size_t new_trailing_octile = (8 * t_idx) / this->m_num_elements;
+
+        const bool had_guard =
+            c.reading_sequences[m_rs_index].data.has_guard.load(std::memory_order_acquire) != 0;
 
         if (new_trailing_octile != m_trailing_octile) {
-            // The trailing guard lives in a packed 8-bit counter. Moving it from one
-            // octile to another requires incrementing the new byte *and* decrementing
-            // the old byte. The previous single fetch_add() attempted to do both via a
-            // single subtraction of bitmasks, but that underflowed the low byte and
-            // never incremented the target byte (e.g. 0x0100 - 0x0001 == 0x00FF).
-            // Performing the transfer in two explicit steps ensures the guard never
-            // disappears in the window between operations.
             const uint64_t new_mask = uint64_t(1) << (8 * new_trailing_octile);
-            const uint64_t old_mask = uint64_t(1) << (8 * m_trailing_octile);
 
-            c.read_access.fetch_add(new_mask, std::memory_order_acq_rel);
-            c.reading_sequences[m_rs_index].data.trailing_octile.store(
-                static_cast<uint8_t>(new_trailing_octile), std::memory_order_relaxed);
-            c.read_access.fetch_sub(old_mask, std::memory_order_acq_rel);
+            if (had_guard) {
+                const uint64_t old_mask = uint64_t(1) << (8 * m_trailing_octile);
+                c.read_access.fetch_add(new_mask, std::memory_order_acq_rel);
+                c.reading_sequences[m_rs_index].data.trailing_octile.store(
+                    static_cast<uint8_t>(new_trailing_octile), std::memory_order_relaxed);
+                c.read_access.fetch_sub(old_mask, std::memory_order_acq_rel);
+            }
+            else {
+                // Evicted: reacquire only (no subtract)
+                c.read_access.fetch_add(new_mask, std::memory_order_acq_rel);
+                c.reading_sequences[m_rs_index].data.trailing_octile.store(
+                    static_cast<uint8_t>(new_trailing_octile), std::memory_order_relaxed);
+                c.reading_sequences[m_rs_index].data.has_guard.store(1, std::memory_order_release);
+            }
+
             m_trailing_octile = new_trailing_octile;
+        }
+        else
+        if (!had_guard) {
+            // Same octile but evicted: reacquire the guard
+            const uint64_t mask = uint64_t(1) << (8 * m_trailing_octile);
+            c.read_access.fetch_add(mask, std::memory_order_acq_rel);
+            c.reading_sequences[m_rs_index].data.has_guard.store(1, std::memory_order_release);
         }
     }
 
@@ -2101,6 +2137,14 @@ private:
 
         // Only check when crossing to a new octile (fast path otherwise)
         if (m_octile != new_octile) {
+#ifndef NDEBUG
+            {
+                uint64_t ra = c.read_access.load(std::memory_order_acquire);
+                for (int b = 0; b < 8; ++b) {
+                    assert(((ra >> (8*b)) & 0xffu) != 0xffu && "read_access octile underflowed to 255");
+                }
+            }
+#endif
             auto range_mask = (uint64_t(0xff) << (8 * new_octile));
 #ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
             uint64_t spin_count = 0;
