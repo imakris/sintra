@@ -453,7 +453,15 @@ def main():
         suite_start_time = time.time()
 
         # Adaptive soak test for this suite
-        accumulated_results = {test.stem: {'passed': 0, 'failed': 0, 'durations': []} for test in tests}
+        accumulated_results = {
+            test.stem: {
+                'passed': 0,
+                'failed': 0,
+                'durations': [],
+                'errors': []
+            }
+            for test in tests
+        }
         total_reps_so_far = 0
         max_reps_per_test = args.repetitions
         suite_all_passed = True
@@ -478,6 +486,10 @@ def main():
                         accumulated_results[test_name]['failed'] += 1
                         suite_all_passed = False
                         overall_all_passed = False
+                        error_message = (result.error or "").strip()
+                        if not error_message:
+                            error_message = "(no error message captured)"
+                        accumulated_results[test_name]['errors'].append(error_message)
                         print(f"{Color.RED}F{Color.RESET}", end="", flush=True)
 
                 print()
@@ -494,9 +506,7 @@ def main():
         suite_duration = time.time() - suite_start_time
         print(f"\n{Color.BOLD}Results for {config_name}:{Color.RESET}")
         print("=" * 80)
-        print(f"{'Test':<40} {'Pass rate':<20} {'Avg runtime (s)':>15}")
-        print("=" * 80)
-
+        table_rows = []
         for test_name in sorted(accumulated_results.keys()):
             passed = accumulated_results[test_name]['passed']
             failed = accumulated_results[test_name]['failed']
@@ -507,15 +517,45 @@ def main():
             avg_duration = sum(durations) / len(durations) if durations else 0
 
             pass_rate_str = f"{passed}/{total} ({pass_rate:6.2f}%)"
-            print(f"{test_name:<40} {pass_rate_str:<20} {avg_duration:>15.2f}")
+            avg_runtime_str = format_duration(avg_duration)
+            table_rows.append((test_name, pass_rate_str, avg_runtime_str))
 
-        print("=" * 80)
+        if table_rows:
+            name_width = max(len('Test'), *(len(row[0]) for row in table_rows))
+            pass_width = max(len('Pass rate'), *(len(row[1]) for row in table_rows))
+            runtime_width = max(len('Avg runtime'), *(len(row[2]) for row in table_rows))
+
+            print(f"{'Test':<{name_width}}  {'Pass rate':<{pass_width}}  {'Avg runtime':>{runtime_width}}")
+            print("=" * (name_width + pass_width + runtime_width + 4))
+
+            for test_name, pass_rate_str, avg_runtime_str in table_rows:
+                print(f"{test_name:<{name_width}}  {pass_rate_str:<{pass_width}}  {avg_runtime_str:>{runtime_width}}")
+
+            print("=" * (name_width + pass_width + runtime_width + 4))
+        else:
+            print("(no tests were executed in this suite)")
         print(f"Suite duration: {format_duration(suite_duration)}")
 
         if suite_all_passed:
             print(f"Suite result: {Color.GREEN}PASSED{Color.RESET}")
         else:
             print(f"Suite result: {Color.RED}FAILED{Color.RESET}")
+            failing_tests = [
+                (name, data['errors'])
+                for name, data in sorted(accumulated_results.items())
+                if data['failed'] > 0
+            ]
+            if failing_tests:
+                print(f"\n{Color.RED}Failure details:{Color.RESET}")
+                for test_name, errors in failing_tests:
+                    print(f"  {Color.BOLD}{test_name}{Color.RESET}")
+                    for idx, message in enumerate(errors, 1):
+                        summary_line = message.splitlines()[0] if message else "(empty error message)"
+                        print(f"    #{idx}: {summary_line}")
+                        if idx == 3 and len(errors) > 3:
+                            remaining = len(errors) - 3
+                            print(f"    ... {remaining} more failure(s) not shown")
+                            break
             print(f"\n{Color.RED}Stopping - suite {config_name} failed{Color.RESET}")
             break
 
