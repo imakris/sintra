@@ -21,7 +21,14 @@
 
 // Tune eviction behaviour for faster unit tests before including the ring header.
 #define SINTRA_EVICTION_SPIN_THRESHOLD 0
+
+// Expose private members of the ring classes so tests can introspect internal
+// state and simulate races. This is confined to the test translation unit.
+#define private public
+#define protected public
 #include "sintra/detail/ipc_rings.h"
+#undef private
+#undef protected
 
 using namespace std::chrono_literals;
 
@@ -141,6 +148,93 @@ struct Temp_ring_dir {
     }
 
     std::string str() const { return path.string(); }
+};
+
+class Hooked_ring_reader : public sintra::Ring_R<int> {
+public:
+    using Base = sintra::Ring_R<int>;
+    using Base::Ring_R;
+
+    template <typename Hook>
+    sintra::Range<int> start_reading_with_hook(size_t num_trailing_elements, Hook&& hook)
+    {
+        bool f = false;
+        while (!this->m_reading_lock.compare_exchange_strong(f, true)) { f = false; }
+
+        if (this->m_reading.load(std::memory_order_acquire)) {
+            this->m_reading_lock = false;
+            throw std::logic_error(
+                "Sintra Ring: Cannot call start_reading() again before calling done_reading().");
+        }
+
+#ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
+        if (this->c.reading_sequences[this->m_rs_index].data.status.load() ==
+            sintra::Ring<int, true>::READER_STATE_EVICTED)
+        {
+            this->m_reading_lock = false;
+            throw sintra::ring_reader_evicted_exception();
+        }
+#endif
+
+        this->m_reading.store(true, std::memory_order_release);
+
+        sintra::Range<int> ret;
+
+        while (true) {
+            auto leading_sequence = this->c.leading_sequence.load(std::memory_order_acquire);
+
+            auto range_first_sequence =
+                std::max<int64_t>(0, int64_t(leading_sequence) - int64_t(num_trailing_elements));
+
+            size_t trailing_idx = sintra::mod_pos_i64(
+                int64_t(range_first_sequence) - int64_t(this->m_max_trailing_elements),
+                this->m_num_elements);
+
+            uint8_t trailing_octile = static_cast<uint8_t>((8 * trailing_idx) / this->m_num_elements);
+            uint64_t guard_mask     = uint64_t(1) << (8 * trailing_octile);
+
+            this->c.read_access.fetch_add(guard_mask, std::memory_order_acq_rel);
+
+            this->c.reading_sequences[this->m_rs_index].data.trailing_octile.store(
+                trailing_octile, std::memory_order_relaxed);
+            this->c.reading_sequences[this->m_rs_index].data.has_guard.store(
+                1, std::memory_order_release);
+            this->c.reading_sequences[this->m_rs_index].data.status.store(
+                sintra::Ring<int, true>::READER_STATE_ACTIVE, std::memory_order_release);
+
+            hook(guard_mask, trailing_octile);
+
+            auto confirmed_leading_sequence = this->c.leading_sequence.load(std::memory_order_acquire);
+            auto confirmed_range_first_sequence = std::max<int64_t>(
+                0, int64_t(confirmed_leading_sequence) - int64_t(num_trailing_elements));
+
+            size_t confirmed_trailing_idx = sintra::mod_pos_i64(
+                int64_t(confirmed_range_first_sequence) - int64_t(this->m_max_trailing_elements),
+                this->m_num_elements);
+            uint8_t confirmed_trailing_octile = static_cast<uint8_t>((8 * confirmed_trailing_idx) /
+                                                                      this->m_num_elements);
+
+            if (confirmed_trailing_octile == trailing_octile) {
+                ret.begin = this->m_data +
+                            sintra::mod_pos_i64(confirmed_range_first_sequence, this->m_num_elements);
+                ret.end = ret.begin + (confirmed_leading_sequence - confirmed_range_first_sequence);
+
+                this->m_trailing_octile = trailing_octile;
+                this->m_reading_sequence->store(confirmed_leading_sequence);
+                break;
+            }
+
+            uint8_t expected_guard = 1;
+            if (this->c.reading_sequences[this->m_rs_index].data.has_guard.compare_exchange_strong(
+                    expected_guard, uint8_t{0}, std::memory_order_acq_rel))
+            {
+                this->c.read_access.fetch_sub(guard_mask, std::memory_order_acq_rel);
+            }
+        }
+
+        this->m_reading_lock = false;
+        return ret;
+    }
 };
 
 template <typename T>
@@ -439,6 +533,83 @@ STRESS_TEST(stress_multi_reader_throughput)
             ASSERT_EQ(results[i], static_cast<uint64_t>(i));
         }
     }
+}
+
+TEST_CASE(test_eviction_guard_underflow_and_status_stickiness)
+{
+    Temp_ring_dir tmp("eviction_underflow");
+    auto ring_elements = pick_ring_elements<int>(64);
+    sintra::Ring_W<int> writer(tmp.str(), "ring_data", ring_elements);
+    (void)writer;
+
+    const size_t max_trailing = (ring_elements * 3) / 4;
+    Hooked_ring_reader reader(tmp.str(), "ring_data", ring_elements, max_trailing);
+
+    auto& control = reader.c;
+    auto& slot    = control.reading_sequences[reader.m_rs_index].data;
+
+    const sintra::sequence_counter_type base_sequence =
+        static_cast<sintra::sequence_counter_type>(max_trailing + ring_elements / 8);
+    const sintra::sequence_counter_type advanced_sequence =
+        base_sequence + static_cast<sintra::sequence_counter_type>(ring_elements / 8);
+
+    control.leading_sequence.store(base_sequence, std::memory_order_release);
+    reader.m_reading_sequence->store(base_sequence, std::memory_order_release);
+    slot.v.store(base_sequence, std::memory_order_release);
+
+    control.read_access.store(0, std::memory_order_relaxed);
+    slot.has_guard.store(0, std::memory_order_relaxed);
+    slot.status.store(sintra::Ring<int, true>::READER_STATE_ACTIVE, std::memory_order_relaxed);
+    slot.trailing_octile.store(0, std::memory_order_relaxed);
+
+    bool     hook_invoked   = false;
+    uint8_t  evicted_octile = 0;
+    uint64_t guard_mask      = 0;
+
+    auto hook = [&](uint64_t mask, uint8_t trailing_octile) {
+        if (hook_invoked) {
+            return;
+        }
+        hook_invoked    = true;
+        evicted_octile  = trailing_octile;
+        guard_mask      = mask;
+
+        control.leading_sequence.store(advanced_sequence, std::memory_order_release);
+
+        uint8_t expected = 1;
+        if (slot.has_guard.compare_exchange_strong(expected, uint8_t{0}, std::memory_order_acq_rel)) {
+            control.read_access.fetch_sub(mask, std::memory_order_acq_rel);
+            slot.status.store(
+                sintra::Ring<int, true>::READER_STATE_EVICTED, std::memory_order_release);
+        }
+    };
+
+    reader.start_reading_with_hook(max_trailing, hook);
+
+    ASSERT_TRUE(hook_invoked);
+
+    const uint64_t read_access_value = control.read_access.load(std::memory_order_acquire);
+    const uint8_t guard_count_after_retry =
+        static_cast<uint8_t>((read_access_value >> (8 * evicted_octile)) & 0xffu);
+    const uint8_t status_after_retry = slot.status.load(std::memory_order_acquire);
+    const uint8_t resumed_octile =
+        control.reading_sequences[reader.m_rs_index].data.trailing_octile.load(std::memory_order_acquire);
+    const uint8_t guard_count_resumed = static_cast<uint8_t>(
+        (read_access_value >> (8 * resumed_octile)) & 0xffu);
+
+    reader.done_reading();
+
+    const uint64_t read_access_after_release = control.read_access.load(std::memory_order_acquire);
+    const uint8_t guard_count_after_release =
+        static_cast<uint8_t>((read_access_after_release >> (8 * evicted_octile)) & 0xffu);
+    const uint8_t guard_count_resumed_after_release = static_cast<uint8_t>(
+        (read_access_after_release >> (8 * resumed_octile)) & 0xffu);
+
+    ASSERT_EQ(guard_count_after_retry, 0u);
+    ASSERT_EQ(status_after_retry, static_cast<uint8_t>(sintra::Ring<int, true>::READER_STATE_ACTIVE));
+    ASSERT_EQ(guard_count_resumed, 1u);
+    ASSERT_EQ(guard_count_after_release, 0u);
+    ASSERT_EQ(guard_count_resumed_after_release, 0u);
 }
 
 STRESS_TEST(stress_attach_detach_readers)
