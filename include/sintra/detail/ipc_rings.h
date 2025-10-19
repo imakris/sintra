@@ -1736,6 +1736,17 @@ struct Ring_R : Ring<T, true>
         const bool had_guard =
             c.reading_sequences[m_rs_index].data.has_guard.load(std::memory_order_acquire) != 0;
 
+        const auto status =
+            c.reading_sequences[m_rs_index].data.status.load(std::memory_order_acquire);
+
+        if (status != Ring<T, true>::READER_STATE_ACTIVE) {
+            // Reader has been deactivated or evicted. The writer already reclaimed our
+            // trailing guard, so never try to reacquire it here. Leaving the guard cleared
+            // ensures the writer can continue to make progress while the reader tears down.
+            m_trailing_octile = new_trailing_octile;
+            return;
+        }
+
         if (new_trailing_octile != m_trailing_octile) {
             const uint64_t new_mask = uint64_t(1) << (8 * new_trailing_octile);
 
