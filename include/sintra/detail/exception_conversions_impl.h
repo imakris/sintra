@@ -34,6 +34,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <future>
 #include <optional>
 #include <regex>
+#include <variant>
 #include <stdexcept>
 #include <string>
 #include <system_error>

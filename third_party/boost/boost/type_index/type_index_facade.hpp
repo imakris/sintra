@@ -20,7 +20,6 @@
 #include <iosfwd>               // for std::basic_ostream
 
 #include <boost/config.hpp>
-#include <boost/container_hash/hash_fwd.hpp>
 #endif
 
 #ifdef BOOST_HAS_PRAGMA_ONCE
@@ -28,6 +27,27 @@
 #endif
 
 namespace boost { namespace typeindex {
+
+namespace detail {
+    inline std::size_t hash_bytes(const char* data, std::size_t length) noexcept {
+        const unsigned char* ptr = reinterpret_cast<const unsigned char*>(data);
+        const bool is_64_bit = sizeof(std::size_t) > 4;
+        const std::size_t offset_basis = is_64_bit
+            ? static_cast<std::size_t>(1469598103934665603ull)
+            : static_cast<std::size_t>(2166136261u);
+        const std::size_t prime = is_64_bit
+            ? static_cast<std::size_t>(1099511628211ull)
+            : static_cast<std::size_t>(16777619u);
+
+        std::size_t result = offset_basis;
+        for (std::size_t i = 0; i < length; ++i) {
+            result ^= static_cast<std::size_t>(ptr[i]);
+            result *= prime;
+        }
+
+        return result;
+    }
+}
 
 BOOST_TYPE_INDEX_BEGIN_MODULE_EXPORT
 
@@ -102,11 +122,9 @@ public:
 
     /// \b Override: This function \b may be redefined in Derived class. Overrides \b must not throw.
     /// \return Hash code of a type. By default hashes types by raw_name().
-    /// \note Derived class header \b must include <boost/container_hash/hash.hpp>, \b unless this function is redefined in
-    /// Derived class to not use boost::hash_range().
     inline std::size_t hash_code() const noexcept {
         const char* const name_raw = derived().raw_name();
-        return boost::hash_range(name_raw, name_raw + std::strlen(name_raw));
+        return detail::hash_bytes(name_raw, std::strlen(name_raw));
     }
 
 #if defined(BOOST_TYPE_INDEX_DOXYGEN_INVOKED)
@@ -277,7 +295,6 @@ inline std::basic_ostream<CharT, TriatT>& operator<<(
 #endif // BOOST_NO_IOSTREAM
 
 /// This free function is used by Boost's unordered containers.
-/// \note <boost/container_hash/hash.hpp> has to be included if this function is used.
 template <class Derived, class TypeInfo>
 inline std::size_t hash_value(const type_index_facade<Derived, TypeInfo>& lhs) noexcept {
     return static_cast<Derived const&>(lhs).hash_code();
