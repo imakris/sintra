@@ -116,7 +116,10 @@ struct typed_variable_buffer_alignment<
 >
 {
     using value_type = typename std::decay_t<T>::value_type;
-    static constexpr std::size_t value = alignof(value_type);
+    static constexpr std::size_t value =
+        alignof(value_type) < alignof(variable_buffer)
+            ? alignof(variable_buffer)
+            : alignof(value_type);
 };
 
 } // namespace detail
