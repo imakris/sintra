@@ -606,7 +606,9 @@ struct sintra_ring_semaphore : ipc::interprocess_semaphore
     {
         ipc::interprocess_semaphore::wait();
         posted.clear(std::memory_order_release);
-        return unordered.load();
+        // Capture whether the wakeup was unordered (triggered by a local unblock)
+        // and reset the flag so subsequent ordered posts are not suppressed.
+        return unordered.exchange(false, std::memory_order_acq_rel);
     }
 private:
     std::atomic_flag posted = ATOMIC_FLAG_INIT;
