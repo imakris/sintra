@@ -1969,7 +1969,11 @@ struct Ring_W : Ring<T, false>
             m_pending_new_sequence -= num_src_elements;
             const size_t head = mod_u64(m_pending_new_sequence, this->m_num_elements);
             m_octile = (8 * head) / this->m_num_elements;
+#ifdef __APPLE__
+            m_writing_thread_id = std::thread::id();
+#else
             m_writing_thread = std::thread::id();
+#endif
             throw;
         }
     }
@@ -1992,7 +1996,11 @@ struct Ring_W : Ring<T, false>
             m_pending_new_sequence -= num_elements;
             const size_t head = mod_u64(m_pending_new_sequence, this->m_num_elements);
             m_octile = (8 * head) / this->m_num_elements;
+#ifdef __APPLE__
+            m_writing_thread_id = std::thread::id();
+#else
             m_writing_thread = std::thread::id();
+#endif
             throw;
         }
     }
@@ -2009,8 +2017,12 @@ struct Ring_W : Ring<T, false>
     {
 #if SINTRA_RING_READING_POLICY != SINTRA_RING_READING_POLICY_ALWAYS_SPIN
         c.lock();
+#ifdef __APPLE__
+        assert(m_writing_thread_id == std::this_thread::get_id());
+#else
         assert(m_writing_thread.load(std::memory_order_relaxed) ==
                std::this_thread::get_id());
+#endif
         c.leading_sequence.store(m_pending_new_sequence);
         // Wake sleeping readers in a deterministic order
         for (int i = 0; i < c.num_sleeping; i++) {
@@ -2024,7 +2036,11 @@ struct Ring_W : Ring<T, false>
 #else
         c.leading_sequence.store(m_pending_new_sequence);
 #endif
+#ifdef __APPLE__
+        m_writing_thread_id = std::thread::id();
+#else
         m_writing_thread = std::thread::id();
+#endif
         return m_pending_new_sequence;
     }
 
@@ -2169,6 +2185,18 @@ private:
         assert(num_elements_to_write <= this->m_num_elements / 8);
 
         // Enforce exclusive writer (cheap fast-path loop)
+#ifdef __APPLE__
+        // macOS workaround: use mutex instead of atomic thread_id
+        std::lock_guard<std::mutex> lock(m_writing_mutex);
+        if (m_writing_thread_id != std::this_thread::get_id()) {
+            if (m_writing_thread_id == std::thread::id()) {
+                m_writing_thread_id = std::this_thread::get_id();
+            } else {
+                // Another thread owns it - shouldn't happen with proper usage
+                assert(false && "Multiple writers detected");
+            }
+        }
+#else
         while (m_writing_thread.load(std::memory_order_relaxed) !=
                std::this_thread::get_id()) {
             auto invalid = std::thread::id();
@@ -2178,6 +2206,7 @@ private:
                 std::memory_order_acq_rel,
                 std::memory_order_acquire);
         }
+#endif
 
         const size_t index = mod_u64(m_pending_new_sequence, this->m_num_elements);
         m_pending_new_sequence += num_elements_to_write;
@@ -2276,7 +2305,14 @@ private:
     }
 
 private:
+#ifdef __APPLE__
+    // macOS workaround: std::atomic<std::thread::id> has issues with compare_exchange
+    // Use a mutex instead for thread exclusivity on macOS
+    std::mutex                      m_writing_mutex;
+    std::thread::id                 m_writing_thread_id;
+#else
     std::atomic<std::thread::id>    m_writing_thread;
+#endif
     size_t                          m_octile                 = 0;
     sequence_counter_type           m_pending_new_sequence   = 0;
 
