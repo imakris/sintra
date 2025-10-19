@@ -212,6 +212,11 @@ constexpr auto invalid_sequence = ~sequence_counter_type(0);
 #ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
 namespace ring_detail {
 
+#ifdef SINTRA_RING_TEST_HOOKS
+extern void (*g_ring_r_guard_retry_hook)(void* reader);
+extern void* g_ring_r_guard_retry_context;
+#endif
+
 inline uint64_t calibrate_spin_loops_per_microsecond()
 {
     static std::atomic<uint64_t> cached{0};
@@ -1422,6 +1427,12 @@ struct Ring_R : Ring<T, true>
                 trailing_octile, std::memory_order_relaxed);
             c.reading_sequences[m_rs_index].data.has_guard.store(1, std::memory_order_release);
 
+#ifdef SINTRA_RING_TEST_HOOKS
+            if (ring_detail::g_ring_r_guard_retry_hook) {
+                ring_detail::g_ring_r_guard_retry_hook(this);
+            }
+#endif
+
             auto confirmed_leading_sequence = c.leading_sequence.load(std::memory_order_acquire);
             auto confirmed_range_first_sequence = std::max<int64_t>(
                 0, int64_t(confirmed_leading_sequence) - int64_t(num_trailing_elements));
@@ -1438,12 +1449,21 @@ struct Ring_R : Ring<T, true>
 
                 m_trailing_octile = trailing_octile;
                 m_reading_sequence->store(confirmed_leading_sequence);
+                c.reading_sequences[m_rs_index].data.status.store(
+                    Ring<T, true>::READER_STATE_ACTIVE, std::memory_order_release);
                 break;
             }
 
             // Trailing guard requirement changed between reads; drop and retry.
-            c.read_access.fetch_sub(guard_mask, std::memory_order_acq_rel);
-            c.reading_sequences[m_rs_index].data.has_guard.store(0, std::memory_order_release);
+            uint8_t expected_guard = 1;
+            if (c.reading_sequences[m_rs_index].data.has_guard.compare_exchange_strong(
+                    expected_guard,
+                    uint8_t{0},
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire))
+            {
+                c.read_access.fetch_sub(guard_mask, std::memory_order_acq_rel);
+            }
         }
 
         m_reading_lock = false;
@@ -1761,6 +1781,8 @@ struct Ring_R : Ring<T, true>
                 c.reading_sequences[m_rs_index].data.trailing_octile.store(
                     static_cast<uint8_t>(new_trailing_octile), std::memory_order_relaxed);
                 c.reading_sequences[m_rs_index].data.has_guard.store(1, std::memory_order_release);
+                c.reading_sequences[m_rs_index].data.status.store(
+                    Ring<T, true>::READER_STATE_ACTIVE, std::memory_order_release);
             }
 
             m_trailing_octile = new_trailing_octile;
@@ -1771,6 +1793,8 @@ struct Ring_R : Ring<T, true>
             const uint64_t mask = uint64_t(1) << (8 * m_trailing_octile);
             c.read_access.fetch_add(mask, std::memory_order_acq_rel);
             c.reading_sequences[m_rs_index].data.has_guard.store(1, std::memory_order_release);
+            c.reading_sequences[m_rs_index].data.status.store(
+                Ring<T, true>::READER_STATE_ACTIVE, std::memory_order_release);
         }
     }
 
