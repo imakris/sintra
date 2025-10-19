@@ -83,10 +83,54 @@ target_link_libraries(sintra_variable_buffer_alignment_test PRIVATE ${SINTRA_TES
 add_test(NAME sintra.variable_buffer_alignment COMMAND sintra_variable_buffer_alignment_test)
 list(APPEND SINTRA_CI_TESTS sintra.variable_buffer_alignment)
 
-add_executable(sintra_ipc_rings_tests ipc_rings_tests.cpp)
-target_link_libraries(sintra_ipc_rings_tests PRIVATE ${SINTRA_TEST_TARGET})
-add_test(NAME sintra.ipc_rings COMMAND sintra_ipc_rings_tests)
-list(APPEND SINTRA_CI_TESTS sintra.ipc_rings)
+# IPC Rings tests - build 6 configurations: 3 reading policies × 2 build types
+# This ensures comprehensive testing of all policy/optimization combinations
+set(READING_POLICIES
+    "ADAPTIVE_SPIN:3"
+    "HYBRID:2"
+    "ALWAYS_SPIN:1"
+)
+
+foreach(policy_pair IN LISTS READING_POLICIES)
+    string(REPLACE ":" ";" policy_list "${policy_pair}")
+    list(GET policy_list 0 policy_name)
+    list(GET policy_list 1 policy_value)
+
+    # Release build
+    set(target_name "sintra_ipc_rings_tests_release_${policy_name}")
+    string(TOLOWER "${target_name}" target_name)
+    add_executable(${target_name} ipc_rings_tests.cpp)
+    target_link_libraries(${target_name} PRIVATE sintra)
+    target_compile_definitions(${target_name} PRIVATE
+        SINTRA_RING_READING_POLICY=${policy_value}
+    )
+    if(WIN32)
+        target_link_libraries(${target_name} PRIVATE winmm)
+        target_compile_options(${target_name} PRIVATE /O2 /DNDEBUG)
+    else()
+        target_compile_options(${target_name} PRIVATE -O3 -DNDEBUG)
+    endif()
+    add_test(NAME sintra.ipc_rings_release_${policy_name} COMMAND ${target_name})
+    list(APPEND SINTRA_CI_TESTS sintra.ipc_rings_release_${policy_name})
+
+    # Debug build
+    set(target_name "sintra_ipc_rings_tests_debug_${policy_name}")
+    string(TOLOWER "${target_name}" target_name)
+    add_executable(${target_name} ipc_rings_tests.cpp)
+    target_link_libraries(${target_name} PRIVATE sintra)
+    target_compile_definitions(${target_name} PRIVATE
+        SINTRA_RING_READING_POLICY=${policy_value}
+    )
+    if(WIN32)
+        target_link_libraries(${target_name} PRIVATE winmm)
+        target_compile_options(${target_name} PRIVATE /Od /Zi /RTC1)
+        target_link_options(${target_name} PRIVATE /DEBUG:FULL)
+    else()
+        target_compile_options(${target_name} PRIVATE -g -O0)
+    endif()
+    add_test(NAME sintra.ipc_rings_debug_${policy_name} COMMAND ${target_name})
+    list(APPEND SINTRA_CI_TESTS sintra.ipc_rings_debug_${policy_name})
+endforeach()
 
 add_executable(sintra_spawn_detached_test spawn_detached_test.cpp)
 target_link_libraries(sintra_spawn_detached_test PRIVATE ${SINTRA_TEST_TARGET})
