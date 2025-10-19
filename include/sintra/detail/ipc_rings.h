@@ -1421,6 +1421,10 @@ struct Ring_R : Ring<T, true>
      */
     Range<T> start_reading(size_t num_trailing_elements)
     {
+#ifdef __APPLE__
+        std::fprintf(stderr, "[RING_DEBUG] start_reading() called with num_trailing=%zu\n", num_trailing_elements);
+        std::fflush(stderr);
+#endif
         bool f = false;
         while (!m_reading_lock.compare_exchange_strong(f, true)) { f = false; }
 
@@ -1448,7 +1452,22 @@ struct Ring_R : Ring<T, true>
 
         Range<T> ret;
 
+#ifdef __APPLE__
+        int loop_count = 0;
+#endif
         while (true) {
+#ifdef __APPLE__
+            if (loop_count == 0) {
+                std::fprintf(stderr, "[RING_DEBUG] start_reading: entering guard acquisition loop\n");
+                std::fflush(stderr);
+            }
+            loop_count++;
+            if (loop_count > 100) {
+                std::fprintf(stderr, "[RING_DEBUG] start_reading: STUCK in loop (iteration %d)!\n", loop_count);
+                std::fflush(stderr);
+                loop_count = 0;  // Print every 100 iterations
+            }
+#endif
             auto leading_sequence = c.leading_sequence.load(std::memory_order_acquire);
 
             auto range_first_sequence =
@@ -1476,6 +1495,14 @@ struct Ring_R : Ring<T, true>
             uint8_t confirmed_trailing_octile =
                 static_cast<uint8_t>((8 * confirmed_trailing_idx) / this->m_num_elements);
 
+#ifdef __APPLE__
+            if (loop_count <= 2) {
+                std::fprintf(stderr, "[RING_DEBUG] start_reading: octile=%u confirmed=%u leading=%llu\n",
+                            trailing_octile, confirmed_trailing_octile, (unsigned long long)confirmed_leading_sequence);
+                std::fflush(stderr);
+            }
+#endif
+
             if (confirmed_trailing_octile == trailing_octile) {
                 ret.begin = this->m_data +
                             mod_pos_i64(confirmed_range_first_sequence, this->m_num_elements);
@@ -1483,6 +1510,11 @@ struct Ring_R : Ring<T, true>
 
                 m_trailing_octile = trailing_octile;
                 m_reading_sequence->store(confirmed_leading_sequence);
+#ifdef __APPLE__
+                std::fprintf(stderr, "[RING_DEBUG] start_reading: SUCCESS after %d iterations, range size=%zu\n",
+                            loop_count, (size_t)(ret.end - ret.begin));
+                std::fflush(stderr);
+#endif
                 break;
             }
 
