@@ -100,8 +100,30 @@ template <> thread_local char*      variable_buffer::S::tl_message_start_address
 template <> thread_local uint32_t*  variable_buffer::S::tl_pbytes_to_next_message   = nullptr;
 
 
+namespace detail
+{
+
+template <typename T, typename = void>
+struct typed_variable_buffer_alignment
+{
+    static constexpr std::size_t value = alignof(variable_buffer);
+};
+
 template <typename T>
-struct typed_variable_buffer: protected variable_buffer
+struct typed_variable_buffer_alignment<
+    T,
+    std::void_t<typename std::decay_t<T>::value_type>
+>
+{
+    using value_type = typename std::decay_t<T>::value_type;
+    static constexpr std::size_t value = alignof(value_type);
+};
+
+} // namespace detail
+
+
+template <typename T>
+struct alignas(detail::typed_variable_buffer_alignment<T>::value) typed_variable_buffer: protected variable_buffer
 {
 public:
     typed_variable_buffer() {}
