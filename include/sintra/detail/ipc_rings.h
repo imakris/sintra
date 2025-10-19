@@ -1509,7 +1509,7 @@ struct Ring_R : Ring<T, true>
         }
 
 #if SINTRA_RING_READING_POLICY == SINTRA_RING_READING_POLICY_ALWAYS_SPIN
-        while (m_reading_sequence->load() == c.leading_sequence.load()) {
+        while (m_reading_sequence->load(std::memory_order_relaxed) == c.leading_sequence.load(std::memory_order_relaxed)) {
             // Check for shutdown during spin
             if (m_stopping.load(std::memory_order_acquire)) {
                 return Range<T>{};
@@ -1523,7 +1523,7 @@ struct Ring_R : Ring<T, true>
 #elif SINTRA_RING_READING_POLICY == SINTRA_RING_READING_POLICY_ADAPTIVE_SPIN
         // Phase 1: Fast spin for ultra-low latency (~50μs)
         double fast_spin_end = get_wtime() + fast_spin_duration;
-        while (m_reading_sequence->load() == c.leading_sequence.load() && get_wtime() < fast_spin_end) {
+        while (m_reading_sequence->load(std::memory_order_relaxed) == c.leading_sequence.load(std::memory_order_relaxed) && get_wtime() < fast_spin_end) {
             if (m_stopping.load(std::memory_order_acquire)) {
                 return Range<T>{};
             }
@@ -1536,7 +1536,7 @@ struct Ring_R : Ring<T, true>
             ::timeBeginPeriod(1);
 #endif
             double precision_sleep_end = get_wtime() + precision_sleep_duration;
-            while (m_reading_sequence->load() == c.leading_sequence.load() && get_wtime() < precision_sleep_end) {
+            while (m_reading_sequence->load(std::memory_order_relaxed) == c.leading_sequence.load(std::memory_order_relaxed) && get_wtime() < precision_sleep_end) {
                 if (m_stopping.load(std::memory_order_acquire)) {
 #ifdef _WIN32
                     ::timeEndPeriod(1);
@@ -1632,7 +1632,7 @@ struct Ring_R : Ring<T, true>
 #else // HYBRID or ALWAYS_SLEEP
     #if SINTRA_RING_READING_POLICY == SINTRA_RING_READING_POLICY_HYBRID
         double tl = get_wtime() + spin_before_sleep * 0.5;
-        while (m_reading_sequence->load() == c.leading_sequence.load() && get_wtime() < tl) {
+        while (m_reading_sequence->load(std::memory_order_relaxed) == c.leading_sequence.load(std::memory_order_relaxed) && get_wtime() < tl) {
             // Check for shutdown during spin phase
             if (m_stopping.load(std::memory_order_acquire)) {
                 return Range<T>{};
