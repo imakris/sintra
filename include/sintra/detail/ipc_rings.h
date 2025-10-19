@@ -1156,7 +1156,16 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
             }
         }
 
-        m_control->num_attached++;
+        // Multiple writers/readers may attach concurrently (e.g. the stress
+        // tests spawn several reader instances in parallel).  num_attached is
+        // an interprocess atomic specifically so the reference count remains
+        // correct under concurrent increments.  Using a plain post-increment
+        // here caused lost updates and the final detaching instance would run
+        // the shared Control destructor while other rings were still using the
+        // semaphores on platforms with different scheduling characteristics
+        // (Windows/macOS), resulting in the observed hangs.  fetch_add keeps
+        // the count consistent across all attachers.
+        m_control->num_attached.fetch_add(1, std::memory_order_acq_rel);
     }
 
 
