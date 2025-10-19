@@ -738,8 +738,6 @@ private:
             auto data_rights = READ_ONLY_DATA ? ipc::read_only : ipc::read_write;
             ipc::file_mapping file(m_data_filename.c_str(), data_rights);
 
-            ipc::map_options_t map_extra_options = 0;
-
             // Unified retry logic for all platforms.
             // When multiple threads in the same process try to map the same file simultaneously,
             // the OS can fail due to concurrent access to the virtual memory manager.
@@ -748,6 +746,7 @@ private:
 
             for (int attempt = 0; attempt < max_attach_attempts; ++attempt) {
                 char* ptr = nullptr;
+                ipc::map_options_t map_extra_options = 0;
 
 #ifdef _WIN32
                 // ── Windows: VirtualAlloc → round → VirtualFree → map ──────────────
@@ -797,14 +796,21 @@ private:
                     region1->get_size() == m_data_region_size;
 
                 if (layout_ok) {
-                    // Success!
+                    // Success! MAP_FIXED has replaced the PROT_NONE reservation.
                     m_data_region_0 = region0.release();
                     m_data_region_1 = region1.release();
                     m_data = (T*)m_data_region_0->get_address();
                     break;
                 }
 
-                // ── Retry or fail ───────────────────────────────────────────────────
+                // ── Failure: clean up and retry or fail ────────────────────────────
+#ifndef _WIN32
+                // CRITICAL: Release the PROT_NONE reservation on POSIX.
+                // On macOS especially, leaked reservations accumulate and cause
+                // subsequent mapping attempts to fail deterministically.
+                ::munmap(mem, m_data_region_size * 2);
+#endif
+
                 if (attempt + 1 < max_attach_attempts) {
 #ifdef _WIN32
                     ::Sleep(0);
