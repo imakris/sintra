@@ -1711,6 +1711,8 @@ struct Ring_R : Ring<T, true>
         Range<T> ret;
         if (num_range_elements == 0) {
             // Could happen if we were explicitly unblocked
+            m_seen_unblock_sequence =
+                c.global_unblock_sequence.load(std::memory_order_acquire);
             return ret;
         }
 
