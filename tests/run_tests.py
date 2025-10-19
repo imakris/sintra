@@ -78,8 +78,8 @@ class TestRunner:
             print(f"{Color.RED}Test directory not found: {self.test_dir}{Color.RESET}")
             return []
 
-        # List of test executables to run
-        test_names = [
+        # Base test names (without configuration suffix)
+        base_test_names = [
             'sintra_dummy_test',
             'sintra_basic_pubsub_test',
             'sintra_ping_pong_test',
@@ -89,15 +89,25 @@ class TestRunner:
             'sintra_barrier_flush_test',
             'sintra_barrier_stress_test',
             'sintra_variable_buffer_alignment_test',
-            # IPC rings tests - 6 configurations: 3 policies × 2 build types
-            'sintra_ipc_rings_tests_release_adaptive',
-            'sintra_ipc_rings_tests_release_hybrid',
-            'sintra_ipc_rings_tests_release_always_spin',
-            'sintra_ipc_rings_tests_debug_adaptive',
-            'sintra_ipc_rings_tests_debug_hybrid',
-            'sintra_ipc_rings_tests_debug_always_spin',
+            'sintra_ipc_rings_tests',
             'sintra_spawn_detached_test'
         ]
+
+        # 6 configurations: 3 policies × 2 build types
+        configurations = [
+            'release_adaptive',
+            'release_hybrid',
+            'release_always_spin',
+            'debug_adaptive',
+            'debug_hybrid',
+            'debug_always_spin'
+        ]
+
+        # Build full test list: each base test × each configuration
+        test_names = []
+        for config in configurations:
+            for base_name in base_test_names:
+                test_names.append(f"{base_name}_{config}")
 
         if test_name:
             test_names = [name for name in test_names if test_name in name]
