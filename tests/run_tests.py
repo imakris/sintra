@@ -72,11 +72,11 @@ class TestRunner:
         # Kill any existing sintra processes for a clean start
         self._kill_all_sintra_processes()
 
-    def find_tests(self, test_name: Optional[str] = None) -> List[Path]:
-        """Find all test executables"""
+    def find_test_suites(self, test_name: Optional[str] = None) -> dict:
+        """Find all test executables organized by configuration suite"""
         if not self.test_dir.exists():
             print(f"{Color.RED}Test directory not found: {self.test_dir}{Color.RESET}")
-            return []
+            return {}
 
         # Base test names (without configuration suffix)
         base_test_names = [
@@ -103,28 +103,30 @@ class TestRunner:
             'debug_always_spin'
         ]
 
-        # Build full test list: each base test × each configuration
-        test_names = []
+        # Build test suites: dict mapping config -> list of test paths
+        test_suites = {}
         for config in configurations:
+            suite_tests = []
             for base_name in base_test_names:
-                test_names.append(f"{base_name}_{config}")
+                full_name = f"{base_name}_{config}"
 
-        if test_name:
-            test_names = [name for name in test_names if test_name in name]
+                if test_name and test_name not in full_name:
+                    continue
 
-        tests = []
-        for name in test_names:
-            if sys.platform == 'win32':
-                test_path = self.test_dir / f"{name}.exe"
-            else:
-                test_path = self.test_dir / name
+                if sys.platform == 'win32':
+                    test_path = self.test_dir / f"{full_name}.exe"
+                else:
+                    test_path = self.test_dir / full_name
 
-            if test_path.exists():
-                tests.append(test_path)
-            else:
-                print(f"{Color.YELLOW}Warning: Test not found: {test_path}{Color.RESET}")
+                if test_path.exists():
+                    suite_tests.append(test_path)
+                else:
+                    print(f"{Color.YELLOW}Warning: Test not found: {test_path}{Color.RESET}")
 
-        return tests
+            if suite_tests:
+                test_suites[config] = suite_tests
+
+        return test_suites
 
     def run_test_once(self, test_path: Path) -> TestResult:
         """Run a single test with timeout and proper cleanup"""
@@ -428,81 +430,106 @@ def main():
 
     preserve_on_timeout = args.preserve_stalled_processes
     runner = TestRunner(build_dir, args.config, args.timeout, args.verbose, preserve_on_timeout)
-    tests = runner.find_tests(args.test)
+    test_suites = runner.find_test_suites(args.test)
 
-    if not tests:
-        print(f"{Color.RED}No tests found to run{Color.RESET}")
+    if not test_suites:
+        print(f"{Color.RED}No test suites found to run{Color.RESET}")
         return 1
 
-    print(f"Found {len(tests)} test(s) to run")
+    total_configs = len(test_suites)
+    print(f"Found {total_configs} configuration suite(s) to run")
 
-    start_time = time.time()
+    overall_start_time = time.time()
+    overall_all_passed = True
 
-    # Adaptive soak test: run full suite with exponentially increasing batch sizes
-    accumulated_results = {test.stem: {'passed': 0, 'failed': 0, 'durations': []} for test in tests}
-    total_reps_so_far = 0
-    max_reps_per_test = args.repetitions
-    all_passed = True
-    batch_size = 1
+    # Run each configuration suite independently
+    for config_idx, (config_name, tests) in enumerate(test_suites.items(), 1):
+        print(f"\n{'=' * 80}")
+        print(f"{Color.BOLD}{Color.BLUE}Configuration {config_idx}/{total_configs}: {config_name}{Color.RESET}")
+        print(f"  Tests in suite: {len(tests)}")
+        print(f"  Repetitions: {args.repetitions}")
+        print(f"{'=' * 80}")
 
-    while total_reps_so_far < max_reps_per_test:
-        reps_in_this_round = min(batch_size, max_reps_per_test - total_reps_so_far)
-        print(f"\n{Color.BLUE}--- Running Round: {reps_in_this_round} repetition(s) ---{Color.RESET}")
+        suite_start_time = time.time()
 
-        for i in range(reps_in_this_round):
-            print(f"  Repetition {i + 1}/{reps_in_this_round}: ", end="", flush=True)
-            for test_path in tests:
-                test_name = test_path.stem
-                result = runner.run_test_once(test_path)
+        # Adaptive soak test for this suite
+        accumulated_results = {test.stem: {'passed': 0, 'failed': 0, 'durations': []} for test in tests}
+        total_reps_so_far = 0
+        max_reps_per_test = args.repetitions
+        suite_all_passed = True
+        batch_size = 1
 
-                accumulated_results[test_name]['durations'].append(result.duration)
+        while total_reps_so_far < max_reps_per_test:
+            reps_in_this_round = min(batch_size, max_reps_per_test - total_reps_so_far)
+            print(f"\n{Color.BLUE}--- Round: {reps_in_this_round} repetition(s) ---{Color.RESET}")
 
-                if result.success:
-                    accumulated_results[test_name]['passed'] += 1
-                    print(f"{Color.GREEN}.{Color.RESET}", end="", flush=True)
-                else:
-                    accumulated_results[test_name]['failed'] += 1
-                    all_passed = False
-                    print(f"{Color.RED}F{Color.RESET}", end="", flush=True)
+            for i in range(reps_in_this_round):
+                print(f"  Rep {i + 1}/{reps_in_this_round}: ", end="", flush=True)
+                for test_path in tests:
+                    test_name = test_path.stem
+                    result = runner.run_test_once(test_path)
 
-            print() # Newline after round
-            if not all_passed:
-                break # Stop all rounds
+                    accumulated_results[test_name]['durations'].append(result.duration)
 
-        total_reps_so_far += reps_in_this_round
-        if not all_passed:
+                    if result.success:
+                        accumulated_results[test_name]['passed'] += 1
+                        print(f"{Color.GREEN}.{Color.RESET}", end="", flush=True)
+                    else:
+                        accumulated_results[test_name]['failed'] += 1
+                        suite_all_passed = False
+                        overall_all_passed = False
+                        print(f"{Color.RED}F{Color.RESET}", end="", flush=True)
+
+                print()
+                if not suite_all_passed:
+                    break
+
+            total_reps_so_far += reps_in_this_round
+            if not suite_all_passed:
+                break
+
+            batch_size *= 2
+
+        # Print suite results
+        suite_duration = time.time() - suite_start_time
+        print(f"\n{Color.BOLD}Results for {config_name}:{Color.RESET}")
+        print("=" * 80)
+        print(f"{'Test':<40} {'Pass rate':<20} {'Avg runtime (s)':>15}")
+        print("=" * 80)
+
+        for test_name in sorted(accumulated_results.keys()):
+            passed = accumulated_results[test_name]['passed']
+            failed = accumulated_results[test_name]['failed']
+            total = passed + failed
+            pass_rate = (passed / total * 100) if total > 0 else 0
+
+            durations = accumulated_results[test_name]['durations']
+            avg_duration = sum(durations) / len(durations) if durations else 0
+
+            pass_rate_str = f"{passed}/{total} ({pass_rate:6.2f}%)"
+            print(f"{test_name:<40} {pass_rate_str:<20} {avg_duration:>15.2f}")
+
+        print("=" * 80)
+        print(f"Suite duration: {format_duration(suite_duration)}")
+
+        if suite_all_passed:
+            print(f"Suite result: {Color.GREEN}PASSED{Color.RESET}")
+        else:
+            print(f"Suite result: {Color.RED}FAILED{Color.RESET}")
+            print(f"\n{Color.RED}Stopping - suite {config_name} failed{Color.RESET}")
             break
 
-        batch_size *= 2
-
-    # Print final results
-    print("\n" + "=" * 80)
-    print(f"{'Test':<40} {'Pass rate':<20} {'Avg runtime (s)':>15}")
-    print("=" * 80)
-
-    for test_name in sorted(accumulated_results.keys()):
-        passed = accumulated_results[test_name]['passed']
-        failed = accumulated_results[test_name]['failed']
-        total = passed + failed
-        pass_rate = (passed / total * 100) if total > 0 else 0
-
-        durations = accumulated_results[test_name]['durations']
-        avg_duration = sum(durations) / len(durations) if durations else 0
-
-        pass_rate_str = f"{passed}/{total} ({pass_rate:6.2f}%)"
-        print(f"{test_name:<40} {pass_rate_str:<20} {avg_duration:>15.2f}")
-
-    print("=" * 80)
-
-    total_duration = time.time() - start_time
+    # Final summary
+    total_duration = time.time() - overall_start_time
+    print(f"\n{'=' * 80}")
+    print(f"{Color.BOLD}OVERALL SUMMARY{Color.RESET}")
     print(f"Total duration: {format_duration(total_duration)}")
-    print()
 
-    if all_passed:
-        print(f"{Color.GREEN}PASSED{Color.RESET}")
+    if overall_all_passed:
+        print(f"Overall result: {Color.GREEN}ALL SUITES PASSED{Color.RESET}")
         return 0
     else:
-        print(f"{Color.RED}FAILED{Color.RESET}")
+        print(f"Overall result: {Color.RED}FAILED{Color.RESET}")
         return 1
 
 if __name__ == '__main__':
