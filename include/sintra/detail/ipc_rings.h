@@ -760,11 +760,22 @@ private:
                 // ── POSIX: mmap PROT_NONE reservation ──────────────────────────────
                 void* mem = ::mmap(nullptr, m_data_region_size * 2,
                                    PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-                if (mem == MAP_FAILED) return false;
+                if (mem == MAP_FAILED) {
+#ifdef __APPLE__
+                    std::fprintf(stderr, "[RING_DEBUG] mmap PROT_NONE failed on attempt %d: %s\n",
+                                attempt, std::strerror(errno));
+#endif
+                    return false;
+                }
 
                 ptr = static_cast<char*>(mem);
                 assert((reinterpret_cast<uintptr_t>(ptr) % page_size) == 0 &&
                        "mmap(PROT_NONE) base not page-aligned?");
+
+#ifdef __APPLE__
+                std::fprintf(stderr, "[RING_DEBUG] Attempt %d: Reserved %p - %p\n",
+                            attempt, mem, (char*)mem + m_data_region_size * 2);
+#endif
 
                 #ifdef MAP_FIXED
                 map_extra_options |= MAP_FIXED;
@@ -780,11 +791,29 @@ private:
                 try {
                     region0.reset(new ipc::mapped_region(file, data_rights, 0,
                         m_data_region_size, ptr, map_extra_options));
+#ifdef __APPLE__
+                    std::fprintf(stderr, "[RING_DEBUG] Attempt %d: region0 mapped at %p\n",
+                                attempt, region0->get_address());
+#endif
                     region1.reset(new ipc::mapped_region(file, data_rights, 0, 0,
                         ((char*)region0->get_address()) + m_data_region_size, map_extra_options));
+#ifdef __APPLE__
+                    std::fprintf(stderr, "[RING_DEBUG] Attempt %d: region1 mapped at %p\n",
+                                attempt, region1->get_address());
+#endif
+                }
+                catch (const std::exception& ex) {
+                    mapping_failed = true;
+#ifdef __APPLE__
+                    std::fprintf(stderr, "[RING_DEBUG] Attempt %d: mapping exception: %s\n",
+                                attempt, ex.what());
+#endif
                 }
                 catch (...) {
                     mapping_failed = true;
+#ifdef __APPLE__
+                    std::fprintf(stderr, "[RING_DEBUG] Attempt %d: unknown mapping exception\n", attempt);
+#endif
                 }
 
                 // ── Validate layout ─────────────────────────────────────────────────
@@ -797,6 +826,9 @@ private:
 
                 if (layout_ok) {
                     // Success! MAP_FIXED has replaced the PROT_NONE reservation.
+#ifdef __APPLE__
+                    std::fprintf(stderr, "[RING_DEBUG] Attempt %d: SUCCESS\n", attempt);
+#endif
                     m_data_region_0 = region0.release();
                     m_data_region_1 = region1.release();
                     m_data = (T*)m_data_region_0->get_address();
@@ -805,10 +837,21 @@ private:
 
                 // ── Failure: clean up and retry or fail ────────────────────────────
 #ifndef _WIN32
+#ifdef __APPLE__
+                std::fprintf(stderr, "[RING_DEBUG] Attempt %d: layout check FAILED (mapping_failed=%d, r0=%p, r1=%p)\n",
+                            attempt, mapping_failed,
+                            region0 ? region0->get_address() : nullptr,
+                            region1 ? region1->get_address() : nullptr);
+#endif
+
                 // CRITICAL: Release the PROT_NONE reservation on POSIX.
                 // On macOS especially, leaked reservations accumulate and cause
                 // subsequent mapping attempts to fail deterministically.
-                ::munmap(mem, m_data_region_size * 2);
+                int munmap_result = ::munmap(mem, m_data_region_size * 2);
+#ifdef __APPLE__
+                std::fprintf(stderr, "[RING_DEBUG] Attempt %d: munmap returned %d (errno=%d)\n",
+                            attempt, munmap_result, errno);
+#endif
 #endif
 
                 if (attempt + 1 < max_attach_attempts) {
@@ -821,6 +864,9 @@ private:
                 }
 
                 // Final attempt failed
+#ifdef __APPLE__
+                std::fprintf(stderr, "[RING_DEBUG] ALL ATTEMPTS FAILED\n");
+#endif
 #ifndef NDEBUG
                 assert(false && "Ring memory layout validation failed after all retry attempts");
 #endif
