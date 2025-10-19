@@ -104,7 +104,7 @@ namespace sintra {
 
     // ADAPTIVE_SPIN policy: Total time to spend in precision sleep phase before
     // transitioning to true blocking sleep (semaphore wait).
-    constexpr double    precision_sleep_duration            = 1.0;     // secs (1000ms)
+    constexpr double    precision_sleep_duration            = 0.005;   // secs (5ms)
 
     // Whenever control data is read and written in an array by multiple threads, the layout used
 	// should not cause cache invalidations (false sharing). This setting is architecture specific,

@@ -21,9 +21,6 @@
 
 // Tune eviction behaviour for faster unit tests before including the ring header.
 #define SINTRA_EVICTION_SPIN_THRESHOLD 0
-#include "sintra/detail/config.h"
-#undef SINTRA_RING_READING_POLICY
-#define SINTRA_RING_READING_POLICY SINTRA_RING_READING_POLICY_ALWAYS_SPIN
 #include "sintra/detail/ipc_rings.h"
 
 using namespace std::chrono_literals;
