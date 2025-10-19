@@ -580,27 +580,75 @@ struct sintra_ring_semaphore : ipc::interprocess_semaphore
 {
     sintra_ring_semaphore() : ipc::interprocess_semaphore(0) {}
 
-    // Always post. unordered is advisory only.
     void post_ordered()
     {
-        unordered.store(false, std::memory_order_release);
-        this->post();
+        constexpr uint32_t posted_bit    = 0x1u;
+        constexpr uint32_t unordered_bit = 0x2u;
+
+        uint32_t state = m_state.load(std::memory_order_acquire);
+        while (true) {
+            if ((state & posted_bit) == 0) {
+                if (m_state.compare_exchange_weak(
+                        state,
+                        posted_bit,
+                        std::memory_order_acq_rel,
+                        std::memory_order_acquire))
+                {
+                    ipc::interprocess_semaphore::post();
+                    return;
+                }
+                continue;
+            }
+
+            if ((state & unordered_bit) == 0) {
+                return;  // already posted in ordered form
+            }
+
+            uint32_t desired = state & ~unordered_bit;
+            if (m_state.compare_exchange_weak(
+                    state,
+                    desired,
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire))
+            {
+                return;
+            }
+        }
     }
 
     void post_unordered()
     {
-        unordered.store(true, std::memory_order_release);
-        this->post();
+        constexpr uint32_t posted_bit    = 0x1u;
+        constexpr uint32_t unordered_bit = 0x2u;
+
+        uint32_t state = m_state.load(std::memory_order_acquire);
+        while (true) {
+            const bool need_post = (state & posted_bit) == 0;
+            uint32_t desired = state | posted_bit | unordered_bit;
+            if (m_state.compare_exchange_weak(
+                    state,
+                    desired,
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire))
+            {
+                if (need_post) {
+                    ipc::interprocess_semaphore::post();
+                }
+                return;
+            }
+        }
     }
 
     // Returns true if the wakeup was unordered (best effort).
     bool wait()
     {
         ipc::interprocess_semaphore::wait();
-        return unordered.exchange(false, std::memory_order_acq_rel);
+        constexpr uint32_t unordered_bit = 0x2u;
+        return (m_state.exchange(0, std::memory_order_acq_rel) & unordered_bit) != 0;
     }
+
 private:
-    std::atomic<bool> unordered{false};
+    std::atomic<uint32_t> m_state{0};
 };
 
 
