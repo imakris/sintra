@@ -2162,6 +2162,10 @@ private:
      */
     T* prepare_write(size_t num_elements_to_write)
     {
+#ifdef __APPLE__
+        std::fprintf(stderr, "[RING_DEBUG] prepare_write() called with num_elements=%zu\n", num_elements_to_write);
+        std::fflush(stderr);
+#endif
         assert(num_elements_to_write <= this->m_num_elements / 8);
 
         // Enforce exclusive writer (cheap fast-path loop)
@@ -2181,6 +2185,11 @@ private:
         const size_t head = mod_u64(m_pending_new_sequence, this->m_num_elements);
         size_t new_octile = (8 * head) / this->m_num_elements;
 
+#ifdef __APPLE__
+        std::fprintf(stderr, "[RING_DEBUG] prepare_write: m_octile=%zu new_octile=%zu\n", m_octile, new_octile);
+        std::fflush(stderr);
+#endif
+
         // Only check when crossing to a new octile (fast path otherwise)
         if (m_octile != new_octile) {
 #ifndef NDEBUG
@@ -2196,7 +2205,26 @@ private:
             uint64_t spin_count = 0;
             const uint64_t spin_loop_budget = ring_detail::get_eviction_spin_loop_budget();
 #endif
+#ifdef __APPLE__
+            uint64_t read_access_value = c.read_access.load(std::memory_order_acquire);
+            std::fprintf(stderr, "[RING_DEBUG] prepare_write: checking octile %zu, range_mask=0x%llx, read_access=0x%llx\n",
+                        new_octile, (unsigned long long)range_mask, (unsigned long long)read_access_value);
+            std::fflush(stderr);
+            int wait_iterations = 0;
+#endif
             while (c.read_access.load(std::memory_order_acquire) & range_mask) {
+#ifdef __APPLE__
+                if (wait_iterations == 0) {
+                    std::fprintf(stderr, "[RING_DEBUG] prepare_write: WAITING for octile %zu to be released\n", new_octile);
+                    std::fflush(stderr);
+                }
+                wait_iterations++;
+                if (wait_iterations % 10000000 == 0) {
+                    std::fprintf(stderr, "[RING_DEBUG] prepare_write: STILL WAITING (iteration %d), read_access=0x%llx\n",
+                                wait_iterations, (unsigned long long)c.read_access.load(std::memory_order_acquire));
+                    std::fflush(stderr);
+                }
+#endif
                 // Busy-wait until the target octile is unguarded
 #ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
                 if (++spin_count > spin_loop_budget) {
