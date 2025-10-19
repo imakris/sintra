@@ -1922,12 +1922,13 @@ private:
 // Writer API
 //==============================================================================
 
-// Helper to convert std::thread::id to a trivial type for atomic operations
+// Helper to get a unique thread index (trivial type) for atomic operations
 // std::atomic<std::thread::id> has issues on some platforms (macOS)
-inline uint64_t thread_id_to_uint64(std::thread::id id)
+inline uint32_t thread_index()
 {
-    std::hash<std::thread::id> hasher;
-    return hasher(id);
+    static std::atomic<uint32_t> next{1};
+    thread_local uint32_t mine = next.fetch_add(1, std::memory_order_relaxed);
+    return mine;
 }
 
 template <typename T>
@@ -1977,7 +1978,7 @@ struct Ring_W : Ring<T, false>
             m_pending_new_sequence -= num_src_elements;
             const size_t head = mod_u64(m_pending_new_sequence, this->m_num_elements);
             m_octile = (8 * head) / this->m_num_elements;
-            m_writing_thread_hash.store(0, std::memory_order_release);
+            m_writing_thread_index.store(0, std::memory_order_release);
             throw;
         }
     }
@@ -2000,7 +2001,7 @@ struct Ring_W : Ring<T, false>
             m_pending_new_sequence -= num_elements;
             const size_t head = mod_u64(m_pending_new_sequence, this->m_num_elements);
             m_octile = (8 * head) / this->m_num_elements;
-            m_writing_thread_hash.store(0, std::memory_order_release);
+            m_writing_thread_index.store(0, std::memory_order_release);
             throw;
         }
     }
@@ -2017,8 +2018,7 @@ struct Ring_W : Ring<T, false>
     {
 #if SINTRA_RING_READING_POLICY != SINTRA_RING_READING_POLICY_ALWAYS_SPIN
         c.lock();
-        assert(m_writing_thread_hash.load(std::memory_order_relaxed) ==
-               thread_id_to_uint64(std::this_thread::get_id()));
+        assert(m_writing_thread_index.load(std::memory_order_relaxed) == thread_index());
         c.leading_sequence.store(m_pending_new_sequence);
         // Wake sleeping readers in a deterministic order
         for (int i = 0; i < c.num_sleeping; i++) {
@@ -2032,7 +2032,7 @@ struct Ring_W : Ring<T, false>
 #else
         c.leading_sequence.store(m_pending_new_sequence);
 #endif
-        m_writing_thread_hash.store(0, std::memory_order_release);
+        m_writing_thread_index.store(0, std::memory_order_release);
         return m_pending_new_sequence;
     }
 
@@ -2177,13 +2177,13 @@ private:
         assert(num_elements_to_write <= this->m_num_elements / 8);
 
         // Enforce exclusive writer (cheap fast-path loop)
-        // Use hash of thread ID (trivial type) for reliable atomic operations across all platforms
-        const uint64_t my_thread_hash = thread_id_to_uint64(std::this_thread::get_id());
-        while (m_writing_thread_hash.load(std::memory_order_relaxed) != my_thread_hash) {
-            uint64_t expected = 0;
-            m_writing_thread_hash.compare_exchange_strong(
+        // Use thread-local index (trivial type) for reliable atomic operations across all platforms
+        const uint32_t my_thread_idx = thread_index();
+        while (m_writing_thread_index.load(std::memory_order_relaxed) != my_thread_idx) {
+            uint32_t expected = 0;
+            m_writing_thread_index.compare_exchange_strong(
                 expected,
-                my_thread_hash,
+                my_thread_idx,
                 std::memory_order_acq_rel,
                 std::memory_order_acquire);
         }
@@ -2285,9 +2285,9 @@ private:
     }
 
 private:
-    // Use uint64_t (trivial type) instead of std::thread::id for reliable atomic operations
+    // Use uint32_t (trivial type) instead of std::thread::id for reliable atomic operations
     // std::atomic<std::thread::id> has platform-specific issues (broken on macOS)
-    std::atomic<uint64_t>           m_writing_thread_hash    = {0};
+    std::atomic<uint32_t>           m_writing_thread_index   = {0};
     size_t                          m_octile                 = 0;
     sequence_counter_type           m_pending_new_sequence   = 0;
 
