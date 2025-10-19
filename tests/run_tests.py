@@ -453,7 +453,10 @@ def main():
         suite_start_time = time.time()
 
         # Adaptive soak test for this suite
-        accumulated_results = {test.stem: {'passed': 0, 'failed': 0, 'durations': []} for test in tests}
+        accumulated_results = {
+            test.stem: {'passed': 0, 'failed': 0, 'durations': [], 'failures': []}
+            for test in tests
+        }
         total_reps_so_far = 0
         max_reps_per_test = args.repetitions
         suite_all_passed = True
@@ -471,13 +474,28 @@ def main():
 
                     accumulated_results[test_name]['durations'].append(result.duration)
 
+                    result_bucket = accumulated_results[test_name]
+
                     if result.success:
-                        accumulated_results[test_name]['passed'] += 1
+                        result_bucket['passed'] += 1
                         print(f"{Color.GREEN}.{Color.RESET}", end="", flush=True)
                     else:
-                        accumulated_results[test_name]['failed'] += 1
+                        result_bucket['failed'] += 1
                         suite_all_passed = False
                         overall_all_passed = False
+
+                        run_index = result_bucket['passed'] + result_bucket['failed']
+                        error_message = (result.error or '').strip()
+                        if error_message:
+                            first_line = error_message.splitlines()[0]
+                        else:
+                            first_line = 'No error output captured'
+
+                        result_bucket['failures'].append({
+                            'run': run_index,
+                            'message': first_line,
+                        })
+
                         print(f"{Color.RED}F{Color.RESET}", end="", flush=True)
 
                 print()
@@ -494,10 +512,27 @@ def main():
         suite_duration = time.time() - suite_start_time
         print(f"\n{Color.BOLD}Results for {config_name}:{Color.RESET}")
         print("=" * 80)
-        print(f"{'Test':<40} {'Pass rate':<20} {'Avg runtime (s)':>15}")
-        print("=" * 80)
+        test_names = sorted(accumulated_results.keys())
+        test_col_width = max([len(name) for name in test_names] + [4]) + 2
+        passrate_col_width = 20
+        avg_runtime_col_width = 17
+        failures_col_width = 10
 
-        for test_name in sorted(accumulated_results.keys()):
+        header_fmt = (
+            f"{{:<{test_col_width}}}"
+            f" {{:>{passrate_col_width}}}"
+            f" {{:>{avg_runtime_col_width}}}"
+            f" {{:>{failures_col_width}}}"
+        )
+        row_fmt = header_fmt
+        table_width = (
+            test_col_width + passrate_col_width + avg_runtime_col_width + failures_col_width + 3
+        )
+
+        print(header_fmt.format('Test', 'Pass rate', 'Avg runtime (s)', 'Failures'))
+        print("=" * table_width)
+
+        for test_name in test_names:
             passed = accumulated_results[test_name]['passed']
             failed = accumulated_results[test_name]['failed']
             total = passed + failed
@@ -507,15 +542,32 @@ def main():
             avg_duration = sum(durations) / len(durations) if durations else 0
 
             pass_rate_str = f"{passed}/{total} ({pass_rate:6.2f}%)"
-            print(f"{test_name:<40} {pass_rate_str:<20} {avg_duration:>15.2f}")
+            failure_count = len(accumulated_results[test_name]['failures'])
+            avg_duration_str = f"{avg_duration:.2f}"
+            print(row_fmt.format(test_name, pass_rate_str, avg_duration_str, failure_count))
 
-        print("=" * 80)
+        print("=" * table_width)
         print(f"Suite duration: {format_duration(suite_duration)}")
 
         if suite_all_passed:
             print(f"Suite result: {Color.GREEN}PASSED{Color.RESET}")
         else:
             print(f"Suite result: {Color.RED}FAILED{Color.RESET}")
+            failing_tests = {
+                name: data['failures']
+                for name, data in accumulated_results.items()
+                if data['failures']
+            }
+
+            if failing_tests:
+                print(f"\n{Color.YELLOW}Failure summary:{Color.RESET}")
+                for test_name, failures in failing_tests.items():
+                    print(f"  {test_name}:")
+                    for failure in failures[:5]:
+                        print(f"    Run #{failure['run']}: {failure['message']}")
+                    if len(failures) > 5:
+                        remaining = len(failures) - 5
+                        print(f"    ... and {remaining} more failure(s)")
             print(f"\n{Color.RED}Stopping - suite {config_name} failed{Color.RESET}")
             break
 
