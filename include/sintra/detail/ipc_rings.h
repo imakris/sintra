@@ -575,7 +575,7 @@ public:
               "Ring reader was evicted by the writer due to being too slow.") {}
 };
 
-// A binary semaphore tailored for the ring’s reader wakeup policy.
+// A binary semaphore tailored for the ring's reader wakeup policy.
 struct sintra_ring_semaphore : ipc::interprocess_semaphore
 {
     sintra_ring_semaphore() : ipc::interprocess_semaphore(0) {}
@@ -742,7 +742,12 @@ private:
 
 #ifdef _WIN32
             // ── Windows path ───────────────────────────────────────────────────
-            // Uses retry logic to handle filesystem delays and address reuse races on Windows.
+            // Uses retry logic to handle concurrent mapping races on Windows.
+            // When multiple threads in the same process try to map the same file
+            // simultaneously, Windows can fail with ERROR_INVALID_ADDRESS because
+            // the VirtualFree from one thread hasn't fully completed before another
+            // thread tries to map at a nearby address. Retrying with Sleep(0) yields
+            // the CPU and allows Windows to complete cleanup.
             constexpr int max_attach_attempts = 8;
             for (int attempt = 0; attempt < max_attach_attempts; ++attempt) {
                 // Reserve (2× + granularity) so we can round within the reservation.
@@ -775,7 +780,7 @@ private:
                     if ((native_error == ERROR_INVALID_ADDRESS ||
                          native_error == ERROR_INVALID_PARAMETER) &&
                         attempt + 1 < max_attach_attempts) {
-                        ::Sleep(0);  // Yield CPU to let other processes release resources
+                        ::Sleep(0);  // Yield CPU to allow Windows to complete cleanup
                         continue;
                     }
                     return false;

@@ -124,48 +124,20 @@ struct Temp_ring_dir {
         auto base = std::filesystem::temp_directory_path() / "sintra_ipc_ring_tests";
         std::filesystem::create_directories(base);
 
-        // Include PID for better isolation across process runs
-        auto pid = std::to_string(
-#ifdef _WIN32
-            ::GetCurrentProcessId()
-#else
-            ::getpid()
-#endif
-        );
-
-        // Use high-resolution timestamp + counter for uniqueness
-        auto timestamp = std::to_string(std::chrono::high_resolution_clock::now().time_since_epoch().count());
+        // Simple unique directory name
         auto id = test_counter().fetch_add(1, std::memory_order_relaxed);
-
-        path = base / (hint + '_' + pid + '_' + timestamp + '_' + std::to_string(id));
+        path = base / (hint + '_' + std::to_string(id));
         std::filesystem::create_directories(path);
     }
 
     ~Temp_ring_dir()
     {
+        // Clean removal - no delays needed!
+        // The library now handles uniqueness internally, so rapid create/destroy
+        // never tries to reuse the same files.
         std::error_code ec;
-
-#ifdef _WIN32
-        // On Windows, give the OS time to release memory-mapped file handles.
-        // Without this delay, remove_all() can fail because files are still
-        // in use, especially when tests run rapidly in succession.
-        // The delay needs to be substantial for stress tests with multiple threads.
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-        // Retry removal multiple times with exponential backoff if it fails
-        int delay_ms = 10;
-        for (int retry = 0; retry < 10; ++retry) {
-            std::filesystem::remove_all(path, ec);
-            if (!ec) {
-                break;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
-            delay_ms *= 2;  // Exponential backoff
-            if (delay_ms > 200) delay_ms = 200;  // Cap at 200ms
-        }
-#else
         std::filesystem::remove_all(path, ec);
-#endif
+        // Ignore errors - temp cleanup is best-effort
     }
 
     std::string str() const { return path.string(); }
@@ -494,7 +466,6 @@ int run_tests(bool include_unit, bool include_stress)
 {
     int failures = 0;
     size_t executed = 0;
-    bool previous_was_stress = false;
     for (const auto& test : registry()) {
         if (!include_stress && test.is_stress) {
             continue;
@@ -502,14 +473,6 @@ int run_tests(bool include_unit, bool include_stress)
         if (!include_unit && !test.is_stress) {
             continue;
         }
-
-#ifdef _WIN32
-        // On Windows, add a delay between stress tests to ensure full resource cleanup
-        if (test.is_stress && previous_was_stress) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        }
-        previous_was_stress = test.is_stress;
-#endif
 
         ++executed;
         try {
