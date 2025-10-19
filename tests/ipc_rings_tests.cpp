@@ -8,6 +8,8 @@
 #include <fstream>
 #include <functional>
 #include <future>
+#include <boost/interprocess/exceptions.hpp>
+#include <string_view>
 #include <iostream>
 #include <mutex>
 #include <numeric>
@@ -21,11 +23,26 @@
 
 // Tune eviction behaviour for faster unit tests before including the ring header.
 #define SINTRA_EVICTION_SPIN_THRESHOLD 0
+
+// Expose private members of the ring classes so tests can introspect internal
+// state and simulate races. This is confined to the test translation unit.
+#define private public
+#define protected public
 #include "sintra/detail/ipc_rings.h"
+#undef private
+#undef protected
 
 using namespace std::chrono_literals;
 
 namespace {
+
+#ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
+constexpr bool slow_eviction_enabled = true;
+#else
+constexpr bool slow_eviction_enabled = false;
+#endif
+static_assert(slow_eviction_enabled, "Slow reader eviction must be enabled for this test");
+static_assert(sintra::Ring<int, true>::READER_STATE_ACTIVE == 1, "Unexpected reader active state value");
 
 class Assertion_error : public std::runtime_error {
 public:
@@ -439,6 +456,119 @@ STRESS_TEST(stress_multi_reader_throughput)
             ASSERT_EQ(results[i], static_cast<uint64_t>(i));
         }
     }
+}
+
+TEST_CASE(test_eviction_guard_underflow_and_status_stickiness)
+{
+    Temp_ring_dir tmp("eviction_underflow");
+    auto ring_elements = pick_ring_elements<int>(64);
+    sintra::Ring_W<int> writer(tmp.str(), "ring_data", ring_elements);
+    (void)writer;
+
+    const size_t max_trailing = (ring_elements * 3) / 4;
+    sintra::Ring_R<int> reader(tmp.str(), "ring_data", ring_elements, max_trailing);
+
+    auto& control = reader.c;
+    auto& slot    = control.reading_sequences[reader.m_rs_index].data;
+
+    const sintra::sequence_counter_type base_sequence =
+        static_cast<sintra::sequence_counter_type>(max_trailing + ring_elements / 8);
+
+    bool eviction_success = false;
+    const size_t max_attempts = 2000;
+    uint8_t observed_octile   = 0;
+    uint8_t final_guard_count = 0;
+    uint8_t final_status      = static_cast<uint8_t>(sintra::Ring<int, true>::READER_STATE_ACTIVE);
+
+    for (size_t attempt = 0; attempt < max_attempts && !eviction_success; ++attempt) {
+        control.leading_sequence.store(base_sequence, std::memory_order_release);
+        reader.m_reading_sequence->store(base_sequence, std::memory_order_release);
+        slot.v.store(base_sequence, std::memory_order_release);
+
+        control.read_access.store(0, std::memory_order_relaxed);
+        slot.has_guard.store(0, std::memory_order_relaxed);
+        slot.status.store(sintra::Ring<int, true>::READER_STATE_ACTIVE, std::memory_order_relaxed);
+        slot.trailing_octile.store(0, std::memory_order_relaxed);
+
+        std::exception_ptr thread_error;
+        std::thread snapshot_thread([&]() {
+            try {
+                auto snapshot = reader.start_reading(max_trailing);
+                (void)snapshot;
+                reader.done_reading();
+            }
+            catch (...) {
+                thread_error = std::current_exception();
+            }
+        });
+
+        while (slot.has_guard.load(std::memory_order_acquire) == 0) {
+            std::this_thread::yield();
+        }
+        observed_octile = slot.trailing_octile.load(std::memory_order_relaxed);
+        const uint64_t guard_mask = uint64_t(1) << (8 * observed_octile);
+
+        while ((control.read_access.load(std::memory_order_acquire) & guard_mask) == 0) {
+            std::this_thread::yield();
+        }
+
+        const sintra::sequence_counter_type advanced_sequence =
+            base_sequence + static_cast<sintra::sequence_counter_type>(ring_elements / 8);
+        control.leading_sequence.store(advanced_sequence, std::memory_order_release);
+
+        uint8_t expected_guard = 1;
+        bool cas_success = slot.has_guard.compare_exchange_strong(
+            expected_guard, uint8_t{0}, std::memory_order_acq_rel);
+        if (cas_success) {
+            control.read_access.fetch_sub(guard_mask, std::memory_order_acq_rel);
+            slot.status.store(sintra::Ring<int, true>::READER_STATE_EVICTED, std::memory_order_release);
+        }
+
+        snapshot_thread.join();
+        bool reader_completed = true;
+        if (thread_error) {
+            reader_completed = false;
+            try {
+                std::rethrow_exception(thread_error);
+            }
+            catch (const boost::interprocess::lock_exception&) {
+                thread_error = nullptr;
+            }
+            catch (const sintra::ring_reader_evicted_exception&) {
+                thread_error = nullptr;
+            }
+            catch (const std::runtime_error& ex) {
+                if (std::string_view(ex.what()) == "Failed to acquire ring buffer.") {
+                    thread_error = nullptr;
+                }
+                else {
+                    throw;
+                }
+            }
+        }
+        if (thread_error) {
+            std::rethrow_exception(thread_error);
+        }
+
+        if (cas_success && reader_completed) {
+            const uint64_t read_access_value = control.read_access.load(std::memory_order_acquire);
+            final_guard_count = static_cast<uint8_t>((read_access_value >> (8 * observed_octile)) & 0xffu);
+            final_status = slot.status.load(std::memory_order_acquire);
+            eviction_success = true;
+            break;
+        }
+    }
+
+    control.read_access.store(0, std::memory_order_relaxed);
+    slot.status.store(sintra::Ring<int, true>::READER_STATE_ACTIVE, std::memory_order_relaxed);
+    slot.has_guard.store(0, std::memory_order_relaxed);
+
+    ASSERT_TRUE(eviction_success);
+    ASSERT_EQ(final_guard_count, 0u);
+    const unsigned observed_status_value = static_cast<unsigned>(final_status);
+    const unsigned expected_status_value =
+        static_cast<unsigned>(sintra::Ring<int, true>::READER_STATE_ACTIVE);
+    ASSERT_EQ(observed_status_value, expected_status_value);
 }
 
 STRESS_TEST(stress_attach_detach_readers)
