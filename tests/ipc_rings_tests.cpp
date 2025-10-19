@@ -542,6 +542,17 @@ int run_tests(bool include_unit, bool include_stress)
 
 int main(int argc, char** argv)
 {
+#ifdef __APPLE__
+    // Make stderr unbuffered so debug output appears immediately
+    // This is critical for debugging timeouts in CI
+    setbuf(stderr, NULL);
+    std::fprintf(stderr, "========================================\n");
+    std::fprintf(stderr, "[INIT] sintra_ipc_rings_tests starting\n");
+    std::fprintf(stderr, "[INIT] stderr unbuffered\n");
+    std::fprintf(stderr, "========================================\n");
+    std::fflush(stderr);
+#endif
+
     bool include_unit = true;
     bool include_stress = true;
 
@@ -562,5 +573,17 @@ int main(int argc, char** argv)
         }
     }
 
-    return run_tests(include_unit, include_stress);
+#ifdef __APPLE__
+    std::fprintf(stderr, "[INIT] About to run tests (unit=%d, stress=%d)\n", include_unit, include_stress);
+    std::fflush(stderr);
+#endif
+
+    int result = run_tests(include_unit, include_stress);
+
+#ifdef __APPLE__
+    std::fprintf(stderr, "[INIT] Tests completed with result %d\n", result);
+    std::fflush(stderr);
+#endif
+
+    return result;
 }
