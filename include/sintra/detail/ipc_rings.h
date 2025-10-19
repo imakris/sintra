@@ -761,23 +761,12 @@ private:
                 void* mem = ::mmap(nullptr, m_data_region_size * 2,
                                    PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
                 if (mem == MAP_FAILED) {
-#ifdef __APPLE__
-                    std::fprintf(stderr, "[RING_DEBUG] mmap PROT_NONE failed on attempt %d: %s\n",
-                                attempt, std::strerror(errno));
-                    std::fflush(stderr);
-#endif
                     return false;
                 }
 
                 ptr = static_cast<char*>(mem);
                 assert((reinterpret_cast<uintptr_t>(ptr) % page_size) == 0 &&
                        "mmap(PROT_NONE) base not page-aligned?");
-
-#ifdef __APPLE__
-                std::fprintf(stderr, "[RING_DEBUG] Attempt %d: Reserved %p - %p\n",
-                            attempt, mem, (char*)mem + m_data_region_size * 2);
-                std::fflush(stderr);
-#endif
 
                 #ifdef MAP_FIXED
                 map_extra_options |= MAP_FIXED;
@@ -793,33 +782,14 @@ private:
                 try {
                     region0.reset(new ipc::mapped_region(file, data_rights, 0,
                         m_data_region_size, ptr, map_extra_options));
-#ifdef __APPLE__
-                    std::fprintf(stderr, "[RING_DEBUG] Attempt %d: region0 mapped at %p\n",
-                                attempt, region0->get_address());
-                    std::fflush(stderr);
-#endif
                     region1.reset(new ipc::mapped_region(file, data_rights, 0, 0,
                         ((char*)region0->get_address()) + m_data_region_size, map_extra_options));
-#ifdef __APPLE__
-                    std::fprintf(stderr, "[RING_DEBUG] Attempt %d: region1 mapped at %p\n",
-                                attempt, region1->get_address());
-                    std::fflush(stderr);
-#endif
                 }
                 catch (const std::exception& ex) {
                     mapping_failed = true;
-#ifdef __APPLE__
-                    std::fprintf(stderr, "[RING_DEBUG] Attempt %d: mapping exception: %s\n",
-                                attempt, ex.what());
-                    std::fflush(stderr);
-#endif
                 }
                 catch (...) {
                     mapping_failed = true;
-#ifdef __APPLE__
-                    std::fprintf(stderr, "[RING_DEBUG] Attempt %d: unknown mapping exception\n", attempt);
-                    std::fflush(stderr);
-#endif
                 }
 
                 // ── Validate layout ─────────────────────────────────────────────────
@@ -832,10 +802,6 @@ private:
 
                 if (layout_ok) {
                     // Success! MAP_FIXED has replaced the PROT_NONE reservation.
-#ifdef __APPLE__
-                    std::fprintf(stderr, "[RING_DEBUG] Attempt %d: SUCCESS\n", attempt);
-                    std::fflush(stderr);
-#endif
                     m_data_region_0 = region0.release();
                     m_data_region_1 = region1.release();
                     m_data = (T*)m_data_region_0->get_address();
@@ -844,23 +810,10 @@ private:
 
                 // ── Failure: clean up and retry or fail ────────────────────────────
 #ifndef _WIN32
-#ifdef __APPLE__
-                std::fprintf(stderr, "[RING_DEBUG] Attempt %d: layout check FAILED (mapping_failed=%d, r0=%p, r1=%p)\n",
-                            attempt, mapping_failed,
-                            region0 ? region0->get_address() : nullptr,
-                            region1 ? region1->get_address() : nullptr);
-                std::fflush(stderr);
-#endif
-
                 // CRITICAL: Release the PROT_NONE reservation on POSIX.
                 // On macOS especially, leaked reservations accumulate and cause
                 // subsequent mapping attempts to fail deterministically.
-                int munmap_result = ::munmap(mem, m_data_region_size * 2);
-#ifdef __APPLE__
-                std::fprintf(stderr, "[RING_DEBUG] Attempt %d: munmap returned %d (errno=%d)\n",
-                            attempt, munmap_result, errno);
-                std::fflush(stderr);
-#endif
+                ::munmap(mem, m_data_region_size * 2);
 #endif
 
                 if (attempt + 1 < max_attach_attempts) {
@@ -873,13 +826,6 @@ private:
                 }
 
                 // Final attempt failed
-#ifdef __APPLE__
-                std::fprintf(stderr, "[RING_DEBUG] ALL ATTEMPTS FAILED\n");
-                std::fflush(stderr);
-#endif
-#ifndef NDEBUG
-                assert(false && "Ring memory layout validation failed after all retry attempts");
-#endif
                 return false;
             }
 
@@ -1421,10 +1367,6 @@ struct Ring_R : Ring<T, true>
      */
     Range<T> start_reading(size_t num_trailing_elements)
     {
-#ifdef __APPLE__
-        std::fprintf(stderr, "[RING_DEBUG] start_reading() called with num_trailing=%zu\n", num_trailing_elements);
-        std::fflush(stderr);
-#endif
         bool f = false;
         while (!m_reading_lock.compare_exchange_strong(f, true)) { f = false; }
 
@@ -1452,22 +1394,7 @@ struct Ring_R : Ring<T, true>
 
         Range<T> ret;
 
-#ifdef __APPLE__
-        int loop_count = 0;
-#endif
         while (true) {
-#ifdef __APPLE__
-            if (loop_count == 0) {
-                std::fprintf(stderr, "[RING_DEBUG] start_reading: entering guard acquisition loop\n");
-                std::fflush(stderr);
-            }
-            loop_count++;
-            if (loop_count > 100) {
-                std::fprintf(stderr, "[RING_DEBUG] start_reading: STUCK in loop (iteration %d)!\n", loop_count);
-                std::fflush(stderr);
-                loop_count = 0;  // Print every 100 iterations
-            }
-#endif
             auto leading_sequence = c.leading_sequence.load(std::memory_order_acquire);
 
             auto range_first_sequence =
@@ -1495,14 +1422,6 @@ struct Ring_R : Ring<T, true>
             uint8_t confirmed_trailing_octile =
                 static_cast<uint8_t>((8 * confirmed_trailing_idx) / this->m_num_elements);
 
-#ifdef __APPLE__
-            if (loop_count <= 2) {
-                std::fprintf(stderr, "[RING_DEBUG] start_reading: octile=%u confirmed=%u leading=%llu\n",
-                            trailing_octile, confirmed_trailing_octile, (unsigned long long)confirmed_leading_sequence);
-                std::fflush(stderr);
-            }
-#endif
-
             if (confirmed_trailing_octile == trailing_octile) {
                 ret.begin = this->m_data +
                             mod_pos_i64(confirmed_range_first_sequence, this->m_num_elements);
@@ -1510,11 +1429,6 @@ struct Ring_R : Ring<T, true>
 
                 m_trailing_octile = trailing_octile;
                 m_reading_sequence->store(confirmed_leading_sequence);
-#ifdef __APPLE__
-                std::fprintf(stderr, "[RING_DEBUG] start_reading: SUCCESS after %d iterations, range size=%zu\n",
-                            loop_count, (size_t)(ret.end - ret.begin));
-                std::fflush(stderr);
-#endif
                 break;
             }
 
@@ -2170,10 +2084,6 @@ private:
      */
     T* prepare_write(size_t num_elements_to_write)
     {
-#ifdef __APPLE__
-        std::fprintf(stderr, "[RING_DEBUG] prepare_write() called with num_elements=%zu\n", num_elements_to_write);
-        std::fflush(stderr);
-#endif
         assert(num_elements_to_write <= this->m_num_elements / 8);
 
         // Enforce exclusive writer (cheap fast-path loop)
@@ -2194,11 +2104,6 @@ private:
         const size_t head = mod_u64(m_pending_new_sequence, this->m_num_elements);
         size_t new_octile = (8 * head) / this->m_num_elements;
 
-#ifdef __APPLE__
-        std::fprintf(stderr, "[RING_DEBUG] prepare_write: m_octile=%zu new_octile=%zu\n", m_octile, new_octile);
-        std::fflush(stderr);
-#endif
-
         // Only check when crossing to a new octile (fast path otherwise)
         if (m_octile != new_octile) {
 #ifndef NDEBUG
@@ -2214,26 +2119,7 @@ private:
             uint64_t spin_count = 0;
             const uint64_t spin_loop_budget = ring_detail::get_eviction_spin_loop_budget();
 #endif
-#ifdef __APPLE__
-            uint64_t read_access_value = c.read_access.load(std::memory_order_acquire);
-            std::fprintf(stderr, "[RING_DEBUG] prepare_write: checking octile %zu, range_mask=0x%llx, read_access=0x%llx\n",
-                        new_octile, (unsigned long long)range_mask, (unsigned long long)read_access_value);
-            std::fflush(stderr);
-            int wait_iterations = 0;
-#endif
             while (c.read_access.load(std::memory_order_acquire) & range_mask) {
-#ifdef __APPLE__
-                if (wait_iterations == 0) {
-                    std::fprintf(stderr, "[RING_DEBUG] prepare_write: WAITING for octile %zu to be released\n", new_octile);
-                    std::fflush(stderr);
-                }
-                wait_iterations++;
-                if (wait_iterations % 10000000 == 0) {
-                    std::fprintf(stderr, "[RING_DEBUG] prepare_write: STILL WAITING (iteration %d), read_access=0x%llx\n",
-                                wait_iterations, (unsigned long long)c.read_access.load(std::memory_order_acquire));
-                    std::fflush(stderr);
-                }
-#endif
                 // Busy-wait until the target octile is unguarded
 #ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
                 if (++spin_count > spin_loop_budget) {

@@ -25,18 +25,6 @@
 
 using namespace std::chrono_literals;
 
-// Debug logging for macOS
-#ifdef __APPLE__
-#define TEST_DEBUG(...) do { \
-    std::fprintf(stderr, "[TEST_DEBUG] "); \
-    std::fprintf(stderr, __VA_ARGS__); \
-    std::fprintf(stderr, "\n"); \
-    std::fflush(stderr); \
-} while(0)
-#else
-#define TEST_DEBUG(...) do { } while(0)
-#endif
-
 namespace {
 
 class Assertion_error : public std::runtime_error {
@@ -227,15 +215,11 @@ TEST_CASE(test_directory_helpers)
 
 TEST_CASE(test_ring_write_read_single_reader)
 {
-    TEST_DEBUG("Creating temp directory");
     Temp_ring_dir tmp("single_reader");
     size_t ring_elements = pick_ring_elements<int>(128);
 
-    TEST_DEBUG("Creating writer");
     sintra::Ring_W<int> writer(tmp.str(), "ring_data", ring_elements);
-    TEST_DEBUG("Creating reader");
     sintra::Ring_R<int> reader(tmp.str(), "ring_data", ring_elements, (ring_elements * 3) / 4);
-    TEST_DEBUG("Writer and reader created");
 
     std::vector<int> payload{0, 1, 2, 3, 4, 5, 6, 7};
     ASSERT_LE(payload.size(), ring_elements / 8);
@@ -361,7 +345,6 @@ TEST_CASE(test_wait_for_new_data)
 
 STRESS_TEST(stress_multi_reader_throughput)
 {
-    TEST_DEBUG("Creating temp directory");
     Temp_ring_dir tmp("stress_multi");
     size_t ring_elements = pick_ring_elements<uint64_t>(512);
     const size_t max_trailing = (ring_elements * 3) / 4;
@@ -369,9 +352,7 @@ STRESS_TEST(stress_multi_reader_throughput)
     const size_t chunk = std::max<size_t>(1, ring_elements / 16);
     const size_t total_messages = chunk * 64;
 
-    TEST_DEBUG("Creating writer with %zu elements", ring_elements);
     sintra::Ring_W<uint64_t> writer(tmp.str(), "ring_data", ring_elements);
-    TEST_DEBUG("Writer created successfully");
 
     std::atomic<bool> writer_done{false};
     std::vector<std::vector<uint64_t>> reader_results(reader_count);
@@ -379,18 +360,14 @@ STRESS_TEST(stress_multi_reader_throughput)
     std::vector<std::atomic<bool>> reader_ready(reader_count);
     for (auto& flag : reader_ready) { flag.store(false, std::memory_order_relaxed); }
 
-    TEST_DEBUG("Starting %zu reader threads", reader_count);
     std::vector<std::thread> reader_threads;
     reader_threads.reserve(reader_count);
     for (size_t rid = 0; rid < reader_count; ++rid) {
         reader_threads.emplace_back([&, rid]() {
             try {
-                TEST_DEBUG("Reader %zu: Creating reader", rid);
                 sintra::Ring_R<uint64_t> reader(tmp.str(), "ring_data", ring_elements, max_trailing);
-                TEST_DEBUG("Reader %zu: Reader created, calling start_reading", rid);
                 auto initial = reader.start_reading();
                 ASSERT_EQ(static_cast<size_t>(initial.end - initial.begin), size_t(0));
-                TEST_DEBUG("Reader %zu: Ready", rid);
                 reader_ready[rid].store(true, std::memory_order_release);
 
                 while (!writer_done.load(std::memory_order_acquire) || reader_results[rid].size() < total_messages) {
@@ -405,32 +382,26 @@ STRESS_TEST(stress_multi_reader_throughput)
                     reader_results[rid].insert(reader_results[rid].end(), range.begin, range.begin + len);
                     reader.done_reading_new_data();
                 }
-                TEST_DEBUG("Reader %zu: Done reading, exiting", rid);
                 reader.done_reading();
             }
             catch (...) {
-                TEST_DEBUG("Reader %zu: Exception caught", rid);
                 reader_errors[rid] = std::current_exception();
                 reader_ready[rid].store(true, std::memory_order_release);
             }
         });
     }
 
-    TEST_DEBUG("Waiting for all readers to be ready");
     for (size_t rid = 0; rid < reader_count; ++rid) {
         while (!reader_ready[rid].load(std::memory_order_acquire)) {
             std::this_thread::sleep_for(1ms);
         }
-        TEST_DEBUG("Reader %zu is ready", rid);
     }
 
-    TEST_DEBUG("Starting writer thread");
     std::exception_ptr writer_error;
     std::thread writer_thread([&]() {
         try {
             std::vector<uint64_t> buffer(chunk);
             uint64_t seq = 0;
-            TEST_DEBUG("Writer: Starting to write %zu messages", total_messages);
             while (seq < total_messages) {
                 size_t count = std::min(chunk, static_cast<size_t>(total_messages - seq));
                 for (size_t i = 0; i < count; ++i) {
@@ -440,23 +411,17 @@ STRESS_TEST(stress_multi_reader_throughput)
                 writer.done_writing();
                 seq += count;
             }
-            TEST_DEBUG("Writer: Finished writing all messages");
         }
         catch (...) {
-            TEST_DEBUG("Writer: Exception caught");
             writer_error = std::current_exception();
         }
         writer_done.store(true, std::memory_order_release);
         writer.unblock_global();
-        TEST_DEBUG("Writer: Exiting");
     });
 
-    TEST_DEBUG("Waiting for writer thread to complete");
     writer_thread.join();
-    TEST_DEBUG("Writer thread completed, waiting for readers");
     for (size_t rid = 0; rid < reader_count; ++rid) {
         reader_threads[rid].join();
-        TEST_DEBUG("Reader %zu thread joined", rid);
     }
 
     if (writer_error) {
@@ -510,26 +475,21 @@ int run_tests(bool include_unit, bool include_stress)
         }
 
         ++executed;
-        TEST_DEBUG("=== Starting test: %s ===", test.name.c_str());
         try {
             test.fn();
             std::cout << "[PASS] " << test.name << '\n';
-            TEST_DEBUG("=== Test PASSED: %s ===", test.name.c_str());
         }
         catch (const Assertion_error& ex) {
             ++failures;
             std::cerr << "[FAIL] " << test.name << " - " << ex.what() << '\n';
-            TEST_DEBUG("=== Test FAILED: %s - %s ===", test.name.c_str(), ex.what());
         }
         catch (const std::exception& ex) {
             ++failures;
             std::cerr << "[FAIL] " << test.name << " - unexpected exception: " << ex.what() << '\n';
-            TEST_DEBUG("=== Test FAILED: %s - exception: %s ===", test.name.c_str(), ex.what());
         }
         catch (...) {
             ++failures;
             std::cerr << "[FAIL] " << test.name << " - unknown exception" << '\n';
-            TEST_DEBUG("=== Test FAILED: %s - unknown exception ===", test.name.c_str());
         }
     }
     std::cout << "==== Summary ====" << '\n';
@@ -542,17 +502,6 @@ int run_tests(bool include_unit, bool include_stress)
 
 int main(int argc, char** argv)
 {
-#ifdef __APPLE__
-    // Make stderr unbuffered so debug output appears immediately
-    // This is critical for debugging timeouts in CI
-    setbuf(stderr, NULL);
-    std::fprintf(stderr, "========================================\n");
-    std::fprintf(stderr, "[INIT] sintra_ipc_rings_tests starting\n");
-    std::fprintf(stderr, "[INIT] stderr unbuffered\n");
-    std::fprintf(stderr, "========================================\n");
-    std::fflush(stderr);
-#endif
-
     bool include_unit = true;
     bool include_stress = true;
 
@@ -573,17 +522,5 @@ int main(int argc, char** argv)
         }
     }
 
-#ifdef __APPLE__
-    std::fprintf(stderr, "[INIT] About to run tests (unit=%d, stress=%d)\n", include_unit, include_stress);
-    std::fflush(stderr);
-#endif
-
-    int result = run_tests(include_unit, include_stress);
-
-#ifdef __APPLE__
-    std::fprintf(stderr, "[INIT] Tests completed with result %d\n", result);
-    std::fflush(stderr);
-#endif
-
-    return result;
+    return run_tests(include_unit, include_stress);
 }
