@@ -1521,124 +1521,140 @@ struct Ring_R : Ring<T, true>
             return m_stopping.load(std::memory_order_acquire);
         };
 
-        if (should_shutdown()) {
-            return Range<T>{};
-        }
-
-        // Phase 1 — fast spin: aggressively poll for a very short window to
-        // deliver sub-100µs wakeups when the writer is still active.
-        const double fast_spin_end = get_wtime() + fast_spin_duration;
-        while (sequences_equal() && get_wtime() < fast_spin_end) {
+        while (true) {
             if (should_shutdown()) {
                 return Range<T>{};
             }
-        }
 
-        if (sequences_equal()) {
-            // Phase 2 — precision sleeps: yield the CPU in 1ms slices while
-            // still polling at a high enough cadence to catch bursts quickly.
-            Scoped_timer_resolution timer_resolution_guard(1);
-            const double precision_sleep_end = get_wtime() + precision_sleep_duration;
-            while (sequences_equal() && get_wtime() < precision_sleep_end) {
+            // Phase 1 — fast spin: aggressively poll for a very short window to
+            // deliver sub-100µs wakeups when the writer is still active.
+            const double fast_spin_end = get_wtime() + fast_spin_duration;
+            while (sequences_equal() && get_wtime() < fast_spin_end) {
                 if (should_shutdown()) {
                     return Range<T>{};
                 }
-                const auto seq_now = c.global_unblock_sequence.load(std::memory_order_acquire);
-                if (seq_now != m_seen_unblock_sequence) {
-                    m_seen_unblock_sequence = seq_now;
-                    return Range<T>{};
-                }
-                std::this_thread::sleep_for(std::chrono::duration<double>(precision_sleep_cycle));
-            }
-        }
-
-        if (sequences_equal()) {
-            // Phase 3 — blocking wait: fully park on the semaphore to avoid
-            // burning CPU when the writer is stalled for long periods.
-            const auto unblock_sequence_now =
-                c.global_unblock_sequence.load(std::memory_order_acquire);
-            if (unblock_sequence_now != m_seen_unblock_sequence) {
-                m_seen_unblock_sequence = unblock_sequence_now;
-                return Range<T>{};
             }
 
-            c.lock();
-            m_sleepy_index.store(-1, std::memory_order_relaxed);
             if (sequences_equal()) {
-                if (should_shutdown()) {
-                    c.unlock();
-                    return Range<T>{};
-                }
-                int sleepy = c.ready_stack[--c.num_ready];
-                m_sleepy_index.store(sleepy, std::memory_order_release);
-                c.sleeping_stack[c.num_sleeping++] = sleepy;
-            }
-            const auto unblock_sequence_after =
-                c.global_unblock_sequence.load(std::memory_order_acquire);
-            if (unblock_sequence_after != m_seen_unblock_sequence) {
-                m_seen_unblock_sequence = unblock_sequence_after;
-                const int sleepy = m_sleepy_index.load(std::memory_order_relaxed);
-                if (sleepy >= 0) {
-                    if (c.num_sleeping > 0 && c.sleeping_stack[c.num_sleeping - 1] == sleepy) {
-                        c.sleeping_stack[--c.num_sleeping] = -1;
+                // Phase 2 — precision sleeps: yield the CPU in 1ms slices while
+                // still polling at a high enough cadence to catch bursts quickly.
+                Scoped_timer_resolution timer_resolution_guard(1);
+                const double precision_sleep_end = get_wtime() + precision_sleep_duration;
+                bool restart = false;
+                while (sequences_equal() && get_wtime() < precision_sleep_end) {
+                    if (should_shutdown()) {
+                        return Range<T>{};
                     }
-                    c.ready_stack[c.num_ready++] = sleepy;
-                    m_sleepy_index.store(-1, std::memory_order_release);
+                    const auto seq_now = c.global_unblock_sequence.load(std::memory_order_acquire);
+                    if (seq_now != m_seen_unblock_sequence) {
+                        m_seen_unblock_sequence = seq_now;
+                        if (sequences_equal()) {
+                            return Range<T>{};
+                        }
+                        restart = true;
+                        break;
+                    }
+                    std::this_thread::sleep_for(std::chrono::duration<double>(precision_sleep_cycle));
+                }
+                if (restart) {
+                    continue;
+                }
+            }
+
+            if (sequences_equal()) {
+                // Phase 3 — blocking wait: fully park on the semaphore to avoid
+                // burning CPU when the writer is stalled for long periods.
+                const auto unblock_sequence_now =
+                    c.global_unblock_sequence.load(std::memory_order_acquire);
+                if (unblock_sequence_now != m_seen_unblock_sequence) {
+                    m_seen_unblock_sequence = unblock_sequence_now;
+                    if (sequences_equal()) {
+                        return Range<T>{};
+                    }
+                    continue;
+                }
+
+                c.lock();
+                m_sleepy_index.store(-1, std::memory_order_relaxed);
+                if (sequences_equal()) {
+                    if (should_shutdown()) {
+                        c.unlock();
+                        return Range<T>{};
+                    }
+                    int sleepy = c.ready_stack[--c.num_ready];
+                    m_sleepy_index.store(sleepy, std::memory_order_release);
+                    c.sleeping_stack[c.num_sleeping++] = sleepy;
+                }
+                const auto unblock_sequence_after =
+                    c.global_unblock_sequence.load(std::memory_order_acquire);
+                if (unblock_sequence_after != m_seen_unblock_sequence) {
+                    m_seen_unblock_sequence = unblock_sequence_after;
+                    const int sleepy = m_sleepy_index.load(std::memory_order_relaxed);
+                    if (sleepy >= 0) {
+                        if (c.num_sleeping > 0 && c.sleeping_stack[c.num_sleeping - 1] == sleepy) {
+                            c.sleeping_stack[--c.num_sleeping] = -1;
+                        }
+                        c.ready_stack[c.num_ready++] = sleepy;
+                        m_sleepy_index.store(-1, std::memory_order_release);
+                    }
+                    c.unlock();
+                    if (sequences_equal()) {
+                        return Range<T>{};
+                    }
+                    continue;
                 }
                 c.unlock();
-                return Range<T>{};
-            }
-            c.unlock();
 
-            int sleepy_index = m_sleepy_index.load(std::memory_order_acquire);
-            if (sleepy_index >= 0) {
-                if (should_shutdown()) {
-                    c.lock();
-                    if (m_sleepy_index.load(std::memory_order_acquire) >= 0) {
-                        c.dirty_semaphores[sleepy_index].post_unordered();
+                int sleepy_index = m_sleepy_index.load(std::memory_order_acquire);
+                if (sleepy_index >= 0) {
+                    if (should_shutdown()) {
+                        c.lock();
+                        if (m_sleepy_index.load(std::memory_order_acquire) >= 0) {
+                            c.dirty_semaphores[sleepy_index].post_unordered();
+                        }
+                        c.unlock();
                     }
-                    c.unlock();
-                }
 
-                if (c.dirty_semaphores[sleepy_index].wait()) { // unordered wake
-                    c.lock();
-                    c.unordered_stack[c.num_unordered++] = sleepy_index;
-                    c.unlock();
-                }
-                else {
-                    c.lock();
-                    c.ready_stack[c.num_ready++] = sleepy_index;
-                    c.unlock();
-                }
-                m_sleepy_index.store(-1, std::memory_order_release);
+                    if (c.dirty_semaphores[sleepy_index].wait()) { // unordered wake
+                        c.lock();
+                        c.unordered_stack[c.num_unordered++] = sleepy_index;
+                        c.unlock();
+                    }
+                    else {
+                        c.lock();
+                        c.ready_stack[c.num_ready++] = sleepy_index;
+                        c.unlock();
+                    }
+                    m_sleepy_index.store(-1, std::memory_order_release);
 
-                if (should_shutdown()) {
-                    return Range<T>{};
+                    if (should_shutdown()) {
+                        return Range<T>{};
+                    }
                 }
             }
-        }
 
-        if (c.reading_sequences[m_rs_index].data.has_guard.load(std::memory_order_acquire) == 0) {
-            reattach_after_eviction();
-        }
+            if (c.reading_sequences[m_rs_index].data.has_guard.load(std::memory_order_acquire) == 0) {
+                reattach_after_eviction();
+            }
 
-        auto num_range_elements =
-            size_t(c.leading_sequence.load(std::memory_order_acquire) - m_reading_sequence->load());
+            auto num_range_elements =
+                size_t(c.leading_sequence.load(std::memory_order_acquire) - m_reading_sequence->load());
 
-        if (num_range_elements > this->m_num_elements) {
-            num_range_elements = this->m_num_elements;
-        }
+            if (num_range_elements > this->m_num_elements) {
+                num_range_elements = this->m_num_elements;
+            }
 
-        Range<T> ret;
-        if (num_range_elements == 0) {
-            // Could happen if we were explicitly unblocked
+            Range<T> ret;
+            if (num_range_elements == 0) {
+                // Could happen if we were explicitly unblocked
+                return ret;
+            }
+
+            ret.begin = this->m_data + mod_u64(m_reading_sequence->load(), this->m_num_elements);
+            ret.end   = ret.begin + num_range_elements;
+            m_reading_sequence->fetch_add(num_range_elements);  // +=
             return ret;
         }
-
-        ret.begin = this->m_data + mod_u64(m_reading_sequence->load(), this->m_num_elements);
-        ret.end   = ret.begin + num_range_elements;
-        m_reading_sequence->fetch_add(num_range_elements);  // +=
-        return ret;
     }
 
     /**
