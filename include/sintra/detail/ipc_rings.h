@@ -1512,6 +1512,30 @@ struct Ring_R : Ring<T, true>
      */
     const Range<T> wait_for_new_data()
     {
+        auto produce_range = [&]() -> Range<T> {
+            if (c.reading_sequences[m_rs_index].data.has_guard.load(std::memory_order_acquire) == 0) {
+                reattach_after_eviction();
+            }
+
+            auto num_range_elements =
+                size_t(c.leading_sequence.load(std::memory_order_acquire) - m_reading_sequence->load());
+
+            if (num_range_elements > this->m_num_elements) {
+                num_range_elements = this->m_num_elements;
+            }
+
+            Range<T> ret;
+            if (num_range_elements == 0) {
+                // Could happen if we were explicitly unblocked
+                return ret;
+            }
+
+            ret.begin = this->m_data + mod_u64(m_reading_sequence->load(), this->m_num_elements);
+            ret.end   = ret.begin + num_range_elements;
+            m_reading_sequence->fetch_add(num_range_elements);  // +=
+            return ret;
+        };
+
         auto sequences_equal = [&]() {
             return m_reading_sequence->load(std::memory_order_acquire) ==
                    c.leading_sequence.load(std::memory_order_acquire);
@@ -1546,6 +1570,9 @@ struct Ring_R : Ring<T, true>
                 const auto seq_now = c.global_unblock_sequence.load(std::memory_order_acquire);
                 if (seq_now != m_seen_unblock_sequence) {
                     m_seen_unblock_sequence = seq_now;
+                    if (!sequences_equal()) {
+                        return produce_range();
+                    }
                     return Range<T>{};
                 }
                 std::this_thread::sleep_for(std::chrono::duration<double>(precision_sleep_cycle));
@@ -1559,6 +1586,9 @@ struct Ring_R : Ring<T, true>
                 c.global_unblock_sequence.load(std::memory_order_acquire);
             if (unblock_sequence_now != m_seen_unblock_sequence) {
                 m_seen_unblock_sequence = unblock_sequence_now;
+                if (!sequences_equal()) {
+                    return produce_range();
+                }
                 return Range<T>{};
             }
 
@@ -1586,6 +1616,9 @@ struct Ring_R : Ring<T, true>
                     m_sleepy_index.store(-1, std::memory_order_release);
                 }
                 c.unlock();
+                if (!sequences_equal()) {
+                    return produce_range();
+                }
                 return Range<T>{};
             }
             c.unlock();
@@ -1618,27 +1651,7 @@ struct Ring_R : Ring<T, true>
             }
         }
 
-        if (c.reading_sequences[m_rs_index].data.has_guard.load(std::memory_order_acquire) == 0) {
-            reattach_after_eviction();
-        }
-
-        auto num_range_elements =
-            size_t(c.leading_sequence.load(std::memory_order_acquire) - m_reading_sequence->load());
-
-        if (num_range_elements > this->m_num_elements) {
-            num_range_elements = this->m_num_elements;
-        }
-
-        Range<T> ret;
-        if (num_range_elements == 0) {
-            // Could happen if we were explicitly unblocked
-            return ret;
-        }
-
-        ret.begin = this->m_data + mod_u64(m_reading_sequence->load(), this->m_num_elements);
-        ret.end   = ret.begin + num_range_elements;
-        m_reading_sequence->fetch_add(num_range_elements);  // +=
-        return ret;
+        return produce_range();
     }
 
     /**
