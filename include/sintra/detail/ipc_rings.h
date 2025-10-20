@@ -1497,8 +1497,11 @@ struct Ring_R : Ring<T, true>
             if (c.reading_sequences[m_rs_index].data.has_guard.compare_exchange_strong(
                     expected, uint8_t{0}, std::memory_order_acq_rel))
             {
-                c.read_access.fetch_sub(
-                    uint64_t(1) << (8 * m_trailing_octile), std::memory_order_acq_rel);
+                const uint64_t mask = uint64_t(1) << (8 * m_trailing_octile);
+                const uint64_t previous = c.read_access.fetch_sub(mask, std::memory_order_acq_rel);
+                if ((previous & mask) == 0) {
+                    c.read_access.fetch_add(mask, std::memory_order_acq_rel);
+                }
             }
 #ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
             c.reading_sequences[m_rs_index].data.status.store(
@@ -1781,16 +1784,15 @@ struct Ring_R : Ring<T, true>
                 const uint64_t old_mask = uint64_t(1) << (8 * m_trailing_octile);
                 c.read_access.fetch_add(new_mask, std::memory_order_acq_rel);
                 slot.trailing_octile.store(static_cast<uint8_t>(new_trailing_octile), std::memory_order_relaxed);
-                c.read_access.fetch_sub(old_mask, std::memory_order_acq_rel);
+                const uint64_t previous = c.read_access.fetch_sub(old_mask, std::memory_order_acq_rel);
+                if ((previous & old_mask) == 0) {
+                    c.read_access.fetch_add(old_mask, std::memory_order_acq_rel);
+                }
             }
             else {
-                // Evicted: reacquire only (no subtract)
-                c.read_access.fetch_add(new_mask, std::memory_order_acq_rel);
+                // Evicted: track the new trailing position locally but leave the
+                // shared guard state untouched so callers can detect the eviction.
                 slot.trailing_octile.store(static_cast<uint8_t>(new_trailing_octile), std::memory_order_relaxed);
-                slot.has_guard.store(1, std::memory_order_release);
-#ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
-                slot.status.store(Ring<T, true>::READER_STATE_ACTIVE, std::memory_order_release);
-#endif
             }
 
             m_trailing_octile = new_trailing_octile;
@@ -2191,7 +2193,12 @@ private:
 
                                     size_t evicted_reader_octile =
                                         c.reading_sequences[i].data.trailing_octile.load(std::memory_order_relaxed);
-                                    c.read_access.fetch_sub(uint64_t(1) << (8 * evicted_reader_octile), std::memory_order_acq_rel);
+                                    const uint64_t guard_mask = uint64_t(1) << (8 * evicted_reader_octile);
+                                    const uint64_t previous =
+                                        c.read_access.fetch_sub(guard_mask, std::memory_order_acq_rel);
+                                    if ((previous & guard_mask) == 0) {
+                                        c.read_access.fetch_add(guard_mask, std::memory_order_acq_rel);
+                                    }
                                 }
                             }
                         }
