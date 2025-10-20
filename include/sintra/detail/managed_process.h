@@ -23,8 +23,7 @@ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-#ifndef SINTRA_MANAGED_PROCESS_H
-#define SINTRA_MANAGED_PROCESS_H
+#pragma once
 
 #include "config.h"
 #include "globals.h"
@@ -348,4 +347,3 @@ struct Managed_process: Derived_transceiver<Managed_process>
 } // namespace sintra
 
 
-#endif

@@ -23,9 +23,7 @@ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-#ifndef SINTRA_PROCESS_MESSAGE_READER_IMPL_H
-#define SINTRA_PROCESS_MESSAGE_READER_IMPL_H
-
+#pragma once
 
 #include "transceiver_impl.h"
 #include <atomic>
@@ -670,4 +668,3 @@ void Process_message_reader::reply_reader_function()
 
 } // namespace sintra
 
-#endif

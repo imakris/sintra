@@ -23,9 +23,7 @@ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-#ifndef SINTRA_EXCEPTION_CONVERSION_IMPL_H
-#define SINTRA_EXCEPTION_CONVERSION_IMPL_H
-
+#pragma once
 
 #include "exception_conversions.h"
 #include "message.h"
@@ -218,4 +216,3 @@ void string_to_exception(type_id_type exception_type, const std::string& str)
 
 } // namespae sintra
 
-#endif

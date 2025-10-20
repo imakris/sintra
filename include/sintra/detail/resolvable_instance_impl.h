@@ -23,9 +23,7 @@ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-#ifndef SINTRA_RESOLVABLE_INSTANCE_IMPL_H
-#define SINTRA_RESOLVABLE_INSTANCE_IMPL_H
-
+#pragma once
 
 namespace sintra {
 
@@ -43,4 +41,3 @@ void Resolvable_instance_id::from_string(const string& str)
 } // namespace sintra
 
 
-#endif

@@ -23,9 +23,7 @@ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-#ifndef SINTRA_SPINLOCK_H
-#define SINTRA_SPINLOCK_H
-
+#pragma once
 
 #include <atomic>
 
@@ -56,4 +54,3 @@ private:
 
 } // namespace sintra
 
-#endif
