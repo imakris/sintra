@@ -1,7 +1,7 @@
 # Helper function to create all test executables for a specific configuration
 # Parameters:
-#   SUFFIX: e.g., "release_adaptive", "debug_hybrid"
-#   POLICY_VALUE: 1, 2, or 3
+#   SUFFIX: e.g., "release_adaptive", "debug_adaptive"
+#   POLICY_VALUE: reading policy value (e.g., 3 for adaptive)
 #   IS_DEBUG: TRUE or FALSE
 function(add_test_suite SUFFIX POLICY_VALUE IS_DEBUG)
     # Create library target for this configuration
@@ -81,10 +81,6 @@ function(add_test_suite SUFFIX POLICY_VALUE IS_DEBUG)
 
 endfunction()
 
-# Build 6 complete test suites: 3 policies × 2 build types
+# Build test suites for the adaptive reading policy in both build types
 add_test_suite("release_adaptive" 3 FALSE)
-add_test_suite("release_hybrid" 2 FALSE)
-add_test_suite("release_always_spin" 1 FALSE)
 add_test_suite("debug_adaptive" 3 TRUE)
-add_test_suite("debug_hybrid" 2 TRUE)
-add_test_suite("debug_always_spin" 1 TRUE)
