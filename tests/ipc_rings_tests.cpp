@@ -641,34 +641,116 @@ STRESS_TEST(stress_attach_detach_readers)
     }
 }
 
-int run_tests(bool include_unit, bool include_stress)
+std::vector<const Test_case*> select_tests(
+    bool include_unit,
+    bool include_stress,
+    const std::vector<std::string>& selectors)
+{
+    std::vector<const Test_case*> tests_to_run;
+
+    auto append_test = [&](const Test_case& test) {
+        if (!include_stress && test.is_stress) {
+            return;
+        }
+        if (!include_unit && !test.is_stress) {
+            return;
+        }
+        tests_to_run.push_back(&test);
+    };
+
+    if (selectors.empty()) {
+        for (const auto& test : registry()) {
+            append_test(test);
+        }
+        return tests_to_run;
+    }
+
+    for (const auto& selector : selectors) {
+        auto pos = selector.find(':');
+        if (pos == std::string::npos) {
+            std::cerr << "Invalid test selector '" << selector
+                      << "'. Expected format <category>:<name>." << std::endl;
+            return {};
+        }
+
+        auto category = selector.substr(0, pos);
+        auto name = selector.substr(pos + 1);
+        bool want_stress;
+        if (category == "unit") {
+            want_stress = false;
+            if (!include_unit) {
+                std::cerr << "Requested unit test '" << name
+                          << "' but unit tests are disabled via command-line flags." << std::endl;
+                return {};
+            }
+        }
+        else if (category == "stress") {
+            want_stress = true;
+            if (!include_stress) {
+                std::cerr << "Requested stress test '" << name
+                          << "' but stress tests are disabled via command-line flags." << std::endl;
+                return {};
+            }
+        }
+        else {
+            std::cerr << "Unknown test category '" << category
+                      << "' in selector '" << selector << "'." << std::endl;
+            return {};
+        }
+
+        const Test_case* match = nullptr;
+        for (const auto& test : registry()) {
+            if (test.name == name && test.is_stress == want_stress) {
+                match = &test;
+                break;
+            }
+        }
+
+        if (!match) {
+            std::cerr << "No " << (want_stress ? "stress" : "unit")
+                      << " test named '" << name << "' found." << std::endl;
+            return {};
+        }
+
+        tests_to_run.push_back(match);
+    }
+
+    return tests_to_run;
+}
+
+int run_tests(bool include_unit, bool include_stress, const std::vector<std::string>& selectors)
 {
     int failures = 0;
     size_t executed = 0;
-    for (const auto& test : registry()) {
-        if (!include_stress && test.is_stress) {
-            continue;
-        }
-        if (!include_unit && !test.is_stress) {
-            continue;
-        }
+    auto tests_to_run = select_tests(include_unit, include_stress, selectors);
 
+    if (tests_to_run.empty()) {
+        if (!selectors.empty()) {
+            return 2;
+        }
+        std::cout << "==== Summary ====" << '\n';
+        std::cout << "Tests executed: 0 / " << registry().size() << '\n';
+        std::cout << "Failures: 0" << '\n';
+        return 0;
+    }
+
+    for (const auto* test : tests_to_run) {
         ++executed;
         try {
-            test.fn();
-            std::cout << "[PASS] " << test.name << '\n';
+            test->fn();
+            std::cout << "[PASS] " << test->name << '\n';
         }
         catch (const Assertion_error& ex) {
             ++failures;
-            std::cerr << "[FAIL] " << test.name << " - " << ex.what() << '\n';
+            std::cerr << "[FAIL] " << test->name << " - " << ex.what() << '\n';
         }
         catch (const std::exception& ex) {
             ++failures;
-            std::cerr << "[FAIL] " << test.name << " - unexpected exception: " << ex.what() << '\n';
+            std::cerr << "[FAIL] " << test->name << " - unexpected exception: " << ex.what() << '\n';
         }
         catch (...) {
             ++failures;
-            std::cerr << "[FAIL] " << test.name << " - unknown exception" << '\n';
+            std::cerr << "[FAIL] " << test->name << " - unknown exception" << '\n';
         }
     }
     std::cout << "==== Summary ====" << '\n';
@@ -683,6 +765,8 @@ int main(int argc, char** argv)
 {
     bool include_unit = true;
     bool include_stress = true;
+    bool list_tests = false;
+    std::vector<std::string> selectors;
 
     for (int i = 1; i < argc; ++i) {
         std::string_view arg(argv[i]);
@@ -699,7 +783,26 @@ int main(int argc, char** argv)
             include_unit = true;
             include_stress = false;
         }
+        else
+        if (arg == "--list-tests") {
+            list_tests = true;
+        }
+        else
+        if (arg == "--run" && i + 1 < argc) {
+            selectors.emplace_back(argv[++i]);
+        }
+        else if (arg == "--run") {
+            std::cerr << "--run requires an argument" << std::endl;
+            return 2;
+        }
     }
 
-    return run_tests(include_unit, include_stress);
+    if (list_tests) {
+        for (const auto& test : registry()) {
+            std::cout << (test.is_stress ? "stress:" : "unit:") << test.name << '\n';
+        }
+        return 0;
+    }
+
+    return run_tests(include_unit, include_stress, selectors);
 }
