@@ -28,44 +28,14 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <cstddef>
 
-// Ring reading policies
-// =====================
+// Ring reading policy
+// ===================
 
-// The reading thread will yield if there is nothing to read. This means that the loop will
-// be driven by OS-level interprocess synchronization, which may have some impact
-// in performance. However, in single-processor systems, this policy will perform much
-// better than the others.
-
-#define SINTRA_RING_READING_POLICY_ALWAYS_SLEEP     0
-
-
-// Using this policy, the reader will livelock while waiting for data. As a consequence, this
-// policy does not require locking on either reading or writing.
-// NOTE: It needs to be used with care and only when necessary, to avoid wasting CPU resources.
-
-#define SINTRA_RING_READING_POLICY_ALWAYS_SPIN      1
-
-
-// With this policy, the reading loop will initially spin once a read is made, but will
-// eventually sleep after a certain time of inactivity.
-// NOTE: This policy assumes that omp_get_wtime() is faster than locking an interprocess_mutex.
-// The aforementioned condition would very likely be true for an x86 implementation using rdtsc.
-// But should this not be the case on a given system, then this policy might eventually provide
-// inferior performance.
-
-#define SINTRA_RING_READING_POLICY_HYBRID           2
-
-
-// Three-phase adaptive waiting policy:
-// Phase 1: Fast spin (50μs) for ultra-low latency
-// Phase 2: Precision sleep cycles (1ms) for moderate latency with low CPU
-// Phase 3: True blocking sleep (semaphore) for no CPU burn on stalls
+// The waiting policy is 3 phase, adaptive:
+// - Phase 1: Fast spin (50μs) for ultra-low latency
+// - Phase 2: Precision sleep cycles (1ms) for moderate latency with low CPU
+// - Phase 3: True blocking sleep (semaphore) for no CPU burn on stalls
 // Memory barriers ensure cache coherency even with stale shared memory.
-
-#define SINTRA_RING_READING_POLICY_ADAPTIVE    3
-
-
-#define SINTRA_RING_READING_POLICY SINTRA_RING_READING_POLICY_ADAPTIVE
 
 #ifndef __clang__ 
 #define SINTRA_USE_OMP_GET_WTIME
@@ -90,25 +60,21 @@ namespace sintra {
     // process to send messages arbitrarily large could compromise stability.
     constexpr int       max_message_length                  = 4096;
 
-    // HYBRID policy: Time value in seconds that the hybrid reading policy algorithm will try to
-    // approach while spinning before transitioning to semaphore-based sleep.
-    constexpr double    spin_before_sleep                   = 0.01;   // secs (10ms, actual ~5ms)
-
-    // ADAPTIVE_SPIN policy: Fast spin duration before transitioning to precision sleep.
+    // Adaptive policy: Fast spin duration before transitioning to precision sleep.
     // This should be very short to catch immediate responses with minimal latency.
     constexpr double    fast_spin_duration                  = 0.00005; // secs (50μs)
 
-    // ADAPTIVE_SPIN policy: Precision sleep cycle duration.
+    // Adaptive policy: Precision sleep cycle duration (seconds).
     // Uses high-resolution sleep (timeBeginPeriod on Windows, nanosleep on Linux).
     constexpr double    precision_sleep_cycle               = 0.001;   // secs (1ms)
 
-    // ADAPTIVE_SPIN policy: Total time to spend in precision sleep phase before
+    // Adaptive policy: Total time to spend in precision sleep phase before
     // transitioning to true blocking sleep (semaphore wait).
     constexpr double    precision_sleep_duration            = 1.0;     // secs (1000ms)
 
     // Whenever control data is read and written in an array by multiple threads, the layout used
-	// should not cause cache invalidations (false sharing). This setting is architecture specific,
-	// but it's not really that different among different x86 CPUs.
+    // should not cause cache invalidations (false sharing). This setting is architecture specific,
+    // but it's not really that different among different x86 CPUs.
     constexpr size_t    assumed_cache_line_size             = 0x40;
 }
 
