@@ -142,6 +142,16 @@ class TestRunner:
                     break
 
                 invocations = self._expand_test_invocations(entry, base_name, normalized_name)
+                invocations = [
+                    invocation
+                    for invocation in invocations
+                    if self._invocation_matches_filters(
+                        invocation,
+                        test_name,
+                        include_patterns,
+                        exclude_patterns,
+                    )
+                ]
                 if invocations:
                     discovered_tests[config].extend(invocations)
                 break
@@ -180,9 +190,41 @@ class TestRunner:
         include_patterns: Optional[List[str]],
         exclude_patterns: Optional[List[str]],
     ) -> bool:
-        """Determine if a test name should be included based on provided filters."""
+        """Determine if a test binary should be considered based on provided filters."""
 
         candidate_names = [base_name, normalized_name]
+
+        if include_patterns:
+            include_match = any(
+                fnmatch.fnmatch(name, pattern)
+                for pattern in include_patterns
+                for name in candidate_names
+            )
+            if not include_match:
+                return False
+
+        if exclude_patterns:
+            if any(
+                fnmatch.fnmatch(name, pattern)
+                for pattern in exclude_patterns
+                for name in candidate_names
+            ):
+                return False
+
+        # Allow --test to be applied to individual invocations so we don't
+        # prematurely filter out binaries that only match at the sub-test level.
+        return True
+
+    @staticmethod
+    def _invocation_matches_filters(
+        invocation: TestInvocation,
+        test_name: Optional[str],
+        include_patterns: Optional[List[str]],
+        exclude_patterns: Optional[List[str]],
+    ) -> bool:
+        """Check whether a single test invocation satisfies the active filters."""
+
+        candidate_names = [invocation.name, invocation.path.name]
 
         if test_name and all(test_name not in name for name in candidate_names):
             return False
