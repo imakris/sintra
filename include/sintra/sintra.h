@@ -143,17 +143,26 @@ void deactivate_all_slots();
 ///
 /// When recovery is enabled the coordinator will respawn the process if it
 /// exits unexpectedly.  Applications that rely on clean shutdown can still call
-/// `sintra::finalize()` (via the implementation header) when they are done.
+/// `sintra::finalize()` (included below via the runtime utilities) when they
+/// are done.
 void enable_recovery();
 
 } // namespace sintra
 
 
-#include "detail/sintra_impl.h"
+// -- Runtime utilities ------------------------------------------------------
+// High-level synchronisation, logging, message composition helpers, and the
+// process runtime live here.  Historically these were gathered in
+// `detail/sintra_impl.h`; we now include the specific headers directly to keep
+// dependency relationships obvious.
+#include "detail/barrier.h"
+#include "detail/console.h"
+#include "detail/maildrop.h"
+#include "detail/runtime.h"
 
 
 #ifdef _MSC_VER
-#pragma warning( pop ) 
+#pragma warning( pop )
 #endif
 
 
