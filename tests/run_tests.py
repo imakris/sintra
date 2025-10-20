@@ -142,6 +142,13 @@ class TestRunner:
                     break
 
                 invocations = self._expand_test_invocations(entry, base_name, normalized_name)
+                invocations = self._filter_invocations(
+                    invocations,
+                    include_patterns,
+                    exclude_patterns,
+                    base_name,
+                    normalized_name,
+                )
                 if invocations:
                     discovered_tests[config].extend(invocations)
                 break
@@ -187,14 +194,8 @@ class TestRunner:
         if test_name and all(test_name not in name for name in candidate_names):
             return False
 
-        if include_patterns:
-            include_match = any(
-                fnmatch.fnmatch(name, pattern)
-                for pattern in include_patterns
-                for name in candidate_names
-            )
-            if not include_match:
-                return False
+        # Include patterns are evaluated after test invocations are expanded so that
+        # filters can target individual test cases (e.g. ipc_rings sub-tests).
 
         if exclude_patterns:
             if any(
@@ -216,6 +217,45 @@ class TestRunner:
             return self._expand_ipc_rings_invocations(entry, normalized_name)
 
         return [TestInvocation(path=entry, name=normalized_name)]
+
+    def _filter_invocations(
+        self,
+        invocations: List[TestInvocation],
+        include_patterns: Optional[List[str]],
+        exclude_patterns: Optional[List[str]],
+        base_name: str,
+        normalized_name: str,
+    ) -> List[TestInvocation]:
+        """Apply include/exclude filters to expanded test invocations."""
+
+        if not include_patterns and not exclude_patterns:
+            return invocations
+
+        filtered: List[TestInvocation] = []
+        for invocation in invocations:
+            candidate_names = [
+                invocation.name,
+                base_name,
+                normalized_name,
+            ]
+
+            if include_patterns and not any(
+                fnmatch.fnmatch(name, pattern)
+                for pattern in include_patterns
+                for name in candidate_names
+            ):
+                continue
+
+            if exclude_patterns and any(
+                fnmatch.fnmatch(name, pattern)
+                for pattern in exclude_patterns
+                for name in candidate_names
+            ):
+                continue
+
+            filtered.append(invocation)
+
+        return filtered
 
     def _expand_ipc_rings_invocations(
         self,
