@@ -23,9 +23,7 @@ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-#ifndef SINTRA_COORDINATOR_H
-#define SINTRA_COORDINATOR_H
-
+#pragma once
 
 #include "id_types.h"
 #include "resolvable_instance.h"
@@ -240,4 +238,3 @@ public:
 }
 
 
-#endif

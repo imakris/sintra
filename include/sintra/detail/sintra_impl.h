@@ -23,12 +23,10 @@ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-#ifndef SINTRA_IMPL_H
-#define SINTRA_IMPL_H
+#pragma once
 
 #include "barrier.h"
 #include "console.h"
 #include "maildrop.h"
 #include "runtime.h"
 
-#endif

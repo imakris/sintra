@@ -23,9 +23,7 @@ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-#ifndef SINTRA_COORDINATOR_IMPL_H
-#define SINTRA_COORDINATOR_IMPL_H
-
+#pragma once
 
 #include "coordinator.h"
 #include "managed_process.h"
@@ -646,4 +644,3 @@ void Coordinator::recover_if_required(instance_id_type piid)
 } // sintra
 
 
-#endif

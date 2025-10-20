@@ -23,9 +23,7 @@ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-#ifndef SINTRA_MANAGED_PROCESS_IMPL_H
-#define SINTRA_MANAGED_PROCESS_IMPL_H
-
+#pragma once
 
 #include "utility.h"
 
@@ -1577,12 +1575,5 @@ size_t Managed_process::unblock_rpc(instance_id_type process_instance_id)
 
 
 } // sintra
-
-
-#endif
-
-
-
-
 
 
