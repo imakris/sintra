@@ -84,6 +84,14 @@ private:
     } \
     if (!_thrown) { throw Assertion_error("Expected exception " #exception_type, __FILE__, __LINE__); } \
 } while (false)
+#define ASSERT_NO_THROW(statement) do { \
+    try { \
+        statement; \
+    } \
+    catch (...) { \
+        throw Assertion_error("Unexpected exception", __FILE__, __LINE__); \
+    } \
+} while (false)
 
 struct Test_case {
     std::string name;
@@ -424,6 +432,7 @@ TEST_CASE(test_reader_eviction_does_not_underflow_octile_counter)
     uint8_t guard_count = static_cast<uint8_t>((read_access >> (guarded_octile * 8)) & 0xffu);
 
     reader.c.read_access.fetch_add(guard_mask, std::memory_order_release);
+    slot.has_guard.store(1, std::memory_order_release);
     slot.status.store(sintra::Ring<uint32_t, true>::READER_STATE_ACTIVE, std::memory_order_release);
 
     writer_thread.join();
@@ -469,7 +478,7 @@ TEST_CASE(test_slow_reader_eviction_restores_status)
     ASSERT_EQ(expected_status, restored_status);
 }
 
-TEST_CASE(test_streaming_reader_status_not_restored_after_eviction)
+TEST_CASE(test_streaming_reader_status_restored_after_eviction)
 {
     Temp_ring_dir tmp("streaming_eviction_state");
     const size_t ring_elements = pick_ring_elements<uint32_t>(64);
@@ -511,15 +520,13 @@ TEST_CASE(test_streaming_reader_status_not_restored_after_eviction)
     ASSERT_TRUE(second_range.end >= second_range.begin);
     reader.done_reading_new_data();
 
-    const auto evicted_state = sintra::Ring<uint32_t, true>::READER_STATE_EVICTED;
-    ASSERT_EQ(evicted_state, slot.status.load(std::memory_order_acquire));
-
-    ASSERT_THROW(reader.start_reading(), sintra::ring_reader_evicted_exception);
-
     const auto active_state = sintra::Ring<uint32_t, true>::READER_STATE_ACTIVE;
-    slot.status.store(active_state, std::memory_order_release);
-    control.read_access.store(0, std::memory_order_release);
-    slot.has_guard.store(0, std::memory_order_release);
+    ASSERT_EQ(active_state, slot.status.load(std::memory_order_acquire));
+
+    ASSERT_NO_THROW({
+        reader.start_reading();
+        reader.done_reading();
+    });
 }
 
 STRESS_TEST(stress_multi_reader_throughput)
