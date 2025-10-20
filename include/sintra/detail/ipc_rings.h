@@ -1584,9 +1584,9 @@ struct Ring_R : Ring<T, true>
                     }
                     c.ready_stack[c.num_ready++] = sleepy;
                     m_sleepy_index.store(-1, std::memory_order_release);
+                    c.unlock();
+                    return Range<T>{};
                 }
-                c.unlock();
-                return Range<T>{};
             }
             c.unlock();
 
