@@ -23,9 +23,7 @@ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-#ifndef SINTRA_RESOLVE_TYPE_H
-#define SINTRA_RESOLVE_TYPE_H
-
+#pragma once
 
 namespace sintra {
 
@@ -98,4 +96,3 @@ constexpr static OBJECT_T resolve_object_type(VAR_T OBJECT_T::*) {}
 
 } // namespace sintra
 
-#endif

@@ -23,9 +23,7 @@ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-#ifndef SINTRA_MESSAGE_IMPL_H
-#define SINTRA_MESSAGE_IMPL_H
-
+#pragma once
 
 #include <cassert>
 #include <cstdint>
@@ -91,4 +89,3 @@ variable_buffer::variable_buffer(const TC& container)
 
 } // namespae sintra
 
-#endif

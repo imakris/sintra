@@ -23,9 +23,7 @@ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-#ifndef SINTRA_TRANSCEIVER_IMPL_H
-#define SINTRA_TRANSCEIVER_IMPL_H
-
+#pragma once
 
 #include "coordinator.h"
 #include "managed_process.h"
@@ -1079,4 +1077,3 @@ Transceiver::export_rpc(RT(OBJECT_T::* /*resolution dummy arg*/)(Args...))
 } // namespace sintra
 
 
-#endif
