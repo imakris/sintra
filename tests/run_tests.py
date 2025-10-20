@@ -26,8 +26,9 @@ import os
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional
 
 class Color:
     """ANSI color codes for terminal output"""
@@ -52,6 +53,18 @@ class TestResult:
         self.output = output
         self.error = error
 
+
+@dataclass(frozen=True)
+class TestInvocation:
+    """Represents a single invocation of a test executable"""
+
+    path: Path
+    name: str
+    args: Tuple[str, ...] = ()
+
+    def command(self) -> List[str]:
+        return [str(self.path), *self.args]
+
 class TestRunner:
     """Manages test execution with timeout and repetition"""
 
@@ -62,6 +75,7 @@ class TestRunner:
         self.timeout = timeout
         self.verbose = verbose
         self.preserve_on_timeout = preserve_on_timeout
+        self._ipc_rings_cache: Dict[Path, List[Tuple[str, str]]] = {}
 
         # Determine test directory - check both with and without config subdirectory
         test_dir_with_config = build_dir / 'tests' / config
@@ -97,7 +111,9 @@ class TestRunner:
         ]
 
         # Discover available tests dynamically so the runner adapts to new or removed binaries
-        discovered_tests = {config: [] for config in configurations}
+        discovered_tests: Dict[str, List[TestInvocation]] = {
+            config: [] for config in configurations
+        }
 
         try:
             directory_entries = sorted(self.test_dir.iterdir())
@@ -129,7 +145,9 @@ class TestRunner:
                 ):
                     break
 
-                discovered_tests[config].append((base_name, entry))
+                invocations = self._expand_test_invocations(entry, base_name, normalized_name)
+                if invocations:
+                    discovered_tests[config].extend(invocations)
                 break
 
         test_suites = {}
@@ -137,8 +155,7 @@ class TestRunner:
             if not tests:
                 continue
 
-            tests.sort(key=lambda item: item[0])
-            test_suites[config] = [path for _, path in tests]
+            test_suites[config] = tests
 
         if not test_suites:
             if any([test_name, include_patterns, exclude_patterns]):
@@ -193,7 +210,87 @@ class TestRunner:
 
         return True
 
-    def run_test_once(self, test_path: Path) -> TestResult:
+    def _expand_test_invocations(
+        self,
+        entry: Path,
+        base_name: str,
+        normalized_name: str,
+    ) -> List[TestInvocation]:
+        if base_name == 'sintra_ipc_rings_tests':
+            return self._expand_ipc_rings_invocations(entry, normalized_name)
+
+        return [TestInvocation(path=entry, name=normalized_name)]
+
+    def _expand_ipc_rings_invocations(
+        self,
+        entry: Path,
+        normalized_name: str,
+    ) -> List[TestInvocation]:
+        selectors = self._list_ipc_rings_tests(entry)
+        if not selectors:
+            # Fallback to running the executable as a whole if discovery fails
+            return [TestInvocation(path=entry, name=normalized_name)]
+
+        invocations: List[TestInvocation] = []
+        for category, test_name in selectors:
+            display_name = f"{normalized_name}:{category}:{test_name}"
+            args = ('--run', f"{category}:{test_name}")
+            invocations.append(TestInvocation(entry, display_name, args))
+        return invocations
+
+    def _list_ipc_rings_tests(self, entry: Path) -> List[Tuple[str, str]]:
+        if entry in self._ipc_rings_cache:
+            return self._ipc_rings_cache[entry]
+
+        command = [str(entry), '--list-tests']
+        try:
+            result = subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                cwd=entry.parent,
+                timeout=max(5.0, self.timeout / 2)
+            )
+        except subprocess.TimeoutExpired:
+            print(
+                f"{Color.YELLOW}Warning: Listing tests for {entry.name} timed out; running as a single test.{Color.RESET}"
+            )
+            self._ipc_rings_cache[entry] = []
+            return []
+
+        if result.returncode != 0:
+            print(
+                f"{Color.YELLOW}Warning: Failed to list tests for {entry.name} (exit {result.returncode}). "
+                f"stderr: {result.stderr.strip()}{Color.RESET}"
+            )
+            self._ipc_rings_cache[entry] = []
+            return []
+
+        selectors: List[Tuple[str, str]] = []
+        for raw_line in result.stdout.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if ':' not in line:
+                print(
+                    f"{Color.YELLOW}Warning: Ignoring malformed test descriptor '{line}' from {entry.name}.{Color.RESET}"
+                )
+                continue
+            category, name = line.split(':', 1)
+            category = category.strip()
+            name = name.strip()
+            if category not in {'unit', 'stress'}:
+                print(
+                    f"{Color.YELLOW}Warning: Unknown category '{category}' for test '{name}' in {entry.name}.{Color.RESET}"
+                )
+                continue
+            selectors.append((category, name))
+
+        self._ipc_rings_cache[entry] = selectors
+        return selectors
+
+    def run_test_once(self, invocation: TestInvocation) -> TestResult:
         """Run a single test with timeout and proper cleanup"""
         process = None
         try:
@@ -204,7 +301,7 @@ class TestRunner:
                 'stdout': subprocess.PIPE,
                 'stderr': subprocess.PIPE,
                 'text': True,
-                'cwd': test_path.parent,
+                'cwd': invocation.path.parent,
             }
 
             if sys.platform == 'win32':
@@ -215,7 +312,7 @@ class TestRunner:
             else:
                 popen_kwargs['start_new_session'] = True
 
-            process = subprocess.Popen([str(test_path)], **popen_kwargs)
+            process = subprocess.Popen(invocation.command(), **popen_kwargs)
 
             # Wait with timeout
             try:
@@ -279,7 +376,7 @@ class TestRunner:
                     stderr = e.stderr if e.stderr else ""
 
                 # DEBUGGING: Print stderr immediately to terminal for ipc_rings_tests
-                if 'ipc_rings' in str(test_path):
+                if 'ipc_rings' in invocation.path.name:
                     print(f"\n{Color.RED}=== TIMEOUT DEBUG OUTPUT (ipc_rings_tests) ==={Color.RESET}")
                     print(f"stdout length: {len(stdout)}")
                     print(f"stderr length: {len(stderr)}")
@@ -367,9 +464,9 @@ class TestRunner:
             # Ignore errors - processes may not exist
             pass
 
-    def run_test_multiple(self, test_path: Path, repetitions: int) -> Tuple[int, int, List[TestResult]]:
+    def run_test_multiple(self, invocation: TestInvocation, repetitions: int) -> Tuple[int, int, List[TestResult]]:
         """Run a test multiple times and collect results"""
-        test_name = test_path.stem
+        test_name = invocation.name
 
         print(f"\n{Color.BOLD}{Color.BLUE}Running: {test_name}{Color.RESET}")
         print(f"  Repetitions: {repetitions}, Timeout: {self.timeout}s")
@@ -380,7 +477,7 @@ class TestRunner:
         failed = 0
 
         for i in range(repetitions):
-            result = self.run_test_once(test_path)
+            result = self.run_test_once(invocation)
             results.append(result)
 
             if result.success:
@@ -400,9 +497,9 @@ class TestRunner:
 
         return passed, failed, results
 
-    def print_summary(self, test_path: Path, passed: int, failed: int, results: List[TestResult]):
+    def print_summary(self, invocation: TestInvocation, passed: int, failed: int, results: List[TestResult]):
         """Print summary statistics for a test"""
-        test_name = test_path.stem
+        test_name = invocation.name
         total = passed + failed
         pass_rate = (passed / total * 100) if total > 0 else 0
 
@@ -556,8 +653,8 @@ def main():
 
         # Adaptive soak test for this suite
         accumulated_results = {
-            test.stem: {'passed': 0, 'failed': 0, 'durations': [], 'failures': []}
-            for test in tests
+            invocation.name: {'passed': 0, 'failed': 0, 'durations': [], 'failures': []}
+            for invocation in tests
         }
         total_reps_so_far = 0
         max_reps_per_test = args.repetitions
@@ -570,9 +667,9 @@ def main():
 
             for i in range(reps_in_this_round):
                 print(f"  Rep {i + 1}/{reps_in_this_round}: ", end="", flush=True)
-                for test_path in tests:
-                    test_name = test_path.stem
-                    result = runner.run_test_once(test_path)
+                for invocation in tests:
+                    test_name = invocation.name
+                    result = runner.run_test_once(invocation)
 
                     accumulated_results[test_name]['durations'].append(result.duration)
 
