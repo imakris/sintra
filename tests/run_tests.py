@@ -102,8 +102,8 @@ class TestRunner:
 
         # 2 configurations: adaptive policy in release and debug builds
         configurations = [
-            'release_adaptive',
-            'debug_adaptive'
+            'release',
+            'debug'
         ]
 
         # Discover available tests dynamically so the runner adapts to new or removed binaries
@@ -714,6 +714,11 @@ def main():
 
             if formatted.startswith("ipc_rings_tests_"):
                 formatted = formatted.replace("_release_adaptive", "_release", 1)
+                formatted = formatted.replace("_debug_adaptive", "_debug", 1)
+                if formatted.endswith("_release"):
+                    formatted = formatted[:-len("_release")] + " (release)"
+                elif formatted.endswith("_debug"):
+                    formatted = formatted[:-len("_debug")] + " (debug)"
 
             return formatted
 
