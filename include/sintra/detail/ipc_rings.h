@@ -1532,6 +1532,11 @@ struct Ring_R : Ring<T, true>
             if (should_shutdown()) {
                 return Range<T>{};
             }
+            const auto seq_now = c.global_unblock_sequence.load(std::memory_order_acquire);
+            if (seq_now != m_seen_unblock_sequence) {
+                m_seen_unblock_sequence = seq_now;
+                goto finalize_wait;
+            }
         }
 
         if (sequences_equal()) {
@@ -1546,7 +1551,7 @@ struct Ring_R : Ring<T, true>
                 const auto seq_now = c.global_unblock_sequence.load(std::memory_order_acquire);
                 if (seq_now != m_seen_unblock_sequence) {
                     m_seen_unblock_sequence = seq_now;
-                    return Range<T>{};
+                    goto finalize_wait;
                 }
                 std::this_thread::sleep_for(std::chrono::duration<double>(precision_sleep_cycle));
             }
@@ -1559,7 +1564,7 @@ struct Ring_R : Ring<T, true>
                 c.global_unblock_sequence.load(std::memory_order_acquire);
             if (unblock_sequence_now != m_seen_unblock_sequence) {
                 m_seen_unblock_sequence = unblock_sequence_now;
-                return Range<T>{};
+                goto finalize_wait;
             }
 
             c.lock();
@@ -1586,7 +1591,7 @@ struct Ring_R : Ring<T, true>
                     m_sleepy_index.store(-1, std::memory_order_release);
                 }
                 c.unlock();
-                return Range<T>{};
+                goto finalize_wait;
             }
             c.unlock();
 
@@ -1618,6 +1623,7 @@ struct Ring_R : Ring<T, true>
             }
         }
 
+finalize_wait:
         if (c.reading_sequences[m_rs_index].data.has_guard.load(std::memory_order_acquire) == 0) {
             reattach_after_eviction();
         }
