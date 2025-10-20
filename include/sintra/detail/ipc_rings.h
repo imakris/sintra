@@ -251,7 +251,7 @@ inline uint64_t calibrate_spin_loops_per_microsecond()
 
 inline uint64_t get_eviction_spin_loop_budget()
 {
-#ifdef SINTRA_EVICTION_SPIN_THRESHOLD
+#if defined(SINTRA_EVICTION_SPIN_THRESHOLD) && SINTRA_EVICTION_SPIN_THRESHOLD > 0
     // Backwards compatibility: allow callers to supply a raw iteration budget.
     return SINTRA_EVICTION_SPIN_THRESHOLD;
 #else
@@ -264,7 +264,7 @@ inline uint64_t get_eviction_spin_loop_budget()
     const uint64_t loops_per_us = calibrate_spin_loops_per_microsecond();
     uint64_t computed = loops_per_us * static_cast<uint64_t>(SINTRA_EVICTION_SPIN_BUDGET_US);
     if (computed == 0) {
-        computed = SINTRA_EVICTION_SPIN_BUDGET_US ? 1 : loops_per_us;
+        computed = loops_per_us != 0 ? loops_per_us : 1;
     }
 
     uint64_t expected = 0;
@@ -1717,8 +1717,16 @@ struct Ring_R : Ring<T, true>
         }
 #endif
 
+        if (c.reading_sequences[m_rs_index].data.has_guard.load(std::memory_order_acquire) == 0) {
+            reattach_after_eviction();
+        }
+
         auto num_range_elements =
             size_t(c.leading_sequence.load(std::memory_order_acquire) - m_reading_sequence->load());
+
+        if (num_range_elements > this->m_num_elements) {
+            num_range_elements = this->m_num_elements;
+        }
 
         Range<T> ret;
         if (num_range_elements == 0) {
@@ -1745,44 +1753,33 @@ struct Ring_R : Ring<T, true>
 
         const size_t new_trailing_octile = (8 * t_idx) / this->m_num_elements;
 
-        const bool had_guard =
-            c.reading_sequences[m_rs_index].data.has_guard.load(std::memory_order_acquire) != 0;
+        if (c.reading_sequences[m_rs_index].data.has_guard.load(std::memory_order_acquire) == 0) {
+            reattach_after_eviction();
+        }
 
         if (new_trailing_octile != m_trailing_octile) {
             const uint64_t new_mask = uint64_t(1) << (8 * new_trailing_octile);
-
-            if (had_guard) {
-                const uint64_t old_mask = uint64_t(1) << (8 * m_trailing_octile);
-                c.read_access.fetch_add(new_mask, std::memory_order_acq_rel);
-                c.reading_sequences[m_rs_index].data.trailing_octile.store(
-                    static_cast<uint8_t>(new_trailing_octile), std::memory_order_relaxed);
-                c.read_access.fetch_sub(old_mask, std::memory_order_acq_rel);
-            }
-            else {
-                // Evicted: reacquire only (no subtract)
-                c.read_access.fetch_add(new_mask, std::memory_order_acq_rel);
-                c.reading_sequences[m_rs_index].data.trailing_octile.store(
-                    static_cast<uint8_t>(new_trailing_octile), std::memory_order_relaxed);
-                c.reading_sequences[m_rs_index].data.has_guard.store(1, std::memory_order_release);
-#ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
-                c.reading_sequences[m_rs_index].data.status.store(
-                    Ring<T, false>::READER_STATE_ACTIVE, std::memory_order_release);
-#endif
-            }
+            const uint64_t old_mask = uint64_t(1) << (8 * m_trailing_octile);
+            c.read_access.fetch_add(new_mask, std::memory_order_acq_rel);
+            c.reading_sequences[m_rs_index].data.trailing_octile.store(
+                static_cast<uint8_t>(new_trailing_octile), std::memory_order_relaxed);
+            c.read_access.fetch_sub(old_mask, std::memory_order_acq_rel);
 
             m_trailing_octile = new_trailing_octile;
         }
-        else
-        if (!had_guard) {
-            // Same octile but evicted: reacquire the guard
-            const uint64_t mask = uint64_t(1) << (8 * m_trailing_octile);
-            c.read_access.fetch_add(mask, std::memory_order_acq_rel);
-            c.reading_sequences[m_rs_index].data.has_guard.store(1, std::memory_order_release);
+    }
+
+    void reattach_after_eviction()
+    {
+        const uint64_t mask = uint64_t(1) << (8 * m_trailing_octile);
+        c.read_access.fetch_add(mask, std::memory_order_acq_rel);
+        c.reading_sequences[m_rs_index].data.trailing_octile.store(
+            static_cast<uint8_t>(m_trailing_octile), std::memory_order_relaxed);
+        c.reading_sequences[m_rs_index].data.has_guard.store(1, std::memory_order_release);
 #ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
-            c.reading_sequences[m_rs_index].data.status.store(
-                Ring<T, false>::READER_STATE_ACTIVE, std::memory_order_release);
+        c.reading_sequences[m_rs_index].data.status.store(
+            Ring<T, false>::READER_STATE_ACTIVE, std::memory_order_release);
 #endif
-        }
     }
 
     /**
