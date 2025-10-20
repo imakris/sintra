@@ -1442,8 +1442,11 @@ struct Ring_R : Ring<T, true>
             }
 
             // Trailing guard requirement changed between reads; drop and retry.
-            c.read_access.fetch_sub(guard_mask, std::memory_order_acq_rel);
-            c.reading_sequences[m_rs_index].data.has_guard.store(0, std::memory_order_release);
+            uint8_t had_guard = c.reading_sequences[m_rs_index].data.has_guard.exchange(
+                0, std::memory_order_acq_rel);
+            if (had_guard != 0) {
+                c.read_access.fetch_sub(guard_mask, std::memory_order_acq_rel);
+            }
         }
 
         m_reading_lock = false;
@@ -1761,6 +1764,10 @@ struct Ring_R : Ring<T, true>
                 c.reading_sequences[m_rs_index].data.trailing_octile.store(
                     static_cast<uint8_t>(new_trailing_octile), std::memory_order_relaxed);
                 c.reading_sequences[m_rs_index].data.has_guard.store(1, std::memory_order_release);
+#ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
+                c.reading_sequences[m_rs_index].data.status.store(
+                    Ring<T, false>::READER_STATE_ACTIVE, std::memory_order_release);
+#endif
             }
 
             m_trailing_octile = new_trailing_octile;
@@ -1771,6 +1778,10 @@ struct Ring_R : Ring<T, true>
             const uint64_t mask = uint64_t(1) << (8 * m_trailing_octile);
             c.read_access.fetch_add(mask, std::memory_order_acq_rel);
             c.reading_sequences[m_rs_index].data.has_guard.store(1, std::memory_order_release);
+#ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
+            c.reading_sequences[m_rs_index].data.status.store(
+                Ring<T, false>::READER_STATE_ACTIVE, std::memory_order_release);
+#endif
         }
     }
 
@@ -2123,6 +2134,20 @@ private:
             const uint64_t spin_loop_budget = ring_detail::get_eviction_spin_loop_budget();
 #endif
             while (c.read_access.load(std::memory_order_acquire) & range_mask) {
+                bool has_blocking_reader = false;
+                for (int i = 0; i < max_process_index; ++i) {
+                    if (c.reading_sequences[i].data.has_guard.load(std::memory_order_acquire) != 0 &&
+                        c.reading_sequences[i].data.trailing_octile.load(std::memory_order_relaxed) == new_octile)
+                    {
+                        has_blocking_reader = true;
+                        break;
+                    }
+                }
+
+                if (!has_blocking_reader) {
+                    break;
+                }
+
                 // Busy-wait until the target octile is unguarded
 #ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
                 if (++spin_count > spin_loop_budget) {
@@ -2146,8 +2171,15 @@ private:
                         {
                             sequence_counter_type reader_seq =
                                 c.reading_sequences[i].data.v.load(std::memory_order_acquire);
+                            uint8_t guard_flag =
+                                c.reading_sequences[i].data.has_guard.load(std::memory_order_acquire);
+                            uint8_t reader_octile =
+                                c.reading_sequences[i].data.trailing_octile.load(std::memory_order_relaxed);
 
-                            if (reader_seq < eviction_threshold) {
+                            bool blocking_current_octile =
+                                (guard_flag != 0) && (reader_octile == new_octile);
+
+                            if (reader_seq < eviction_threshold || blocking_current_octile) {
                                 // Evict only if the reader currently holds a guard
                                 uint8_t expected = 1;
                                 if (c.reading_sequences[i].data.has_guard.compare_exchange_strong(
