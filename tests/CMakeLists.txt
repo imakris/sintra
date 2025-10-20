@@ -81,10 +81,59 @@ function(add_test_suite SUFFIX POLICY_VALUE IS_DEBUG)
 
 endfunction()
 
-# Build 6 complete test suites: 3 policies × 2 build types
-add_test_suite("release_adaptive" 3 FALSE)
-add_test_suite("release_hybrid" 2 FALSE)
-add_test_suite("release_always_spin" 1 FALSE)
-add_test_suite("debug_adaptive" 3 TRUE)
-add_test_suite("debug_hybrid" 2 TRUE)
-add_test_suite("debug_always_spin" 1 TRUE)
+# Select which test matrix to build. Quick builds keep only a single Release
+# configuration so developers can iterate rapidly, whereas CI enables the
+# entire matrix (Release + Debug × policy variants) for soak coverage.
+set(SINTRA_TEST_MATRIX "quick" CACHE STRING "Choose the test matrix to build: quick, release, or full")
+set_property(CACHE SINTRA_TEST_MATRIX PROPERTY STRINGS quick release full)
+
+set(SINTRA_QUICK_TEST_SUITES
+    release_adaptive 3 FALSE
+)
+
+set(SINTRA_RELEASE_TEST_SUITES
+    release_adaptive 3 FALSE
+    release_hybrid 2 FALSE
+    release_always_spin 1 FALSE
+)
+
+set(SINTRA_FULL_TEST_SUITES
+    ${SINTRA_RELEASE_TEST_SUITES}
+    debug_adaptive 3 TRUE
+    debug_hybrid 2 TRUE
+    debug_always_spin 1 TRUE
+)
+
+if(SINTRA_TEST_MATRIX STREQUAL "quick")
+    set(_sintra_selected_suites ${SINTRA_QUICK_TEST_SUITES})
+elseif(SINTRA_TEST_MATRIX STREQUAL "release")
+    set(_sintra_selected_suites ${SINTRA_RELEASE_TEST_SUITES})
+elseif(SINTRA_TEST_MATRIX STREQUAL "full")
+    set(_sintra_selected_suites ${SINTRA_FULL_TEST_SUITES})
+else()
+    message(FATAL_ERROR "Unknown SINTRA_TEST_MATRIX selection: ${SINTRA_TEST_MATRIX}")
+endif()
+
+message(STATUS "Configuring Sintra tests with '${SINTRA_TEST_MATRIX}' matrix")
+
+list(LENGTH _sintra_selected_suites _sintra_suite_length)
+if(NOT _sintra_suite_length)
+    message(FATAL_ERROR "No test suites selected for SINTRA_TEST_MATRIX=${SINTRA_TEST_MATRIX}")
+endif()
+
+math(EXPR _sintra_mod "${_sintra_suite_length} % 3")
+if(NOT _sintra_mod EQUAL 0)
+    message(FATAL_ERROR "Internal error: expected suite descriptors to have triplets, got length ${_sintra_suite_length}")
+endif()
+
+math(EXPR _sintra_suite_count "${_sintra_suite_length} / 3")
+math(EXPR _sintra_last_idx "${_sintra_suite_count} - 1")
+foreach(_idx RANGE 0 ${_sintra_last_idx})
+    math(EXPR _base "${_idx} * 3")
+    math(EXPR _policy_index "${_base} + 1")
+    math(EXPR _debug_index "${_base} + 2")
+    list(GET _sintra_selected_suites ${_base} _suite_suffix)
+    list(GET _sintra_selected_suites ${_policy_index} _suite_policy)
+    list(GET _sintra_selected_suites ${_debug_index} _suite_is_debug)
+    add_test_suite("${_suite_suffix}" "${_suite_policy}" "${_suite_is_debug}")
+endforeach()
