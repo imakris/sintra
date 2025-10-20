@@ -1,18 +1,14 @@
 # Helper function to create all test executables for a specific configuration
 # Parameters:
-#   SUFFIX: e.g., "release_adaptive", "debug_adaptive"
-#   POLICY_VALUE: reading policy value (e.g., 3 for adaptive)
+#   SUFFIX: e.g., "release", "debug"
 #   IS_DEBUG: TRUE or FALSE
-function(add_test_suite SUFFIX POLICY_VALUE IS_DEBUG)
+function(add_test_suite SUFFIX IS_DEBUG)
     # Create library target for this configuration
     set(LIB_TARGET sintra_for_${SUFFIX})
     add_library(${LIB_TARGET} INTERFACE)
     target_include_directories(${LIB_TARGET} INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
     target_compile_features(${LIB_TARGET} INTERFACE cxx_std_17)
     target_link_libraries(${LIB_TARGET} INTERFACE Boost::boost Threads::Threads)
-
-    # Set the reading policy
-    target_compile_definitions(${LIB_TARGET} INTERFACE SINTRA_RING_READING_POLICY=${POLICY_VALUE})
 
     # Link winmm on Windows for timeBeginPeriod/timeEndPeriod
     if(WIN32)
@@ -81,6 +77,6 @@ function(add_test_suite SUFFIX POLICY_VALUE IS_DEBUG)
 
 endfunction()
 
-# Build test suites for the adaptive reading policy in both build types
-add_test_suite("release_adaptive" 3 FALSE)
-add_test_suite("debug_adaptive" 3 TRUE)
+# Build test suites for both build types using the adaptive policy
+add_test_suite("release" FALSE)
+add_test_suite("debug" TRUE)
