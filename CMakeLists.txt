@@ -4,15 +4,15 @@ project(sintra LANGUAGES CXX)
 
 find_package(Threads REQUIRED)
 
-# Force Debug build by default
+# Default to a Release build when none is specified
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
-    set(CMAKE_BUILD_TYPE Debug CACHE STRING "Choose the type of build." FORCE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Choose the type of build." FORCE)
     set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release" "MinSizeRel" "RelWithDebInfo")
 endif()
 
-# For MSVC multi-config generators, set debug as default
+# For MSVC multi-config generators, prefer Release and keep Debug available
 if(CMAKE_CONFIGURATION_TYPES)
-    set(CMAKE_CONFIGURATION_TYPES "Debug;Release" CACHE STRING "" FORCE)
+    set(CMAKE_CONFIGURATION_TYPES "Release;Debug" CACHE STRING "" FORCE)
 endif()
 
 # Check if vendored Boost headers exist
@@ -63,17 +63,22 @@ if(WIN32)
     target_link_libraries(sintra INTERFACE winmm)
 endif()
 
-# ALWAYS compile with debug symbols and disable optimizations for debugging
+# Apply per-configuration defaults rather than forcing debug flags everywhere
 if(MSVC)
     target_compile_options(sintra INTERFACE
-        /Zi          # Full debug info
-        /Od          # Disable optimizations
-        /RTC1        # Runtime checks
-        /MDd         # Debug runtime library
+        $<$<CONFIG:Debug>:/Zi;/Od;/RTC1;/MDd>
+        $<$<CONFIG:Release>:/O2;/DNDEBUG>
     )
-    target_link_options(sintra INTERFACE /DEBUG:FULL)
+    target_link_options(sintra INTERFACE
+        $<$<CONFIG:Debug>:/DEBUG:FULL>
+    )
 else()
-    target_compile_options(sintra INTERFACE -g -O0)
+    target_compile_options(sintra INTERFACE
+        $<$<CONFIG:Debug>:-g;-O0>
+        $<$<CONFIG:Release>:-O3;-DNDEBUG>
+        $<$<CONFIG:RelWithDebInfo>:-O2;-g;-DNDEBUG>
+        $<$<CONFIG:MinSizeRel>:-Os;-DNDEBUG>
+    )
 endif()
 
 # OpenMP support - optional for timing
