@@ -124,9 +124,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #pragma once
 
 // ─── Project config & utilities (kept as in original codebase) ───────────────
-#include "config.h"      // defines: assumed_cache_line_size, max_process_index,
-                         //          SINTRA_RING_READING_POLICY*, etc.
-#include "get_wtime.h"   // high-res wall clock (used by hybrid reader policy)
+#include "config.h"      // configuration constants for adaptive waiting, cache sizes, etc.
+#include "get_wtime.h"   // high-res wall clock (used by adaptive reader policy)
 #include "id_types.h"    // ID and type aliases as used by the project
 
 // ─── STL / stdlib ────────────────────────────────────────────────────────────
@@ -135,6 +134,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <atomic>
 #include <cassert>
 #include <cerrno>
+#include <chrono>
 #include <cstdio>        // std::FILE, std::fprintf
 #include <cstring>       // std::strlen
 #include <cstdint>
@@ -208,6 +208,30 @@ namespace ipc = boost::interprocess;
 
 using sequence_counter_type = uint64_t;
 constexpr auto invalid_sequence = ~sequence_counter_type(0);
+
+#ifdef _WIN32
+class Scoped_timer_resolution {
+public:
+    explicit Scoped_timer_resolution(UINT period)
+        : m_period(period), m_active(::timeBeginPeriod(period) == TIMERR_NOERROR) {}
+
+    ~Scoped_timer_resolution()
+    {
+        if (m_active) {
+            ::timeEndPeriod(m_period);
+        }
+    }
+
+private:
+    UINT  m_period;
+    bool  m_active;
+};
+#else
+class Scoped_timer_resolution {
+public:
+    explicit Scoped_timer_resolution(unsigned int) {}
+};
+#endif
 
 #ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
 namespace ring_detail {
@@ -1047,7 +1071,6 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         std::atomic<uint32_t>                writer_pid{0};
         ipc::interprocess_mutex              ownership_mutex;
 
-#if SINTRA_RING_READING_POLICY != SINTRA_RING_READING_POLICY_ALWAYS_SPIN
         // The following synchronization structures may only be accessed between lock()/unlock().
 
         // An array (pool) of semaphores to synchronize reader wakeups. The writer posts these
@@ -1075,16 +1098,13 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         std::atomic_flag                     spinlock_flag = ATOMIC_FLAG_INIT;
         void lock()   { while (spinlock_flag.test_and_set(std::memory_order_acquire)) {} }
         void unlock() { spinlock_flag.clear(std::memory_order_release); }
-#endif
 
 
         Control()
         {
-#if SINTRA_RING_READING_POLICY != SINTRA_RING_READING_POLICY_ALWAYS_SPIN
             for (int i = 0; i < max_process_index; i++) { ready_stack   [i]  =  i; }
             for (int i = 0; i < max_process_index; i++) { sleeping_stack[i]  = -1; }
             for (int i = 0; i < max_process_index; i++) { unordered_stack[i] = -1; }
-#endif
 
             for (int i = 0; i < max_process_index; i++) { reading_sequences[i].data.v = invalid_sequence; }
             for (int i = 0; i < max_process_index; i++) { free_rs_stack[i] = i; }
@@ -1515,74 +1535,60 @@ struct Ring_R : Ring<T, true>
      */
     const Range<T> wait_for_new_data()
     {
-        // Check for shutdown signal before blocking
-        if (m_stopping.load(std::memory_order_acquire)) {
-            return Range<T>{};  // Return empty range to signal shutdown
+        auto sequences_equal = [&]() {
+            return m_reading_sequence->load(std::memory_order_acquire) ==
+                   c.leading_sequence.load(std::memory_order_acquire);
+        };
+
+        auto should_shutdown = [&]() {
+            return m_stopping.load(std::memory_order_acquire);
+        };
+
+        if (should_shutdown()) {
+            return Range<T>{};
         }
 
-#if SINTRA_RING_READING_POLICY == SINTRA_RING_READING_POLICY_ALWAYS_SPIN
-        while (m_reading_sequence->load(std::memory_order_acquire) == c.leading_sequence.load(std::memory_order_acquire)) {
-            // Check for shutdown during spin
-            if (m_stopping.load(std::memory_order_acquire)) {
+        // Phase 1 — fast spin: aggressively poll for a very short window to
+        // deliver sub-100µs wakeups when the writer is still active.
+        const double fast_spin_end = get_wtime() + fast_spin_duration;
+        while (sequences_equal() && get_wtime() < fast_spin_end) {
+            if (should_shutdown()) {
                 return Range<T>{};
             }
         }
 
-#elif SINTRA_RING_READING_POLICY == SINTRA_RING_READING_POLICY_ADAPTIVE
-        // Phase 1: Fast spin for ultra-low latency (~50μs)
-        double fast_spin_end = get_wtime() + fast_spin_duration;
-        while (m_reading_sequence->load(std::memory_order_acquire) == c.leading_sequence.load(std::memory_order_acquire) && get_wtime() < fast_spin_end) {
-            if (m_stopping.load(std::memory_order_acquire)) {
-                return Range<T>{};
-            }
-        }
-
-        // Phase 2: Precision sleep cycles (1ms) for moderate latency with low CPU
-        if (m_reading_sequence->load() == c.leading_sequence.load()) {
-#ifdef _WIN32
-            ::timeBeginPeriod(1);
-#endif
-            double precision_sleep_end = get_wtime() + precision_sleep_duration;
-            while (m_reading_sequence->load(std::memory_order_acquire) == c.leading_sequence.load(std::memory_order_acquire) && get_wtime() < precision_sleep_end) {
-                if (m_stopping.load(std::memory_order_acquire)) {
-#ifdef _WIN32
-                    ::timeEndPeriod(1);
-#endif
+        if (sequences_equal()) {
+            // Phase 2 — precision sleeps: yield the CPU in 1ms slices while
+            // still polling at a high enough cadence to catch bursts quickly.
+            Scoped_timer_resolution timer_resolution_guard(1);
+            const double precision_sleep_end = get_wtime() + precision_sleep_duration;
+            while (sequences_equal() && get_wtime() < precision_sleep_end) {
+                if (should_shutdown()) {
                     return Range<T>{};
                 }
-                // Early exit on durable global unblock (no data pending)
                 const auto seq_now = c.global_unblock_sequence.load(std::memory_order_acquire);
                 if (seq_now != m_seen_unblock_sequence) {
                     m_seen_unblock_sequence = seq_now;
-#ifdef _WIN32
-                    ::timeEndPeriod(1);
-#endif
                     return Range<T>{};
                 }
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                std::this_thread::sleep_for(std::chrono::duration<double>(precision_sleep_cycle));
             }
-#ifdef _WIN32
-            ::timeEndPeriod(1);
-#endif
         }
 
-        // Phase 3: True blocking sleep (semaphore wait) if still no data after precision sleep
-        if (m_reading_sequence->load() == c.leading_sequence.load()) {
-            if (m_reading_sequence->load(std::memory_order_acquire) ==
-                c.leading_sequence.load(std::memory_order_acquire))
-            {
-                const uint64_t unblock_sequence_now =
-                    c.global_unblock_sequence.load(std::memory_order_acquire);
-                if (unblock_sequence_now != m_seen_unblock_sequence) {
-                    m_seen_unblock_sequence = unblock_sequence_now;
-                    return Range<T>{};
-                }
+        if (sequences_equal()) {
+            // Phase 3 — blocking wait: fully park on the semaphore to avoid
+            // burning CPU when the writer is stalled for long periods.
+            const auto unblock_sequence_now =
+                c.global_unblock_sequence.load(std::memory_order_acquire);
+            if (unblock_sequence_now != m_seen_unblock_sequence) {
+                m_seen_unblock_sequence = unblock_sequence_now;
+                return Range<T>{};
             }
 
             c.lock();
             m_sleepy_index.store(-1, std::memory_order_relaxed);
-            if (m_reading_sequence->load() == c.leading_sequence.load()) {
-                if (m_stopping.load(std::memory_order_acquire)) {
+            if (sequences_equal()) {
+                if (should_shutdown()) {
                     c.unlock();
                     return Range<T>{};
                 }
@@ -1590,7 +1596,7 @@ struct Ring_R : Ring<T, true>
                 m_sleepy_index.store(sleepy, std::memory_order_release);
                 c.sleeping_stack[c.num_sleeping++] = sleepy;
             }
-            const uint64_t unblock_sequence_after =
+            const auto unblock_sequence_after =
                 c.global_unblock_sequence.load(std::memory_order_acquire);
             if (unblock_sequence_after != m_seen_unblock_sequence) {
                 m_seen_unblock_sequence = unblock_sequence_after;
@@ -1609,7 +1615,7 @@ struct Ring_R : Ring<T, true>
 
             int sleepy_index = m_sleepy_index.load(std::memory_order_acquire);
             if (sleepy_index >= 0) {
-                if (m_stopping.load(std::memory_order_acquire)) {
+                if (should_shutdown()) {
                     c.lock();
                     if (m_sleepy_index.load(std::memory_order_acquire) >= 0) {
                         c.dirty_semaphores[sleepy_index].post_unordered();
@@ -1617,7 +1623,7 @@ struct Ring_R : Ring<T, true>
                     c.unlock();
                 }
 
-                if (c.dirty_semaphores[sleepy_index].wait()) {
+                if (c.dirty_semaphores[sleepy_index].wait()) { // unordered wake
                     c.lock();
                     c.unordered_stack[c.num_unordered++] = sleepy_index;
                     c.unlock();
@@ -1629,93 +1635,11 @@ struct Ring_R : Ring<T, true>
                 }
                 m_sleepy_index.store(-1, std::memory_order_release);
 
-                if (m_stopping.load(std::memory_order_acquire)) {
+                if (should_shutdown()) {
                     return Range<T>{};
                 }
             }
         }
-
-#else // HYBRID or ALWAYS_SLEEP
-    #if SINTRA_RING_READING_POLICY == SINTRA_RING_READING_POLICY_HYBRID
-        double tl = get_wtime() + spin_before_sleep * 0.5;
-        while (m_reading_sequence->load(std::memory_order_acquire) == c.leading_sequence.load(std::memory_order_acquire) && get_wtime() < tl) {
-            // Check for shutdown during spin phase
-            if (m_stopping.load(std::memory_order_acquire)) {
-                return Range<T>{};
-            }
-        }
-    #endif
-
-        // Transition to sleeping if still no data
-        if (m_reading_sequence->load(std::memory_order_acquire) ==
-            c.leading_sequence.load(std::memory_order_acquire))
-        {
-            const uint64_t unblock_sequence_now =
-                c.global_unblock_sequence.load(std::memory_order_acquire);
-            if (unblock_sequence_now != m_seen_unblock_sequence) {
-                m_seen_unblock_sequence = unblock_sequence_now;
-                return Range<T>{};
-            }
-        }
-
-        c.lock();
-        m_sleepy_index.store(-1, std::memory_order_relaxed);
-        if (m_reading_sequence->load() == c.leading_sequence.load()) {
-            // Check for shutdown before registering as sleeping
-            if (m_stopping.load(std::memory_order_acquire)) {
-                c.unlock();
-                return Range<T>{};
-            }
-            int sleepy = c.ready_stack[--c.num_ready];
-            m_sleepy_index.store(sleepy, std::memory_order_release);
-            c.sleeping_stack[c.num_sleeping++] = sleepy;
-        }
-        const uint64_t unblock_sequence_after =
-            c.global_unblock_sequence.load(std::memory_order_acquire);
-        if (unblock_sequence_after != m_seen_unblock_sequence) {
-            m_seen_unblock_sequence = unblock_sequence_after;
-            const int sleepy = m_sleepy_index.load(std::memory_order_relaxed);
-            if (sleepy >= 0) {
-                if (c.num_sleeping > 0 && c.sleeping_stack[c.num_sleeping - 1] == sleepy) {
-                    c.sleeping_stack[--c.num_sleeping] = -1;
-                }
-                c.ready_stack[c.num_ready++] = sleepy;
-                m_sleepy_index.store(-1, std::memory_order_release);
-            }
-            c.unlock();
-            return Range<T>{};
-        }
-        c.unlock();
-
-        int sleepy_index = m_sleepy_index.load(std::memory_order_acquire);
-        if (sleepy_index >= 0) {
-            // Shutdown could have been signaled after we registered but before waiting.
-            if (m_stopping.load(std::memory_order_acquire)) {
-                c.lock();
-                if (m_sleepy_index.load(std::memory_order_acquire) >= 0) {
-                    c.dirty_semaphores[sleepy_index].post_unordered();
-                }
-                c.unlock();
-            }
-
-            if (c.dirty_semaphores[sleepy_index].wait()) { // unordered wake
-                c.lock();
-                c.unordered_stack[c.num_unordered++] = sleepy_index;
-                c.unlock();
-            }
-            else {
-                c.lock();
-                c.ready_stack[c.num_ready++] = sleepy_index;
-                c.unlock();
-            }
-            m_sleepy_index.store(-1, std::memory_order_release);
-
-            // Check for shutdown after waking from semaphore
-            if (m_stopping.load(std::memory_order_acquire)) {
-                return Range<T>{};
-            }
-        }
-#endif
 
         if (c.reading_sequences[m_rs_index].data.has_guard.load(std::memory_order_acquire) == 0) {
             reattach_after_eviction();
@@ -1788,14 +1712,12 @@ struct Ring_R : Ring<T, true>
      */
     void unblock_local()
     {
-#if SINTRA_RING_READING_POLICY != SINTRA_RING_READING_POLICY_ALWAYS_SPIN
         c.lock();
         int sleepy = m_sleepy_index.load(std::memory_order_acquire);
         if (sleepy >= 0) {
             c.dirty_semaphores[sleepy].post_unordered();
         }
         c.unlock();
-#endif
     }
 
     void request_stop()
@@ -1941,7 +1863,6 @@ struct Ring_W : Ring<T, false>
      */
     sequence_counter_type done_writing()
     {
-#if SINTRA_RING_READING_POLICY != SINTRA_RING_READING_POLICY_ALWAYS_SPIN
         c.lock();
         assert(m_writing_thread_index.load(std::memory_order_relaxed) == thread_index());
         c.leading_sequence.store(m_pending_new_sequence);
@@ -1954,9 +1875,6 @@ struct Ring_W : Ring<T, false>
             c.ready_stack[c.num_ready++] = c.unordered_stack[--c.num_unordered];
         }
         c.unlock();
-#else
-        c.leading_sequence.store(m_pending_new_sequence);
-#endif
         m_writing_thread_index.store(0, std::memory_order_release);
         return m_pending_new_sequence;
     }
@@ -1967,7 +1885,6 @@ struct Ring_W : Ring<T, false>
      */
     void unblock_global()
     {
-#if SINTRA_RING_READING_POLICY != SINTRA_RING_READING_POLICY_ALWAYS_SPIN
         c.global_unblock_sequence.fetch_add(1, std::memory_order_acq_rel);
 
         c.lock();
@@ -1979,7 +1896,6 @@ struct Ring_W : Ring<T, false>
             c.ready_stack[c.num_ready++] = c.unordered_stack[--c.num_unordered];
         }
         c.unlock();
-#endif
     }
 
     /**
