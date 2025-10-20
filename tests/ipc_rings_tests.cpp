@@ -414,7 +414,6 @@ TEST_CASE(test_reader_eviction_does_not_underflow_octile_counter)
         }
         std::this_thread::yield();
     }
-    ASSERT_TRUE(guard_observed);
 
     guard_ready.store(true, std::memory_order_release);
 
@@ -428,7 +427,6 @@ TEST_CASE(test_reader_eviction_does_not_underflow_octile_counter)
         }
         std::this_thread::yield();
     }
-    ASSERT_TRUE(eviction_observed);
 
     reader_thread.join();
 
@@ -443,6 +441,8 @@ TEST_CASE(test_reader_eviction_does_not_underflow_octile_counter)
 
     reader.done_reading();
 
+    ASSERT_TRUE(guard_observed);
+    ASSERT_TRUE(eviction_observed);
     ASSERT_EQ(0u, guard_count);
 }
 
