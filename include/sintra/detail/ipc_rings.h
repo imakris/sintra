@@ -1759,12 +1759,15 @@ struct Ring_R : Ring<T, true>
 
         auto& slot = c.reading_sequences[m_rs_index].data;
         const bool had_guard = slot.has_guard.load(std::memory_order_acquire) != 0;
+        // Reserve a non-zero sentinel so writers that expect value==1 cannot evict
+        // us while the trailing mask update is in flight.
+        constexpr uint8_t guard_in_transition = 2;
         bool guard_confirmed = false;
         if (had_guard) {
             uint8_t expected = 1;
             guard_confirmed = slot.has_guard.compare_exchange_strong(
                 expected,
-                uint8_t{0},
+                guard_in_transition,
                 std::memory_order_acq_rel,
                 std::memory_order_acquire);
         }
