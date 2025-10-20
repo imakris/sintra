@@ -1521,6 +1521,17 @@ struct Ring_R : Ring<T, true>
             return m_stopping.load(std::memory_order_acquire);
         };
 
+        auto handle_global_unblock = [&](std::memory_order order) {
+            const auto seq_now = c.global_unblock_sequence.load(order);
+            if (seq_now != m_seen_unblock_sequence) {
+                m_seen_unblock_sequence = seq_now;
+                if (sequences_equal()) {
+                    return true;
+                }
+            }
+            return false;
+        };
+
         if (should_shutdown()) {
             return Range<T>{};
         }
@@ -1543,9 +1554,7 @@ struct Ring_R : Ring<T, true>
                 if (should_shutdown()) {
                     return Range<T>{};
                 }
-                const auto seq_now = c.global_unblock_sequence.load(std::memory_order_acquire);
-                if (seq_now != m_seen_unblock_sequence) {
-                    m_seen_unblock_sequence = seq_now;
+                if (handle_global_unblock(std::memory_order_acquire)) {
                     return Range<T>{};
                 }
                 std::this_thread::sleep_for(std::chrono::duration<double>(precision_sleep_cycle));
@@ -1555,10 +1564,7 @@ struct Ring_R : Ring<T, true>
         if (sequences_equal()) {
             // Phase 3 — blocking wait: fully park on the semaphore to avoid
             // burning CPU when the writer is stalled for long periods.
-            const auto unblock_sequence_now =
-                c.global_unblock_sequence.load(std::memory_order_acquire);
-            if (unblock_sequence_now != m_seen_unblock_sequence) {
-                m_seen_unblock_sequence = unblock_sequence_now;
+            if (handle_global_unblock(std::memory_order_acquire)) {
                 return Range<T>{};
             }
 
@@ -1573,10 +1579,7 @@ struct Ring_R : Ring<T, true>
                 m_sleepy_index.store(sleepy, std::memory_order_release);
                 c.sleeping_stack[c.num_sleeping++] = sleepy;
             }
-            const auto unblock_sequence_after =
-                c.global_unblock_sequence.load(std::memory_order_acquire);
-            if (unblock_sequence_after != m_seen_unblock_sequence) {
-                m_seen_unblock_sequence = unblock_sequence_after;
+            if (handle_global_unblock(std::memory_order_acquire)) {
                 const int sleepy = m_sleepy_index.load(std::memory_order_relaxed);
                 if (sleepy >= 0) {
                     if (c.num_sleeping > 0 && c.sleeping_stack[c.num_sleeping - 1] == sleepy) {
