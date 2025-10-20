@@ -705,29 +705,50 @@ def main():
 
         # Print suite results
         suite_duration = time.time() - suite_start_time
+        def format_test_name(test_name):
+            """Format the raw test name for display in the summary table."""
+
+            formatted = test_name
+            if formatted.startswith("sintra_"):
+                formatted = formatted[len("sintra_"):]
+
+            if formatted.startswith("ipc_rings_tests_"):
+                formatted = formatted.replace("_release_adaptive", "_release", 1)
+
+            return formatted
+
+        def sort_key(test_name):
+            formatted = format_test_name(test_name)
+            if formatted.startswith("dummy_test"):
+                group = 0
+            elif formatted.startswith("ipc_rings_tests"):
+                group = 1
+            else:
+                group = 2
+            return group, formatted
+
         print(f"\n{Color.BOLD}Results for {config_name}:{Color.RESET}")
-        test_names = sorted(accumulated_results.keys())
-        test_col_width = max([len(name) for name in test_names] + [4]) + 2
+
+        ordered_test_names = sorted(accumulated_results.keys(), key=sort_key)
+        formatted_names = [format_test_name(name) for name in ordered_test_names]
+
+        test_col_width = max([len(name) for name in formatted_names] + [4]) + 2
         passrate_col_width = 20
         avg_runtime_col_width = 17
-        failures_col_width = 10
 
         header_fmt = (
             f"{{:<{test_col_width}}}"
             f" {{:>{passrate_col_width}}}"
             f" {{:>{avg_runtime_col_width}}}"
-            f" {{:>{failures_col_width}}}"
         )
         row_fmt = header_fmt
-        table_width = (
-            test_col_width + passrate_col_width + avg_runtime_col_width + failures_col_width + 3
-        )
+        table_width = test_col_width + passrate_col_width + avg_runtime_col_width + 2
 
         print("=" * table_width)
-        print(header_fmt.format('Test', 'Pass rate', 'Avg runtime (s)', 'Failures'))
+        print(header_fmt.format('Test', 'Pass rate', 'Avg runtime (s)'))
         print("=" * table_width)
 
-        for test_name in test_names:
+        for test_name, display_name in zip(ordered_test_names, formatted_names):
             passed = accumulated_results[test_name]['passed']
             failed = accumulated_results[test_name]['failed']
             total = passed + failed
@@ -737,9 +758,8 @@ def main():
             avg_duration = sum(durations) / len(durations) if durations else 0
 
             pass_rate_str = f"{passed}/{total} ({pass_rate:6.2f}%)"
-            failure_count = len(accumulated_results[test_name]['failures'])
             avg_duration_str = f"{avg_duration:.2f}"
-            print(row_fmt.format(test_name, pass_rate_str, avg_duration_str, failure_count))
+            print(row_fmt.format(display_name, pass_rate_str, avg_duration_str))
 
         print("=" * table_width)
         print(f"Suite duration: {format_duration(suite_duration)}")
