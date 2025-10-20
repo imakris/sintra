@@ -1764,14 +1764,9 @@ struct Ring_R : Ring<T, true>
             uint8_t expected = 1;
             guard_confirmed = slot.has_guard.compare_exchange_strong(
                 expected,
-                uint8_t{1},
+                uint8_t{0},
                 std::memory_order_acq_rel,
                 std::memory_order_acquire);
-#ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
-            if (guard_confirmed) {
-                slot.status.store(Ring<T, true>::READER_STATE_ACTIVE, std::memory_order_release);
-            }
-#endif
         }
 
         if (new_trailing_octile != m_trailing_octile) {
@@ -1780,7 +1775,8 @@ struct Ring_R : Ring<T, true>
             if (guard_confirmed) {
                 const uint64_t old_mask = uint64_t(1) << (8 * m_trailing_octile);
                 c.read_access.fetch_add(new_mask, std::memory_order_acq_rel);
-                slot.trailing_octile.store(static_cast<uint8_t>(new_trailing_octile), std::memory_order_relaxed);
+                slot.trailing_octile.store(
+                    static_cast<uint8_t>(new_trailing_octile), std::memory_order_relaxed);
                 c.read_access.fetch_sub(old_mask, std::memory_order_acq_rel);
             }
             else {
@@ -1800,6 +1796,13 @@ struct Ring_R : Ring<T, true>
             // Same octile but evicted: reacquire the guard
             const uint64_t mask = uint64_t(1) << (8 * m_trailing_octile);
             c.read_access.fetch_add(mask, std::memory_order_acq_rel);
+            slot.has_guard.store(1, std::memory_order_release);
+#ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
+            slot.status.store(Ring<T, true>::READER_STATE_ACTIVE, std::memory_order_release);
+#endif
+        }
+
+        if (guard_confirmed) {
             slot.has_guard.store(1, std::memory_order_release);
 #ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
             slot.status.store(Ring<T, true>::READER_STATE_ACTIVE, std::memory_order_release);
