@@ -14,8 +14,9 @@
 //   2. pong_slot: Responds to Pong with Ping
 //   3. benchmarking_slot: Counts messages and triggers completion
 //
-// The test sends an initial Ping and waits for 1000 ping-pong cycles
-// to complete within a 5-second timeout.
+// The test sends an initial Ping and waits for 10'000 ping-pong cycles
+// to complete within a 5-second timeout while periodically yielding to
+// encourage scheduler churn.
 //
 
 #include <sintra/sintra.h>
@@ -23,6 +24,7 @@
 #include <atomic>
 #include <chrono>
 #include <future>
+#include <thread>
 
 struct Ping {};
 struct Pong {};
@@ -31,7 +33,7 @@ int main(int argc, char* argv[])
 {
     sintra::init(argc, argv);
 
-    constexpr int kTargetPingCount = 1000;
+    constexpr int kTargetPingCount = 10000;
     std::atomic<int> ping_count{0};
     std::atomic<bool> done{false};
     std::promise<void> done_promise;
@@ -61,6 +63,9 @@ int main(int argc, char* argv[])
             if (done.compare_exchange_strong(expected, true)) {
                 done_promise.set_value();
             }
+        }
+        else if ((count % 256) == 0) {
+            std::this_thread::yield();
         }
     };
 
