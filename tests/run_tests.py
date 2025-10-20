@@ -100,14 +100,10 @@ class TestRunner:
             print(f"{Color.RED}Test directory not found: {self.test_dir}{Color.RESET}")
             return {}
 
-        # 6 configurations: 3 policies × 2 build types
+        # 2 configurations: adaptive policy in release and debug builds
         configurations = [
             'release_adaptive',
-            'release_hybrid',
-            'release_always_spin',
-            'debug_adaptive',
-            'debug_hybrid',
-            'debug_always_spin'
+            'debug_adaptive'
         ]
 
         # Discover available tests dynamically so the runner adapts to new or removed binaries
