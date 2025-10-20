@@ -132,16 +132,19 @@ class TestRunner:
 
                 base_name = normalized_name[:-len(suffix)]
 
-                if not self._matches_filters(
+                invocations = self._expand_test_invocations(entry, base_name, normalized_name)
+                if not invocations:
+                    break
+
+                invocations = self._filter_invocations(
+                    invocations,
                     base_name,
                     normalized_name,
                     test_name,
                     include_patterns,
                     exclude_patterns,
-                ):
-                    break
+                )
 
-                invocations = self._expand_test_invocations(entry, base_name, normalized_name)
                 if invocations:
                     discovered_tests[config].extend(invocations)
                 break
@@ -173,38 +176,46 @@ class TestRunner:
         return test_suites
 
     @staticmethod
-    def _matches_filters(
+    def _filter_invocations(
+        invocations: List[TestInvocation],
         base_name: str,
         normalized_name: str,
         test_name: Optional[str],
         include_patterns: Optional[List[str]],
         exclude_patterns: Optional[List[str]],
-    ) -> bool:
-        """Determine if a test name should be included based on provided filters."""
+    ) -> List[TestInvocation]:
+        """Filter expanded invocations using the provided criteria."""
 
-        candidate_names = [base_name, normalized_name]
+        if not any([test_name, include_patterns, exclude_patterns]):
+            return invocations
 
-        if test_name and all(test_name not in name for name in candidate_names):
-            return False
+        filtered: List[TestInvocation] = []
 
-        if include_patterns:
-            include_match = any(
-                fnmatch.fnmatch(name, pattern)
-                for pattern in include_patterns
-                for name in candidate_names
-            )
-            if not include_match:
-                return False
+        for invocation in invocations:
+            candidate_names = [base_name, normalized_name, invocation.name]
 
-        if exclude_patterns:
-            if any(
+            if test_name and all(test_name not in name for name in candidate_names):
+                continue
+
+            if include_patterns:
+                include_match = any(
+                    fnmatch.fnmatch(name, pattern)
+                    for pattern in include_patterns
+                    for name in candidate_names
+                )
+                if not include_match:
+                    continue
+
+            if exclude_patterns and any(
                 fnmatch.fnmatch(name, pattern)
                 for pattern in exclude_patterns
                 for name in candidate_names
             ):
-                return False
+                continue
 
-        return True
+            filtered.append(invocation)
+
+        return filtered
 
     def _expand_test_invocations(
         self,
@@ -656,13 +667,15 @@ def main():
         max_reps_per_test = args.repetitions
         suite_all_passed = True
         batch_size = 1
+        detailed_progress = max_reps_per_test <= 200
 
         while total_reps_so_far < max_reps_per_test:
             reps_in_this_round = min(batch_size, max_reps_per_test - total_reps_so_far)
             print(f"\n{Color.BLUE}--- Round: {reps_in_this_round} repetition(s) ---{Color.RESET}")
 
             for i in range(reps_in_this_round):
-                print(f"  Rep {i + 1}/{reps_in_this_round}: ", end="", flush=True)
+                if detailed_progress:
+                    print(f"  Rep {i + 1}/{reps_in_this_round}: ", end="", flush=True)
                 for invocation in tests:
                     test_name = invocation.name
                     result = runner.run_test_once(invocation)
@@ -673,7 +686,8 @@ def main():
 
                     if result.success:
                         result_bucket['passed'] += 1
-                        print(f"{Color.GREEN}.{Color.RESET}", end="", flush=True)
+                        if detailed_progress:
+                            print(f"{Color.GREEN}.{Color.RESET}", end="", flush=True)
                     else:
                         result_bucket['failed'] += 1
                         suite_all_passed = False
@@ -691,13 +705,24 @@ def main():
                             'message': first_line,
                         })
 
-                        print(f"{Color.RED}F{Color.RESET}", end="", flush=True)
+                        if detailed_progress:
+                            print(f"{Color.RED}F{Color.RESET}", end="", flush=True)
+                        else:
+                            print(
+                                f"  {Color.RED}Failure in repetition {total_reps_so_far + i + 1} for {test_name}:{Color.RESET} {first_line}"
+                            )
 
-                print()
+                if detailed_progress:
+                    print()
                 if not suite_all_passed:
                     break
 
             total_reps_so_far += reps_in_this_round
+            if not detailed_progress and suite_all_passed:
+                print(
+                    f"  Completed {total_reps_so_far}/{max_reps_per_test} repetitions without failures",
+                    flush=True,
+                )
             if not suite_all_passed:
                 break
 
