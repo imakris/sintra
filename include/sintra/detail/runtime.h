@@ -227,8 +227,6 @@ inline bool finalize()
     s_mproc->unpublish_all_transceivers();
 
     s_mproc->pause();
-    s_mproc->join_threads();
-    s_mproc->cleanup();
 
     delete s_mproc;
     s_mproc = nullptr;
