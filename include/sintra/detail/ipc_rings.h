@@ -2145,7 +2145,15 @@ private:
                 }
 
                 if (!has_blocking_reader) {
-                    break;
+                    if (!(c.read_access.load(std::memory_order_acquire) & range_mask)) {
+                        break;
+                    }
+
+                    // A reader is in the process of moving its guard: the guard flag was observed but the
+                    // trailing octile has not yet been published. Keep spinning until the guard count drops
+                    // (or an eviction occurs) so that the writer never writes into an octile that is still
+                    // protected by a reader.
+                    continue;
                 }
 
                 // Busy-wait until the target octile is unguarded
