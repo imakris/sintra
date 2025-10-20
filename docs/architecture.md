@@ -402,21 +402,33 @@ Process A          Process B          Process C (Coordinator with group)
 
 ```cpp
 using instance_id_type = uint64_t;
+constexpr int  num_process_index_bits    = sintra::num_process_index_bits;      // 8 by default
+constexpr int  num_transceiver_index_bits = sizeof(instance_id_type) * 8 - num_process_index_bits;
+constexpr int  max_process_index         = sintra::max_process_index;          // 127 with defaults
+constexpr auto max_instance_index        = sintra::max_instance_index;
 
-// Encoding: [process_index : 48 bits][local_id : 16 bits]
 inline instance_id_type make_instance_id() {
-    static thread_local uint16_t counter = 0;
-    return (uint64_t(s_mproc->m_pid) << 16) | uint64_t(++counter);
-}
-
-inline uint64_t get_process_index(instance_id_type iid) {
-    return iid >> 16;
+    static std::atomic<uint64_t> instance_index_counter(2 + sintra::num_reserved_service_instances);
+    assert(instance_index_counter.load(std::memory_order_relaxed) < max_instance_index);
+    auto d = sintra::decompose_instance(s_mproc_id);
+    const auto index = static_cast<uint64_t>(instance_index_counter++);
+    return sintra::compose_instance(d.process, index);
 }
 ```
 
+* The **upper** `num_process_index_bits` encode the process slot together with complement/wildcard flags. The top bit is
+  reserved for the complement encoding, which is why `max_process_index` is smaller than `2^(num_process_index_bits)`.
+* The **lower** `num_transceiver_index_bits` track the transceiver within that process slot. Index `1` is reserved for the
+  `Managed_process` itself; other transceivers start at `2`.
+* Convenience constants (e.g. `any_local`, `any_remote`, `any_local_or_remote`) and helpers such as `compose_instance()` and
+  `decompose_instance()` provide ergonomic access to this bit layout.
+* `s_mproc_id` expands to the current process's sentinel instance ID via the runtime state helpers in `detail/globals.h`,
+  ensuring per-process counters stay anchored to the right slot.
+
 **Special IDs**:
-- `invalid_instance_id`: ~0ULL
-- `make_service_instance_id()`: process-unique ID for coordinator/system services
+- `invalid_instance_id = 0`
+- `make_service_instance_id()` – allocates service IDs from the reserved range attached to the local process slot
+- `make_process_instance_id()` – produces the per-process sentinel (`transceiver == 1`) used for membership tracking
 
 ### Type IDs
 
@@ -504,9 +516,9 @@ for (auto recipient : completion.recipients) {
 - **Process Management**: `include/sintra/detail/managed_process.h`
 - **Coordinator**: `include/sintra/detail/coordinator.h`, `coordinator_impl.h`
 - **Shutdown Semantics**: `docs/barriers_and_shutdown.md`
-- **Stall Investigation**: `docs/stalled_tests.md`
+- **Stress/Timeout Harness**: `tests/run_tests.py`
 
 ---
 
-**Version**: 2025-10-14 (Updated with shutdown race fixes)
+**Version**: 2024-05-01 (Barrier flush + recovery documentation refresh)
 **Maintainer**: Ioannis Makris
