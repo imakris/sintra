@@ -39,6 +39,13 @@ using instance_id_type = uint64_t;
 struct Managed_process;
 struct Coordinator;
 
+///\brief Stores process-wide runtime pointers shared by façade helpers.
+///
+/// The Sintra runtime is built around a per-process singleton that keeps track
+/// of the active managed process instance, the connected coordinator (if any),
+/// and their associated identifiers.  Having a single well-defined location for
+/// these pointers avoids global variables scattered across translation units
+/// and makes the façade headers easier to reason about.
 class runtime_state {
 public:
     static runtime_state& instance() noexcept
