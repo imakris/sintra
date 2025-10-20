@@ -6,6 +6,9 @@
 # Visual Studio workspace files
 /.vs/
 
+# Local CMake user presets
+CMakeUserPresets.json
+
 # Temporary debug output files
 *.txt
 !CMakeLists.txt
