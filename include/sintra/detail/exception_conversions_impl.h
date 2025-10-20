@@ -33,6 +33,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <filesystem>
 #include <future>
 #include <optional>
+#include <variant>
 #include <regex>
 #include <stdexcept>
 #include <string>

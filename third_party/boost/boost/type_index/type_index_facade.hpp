@@ -20,7 +20,6 @@
 #include <iosfwd>               // for std::basic_ostream
 
 #include <boost/config.hpp>
-#include <boost/container_hash/hash_fwd.hpp>
 #endif
 
 #ifdef BOOST_HAS_PRAGMA_ONCE
@@ -28,6 +27,27 @@
 #endif
 
 namespace boost { namespace typeindex {
+
+namespace detail {
+
+inline std::size_t hash_range(const char* first, const char* last) noexcept {
+    const std::size_t fnv_offset = sizeof(std::size_t) == 8
+        ? static_cast<std::size_t>(1469598103934665603ull)
+        : static_cast<std::size_t>(2166136261u);
+    const std::size_t fnv_prime = sizeof(std::size_t) == 8
+        ? static_cast<std::size_t>(1099511628211ull)
+        : static_cast<std::size_t>(16777619u);
+
+    std::size_t result = fnv_offset;
+    for (const char* it = first; it != last; ++it) {
+        result ^= static_cast<unsigned char>(*it);
+        result *= fnv_prime;
+    }
+
+    return result;
+}
+
+} // namespace detail
 
 BOOST_TYPE_INDEX_BEGIN_MODULE_EXPORT
 
@@ -102,11 +122,9 @@ public:
 
     /// \b Override: This function \b may be redefined in Derived class. Overrides \b must not throw.
     /// \return Hash code of a type. By default hashes types by raw_name().
-    /// \note Derived class header \b must include <boost/container_hash/hash.hpp>, \b unless this function is redefined in
-    /// Derived class to not use boost::hash_range().
     inline std::size_t hash_code() const noexcept {
         const char* const name_raw = derived().raw_name();
-        return boost::hash_range(name_raw, name_raw + std::strlen(name_raw));
+        return detail::hash_range(name_raw, name_raw + std::strlen(name_raw));
     }
 
 #if defined(BOOST_TYPE_INDEX_DOXYGEN_INVOKED)
@@ -277,7 +295,8 @@ inline std::basic_ostream<CharT, TriatT>& operator<<(
 #endif // BOOST_NO_IOSTREAM
 
 /// This free function is used by Boost's unordered containers.
-/// \note <boost/container_hash/hash.hpp> has to be included if this function is used.
+/// This overload relies on the same internal hashing logic as hash_code(), so no
+/// additional Boost headers are required.
 template <class Derived, class TypeInfo>
 inline std::size_t hash_value(const type_index_facade<Derived, TypeInfo>& lhs) noexcept {
     return static_cast<Derived const&>(lhs).hash_code();

@@ -29,7 +29,6 @@
 #include <cstring>
 #include <type_traits>
 
-#include <boost/container_hash/hash.hpp>
 #endif
 
 #ifdef BOOST_HAS_PRAGMA_ONCE
@@ -205,7 +204,7 @@ inline std::string ctti_type_index::pretty_name() const {
 
 
 inline std::size_t ctti_type_index::hash_code() const noexcept {
-    return boost::hash_range(raw_name(), raw_name() + get_raw_name_length());
+    return detail::hash_range(raw_name(), raw_name() + get_raw_name_length());
 }
 
 }} // namespace boost::typeindex
