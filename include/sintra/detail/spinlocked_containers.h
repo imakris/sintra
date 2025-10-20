@@ -23,9 +23,7 @@ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-#ifndef SINTRA_SPINLOCKED_CONTAINERS_H
-#define SINTRA_SPINLOCKED_CONTAINERS_H
-
+#pragma once
 
 // This file defines crippled spinlock-wrapped versions of common containers.
 // The only guarantee that these containers provide is that individual
@@ -239,4 +237,3 @@ using spinlocked_vector = detail::spinlocked<vector, T>;
 } // namespace sintra
 
 
-#endif

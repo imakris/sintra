@@ -23,8 +23,7 @@ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-#ifndef SINTRA_ID_TYPES_H
-#define SINTRA_ID_TYPES_H
+#pragma once
 
 #include "config.h"
 #include "globals.h"
@@ -345,4 +344,3 @@ instance_id_type process_of(instance_id_type iid)
 }
 
 
-#endif

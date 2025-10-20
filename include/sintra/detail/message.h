@@ -23,8 +23,7 @@ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-#ifndef SINTRA_MESSAGE_H
-#define SINTRA_MESSAGE_H
+#pragma once
 
 #include "id_types.h"
 #include "ipc_rings.h"
@@ -795,4 +794,3 @@ public:
 
 } // namespace sintra
 
-#endif

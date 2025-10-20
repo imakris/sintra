@@ -23,9 +23,7 @@ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-#ifndef SINTRA_TRANSCEIVER
-#define SINTRA_TRANSCEIVER
-
+#pragma once
 
 #include "globals.h"
 #include "id_types.h"
@@ -750,4 +748,3 @@ struct Outstanding_rpc_control
 } // sintra
 
 
-#endif
