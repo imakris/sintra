@@ -75,6 +75,9 @@ function(add_test_suite SUFFIX IS_DEBUG)
     add_executable(sintra_spawn_detached_test_${SUFFIX} spawn_detached_test.cpp)
     target_link_libraries(sintra_spawn_detached_test_${SUFFIX} PRIVATE ${LIB_TARGET})
 
+    add_executable(sintra_extreme_choreography_test_${SUFFIX} extreme_choreography_test.cpp)
+    target_link_libraries(sintra_extreme_choreography_test_${SUFFIX} PRIVATE ${LIB_TARGET})
+
 endfunction()
 
 # Build test suites for both build types using the adaptive policy
