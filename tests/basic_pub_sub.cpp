@@ -20,6 +20,7 @@
 #include <sintra/sintra.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
@@ -41,6 +42,24 @@
 namespace {
 
 constexpr std::string_view kEnvSharedDir = "SINTRA_TEST_SHARED_DIR";
+constexpr int kMessageRounds = 5;
+constexpr std::array<std::string_view, 4> kBaseStringMessages{
+    "good morning", "good afternoon", "good evening", "good night"};
+constexpr std::array<int, 4> kBaseIntMessages{1, 2, 3, 4};
+
+std::string format_string_message(std::string_view base, int round)
+{
+    std::string result(base);
+    result.append(" (round ");
+    result.append(std::to_string(round));
+    result.push_back(')');
+    return result;
+}
+
+int format_int_message(int base, int round)
+{
+    return base + (round * 10);
+}
 
 std::filesystem::path get_shared_directory()
 {
@@ -191,15 +210,14 @@ int process_sender()
 {
     sintra::barrier("slots-ready");
 
-    sintra::world() << std::string("good morning");
-    sintra::world() << std::string("good afternoon");
-    sintra::world() << std::string("good evening");
-    sintra::world() << std::string("good night");
-
-    sintra::world() << 1;
-    sintra::world() << 2;
-    sintra::world() << 3;
-    sintra::world() << 4;
+    for (int round = 0; round < kMessageRounds; ++round) {
+        for (auto base : kBaseStringMessages) {
+            sintra::world() << format_string_message(base, round);
+        }
+        for (int base : kBaseIntMessages) {
+            sintra::world() << format_int_message(base, round);
+        }
+    }
 
     sintra::barrier("messages-done");
     sintra::barrier("write-phase");
@@ -208,9 +226,21 @@ int process_sender()
     const auto strings = read_strings(shared_dir / "strings.txt");
     const auto ints = read_ints(shared_dir / "ints.txt");
 
-    const std::vector<std::string> expected_strings{
-        "good morning", "good afternoon", "good evening", "good night"};
-    const std::vector<int> expected_ints{1, 2, 3, 4};
+    std::vector<std::string> expected_strings;
+    expected_strings.reserve(kMessageRounds * kBaseStringMessages.size());
+    for (int round = 0; round < kMessageRounds; ++round) {
+        for (auto base : kBaseStringMessages) {
+            expected_strings.emplace_back(format_string_message(base, round));
+        }
+    }
+
+    std::vector<int> expected_ints;
+    expected_ints.reserve(kMessageRounds * kBaseIntMessages.size());
+    for (int round = 0; round < kMessageRounds; ++round) {
+        for (int base : kBaseIntMessages) {
+            expected_ints.push_back(format_int_message(base, round));
+        }
+    }
 
     const bool ok = (strings == expected_strings) && (ints == expected_ints);
     write_result(shared_dir, ok, strings, ints);
