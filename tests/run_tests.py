@@ -39,6 +39,56 @@ class Color:
     RESET = '\033[0m'
     BOLD = '\033[1m'
 
+
+# Tests that should receive additional repetition weight. The multiplier value
+# is applied on top of the global ``--repetitions`` argument.
+TEST_WEIGHT_OVERRIDES = {
+    # ipc_rings release stress tests
+    "ipc_rings_tests_release:stress:stress_attach_detach_readers": 20,
+    "ipc_rings_tests_release:stress:stress_multi_reader_throughput": 10,
+
+    # ipc_rings release unit tests
+    "ipc_rings_tests_release:unit:test_directory_helpers": 50,
+    "ipc_rings_tests_release:unit:test_get_ring_configurations_properties": 50,
+    "ipc_rings_tests_release:unit:test_mod_helpers": 50,
+    "ipc_rings_tests_release:unit:test_multiple_readers_see_same_data": 50,
+    "ipc_rings_tests_release:unit:test_reader_eviction_does_not_underflow_octile_counter": 3,
+    "ipc_rings_tests_release:unit:test_ring_write_read_single_reader": 50,
+    "ipc_rings_tests_release:unit:test_slow_reader_eviction_restores_status": 50,
+    "ipc_rings_tests_release:unit:test_snapshot_raii": 50,
+    "ipc_rings_tests_release:unit:test_streaming_reader_status_restored_after_eviction": 50,
+    "ipc_rings_tests_release:unit:test_wait_for_new_data": 50,
+
+    # Other release tests
+    "barrier_flush_test_release": 2,
+    "barrier_stress_test_release": 1,
+    "basic_pubsub_test_release": 3,
+    "ping_pong_multi_test_release": 1,
+    "ping_pong_test_release": 20,
+    "processing_fence_test_release": 2,
+    "recovery_test_release": 1,
+    "rpc_append_test_release": 10,
+    "spawn_detached_test_release": 3,
+}
+
+
+def _canonical_test_name(name: str) -> str:
+    """Return the canonical identifier used for weight lookups."""
+
+    canonical = name.strip()
+    if canonical.startswith("sintra_"):
+        canonical = canonical[len("sintra_"):]
+    if canonical.endswith("_adaptive"):
+        canonical = canonical[: -len("_adaptive")]
+    return canonical
+
+
+def _lookup_test_weight(name: str) -> int:
+    """Return the repetition weight for the provided test invocation."""
+
+    canonical = _canonical_test_name(name)
+    return TEST_WEIGHT_OVERRIDES.get(canonical, 1)
+
 def format_duration(seconds: float) -> str:
     """Format duration in human-readable format"""
     if seconds < 1:
@@ -692,19 +742,41 @@ def main():
             invocation.name: {'passed': 0, 'failed': 0, 'durations': [], 'failures': []}
             for invocation in tests
         }
-        total_reps_so_far = 0
-        max_reps_per_test = args.repetitions
+        test_weights = {invocation.name: _lookup_test_weight(invocation.name) for invocation in tests}
+        target_repetitions = {
+            name: max(args.repetitions * weight, 0)
+            for name, weight in test_weights.items()
+        }
+        remaining_repetitions = target_repetitions.copy()
         suite_all_passed = True
         batch_size = 1
 
-        while total_reps_so_far < max_reps_per_test:
-            reps_in_this_round = min(batch_size, max_reps_per_test - total_reps_so_far)
+        weighted_tests = [
+            (_canonical_test_name(name), weight, target_repetitions[name])
+            for name, weight in test_weights.items()
+            if weight != 1
+        ]
+        if weighted_tests:
+            print(f"  Weighted tests:")
+            for display_name, weight, total in sorted(weighted_tests):
+                print(f"    {display_name}: x{weight} -> {total} repetition(s)")
+
+        while True:
+            remaining_counts = [count for count in remaining_repetitions.values() if count > 0]
+            if not remaining_counts:
+                break
+
+            max_remaining = max(remaining_counts)
+            reps_in_this_round = min(batch_size, max_remaining)
             print(f"\n{Color.BLUE}--- Round: {reps_in_this_round} repetition(s) ---{Color.RESET}")
 
             for i in range(reps_in_this_round):
                 print(f"  Rep {i + 1}/{reps_in_this_round}: ", end="", flush=True)
                 for invocation in tests:
                     test_name = invocation.name
+                    if remaining_repetitions[test_name] <= 0:
+                        continue
+
                     result = runner.run_test_once(invocation)
 
                     accumulated_results[test_name]['durations'].append(result.duration)
@@ -733,15 +805,16 @@ def main():
 
                         print(f"{Color.RED}F{Color.RESET}", end="", flush=True)
 
+                    remaining_repetitions[test_name] -= 1
+
                 print()
                 if not suite_all_passed:
                     break
 
-            total_reps_so_far += reps_in_this_round
             if not suite_all_passed:
                 break
 
-            batch_size *= 2
+            batch_size = min(batch_size * 2, max_remaining)
 
         # Print suite results
         suite_duration = time.time() - suite_start_time
