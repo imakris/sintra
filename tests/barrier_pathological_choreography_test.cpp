@@ -349,7 +349,7 @@ int controller_process()
 
         for (int index : final_order) {
             const auto final_name = make_final_barrier_name(iteration, index);
-            sintra::barrier(final_name, "_sintra_all_processes");
+            sintra::barrier(final_name);
         }
 
         const auto final_processing = make_final_processing_name(iteration);
