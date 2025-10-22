@@ -63,6 +63,11 @@ function(add_test_suite SUFFIX IS_DEBUG)
         target_link_libraries(sintra_barrier_stress_test_${SUFFIX} PRIVATE winmm)
     endif()
 
+    add_executable(sintra_barrier_pathological_choreography_test_${SUFFIX}
+                   barrier_pathological_choreography_test.cpp)
+    target_link_libraries(sintra_barrier_pathological_choreography_test_${SUFFIX}
+                          PRIVATE ${LIB_TARGET})
+
     add_executable(sintra_processing_fence_test_${SUFFIX} processing_fence_test.cpp)
     target_link_libraries(sintra_processing_fence_test_${SUFFIX} PRIVATE ${LIB_TARGET})
 
