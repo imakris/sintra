@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <random>
 #include <string_view>
@@ -20,7 +21,7 @@ constexpr std::size_t kProcessCount = 4;
 // Keep the stress loop bounded so slower CI hosts (e.g. FreeBSD jails) still
 // show steady ctest progress. Hundreds of iterations remain enough to exercise
 // the synchronization paths without monopolizing the worker for minutes.
-constexpr std::size_t kIterations = 200;
+constexpr std::size_t kIterations = 220;
 
 std::atomic<int> worker_failures{0};
 std::atomic<int> coordinator_failures{0};
@@ -51,6 +52,8 @@ int worker_process(std::uint32_t worker_index)
     std::uniform_int_distribution<> delay_dist(0, 5);  // 0-5 microseconds
 
     try {
+        std::uint64_t last_seq = 0;
+        std::uint64_t last_alt_seq = 0;
         for (std::uint32_t iter = 0; iter < kIterations; ++iter) {
             // Add random tiny delay to increase chance of race conditions
             if (delay_dist(gen) == 0) {
@@ -58,13 +61,48 @@ int worker_process(std::uint32_t worker_index)
             }
 
             // Call barrier
+            if (((iter + worker_index) & 0x7) == 3) {
+                std::this_thread::sleep_for(std::chrono::microseconds(5));
+            }
+
             auto seq = barrier("stress-barrier");
 
             // Verify sequence is valid (non-zero)
-            if (seq == 0) {
-                std::fprintf(stderr, "Worker %u iter %u: got sequence 0!\n",
-                            worker_index, iter);
+            if (seq == 0 || seq <= last_seq) {
+                std::fprintf(stderr, "Worker %u iter %u: bad stress seq %llu after %llu!\n",
+                            worker_index, iter,
+                            static_cast<unsigned long long>(seq),
+                            static_cast<unsigned long long>(last_seq));
                 worker_failures++;
+            }
+            last_seq = seq;
+
+            if ((iter & 0x7) == 0) {
+                auto seq2 = barrier("stress-barrier");
+                if (seq2 == 0 || seq2 <= last_seq) {
+                    std::fprintf(stderr,
+                                 "Worker %u iter %u: repeated stress seq %llu after %llu!\n",
+                                 worker_index,
+                                 iter,
+                                 static_cast<unsigned long long>(seq2),
+                                 static_cast<unsigned long long>(last_seq));
+                    worker_failures++;
+                }
+                last_seq = seq2;
+            }
+
+            if ((iter & 0xF) == 0) {
+                auto alt_seq = barrier("stress-barrier-alt");
+                if (alt_seq == 0 || alt_seq <= last_alt_seq) {
+                    std::fprintf(stderr,
+                                 "Worker %u iter %u: bad alt seq %llu after %llu!\n",
+                                 worker_index,
+                                 iter,
+                                 static_cast<unsigned long long>(alt_seq),
+                                 static_cast<unsigned long long>(last_alt_seq));
+                    worker_failures++;
+                }
+                last_alt_seq = alt_seq;
             }
         }
     } catch (const std::exception& e) {
