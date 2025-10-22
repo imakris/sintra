@@ -313,20 +313,41 @@ TEST_CASE(test_wait_for_new_data)
     sintra::Ring_W<int> writer(tmp.str(), "ring_data", ring_elements);
     auto reader = std::make_shared<sintra::Ring_R<int>>(tmp.str(), "ring_data", ring_elements, (ring_elements * 3) / 4);
 
+    std::vector<int> payload{11, 12, 13, 14};
+    constexpr int iterations = 16;
+    const size_t total_expected = payload.size() * iterations;
+
     std::vector<int> observed;
+    observed.reserve(total_expected);
+    std::vector<int> expected;
+    expected.reserve(total_expected);
+
     std::atomic<bool> ready{false};
+    std::atomic<bool> writer_done{false};
     std::exception_ptr thread_error;
 
-    std::thread reader_thread([&]() {
+    std::thread reader_thread([&, total_expected]() {
         try {
             auto initial = reader->start_reading();
             ASSERT_EQ(static_cast<size_t>(initial.end - initial.begin), size_t(0));
             ready.store(true, std::memory_order_release);
 
-            auto range = reader->wait_for_new_data();
-            if (range.begin && range.begin != range.end) {
-                observed.assign(range.begin, range.end);
+            while (observed.size() < total_expected || !writer_done.load(std::memory_order_acquire)) {
+                auto range = reader->wait_for_new_data();
+                if (!range.begin || range.begin == range.end) {
+                    if (writer_done.load(std::memory_order_acquire) && observed.size() >= total_expected) {
+                        break;
+                    }
+                    continue;
+                }
+
+                size_t len = static_cast<size_t>(range.end - range.begin);
+                observed.insert(observed.end(), range.begin, range.begin + len);
                 reader->done_reading_new_data();
+
+                if (observed.size() >= total_expected) {
+                    break;
+                }
             }
             reader->done_reading();
         }
@@ -339,9 +360,18 @@ TEST_CASE(test_wait_for_new_data)
         std::this_thread::sleep_for(1ms);
     }
 
-    std::vector<int> payload{11, 12, 13, 14};
-    writer.write(payload.data(), payload.size());
-    writer.done_writing();
+    for (int iter = 0; iter < iterations; ++iter) {
+        for (size_t i = 0; i < payload.size(); ++i) {
+            payload[i] = 11 + static_cast<int>(i) + iter * 10;
+        }
+        expected.insert(expected.end(), payload.begin(), payload.end());
+
+        writer.write(payload.data(), payload.size());
+        writer.done_writing();
+        writer.unblock_global();
+    }
+
+    writer_done.store(true, std::memory_order_release);
     writer.unblock_global();
 
     reader_thread.join();
@@ -349,9 +379,9 @@ TEST_CASE(test_wait_for_new_data)
         std::rethrow_exception(thread_error);
     }
 
-    ASSERT_EQ(observed.size(), payload.size());
-    for (size_t i = 0; i < payload.size(); ++i) {
-        ASSERT_EQ(observed[i], payload[i]);
+    ASSERT_EQ(observed.size(), expected.size());
+    for (size_t i = 0; i < expected.size(); ++i) {
+        ASSERT_EQ(observed[i], expected[i]);
     }
 }
 
