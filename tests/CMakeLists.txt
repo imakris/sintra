@@ -84,6 +84,9 @@ function(add_test_suite SUFFIX IS_DEBUG)
     add_executable(sintra_complex_choreography_test_${SUFFIX} complex_choreography_test.cpp)
     target_link_libraries(sintra_complex_choreography_test_${SUFFIX} PRIVATE ${LIB_TARGET})
 
+    add_executable(sintra_choreography_extreme_test_${SUFFIX} choreography_extreme_test.cpp)
+    target_link_libraries(sintra_choreography_extreme_test_${SUFFIX} PRIVATE ${LIB_TARGET})
+
 endfunction()
 
 # Build test suites for both build types using the adaptive policy
