@@ -609,10 +609,10 @@ int run_producer(int producer_index)
 
     int current_phase = -1;
     bool start_ready = false;
-    bool phase_complete = false;
     bool terminate_requested = false;
     int last_confirmed_round = -1;
     int announced_rounds = 0;
+    int completed_phase = -1;
 
     sintra::activate_slot([&](const PhaseAnnouncement& msg) {
         if (msg.phase < 0 || msg.phase >= kPhaseCount) {
@@ -623,7 +623,6 @@ int run_producer(int producer_index)
             std::lock_guard<std::mutex> lk(state_mutex);
             current_phase = msg.phase;
             start_ready = false;
-            phase_complete = false;
             terminate_requested = false;
             last_confirmed_round = -1;
             announced_rounds = msg.rounds;
@@ -652,10 +651,8 @@ int run_producer(int producer_index)
 
     sintra::activate_slot([&](const PhaseComplete& msg) {
         std::lock_guard<std::mutex> lk(state_mutex);
-        if (msg.phase == current_phase) {
-            phase_complete = true;
-            complete_cv.notify_all();
-        }
+        completed_phase = std::max(completed_phase, msg.phase);
+        complete_cv.notify_all();
     });
 
     sintra::activate_slot([&](const ChaosProbe& msg) {
@@ -703,7 +700,9 @@ int run_producer(int producer_index)
 
         {
             std::unique_lock<std::mutex> lk(state_mutex);
-            complete_cv.wait(lk, [&] { return terminate_requested || phase_complete; });
+            complete_cv.wait(lk, [&] {
+                return terminate_requested || completed_phase >= phase;
+            });
             if (terminate_requested) {
                 break;
             }
@@ -739,7 +738,7 @@ int process_chaos()
     int received_acks = 0;
     bool phase_ready = false;
     bool terminate_requested = false;
-    bool phase_complete = false;
+    int completed_phase = -1;
 
     sintra::activate_slot([&](const PhaseAnnouncement& msg) {
         if (msg.phase < 0 || msg.phase >= kPhaseCount) {
@@ -753,7 +752,6 @@ int process_chaos()
             expected_acks = msg.chaos_tokens * kProducerCount;
             received_acks = 0;
             phase_ready = false;
-            phase_complete = false;
             terminate_requested = false;
             send_ready = true;
         }
@@ -780,10 +778,8 @@ int process_chaos()
 
     sintra::activate_slot([&](const PhaseComplete& msg) {
         std::lock_guard<std::mutex> lk(state_mutex);
-        if (msg.phase == current_phase) {
-            phase_complete = true;
-            complete_cv.notify_all();
-        }
+        completed_phase = std::max(completed_phase, msg.phase);
+        complete_cv.notify_all();
     });
 
     sintra::activate_slot([&](const Terminate&) {
@@ -824,7 +820,9 @@ int process_chaos()
 
         {
             std::unique_lock<std::mutex> lk(state_mutex);
-            complete_cv.wait(lk, [&] { return terminate_requested || phase_complete; });
+            complete_cv.wait(lk, [&] {
+                return terminate_requested || completed_phase >= phase;
+            });
             if (terminate_requested) {
                 break;
             }
