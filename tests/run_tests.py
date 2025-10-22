@@ -44,31 +44,31 @@ class Color:
 # is applied on top of the global ``--repetitions`` argument.
 TEST_WEIGHT_OVERRIDES = {
     # ipc_rings release stress tests
-    "ipc_rings_tests_release:stress:stress_attach_detach_readers": 60,
-    "ipc_rings_tests_release:stress:stress_multi_reader_throughput": 30,
+    "ipc_rings_tests_release:stress:stress_attach_detach_readers": 200,
+    "ipc_rings_tests_release:stress:stress_multi_reader_throughput": 100,
 
     # ipc_rings release unit tests
-    "ipc_rings_tests_release:unit:test_directory_helpers": 150,
-    "ipc_rings_tests_release:unit:test_get_ring_configurations_properties": 150,
-    "ipc_rings_tests_release:unit:test_mod_helpers": 150,
-    "ipc_rings_tests_release:unit:test_multiple_readers_see_same_data": 150,
-    "ipc_rings_tests_release:unit:test_reader_eviction_does_not_underflow_octile_counter": 9,
-    "ipc_rings_tests_release:unit:test_ring_write_read_single_reader": 150,
-    "ipc_rings_tests_release:unit:test_slow_reader_eviction_restores_status": 150,
-    "ipc_rings_tests_release:unit:test_snapshot_raii": 150,
-    "ipc_rings_tests_release:unit:test_streaming_reader_status_restored_after_eviction": 150,
-    "ipc_rings_tests_release:unit:test_wait_for_new_data": 150,
+    "ipc_rings_tests_release:unit:test_directory_helpers": 500,
+    "ipc_rings_tests_release:unit:test_get_ring_configurations_properties": 500,
+    "ipc_rings_tests_release:unit:test_mod_helpers": 500,
+    "ipc_rings_tests_release:unit:test_multiple_readers_see_same_data": 500,
+    "ipc_rings_tests_release:unit:test_reader_eviction_does_not_underflow_octile_counter": 30,
+    "ipc_rings_tests_release:unit:test_ring_write_read_single_reader": 500,
+    "ipc_rings_tests_release:unit:test_slow_reader_eviction_restores_status": 500,
+    "ipc_rings_tests_release:unit:test_snapshot_raii": 500,
+    "ipc_rings_tests_release:unit:test_streaming_reader_status_restored_after_eviction": 500,
+    "ipc_rings_tests_release:unit:test_wait_for_new_data": 500,
 
     # Other release tests
-    "barrier_flush_test_release": 6,
-    "barrier_stress_test_release": 3,
-    "basic_pubsub_test_release": 9,
-    "ping_pong_multi_test_release": 3,
-    "ping_pong_test_release": 60,
-    "processing_fence_test_release": 6,
-    "recovery_test_release": 3,
-    "rpc_append_test_release": 30,
-    "spawn_detached_test_release": 9,
+    "barrier_flush_test_release": 20,
+    "barrier_stress_test_release": 10,
+    "basic_pubsub_test_release": 30,
+    "ping_pong_multi_test_release": 10,
+    "ping_pong_test_release": 200,
+    "processing_fence_test_release": 20,
+    "recovery_test_release": 10,
+    "rpc_append_test_release": 100,
+    "spawn_detached_test_release": 30,
 }
 
 
@@ -617,8 +617,8 @@ def main():
         description='Run Sintra tests with timeout and repetition support',
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument('--repetitions', type=int, default=300,
-                        help='Number of times to run each test (default: 300)')
+    parser.add_argument('--repetitions', type=int, default=1000,
+                        help='Number of times to run each test (default: 1000)')
     parser.add_argument('--timeout', type=float, default=5.0,
                         help='Timeout per test run in seconds (default: 5)')
     parser.add_argument('--test', type=str, default=None,
