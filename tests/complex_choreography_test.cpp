@@ -230,6 +230,7 @@ struct Aggregator_state
     std::array<bool, kWorkerCount> worker_seen{};
     int current_count = 0;
     std::uint64_t checksum_accumulator = 0;
+    std::uint64_t last_completed_token = 0;
 
     int errors = 0;
     std::vector<Round_result> completed_rounds;
@@ -254,6 +255,7 @@ void aggregator_phase_command_slot(const Phase_command& cmd)
     state.active_command = cmd;
     state.command_active = true;
     state.round_complete = false;
+    state.last_completed_token = 0;
     state.worker_seen.fill(false);
     state.current_count = 0;
     state.checksum_accumulator = 0;
@@ -309,6 +311,7 @@ void aggregator_worker_status_slot(const Worker_status& status)
             const auto active = state.active_command;
 
             state.round_complete = true;
+            state.last_completed_token = active.token;
             Round_result result;
             result.phase = active.phase;
             result.round = active.round;
@@ -359,7 +362,7 @@ void wait_for_round_completion(std::uint64_t token)
     auto& state = aggregator_state();
     std::unique_lock<std::mutex> lk(state.mutex);
     state.cv.wait(lk, [&] {
-        return (state.round_complete && state.active_command.token == token) ||
+        return (state.round_complete && state.last_completed_token == token) ||
                state.errors > 0;
     });
 }
