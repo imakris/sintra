@@ -478,7 +478,7 @@ int worker_process(int worker_index)
             if ((index + worker_index) % 2 == 0) {
                 std::this_thread::sleep_for(std::chrono::microseconds(3));
             }
-            sintra::barrier(final_name, "_sintra_all_processes");
+            sintra::barrier(final_name);
 
             StageReport final_after{worker_index, iteration, 3, index, 1};
             sintra::world() << final_after;
