@@ -63,10 +63,13 @@ function(add_test_suite SUFFIX IS_DEBUG)
         target_link_libraries(sintra_barrier_stress_test_${SUFFIX} PRIVATE winmm)
     endif()
 
-    add_executable(sintra_barrier_pathological_choreography_test_${SUFFIX}
-                   barrier_pathological_choreography_test.cpp)
-    target_link_libraries(sintra_barrier_pathological_choreography_test_${SUFFIX}
-                          PRIVATE ${LIB_TARGET})
+    # Disabled for release builds
+    if(IS_DEBUG)
+        add_executable(sintra_barrier_pathological_choreography_test_${SUFFIX}
+                       barrier_pathological_choreography_test.cpp)
+        target_link_libraries(sintra_barrier_pathological_choreography_test_${SUFFIX}
+                              PRIVATE ${LIB_TARGET})
+    endif()
 
     add_executable(sintra_processing_fence_test_${SUFFIX} processing_fence_test.cpp)
     target_link_libraries(sintra_processing_fence_test_${SUFFIX} PRIVATE ${LIB_TARGET})
@@ -89,11 +92,17 @@ function(add_test_suite SUFFIX IS_DEBUG)
     add_executable(sintra_complex_choreography_test_${SUFFIX} complex_choreography_test.cpp)
     target_link_libraries(sintra_complex_choreography_test_${SUFFIX} PRIVATE ${LIB_TARGET})
 
-    add_executable(sintra_choreography_extreme_test_${SUFFIX} choreography_extreme_test.cpp)
-    target_link_libraries(sintra_choreography_extreme_test_${SUFFIX} PRIVATE ${LIB_TARGET})
+    # Disabled for release builds
+    if(IS_DEBUG)
+        add_executable(sintra_choreography_extreme_test_${SUFFIX} choreography_extreme_test.cpp)
+        target_link_libraries(sintra_choreography_extreme_test_${SUFFIX} PRIVATE ${LIB_TARGET})
+    endif()
 
-    add_executable(sintra_complex_choreography_stress_test_${SUFFIX} complex_choreography_stress_test.cpp)
-    target_link_libraries(sintra_complex_choreography_stress_test_${SUFFIX} PRIVATE ${LIB_TARGET})
+    # Disabled for release builds
+    if(IS_DEBUG)
+        add_executable(sintra_complex_choreography_stress_test_${SUFFIX} complex_choreography_stress_test.cpp)
+        target_link_libraries(sintra_complex_choreography_stress_test_${SUFFIX} PRIVATE ${LIB_TARGET})
+    endif()
 
 endfunction()
 
