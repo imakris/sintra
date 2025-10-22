@@ -38,6 +38,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <sstream>
@@ -57,7 +58,7 @@
 namespace {
 
 constexpr std::string_view kEnvSharedDir = "SINTRA_COMPLEX_CHOREO_DIR";
-constexpr const char* kGroupName = "_sintra_complex_choreography";
+constexpr const char* kGroupName = "_sintra_external_processes";
 constexpr int kWorkerCount = 4;
 constexpr std::array<int, 4> kRoundsPerPhase = {3, 5, 4, 6};
 
@@ -230,7 +231,7 @@ struct Aggregator_state
     std::array<bool, kWorkerCount> worker_seen{};
     int current_count = 0;
     std::uint64_t checksum_accumulator = 0;
-    std::uint64_t last_completed_token = 0;
+    std::uint64_t last_completed_token = std::numeric_limits<std::uint64_t>::max();
 
     int errors = 0;
     std::vector<Round_result> completed_rounds;
@@ -255,7 +256,6 @@ void aggregator_phase_command_slot(const Phase_command& cmd)
     state.active_command = cmd;
     state.command_active = true;
     state.round_complete = false;
-    state.last_completed_token = 0;
     state.worker_seen.fill(false);
     state.current_count = 0;
     state.checksum_accumulator = 0;
@@ -362,8 +362,7 @@ void wait_for_round_completion(std::uint64_t token)
     auto& state = aggregator_state();
     std::unique_lock<std::mutex> lk(state.mutex);
     state.cv.wait(lk, [&] {
-        return (state.round_complete && state.last_completed_token == token) ||
-               state.errors > 0;
+        return state.last_completed_token == token || state.errors > 0;
     });
 }
 
