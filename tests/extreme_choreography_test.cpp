@@ -23,6 +23,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
@@ -99,6 +100,16 @@ enum class Actor : int {
     Monitor,
 };
 
+constexpr Actor operator+(Actor base, std::size_t offset) noexcept
+{
+    return static_cast<Actor>(static_cast<int>(base) + static_cast<int>(offset));
+}
+
+constexpr Actor operator+(Actor base, int offset) noexcept
+{
+    return static_cast<Actor>(static_cast<int>(base) + offset);
+}
+
 enum class FailureCode : int {
     UnexpectedPhaseStart = 1,
     SequenceOutOfRange,
@@ -114,48 +125,48 @@ enum class FailureCode : int {
 
 struct PhaseStart
 {
-    int phase{};
+    int phase;
 };
 
 struct Payload
 {
-    int phase{};
-    int producer{};
-    int sequence{};
+    int phase;
+    int producer;
+    int sequence;
 };
 
 struct Heartbeat
 {
-    int phase{};
-    int producer{};
-    int tick{};
+    int phase;
+    int producer;
+    int tick;
 };
 
 struct Ack
 {
-    int phase{};
-    int producer{};
-    int sequence{};
-    int consumer{};
+    int phase;
+    int producer;
+    int sequence;
+    int consumer;
 };
 
 struct PhaseFence
 {
-    int phase{};
+    int phase;
 };
 
 struct PhaseComplete
 {
-    int phase{};
-    int ack_count{};
+    int phase;
+    int ack_count;
 };
 
 struct FailureNotice
 {
-    int actor{};
-    int phase{};
-    int code{};
-    char message[96]{};
+    int actor;
+    int phase;
+    int code;
+    char message[96];
 };
 
 struct Stop
