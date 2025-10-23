@@ -239,12 +239,21 @@ int coordinator_process()
 
     Coordinator_state state;
 
+    const auto make_failure_message = [](std::uint32_t iteration, auto&& formatter) {
+        std::ostringstream oss;
+        oss << "iteration " << iteration << " (delay_fuzz_seed=" << iteration << "): ";
+        std::forward<decltype(formatter)>(formatter)(oss);
+        return oss.str();
+    };
+
     activate_slot([&](const StageReport& report) {
         if (report.stage >= state.stage_counts.size()) {
             std::lock_guard<std::mutex> lock(state.mutex);
             if (!state.failure) {
                 state.failure = true;
-                state.failure_reason = "stage index out of bounds";
+                state.failure_reason = make_failure_message(report.iteration, [&](std::ostringstream& oss) {
+                    oss << "stage index out of bounds (stage=" << report.stage << ')';
+                });
             }
             state.cv.notify_all();
             return;
@@ -253,7 +262,10 @@ int coordinator_process()
             std::lock_guard<std::mutex> lock(state.mutex);
             if (!state.failure) {
                 state.failure = true;
-                state.failure_reason = "iteration index out of bounds";
+                state.failure_reason = make_failure_message(report.iteration, [&](std::ostringstream& oss) {
+                    oss << "iteration index out of bounds (allowed range 0.." << (kIterations - 1)
+                        << ')';
+                });
             }
             state.cv.notify_all();
             return;
@@ -268,37 +280,51 @@ int coordinator_process()
         const std::size_t stage = report.stage;
         if (report.worker >= kExpectedPerStage[stage]) {
             state.failure = true;
-            state.failure_reason = "worker index out of bounds";
+            state.failure_reason = make_failure_message(report.iteration, [&](std::ostringstream& oss) {
+                oss << "worker index out of bounds for stage " << stage << " (worker="
+                    << report.worker << ", expected < " << kExpectedPerStage[stage] << ')';
+            });
             state.cv.notify_all();
             return;
         }
 
         if (state.worker_seen[stage][report.iteration][report.worker]) {
             state.failure = true;
-            state.failure_reason = "duplicate report from worker";
+            state.failure_reason = make_failure_message(report.iteration, [&](std::ostringstream& oss) {
+                oss << "duplicate report from stage " << stage << ", worker " << report.worker;
+            });
             state.cv.notify_all();
             return;
         }
 
-        if (expected_payload(stage, report.iteration, report.worker) != report.payload) {
+        const auto expected = expected_payload(stage, report.iteration, report.worker);
+        if (expected != report.payload) {
             state.failure = true;
-            state.failure_reason = "payload mismatch";
+            state.failure_reason = make_failure_message(report.iteration, [&](std::ostringstream& oss) {
+                oss << "payload mismatch for stage " << stage << ", worker " << report.worker
+                    << " (expected=" << expected << ", actual=" << report.payload << ')';
+            });
             state.cv.notify_all();
             return;
         }
 
         if (stage == 1 && !state.stage_b_release_sent[report.iteration]) {
             state.failure = true;
-            state.failure_reason = "stage B reported before release";
+            state.failure_reason = make_failure_message(report.iteration, [&](std::ostringstream& oss) {
+                oss << "stage B report received before release";
+            });
             state.cv.notify_all();
             return;
         }
 
         state.worker_seen[stage][report.iteration][report.worker] = true;
-        state.stage_counts[stage][report.iteration]++;
-        if (state.stage_counts[stage][report.iteration] > kExpectedPerStage[stage]) {
+        const auto count = ++state.stage_counts[stage][report.iteration];
+        if (count > kExpectedPerStage[stage]) {
             state.failure = true;
-            state.failure_reason = "too many reports for stage";
+            state.failure_reason = make_failure_message(report.iteration, [&](std::ostringstream& oss) {
+                oss << "too many reports for stage " << stage << " (received=" << count
+                    << ", expected=" << kExpectedPerStage[stage] << ')';
+            });
         }
         state.cv.notify_all();
     });
@@ -306,7 +332,8 @@ int coordinator_process()
     std::size_t iterations_completed = 0;
 
     for (std::uint32_t iteration = 0; iteration < kIterations; ++iteration) {
-        sintra::set_delay_fuzzing_run_index(iteration);
+        sintra::set_delay_fuzzing_seed(iteration);
+        const sintra::detail::delay_fuzz_scope fuzz_scope{true};
         const auto start_barrier = make_iteration_barrier_name("complex-start", iteration);
         barrier(start_barrier);
 
@@ -363,7 +390,8 @@ int coordinator_process()
     {
         std::lock_guard<std::mutex> lock(state.mutex);
         for (std::uint32_t iteration = 0; iteration < kIterations; ++iteration) {
-            sintra::set_delay_fuzzing_run_index(iteration);
+            sintra::set_delay_fuzzing_seed(iteration);
+            const sintra::detail::delay_fuzz_scope fuzz_scope{true};
             stage_a_total += state.stage_counts[0][iteration];
             stage_b_total += state.stage_counts[1][iteration];
         }
@@ -436,7 +464,8 @@ int stage_process(std::uint32_t stage, std::uint32_t worker_index)
     };
 
     for (std::uint32_t iteration = 0; iteration < kIterations; ++iteration) {
-        sintra::set_delay_fuzzing_run_index(iteration);
+        sintra::set_delay_fuzzing_seed(iteration);
+        const sintra::detail::delay_fuzz_scope fuzz_scope{true};
         const auto start_barrier = make_iteration_barrier_name("complex-start", iteration);
         barrier(start_barrier);
 
