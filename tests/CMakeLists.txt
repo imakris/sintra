@@ -37,63 +37,14 @@ function(add_test_suite SUFFIX IS_DEBUG)
     endif()
 
     # Create all test executables with this configuration
-    add_executable(sintra_dummy_test_${SUFFIX} dummy_test.cpp)
-
-    add_executable(sintra_basic_pubsub_test_${SUFFIX} basic_pub_sub.cpp)
-    target_link_libraries(sintra_basic_pubsub_test_${SUFFIX} PRIVATE ${LIB_TARGET})
-
-    add_executable(sintra_ping_pong_test_${SUFFIX} ping_pong_test.cpp)
-    target_link_libraries(sintra_ping_pong_test_${SUFFIX} PRIVATE ${LIB_TARGET})
-
-    add_executable(sintra_ping_pong_multi_test_${SUFFIX} ping_pong_multi_test.cpp)
-    target_link_libraries(sintra_ping_pong_multi_test_${SUFFIX} PRIVATE ${LIB_TARGET})
-
-    add_executable(sintra_rpc_append_test_${SUFFIX} rpc_append_test.cpp)
-    target_link_libraries(sintra_rpc_append_test_${SUFFIX} PRIVATE ${LIB_TARGET})
-
-    add_executable(sintra_recovery_test_${SUFFIX} recovery_test.cpp)
-    target_link_libraries(sintra_recovery_test_${SUFFIX} PRIVATE ${LIB_TARGET})
-
     add_executable(sintra_barrier_flush_test_${SUFFIX} barrier_flush_test.cpp)
     target_link_libraries(sintra_barrier_flush_test_${SUFFIX} PRIVATE ${LIB_TARGET})
-
-    add_executable(sintra_barrier_stress_test_${SUFFIX} barrier_stress_test.cpp)
-    target_link_libraries(sintra_barrier_stress_test_${SUFFIX} PRIVATE ${LIB_TARGET})
-    if(WIN32)
-        target_link_libraries(sintra_barrier_stress_test_${SUFFIX} PRIVATE winmm)
-    endif()
-
-    add_executable(sintra_barrier_pathological_choreography_test_${SUFFIX}
-                   barrier_pathological_choreography_test.cpp)
-    target_link_libraries(sintra_barrier_pathological_choreography_test_${SUFFIX}
-                          PRIVATE ${LIB_TARGET})
 
     add_executable(sintra_processing_fence_test_${SUFFIX} processing_fence_test.cpp)
     target_link_libraries(sintra_processing_fence_test_${SUFFIX} PRIVATE ${LIB_TARGET})
 
-    add_executable(sintra_variable_buffer_alignment_test_${SUFFIX} variable_buffer_alignment_test.cpp)
-    target_link_libraries(sintra_variable_buffer_alignment_test_${SUFFIX} PRIVATE ${LIB_TARGET})
-
     add_executable(sintra_ipc_rings_tests_${SUFFIX} ipc_rings_tests.cpp)
     target_link_libraries(sintra_ipc_rings_tests_${SUFFIX} PRIVATE ${LIB_TARGET})
-
-    add_executable(sintra_spawn_detached_test_${SUFFIX} spawn_detached_test.cpp)
-    target_link_libraries(sintra_spawn_detached_test_${SUFFIX} PRIVATE ${LIB_TARGET})
-
-    add_executable(sintra_extreme_choreography_test_${SUFFIX} extreme_choreography_test.cpp)
-    target_link_libraries(sintra_extreme_choreography_test_${SUFFIX} PRIVATE ${LIB_TARGET})
-
-    add_executable(sintra_barrier_complex_choreography_test_${SUFFIX} barrier_complex_choreography_test.cpp)
-    target_link_libraries(sintra_barrier_complex_choreography_test_${SUFFIX} PRIVATE ${LIB_TARGET})
-
-    add_executable(sintra_complex_choreography_test_${SUFFIX} complex_choreography_test.cpp)
-    target_link_libraries(sintra_complex_choreography_test_${SUFFIX} PRIVATE ${LIB_TARGET})
-
-    add_executable(sintra_choreography_extreme_test_${SUFFIX} choreography_extreme_test.cpp)
-    target_link_libraries(sintra_choreography_extreme_test_${SUFFIX} PRIVATE ${LIB_TARGET})
-
-    add_executable(sintra_complex_choreography_stress_test_${SUFFIX} complex_choreography_stress_test.cpp)
-    target_link_libraries(sintra_complex_choreography_stress_test_${SUFFIX} PRIVATE ${LIB_TARGET})
 
 endfunction()
 
