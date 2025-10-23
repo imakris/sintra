@@ -331,42 +331,38 @@ void Process_message_reader::request_reader_function()
 
             // this is an interprocess event message.
 
+            bool handled_locally = false;
             if ((reader_state == READER_NORMAL) ||
                 (s_coord && m->message_type_id > (type_id_type)detail::reserved_id::base_of_messages_handled_by_coordinator))
             {
-                // Avoid double-handling on the coordinator: when the coordinator is
-                // reading a remote ring, it will relay below to its own ring as well.
-                // In that case, skip local event handling here and let the relayed
-                // copy be handled when reading the coordinator's ring.
-                const bool coordinator_reading_remote = (s_coord && !has_same_mapping(*m_in_req_c, *s_mproc->m_out_req_c));
-                if (!coordinator_reading_remote) {
-                    lock_guard<recursive_mutex> sl(s_mproc->m_handlers_mutex);
+                lock_guard<recursive_mutex> sl(s_mproc->m_handlers_mutex);
 
-                    // find handlers that operate with this type of message in this process
-                    auto& active_handlers = s_mproc->m_active_handlers;
-                    auto it_mt = active_handlers.find(m->message_type_id);
+                // find handlers that operate with this type of message in this process
+                auto& active_handlers = s_mproc->m_active_handlers;
+                auto it_mt = active_handlers.find(m->message_type_id);
 
-                    if (it_mt != active_handlers.end()) {
-                        instance_id_type sids[] = {
-                            m->sender_instance_id,
-                            any_remote,
-                            any_local_or_remote
-                        };
+                if (it_mt != active_handlers.end()) {
+                    instance_id_type sids[] = {
+                        m->sender_instance_id,
+                        any_remote,
+                        any_local_or_remote
+                    };
 
-                        for (auto sid : sids) {
-                            auto shl = it_mt->second.find(sid);
-                            if (shl != it_mt->second.end()) {
-                                for (auto& e : shl->second) {
-                                    e(*m);
-                                }
+                    for (auto sid : sids) {
+                        auto shl = it_mt->second.find(sid);
+                        if (shl != it_mt->second.end()) {
+                            for (auto& e : shl->second) {
+                                e(*m);
+                                handled_locally = true;
                             }
                         }
                     }
                 }
             }
 
-            // if the coordinator is in this process, relay
-            if (s_coord && !has_same_mapping(*m_in_req_c, *s_mproc->m_out_req_c)) {
+            // If the coordinator is in this process and no handler consumed the event yet,
+            // relay it to the coordinator's local ring for eventual delivery.
+            if (s_coord && !has_same_mapping(*m_in_req_c, *s_mproc->m_out_req_c) && !handled_locally) {
                 s_mproc->m_out_req_c->relay(*m);
             }
         }
