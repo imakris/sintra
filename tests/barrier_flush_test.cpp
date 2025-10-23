@@ -156,6 +156,7 @@ int coordinator_process()
     barrier("barrier-flush-ready");
 
     for (std::size_t iteration = 0; iteration < kIterations; ++iteration) {
+        sintra::set_delay_fuzzing_run_index(static_cast<std::uint32_t>(iteration));
         std::unique_lock<std::mutex> lock(state.mutex);
         state.cv.wait(lock, [&] {
             return state.messages_in_iteration == kWorkerCount || state.too_many_messages;
@@ -186,6 +187,7 @@ int worker_process(std::uint32_t worker_index)
     barrier("barrier-flush-ready");
 
     for (std::uint32_t iteration = 0; iteration < kIterations; ++iteration) {
+        sintra::set_delay_fuzzing_run_index(iteration);
         world() << Iteration_marker{worker_index, iteration};
         barrier("barrier-flush-iteration");
     }
