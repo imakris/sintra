@@ -9,6 +9,7 @@
 
 #include <stdexcept>
 #include <string>
+#include <thread>
 
 namespace sintra {
 namespace detail {
@@ -57,13 +58,25 @@ inline bool rendezvous_barrier(const std::string& barrier_name, const std::strin
 inline void wait_for_processing_quiescence()
 {
     if (!s_mproc ||
-        s_mproc->m_communication_state != Managed_process::COMMUNICATION_RUNNING ||
-        on_request_reader_thread())
+        s_mproc->m_communication_state != Managed_process::COMMUNICATION_RUNNING)
     {
         return;
     }
 
-    s_mproc->wait_for_delivery_fence();
+    if (!on_request_reader_thread())
+    {
+        s_mproc->wait_for_delivery_fence();
+        return;
+    }
+
+    auto* current_reader = s_tl_current_request_reader;
+    std::thread waiter([current_reader]() {
+        auto* previous_reader = s_tl_current_request_reader;
+        s_tl_current_request_reader = current_reader;
+        s_mproc->wait_for_delivery_fence();
+        s_tl_current_request_reader = previous_reader;
+    });
+    waiter.join();
 }
 
 } // namespace detail
