@@ -73,8 +73,9 @@ inline void wait_for_processing_quiescence()
     // continue draining incoming messages.  Avoid spoofing the request-thread TLS
     // state here; wait_for_delivery_fence() needs to observe pending work and block
     // until the request stream makes progress.
-    std::thread waiter([]() {
-        s_mproc->wait_for_delivery_fence();
+    auto* current_reader = s_tl_current_request_reader;
+    std::thread waiter([current_reader]() {
+        s_mproc->wait_for_delivery_fence(current_reader);
     });
     waiter.join();
 }
