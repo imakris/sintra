@@ -38,7 +38,13 @@ sequence_counter_type Process_group::barrier(
         throw std::logic_error("The caller is not a member of the process group.");
     }
 
-    Barrier& b = m_barriers[barrier_name];
+    auto& barrier_entry = m_barriers[barrier_name];
+    if (!barrier_entry) {
+        barrier_entry = std::make_shared<Barrier>();
+    }
+
+    auto barrier_ptr = barrier_entry;
+    Barrier& b = *barrier_ptr;
     b.m.lock(); // main barrier lock
 
     // Atomically snapshot membership and filter draining processes while holding m_call_mutex.
@@ -93,7 +99,9 @@ sequence_counter_type Process_group::barrier(
         // Re-lock m_call_mutex to safely erase from m_barriers
         basic_lock.lock();
         auto it = m_barriers.find(barrier_name);
-        if (it != m_barriers.end() && it->second.common_function_iid == current_common_fiid) {
+        if (it != m_barriers.end() && it->second &&
+            it->second->common_function_iid == current_common_fiid)
+        {
             m_barriers.erase(it);
         }
         // basic_lock will unlock m_call_mutex on return
@@ -128,34 +136,39 @@ inline void Process_group::drop_from_inflight_barriers(
     std::lock_guard basic_lock(m_call_mutex);
 
     for (auto barrier_it = m_barriers.begin(); barrier_it != m_barriers.end(); ) {
-        auto& barrier = barrier_it->second;
-        std::unique_lock barrier_lock(barrier.m);
+        auto& barrier_ptr = barrier_it->second;
+        if (!barrier_ptr) {
+            ++barrier_it;
+            continue;
+        }
 
-        const bool touched_pending = barrier.processes_pending.erase(process_iid) > 0;
-        const bool touched_arrived = barrier.processes_arrived.erase(process_iid) > 0;
+        std::unique_lock barrier_lock(barrier_ptr->m);
+
+        const bool touched_pending = barrier_ptr->processes_pending.erase(process_iid) > 0;
+        const bool touched_arrived = barrier_ptr->processes_arrived.erase(process_iid) > 0;
 
         if (!touched_pending && !touched_arrived) {
             ++barrier_it;
             continue;
         }
 
-        if (!barrier.processes_pending.empty()) {
+        if (!barrier_ptr->processes_pending.empty()) {
             ++barrier_it;
             continue;
         }
 
         Barrier_completion completion;
-        completion.common_function_iid = barrier.common_function_iid;
+        completion.common_function_iid = barrier_ptr->common_function_iid;
         completion.recipients.assign(
-            barrier.processes_arrived.begin(),
-            barrier.processes_arrived.end());
+            barrier_ptr->processes_arrived.begin(),
+            barrier_ptr->processes_arrived.end());
 
         if (touched_arrived) {
             completion.recipients.push_back(process_iid);
         }
 
-        barrier.processes_arrived.clear();
-        barrier.common_function_iid = invalid_instance_id;
+        barrier_ptr->processes_arrived.clear();
+        barrier_ptr->common_function_iid = invalid_instance_id;
 
         barrier_lock.unlock();
 
