@@ -71,10 +71,7 @@ inline void wait_for_processing_quiescence()
 
     auto* current_reader = s_tl_current_request_reader;
     std::thread waiter([current_reader]() {
-        auto* previous_reader = s_tl_current_request_reader;
-        s_tl_current_request_reader = current_reader;
-        s_mproc->wait_for_delivery_fence();
-        s_tl_current_request_reader = previous_reader;
+        s_mproc->wait_for_delivery_fence(current_reader);
     });
     waiter.join();
 }
