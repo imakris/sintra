@@ -487,9 +487,16 @@ int process_aggregator()
     });
 
     sintra::activate_slot([&](const StartPhase& msg) {
-        std::lock_guard<std::mutex> lk(state_mutex);
-        if (msg.phase == current_phase) {
-            active = true;
+        std::optional<AuditOutcome> audit;
+        {
+            std::lock_guard<std::mutex> lk(state_mutex);
+            if (msg.phase == current_phase) {
+                active = true;
+                audit = prepare_audit_locked();
+            }
+        }
+        if (audit.has_value()) {
+            sintra::world() << *audit;
         }
     });
 
@@ -499,7 +506,7 @@ int process_aggregator()
         std::optional<AuditOutcome> audit;
         {
             std::lock_guard<std::mutex> lk(state_mutex);
-            if (!active || msg.phase != current_phase) {
+            if (msg.phase != current_phase) {
                 return;
             }
             if (msg.producer < 0 || msg.producer >= kProducerCount) {
