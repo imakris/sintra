@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "deterministic_delay.h"
 #include "utility.h"
 
 #include <array>
@@ -1212,6 +1213,7 @@ void Managed_process::wait_for_stop()
 {
     std::unique_lock<mutex> start_stop_lock(m_start_stop_mutex);
     while (m_communication_state == COMMUNICATION_RUNNING) {
+        SINTRA_DELAY_FUZZ("managed_process.wait_for_stop");
         m_start_stop_condition.wait(start_stop_lock);
     }
 }
@@ -1336,6 +1338,7 @@ void Managed_process::wait_until_all_external_readers_are_done(int extra_allowed
 {
     unique_lock<mutex> lock(m_num_active_readers_mutex);
     while (m_num_active_readers > 2 + extra_allowed_readers) {
+        SINTRA_DELAY_FUZZ("managed_process.wait_external_readers");
         m_num_active_readers_condition.wait(lock);
     }
 }
