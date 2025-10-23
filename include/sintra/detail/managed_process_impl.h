@@ -1441,6 +1441,11 @@ inline void Managed_process::run_after_current_handler(function<void()> task)
 inline
 void Managed_process::wait_for_delivery_fence(const Process_message_reader* exclude_request_reader)
 {
+    const Process_message_reader* effective_exclude = exclude_request_reader;
+    if (!effective_exclude && on_request_reader_thread()) {
+        effective_exclude = s_tl_current_request_reader;
+    }
+
     while (true) {
         std::vector<Process_message_reader::Delivery_target> targets;
 
@@ -1460,7 +1465,7 @@ void Managed_process::wait_for_delivery_fence(const Process_message_reader* excl
                 }
 
                 const bool skip_request_stream =
-                    exclude_request_reader && reader_ptr.get() == exclude_request_reader;
+                    effective_exclude && reader_ptr.get() == effective_exclude;
                 if (!skip_request_stream) {
                     const auto req_target = reader.get_request_leading_sequence();
                     auto req_target_info = reader.prepare_delivery_target(
@@ -1478,7 +1483,6 @@ void Managed_process::wait_for_delivery_fence(const Process_message_reader* excl
                 if (rep_target_info.wait_needed) {
                     targets.emplace_back(std::move(rep_target_info));
                 }
-            }
         }
 
         if (targets.empty()) {
