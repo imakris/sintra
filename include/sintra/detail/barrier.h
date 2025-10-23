@@ -69,13 +69,16 @@ inline void wait_for_processing_quiescence()
         return;
     }
 
-    std::thread waiter([]() {
-        // Execute the wait on a separate thread so that the request reader can
-        // continue making progress.  Do not rebind s_tl_current_request_reader
-        // here – wait_for_delivery_fence() must observe that we're *not* on the
-        // request reader thread so it waits for the in-flight handler to
-        // complete before returning.
+    auto* current_reader = s_tl_current_request_reader;
+    std::thread waiter([current_reader]() {
+        // Rebind the request reader thread-local so wait_for_delivery_fence()
+        // observes that it's waiting on the active reader.  This ensures we
+        // don't block waiting for the handler that invoked the barrier (which
+        // would deadlock because the handler can't complete until we return).
+        auto* previous_reader = s_tl_current_request_reader;
+        s_tl_current_request_reader = current_reader;
         s_mproc->wait_for_delivery_fence();
+        s_tl_current_request_reader = previous_reader;
     });
     waiter.join();
 }
