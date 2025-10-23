@@ -37,8 +37,11 @@
 
 namespace {
 
-constexpr std::size_t kWorkerCount = 2;
-constexpr std::size_t kIterations  = 128;
+constexpr std::size_t kWorkerCount         = 2;
+constexpr std::size_t kIterations          = 128;
+constexpr std::uint32_t kFuzzMinDelayUs    = 0U;
+constexpr std::uint32_t kFuzzMaxDelayUs    = 1000U;
+constexpr unsigned      kFuzzInjectionRate = 2U;
 
 struct Iteration_marker
 {
@@ -115,6 +118,36 @@ struct Coordinator_state
     bool too_many_messages            = false;
 };
 
+struct delay_fuzz_settings_guard
+{
+    delay_fuzz_settings_guard(std::uint32_t min_delay_us,
+                              std::uint32_t max_delay_us,
+                              unsigned injection_rate) noexcept
+        : m_previous_min(sintra::detail::deterministic_delay_fuzzer::min_delay())
+        , m_previous_max(sintra::detail::deterministic_delay_fuzzer::max_delay())
+        , m_previous_rate(sintra::detail::deterministic_delay_fuzzer::injection_rate())
+    {
+        sintra::set_delay_fuzzing_bounds(min_delay_us, max_delay_us);
+        sintra::set_delay_fuzzing_injection_rate(injection_rate);
+    }
+
+    ~delay_fuzz_settings_guard() noexcept
+    {
+        sintra::set_delay_fuzzing_bounds(m_previous_min, m_previous_max);
+        sintra::set_delay_fuzzing_injection_rate(m_previous_rate);
+    }
+
+    delay_fuzz_settings_guard(const delay_fuzz_settings_guard&) = delete;
+    delay_fuzz_settings_guard& operator=(const delay_fuzz_settings_guard&) = delete;
+    delay_fuzz_settings_guard(delay_fuzz_settings_guard&&) = delete;
+    delay_fuzz_settings_guard& operator=(delay_fuzz_settings_guard&&) = delete;
+
+private:
+    std::uint32_t m_previous_min;
+    std::uint32_t m_previous_max;
+    unsigned      m_previous_rate;
+};
+
 void write_result(const std::filesystem::path& dir,
                   bool success,
                   std::size_t iterations_completed,
@@ -143,42 +176,83 @@ int coordinator_process()
     std::string failure_reason;
 
     activate_slot([&](const Iteration_marker&) {
+        sintra::detail::deterministic_delay_fuzzer::maybe_inject_delay(
+            "coordinator-slot-before-lock");
         std::lock_guard<std::mutex> lock(state.mutex);
+        sintra::detail::deterministic_delay_fuzzer::maybe_inject_delay(
+            "coordinator-slot-after-lock");
         if (state.messages_in_iteration >= kWorkerCount) {
             state.too_many_messages = true;
         } else {
             ++state.messages_in_iteration;
             ++state.total_messages;
         }
+        sintra::detail::deterministic_delay_fuzzer::maybe_inject_delay(
+            "coordinator-slot-after-update");
         state.cv.notify_one();
+        sintra::detail::deterministic_delay_fuzzer::maybe_inject_delay(
+            "coordinator-slot-after-notify");
     });
 
-    barrier("barrier-flush-ready");
+    {
+        sintra::set_delay_fuzzing_seed(0xC0FFEE0000000000ULL);
+        const sintra::detail::delay_fuzz_scope ready_scope{true};
+        const delay_fuzz_settings_guard fuzz_settings{
+            kFuzzMinDelayUs, kFuzzMaxDelayUs, kFuzzInjectionRate};
+        sintra::detail::deterministic_delay_fuzzer::maybe_inject_delay(
+            "coordinator-before-ready-barrier");
+        barrier("barrier-flush-ready");
+        sintra::detail::deterministic_delay_fuzzer::maybe_inject_delay(
+            "coordinator-after-ready-barrier");
+    }
 
     for (std::size_t iteration = 0; iteration < kIterations; ++iteration) {
         sintra::set_delay_fuzzing_seed(static_cast<std::uint64_t>(iteration) << 32);
         const sintra::detail::delay_fuzz_scope fuzz_scope{true};
+        const delay_fuzz_settings_guard fuzz_settings{
+            kFuzzMinDelayUs, kFuzzMaxDelayUs, kFuzzInjectionRate};
 
-        sintra::detail::deterministic_delay_fuzzer::maybe_inject_delay("coordinator-before-wait");
+        sintra::detail::deterministic_delay_fuzzer::maybe_inject_delay(
+            "coordinator-before-lock");
 
         std::unique_lock<std::mutex> lock(state.mutex);
+        sintra::detail::deterministic_delay_fuzzer::maybe_inject_delay(
+            "coordinator-after-lock");
         state.cv.wait(lock, [&] {
             return state.messages_in_iteration == kWorkerCount || state.too_many_messages;
         });
+        sintra::detail::deterministic_delay_fuzzer::maybe_inject_delay(
+            "coordinator-after-wait");
         if (state.too_many_messages && success) {
             success = false;
             failure_reason = "coordinator observed more messages than expected during an iteration";
         }
+        sintra::detail::deterministic_delay_fuzzer::maybe_inject_delay(
+            "coordinator-before-reset");
         state.messages_in_iteration = 0;
         state.too_many_messages = false;
+        sintra::detail::deterministic_delay_fuzzer::maybe_inject_delay(
+            "coordinator-after-reset");
         lock.unlock();
 
         sintra::detail::deterministic_delay_fuzzer::maybe_inject_delay("coordinator-before-barrier");
 
         barrier("barrier-flush-iteration");
+
+        sintra::detail::deterministic_delay_fuzzer::maybe_inject_delay("coordinator-after-barrier");
     }
 
-    barrier("barrier-flush-done", "_sintra_all_processes");
+    {
+        sintra::set_delay_fuzzing_seed(0xC0FFEE00D00E0000ULL);
+        const sintra::detail::delay_fuzz_scope done_scope{true};
+        const delay_fuzz_settings_guard fuzz_settings{
+            kFuzzMinDelayUs, kFuzzMaxDelayUs, kFuzzInjectionRate};
+        sintra::detail::deterministic_delay_fuzzer::maybe_inject_delay(
+            "coordinator-before-done-barrier");
+        barrier("barrier-flush-done", "_sintra_all_processes");
+        sintra::detail::deterministic_delay_fuzzer::maybe_inject_delay(
+            "coordinator-after-done-barrier");
+    }
     deactivate_all_slots();
 
     const auto shared_dir = get_shared_directory();
@@ -190,22 +264,52 @@ int worker_process(std::uint32_t worker_index)
 {
     using namespace sintra;
 
-    barrier("barrier-flush-ready");
+    {
+        const std::uint64_t ready_seed = 0xFACE000000000000ULL
+            ^ static_cast<std::uint64_t>(worker_index + 1);
+        sintra::set_delay_fuzzing_seed(ready_seed);
+        const sintra::detail::delay_fuzz_scope ready_scope{true};
+        const delay_fuzz_settings_guard fuzz_settings{
+            kFuzzMinDelayUs, kFuzzMaxDelayUs, kFuzzInjectionRate};
+        sintra::detail::deterministic_delay_fuzzer::maybe_inject_delay(
+            "worker-before-ready-barrier");
+        barrier("barrier-flush-ready");
+        sintra::detail::deterministic_delay_fuzzer::maybe_inject_delay(
+            "worker-after-ready-barrier");
+    }
 
     for (std::uint32_t iteration = 0; iteration < kIterations; ++iteration) {
         const std::uint64_t seed = (static_cast<std::uint64_t>(iteration) << 32)
             ^ static_cast<std::uint64_t>(worker_index + 1);
         sintra::set_delay_fuzzing_seed(seed);
         const sintra::detail::delay_fuzz_scope fuzz_scope{true};
+        const delay_fuzz_settings_guard fuzz_settings{
+            kFuzzMinDelayUs, kFuzzMaxDelayUs, kFuzzInjectionRate};
 
         sintra::detail::deterministic_delay_fuzzer::maybe_inject_delay("worker-before-send");
         world() << Iteration_marker{worker_index, iteration};
 
+        sintra::detail::deterministic_delay_fuzzer::maybe_inject_delay("worker-after-send");
+
         sintra::detail::deterministic_delay_fuzzer::maybe_inject_delay("worker-before-barrier");
         barrier("barrier-flush-iteration");
+
+        sintra::detail::deterministic_delay_fuzzer::maybe_inject_delay("worker-after-barrier");
     }
 
-    barrier("barrier-flush-done", "_sintra_all_processes");
+    {
+        const std::uint64_t done_seed = 0xFACE00D00E000000ULL
+            ^ static_cast<std::uint64_t>(worker_index + 1);
+        sintra::set_delay_fuzzing_seed(done_seed);
+        const sintra::detail::delay_fuzz_scope done_scope{true};
+        const delay_fuzz_settings_guard fuzz_settings{
+            kFuzzMinDelayUs, kFuzzMaxDelayUs, kFuzzInjectionRate};
+        sintra::detail::deterministic_delay_fuzzer::maybe_inject_delay(
+            "worker-before-done-barrier");
+        barrier("barrier-flush-done", "_sintra_all_processes");
+        sintra::detail::deterministic_delay_fuzzer::maybe_inject_delay(
+            "worker-after-done-barrier");
+    }
     return 0;
 }
 
