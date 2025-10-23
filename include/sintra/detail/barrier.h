@@ -70,11 +70,10 @@ inline void wait_for_processing_quiescence()
     }
 
     auto* current_reader = s_tl_current_request_reader;
+    // Run the wait on a helper thread so the request reader keeps draining messages.
+    // Do not spoof the request-thread TLS; the processing fence must observe the active reader.
     std::thread waiter([current_reader]() {
-        auto* previous_reader = s_tl_current_request_reader;
-        s_tl_current_request_reader = current_reader;
-        s_mproc->wait_for_delivery_fence();
-        s_tl_current_request_reader = previous_reader;
+        s_mproc->wait_for_delivery_fence(current_reader);
     });
     waiter.join();
 }
