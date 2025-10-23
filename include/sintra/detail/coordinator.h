@@ -11,6 +11,7 @@
 #include <array>
 #include <atomic>
 #include <condition_variable>
+#include <memory>
 #include <mutex>
 #include <unordered_set>
 #include <vector>
@@ -65,7 +66,7 @@ struct Process_group: Derived_transceiver<Process_group>
         std::vector<instance_id_type>           recipients;
     };
 
-    unordered_map<string, Barrier>              m_barriers;
+    unordered_map<string, std::unique_ptr<Barrier>> m_barriers;
     unordered_set<instance_id_type>             m_process_ids;
 
     mutex m_call_mutex;

@@ -38,7 +38,11 @@ sequence_counter_type Process_group::barrier(
         throw std::logic_error("The caller is not a member of the process group.");
     }
 
-    Barrier& b = m_barriers[barrier_name];
+    auto& barrier_ptr = m_barriers[barrier_name];
+    if (!barrier_ptr) {
+        barrier_ptr = std::make_unique<Barrier>();
+    }
+    Barrier& b = *barrier_ptr;
     b.m.lock(); // main barrier lock
 
     // Atomically snapshot membership and filter draining processes while holding m_call_mutex.
@@ -93,7 +97,9 @@ sequence_counter_type Process_group::barrier(
         // Re-lock m_call_mutex to safely erase from m_barriers
         basic_lock.lock();
         auto it = m_barriers.find(barrier_name);
-        if (it != m_barriers.end() && it->second.common_function_iid == current_common_fiid) {
+        if (it != m_barriers.end() && it->second &&
+            it->second->common_function_iid == current_common_fiid)
+        {
             m_barriers.erase(it);
         }
         // basic_lock will unlock m_call_mutex on return
@@ -128,7 +134,12 @@ inline void Process_group::drop_from_inflight_barriers(
     std::lock_guard basic_lock(m_call_mutex);
 
     for (auto barrier_it = m_barriers.begin(); barrier_it != m_barriers.end(); ) {
-        auto& barrier = barrier_it->second;
+        auto& barrier_ptr = barrier_it->second;
+        if (!barrier_ptr) {
+            barrier_it = m_barriers.erase(barrier_it);
+            continue;
+        }
+        auto& barrier = *barrier_ptr;
         std::unique_lock barrier_lock(barrier.m);
 
         const bool touched_pending = barrier.processes_pending.erase(process_iid) > 0;
