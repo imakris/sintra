@@ -15,6 +15,7 @@
 #include <mutex>
 #include <type_traits>
 #include <unordered_map>
+#include <vector>
 
 
 namespace sintra {
@@ -32,6 +33,7 @@ using std::recursive_mutex;
 using std::remove_reference;
 using std::string;
 using std::unordered_map;
+using std::vector;
 
 
 
@@ -576,7 +578,7 @@ private:
     // lifetime ends with the end of the call.
     // They are assigned in pairs, to handle successful and failed calls.
     mutex m_return_handlers_mutex;
-    unordered_map<instance_id_type, Return_handler> m_active_return_handlers;
+    unordered_map<instance_id_type, vector<Return_handler>> m_active_return_handlers;
 
     mutex               m_rpc_lifecycle_mutex;
     condition_variable  m_rpc_lifecycle_condition;

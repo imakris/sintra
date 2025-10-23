@@ -966,7 +966,8 @@ Transceiver::activate_return_handler(const Return_handler &rh)
 {
     instance_id_type function_instance_id = make_instance_id();
     lock_guard<mutex> sl(m_return_handlers_mutex);
-    m_active_return_handlers[function_instance_id] = rh;
+    auto& handlers = m_active_return_handlers[function_instance_id];
+    handlers.push_back(rh);
     return function_instance_id;
 }
 
@@ -986,9 +987,22 @@ void
 Transceiver::replace_return_handler_id(instance_id_type old_id, instance_id_type new_id)
 {
     lock_guard<mutex> sl(m_return_handlers_mutex);
-    auto node_handler = m_active_return_handlers.extract(old_id);
-    node_handler.key() = new_id;
-    m_active_return_handlers.insert(std::move(node_handler));
+    if (old_id == new_id) {
+        return;
+    }
+
+    auto old_it = m_active_return_handlers.find(old_id);
+    if (old_it == m_active_return_handlers.end()) {
+        return;
+    }
+
+    auto handlers = std::move(old_it->second);
+    m_active_return_handlers.erase(old_it);
+
+    auto& destination = m_active_return_handlers[new_id];
+    destination.insert(destination.end(),
+        std::make_move_iterator(handlers.begin()),
+        std::make_move_iterator(handlers.end()));
 }
 
 
