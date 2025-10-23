@@ -447,7 +447,10 @@ Process_message_reader::Delivery_target Process_message_reader::prepare_delivery
 
     target.progress = progress;
 
-    if (stream == Delivery_stream::Request && s_tl_current_request_reader == this) {
+    if (stream == Delivery_stream::Request &&
+        s_tl_current_request_reader == this &&
+        tl_is_req_thread)
+    {
         return target;
     }
 
