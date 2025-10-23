@@ -624,7 +624,6 @@ int run_producer(int producer_index)
             current_phase = msg.phase;
             start_ready = false;
             terminate_requested = false;
-            last_confirmed_round = -1;
             announced_rounds = msg.rounds;
             send_ready = true;
         }
@@ -683,6 +682,7 @@ int run_producer(int producer_index)
             if (terminate_requested) {
                 break;
             }
+            last_confirmed_round = -1;
         }
 
         const int rounds = kPhasePlans[phase].rounds;
