@@ -332,6 +332,9 @@ void Process_message_reader::request_reader_function()
             // this is an interprocess event message.
 
             bool handled_locally = false;
+            const bool is_crash_notification =
+                m->message_type_id ==
+                static_cast<type_id_type>(detail::reserved_id::terminated_abnormally);
             if ((reader_state == READER_NORMAL) ||
                 (s_coord && m->message_type_id > (type_id_type)detail::reserved_id::base_of_messages_handled_by_coordinator))
             {
@@ -362,7 +365,9 @@ void Process_message_reader::request_reader_function()
 
             // If the coordinator is in this process and no handler consumed the event yet,
             // relay it to the coordinator's local ring for eventual delivery.
-            if (s_coord && !has_same_mapping(*m_in_req_c, *s_mproc->m_out_req_c) && !handled_locally) {
+            if (s_coord && !has_same_mapping(*m_in_req_c, *s_mproc->m_out_req_c) &&
+                (!handled_locally || is_crash_notification))
+            {
                 s_mproc->m_out_req_c->relay(*m);
             }
         }
