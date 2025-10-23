@@ -758,8 +758,20 @@ void Transceiver::rpc_handler(Message_prefix& untyped_msg)
             // NOTE: For the recipients in this loop, this will be the second time the function returns,
             // assuming they have already received a deferral.
             for (size_t i = 0; i < s_tl_additional_piids_size; i++) {
-                return_message_type* placed_msg = s_mproc->m_out_rep_c->write<return_message_type>(vb_size<return_message_type>(vf.result), vf.result);
-                finalize_rpc_write(placed_msg, s_tl_additional_piids[i], s_tl_common_function_iid, obj, not_defined_type_id);
+                auto return_payload = vf.result;
+                if constexpr (std::is_same_v<r_type, sequence_counter_type>) {
+                    const auto flush_sequence = s_mproc->m_out_rep_c->get_leading_sequence();
+                    return_payload = static_cast<r_type>(flush_sequence);
+                }
+
+                return_message_type* placed_msg = s_mproc->m_out_rep_c->write<return_message_type>(
+                    vb_size<return_message_type>(return_payload), return_payload);
+                finalize_rpc_write(
+                    placed_msg,
+                    s_tl_additional_piids[i],
+                    s_tl_common_function_iid,
+                    obj,
+                    not_defined_type_id);
             }
 
             s_tl_additional_piids_size = 0;
@@ -767,7 +779,14 @@ void Transceiver::rpc_handler(Message_prefix& untyped_msg)
         }
 
         // the normal return
-        return_message_type* placed_msg = s_mproc->m_out_rep_c->write<return_message_type>(vb_size<return_message_type>(vf.result), vf.result);
+        auto return_payload = vf.result;
+        if constexpr (std::is_same_v<r_type, sequence_counter_type>) {
+            const auto flush_sequence = s_mproc->m_out_rep_c->get_leading_sequence();
+            return_payload = static_cast<r_type>(flush_sequence);
+        }
+
+        return_message_type* placed_msg = s_mproc->m_out_rep_c->write<return_message_type>(
+            vb_size<return_message_type>(return_payload), return_payload);
         finalize_rpc_write(placed_msg, msg, obj, etid);
     }
     else {
