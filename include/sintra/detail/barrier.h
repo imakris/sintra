@@ -69,12 +69,12 @@ inline void wait_for_processing_quiescence()
         return;
     }
 
-    auto* current_reader = s_tl_current_request_reader;
-    std::thread waiter([current_reader]() {
-        auto* previous_reader = s_tl_current_request_reader;
-        s_tl_current_request_reader = current_reader;
+    // Run the wait on a helper thread so that the request reader thread is free to
+    // continue draining incoming messages.  Avoid spoofing the request-thread TLS
+    // state here; wait_for_delivery_fence() needs to observe pending work and block
+    // until the request stream makes progress.
+    std::thread waiter([]() {
         s_mproc->wait_for_delivery_fence();
-        s_tl_current_request_reader = previous_reader;
     });
     waiter.join();
 }
