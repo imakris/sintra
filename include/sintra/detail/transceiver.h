@@ -21,6 +21,9 @@
 namespace sintra {
 
 
+struct Outstanding_rpc_control;
+
+
 using std::condition_variable;
 using std::function;
 using std::is_base_of;
@@ -473,6 +476,7 @@ public:
         function<void(const Message_prefix&)>   exception_handler;
         function<void(const Message_prefix&)>   deferral_handler;
         instance_id_type                        instance_id = 0;
+        Outstanding_rpc_control*                owner = nullptr;
     };
 
 
@@ -480,7 +484,7 @@ public:
     instance_id_type activate_return_handler(const Return_handler &rh);
 
     inline
-    void deactivate_return_handler(instance_id_type function_instance_id);
+    void deactivate_return_handler(instance_id_type function_instance_id, Outstanding_rpc_control* owner);
 
     // useful for deferred
     void replace_return_handler_id(instance_id_type old_id, instance_id_type new_id);

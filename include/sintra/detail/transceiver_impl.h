@@ -889,6 +889,7 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
         // and keeps waiting until the final result arrives,
         // which will be identified with the replaced message instance id
     };
+    rh.owner = &orpcc;
 
 
     // Register the RPC in the outstanding set BEFORE locking keep_waiting_mutex
@@ -937,7 +938,7 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
     }
 
     // we can now disable the return message handler
-    s_mproc->deactivate_return_handler(function_instance_id);
+    s_mproc->deactivate_return_handler(function_instance_id, &orpcc);
 
     if (!orpcc.success) {
         if (ex_tid != not_defined_type_id) {
@@ -975,10 +976,28 @@ Transceiver::activate_return_handler(const Return_handler &rh)
 
 inline
 void
-Transceiver::deactivate_return_handler(instance_id_type function_instance_id)
+Transceiver::deactivate_return_handler(instance_id_type function_instance_id, Outstanding_rpc_control* owner)
 {
     lock_guard<mutex> sl(m_return_handlers_mutex);
-    m_active_return_handlers.erase(function_instance_id);
+    auto handlers_it = m_active_return_handlers.find(function_instance_id);
+    if (handlers_it == m_active_return_handlers.end()) {
+        return;
+    }
+
+    auto& handlers = handlers_it->second;
+
+    for (auto it = handlers.begin(); it != handlers.end(); ) {
+        if (it->owner == owner) {
+            it = handlers.erase(it);
+        }
+        else {
+            ++it;
+        }
+    }
+
+    if (handlers.empty()) {
+        m_active_return_handlers.erase(handlers_it);
+    }
 }
 
 
