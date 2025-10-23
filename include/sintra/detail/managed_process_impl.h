@@ -1396,9 +1396,47 @@ inline void Managed_process::flush(instance_id_type process_id, sequence_counter
     std::unique_lock<mutex> flush_lock(m_flush_sequence_mutex);
     m_flush_sequence.push_back(flush_sequence);
 
-    while (reader->get_reply_reading_sequence() < flush_sequence &&
-           m_communication_state == COMMUNICATION_RUNNING)
+    auto current_reader = reader;
+
+    while (m_communication_state == COMMUNICATION_RUNNING)
     {
+        if (current_reader &&
+            current_reader->get_reply_reading_sequence() >= flush_sequence)
+        {
+            break;
+        }
+
+        bool reader_stopped = !current_reader;
+        if (current_reader)
+        {
+            const auto progress = current_reader->delivery_progress();
+            reader_stopped = (current_reader->state() == Process_message_reader::READER_STOPPING) ||
+                             (progress &&
+                              progress->reply_stopped.load(std::memory_order_acquire));
+        }
+
+        if (reader_stopped)
+        {
+            flush_lock.unlock();
+            std::shared_ptr<Process_message_reader> refreshed;
+            {
+                std::shared_lock<std::shared_mutex> readers_lock(m_readers_mutex);
+                auto it = m_readers.find(process_id);
+                if (it != m_readers.end()) {
+                    refreshed = it->second;
+                }
+            }
+            flush_lock.lock();
+
+            if (!refreshed || refreshed.get() == current_reader.get())
+            {
+                break;
+            }
+
+            current_reader = std::move(refreshed);
+            continue;
+        }
+
         m_flush_sequence_condition.wait_for(
             flush_lock,
             std::chrono::milliseconds(500));
