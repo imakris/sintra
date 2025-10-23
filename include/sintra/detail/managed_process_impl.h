@@ -1430,7 +1430,10 @@ inline void Managed_process::flush(instance_id_type process_id, sequence_counter
 
             if (!refreshed || refreshed.get() == current_reader.get())
             {
-                break;
+                m_flush_sequence_condition.wait_for(
+                    flush_lock,
+                    std::chrono::milliseconds(500));
+                continue;
             }
 
             current_reader = std::move(refreshed);
