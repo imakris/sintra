@@ -7,10 +7,6 @@
 #include "managed_process.h"
 #include "process_message_reader_impl.h"
 
-#include <atomic>
-#include <condition_variable>
-#include <memory>
-#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -73,34 +69,12 @@ inline void wait_for_processing_quiescence()
         return;
     }
 
-    auto completion_flag = std::make_shared<std::atomic<bool>>(false);
-    auto completion_mutex = std::make_shared<std::mutex>();
-    auto completion_cv = std::make_shared<std::condition_variable>();
-
-    s_mproc->run_after_current_handler([
-        completion_flag,
-        completion_mutex,
-        completion_cv
-    ]()
-    {
-        {
-            std::lock_guard<std::mutex> lk(*completion_mutex);
-            completion_flag->store(true, std::memory_order_release);
-        }
-        completion_cv->notify_all();
-    });
-
-    std::thread waiter([
-        completion_flag,
-        completion_mutex,
-        completion_cv
-    ]()
-    {
-        std::unique_lock<std::mutex> lk(*completion_mutex);
-        completion_cv->wait(lk, [&]() {
-            return completion_flag->load(std::memory_order_acquire);
-        });
+    auto* current_reader = s_tl_current_request_reader;
+    std::thread waiter([current_reader]() {
+        auto* previous_reader = s_tl_current_request_reader;
+        s_tl_current_request_reader = current_reader;
         s_mproc->wait_for_delivery_fence();
+        s_tl_current_request_reader = previous_reader;
     });
     waiter.join();
 }
