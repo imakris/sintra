@@ -88,6 +88,7 @@ sequence_counter_type Process_group::barrier(
 
         const auto current_common_fiid = b.common_function_iid;
         s_tl_common_function_iid = current_common_fiid;
+        s_tl_return_value_is_barrier_flush = true;
         b.m.unlock();
 
         // Re-lock m_call_mutex to safely erase from m_barriers
@@ -181,11 +182,16 @@ inline void Process_group::emit_barrier_completions(
         // Get per-recipient flush token: compute it INSIDE the loop so each recipient
         // gets a watermark that's valid for their specific message write time.
         // This prevents hangs where a global token is ahead of some recipient's channel.
+        sequence_counter_type flush_sequence_cursor = s_mproc->m_out_rep_c->get_leading_sequence();
+        const size_t return_message_extra_size = vb_size<return_message_type>(sequence_counter_type{});
+        const size_t return_message_bytes = sizeof(return_message_type) + return_message_extra_size;
+
         for (auto recipient : completion.recipients) {
-            const auto flush_sequence = s_mproc->m_out_rep_c->get_leading_sequence();
+            flush_sequence_cursor += return_message_bytes;
 
             auto* placed_msg = s_mproc->m_out_rep_c->write<return_message_type>(
-                vb_size<return_message_type>(flush_sequence), flush_sequence);
+                return_message_extra_size,
+                flush_sequence_cursor);
 
             Transceiver::finalize_rpc_write(
                 placed_msg,

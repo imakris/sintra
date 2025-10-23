@@ -55,6 +55,7 @@ static inline thread_local Process_message_reader* s_tl_current_request_reader =
 static inline thread_local instance_id_type s_tl_additional_piids[max_process_index];
 static inline thread_local size_t s_tl_additional_piids_size = 0;
 static inline thread_local bool s_tl_rpc_reply_deferred = false;
+static inline thread_local bool s_tl_return_value_is_barrier_flush = false;
 
 inline void clear_rpc_reply_deferred()
 {

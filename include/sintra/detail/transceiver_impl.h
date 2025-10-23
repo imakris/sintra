@@ -755,10 +755,49 @@ void Transceiver::rpc_handler(Message_prefix& untyped_msg)
         // additional return recipients, assumed to be waiting
         if (s_tl_common_function_iid != invalid_instance_id) {
 
+            const bool barrier_flush = s_tl_return_value_is_barrier_flush;
+
+            if constexpr (std::is_same_v<typename return_message_type::return_type, sequence_counter_type>) {
+                if (barrier_flush) {
+                    sequence_counter_type flush_sequence_cursor = s_mproc->m_out_rep_c->get_leading_sequence();
+                    const size_t return_message_extra_size = vb_size<return_message_type>(sequence_counter_type{});
+                    const size_t return_message_bytes = sizeof(return_message_type) + return_message_extra_size;
+
+                    for (size_t i = 0; i < s_tl_additional_piids_size; ++i) {
+                        flush_sequence_cursor += return_message_bytes;
+                        auto* placed_msg = s_mproc->m_out_rep_c->write<return_message_type>(
+                            return_message_extra_size,
+                            static_cast<sequence_counter_type>(flush_sequence_cursor));
+                        finalize_rpc_write(
+                            placed_msg,
+                            s_tl_additional_piids[i],
+                            s_tl_common_function_iid,
+                            obj,
+                            not_defined_type_id);
+                    }
+
+                    s_tl_additional_piids_size = 0;
+                    s_tl_common_function_iid = invalid_instance_id;
+
+                    flush_sequence_cursor += return_message_bytes;
+                    vf.result = static_cast<typename return_message_type::return_type>(flush_sequence_cursor);
+                    auto* placed_msg = s_mproc->m_out_rep_c->write<return_message_type>(
+                        return_message_extra_size,
+                        vf.result);
+                    finalize_rpc_write(placed_msg, msg, obj, etid);
+                    s_tl_return_value_is_barrier_flush = false;
+                    return;
+                }
+            }
+
+            s_tl_return_value_is_barrier_flush = false;
+
             // NOTE: For the recipients in this loop, this will be the second time the function returns,
             // assuming they have already received a deferral.
             for (size_t i = 0; i < s_tl_additional_piids_size; i++) {
-                return_message_type* placed_msg = s_mproc->m_out_rep_c->write<return_message_type>(vb_size<return_message_type>(vf.result), vf.result);
+                auto* placed_msg = s_mproc->m_out_rep_c->write<return_message_type>(
+                    vb_size<return_message_type>(vf.result),
+                    vf.result);
                 finalize_rpc_write(placed_msg, s_tl_additional_piids[i], s_tl_common_function_iid, obj, not_defined_type_id);
             }
 
@@ -771,6 +810,7 @@ void Transceiver::rpc_handler(Message_prefix& untyped_msg)
         finalize_rpc_write(placed_msg, msg, obj, etid);
     }
     else {
+        s_tl_return_value_is_barrier_flush = false;
         exception* placed_msg = s_mproc->m_out_rep_c->write<exception>(vb_size<exception>(what), what);
         finalize_rpc_write(placed_msg, msg, obj, etid);
     }
