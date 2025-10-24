@@ -1179,6 +1179,7 @@ void Managed_process::pause()
 
     m_communication_state = COMMUNICATION_PAUSED;
     m_start_stop_condition.notify_all();
+    m_delivery_condition.notify_all();
 }
 
 
@@ -1204,6 +1205,7 @@ void Managed_process::stop()
 
     m_communication_state = COMMUNICATION_STOPPED;
     m_start_stop_condition.notify_all();
+    m_delivery_condition.notify_all();
 }
 
 
