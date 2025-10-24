@@ -72,6 +72,14 @@ inline void wait_for_processing_quiescence()
         return;
     }
 
+    // When running on the request reader thread we cannot simply block on the
+    // delivery fence because that would prevent any post-handler continuations
+    // (registered via run_after_current_handler) from executing. These
+    // continuations are required to make progress towards quiescence. Drain
+    // continuations scheduled by *earlier* handlers while preserving the
+    // deferral contract for work posted by the current handler.
+    detail::drain_post_handlers_before_current_handler();
+
     auto* current_reader = s_tl_current_request_reader;
     std::atomic<bool> fence_ready{false};
     std::exception_ptr waiter_error;
