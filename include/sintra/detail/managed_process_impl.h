@@ -5,6 +5,7 @@
 
 #include "deterministic_delay.h"
 #include "utility.h"
+#include "post_handler_queue.h"
 
 #include <array>
 #include <atomic>
@@ -33,7 +34,6 @@
 namespace sintra {
 
 extern thread_local bool tl_is_req_thread;
-extern thread_local std::function<void()> tl_post_handler_function;
 
 inline std::once_flag& signal_handler_once_flag()
 {
@@ -491,12 +491,8 @@ Managed_process::~Managed_process()
         stop();
 
         const bool called_from_request_reader = tl_is_req_thread;
-        if (called_from_request_reader && tl_post_handler_function) {
-            auto post_handler = std::move(tl_post_handler_function);
-            tl_post_handler_function = {};
-            if (post_handler) {
-                post_handler();
-            }
+        if (called_from_request_reader && detail::has_post_handler_work()) {
+            detail::drain_all_post_handlers();
         }
 
         wait_until_all_external_readers_are_done(called_from_request_reader ? 1 : 0);
@@ -1426,18 +1422,7 @@ inline void Managed_process::run_after_current_handler(function<void()> task)
         return;
     }
 
-    if (!tl_post_handler_function) {
-        tl_post_handler_function = std::move(task);
-        return;
-    }
-
-    auto previous = std::move(tl_post_handler_function);
-    tl_post_handler_function = [prev = std::move(previous), task = std::move(task)]() mutable {
-        if (prev) {
-            prev();
-        }
-        task();
-    };
+    detail::enqueue_post_handler_task(std::move(task));
 }
 
 

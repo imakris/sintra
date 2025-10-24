@@ -73,13 +73,9 @@ inline void wait_for_processing_quiescence()
     // delivery fence because that would prevent any post-handler continuations
     // (registered via run_after_current_handler) from executing. These
     // continuations are required to make progress towards quiescence. Drain
-    // them eagerly before waiting so that any work they schedule can run.
-    while (tl_post_handler_function)
-    {
-        auto post_handler = std::move(tl_post_handler_function);
-        tl_post_handler_function = {};
-        post_handler();
-    }
+    // continuations scheduled by *earlier* handlers while preserving the
+    // deferral contract for work posted by the current handler.
+    detail::drain_post_handlers_before_current_handler();
 
     auto* current_reader = s_tl_current_request_reader;
     std::thread waiter([current_reader]() {
