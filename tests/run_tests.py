@@ -23,6 +23,7 @@ Options:
 import argparse
 import fnmatch
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -398,6 +399,10 @@ class TestRunner:
                 # Try to get output immediately before killing
                 stdout = ""
                 stderr = ""
+                stack_traces = ""
+                stack_error = ""
+                if process and sys.platform != 'win32':
+                    stack_traces, stack_error = self._capture_process_stacks(process.pid)
                 try:
                     # Try to read from pipes before killing (non-blocking if possible)
                     import select
@@ -433,6 +438,11 @@ class TestRunner:
                         print(f"{Color.YELLOW}stdout content:{Color.RESET}")
                         print(stdout)
                     print(f"{Color.RED}=== END TIMEOUT DEBUG ==={Color.RESET}\n")
+
+                if stack_traces:
+                    stderr = f"{stderr}\n\n=== Captured stack traces ===\n{stack_traces}"
+                elif stack_error:
+                    stderr = f"{stderr}\n\n[Stack capture unavailable: {stack_error}]"
 
                 return TestResult(
                     success=False,
@@ -509,6 +519,123 @@ class TestRunner:
         except Exception:
             # Ignore errors - processes may not exist
             pass
+
+    def _capture_process_stacks(self, pid: int) -> Tuple[str, str]:
+        """Attempt to capture stack traces for all processes in the test's process group."""
+
+        if sys.platform == 'win32':
+            return "", "stack capture not supported on Windows"
+
+        gdb_path = shutil.which('gdb')
+        if not gdb_path:
+            return "", "gdb not available"
+
+        import signal
+        try:
+            pgid = os.getpgid(pid)
+        except ProcessLookupError:
+            return "", "process exited before stack capture"
+
+        target_pids = self._collect_process_group_pids(pgid)
+        if not target_pids:
+            target_pids = [pid]
+
+        # Pause the process group to obtain consistent stack traces
+        try:
+            os.killpg(pgid, signal.SIGSTOP)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+        stack_outputs = []
+        capture_errors = []
+
+        for target_pid in sorted(set(target_pids)):
+            if target_pid == os.getpid():
+                continue
+
+            try:
+                result = subprocess.run(
+                    [
+                        gdb_path,
+                        '--batch',
+                        '-p', str(target_pid),
+                        '-ex', 'set pagination off',
+                        '-ex', 'thread apply all bt',
+                        '-ex', 'detach',
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=30,
+                )
+            except FileNotFoundError:
+                return "", "gdb not available"
+            except subprocess.SubprocessError as exc:
+                capture_errors.append(f"PID {target_pid}: gdb failed ({exc})")
+                continue
+
+            output = result.stdout.strip()
+            if not output and result.stderr:
+                output = result.stderr.strip()
+
+            if result.returncode != 0:
+                capture_errors.append(
+                    f"PID {target_pid}: gdb exited with code {result.returncode}: {result.stderr.strip()}"
+                )
+                continue
+
+            if output:
+                stack_outputs.append(f"PID {target_pid}\n{output}")
+
+        # Allow processes to continue so gdb can detach cleanly before killing
+        try:
+            os.killpg(pgid, signal.SIGCONT)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+        if stack_outputs:
+            return "\n\n".join(stack_outputs), ""
+
+        if capture_errors:
+            return "", "; ".join(capture_errors)
+
+        return "", "no stack data captured"
+
+    def _collect_process_group_pids(self, pgid: int) -> List[int]:
+        """Return all process IDs belonging to the provided process group."""
+
+        pids: List[int] = []
+
+        if sys.platform == 'win32':
+            return pids
+
+        proc_path = Path('/proc')
+        try:
+            entries = list(proc_path.iterdir())
+        except Exception:
+            return pids
+
+        for entry in entries:
+            if not entry.is_dir():
+                continue
+            name = entry.name
+            if not name.isdigit():
+                continue
+
+            try:
+                candidate_pid = int(name)
+            except ValueError:
+                continue
+
+            try:
+                candidate_pgid = os.getpgid(candidate_pid)
+            except (ProcessLookupError, PermissionError):
+                continue
+
+            if candidate_pgid == pgid:
+                pids.append(candidate_pid)
+
+        return pids
 
     def run_test_multiple(self, invocation: TestInvocation, repetitions: int) -> Tuple[int, int, List[TestResult]]:
         """Run a test multiple times and collect results"""
