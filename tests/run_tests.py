@@ -524,7 +524,7 @@ class TestRunner:
         """Attempt to capture stack traces for all processes in the test's process group."""
 
         if sys.platform == 'win32':
-            return "", "stack capture not supported on Windows"
+            return self._capture_process_stacks_windows(pid)
 
         gdb_path = shutil.which('gdb')
         if not gdb_path:
@@ -600,6 +600,109 @@ class TestRunner:
             return "", "; ".join(capture_errors)
 
         return "", "no stack data captured"
+
+    def _capture_process_stacks_windows(self, pid: int) -> Tuple[str, str]:
+        """Capture stack traces for a process tree on Windows using cdb."""
+
+        cdb_path = shutil.which('cdb')
+        if not cdb_path:
+            return "", "cdb not available"
+
+        target_pids = self._collect_windows_process_tree_pids(pid)
+        if not target_pids:
+            target_pids = [pid]
+
+        stack_outputs: List[str] = []
+        capture_errors: List[str] = []
+
+        for target_pid in sorted(set(target_pids)):
+            try:
+                result = subprocess.run(
+                    [
+                        cdb_path,
+                        '-p', str(target_pid),
+                        '-c', '.symfix; .reload; ~* k; qd',
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=60,
+                )
+            except FileNotFoundError:
+                return "", "cdb not available"
+            except subprocess.SubprocessError as exc:
+                capture_errors.append(f"PID {target_pid}: cdb failed ({exc})")
+                continue
+
+            output = result.stdout.strip()
+            if not output and result.stderr:
+                output = result.stderr.strip()
+
+            if result.returncode != 0:
+                capture_errors.append(
+                    f"PID {target_pid}: cdb exited with code {result.returncode}: {result.stderr.strip()}"
+                )
+                continue
+
+            if output:
+                stack_outputs.append(f"PID {target_pid}\n{output}")
+
+        if stack_outputs:
+            return "\n\n".join(stack_outputs), ""
+
+        if capture_errors:
+            return "", "; ".join(capture_errors)
+
+        return "", "no stack data captured"
+
+    def _collect_windows_process_tree_pids(self, pid: int) -> List[int]:
+        """Return all descendant process IDs for the provided Windows process."""
+
+        powershell_path = shutil.which('powershell')
+        if not powershell_path:
+            return []
+
+        script = (
+            "function Get-ChildPids($Pid){"
+            "  $children = Get-CimInstance Win32_Process -Filter \"ParentProcessId=$Pid\";"
+            "  foreach($child in $children){"
+            "    $child.ProcessId;"
+            "    Get-ChildPids $child.ProcessId"
+            "  }"
+            "}"
+            f"; Get-ChildPids {pid}"
+        )
+
+        try:
+            result = subprocess.run(
+                [
+                    powershell_path,
+                    '-NoProfile',
+                    '-Command',
+                    script,
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=30,
+            )
+        except (subprocess.SubprocessError, OSError):
+            return []
+
+        if result.returncode != 0:
+            return []
+
+        descendants: List[int] = []
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                descendants.append(int(line))
+            except ValueError:
+                continue
+
+        return descendants
 
     def _collect_process_group_pids(self, pgid: int) -> List[int]:
         """Return all process IDs belonging to the provided process group."""
