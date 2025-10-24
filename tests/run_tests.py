@@ -369,6 +369,11 @@ class TestRunner:
                 success = (process.returncode == 0)
                 error_msg = stderr
 
+                live_stack_traces = ""
+                live_stack_error = ""
+                postmortem_stack_traces = ""
+                postmortem_stack_error = ""
+
                 if not success:
                     # Categorize failure type for better diagnostics
                     if process.returncode < 0 or process.returncode > 128:
@@ -380,6 +385,30 @@ class TestRunner:
                     else:
                         # Normal test failure
                         error_msg = f"TEST FAILED: Exit code {process.returncode} after {duration:.2f}s\n{stderr}"
+
+                    if self._is_crash_exit(process.returncode):
+                        live_stack_traces, live_stack_error = self._capture_process_stacks(process.pid)
+
+                        if sys.platform == 'win32':
+                            (
+                                postmortem_stack_traces,
+                                postmortem_stack_error,
+                            ) = self._capture_windows_crash_dump(invocation, start_time, process.pid)
+                        else:
+                            (
+                                postmortem_stack_traces,
+                                postmortem_stack_error,
+                            ) = self._capture_core_dump_stack(invocation, start_time, process.pid)
+
+                if live_stack_traces:
+                    error_msg = f"{error_msg}\n\n=== Captured stack traces ===\n{live_stack_traces}"
+                elif live_stack_error:
+                    error_msg = f"{error_msg}\n\n[Stack capture unavailable: {live_stack_error}]"
+
+                if postmortem_stack_traces:
+                    error_msg = f"{error_msg}\n\n=== Post-mortem stack trace ===\n{postmortem_stack_traces}"
+                elif postmortem_stack_error:
+                    error_msg = f"{error_msg}\n\n[Post-mortem stack capture unavailable: {postmortem_stack_error}]"
 
                 return TestResult(
                     success=success,
@@ -520,6 +549,20 @@ class TestRunner:
             # Ignore errors - processes may not exist
             pass
 
+    def _is_crash_exit(self, returncode: int) -> bool:
+        """Return True if the exit code represents an abnormal termination."""
+
+        if returncode == 0:
+            return False
+
+        if sys.platform == 'win32':
+            # Windows crash codes are typically large unsigned values such as 0xC0000005.
+            return returncode < 0 or returncode >= 0xC0000000
+
+        # POSIX: negative return codes indicate termination by signal.
+        # Codes > 128 are also commonly used to report signal-based exits.
+        return returncode < 0 or returncode > 128
+
     def _capture_process_stacks(self, pid: int) -> Tuple[str, str]:
         """Attempt to capture stack traces for all processes in the test's process group."""
 
@@ -600,6 +643,217 @@ class TestRunner:
             return "", "; ".join(capture_errors)
 
         return "", "no stack data captured"
+
+    def _capture_core_dump_stack(
+        self,
+        invocation: TestInvocation,
+        start_time: float,
+        pid: int,
+    ) -> Tuple[str, str]:
+        """Attempt to capture stack traces from a recently generated core dump."""
+
+        if sys.platform == 'win32':
+            return "", "core dump stack capture not supported on Windows"
+
+        gdb_path = shutil.which('gdb')
+        if not gdb_path:
+            return "", "gdb not available"
+
+        candidate_dirs = [invocation.path.parent, Path.cwd()]
+        candidate_cores: List[Tuple[float, Path]] = []
+
+        for directory in candidate_dirs:
+            try:
+                entries = list(directory.iterdir())
+            except OSError:
+                continue
+
+            for entry in entries:
+                if not entry.is_file():
+                    continue
+
+                name = entry.name
+                if not (
+                    name == 'core'
+                    or name.startswith('core.')
+                    or name.startswith('core-')
+                    or name.endswith('.core')
+                ):
+                    continue
+
+                try:
+                    stat_info = entry.stat()
+                except OSError:
+                    continue
+
+                # Only consider cores generated after the process started.
+                if stat_info.st_mtime + 0.001 < start_time:
+                    continue
+
+                candidate_cores.append((stat_info.st_mtime, entry))
+
+        if not candidate_cores:
+            return "", "no recent core dump found"
+
+        # Prefer cores whose filename contains the PID of the crashed process.
+        pid_str = str(pid)
+        prioritized = [item for item in candidate_cores if pid_str in item[1].name]
+        if prioritized:
+            candidate_cores = prioritized
+
+        # Sort newest first to analyse the most relevant dumps first.
+        candidate_cores.sort(key=lambda item: item[0], reverse=True)
+
+        stack_outputs: List[str] = []
+        capture_errors: List[str] = []
+
+        for _, core_path in candidate_cores:
+            try:
+                result = subprocess.run(
+                    [
+                        gdb_path,
+                        '--batch',
+                        '-ex', 'set pagination off',
+                        '-ex', 'thread apply all bt',
+                        str(invocation.path),
+                        str(core_path),
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=60,
+                )
+            except subprocess.SubprocessError as exc:
+                capture_errors.append(f"{core_path.name}: gdb failed ({exc})")
+                continue
+
+            output = result.stdout.strip()
+            if not output and result.stderr:
+                output = result.stderr.strip()
+
+            if result.returncode != 0:
+                capture_errors.append(
+                    f"{core_path.name}: gdb exited with code {result.returncode}: {result.stderr.strip()}"
+                )
+                continue
+
+            if output:
+                stack_outputs.append(f"core file: {core_path}\n{output}")
+                break
+
+        if stack_outputs:
+            return "\n\n".join(stack_outputs), ""
+
+        if capture_errors:
+            return "", "; ".join(capture_errors)
+
+        return "", "no usable core dump found"
+
+    def _capture_windows_crash_dump(
+        self,
+        invocation: TestInvocation,
+        start_time: float,
+        pid: int,
+    ) -> Tuple[str, str]:
+        """Attempt to capture stack traces from recent Windows crash dump files."""
+
+        cdb_path = shutil.which('cdb')
+        if not cdb_path:
+            return "", "cdb not available"
+
+        candidate_dirs = [invocation.path.parent, Path.cwd()]
+
+        local_app_data = os.environ.get('LOCALAPPDATA')
+        if local_app_data:
+            candidate_dirs.append(Path(local_app_data) / 'CrashDumps')
+        else:
+            candidate_dirs.append(Path.home() / 'AppData' / 'Local' / 'CrashDumps')
+
+        exe_name_lower = invocation.path.name.lower()
+        exe_stem_lower = invocation.path.stem.lower()
+        pid_str = str(pid)
+
+        candidate_dumps: List[Tuple[float, Path]] = []
+
+        for directory in candidate_dirs:
+            try:
+                if not directory or not directory.exists():
+                    continue
+                entries = list(directory.iterdir())
+            except OSError:
+                continue
+
+            for entry in entries:
+                if not entry.is_file():
+                    continue
+
+                name_lower = entry.name.lower()
+                if not name_lower.endswith('.dmp'):
+                    continue
+
+                if exe_name_lower not in name_lower and exe_stem_lower not in name_lower:
+                    continue
+
+                try:
+                    stat_info = entry.stat()
+                except OSError:
+                    continue
+
+                if stat_info.st_mtime + 0.001 < start_time:
+                    continue
+
+                candidate_dumps.append((stat_info.st_mtime, entry))
+
+        if not candidate_dumps:
+            return "", "no recent crash dump found"
+
+        prioritized = [item for item in candidate_dumps if pid_str in item[1].name]
+        if prioritized:
+            candidate_dumps = prioritized
+
+        candidate_dumps.sort(key=lambda item: item[0], reverse=True)
+
+        stack_outputs: List[str] = []
+        capture_errors: List[str] = []
+
+        for _, dump_path in candidate_dumps:
+            try:
+                result = subprocess.run(
+                    [
+                        cdb_path,
+                        '-z', str(dump_path),
+                        '-c', '.symfix; .reload; ~* k; qd',
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=120,
+                )
+            except subprocess.SubprocessError as exc:
+                capture_errors.append(f"{dump_path.name}: cdb failed ({exc})")
+                continue
+
+            output = result.stdout.strip()
+            if not output and result.stderr:
+                output = result.stderr.strip()
+
+            if result.returncode != 0:
+                capture_errors.append(
+                    f"{dump_path.name}: cdb exited with code {result.returncode}: {result.stderr.strip()}"
+                )
+                continue
+
+            if output:
+                stack_outputs.append(f"dump file: {dump_path}\n{output}")
+                break
+
+        if stack_outputs:
+            return "\n\n".join(stack_outputs), ""
+
+        if capture_errors:
+            return "", "; ".join(capture_errors)
+
+        return "", "no usable crash dump found"
 
     def _capture_process_stacks_windows(self, pid: int) -> Tuple[str, str]:
         """Capture stack traces for a process tree on Windows using cdb."""
