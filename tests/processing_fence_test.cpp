@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -25,14 +26,21 @@ struct Work_message
 
 constexpr auto kHandlerDelay = std::chrono::milliseconds(300);
 constexpr std::string_view kEnvSharedDir = "SINTRA_PROCESSING_FENCE_DIR";
+constexpr std::string_view kSharedDirFlag = "--shared-dir";
 
-std::filesystem::path get_shared_directory()
+std::filesystem::path& shared_directory_storage()
 {
-    const char* value = std::getenv(kEnvSharedDir.data());
-    if (!value) {
-        throw std::runtime_error("processing fence test shared directory is not set");
+    static std::filesystem::path storage;
+    return storage;
+}
+
+const std::filesystem::path& shared_directory()
+{
+    const auto& dir = shared_directory_storage();
+    if (dir.empty()) {
+        throw std::logic_error("shared directory has not been initialised");
     }
-    return std::filesystem::path(value);
+    return dir;
 }
 
 void set_shared_directory_env(const std::filesystem::path& dir)
@@ -47,8 +55,10 @@ void set_shared_directory_env(const std::filesystem::path& dir)
 std::filesystem::path ensure_shared_directory()
 {
     const char* value = std::getenv(kEnvSharedDir.data());
-    if (value) {
-        return std::filesystem::path(value);
+    if (value && *value) {
+        std::filesystem::path dir(value);
+        std::filesystem::create_directories(dir);
+        return dir;
     }
 
     auto base = std::filesystem::temp_directory_path() / "sintra_processing_fence";
@@ -77,12 +87,45 @@ std::filesystem::path ensure_shared_directory()
 
 bool has_branch_flag(int argc, char* argv[])
 {
-    for (int i = 0; i < argc; ++i) {
+    for (int i = 1; i < argc; ++i) {
         if (std::string_view(argv[i]) == "--branch_index") {
             return true;
         }
     }
     return false;
+}
+
+std::optional<std::filesystem::path> find_shared_directory_arg(int argc, char* argv[])
+{
+    for (int i = 1; i < argc; ++i) {
+        std::string_view arg(argv[i]);
+        if (arg == kSharedDirFlag) {
+            if (i + 1 >= argc) {
+                throw std::runtime_error("--shared-dir requires a value");
+            }
+            return std::filesystem::path(argv[i + 1]);
+        }
+
+        if (arg.size() > kSharedDirFlag.size() &&
+            arg.substr(0, kSharedDirFlag.size()) == kSharedDirFlag &&
+            arg[kSharedDirFlag.size()] == '=')
+        {
+            return std::filesystem::path(std::string(arg.substr(kSharedDirFlag.size() + 1)));
+        }
+    }
+
+    return std::nullopt;
+}
+
+std::filesystem::path resolve_shared_directory(int argc, char* argv[])
+{
+    if (auto arg_path = find_shared_directory_arg(argc, argv)) {
+        std::filesystem::create_directories(*arg_path);
+        set_shared_directory_env(*arg_path);
+        return *arg_path;
+    }
+
+    return ensure_shared_directory();
 }
 
 void cleanup_directory(const std::filesystem::path& dir)
@@ -95,7 +138,7 @@ int controller_process()
 {
     using namespace sintra;
 
-    const auto shared_dir = get_shared_directory();
+    const auto& shared_dir = shared_directory();
     const auto flag_path = shared_dir / "handler_done.txt";
     const auto result_path = shared_dir / "result.txt";
 
@@ -126,7 +169,7 @@ int worker_process()
 {
     using namespace sintra;
 
-    const auto shared_dir = get_shared_directory();
+    const auto& shared_dir = shared_directory();
     const auto flag_path = shared_dir / "handler_done.txt";
 
     auto slot = [flag_path](const Work_message&) {
@@ -149,7 +192,8 @@ int worker_process()
 int main(int argc, char* argv[])
 {
     const bool is_spawned = has_branch_flag(argc, argv);
-    const auto shared_dir = ensure_shared_directory();
+    const auto shared_dir = resolve_shared_directory(argc, argv);
+    shared_directory_storage() = shared_dir;
     const auto flag_path = shared_dir / "handler_done.txt";
     const auto result_path = shared_dir / "result.txt";
 
@@ -160,7 +204,9 @@ int main(int argc, char* argv[])
 
     std::vector<sintra::Process_descriptor> processes;
     processes.emplace_back(controller_process);
+    processes.back().user_options = {std::string(kSharedDirFlag), shared_dir.string()};
     processes.emplace_back(worker_process);
+    processes.back().user_options = {std::string(kSharedDirFlag), shared_dir.string()};
 
     sintra::init(argc, argv, processes);
     if (!is_spawned) {
