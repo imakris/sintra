@@ -1442,7 +1442,7 @@ inline void Managed_process::run_after_current_handler(function<void()> task)
 
 
 inline
-void Managed_process::wait_for_delivery_fence()
+void Managed_process::wait_for_delivery_fence(Process_message_reader* skip_reader)
 {
     std::vector<Process_message_reader::Delivery_target> targets;
 
@@ -1453,6 +1453,10 @@ void Managed_process::wait_for_delivery_fence()
         for (auto& [process_id, reader_ptr] : m_readers) {
             (void)process_id;
             if (!reader_ptr) {
+                continue;
+            }
+
+            if (reader_ptr.get() == skip_reader) {
                 continue;
             }
 
