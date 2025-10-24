@@ -73,12 +73,20 @@ inline void wait_for_processing_quiescence()
     }
 
     auto* current_reader = s_tl_current_request_reader;
+    if (!current_reader) {
+        s_mproc->wait_for_delivery_fence();
+        return;
+    }
+
     std::atomic<bool> fence_ready{false};
     std::exception_ptr waiter_error;
 
     std::thread waiter([current_reader, &fence_ready, &waiter_error]() {
         auto* previous_reader = s_tl_current_request_reader;
+        const bool previous_is_request_thread = tl_is_req_thread;
+
         s_tl_current_request_reader = current_reader;
+        tl_is_req_thread = true;
 
         try {
             s_mproc->wait_for_delivery_fence();
@@ -87,6 +95,7 @@ inline void wait_for_processing_quiescence()
             waiter_error = std::current_exception();
         }
 
+        tl_is_req_thread = previous_is_request_thread;
         s_tl_current_request_reader = previous_reader;
         fence_ready.store(true, std::memory_order_release);
     });
