@@ -55,6 +55,7 @@ int worker_process(std::uint32_t worker_index)
         std::uint64_t last_seq = 0;
         std::uint64_t last_alt_seq = 0;
         for (std::uint32_t iter = 0; iter < kIterations; ++iter) {
+            sintra::set_delay_fuzzing_run_index(iter);
             // Add random tiny delay to increase chance of race conditions
             if (delay_dist(gen) == 0) {
                 std::this_thread::sleep_for(std::chrono::microseconds(1));
