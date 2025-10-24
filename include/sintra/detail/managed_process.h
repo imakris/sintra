@@ -257,6 +257,8 @@ struct Managed_process: Derived_transceiver<Managed_process>
     void run_after_current_handler(function<void()> task);
 
     void wait_for_delivery_fence();
+
+    std::shared_ptr<Process_message_reader> find_request_reader(std::thread::id request_thread_id) const;
     void notify_delivery_progress();
 
 
