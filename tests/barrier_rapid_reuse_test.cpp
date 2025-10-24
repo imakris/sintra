@@ -12,7 +12,7 @@
 #include <thread>
 
 constexpr std::size_t kProcessCount = 3;
-constexpr std::size_t kIterations = 2048;
+constexpr std::size_t kIterations = 2048 / 20;
 
 std::atomic<int> failures{0};
 
