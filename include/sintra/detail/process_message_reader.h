@@ -188,6 +188,12 @@ struct Process_message_reader
         return m_in_rep_c->get_message_reading_sequence();
     }
 
+    std::thread::id request_thread_id() const
+    {
+        return m_request_reader_thread ? m_request_reader_thread->get_id()
+                                       : std::thread::id{};
+    }
+
     Delivery_target prepare_delivery_target(Delivery_stream stream, sequence_counter_type target_sequence) const;
 
     Delivery_progress_ptr delivery_progress() const { return m_delivery_progress; }

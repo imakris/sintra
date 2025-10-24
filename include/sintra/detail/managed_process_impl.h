@@ -1414,6 +1414,23 @@ inline void Managed_process::flush(instance_id_type process_id, sequence_counter
     }
 }
 
+inline std::shared_ptr<Process_message_reader> Managed_process::find_request_reader(std::thread::id request_thread_id) const
+{
+    std::shared_lock<std::shared_mutex> readers_lock(m_readers_mutex);
+    for (const auto& [process_id, reader_ptr] : m_readers) {
+        (void)process_id;
+        if (!reader_ptr) {
+            continue;
+        }
+
+        if (reader_ptr->request_thread_id() == request_thread_id) {
+            return reader_ptr;
+        }
+    }
+
+    return {};
+}
+
 
 inline void Managed_process::run_after_current_handler(function<void()> task)
 {

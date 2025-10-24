@@ -69,8 +69,14 @@ inline void wait_for_processing_quiescence()
         return;
     }
 
-    auto* current_reader = s_tl_current_request_reader;
-    std::thread waiter([current_reader]() {
+    auto reader_ptr = s_mproc->find_request_reader(std::this_thread::get_id());
+    if (!reader_ptr) {
+        return;
+    }
+
+    auto* current_reader = reader_ptr.get();
+    std::thread waiter([reader_ptr, current_reader]() {
+        (void)reader_ptr; // keep reader alive for the duration of the wait
         auto* previous_reader = s_tl_current_request_reader;
         s_tl_current_request_reader = current_reader;
         s_mproc->wait_for_delivery_fence();
