@@ -35,6 +35,7 @@ int worker_process(std::uint32_t worker_index)
         std::uint64_t last_other_seq = 0;
 
         for (std::uint32_t iter = 0; iter < kIterations; ++iter) {
+            sintra::set_delay_fuzzing_run_index(iter);
             if (((iter + worker_index) & 0x7) == 0) {
                 std::this_thread::sleep_for(std::chrono::microseconds(10));
             }
