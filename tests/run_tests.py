@@ -1055,7 +1055,24 @@ class TestRunner:
             for i, result in enumerate(results):
                 if not result.success:
                     failure_count += 1
-                    print(f"    Run #{i+1}: {result.error[:100]}")
+
+                    full_error_needed = (
+                        self.verbose
+                        or '=== Captured stack traces ===' in result.error
+                        or '=== Post-mortem stack trace ===' in result.error
+                        or '[Stack capture unavailable' in result.error
+                    )
+
+                    if full_error_needed:
+                        error_lines = result.error.splitlines() or [result.error]
+                    else:
+                        truncated = result.error[:100]
+                        error_lines = truncated.splitlines() or [truncated]
+
+                    first_line, *remaining_lines = error_lines
+                    print(f"    Run #{i+1}: {first_line}")
+                    for line in remaining_lines:
+                        print(f"      {line}")
                     if self.verbose and result.output:
                         print(f"      stdout: {result.output[:200]}")
                     if self.verbose and result.error:
