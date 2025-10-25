@@ -1102,8 +1102,27 @@ inline size_t Managed_process::spawn_registered_branch(int branch_index, size_t 
     size_t spawned = 0;
     for (size_t i = 0; i < multiplicity; ++i) {
         auto spawn_args = make_spawn_args(*descriptor, branch_index);
+        const auto process_iid = spawn_args.piid;
+
+        const bool added_all = s_coord->add_process_to_group("_sintra_all_processes", process_iid);
+        const bool added_external = s_coord->add_process_to_group("_sintra_external_processes", process_iid);
+
+        if (!added_all || !added_external) {
+            if (added_all) {
+                s_coord->remove_process_from_group("_sintra_all_processes", process_iid);
+            }
+            if (added_external) {
+                s_coord->remove_process_from_group("_sintra_external_processes", process_iid);
+            }
+            continue;
+        }
+
         if (spawn_swarm_process(spawn_args)) {
             ++spawned;
+        }
+        else {
+            s_coord->remove_process_from_group("_sintra_all_processes", process_iid);
+            s_coord->remove_process_from_group("_sintra_external_processes", process_iid);
         }
     }
 

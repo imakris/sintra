@@ -140,6 +140,10 @@ private:
         const unordered_set<instance_id_type>& member_process_ids);
 
 
+    bool add_process_to_group(const string& name, instance_id_type process_iid);
+    bool remove_process_from_group(const string& name, instance_id_type process_iid);
+
+
     void enable_recovery(instance_id_type piid);
     void recover_if_required(instance_id_type piid);
 
@@ -198,6 +202,8 @@ public:
     SINTRA_RPC_EXPLICIT(unpublish_transceiver)
     SINTRA_RPC_STRICT_EXPLICIT(begin_process_draining)
     SINTRA_RPC_EXPLICIT(make_process_group)
+    SINTRA_RPC_EXPLICIT(add_process_to_group)
+    SINTRA_RPC_EXPLICIT(remove_process_from_group)
     SINTRA_RPC_EXPLICIT(print)
     SINTRA_RPC_EXPLICIT(enable_recovery)
 
