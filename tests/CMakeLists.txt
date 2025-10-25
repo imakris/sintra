@@ -53,6 +53,7 @@ function(add_test_suite SUFFIX IS_DEBUG)
         ping_pong_multi_test.cpp
         ping_pong_test.cpp
         processing_fence_test.cpp
+        processing_fence_example_test.cpp
         recovery_test.cpp
         rpc_append_test.cpp
         spawn_detached_test.cpp

@@ -18,3 +18,6 @@ target_link_libraries(sintra_example_4_recovery PRIVATE sintra)
 
 add_executable(sintra_example_5_barrier_flush sintra_example_5_barrier_flush.cpp)
 target_link_libraries(sintra_example_5_barrier_flush PRIVATE sintra)
+
+add_executable(sintra_example_6_processing_fence sintra_example_6_processing_fence.cpp)
+target_link_libraries(sintra_example_6_processing_fence PRIVATE sintra)
