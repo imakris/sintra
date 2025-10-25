@@ -1486,10 +1486,6 @@ void Managed_process::wait_for_delivery_fence()
     }
 
     auto all_targets_satisfied = [&]() {
-        if (m_communication_state != COMMUNICATION_RUNNING) {
-            return true;
-        }
-
         for (const auto& target : targets) {
             auto progress = target.progress.lock();
             if (!progress) {
