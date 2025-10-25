@@ -7,6 +7,9 @@
 #include <optional>
 #include <system_error>
 #include <type_traits>
+#include <cstdio>
+#include <mutex>
+#include <unordered_map>
 
 #ifdef _WIN32
   #ifndef NOMINMAX
@@ -19,11 +22,13 @@
   #include <synchapi.h>
   #include <cerrno>
   #include <cwchar>
-  #include <mutex>
-  #include <unordered_map>
 #elif defined(__APPLE__)
   #include <errno.h>
-  #include <sys/ulock.h>
+  #include <fcntl.h>
+  #include <semaphore.h>
+  #include <sched.h>
+  #include <sys/stat.h>
+  #include <time.h>
   #include <unistd.h>
 #else
   #include <cerrno>
@@ -146,7 +151,7 @@ private:
 #ifdef _WIN32
         return wait_on_address(expected, deadline);
 #elif defined(__APPLE__)
-        return wait_ulock(expected, deadline);
+        return wait_semaphore(expected, deadline);
 #else
         return wait_futex(expected, deadline);
 #endif
@@ -163,7 +168,11 @@ private:
                     "ReleaseSemaphore failed");
         }
 #elif defined(__APPLE__)
-        __ulock_wake(UL_COMPARE_AND_WAIT | ULF_SHARED, reinterpret_cast<void*>(&count_), 0);
+        sem_t* sem = get_semaphore_handle();
+        if (sem_post(sem) == -1) {
+            int err = errno;
+            throw std::system_error(err, std::system_category(), "sem_post failed");
+        }
 #else
         int op = FUTEX_WAKE;
         futex(reinterpret_cast<int*>(&count_), op, 1);
@@ -229,26 +238,44 @@ private:
         return true;
     }
 #elif defined(__APPLE__)
-    bool wait_ulock(int expected, std::optional<steady_clock::time_point> deadline)
+    bool wait_semaphore(int expected, std::optional<steady_clock::time_point> deadline)
     {
+        sem_t* sem = get_semaphore_handle();
         while (count_.load(std::memory_order_relaxed) == expected) {
-            uint32_t op = UL_COMPARE_AND_WAIT | ULF_SHARED;
-            uint64_t timeout = 0;
+            int rc = 0;
             if (deadline) {
                 auto now = steady_clock::now();
                 if (now >= *deadline) {
                     return false;
                 }
+
                 auto remaining = std::chrono::duration_cast<std::chrono::nanoseconds>(*deadline - now);
                 if (remaining.count() <= 0) {
-                    timeout = 0;
+                    return false;
                 }
-                else {
-                    timeout = static_cast<uint64_t>(remaining.count());
+
+                struct timespec ts;
+                if (clock_gettime(CLOCK_REALTIME, &ts) != 0) {
+                    int err = errno;
+                    throw std::system_error(err, std::system_category(), "clock_gettime failed");
                 }
+
+                constexpr long long kBillion = 1000000000LL;
+                long long total_ns = remaining.count();
+                ts.tv_sec += static_cast<time_t>(total_ns / kBillion);
+                long long nanos = total_ns % kBillion;
+                ts.tv_nsec += static_cast<long>(nanos);
+                if (ts.tv_nsec >= kBillion) {
+                    ts.tv_sec += 1;
+                    ts.tv_nsec -= static_cast<long>(kBillion);
+                }
+
+                rc = sem_timedwait(sem, &ts);
+            }
+            else {
+                rc = sem_wait(sem);
             }
 
-            int rc = __ulock_wait(op, reinterpret_cast<void*>(&count_), static_cast<uint64_t>(expected), timeout);
             if (rc == 0) {
                 return true;
             }
@@ -263,7 +290,7 @@ private:
             if (err == EAGAIN) {
                 return true;
             }
-            throw std::system_error(err, std::system_category(), "__ulock_wait failed");
+            throw std::system_error(err, std::system_category(), "semaphore wait failed");
         }
         return true;
     }
@@ -433,6 +460,113 @@ private:
     mutable std::atomic<int> name_state_{kNameUninitialized};
     static constexpr size_t  kNameLength = 64;
     mutable wchar_t          name_[kNameLength]{};
+#elif defined(__APPLE__)
+    void ensure_name_initialized() const
+    {
+        int state = name_state_.load(std::memory_order_acquire);
+        if (state == kNameInitialized) {
+            return;
+        }
+        initialize_name();
+    }
+
+    void initialize_name() const
+    {
+        int expected = kNameUninitialized;
+        if (name_state_.compare_exchange_strong(
+                    expected,
+                    kNameInitializing,
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire))
+        {
+            generate_unique_name();
+            name_state_.store(kNameInitialized, std::memory_order_release);
+        }
+        else {
+            while (name_state_.load(std::memory_order_acquire) != kNameInitialized) {
+                sched_yield();
+            }
+        }
+    }
+
+    void generate_unique_name() const
+    {
+        static std::atomic<uint64_t> local_counter{0};
+        uint64_t counter_value = local_counter.fetch_add(1, std::memory_order_relaxed);
+        pid_t    process_id    = getpid();
+        uintptr_t address      = reinterpret_cast<uintptr_t>(this);
+        uint64_t  timestamp    = static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+
+        int written = std::snprintf(
+                name_,
+                kNameLength,
+                "/SintraIPS_%08x_%016llx_%016llx_%016llx",
+                static_cast<unsigned int>(process_id),
+                static_cast<unsigned long long>(timestamp),
+                static_cast<unsigned long long>(address),
+                static_cast<unsigned long long>(counter_value));
+        if (written < 0) {
+            int err = errno ? errno : EINVAL;
+            throw std::system_error(err, std::system_category(), "snprintf failed to generate semaphore name");
+        }
+        name_[kNameLength - 1] = '\0';
+    }
+
+    sem_t* get_semaphore_handle() const
+    {
+        ensure_name_initialized();
+        return darwin_handle_registry::instance().get(this, name_);
+    }
+
+    struct darwin_handle_registry
+    {
+        static darwin_handle_registry& instance()
+        {
+            static darwin_handle_registry registry;
+            return registry;
+        }
+
+        sem_t* get(const interprocess_semaphore* semaphore, const char* name)
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto it = handles_.find(semaphore);
+            if (it != handles_.end()) {
+                return it->second;
+            }
+
+            sem_t* handle = sem_open(name, O_CREAT, S_IRUSR | S_IWUSR, 0);
+            if (handle == SEM_FAILED) {
+                int err = errno;
+                throw std::system_error(err, std::system_category(), "sem_open failed");
+            }
+
+            handles_.emplace(semaphore, handle);
+            return handle;
+        }
+
+        ~darwin_handle_registry()
+        {
+            for (auto& entry : handles_) {
+                if (entry.second && entry.second != SEM_FAILED) {
+                    sem_close(entry.second);
+                }
+            }
+        }
+
+    private:
+        darwin_handle_registry() = default;
+
+        std::mutex mutex_;
+        std::unordered_map<const interprocess_semaphore*, sem_t*> handles_;
+    };
+
+    static constexpr int kNameUninitialized = 0;
+    static constexpr int kNameInitializing  = 1;
+    static constexpr int kNameInitialized   = 2;
+
+    mutable std::atomic<int> name_state_{kNameUninitialized};
+    static constexpr size_t  kNameLength = 64;
+    mutable char             name_[kNameLength]{};
 #endif
 
     std::atomic<int> count_;
