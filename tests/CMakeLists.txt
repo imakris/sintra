@@ -47,6 +47,7 @@ function(add_test_suite SUFFIX IS_DEBUG)
         choreography_extreme_test.cpp
         complex_choreography_stress_test.cpp
         complex_choreography_test.cpp
+        dynamic_swarm_test.cpp
         dummy_test.cpp
         extreme_choreography_test.cpp
         ipc_rings_tests.cpp
