@@ -172,6 +172,19 @@ private:
     >                                           m_groups_of_process;
     map<string, Process_group>                  m_groups;
 
+    bool add_process_to_group_locked(
+        std::unique_lock<std::mutex>& groups_lock,
+        Process_group& group,
+        instance_id_type process_iid);
+    void remove_process_from_group_locked(
+        std::unique_lock<std::mutex>& groups_lock,
+        Process_group& group,
+        instance_id_type process_iid);
+    bool enroll_process_in_default_groups_locked(
+        std::unique_lock<std::mutex>& groups_lock,
+        instance_id_type process_iid,
+        bool include_in_external_group);
+
 
     // access only after acquiring m_publish_mutex
     // (currently, only inside publish_transceiver() )
