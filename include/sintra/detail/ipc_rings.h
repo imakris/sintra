@@ -156,6 +156,7 @@
     #include <sys/user.h>
   #elif defined(__APPLE__)
     #include <libproc.h>
+    #include <mach/mach_time.h>
   #endif
 #endif
 
@@ -210,6 +211,47 @@ public:
     explicit Scoped_timer_resolution(unsigned int) {}
 };
 #endif
+
+inline void precision_sleep_for(std::chrono::nanoseconds interval)
+{
+    if (interval <= std::chrono::nanoseconds::zero()) {
+        return;
+    }
+
+#if defined(__APPLE__)
+    static const mach_timebase_info_data_t timebase = [] {
+        mach_timebase_info_data_t info{};
+        mach_timebase_info(&info);
+        return info;
+    }();
+
+    const __uint128_t numerator = static_cast<__uint128_t>(interval.count()) *
+        static_cast<__uint128_t>(timebase.denom);
+    const __uint128_t ticks = (numerator + static_cast<__uint128_t>(timebase.numer) -
+                               __uint128_t{1}) /
+        static_cast<__uint128_t>(timebase.numer);
+
+    const __uint128_t clamped_ticks = std::max<__uint128_t>(ticks, __uint128_t{1});
+    if (clamped_ticks > std::numeric_limits<uint64_t>::max()) {
+        std::this_thread::sleep_for(interval);
+        return;
+    }
+
+    const uint64_t deadline = mach_absolute_time() +
+        static_cast<uint64_t>(clamped_ticks);
+
+    kern_return_t rc;
+    do {
+        rc = mach_wait_until(deadline);
+    } while (rc == KERN_ABORTED);
+
+    if (rc != KERN_SUCCESS) {
+        std::this_thread::sleep_for(interval);
+    }
+#else
+    std::this_thread::sleep_for(interval);
+#endif
+}
 
 #ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
 namespace ring_detail {
@@ -1579,6 +1621,9 @@ struct Ring_R : Ring<T, true>
             // still polling at a high enough cadence to catch bursts quickly.
             Scoped_timer_resolution timer_resolution_guard(1);
             const double precision_sleep_end = get_wtime() + precision_sleep_duration;
+            const auto precision_sleep_interval =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::duration<double>(precision_sleep_cycle));
             while (sequences_equal() && get_wtime() < precision_sleep_end) {
                 if (should_shutdown()) {
                     return Range<T>{};
@@ -1591,7 +1636,7 @@ struct Ring_R : Ring<T, true>
                     }
                     return Range<T>{};
                 }
-                std::this_thread::sleep_for(std::chrono::duration<double>(precision_sleep_cycle));
+                precision_sleep_for(precision_sleep_interval);
                 SINTRA_DELAY_FUZZ("ipc_rings.precision_sleep");
             }
         }
