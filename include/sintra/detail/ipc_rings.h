@@ -134,7 +134,6 @@
 #include <boost/interprocess/file_mapping.hpp>
 #include <boost/interprocess/mapped_region.hpp>
 #include <boost/interprocess/sync/interprocess_mutex.hpp>
-#include <boost/interprocess/sync/interprocess_semaphore.hpp>
 
 // ─── Platform headers (grouped) ──────────────────────────────────────────────
 #ifdef _WIN32
@@ -144,18 +143,28 @@
   #ifndef WIN32_LEAN_AND_MEAN
   #define WIN32_LEAN_AND_MEAN
   #endif
+  #ifndef _WIN32_WINNT
+  #define _WIN32_WINNT 0x0602
+  #endif
   #include <Windows.h>   // ::VirtualAlloc, granularity details (via Boost)
+  #include <synchapi.h>  // ::WaitOnAddress, ::WakeByAddressSingle
   #include <timeapi.h>   // ::timeBeginPeriod, ::timeEndPeriod (for ADAPTIVE_SPIN)
 #else
   #include <sys/mman.h>  // ::mmap, ::munmap, MAP_FIXED, MAP_NOSYNC (if available)
   #include <unistd.h>    // ::sysconf
   #include <signal.h>    // ::kill
+  #include <pthread.h>
   #if defined(__FreeBSD__)
     #include <sys/types.h>
     #include <sys/sysctl.h>
     #include <sys/user.h>
   #elif defined(__APPLE__)
     #include <libproc.h>
+    #include <mach/mach_time.h>
+    #include <sys/ulock.h>
+  #elif defined(__linux__)
+    #include <linux/futex.h>
+    #include <sys/syscall.h>
   #endif
 #endif
 
@@ -210,6 +219,382 @@ public:
     explicit Scoped_timer_resolution(unsigned int) {}
 };
 #endif
+
+inline void precision_sleep_for(std::chrono::nanoseconds interval)
+{
+    if (interval <= std::chrono::nanoseconds::zero()) {
+        return;
+    }
+
+#if defined(__APPLE__)
+    static const mach_timebase_info_data_t timebase = [] {
+        mach_timebase_info_data_t info{};
+        mach_timebase_info(&info);
+        return info;
+    }();
+
+    const __uint128_t numerator = static_cast<__uint128_t>(interval.count()) *
+        static_cast<__uint128_t>(timebase.denom);
+    const __uint128_t ticks = (numerator + static_cast<__uint128_t>(timebase.numer) -
+                               __uint128_t{1}) /
+        static_cast<__uint128_t>(timebase.numer);
+
+    const __uint128_t clamped_ticks = std::max<__uint128_t>(ticks, __uint128_t{1});
+    if (clamped_ticks > std::numeric_limits<uint64_t>::max()) {
+        std::this_thread::sleep_for(interval);
+        return;
+    }
+
+    const uint64_t deadline = mach_absolute_time() +
+        static_cast<uint64_t>(clamped_ticks);
+
+    kern_return_t rc;
+    do {
+        rc = mach_wait_until(deadline);
+    } while (rc == KERN_ABORTED);
+
+    if (rc != KERN_SUCCESS) {
+        std::this_thread::sleep_for(interval);
+    }
+#else
+    std::this_thread::sleep_for(interval);
+#endif
+}
+
+namespace detail {
+
+#if defined(_WIN32)
+
+class wait_on_address_semaphore_impl {
+public:
+    wait_on_address_semaphore_impl() = default;
+
+    void init(unsigned initial)
+    {
+        value.store(static_cast<int>(initial), std::memory_order_relaxed);
+    }
+
+    void destroy() {}
+
+    void post()
+    {
+        int previous = value.fetch_add(1, std::memory_order_release);
+        if (previous < 0) {
+            ::WakeByAddressSingle(address());
+        }
+    }
+
+    void wait()
+    {
+        int previous = value.fetch_sub(1, std::memory_order_acquire);
+        if (previous <= 0) {
+            int expected = previous - 1;
+            for (;;) {
+                if (!::WaitOnAddress(address_volatile(), &expected, sizeof(expected), INFINITE)) {
+                    const DWORD err = ::GetLastError();
+                    if (err == ERROR_TIMEOUT) {
+                        continue;
+                    }
+                    throw std::system_error(static_cast<int>(err), std::system_category(), "WaitOnAddress failed");
+                }
+
+                const int current = value.load(std::memory_order_acquire);
+                if (current > expected) {
+                    break;
+                }
+                expected = current;
+            }
+        }
+    }
+
+private:
+    void* address() { return static_cast<void*>(&value); }
+    volatile void* address_volatile() { return static_cast<volatile void*>(&value); }
+
+    alignas(4) std::atomic<int> value{0};
+};
+
+using interprocess_semaphore_impl = wait_on_address_semaphore_impl;
+
+#elif defined(__linux__)
+
+class futex_semaphore_impl {
+public:
+    futex_semaphore_impl() = default;
+
+    void init(unsigned initial)
+    {
+        value.store(static_cast<int>(initial), std::memory_order_relaxed);
+    }
+
+    void destroy() {}
+
+    void post()
+    {
+        int previous = value.fetch_add(1, std::memory_order_release);
+        if (previous < 0) {
+            futex_wake(1);
+        }
+    }
+
+    void wait()
+    {
+        int previous = value.fetch_sub(1, std::memory_order_acquire);
+        if (previous <= 0) {
+            int expected = previous - 1;
+            for (;;) {
+                const int rc = futex_wait(expected);
+                if (rc == 0) {
+                    break;
+                }
+
+                const int err = errno;
+                if (err == EINTR) {
+                    continue;
+                }
+                if (err == EAGAIN) {
+                    const int current = value.load(std::memory_order_acquire);
+                    if (current > expected) {
+                        break;
+                    }
+                    expected = current;
+                    continue;
+                }
+
+                throw std::system_error(err, std::system_category(), "futex_wait failed");
+            }
+        }
+    }
+
+private:
+    int futex_wait(int expected)
+    {
+        return static_cast<int>(::syscall(SYS_futex, raw_value(), FUTEX_WAIT_PRIVATE, expected, nullptr, nullptr, 0));
+    }
+
+    void futex_wake(int count)
+    {
+        const int rc = static_cast<int>(::syscall(SYS_futex, raw_value(), FUTEX_WAKE_PRIVATE, count, nullptr, nullptr, 0));
+        if (rc == -1) {
+            throw std::system_error(errno, std::system_category(), "futex_wake failed");
+        }
+    }
+
+    int* raw_value()
+    {
+        return reinterpret_cast<int*>(&value);
+    }
+
+    alignas(4) std::atomic<int> value{0};
+};
+
+using interprocess_semaphore_impl = futex_semaphore_impl;
+
+#elif defined(__APPLE__)
+
+class ulock_semaphore_impl {
+public:
+    ulock_semaphore_impl() = default;
+
+    void init(unsigned initial)
+    {
+        value.store(static_cast<int>(initial), std::memory_order_relaxed);
+    }
+
+    void destroy() {}
+
+    void post()
+    {
+        int previous = value.fetch_add(1, std::memory_order_release);
+        if (previous < 0) {
+            const int rc = __ulock_wake(UL_COMPARE_AND_WAIT, raw_value(), 0);
+            if (rc != 0) {
+                throw std::system_error(errno, std::system_category(), "__ulock_wake failed");
+            }
+        }
+    }
+
+    void wait()
+    {
+        int previous = value.fetch_sub(1, std::memory_order_acquire);
+        if (previous <= 0) {
+            int expected = previous - 1;
+            for (;;) {
+                int rc;
+                do {
+                    rc = __ulock_wait(UL_COMPARE_AND_WAIT, raw_value(), static_cast<uint64_t>(expected), 0);
+                } while (rc != 0 && errno == EINTR);
+
+                if (rc != 0) {
+                    const int err = errno;
+                    if (err == EAGAIN) {
+                        const int current = value.load(std::memory_order_acquire);
+                        if (current > expected) {
+                            break;
+                        }
+                        expected = current;
+                        continue;
+                    }
+                    throw std::system_error(err, std::system_category(), "__ulock_wait failed");
+                }
+
+                const int current = value.load(std::memory_order_acquire);
+                if (current > expected) {
+                    break;
+                }
+                expected = current;
+            }
+        }
+    }
+
+private:
+    void* raw_value()
+    {
+        return static_cast<void*>(&value);
+    }
+
+    alignas(4) std::atomic<int> value{0};
+};
+
+using interprocess_semaphore_impl = ulock_semaphore_impl;
+
+#else
+
+class pthread_semaphore_impl {
+public:
+    pthread_semaphore_impl() = default;
+
+    void init(unsigned initial)
+    {
+        pthread_mutexattr_t mattr;
+        pthread_condattr_t  cattr;
+
+        int rc = pthread_mutexattr_init(&mattr);
+        if (rc != 0) {
+            throw std::system_error(rc, std::system_category(), "pthread_mutexattr_init failed");
+        }
+
+        rc = pthread_mutexattr_setpshared(&mattr, PTHREAD_PROCESS_SHARED);
+        if (rc != 0) {
+            pthread_mutexattr_destroy(&mattr);
+            throw std::system_error(rc, std::system_category(), "pthread_mutexattr_setpshared failed");
+        }
+
+        rc = pthread_mutex_init(&mutex, &mattr);
+        if (rc != 0) {
+            pthread_mutexattr_destroy(&mattr);
+            throw std::system_error(rc, std::system_category(), "pthread_mutex_init failed");
+        }
+
+        pthread_mutexattr_destroy(&mattr);
+
+        rc = pthread_condattr_init(&cattr);
+        if (rc != 0) {
+            pthread_mutex_destroy(&mutex);
+            throw std::system_error(rc, std::system_category(), "pthread_condattr_init failed");
+        }
+
+        rc = pthread_condattr_setpshared(&cattr, PTHREAD_PROCESS_SHARED);
+        if (rc != 0) {
+            pthread_condattr_destroy(&cattr);
+            pthread_mutex_destroy(&mutex);
+            throw std::system_error(rc, std::system_category(), "pthread_condattr_setpshared failed");
+        }
+
+        rc = pthread_cond_init(&cond, &cattr);
+        if (rc != 0) {
+            pthread_condattr_destroy(&cattr);
+            pthread_mutex_destroy(&mutex);
+            throw std::system_error(rc, std::system_category(), "pthread_cond_init failed");
+        }
+
+        pthread_condattr_destroy(&cattr);
+
+        value = initial;
+    }
+
+    void destroy()
+    {
+        pthread_cond_destroy(&cond);
+        pthread_mutex_destroy(&mutex);
+    }
+
+    void post()
+    {
+        int rc = pthread_mutex_lock(&mutex);
+        if (rc != 0) {
+            throw std::system_error(rc, std::system_category(), "pthread_mutex_lock failed");
+        }
+
+        ++value;
+
+        rc = pthread_mutex_unlock(&mutex);
+        if (rc != 0) {
+            throw std::system_error(rc, std::system_category(), "pthread_mutex_unlock failed");
+        }
+
+        rc = pthread_cond_signal(&cond);
+        if (rc != 0) {
+            throw std::system_error(rc, std::system_category(), "pthread_cond_signal failed");
+        }
+    }
+
+    void wait()
+    {
+        int rc = pthread_mutex_lock(&mutex);
+        if (rc != 0) {
+            throw std::system_error(rc, std::system_category(), "pthread_mutex_lock failed");
+        }
+
+        while (value == 0) {
+            rc = pthread_cond_wait(&cond, &mutex);
+            if (rc != 0) {
+                pthread_mutex_unlock(&mutex);
+                throw std::system_error(rc, std::system_category(), "pthread_cond_wait failed");
+            }
+        }
+
+        --value;
+
+        rc = pthread_mutex_unlock(&mutex);
+        if (rc != 0) {
+            throw std::system_error(rc, std::system_category(), "pthread_mutex_unlock failed");
+        }
+    }
+
+private:
+    pthread_mutex_t mutex{};
+    pthread_cond_t  cond{};
+    unsigned        value{0};
+};
+
+using interprocess_semaphore_impl = pthread_semaphore_impl;
+
+#endif
+
+} // namespace detail
+
+class interprocess_semaphore {
+public:
+    explicit interprocess_semaphore(unsigned initial = 0)
+    {
+        m_impl.init(initial);
+    }
+
+    ~interprocess_semaphore()
+    {
+        m_impl.destroy();
+    }
+
+    interprocess_semaphore(const interprocess_semaphore&) = delete;
+    interprocess_semaphore& operator=(const interprocess_semaphore&) = delete;
+
+    void post() { m_impl.post(); }
+    void wait() { m_impl.wait(); }
+
+private:
+    detail::interprocess_semaphore_impl m_impl;
+};
 
 #ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
 namespace ring_detail {
@@ -578,9 +963,9 @@ public:
 };
 
 // A binary semaphore tailored for the ring's reader wakeup policy.
-struct sintra_ring_semaphore : ipc::interprocess_semaphore
+struct sintra_ring_semaphore
 {
-    sintra_ring_semaphore() : ipc::interprocess_semaphore(0) {}
+    sintra_ring_semaphore() = default;
 
     // Wakes all readers in an ordered fashion (used by writer after publishing).
     void post_ordered()
@@ -589,7 +974,7 @@ struct sintra_ring_semaphore : ipc::interprocess_semaphore
             unordered.store(false, std::memory_order_release);
         }
         else if (!posted.test_and_set(std::memory_order_acquire)) {
-            this->post();
+            sem.post();
         }
     }
 
@@ -598,18 +983,19 @@ struct sintra_ring_semaphore : ipc::interprocess_semaphore
     {
         if (!posted.test_and_set(std::memory_order_acquire)) {
             unordered.store(true, std::memory_order_release);
-            this->post();
+            sem.post();
         }
     }
 
     // Wait returns true if the wakeup was unordered and no ordered post happened since.
     bool wait()
     {
-        ipc::interprocess_semaphore::wait();
+        sem.wait();
         posted.clear(std::memory_order_release);
         return unordered.exchange(false, std::memory_order_acq_rel);
     }
 private:
+    interprocess_semaphore sem{};
     std::atomic_flag posted = ATOMIC_FLAG_INIT;
     std::atomic<bool> unordered{false};
 };
@@ -1162,13 +1548,11 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
     ~Ring()
     {
         if (m_control) {
-            // The *last* detaching process deletes both control and data files. On
-            // platforms where Control wraps kernel semaphore handles (Windows/macOS)
-            // we must explicitly run the destructor once the final reference drops.
+            // The *last* detaching process deletes both control and data files. We must
+            // explicitly run the shared Control destructor so that platform-specific
+            // synchronization primitives are released cleanly.
             if (m_control->num_attached.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-#if defined(_WIN32) || defined(__APPLE__)
                 m_control->~Control();
-#endif
                 this->m_remove_files_on_destruction = true;
             }
         }
@@ -1579,6 +1963,9 @@ struct Ring_R : Ring<T, true>
             // still polling at a high enough cadence to catch bursts quickly.
             Scoped_timer_resolution timer_resolution_guard(1);
             const double precision_sleep_end = get_wtime() + precision_sleep_duration;
+            const auto precision_sleep_interval =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::duration<double>(precision_sleep_cycle));
             while (sequences_equal() && get_wtime() < precision_sleep_end) {
                 if (should_shutdown()) {
                     return Range<T>{};
@@ -1591,7 +1978,7 @@ struct Ring_R : Ring<T, true>
                     }
                     return Range<T>{};
                 }
-                std::this_thread::sleep_for(std::chrono::duration<double>(precision_sleep_cycle));
+                precision_sleep_for(precision_sleep_interval);
                 SINTRA_DELAY_FUZZ("ipc_rings.precision_sleep");
             }
         }
