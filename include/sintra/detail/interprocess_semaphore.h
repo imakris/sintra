@@ -6,29 +6,50 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <limits>
+#include <mutex>
+#include <random>
 #include <type_traits>
+#include <unordered_map>
 #if defined(_WIN32)
 #    include <algorithm>
 #    include <climits>
 #    include <cwchar>
-#    include <mutex>
-#    include <random>
-#    include <unordered_map>
 #endif
 
 #if defined(_WIN32)
   #include <Windows.h>
   #include <synchapi.h>
-#elif defined(__APPLE__)
-  #include <errno.h>
-  #include <sys/ulock.h>
-#else
+#elif defined(__linux__)
   #include <errno.h>
   #include <linux/futex.h>
+  #include <sched.h>
   #include <sys/syscall.h>
   #include <time.h>
   #include <unistd.h>
+#elif defined(__APPLE__)
+  #include <errno.h>
+#  if __has_include(<sys/ulock.h>)
+    #include <sys/ulock.h>
+#    define SINTRA_HAS_ULOCK 1
+#  else
+    #include <fcntl.h>
+    #include <semaphore.h>
+    #include <time.h>
+    #include <unistd.h>
+#    define SINTRA_HAS_ULOCK 0
+#  endif
+#else
+  #include <errno.h>
+  #include <fcntl.h>
+  #include <semaphore.h>
+  #include <time.h>
+  #include <unistd.h>
+#endif
+
+#ifndef SINTRA_HAS_ULOCK
+#define SINTRA_HAS_ULOCK 0
 #endif
 
 namespace sintra {
@@ -229,7 +250,7 @@ inline wait_status platform_wait_until(std::atomic<int32_t>& value,
     return wait_status::value_changed;
 }
 
-#elif defined(__APPLE__)
+#elif defined(__APPLE__) && SINTRA_HAS_ULOCK
 
 #ifndef UL_COMPARE_AND_WAIT_SHARED
 #define UL_COMPARE_AND_WAIT_SHARED (UL_COMPARE_AND_WAIT | ULF_SHARED)
@@ -301,7 +322,7 @@ inline wait_status platform_wait_until(std::atomic<int32_t>& value,
     return (err == EAGAIN) ? wait_status::value_changed : wait_status::timed_out;
 }
 
-#else // Linux / POSIX fallback
+#elif defined(__linux__)
 
 inline void platform_wake(std::atomic<int32_t>& value)
 {
@@ -381,6 +402,193 @@ inline wait_status platform_wait_until(std::atomic<int32_t>& value,
     }
 }
 
+#else // POSIX named semaphore fallback
+
+namespace posix {
+
+struct semaphore_state
+{
+    std::atomic<int32_t> initialized{0};
+    char                  name[64]{};
+};
+
+inline std::unordered_map<void*, sem_t*>& handle_map()
+{
+    static std::unordered_map<void*, sem_t*> map;
+    return map;
+}
+
+inline std::mutex& handle_mutex()
+{
+    static std::mutex mtx;
+    return mtx;
+}
+
+inline sem_t* open_or_create_handle(semaphore_state& state)
+{
+    {
+        std::lock_guard<std::mutex> lock(handle_mutex());
+        auto                        it = handle_map().find(&state);
+        if (it != handle_map().end()) {
+            return it->second;
+        }
+    }
+
+    int init_state = state.initialized.load(std::memory_order_acquire);
+    if (init_state != 2) {
+        int expected = 0;
+        if (state.initialized.compare_exchange_strong(expected, 1, std::memory_order_acq_rel)) {
+            std::random_device rd;
+            const auto         unique_hi = static_cast<unsigned long long>(::getpid());
+            const auto         unique_lo = static_cast<unsigned long long>(rd());
+            const auto         unique_id = (unique_hi << 32) ^ unique_lo ^
+                                   static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(&state));
+
+            std::snprintf(state.name,
+                          sizeof(state.name),
+                          "/sintra_ipc_sem_%016llx",
+                          unique_id);
+
+            sem_t* created = sem_open(state.name, O_CREAT | O_EXCL, 0600, 0);
+            if (created == SEM_FAILED) {
+                if (errno == EEXIST) {
+                    created = sem_open(state.name, 0);
+                }
+            }
+            if (created == SEM_FAILED) {
+                state.initialized.store(0, std::memory_order_release);
+                return nullptr;
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(handle_mutex());
+                handle_map()[&state] = created;
+            }
+
+            state.initialized.store(2, std::memory_order_release);
+            return created;
+        }
+
+        while (state.initialized.load(std::memory_order_acquire) == 1) {
+            ::usleep(1000);
+        }
+    }
+
+    sem_t* opened = sem_open(state.name, 0);
+    if (opened == SEM_FAILED) {
+        opened = sem_open(state.name, O_CREAT, 0600, 0);
+        if (opened == SEM_FAILED) {
+            return nullptr;
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(handle_mutex());
+        auto [it, inserted]         = handle_map().emplace(&state, opened);
+        if (!inserted) {
+            sem_close(opened);
+            return it->second;
+        }
+    }
+
+    return opened;
+}
+
+inline void close_handle(semaphore_state& state)
+{
+    std::lock_guard<std::mutex> lock(handle_mutex());
+    auto                        it = handle_map().find(&state);
+    if (it != handle_map().end()) {
+        sem_close(it->second);
+        handle_map().erase(it);
+    }
+}
+
+} // namespace posix
+
+inline void platform_wake(std::atomic<int32_t>& value, posix::semaphore_state& state)
+{
+    (void)value;
+    if (sem_t* sem = posix::open_or_create_handle(state)) {
+        sem_post(sem);
+    }
+}
+
+inline void platform_wait(std::atomic<int32_t>& value, int32_t expected, posix::semaphore_state& state)
+{
+    sem_t* sem = posix::open_or_create_handle(state);
+    if (!sem) {
+        while (value.load(std::memory_order_acquire) == expected) {
+            ::usleep(1000);
+        }
+        return;
+    }
+
+    while (value.load(std::memory_order_acquire) == expected) {
+        if (sem_wait(sem) == 0) {
+            return;
+        }
+        if (errno != EINTR) {
+            return;
+        }
+    }
+}
+
+inline wait_status platform_wait_until(std::atomic<int32_t>& value,
+                                       int32_t                expected,
+                                       std::chrono::nanoseconds timeout,
+                                       posix::semaphore_state& state)
+{
+    sem_t* sem = posix::open_or_create_handle(state);
+    if (!sem) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (value.load(std::memory_order_acquire) != expected) {
+                return wait_status::value_changed;
+            }
+            ::usleep(1000);
+        }
+        return wait_status::timed_out;
+    }
+
+    if (timeout <= std::chrono::nanoseconds::zero()) {
+        if (sem_trywait(sem) == 0) {
+            return wait_status::value_changed;
+        }
+        return (errno == EAGAIN) ? wait_status::timed_out : wait_status::value_changed;
+    }
+
+    timespec ts{};
+    auto     now       = std::chrono::system_clock::now().time_since_epoch();
+    auto     now_secs  = std::chrono::duration_cast<std::chrono::seconds>(now);
+    auto     now_nanos = std::chrono::duration_cast<std::chrono::nanoseconds>(now - now_secs);
+    ts.tv_sec          = static_cast<time_t>(now_secs.count());
+    ts.tv_nsec         = static_cast<long>(now_nanos.count());
+
+    auto secs  = std::chrono::duration_cast<std::chrono::seconds>(timeout);
+    auto nanos = timeout - secs;
+    ts.tv_sec += static_cast<time_t>(secs.count());
+    ts.tv_nsec += static_cast<long>(std::chrono::duration_cast<std::chrono::nanoseconds>(nanos).count());
+    if (ts.tv_nsec >= 1000000000L) {
+        ts.tv_sec += ts.tv_nsec / 1000000000L;
+        ts.tv_nsec %= 1000000000L;
+    }
+
+    while (value.load(std::memory_order_acquire) == expected) {
+        if (sem_timedwait(sem, &ts) == 0) {
+            return wait_status::value_changed;
+        }
+        if (errno == ETIMEDOUT) {
+            return wait_status::timed_out;
+        }
+        if (errno != EINTR) {
+            return wait_status::timed_out;
+        }
+    }
+
+    return wait_status::value_changed;
+}
+
 #endif
 
 } // namespace detail
@@ -395,6 +603,8 @@ public:
     {
 #if defined(_WIN32)
         detail::win32::close_handle(m_platform_state);
+#elif !defined(__linux__) && !(defined(__APPLE__) && SINTRA_HAS_ULOCK)
+        detail::posix::close_handle(m_platform_state);
 #endif
     }
 
@@ -407,8 +617,12 @@ public:
         if (previous < 0) {
 #if defined(_WIN32)
             detail::platform_wake(m_count, m_platform_state);
-#else
+#elif defined(__APPLE__) && SINTRA_HAS_ULOCK
             detail::platform_wake(m_count);
+#elif defined(__linux__)
+            detail::platform_wake(m_count);
+#else
+            detail::platform_wake(m_count, m_platform_state);
 #endif
         }
     }
@@ -449,8 +663,12 @@ private:
         while (true) {
 #if defined(_WIN32)
             detail::platform_wait(m_count, expected, m_platform_state);
-#else
+#elif defined(__APPLE__) && SINTRA_HAS_ULOCK
             detail::platform_wait(m_count, expected);
+#elif defined(__linux__)
+            detail::platform_wait(m_count, expected);
+#else
+            detail::platform_wait(m_count, expected, m_platform_state);
 #endif
             int32_t current = m_count.load(std::memory_order_acquire);
             if (current > expected) {
@@ -480,8 +698,13 @@ private:
 #if defined(_WIN32)
             detail::wait_status result =
                 detail::platform_wait_until(m_count, expected, remaining, m_platform_state);
-#else
+#elif defined(__APPLE__) && SINTRA_HAS_ULOCK
             detail::wait_status result = detail::platform_wait_until(m_count, expected, remaining);
+#elif defined(__linux__)
+            detail::wait_status result = detail::platform_wait_until(m_count, expected, remaining);
+#else
+            detail::wait_status result =
+                detail::platform_wait_until(m_count, expected, remaining, m_platform_state);
 #endif
             int32_t             current = m_count.load(std::memory_order_acquire);
             if (current > expected) {
@@ -515,6 +738,8 @@ private:
 
 #if defined(_WIN32)
     mutable detail::win32::semaphore_state m_platform_state{};
+#elif !defined(__linux__) && !(defined(__APPLE__) && SINTRA_HAS_ULOCK)
+    mutable detail::posix::semaphore_state m_platform_state{};
 #endif
     std::atomic<int32_t> m_count;
 };
