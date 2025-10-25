@@ -461,7 +461,7 @@ Managed_process::Managed_process():
     assert(s_mproc == nullptr);
     s_mproc = this;
 
-    m_pid = ipc::ipcdetail::get_current_process_id();
+    m_pid = bipc::ipcdetail::get_current_process_id();
 
     install_signal_handler();
 

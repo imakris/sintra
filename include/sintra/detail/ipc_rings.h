@@ -134,7 +134,8 @@
 #include <boost/interprocess/file_mapping.hpp>
 #include <boost/interprocess/mapped_region.hpp>
 #include <boost/interprocess/sync/interprocess_mutex.hpp>
-#include <boost/interprocess/sync/interprocess_semaphore.hpp>
+
+#include "interprocess_semaphore.h"
 
 // ─── Platform headers (grouped) ──────────────────────────────────────────────
 #ifdef _WIN32
@@ -183,8 +184,8 @@
 
 namespace sintra {
 
-namespace fs  = std::filesystem;
-namespace ipc = boost::interprocess;
+namespace fs   = std::filesystem;
+namespace bipc = boost::interprocess;
 
 using sequence_counter_type = uint64_t;
 constexpr auto invalid_sequence = ~sequence_counter_type(0);
@@ -566,7 +567,7 @@ std::vector<size_t> get_ring_configurations(
         return m / gcd(m, n) * n;
     };
 
-    size_t page_size = ipc::mapped_region::get_page_size();
+    size_t page_size = bipc::mapped_region::get_page_size();
     // Round up to a page-size multiple that is also a multiple of sizeof(T)
     size_t base_size = lcm(sizeof(T), page_size);
 
@@ -729,13 +730,13 @@ private:
             if (!check_or_create_directory(m_directory))
                 return false;
 
-            ipc::file_handle_t fh_data =
-                ipc::ipcdetail::create_new_file(m_data_filename.c_str(), ipc::read_write);
-            if (fh_data == ipc::ipcdetail::invalid_file())
+            bipc::file_handle_t fh_data =
+                bipc::ipcdetail::create_new_file(m_data_filename.c_str(), bipc::read_write);
+            if (fh_data == bipc::ipcdetail::invalid_file())
                 return false;
 
 #ifdef NDEBUG
-            if (!ipc::ipcdetail::truncate_file(fh_data, m_data_region_size))
+            if (!bipc::ipcdetail::truncate_file(fh_data, m_data_region_size))
                 return false;
 #else
             // Fill with a recognizable pattern to aid debugging
@@ -745,9 +746,9 @@ private:
             for (size_t i = 0; i < m_data_region_size; ++i) {
                 tmp[i] = ustr[i % dv];
             }
-            ipc::ipcdetail::write_file(fh_data, tmp.get(), m_data_region_size);
+            bipc::ipcdetail::write_file(fh_data, tmp.get(), m_data_region_size);
 #endif
-            return ipc::ipcdetail::close_file(fh_data);
+            return bipc::ipcdetail::close_file(fh_data);
         }
         catch (...) {
         }
@@ -781,14 +782,14 @@ private:
             }
 
             // NOTE: On Windows, Boost's "page size" here is the allocation granularity.
-            size_t page_size = ipc::mapped_region::get_page_size();
+            size_t page_size = bipc::mapped_region::get_page_size();
 
             // Enforce the “multiple of page/granularity” constraint explicitly.
             assert((m_data_region_size % page_size) == 0 &&
                    "Ring size (bytes) must be multiple of mapping granularity");
 
-            auto data_rights = READ_ONLY_DATA ? ipc::read_only : ipc::read_write;
-            ipc::file_mapping file(m_data_filename.c_str(), data_rights);
+            auto data_rights = READ_ONLY_DATA ? bipc::read_only : bipc::read_write;
+            bipc::file_mapping file(m_data_filename.c_str(), data_rights);
 
             // Unified retry logic for all platforms.
             // When multiple threads in the same process try to map the same file simultaneously,
@@ -798,7 +799,7 @@ private:
 
             for (int attempt = 0; attempt < max_attach_attempts; ++attempt) {
                 char* ptr = nullptr;
-                ipc::map_options_t map_extra_options = 0;
+                bipc::map_options_t map_extra_options = 0;
 
 #ifdef _WIN32
                 // ── Windows: VirtualAlloc → round → VirtualFree → map ──────────────
@@ -828,13 +829,13 @@ private:
                 #endif
 #endif
                 // ── Platform-independent: map twice back-to-back ───────────────────
-                std::unique_ptr<ipc::mapped_region> region0, region1;
+                std::unique_ptr<bipc::mapped_region> region0, region1;
                 bool mapping_failed = false;
 
                 try {
-                    region0.reset(new ipc::mapped_region(file, data_rights, 0,
+                    region0.reset(new bipc::mapped_region(file, data_rights, 0,
                         m_data_region_size, ptr, map_extra_options));
-                    region1.reset(new ipc::mapped_region(file, data_rights, 0, 0,
+                    region1.reset(new bipc::mapped_region(file, data_rights, 0, 0,
                         ((char*)region0->get_address()) + m_data_region_size, map_extra_options));
                 }
                 catch (const std::exception& ex) {
@@ -900,8 +901,8 @@ private:
     }
 
 
-    ipc::mapped_region*                 m_data_region_0                 = nullptr;
-    ipc::mapped_region*                 m_data_region_1                 = nullptr;
+    bipc::mapped_region*                 m_data_region_0                 = nullptr;
+    bipc::mapped_region*                 m_data_region_1                 = nullptr;
     std::string                         m_directory;
 
 protected:
@@ -1093,7 +1094,7 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         // Used to avoid accidentally having multiple writers on the same ring
         // across processes. Only one writer may hold this at a time.
         std::atomic<uint32_t>                writer_pid{0};
-        ipc::interprocess_mutex              ownership_mutex;
+        bipc::interprocess_mutex              ownership_mutex;
 
         // The following synchronization structures may only be accessed between lock()/unlock().
 
@@ -1252,13 +1253,13 @@ private:
     bool create()
     {
         try {
-            ipc::file_handle_t fh_control =
-                ipc::ipcdetail::create_new_file(m_control_filename.c_str(), ipc::read_write);
-            if (fh_control == ipc::ipcdetail::invalid_file())
+            bipc::file_handle_t fh_control =
+                bipc::ipcdetail::create_new_file(m_control_filename.c_str(), bipc::read_write);
+            if (fh_control == bipc::ipcdetail::invalid_file())
                 return false;
 
 #ifdef NDEBUG
-            if (!ipc::ipcdetail::truncate_file(fh_control, sizeof(Control)))
+            if (!bipc::ipcdetail::truncate_file(fh_control, sizeof(Control)))
                 return false;
 #else
             const char* ustr = "UNINITIALIZED";
@@ -1267,9 +1268,9 @@ private:
             for (size_t i = 0; i < sizeof(Control); ++i) {
                 tmp[i] = ustr[i % dv];
             }
-            ipc::ipcdetail::write_file(fh_control, tmp.get(), sizeof(Control));
+            bipc::ipcdetail::write_file(fh_control, tmp.get(), sizeof(Control));
 #endif
-            return ipc::ipcdetail::close_file(fh_control);
+            return bipc::ipcdetail::close_file(fh_control);
         }
         catch (...) {
         }
@@ -1286,8 +1287,8 @@ private:
                 return false;
             }
 
-            ipc::file_mapping fm_control(m_control_filename.c_str(), ipc::read_write);
-            m_control_region = new ipc::mapped_region(fm_control, ipc::read_write, 0, 0);
+            bipc::file_mapping fm_control(m_control_filename.c_str(), bipc::read_write);
+            m_control_region = new bipc::mapped_region(fm_control, bipc::read_write, 0, 0);
             m_control = (Control*)m_control_region->get_address();
 
             return true;
@@ -1298,7 +1299,7 @@ private:
     }
 
 private:
-    ipc::mapped_region*  m_control_region = nullptr;
+    bipc::mapped_region*  m_control_region = nullptr;
     std::string          m_control_filename;
 protected:
     Control*             m_control        = nullptr;
@@ -1995,7 +1996,7 @@ private:
 
         auto finalize_recovery = [&]() {
             c.ownership_mutex.~interprocess_mutex();
-            new (&c.ownership_mutex) ipc::interprocess_mutex();
+            new (&c.ownership_mutex) bipc::interprocess_mutex();
             c.writer_pid.store(0, std::memory_order_release);
         };
 

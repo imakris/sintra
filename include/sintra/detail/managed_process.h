@@ -213,7 +213,7 @@ struct Managed_process: Derived_transceiver<Managed_process>
 
     string                              m_binary_name;
 
-    ipc::ipcdetail::OS_process_id_t     m_pid;
+    bipc::ipcdetail::OS_process_id_t     m_pid;
 
     atomic<bool>                        m_must_stop;
     condition_variable                  m_termination_condition;
