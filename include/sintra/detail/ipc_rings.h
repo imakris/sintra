@@ -134,7 +134,6 @@
 #include <boost/interprocess/file_mapping.hpp>
 #include <boost/interprocess/mapped_region.hpp>
 #include <boost/interprocess/sync/interprocess_mutex.hpp>
-#include <boost/interprocess/sync/interprocess_semaphore.hpp>
 
 // ─── Platform headers (grouped) ──────────────────────────────────────────────
 #ifdef _WIN32
@@ -144,8 +143,12 @@
   #ifndef WIN32_LEAN_AND_MEAN
   #define WIN32_LEAN_AND_MEAN
   #endif
+  #ifndef _WIN32_WINNT
+  #define _WIN32_WINNT 0x0602
+  #endif
   #include <Windows.h>   // ::VirtualAlloc, granularity details (via Boost)
   #include <timeapi.h>   // ::timeBeginPeriod, ::timeEndPeriod (for ADAPTIVE_SPIN)
+  #include <synchapi.h>  // WaitOnAddress family for custom semaphore
 #else
   #include <sys/mman.h>  // ::mmap, ::munmap, MAP_FIXED, MAP_NOSYNC (if available)
   #include <unistd.h>    // ::sysconf
@@ -156,7 +159,14 @@
     #include <sys/user.h>
   #elif defined(__APPLE__)
     #include <libproc.h>
+    #include <mach/mach_time.h>
+    #include <sys/ulock.h>
   #endif
+#endif
+
+#if defined(__linux__)
+#  include <linux/futex.h>
+#  include <sys/syscall.h>
 #endif
 
 
@@ -210,6 +220,47 @@ public:
     explicit Scoped_timer_resolution(unsigned int) {}
 };
 #endif
+
+inline void precision_sleep_for(std::chrono::nanoseconds interval)
+{
+    if (interval <= std::chrono::nanoseconds::zero()) {
+        return;
+    }
+
+#if defined(__APPLE__)
+    static const mach_timebase_info_data_t timebase = [] {
+        mach_timebase_info_data_t info{};
+        mach_timebase_info(&info);
+        return info;
+    }();
+
+    const __uint128_t numerator = static_cast<__uint128_t>(interval.count()) *
+        static_cast<__uint128_t>(timebase.denom);
+    const __uint128_t ticks = (numerator + static_cast<__uint128_t>(timebase.numer) -
+                               __uint128_t{1}) /
+        static_cast<__uint128_t>(timebase.numer);
+
+    const __uint128_t clamped_ticks = std::max<__uint128_t>(ticks, __uint128_t{1});
+    if (clamped_ticks > std::numeric_limits<uint64_t>::max()) {
+        std::this_thread::sleep_for(interval);
+        return;
+    }
+
+    const uint64_t deadline = mach_absolute_time() +
+        static_cast<uint64_t>(clamped_ticks);
+
+    kern_return_t rc;
+    do {
+        rc = mach_wait_until(deadline);
+    } while (rc == KERN_ABORTED);
+
+    if (rc != KERN_SUCCESS) {
+        std::this_thread::sleep_for(interval);
+    }
+#else
+    std::this_thread::sleep_for(interval);
+#endif
+}
 
 #ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
 namespace ring_detail {
@@ -577,10 +628,114 @@ public:
               "Ring reader was evicted by the writer due to being too slow.") {}
 };
 
-// A binary semaphore tailored for the ring's reader wakeup policy.
-struct sintra_ring_semaphore : ipc::interprocess_semaphore
+// Counting semaphore that lives in shared memory and relies on platform-specific
+// address-based wait primitives (futex/WaitOnAddress/ulock) for blocking.
+class interprocess_semaphore
 {
-    sintra_ring_semaphore() : ipc::interprocess_semaphore(0) {}
+public:
+    interprocess_semaphore(unsigned int initial = 0) noexcept
+        : m_count(static_cast<int32_t>(initial)),
+          m_wait_seq(0),
+          m_wake_seq(0)
+    {}
+
+    void post() noexcept
+    {
+        const int32_t old = m_count.fetch_add(1, std::memory_order_release);
+        if (old < 0) {
+            m_wake_seq.fetch_add(1, std::memory_order_release);
+            wake_all(m_wake_seq);
+        }
+    }
+
+    void wait() noexcept
+    {
+        const int32_t old = m_count.fetch_sub(1, std::memory_order_acquire);
+        if (old > 0) {
+            return;
+        }
+        wait_slow_path();
+    }
+
+private:
+    void wait_slow_path() noexcept
+    {
+        const uint32_t seq = m_wait_seq.fetch_add(1, std::memory_order_acq_rel);
+        uint32_t observed = m_wake_seq.load(std::memory_order_acquire);
+
+        while ((observed - seq) == 0u) {
+            wait_on(m_wake_seq, observed);
+            observed = m_wake_seq.load(std::memory_order_acquire);
+        }
+    }
+
+    static void wait_on(std::atomic<uint32_t>& target, uint32_t expected) noexcept
+    {
+#if defined(__linux__)
+        auto* addr = reinterpret_cast<uint32_t*>(std::addressof(target));
+        while (true) {
+            int rc = syscall(SYS_futex, addr, FUTEX_WAIT, expected, nullptr, nullptr, 0);
+            if (rc == 0 || errno == EAGAIN) {
+                return;
+            }
+            if (errno == EINTR) {
+                continue;
+            }
+            return;
+        }
+#elif defined(__APPLE__)
+        auto* addr = reinterpret_cast<uint32_t*>(std::addressof(target));
+        while (true) {
+            int rc = __ulock_wait(UL_COMPARE_AND_WAIT | ULF_SHARED, addr, expected, 0);
+            if (rc == 0 || errno == EAGAIN) {
+                return;
+            }
+            if (errno == EINTR) {
+                continue;
+            }
+            return;
+        }
+#elif defined(_WIN32)
+        auto* addr = reinterpret_cast<volatile void*>(std::addressof(target));
+        while (!::WaitOnAddress(addr, &expected, sizeof(expected), INFINITE)) {
+            if (::GetLastError() == ERROR_TIMEOUT) {
+                continue;
+            }
+            return;
+        }
+#else
+        (void)target;
+        (void)expected;
+        std::this_thread::sleep_for(std::chrono::microseconds(50));
+#endif
+    }
+
+    static void wake_all(std::atomic<uint32_t>& target) noexcept
+    {
+#if defined(__linux__)
+        auto* addr = reinterpret_cast<uint32_t*>(std::addressof(target));
+        (void)syscall(SYS_futex, addr, FUTEX_WAKE,
+                      std::numeric_limits<int>::max(), nullptr, nullptr, 0);
+#elif defined(__APPLE__)
+        auto* addr = reinterpret_cast<uint32_t*>(std::addressof(target));
+        (void)__ulock_wake(UL_COMPARE_AND_WAIT | ULF_SHARED | ULF_WAKE_ALL, addr, 0);
+#elif defined(_WIN32)
+        auto* addr = reinterpret_cast<volatile void*>(std::addressof(target));
+        ::WakeByAddressAll(addr);
+#else
+        (void)target;
+#endif
+    }
+
+    std::atomic<int32_t>  m_count;
+    std::atomic<uint32_t> m_wait_seq;
+    std::atomic<uint32_t> m_wake_seq;
+};
+
+// A binary semaphore wrapper that preserves the ring's ordered/unordered wake policy.
+struct sintra_ring_semaphore
+{
+    sintra_ring_semaphore() noexcept = default;
 
     // Wakes all readers in an ordered fashion (used by writer after publishing).
     void post_ordered()
@@ -589,7 +744,7 @@ struct sintra_ring_semaphore : ipc::interprocess_semaphore
             unordered.store(false, std::memory_order_release);
         }
         else if (!posted.test_and_set(std::memory_order_acquire)) {
-            this->post();
+            semaphore.post();
         }
     }
 
@@ -598,20 +753,22 @@ struct sintra_ring_semaphore : ipc::interprocess_semaphore
     {
         if (!posted.test_and_set(std::memory_order_acquire)) {
             unordered.store(true, std::memory_order_release);
-            this->post();
+            semaphore.post();
         }
     }
 
     // Wait returns true if the wakeup was unordered and no ordered post happened since.
     bool wait()
     {
-        ipc::interprocess_semaphore::wait();
+        semaphore.wait();
         posted.clear(std::memory_order_release);
         return unordered.exchange(false, std::memory_order_acq_rel);
     }
+
 private:
-    std::atomic_flag posted = ATOMIC_FLAG_INIT;
-    std::atomic<bool> unordered{false};
+    interprocess_semaphore semaphore{};
+    std::atomic_flag       posted = ATOMIC_FLAG_INIT;
+    std::atomic<bool>      unordered{false};
 };
 
 
@@ -1579,6 +1736,9 @@ struct Ring_R : Ring<T, true>
             // still polling at a high enough cadence to catch bursts quickly.
             Scoped_timer_resolution timer_resolution_guard(1);
             const double precision_sleep_end = get_wtime() + precision_sleep_duration;
+            const auto precision_sleep_interval =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::duration<double>(precision_sleep_cycle));
             while (sequences_equal() && get_wtime() < precision_sleep_end) {
                 if (should_shutdown()) {
                     return Range<T>{};
@@ -1591,7 +1751,7 @@ struct Ring_R : Ring<T, true>
                     }
                     return Range<T>{};
                 }
-                std::this_thread::sleep_for(std::chrono::duration<double>(precision_sleep_cycle));
+                precision_sleep_for(precision_sleep_interval);
                 SINTRA_DELAY_FUZZ("ipc_rings.precision_sleep");
             }
         }
