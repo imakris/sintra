@@ -386,6 +386,18 @@ instance_id_type Coordinator::publish_transceiver(type_id_type tid, instance_id_
             m_draining_process_states[slot].store(0, std::memory_order_release);
         }
 
+        bool enrolled = true;
+        {
+            lock_guard<mutex> groups_lock(m_groups_mutex);
+            enrolled = enroll_process_in_default_groups_locked(process_iid);
+        }
+
+        if (!enrolled) {
+            m_transceiver_registry.erase(process_iid);
+            s_mproc->m_instance_id_of_assigned_name.erase(entry.name);
+            return invalid_instance_id;
+        }
+
         return true_sequence();
     }
     else {
@@ -455,21 +467,13 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
 
         lock_guard<mutex> lock(m_groups_mutex);
 
-        for (auto& group_entry : m_groups) {
-            group_entry.second.remove_process(process_iid);
+        for (auto& [name, group] : m_groups) {
+            remove_process_from_group_locked(group, process_iid);
         }
-
-        m_groups_of_process.erase(process_iid);
 
         // Keep the draining bit set; it will be re-initialized to 0 (ACTIVE)
         // when a new process is published into this slot. This prevents the race
         // where resetting too early allows concurrent barriers to include a dying process.
-
-        // remove all group associations of unpublished process
-        auto groups_it = m_groups_of_process.find(iid);
-        if (groups_it != m_groups_of_process.end()) {
-            m_groups_of_process.erase(groups_it);
-        }
 
         //// and finally, if the process was being read, stop reading from it
         if (iid != s_mproc_id) {
@@ -582,6 +586,58 @@ instance_id_type Coordinator::make_process_group(
     return ret;
 }
 
+
+inline bool Coordinator::add_process_to_group_locked(
+    Process_group& group,
+    instance_id_type process_iid)
+{
+    const bool inserted = group.add_process(process_iid);
+    m_groups_of_process[process_iid].insert(group.m_instance_id);
+    return inserted;
+}
+
+
+inline void Coordinator::remove_process_from_group_locked(
+    Process_group& group,
+    instance_id_type process_iid)
+{
+    group.remove_process(process_iid);
+
+    auto groups_it = m_groups_of_process.find(process_iid);
+    if (groups_it == m_groups_of_process.end()) {
+        return;
+    }
+
+    groups_it->second.erase(group.m_instance_id);
+    if (groups_it->second.empty()) {
+        m_groups_of_process.erase(groups_it);
+    }
+}
+
+
+inline bool Coordinator::enroll_process_in_default_groups_locked(
+    instance_id_type process_iid)
+{
+    auto all_it = m_groups.find("_sintra_all_processes");
+    if (all_it == m_groups.end()) {
+        return false;
+    }
+
+    add_process_to_group_locked(all_it->second, process_iid);
+
+    if (process_iid == s_mproc_id) {
+        return true;
+    }
+
+    auto external_it = m_groups.find("_sintra_external_processes");
+    if (external_it == m_groups.end()) {
+        remove_process_from_group_locked(all_it->second, process_iid);
+        return false;
+    }
+
+    add_process_to_group_locked(external_it->second, process_iid);
+    return true;
+}
 
 
 // EXPORTED FOR RPC

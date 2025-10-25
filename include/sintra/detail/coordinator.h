@@ -79,8 +79,8 @@ public:
         const std::vector<Barrier_completion>& completions);
 
 private:
-    void add_process(instance_id_type process_iid);
-    void remove_process(instance_id_type process_iid);
+    bool add_process(instance_id_type process_iid);
+    bool remove_process(instance_id_type process_iid);
 
     friend struct Coordinator;
 };
@@ -97,18 +97,18 @@ void Process_group::set(const unordered_set<instance_id_type>& member_process_id
 
 
 inline
-void Process_group::add_process(instance_id_type process_iid)
+bool Process_group::add_process(instance_id_type process_iid)
 {
     std::lock_guard lock(m_call_mutex);
-    m_process_ids.insert(process_iid);
+    return m_process_ids.insert(process_iid).second;
 }
 
 
 inline
-void Process_group::remove_process(instance_id_type process_iid)
+bool Process_group::remove_process(instance_id_type process_iid)
 {
     std::lock_guard lock(m_call_mutex);
-    m_process_ids.erase(process_iid);
+    return m_process_ids.erase(process_iid) > 0;
 }
 
 
@@ -138,6 +138,11 @@ private:
     instance_id_type make_process_group(
         const string& name,
         const unordered_set<instance_id_type>& member_process_ids);
+
+
+    bool add_process_to_group_locked(Process_group& group, instance_id_type process_iid);
+    void remove_process_from_group_locked(Process_group& group, instance_id_type process_iid);
+    bool enroll_process_in_default_groups_locked(instance_id_type process_iid);
 
 
     void enable_recovery(instance_id_type piid);
