@@ -262,6 +262,12 @@ int alpha_process()
             return report_failure("alpha", "depart signal missing");
         }
         append_event("alpha", "depart");
+
+        std::ofstream done(shared_dir / "alpha.done", std::ios::binary | std::ios::trunc);
+        if (!done) {
+            return report_failure("alpha", "failed to create completion signal");
+        }
+        done << "done";
     }
     catch (const std::exception& e) {
         report_failure("alpha", e.what());
@@ -326,16 +332,7 @@ int main(int argc, char* argv[])
 
     sintra::init(argc, argv, processes);
 
-    const int branch_index = sintra::process_index();
-
     sintra::finalize();
-
-    if (branch_index == 1) {
-        std::ofstream done(shared_dir / "alpha.done", std::ios::binary | std::ios::trunc);
-        if (done) {
-            done << "done";
-        }
-    }
 
     if (!spawned) {
         bool ok = true;
