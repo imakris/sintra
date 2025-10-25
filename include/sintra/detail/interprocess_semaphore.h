@@ -46,12 +46,12 @@ namespace detail {
 #if defined(__linux__)
 inline int futex_wait(std::atomic<int>* addr, int expected, const struct timespec* ts)
 {
-    return syscall(SYS_futex, reinterpret_cast<int*>(addr), FUTEX_WAIT_PRIVATE, expected, ts, nullptr, 0);
+    return syscall(SYS_futex, reinterpret_cast<int*>(addr), FUTEX_WAIT, expected, ts, nullptr, 0);
 }
 
 inline int futex_wake(std::atomic<int>* addr, int count)
 {
-    return syscall(SYS_futex, reinterpret_cast<int*>(addr), FUTEX_WAKE_PRIVATE, count, nullptr, nullptr, 0);
+    return syscall(SYS_futex, reinterpret_cast<int*>(addr), FUTEX_WAKE, count, nullptr, nullptr, 0);
 }
 #endif
 
