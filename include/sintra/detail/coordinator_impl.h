@@ -583,6 +583,45 @@ instance_id_type Coordinator::make_process_group(
 }
 
 
+inline bool Coordinator::add_process_to_group(const string& name, instance_id_type process_iid)
+{
+    lock_guard<mutex> lock(m_groups_mutex);
+
+    auto group_it = m_groups.find(name);
+    if (group_it == m_groups.end()) {
+        return false;
+    }
+
+    group_it->second.add_process(process_iid);
+    m_groups_of_process[process_iid].insert(group_it->second.m_instance_id);
+
+    return true;
+}
+
+
+inline bool Coordinator::remove_process_from_group(const string& name, instance_id_type process_iid)
+{
+    lock_guard<mutex> lock(m_groups_mutex);
+
+    auto group_it = m_groups.find(name);
+    if (group_it == m_groups.end()) {
+        return false;
+    }
+
+    group_it->second.remove_process(process_iid);
+
+    auto groups_it = m_groups_of_process.find(process_iid);
+    if (groups_it != m_groups_of_process.end()) {
+        groups_it->second.erase(group_it->second.m_instance_id);
+        if (groups_it->second.size() == 0) {
+            m_groups_of_process.erase(groups_it);
+        }
+    }
+
+    return true;
+}
+
+
 
 // EXPORTED FOR RPC
 inline

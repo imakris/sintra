@@ -25,6 +25,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
 #include <stdexcept>
 #include <string>
@@ -90,41 +91,50 @@ struct Process_descriptor
     vector<string> user_options;
     int num_children = 0; // quota
     instance_id_type assigned_instance_id = invalid_instance_id;
+    int branch_index = 0;
+    bool auto_start = true;
 
     Process_descriptor(
         const Entry_descriptor& aentry,
         const vector<string>& auser_options = vector<string>(),
-        int anum_children = 0)
+        int anum_children = 0,
+        bool auto_starting = true)
     :
         entry(aentry),
         user_options(auser_options),
-        num_children(anum_children)
+        num_children(anum_children),
+        auto_start(auto_starting)
     {
     }
     Process_descriptor(
         const string& binary_path,
         const vector<string>& auser_options = vector<string>(),
-        int anum_children = 0)
+        int anum_children = 0,
+        bool auto_starting = true)
     :
         entry(binary_path),
         user_options(auser_options),
-        num_children(anum_children)
+        num_children(anum_children),
+        auto_start(auto_starting)
     {
     }
     Process_descriptor(
         const char* binary_path,
         const vector<string>& auser_options = vector<string>(),
-        int anum_children = 0)
+        int anum_children = 0,
+        bool auto_starting = true)
     :
         entry(binary_path),
         user_options(auser_options),
-        num_children(anum_children)
+        num_children(anum_children),
+        auto_start(auto_starting)
     {
     }
 
-    Process_descriptor(int(*entry_function)())
+    Process_descriptor(int(*entry_function)(), bool auto_starting = true)
     :
-        entry(entry_function)
+        entry(entry_function),
+        auto_start(auto_starting)
     {
     }
 
@@ -319,6 +329,14 @@ struct Managed_process: Derived_transceiver<Managed_process>
     bool spawn_swarm_process( const Spawn_swarm_process_args& ssp_args );
 
     map<instance_id_type, Spawn_swarm_process_args> m_cached_spawns;
+    std::map<int, Process_descriptor>  m_branch_registry;
+    mutable std::mutex                 m_branch_registry_mutex;
+
+    Spawn_swarm_process_args make_spawn_args(
+        const Process_descriptor& descriptor,
+        int branch_index) const;
+
+    size_t spawn_registered_branch(int branch_index, size_t multiplicity);
 };
 
 
