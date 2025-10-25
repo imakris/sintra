@@ -18,6 +18,7 @@
 #include <optional>
 #include <shared_mutex>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #ifndef _WIN32
 #include <signal.h>
@@ -34,6 +35,17 @@ namespace sintra {
 
 extern thread_local bool tl_is_req_thread;
 extern thread_local std::function<void()> tl_post_handler_function;
+
+namespace detail {
+
+struct Delivery_fence_no_pump {
+    bool operator()() const noexcept
+    {
+        return false;
+    }
+};
+
+} // namespace detail
 
 inline std::once_flag& signal_handler_once_flag()
 {
@@ -1443,8 +1455,8 @@ inline void Managed_process::run_after_current_handler(function<void()> task)
 }
 
 
-inline
-void Managed_process::wait_for_delivery_fence()
+template <typename Pump>
+inline void Managed_process::wait_for_delivery_fence_impl(Pump&& pump)
 {
     std::vector<Process_message_reader::Delivery_target> targets;
 
@@ -1524,8 +1536,43 @@ void Managed_process::wait_for_delivery_fence()
         return;
     }
 
-    std::unique_lock<std::mutex> lk(m_delivery_mutex);
-    m_delivery_condition.wait(lk, all_targets_satisfied);
+    using Pump_type = std::decay_t<Pump>;
+    constexpr bool has_pump = !std::is_same_v<Pump_type, detail::Delivery_fence_no_pump>;
+
+    if constexpr (!has_pump) {
+        std::unique_lock<std::mutex> lk(m_delivery_mutex);
+        m_delivery_condition.wait(lk, all_targets_satisfied);
+    }
+    else {
+        std::unique_lock<std::mutex> lk(m_delivery_mutex);
+        while (!all_targets_satisfied()) {
+            lk.unlock();
+            bool pumped = false;
+            try {
+                pumped = pump();
+            }
+            catch (...) {
+                lk.lock();
+                throw;
+            }
+            lk.lock();
+
+            if (!pumped && !all_targets_satisfied()) {
+                m_delivery_condition.wait_for(lk, std::chrono::milliseconds(1));
+            }
+        }
+    }
+}
+
+inline void Managed_process::wait_for_delivery_fence()
+{
+    wait_for_delivery_fence_impl(detail::Delivery_fence_no_pump{});
+}
+
+template <typename Pump>
+inline void Managed_process::wait_for_delivery_fence_with_pump(Pump&& pump)
+{
+    wait_for_delivery_fence_impl(std::forward<Pump>(pump));
 }
 
 

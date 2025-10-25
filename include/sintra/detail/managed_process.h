@@ -257,6 +257,10 @@ struct Managed_process: Derived_transceiver<Managed_process>
     void run_after_current_handler(function<void()> task);
 
     void wait_for_delivery_fence();
+    template <typename Pump>
+    void wait_for_delivery_fence_with_pump(Pump&& pump);
+    template <typename Pump>
+    void wait_for_delivery_fence_impl(Pump&& pump);
     void notify_delivery_progress();
 
 
