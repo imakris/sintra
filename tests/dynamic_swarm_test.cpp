@@ -364,11 +364,13 @@ int main(int argc, char* argv[])
 
     sintra::init(argc, argv, processes);
 
+    int status = 0;
+
     if (!is_spawned) {
-        process_coordinator();
+        status = process_coordinator();
         sintra::finalize();
     }
 
-    return 0;
+    return status;
 }
 
