@@ -1,0 +1,449 @@
+#pragma once
+
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <stdexcept>
+#include <system_error>
+
+#if defined(_WIN32)
+  #ifndef NOMINMAX
+    #define NOMINMAX
+  #endif
+  #ifndef WIN32_LEAN_AND_MEAN
+    #define WIN32_LEAN_AND_MEAN
+  #endif
+  #include <Windows.h>
+  #include <climits>
+  #include <cwchar>
+  #include <limits>
+  #include <mutex>
+  #include <unordered_map>
+#elif defined(__APPLE__)
+  #include <cerrno>
+  #include <fcntl.h>
+  #include <semaphore.h>
+  #include <unistd.h>
+  #include <mutex>
+  #include <unordered_map>
+  #include <cstdio>
+#else
+  #include <cerrno>
+  #include <semaphore.h>
+#endif
+
+namespace sintra::detail
+{
+namespace interprocess_semaphore_detail
+{
+    inline std::atomic<uint64_t>& global_id_counter()
+    {
+        static std::atomic<uint64_t> counter{1};
+        return counter;
+    }
+
+#if defined(_WIN32)
+    inline std::mutex& handle_mutex()
+    {
+        static std::mutex mtx;
+        return mtx;
+    }
+
+    inline std::unordered_map<uint64_t, HANDLE>& handle_map()
+    {
+        static std::unordered_map<uint64_t, HANDLE> map;
+        return map;
+    }
+
+    inline HANDLE register_handle(uint64_t id, HANDLE handle)
+    {
+        std::lock_guard<std::mutex> lock(handle_mutex());
+        handle_map()[id] = handle;
+        return handle;
+    }
+
+    inline HANDLE ensure_handle(uint64_t id, const wchar_t* name)
+    {
+        {
+            std::lock_guard<std::mutex> lock(handle_mutex());
+            auto it = handle_map().find(id);
+            if (it != handle_map().end()) {
+                return it->second;
+            }
+        }
+
+        HANDLE handle = ::OpenSemaphoreW(SYNCHRONIZE | SEMAPHORE_MODIFY_STATE, FALSE, name);
+        if (!handle) {
+            throw std::system_error(::GetLastError(), std::system_category(), "OpenSemaphoreW");
+        }
+
+        std::lock_guard<std::mutex> lock(handle_mutex());
+        return handle_map().emplace(id, handle).first->second;
+    }
+
+    inline void close_handle(uint64_t id)
+    {
+        HANDLE handle = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(handle_mutex());
+            auto it = handle_map().find(id);
+            if (it != handle_map().end()) {
+                handle = it->second;
+                handle_map().erase(it);
+            }
+        }
+
+        if (handle) {
+            ::CloseHandle(handle);
+        }
+    }
+#elif defined(__APPLE__)
+    inline std::mutex& handle_mutex()
+    {
+        static std::mutex mtx;
+        return mtx;
+    }
+
+    inline std::unordered_map<uint64_t, sem_t*>& handle_map()
+    {
+        static std::unordered_map<uint64_t, sem_t*> map;
+        return map;
+    }
+
+    inline sem_t* register_handle(uint64_t id, sem_t* handle)
+    {
+        std::lock_guard<std::mutex> lock(handle_mutex());
+        handle_map()[id] = handle;
+        return handle;
+    }
+
+    inline sem_t* ensure_handle(uint64_t id, const char* name)
+    {
+        {
+            std::lock_guard<std::mutex> lock(handle_mutex());
+            auto it = handle_map().find(id);
+            if (it != handle_map().end()) {
+                return it->second;
+            }
+        }
+
+        sem_t* sem = sem_open(name, 0);
+        if (sem == SEM_FAILED) {
+            throw std::system_error(errno, std::generic_category(), "sem_open");
+        }
+
+        std::lock_guard<std::mutex> lock(handle_mutex());
+        return handle_map().emplace(id, sem).first->second;
+    }
+
+    inline void close_handle(uint64_t id)
+    {
+        sem_t* sem = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(handle_mutex());
+            auto it = handle_map().find(id);
+            if (it != handle_map().end()) {
+                sem = it->second;
+                handle_map().erase(it);
+            }
+        }
+
+        if (sem) {
+            while (sem_close(sem) == -1 && errno == EINTR) {}
+        }
+    }
+#endif
+}
+
+class interprocess_semaphore
+{
+public:
+    explicit interprocess_semaphore(unsigned int initial_count = 0)
+    {
+#if defined(_WIN32)
+        initialise_windows(initial_count);
+#elif defined(__APPLE__)
+        initialise_named(initial_count);
+#else
+        initialise_posix(initial_count);
+#endif
+    }
+
+    interprocess_semaphore(const interprocess_semaphore&) = delete;
+    interprocess_semaphore& operator=(const interprocess_semaphore&) = delete;
+
+    ~interprocess_semaphore() noexcept
+    {
+#if defined(_WIN32)
+        teardown_windows();
+#elif defined(__APPLE__)
+        teardown_named();
+#else
+        teardown_posix();
+#endif
+    }
+
+    void release_local_handle() noexcept
+    {
+#if defined(_WIN32)
+        interprocess_semaphore_detail::close_handle(m_windows.id);
+#elif defined(__APPLE__)
+        interprocess_semaphore_detail::close_handle(m_named.id);
+#else
+        // Nothing to do for POSIX unnamed semaphores.
+#endif
+    }
+
+    void post()
+    {
+#if defined(_WIN32)
+        HANDLE handle = windows_handle();
+        if (!::ReleaseSemaphore(handle, 1, nullptr)) {
+            throw std::system_error(::GetLastError(), std::system_category(), "ReleaseSemaphore");
+        }
+#elif defined(__APPLE__)
+        sem_t* sem = named_handle();
+        while (sem_post(sem) == -1) {
+            if (errno == EINTR) {
+                continue;
+            }
+            throw std::system_error(errno, std::generic_category(), "sem_post");
+        }
+#else
+        while (sem_post(&m_sem) == -1) {
+            if (errno == EINTR) {
+                continue;
+            }
+            throw std::system_error(errno, std::generic_category(), "sem_post");
+        }
+#endif
+    }
+
+    void wait()
+    {
+#if defined(_WIN32)
+        HANDLE handle = windows_handle();
+        DWORD result = ::WaitForSingleObject(handle, INFINITE);
+        if (result != WAIT_OBJECT_0) {
+            throw std::system_error(::GetLastError(), std::system_category(), "WaitForSingleObject");
+        }
+#elif defined(__APPLE__)
+        sem_t* sem = named_handle();
+        while (sem_wait(sem) == -1) {
+            if (errno == EINTR) {
+                continue;
+            }
+            throw std::system_error(errno, std::generic_category(), "sem_wait");
+        }
+#else
+        while (sem_wait(&m_sem) == -1) {
+            if (errno == EINTR) {
+                continue;
+            }
+            throw std::system_error(errno, std::generic_category(), "sem_wait");
+        }
+#endif
+    }
+
+    bool try_wait()
+    {
+#if defined(_WIN32)
+        HANDLE handle = windows_handle();
+        DWORD result = ::WaitForSingleObject(handle, 0);
+        if (result == WAIT_OBJECT_0) {
+            return true;
+        }
+        if (result == WAIT_TIMEOUT) {
+            return false;
+        }
+        throw std::system_error(::GetLastError(), std::system_category(), "WaitForSingleObject");
+#elif defined(__APPLE__)
+        sem_t* sem = named_handle();
+        while (sem_trywait(sem) == -1) {
+            if (errno == EINTR) {
+                continue;
+            }
+            if (errno == EAGAIN) {
+                return false;
+            }
+            throw std::system_error(errno, std::generic_category(), "sem_trywait");
+        }
+        return true;
+#else
+        while (sem_trywait(&m_sem) == -1) {
+            if (errno == EINTR) {
+                continue;
+            }
+            if (errno == EAGAIN) {
+                return false;
+            }
+            throw std::system_error(errno, std::generic_category(), "sem_trywait");
+        }
+        return true;
+#endif
+    }
+
+    template <typename Clock, typename Duration>
+    bool timed_wait(const std::chrono::time_point<Clock, Duration>& abs_time)
+    {
+#if defined(_WIN32)
+        HANDLE handle = windows_handle();
+        auto now = Clock::now();
+        if (abs_time <= now) {
+            return try_wait();
+        }
+        auto remaining = std::chrono::ceil<std::chrono::milliseconds>(abs_time - now);
+        DWORD timeout;
+        if (remaining.count() < 0) {
+            timeout = 0;
+        }
+        else if (remaining.count() >= static_cast<long long>(std::numeric_limits<DWORD>::max())) {
+            timeout = INFINITE;
+        }
+        else {
+            timeout = static_cast<DWORD>(remaining.count());
+        }
+
+        DWORD result = ::WaitForSingleObject(handle, timeout);
+        if (result == WAIT_OBJECT_0) {
+            return true;
+        }
+        if (result == WAIT_TIMEOUT) {
+            return false;
+        }
+        throw std::system_error(::GetLastError(), std::system_category(), "WaitForSingleObject");
+#elif defined(__APPLE__)
+        sem_t* sem = named_handle();
+        auto ts = make_abs_timespec(abs_time);
+        while (sem_timedwait(sem, &ts) == -1) {
+            if (errno == EINTR) {
+                continue;
+            }
+            if (errno == ETIMEDOUT) {
+                return false;
+            }
+            throw std::system_error(errno, std::generic_category(), "sem_timedwait");
+        }
+        return true;
+#else
+        auto ts = make_abs_timespec(abs_time);
+        while (sem_timedwait(&m_sem, &ts) == -1) {
+            if (errno == EINTR) {
+                continue;
+            }
+            if (errno == ETIMEDOUT) {
+                return false;
+            }
+            throw std::system_error(errno, std::generic_category(), "sem_timedwait");
+        }
+        return true;
+#endif
+    }
+
+private:
+#if !defined(_WIN32)
+    template <typename Clock, typename Duration>
+    static timespec make_abs_timespec(const std::chrono::time_point<Clock, Duration>& abs_time)
+    {
+        using namespace std::chrono;
+        auto now = Clock::now();
+        auto delta = abs_time > now ? abs_time - now : Clock::duration::zero();
+        auto sys_time = system_clock::now() + duration_cast<system_clock::duration>(delta);
+        auto ns = duration_cast<nanoseconds>(sys_time.time_since_epoch());
+        timespec ts;
+        ts.tv_sec = static_cast<time_t>(ns.count() / 1000000000);
+        ts.tv_nsec = static_cast<long>(ns.count() % 1000000000);
+        return ts;
+    }
+#endif
+
+#if defined(_WIN32)
+    struct windows_storage
+    {
+        uint64_t id = 0;
+        wchar_t  name[64]{};
+    };
+
+    windows_storage m_windows;
+
+    void initialise_windows(unsigned int initial_count)
+    {
+        m_windows.id = interprocess_semaphore_detail::global_id_counter().fetch_add(1, std::memory_order_relaxed);
+        std::swprintf(m_windows.name,
+                      sizeof(m_windows.name) / sizeof(m_windows.name[0]),
+                      L"SintraSemaphore_%016llX",
+                      static_cast<unsigned long long>(m_windows.id));
+
+        HANDLE handle = ::CreateSemaphoreW(nullptr, static_cast<LONG>(initial_count), LONG_MAX, m_windows.name);
+        if (!handle) {
+            throw std::system_error(::GetLastError(), std::system_category(), "CreateSemaphoreW");
+        }
+
+        interprocess_semaphore_detail::register_handle(m_windows.id, handle);
+    }
+
+    HANDLE windows_handle() const
+    {
+        return interprocess_semaphore_detail::ensure_handle(m_windows.id, m_windows.name);
+    }
+
+    void teardown_windows() noexcept
+    {
+        interprocess_semaphore_detail::close_handle(m_windows.id);
+    }
+#elif defined(__APPLE__)
+    struct named_storage
+    {
+        uint64_t id = 0;
+        char     name[32]{};
+    };
+
+    named_storage m_named;
+
+    void initialise_named(unsigned int initial_count)
+    {
+        m_named.id = interprocess_semaphore_detail::global_id_counter().fetch_add(1, std::memory_order_relaxed);
+        std::snprintf(m_named.name,
+                      sizeof(m_named.name) / sizeof(m_named.name[0]),
+                      "/sintra_sem_%016llx",
+                      static_cast<unsigned long long>(m_named.id));
+
+        sem_unlink(m_named.name);
+        sem_t* sem = sem_open(m_named.name, O_CREAT | O_EXCL, 0600, initial_count);
+        if (sem == SEM_FAILED) {
+            throw std::system_error(errno, std::generic_category(), "sem_open");
+        }
+
+        interprocess_semaphore_detail::register_handle(m_named.id, sem);
+    }
+
+    sem_t* named_handle() const
+    {
+        return interprocess_semaphore_detail::ensure_handle(m_named.id, m_named.name);
+    }
+
+    void teardown_named() noexcept
+    {
+        interprocess_semaphore_detail::close_handle(m_named.id);
+        if (m_named.name[0] != '\0') {
+            sem_unlink(m_named.name);
+        }
+    }
+#else
+    sem_t m_sem{};
+
+    void initialise_posix(unsigned int initial_count)
+    {
+        if (sem_init(&m_sem, 1, initial_count) == -1) {
+            throw std::system_error(errno, std::generic_category(), "sem_init");
+        }
+    }
+
+    void teardown_posix() noexcept
+    {
+        sem_destroy(&m_sem);
+    }
+#endif
+};
+
+} // namespace sintra::detail
