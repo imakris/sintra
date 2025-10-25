@@ -105,6 +105,7 @@
 #include "deterministic_delay.h"
 #include "get_wtime.h"   // high-res wall clock (used by adaptive reader policy)
 #include "id_types.h"    // ID and type aliases as used by the project
+#include "process_semaphore.h"
 
 // ─── STL / stdlib ────────────────────────────────────────────────────────────
 #include <algorithm>     // std::reverse
@@ -134,7 +135,6 @@
 #include <boost/interprocess/file_mapping.hpp>
 #include <boost/interprocess/mapped_region.hpp>
 #include <boost/interprocess/sync/interprocess_mutex.hpp>
-#include <boost/interprocess/sync/interprocess_semaphore.hpp>
 
 // ─── Platform headers (grouped) ──────────────────────────────────────────────
 #ifdef _WIN32
@@ -156,6 +156,7 @@
     #include <sys/user.h>
   #elif defined(__APPLE__)
     #include <libproc.h>
+    #include <mach/mach_time.h>
   #endif
 #endif
 
@@ -210,6 +211,47 @@ public:
     explicit Scoped_timer_resolution(unsigned int) {}
 };
 #endif
+
+inline void precision_sleep_for(std::chrono::nanoseconds interval)
+{
+    if (interval <= std::chrono::nanoseconds::zero()) {
+        return;
+    }
+
+#if defined(__APPLE__)
+    static const mach_timebase_info_data_t timebase = [] {
+        mach_timebase_info_data_t info{};
+        mach_timebase_info(&info);
+        return info;
+    }();
+
+    const __uint128_t numerator = static_cast<__uint128_t>(interval.count()) *
+        static_cast<__uint128_t>(timebase.denom);
+    const __uint128_t ticks = (numerator + static_cast<__uint128_t>(timebase.numer) -
+                               __uint128_t{1}) /
+        static_cast<__uint128_t>(timebase.numer);
+
+    const __uint128_t clamped_ticks = std::max<__uint128_t>(ticks, __uint128_t{1});
+    if (clamped_ticks > std::numeric_limits<uint64_t>::max()) {
+        std::this_thread::sleep_for(interval);
+        return;
+    }
+
+    const uint64_t deadline = mach_absolute_time() +
+        static_cast<uint64_t>(clamped_ticks);
+
+    kern_return_t rc;
+    do {
+        rc = mach_wait_until(deadline);
+    } while (rc == KERN_ABORTED);
+
+    if (rc != KERN_SUCCESS) {
+        std::this_thread::sleep_for(interval);
+    }
+#else
+    std::this_thread::sleep_for(interval);
+#endif
+}
 
 #ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
 namespace ring_detail {
@@ -578,9 +620,9 @@ public:
 };
 
 // A binary semaphore tailored for the ring's reader wakeup policy.
-struct sintra_ring_semaphore : ipc::interprocess_semaphore
+struct sintra_ring_semaphore : detail::process_semaphore
 {
-    sintra_ring_semaphore() : ipc::interprocess_semaphore(0) {}
+    sintra_ring_semaphore() : detail::process_semaphore(0) {}
 
     // Wakes all readers in an ordered fashion (used by writer after publishing).
     void post_ordered()
@@ -605,7 +647,7 @@ struct sintra_ring_semaphore : ipc::interprocess_semaphore
     // Wait returns true if the wakeup was unordered and no ordered post happened since.
     bool wait()
     {
-        ipc::interprocess_semaphore::wait();
+        detail::process_semaphore::wait();
         posted.clear(std::memory_order_release);
         return unordered.exchange(false, std::memory_order_acq_rel);
     }
@@ -1162,13 +1204,11 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
     ~Ring()
     {
         if (m_control) {
-            // The *last* detaching process deletes both control and data files. On
-            // platforms where Control wraps kernel semaphore handles (Windows/macOS)
-            // we must explicitly run the destructor once the final reference drops.
+            // The *last* detaching process deletes both control and data files and must
+            // run the Control destructor so platform-specific semaphore state is cleaned
+            // up (e.g., named handles on Windows/macOS and POSIX semaphores on Linux).
             if (m_control->num_attached.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-#if defined(_WIN32) || defined(__APPLE__)
                 m_control->~Control();
-#endif
                 this->m_remove_files_on_destruction = true;
             }
         }
@@ -1579,6 +1619,9 @@ struct Ring_R : Ring<T, true>
             // still polling at a high enough cadence to catch bursts quickly.
             Scoped_timer_resolution timer_resolution_guard(1);
             const double precision_sleep_end = get_wtime() + precision_sleep_duration;
+            const auto precision_sleep_interval =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::duration<double>(precision_sleep_cycle));
             while (sequences_equal() && get_wtime() < precision_sleep_end) {
                 if (should_shutdown()) {
                     return Range<T>{};
@@ -1591,7 +1634,7 @@ struct Ring_R : Ring<T, true>
                     }
                     return Range<T>{};
                 }
-                std::this_thread::sleep_for(std::chrono::duration<double>(precision_sleep_cycle));
+                precision_sleep_for(precision_sleep_interval);
                 SINTRA_DELAY_FUZZ("ipc_rings.precision_sleep");
             }
         }
