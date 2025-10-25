@@ -386,7 +386,11 @@ instance_id_type Coordinator::publish_transceiver(type_id_type tid, instance_id_
             m_draining_process_states[slot].store(0, std::memory_order_release);
         }
 
-        return true_sequence();
+        auto published_iid = true_sequence();
+
+        ensure_default_groups_membership(process_iid);
+
+        return published_iid;
     }
     else {
         return invalid_instance_id;
@@ -580,6 +584,103 @@ instance_id_type Coordinator::make_process_group(
 
     m_groups[name].assign_name(name);
     return ret;
+}
+
+
+inline instance_id_type Coordinator::spawn_registered_branch(int branch_index)
+{
+    if (!s_mproc) {
+        return invalid_instance_id;
+    }
+
+    return s_mproc->spawn_branch_local(branch_index);
+}
+
+
+inline bool Coordinator::link_process_to_group_unlocked(
+    const string& name,
+    instance_id_type process_iid)
+{
+    auto group_it = m_groups.find(name);
+    if (group_it == m_groups.end()) {
+        return false;
+    }
+
+    group_it->second.add_process(process_iid);
+    m_groups_of_process[process_iid].insert(group_it->second.m_instance_id);
+    return true;
+}
+
+
+inline bool Coordinator::unlink_process_from_group_unlocked(
+    const string& name,
+    instance_id_type process_iid)
+{
+    auto group_it = m_groups.find(name);
+    if (group_it == m_groups.end()) {
+        return false;
+    }
+
+    group_it->second.remove_process(process_iid);
+    auto groups_it = m_groups_of_process.find(process_iid);
+    if (groups_it != m_groups_of_process.end()) {
+        groups_it->second.erase(group_it->second.m_instance_id);
+        if (groups_it->second.empty()) {
+            m_groups_of_process.erase(groups_it);
+        }
+    }
+
+    return true;
+}
+
+
+inline void Coordinator::ensure_default_groups_membership(instance_id_type process_iid)
+{
+    if (!s_mproc || process_iid == s_mproc_id) {
+        return;
+    }
+
+    const auto coordinator_iid = s_mproc->m_instance_id;
+
+    auto ensure_group = [&](
+        const char* group_name,
+        instance_id_type Managed_process::*member) {
+        if (s_mproc->*member == invalid_instance_id) {
+            std::unordered_set<instance_id_type> members = {
+                coordinator_iid,
+                process_iid
+            };
+            auto created = make_process_group(group_name, members);
+            if (created != invalid_instance_id) {
+                s_mproc->*member = created;
+            }
+            return;
+        }
+
+        std::lock_guard<mutex> lock(m_groups_mutex);
+        link_process_to_group_unlocked(group_name, process_iid);
+    };
+
+    ensure_group("_sintra_all_processes", &Managed_process::m_group_all);
+    ensure_group("_sintra_external_processes", &Managed_process::m_group_external);
+}
+
+
+inline bool Coordinator::add_process_to_group(const string& name, instance_id_type process_iid)
+{
+    if (name == "_sintra_all_processes" || name == "_sintra_external_processes") {
+        ensure_default_groups_membership(process_iid);
+    }
+
+    std::lock_guard<mutex> lock(m_groups_mutex);
+    return link_process_to_group_unlocked(name, process_iid);
+}
+
+
+inline bool Coordinator::remove_process_from_group(const string& name, instance_id_type process_iid)
+{
+    std::lock_guard<mutex> lock(m_groups_mutex);
+    return unlink_process_from_group_unlocked(name, process_iid);
 }
 
 

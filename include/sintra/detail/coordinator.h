@@ -132,12 +132,24 @@ private:
     sequence_counter_type begin_process_draining(instance_id_type process_iid);
     void unpublish_transceiver_notify(instance_id_type transceiver_iid);
 
+    bool add_process_to_group(const string& name, instance_id_type process_iid);
+    bool remove_process_from_group(const string& name, instance_id_type process_iid);
+
     //bool add_process_into_group(instance_id_type process_id, type_id_type process_group_id);
 
 
     instance_id_type make_process_group(
         const string& name,
         const unordered_set<instance_id_type>& member_process_ids);
+    instance_id_type spawn_registered_branch(int branch_index);
+
+    bool link_process_to_group_unlocked(
+        const string& name,
+        instance_id_type process_iid);
+    bool unlink_process_from_group_unlocked(
+        const string& name,
+        instance_id_type process_iid);
+    void ensure_default_groups_membership(instance_id_type process_iid);
 
 
     void enable_recovery(instance_id_type piid);
@@ -198,6 +210,9 @@ public:
     SINTRA_RPC_EXPLICIT(unpublish_transceiver)
     SINTRA_RPC_STRICT_EXPLICIT(begin_process_draining)
     SINTRA_RPC_EXPLICIT(make_process_group)
+    SINTRA_RPC_STRICT_EXPLICIT(spawn_registered_branch)
+    SINTRA_RPC_EXPLICIT(add_process_to_group)
+    SINTRA_RPC_EXPLICIT(remove_process_from_group)
     SINTRA_RPC_EXPLICIT(print)
     SINTRA_RPC_EXPLICIT(enable_recovery)
 

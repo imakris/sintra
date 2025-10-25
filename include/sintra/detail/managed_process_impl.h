@@ -17,6 +17,7 @@
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
+#include <sstream>
 #include <thread>
 #include <utility>
 #ifndef _WIN32
@@ -983,6 +984,124 @@ Managed process options:
 
 
 
+inline Managed_process::Spawn_swarm_process_args Managed_process::make_spawn_args(
+    const Process_descriptor& descriptor,
+    int branch_index) const
+{
+    Spawn_swarm_process_args spawn_args;
+    spawn_args.binary_name = descriptor.entry.m_binary_name.empty()
+        ? m_binary_name
+        : descriptor.entry.m_binary_name;
+
+    if (spawn_args.binary_name.empty()) {
+        spawn_args.piid = invalid_instance_id;
+        return spawn_args;
+    }
+
+    std::vector<std::string> sintra_options = descriptor.base_sintra_options.empty()
+        ? descriptor.sintra_options
+        : descriptor.base_sintra_options;
+
+    if (descriptor.entry.m_binary_name.empty()) {
+        // When spawning from the same binary, ensure the branch index flag is present.
+        const auto branch_flag = std::string("--branch_index");
+        const auto branch_value = std::to_string(branch_index);
+        const auto it = std::adjacent_find(
+            sintra_options.begin(),
+            sintra_options.end(),
+            [&](const std::string& lhs, const std::string& rhs) {
+                return lhs == branch_flag && rhs == branch_value;
+            });
+        if (it == sintra_options.end()) {
+            sintra_options.push_back(branch_flag);
+            sintra_options.push_back(branch_value);
+        }
+    }
+
+    const auto assigned_instance_id = make_process_instance_id();
+    spawn_args.piid = assigned_instance_id;
+
+    sintra_options.insert(sintra_options.end(), {
+        "--swarm_id",       std::to_string(m_swarm_id),
+        "--instance_id",    std::to_string(assigned_instance_id),
+        "--coordinator_id", std::to_string(s_coord_id)
+    });
+
+    spawn_args.args.reserve(1 + sintra_options.size() + descriptor.user_options.size());
+    spawn_args.args.push_back(spawn_args.binary_name);
+    spawn_args.args.insert(
+        spawn_args.args.end(),
+        sintra_options.begin(),
+        sintra_options.end());
+    spawn_args.args.insert(
+        spawn_args.args.end(),
+        descriptor.user_options.begin(),
+        descriptor.user_options.end());
+
+    return spawn_args;
+}
+
+
+inline bool Managed_process::spawn_registered_descriptor(
+    const Process_descriptor& descriptor,
+    int branch_index,
+    instance_id_type& spawned_iid,
+    bool ensure_group_membership)
+{
+    auto spawn_args = make_spawn_args(descriptor, branch_index);
+    spawned_iid = spawn_args.piid;
+    if (spawn_args.piid == invalid_instance_id) {
+        return false;
+    }
+
+    auto add_to_group = [&](const std::string& name) {
+        if (!ensure_group_membership) {
+            return true;
+        }
+
+        if (s_coord) {
+            return s_coord->add_process_to_group(name, spawn_args.piid);
+        }
+
+        return Coordinator::rpc_add_process_to_group(s_coord_id, name, spawn_args.piid);
+    };
+
+    auto remove_from_group = [&](const std::string& name) {
+        if (!ensure_group_membership) {
+            return;
+        }
+
+        if (s_coord) {
+            s_coord->remove_process_from_group(name, spawn_args.piid);
+        }
+        else {
+            Coordinator::rpc_remove_process_from_group(s_coord_id, name, spawn_args.piid);
+        }
+    };
+
+    const bool added_all = add_to_group("_sintra_all_processes");
+    const bool added_external = add_to_group("_sintra_external_processes");
+
+    if (ensure_group_membership && (!added_all || !added_external)) {
+        if (added_all) {
+            remove_from_group("_sintra_all_processes");
+        }
+        if (added_external) {
+            remove_from_group("_sintra_external_processes");
+        }
+        return false;
+    }
+
+    if (spawn_swarm_process(spawn_args)) {
+        return true;
+    }
+
+    remove_from_group("_sintra_all_processes");
+    remove_from_group("_sintra_external_processes");
+    return false;
+}
+
+
 inline
 bool Managed_process::spawn_swarm_process(
     const Spawn_swarm_process_args& s )
@@ -1036,7 +1155,17 @@ bool Managed_process::spawn_swarm_process(
         m_cached_spawns[s.piid].occurrence++;
     }
     else {
-        std::cerr << "failed to launch " << s.binary_name << std::endl;
+        auto log_failure = [&]() {
+            try {
+                std::ostringstream stream;
+                stream << "[Managed_process] failed to launch " << s.binary_name << "\n";
+                Coordinator::rpc_print(s_coord_id, stream.str());
+            }
+            catch (...) {
+            }
+        };
+
+        log_failure();
 
         //m_readers.pop_back();
         std::unique_lock<std::shared_mutex> readers_lock(m_readers_mutex);
@@ -1057,36 +1186,51 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
     using namespace sintra;
     using std::to_string;
 
+    std::vector<Process_descriptor> normalized = branch_vector;
+    int branch_index = 1;
+    for (auto& descriptor : normalized) {
+        descriptor.branch_index = branch_index++;
+        if (descriptor.base_sintra_options.empty()) {
+            descriptor.base_sintra_options = descriptor.sintra_options;
+        }
+        if (descriptor.entry.m_binary_name.empty()) {
+            descriptor.entry.m_binary_name = m_binary_name;
+            descriptor.base_sintra_options.push_back("--branch_index");
+            descriptor.base_sintra_options.push_back(
+                std::to_string(descriptor.branch_index));
+        }
+        descriptor.sintra_options = descriptor.base_sintra_options;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(m_branch_registry_mutex);
+        for (const auto& descriptor : normalized) {
+            m_branch_registry[descriptor.branch_index] = descriptor;
+            m_branch_registry[descriptor.branch_index].sintra_options =
+                descriptor.base_sintra_options;
+            m_branch_registry[descriptor.branch_index].base_sintra_options =
+                descriptor.base_sintra_options;
+        }
+    }
+
+    branch_vector = normalized;
+
     if (s_coord) {
 
-        // 1. prepare the command line for each invocation
-        auto it = branch_vector.begin();
-        for (int i = 1; it != branch_vector.end(); it++, i++) {
-
-            auto& options = it->sintra_options;
-            if (it->entry.m_binary_name.empty()) {
-                it->entry.m_binary_name = m_binary_name;
-                options.insert(options.end(), { "--branch_index", to_string(i) });
-            }
-            options.insert(options.end(), {
-                "--swarm_id",       to_string(m_swarm_id),
-                "--instance_id",    to_string(it->assigned_instance_id = make_process_instance_id()),
-                "--coordinator_id", to_string(s_coord_id)
-            });
-        }
-
-        // 2. spawn
         std::unordered_set<instance_id_type> successfully_spawned;
-        it = branch_vector.begin();
-        //auto readers_it = m_readers.begin();
-        for (int i = 0; it != branch_vector.end(); it++, i++) {
+        for (auto& descriptor : normalized) {
+            if (!descriptor.auto_start) {
+                continue;
+            }
 
-            std::vector<std::string> all_args = {it->entry.m_binary_name.c_str()};
-            all_args.insert(all_args.end(), it->sintra_options.begin(), it->sintra_options.end());
-            all_args.insert(all_args.end(), it->user_options.begin(), it->user_options.end());
-
-            if (spawn_swarm_process({it->entry.m_binary_name, all_args, it->assigned_instance_id})) {
-                successfully_spawned.insert(it->assigned_instance_id);
+            instance_id_type spawned_iid = invalid_instance_id;
+            if (spawn_registered_descriptor(
+                    descriptor,
+                    descriptor.branch_index,
+                    spawned_iid,
+                    false)) {
+                descriptor.assigned_instance_id = spawned_iid;
+                successfully_spawned.insert(spawned_iid);
             }
         }
 
@@ -1124,6 +1268,75 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
     }
 
     return true;
+}
+
+
+inline instance_id_type Managed_process::spawn_branch(int branch_index)
+{
+    if (!s_coord) {
+        return Coordinator::rpc_spawn_registered_branch(s_coord_id, branch_index);
+    }
+
+    return spawn_branch_local(branch_index);
+}
+
+
+inline size_t Managed_process::spawn_registered_branch(int branch_index, size_t multiplicity)
+{
+    if (multiplicity == 0) {
+        return 0;
+    }
+
+    if (!s_coord) {
+        size_t spawned = 0;
+        for (size_t i = 0; i < multiplicity; ++i) {
+            if (spawn_branch(branch_index) != invalid_instance_id) {
+                ++spawned;
+            }
+        }
+        return spawned;
+    }
+
+    Process_descriptor descriptor;
+    {
+        std::lock_guard<std::mutex> lock(m_branch_registry_mutex);
+        auto it = m_branch_registry.find(branch_index);
+        if (it == m_branch_registry.end()) {
+            return 0;
+        }
+        descriptor = it->second;
+    }
+
+    size_t spawned = 0;
+    for (size_t i = 0; i < multiplicity; ++i) {
+        instance_id_type spawned_iid = invalid_instance_id;
+        if (spawn_registered_descriptor(descriptor, branch_index, spawned_iid, true)) {
+            ++spawned;
+        }
+    }
+
+    return spawned;
+}
+
+
+inline instance_id_type Managed_process::spawn_branch_local(int branch_index)
+{
+    Process_descriptor descriptor;
+    {
+        std::lock_guard<std::mutex> lock(m_branch_registry_mutex);
+        auto it = m_branch_registry.find(branch_index);
+        if (it == m_branch_registry.end()) {
+            return invalid_instance_id;
+        }
+        descriptor = it->second;
+    }
+
+    instance_id_type spawned_iid = invalid_instance_id;
+    if (spawn_registered_descriptor(descriptor, branch_index, spawned_iid, true)) {
+        return spawned_iid;
+    }
+
+    return invalid_instance_id;
 }
 
 

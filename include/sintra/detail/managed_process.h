@@ -65,6 +65,7 @@ string uibs_impl(const char *file, int line)
 
 struct Entry_descriptor
 {
+    Entry_descriptor() = default;
     Entry_descriptor(const string& binary_name)
     {
         m_binary_name = binary_name;
@@ -85,11 +86,15 @@ private:
 
 struct Process_descriptor
 {
+    Process_descriptor() = default;
     Entry_descriptor entry;
     vector<string> sintra_options;
     vector<string> user_options;
     int num_children = 0; // quota
     instance_id_type assigned_instance_id = invalid_instance_id;
+    vector<string> base_sintra_options;
+    bool auto_start = true;
+    int branch_index = 0;
 
     Process_descriptor(
         const Entry_descriptor& aentry,
@@ -173,6 +178,9 @@ struct Managed_process: Derived_transceiver<Managed_process>
     void wait_for_stop();
 
     void enable_recovery();
+
+    instance_id_type spawn_branch(int branch_index);
+    size_t spawn_registered_branch(int branch_index, size_t multiplicity);
 
 
     Message_ring_W*                     m_out_req_c = nullptr;
@@ -316,9 +324,21 @@ struct Managed_process: Derived_transceiver<Managed_process>
     };
 
 
+    Spawn_swarm_process_args make_spawn_args(
+        const Process_descriptor& descriptor,
+        int branch_index) const;
+    bool spawn_registered_descriptor(
+        const Process_descriptor& descriptor,
+        int branch_index,
+        instance_id_type& spawned_iid,
+        bool ensure_group_membership);
+    instance_id_type spawn_branch_local(int branch_index);
+
     bool spawn_swarm_process( const Spawn_swarm_process_args& ssp_args );
 
     map<instance_id_type, Spawn_swarm_process_args> m_cached_spawns;
+    mutable std::mutex                 m_branch_registry_mutex;
+    std::map<int, Process_descriptor>  m_branch_registry;
 };
 
 

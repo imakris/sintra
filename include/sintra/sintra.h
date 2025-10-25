@@ -148,6 +148,9 @@ void deactivate_all_slots();
 /// are done.
 void enable_recovery();
 
+instance_id_type spawn_branch(int branch_index);
+size_t spawn_registered_branch(int branch_index, size_t multiplicity);
+
 } // namespace sintra
 
 
