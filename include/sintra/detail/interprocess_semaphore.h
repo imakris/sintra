@@ -495,20 +495,32 @@ private:
 
     void generate_unique_name() const
     {
+        // POSIX named semaphores on macOS are limited to 31 characters (including the
+        // leading slash and excluding the null terminator). Longer names cause
+        // sem_open to fail with ENAMETOOLONG. The previous implementation attempted to
+        // embed several identifiers which routinely exceeded that limit on real-world
+        // workloads. To keep the names short while still providing enough entropy to
+        // avoid collisions, we condense the data we care about into two hexadecimal
+        // components: the process id and a 64-bit mix of the address, timestamp and
+        // a local counter.
         static std::atomic<uint64_t> local_counter{0};
         uint64_t counter_value = local_counter.fetch_add(1, std::memory_order_relaxed);
         pid_t    process_id    = getpid();
         uintptr_t address      = reinterpret_cast<uintptr_t>(this);
-        uint64_t  timestamp    = static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+        uint64_t  timestamp    = static_cast<uint64_t>(
+                std::chrono::steady_clock::now().time_since_epoch().count());
+
+        uint64_t entropy = counter_value;
+        entropy ^= static_cast<uint64_t>(process_id) << 32;
+        entropy ^= static_cast<uint64_t>(address);
+        entropy ^= timestamp;
 
         int written = std::snprintf(
                 name_,
                 kNameLength,
-                "/SintraIPS_%08x_%016llx_%016llx_%016llx",
+                "/SIPS_%08x_%016llx",
                 static_cast<unsigned int>(process_id),
-                static_cast<unsigned long long>(timestamp),
-                static_cast<unsigned long long>(address),
-                static_cast<unsigned long long>(counter_value));
+                static_cast<unsigned long long>(entropy));
         if (written < 0) {
             int err = errno ? errno : EINVAL;
             throw std::system_error(err, std::system_category(), "snprintf failed to generate semaphore name");
