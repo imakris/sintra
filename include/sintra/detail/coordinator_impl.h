@@ -220,6 +220,73 @@ Coordinator::~Coordinator()
 }
 
 
+inline bool Coordinator::add_process_to_group_locked(
+    std::unique_lock<std::mutex>& groups_lock,
+    Process_group& group,
+    instance_id_type process_iid)
+{
+    assert(groups_lock.owns_lock());
+
+    auto [entry, inserted] = m_groups_of_process[process_iid].insert(group.m_instance_id);
+    if (inserted) {
+        group.add_process(process_iid);
+    }
+
+    return inserted;
+}
+
+
+inline void Coordinator::remove_process_from_group_locked(
+    std::unique_lock<std::mutex>& groups_lock,
+    Process_group& group,
+    instance_id_type process_iid)
+{
+    assert(groups_lock.owns_lock());
+
+    auto map_it = m_groups_of_process.find(process_iid);
+    if (map_it != m_groups_of_process.end()) {
+        map_it->second.erase(group.m_instance_id);
+        if (map_it->second.empty()) {
+            m_groups_of_process.erase(map_it);
+        }
+    }
+
+    group.remove_process(process_iid);
+}
+
+
+inline bool Coordinator::enroll_process_in_default_groups_locked(
+    std::unique_lock<std::mutex>& groups_lock,
+    instance_id_type process_iid,
+    bool include_in_external_group)
+{
+    assert(groups_lock.owns_lock());
+
+    auto all_it = m_groups.find("_sintra_all_processes");
+    if (all_it == m_groups.end()) {
+        // Default groups have not been created yet (e.g. during initial branch).
+        return true;
+    }
+
+    const bool added_to_all = add_process_to_group_locked(groups_lock, all_it->second, process_iid);
+    (void)added_to_all;
+
+    if (!include_in_external_group) {
+        return true;
+    }
+
+    auto external_it = m_groups.find("_sintra_external_processes");
+    if (external_it == m_groups.end()) {
+        if (added_to_all) {
+            remove_process_from_group_locked(groups_lock, all_it->second, process_iid);
+        }
+        return false;
+    }
+
+    add_process_to_group_locked(groups_lock, external_it->second, process_iid);
+    return true;
+}
+
 
 // EXPORTED FOR RPC
 inline
