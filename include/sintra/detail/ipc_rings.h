@@ -156,6 +156,8 @@
     #include <sys/user.h>
   #elif defined(__APPLE__)
     #include <libproc.h>
+    #include <mach/mach.h>
+    #include <mach/mach_time.h>
   #endif
 #endif
 
@@ -210,6 +212,45 @@ public:
     explicit Scoped_timer_resolution(unsigned int) {}
 };
 #endif
+
+inline void precision_sleep_for(std::chrono::duration<double> duration)
+{
+#if defined(__APPLE__)
+    if (duration <= std::chrono::duration<double>::zero()) {
+        return;
+    }
+
+    static const mach_timebase_info_data_t timebase = [] {
+        mach_timebase_info_data_t info{};
+        (void)mach_timebase_info(&info);
+        return info;
+    }();
+
+    const auto nanos = std::chrono::duration_cast<std::chrono::nanoseconds>(duration);
+    if (nanos.count() <= 0) {
+        return;
+    }
+
+    unsigned __int128 absolute_delta = static_cast<unsigned __int128>(nanos.count()) *
+                                       static_cast<unsigned __int128>(timebase.denom);
+    absolute_delta += static_cast<unsigned __int128>(timebase.numer - 1);
+    absolute_delta /= static_cast<unsigned __int128>(timebase.numer);
+
+    if (absolute_delta == 0) {
+        std::this_thread::sleep_for(duration);
+        return;
+    }
+
+    const uint64_t target = mach_absolute_time() + static_cast<uint64_t>(absolute_delta);
+
+    auto status = mach_wait_until(target);
+    while (status == KERN_ABORTED) {
+        status = mach_wait_until(target);
+    }
+#else
+    std::this_thread::sleep_for(duration);
+#endif
+}
 
 #ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
 namespace ring_detail {
@@ -1591,7 +1632,7 @@ struct Ring_R : Ring<T, true>
                     }
                     return Range<T>{};
                 }
-                std::this_thread::sleep_for(std::chrono::duration<double>(precision_sleep_cycle));
+                precision_sleep_for(std::chrono::duration<double>(precision_sleep_cycle));
                 SINTRA_DELAY_FUZZ("ipc_rings.precision_sleep");
             }
         }
