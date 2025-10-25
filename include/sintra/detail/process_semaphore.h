@@ -153,7 +153,7 @@ inline void process_semaphore::ensure_created(unsigned int initial)
         std::uniform_int_distribution<int> dist(0, 15);
 
         m_name.fill(L'\0');
-        std::wstring generated = L"Global\\sintra_sem_";
+        std::wstring generated = L"Local\\sintra_sem_";
         for (size_t i = 0; i < 32; ++i) {
             generated.push_back(alphabet[dist(rd)]);
         }
