@@ -7,12 +7,9 @@
 #include "managed_process.h"
 #include "process_message_reader_impl.h"
 
-#include <atomic>
 #include <exception>
 #include <stdexcept>
 #include <string>
-#include <thread>
-#include <utility>
 
 namespace sintra {
 namespace detail {
@@ -72,50 +69,7 @@ inline void wait_for_processing_quiescence()
         return;
     }
 
-    auto* current_reader = s_tl_current_request_reader;
-    if (!current_reader) {
-        s_mproc->wait_for_delivery_fence();
-        return;
-    }
-
-    std::atomic<bool> fence_ready{false};
-    std::exception_ptr waiter_error;
-
-    std::thread waiter([current_reader, &fence_ready, &waiter_error]() {
-        auto* previous_reader = s_tl_current_request_reader;
-        const bool previous_is_request_thread = tl_is_req_thread;
-
-        s_tl_current_request_reader = current_reader;
-        tl_is_req_thread = true;
-
-        try {
-            s_mproc->wait_for_delivery_fence();
-        }
-        catch (...) {
-            waiter_error = std::current_exception();
-        }
-
-        tl_is_req_thread = previous_is_request_thread;
-        s_tl_current_request_reader = previous_reader;
-        fence_ready.store(true, std::memory_order_release);
-    });
-
-    while (!fence_ready.load(std::memory_order_acquire)) {
-        if (tl_post_handler_function) {
-            auto post_handler = std::move(tl_post_handler_function);
-            tl_post_handler_function = {};
-            post_handler();
-            continue;
-        }
-
-        std::this_thread::yield();
-    }
-
-    waiter.join();
-
-    if (waiter_error) {
-        std::rethrow_exception(waiter_error);
-    }
+    s_mproc->wait_for_delivery_fence();
 }
 
 } // namespace detail

@@ -1525,7 +1525,26 @@ void Managed_process::wait_for_delivery_fence()
     }
 
     std::unique_lock<std::mutex> lk(m_delivery_mutex);
-    m_delivery_condition.wait(lk, all_targets_satisfied);
+
+    while (!all_targets_satisfied()) {
+        if (tl_is_req_thread && tl_post_handler_function) {
+            auto post_handler = std::move(tl_post_handler_function);
+            tl_post_handler_function = {};
+
+            lk.unlock();
+            post_handler();
+            lk.lock();
+            continue;
+        }
+
+        if (tl_is_req_thread) {
+            m_delivery_condition.wait_for(
+                lk, std::chrono::milliseconds(1));
+        }
+        else {
+            m_delivery_condition.wait(lk);
+        }
+    }
 }
 
 
