@@ -1017,9 +1017,10 @@ bool Managed_process::spawn_swarm_process(
         reader->wait_until_ready();
     }
 
-    bool success = spawn_detached(s.binary_name.c_str(), cargs.v());
+    const bool spawned = spawn_detached(s.binary_name.c_str(), cargs.v());
+    bool success = spawned;
 
-    if (success) {
+    if (spawned) {
         // Create an entry in the coordinator's transceiver registry.
         // This is essential for the implementation of publish_transceiver()
         {
@@ -1027,16 +1028,35 @@ bool Managed_process::spawn_swarm_process(
             s_coord->m_transceiver_registry[s.piid];
         }
 
+        bool enrolled_in_default_groups = true;
+        {
+            std::unique_lock<std::mutex> groups_lock(s_coord->m_groups_mutex);
+            enrolled_in_default_groups = s_coord->enroll_process_in_default_groups_locked(
+                groups_lock,
+                s.piid,
+                /*include_in_external_group=*/true);
+        }
+
+        if (!enrolled_in_default_groups) {
+            std::lock_guard<mutex> lock(s_coord->m_publish_mutex);
+            s_coord->m_transceiver_registry.erase(s.piid);
+            success = false;
+        }
+        else {
+            m_cached_spawns[s.piid] = s;
+            m_cached_spawns[s.piid].occurrence++;
+        }
+    }
+
+    if (!success) {
+        if (!spawned) {
+            std::cerr << "failed to launch " << s.binary_name << std::endl;
+        }
+
         // create the readers. The next line will start the reader threads,
         // which might take some time. At this stage, we do not have to wait
         // until they are ready for messages.
         //m_readers.emplace_back(std::move(reader));
-
-        m_cached_spawns[s.piid] = s;
-        m_cached_spawns[s.piid].occurrence++;
-    }
-    else {
-        std::cerr << "failed to launch " << s.binary_name << std::endl;
 
         //m_readers.pop_back();
         std::unique_lock<std::shared_mutex> readers_lock(m_readers_mutex);
