@@ -105,6 +105,7 @@
 #include "deterministic_delay.h"
 #include "get_wtime.h"   // high-res wall clock (used by adaptive reader policy)
 #include "id_types.h"    // ID and type aliases as used by the project
+#include "interprocess_semaphore.h"
 
 // ─── STL / stdlib ────────────────────────────────────────────────────────────
 #include <algorithm>     // std::reverse
@@ -134,7 +135,6 @@
 #include <boost/interprocess/file_mapping.hpp>
 #include <boost/interprocess/mapped_region.hpp>
 #include <boost/interprocess/sync/interprocess_mutex.hpp>
-#include <boost/interprocess/sync/interprocess_semaphore.hpp>
 
 // ─── Platform headers (grouped) ──────────────────────────────────────────────
 #ifdef _WIN32
@@ -619,9 +619,9 @@ public:
 };
 
 // A binary semaphore tailored for the ring's reader wakeup policy.
-struct sintra_ring_semaphore : ipc::interprocess_semaphore
+struct sintra_ring_semaphore : interprocess_semaphore
 {
-    sintra_ring_semaphore() : ipc::interprocess_semaphore(0) {}
+    sintra_ring_semaphore() : interprocess_semaphore(0) {}
 
     // Wakes all readers in an ordered fashion (used by writer after publishing).
     void post_ordered()
@@ -646,7 +646,7 @@ struct sintra_ring_semaphore : ipc::interprocess_semaphore
     // Wait returns true if the wakeup was unordered and no ordered post happened since.
     bool wait()
     {
-        ipc::interprocess_semaphore::wait();
+        interprocess_semaphore::wait();
         posted.clear(std::memory_order_release);
         return unordered.exchange(false, std::memory_order_acq_rel);
     }
