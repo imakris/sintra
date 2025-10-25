@@ -134,6 +134,7 @@
 #include <boost/interprocess/file_mapping.hpp>
 #include <boost/interprocess/mapped_region.hpp>
 #include <boost/interprocess/sync/interprocess_mutex.hpp>
+#include <boost/interprocess/sync/interprocess_semaphore.hpp>
 
 // ─── Platform headers (grouped) ──────────────────────────────────────────────
 #ifdef _WIN32
@@ -148,7 +149,6 @@
   #endif
   #include <Windows.h>   // ::VirtualAlloc, granularity details (via Boost)
   #include <timeapi.h>   // ::timeBeginPeriod, ::timeEndPeriod (for ADAPTIVE_SPIN)
-  #include <synchapi.h>  // WaitOnAddress family for custom semaphore
 #else
   #include <sys/mman.h>  // ::mmap, ::munmap, MAP_FIXED, MAP_NOSYNC (if available)
   #include <unistd.h>    // ::sysconf
@@ -628,8 +628,26 @@ public:
               "Ring reader was evicted by the writer due to being too slow.") {}
 };
 
+#if defined(_WIN32)
+// On Windows, rely on Boost.Interprocess' semaphore which supports cross-process waits.
+class interprocess_semaphore
+{
+public:
+    explicit interprocess_semaphore(unsigned int initial = 0) noexcept
+        : m_sem(static_cast<int>(initial))
+    {
+    }
+
+    void post() noexcept { m_sem.post(); }
+
+    void wait() noexcept { m_sem.wait(); }
+
+private:
+    boost::interprocess::interprocess_semaphore m_sem;
+};
+#else
 // Counting semaphore that lives in shared memory and relies on platform-specific
-// address-based wait primitives (futex/WaitOnAddress/ulock) for blocking.
+// address-based wait primitives (futex/ulock) for blocking.
 class interprocess_semaphore
 {
 public:
@@ -695,14 +713,6 @@ private:
             }
             return;
         }
-#elif defined(_WIN32)
-        auto* addr = reinterpret_cast<volatile void*>(std::addressof(target));
-        while (!::WaitOnAddress(addr, &expected, sizeof(expected), INFINITE)) {
-            if (::GetLastError() == ERROR_TIMEOUT) {
-                continue;
-            }
-            return;
-        }
 #else
         (void)target;
         (void)expected;
@@ -719,9 +729,6 @@ private:
 #elif defined(__APPLE__)
         auto* addr = reinterpret_cast<uint32_t*>(std::addressof(target));
         (void)__ulock_wake(UL_COMPARE_AND_WAIT | ULF_SHARED | ULF_WAKE_ALL, addr, 0);
-#elif defined(_WIN32)
-        auto* addr = reinterpret_cast<volatile void*>(std::addressof(target));
-        ::WakeByAddressAll(addr);
 #else
         (void)target;
 #endif
@@ -731,6 +738,7 @@ private:
     std::atomic<uint32_t> m_wait_seq;
     std::atomic<uint32_t> m_wake_seq;
 };
+#endif
 
 // A binary semaphore wrapper that preserves the ring's ordered/unordered wake policy.
 struct sintra_ring_semaphore
