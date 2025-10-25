@@ -209,12 +209,30 @@ constexpr auto invalid_sequence = ~sequence_counter_type(0);
 #if defined(__linux__)
 namespace detail {
 
+inline std::atomic<uint32_t>& futex_private_mode()
+{
+    static std::atomic<uint32_t> mode{FUTEX_PRIVATE_FLAG};
+    return mode;
+}
+
+inline uint32_t futex_op_flags()
+{
+    return futex_private_mode().load(std::memory_order_acquire);
+}
+
+inline void disable_private_futex_mode()
+{
+    uint32_t expected = FUTEX_PRIVATE_FLAG;
+    futex_private_mode().compare_exchange_strong(expected, 0u, std::memory_order_acq_rel);
+}
+
 inline void futex_wait(std::atomic<int32_t>& value, int32_t expected)
 {
     while (true) {
+        uint32_t flags = futex_op_flags();
         int rc = ::syscall(SYS_futex,
                            reinterpret_cast<int32_t*>(&value),
-                           FUTEX_WAIT,
+                           FUTEX_WAIT | flags,
                            expected,
                            nullptr,
                            nullptr,
@@ -222,25 +240,44 @@ inline void futex_wait(std::atomic<int32_t>& value, int32_t expected)
         if (rc == 0) {
             return;
         }
-        if (errno == EINTR) {
+        int err = errno;
+        if (err == EINTR) {
             continue;
         }
-        if (errno == EAGAIN) {
+        if (err == EAGAIN) {
             return;
         }
-        throw std::system_error(errno, std::generic_category(), "futex_wait failed");
+        if (err == EINVAL && flags != 0) {
+            disable_private_futex_mode();
+            continue;
+        }
+        throw std::system_error(err, std::generic_category(), "futex_wait failed");
     }
 }
 
 inline void futex_wake(std::atomic<int32_t>& value)
 {
-    ::syscall(SYS_futex,
-              reinterpret_cast<int32_t*>(&value),
-              FUTEX_WAKE,
-              1,
-              nullptr,
-              nullptr,
-              0);
+    while (true) {
+        uint32_t flags = futex_op_flags();
+        int rc = ::syscall(SYS_futex,
+                           reinterpret_cast<int32_t*>(&value),
+                           FUTEX_WAKE | flags,
+                           1,
+                           nullptr,
+                           nullptr,
+                           0);
+        if (rc >= 0) {
+            return;
+        }
+
+        int err = errno;
+        if (err == EINVAL && flags != 0) {
+            disable_private_futex_mode();
+            continue;
+        }
+
+        throw std::system_error(err, std::generic_category(), "futex_wake failed");
+    }
 }
 
 } // namespace detail
