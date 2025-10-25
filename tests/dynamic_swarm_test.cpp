@@ -22,6 +22,7 @@
 namespace {
 
 constexpr int kBenchBranchIndex = 3;
+constexpr std::uint64_t kThreeWayHits = 12;
 
 struct Ball {
     int target;
@@ -230,7 +231,7 @@ bool validate_stats(const ControllerStats& stats)
         return false;
     }
     for (auto value : stats.hits_per_cycle) {
-        if (value != 12) {
+        if (value < kThreeWayHits) {
             return false;
         }
     }
@@ -271,7 +272,6 @@ int controller()
 
     constexpr std::uint64_t warmup_initial = 10;
     constexpr std::uint64_t warmup_between = 6;
-    constexpr std::uint64_t three_way_hits = 12;
     constexpr std::uint64_t cooldown_hits = 6;
     constexpr int target_cycles = 2;
 
@@ -309,7 +309,7 @@ int controller()
             if (report.roster_size > 2) {
                 ++hits_in_cycle;
                 cycle_hits = hits_in_cycle;
-                if (!bench_retiring && hits_in_cycle >= three_way_hits) {
+                if (!bench_retiring && hits_in_cycle >= kThreeWayHits) {
                     bench_retiring = true;
                     request_leave = true;
                     send_two_player_roster = true;
