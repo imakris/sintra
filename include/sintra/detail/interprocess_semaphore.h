@@ -382,27 +382,32 @@ private:
                 return false;
             }
 
-            auto remaining = abs_time - now;
-            auto system_deadline = std::chrono::system_clock::now() +
-                std::chrono::duration_cast<std::chrono::system_clock::duration>(remaining);
-
-            struct timespec ts;
-            auto secs = std::chrono::time_point_cast<std::chrono::seconds>(system_deadline);
-            ts.tv_sec = static_cast<time_t>(secs.time_since_epoch().count());
-            auto nsecs = std::chrono::duration_cast<std::chrono::nanoseconds>(system_deadline - secs);
-            ts.tv_nsec = static_cast<long>(nsecs.count());
-
             sem_t* handle = get_handle();
-            while (sem_timedwait(handle, &ts) != 0) {
+
+            while (true) {
+                if (sem_trywait(handle) == 0) {
+                    return true;
+                }
+
                 if (errno == EINTR) {
                     continue;
                 }
-                if (errno == ETIMEDOUT) {
+
+                if (errno != EAGAIN) {
+                    throw std::system_error(errno, std::generic_category(), "sem_trywait");
+                }
+
+                now = Clock::now();
+                if (now >= abs_time) {
                     return false;
                 }
-                throw std::system_error(errno, std::generic_category(), "sem_timedwait");
+
+                auto sleep_duration = std::min(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(abs_time - now),
+                    std::chrono::nanoseconds{10'000'000});
+
+                std::this_thread::sleep_for(sleep_duration);
             }
-            return true;
         }
 
     private:
