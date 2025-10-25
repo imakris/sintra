@@ -7,6 +7,8 @@
 #include "managed_process.h"
 #include "process_message_reader_impl.h"
 
+#include <cassert>
+#include <cstddef>
 #include <chrono>
 #include <condition_variable>
 #include <exception>
@@ -34,13 +36,20 @@ public:
             m_worker = std::thread([this]() { worker_loop(); });
         }
 
-        m_cv.wait(lock, [this]() { return m_state == State::Idle; });
+        if (m_wait_depth == 0) {
+            m_cv.wait(lock, [this]() { return m_state == State::Idle; });
 
-        m_process = &process;
-        m_reader = reader;
-        m_error = nullptr;
-        m_state = State::Running;
-        m_cv.notify_one();
+            m_process = &process;
+            m_reader = reader;
+            m_error = nullptr;
+            m_state = State::Running;
+            m_cv.notify_one();
+        } else {
+            assert(m_process == &process);
+            assert(m_reader == reader);
+        }
+
+        ++m_wait_depth;
 
         auto pump_post_handlers = []() {
             if (tl_post_handler_function) {
@@ -64,10 +73,16 @@ public:
         }
 
         auto error = m_error;
-        m_error = nullptr;
-        m_state = State::Idle;
+        const bool notify_waiters = (--m_wait_depth == 0);
+        if (notify_waiters) {
+            m_error = nullptr;
+            m_state = State::Idle;
+        }
+
         lock.unlock();
-        m_cv.notify_all();
+        if (notify_waiters) {
+            m_cv.notify_all();
+        }
 
         if (error) {
             std::rethrow_exception(error);
@@ -145,6 +160,7 @@ private:
     Managed_process* m_process = nullptr;
     Process_message_reader* m_reader = nullptr;
     std::exception_ptr m_error;
+    std::size_t m_wait_depth = 0;
     bool m_stop = false;
     State m_state = State::Idle;
 };
