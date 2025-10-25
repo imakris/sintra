@@ -156,6 +156,8 @@
     #include <sys/user.h>
   #elif defined(__APPLE__)
     #include <libproc.h>
+    #include <mach/mach.h>
+    #include <mach/mach_time.h>
   #endif
 #endif
 
@@ -210,6 +212,66 @@ public:
     explicit Scoped_timer_resolution(unsigned int) {}
 };
 #endif
+
+namespace ring_detail {
+
+#if defined(__APPLE__)
+
+inline const mach_timebase_info_data_t& macos_timebase_info()
+{
+    static mach_timebase_info_data_t info = [] {
+        mach_timebase_info_data_t data{};
+        (void)::mach_timebase_info(&data);
+        if (data.denom == 0) {
+            data.denom = 1;
+        }
+        if (data.numer == 0) {
+            data.numer = 1;
+        }
+        return data;
+    }();
+    return info;
+}
+
+inline void precision_sleep_for(std::chrono::nanoseconds duration)
+{
+    if (duration.count() <= 0) {
+        return;
+    }
+
+    const auto& timebase = macos_timebase_info();
+    const uint64_t numer = timebase.numer;
+    const uint64_t denom = timebase.denom;
+
+    const __uint128_t scaled = (static_cast<__uint128_t>(duration.count()) * denom + (numer - 1)) / numer;
+    const uint64_t deadline = ::mach_absolute_time() + static_cast<uint64_t>(scaled);
+
+    const kern_return_t wait_result = ::mach_wait_until(deadline);
+    if (wait_result != KERN_SUCCESS && wait_result != KERN_ABORTED) {
+        std::this_thread::sleep_for(duration);
+    }
+}
+
+template <class Rep, class Period>
+inline void precision_sleep_for(std::chrono::duration<Rep, Period> duration)
+{
+    precision_sleep_for(std::chrono::duration_cast<std::chrono::nanoseconds>(duration));
+}
+
+#else
+
+template <class Rep, class Period>
+inline void precision_sleep_for(std::chrono::duration<Rep, Period> duration)
+{
+    if (duration <= std::chrono::duration<Rep, Period>::zero()) {
+        return;
+    }
+    std::this_thread::sleep_for(duration);
+}
+
+#endif
+
+}  // namespace ring_detail
 
 #ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
 namespace ring_detail {
@@ -1591,7 +1653,7 @@ struct Ring_R : Ring<T, true>
                     }
                     return Range<T>{};
                 }
-                std::this_thread::sleep_for(std::chrono::duration<double>(precision_sleep_cycle));
+                ring_detail::precision_sleep_for(std::chrono::duration<double>(precision_sleep_cycle));
                 SINTRA_DELAY_FUZZ("ipc_rings.precision_sleep");
             }
         }
