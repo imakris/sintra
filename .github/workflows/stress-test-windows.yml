@@ -23,6 +23,19 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
 
+      - name: Ensure Windows debugging tools
+        shell: pwsh
+        run: |
+          $debugTools = "${env:ProgramFiles(x86)}\Windows Kits\10\Debuggers\x64"
+          if (-not (Test-Path $debugTools)) {
+            choco install --no-progress windows-sdk-10-version-10.0.22621.0 --package-parameters "'ADDLOCAL=DebuggingTools'"
+          }
+          Add-Content -Path $env:GITHUB_PATH -Value $debugTools
+
+      - name: Verify cdb
+        shell: pwsh
+        run: where cdb
+
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
