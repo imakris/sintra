@@ -17,6 +17,10 @@
   #endif
   #include <Windows.h>
   #include <synchapi.h>
+  #include <cerrno>
+  #include <cwchar>
+  #include <mutex>
+  #include <unordered_map>
 #elif defined(__APPLE__)
   #include <errno.h>
   #include <sys/ulock.h>
@@ -151,14 +155,17 @@ private:
     void wake_one()
     {
 #ifdef _WIN32
-        WakeByAddressSingle(reinterpret_cast<volatile VOID*>(&count_));
+        HANDLE handle = get_semaphore_handle();
+        if (!ReleaseSemaphore(handle, 1, nullptr)) {
+            throw std::system_error(
+                    static_cast<int>(GetLastError()),
+                    std::system_category(),
+                    "ReleaseSemaphore failed");
+        }
 #elif defined(__APPLE__)
         __ulock_wake(UL_COMPARE_AND_WAIT | ULF_SHARED, reinterpret_cast<void*>(&count_), 0);
 #else
         int op = FUTEX_WAKE;
-#ifdef FUTEX_PRIVATE_FLAG
-        op |= FUTEX_PRIVATE_FLAG;
-#endif
         futex(reinterpret_cast<int*>(&count_), op, 1);
 #endif
     }
@@ -185,6 +192,7 @@ private:
 #ifdef _WIN32
     bool wait_on_address(int expected, std::optional<steady_clock::time_point> deadline)
     {
+        HANDLE handle = get_semaphore_handle();
         while (count_.load(std::memory_order_relaxed) == expected) {
             DWORD timeout = INFINITE;
             if (deadline) {
@@ -204,18 +212,18 @@ private:
                 }
             }
 
-            BOOL ok = WaitOnAddress(
-                    reinterpret_cast<volatile VOID*>(&count_),
-                    &expected,
-                    sizeof(expected),
-                    timeout);
-            if (ok) {
+            DWORD result = WaitForSingleObject(handle, timeout);
+            if (result == WAIT_OBJECT_0) {
                 return true;
             }
-
-            DWORD error = GetLastError();
-            if (error == ERROR_TIMEOUT) {
+            if (result == WAIT_TIMEOUT) {
                 return false;
+            }
+            if (result == WAIT_FAILED) {
+                throw std::system_error(
+                        static_cast<int>(GetLastError()),
+                        std::system_category(),
+                        "WaitForSingleObject failed");
             }
         }
         return true;
@@ -266,9 +274,6 @@ private:
             const struct timespec* ts_ptr = nullptr;
             struct timespec ts;
             int op = FUTEX_WAIT;
-#ifdef FUTEX_PRIVATE_FLAG
-            op |= FUTEX_PRIVATE_FLAG;
-#endif
 
             if (deadline) {
                 auto now = steady_clock::now();
@@ -313,6 +318,121 @@ private:
         }
         return true;
     }
+#endif
+
+#ifdef _WIN32
+    void ensure_name_initialized() const
+    {
+        int state = name_state_.load(std::memory_order_acquire);
+        if (state == kNameInitialized) {
+            return;
+        }
+        initialize_name();
+    }
+
+    void initialize_name() const
+    {
+        int expected = kNameUninitialized;
+        if (name_state_.compare_exchange_strong(
+                    expected,
+                    kNameInitializing,
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire))
+        {
+            generate_unique_name();
+            name_state_.store(kNameInitialized, std::memory_order_release);
+        }
+        else {
+            while (name_state_.load(std::memory_order_acquire) != kNameInitialized) {
+                Sleep(0);
+            }
+        }
+    }
+
+    void generate_unique_name() const
+    {
+        static std::atomic<uint64_t> local_counter{0};
+        uint64_t counter_value = local_counter.fetch_add(1, std::memory_order_relaxed);
+        unsigned long process_id = GetCurrentProcessId();
+        unsigned long long ticks = GetTickCount64();
+        uintptr_t address       = reinterpret_cast<uintptr_t>(this);
+
+        errno       = 0;
+        int written = swprintf(
+                name_,
+                kNameLength,
+                L"SintraIPS_%08lx_%016llx_%016llx_%016llx",
+                process_id,
+                static_cast<unsigned long long>(ticks),
+                static_cast<unsigned long long>(address),
+                static_cast<unsigned long long>(counter_value));
+        if (written < 0) {
+            int err = errno ? errno : EINVAL;
+            throw std::system_error(
+                    err,
+                    std::system_category(),
+                    "swprintf failed to generate semaphore name");
+        }
+        name_[kNameLength - 1] = L'\0';
+    }
+
+    HANDLE get_semaphore_handle() const
+    {
+        ensure_name_initialized();
+        return win32_handle_registry::instance().get(this, name_);
+    }
+
+    struct win32_handle_registry
+    {
+        static win32_handle_registry& instance()
+        {
+            static win32_handle_registry registry;
+            return registry;
+        }
+
+        HANDLE get(const interprocess_semaphore* semaphore, const wchar_t* name)
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto it = handles_.find(semaphore);
+            if (it != handles_.end()) {
+                return it->second;
+            }
+
+            HANDLE handle = CreateSemaphoreW(nullptr, 0, std::numeric_limits<LONG>::max(), name);
+            if (!handle) {
+                throw std::system_error(
+                        static_cast<int>(GetLastError()),
+                        std::system_category(),
+                        "CreateSemaphoreW failed");
+            }
+
+            handles_.emplace(semaphore, handle);
+            return handle;
+        }
+
+        ~win32_handle_registry()
+        {
+            for (auto& entry : handles_) {
+                if (entry.second) {
+                    CloseHandle(entry.second);
+                }
+            }
+        }
+
+    private:
+        win32_handle_registry() = default;
+
+        std::mutex mutex_;
+        std::unordered_map<const interprocess_semaphore*, HANDLE> handles_;
+    };
+
+    static constexpr int kNameUninitialized = 0;
+    static constexpr int kNameInitializing  = 1;
+    static constexpr int kNameInitialized   = 2;
+
+    mutable std::atomic<int> name_state_{kNameUninitialized};
+    static constexpr size_t  kNameLength = 64;
+    mutable wchar_t          name_[kNameLength]{};
 #endif
 
     std::atomic<int> count_;
