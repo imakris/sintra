@@ -1047,6 +1047,69 @@ bool Managed_process::spawn_swarm_process(
 }
 
 
+inline
+Managed_process::Spawn_swarm_process_args Managed_process::make_spawn_args(
+    const Process_descriptor& descriptor,
+    int branch_index) const
+{
+    Spawn_swarm_process_args spawn_args;
+    spawn_args.binary_name = descriptor.entry.m_binary_name.empty()
+        ? m_binary_name
+        : descriptor.entry.m_binary_name;
+    spawn_args.piid = make_process_instance_id();
+
+    spawn_args.args.push_back(spawn_args.binary_name);
+
+    std::vector<std::string> sintra_options = descriptor.sintra_options;
+    if (descriptor.entry.m_entry_function != nullptr) {
+        sintra_options.insert(sintra_options.end(), {
+            "--branch_index", std::to_string(branch_index)
+        });
+    }
+
+    sintra_options.insert(sintra_options.end(), {
+        "--swarm_id",       std::to_string(m_swarm_id),
+        "--instance_id",    std::to_string(spawn_args.piid),
+        "--coordinator_id", std::to_string(s_coord_id)
+    });
+
+    spawn_args.args.insert(spawn_args.args.end(), sintra_options.begin(), sintra_options.end());
+    spawn_args.args.insert(spawn_args.args.end(), descriptor.user_options.begin(), descriptor.user_options.end());
+
+    return spawn_args;
+}
+
+
+inline size_t Managed_process::spawn_registered_branch(int branch_index, size_t multiplicity)
+{
+    if (!s_coord || multiplicity == 0) {
+        return 0;
+    }
+
+    std::optional<Process_descriptor> descriptor;
+    {
+        std::lock_guard<std::mutex> lock(m_branch_registry_mutex);
+        auto it = m_branch_registry.find(branch_index);
+        if (it != m_branch_registry.end()) {
+            descriptor = it->second;
+        }
+    }
+
+    if (!descriptor) {
+        return 0;
+    }
+
+    size_t spawned = 0;
+    for (size_t i = 0; i < multiplicity; ++i) {
+        auto spawn_args = make_spawn_args(*descriptor, branch_index);
+        if (spawn_swarm_process(spawn_args)) {
+            ++spawned;
+        }
+    }
+
+    return spawned;
+}
+
 
 inline
 bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
@@ -1060,33 +1123,43 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
     if (s_coord) {
 
         // 1. prepare the command line for each invocation
-        auto it = branch_vector.begin();
-        for (int i = 1; it != branch_vector.end(); it++, i++) {
+        std::vector<Process_descriptor> registered;
+        registered.reserve(branch_vector.size());
 
-            auto& options = it->sintra_options;
-            if (it->entry.m_binary_name.empty()) {
-                it->entry.m_binary_name = m_binary_name;
-                options.insert(options.end(), { "--branch_index", to_string(i) });
+        {
+            int i = 1;
+            for (auto& descriptor : branch_vector) {
+                Process_descriptor stored = descriptor;
+                stored.branch_index = i++;
+                if (stored.entry.m_binary_name.empty()) {
+                    stored.entry.m_binary_name = m_binary_name;
+                }
+                stored.assigned_instance_id = invalid_instance_id;
+                registered.push_back(std::move(stored));
             }
-            options.insert(options.end(), {
-                "--swarm_id",       to_string(m_swarm_id),
-                "--instance_id",    to_string(it->assigned_instance_id = make_process_instance_id()),
-                "--coordinator_id", to_string(s_coord_id)
-            });
         }
 
-        // 2. spawn
+        {
+            std::lock_guard<std::mutex> lock(m_branch_registry_mutex);
+            m_branch_registry.clear();
+            for (auto& descriptor : registered) {
+                m_branch_registry.emplace(descriptor.branch_index, descriptor);
+            }
+        }
+
         std::unordered_set<instance_id_type> successfully_spawned;
-        it = branch_vector.begin();
-        //auto readers_it = m_readers.begin();
-        for (int i = 0; it != branch_vector.end(); it++, i++) {
 
-            std::vector<std::string> all_args = {it->entry.m_binary_name.c_str()};
-            all_args.insert(all_args.end(), it->sintra_options.begin(), it->sintra_options.end());
-            all_args.insert(all_args.end(), it->user_options.begin(), it->user_options.end());
+        for (size_t idx = 0; idx < registered.size(); ++idx) {
+            auto& descriptor = registered[idx];
+            if (!descriptor.auto_start) {
+                continue;
+            }
 
-            if (spawn_swarm_process({it->entry.m_binary_name, all_args, it->assigned_instance_id})) {
-                successfully_spawned.insert(it->assigned_instance_id);
+            auto spawn_args = make_spawn_args(descriptor, descriptor.branch_index);
+            branch_vector[idx].assigned_instance_id = spawn_args.piid;
+
+            if (spawn_swarm_process(spawn_args)) {
+                successfully_spawned.insert(branch_vector[idx].assigned_instance_id);
             }
         }
 
