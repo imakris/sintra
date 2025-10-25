@@ -863,8 +863,7 @@ class TestRunner:
             return "", "cdb not available"
 
         target_pids = self._collect_windows_process_tree_pids(pid)
-        if not target_pids:
-            target_pids = [pid]
+        target_pids.append(pid)
 
         stack_outputs: List[str] = []
         capture_errors: List[str] = []
