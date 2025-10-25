@@ -659,22 +659,22 @@ instance_id_type Coordinator::make_process_group(
     const string& name,
     const unordered_set<instance_id_type>& member_process_ids)
 {
-    lock_guard<mutex> lock(m_groups_mutex);
+    std::unique_lock<std::mutex> groups_lock(m_groups_mutex);
 
     // check if it exists
     if (m_groups.count(name)) {
         return invalid_instance_id;
     }
 
-    m_groups[name].set(member_process_ids);
-    auto ret = m_groups[name].m_instance_id;
+    auto& group = m_groups[name];
+    const auto instance = group.m_instance_id;
 
-    for (auto& e : member_process_ids) {
-        m_groups_of_process[e].insert(ret);
+    for (auto process_iid : member_process_ids) {
+        add_process_to_group_locked(groups_lock, group, process_iid);
     }
 
-    m_groups[name].assign_name(name);
-    return ret;
+    group.assign_name(name);
+    return instance;
 }
 
 
