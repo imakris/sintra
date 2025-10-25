@@ -564,6 +564,39 @@ inline wait_status platform_wait_until(std::atomic<int32_t>& value,
         return (errno == EAGAIN) ? wait_status::timed_out : wait_status::value_changed;
     }
 
+#if defined(__APPLE__) && !SINTRA_HAS_ULOCK
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+
+    while (value.load(std::memory_order_acquire) == expected) {
+        if (sem_trywait(sem) == 0) {
+            return wait_status::value_changed;
+        }
+
+        if (errno == EINTR) {
+            continue;
+        }
+
+        if (errno == EAGAIN) {
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= deadline) {
+                return wait_status::timed_out;
+            }
+
+            auto remaining = std::chrono::duration_cast<std::chrono::microseconds>(deadline - now);
+            if (remaining.count() > 0) {
+                useconds_t sleep_us = 1000;
+                if (remaining.count() < 1000) {
+                    sleep_us = static_cast<useconds_t>(remaining.count());
+                }
+                ::usleep(sleep_us);
+            }
+
+            continue;
+        }
+
+        return wait_status::timed_out;
+    }
+#else
     timespec ts{};
     auto     now       = std::chrono::system_clock::now().time_since_epoch();
     auto     now_secs  = std::chrono::duration_cast<std::chrono::seconds>(now);
@@ -591,6 +624,7 @@ inline wait_status platform_wait_until(std::atomic<int32_t>& value,
             return wait_status::timed_out;
         }
     }
+#endif
 
     return wait_status::value_changed;
 }
