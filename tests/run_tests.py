@@ -29,7 +29,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional, Set, Tuple
 
 class Color:
     """ANSI color codes for terminal output"""
@@ -564,7 +564,7 @@ class TestRunner:
         return returncode < 0 or returncode > 128
 
     def _capture_process_stacks(self, pid: int) -> Tuple[str, str]:
-        """Attempt to capture stack traces for all processes in the test's process group."""
+        """Attempt to capture stack traces for the test process and all of its helpers."""
 
         if sys.platform == 'win32':
             return self._capture_process_stacks_windows(pid)
@@ -579,20 +579,36 @@ class TestRunner:
         except ProcessLookupError:
             return "", "process exited before stack capture"
 
-        target_pids = self._collect_process_group_pids(pgid)
+        target_pids = set()
+        target_pids.add(pid)
+        target_pids.update(self._collect_process_group_pids(pgid))
+        target_pids.update(self._collect_descendant_pids(pid))
+
         if not target_pids:
-            target_pids = [pid]
+            target_pids = {pid}
 
-        # Pause the process group to obtain consistent stack traces
-        try:
-            os.killpg(pgid, signal.SIGSTOP)
-        except (ProcessLookupError, PermissionError):
-            pass
-
+        paused_pids = []
         stack_outputs = []
         capture_errors = []
 
-        for target_pid in sorted(set(target_pids)):
+        # Pause each discovered process individually so we can capture consistent stacks,
+        # even if helpers spawned new process groups.
+        try:
+            import signal
+        except ImportError:
+            signal = None
+
+        if signal is not None:
+            for target_pid in sorted(target_pids):
+                if target_pid == os.getpid():
+                    continue
+                try:
+                    os.kill(target_pid, signal.SIGSTOP)
+                    paused_pids.append(target_pid)
+                except (ProcessLookupError, PermissionError):
+                    continue
+
+        for target_pid in sorted(target_pids):
             if target_pid == os.getpid():
                 continue
 
@@ -631,10 +647,12 @@ class TestRunner:
                 stack_outputs.append(f"PID {target_pid}\n{output}")
 
         # Allow processes to continue so gdb can detach cleanly before killing
-        try:
-            os.killpg(pgid, signal.SIGCONT)
-        except (ProcessLookupError, PermissionError):
-            pass
+        if signal is not None:
+            for target_pid in paused_pids:
+                try:
+                    os.kill(target_pid, signal.SIGCONT)
+                except (ProcessLookupError, PermissionError):
+                    continue
 
         if stack_outputs:
             return "\n\n".join(stack_outputs), ""
@@ -993,6 +1011,69 @@ class TestRunner:
 
         return pids
 
+    def _collect_descendant_pids(self, root_pid: int) -> List[int]:
+        """Return all descendant process IDs for the provided root PID on Unix."""
+
+        descendants: List[int] = []
+
+        if sys.platform == 'win32':
+            return descendants
+
+        proc_path = Path('/proc')
+        try:
+            entries = list(proc_path.iterdir())
+        except Exception:
+            return descendants
+
+        parent_to_children: Dict[int, List[int]] = {}
+
+        for entry in entries:
+            if not entry.is_dir():
+                continue
+
+            name = entry.name
+            if not name.isdigit():
+                continue
+
+            try:
+                pid = int(name)
+            except ValueError:
+                continue
+
+            stat_path = entry / 'stat'
+            try:
+                stat_content = stat_path.read_text()
+            except (OSError, UnicodeDecodeError):
+                continue
+
+            close_paren = stat_content.find(')')
+            if close_paren == -1 or close_paren + 2 >= len(stat_content):
+                continue
+
+            remainder = stat_content[close_paren + 2 :].split()
+            if len(remainder) < 2:
+                continue
+
+            try:
+                parent_pid = int(remainder[1])
+            except ValueError:
+                continue
+
+            parent_to_children.setdefault(parent_pid, []).append(pid)
+
+        visited: Set[int] = set()
+        stack: List[int] = parent_to_children.get(root_pid, [])[:]
+
+        while stack:
+            current = stack.pop()
+            if current in visited or current == root_pid:
+                continue
+            visited.add(current)
+            descendants.append(current)
+            stack.extend(parent_to_children.get(current, []))
+
+        return descendants
+
     def run_test_multiple(self, invocation: TestInvocation, repetitions: int) -> Tuple[int, int, List[TestResult]]:
         """Run a test multiple times and collect results"""
         test_name = invocation.name
@@ -1260,7 +1341,8 @@ def main():
 
                         result_bucket['failures'].append({
                             'run': run_index,
-                            'message': first_line,
+                            'summary': first_line,
+                            'message': error_message if error_message else first_line,
                         })
 
                         print(f"{Color.RED}F{Color.RESET}", end="", flush=True)
@@ -1357,7 +1439,20 @@ def main():
                 for test_name, failures in failing_tests.items():
                     print(f"  {test_name}:")
                     for failure in failures[:5]:
-                        print(f"    Run #{failure['run']}: {failure['message']}")
+                        message = failure.get('message') or ''
+                        summary = failure.get('summary') or message
+                        lines = message.splitlines() if message else []
+
+                        print(f"    Run #{failure['run']}: {summary}")
+
+                        if lines:
+                            if summary == lines[0]:
+                                extra_lines = lines[1:]
+                            else:
+                                extra_lines = lines
+                            for line in extra_lines:
+                                print(f"      {line}")
+
                     if len(failures) > 5:
                         remaining = len(failures) - 5
                         print(f"    ... and {remaining} more failure(s)")
