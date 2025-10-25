@@ -244,53 +244,57 @@ private:
         while (count_.load(std::memory_order_relaxed) == expected) {
             int rc = 0;
             if (deadline) {
-                auto now = steady_clock::now();
-                if (now >= *deadline) {
-                    return false;
-                }
+                while (true) {
+                    rc = sem_trywait(sem);
+                    if (rc == 0) {
+                        return true;
+                    }
 
-                auto remaining = std::chrono::duration_cast<std::chrono::nanoseconds>(*deadline - now);
-                if (remaining.count() <= 0) {
-                    return false;
-                }
-
-                struct timespec ts;
-                if (clock_gettime(CLOCK_REALTIME, &ts) != 0) {
                     int err = errno;
-                    throw std::system_error(err, std::system_category(), "clock_gettime failed");
-                }
+                    if (err == EINTR) {
+                        continue;
+                    }
+                    if (err != EAGAIN) {
+                        throw std::system_error(err, std::system_category(), "semaphore wait failed");
+                    }
 
-                constexpr long long kBillion = 1000000000LL;
-                long long total_ns = remaining.count();
-                ts.tv_sec += static_cast<time_t>(total_ns / kBillion);
-                long long nanos = total_ns % kBillion;
-                ts.tv_nsec += static_cast<long>(nanos);
-                if (ts.tv_nsec >= kBillion) {
-                    ts.tv_sec += 1;
-                    ts.tv_nsec -= static_cast<long>(kBillion);
-                }
+                    auto now = steady_clock::now();
+                    if (now >= *deadline) {
+                        return false;
+                    }
 
-                rc = sem_timedwait(sem, &ts);
+                    auto remaining = std::chrono::duration_cast<std::chrono::nanoseconds>(*deadline - now);
+                    if (remaining.count() <= 0) {
+                        return false;
+                    }
+
+                    constexpr long long kBillion = 1000000000LL;
+                    long long sleep_ns = remaining.count();
+                    if (sleep_ns > 1000000LL) {
+                        sleep_ns = 1000000LL;
+                    }
+
+                    struct timespec ts;
+                    ts.tv_sec  = static_cast<time_t>(sleep_ns / kBillion);
+                    ts.tv_nsec = static_cast<long>(sleep_ns % kBillion);
+                    nanosleep(&ts, nullptr);
+                }
             }
             else {
                 rc = sem_wait(sem);
-            }
+                if (rc == 0) {
+                    return true;
+                }
 
-            if (rc == 0) {
-                return true;
+                int err = errno;
+                if (err == EINTR) {
+                    continue;
+                }
+                if (err == EAGAIN) {
+                    return true;
+                }
+                throw std::system_error(err, std::system_category(), "semaphore wait failed");
             }
-
-            int err = errno;
-            if (err == ETIMEDOUT) {
-                return false;
-            }
-            if (err == EINTR) {
-                continue;
-            }
-            if (err == EAGAIN) {
-                return true;
-            }
-            throw std::system_error(err, std::system_category(), "semaphore wait failed");
         }
         return true;
     }
@@ -458,7 +462,7 @@ private:
     static constexpr int kNameInitialized   = 2;
 
     mutable std::atomic<int> name_state_{kNameUninitialized};
-    static constexpr size_t  kNameLength = 64;
+    static constexpr size_t  kNameLength = 128;
     mutable wchar_t          name_[kNameLength]{};
 #elif defined(__APPLE__)
     void ensure_name_initialized() const
@@ -565,7 +569,7 @@ private:
     static constexpr int kNameInitialized   = 2;
 
     mutable std::atomic<int> name_state_{kNameUninitialized};
-    static constexpr size_t  kNameLength = 64;
+    static constexpr size_t  kNameLength = 128;
     mutable char             name_[kNameLength]{};
 #endif
 
