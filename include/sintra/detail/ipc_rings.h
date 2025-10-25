@@ -113,7 +113,9 @@
 #include <cassert>
 #include <cerrno>
 #include <chrono>
+#include <climits>
 #include <cstdio>        // std::FILE, std::fprintf
+#include <cstdlib>
 #include <cstring>       // std::strlen
 #include <cstdint>
 #include <filesystem>
@@ -124,6 +126,8 @@
 #include <mutex>         // std::once_flag, std::call_once
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <unordered_map>
 #include <system_error>
 #include <thread>
 #include <utility>
@@ -134,7 +138,6 @@
 #include <boost/interprocess/file_mapping.hpp>
 #include <boost/interprocess/mapped_region.hpp>
 #include <boost/interprocess/sync/interprocess_mutex.hpp>
-#include <boost/interprocess/sync/interprocess_semaphore.hpp>
 
 // ─── Platform headers (grouped) ──────────────────────────────────────────────
 #ifdef _WIN32
@@ -156,7 +159,23 @@
     #include <sys/user.h>
   #elif defined(__APPLE__)
     #include <libproc.h>
+    #include <mach/mach_time.h>
+    #include <semaphore.h>
+    #include <sys/stat.h>
+    #include <fcntl.h>
   #endif
+#endif
+
+#if defined(__linux__)
+  #include <linux/futex.h>
+  #include <sys/syscall.h>
+#ifndef FUTEX_PRIVATE_FLAG
+#define FUTEX_PRIVATE_FLAG 0
+#endif
+#endif
+
+#if defined(_WIN32)
+  #include <cwchar>
 #endif
 
 
@@ -187,6 +206,195 @@ namespace ipc = boost::interprocess;
 using sequence_counter_type = uint64_t;
 constexpr auto invalid_sequence = ~sequence_counter_type(0);
 
+#if defined(__linux__)
+namespace detail {
+
+inline void futex_wait(std::atomic<int32_t>& value, int32_t expected)
+{
+    while (true) {
+        int rc = ::syscall(SYS_futex,
+                           reinterpret_cast<int32_t*>(&value),
+                           FUTEX_WAIT | FUTEX_PRIVATE_FLAG,
+                           expected,
+                           nullptr,
+                           nullptr,
+                           0);
+        if (rc == 0) {
+            return;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        if (errno == EAGAIN) {
+            return;
+        }
+        throw std::system_error(errno, std::generic_category(), "futex_wait failed");
+    }
+}
+
+inline void futex_wake(std::atomic<int32_t>& value)
+{
+    ::syscall(SYS_futex,
+              reinterpret_cast<int32_t*>(&value),
+              FUTEX_WAKE | FUTEX_PRIVATE_FLAG,
+              1,
+              nullptr,
+              nullptr,
+              0);
+}
+
+} // namespace detail
+#endif
+
+#if defined(__APPLE__)
+namespace detail {
+
+class posix_named_semaphore_registry {
+public:
+    static sem_t* acquire(const char* name)
+    {
+        register_cleanup();
+        std::lock_guard<std::mutex> lock(mutex());
+        auto& map = handles();
+        std::string_view key{name};
+        auto it = map.find(key);
+        if (it != map.end()) {
+            return it->second;
+        }
+
+        sem_t* sem = ::sem_open(name, O_CREAT, S_IRUSR | S_IWUSR, 0);
+        if (sem == SEM_FAILED) {
+            throw std::system_error(errno, std::generic_category(), "sem_open failed");
+        }
+        map.emplace(std::string(key), sem);
+        return sem;
+    }
+
+    static void release(const char* name)
+    {
+        std::lock_guard<std::mutex> lock(mutex());
+        auto& map = handles();
+        std::string_view key{name};
+        auto it = map.find(key);
+        if (it != map.end()) {
+            if (it->second && it->second != SEM_FAILED) {
+                ::sem_close(it->second);
+            }
+            map.erase(it);
+        }
+    }
+
+    static void release_all()
+    {
+        std::lock_guard<std::mutex> lock(mutex());
+        for (auto& entry : handles()) {
+            if (entry.second && entry.second != SEM_FAILED) {
+                ::sem_close(entry.second);
+            }
+        }
+        handles().clear();
+    }
+
+private:
+    static void register_cleanup()
+    {
+        static std::once_flag once;
+        std::call_once(once, [] {
+            std::atexit([] { release_all(); });
+        });
+    }
+
+    static std::mutex& mutex()
+    {
+        static std::mutex m;
+        return m;
+    }
+
+    static std::unordered_map<std::string, sem_t*>& handles()
+    {
+        static std::unordered_map<std::string, sem_t*, std::hash<std::string_view>, std::equal_to<>> map;
+        return map;
+    }
+};
+
+} // namespace detail
+#endif
+
+#if defined(_WIN32)
+namespace detail {
+
+class win32_named_semaphore_registry {
+public:
+    static HANDLE acquire(const wchar_t* name)
+    {
+        register_cleanup();
+        std::lock_guard<std::mutex> lock(mutex());
+        auto& map = handles();
+        std::wstring_view key{name};
+        auto it = map.find(key);
+        if (it != map.end()) {
+            return it->second;
+        }
+
+        HANDLE handle = ::CreateSemaphoreW(nullptr, 0, LONG_MAX, name);
+        if (!handle) {
+            throw std::system_error(::GetLastError(), std::system_category(),
+                                    "CreateSemaphoreW failed");
+        }
+        map.emplace(std::wstring(key), handle);
+        return handle;
+    }
+
+    static void release(const wchar_t* name)
+    {
+        std::lock_guard<std::mutex> lock(mutex());
+        auto& map = handles();
+        std::wstring_view key{name};
+        auto it = map.find(key);
+        if (it != map.end()) {
+            if (it->second) {
+                ::CloseHandle(it->second);
+            }
+            map.erase(it);
+        }
+    }
+
+    static void release_all()
+    {
+        std::lock_guard<std::mutex> lock(mutex());
+        for (auto& entry : handles()) {
+            if (entry.second) {
+                ::CloseHandle(entry.second);
+            }
+        }
+        handles().clear();
+    }
+
+private:
+    static void register_cleanup()
+    {
+        static std::once_flag once;
+        std::call_once(once, [] {
+            std::atexit([] { release_all(); });
+        });
+    }
+
+    static std::mutex& mutex()
+    {
+        static std::mutex m;
+        return m;
+    }
+
+    static std::unordered_map<std::wstring, HANDLE, std::hash<std::wstring_view>, std::equal_to<>>& handles()
+    {
+        static std::unordered_map<std::wstring, HANDLE, std::hash<std::wstring_view>, std::equal_to<>> map;
+        return map;
+    }
+};
+
+} // namespace detail
+#endif
+
 #ifdef _WIN32
 class Scoped_timer_resolution {
 public:
@@ -210,6 +418,47 @@ public:
     explicit Scoped_timer_resolution(unsigned int) {}
 };
 #endif
+
+inline void precision_sleep_for(std::chrono::nanoseconds interval)
+{
+    if (interval <= std::chrono::nanoseconds::zero()) {
+        return;
+    }
+
+#if defined(__APPLE__)
+    static const mach_timebase_info_data_t timebase = [] {
+        mach_timebase_info_data_t info{};
+        mach_timebase_info(&info);
+        return info;
+    }();
+
+    const __uint128_t numerator = static_cast<__uint128_t>(interval.count()) *
+        static_cast<__uint128_t>(timebase.denom);
+    const __uint128_t ticks = (numerator + static_cast<__uint128_t>(timebase.numer) -
+                               __uint128_t{1}) /
+        static_cast<__uint128_t>(timebase.numer);
+
+    const __uint128_t clamped_ticks = std::max<__uint128_t>(ticks, __uint128_t{1});
+    if (clamped_ticks > std::numeric_limits<uint64_t>::max()) {
+        std::this_thread::sleep_for(interval);
+        return;
+    }
+
+    const uint64_t deadline = mach_absolute_time() +
+        static_cast<uint64_t>(clamped_ticks);
+
+    kern_return_t rc;
+    do {
+        rc = mach_wait_until(deadline);
+    } while (rc == KERN_ABORTED);
+
+    if (rc != KERN_SUCCESS) {
+        std::this_thread::sleep_for(interval);
+    }
+#else
+    std::this_thread::sleep_for(interval);
+#endif
+}
 
 #ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
 namespace ring_detail {
@@ -578,9 +827,19 @@ public:
 };
 
 // A binary semaphore tailored for the ring's reader wakeup policy.
-struct sintra_ring_semaphore : ipc::interprocess_semaphore
+struct sintra_ring_semaphore
 {
-    sintra_ring_semaphore() : ipc::interprocess_semaphore(0) {}
+    sintra_ring_semaphore() = default;
+
+    void configure(uint64_t namespace_id, int index)
+    {
+        backend.configure(namespace_id, index);
+    }
+
+    void destroy()
+    {
+        backend.destroy();
+    }
 
     // Wakes all readers in an ordered fashion (used by writer after publishing).
     void post_ordered()
@@ -589,7 +848,7 @@ struct sintra_ring_semaphore : ipc::interprocess_semaphore
             unordered.store(false, std::memory_order_release);
         }
         else if (!posted.test_and_set(std::memory_order_acquire)) {
-            this->post();
+            backend.post();
         }
     }
 
@@ -598,18 +857,163 @@ struct sintra_ring_semaphore : ipc::interprocess_semaphore
     {
         if (!posted.test_and_set(std::memory_order_acquire)) {
             unordered.store(true, std::memory_order_release);
-            this->post();
+            backend.post();
         }
     }
 
     // Wait returns true if the wakeup was unordered and no ordered post happened since.
     bool wait()
     {
-        ipc::interprocess_semaphore::wait();
+        backend.wait();
         posted.clear(std::memory_order_release);
         return unordered.exchange(false, std::memory_order_acq_rel);
     }
+
 private:
+    struct platform_semaphore
+    {
+#if defined(__linux__)
+        void configure(uint64_t, int) {}
+        void destroy() {}
+
+        void post()
+        {
+            int32_t previous = value.fetch_add(1, std::memory_order_release);
+            if (previous <= 0) {
+                detail::futex_wake(value);
+            }
+        }
+
+        void wait()
+        {
+            while (true) {
+                int32_t expected = value.load(std::memory_order_acquire);
+                if (expected > 0 &&
+                    value.compare_exchange_weak(expected, expected - 1,
+                                                std::memory_order_acq_rel,
+                                                std::memory_order_acquire))
+                {
+                    return;
+                }
+
+                if (expected <= 0) {
+                    detail::futex_wait(value, expected);
+                }
+            }
+        }
+
+    private:
+        std::atomic<int32_t> value{0};
+#elif defined(__APPLE__)
+        void configure(uint64_t namespace_id, int index)
+        {
+            std::snprintf(name, sizeof(name), "/sintra_ring_%llx_%03d",
+                          static_cast<unsigned long long>(namespace_id), index);
+        }
+
+        void destroy()
+        {
+            if (name[0] != '\0') {
+                detail::posix_named_semaphore_registry::release(name);
+                ::sem_unlink(name);
+                name[0] = '\0';
+            }
+        }
+
+        void post()
+        {
+            if (name[0] == '\0') {
+                throw std::logic_error("sintra_ring_semaphore used before configure()");
+            }
+            sem_t* sem = detail::posix_named_semaphore_registry::acquire(name);
+            while (::sem_post(sem) == -1) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                throw std::system_error(errno, std::generic_category(), "sem_post failed");
+            }
+        }
+
+        void wait()
+        {
+            if (name[0] == '\0') {
+                throw std::logic_error("sintra_ring_semaphore used before configure()");
+            }
+            sem_t* sem = detail::posix_named_semaphore_registry::acquire(name);
+            while (::sem_wait(sem) == -1) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                throw std::system_error(errno, std::generic_category(), "sem_wait failed");
+            }
+        }
+
+    private:
+        char name[64]{};
+#elif defined(_WIN32)
+        void configure(uint64_t namespace_id, int index)
+        {
+            const size_t count = sizeof(name) / sizeof(name[0]);
+            std::swprintf(name, count, L"Global\\sintra_ring_%llx_%03d",
+                          static_cast<unsigned long long>(namespace_id), index);
+        }
+
+        void destroy()
+        {
+            if (name[0] != L'\0') {
+                detail::win32_named_semaphore_registry::release(name);
+                name[0] = L'\0';
+            }
+        }
+
+        void post()
+        {
+            if (name[0] == L'\0') {
+                throw std::logic_error("sintra_ring_semaphore used before configure()");
+            }
+            HANDLE handle = detail::win32_named_semaphore_registry::acquire(name);
+            if (!::ReleaseSemaphore(handle, 1, nullptr)) {
+                throw std::system_error(::GetLastError(), std::system_category(),
+                                        "ReleaseSemaphore failed");
+            }
+        }
+
+        void wait()
+        {
+            if (name[0] == L'\0') {
+                throw std::logic_error("sintra_ring_semaphore used before configure()");
+            }
+            HANDLE handle = detail::win32_named_semaphore_registry::acquire(name);
+            while (true) {
+                DWORD result = ::WaitForSingleObject(handle, INFINITE);
+                if (result == WAIT_OBJECT_0) {
+                    return;
+                }
+                if (result == WAIT_IO_COMPLETION) {
+                    continue;
+                }
+                throw std::system_error(::GetLastError(), std::system_category(),
+                                        "WaitForSingleObject failed");
+            }
+        }
+
+    private:
+        wchar_t name[128]{};
+#else
+        void configure(uint64_t, int) {}
+        void destroy() {}
+        [[noreturn]] void post()
+        {
+            throw std::logic_error("sintra_ring_semaphore unsupported on this platform");
+        }
+        [[noreturn]] void wait()
+        {
+            throw std::logic_error("sintra_ring_semaphore unsupported on this platform");
+        }
+#endif
+    };
+
+    platform_semaphore backend;
     std::atomic_flag posted = ATOMIC_FLAG_INIT;
     std::atomic<bool> unordered{false};
 };
@@ -960,6 +1364,10 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         // issued the unblock.
         std::atomic<uint64_t>                global_unblock_sequence{0};
 
+        // Namespace that uniquely identifies the named semaphores backing dirty_semaphores.
+        std::atomic<uint64_t>                semaphore_namespace{0};
+        std::atomic<uint32_t>                semaphore_state{0}; // 0: uninitialized, 1: initializing, 2: ready
+
         // Octile read guards:
         //   An 8-byte integer where each *byte* corresponds to one octile of the ring
         //   (the ring is conceptually split into 8 equal parts). Each byte is a reader
@@ -1060,6 +1468,42 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         // on publish; readers may also be unblocked locally in an “unordered” fashion.
         sintra_ring_semaphore                dirty_semaphores[max_process_index];
 
+        void ensure_semaphores_initialized(uint64_t ns)
+        {
+            uint64_t stored = semaphore_namespace.load(std::memory_order_acquire);
+            if (stored == 0) {
+                if (semaphore_namespace.compare_exchange_strong(
+                        stored, ns, std::memory_order_acq_rel, std::memory_order_acquire))
+                {
+                    stored = ns;
+                }
+                else {
+                    stored = semaphore_namespace.load(std::memory_order_acquire);
+                }
+            }
+
+            assert(stored == ns && "Mismatched semaphore namespace for control block");
+
+            uint32_t state = semaphore_state.load(std::memory_order_acquire);
+            if (state == 2) {
+                return;
+            }
+
+            if (state == 0 &&
+                semaphore_state.compare_exchange_strong(state, 1, std::memory_order_acq_rel))
+            {
+                for (int i = 0; i < max_process_index; ++i) {
+                    dirty_semaphores[i].configure(ns, i);
+                }
+                semaphore_state.store(2, std::memory_order_release);
+            }
+            else {
+                while (semaphore_state.load(std::memory_order_acquire) != 2) {
+                    std::this_thread::yield();
+                }
+            }
+        }
+
         // A stack of indices into dirty_semaphores[] that are free/ready for use.
         // Initially all semaphores are ready.
         int                                  ready_stack[max_process_index]{};
@@ -1121,6 +1565,15 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
             num_free_rs.store(max_process_index, std::memory_order_relaxed);
         }
 
+        ~Control()
+        {
+            if (semaphore_state.load(std::memory_order_acquire) == 2) {
+                for (int i = 0; i < max_process_index; ++i) {
+                    dirty_semaphores[i].destroy();
+                }
+            }
+        }
+
         static_assert(max_process_index <= 255,
             "max_process_index must be <= 255 because read_access uses 8-bit octile counters.");
     };
@@ -1150,6 +1603,9 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
             }
         }
 
+        const uint64_t semaphore_ns = this->m_data_filename_hash;
+        m_control->ensure_semaphores_initialized(semaphore_ns);
+
         // Multiple writers/readers may attach concurrently (e.g. stress tests spawn
         // readers in parallel). num_attached is an interprocess atomic so we must use
         // a fetch_add here; a plain ++ loses updates under contention and the final
@@ -1162,13 +1618,11 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
     ~Ring()
     {
         if (m_control) {
-            // The *last* detaching process deletes both control and data files. On
-            // platforms where Control wraps kernel semaphore handles (Windows/macOS)
-            // we must explicitly run the destructor once the final reference drops.
+            // The *last* detaching process deletes both control and data files.
+            // When the final reference drops we explicitly run the Control destructor
+            // so platform-specific semaphore resources are released.
             if (m_control->num_attached.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-#if defined(_WIN32) || defined(__APPLE__)
                 m_control->~Control();
-#endif
                 this->m_remove_files_on_destruction = true;
             }
         }
@@ -1579,6 +2033,9 @@ struct Ring_R : Ring<T, true>
             // still polling at a high enough cadence to catch bursts quickly.
             Scoped_timer_resolution timer_resolution_guard(1);
             const double precision_sleep_end = get_wtime() + precision_sleep_duration;
+            const auto precision_sleep_interval =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::duration<double>(precision_sleep_cycle));
             while (sequences_equal() && get_wtime() < precision_sleep_end) {
                 if (should_shutdown()) {
                     return Range<T>{};
@@ -1591,7 +2048,7 @@ struct Ring_R : Ring<T, true>
                     }
                     return Range<T>{};
                 }
-                std::this_thread::sleep_for(std::chrono::duration<double>(precision_sleep_cycle));
+                precision_sleep_for(precision_sleep_interval);
                 SINTRA_DELAY_FUZZ("ipc_rings.precision_sleep");
             }
         }
