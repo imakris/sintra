@@ -386,6 +386,40 @@ instance_id_type Coordinator::publish_transceiver(type_id_type tid, instance_id_
             m_draining_process_states[slot].store(0, std::memory_order_release);
         }
 
+        // When a new managed process joins, ensure it participates in the built-in
+        // process groups so barriers that refer to "_sintra_all_processes" and
+        // "_sintra_external_processes" continue to function for dynamically
+        // spawned members. During the initial bootstrap the coordinator publishes
+        // itself first; skip the bookkeeping in that case so the groups are
+        // created only when additional processes arrive.
+        if (process_iid != s_mproc_id) {
+            const auto coordinator_iid = s_mproc->m_instance_id;
+
+            if (s_mproc->m_group_all == invalid_instance_id) {
+                std::unordered_set<instance_id_type> members = {coordinator_iid, process_iid};
+                s_mproc->m_group_all = make_process_group("_sintra_all_processes", members);
+            }
+            else {
+                std::lock_guard<mutex> lock(m_groups_mutex);
+                if (auto it = m_groups.find("_sintra_all_processes"); it != m_groups.end()) {
+                    it->second.add_process(process_iid);
+                    m_groups_of_process[process_iid].insert(it->second.m_instance_id);
+                }
+            }
+
+            if (s_mproc->m_group_external == invalid_instance_id) {
+                std::unordered_set<instance_id_type> members = {process_iid};
+                s_mproc->m_group_external = make_process_group("_sintra_external_processes", members);
+            }
+            else {
+                std::lock_guard<mutex> lock(m_groups_mutex);
+                if (auto it = m_groups.find("_sintra_external_processes"); it != m_groups.end()) {
+                    it->second.add_process(process_iid);
+                    m_groups_of_process[process_iid].insert(it->second.m_instance_id);
+                }
+            }
+        }
+
         return true_sequence();
     }
     else {
