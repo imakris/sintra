@@ -1,4 +1,4 @@
-#include <sintra/sintra.h>
+#include <sintra/sintra.h>  // Provides the sintra runtime APIs exercised by this test.
 
 #include <atomic>
 #include <chrono>
