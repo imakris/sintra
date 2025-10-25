@@ -25,6 +25,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <functional>
 #include <shared_mutex>
 #include <stdexcept>
 #include <string>
@@ -256,7 +257,7 @@ struct Managed_process: Derived_transceiver<Managed_process>
     void flush(instance_id_type process_id, sequence_counter_type flush_sequence);
     void run_after_current_handler(function<void()> task);
 
-    void wait_for_delivery_fence();
+    void wait_for_delivery_fence(function<void()> pump = {});
     void notify_delivery_progress();
 
 
