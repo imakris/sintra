@@ -26,7 +26,7 @@ jobs:
 
       - name: Verify cdb
         shell: pwsh
-        run: where cdb
+        run: where.exe cdb
 
       - name: Configure CMake
         run: cmake -B build -S . -DCMAKE_BUILD_TYPE=Release

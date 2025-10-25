@@ -34,7 +34,7 @@ jobs:
 
       - name: Verify cdb
         shell: pwsh
-        run: where cdb
+        run: where.exe cdb
 
       - name: Download build artifacts
         uses: actions/download-artifact@v4
