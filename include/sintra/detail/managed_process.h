@@ -90,6 +90,7 @@ struct Process_descriptor
     vector<string> user_options;
     int num_children = 0; // quota
     instance_id_type assigned_instance_id = invalid_instance_id;
+    bool spawn_on_init = true;
 
     Process_descriptor(
         const Entry_descriptor& aentry,
@@ -315,10 +316,19 @@ struct Managed_process: Derived_transceiver<Managed_process>
         uint32_t                        occurrence = 0;
     };
 
+    struct Branch_spawn_template
+    {
+        std::string              binary_name;
+        std::vector<std::string> base_sintra_options;
+        std::vector<std::string> user_options;
+    };
+
 
     bool spawn_swarm_process( const Spawn_swarm_process_args& ssp_args );
+    instance_id_type spawn_branch(size_t branch_index);
 
     map<instance_id_type, Spawn_swarm_process_args> m_cached_spawns;
+    std::vector<Branch_spawn_template>              m_branch_spawn_templates;
 };
 
 

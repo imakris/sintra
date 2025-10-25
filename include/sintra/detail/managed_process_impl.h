@@ -1047,6 +1047,43 @@ bool Managed_process::spawn_swarm_process(
 }
 
 
+inline instance_id_type Managed_process::spawn_branch(size_t branch_index)
+{
+    if (!s_coord) {
+        return invalid_instance_id;
+    }
+
+    if (branch_index == 0 || branch_index > m_branch_spawn_templates.size()) {
+        return invalid_instance_id;
+    }
+
+    const auto& spawn_template = m_branch_spawn_templates[branch_index - 1];
+
+    const auto assigned_instance_id = make_process_instance_id();
+
+    std::vector<std::string> sintra_options = spawn_template.base_sintra_options;
+    sintra_options.push_back("--swarm_id");
+    sintra_options.push_back(std::to_string(m_swarm_id));
+    sintra_options.push_back("--instance_id");
+    sintra_options.push_back(std::to_string(assigned_instance_id));
+    sintra_options.push_back("--coordinator_id");
+    sintra_options.push_back(std::to_string(s_coord_id));
+
+    std::vector<std::string> all_args = {spawn_template.binary_name};
+    all_args.insert(all_args.end(), sintra_options.begin(), sintra_options.end());
+    all_args.insert(all_args.end(), spawn_template.user_options.begin(), spawn_template.user_options.end());
+
+    if (!spawn_swarm_process({spawn_template.binary_name, all_args, assigned_instance_id})) {
+        return invalid_instance_id;
+    }
+
+    Coordinator::rpc_add_process_to_group(s_coord_id, "_sintra_all_processes", assigned_instance_id);
+    Coordinator::rpc_add_process_to_group(s_coord_id, "_sintra_external_processes", assigned_instance_id);
+
+    return assigned_instance_id;
+}
+
+
 
 inline
 bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
@@ -1059,34 +1096,74 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
 
     if (s_coord) {
 
-        // 1. prepare the command line for each invocation
-        auto it = branch_vector.begin();
-        for (int i = 1; it != branch_vector.end(); it++, i++) {
+        auto strip_option = [](std::vector<std::string>& opts, const std::string& option)
+        {
+            const std::string with_equals = option + "=";
+            for (auto it = opts.begin(); it != opts.end(); ) {
+                if (*it == option) {
+                    it = opts.erase(it);
+                    if (it != opts.end()) {
+                        it = opts.erase(it);
+                    }
+                    continue;
+                }
 
-            auto& options = it->sintra_options;
-            if (it->entry.m_binary_name.empty()) {
-                it->entry.m_binary_name = m_binary_name;
-                options.insert(options.end(), { "--branch_index", to_string(i) });
+                if (it->rfind(with_equals, 0) == 0) {
+                    it = opts.erase(it);
+                    continue;
+                }
+
+                ++it;
             }
-            options.insert(options.end(), {
-                "--swarm_id",       to_string(m_swarm_id),
-                "--instance_id",    to_string(it->assigned_instance_id = make_process_instance_id()),
-                "--coordinator_id", to_string(s_coord_id)
-            });
-        }
+        };
 
-        // 2. spawn
+        m_branch_spawn_templates.clear();
+        m_branch_spawn_templates.reserve(branch_vector.size());
+
         std::unordered_set<instance_id_type> successfully_spawned;
-        it = branch_vector.begin();
-        //auto readers_it = m_readers.begin();
-        for (int i = 0; it != branch_vector.end(); it++, i++) {
 
-            std::vector<std::string> all_args = {it->entry.m_binary_name.c_str()};
-            all_args.insert(all_args.end(), it->sintra_options.begin(), it->sintra_options.end());
-            all_args.insert(all_args.end(), it->user_options.begin(), it->user_options.end());
+        auto it = branch_vector.begin();
+        for (int i = 1; it != branch_vector.end(); ++it, ++i) {
 
-            if (spawn_swarm_process({it->entry.m_binary_name, all_args, it->assigned_instance_id})) {
-                successfully_spawned.insert(it->assigned_instance_id);
+            Branch_spawn_template spawn_template;
+            spawn_template.binary_name = it->entry.m_binary_name.empty() ? m_binary_name : it->entry.m_binary_name;
+            spawn_template.base_sintra_options = it->sintra_options;
+            spawn_template.user_options = it->user_options;
+
+            strip_option(spawn_template.base_sintra_options, "--branch_index");
+            strip_option(spawn_template.base_sintra_options, "--swarm_id");
+            strip_option(spawn_template.base_sintra_options, "--instance_id");
+            strip_option(spawn_template.base_sintra_options, "--coordinator_id");
+            strip_option(spawn_template.base_sintra_options, "--recovery_occurrence");
+
+            if (it->entry.m_entry_function != nullptr) {
+                spawn_template.base_sintra_options.push_back("--branch_index");
+                spawn_template.base_sintra_options.push_back(std::to_string(i));
+            }
+
+            m_branch_spawn_templates.push_back(spawn_template);
+
+            if (!it->spawn_on_init) {
+                continue;
+            }
+
+            auto assigned_instance_id = make_process_instance_id();
+            it->assigned_instance_id = assigned_instance_id;
+
+            std::vector<std::string> sintra_options = spawn_template.base_sintra_options;
+            sintra_options.push_back("--swarm_id");
+            sintra_options.push_back(std::to_string(m_swarm_id));
+            sintra_options.push_back("--instance_id");
+            sintra_options.push_back(std::to_string(assigned_instance_id));
+            sintra_options.push_back("--coordinator_id");
+            sintra_options.push_back(std::to_string(s_coord_id));
+
+            std::vector<std::string> all_args = {spawn_template.binary_name};
+            all_args.insert(all_args.end(), sintra_options.begin(), sintra_options.end());
+            all_args.insert(all_args.end(), spawn_template.user_options.begin(), spawn_template.user_options.end());
+
+            if (spawn_swarm_process({spawn_template.binary_name, all_args, assigned_instance_id})) {
+                successfully_spawned.insert(assigned_instance_id);
             }
         }
 
