@@ -430,7 +430,7 @@ class TestRunner:
                 stderr = ""
                 stack_traces = ""
                 stack_error = ""
-                if process and sys.platform != 'win32':
+                if process:
                     stack_traces, stack_error = self._capture_process_stacks(process.pid)
                 try:
                     # Try to read from pipes before killing (non-blocking if possible)
