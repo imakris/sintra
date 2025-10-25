@@ -1444,7 +1444,7 @@ inline void Managed_process::run_after_current_handler(function<void()> task)
 
 
 inline
-void Managed_process::wait_for_delivery_fence()
+void Managed_process::wait_for_delivery_fence(function<void()> pump)
 {
     std::vector<Process_message_reader::Delivery_target> targets;
 
@@ -1482,6 +1482,9 @@ void Managed_process::wait_for_delivery_fence()
     }
 
     if (targets.empty()) {
+        if (pump) {
+            pump();
+        }
         return;
     }
 
@@ -1520,12 +1523,28 @@ void Managed_process::wait_for_delivery_fence()
         return true;
     };
 
-    if (all_targets_satisfied()) {
+    if (!pump) {
+        if (all_targets_satisfied()) {
+            return;
+        }
+
+        std::unique_lock<std::mutex> lk(m_delivery_mutex);
+        m_delivery_condition.wait(lk, all_targets_satisfied);
         return;
     }
 
-    std::unique_lock<std::mutex> lk(m_delivery_mutex);
-    m_delivery_condition.wait(lk, all_targets_satisfied);
+    while (!all_targets_satisfied()) {
+        pump();
+
+        std::unique_lock<std::mutex> lk(m_delivery_mutex);
+        if (all_targets_satisfied()) {
+            break;
+        }
+
+        m_delivery_condition.wait_for(
+            lk,
+            std::chrono::milliseconds(1));
+    }
 }
 
 
