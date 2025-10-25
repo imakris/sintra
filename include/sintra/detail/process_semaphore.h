@@ -152,22 +152,41 @@ inline void process_semaphore::ensure_created(unsigned int initial)
         std::random_device rd;
         std::uniform_int_distribution<int> dist(0, 15);
 
-        m_name.fill(L'\0');
-        std::wstring generated = L"Local\\sintra_sem_";
+        std::wstring base = L"sintra_sem_";
         for (size_t i = 0; i < 32; ++i) {
-            generated.push_back(alphabet[dist(rd)]);
+            base.push_back(alphabet[dist(rd)]);
         }
-        generated.copy(m_name.data(), m_name.size() - 1);
 
-        HANDLE handle = CreateSemaphoreW(nullptr,
-                                         static_cast<LONG>(initial),
-                                         LONG_MAX,
-                                         m_name.data());
-        if (!handle) {
-            m_state.store(static_cast<uint32_t>(state::uninitialized), std::memory_order_release);
-            throw std::runtime_error("Failed to create Win32 semaphore");
+        const auto try_create_with_prefix = [&](const wchar_t* prefix) {
+            std::wstring full_name = prefix;
+            full_name += base;
+
+            m_name.fill(L'\0');
+            full_name.copy(m_name.data(), m_name.size() - 1);
+
+            HANDLE handle = CreateSemaphoreW(nullptr,
+                                             static_cast<LONG>(initial),
+                                             LONG_MAX,
+                                             m_name.data());
+            if (!handle) {
+                return false;
+            }
+
+            CloseHandle(handle);
+            return true;
+        };
+
+        bool created = try_create_with_prefix(L"Global\\");
+        if (!created) {
+            DWORD last_error = GetLastError();
+            bool fallback_allowed = last_error == ERROR_ACCESS_DENIED ||
+                                    last_error == ERROR_PRIVILEGE_NOT_HELD;
+
+            if (!fallback_allowed || !try_create_with_prefix(L"Local\\")) {
+                m_state.store(static_cast<uint32_t>(state::uninitialized), std::memory_order_release);
+                throw std::runtime_error("Failed to create Win32 semaphore");
+            }
         }
-        CloseHandle(handle);
 
         m_state.store(static_cast<uint32_t>(state::ready), std::memory_order_release);
     }
