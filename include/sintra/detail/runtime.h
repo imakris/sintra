@@ -286,4 +286,22 @@ inline void enable_recovery()
     s_mproc->enable_recovery();
 }
 
+inline instance_id_type spawn_branch(int branch_index)
+{
+    if (!s_mproc) {
+        return invalid_instance_id;
+    }
+
+    return s_mproc->spawn_branch(branch_index);
+}
+
+inline size_t spawn_registered_branch(int branch_index, size_t multiplicity)
+{
+    if (!s_mproc) {
+        return 0;
+    }
+
+    return s_mproc->spawn_registered_branch(branch_index, multiplicity);
+}
+
 } // namespace sintra
