@@ -25,11 +25,11 @@ struct Coordinator_group_membership
     template <typename GroupsOfProcess, typename Group>
     static bool add_process(GroupsOfProcess& groups_of_process, Group& group, instance_id_type process_iid)
     {
-        auto [entry, inserted] = groups_of_process[process_iid].insert(group.instance_id());
-        if (inserted) {
+        auto insert_result = groups_of_process[process_iid].insert(group.instance_id());
+        if (insert_result.second) {
             group.add_process(process_iid);
         }
-        return inserted;
+        return insert_result.second;
     }
 
     template <typename GroupsOfProcess, typename Group>
@@ -54,26 +54,19 @@ struct Coordinator_group_membership
         bool include_in_external_group)
     {
         auto all_it = groups.find("_sintra_all_processes");
-        if (all_it == groups.end()) {
-            return true;
+        if (all_it != groups.end()) {
+            add_process(groups_of_process, all_it->second, process_iid);
         }
-
-        const bool added_to_all = add_process(groups_of_process, all_it->second, process_iid);
-        (void)added_to_all;
 
         if (!include_in_external_group) {
             return true;
         }
 
         auto external_it = groups.find("_sintra_external_processes");
-        if (external_it == groups.end()) {
-            if (added_to_all) {
-                remove_process(groups_of_process, all_it->second, process_iid);
-            }
-            return false;
+        if (external_it != groups.end()) {
+            add_process(groups_of_process, external_it->second, process_iid);
         }
 
-        add_process(groups_of_process, external_it->second, process_iid);
         return true;
     }
 };
@@ -659,22 +652,22 @@ instance_id_type Coordinator::make_process_group(
     const string& name,
     const unordered_set<instance_id_type>& member_process_ids)
 {
-    lock_guard<mutex> lock(m_groups_mutex);
+    std::unique_lock<std::mutex> groups_lock(m_groups_mutex);
 
     // check if it exists
     if (m_groups.count(name)) {
         return invalid_instance_id;
     }
 
-    m_groups[name].set(member_process_ids);
-    auto ret = m_groups[name].m_instance_id;
+    auto& group = m_groups[name];
+    const auto instance = group.m_instance_id;
 
-    for (auto& e : member_process_ids) {
-        m_groups_of_process[e].insert(ret);
+    for (auto process_iid : member_process_ids) {
+        add_process_to_group_locked(groups_lock, group, process_iid);
     }
 
-    m_groups[name].assign_name(name);
-    return ret;
+    group.assign_name(name);
+    return instance;
 }
 
 

@@ -1,4 +1,5 @@
 #include "sintra/detail/coordinator_impl.h"
+#include <sintra/sintra.h>
 
 #include <initializer_list>
 #include <iostream>
