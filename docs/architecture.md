@@ -157,6 +157,7 @@ enum Communication_state {
 - `stop()`: Stop and join all reader threads
 - `flush()`: Wait for a specific sequence to be visible
 - `run_after_current_handler()`: Queue deferred task execution (avoids re-entrancy)
+- `spawn_branch(index)`: Spawn additional instances of an already-registered branch template at runtime (coordinator only)
 
 ---
 
@@ -243,6 +244,16 @@ bool is_process_draining(instance_id_type process_iid) const {
 ```
 m_publish_mutex → m_groups_mutex → m_call_mutex → b.m → atomics
 ```
+
+### Dynamic Swarm Membership
+
+- `Managed_process::spawn_branch()` reuses the command line templates collected during the initial `branch()` call to spin up
+  additional workers later in the program's lifetime. The helper records the base options (including the `--branch_index`
+  argument where applicable), assigns a new instance identifier, and connects the fresh process to the coordinator.
+- `Coordinator::add_process_to_group()` updates the membership of named process groups (such as `_sintra_all_processes`) so late
+  joiners participate in subsequent barriers and delivery fences without waiting for a full restart.
+- When a process leaves by calling `sintra::finalize()`, the coordinator removes it from all registered groups, allowing the
+  remaining participants to continue without blocking on stale members.
 
 ---
 

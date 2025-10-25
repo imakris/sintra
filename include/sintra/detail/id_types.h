@@ -38,6 +38,7 @@ namespace detail {
         publish_transceiver,
         unpublish_transceiver,
         make_process_group,
+        add_process_to_group,
         print,
         barrier,
         enable_recovery,

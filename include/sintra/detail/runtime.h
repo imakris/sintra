@@ -265,6 +265,15 @@ inline size_t spawn_swarm_process(
     return spawned;
 }
 
+inline instance_id_type spawn_branch(size_t branch_index)
+{
+    if (!s_mproc) {
+        return invalid_instance_id;
+    }
+
+    return s_mproc->spawn_branch(branch_index);
+}
+
 inline int process_index()
 {
     return s_branch_index;

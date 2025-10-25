@@ -582,6 +582,18 @@ instance_id_type Coordinator::make_process_group(
     return ret;
 }
 
+inline void Coordinator::add_process_to_group(const string& name, instance_id_type process_iid)
+{
+    lock_guard<mutex> lock(m_groups_mutex);
+
+    auto it = m_groups.find(name);
+    if (it == m_groups.end()) {
+        return;
+    }
+
+    it->second.add_process(process_iid);
+    m_groups_of_process[process_iid].insert(it->second.m_instance_id);
+}
 
 
 // EXPORTED FOR RPC
