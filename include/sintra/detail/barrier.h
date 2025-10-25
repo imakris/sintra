@@ -7,8 +7,10 @@
 #include "managed_process.h"
 #include "process_message_reader_impl.h"
 
-#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <exception>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -16,6 +18,136 @@
 
 namespace sintra {
 namespace detail {
+
+class request_thread_delivery_fence_waiter
+{
+public:
+    void wait(Managed_process& process, Process_message_reader* reader)
+    {
+        if (!reader) {
+            process.wait_for_delivery_fence();
+            return;
+        }
+
+        std::unique_lock<std::mutex> lock(m_mutex);
+        if (!m_worker.joinable()) {
+            m_worker = std::thread([this]() { worker_loop(); });
+        }
+
+        m_cv.wait(lock, [this]() { return m_state == State::Idle; });
+
+        m_process = &process;
+        m_reader = reader;
+        m_error = nullptr;
+        m_state = State::Running;
+        m_cv.notify_one();
+
+        auto pump_post_handlers = []() {
+            if (tl_post_handler_function) {
+                auto post_handler = std::move(tl_post_handler_function);
+                tl_post_handler_function = {};
+                post_handler();
+                return;
+            }
+
+            std::this_thread::yield();
+        };
+
+        while (m_state == State::Running) {
+            lock.unlock();
+            pump_post_handlers();
+            lock.lock();
+
+            if (m_state == State::Running) {
+                m_cv.wait_for(lock, std::chrono::milliseconds(1));
+            }
+        }
+
+        auto error = m_error;
+        m_error = nullptr;
+        m_state = State::Idle;
+        lock.unlock();
+        m_cv.notify_all();
+
+        if (error) {
+            std::rethrow_exception(error);
+        }
+    }
+
+    ~request_thread_delivery_fence_waiter()
+    {
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_stop = true;
+        }
+
+        m_cv.notify_all();
+
+        if (m_worker.joinable()) {
+            m_worker.join();
+        }
+    }
+
+private:
+    enum class State {
+        Idle,
+        Running,
+        Completed
+    };
+
+    void worker_loop()
+    {
+        std::unique_lock<std::mutex> lock(m_mutex);
+
+        while (true) {
+            m_cv.wait(lock, [this]() {
+                return m_state == State::Running || m_stop;
+            });
+
+            if (m_stop) {
+                return;
+            }
+
+            auto* process = m_process;
+            auto* reader = m_reader;
+
+            lock.unlock();
+
+            auto* previous_reader = s_tl_current_request_reader;
+            const bool previous_is_request_thread = tl_is_req_thread;
+
+            s_tl_current_request_reader = reader;
+            tl_is_req_thread = true;
+
+            std::exception_ptr local_error;
+
+            try {
+                process->wait_for_delivery_fence();
+            }
+            catch (...) {
+                local_error = std::current_exception();
+            }
+
+            tl_is_req_thread = previous_is_request_thread;
+            s_tl_current_request_reader = previous_reader;
+
+            lock.lock();
+
+            m_error = std::move(local_error);
+            m_state = State::Completed;
+            m_cv.notify_all();
+        }
+    }
+
+    std::mutex m_mutex;
+    std::condition_variable m_cv;
+    std::thread m_worker;
+    Managed_process* m_process = nullptr;
+    Process_message_reader* m_reader = nullptr;
+    std::exception_ptr m_error;
+    bool m_stop = false;
+    State m_state = State::Idle;
+};
 
 inline bool should_treat_rpc_failure_as_satisfied()
 {
@@ -78,44 +210,8 @@ inline void wait_for_processing_quiescence()
         return;
     }
 
-    std::atomic<bool> fence_ready{false};
-    std::exception_ptr waiter_error;
-
-    std::thread waiter([current_reader, &fence_ready, &waiter_error]() {
-        auto* previous_reader = s_tl_current_request_reader;
-        const bool previous_is_request_thread = tl_is_req_thread;
-
-        s_tl_current_request_reader = current_reader;
-        tl_is_req_thread = true;
-
-        try {
-            s_mproc->wait_for_delivery_fence();
-        }
-        catch (...) {
-            waiter_error = std::current_exception();
-        }
-
-        tl_is_req_thread = previous_is_request_thread;
-        s_tl_current_request_reader = previous_reader;
-        fence_ready.store(true, std::memory_order_release);
-    });
-
-    while (!fence_ready.load(std::memory_order_acquire)) {
-        if (tl_post_handler_function) {
-            auto post_handler = std::move(tl_post_handler_function);
-            tl_post_handler_function = {};
-            post_handler();
-            continue;
-        }
-
-        std::this_thread::yield();
-    }
-
-    waiter.join();
-
-    if (waiter_error) {
-        std::rethrow_exception(waiter_error);
-    }
+    thread_local request_thread_delivery_fence_waiter waiter;
+    waiter.wait(*s_mproc, current_reader);
 }
 
 } // namespace detail
