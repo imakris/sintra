@@ -8,6 +8,14 @@
 #include <cstdint>
 #include <limits>
 #include <type_traits>
+#if defined(_WIN32)
+#    include <algorithm>
+#    include <climits>
+#    include <cwchar>
+#    include <mutex>
+#    include <random>
+#    include <unordered_map>
+#endif
 
 #if defined(_WIN32)
   #include <Windows.h>
@@ -48,64 +56,176 @@ inline std::chrono::steady_clock::time_point to_steady(
 
 #if defined(_WIN32)
 
-inline void platform_wake(std::atomic<int32_t>& value)
+namespace win32 {
+
+struct semaphore_state
 {
-    ::WakeByAddressSingle(static_cast<volatile void*>(static_cast<void*>(&value)));
+    std::atomic<int32_t> initialized{0};
+    wchar_t              name[64]{};
+};
+
+inline std::unordered_map<void*, HANDLE>& handle_map()
+{
+    static std::unordered_map<void*, HANDLE> map;
+    return map;
 }
 
-inline void platform_wait(std::atomic<int32_t>& value, int32_t expected)
+inline std::mutex& handle_mutex()
 {
-    int32_t snapshot = expected;
-    while (true) {
-        if (::WaitOnAddress(static_cast<volatile void*>(static_cast<void*>(&value)),
-                             &snapshot,
-                             sizeof(snapshot),
-                             INFINITE)) {
+    static std::mutex mtx;
+    return mtx;
+}
+
+inline HANDLE open_or_create_handle(semaphore_state& state)
+{
+    {
+        std::lock_guard<std::mutex> lock(handle_mutex());
+        auto                        it = handle_map().find(&state);
+        if (it != handle_map().end()) {
+            return it->second;
+        }
+    }
+
+    int init_state = state.initialized.load(std::memory_order_acquire);
+    if (init_state != 2) {
+        int expected = 0;
+        if (state.initialized.compare_exchange_strong(expected, 1, std::memory_order_acq_rel)) {
+            std::random_device rd;
+            const auto         unique_hi = static_cast<unsigned long long>(::GetCurrentProcessId());
+            const auto         unique_lo = static_cast<unsigned long long>(rd());
+            const auto         unique_id = (unique_hi << 32) ^ unique_lo ^
+                                   static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(&state));
+
+            std::swprintf(state.name,
+                          sizeof(state.name) / sizeof(wchar_t),
+                          L"Global\\sintra_ipc_sem_%016llx",
+                          unique_id);
+
+            HANDLE created = ::CreateSemaphoreW(nullptr, 0, LONG_MAX, state.name);
+            if (!created) {
+                state.initialized.store(0, std::memory_order_release);
+                return nullptr;
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(handle_mutex());
+                handle_map()[&state] = created;
+            }
+
+            state.initialized.store(2, std::memory_order_release);
+            return created;
+        }
+
+        while (state.initialized.load(std::memory_order_acquire) == 1) {
+            ::Sleep(0);
+        }
+    }
+
+    HANDLE opened = ::OpenSemaphoreW(SYNCHRONIZE | SEMAPHORE_MODIFY_STATE, FALSE, state.name);
+    if (!opened) {
+        opened = ::CreateSemaphoreW(nullptr, 0, LONG_MAX, state.name);
+        if (!opened) {
+            return nullptr;
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(handle_mutex());
+        auto [it, inserted]         = handle_map().emplace(&state, opened);
+        if (!inserted) {
+            ::CloseHandle(opened);
+            return it->second;
+        }
+    }
+
+    return opened;
+}
+
+inline void close_handle(semaphore_state& state)
+{
+    std::lock_guard<std::mutex> lock(handle_mutex());
+    auto                        it = handle_map().find(&state);
+    if (it != handle_map().end()) {
+        ::CloseHandle(it->second);
+        handle_map().erase(it);
+    }
+}
+
+} // namespace win32
+
+inline void platform_wake(std::atomic<int32_t>& value, win32::semaphore_state& state)
+{
+    (void)value;
+    if (HANDLE handle = win32::open_or_create_handle(state)) {
+        ::ReleaseSemaphore(handle, 1, nullptr);
+    }
+}
+
+inline void platform_wait(std::atomic<int32_t>& value, int32_t expected, win32::semaphore_state& state)
+{
+    HANDLE handle = win32::open_or_create_handle(state);
+    if (!handle) {
+        while (value.load(std::memory_order_acquire) == expected) {
+            ::Sleep(1);
+        }
+        return;
+    }
+
+    while (value.load(std::memory_order_acquire) == expected) {
+        DWORD wait_result = ::WaitForSingleObject(handle, INFINITE);
+        if (wait_result == WAIT_OBJECT_0) {
             return;
         }
-        const DWORD error = ::GetLastError();
-        if (error == ERROR_TIMEOUT) {
-            return;
+        if (wait_result == WAIT_FAILED) {
+            ::Sleep(1);
         }
-        if (error != ERROR_IO_PENDING && error != ERROR_OPERATION_ABORTED) {
-            return;
-        }
-        snapshot = expected;
     }
 }
 
 inline wait_status platform_wait_until(std::atomic<int32_t>& value,
                                        int32_t                expected,
-                                       std::chrono::nanoseconds timeout)
+                                       std::chrono::nanoseconds timeout,
+                                       win32::semaphore_state& state)
 {
-    if (timeout <= std::chrono::nanoseconds::zero()) {
-        int32_t snapshot = expected;
-        if (!::WaitOnAddress(static_cast<volatile void*>(static_cast<void*>(&value)),
-                              &snapshot,
-                              sizeof(snapshot),
-                              0)) {
-            return (::GetLastError() == ERROR_TIMEOUT) ? wait_status::timed_out : wait_status::value_changed;
+    HANDLE handle = win32::open_or_create_handle(state);
+    if (!handle) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (value.load(std::memory_order_acquire) != expected) {
+                return wait_status::value_changed;
+            }
+            ::Sleep(1);
         }
-        return wait_status::value_changed;
+        return wait_status::timed_out;
     }
 
-    const auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(timeout);
-    DWORD wait_ms;
-    if (millis.count() <= 0) {
-        wait_ms = 1;
-    } else if (millis.count() >= static_cast<long long>(std::numeric_limits<DWORD>::max())) {
-        wait_ms = std::numeric_limits<DWORD>::max() - 1;
-    } else {
-        wait_ms = static_cast<DWORD>(millis.count());
+    while (value.load(std::memory_order_acquire) == expected) {
+        DWORD wait_ms = INFINITE;
+        if (timeout <= std::chrono::nanoseconds::zero()) {
+            wait_ms = 0;
+        } else {
+            auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(timeout);
+            if (millis.count() <= 0) {
+                wait_ms = 1;
+            } else if (millis.count() >= static_cast<long long>(INFINITE - 1)) {
+                wait_ms = INFINITE - 1;
+            } else {
+                wait_ms = static_cast<DWORD>(millis.count());
+            }
+        }
+
+        DWORD wait_result = ::WaitForSingleObject(handle, wait_ms);
+        if (wait_result == WAIT_OBJECT_0) {
+            return wait_status::value_changed;
+        }
+        if (wait_result == WAIT_TIMEOUT) {
+            return wait_status::timed_out;
+        }
+        if (wait_result == WAIT_FAILED) {
+            return wait_status::timed_out;
+        }
     }
 
-    int32_t snapshot = expected;
-    if (!::WaitOnAddress(static_cast<volatile void*>(static_cast<void*>(&value)),
-                          &snapshot,
-                          sizeof(snapshot),
-                          wait_ms)) {
-        return (::GetLastError() == ERROR_TIMEOUT) ? wait_status::timed_out : wait_status::value_changed;
-    }
     return wait_status::value_changed;
 }
 
@@ -271,6 +391,13 @@ public:
         : m_count(static_cast<int32_t>(initial_count))
     {}
 
+    ~interprocess_semaphore()
+    {
+#if defined(_WIN32)
+        detail::win32::close_handle(m_platform_state);
+#endif
+    }
+
     interprocess_semaphore(const interprocess_semaphore&) = delete;
     interprocess_semaphore& operator=(const interprocess_semaphore&) = delete;
 
@@ -278,7 +405,11 @@ public:
     {
         int32_t previous = m_count.fetch_add(1, std::memory_order_release);
         if (previous < 0) {
+#if defined(_WIN32)
+            detail::platform_wake(m_count, m_platform_state);
+#else
             detail::platform_wake(m_count);
+#endif
         }
     }
 
@@ -316,7 +447,11 @@ private:
     void wait_slow(int32_t expected)
     {
         while (true) {
+#if defined(_WIN32)
+            detail::platform_wait(m_count, expected, m_platform_state);
+#else
             detail::platform_wait(m_count, expected);
+#endif
             int32_t current = m_count.load(std::memory_order_acquire);
             if (current > expected) {
                 return;
@@ -342,7 +477,12 @@ private:
             }
 
             const auto remaining = std::chrono::duration_cast<std::chrono::nanoseconds>(deadline - now);
+#if defined(_WIN32)
+            detail::wait_status result =
+                detail::platform_wait_until(m_count, expected, remaining, m_platform_state);
+#else
             detail::wait_status result = detail::platform_wait_until(m_count, expected, remaining);
+#endif
             int32_t             current = m_count.load(std::memory_order_acquire);
             if (current > expected) {
                 return true;
@@ -373,6 +513,9 @@ private:
         }
     }
 
+#if defined(_WIN32)
+    mutable detail::win32::semaphore_state m_platform_state{};
+#endif
     std::atomic<int32_t> m_count;
 };
 
