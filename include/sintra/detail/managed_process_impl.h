@@ -1135,8 +1135,36 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
         auto all_processes = successfully_spawned;
         all_processes.insert(m_instance_id);
 
-        m_group_all      = s_coord->make_process_group("_sintra_all_processes", all_processes);
-        m_group_external = s_coord->make_process_group("_sintra_external_processes", successfully_spawned);
+        auto reuse_existing_group = [](
+            const std::string& group_name,
+            const std::unordered_set<instance_id_type>& members)
+        {
+            std::unique_lock<std::mutex> groups_lock(s_coord->m_groups_mutex);
+            auto it = s_coord->m_groups.find(group_name);
+            if (it == s_coord->m_groups.end()) {
+                return invalid_instance_id;
+            }
+
+            for (auto member : members) {
+                s_coord->add_process_to_group_locked(groups_lock, it->second, member);
+            }
+
+            return it->second.instance_id();
+        };
+
+        m_group_all = s_coord->make_process_group("_sintra_all_processes", all_processes);
+        if (m_group_all == invalid_instance_id) {
+            m_group_all = reuse_existing_group("_sintra_all_processes", all_processes);
+        }
+
+        m_group_external = s_coord->make_process_group(
+            "_sintra_external_processes",
+            successfully_spawned);
+        if (m_group_external == invalid_instance_id) {
+            m_group_external = reuse_existing_group(
+                "_sintra_external_processes",
+                successfully_spawned);
+        }
 
         s_branch_index = 0;
     }
