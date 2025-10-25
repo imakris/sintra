@@ -140,6 +140,10 @@ private:
         const unordered_set<instance_id_type>& member_process_ids);
 
 
+    bool add_process_to_group_locked(Process_group& group, instance_id_type process_iid);
+    bool enroll_process_in_default_groups_locked(instance_id_type process_iid);
+
+
     void enable_recovery(instance_id_type piid);
     void recover_if_required(instance_id_type piid);
 

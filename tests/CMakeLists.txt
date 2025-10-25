@@ -45,6 +45,7 @@ function(add_test_suite SUFFIX IS_DEBUG)
         barrier_stress_test.cpp
         basic_pub_sub.cpp
         choreography_extreme_test.cpp
+        coordinator_lifecycle_test.cpp
         complex_choreography_stress_test.cpp
         complex_choreography_test.cpp
         dummy_test.cpp

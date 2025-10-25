@@ -386,12 +386,52 @@ instance_id_type Coordinator::publish_transceiver(type_id_type tid, instance_id_
             m_draining_process_states[slot].store(0, std::memory_order_release);
         }
 
+        {
+            lock_guard<mutex> groups_lock(m_groups_mutex);
+            enroll_process_in_default_groups_locked(iid);
+        }
+
         return true_sequence();
     }
     else {
         return invalid_instance_id;
     }
 }
+
+
+inline bool Coordinator::add_process_to_group_locked(
+    Process_group& group,
+    instance_id_type process_iid)
+{
+    std::lock_guard group_lock(group.m_call_mutex);
+    const auto inserted = group.m_process_ids.insert(process_iid).second;
+    m_groups_of_process[process_iid].insert(group.m_instance_id);
+    return inserted;
+}
+
+
+inline bool Coordinator::enroll_process_in_default_groups_locked(
+    instance_id_type process_iid)
+{
+    bool added = false;
+
+    auto add_if_present = [&](const char* name) {
+        auto it = m_groups.find(name);
+        if (it == m_groups.end()) {
+            return false;
+        }
+        return add_process_to_group_locked(it->second, process_iid);
+    };
+
+    added = add_if_present("_sintra_all_processes") || added;
+
+    if (process_iid != m_instance_id) {
+        added = add_if_present("_sintra_external_processes") || added;
+    }
+
+    return added;
+}
+
 
 
 
@@ -571,14 +611,15 @@ instance_id_type Coordinator::make_process_group(
         return invalid_instance_id;
     }
 
-    m_groups[name].set(member_process_ids);
-    auto ret = m_groups[name].m_instance_id;
+    auto& group = m_groups[name];
+    group.set(member_process_ids);
+    auto ret = group.m_instance_id;
 
-    for (auto& e : member_process_ids) {
-        m_groups_of_process[e].insert(ret);
+    for (auto process_iid : member_process_ids) {
+        add_process_to_group_locked(group, process_iid);
     }
 
-    m_groups[name].assign_name(name);
+    group.assign_name(name);
     return ret;
 }
 
