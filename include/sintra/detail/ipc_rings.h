@@ -214,7 +214,7 @@ inline void futex_wait(std::atomic<int32_t>& value, int32_t expected)
     while (true) {
         int rc = ::syscall(SYS_futex,
                            reinterpret_cast<int32_t*>(&value),
-                           FUTEX_WAIT | FUTEX_PRIVATE_FLAG,
+                           FUTEX_WAIT,
                            expected,
                            nullptr,
                            nullptr,
@@ -236,7 +236,7 @@ inline void futex_wake(std::atomic<int32_t>& value)
 {
     ::syscall(SYS_futex,
               reinterpret_cast<int32_t*>(&value),
-              FUTEX_WAKE | FUTEX_PRIVATE_FLAG,
+              FUTEX_WAKE,
               1,
               nullptr,
               nullptr,
