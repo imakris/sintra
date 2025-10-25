@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <stdexcept>
 #include <system_error>
+#include <random>
 
 #if defined(_WIN32)
   #ifndef NOMINMAX
@@ -23,7 +24,6 @@
   #include <cerrno>
   #include <fcntl.h>
   #include <semaphore.h>
-  #include <unistd.h>
   #include <mutex>
   #include <unordered_map>
   #include <cstdio>
@@ -32,14 +32,43 @@
   #include <semaphore.h>
 #endif
 
+#if defined(__unix__) || defined(__APPLE__)
+  #include <unistd.h>
+#endif
+
 namespace sintra::detail
 {
 namespace interprocess_semaphore_detail
 {
-    inline std::atomic<uint64_t>& global_id_counter()
+    inline uint64_t generate_global_identifier()
     {
-        static std::atomic<uint64_t> counter{1};
-        return counter;
+        static const uint64_t process_entropy = [] {
+            uint64_t value = 0;
+
+#if defined(_WIN32)
+            value ^= static_cast<uint64_t>(::GetCurrentProcessId()) << 32;
+#endif
+
+#if defined(__unix__) || defined(__APPLE__)
+            value ^= static_cast<uint64_t>(::getpid()) << 32;
+#endif
+
+            std::random_device rd;
+            value ^= (static_cast<uint64_t>(rd()) << 32);
+            value ^= static_cast<uint64_t>(rd());
+
+            value ^= static_cast<uint64_t>(
+                std::chrono::high_resolution_clock::now().time_since_epoch().count());
+
+            if (value == 0) {
+                value = 0x8000000000000000ULL;
+            }
+
+            return value;
+        }();
+
+        static std::atomic<uint64_t> counter{0};
+        return process_entropy + counter.fetch_add(1, std::memory_order_relaxed);
     }
 
 #if defined(_WIN32)
@@ -368,7 +397,7 @@ private:
 
     void initialise_windows(unsigned int initial_count)
     {
-        m_windows.id = interprocess_semaphore_detail::global_id_counter().fetch_add(1, std::memory_order_relaxed);
+        m_windows.id = interprocess_semaphore_detail::generate_global_identifier();
         std::swprintf(m_windows.name,
                       sizeof(m_windows.name) / sizeof(m_windows.name[0]),
                       L"SintraSemaphore_%016llX",
@@ -402,7 +431,7 @@ private:
 
     void initialise_named(unsigned int initial_count)
     {
-        m_named.id = interprocess_semaphore_detail::global_id_counter().fetch_add(1, std::memory_order_relaxed);
+        m_named.id = interprocess_semaphore_detail::generate_global_identifier();
         std::snprintf(m_named.name,
                       sizeof(m_named.name) / sizeof(m_named.name[0]),
                       "/sintra_sem_%016llx",
