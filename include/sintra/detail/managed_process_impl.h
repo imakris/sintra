@@ -1525,7 +1525,36 @@ void Managed_process::wait_for_delivery_fence()
     }
 
     std::unique_lock<std::mutex> lk(m_delivery_mutex);
-    m_delivery_condition.wait(lk, all_targets_satisfied);
+
+    if (!tl_is_req_thread) {
+        m_delivery_condition.wait(lk, all_targets_satisfied);
+        return;
+    }
+
+    while (!all_targets_satisfied()) {
+        if (tl_post_handler_function) {
+            auto post_handler = std::move(tl_post_handler_function);
+            tl_post_handler_function = {};
+
+            lk.unlock();
+            try {
+                post_handler();
+            }
+            catch (...) {
+                lk.lock();
+                throw;
+            }
+            lk.lock();
+
+            continue;
+        }
+
+        // Spurious wake-ups are possible here, so re-evaluate the delivery
+        // targets on each iteration rather than relying on the condition's
+        // predicate form. This keeps the post-handler draining path symmetric
+        // with the non-request thread case.
+        m_delivery_condition.wait(lk);
+    }
 }
 
 
