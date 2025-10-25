@@ -129,6 +129,8 @@ private:
     instance_id_type publish_transceiver(
         type_id_type type_id, instance_id_type instance_id, const string& assigned_name);
     bool unpublish_transceiver(instance_id_type instance_id);
+    bool add_process_to_group(const string& name, instance_id_type process_iid);
+    bool remove_process_from_group(const string& name, instance_id_type process_iid);
     sequence_counter_type begin_process_draining(instance_id_type process_iid);
     void unpublish_transceiver_notify(instance_id_type transceiver_iid);
 
@@ -173,6 +175,11 @@ private:
     map<string, Process_group>                  m_groups;
 
 
+    bool add_process_to_group_locked(const string& name, instance_id_type process_iid);
+    bool remove_process_from_group_locked(const string& name, instance_id_type process_iid);
+    void enroll_process_in_default_groups_locked(instance_id_type process_iid);
+
+
     // access only after acquiring m_publish_mutex
     // (currently, only inside publish_transceiver() )
     struct waited_instance_info
@@ -196,6 +203,8 @@ public:
     SINTRA_RPC_STRICT_EXPLICIT(wait_for_instance)
     SINTRA_RPC_STRICT_EXPLICIT(publish_transceiver)
     SINTRA_RPC_EXPLICIT(unpublish_transceiver)
+    SINTRA_RPC_STRICT_EXPLICIT(add_process_to_group)
+    SINTRA_RPC_STRICT_EXPLICIT(remove_process_from_group)
     SINTRA_RPC_STRICT_EXPLICIT(begin_process_draining)
     SINTRA_RPC_EXPLICIT(make_process_group)
     SINTRA_RPC_EXPLICIT(print)

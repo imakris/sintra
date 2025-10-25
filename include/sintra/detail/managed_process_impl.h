@@ -5,6 +5,7 @@
 
 #include "deterministic_delay.h"
 #include "utility.h"
+#include "console.h"
 
 #include <array>
 #include <atomic>
@@ -1048,6 +1049,138 @@ bool Managed_process::spawn_swarm_process(
 
 
 
+inline Managed_process::Branch_spawn_template Managed_process::make_branch_template(
+    const Process_descriptor& descriptor,
+    int branch_index) const
+{
+    Branch_spawn_template templ;
+    templ.binary_name = descriptor.entry.m_binary_name;
+    templ.sintra_options = descriptor.sintra_options;
+    templ.user_options = descriptor.user_options;
+    templ.include_branch_index = descriptor.entry.m_binary_name.empty() && descriptor.entry.m_entry_function != nullptr;
+
+    if (templ.binary_name.empty()) {
+        templ.binary_name = m_binary_name;
+    }
+
+    (void)branch_index;
+    return templ;
+}
+
+inline Managed_process::Spawn_swarm_process_args Managed_process::make_spawn_args(
+    const Branch_spawn_template& templ,
+    int branch_index) const
+{
+    Spawn_swarm_process_args spawn_args;
+    spawn_args.binary_name = templ.binary_name;
+    spawn_args.piid = make_process_instance_id();
+
+    std::vector<std::string> sintra_options = templ.sintra_options;
+    if (templ.include_branch_index) {
+        sintra_options.push_back("--branch_index");
+        sintra_options.push_back(std::to_string(branch_index));
+    }
+
+    sintra_options.push_back("--swarm_id");
+    sintra_options.push_back(std::to_string(m_swarm_id));
+    sintra_options.push_back("--instance_id");
+    sintra_options.push_back(std::to_string(spawn_args.piid));
+    sintra_options.push_back("--coordinator_id");
+    sintra_options.push_back(std::to_string(s_coord_id));
+
+    std::vector<std::string> all_args;
+    all_args.reserve(1 + sintra_options.size() + templ.user_options.size());
+    all_args.push_back(spawn_args.binary_name);
+    all_args.insert(all_args.end(), sintra_options.begin(), sintra_options.end());
+    all_args.insert(all_args.end(), templ.user_options.begin(), templ.user_options.end());
+    spawn_args.args = std::move(all_args);
+
+    return spawn_args;
+}
+
+inline std::pair<size_t, instance_id_type> Managed_process::spawn_branch_impl(
+    int branch_index,
+    size_t multiplicity)
+{
+    if (multiplicity == 0) {
+        return {0, invalid_instance_id};
+    }
+
+    Branch_spawn_template template_copy;
+    {
+        std::lock_guard<std::mutex> lock(m_branch_registry_mutex);
+        auto it = m_branch_registry.find(branch_index);
+        if (it == m_branch_registry.end()) {
+            return {0, invalid_instance_id};
+        }
+        template_copy = it->second;
+    }
+
+    const auto add_to_group = [&](const std::string& name, instance_id_type process_iid) {
+        if (s_coord) {
+            return s_coord->add_process_to_group(name, process_iid);
+        }
+        return Coordinator::rpc_add_process_to_group(s_coord_id, name, process_iid);
+    };
+
+    const auto remove_from_group = [&](const std::string& name, instance_id_type process_iid) {
+        if (s_coord) {
+            return s_coord->remove_process_from_group(name, process_iid);
+        }
+        return Coordinator::rpc_remove_process_from_group(s_coord_id, name, process_iid);
+    };
+
+    size_t spawned = 0;
+    instance_id_type first_spawned = invalid_instance_id;
+
+    for (size_t i = 0; i < multiplicity; ++i) {
+        auto spawn_args = make_spawn_args(template_copy, branch_index);
+        const auto process_iid = spawn_args.piid;
+
+        const bool added_all = add_to_group("_sintra_all_processes", process_iid);
+        const bool added_external = add_to_group("_sintra_external_processes", process_iid);
+        if (!added_all || !added_external) {
+            if (added_all) {
+                remove_from_group("_sintra_all_processes", process_iid);
+            }
+            if (added_external) {
+                remove_from_group("_sintra_external_processes", process_iid);
+            }
+            continue;
+        }
+
+        if (spawn_swarm_process(spawn_args)) {
+            sintra::console() << "[Runtime] spawned branch " << branch_index
+                              << " iid=" << process_iid << "\n";
+            if (spawned == 0) {
+                first_spawned = process_iid;
+            }
+            ++spawned;
+        }
+        else {
+            sintra::console() << "[Runtime] failed to spawn branch " << branch_index
+                              << " iid=" << process_iid << "\n";
+            remove_from_group("_sintra_all_processes", process_iid);
+            remove_from_group("_sintra_external_processes", process_iid);
+        }
+    }
+
+    return {spawned, first_spawned};
+}
+
+inline instance_id_type Managed_process::spawn_branch(int branch_index)
+{
+    auto [count, first] = spawn_branch_impl(branch_index, 1);
+    return count > 0 ? first : invalid_instance_id;
+}
+
+inline size_t Managed_process::spawn_registered_branch(int branch_index, size_t multiplicity)
+{
+    auto [count, _] = spawn_branch_impl(branch_index, multiplicity);
+    return count;
+}
+
+
 inline
 bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
 {
@@ -1057,37 +1190,37 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
     using namespace sintra;
     using std::to_string;
 
+    bool should_wait_for_all_barrier = true;
+
     if (s_coord) {
 
-        // 1. prepare the command line for each invocation
-        auto it = branch_vector.begin();
-        for (int i = 1; it != branch_vector.end(); it++, i++) {
+        std::unordered_set<instance_id_type> successfully_spawned;
+        std::map<int, Branch_spawn_template> registry_updates;
 
-            auto& options = it->sintra_options;
-            if (it->entry.m_binary_name.empty()) {
-                it->entry.m_binary_name = m_binary_name;
-                options.insert(options.end(), { "--branch_index", to_string(i) });
+        int branch_id = 1;
+        for (auto& descriptor : branch_vector) {
+            descriptor.branch_index = branch_id;
+
+            auto templ = make_branch_template(descriptor, branch_id);
+            registry_updates.emplace(branch_id, templ);
+
+            if (!descriptor.auto_start) {
+                ++branch_id;
+                continue;
             }
-            options.insert(options.end(), {
-                "--swarm_id",       to_string(m_swarm_id),
-                "--instance_id",    to_string(it->assigned_instance_id = make_process_instance_id()),
-                "--coordinator_id", to_string(s_coord_id)
-            });
+
+            auto spawn_args = make_spawn_args(templ, branch_id);
+            if (spawn_swarm_process(spawn_args)) {
+                successfully_spawned.insert(spawn_args.piid);
+                descriptor.assigned_instance_id = spawn_args.piid;
+            }
+
+            ++branch_id;
         }
 
-        // 2. spawn
-        std::unordered_set<instance_id_type> successfully_spawned;
-        it = branch_vector.begin();
-        //auto readers_it = m_readers.begin();
-        for (int i = 0; it != branch_vector.end(); it++, i++) {
-
-            std::vector<std::string> all_args = {it->entry.m_binary_name.c_str()};
-            all_args.insert(all_args.end(), it->sintra_options.begin(), it->sintra_options.end());
-            all_args.insert(all_args.end(), it->user_options.begin(), it->user_options.end());
-
-            if (spawn_swarm_process({it->entry.m_binary_name, all_args, it->assigned_instance_id})) {
-                successfully_spawned.insert(it->assigned_instance_id);
-            }
+        {
+            std::lock_guard<std::mutex> lock(m_branch_registry_mutex);
+            m_branch_registry = std::move(registry_updates);
         }
 
         auto all_processes = successfully_spawned;
@@ -1102,6 +1235,7 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
         assert(s_branch_index != -1);
         assert( (ptrdiff_t)branch_vector.size() > s_branch_index-1);
         Process_descriptor& own_pd = branch_vector[s_branch_index-1];
+        own_pd.branch_index = static_cast<int>(s_branch_index);
         if (own_pd.entry.m_entry_function != nullptr) {
             m_entry_function = own_pd.entry.m_entry_function;
         }
@@ -1112,11 +1246,13 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
 
         m_group_all      = Coordinator::rpc_wait_for_instance(s_coord_id, "_sintra_all_processes");
         m_group_external = Coordinator::rpc_wait_for_instance(s_coord_id, "_sintra_external_processes");
+
+        should_wait_for_all_barrier = own_pd.auto_start;
     }
 
     // assign_name requires that all group processes are instantiated, in order
     // to receive the instance_published event
-    if (s_recovery_occurrence == 0) {
+    if (s_recovery_occurrence == 0 && should_wait_for_all_barrier) {
         bool all_started = Process_group::rpc_barrier(m_group_all, UIBS);
         if (!all_started) {
             return false;

@@ -90,6 +90,8 @@ struct Process_descriptor
     vector<string> user_options;
     int num_children = 0; // quota
     instance_id_type assigned_instance_id = invalid_instance_id;
+    int branch_index = 0;
+    bool auto_start = true;
 
     Process_descriptor(
         const Entry_descriptor& aentry,
@@ -160,6 +162,9 @@ struct Managed_process: Derived_transceiver<Managed_process>
     void init(int argc, const char* const* argv);
     bool branch(vector<Process_descriptor>& branch_vector);
     void go();
+
+    instance_id_type spawn_branch(int branch_index);
+    size_t spawn_registered_branch(int branch_index, size_t multiplicity);
 
     // Pauses the process. Once called, reader threads will continue running,
     // but in a mode where only messages originating from the coordinator are
@@ -316,8 +321,23 @@ struct Managed_process: Derived_transceiver<Managed_process>
     };
 
 
+    struct Branch_spawn_template
+    {
+        std::string              binary_name;
+        std::vector<std::string> sintra_options;
+        std::vector<std::string> user_options;
+        bool                     include_branch_index = false;
+    };
+
+    Branch_spawn_template make_branch_template(const Process_descriptor& descriptor, int branch_index) const;
+    Spawn_swarm_process_args make_spawn_args(const Branch_spawn_template& templ, int branch_index) const;
+    std::pair<size_t, instance_id_type> spawn_branch_impl(int branch_index, size_t multiplicity);
+
+
     bool spawn_swarm_process( const Spawn_swarm_process_args& ssp_args );
 
+    std::map<int, Branch_spawn_template> m_branch_registry;
+    mutable std::mutex                   m_branch_registry_mutex;
     map<instance_id_type, Spawn_swarm_process_args> m_cached_spawns;
 };
 

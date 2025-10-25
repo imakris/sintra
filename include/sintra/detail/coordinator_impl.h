@@ -386,6 +386,11 @@ instance_id_type Coordinator::publish_transceiver(type_id_type tid, instance_id_
             m_draining_process_states[slot].store(0, std::memory_order_release);
         }
 
+        {
+            lock_guard<mutex> groups_lock(m_groups_mutex);
+            enroll_process_in_default_groups_locked(process_iid);
+        }
+
         return true_sequence();
     }
     else {
@@ -393,6 +398,90 @@ instance_id_type Coordinator::publish_transceiver(type_id_type tid, instance_id_
     }
 }
 
+
+
+// EXPORTED FOR RPC
+inline
+bool Coordinator::add_process_to_group_locked(const string& name, instance_id_type process_iid)
+{
+    auto group_it = m_groups.find(name);
+    if (group_it == m_groups.end()) {
+        return false;
+    }
+
+    auto& group = group_it->second;
+    {
+        std::lock_guard<mutex> group_lock(group.m_call_mutex);
+        auto [_, inserted] = group.m_process_ids.insert(process_iid);
+        if (!inserted) {
+            return true;
+        }
+    }
+
+    m_groups_of_process[process_iid].insert(group.m_instance_id);
+    return true;
+}
+
+inline
+bool Coordinator::remove_process_from_group_locked(const string& name, instance_id_type process_iid)
+{
+    auto group_it = m_groups.find(name);
+    if (group_it == m_groups.end()) {
+        return false;
+    }
+
+    auto& group = group_it->second;
+    bool removed = false;
+    {
+        std::lock_guard<mutex> group_lock(group.m_call_mutex);
+        removed = group.m_process_ids.erase(process_iid) > 0;
+    }
+
+    if (!removed) {
+        return false;
+    }
+
+    auto groups_it = m_groups_of_process.find(process_iid);
+    if (groups_it != m_groups_of_process.end()) {
+        groups_it->second.erase(group.m_instance_id);
+        if (groups_it->second.size() == 0) {
+            m_groups_of_process.erase(groups_it);
+        }
+    }
+
+    return true;
+}
+
+inline
+void Coordinator::enroll_process_in_default_groups_locked(instance_id_type process_iid)
+{
+    add_process_to_group_locked("_sintra_all_processes", process_iid);
+    if (process_iid != m_instance_id) {
+        add_process_to_group_locked("_sintra_external_processes", process_iid);
+    }
+}
+
+inline
+bool Coordinator::add_process_to_group(const string& name, instance_id_type process_iid)
+{
+    if (!is_process(process_iid) || name.empty()) {
+        return false;
+    }
+
+    lock_guard<mutex> lock(m_groups_mutex);
+    return add_process_to_group_locked(name, process_iid);
+}
+
+inline
+bool Coordinator::remove_process_from_group(const string& name, instance_id_type process_iid)
+{
+    if (!is_process(process_iid) || name.empty()) {
+        return false;
+    }
+
+    lock_guard<mutex> lock(m_groups_mutex);
+    return remove_process_from_group_locked(name, process_iid);
+}
 
 
 // EXPORTED FOR RPC
