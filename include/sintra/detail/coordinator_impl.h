@@ -18,6 +18,68 @@
 
 namespace sintra {
 
+namespace detail {
+
+struct Coordinator_group_membership
+{
+    template <typename GroupsOfProcess, typename Group>
+    static bool add_process(GroupsOfProcess& groups_of_process, Group& group, instance_id_type process_iid)
+    {
+        auto insert_result = groups_of_process[process_iid].insert(group.instance_id());
+        if (insert_result.second) {
+            group.add_process(process_iid);
+        }
+        return insert_result.second;
+    }
+
+    template <typename GroupsOfProcess, typename Group>
+    static void remove_process(GroupsOfProcess& groups_of_process, Group& group, instance_id_type process_iid)
+    {
+        auto map_it = groups_of_process.find(process_iid);
+        if (map_it != groups_of_process.end()) {
+            map_it->second.erase(group.instance_id());
+            if (map_it->second.empty()) {
+                groups_of_process.erase(map_it);
+            }
+        }
+
+        group.remove_process(process_iid);
+    }
+
+    template <typename GroupsOfProcess, typename GroupsMap>
+    static bool enroll_in_default_groups(
+        GroupsOfProcess& groups_of_process,
+        GroupsMap& groups,
+        instance_id_type process_iid,
+        bool include_in_external_group)
+    {
+        auto all_it = groups.find("_sintra_all_processes");
+        if (all_it == groups.end()) {
+            return true;
+        }
+
+        const bool added_to_all = add_process(groups_of_process, all_it->second, process_iid);
+        (void)added_to_all;
+
+        if (!include_in_external_group) {
+            return true;
+        }
+
+        auto external_it = groups.find("_sintra_external_processes");
+        if (external_it == groups.end()) {
+            if (added_to_all) {
+                remove_process(groups_of_process, all_it->second, process_iid);
+            }
+            return false;
+        }
+
+        add_process(groups_of_process, external_it->second, process_iid);
+        return true;
+    }
+};
+
+} // namespace detail
+
 
 using std::cout;
 using std::lock_guard;
@@ -219,6 +281,39 @@ Coordinator::~Coordinator()
     s_coord_id  = 0;
 }
 
+
+inline bool Coordinator::add_process_to_group_locked(
+    std::unique_lock<std::mutex>& groups_lock,
+    Process_group& group,
+    instance_id_type process_iid)
+{
+    assert(groups_lock.owns_lock());
+    return detail::Coordinator_group_membership::add_process(m_groups_of_process, group, process_iid);
+}
+
+
+inline void Coordinator::remove_process_from_group_locked(
+    std::unique_lock<std::mutex>& groups_lock,
+    Process_group& group,
+    instance_id_type process_iid)
+{
+    assert(groups_lock.owns_lock());
+    detail::Coordinator_group_membership::remove_process(m_groups_of_process, group, process_iid);
+}
+
+
+inline bool Coordinator::enroll_process_in_default_groups_locked(
+    std::unique_lock<std::mutex>& groups_lock,
+    instance_id_type process_iid,
+    bool include_in_external_group)
+{
+    assert(groups_lock.owns_lock());
+    return detail::Coordinator_group_membership::enroll_in_default_groups(
+        m_groups_of_process,
+        m_groups,
+        process_iid,
+        include_in_external_group);
+}
 
 
 // EXPORTED FOR RPC
@@ -564,22 +659,22 @@ instance_id_type Coordinator::make_process_group(
     const string& name,
     const unordered_set<instance_id_type>& member_process_ids)
 {
-    lock_guard<mutex> lock(m_groups_mutex);
+    std::unique_lock<std::mutex> groups_lock(m_groups_mutex);
 
     // check if it exists
     if (m_groups.count(name)) {
         return invalid_instance_id;
     }
 
-    m_groups[name].set(member_process_ids);
-    auto ret = m_groups[name].m_instance_id;
+    auto& group = m_groups[name];
+    const auto instance = group.m_instance_id;
 
-    for (auto& e : member_process_ids) {
-        m_groups_of_process[e].insert(ret);
+    for (auto process_iid : member_process_ids) {
+        add_process_to_group_locked(groups_lock, group, process_iid);
     }
 
-    m_groups[name].assign_name(name);
-    return ret;
+    group.assign_name(name);
+    return instance;
 }
 
 

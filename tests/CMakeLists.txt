@@ -44,6 +44,7 @@ function(add_test_suite SUFFIX IS_DEBUG)
         barrier_rapid_reuse_test.cpp
         barrier_stress_test.cpp
         basic_pub_sub.cpp
+        coordinator_default_groups_test.cpp
         choreography_extreme_test.cpp
         complex_choreography_stress_test.cpp
         complex_choreography_test.cpp
