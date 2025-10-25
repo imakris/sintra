@@ -4,9 +4,7 @@
 #pragma once
 
 #include <atomic>
-
-#include "deterministic_delay.h"
-
+#include <thread>
 
 namespace sintra {
 
@@ -27,7 +25,7 @@ struct spinlock
     void lock()
     {
         while (m_locked.test_and_set(std::memory_order_acquire)) {
-            SINTRA_DELAY_FUZZ("spinlock.lock");
+            std::this_thread::yield();
         }
     }
     void unlock() { m_locked.clear(std::memory_order_release);                  }

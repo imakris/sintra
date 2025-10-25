@@ -102,7 +102,6 @@
 
 // ─── Project config & utilities (kept as in original codebase) ───────────────
 #include "config.h"      // configuration constants for adaptive waiting, cache sizes, etc.
-#include "deterministic_delay.h"
 #include "get_wtime.h"   // high-res wall clock (used by adaptive reader policy)
 #include "id_types.h"    // ID and type aliases as used by the project
 
@@ -1028,7 +1027,7 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         void rs_stack_lock()
         {
             while (rs_stack_spinlock.test_and_set(std::memory_order_acquire)) {
-                SINTRA_DELAY_FUZZ("ipc_rings.rs_stack_lock");
+                std::this_thread::yield();
             }
         }
         void rs_stack_unlock() { rs_stack_spinlock.clear(std::memory_order_release); }
@@ -1123,7 +1122,7 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         void lock()
         {
             while (spinlock_flag.test_and_set(std::memory_order_acquire)) {
-                SINTRA_DELAY_FUZZ("ipc_rings.spinlock_lock");
+                std::this_thread::yield();
             }
         }
         void unlock() { spinlock_flag.clear(std::memory_order_release); }
@@ -1428,7 +1427,7 @@ struct Ring_R : Ring<T, true>
         bool f = false;
         while (!m_reading_lock.compare_exchange_strong(f, true)) {
             f = false;
-            SINTRA_DELAY_FUZZ("ipc_rings.reader_lock");
+            std::this_thread::yield();
         }
 
         if (m_reading.load(std::memory_order_acquire)) {
@@ -1534,7 +1533,7 @@ struct Ring_R : Ring<T, true>
                     std::memory_order_relaxed))
         {
             expected = false;
-            SINTRA_DELAY_FUZZ("ipc_rings.reader_unlock");
+            std::this_thread::yield();
         }
 
         if (m_reading.load(std::memory_order_acquire)) {
@@ -1612,7 +1611,7 @@ struct Ring_R : Ring<T, true>
             if (should_shutdown()) {
                 return Range<T>{};
             }
-            SINTRA_DELAY_FUZZ("ipc_rings.fast_spin");
+            std::this_thread::yield();
         }
 
         if (sequences_equal()) {
@@ -1633,7 +1632,6 @@ struct Ring_R : Ring<T, true>
                     return Range<T>{};
                 }
                 precision_sleep_for(std::chrono::duration<double>(precision_sleep_cycle));
-                SINTRA_DELAY_FUZZ("ipc_rings.precision_sleep");
             }
         }
 

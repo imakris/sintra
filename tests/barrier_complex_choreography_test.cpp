@@ -241,7 +241,7 @@ int coordinator_process()
 
     const auto make_failure_message = [](std::uint32_t iteration, auto&& formatter) {
         std::ostringstream oss;
-        oss << "iteration " << iteration << " (delay_fuzz_seed=" << iteration << "): ";
+        oss << "iteration " << iteration << ": ";
         std::forward<decltype(formatter)>(formatter)(oss);
         return oss.str();
     };
@@ -332,8 +332,6 @@ int coordinator_process()
     std::size_t iterations_completed = 0;
 
     for (std::uint32_t iteration = 0; iteration < kIterations; ++iteration) {
-        sintra::set_delay_fuzzing_seed(iteration);
-        const sintra::detail::delay_fuzz_scope fuzz_scope{true};
         const auto start_barrier = make_iteration_barrier_name("complex-start", iteration);
         barrier(start_barrier);
 
@@ -390,8 +388,6 @@ int coordinator_process()
     {
         std::lock_guard<std::mutex> lock(state.mutex);
         for (std::uint32_t iteration = 0; iteration < kIterations; ++iteration) {
-            sintra::set_delay_fuzzing_seed(iteration);
-            const sintra::detail::delay_fuzz_scope fuzz_scope{true};
             stage_a_total += state.stage_counts[0][iteration];
             stage_b_total += state.stage_counts[1][iteration];
         }
@@ -464,8 +460,6 @@ int stage_process(std::uint32_t stage, std::uint32_t worker_index)
     };
 
     for (std::uint32_t iteration = 0; iteration < kIterations; ++iteration) {
-        sintra::set_delay_fuzzing_seed(iteration);
-        const sintra::detail::delay_fuzz_scope fuzz_scope{true};
         const auto start_barrier = make_iteration_barrier_name("complex-start", iteration);
         barrier(start_barrier);
 

@@ -63,7 +63,6 @@
 // published transceivers, and resolves names.  The runtime_state helper lives
 // here as well: it exposes the global singleton that binds together the active
 // coordinator and the local managed process instance.
-#include "detail/deterministic_delay.h"
 #include "detail/globals.h"
 #include "detail/coordinator.h"
 #include "detail/coordinator_impl.h"
