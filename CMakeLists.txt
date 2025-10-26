@@ -63,17 +63,20 @@ if(WIN32)
     target_link_libraries(sintra INTERFACE winmm)
 endif()
 
-# ALWAYS compile with debug symbols and disable optimizations for debugging
+# Apply debug-friendly flags only when building Debug configurations
 if(MSVC)
     target_compile_options(sintra INTERFACE
-        /Zi          # Full debug info
-        /Od          # Disable optimizations
-        /RTC1        # Runtime checks
-        /MDd         # Debug runtime library
+        $<$<CONFIG:Debug>:/Zi>          # Full debug info
+        $<$<CONFIG:Debug>:/Od>          # Disable optimizations
+        $<$<CONFIG:Debug>:/RTC1>        # Runtime checks
+        $<$<CONFIG:Debug>:/MDd>         # Debug runtime library
     )
-    target_link_options(sintra INTERFACE /DEBUG:FULL)
+    target_link_options(sintra INTERFACE $<$<CONFIG:Debug>:/DEBUG:FULL>)
 else()
-    target_compile_options(sintra INTERFACE -g -O0)
+    target_compile_options(sintra INTERFACE
+        $<$<CONFIG:Debug>:-g>
+        $<$<CONFIG:Debug>:-O0>
+    )
 endif()
 
 # OpenMP support - optional for timing
