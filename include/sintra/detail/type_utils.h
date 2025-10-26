@@ -7,6 +7,8 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <string_view>
+#include <type_traits>
 #include <typeinfo>
 
 #if defined(__GNUG__)
@@ -16,6 +18,57 @@
 namespace sintra::detail {
 
 namespace detail_type_utils {
+
+template <typename, typename = void>
+struct is_complete : std::false_type {};
+
+template <typename T>
+struct is_complete<T, std::void_t<decltype(sizeof(T))>> : std::true_type {};
+
+template <>
+struct is_complete<void, void> : std::true_type {};
+
+template <>
+struct is_complete<const void, void> : std::true_type {};
+
+template <>
+struct is_complete<volatile void, void> : std::true_type {};
+
+template <>
+struct is_complete<const volatile void, void> : std::true_type {};
+
+template <typename T>
+constexpr std::string_view ctti_name()
+{
+#if defined(__clang__) || defined(__GNUC__)
+    constexpr std::string_view pretty = __PRETTY_FUNCTION__;
+    constexpr std::string_view needle = "T = ";
+    auto start = pretty.find(needle);
+    if (start == std::string_view::npos) {
+        return pretty;
+    }
+    start += needle.size();
+    auto end = pretty.rfind(']');
+    if (end == std::string_view::npos || end < start) {
+        end = pretty.size();
+    }
+    return pretty.substr(start, end - start);
+#elif defined(_MSC_VER)
+    constexpr std::string_view pretty = __FUNCSIG__;
+    auto begin = pretty.find('<');
+    if (begin == std::string_view::npos) {
+        return pretty;
+    }
+    ++begin;
+    auto end = pretty.find('>', begin);
+    if (end == std::string_view::npos) {
+        end = pretty.size();
+    }
+    return pretty.substr(begin, end - begin);
+#else
+    return std::string_view{};
+#endif
+}
 
 inline std::string demangle(const char* name)
 {
@@ -157,7 +210,13 @@ inline std::string type_name_from_info(const std::type_info& info)
 template <typename T>
 inline std::string type_name()
 {
-    return type_name_from_info(typeid(T));
+    if constexpr (detail_type_utils::is_complete<T>::value) {
+        return type_name_from_info(typeid(T));
+    }
+    else {
+        constexpr auto view = detail_type_utils::ctti_name<T>();
+        return std::string(view);
+    }
 }
 
 inline std::string abi_token()
