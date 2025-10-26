@@ -48,6 +48,7 @@ function(add_test_suite SUFFIX IS_DEBUG)
         complex_choreography_stress_test.cpp
         complex_choreography_test.cpp
         dummy_test.cpp
+        message_args_traits_test.cpp
         extreme_choreography_test.cpp
         ipc_rings_tests.cpp
         ping_pong_multi_test.cpp
