@@ -998,7 +998,7 @@ function<void()>
 Transceiver::export_rpc_impl()
 {
     warn_about_reference_return<typename RPCTC::r_type>();
-    warn_about_reference_args<MT>();
+    warn_about_reference_args<typename MT::body_type>();
 
     auto* self = static_cast<typename RPCTC::o_type*>(this);
     const auto instance_id = m_instance_id;
