@@ -1154,8 +1154,11 @@ class TestRunner:
             if not root or not arch_dirs:
                 return
 
-            root_path = Path(root)
-            if not root_path.exists():
+            try:
+                root_path = Path(root)
+                if not root_path.exists():
+                    return
+            except OSError:
                 return
 
             try:
@@ -1212,20 +1215,6 @@ class TestRunner:
 
             base_path = Path(base)
             windows_kits = base_path / 'Windows Kits'
-            is_x86_base = 'x86' in var_name.lower()
-
-            if preferred_arches:
-                if is_x86_base:
-                    relevant_arches = [arch for arch in preferred_arches if arch == 'x86']
-                else:
-                    relevant_arches = [arch for arch in preferred_arches if arch != 'x86']
-                if not relevant_arches:
-                    relevant_arches = []
-            else:
-                relevant_arches = ['x86'] if is_x86_base else ['x64']
-
-            arch_dirs_for_base = self._expand_windows_architecture_dirs(relevant_arches)
-
             if preferred_arches:
                 kits_arches = preferred_arches
             else:
