@@ -77,19 +77,31 @@ jobs:
         run: |
           $candidates = @('cdb', 'ntsd', 'windbg')
           $found = @()
+
           foreach ($candidate in $candidates) {
+            $command = $null
             try {
-              $paths = (where.exe $candidate 2>$null)
-              if ($paths) {
-                Write-Host "$candidate -> $paths"
-                $found += $candidate
-              } else {
-                Write-Warning "Unable to locate $candidate"
-              }
+              $command = Get-Command $candidate -ErrorAction SilentlyContinue | Select-Object -First 1
             } catch {
+              $command = $null
+            }
+
+            if ($command) {
+              $resolvedPath = $command.Source
+              if (-not $resolvedPath -and $command.CommandType -eq 'Application') {
+                $resolvedPath = $command.Definition
+              }
+              if ($resolvedPath) {
+                Write-Host "$candidate -> $resolvedPath"
+              } else {
+                Write-Host "$candidate discovered"
+              }
+              $found += $candidate
+            } else {
               Write-Warning "Unable to locate $candidate"
             }
           }
+
           if (-not $found) {
             Write-Warning "No Windows debugger discovered. Checked: $($candidates -join ', ')"
             Add-Content -Path $env:GITHUB_ENV -Value 'SINTRA_WINDOWS_DEBUGGER_AVAILABLE=false'
