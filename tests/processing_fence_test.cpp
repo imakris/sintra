@@ -27,6 +27,7 @@ struct Work_message
 constexpr auto kHandlerDelay = std::chrono::milliseconds(300);
 constexpr std::string_view kEnvSharedDir = "SINTRA_PROCESSING_FENCE_DIR";
 constexpr std::string_view kSharedDirFlag = "--shared-dir";
+constexpr std::string_view kMessageReadyBarrier = "processing-fence-message-ready";
 
 std::filesystem::path& shared_directory_storage()
 {
@@ -147,6 +148,8 @@ int controller_process()
 
     world() << Work_message{};
 
+    barrier(std::string(kMessageReadyBarrier), group);
+
     const auto start = std::chrono::steady_clock::now();
     const bool barrier_result = barrier<processing_fence_t>(
         "processing-fence", group);
@@ -181,6 +184,7 @@ int worker_process()
 
     const std::string group = "_sintra_external_processes";
     barrier("processing-fence-setup", group);
+    barrier(std::string(kMessageReadyBarrier), group);
     barrier<processing_fence_t>("processing-fence", group);
     barrier("processing-fence-test-done", "_sintra_all_processes");
 
