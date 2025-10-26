@@ -18,15 +18,39 @@ jobs:
       - name: Ensure Windows debugging tools
         shell: pwsh
         run: |
-          $debugTools = "${env:ProgramFiles(x86)}\Windows Kits\10\Debuggers\x64"
-          if (-not (Test-Path $debugTools)) {
-            choco install --no-progress windows-sdk-10-version-10.0.22621.0 --package-parameters "'ADDLOCAL=DebuggingTools'"
+          choco install windows-sdk-10-version-10.0.22621.0 --no-progress -y --package-parameters "'ADDLOCAL=DebuggingTools'"
+          $debugDirs = @(
+            "${env:ProgramFiles(x86)}\Windows Kits\10\Debuggers\x64",
+            "${env:ProgramFiles(x86)}\Windows Kits\10\Debuggers\x86"
+          ) | Where-Object { $_ -and (Test-Path $_) }
+          if (-not $debugDirs) {
+            throw 'Windows debugging tools not found after installation.'
           }
-          Add-Content -Path $env:GITHUB_PATH -Value $debugTools
+          foreach ($dir in $debugDirs) {
+            Add-Content -Path $env:GITHUB_PATH -Value $dir
+          }
 
-      - name: Verify cdb
+      - name: Verify Windows debuggers
         shell: pwsh
-        run: where cdb
+        run: |
+          $candidates = @('cdb', 'ntsd', 'windbg')
+          $found = @()
+          foreach ($candidate in $candidates) {
+            try {
+              $paths = (where.exe $candidate 2>$null)
+              if ($paths) {
+                Write-Host "$candidate -> $paths"
+                $found += $candidate
+              } else {
+                Write-Warning "Unable to locate $candidate"
+              }
+            } catch {
+              Write-Warning "Unable to locate $candidate"
+            }
+          }
+          if (-not $found) {
+            throw "No Windows debugger discovered. Checked: $($candidates -join ', ')"
+          }
 
       - name: Configure CMake
         run: cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
