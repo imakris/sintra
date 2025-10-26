@@ -12,7 +12,7 @@
 #include "resolve_type.h"
 #include "spinlocked_containers.h"
 #include "transceiver.h"
-#include "call_function_with_fusion_vector_args.h"
+#include "call_function_with_message_args.h"
 
 #include <algorithm>
 #include <atomic>
