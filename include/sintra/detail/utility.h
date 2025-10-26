@@ -385,7 +385,10 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
         return false;
     }
 
-    pid_t child_pid = ::fork();
+    pid_t child_pid = -1;
+    do {
+        child_pid = ::fork();
+    } while (child_pid == -1 && errno == EINTR);
     if (child_pid == -1) {
         if (ready_pipe[0] >= 0) {
             close(ready_pipe[0]);
