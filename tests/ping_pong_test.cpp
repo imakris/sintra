@@ -1,87 +1,150 @@
-//
-// Sintra Single-Process Ping-Pong Test
-//
-// This test validates single-process message dispatch functionality.
-// It corresponds to example_3 and tests the following features:
-// - Message passing within a single process (no worker processes)
-// - Multiple slots responding to different message types
-// - High-frequency message throughput
-// - Timeout-based test completion
-//
-// Test structure:
-// - Three slots all within the coordinator process:
-//   1. ping_slot: Responds to Ping with Pong
-//   2. pong_slot: Responds to Pong with Ping
-//   3. benchmarking_slot: Counts messages and triggers completion
-//
-// The test sends an initial Ping and waits for 10'000 ping-pong cycles
-// to complete within a 5-second timeout while periodically yielding to
-// encourage scheduler churn.
-//
-
 #include <sintra/sintra.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <future>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <string>
+#include <string_view>
 #include <thread>
+#include <vector>
+
+#ifdef _WIN32
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
+
+namespace {
 
 struct Ping {};
 struct Pong {};
 
+constexpr std::string_view kSharedDirEnv = "SINTRA_PING_PONG_CRASH_DIR";
+
+std::filesystem::path ensure_shared_directory()
+{
+    if (const char* existing = std::getenv(kSharedDirEnv.data()); existing && *existing) {
+        return std::filesystem::path(existing);
+    }
+
+    auto base = std::filesystem::temp_directory_path() / "sintra_ping_pong_crash";
+    std::filesystem::create_directories(base);
+
+    auto timestamp = std::chrono::high_resolution_clock::now().time_since_epoch();
+    auto unique_value = std::chrono::duration_cast<std::chrono::nanoseconds>(timestamp).count();
+#ifdef _WIN32
+    unique_value ^= static_cast<long long>(_getpid());
+#else
+    unique_value ^= static_cast<long long>(getpid());
+#endif
+
+    auto dir = base / std::to_string(unique_value);
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+
+#ifdef _WIN32
+    _putenv_s(kSharedDirEnv.data(), dir.string().c_str());
+#else
+    setenv(kSharedDirEnv.data(), dir.string().c_str(), 1);
+#endif
+
+    return dir;
+}
+
+std::filesystem::path shared_directory()
+{
+    return ensure_shared_directory();
+}
+
+void write_ready_marker(const std::filesystem::path& directory)
+{
+    std::ofstream ready(directory / "worker_ready", std::ios::binary | std::ios::trunc);
+    ready << "ready\n";
+    ready.flush();
+}
+
+bool wait_for_ready_marker(const std::filesystem::path& directory)
+{
+    const auto marker = directory / "worker_ready";
+    for (int attempt = 0; attempt < 50; ++attempt) {
+        if (std::filesystem::exists(marker)) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    return false;
+}
+
+[[noreturn]] void keep_worker_alive()
+{
+    using namespace std::chrono_literals;
+    for (;;) {
+        std::this_thread::sleep_for(1s);
+    }
+}
+
+int worker_process()
+{
+    const auto directory = shared_directory();
+
+    sintra::activate_slot([](Ping) {
+        sintra::world() << Pong{};
+    });
+
+    write_ready_marker(directory);
+
+    // Keep the worker process alive so gdb can capture its stacks.
+    keep_worker_alive();
+}
+
+bool is_spawned_process(int argc, char* argv[])
+{
+    return std::any_of(argv, argv + argc, [](const char* arg) {
+        return std::string_view(arg) == "--branch_index";
+    });
+}
+
+} // namespace
+
 int main(int argc, char* argv[])
 {
-    sintra::init(argc, argv);
+    const auto directory = shared_directory();
 
-    constexpr int kTargetPingCount = 10000;
-    std::atomic<int> ping_count{0};
-    std::atomic<bool> done{false};
-    std::promise<void> done_promise;
-    auto done_future = done_promise.get_future();
+    std::vector<sintra::Process_descriptor> processes;
+    processes.emplace_back(worker_process);
 
-    auto ping_slot = [&](Ping) {
-        if (done.load(std::memory_order_acquire)) {
-            return;
-        }
-        sintra::world() << Pong();
-    };
+    sintra::init(argc, argv, processes);
 
-    auto pong_slot = [&](Pong) {
-        if (done.load(std::memory_order_acquire)) {
-            return;
-        }
-        sintra::world() << Ping();
-    };
+    if (is_spawned_process(argc, argv)) {
+        keep_worker_alive();
+    }
 
-    auto benchmarking_slot = [&](Ping) {
-        if (done.load(std::memory_order_acquire)) {
-            return;
-        }
-        int count = ping_count.fetch_add(1, std::memory_order_relaxed) + 1;
-        if (count >= kTargetPingCount) {
-            bool expected = false;
-            if (done.compare_exchange_strong(expected, true)) {
-                done_promise.set_value();
-            }
-        }
-        else if ((count % 256) == 0) {
-            std::this_thread::yield();
-        }
-    };
-
-    sintra::activate_slot(ping_slot);
-    sintra::activate_slot(pong_slot);
-    sintra::activate_slot(benchmarking_slot);
-
-    sintra::world() << Ping();
-
-    const auto wait_status = done_future.wait_for(std::chrono::seconds(5));
-    if (wait_status != std::future_status::ready) {
+    if (!wait_for_ready_marker(directory)) {
+        std::cerr << "Coordinator timed out waiting for worker readiness" << std::endl;
         sintra::finalize();
         return 1;
     }
 
+    std::atomic<bool> seen_pong{false};
+
+    sintra::activate_slot([&](Pong) {
+        seen_pong.store(true, std::memory_order_release);
+        std::cerr << "Coordinator intentionally aborting after receiving Pong" << std::endl;
+        std::abort();
+    });
+
+    sintra::world() << Ping{};
+
+    // If the abort does not trigger for some reason, sleep briefly before
+    // finalizing to avoid tight loops.
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
     sintra::finalize();
 
-    return ping_count.load(std::memory_order_relaxed) == kTargetPingCount ? 0 : 1;
+    (void)seen_pong.load(std::memory_order_acquire);
+    return 1;
 }
