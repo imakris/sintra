@@ -26,15 +26,38 @@ jobs:
       - name: Ensure Windows debugging tools
         shell: pwsh
         run: |
-          $debugTools = "${env:ProgramFiles(x86)}\Windows Kits\10\Debuggers\x64"
-          if (-not (Test-Path $debugTools)) {
-            choco install --no-progress windows-sdk-10-version-10.0.22621.0 --package-parameters "'ADDLOCAL=DebuggingTools'"
-          }
-          Add-Content -Path $env:GITHUB_PATH -Value $debugTools
+          $ErrorActionPreference = 'Stop'
+          choco install --yes --no-progress windows-sdk-10-version-10.0.22621.0 --package-parameters "'ADDLOCAL=DebuggingTools'"
 
-      - name: Verify cdb
+          $debugToolsRoot = Join-Path "${env:ProgramFiles(x86)}" 'Windows Kits\10\Debuggers'
+          $candidatePaths = @(
+            Join-Path $debugToolsRoot 'x64',
+            Join-Path $debugToolsRoot 'x86',
+            Join-Path $debugToolsRoot 'arm64'
+          ) | Where-Object { Test-Path $_ }
+
+          foreach ($candidate in $candidatePaths) {
+            Add-Content -Path $env:GITHUB_PATH -Value $candidate
+          }
+
+      - name: Verify Windows debuggers
         shell: pwsh
-        run: where cdb
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $debuggers = @('cdb', 'ntsd', 'windbg')
+          $found = @()
+          foreach ($debugger in $debuggers) {
+            $command = Get-Command $debugger -ErrorAction SilentlyContinue
+            if ($command) {
+              $found += "$debugger -> $($command.Source)"
+            }
+          }
+
+          if (-not $found) {
+            throw 'None of the Windows debugging tools (cdb, ntsd, windbg) were found in PATH after installation.'
+          }
+
+          $found | ForEach-Object { Write-Host $_ }
 
       - name: Download build artifacts
         uses: actions/download-artifact@v4
