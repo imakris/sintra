@@ -376,6 +376,8 @@ class TestRunner:
                 postmortem_stack_traces = ""
                 postmortem_stack_error = ""
 
+                should_capture_stacks = False
+
                 if not success:
                     # Categorize failure type for better diagnostics
                     if process.returncode < 0 or process.returncode > 128:
@@ -388,7 +390,18 @@ class TestRunner:
                         # Normal test failure
                         error_msg = f"TEST FAILED: Exit code {process.returncode} after {duration:.2f}s\n{stderr}"
 
-                    if self._is_crash_exit(process.returncode):
+                    should_capture_stacks = self._is_crash_exit(process.returncode)
+
+                    if (
+                        not should_capture_stacks
+                        and process.returncode != 0
+                        and duration < 1.0
+                    ):
+                        # Treat abrupt exits that finish almost immediately as crashes so we still
+                        # attempt to capture stack traces from any surviving helper processes.
+                        should_capture_stacks = True
+
+                    if should_capture_stacks:
                         live_stack_traces, live_stack_error = self._capture_process_stacks(process.pid)
 
                         if sys.platform == 'win32':
@@ -1260,28 +1273,36 @@ class TestRunner:
             return pids
 
         proc_path = Path('/proc')
-        try:
-            entries = list(proc_path.iterdir())
-        except Exception:
+        if proc_path.exists():
+            try:
+                entries = list(proc_path.iterdir())
+            except Exception:
+                entries = []
+
+            for entry in entries:
+                if not entry.is_dir():
+                    continue
+                name = entry.name
+                if not name.isdigit():
+                    continue
+
+                try:
+                    candidate_pid = int(name)
+                except ValueError:
+                    continue
+
+                try:
+                    candidate_pgid = os.getpgid(candidate_pid)
+                except (ProcessLookupError, PermissionError):
+                    continue
+
+                if candidate_pgid == pgid:
+                    pids.append(candidate_pid)
+
             return pids
 
-        for entry in entries:
-            if not entry.is_dir():
-                continue
-            name = entry.name
-            if not name.isdigit():
-                continue
-
-            try:
-                candidate_pid = int(name)
-            except ValueError:
-                continue
-
-            try:
-                candidate_pgid = os.getpgid(candidate_pid)
-            except (ProcessLookupError, PermissionError):
-                continue
-
+        for entry in self._collect_process_table_via_ps(('pid', 'pgid')):
+            candidate_pid, candidate_pgid = entry
             if candidate_pgid == pgid:
                 pids.append(candidate_pid)
 
@@ -1295,47 +1316,53 @@ class TestRunner:
         if sys.platform == 'win32':
             return descendants
 
-        proc_path = Path('/proc')
-        try:
-            entries = list(proc_path.iterdir())
-        except Exception:
-            return descendants
-
         parent_to_children: Dict[int, List[int]] = {}
 
-        for entry in entries:
-            if not entry.is_dir():
-                continue
-
-            name = entry.name
-            if not name.isdigit():
-                continue
-
+        proc_path = Path('/proc')
+        if proc_path.exists():
             try:
-                pid = int(name)
-            except ValueError:
-                continue
+                entries = list(proc_path.iterdir())
+            except Exception:
+                entries = []
 
-            stat_path = entry / 'stat'
-            try:
-                stat_content = stat_path.read_text()
-            except (OSError, UnicodeDecodeError):
-                continue
+            for entry in entries:
+                if not entry.is_dir():
+                    continue
 
-            close_paren = stat_content.find(')')
-            if close_paren == -1 or close_paren + 2 >= len(stat_content):
-                continue
+                name = entry.name
+                if not name.isdigit():
+                    continue
 
-            remainder = stat_content[close_paren + 2 :].split()
-            if len(remainder) < 2:
-                continue
+                try:
+                    pid = int(name)
+                except ValueError:
+                    continue
 
-            try:
-                parent_pid = int(remainder[1])
-            except ValueError:
-                continue
+                stat_path = entry / 'stat'
+                try:
+                    stat_content = stat_path.read_text()
+                except (OSError, UnicodeDecodeError):
+                    continue
 
-            parent_to_children.setdefault(parent_pid, []).append(pid)
+                close_paren = stat_content.find(')')
+                if close_paren == -1 or close_paren + 2 >= len(stat_content):
+                    continue
+
+                remainder = stat_content[close_paren + 2 :].split()
+                if len(remainder) < 2:
+                    continue
+
+                try:
+                    parent_pid = int(remainder[1])
+                except ValueError:
+                    continue
+
+                parent_to_children.setdefault(parent_pid, []).append(pid)
+
+        else:
+            for entry in self._collect_process_table_via_ps(('pid', 'ppid')):
+                pid, parent_pid = entry
+                parent_to_children.setdefault(parent_pid, []).append(pid)
 
         visited: Set[int] = set()
         stack: List[int] = parent_to_children.get(root_pid, [])[:]
@@ -1349,6 +1376,40 @@ class TestRunner:
             stack.extend(parent_to_children.get(current, []))
 
         return descendants
+
+    def _collect_process_table_via_ps(self, columns: Tuple[str, ...]) -> List[Tuple[int, ...]]:
+        """Collect process metadata using the ``ps`` command on systems without ``/proc``."""
+
+        command = ['ps', '-eo', ','.join(columns)]
+        try:
+            result = subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=5,
+            )
+        except (FileNotFoundError, subprocess.SubprocessError, subprocess.TimeoutExpired):
+            return []
+
+        if result.returncode != 0:
+            return []
+
+        entries: List[Tuple[int, ...]] = []
+        lines = result.stdout.splitlines()
+        for line in lines[1:]:  # Skip header line
+            parts = line.strip().split()
+            if len(parts) < len(columns):
+                continue
+
+            try:
+                values = tuple(int(parts[i]) for i in range(len(columns)))
+            except ValueError:
+                continue
+
+            entries.append(values)
+
+        return entries
 
     def run_test_multiple(self, invocation: TestInvocation, repetitions: int) -> Tuple[int, int, List[TestResult]]:
         """Run a test multiple times and collect results"""
