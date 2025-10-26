@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <array>
 #include <chrono>
 #include <cstdlib>
 #include <functional>
@@ -454,32 +455,53 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
     }
 
     int exec_errno = 0;
-    bool read_success = false;
-    int handshake_value = -1;
-    size_t total_read = 0;
-    while (total_read < sizeof(handshake_value)) {
-        ssize_t rv = detail::call_read(ready_pipe[0], reinterpret_cast<char*>(&handshake_value) + total_read, sizeof(handshake_value) - total_read);
+    bool handshake_received = false;
+    bool spawn_failed = false;
+    std::array<char, sizeof(int)> handshake_buffer{};
+    size_t buffer_offset = 0;
+    while (true) {
+        ssize_t rv = detail::call_read(ready_pipe[0], handshake_buffer.data() + buffer_offset, handshake_buffer.size() - buffer_offset);
         if (rv < 0) {
             if (errno == EINTR) {
                 continue;
             }
             exec_errno = errno;
+            spawn_failed = true;
             break;
         }
         if (rv == 0) {
-            exec_errno = EPIPE;
             break;
         }
-        total_read += static_cast<size_t>(rv);
+
+        buffer_offset += static_cast<size_t>(rv);
+        if (buffer_offset == handshake_buffer.size()) {
+            int value = 0;
+            std::memcpy(&value, handshake_buffer.data(), sizeof(value));
+            if (!handshake_received) {
+                handshake_received = true;
+                if (value != 0) {
+                    exec_errno = value > 0 ? value : -value;
+                    spawn_failed = true;
+                    break;
+                }
+            }
+            else {
+                exec_errno = value > 0 ? value : -value;
+                spawn_failed = true;
+                break;
+            }
+            buffer_offset = 0;
+        }
     }
 
-    if (total_read == sizeof(handshake_value) && handshake_value == 0) {
-        read_success = true;
+    if ((!handshake_received || buffer_offset != 0) && !spawn_failed) {
+        spawn_failed = true;
+        if (exec_errno == 0) {
+            exec_errno = EPIPE;
+        }
     }
-    else if (total_read == sizeof(handshake_value) && handshake_value != 0) {
-        exec_errno = handshake_value > 0 ? handshake_value : -handshake_value;
-        read_success = false;
-    }
+
+    bool read_success = handshake_received && !spawn_failed;
 
     if (ready_pipe[0] >= 0) {
         close(ready_pipe[0]);
