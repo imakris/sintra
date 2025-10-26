@@ -686,35 +686,34 @@ private:
 
     detail::interprocess_semaphore* ensure()
     {
-        auto current = m_state.load(std::memory_order_acquire);
-        if (current == static_cast<uint8_t>(state::initialized)) {
-            return get();
-        }
-
-        if (current == static_cast<uint8_t>(state::uninitialized)) {
-            uint8_t expected = static_cast<uint8_t>(state::uninitialized);
-            if (m_state.compare_exchange_strong(expected,
-                                                static_cast<uint8_t>(state::initializing),
-                                                std::memory_order_acq_rel,
-                                                std::memory_order_acquire))
-            {
-                try {
-                    new (get()) detail::interprocess_semaphore(0);
-                    m_state.store(static_cast<uint8_t>(state::initialized), std::memory_order_release);
-                    return get();
-                } catch (...) {
-                    m_state.store(static_cast<uint8_t>(state::uninitialized), std::memory_order_release);
-                    throw;
-                }
+        for (;;) {
+            auto current = m_state.load(std::memory_order_acquire);
+            if (current == static_cast<uint8_t>(state::initialized)) {
+                return get();
             }
-            current = expected;
-        }
 
-        while (m_state.load(std::memory_order_acquire) != static_cast<uint8_t>(state::initialized)) {
+            if (current == static_cast<uint8_t>(state::uninitialized)) {
+                uint8_t expected = static_cast<uint8_t>(state::uninitialized);
+                if (m_state.compare_exchange_strong(expected,
+                                                    static_cast<uint8_t>(state::initializing),
+                                                    std::memory_order_acq_rel,
+                                                    std::memory_order_acquire))
+                {
+                    try {
+                        new (get()) detail::interprocess_semaphore(0);
+                        m_state.store(static_cast<uint8_t>(state::initialized), std::memory_order_release);
+                        return get();
+                    } catch (...) {
+                        m_state.store(static_cast<uint8_t>(state::uninitialized), std::memory_order_release);
+                        throw;
+                    }
+                }
+
+                continue;
+            }
+
             SINTRA_DELAY_FUZZ("ipc_rings.semaphore_init");
         }
-
-        return get();
     }
 
     void destroy() noexcept
