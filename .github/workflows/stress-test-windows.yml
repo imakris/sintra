@@ -26,14 +26,42 @@ jobs:
       - name: Ensure Windows debugging tools
         shell: pwsh
         run: |
-          choco install windows-sdk-10-version-10.0.22621.0 --no-progress -y --package-parameters "'ADDLOCAL=DebuggingTools'"
-          $debugDirs = @(
-            "${env:ProgramFiles(x86)}\Windows Kits\10\Debuggers\x64",
-            "${env:ProgramFiles(x86)}\Windows Kits\10\Debuggers\x86"
-          ) | Where-Object { $_ -and (Test-Path $_) }
+          function Get-DebugDirectories {
+            return @(
+              "${env:ProgramFiles(x86)}\Windows Kits\10\Debuggers\x64",
+              "${env:ProgramFiles(x86)}\Windows Kits\10\Debuggers\x86"
+            ) | Where-Object { $_ -and (Test-Path $_) }
+          }
+
+          $debugDirs = Get-DebugDirectories
+          if (-not $debugDirs) {
+            $packages = @(
+              'windows-sdk-10-version-10.0.26100.1742',
+              'windows-sdk-10-version-10.0.26100.1',
+              'windows-sdk-10-version-10.0.22621.755'
+            )
+
+            $installed = $false
+            foreach ($package in $packages) {
+              Write-Host "Attempting to install $package via Chocolatey"
+              choco install $package --no-progress -y --package-parameters "'ADDLOCAL=DebuggingTools'"
+              if ($LASTEXITCODE -eq 0) {
+                $installed = $true
+                break
+              }
+            }
+
+            if (-not $installed) {
+              throw "Windows debugging tools could not be installed. Packages tried: $($packages -join ', ')"
+            }
+
+            $debugDirs = Get-DebugDirectories
+          }
+
           if (-not $debugDirs) {
             throw 'Windows debugging tools not found after installation.'
           }
+
           foreach ($dir in $debugDirs) {
             Add-Content -Path $env:GITHUB_PATH -Value $dir
           }
