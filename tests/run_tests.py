@@ -23,6 +23,7 @@ Options:
 import argparse
 import fnmatch
 import os
+import platform
 import shlex
 import shutil
 import subprocess
@@ -32,7 +33,7 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 class Color:
     """ANSI color codes for terminal output"""
@@ -995,6 +996,81 @@ class TestRunner:
             '-o', 'quit',
         ]
 
+    @staticmethod
+    def _normalize_windows_architecture(value: Optional[str]) -> Optional[str]:
+        """Return the canonical Windows debugger architecture name."""
+
+        if not value:
+            return None
+
+        normalized = value.strip().lower()
+        mapping = {
+            'amd64': 'x64',
+            'x86_64': 'x64',
+            'ia64': 'x64',
+            'x64': 'x64',
+            'arm64': 'arm64',
+            'aarch64': 'arm64',
+            'arm': 'arm64',
+            'x86': 'x86',
+            'i386': 'x86',
+            'i486': 'x86',
+            'i586': 'x86',
+            'i686': 'x86',
+            'win32': 'x86',
+        }
+
+        return mapping.get(normalized)
+
+    def _preferred_windows_debug_architectures(self) -> List[str]:
+        """Return the preferred debugger architectures for the current build."""
+
+        if sys.platform != 'win32':
+            return []
+
+        hints = [
+            os.environ.get('SINTRA_TARGET_ARCH'),
+            os.environ.get('CDB_ARCH'),
+            os.environ.get('VSCMD_ARG_TGT_ARCH'),
+            os.environ.get('CMAKE_GENERATOR_PLATFORM'),
+            os.environ.get('Platform'),
+            os.environ.get('PROCESSOR_ARCHITECTURE'),
+            os.environ.get('PROCESSOR_ARCHITEW6432'),
+        ]
+
+        preferred: List[str] = []
+        for hint in hints:
+            normalized = self._normalize_windows_architecture(hint)
+            if normalized and normalized not in preferred:
+                preferred.append(normalized)
+
+        if preferred:
+            return preferred
+
+        bits, _ = platform.architecture()
+        if bits == '64bit':
+            return ['x64']
+
+        return ['x86']
+
+    @staticmethod
+    def _expand_windows_architecture_dirs(architectures: List[str]) -> List[str]:
+        """Expand canonical architectures into known directory aliases."""
+
+        aliases = {
+            'x64': ['x64', 'amd64'],
+            'x86': ['x86'],
+            'arm64': ['arm64'],
+        }
+
+        expanded: List[str] = []
+        for arch in architectures:
+            for alias in aliases.get(arch, [arch]):
+                if alias not in expanded:
+                    expanded.append(alias)
+
+        return expanded
+
     def _locate_windows_debugger(self, executable: str) -> Tuple[Optional[str], str]:
         """Locate a Windows debugger executable in common installation paths."""
 
@@ -1008,6 +1084,11 @@ class TestRunner:
         exe_variants = {executable}
         if not executable.lower().endswith('.exe'):
             exe_variants.add(f"{executable}.exe")
+
+        preferred_arches = self._preferred_windows_debug_architectures()
+        arch_dir_names = self._expand_windows_architecture_dirs(preferred_arches)
+        if not arch_dir_names:
+            arch_dir_names = self._expand_windows_architecture_dirs(['x64'])
 
         located = shutil.which(executable)
         if located:
@@ -1030,7 +1111,10 @@ class TestRunner:
             if len(searched_locations) < 32:
                 searched_locations.append(str(expanded))
 
-        def add_debugger_candidates(root: Optional[Path]) -> None:
+        def add_debugger_candidates(
+            root: Optional[Path],
+            arch_dirs: Optional[Sequence[str]] = None,
+        ) -> None:
             if not root:
                 return
 
@@ -1038,10 +1122,17 @@ class TestRunner:
             while queue:
                 current, depth = queue.pop(0)
                 for variant in exe_variants:
-                    register_candidate(current / variant)
-                for arch in ('x64', 'x86', 'arm64', 'amd64'):
-                    for variant in exe_variants:
-                        register_candidate(current / arch / variant)
+                    candidate = current / variant
+                    if candidate.exists():
+                        register_candidate(candidate)
+                for arch in arch_dirs or arch_dir_names:
+                    arch_dir = current / arch
+                    if arch_dir.exists():
+                        register_candidate(arch_dir)
+                        for variant in exe_variants:
+                            candidate = arch_dir / variant
+                            if candidate.exists():
+                                register_candidate(candidate)
 
                 if depth >= 2:
                     continue
@@ -1055,6 +1146,43 @@ class TestRunner:
                     # Ignore directories we cannot enumerate (e.g. permission issues
                     # on WindowsApps) and continue probing other known locations.
                     continue
+
+        def search_windows_kits_debuggers(
+            root: Optional[Path],
+            arch_dirs: Sequence[str],
+        ) -> None:
+            if not root or not arch_dirs:
+                return
+
+            try:
+                root_path = Path(root)
+                if not root_path.exists():
+                    return
+            except OSError:
+                return
+
+            try:
+                for debuggers_dir in root_path.rglob('Debuggers'):
+                    if not debuggers_dir.is_dir():
+                        continue
+
+                    for variant in exe_variants:
+                        candidate = debuggers_dir / variant
+                        if candidate.exists():
+                            register_candidate(candidate)
+
+                    for arch in arch_dirs:
+                        arch_dir = debuggers_dir / arch
+                        if not arch_dir.exists():
+                            continue
+                        register_candidate(arch_dir)
+                        for variant in exe_variants:
+                            candidate = arch_dir / variant
+                            if candidate.exists():
+                                register_candidate(candidate)
+            except OSError:
+                # Some directories under Windows Kits may not be accessible.
+                return
 
         env_roots = [
             os.environ.get('CDB_PATH'),
@@ -1075,42 +1203,26 @@ class TestRunner:
                 add_debugger_candidates(value_path)
                 add_debugger_candidates(value_path / 'Debuggers')
 
-        program_dirs = {
-            os.environ.get('ProgramFiles'),
-            os.environ.get('ProgramFiles(x86)'),
-            os.environ.get('ProgramW6432'),
-        }
+        program_dirs = [
+            ('ProgramFiles', os.environ.get('ProgramFiles')),
+            ('ProgramFiles(x86)', os.environ.get('ProgramFiles(x86)')),
+            ('ProgramW6432', os.environ.get('ProgramW6432')),
+        ]
 
-        for base in filter(None, program_dirs):
+        for var_name, base in program_dirs:
+            if not base:
+                continue
+
             base_path = Path(base)
             windows_kits = base_path / 'Windows Kits'
-
-            add_debugger_candidates(windows_kits)
-
-            if windows_kits.exists():
-                try:
-                    kit_versions = sorted(windows_kits.iterdir(), reverse=True)
-                except OSError:
-                    kit_versions = []
-
-                for version_dir in kit_versions:
-                    if not version_dir.is_dir():
-                        continue
-                    add_debugger_candidates(version_dir / 'Debuggers')
-                    add_debugger_candidates(version_dir)
-
-                    sdk_bin = version_dir / 'bin'
-                    if not sdk_bin.exists():
-                        continue
-
-                    try:
-                        sdk_subdirs = sorted(sdk_bin.iterdir(), reverse=True)
-                    except OSError:
-                        sdk_subdirs = []
-
-                    for sdk_subdir in sdk_subdirs:
-                        if sdk_subdir.is_dir():
-                            add_debugger_candidates(sdk_subdir)
+            if preferred_arches:
+                kits_arches = preferred_arches
+            else:
+                kits_arches = ['x64', 'x86']
+            kits_arch_dirs = self._expand_windows_architecture_dirs(kits_arches)
+            if kits_arch_dirs:
+                add_debugger_candidates(windows_kits, arch_dirs=kits_arch_dirs)
+                search_windows_kits_debuggers(windows_kits, kits_arch_dirs)
 
             visual_studio = base_path / 'Microsoft Visual Studio'
             if visual_studio.exists():
