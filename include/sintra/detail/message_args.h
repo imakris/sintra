@@ -84,13 +84,15 @@ struct message_args : message_args_base<std::index_sequence_for<Args...>, Args..
     template <std::size_t I>
     constexpr auto&& element() && noexcept
     {
-        return std::move(element<I>());
+        using holder = message_arg_holder<I, typename message_args_element<I, Args...>::type>;
+        return std::move(static_cast<holder&&>(*this).value);
     }
 
     template <std::size_t I>
     constexpr const auto&& element() const&& noexcept
     {
-        return std::move(element<I>());
+        using holder = message_arg_holder<I, typename message_args_element<I, Args...>::type>;
+        return std::move(static_cast<const holder&&>(*this).value);
     }
 };
 
