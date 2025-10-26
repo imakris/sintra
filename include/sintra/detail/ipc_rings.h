@@ -130,7 +130,6 @@
 #include <vector>
 
 // ─── Boost.Interprocess ──────────────────────────────────────────────────────
-#include <boost/interprocess/detail/os_file_functions.hpp>
 #include <boost/interprocess/file_mapping.hpp>
 #include <boost/interprocess/mapped_region.hpp>
 #include <boost/interprocess/sync/interprocess_mutex.hpp>
@@ -148,7 +147,10 @@
   #include <Windows.h>   // ::VirtualAlloc, granularity details (via Boost)
   #include <timeapi.h>   // ::timeBeginPeriod, ::timeEndPeriod (for ADAPTIVE_SPIN)
 #else
+  #include <fcntl.h>     // ::open
   #include <sys/mman.h>  // ::mmap, ::munmap, MAP_FIXED, MAP_NOSYNC (if available)
+  #include <sys/stat.h>  // ::fchmod, mode_t
+  #include <sys/types.h>
   #include <unistd.h>    // ::sysconf
   #include <signal.h>    // ::kill
   #if defined(__FreeBSD__)
@@ -184,6 +186,153 @@ namespace sintra {
 
 namespace fs  = std::filesystem;
 namespace ipc = boost::interprocess;
+
+namespace detail {
+namespace os_file {
+
+#ifdef _WIN32
+using file_handle = HANDLE;
+
+inline DWORD to_desired_access(ipc::mode_t mode)
+{
+    switch (mode) {
+    case ipc::read_only:
+        return GENERIC_READ;
+    case ipc::copy_on_write:
+    case ipc::read_private:
+        return GENERIC_READ;
+    case ipc::read_write:
+        return GENERIC_READ | GENERIC_WRITE;
+    default:
+        return GENERIC_READ | GENERIC_WRITE;
+    }
+}
+
+inline file_handle invalid_file()
+{
+    return INVALID_HANDLE_VALUE;
+}
+
+inline file_handle create_new_file(const char* name, ipc::mode_t mode)
+{
+    return ::CreateFileA(name,
+                         to_desired_access(mode),
+                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                         nullptr,
+                         CREATE_NEW,
+                         FILE_ATTRIBUTE_NORMAL,
+                         nullptr);
+}
+
+inline bool truncate_file(file_handle handle, std::size_t size)
+{
+    if (size > static_cast<std::size_t>(std::numeric_limits<LONGLONG>::max())) {
+        ::SetLastError(ERROR_FILE_TOO_LARGE);
+        return false;
+    }
+
+    LARGE_INTEGER distance;
+    distance.QuadPart = static_cast<LONGLONG>(size);
+    if (!::SetFilePointerEx(handle, distance, nullptr, FILE_BEGIN)) {
+        return false;
+    }
+    return ::SetEndOfFile(handle) != 0;
+}
+
+inline bool write_file(file_handle handle, const void* data, std::size_t num_bytes)
+{
+    const char* buffer = static_cast<const char*>(data);
+    while (num_bytes > 0) {
+        const DWORD chunk = num_bytes > std::numeric_limits<DWORD>::max()
+                                ? std::numeric_limits<DWORD>::max()
+                                : static_cast<DWORD>(num_bytes);
+        DWORD written = 0;
+        if (::WriteFile(handle, buffer, chunk, &written, nullptr) == 0 || written == 0) {
+            return false;
+        }
+        buffer += written;
+        num_bytes -= written;
+    }
+    return true;
+}
+
+inline bool close_file(file_handle handle)
+{
+    if (handle == invalid_file()) {
+        return true;
+    }
+    return ::CloseHandle(handle) != 0;
+}
+
+#else
+
+using file_handle = int;
+
+inline int to_open_flags(ipc::mode_t mode)
+{
+    switch (mode) {
+    case ipc::read_only:
+        return O_RDONLY;
+    case ipc::copy_on_write:
+    case ipc::read_private:
+        return O_RDONLY;
+    case ipc::read_write:
+        return O_RDWR;
+    default:
+        return O_RDWR;
+    }
+}
+
+inline file_handle invalid_file()
+{
+    return -1;
+}
+
+inline file_handle create_new_file(const char* name, ipc::mode_t mode)
+{
+    const int flags = O_CREAT | O_EXCL | to_open_flags(mode);
+    return ::open(name, flags, static_cast<mode_t>(0666));
+}
+
+inline bool truncate_file(file_handle handle, std::size_t size)
+{
+    if (size > static_cast<std::size_t>(std::numeric_limits<off_t>::max())) {
+        errno = EFBIG;
+        return false;
+    }
+
+    const off_t target = static_cast<off_t>(size);
+    return ::ftruncate(handle, target) == 0;
+}
+
+inline bool write_file(file_handle handle, const void* data, std::size_t num_bytes)
+{
+    const char* buffer = static_cast<const char*>(data);
+    while (num_bytes > 0) {
+        const std::size_t chunk = std::min<std::size_t>(
+            num_bytes, static_cast<std::size_t>(std::numeric_limits<ssize_t>::max()));
+        const ssize_t written = ::write(handle, buffer, chunk);
+        if (written <= 0) {
+            return false;
+        }
+        buffer += static_cast<std::size_t>(written);
+        num_bytes -= static_cast<std::size_t>(written);
+    }
+    return true;
+}
+
+inline bool close_file(file_handle handle)
+{
+    if (handle == invalid_file()) {
+        return true;
+    }
+    return ::close(handle) == 0;
+}
+
+#endif
+
+} // namespace os_file
+} // namespace detail
 
 using sequence_counter_type = uint64_t;
 constexpr auto invalid_sequence = ~sequence_counter_type(0);
@@ -815,13 +964,13 @@ private:
             if (!check_or_create_directory(m_directory))
                 return false;
 
-            ipc::file_handle_t fh_data =
-                ipc::ipcdetail::create_new_file(m_data_filename.c_str(), ipc::read_write);
-            if (fh_data == ipc::ipcdetail::invalid_file())
+            detail::os_file::file_handle fh_data =
+                detail::os_file::create_new_file(m_data_filename.c_str(), ipc::read_write);
+            if (fh_data == detail::os_file::invalid_file())
                 return false;
 
 #ifdef NDEBUG
-            if (!ipc::ipcdetail::truncate_file(fh_data, m_data_region_size))
+            if (!detail::os_file::truncate_file(fh_data, m_data_region_size))
                 return false;
 #else
             // Fill with a recognizable pattern to aid debugging
@@ -831,9 +980,9 @@ private:
             for (size_t i = 0; i < m_data_region_size; ++i) {
                 tmp[i] = ustr[i % dv];
             }
-            ipc::ipcdetail::write_file(fh_data, tmp.get(), m_data_region_size);
+            detail::os_file::write_file(fh_data, tmp.get(), m_data_region_size);
 #endif
-            return ipc::ipcdetail::close_file(fh_data);
+            return detail::os_file::close_file(fh_data);
         }
         catch (...) {
         }
@@ -1335,13 +1484,13 @@ private:
     bool create()
     {
         try {
-            ipc::file_handle_t fh_control =
-                ipc::ipcdetail::create_new_file(m_control_filename.c_str(), ipc::read_write);
-            if (fh_control == ipc::ipcdetail::invalid_file())
+            detail::os_file::file_handle fh_control =
+                detail::os_file::create_new_file(m_control_filename.c_str(), ipc::read_write);
+            if (fh_control == detail::os_file::invalid_file())
                 return false;
 
 #ifdef NDEBUG
-            if (!ipc::ipcdetail::truncate_file(fh_control, sizeof(Control)))
+            if (!detail::os_file::truncate_file(fh_control, sizeof(Control)))
                 return false;
 #else
             const char* ustr = "UNINITIALIZED";
@@ -1350,9 +1499,9 @@ private:
             for (size_t i = 0; i < sizeof(Control); ++i) {
                 tmp[i] = ustr[i % dv];
             }
-            ipc::ipcdetail::write_file(fh_control, tmp.get(), sizeof(Control));
+            detail::os_file::write_file(fh_control, tmp.get(), sizeof(Control));
 #endif
-            return ipc::ipcdetail::close_file(fh_control);
+            return detail::os_file::close_file(fh_control);
         }
         catch (...) {
         }
