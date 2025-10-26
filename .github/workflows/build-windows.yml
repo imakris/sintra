@@ -18,7 +18,7 @@ jobs:
       - name: Ensure Windows debugging tools
         shell: pwsh
         run: |
-          choco install windows-sdk-10-version-10.0.22621.0 --no-progress -y --package-parameters "'ADDLOCAL=DebuggingTools'"
+          choco install windows-sdk-10 --no-progress -y --package-parameters "'ADDLOCAL=DebuggingTools'"
           $debugDirs = @(
             "${env:ProgramFiles(x86)}\Windows Kits\10\Debuggers\x64",
             "${env:ProgramFiles(x86)}\Windows Kits\10\Debuggers\x86"
