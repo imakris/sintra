@@ -457,7 +457,8 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
     bool read_success = false;
     int handshake_value = -1;
     size_t total_read = 0;
-    while (total_read < sizeof(handshake_value)) {
+    bool saw_handshake = false;
+    while (true) {
         ssize_t rv = detail::call_read(ready_pipe[0], reinterpret_cast<char*>(&handshake_value) + total_read, sizeof(handshake_value) - total_read);
         if (rv < 0) {
             if (errno == EINTR) {
@@ -467,18 +468,29 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
             break;
         }
         if (rv == 0) {
-            exec_errno = EPIPE;
+            if (!saw_handshake) {
+                exec_errno = EPIPE;
+            }
             break;
         }
-        total_read += static_cast<size_t>(rv);
-    }
 
-    if (total_read == sizeof(handshake_value) && handshake_value == 0) {
-        read_success = true;
-    }
-    else if (total_read == sizeof(handshake_value) && handshake_value != 0) {
+        total_read += static_cast<size_t>(rv);
+
+        if (total_read < sizeof(handshake_value)) {
+            continue;
+        }
+
+        if (handshake_value == 0) {
+            saw_handshake = true;
+            read_success = true;
+            total_read = 0;
+            handshake_value = -1;
+            continue;
+        }
+
         exec_errno = handshake_value > 0 ? handshake_value : -handshake_value;
         read_success = false;
+        break;
     }
 
     if (ready_pipe[0] >= 0) {
