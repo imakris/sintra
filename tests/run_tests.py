@@ -762,7 +762,15 @@ class TestRunner:
         except ImportError:
             signal = None
 
-        if signal is not None:
+        # Pausing processes helps capture coherent stacks, but LLDB on macOS fails
+        # to attach to tasks that are already SIGSTOPed. Skip the pause in that case
+        # and let LLDB suspend threads itself.
+        should_pause = (
+            signal is not None
+            and not (debugger_name == 'lldb' and sys.platform == 'darwin')
+        )
+
+        if should_pause:
             for target_pid in sorted(target_pids):
                 if target_pid == os.getpid():
                     continue
@@ -813,7 +821,7 @@ class TestRunner:
                 stack_outputs.append(f"PID {target_pid}\n{output}")
 
         # Allow processes to continue so gdb can detach cleanly before killing
-        if signal is not None:
+        if should_pause:
             for target_pid in paused_pids:
                 try:
                     os.kill(target_pid, signal.SIGCONT)
