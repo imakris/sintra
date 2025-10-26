@@ -772,6 +772,8 @@ class TestRunner:
                 except (ProcessLookupError, PermissionError):
                     continue
 
+        debugger_timeout = 90 if debugger_name == 'lldb' else 30
+
         for target_pid in sorted(target_pids):
             if target_pid == os.getpid():
                 continue
@@ -786,7 +788,7 @@ class TestRunner:
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
-                    timeout=30,
+                    timeout=debugger_timeout,
                 )
             except subprocess.SubprocessError as exc:
                 capture_errors.append(
@@ -1020,7 +1022,7 @@ class TestRunner:
             *debugger_command,
             '--batch',
             '--no-lldbinit',
-            '-o', f'target create {quoted_executable} --core {quoted_core}',
+            '-o', f'target create --core {quoted_core} {quoted_executable}',
             '-o', 'thread backtrace all',
             '-o', 'quit',
         ]
