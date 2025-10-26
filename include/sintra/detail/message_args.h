@@ -9,25 +9,59 @@ namespace sintra {
 template <typename... Args>
 struct message_args;
 
-template <>
-struct message_args<>
+namespace detail {
+
+template <std::size_t I, typename T>
+struct message_args_leaf
 {
-    constexpr message_args() = default;
+    T value;
+
+    constexpr message_args_leaf() = default;
+
+    template <typename U>
+    constexpr message_args_leaf(U&& v)
+        : value(std::forward<U>(v))
+    {}
 };
 
-template <typename Head, typename... Tail>
-struct message_args<Head, Tail...>
+template <typename IndexSequence, typename... Args>
+struct message_args_storage;
+
+template <std::size_t... I, typename... Args>
+struct message_args_storage<std::index_sequence<I...>, Args...>
+    : message_args_leaf<I, Args>...
 {
-    Head head;
-    message_args<Tail...> tail;
+    constexpr message_args_storage() = default;
 
-    constexpr message_args() = default;
+    template <typename... U,
+              typename = typename std::enable_if<(sizeof...(U) == sizeof...(Args))>::type>
+    constexpr message_args_storage(U&&... u)
+        : message_args_leaf<I, Args>(std::forward<U>(u))...
+    {}
+};
 
-    template <typename H, typename... U,
-              typename = typename std::enable_if<(sizeof...(U) == sizeof...(Tail))>::type>
-    constexpr message_args(H&& h, U&&... u)
-        : head(std::forward<H>(h))
-        , tail(std::forward<U>(u)...) {}
+template <>
+struct message_args_storage<std::index_sequence<>>
+{
+    constexpr message_args_storage() = default;
+};
+
+} // namespace detail
+
+template <typename... Args>
+struct message_args
+    : detail::message_args_storage<std::index_sequence_for<Args...>, Args...>
+{
+    using storage_type = detail::message_args_storage<std::index_sequence_for<Args...>, Args...>;
+    using storage_type::storage_type;
+};
+
+template <>
+struct message_args<>
+    : detail::message_args_storage<std::index_sequence<>>
+{
+    using storage_type = detail::message_args_storage<std::index_sequence<>>;
+    using storage_type::storage_type;
 };
 
 namespace detail {
@@ -110,44 +144,29 @@ namespace detail {
 template <std::size_t I>
 struct message_args_get
 {
-    template <typename Head, typename... Tail>
-    static auto& apply(message_args<Head, Tail...>& args)
+    template <typename... Args>
+    static auto& apply(message_args<Args...>& args)
     {
-        return message_args_get<I - 1>::apply(args.tail);
+        using element_type = typename message_args_element_impl<message_args<Args...>, I>::type;
+        using leaf_type = message_args_leaf<I, element_type>;
+        return static_cast<leaf_type&>(args).value;
     }
 
-    template <typename Head, typename... Tail>
-    static const auto& apply(const message_args<Head, Tail...>& args)
+    template <typename... Args>
+    static const auto& apply(const message_args<Args...>& args)
     {
-        return message_args_get<I - 1>::apply(args.tail);
+        using element_type = typename message_args_element_impl<message_args<Args...>, I>::type;
+        using leaf_type = message_args_leaf<I, element_type>;
+        return static_cast<const leaf_type&>(args).value;
     }
 
-    template <typename Head, typename... Tail>
-    static auto&& apply(message_args<Head, Tail...>&& args)
+    template <typename... Args>
+    static auto&& apply(message_args<Args...>&& args)
     {
-        return message_args_get<I - 1>::apply(std::move(args.tail));
-    }
-};
-
-template <>
-struct message_args_get<0>
-{
-    template <typename Head, typename... Tail>
-    static Head& apply(message_args<Head, Tail...>& args)
-    {
-        return args.head;
-    }
-
-    template <typename Head, typename... Tail>
-    static const Head& apply(const message_args<Head, Tail...>& args)
-    {
-        return args.head;
-    }
-
-    template <typename Head, typename... Tail>
-    static Head&& apply(message_args<Head, Tail...>&& args)
-    {
-        return std::move(args.head);
+        using element_type = typename message_args_element_impl<message_args<Args...>, I>::type;
+        using leaf_type = message_args_leaf<I, element_type>;
+        auto&& leaf = static_cast<leaf_type&&>(args);
+        return std::move(leaf.value);
     }
 };
 
