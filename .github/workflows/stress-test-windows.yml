@@ -51,10 +51,12 @@ jobs:
               }
               Write-Warning "Failed to install $package (exit code $LASTEXITCODE)."
               $global:LASTEXITCODE = 0
-            }
-
-            if (-not $installed) {
               Write-Warning "Windows debugging tools could not be installed. Packages tried: $($packages -join ', ')"
+            Write-Warning 'Windows debugging tools not found after installation attempts; continuing without debugger support.'
+          } else {
+            foreach ($dir in $debugDirs) {
+              Add-Content -Path $env:GITHUB_PATH -Value $dir
+            }
             }
 
             $debugDirs = Get-DebugDirectories

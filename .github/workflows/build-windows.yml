@@ -51,6 +51,7 @@ jobs:
             foreach ($dir in $debugDirs) {
               Add-Content -Path $env:GITHUB_PATH -Value $dir
             }
+            }
           }
 
       - name: Verify Windows debuggers
