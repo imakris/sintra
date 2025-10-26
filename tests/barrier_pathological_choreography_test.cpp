@@ -187,7 +187,6 @@ int total_expected_noise_for_worker(int worker_index)
 {
     int total = 0;
     for (int iteration = 0; iteration < kIterations; ++iteration) {
-        sintra::set_delay_fuzzing_run_index(static_cast<std::uint32_t>(iteration));
         const auto counts = expected_noise_counts_for_iteration(iteration);
         total += counts[static_cast<std::size_t>(worker_index)];
     }
@@ -333,7 +332,6 @@ int controller_process()
     sintra::barrier("pathological-setup");
 
     for (int iteration = 0; iteration < kIterations; ++iteration) {
-        sintra::set_delay_fuzzing_run_index(static_cast<std::uint32_t>(iteration));
         const auto pre_name = make_pre_barrier_name(iteration);
         sintra::barrier(pre_name);
 
@@ -420,7 +418,6 @@ int worker_process(int worker_index)
     std::uniform_int_distribution<int> jitter(0, 5);
 
     for (int iteration = 0; iteration < kIterations; ++iteration) {
-        sintra::set_delay_fuzzing_run_index(static_cast<std::uint32_t>(iteration));
         const auto pre_name = make_pre_barrier_name(iteration);
 
         StageReport pre_before{worker_index, iteration, 0, -1, 0};
