@@ -7,6 +7,7 @@
 #include "globals.h"
 #include "ipc_rings.h"
 #include "message.h"
+#include "process_id.h"
 #include "process_message_reader.h"
 #include "resolve_type.h"
 #include "spinlocked_containers.h"
@@ -34,9 +35,6 @@
 #include <thread>
 #include <type_traits>
 #include <vector>
-
-#include <boost/interprocess/detail/os_thread_functions.hpp>
-
 
 #undef max
 
@@ -217,7 +215,7 @@ struct Managed_process: Derived_transceiver<Managed_process>
 
     string                              m_binary_name;
 
-    ipc::ipcdetail::OS_process_id_t     m_pid;
+    detail::process_id_type             m_pid;
 
     atomic<bool>                        m_must_stop;
     condition_variable                  m_termination_condition;
