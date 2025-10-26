@@ -18,14 +18,45 @@ jobs:
       - name: Ensure Windows debugging tools
         shell: pwsh
         run: |
-          choco install windows-sdk-10-version-10.0.22621.0 --no-progress -y --package-parameters "'ADDLOCAL=DebuggingTools'"
+          $packages = @(
+            @{ Name = 'windows-sdk-10-version-10.0.22621.0'; Parameters = "'ADDLOCAL=DebuggingTools'" },
+            @{ Name = 'windows-sdk-10'; Parameters = "'ADDLOCAL=DebuggingTools'" },
+            @{ Name = 'windows-sdk-10-version-2004-all'; Parameters = "'ADDLOCAL=DebuggingTools'" }
+          )
+
+          $installed = $false
+          foreach ($package in $packages) {
+            $name = $package.Name
+            $parameters = $package.Parameters
+            Write-Host "Attempting to install $name..."
+            if ($parameters) {
+              choco install $name --no-progress -y --package-parameters $parameters
+            } else {
+              choco install $name --no-progress -y
+            }
+
+            if ($LASTEXITCODE -eq 0) {
+              Write-Host "Successfully installed $name."
+              $installed = $true
+              break
+            }
+
+            Write-Warning "Installation of $name failed with exit code $LASTEXITCODE."
+          }
+
+          if (-not $installed) {
+            throw 'Unable to install a Windows SDK that provides debugging tools.'
+          }
+
           $debugDirs = @(
             "${env:ProgramFiles(x86)}\Windows Kits\10\Debuggers\x64",
             "${env:ProgramFiles(x86)}\Windows Kits\10\Debuggers\x86"
           ) | Where-Object { $_ -and (Test-Path $_) }
+
           if (-not $debugDirs) {
             throw 'Windows debugging tools not found after installation.'
           }
+
           foreach ($dir in $debugDirs) {
             Add-Content -Path $env:GITHUB_PATH -Value $dir
           }
