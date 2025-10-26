@@ -1,11 +1,14 @@
 #pragma once
 
 #include <atomic>
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
-#include <stdexcept>
-#include <system_error>
 #include <random>
+#include <stdexcept>
+#include <string_view>
+#include <system_error>
+#include <cstring>
 
 #if defined(_WIN32)
   #ifndef NOMINMAX
@@ -212,6 +215,25 @@ public:
 #endif
     }
 
+    void reinitialise(unsigned int initial_count,
+                      std::string_view explicit_name = std::string_view{},
+                      uint64_t explicit_id = 0)
+    {
+#if defined(_WIN32)
+        teardown_windows();
+        initialise_windows(initial_count, explicit_id);
+        (void)explicit_name;
+#elif defined(__APPLE__)
+        teardown_named();
+        initialise_named(initial_count, explicit_id, explicit_name);
+#else
+        teardown_posix();
+        initialise_posix(initial_count);
+        (void)explicit_name;
+        (void)explicit_id;
+#endif
+    }
+
     void release_local_handle() noexcept
     {
 #if defined(_WIN32)
@@ -395,9 +417,10 @@ private:
 
     windows_storage m_windows;
 
-    void initialise_windows(unsigned int initial_count)
+    void initialise_windows(unsigned int initial_count, uint64_t explicit_id = 0)
     {
-        m_windows.id = interprocess_semaphore_detail::generate_global_identifier();
+        m_windows.id = explicit_id ? explicit_id
+                                   : interprocess_semaphore_detail::generate_global_identifier();
         std::swprintf(m_windows.name,
                       sizeof(m_windows.name) / sizeof(m_windows.name[0]),
                       L"SintraSemaphore_%016llX",
@@ -429,13 +452,24 @@ private:
 
     named_storage m_named;
 
-    void initialise_named(unsigned int initial_count)
+    void initialise_named(unsigned int initial_count,
+                          uint64_t explicit_id = 0,
+                          std::string_view explicit_name = std::string_view{})
     {
-        m_named.id = interprocess_semaphore_detail::generate_global_identifier();
-        std::snprintf(m_named.name,
-                      sizeof(m_named.name) / sizeof(m_named.name[0]),
-                      "/sintra_sem_%016llx",
-                      static_cast<unsigned long long>(m_named.id));
+        m_named.id = explicit_id ? explicit_id
+                                 : interprocess_semaphore_detail::generate_global_identifier();
+
+        if (!explicit_name.empty()) {
+            const auto copy_len = std::min(explicit_name.size(), sizeof(m_named.name) - 1);
+            std::memcpy(m_named.name, explicit_name.data(), copy_len);
+            m_named.name[copy_len] = '\0';
+        }
+        else {
+            std::snprintf(m_named.name,
+                          sizeof(m_named.name) / sizeof(m_named.name[0]),
+                          "/sintra_sem_%016llx",
+                          static_cast<unsigned long long>(m_named.id));
+        }
 
         sem_unlink(m_named.name);
         sem_t* sem = sem_open(m_named.name, O_CREAT | O_EXCL, 0600, initial_count);

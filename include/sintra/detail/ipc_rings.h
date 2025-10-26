@@ -124,6 +124,7 @@
 #include <mutex>         // std::once_flag, std::call_once
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <thread>
 #include <utility>
@@ -623,6 +624,11 @@ public:
 struct sintra_ring_semaphore : detail::interprocess_semaphore
 {
     sintra_ring_semaphore() : detail::interprocess_semaphore(0) {}
+
+    void rebind(uint64_t identity, std::string_view explicit_name)
+    {
+        detail::interprocess_semaphore::reinitialise(0, explicit_name, identity);
+    }
 
     // Wakes all readers in an ordered fashion (used by writer after publishing).
     void post_ordered()
@@ -1137,7 +1143,7 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         void unlock() { spinlock_flag.clear(std::memory_order_release); }
 
 
-        Control()
+        explicit Control(const std::string& control_filename)
         {
             for (int i = 0; i < max_process_index; i++) { ready_stack   [i]  =  i; }
             for (int i = 0; i < max_process_index; i++) { sleeping_stack[i]  = -1; }
@@ -1148,10 +1154,15 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
 
             writer_pid.store(0, std::memory_order_relaxed);
 
+#if defined(_WIN32) || defined(__APPLE__)
+            initialise_semaphores(control_filename);
+#else
+            (void)control_filename;
+#endif
 
             // See the 'Note' in N4713 32.5 [Lock-free property], Par. 4.
             // The program is only valid if the conditions below are true.
-            
+
             // On a second read... quoting the aforementioned note from the draft:
             //
             // "Operations that are lock-free should also be address-free. That is, atomic operations on the
@@ -1169,6 +1180,51 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
 
             num_free_rs.store(max_process_index, std::memory_order_relaxed);
         }
+
+#if defined(_WIN32) || defined(__APPLE__)
+        static uint64_t compute_semaphore_identity(const std::string& control_filename, int index)
+        {
+            constexpr uint64_t fnv_offset = 1469598103934665603ull;
+            constexpr uint64_t fnv_prime  = 1099511628211ull;
+
+            uint64_t hash = fnv_offset;
+            for (unsigned char ch : control_filename) {
+                hash ^= ch;
+                hash *= fnv_prime;
+            }
+
+            uint32_t idx = static_cast<uint32_t>(index);
+            for (int shift = 0; shift < 32; shift += 8) {
+                hash ^= static_cast<uint8_t>((idx >> shift) & 0xffu);
+                hash *= fnv_prime;
+            }
+
+            if (hash == 0) {
+                hash = 0x8000000000000000ull;
+            }
+
+            return hash;
+        }
+
+        static std::string make_semaphore_name(uint64_t identity)
+        {
+            char buffer[32];
+            std::snprintf(buffer,
+                          sizeof(buffer),
+                          "/sintra_sem_%016llx",
+                          static_cast<unsigned long long>(identity));
+            return std::string(buffer);
+        }
+
+        void initialise_semaphores(const std::string& control_filename)
+        {
+            for (int i = 0; i < max_process_index; ++i) {
+                const uint64_t identity = compute_semaphore_identity(control_filename, i);
+                const auto name = make_semaphore_name(identity);
+                dirty_semaphores[i].rebind(identity, name);
+            }
+        }
+#endif
 
         static_assert(max_process_index <= 255,
             "max_process_index must be <= 255 because read_access uses 8-bit octile counters.");
@@ -1192,7 +1248,7 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         if (!already_exists) {
             // Placement-new the shared Control block
             try {
-                new (m_control) Control;
+                new (m_control) Control(m_control_filename);
             }
             catch (...) {
                 throw ring_acquisition_failure_exception();
