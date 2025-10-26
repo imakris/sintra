@@ -772,7 +772,10 @@ class TestRunner:
                 except (ProcessLookupError, PermissionError):
                     continue
 
-        debugger_timeout = 90 if debugger_name == 'lldb' else 30
+        # LLDB on macOS can take noticeably longer to materialize stack traces, but
+        # other platforms (and gdb) stay fast; keep the longer timeout mac-only so
+        # Linux runs don't stall when falling back to LLDB.
+        debugger_timeout = 90 if debugger_name == 'lldb' and sys.platform == 'darwin' else 30
 
         for target_pid in sorted(target_pids):
             if target_pid == os.getpid():
