@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <functional>
 #include <tuple>
 #include <type_traits>
 #include <utility>
@@ -8,13 +9,42 @@
 namespace sintra {
 namespace detail {
 
+template <typename T>
+using message_arg_storage_value_t = std::conditional_t<
+    std::is_reference<T>::value,
+    std::reference_wrapper<typename std::remove_reference<T>::type>,
+    T>;
+
 template <std::size_t I, typename T>
 struct message_arg_storage {
-    T value;
+    using storage_type = message_arg_storage_value_t<T>;
 
-    constexpr message_arg_storage() = default;
-    constexpr message_arg_storage(const T& v) : value(v) {}
-    constexpr message_arg_storage(T&& v) : value(std::move(v)) {}
+    storage_type value;
+
+    template <typename U = storage_type,
+              typename = std::enable_if_t<std::is_default_constructible<U>::value>>
+    constexpr message_arg_storage() noexcept(std::is_nothrow_default_constructible<U>::value)
+        : value()
+    {
+    }
+
+    template <typename U,
+              typename = std::enable_if_t<std::is_constructible<storage_type, U&&>::value>>
+    constexpr message_arg_storage(U&& v) noexcept(
+        std::is_nothrow_constructible<storage_type, U&&>::value)
+        : value(std::forward<U>(v))
+    {
+    }
+
+    template <typename U>
+    static constexpr decltype(auto) access(U&& v) noexcept
+    {
+        if constexpr (std::is_reference<T>::value) {
+            return v.get();
+        } else {
+            return std::forward<U>(v);
+        }
+    }
 };
 
 template <typename Seq, typename... Args>
@@ -72,27 +102,29 @@ using message_args_storage_t =
 template <std::size_t I, typename... Args>
 constexpr decltype(auto) get(message_args<Args...>& args) noexcept
 {
-    return static_cast<message_args_storage_t<I, Args...>&>(args).value;
+    using storage_t = message_args_storage_t<I, Args...>;
+    return storage_t::access(static_cast<storage_t&>(args).value);
 }
 
 template <std::size_t I, typename... Args>
 constexpr decltype(auto) get(const message_args<Args...>& args) noexcept
 {
-    return static_cast<const message_args_storage_t<I, Args...>&>(args).value;
+    using storage_t = message_args_storage_t<I, Args...>;
+    return storage_t::access(static_cast<const storage_t&>(args).value);
 }
 
 template <std::size_t I, typename... Args>
 constexpr decltype(auto) get(message_args<Args...>&& args) noexcept
 {
     using storage_t = message_args_storage_t<I, Args...>;
-    return std::move(static_cast<storage_t&>(args).value);
+    return storage_t::access(std::move(static_cast<storage_t&>(args).value));
 }
 
 template <std::size_t I, typename... Args>
 constexpr decltype(auto) get(const message_args<Args...>&& args) noexcept
 {
     using storage_t = message_args_storage_t<I, Args...>;
-    return std::move(static_cast<const storage_t&>(args).value);
+    return storage_t::access(std::move(static_cast<const storage_t&>(args).value));
 }
 
 } // namespace detail
