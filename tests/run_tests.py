@@ -1225,9 +1225,15 @@ class TestRunner:
                 relevant_arches = ['x86'] if is_x86_base else ['x64']
 
             arch_dirs_for_base = self._expand_windows_architecture_dirs(relevant_arches)
-            if arch_dirs_for_base:
-                add_debugger_candidates(windows_kits, arch_dirs=arch_dirs_for_base)
-                search_windows_kits_debuggers(windows_kits, arch_dirs_for_base)
+
+            if preferred_arches:
+                kits_arches = preferred_arches
+            else:
+                kits_arches = ['x64', 'x86']
+            kits_arch_dirs = self._expand_windows_architecture_dirs(kits_arches)
+            if kits_arch_dirs:
+                add_debugger_candidates(windows_kits, arch_dirs=kits_arch_dirs)
+                search_windows_kits_debuggers(windows_kits, kits_arch_dirs)
 
             visual_studio = base_path / 'Microsoft Visual Studio'
             if visual_studio.exists():
