@@ -27,8 +27,11 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+import urllib.error
+import urllib.request
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -74,6 +77,20 @@ TEST_WEIGHT_OVERRIDES = {
     "rpc_append_test_release": 100,
     "spawn_detached_test_release": 30,
 }
+
+WINDOWS_DEBUGGER_CACHE_ENV = 'SINTRA_WINDOWS_DEBUGGER_CACHE'
+WINSDK_INSTALLER_URL_ENV = 'SINTRA_WINSDK_INSTALLER_URL'
+WINSDK_FEATURE_ENV = 'SINTRA_WINSDK_FEATURE'
+WINSDK_DEBUGGER_MSI_ENV = 'SINTRA_WINSDK_DEBUGGER_MSI'
+WINSDK_INSTALLER_URL = os.environ.get(
+    WINSDK_INSTALLER_URL_ENV,
+    'https://download.microsoft.com/download/7/9/6/7962e9ce-cd69-4574-978c-1202654bd729/windowssdk/winsdksetup.exe',
+)
+WINSDK_FEATURE_ID = os.environ.get(WINSDK_FEATURE_ENV, 'OptionId.WindowsDesktopDebuggers')
+WINSDK_DEBUGGER_MSI_NAME = os.environ.get(
+    WINSDK_DEBUGGER_MSI_ENV,
+    'X64 Debuggers And Tools-x64_en-us.msi',
+)
 
 
 def _canonical_test_name(name: str) -> str:
@@ -131,6 +148,7 @@ class TestRunner:
         self.preserve_on_timeout = preserve_on_timeout
         self._ipc_rings_cache: Dict[Path, List[Tuple[str, str]]] = {}
         self._debugger_cache: Dict[str, Tuple[Optional[str], str]] = {}
+        self._downloaded_windows_debugger_root: Optional[Path] = None
 
         # Determine test directory - check both with and without config subdirectory
         test_dir_with_config = build_dir / 'tests' / config
@@ -1008,147 +1026,279 @@ class TestRunner:
         if cache_key in self._debugger_cache:
             return self._debugger_cache[cache_key]
 
+        debugger_root, prepare_error = self._ensure_downloaded_windows_debugger_root()
+        if not debugger_root:
+            error = prepare_error or f"failed to prepare debugger payload for {executable}"
+            result = (None, error)
+            self._debugger_cache[cache_key] = result
+            return result
+
         candidates = [executable]
         if not executable.lower().endswith('.exe'):
             candidates.append(f"{executable}.exe")
 
-        for name in candidates:
-            located = shutil.which(name)
-            if located:
-                result = (located, '')
-                self._debugger_cache[cache_key] = result
-                return result
-
-        known_path = self._locate_windows_debugger_from_known_paths(executable)
-        if known_path:
-            result = (str(known_path), '')
+        located = self._find_downloaded_debugger_executable(debugger_root, candidates)
+        if located:
+            result = (str(located), '')
             self._debugger_cache[cache_key] = result
             return result
 
-        winget_error = ''
-        winget_path = shutil.which('winget')
-        if winget_path:
-            try:
-                install_result = subprocess.run(
-                    [
-                        winget_path,
-                        'install',
-                        '--id',
-                        'Microsoft.WinDbg',
-                        '-e',
-                        '--accept-package-agreements',
-                        '--accept-source-agreements',
-                    ],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    timeout=300,
-                )
-                acceptable_codes = {0, 2316632107}
-                if install_result.returncode not in acceptable_codes:
-                    detail = install_result.stderr.strip() or install_result.stdout.strip()
-                    winget_error = f"winget install returned {install_result.returncode}: {detail}"
-                located_path = None
-                if install_result.returncode in acceptable_codes:
-                    for name in candidates:
-                        located_path = shutil.which(name)
-                        if located_path:
-                            break
-                    if not located_path:
-                        known_path = self._locate_windows_debugger_from_known_paths(executable)
-                        if known_path:
-                            located_path = str(known_path)
-
-                if located_path:
-                    result = (located_path, '')
-                    self._debugger_cache[cache_key] = result
-                    return result
-            except subprocess.SubprocessError as exc:
-                winget_error = f"winget install failed: {exc}"
-            except OSError as exc:
-                winget_error = f"winget invocation error: {exc}"
-        else:
-            winget_error = "'winget' not available"
-
-        error_parts = [f"{executable} not available"]
-        if winget_error:
-            error_parts.append(f"attempted winget install: {winget_error}")
-
-        error = '; '.join(error_parts)
+        error = f"{executable} not found in downloaded debugger cache ({debugger_root})"
         result = (None, error)
         self._debugger_cache[cache_key] = result
         return result
 
-    def _locate_windows_debugger_from_known_paths(self, executable: str) -> Optional[Path]:
-        """Search common installation directories for Windows debuggers."""
+    def _ensure_downloaded_windows_debugger_root(self) -> Tuple[Optional[Path], str]:
+        """Ensure Debugging Tools for Windows are cached and return their root."""
 
-        program_files_variants = [
-            os.environ.get('ProgramFiles'),
-            os.environ.get('ProgramFiles(x86)'),
+        if self._downloaded_windows_debugger_root:
+            return self._downloaded_windows_debugger_root, ''
+
+        cache_dir = self._get_windows_debugger_cache_dir()
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            return None, f"failed to create debugger cache directory {cache_dir}: {exc}"
+
+        install_root = cache_dir / 'winsdk_debuggers'
+        debugger_root = install_root / 'Windows Kits' / '10' / 'Debuggers'
+        sentinel = debugger_root / 'x64' / 'cdb.exe'
+        try:
+            if sentinel.exists():
+                self._downloaded_windows_debugger_root = debugger_root
+                return debugger_root, ''
+        except OSError:
+            pass
+
+        layout_dir = cache_dir / 'winsdk_layout'
+        msi_path = layout_dir / 'Installers' / WINSDK_DEBUGGER_MSI_NAME
+
+        if not msi_path.exists():
+            layout_error = self._ensure_winsdk_layout(layout_dir)
+            if layout_error:
+                return None, layout_error
+            if not msi_path.exists():
+                return None, f"expected debugger MSI {WINSDK_DEBUGGER_MSI_NAME} missing from layout ({layout_dir})"
+
+        extract_error = self._extract_debugger_msi(msi_path, install_root)
+        if extract_error:
+            return None, extract_error
+
+        try:
+            if not sentinel.exists():
+                return None, f"debugger executable not found at {sentinel}"
+        except OSError as exc:
+            return None, f"failed to verify debugger installation at {sentinel}: {exc}"
+
+        self._downloaded_windows_debugger_root = debugger_root
+        return debugger_root, ''
+
+    def _ensure_winsdk_layout(self, layout_dir: Path) -> Optional[str]:
+        """Run winsdksetup.exe to produce an offline layout containing the debugger MSI."""
+
+        installer_path, installer_error = self._ensure_winsdk_installer()
+        if installer_error:
+            return installer_error
+        assert installer_path is not None
+
+        if layout_dir.exists():
+            shutil.rmtree(layout_dir, ignore_errors=True)
+
+        try:
+            layout_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            return f"failed to create layout directory {layout_dir}: {exc}"
+
+        log_path = layout_dir.parent / 'winsdksetup-layout.log'
+        command = [
+            str(installer_path),
+            '/quiet',
+            '/norestart',
+            '/layout',
+            str(layout_dir),
+            '/features',
+            WINSDK_FEATURE_ID,
+            '/log',
+            str(log_path),
         ]
 
-        candidate_roots = []
-        for base in program_files_variants:
-            if not base:
-                continue
-            windows_kits = Path(base) / 'Windows Kits'
-            candidate_roots.append(windows_kits / '10' / 'Debuggers')
-            candidate_roots.append(windows_kits / '10' / 'Debuggers' / 'bin')
+        try:
+            result = subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=3600,
+            )
+        except (subprocess.SubprocessError, OSError) as exc:
+            return f"winsdksetup.exe failed to create layout: {exc}"
 
-            windows_apps = Path(base) / 'WindowsApps'
-            candidate_roots.append(windows_apps)
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip()
+            return (
+                f"winsdksetup.exe layout failed with exit code {result.returncode}: "
+                f"{detail or f'see {log_path} for details'}"
+            )
 
-        suffixes = [
-            Path('x64'),
-            Path('x86'),
-            Path('arm64'),
-            Path('dbg') / 'amd64',
-            Path('dbg') / 'x86',
-            Path(),
-        ]
+        return None
 
-        executable_names = [executable]
-        if not executable.lower().endswith('.exe'):
-            executable_names.append(f"{executable}.exe")
+    def _ensure_winsdk_installer(self) -> Tuple[Optional[Path], Optional[str]]:
+        """Download winsdksetup.exe if needed."""
 
-        for root in candidate_roots:
+        cache_dir = self._get_windows_debugger_cache_dir()
+        installer_path = cache_dir / 'winsdksetup.exe'
+        if installer_path.exists():
+            return installer_path, None
+
+        download_error = self._download_file(WINSDK_INSTALLER_URL, installer_path)
+        if download_error:
+            return None, f"failed to download WinSDK installer: {download_error}"
+
+        return installer_path, None
+
+    def _extract_debugger_msi(self, msi_path: Path, destination: Path) -> Optional[str]:
+        """Extract the Debugging Tools MSI into the destination directory."""
+
+        if destination.exists():
+            shutil.rmtree(destination, ignore_errors=True)
+
+        extract_error = self._extract_msi_package(msi_path, destination)
+        if extract_error:
+            shutil.rmtree(destination, ignore_errors=True)
+            return extract_error
+
+        return None
+
+    def _get_windows_debugger_cache_dir(self) -> Path:
+        """Return the directory that stores downloaded debugger assets."""
+
+        override = os.environ.get(WINDOWS_DEBUGGER_CACHE_ENV)
+        if override:
+            return Path(override)
+
+        local_app_data = os.environ.get('LOCALAPPDATA')
+        if local_app_data:
+            base_dir = Path(local_app_data)
+        else:
+            base_dir = Path.home() / 'AppData' / 'Local'
+
+        return base_dir / 'sintra' / 'debugger_cache'
+
+    def _download_file(self, url: str, destination: Path) -> Optional[str]:
+        """Download a URL to a file atomically."""
+
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            return f"failed to create directory for {destination}: {exc}"
+
+        temp_file = tempfile.NamedTemporaryFile(delete=False, dir=str(destination.parent), suffix='.tmp')
+        temp_path = Path(temp_file.name)
+        try:
+            with urllib.request.urlopen(url) as response:
+                chunk_size = 1024 * 1024
+                while True:
+                    chunk = response.read(chunk_size)
+                    if not chunk:
+                        break
+                    temp_file.write(chunk)
+            temp_file.close()
+            os.replace(temp_path, destination)
+            return None
+        except urllib.error.URLError as exc:
+            temp_file.close()
             try:
-                if not root.exists():
+                temp_path.unlink()
+            except FileNotFoundError:
+                pass
+            return f"failed to download {url}: {exc}"
+        except OSError as exc:
+            temp_file.close()
+            try:
+                temp_path.unlink()
+            except FileNotFoundError:
+                pass
+            return f"failed to write {destination}: {exc}"
+
+    def _extract_msi_package(self, package: Path, destination: Path) -> Optional[str]:
+        """Extract an MSI into the provided destination directory."""
+
+        msiexec = shutil.which('msiexec')
+        if not msiexec:
+            windir = os.environ.get('WINDIR')
+            if windir:
+                candidate = Path(windir) / 'System32' / 'msiexec.exe'
+                if candidate.exists():
+                    msiexec = str(candidate)
+
+        if not msiexec:
+            return "'msiexec' not available to extract debugger package"
+
+        try:
+            destination.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            return f"failed to create extraction directory {destination}: {exc}"
+
+        try:
+            result = subprocess.run(
+                [
+                    msiexec,
+                    '/a',
+                    str(package),
+                    '/qn',
+                    f'TARGETDIR={destination}',
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=900,
+            )
+        except (subprocess.SubprocessError, OSError) as exc:
+            return f"msiexec failed to extract debugger package: {exc}"
+
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip()
+            return f"msiexec exited with {result.returncode}: {detail}"
+
+        return None
+
+    def _find_downloaded_debugger_executable(
+        self,
+        debugger_root: Path,
+        executable_names: List[str],
+    ) -> Optional[Path]:
+        """Search the downloaded debugger payload for a specific executable."""
+
+        candidate_dirs = [
+            debugger_root / 'x64',
+            debugger_root / 'amd64',
+            debugger_root / 'dbg' / 'amd64',
+            debugger_root / 'bin' / 'x64',
+            debugger_root,
+        ]
+
+        for directory in candidate_dirs:
+            try:
+                if not directory.exists():
                     continue
             except OSError:
                 continue
 
-            for suffix in suffixes:
-                directory = root / suffix
+            for name in executable_names:
+                candidate = directory / name
                 try:
-                    if not directory.exists():
-                        continue
+                    if candidate.exists():
+                        return candidate
                 except OSError:
                     continue
 
-                for name in executable_names:
-                    candidate = directory / name
-                    try:
-                        if candidate.exists():
-                            return candidate
-                    except OSError:
-                        continue
-
-                try:
-                    entries = list(directory.iterdir())
-                except OSError:
-                    continue
-
-                for subdir in entries:
-                    if not subdir.is_dir():
-                        continue
-                    for name in executable_names:
-                        candidate = subdir / name
-                        try:
-                            if candidate.exists():
-                                return candidate
-                        except OSError:
-                            continue
+        for name in executable_names:
+            try:
+                matches = list(debugger_root.rglob(name))
+            except OSError:
+                matches = []
+            if matches:
+                return matches[0]
 
         return None
 
