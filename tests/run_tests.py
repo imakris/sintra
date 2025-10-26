@@ -74,6 +74,16 @@ TEST_WEIGHT_OVERRIDES = {
 }
 
 
+WINDOWS_DEBUGGER_PRIORITY: Tuple[Tuple[str, str], ...] = (
+    ("cdb", "cdb"),
+    ("ntsd", "cdb"),
+    ("windbg", "windbg"),
+    ("windbgx", "windbg"),
+)
+
+WINDOWS_DEBUGGER_NAMES = {name: invocation for name, invocation in WINDOWS_DEBUGGER_PRIORITY}
+
+
 def _canonical_test_name(name: str) -> str:
     """Return the canonical identifier used for weight lookups."""
 
@@ -117,6 +127,16 @@ class TestInvocation:
     def command(self) -> List[str]:
         return [str(self.path), *self.args]
 
+
+@dataclass(frozen=True)
+class WindowsDebuggerInfo:
+    """Describes a Windows debugger executable and invocation style."""
+
+    name: str
+    path: str
+    invocation: str
+
+
 class TestRunner:
     """Manages test execution with timeout and repetition"""
 
@@ -128,9 +148,9 @@ class TestRunner:
         self.verbose = verbose
         self.preserve_on_timeout = preserve_on_timeout
         self._ipc_rings_cache: Dict[Path, List[Tuple[str, str]]] = {}
-        self._cdb_search_attempted = False
-        self._cached_cdb_path: Optional[str] = None
-        self._cached_cdb_error: Optional[str] = None
+        self._windows_debugger_search_attempted = False
+        self._cached_windows_debugger: Optional[WindowsDebuggerInfo] = None
+        self._cached_windows_debugger_error: Optional[str] = None
 
         # Determine test directory - check both with and without config subdirectory
         test_dir_with_config = build_dir / 'tests' / config
@@ -848,43 +868,72 @@ class TestRunner:
             '-o', 'quit',
         ]
 
-    def _resolve_cdb_path(self) -> Tuple[Optional[str], str]:
-        """Locate the Windows cdb debugger in common installation paths."""
+    def _resolve_windows_debugger(self) -> Tuple[Optional[WindowsDebuggerInfo], str]:
+        """Locate an available Windows debugger (cdb, ntsd, windbg)."""
 
         if sys.platform != 'win32':
-            return None, 'cdb not available on this platform'
+            return None, 'Windows debuggers not available on this platform'
 
-        if self._cdb_search_attempted:
-            cached_error = self._cached_cdb_error or 'cdb not available'
-            return self._cached_cdb_path, cached_error
+        if self._windows_debugger_search_attempted:
+            cached_error = self._cached_windows_debugger_error or 'Windows debugger not available'
+            return self._cached_windows_debugger, cached_error
 
-        self._cdb_search_attempted = True
+        self._windows_debugger_search_attempted = True
 
-        cdb_path = shutil.which('cdb')
-        if cdb_path:
-            self._cached_cdb_path = cdb_path
-            self._cached_cdb_error = ''
-            return cdb_path, ''
+        for exe_name, invocation in WINDOWS_DEBUGGER_PRIORITY:
+            direct_path = shutil.which(exe_name) or shutil.which(f'{exe_name}.exe')
+            if direct_path:
+                info = WindowsDebuggerInfo(name=exe_name, path=direct_path, invocation=invocation)
+                self._cached_windows_debugger = info
+                self._cached_windows_debugger_error = ''
+                return info, ''
 
+        candidate_paths: Dict[str, List[Path]] = {name: [] for name, _ in WINDOWS_DEBUGGER_PRIORITY}
         searched_locations: List[str] = []
-        candidate_paths: List[Path] = []
-        seen: Set[Path] = set()
+        seen_paths: Set[Path] = set()
+        recorded_locations: Set[str] = set()
 
-        def register_candidate(path: Optional[Path]) -> None:
+        def register_candidate(path: Optional[Path], exe_key: Optional[str] = None) -> None:
             if not path:
                 return
             expanded = Path(str(path)).expanduser()
-            if expanded in seen:
+            if expanded in seen_paths:
                 return
-            seen.add(expanded)
-            candidate_paths.append(expanded)
+            seen_paths.add(expanded)
+
+            location = str(expanded)
+            if location not in recorded_locations:
+                searched_locations.append(location)
+                recorded_locations.add(location)
+
+            if exe_key and exe_key in candidate_paths:
+                candidate_paths[exe_key].append(expanded)
 
         def add_debugger_candidates(root: Optional[Path]) -> None:
             if not root:
                 return
-            register_candidate(root / 'cdb.exe')
-            for arch in ('x64', 'x86', 'arm64', 'amd64'):
-                register_candidate(root / arch / 'cdb.exe')
+
+            queue: List[Tuple[Path, int]] = [(Path(root), 0)]
+            while queue:
+                current, depth = queue.pop(0)
+                for exe_name in WINDOWS_DEBUGGER_NAMES:
+                    register_candidate(current / f'{exe_name}.exe', exe_name)
+                for arch in ('x64', 'x86', 'arm64', 'amd64'):
+                    for exe_name in WINDOWS_DEBUGGER_NAMES:
+                        register_candidate(current / arch / f'{exe_name}.exe', exe_name)
+
+                if depth >= 2:
+                    continue
+
+                try:
+                    for child in current.iterdir():
+                        if not child.is_dir():
+                            continue
+                        queue.append((child, depth + 1))
+                except OSError:
+                    # Ignore directories we cannot enumerate (e.g. permission issues
+                    # on WindowsApps) and continue probing other known locations.
+                    continue
 
         env_roots = [
             os.environ.get('CDB_PATH'),
@@ -899,9 +948,11 @@ class TestRunner:
             if not value:
                 continue
             value_path = Path(value)
-            if value_path.suffix.lower() == '.exe':
-                register_candidate(value_path)
+            exe_key = WINDOWS_DEBUGGER_NAMES.get(value_path.stem.lower())
+            if value_path.suffix.lower() == '.exe' and exe_key:
+                register_candidate(value_path, exe_key)
             else:
+                register_candidate(value_path)
                 add_debugger_candidates(value_path)
                 add_debugger_candidates(value_path / 'Debuggers')
 
@@ -948,25 +999,46 @@ class TestRunner:
                             continue
                         add_debugger_candidates(edition_dir / 'Common7' / 'IDE' / 'Remote Debugger')
 
-        for candidate in candidate_paths:
-            searched_locations.append(str(candidate))
-            try:
-                if candidate.is_file():
-                    self._cached_cdb_path = str(candidate)
-                    self._cached_cdb_error = ''
-                    return self._cached_cdb_path, ''
-            except OSError:
-                continue
+        for exe_name, invocation in WINDOWS_DEBUGGER_PRIORITY:
+            for candidate in candidate_paths.get(exe_name, []):
+                try:
+                    if candidate.is_file():
+                        info = WindowsDebuggerInfo(name=exe_name, path=str(candidate), invocation=invocation)
+                        self._cached_windows_debugger = info
+                        self._cached_windows_debugger_error = ''
+                        return info, ''
+                except OSError:
+                    continue
 
         if searched_locations:
             sample = ', '.join(searched_locations[:3])
             if len(searched_locations) > 3:
                 sample += ', ...'
-            self._cached_cdb_error = f"cdb not available (searched: {sample})"
+            self._cached_windows_debugger_error = f"no Windows debugger available (searched: {sample})"
         else:
-            self._cached_cdb_error = 'cdb not available'
+            self._cached_windows_debugger_error = 'no Windows debugger available'
 
-        return None, self._cached_cdb_error
+        return None, self._cached_windows_debugger_error
+
+    def _build_windows_debugger_command(
+        self,
+        debugger: WindowsDebuggerInfo,
+        mode: str,
+        target: str,
+    ) -> List[str]:
+        """Create the command used to run a Windows debugger."""
+
+        command_sequence = '.symfix; .reload; ~* k; qd'
+
+        if debugger.invocation == 'windbg':
+            base = [debugger.path, '-Q', '-c', command_sequence]
+            if mode == 'attach':
+                return [*base, '-p', target]
+            return [*base, '-z', target]
+
+        if mode == 'attach':
+            return [debugger.path, '-p', target, '-c', command_sequence]
+        return [debugger.path, '-z', target, '-c', command_sequence]
 
     def _capture_windows_crash_dump(
         self,
@@ -976,9 +1048,9 @@ class TestRunner:
     ) -> Tuple[str, str]:
         """Attempt to capture stack traces from recent Windows crash dump files."""
 
-        cdb_path, cdb_error = self._resolve_cdb_path()
-        if not cdb_path:
-            return "", cdb_error
+        debugger, debugger_error = self._resolve_windows_debugger()
+        if not debugger:
+            return "", debugger_error
 
         candidate_dirs = [invocation.path.parent, Path.cwd()]
 
@@ -1038,18 +1110,14 @@ class TestRunner:
         for _, dump_path in candidate_dumps:
             try:
                 result = subprocess.run(
-                    [
-                        cdb_path,
-                        '-z', str(dump_path),
-                        '-c', '.symfix; .reload; ~* k; qd',
-                    ],
+                    self._build_windows_debugger_command(debugger, 'dump', str(dump_path)),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
                     timeout=120,
                 )
             except subprocess.SubprocessError as exc:
-                capture_errors.append(f"{dump_path.name}: cdb failed ({exc})")
+                capture_errors.append(f"{dump_path.name}: {debugger.name} failed ({exc})")
                 continue
 
             output = result.stdout.strip()
@@ -1058,7 +1126,7 @@ class TestRunner:
 
             if result.returncode != 0:
                 capture_errors.append(
-                    f"{dump_path.name}: cdb exited with code {result.returncode}: {result.stderr.strip()}"
+                    f"{dump_path.name}: {debugger.name} exited with code {result.returncode}: {result.stderr.strip()}"
                 )
                 continue
 
@@ -1075,11 +1143,11 @@ class TestRunner:
         return "", "no usable crash dump found"
 
     def _capture_process_stacks_windows(self, pid: int) -> Tuple[str, str]:
-        """Capture stack traces for a process tree on Windows using cdb."""
+        """Capture stack traces for a process tree on Windows using an installed debugger."""
 
-        cdb_path, cdb_error = self._resolve_cdb_path()
-        if not cdb_path:
-            return "", cdb_error
+        debugger, debugger_error = self._resolve_windows_debugger()
+        if not debugger:
+            return "", debugger_error
 
         target_pids = self._collect_windows_process_tree_pids(pid)
         target_pids.append(pid)
@@ -1090,20 +1158,16 @@ class TestRunner:
         for target_pid in sorted(set(target_pids)):
             try:
                 result = subprocess.run(
-                    [
-                        cdb_path,
-                        '-p', str(target_pid),
-                        '-c', '.symfix; .reload; ~* k; qd',
-                    ],
+                    self._build_windows_debugger_command(debugger, 'attach', str(target_pid)),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
                     timeout=60,
                 )
             except FileNotFoundError:
-                return "", cdb_error or "cdb not available"
+                return "", debugger_error or "Windows debugger not available"
             except subprocess.SubprocessError as exc:
-                capture_errors.append(f"PID {target_pid}: cdb failed ({exc})")
+                capture_errors.append(f"PID {target_pid}: {debugger.name} failed ({exc})")
                 continue
 
             output = result.stdout.strip()
@@ -1112,7 +1176,7 @@ class TestRunner:
 
             if result.returncode != 0:
                 capture_errors.append(
-                    f"PID {target_pid}: cdb exited with code {result.returncode}: {result.stderr.strip()}"
+                    f"PID {target_pid}: {debugger.name} exited with code {result.returncode}: {result.stderr.strip()}"
                 )
                 continue
 

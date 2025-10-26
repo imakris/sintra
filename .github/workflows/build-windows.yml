@@ -24,9 +24,21 @@ jobs:
           }
           Add-Content -Path $env:GITHUB_PATH -Value $debugTools
 
-      - name: Verify cdb
+      - name: Verify Windows debugger availability
         shell: pwsh
-        run: where cdb
+        run: |
+          $debuggers = @('cdb', 'ntsd', 'windbg', 'windbgx')
+          $found = @()
+          foreach ($dbg in $debuggers) {
+            $command = Get-Command $dbg -ErrorAction SilentlyContinue
+            if ($command) {
+              $found += $command.Source
+            }
+          }
+          if (-not $found) {
+            throw "No Windows debuggers (cdb, ntsd, windbg, windbgx) found in PATH."
+          }
+          "Available debuggers:`n$($found -join "`n")"
 
       - name: Configure CMake
         run: cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
