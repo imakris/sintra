@@ -19,6 +19,9 @@
 #include <chrono>
 #include <condition_variable>
 #include <csignal>
+#ifndef _WIN32
+#include <sys/types.h>
+#endif
 #include <deque>
 #include <float.h>
 #include <list>
@@ -30,6 +33,7 @@
 #include <string>
 #include <thread>
 #include <type_traits>
+#include <vector>
 
 #include <boost/interprocess/detail/os_thread_functions.hpp>
 
@@ -314,6 +318,11 @@ struct Managed_process: Derived_transceiver<Managed_process>
         instance_id_type                piid;
         uint32_t                        occurrence = 0;
     };
+
+#ifndef _WIN32
+    std::vector<pid_t>                  m_spawned_child_pids;
+    mutable std::mutex                  m_spawned_child_pids_mutex;
+#endif
 
 
     bool spawn_swarm_process( const Spawn_swarm_process_args& ssp_args );

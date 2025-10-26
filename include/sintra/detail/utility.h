@@ -322,7 +322,7 @@ inline detail::read_fn set_read_override(detail::read_fn fn)
 #endif // !_WIN32
 
 inline
-bool spawn_detached(const char* prog, const char * const*argv)
+bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_out = nullptr)
 {
 
 #ifdef _WIN32
@@ -345,7 +345,11 @@ bool spawn_detached(const char* prog, const char * const*argv)
             argv_with_prog[i+1] = argv[i];
         }
         argv_with_prog[argv_size+1] = nullptr;
-        auto ret = _spawnv(P_DETACH, full_path, argv_with_prog) != -1;
+        auto spawned = _spawnv(P_DETACH, full_path, argv_with_prog);
+        if (child_pid_out) {
+            *child_pid_out = static_cast<int>(spawned);
+        }
+        auto ret = spawned != -1;
         delete [] argv_with_prog;
         return ret;
     }
@@ -371,96 +375,155 @@ bool spawn_detached(const char* prog, const char * const*argv)
         signal_ignored.sa_handler = SIG_IGN;\
         ::sigaction(SIGPIPE, &signal_ignored, 0);
 
-    int rv = -1;
-    pid_t child_pid = fork();
-    if (child_pid == 0) {
+    if (prog == nullptr || argv == nullptr) {
+        return false;
+    }
 
-        IGNORE_SIGPIPE
-        ::setsid();
+    int ready_pipe[2] = {-1, -1};
+    if (detail::call_pipe2(ready_pipe, O_CLOEXEC) == -1) {
+        return false;
+    }
 
-        int ready_pipe[2] = {-1, -1};
-        if (detail::call_pipe2(ready_pipe, O_CLOEXEC) == -1) {
-            ::_exit(EXIT_FAILURE);
-        }
-
-        pid_t grandchild_pid = fork();
-
-        if (grandchild_pid == 0) {
-            IGNORE_SIGPIPE
-            if (ready_pipe[0] >= 0) {
-                close(ready_pipe[0]);
-            }
-
-            // copy argv, to be no longer dependent on pages that have not been copied yet
-            auto prog_copy = strdup(prog);
-            int argc = 0;
-            while (argv[argc]) { argc++; }
-            auto argv_copy = new char* [argc+1]; // +1 for null terminator
-            argv_copy[argc] = nullptr;
-            for (int i = 0; i < argc; i++) {
-                argv_copy[i] = strdup(argv[i]);
-            }
-
-            // allow the parent (child) process to exit. The write is retried on EINTR
-            // so the parent only proceeds once the grandchild is ready to exec.
-            int status = 0;
-            if (!detail::write_fully(ready_pipe[1], &status, sizeof(int))) {
-                if (ready_pipe[1] >= 0) {
-                    close(ready_pipe[1]);
-                }
-                ::_exit(EXIT_FAILURE);
-            }
-
-            // proceed with the new program
-            ::execv(prog_copy, (char* const*)argv_copy);
-
-            free(prog_copy);
-            for (int i = 0; i < argc; i++) {
-                free(argv_copy[i]);
-            }
-            delete[] argv_copy;
-
-            // execv failed; propagate the failure back to the parent process via the pipe.
-            status = -1;
-            detail::write_fully(ready_pipe[1], &status, sizeof(int));   // best effort
-            if (ready_pipe[1] >= 0) {
-                close(ready_pipe[1]);
-            }
-            ::_exit(1);
-        }
-        else
-        if (grandchild_pid == -1) {
-            // second fork failed
-            IGNORE_SIGPIPE
-            rv = -1;
+    pid_t child_pid = ::fork();
+    if (child_pid == -1) {
+        if (ready_pipe[0] >= 0) {
+            close(ready_pipe[0]);
         }
         if (ready_pipe[1] >= 0) {
             close(ready_pipe[1]);
         }
+        return false;
+    }
+
+    if (child_pid == 0) {
+        IGNORE_SIGPIPE
+
         if (ready_pipe[0] >= 0) {
-            if (!detail::read_fully(ready_pipe[0], &rv, sizeof(int))) {
-                rv = -1;
-            }
             close(ready_pipe[0]);
         }
-        ::_exit(rv == 0 ? EXIT_SUCCESS : EXIT_FAILURE);
+
+        // Ensure the status pipe closes on exec so the parent observes EOF
+        int flags = fcntl(ready_pipe[1], F_GETFD);
+        if (flags != -1) {
+            fcntl(ready_pipe[1], F_SETFD, flags | FD_CLOEXEC);
+        }
+
+        ::setsid();
+
+        // Copy argv so the child no longer depends on copy-on-write pages
+        auto prog_copy = strdup(prog);
+        int argc = 0;
+        while (argv[argc]) { ++argc; }
+        auto argv_copy = new char*[argc + 1];
+        argv_copy[argc] = nullptr;
+        for (int i = 0; i < argc; ++i) {
+            argv_copy[i] = strdup(argv[i]);
+        }
+
+        int ready_status = 0;
+        if (!detail::write_fully(ready_pipe[1], &ready_status, sizeof(ready_status))) {
+            if (ready_pipe[1] >= 0) {
+                close(ready_pipe[1]);
+            }
+            ::_exit(EXIT_FAILURE);
+        }
+
+        ::execv(prog_copy, (char* const*)argv_copy);
+
+        int exec_errno = errno;
+
+        if (prog_copy) {
+            free(prog_copy);
+        }
+        for (int i = 0; i < argc; ++i) {
+            if (argv_copy[i]) {
+                free(argv_copy[i]);
+            }
+        }
+        delete[] argv_copy;
+
+        detail::write_fully(ready_pipe[1], &exec_errno, sizeof(exec_errno));
+        if (ready_pipe[1] >= 0) {
+            close(ready_pipe[1]);
+        }
+        ::_exit(EXIT_FAILURE);
     }
 
-    if (child_pid == -1) {
-        // first fork failed
+    if (ready_pipe[1] >= 0) {
+        close(ready_pipe[1]);
+    }
+
+    int exec_errno = 0;
+    bool read_success = false;
+    int handshake_value = -1;
+    size_t total_read = 0;
+    while (total_read < sizeof(handshake_value)) {
+        ssize_t rv = detail::call_read(ready_pipe[0], reinterpret_cast<char*>(&handshake_value) + total_read, sizeof(handshake_value) - total_read);
+        if (rv < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            exec_errno = errno;
+            break;
+        }
+        if (rv == 0) {
+            exec_errno = EPIPE;
+            break;
+        }
+        total_read += static_cast<size_t>(rv);
+    }
+
+    if (total_read == sizeof(handshake_value) && handshake_value == 0) {
+        read_success = true;
+    }
+    else if (total_read == sizeof(handshake_value) && handshake_value != 0) {
+        exec_errno = handshake_value > 0 ? handshake_value : -handshake_value;
+        read_success = false;
+    }
+
+    if (ready_pipe[0] >= 0) {
+        close(ready_pipe[0]);
+    }
+
+    if (!read_success) {
+        int status = 0;
+        while (::waitpid(child_pid, &status, 0) == -1) {
+            if (errno != EINTR) {
+                break;
+            }
+        }
+        errno = exec_errno ? exec_errno : errno;
         return false;
     }
 
-    int status = 0;
-    if (::waitpid(child_pid, &status, 0) == -1) {
+#ifndef _WIN32
+    int wait_status = 0;
+    pid_t wait_result = 0;
+    do {
+        wait_result = ::waitpid(child_pid, &wait_status, WNOHANG);
+    } while (wait_result == -1 && errno == EINTR);
+
+    if (wait_result == child_pid) {
+        if (!(WIFEXITED(wait_status) && WEXITSTATUS(wait_status) == 0)) {
+            errno = exec_errno ? exec_errno : ECHILD;
+            return false;
+        }
+        if (child_pid_out) {
+            *child_pid_out = -1;
+        }
+        return true;
+    }
+
+    if (wait_result == -1) {
         return false;
     }
+#endif
 
-    if (WIFEXITED(status)) {
-        return WEXITSTATUS(status) == 0;
+    if (child_pid_out) {
+        *child_pid_out = static_cast<int>(child_pid);
     }
 
-    return false;
+    return true;
 
     #undef IGNORE_SIGPIPE
 
