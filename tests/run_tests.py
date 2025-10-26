@@ -1138,7 +1138,8 @@ class TestRunner:
         if {'x64', 'arm64'} & normalized_arch_set:
             add_program_dir('ProgramFiles')
             add_program_dir('ProgramW6432')
-        if 'x86' in normalized_arch_set:
+
+        if normalized_arch_set & {'x86', 'x64', 'arm64'}:
             add_program_dir('ProgramFiles(x86)')
 
         if not program_dirs:
