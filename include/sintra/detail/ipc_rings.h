@@ -126,6 +126,7 @@
 #include <string>
 #include <system_error>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -620,40 +621,120 @@ public:
 };
 
 // A binary semaphore tailored for the ring's reader wakeup policy.
-struct sintra_ring_semaphore : detail::interprocess_semaphore
+struct sintra_ring_semaphore
 {
-    sintra_ring_semaphore() : detail::interprocess_semaphore(0) {}
+    sintra_ring_semaphore() = default;
+
+    ~sintra_ring_semaphore()
+    {
+        destroy();
+    }
 
     // Wakes all readers in an ordered fashion (used by writer after publishing).
     void post_ordered()
     {
+        auto* sem = ensure();
         if (unordered.load(std::memory_order_acquire)) {
             unordered.store(false, std::memory_order_release);
         }
         else if (!posted.test_and_set(std::memory_order_acquire)) {
-            this->post();
+            sem->post();
         }
     }
 
     // Wakes a single reader in an unordered fashion (used by local unblocks).
     void post_unordered()
     {
+        auto* sem = ensure();
         if (!posted.test_and_set(std::memory_order_acquire)) {
             unordered.store(true, std::memory_order_release);
-            this->post();
+            sem->post();
         }
     }
 
     // Wait returns true if the wakeup was unordered and no ordered post happened since.
     bool wait()
     {
-        detail::interprocess_semaphore::wait();
+        auto* sem = ensure();
+        sem->wait();
         posted.clear(std::memory_order_release);
         return unordered.exchange(false, std::memory_order_acq_rel);
     }
+
+    void release_local_handle() noexcept
+    {
+        if (auto* sem = try_get()) {
+            sem->release_local_handle();
+        }
+    }
+
 private:
-    std::atomic_flag posted = ATOMIC_FLAG_INIT;
-    std::atomic<bool> unordered{false};
+    enum class state : uint8_t { uninitialized = 0, initializing = 1, initialized = 2 };
+
+    detail::interprocess_semaphore* get() noexcept
+    {
+        return reinterpret_cast<detail::interprocess_semaphore*>(&m_storage);
+    }
+
+    detail::interprocess_semaphore* try_get() noexcept
+    {
+        if (m_state.load(std::memory_order_acquire) == static_cast<uint8_t>(state::initialized)) {
+            return get();
+        }
+        return nullptr;
+    }
+
+    detail::interprocess_semaphore* ensure()
+    {
+        auto current = m_state.load(std::memory_order_acquire);
+        if (current == static_cast<uint8_t>(state::initialized)) {
+            return get();
+        }
+
+        if (current == static_cast<uint8_t>(state::uninitialized)) {
+            uint8_t expected = static_cast<uint8_t>(state::uninitialized);
+            if (m_state.compare_exchange_strong(expected,
+                                                static_cast<uint8_t>(state::initializing),
+                                                std::memory_order_acq_rel,
+                                                std::memory_order_acquire))
+            {
+                new (get()) detail::interprocess_semaphore(0);
+                m_state.store(static_cast<uint8_t>(state::initialized), std::memory_order_release);
+                return get();
+            }
+            current = expected;
+        }
+
+        while (m_state.load(std::memory_order_acquire) != static_cast<uint8_t>(state::initialized)) {
+            SINTRA_DELAY_FUZZ("ipc_rings.semaphore_init");
+        }
+
+        return get();
+    }
+
+    void destroy() noexcept
+    {
+        auto current = m_state.load(std::memory_order_acquire);
+        while (current == static_cast<uint8_t>(state::initialized)) {
+            if (m_state.compare_exchange_strong(current,
+                                                static_cast<uint8_t>(state::initializing),
+                                                std::memory_order_acq_rel,
+                                                std::memory_order_acquire))
+            {
+                get()->~interprocess_semaphore();
+                m_state.store(static_cast<uint8_t>(state::uninitialized), std::memory_order_release);
+                return;
+            }
+        }
+    }
+
+    using storage_t = std::aligned_storage_t<sizeof(detail::interprocess_semaphore),
+                                             alignof(detail::interprocess_semaphore)>;
+
+    storage_t             m_storage{};
+    std::atomic<uint8_t>  m_state{static_cast<uint8_t>(state::uninitialized)};
+    std::atomic_flag      posted = ATOMIC_FLAG_INIT;
+    std::atomic<bool>     unordered{false};
 };
 
 
