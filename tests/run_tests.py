@@ -35,7 +35,7 @@ import urllib.request
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, IO, List, Optional, Set, Tuple
 
 class Color:
     """ANSI color codes for terminal output"""
@@ -396,7 +396,33 @@ class TestRunner:
             capture_lock = threading.Lock()
             capture_pause_total = 0.0
             capture_active_start: Optional[float] = None
-            threads: List[threading.Thread] = []
+            threads: List[Tuple[threading.Thread, IO[str]]] = []
+
+            def shutdown_reader_threads() -> None:
+                """Ensure log reader threads terminate to avoid leaking resources."""
+                join_step = 0.2
+                max_join_time = 5.0
+
+                for thread, stream in threads:
+                    join_deadline = time.monotonic() + max_join_time
+                    while thread.is_alive():
+                        remaining = join_deadline - time.monotonic()
+                        if remaining <= 0:
+                            break
+                        thread.join(timeout=min(join_step, remaining))
+
+                    if thread.is_alive():
+                        try:
+                            stream.close()
+                        except Exception:
+                            pass
+                        thread.join(timeout=join_step)
+
+                    if thread.is_alive():
+                        print(
+                            f"\n{Color.YELLOW}Warning: Log reader thread did not terminate cleanly; "
+                            "closing descriptors to avoid resource leak.{Color.RESET}"
+                        )
 
             process = subprocess.Popen(invocation.command(), **popen_kwargs)
 
@@ -440,6 +466,12 @@ class TestRunner:
                     for line in iter(stream.readline, ''):
                         buffer.append(line)
                         attempt_live_capture(line)
+                except (OSError, ValueError):
+                    # The stream may be closed from another thread during shutdown.
+                    pass
+                except Exception:
+                    # Swallow unexpected reader errors so they don't crash the runner.
+                    pass
                 finally:
                     try:
                         stream.close()
@@ -453,7 +485,7 @@ class TestRunner:
                     daemon=True,
                 )
                 stdout_thread.start()
-                threads.append(stdout_thread)
+                threads.append((stdout_thread, process.stdout))
 
             if process.stderr:
                 stderr_thread = threading.Thread(
@@ -462,7 +494,7 @@ class TestRunner:
                     daemon=True,
                 )
                 stderr_thread.start()
-                threads.append(stderr_thread)
+                threads.append((stderr_thread, process.stderr))
 
             # Wait with timeout, extending the deadline for live stack captures
             try:
@@ -493,8 +525,7 @@ class TestRunner:
                 process.wait()
                 duration = time.time() - start_time
 
-                for thread in threads:
-                    thread.join(timeout=1)
+                shutdown_reader_threads()
 
                 stdout = ''.join(stdout_lines)
                 stderr = ''.join(stderr_lines)
@@ -589,8 +620,7 @@ class TestRunner:
                 except Exception:
                     pass
 
-                for thread in threads:
-                    thread.join(timeout=1)
+                shutdown_reader_threads()
 
                 stdout = ''.join(stdout_lines)
                 stderr = ''.join(stderr_lines)
@@ -610,11 +640,7 @@ class TestRunner:
         except Exception as e:
             if process:
                 self._kill_process_tree(process.pid)
-            for thread in threads:
-                try:
-                    thread.join(timeout=1)
-                except Exception:
-                    pass
+            shutdown_reader_threads()
             stdout = ''.join(stdout_lines) if stdout_lines else ""
             stderr = ''.join(stderr_lines) if stderr_lines else ""
             error_msg = f"Exception: {str(e)}"
