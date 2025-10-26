@@ -23,6 +23,24 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
 
+      - name: Verify LLDB availability
+        run: |
+          if ! xcrun -f lldb >/dev/null 2>&1; then
+            echo "::error::lldb not available via xcrun. Install Xcode Command Line Tools to provide LLDB." >&2
+            exit 1
+          fi
+          xcrun lldb --version
+
+      - name: Enable debugger attachments and core dumps
+        shell: bash
+        run: |
+          sudo /usr/sbin/DevToolsSecurity -enable
+          sudo dscl . append /Groups/_developer GroupMembership "$(whoami)" || true
+          sudo mkdir -p /cores
+          sudo chmod 1777 /cores
+          sudo launchctl limit core unlimited unlimited
+          sudo sysctl kern.corefile=core.%P || true
+
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
@@ -47,5 +65,6 @@ jobs:
       - name: Run stress tests with run_tests.py
         shell: bash
         run: |
+          ulimit -c unlimited
           cd tests
           python run_tests.py --repetitions 10 --timeout 30 --build-dir ../build --config Release
