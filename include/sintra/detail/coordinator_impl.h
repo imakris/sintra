@@ -5,6 +5,7 @@
 
 #include "coordinator.h"
 #include "managed_process.h"
+#include "type_utils.h"
 
 #include <cassert>
 #include <functional>
@@ -223,8 +224,17 @@ Coordinator::~Coordinator()
 
 // EXPORTED FOR RPC
 inline
-type_id_type Coordinator::resolve_type(const string& pretty_name)
+type_id_type Coordinator::resolve_type(const string& abi_descriptor, const string& pretty_name)
 {
+    const std::string& local_abi = detail::current_abi_descriptor();
+    if (abi_descriptor != local_abi) {
+        throw std::runtime_error(
+            "sintra ABI mismatch: this process was built with '" + local_abi +
+            "' but received a request from '" + abi_descriptor +
+            "'. Cross-ABI communication is not supported. Rebuild all communicating binaries with the same compiler, standard library, and target architecture."
+        );
+    }
+
     lock_guard<mutex> lock(m_type_resolution_mutex);
     auto it = s_mproc->m_type_id_of_type_name.find(pretty_name);
     if (it != s_mproc->m_type_id_of_type_name.end()) {

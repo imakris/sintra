@@ -436,8 +436,13 @@ inline instance_id_type make_instance_id() {
 using type_id_type = uint64_t;
 
 // Resolved at runtime via coordinator
-type_id_type resolve_type(const string& pretty_name);
+type_id_type resolve_type(const string& abi_descriptor, const string& pretty_name);
 ```
+
+The `abi_descriptor` argument encodes compiler, standard library, platform, and
+architecture details. The coordinator rejects type resolution requests when the
+descriptor does not match the local build, preventing binaries produced with
+different ABIs from communicating inadvertently.
 
 ### Deferred Functions (Barriers)
 

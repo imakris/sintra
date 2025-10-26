@@ -132,7 +132,7 @@ Processing fences are safe to call from any thread, including handlers themselve
 1. Add the `include/` directory to your project's include path.
 2. Ensure that a C++17 compliant compiler is used (GCC, Clang, or MSVC are supported).
 3. Sintra vendors the required Boost headers under `third_party/boost`,
-   including `interprocess`, `type_index`, and `fusion`, so no additional
+   including `interprocess` and `fusion`, so no additional
    dependency setup is needed when using the repository as-is.
 4. Explore the `example/` directory to see how to set up signal buses, channels, and
    remote call endpoints.

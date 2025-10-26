@@ -5,6 +5,7 @@
 
 #include "deterministic_delay.h"
 #include "utility.h"
+#include "type_utils.h"
 
 #include <array>
 #include <atomic>
@@ -28,8 +29,6 @@
 #include <time.h>
 #include <unistd.h>
 #endif
-
-#include <boost/type_index/ctti_type_index.hpp>
 
 namespace sintra {
 
@@ -414,7 +413,7 @@ void install_signal_handler()
 template <typename T>
 sintra::type_id_type get_type_id()
 {
-    const std::string pretty_name = boost::typeindex::ctti_type_index::template type_id<T>().pretty_name();
+    const std::string pretty_name = detail::type_pretty_name<T>();
     auto it = s_mproc->m_type_id_of_type_name.find(pretty_name);
     if (it != s_mproc->m_type_id_of_type_name.end()) {
         return it->second;
@@ -423,7 +422,11 @@ sintra::type_id_type get_type_id()
     // Caution the Coordinator call will refer to the map that is being assigned,
     // if the Coordinator is local. Do not be tempted to simplify the temporary,
     // because depending on the order of evaluation, it may or it may not work.
-    auto tid = Coordinator::rpc_resolve_type(s_coord_id, pretty_name);
+    auto tid = Coordinator::rpc_resolve_type(
+        s_coord_id,
+        detail::current_abi_descriptor(),
+        pretty_name
+    );
 
     // if it is not invalid, cache it
     if (tid != invalid_type_id) {

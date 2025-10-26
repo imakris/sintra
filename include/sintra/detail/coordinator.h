@@ -121,7 +121,7 @@ private:
     ~Coordinator();
 
     // EXPORTED FOR RPC
-    type_id_type resolve_type(const string& pretty_name);
+    type_id_type resolve_type(const string& abi_descriptor, const string& pretty_name);
     instance_id_type resolve_instance(const string& assigned_name);
 
     instance_id_type wait_for_instance(const string& assigned_name);

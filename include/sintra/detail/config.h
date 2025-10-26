@@ -5,6 +5,8 @@
 
 #include <cstddef>
 
+#include "rtti_check.h"
+
 // Ring reading policy
 // ===================
 

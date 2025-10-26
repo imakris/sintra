@@ -63,6 +63,13 @@ if(WIN32)
     target_link_libraries(sintra INTERFACE winmm)
 endif()
 
+# Enforce RTTI for all consumers of the interface library.
+if(MSVC)
+    target_compile_options(sintra INTERFACE /GR)
+else()
+    target_compile_options(sintra INTERFACE -frtti)
+endif()
+
 # Apply debug-friendly flags only when building Debug configurations
 if(MSVC)
     target_compile_options(sintra INTERFACE
