@@ -772,6 +772,8 @@ class TestRunner:
                 except (ProcessLookupError, PermissionError):
                     continue
 
+        debugger_env = self._build_debugger_environment(debugger_name)
+
         for target_pid in sorted(target_pids):
             if target_pid == os.getpid():
                 continue
@@ -786,6 +788,7 @@ class TestRunner:
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
+                    env=debugger_env,
                     timeout=30,
                 )
             except subprocess.SubprocessError as exc:
@@ -894,6 +897,8 @@ class TestRunner:
         stack_outputs: List[str] = []
         capture_errors: List[str] = []
 
+        debugger_env = self._build_debugger_environment(debugger_name)
+
         for _, core_path in candidate_cores:
             try:
                 result = subprocess.run(
@@ -906,6 +911,7 @@ class TestRunner:
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
+                    env=debugger_env,
                     timeout=60,
                 )
             except subprocess.SubprocessError as exc:
@@ -970,6 +976,7 @@ class TestRunner:
                 '--batch',
                 '-p', str(pid),
                 '-ex', 'set pagination off',
+                '-ex', 'set confirm off',
                 '-ex', 'thread apply all bt',
                 '-ex', 'detach',
             ]
@@ -998,6 +1005,7 @@ class TestRunner:
                 *debugger_command,
                 '--batch',
                 '-ex', 'set pagination off',
+                '-ex', 'set confirm off',
                 '-ex', 'thread apply all bt',
                 str(invocation.path),
                 str(core_path),
@@ -1015,6 +1023,21 @@ class TestRunner:
             '-o', 'thread backtrace all',
             '-o', 'quit',
         ]
+
+    def _build_debugger_environment(self, debugger_name: str) -> Dict[str, str]:
+        """Return the environment to use when spawning debugger processes."""
+
+        env = os.environ.copy()
+
+        if debugger_name == 'gdb':
+            # Prevent gdb from spending minutes attempting to download debug
+            # information via debuginfod when attaching to many processes.
+            # A blank value disables remote lookups while still allowing users
+            # to override the behaviour by explicitly setting the variable.
+            env.setdefault('DEBUGINFOD_URLS', '')
+            env.setdefault('DEBUGINFOD_PROGRESS', '0')
+
+        return env
 
     def _locate_windows_debugger(self, executable: str) -> Tuple[Optional[str], str]:
         """Locate or install the requested Windows debugger executable."""
