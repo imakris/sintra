@@ -762,13 +762,11 @@ class TestRunner:
         except ImportError:
             signal = None
 
+        debugger_is_macos_lldb = debugger_name == 'lldb' and sys.platform == 'darwin'
         # Pausing processes helps capture coherent stacks, but LLDB on macOS fails
         # to attach to tasks that are already SIGSTOPed. Skip the pause in that case
         # and let LLDB suspend threads itself.
-        should_pause = (
-            signal is not None
-            and not (debugger_name == 'lldb' and sys.platform == 'darwin')
-        )
+        should_pause = signal is not None and not debugger_is_macos_lldb
 
         if should_pause:
             for target_pid in sorted(target_pids):
@@ -780,14 +778,21 @@ class TestRunner:
                 except (ProcessLookupError, PermissionError):
                     continue
 
-        # LLDB on macOS can take noticeably longer to materialize stack traces, but
-        # other platforms (and gdb) stay fast; keep the longer timeout mac-only so
-        # Linux runs don't stall when falling back to LLDB.
-        debugger_timeout = 90 if debugger_name == 'lldb' and sys.platform == 'darwin' else 30
+        per_pid_timeout = 30
+        total_budget = 90 if debugger_is_macos_lldb else per_pid_timeout
+        capture_deadline = time.monotonic() + total_budget
 
         for target_pid in sorted(target_pids):
             if target_pid == os.getpid():
                 continue
+
+            remaining = capture_deadline - time.monotonic()
+            if remaining <= 0:
+                capture_errors.append(
+                    f"PID {target_pid}: skipped stack capture (overall debugger timeout exceeded)"
+                )
+                break
+            debugger_timeout = max(5, min(per_pid_timeout, remaining))
 
             try:
                 result = subprocess.run(
