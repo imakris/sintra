@@ -32,7 +32,7 @@ template <
         message_args_size<TVector>::value == sizeof...(Args)
     >
 >
-auto call_function_with_fusion_vector_args_sfb(
+auto call_function_with_message_args_sfb(
     const TFunction& f, const TVector&,
     const Args&... args) -> decltype(f(args...))
 {
@@ -48,12 +48,12 @@ template <
         message_args_size<TVector>::value != sizeof...(Args)
     >
 >
-auto call_function_with_fusion_vector_args_sfb(
+auto call_function_with_message_args_sfb(
     const TFunction& f,
     const TVector& t,
     const Args&... args)
 {
-    return call_function_with_fusion_vector_args_sfb(
+    return call_function_with_message_args_sfb(
         f, t, args..., get< sizeof...(Args) >(t));
 }
 
@@ -65,14 +65,14 @@ template <
         message_args_size<TVector>::value != 0
     >
 >
-auto call_function_with_fusion_vector_args(const TFunction& f, const TVector& t)
+auto call_function_with_message_args(const TFunction& f, const TVector& t)
 {
     // TODO: implement a static assertion for the statement that follows, to provide the message
     // in the compiler output.
 
     // if the compiler complains here, make sure that the function you are trying to call has
     // no non-const references
-    return call_function_with_fusion_vector_args_sfb(f, t, get<0>(t));
+    return call_function_with_message_args_sfb(f, t, get<0>(t));
 }
 
 
@@ -83,7 +83,7 @@ template <
         message_args_size<TVector>::value == 0
     >
 >
-auto call_function_with_fusion_vector_args(const TFunction& f, const TVector&) -> decltype(f())
+auto call_function_with_message_args(const TFunction& f, const TVector&) -> decltype(f())
 {
     // the function is called without arguments
     return f();
@@ -117,7 +117,7 @@ template <
         message_args_size<TVector>::value == sizeof...(Args)
     >
 >
-auto call_function_with_fusion_vector_args_mfb(
+auto call_function_with_message_args_mfb(
     TObj& obj,
     const TFunction& f,
     const TVector& /* t */,
@@ -136,13 +136,13 @@ template <
         message_args_size<TVector>::value != sizeof...(Args)
     >
 >
-auto call_function_with_fusion_vector_args_mfb(
+auto call_function_with_message_args_mfb(
     TObj& obj,
     const TFunction& f,
     const TVector& t,
     const Args&... args)
 {
-    return call_function_with_fusion_vector_args_mfb(
+    return call_function_with_message_args_mfb(
         obj, f, t, args..., get< sizeof...(Args) >(t));
 }
 
@@ -155,7 +155,7 @@ template <
         message_args_size<TVector>::value != 0
     >
 >
-auto call_function_with_fusion_vector_args(TObj& obj, const TFunction& f, const TVector& t)
+auto call_function_with_message_args(TObj& obj, const TFunction& f, const TVector& t)
 {
     // TODO: implement a static assertion for the statement that follows, to provide the message
     // in the compiler output.
@@ -163,7 +163,7 @@ auto call_function_with_fusion_vector_args(TObj& obj, const TFunction& f, const 
     // if the compiler complains here, make sure that none of the function arguments is either
     // - a non-const reference
     // - a non-POD and non STL container object
-    return call_function_with_fusion_vector_args_mfb(obj, f, t, get<0>(t));
+    return call_function_with_message_args_mfb(obj, f, t, get<0>(t));
 }
 
 
@@ -175,7 +175,7 @@ template <
         message_args_size<TVector>::value == 0
     >
 >
-auto call_function_with_fusion_vector_args(
+auto call_function_with_message_args(
     TObj& obj,
     TFunction f,
     const TVector&) -> decltype((obj.*f)())
@@ -196,82 +196,5 @@ auto call_function_with_fusion_vector_args(
 
 } // namespace sintra;
 
-
-
-/*
-
-// This is a test
-
-#include <iostream>
-#include <boost/fusion/include/make_vector.hpp>
-
-
-using namespace sintra;
-
-
-int func0()
-{
-    std::cout << "func0" << '\n';
-    return 5;
-}
-
-
-void func1(int a)
-{
-    std::cout << a << '\n';
-}
-
-
-float func2(int a, float b)
-{
-    std::cout << a << ' ' << b << '\n';
-    return 0.2f;
-}
-
-struct B
-{
-    int mfunc0()
-    {
-        std::cout << "mfunc0" << '\n';
-        return 5;
-    }
-
-    void mfunc1(int a)
-    {
-        std::cout << a << '\n';
-    }
-
-    float mfunc2(int a, float b)
-    {
-        std::cout << a << ' ' << b << '\n';
-        return 0.2f;
-    }
-};
-
-
-
-int main(void)
-{
-    boost::fusion::vector<> t0 = boost::fusion::make_vector();
-    boost::fusion::vector<int> t1 = boost::fusion::make_vector(1);
-    boost::fusion::vector<int, float> t2 = boost::fusion::make_vector(1, 1.5f);
-
-    auto rv0 = call_function_with_fusion_vector_args(func0, t0);
-    call_function_with_fusion_vector_args(func1, t1);
-    auto rv2 = call_function_with_fusion_vector_args(func2, t2);
-
-    std::cout << rv0 << ' ' << rv2 << '\n';
-
-    B b;
-    auto rv00 = call_function_with_fusion_vector_args(b, &B::mfunc0, t0);
-    call_function_with_fusion_vector_args(b, &B::mfunc1, t1);
-    auto rv22 = call_function_with_fusion_vector_args(b, &B::mfunc2, t2);
-
-    std::cout << rv00 << ' ' << rv22 << '\n';
-
-    return 0;
-}
-
-*/
 
 

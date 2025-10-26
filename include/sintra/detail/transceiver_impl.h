@@ -723,7 +723,7 @@ void Transceiver::rpc_handler(Message_prefix& untyped_msg)
     };
 
     auto vf = Void_filter<r_type>{
-        [&](){return call_function_with_fusion_vector_args(*obj, RPCTC::mf(), msg);}
+        [&](){return call_function_with_message_args(*obj, RPCTC::mf(), msg);}
     };
 
     clear_rpc_reply_deferred();
