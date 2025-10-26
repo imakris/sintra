@@ -343,15 +343,20 @@ class TestRunner:
     def run_test_once(self, invocation: TestInvocation) -> TestResult:
         """Run a single test with timeout and proper cleanup"""
         process = None
+        process_pgid: Optional[int] = None
         try:
             start_time = time.time()
 
             # Use Popen for better process control
+            env = os.environ.copy()
+            env.setdefault('SINTRA_CAPTURE_FAILURE_STACKS', '1')
+
             popen_kwargs = {
                 'stdout': subprocess.PIPE,
                 'stderr': subprocess.PIPE,
                 'text': True,
                 'cwd': invocation.path.parent,
+                'env': env,
             }
 
             if sys.platform == 'win32':
@@ -363,6 +368,12 @@ class TestRunner:
                 popen_kwargs['start_new_session'] = True
 
             process = subprocess.Popen(invocation.command(), **popen_kwargs)
+
+            if sys.platform != 'win32':
+                try:
+                    process_pgid = os.getpgid(process.pid)
+                except ProcessLookupError:
+                    process_pgid = None
 
             # Wait with timeout
             try:
@@ -390,7 +401,7 @@ class TestRunner:
                         error_msg = f"TEST FAILED: Exit code {process.returncode} after {duration:.2f}s\n{stderr}"
 
                     if self._is_crash_exit(process.returncode):
-                        live_stack_traces, live_stack_error = self._capture_process_stacks(process.pid)
+                        live_stack_traces, live_stack_error = self._capture_process_stacks(process.pid, process_pgid)
 
                         if sys.platform == 'win32':
                             (
@@ -434,7 +445,7 @@ class TestRunner:
                 stack_traces = ""
                 stack_error = ""
                 if process:
-                    stack_traces, stack_error = self._capture_process_stacks(process.pid)
+                    stack_traces, stack_error = self._capture_process_stacks(process.pid, process_pgid)
                 try:
                     # Try to read from pipes before killing (non-blocking if possible)
                     import select
@@ -566,7 +577,7 @@ class TestRunner:
         # Codes > 128 are also commonly used to report signal-based exits.
         return returncode < 0 or returncode > 128
 
-    def _capture_process_stacks(self, pid: int) -> Tuple[str, str]:
+    def _capture_process_stacks(self, pid: int, pgid: Optional[int] = None) -> Tuple[str, str]:
         """Attempt to capture stack traces for the test process and all of its helpers."""
 
         if sys.platform == 'win32':
@@ -577,14 +588,17 @@ class TestRunner:
             return "", debugger_error
 
         import signal
-        try:
-            pgid = os.getpgid(pid)
-        except ProcessLookupError:
-            return "", "process exited before stack capture"
+        actual_pgid = pgid
+        if actual_pgid is None:
+            try:
+                actual_pgid = os.getpgid(pid)
+            except ProcessLookupError:
+                actual_pgid = None
 
         target_pids = set()
         target_pids.add(pid)
-        target_pids.update(self._collect_process_group_pids(pgid))
+        if actual_pgid is not None:
+            target_pids.update(self._collect_process_group_pids(actual_pgid))
         target_pids.update(self._collect_descendant_pids(pid))
 
         if not target_pids:

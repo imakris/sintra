@@ -3,6 +3,7 @@
 // to try to expose races during barrier cleanup/recreation
 
 #include <sintra/sintra.h>
+#include "test_support.h"
 
 #include <atomic>
 #include <chrono>
@@ -111,7 +112,7 @@ int worker_process(std::uint32_t worker_index)
         }
     } catch (const std::exception& e) {
         std::fprintf(stderr, "Worker %u exception: %s\n", worker_index, e.what());
-        return 1;
+        return sintra::tests::report_exit(1);
     }
 
     barrier("barrier-rapid-reuse-done", "_sintra_all_processes");
@@ -142,5 +143,6 @@ int main(int argc, char* argv[])
     std::printf("Barrier rapid reuse test completed\n");
     std::printf("Failures: %d\n", failures.load());
 
-    return (failures > 0) ? 1 : 0;
+    int exit_code = (failures > 0) ? 1 : 0;
+    return sintra::tests::report_exit(exit_code);
 }

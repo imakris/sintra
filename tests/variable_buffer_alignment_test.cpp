@@ -1,5 +1,6 @@
 #include <sintra/detail/message.h>
 #include <sintra/detail/message_impl.h>
+#include "test_support.h"
 
 #include <array>
 #include <cstdint>
@@ -57,7 +58,7 @@ int main()
     auto cleanup_and_fail = [&](int code) {
         message->~AlignmentMessage();
         ::operator delete(raw, std::align_val_t(alignof(AlignmentMessage)));
-        return code;
+        return sintra::tests::report_exit(code);
     };
 
     if (!is_aligned(aligned_ptr, alignof(Aligned16))) {

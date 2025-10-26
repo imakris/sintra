@@ -18,6 +18,7 @@
 //
 
 #include <sintra/sintra.h>
+#include "test_support.h"
 
 #include <algorithm>
 #include <array>
@@ -381,7 +382,7 @@ int main(int argc, char* argv[])
             exit_code = (status == "ok") ? 0 : 1;
         }
 
-        return exit_code;
+        return sintra::tests::report_exit(exit_code);
     }
 
     return 0;

@@ -11,6 +11,7 @@
 //
 
 #include <sintra/sintra.h>
+#include "test_support.h"
 
 #include <atomic>
 #include <chrono>
@@ -259,7 +260,8 @@ int coordinator_process()
 
     const auto shared_dir = get_shared_directory();
     write_result(shared_dir, success, kIterations, state.total_messages, failure_reason);
-    return success ? 0 : 1;
+    int exit_code = success ? 0 : 1;
+    return sintra::tests::report_exit(exit_code);
 }
 
 int worker_process(std::uint32_t worker_index)
@@ -392,14 +394,14 @@ int main(int argc, char* argv[])
         if (!std::filesystem::exists(result_path)) {
             std::fprintf(stderr, "Error: result file not found at %s\n", result_path.string().c_str());
             cleanup_directory_with_retries(shared_dir);
-            return 1;
+            return sintra::tests::report_exit(1);
         }
 
         std::ifstream in(result_path, std::ios::binary);
         if (!in) {
             std::fprintf(stderr, "Error: failed to open result file %s\n", result_path.string().c_str());
             cleanup_directory_with_retries(shared_dir);
-            return 1;
+            return sintra::tests::report_exit(1);
         }
 
         std::string status;
@@ -416,18 +418,18 @@ int main(int argc, char* argv[])
 
         if (status != "ok") {
             std::fprintf(stderr, "Barrier flush test reported failure: %s\n", reason.c_str());
-            return 1;
+            return sintra::tests::report_exit(1);
         }
         if (iterations_completed != kIterations) {
             std::fprintf(stderr, "Expected %zu iterations, got %zu\n",
                          kIterations, iterations_completed);
-            return 1;
+            return sintra::tests::report_exit(1);
         }
         const std::size_t expected_messages = kWorkerCount * kIterations;
         if (total_messages != expected_messages) {
             std::fprintf(stderr, "Expected %zu total messages, got %zu\n",
                          expected_messages, total_messages);
-            return 1;
+            return sintra::tests::report_exit(1);
         }
     }
 

@@ -20,6 +20,7 @@
 //
 
 #include <sintra/sintra.h>
+#include "test_support.h"
 
 #include <atomic>
 #include <chrono>
@@ -78,10 +79,11 @@ int main(int argc, char* argv[])
     const auto wait_status = done_future.wait_for(std::chrono::seconds(5));
     if (wait_status != std::future_status::ready) {
         sintra::finalize();
-        return 1;
+        return sintra::tests::report_exit(1);
     }
 
     sintra::finalize();
 
-    return ping_count.load(std::memory_order_relaxed) == kTargetPingCount ? 0 : 1;
+    int exit_code = ping_count.load(std::memory_order_relaxed) == kTargetPingCount ? 0 : 1;
+    return sintra::tests::report_exit(exit_code);
 }

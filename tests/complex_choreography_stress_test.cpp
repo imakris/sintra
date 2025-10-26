@@ -28,6 +28,7 @@
 // intended.
 //
 #include <sintra/sintra.h>
+#include "test_support.h"
 
 #include <algorithm>
 #include <array>
@@ -436,7 +437,8 @@ int process_aggregator()
 
     auto& state = aggregator_state();
     std::lock_guard<std::mutex> lk(state.mutex);
-    return state.errors == 0 ? 0 : 1;
+    int exit_code = state.errors == 0 ? 0 : 1;
+    return sintra::tests::report_exit(exit_code);
 }
 
 // -----------------------------------------------------------------------------
@@ -665,7 +667,8 @@ int worker_process_impl(int worker_id)
 
     barrier("complex-choreography-finished", "_sintra_all_processes");
 
-    return state.errors == 0 ? 0 : 1;
+    int exit_code = state.errors == 0 ? 0 : 1;
+    return sintra::tests::report_exit(exit_code);
 }
 
 int process_worker0() { return worker_process_impl(0); }
@@ -803,7 +806,8 @@ int process_conductor()
 
     auto& state = conductor_state();
     std::lock_guard<std::mutex> lk(state.mutex);
-    return state.errors == 0 ? 0 : 1;
+    int exit_code = state.errors == 0 ? 0 : 1;
+    return sintra::tests::report_exit(exit_code);
 }
 
 // -----------------------------------------------------------------------------
@@ -984,6 +988,6 @@ int main(int argc, char* argv[])
         exit_code = success ? 0 : 1;
     }
 
-    return exit_code;
+    return sintra::tests::report_exit(exit_code);
 }
 

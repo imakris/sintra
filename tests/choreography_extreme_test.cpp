@@ -30,6 +30,7 @@
 // honoured, and audits declared success.
 
 #include <sintra/sintra.h>
+#include "test_support.h"
 
 #include <algorithm>
 #include <array>
@@ -1031,7 +1032,8 @@ int main(int argc, char* argv[])
         }
         catch (...) {
         }
-        return ok ? 0 : 1;
+        int exit_code = ok ? 0 : 1;
+        return sintra::tests::report_exit(exit_code);
     }
 
     return 0;

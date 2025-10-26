@@ -1,4 +1,5 @@
 #include "sintra/detail/utility.h"
+#include "test_support.h"
 
 #include <iostream>
 
@@ -178,7 +179,8 @@ int main()
     ok &= spawn_succeeds_under_eintr_pressure();
     ok &= spawn_fails_when_grandchild_cannot_report_readiness();
     ok &= spawn_reports_exec_failure();
-    return ok ? 0 : 1;
+    int exit_code = ok ? 0 : 1;
+    return sintra::tests::report_exit(exit_code);
 }
 
 #else

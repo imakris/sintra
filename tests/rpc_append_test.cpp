@@ -19,6 +19,7 @@
 //
 
 #include <sintra/sintra.h>
+#include "test_support.h"
 
 #include <algorithm>
 #include <chrono>
@@ -214,7 +215,7 @@ int main(int argc, char* argv[])
         };
 
         if (successes != expected_successes || failures != expected_failures) {
-            return 1;
+            return sintra::tests::report_exit(1);
         }
 
         try {

@@ -19,6 +19,8 @@
 #include <utility>
 #include <vector>
 
+#include "test_support.h"
+
 // Tune eviction behaviour for faster unit tests before including the ring header.
 #define SINTRA_EVICTION_SPIN_THRESHOLD 0
 #define private public
@@ -763,7 +765,7 @@ int run_tests(bool include_unit, bool include_stress, const std::vector<std::str
 
     if (tests_to_run.empty()) {
         if (!selectors.empty()) {
-            return 2;
+            return sintra::tests::report_exit(2);
         }
         std::cout << "==== Summary ====" << '\n';
         std::cout << "Tests executed: 0 / " << registry().size() << '\n';
@@ -779,21 +781,24 @@ int run_tests(bool include_unit, bool include_stress, const std::vector<std::str
         }
         catch (const Assertion_error& ex) {
             ++failures;
+            sintra::tests::mark_failure();
             std::cerr << "[FAIL] " << test->name << " - " << ex.what() << '\n';
         }
         catch (const std::exception& ex) {
             ++failures;
+            sintra::tests::mark_failure();
             std::cerr << "[FAIL] " << test->name << " - unexpected exception: " << ex.what() << '\n';
         }
         catch (...) {
             ++failures;
+            sintra::tests::mark_failure();
             std::cerr << "[FAIL] " << test->name << " - unknown exception" << '\n';
         }
     }
     std::cout << "==== Summary ====" << '\n';
     std::cout << "Tests executed: " << executed << " / " << registry().size() << '\n';
     std::cout << "Failures: " << failures << '\n';
-    return failures == 0 ? 0 : 1;
+    return sintra::tests::report_exit(failures == 0 ? 0 : 1);
 }
 
 } // namespace
@@ -830,7 +835,7 @@ int main(int argc, char** argv)
         }
         else if (arg == "--run") {
             std::cerr << "--run requires an argument" << std::endl;
-            return 2;
+            return sintra::tests::report_exit(2);
         }
     }
 

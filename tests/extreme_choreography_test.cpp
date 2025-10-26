@@ -19,6 +19,7 @@
 // inspects the final summary written to disk.
 
 #include <sintra/sintra.h>
+#include "test_support.h"
 
 #include <array>
 #include <atomic>
@@ -369,7 +370,8 @@ int coordinator_process()
     deactivate_all_slots();
     barrier("extreme-choreography-finished", "_sintra_all_processes");
 
-    return failure_observed ? 1 : 0;
+    int exit_code = failure_observed ? 1 : 0;
+    return sintra::tests::report_exit(exit_code);
 }
 
 // ---------------------------------------------------------------------------
@@ -855,7 +857,8 @@ int aggregator_process()
         }
     }
 
-    return failure_flag ? 1 : 0;
+    int exit_code = failure_flag ? 1 : 0;
+    return sintra::tests::report_exit(exit_code);
 }
 
 // ---------------------------------------------------------------------------
@@ -896,7 +899,7 @@ int main(int argc, char* argv[])
         std::ifstream in(summary_path, std::ios::binary);
         if (!in) {
             cleanup_directory(shared_dir);
-            return 1;
+            return sintra::tests::report_exit(1);
         }
 
         std::string status;
@@ -951,7 +954,8 @@ int main(int argc, char* argv[])
         }
 
         cleanup_directory(shared_dir);
-        return ok ? 0 : 1;
+        int exit_code = ok ? 0 : 1;
+        return sintra::tests::report_exit(exit_code);
     }
 
     return 0;

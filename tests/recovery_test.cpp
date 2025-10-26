@@ -22,6 +22,7 @@
 
 #include <sintra/sintra.h>
 #include <sintra/detail/managed_process.h>
+#include "test_support.h"
 
 #include <chrono>
 #include <condition_variable>
@@ -432,7 +433,7 @@ int main(int argc, char* argv[])
     if (!is_spawned) {
         const auto result_path = shared_dir / "result.txt";
         if (!std::filesystem::exists(result_path)) {
-            return 1;
+            return sintra::tests::report_exit(1);
         }
 
         std::ifstream in(result_path, std::ios::binary);
@@ -445,7 +446,8 @@ int main(int argc, char* argv[])
         if (ec) {
             std::fprintf(stderr, "[MAIN] Cleanup warning: %s\n", ec.message().c_str());
         }
-        return (status == "ok") ? 0 : 1;
+        int exit_code = (status == "ok") ? 0 : 1;
+        return sintra::tests::report_exit(exit_code);
     }
 
     return 0;

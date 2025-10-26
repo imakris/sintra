@@ -8,6 +8,7 @@
 // synchronisation points that stresses ordering guarantees.
 
 #include <sintra/sintra.h>
+#include "test_support.h"
 
 #include <array>
 #include <atomic>
@@ -406,10 +407,11 @@ int coordinator_process()
         write_result(shared_dir, success, iterations_completed, stage_a_total, stage_b_total, failure_reason);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "Failed to write result: %s\n", e.what());
-        return 1;
+        return sintra::tests::report_exit(1);
     }
 
-    return success ? 0 : 1;
+    int exit_code = success ? 0 : 1;
+    return sintra::tests::report_exit(exit_code);
 }
 
 int stage_process(std::uint32_t stage, std::uint32_t worker_index)
@@ -579,14 +581,14 @@ int main(int argc, char* argv[])
         if (!std::filesystem::exists(result_path)) {
             std::fprintf(stderr, "Error: result file not found at %s\n", result_path.string().c_str());
             cleanup_directory_with_retries(shared_dir);
-            return 1;
+            return sintra::tests::report_exit(1);
         }
 
         std::ifstream in(result_path, std::ios::binary);
         if (!in) {
             std::fprintf(stderr, "Error: failed to open result file %s\n", result_path.string().c_str());
             cleanup_directory_with_retries(shared_dir);
-            return 1;
+            return sintra::tests::report_exit(1);
         }
 
         std::string status;
@@ -608,22 +610,22 @@ int main(int argc, char* argv[])
 
         if (status != "ok") {
             std::fprintf(stderr, "Complex choreography test reported failure: %s\n", reason.c_str());
-            return 1;
+            return sintra::tests::report_exit(1);
         }
         if (iterations_completed != kIterations) {
             std::fprintf(stderr, "Expected %zu iterations, got %zu\n",
                          kIterations, iterations_completed);
-            return 1;
+            return sintra::tests::report_exit(1);
         }
         if (stage_a_total != expected_stage_a) {
             std::fprintf(stderr, "Expected %zu stage A reports, got %zu\n",
                          expected_stage_a, stage_a_total);
-            return 1;
+            return sintra::tests::report_exit(1);
         }
         if (stage_b_total != expected_stage_b) {
             std::fprintf(stderr, "Expected %zu stage B reports, got %zu\n",
                          expected_stage_b, stage_b_total);
-            return 1;
+            return sintra::tests::report_exit(1);
         }
     }
 

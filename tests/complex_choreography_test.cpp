@@ -25,6 +25,7 @@
 // without deadlocking on barriers.
 //
 #include <sintra/sintra.h>
+#include "test_support.h"
 
 #include <algorithm>
 #include <array>
@@ -363,7 +364,8 @@ int conductor_process()
                  std::max(last_completed_round, -1), due_to_failure);
 
     sintra::barrier(std::string(kFinalBarrier), "_sintra_all_processes");
-    return due_to_failure ? 1 : 0;
+    int exit_code = due_to_failure ? 1 : 0;
+    return sintra::tests::report_exit(exit_code);
 }
 // ---------------------------------------------------------------------------
 // Worker processes
@@ -635,7 +637,8 @@ int aggregator_process()
     }
 
     sintra::barrier(std::string(kFinalBarrier), "_sintra_all_processes");
-    return failure.load() ? 1 : 0;
+    int exit_code = failure.load() ? 1 : 0;
+    return sintra::tests::report_exit(exit_code);
 }
 // ---------------------------------------------------------------------------
 // Verifier process
@@ -771,7 +774,8 @@ int verifier_process()
     }
 
     sintra::barrier(std::string(kFinalBarrier), "_sintra_all_processes");
-    return failure.load() ? 1 : 0;
+    int exit_code = failure.load() ? 1 : 0;
+    return sintra::tests::report_exit(exit_code);
 }
 
 // ---------------------------------------------------------------------------
@@ -811,7 +815,7 @@ int main(int argc, char* argv[])
         std::ifstream in(result_path, std::ios::binary);
         if (!in)
         {
-            return 1;
+            return sintra::tests::report_exit(1);
         }
         std::string status;
         int completed_rounds = -1;
@@ -824,7 +828,8 @@ int main(int argc, char* argv[])
                         (failure_state == "success");
         std::error_code ec;
         std::filesystem::remove_all(shared_dir, ec);
-        return ok ? 0 : 1;
+        int exit_code = ok ? 0 : 1;
+        return sintra::tests::report_exit(exit_code);
     }
 
     return 0;

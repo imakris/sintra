@@ -6,6 +6,7 @@
 // exposing race conditions or ordering bugs in the barrier implementation.
 
 #include <sintra/sintra.h>
+#include "test_support.h"
 
 #include <algorithm>
 #include <array>
@@ -575,5 +576,5 @@ int main(int argc, char* argv[])
         cleanup_directory(shared_dir);
     }
 
-    return exit_code;
+    return sintra::tests::report_exit(exit_code);
 }

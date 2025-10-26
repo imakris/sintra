@@ -1,4 +1,5 @@
 #include <sintra/sintra.h>
+#include "test_support.h"
 
 #include <atomic>
 #include <chrono>
@@ -180,7 +181,8 @@ int controller_process()
 
     handler_done_deactivator();
 
-    return (barrier_result && handler_done) ? 0 : 1;
+    int exit_code = (barrier_result && handler_done) ? 0 : 1;
+    return sintra::tests::report_exit(exit_code);
 }
 
 int worker_process()
@@ -230,7 +232,7 @@ int main(int argc, char* argv[])
         std::ifstream in(result_path, std::ios::binary);
         if (!in) {
             cleanup_directory(shared_dir);
-            return 1;
+            return sintra::tests::report_exit(1);
         }
 
         std::string status;
@@ -246,7 +248,8 @@ int main(int argc, char* argv[])
         const bool success = (status == "ok") && elapsed_ok && done_ok;
 
         cleanup_directory(shared_dir);
-        return success ? 0 : 1;
+        int exit_code = success ? 0 : 1;
+        return sintra::tests::report_exit(exit_code);
     }
 
     return 0;

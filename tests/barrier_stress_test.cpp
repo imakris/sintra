@@ -2,6 +2,7 @@
 // Attempts to expose race conditions and timing issues in barrier implementation
 
 #include <sintra/sintra.h>
+#include "test_support.h"
 
 #include <atomic>
 #include <chrono>
@@ -108,7 +109,7 @@ int worker_process(std::uint32_t worker_index)
         }
     } catch (const std::exception& e) {
         std::fprintf(stderr, "Worker %u exception: %s\n", worker_index, e.what());
-        return 1;
+        return sintra::tests::report_exit(1);
     }
 
     sintra::barrier("barrier-stress-done", "_sintra_all_processes");
@@ -149,7 +150,7 @@ int main(int argc, char* argv[])
 
     if (worker_failures > 0 || coordinator_failures > 0) {
         std::fprintf(stderr, "TEST FAILED: Detected failures\n");
-        return 1;
+        return sintra::tests::report_exit(1);
     }
 
     return 0;
