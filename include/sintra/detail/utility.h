@@ -183,26 +183,65 @@ inline std::atomic<read_fn>& read_override()
     return fn;
 }
 
+inline int eintr_safe_pipe(int pipefd[2])
+{
+    int rv = -1;
+    do {
+        rv = ::pipe(pipefd);
+    } while (rv == -1 && errno == EINTR);
+    return rv;
+}
+
+#if defined(__linux__) || defined(__FreeBSD__) || defined(__DragonFly__) || defined(__NetBSD__) || defined(__OpenBSD__)
+inline int eintr_safe_pipe2(int pipefd[2], int flags)
+{
+    int rv = -1;
+    do {
+        rv = ::pipe2(pipefd, flags);
+    } while (rv == -1 && errno == EINTR);
+    return rv;
+}
+#endif
+
+inline int eintr_safe_fcntl_get(int fd, int cmd)
+{
+    int rv = -1;
+    do {
+        rv = ::fcntl(fd, cmd);
+    } while (rv == -1 && errno == EINTR);
+    return rv;
+}
+
+inline int eintr_safe_fcntl_set(int fd, int cmd, int value)
+{
+    int rv = -1;
+    do {
+        rv = ::fcntl(fd, cmd, value);
+    } while (rv == -1 && errno == EINTR);
+    return rv;
+}
+
 inline int system_pipe2(int pipefd[2], int flags)
 {
 #if defined(__linux__) || defined(__FreeBSD__) || defined(__DragonFly__) || defined(__NetBSD__) || defined(__OpenBSD__)
-    return ::pipe2(pipefd, flags);
+    return eintr_safe_pipe2(pipefd, flags);
 #else
     if (flags & ~(O_CLOEXEC | O_NONBLOCK)) {
         errno = EINVAL;
         return -1;
     }
 
-    if (::pipe(pipefd) == -1) {
+    if (eintr_safe_pipe(pipefd) == -1) {
         return -1;
     }
 
     const auto set_flag = [&](int fd, int cmd, int value) {
-        int current = ::fcntl(fd, cmd == F_SETFD ? F_GETFD : F_GETFL);
+        const int get_cmd = (cmd == F_SETFD) ? F_GETFD : F_GETFL;
+        int current = eintr_safe_fcntl_get(fd, get_cmd);
         if (current == -1) {
             return -1;
         }
-        return ::fcntl(fd, cmd, current | value);
+        return eintr_safe_fcntl_set(fd, cmd, current | value);
     };
 
     if (flags & O_CLOEXEC) {
@@ -381,7 +420,18 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
     }
 
     int ready_pipe[2] = {-1, -1};
-    if (detail::call_pipe2(ready_pipe, O_CLOEXEC) == -1) {
+    while (detail::call_pipe2(ready_pipe, O_CLOEXEC) == -1) {
+        if (errno == EINTR) {
+            if (ready_pipe[0] >= 0) {
+                ::close(ready_pipe[0]);
+                ready_pipe[0] = -1;
+            }
+            if (ready_pipe[1] >= 0) {
+                ::close(ready_pipe[1]);
+                ready_pipe[1] = -1;
+            }
+            continue;
+        }
         return false;
     }
 
@@ -407,9 +457,9 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
         }
 
         // Ensure the status pipe closes on exec so the parent observes EOF
-        int flags = fcntl(ready_pipe[1], F_GETFD);
+        int flags = detail::eintr_safe_fcntl_get(ready_pipe[1], F_GETFD);
         if (flags != -1) {
-            fcntl(ready_pipe[1], F_SETFD, flags | FD_CLOEXEC);
+            detail::eintr_safe_fcntl_set(ready_pipe[1], F_SETFD, flags | FD_CLOEXEC);
         }
 
         ::setsid();
