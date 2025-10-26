@@ -4,11 +4,14 @@
 #pragma once
 
 #include "utility.h"
+#include "type_utils.h"
 
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <filesystem>
 #include <csignal>
+#include <fstream>
 #include <functional>
 #include <list>
 #include <vector>
@@ -27,8 +30,6 @@
 #include <time.h>
 #include <unistd.h>
 #endif
-
-#include <boost/type_index/ctti_type_index.hpp>
 
 namespace sintra {
 
@@ -408,8 +409,8 @@ void install_signal_handler()
 template <typename T>
 sintra::type_id_type get_type_id()
 {
-    const std::string pretty_name = boost::typeindex::ctti_type_index::template type_id<T>().pretty_name();
-    auto it = s_mproc->m_type_id_of_type_name.find(pretty_name);
+    const std::string type_name = detail::type_name<T>();
+    auto it = s_mproc->m_type_id_of_type_name.find(type_name);
     if (it != s_mproc->m_type_id_of_type_name.end()) {
         return it->second;
     }
@@ -417,11 +418,11 @@ sintra::type_id_type get_type_id()
     // Caution the Coordinator call will refer to the map that is being assigned,
     // if the Coordinator is local. Do not be tempted to simplify the temporary,
     // because depending on the order of evaluation, it may or it may not work.
-    auto tid = Coordinator::rpc_resolve_type(s_coord_id, pretty_name);
+    auto tid = Coordinator::rpc_resolve_type(s_coord_id, type_name);
 
     // if it is not invalid, cache it
     if (tid != invalid_type_id) {
-        s_mproc->m_type_id_of_type_name[pretty_name] = tid;
+        s_mproc->m_type_id_of_type_name[type_name] = tid;
     }
 
     return tid;
@@ -873,6 +874,45 @@ Managed process options:
         s_mproc_id = m_instance_id;
     }
     m_directory = obtain_swarm_directory();
+
+    const auto abi_path = std::filesystem::path(m_directory) / detail::abi_marker_filename();
+    const std::string current_abi = detail::abi_token();
+
+    if (coordinator_is_local) {
+        std::ofstream marker(abi_path, std::ios::out | std::ios::trunc);
+        if (!marker) {
+            throw std::runtime_error(
+                "Sintra failed to write the ABI fingerprint file at " + abi_path.string());
+        }
+        marker << current_abi;
+        marker.close();
+        if (!marker) {
+            throw std::runtime_error(
+                "Sintra failed to persist the ABI fingerprint file at " + abi_path.string());
+        }
+    }
+    else {
+        std::ifstream marker(abi_path);
+        if (!marker) {
+            throw std::runtime_error(
+                "Sintra could not read the coordinator ABI fingerprint at " + abi_path.string() +
+                ". Ensure all processes start from the same swarm directory.");
+        }
+        std::string coordinator_abi;
+        std::getline(marker, coordinator_abi);
+        if (!marker.good() && !marker.eof()) {
+            throw std::runtime_error(
+                "Sintra encountered an error while reading the ABI fingerprint at " + abi_path.string());
+        }
+
+        if (coordinator_abi != current_abi) {
+            throw std::runtime_error(
+                std::string("Sintra ABI mismatch detected. The coordinator reports ") +
+                detail::describe_abi_token(coordinator_abi) +
+                ", while this process was built with " + detail::abi_description() +
+                ". Mixing toolchains (for example MSVC and MinGW) is not supported.");
+        }
+    }
 
     m_out_req_c = new Message_ring_W(m_directory, "req", m_instance_id, s_recovery_occurrence);
     m_out_rep_c = new Message_ring_W(m_directory, "rep", m_instance_id, s_recovery_occurrence);
