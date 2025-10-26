@@ -31,6 +31,14 @@ jobs:
           fi
           xcrun lldb --version
 
+      - name: Enable debugger permissions
+        run: |
+          sudo /usr/sbin/DevToolsSecurity -enable
+          sudo /usr/sbin/dscl . append /Groups/_developer GroupMembership "$(whoami)" || true
+          if ! sudo security authorizationdb write system.privilege.taskport allow 2>/dev/null; then
+            echo "::warning::Failed to update taskport authorization policy; LLDB attach may still be restricted." >&2
+          fi
+
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:

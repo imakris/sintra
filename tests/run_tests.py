@@ -1260,26 +1260,55 @@ class TestRunner:
             return pids
 
         proc_path = Path('/proc')
-        try:
-            entries = list(proc_path.iterdir())
-        except Exception:
+        if proc_path.exists():
+            try:
+                entries = list(proc_path.iterdir())
+            except Exception:
+                return pids
+
+            for entry in entries:
+                if not entry.is_dir():
+                    continue
+                name = entry.name
+                if not name.isdigit():
+                    continue
+
+                try:
+                    candidate_pid = int(name)
+                except ValueError:
+                    continue
+
+                try:
+                    candidate_pgid = os.getpgid(candidate_pid)
+                except (ProcessLookupError, PermissionError):
+                    continue
+
+                if candidate_pgid == pgid:
+                    pids.append(candidate_pid)
+
             return pids
 
-        for entry in entries:
-            if not entry.is_dir():
-                continue
-            name = entry.name
-            if not name.isdigit():
-                continue
+        # macOS and other Unix variants without /proc: query process table via ps
+        try:
+            result = subprocess.run(
+                ['ps', '-axo', 'pid=,pgid='],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=10,
+                check=True,
+            )
+        except (subprocess.SubprocessError, OSError):
+            return pids
 
+        for line in result.stdout.splitlines():
+            parts = line.strip().split()
+            if len(parts) != 2:
+                continue
             try:
-                candidate_pid = int(name)
+                candidate_pid = int(parts[0])
+                candidate_pgid = int(parts[1])
             except ValueError:
-                continue
-
-            try:
-                candidate_pgid = os.getpgid(candidate_pid)
-            except (ProcessLookupError, PermissionError):
                 continue
 
             if candidate_pgid == pgid:
@@ -1296,42 +1325,83 @@ class TestRunner:
             return descendants
 
         proc_path = Path('/proc')
+        if proc_path.exists():
+            try:
+                entries = list(proc_path.iterdir())
+            except Exception:
+                return descendants
+
+            parent_to_children: Dict[int, List[int]] = {}
+
+            for entry in entries:
+                if not entry.is_dir():
+                    continue
+
+                name = entry.name
+                if not name.isdigit():
+                    continue
+
+                try:
+                    pid = int(name)
+                except ValueError:
+                    continue
+
+                stat_path = entry / 'stat'
+                try:
+                    stat_content = stat_path.read_text()
+                except (OSError, UnicodeDecodeError):
+                    continue
+
+                close_paren = stat_content.find(')')
+                if close_paren == -1 or close_paren + 2 >= len(stat_content):
+                    continue
+
+                remainder = stat_content[close_paren + 2 :].split()
+                if len(remainder) < 2:
+                    continue
+
+                try:
+                    parent_pid = int(remainder[1])
+                except ValueError:
+                    continue
+
+                parent_to_children.setdefault(parent_pid, []).append(pid)
+
+            visited: Set[int] = set()
+            stack: List[int] = parent_to_children.get(root_pid, [])[:]
+
+            while stack:
+                current = stack.pop()
+                if current in visited or current == root_pid:
+                    continue
+                visited.add(current)
+                descendants.append(current)
+                stack.extend(parent_to_children.get(current, []))
+
+            return descendants
+
+        # macOS and other Unix variants without /proc: derive hierarchy via ps output
         try:
-            entries = list(proc_path.iterdir())
-        except Exception:
+            result = subprocess.run(
+                ['ps', '-axo', 'pid=,ppid='],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=10,
+                check=True,
+            )
+        except (subprocess.SubprocessError, OSError):
             return descendants
 
         parent_to_children: Dict[int, List[int]] = {}
 
-        for entry in entries:
-            if not entry.is_dir():
+        for line in result.stdout.splitlines():
+            parts = line.strip().split()
+            if len(parts) != 2:
                 continue
-
-            name = entry.name
-            if not name.isdigit():
-                continue
-
             try:
-                pid = int(name)
-            except ValueError:
-                continue
-
-            stat_path = entry / 'stat'
-            try:
-                stat_content = stat_path.read_text()
-            except (OSError, UnicodeDecodeError):
-                continue
-
-            close_paren = stat_content.find(')')
-            if close_paren == -1 or close_paren + 2 >= len(stat_content):
-                continue
-
-            remainder = stat_content[close_paren + 2 :].split()
-            if len(remainder) < 2:
-                continue
-
-            try:
-                parent_pid = int(remainder[1])
+                pid = int(parts[0])
+                parent_pid = int(parts[1])
             except ValueError:
                 continue
 
