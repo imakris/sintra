@@ -498,54 +498,80 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
         close(ready_pipe[1]);
     }
 
-    int exec_errno = 0;
-    bool handshake_received = false;
-    bool spawn_failed = false;
-    std::array<char, sizeof(int)> handshake_buffer{};
-    size_t buffer_offset = 0;
-    while (true) {
-        ssize_t rv = detail::call_read(ready_pipe[0], handshake_buffer.data() + buffer_offset, handshake_buffer.size() - buffer_offset);
-        if (rv < 0) {
-            if (errno == EINTR) {
-                continue;
+    enum class Read_result {
+        Value,
+        Eof,
+        Error,
+    };
+
+    auto read_int = [&](int* value, int* error_out) -> Read_result {
+        std::array<char, sizeof(int)> buffer{};
+        size_t offset = 0;
+        while (offset < buffer.size()) {
+            ssize_t rv = detail::call_read(ready_pipe[0], buffer.data() + offset, buffer.size() - offset);
+            if (rv < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                if (error_out) {
+                    *error_out = errno;
+                }
+                return Read_result::Error;
             }
-            exec_errno = errno;
+            if (rv == 0) {
+                if (offset == 0) {
+                    return Read_result::Eof;
+                }
+                if (error_out) {
+                    *error_out = EPIPE;
+                }
+                return Read_result::Error;
+            }
+
+            offset += static_cast<size_t>(rv);
+        }
+
+        std::memcpy(value, buffer.data(), sizeof(*value));
+        return Read_result::Value;
+    };
+
+    int exec_errno = 0;
+    bool spawn_failed = false;
+
+    int ready_status = 0;
+    switch (read_int(&ready_status, &exec_errno)) {
+        case Read_result::Value:
+            break;
+        case Read_result::Eof:
+            spawn_failed = true;
+            exec_errno = exec_errno ? exec_errno : EPIPE;
+            break;
+        case Read_result::Error:
             spawn_failed = true;
             break;
-        }
-        if (rv == 0) {
-            break;
-        }
+    }
 
-        buffer_offset += static_cast<size_t>(rv);
-        if (buffer_offset == handshake_buffer.size()) {
-            int value = 0;
-            std::memcpy(&value, handshake_buffer.data(), sizeof(value));
-            if (!handshake_received) {
-                handshake_received = true;
-                if (value != 0) {
-                    exec_errno = value > 0 ? value : -value;
-                    spawn_failed = true;
-                    break;
-                }
-            }
-            else {
-                exec_errno = value > 0 ? value : -value;
+    if (!spawn_failed && ready_status != 0) {
+        exec_errno = ready_status > 0 ? ready_status : -ready_status;
+        spawn_failed = true;
+    }
+
+    if (!spawn_failed) {
+        int exec_status = 0;
+        switch (read_int(&exec_status, &exec_errno)) {
+            case Read_result::Value:
+                exec_errno = exec_status > 0 ? exec_status : -exec_status;
                 spawn_failed = true;
                 break;
-            }
-            buffer_offset = 0;
+            case Read_result::Eof:
+                break;
+            case Read_result::Error:
+                spawn_failed = true;
+                break;
         }
     }
 
-    if ((!handshake_received || buffer_offset != 0) && !spawn_failed) {
-        spawn_failed = true;
-        if (exec_errno == 0) {
-            exec_errno = EPIPE;
-        }
-    }
-
-    bool read_success = handshake_received && !spawn_failed;
+    bool read_success = !spawn_failed;
 
     if (ready_pipe[0] >= 0) {
         close(ready_pipe[0]);
