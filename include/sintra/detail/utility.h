@@ -420,14 +420,6 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
             argv_copy[i] = strdup(argv[i]);
         }
 
-        int ready_status = 0;
-        if (!detail::write_fully(ready_pipe[1], &ready_status, sizeof(ready_status))) {
-            if (ready_pipe[1] >= 0) {
-                close(ready_pipe[1]);
-            }
-            ::_exit(EXIT_FAILURE);
-        }
-
         ::execv(prog_copy, (char* const*)argv_copy);
 
         int exec_errno = errno;
@@ -454,9 +446,10 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
     }
 
     int exec_errno = 0;
-    bool read_success = false;
     int handshake_value = -1;
     size_t total_read = 0;
+    bool saw_eof = false;
+    bool read_success = false;
     while (total_read < sizeof(handshake_value)) {
         ssize_t rv = detail::call_read(ready_pipe[0], reinterpret_cast<char*>(&handshake_value) + total_read, sizeof(handshake_value) - total_read);
         if (rv < 0) {
@@ -467,18 +460,21 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
             break;
         }
         if (rv == 0) {
-            exec_errno = EPIPE;
+            saw_eof = true;
             break;
         }
         total_read += static_cast<size_t>(rv);
     }
 
-    if (total_read == sizeof(handshake_value) && handshake_value == 0) {
+    if (saw_eof && total_read == 0 && exec_errno == 0) {
         read_success = true;
     }
-    else if (total_read == sizeof(handshake_value) && handshake_value != 0) {
+    else if (total_read == sizeof(handshake_value)) {
         exec_errno = handshake_value > 0 ? handshake_value : -handshake_value;
         read_success = false;
+    }
+    else if (exec_errno == 0) {
+        exec_errno = EPIPE;
     }
 
     if (ready_pipe[0] >= 0) {
