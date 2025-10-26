@@ -51,10 +51,10 @@ namespace {
         bool has_previous = false;
     };
 
-    inline std::array<signal_slot, 7>& signal_slots()
+    inline std::array<signal_slot, 6>& signal_slots()
     {
-        static std::array<signal_slot, 7> slots {{
-            {SIGABRT}, {SIGFPE}, {SIGILL}, {SIGINT}, {SIGSEGV}, {SIGTERM}, {SIGCHLD}
+        static std::array<signal_slot, 6> slots {{
+            {SIGABRT}, {SIGFPE}, {SIGILL}, {SIGINT}, {SIGSEGV}, {SIGTERM}
         }};
         return slots;
     }
