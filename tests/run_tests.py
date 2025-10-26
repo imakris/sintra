@@ -27,6 +27,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from collections import defaultdict
 from dataclasses import dataclass
@@ -343,6 +344,44 @@ class TestRunner:
     def run_test_once(self, invocation: TestInvocation) -> TestResult:
         """Run a single test with timeout and proper cleanup"""
         process = None
+        stdout_lines: List[str] = []
+        stderr_lines: List[str] = []
+        preemptive_stack_traces = ""
+        preemptive_stack_error = ""
+        stack_capture_event = threading.Event()
+        stack_capture_lock = threading.Lock()
+
+        def request_stack_capture() -> None:
+            nonlocal preemptive_stack_traces, preemptive_stack_error, process
+            if process is None or stack_capture_event.is_set():
+                return
+            with stack_capture_lock:
+                if stack_capture_event.is_set() or process is None:
+                    return
+                stack_capture_event.set()
+                traces, error = self._capture_process_stacks(process.pid)
+                if traces:
+                    preemptive_stack_traces = traces
+                    preemptive_stack_error = ""
+                elif error:
+                    preemptive_stack_error = error
+
+        def make_reader(stream, buffer: List[str], monitor_failure: bool) -> threading.Thread:
+            def _reader() -> None:
+                try:
+                    for line in iter(stream.readline, ''):
+                        buffer.append(line)
+                        if monitor_failure and self._should_trigger_live_stack_capture(line, invocation):
+                            request_stack_capture()
+                finally:
+                    try:
+                        stream.close()
+                    except Exception:
+                        pass
+
+            thread = threading.Thread(target=_reader, daemon=True)
+            return thread
+
         try:
             start_time = time.time()
 
@@ -352,6 +391,7 @@ class TestRunner:
                 'stderr': subprocess.PIPE,
                 'text': True,
                 'cwd': invocation.path.parent,
+                'bufsize': 1,
             }
 
             if sys.platform == 'win32':
@@ -364,63 +404,21 @@ class TestRunner:
 
             process = subprocess.Popen(invocation.command(), **popen_kwargs)
 
-            # Wait with timeout
+            readers: List[threading.Thread] = []
+            if process.stdout is not None:
+                readers.append(make_reader(process.stdout, stdout_lines, False))
+            if process.stderr is not None:
+                readers.append(make_reader(process.stderr, stderr_lines, True))
+
+            for thread in readers:
+                thread.start()
+
+            timeout_occurred = False
             try:
-                stdout, stderr = process.communicate(timeout=self.timeout)
+                process.wait(timeout=self.timeout)
                 duration = time.time() - start_time
-
-                success = (process.returncode == 0)
-                error_msg = stderr
-
-                live_stack_traces = ""
-                live_stack_error = ""
-                postmortem_stack_traces = ""
-                postmortem_stack_error = ""
-
-                if not success:
-                    # Categorize failure type for better diagnostics
-                    if process.returncode < 0 or process.returncode > 128:
-                        # Unix signal (negative) or Windows crash code (large positive like 0xC0000005)
-                        error_msg = f"CRASH: Process terminated abnormally (exit code {process.returncode})\n{stderr}"
-                    elif duration < 0.1:
-                        # Exited almost immediately - likely crash or early abort
-                        error_msg = f"EARLY EXIT: Process exited with code {process.returncode} after {duration:.3f}s (possible crash)\n{stderr}"
-                    else:
-                        # Normal test failure
-                        error_msg = f"TEST FAILED: Exit code {process.returncode} after {duration:.2f}s\n{stderr}"
-
-                    if self._is_crash_exit(process.returncode):
-                        live_stack_traces, live_stack_error = self._capture_process_stacks(process.pid)
-
-                        if sys.platform == 'win32':
-                            (
-                                postmortem_stack_traces,
-                                postmortem_stack_error,
-                            ) = self._capture_windows_crash_dump(invocation, start_time, process.pid)
-                        else:
-                            (
-                                postmortem_stack_traces,
-                                postmortem_stack_error,
-                            ) = self._capture_core_dump_stack(invocation, start_time, process.pid)
-
-                if live_stack_traces:
-                    error_msg = f"{error_msg}\n\n=== Captured stack traces ===\n{live_stack_traces}"
-                elif live_stack_error:
-                    error_msg = f"{error_msg}\n\n[Stack capture unavailable: {live_stack_error}]"
-
-                if postmortem_stack_traces:
-                    error_msg = f"{error_msg}\n\n=== Post-mortem stack trace ===\n{postmortem_stack_traces}"
-                elif postmortem_stack_error:
-                    error_msg = f"{error_msg}\n\n[Post-mortem stack capture unavailable: {postmortem_stack_error}]"
-
-                return TestResult(
-                    success=success,
-                    duration=duration,
-                    output=stdout,
-                    error=error_msg
-                )
-
-            except subprocess.TimeoutExpired as e:
+            except subprocess.TimeoutExpired:
+                timeout_occurred = True
                 duration = self.timeout
 
                 if self.preserve_on_timeout:
@@ -428,35 +426,22 @@ class TestRunner:
                     print(f"{Color.YELLOW}Attach a debugger to PID {process.pid} or terminate it manually when done.{Color.RESET}")
                     sys.exit(2)
 
-                # Try to get output immediately before killing
-                stdout = ""
-                stderr = ""
-                stack_traces = ""
-                stack_error = ""
-                if process:
-                    stack_traces, stack_error = self._capture_process_stacks(process.pid)
+                request_stack_capture()
+                self._kill_process_tree(process.pid)
                 try:
-                    # Try to read from pipes before killing (non-blocking if possible)
-                    import select
-                    import os
-                    if hasattr(select, 'select'):
-                        # Unix: check if data is available
-                        pass  # Will use communicate after kill
-                except:
+                    process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
                     pass
 
-                # Kill the process tree on timeout
-                self._kill_process_tree(process.pid)
+            for thread in readers:
+                thread.join(timeout=1)
 
-                # Try to get any buffered output after killing
-                try:
-                    stdout_data, stderr_data = process.communicate(timeout=1)
-                    stdout = stdout_data if stdout_data else ""
-                    stderr = stderr_data if stderr_data else ""
-                except:
-                    # Fall back to exception object
-                    stdout = e.stdout if e.stdout else ""
-                    stderr = e.stderr if e.stderr else ""
+            stdout = ''.join(stdout_lines)
+            stderr = ''.join(stderr_lines)
+
+            if timeout_occurred:
+                stack_traces = preemptive_stack_traces
+                stack_error = preemptive_stack_error
 
                 # DEBUGGING: Print stderr immediately to terminal for ipc_rings_tests
                 if 'ipc_rings' in invocation.path.name:
@@ -482,6 +467,62 @@ class TestRunner:
                     output=stdout,
                     error=f"TIMEOUT: Test exceeded {self.timeout}s and was terminated.\n{stderr}"
                 )
+
+            success = (process.returncode == 0)
+            error_msg = stderr
+
+            live_stack_traces = preemptive_stack_traces
+            live_stack_error = preemptive_stack_error
+            postmortem_stack_traces = ""
+            postmortem_stack_error = ""
+
+            if not success:
+                if not stack_capture_event.is_set():
+                    request_stack_capture()
+
+                if process.returncode < 0 or process.returncode > 128:
+                    error_msg = f"CRASH: Process terminated abnormally (exit code {process.returncode})\n{stderr}"
+                elif duration < 0.1:
+                    error_msg = f"EARLY EXIT: Process exited with code {process.returncode} after {duration:.3f}s (possible crash)\n{stderr}"
+                else:
+                    error_msg = f"TEST FAILED: Exit code {process.returncode} after {duration:.2f}s\n{stderr}"
+
+                if self._is_crash_exit(process.returncode):
+                    extra_traces, extra_error = self._capture_process_stacks(process.pid)
+                    live_stack_traces, live_stack_error = self._merge_stack_outputs(
+                        live_stack_traces,
+                        live_stack_error,
+                        extra_traces,
+                        extra_error,
+                    )
+
+                    if sys.platform == 'win32':
+                        (
+                            postmortem_stack_traces,
+                            postmortem_stack_error,
+                        ) = self._capture_windows_crash_dump(invocation, start_time, process.pid)
+                    else:
+                        (
+                            postmortem_stack_traces,
+                            postmortem_stack_error,
+                        ) = self._capture_core_dump_stack(invocation, start_time, process.pid)
+
+            if live_stack_traces:
+                error_msg = f"{error_msg}\n\n=== Captured stack traces ===\n{live_stack_traces}"
+            elif live_stack_error:
+                error_msg = f"{error_msg}\n\n[Stack capture unavailable: {live_stack_error}]"
+
+            if postmortem_stack_traces:
+                error_msg = f"{error_msg}\n\n=== Post-mortem stack trace ===\n{postmortem_stack_traces}"
+            elif postmortem_stack_error:
+                error_msg = f"{error_msg}\n\n[Post-mortem stack capture unavailable: {postmortem_stack_error}]"
+
+            return TestResult(
+                success=success,
+                duration=duration,
+                output=stdout,
+                error=error_msg
+            )
 
         except Exception as e:
             if process:
@@ -565,6 +606,53 @@ class TestRunner:
         # POSIX: negative return codes indicate termination by signal.
         # Codes > 128 are also commonly used to report signal-based exits.
         return returncode < 0 or returncode > 128
+
+    def _should_trigger_live_stack_capture(self, text: str, invocation: TestInvocation) -> bool:
+        """Heuristically determine whether stderr output indicates an imminent failure."""
+
+        normalized = text.lower()
+        if '[fail]' in normalized:
+            return True
+
+        failure_keywords = [
+            'assertion failed',
+            'assert failed',
+            'fatal error',
+            'terminate called after throwing',
+            'panic:',
+            'unhandled exception',
+        ]
+
+        if any(keyword in normalized for keyword in failure_keywords):
+            return True
+
+        if ' error:' in normalized and 'sintra_ipc_rings' in invocation.path.name:
+            return True
+
+        return False
+
+    def _merge_stack_outputs(
+        self,
+        base_traces: str,
+        base_error: str,
+        extra_traces: str,
+        extra_error: str,
+    ) -> Tuple[str, str]:
+        """Combine multiple stack capture attempts into a single report."""
+
+        if extra_traces:
+            if base_traces:
+                base_traces = f"{base_traces}\n\n{extra_traces}"
+            else:
+                base_traces = extra_traces
+            base_error = ""
+        elif extra_error:
+            if base_error:
+                base_error = f"{base_error}; {extra_error}"
+            elif not base_traces:
+                base_error = extra_error
+
+        return base_traces, base_error
 
     def _capture_process_stacks(self, pid: int) -> Tuple[str, str]:
         """Attempt to capture stack traces for the test process and all of its helpers."""
