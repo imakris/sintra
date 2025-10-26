@@ -27,10 +27,12 @@ inline bool should_capture_failure_stacks()
     return !(view == "0" || view == "false" || view == "False" || view == "FALSE");
 }
 
+inline std::atomic<bool> failure_flag_state{false};
+inline std::atomic<bool> stack_capture_triggered{false};
+
 inline std::atomic<bool>& failure_flag()
 {
-    static std::atomic<bool> flag{false};
-    return flag;
+    return failure_flag_state;
 }
 
 inline void mark_failure()
@@ -48,11 +50,10 @@ inline int report_exit(int code)
 
 inline void trigger_stack_capture()
 {
-    static std::atomic<bool> already_triggered{false};
     bool expected = false;
     if (!should_capture_failure_stacks()
         || !failure_flag().load(std::memory_order_relaxed)
-        || !already_triggered.compare_exchange_strong(expected, true)) {
+        || !stack_capture_triggered.compare_exchange_strong(expected, true)) {
         return;
     }
 
