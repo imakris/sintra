@@ -58,6 +58,10 @@ add_library(sintra INTERFACE)
 target_include_directories(sintra INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(sintra INTERFACE cxx_std_17)
 target_link_libraries(sintra INTERFACE Boost::boost Threads::Threads)
+target_compile_options(sintra INTERFACE
+    $<$<CXX_COMPILER_ID:MSVC>:/GR>
+    $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>,$<CXX_COMPILER_ID:AppleClang>,$<CXX_COMPILER_ID:Intel>,$<CXX_COMPILER_ID:IntelLLVM>>:-frtti>
+)
 # Link winmm on Windows for timeBeginPeriod/timeEndPeriod (ADAPTIVE_SPIN policy)
 if(WIN32)
     target_link_libraries(sintra INTERFACE winmm)

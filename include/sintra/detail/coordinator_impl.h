@@ -200,7 +200,8 @@ inline void Process_group::emit_barrier_completions(
 
 inline
 Coordinator::Coordinator():
-    Derived_transceiver<Coordinator>("", make_service_instance_id())
+    Derived_transceiver<Coordinator>("", make_service_instance_id()),
+    m_abi_tag(detail::local_abi_tag())
 {
     // Pre-initialize/ all draining states to 0 (ACTIVE) so that concurrent reads from
     // barrier paths are safe without additional locking. The array is fixed-size and
@@ -248,6 +249,11 @@ instance_id_type Coordinator::resolve_instance(const string& assigned_name)
 
     // unlike types, instances need explicit allocation
     return invalid_instance_id;
+}
+
+inline std::string Coordinator::abi_tag()
+{
+    return m_abi_tag;
 }
 
 

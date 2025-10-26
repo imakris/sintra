@@ -26,6 +26,8 @@
 
 #include <string>
 
+#include "detail/type_support.h"
+
 // -- Platform and toolchain adjustments ------------------------------------
 // Sintra ships as headers and can be built with MSVC or GCC/Clang.  The block
 // below matches the behaviour of the original project while documenting the

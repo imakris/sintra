@@ -15,6 +15,8 @@
 #include <unordered_set>
 #include <vector>
 
+#include "type_support.h"
+
 
 namespace sintra {
 
@@ -126,6 +128,8 @@ private:
 
     instance_id_type wait_for_instance(const string& assigned_name);
 
+    std::string abi_tag();
+
     instance_id_type publish_transceiver(
         type_id_type type_id, instance_id_type instance_id, const string& assigned_name);
     bool unpublish_transceiver(instance_id_type instance_id);
@@ -190,6 +194,8 @@ private:
 
     std::array<std::atomic<uint8_t>, max_process_index + 1> m_draining_process_states{};
 
+    std::string                                 m_abi_tag;
+
 public:
     SINTRA_RPC_EXPLICIT(resolve_type)
     SINTRA_RPC_EXPLICIT(resolve_instance)
@@ -199,6 +205,7 @@ public:
     SINTRA_RPC_STRICT_EXPLICIT(begin_process_draining)
     SINTRA_RPC_EXPLICIT(make_process_group)
     SINTRA_RPC_EXPLICIT(print)
+    SINTRA_RPC_EXPLICIT(abi_tag)
     SINTRA_RPC_EXPLICIT(enable_recovery)
 
     bool is_process_draining(instance_id_type process_iid) const;

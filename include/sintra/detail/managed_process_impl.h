@@ -4,6 +4,7 @@
 #pragma once
 
 #include "deterministic_delay.h"
+#include "type_support.h"
 #include "utility.h"
 
 #include <array>
@@ -17,6 +18,7 @@
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
+#include <sstream>
 #include <thread>
 #include <utility>
 #ifndef _WIN32
@@ -28,8 +30,6 @@
 #include <time.h>
 #include <unistd.h>
 #endif
-
-#include <boost/type_index/ctti_type_index.hpp>
 
 namespace sintra {
 
@@ -414,7 +414,7 @@ void install_signal_handler()
 template <typename T>
 sintra::type_id_type get_type_id()
 {
-    const std::string pretty_name = boost::typeindex::ctti_type_index::template type_id<T>().pretty_name();
+    const std::string pretty_name = detail::type_pretty_name<T>();
     auto it = s_mproc->m_type_id_of_type_name.find(pretty_name);
     if (it != s_mproc->m_type_id_of_type_name.end()) {
         return it->second;
@@ -916,6 +916,27 @@ Managed process options:
         auto [reader_it, inserted] = m_readers.emplace(process_of(s_coord_id), reader);
         assert(inserted == true);
         reader->wait_until_ready();
+    }
+
+    const std::string& local_abi = detail::local_abi_tag();
+    if (coordinator_is_local) {
+        // Nothing further to do – the coordinator lives in this process and thus
+        // necessarily shares the ABI with the managed process.
+    }
+    else {
+        const std::string remote_abi = Coordinator::rpc_abi_tag(s_coord_id);
+        if (remote_abi != local_abi) {
+            std::ostringstream oss;
+            oss << "Sintra runtime ABI mismatch detected.\n"
+                << "Coordinator ABI: " << remote_abi << "\n"
+                << "Process ABI    : " << local_abi << "\n";
+            if (!m_binary_name.empty()) {
+                oss << "Offending binary : " << m_binary_name << "\n";
+            }
+            oss << "Sintra does not support mixing binaries produced with different compilers or standard libraries. "
+                << "Rebuild every participant of the swarm with the same toolchain.";
+            throw std::runtime_error(oss.str());
+        }
     }
 
     // Up to this point, there was no infrastructure for a proper construction
