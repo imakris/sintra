@@ -494,7 +494,11 @@ class TestRunner:
                 duration = time.time() - start_time
 
                 for thread in threads:
-                    thread.join()
+                    thread.join(timeout=1)
+
+                for thread in threads:
+                    if thread.is_alive():
+                        print(f"\n{Color.YELLOW}Warning: Output reader thread did not terminate cleanly after killing PID {process.pid}.{Color.RESET}")
 
                 stdout = ''.join(stdout_lines)
                 stderr = ''.join(stderr_lines)
@@ -628,33 +632,54 @@ class TestRunner:
             )
 
     def _kill_process_tree(self, pid: int):
-        """Kill a process and all its children"""
+        """Kill a process and every helper it may have spawned."""
+
         try:
             if sys.platform == 'win32':
-                # On Windows, use taskkill to kill process tree.
-                # Redirect output to DEVNULL to avoid hanging.
                 subprocess.run(
                     ['taskkill', '/F', '/T', '/PID', str(pid)],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
-                    timeout=5
+                    timeout=5,
                 )
-            else:
-                # On Unix, kill process group
-                import signal
-                try:
-                    pgid = os.getpgid(pid)
-                except ProcessLookupError:
-                    pgid = None
+                return
 
-                if pgid is not None:
+            import signal
+
+            to_kill: Set[int] = set()
+
+            try:
+                pgid = os.getpgid(pid)
+            except ProcessLookupError:
+                pgid = None
+
+            if pgid is not None:
+                to_kill.update(self._collect_process_group_pids(pgid))
+
+            to_kill.update(self._collect_descendant_pids(pid))
+            to_kill.add(pid)
+
+            current_pid = os.getpid()
+
+            if pgid is not None:
+                try:
                     os.killpg(pgid, signal.SIGKILL)
-                else:
-                    os.kill(pid, signal.SIGKILL)
-        except Exception as e:
-            # Log but don't fail if cleanup fails
-            print(f"\n{Color.YELLOW}Warning: Failed to kill process {pid}: {e}{Color.RESET}")
-            pass
+                except ProcessLookupError:
+                    pass
+                except PermissionError as exc:
+                    print(f"\n{Color.YELLOW}Warning: Failed to kill process group {pgid}: {exc}{Color.RESET}")
+
+            for target_pid in to_kill:
+                if target_pid == current_pid:
+                    continue
+                try:
+                    os.kill(target_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    continue
+                except PermissionError as exc:
+                    print(f"\n{Color.YELLOW}Warning: Failed to kill process {target_pid}: {exc}{Color.RESET}")
+        except Exception as exc:
+            print(f"\n{Color.YELLOW}Warning: Failed to kill process tree rooted at {pid}: {exc}{Color.RESET}")
 
     def _kill_all_sintra_processes(self):
         """Kill all existing sintra processes to ensure clean start"""
