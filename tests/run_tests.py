@@ -493,8 +493,7 @@ class TestRunner:
                 process.wait()
                 duration = time.time() - start_time
 
-                for thread in threads:
-                    thread.join()
+                self._finalize_stream_threads(process, threads)
 
                 stdout = ''.join(stdout_lines)
                 stderr = ''.join(stderr_lines)
@@ -589,8 +588,7 @@ class TestRunner:
                 except Exception:
                     pass
 
-                for thread in threads:
-                    thread.join()
+                self._finalize_stream_threads(process, threads)
 
                 stdout = ''.join(stdout_lines)
                 stderr = ''.join(stderr_lines)
@@ -610,11 +608,7 @@ class TestRunner:
         except Exception as e:
             if process:
                 self._kill_process_tree(process.pid)
-            for thread in threads:
-                try:
-                    thread.join(timeout=1)
-                except Exception:
-                    pass
+            self._finalize_stream_threads(process, threads, allow_close=True)
             stdout = ''.join(stdout_lines) if stdout_lines else ""
             stderr = ''.join(stderr_lines) if stderr_lines else ""
             error_msg = f"Exception: {str(e)}"
@@ -686,6 +680,44 @@ class TestRunner:
         except Exception:
             # Ignore errors - processes may not exist
             pass
+
+    def _finalize_stream_threads(
+        self,
+        process: Optional[subprocess.Popen],
+        threads: List[threading.Thread],
+        allow_close: bool = False,
+    ) -> None:
+        """Ensure background stream readers finish without blocking indefinitely."""
+
+        if not threads:
+            return
+
+        # Attempt to signal EOF to any reader threads that might be blocked on
+        # inherited pipes kept open by descendant processes.
+        if process:
+            for stream_name in ('stdout', 'stderr'):
+                stream = getattr(process, stream_name, None)
+                if stream:
+                    fd = None
+                    try:
+                        fd = stream.fileno()
+                    except Exception:
+                        fd = None
+                    if fd is not None:
+                        try:
+                            os.close(fd)
+                        except OSError:
+                            pass
+        elif not allow_close:
+            return
+
+        # Join each helper thread briefly so we do not block the runner when
+        # descendant processes keep their inherited descriptors open.
+        for thread in threads:
+            try:
+                thread.join(timeout=0.1)
+            except Exception:
+                pass
 
     def _line_indicates_failure(self, line: str) -> bool:
         """Heuristically determine whether a log line signals a test failure."""
