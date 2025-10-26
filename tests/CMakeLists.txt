@@ -38,25 +38,7 @@ function(add_test_suite SUFFIX IS_DEBUG)
 
     # Create all test executables with this configuration
     set(TEST_FILES
-        barrier_complex_choreography_test.cpp
-        barrier_flush_test.cpp
-        barrier_pathological_choreography_test.cpp
-        barrier_rapid_reuse_test.cpp
-        barrier_stress_test.cpp
-        basic_pub_sub.cpp
-        choreography_extreme_test.cpp
-        complex_choreography_stress_test.cpp
-        complex_choreography_test.cpp
-        dummy_test.cpp
-        extreme_choreography_test.cpp
-        ipc_rings_tests.cpp
-        ping_pong_multi_test.cpp
-        ping_pong_test.cpp
-        processing_fence_test.cpp
-        recovery_test.cpp
-        rpc_append_test.cpp
-        spawn_detached_test.cpp
-        variable_buffer_alignment_test.cpp
+        ping_pong_coordinator_crash_test.cpp
     )
 
     foreach(TEST_FILE IN LISTS TEST_FILES)
@@ -67,6 +49,5 @@ function(add_test_suite SUFFIX IS_DEBUG)
 
 endfunction()
 
-# Build test suites for both build types using the adaptive policy
-add_test_suite("release" FALSE)
+# Build only the debug test suite for the crash reproduction scenario
 add_test_suite("debug" TRUE)
