@@ -1159,7 +1159,10 @@ class TestRunner:
         program_dir_specs: List[Tuple[str, Optional[Set[str]]]] = [
             ('ProgramFiles', None),
             ('ProgramW6432', {'x64', 'arm64'}),
-            ('ProgramFiles(x86)', {'x86'}),
+            # The Windows SDK installs both 32-bit and 64-bit debuggers under
+            # ProgramFiles(x86), so keep scanning it regardless of the
+            # preferred architecture.
+            ('ProgramFiles(x86)', None),
         ]
 
         preferred_arch_set = set(preferred_arches)
