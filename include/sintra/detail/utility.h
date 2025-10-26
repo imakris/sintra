@@ -193,16 +193,33 @@ inline int system_pipe2(int pipefd[2], int flags)
         return -1;
     }
 
-    if (::pipe(pipefd) == -1) {
+    int pipe_result = -1;
+    do {
+        pipe_result = ::pipe(pipefd);
+    } while (pipe_result == -1 && errno == EINTR);
+
+    if (pipe_result == -1) {
         return -1;
     }
 
     const auto set_flag = [&](int fd, int cmd, int value) {
-        int current = ::fcntl(fd, cmd == F_SETFD ? F_GETFD : F_GETFL);
+        const int get_cmd = (cmd == F_SETFD) ? F_GETFD : F_GETFL;
+
+        int current = -1;
+        do {
+            current = ::fcntl(fd, get_cmd);
+        } while (current == -1 && errno == EINTR);
+
         if (current == -1) {
             return -1;
         }
-        return ::fcntl(fd, cmd, current | value);
+
+        int set_result = -1;
+        do {
+            set_result = ::fcntl(fd, cmd, current | value);
+        } while (set_result == -1 && errno == EINTR);
+
+        return set_result;
     };
 
     if (flags & O_CLOEXEC) {
@@ -407,9 +424,16 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
         }
 
         // Ensure the status pipe closes on exec so the parent observes EOF
-        int flags = fcntl(ready_pipe[1], F_GETFD);
+        int flags = -1;
+        do {
+            flags = fcntl(ready_pipe[1], F_GETFD);
+        } while (flags == -1 && errno == EINTR);
+
         if (flags != -1) {
-            fcntl(ready_pipe[1], F_SETFD, flags | FD_CLOEXEC);
+            int set_result = -1;
+            do {
+                set_result = fcntl(ready_pipe[1], F_SETFD, flags | FD_CLOEXEC);
+            } while (set_result == -1 && errno == EINTR);
         }
 
         ::setsid();
