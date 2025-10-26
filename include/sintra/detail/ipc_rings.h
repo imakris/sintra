@@ -152,6 +152,7 @@
   #include <unistd.h>    // ::sysconf
   #include <signal.h>    // ::kill
   #include <fcntl.h>     // ::open
+  #include <sys/stat.h>  // ::fchmod
   #if defined(__FreeBSD__)
     #include <sys/types.h>
     #include <sys/sysctl.h>
@@ -198,10 +199,22 @@ inline native_file_handle invalid_file() noexcept
 
 inline native_file_handle create_new_file(const char* path)
 {
+    SECURITY_ATTRIBUTES  sa{};
+    SECURITY_DESCRIPTOR  sd{};
+    SECURITY_ATTRIBUTES* psa = nullptr;
+
+    if (::InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION) &&
+        ::SetSecurityDescriptorDacl(&sd, TRUE, nullptr, FALSE)) {
+        sa.nLength = sizeof(sa);
+        sa.lpSecurityDescriptor = &sd;
+        sa.bInheritHandle = FALSE;
+        psa = &sa;
+    }
+
     return ::CreateFileA(path,
                          GENERIC_READ | GENERIC_WRITE,
-                         FILE_SHARE_READ | FILE_SHARE_WRITE,
-                         nullptr,
+                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                         psa,
                          CREATE_NEW,
                          FILE_ATTRIBUTE_NORMAL,
                          nullptr);
@@ -253,7 +266,11 @@ inline native_file_handle invalid_file() noexcept
 
 inline native_file_handle create_new_file(const char* path)
 {
-    return ::open(path, O_CREAT | O_EXCL | O_RDWR, 0666);
+    native_file_handle fd = ::open(path, O_CREAT | O_EXCL | O_RDWR, 0666);
+    if (fd >= 0) {
+        (void)::fchmod(fd, 0666);
+    }
+    return fd;
 }
 
 inline bool truncate_file(native_file_handle handle, std::uint64_t size)
