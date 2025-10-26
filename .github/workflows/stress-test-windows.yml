@@ -52,18 +52,18 @@ jobs:
             }
 
             if (-not $installed) {
-              throw "Windows debugging tools could not be installed. Packages tried: $($packages -join ', ')"
+              Write-Warning "Windows debugging tools could not be installed. Packages tried: $($packages -join ', ')"
             }
 
             $debugDirs = Get-DebugDirectories
           }
 
           if (-not $debugDirs) {
-            throw 'Windows debugging tools not found after installation.'
-          }
-
-          foreach ($dir in $debugDirs) {
-            Add-Content -Path $env:GITHUB_PATH -Value $dir
+            Write-Warning 'Windows debugging tools not found after installation. Continuing without debugger integration.'
+          } else {
+            foreach ($dir in $debugDirs) {
+              Add-Content -Path $env:GITHUB_PATH -Value $dir
+            }
           }
 
       - name: Verify Windows debuggers
@@ -85,7 +85,7 @@ jobs:
             }
           }
           if (-not $found) {
-            throw "No Windows debugger discovered. Checked: $($candidates -join ', ')"
+            Write-Warning "No Windows debugger discovered. Checked: $($candidates -join ', '). Proceeding without debugger support."
           }
 
       - name: Download build artifacts
