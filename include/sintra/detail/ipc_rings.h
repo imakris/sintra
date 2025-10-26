@@ -126,6 +126,8 @@
 #include <string>
 #include <system_error>
 #include <thread>
+#include <type_traits>
+#include <new>
 #include <utility>
 #include <vector>
 
@@ -620,40 +622,132 @@ public:
 };
 
 // A binary semaphore tailored for the ring's reader wakeup policy.
-struct sintra_ring_semaphore : detail::interprocess_semaphore
+class sintra_ring_semaphore
 {
-    sintra_ring_semaphore() : detail::interprocess_semaphore(0) {}
+public:
+    sintra_ring_semaphore() = default;
+    sintra_ring_semaphore(const sintra_ring_semaphore&) = delete;
+    sintra_ring_semaphore& operator=(const sintra_ring_semaphore&) = delete;
+
+    ~sintra_ring_semaphore() { destroy(); }
 
     // Wakes all readers in an ordered fashion (used by writer after publishing).
     void post_ordered()
     {
-        if (unordered.load(std::memory_order_acquire)) {
-            unordered.store(false, std::memory_order_release);
-        }
-        else if (!posted.test_and_set(std::memory_order_acquire)) {
-            this->post();
-        }
+        ensure_initialized().post_ordered();
     }
 
     // Wakes a single reader in an unordered fashion (used by local unblocks).
     void post_unordered()
     {
-        if (!posted.test_and_set(std::memory_order_acquire)) {
-            unordered.store(true, std::memory_order_release);
-            this->post();
-        }
+        ensure_initialized().post_unordered();
     }
 
     // Wait returns true if the wakeup was unordered and no ordered post happened since.
     bool wait()
     {
-        detail::interprocess_semaphore::wait();
-        posted.clear(std::memory_order_release);
-        return unordered.exchange(false, std::memory_order_acq_rel);
+        return ensure_initialized().wait();
     }
+
+    void release_local_handle() noexcept
+    {
+        if (is_initialized()) {
+            access().release_local_handle();
+        }
+    }
+
 private:
-    std::atomic_flag posted = ATOMIC_FLAG_INIT;
-    std::atomic<bool> unordered{false};
+    struct impl : detail::interprocess_semaphore
+    {
+        impl() : detail::interprocess_semaphore(0) {}
+
+        void post_ordered()
+        {
+            if (unordered.load(std::memory_order_acquire)) {
+                unordered.store(false, std::memory_order_release);
+            }
+            else if (!posted.test_and_set(std::memory_order_acquire)) {
+                this->post();
+            }
+        }
+
+        void post_unordered()
+        {
+            if (!posted.test_and_set(std::memory_order_acquire)) {
+                unordered.store(true, std::memory_order_release);
+                this->post();
+            }
+        }
+
+        bool wait()
+        {
+            detail::interprocess_semaphore::wait();
+            posted.clear(std::memory_order_release);
+            return unordered.exchange(false, std::memory_order_acq_rel);
+        }
+
+        std::atomic_flag posted = ATOMIC_FLAG_INIT;
+        std::atomic<bool> unordered{false};
+    };
+
+    static constexpr uint8_t state_uninitialized = 0;
+    static constexpr uint8_t state_initializing  = 1;
+    static constexpr uint8_t state_initialized   = 2;
+
+    bool is_initialized() const noexcept
+    {
+        return m_state.load(std::memory_order_acquire) == state_initialized;
+    }
+
+    impl& access() noexcept
+    {
+        return *std::launder(reinterpret_cast<impl*>(&m_storage));
+    }
+
+    const impl& access() const noexcept
+    {
+        return *std::launder(reinterpret_cast<const impl*>(&m_storage));
+    }
+
+    impl& ensure_initialized()
+    {
+        while (true) {
+            uint8_t current = m_state.load(std::memory_order_acquire);
+            if (current == state_initialized) {
+                return access();
+            }
+            if (current == state_uninitialized) {
+                if (m_state.compare_exchange_strong(
+                        current,
+                        state_initializing,
+                        std::memory_order_acq_rel,
+                        std::memory_order_acquire))
+                {
+                    try {
+                        new (&m_storage) impl();
+                        m_state.store(state_initialized, std::memory_order_release);
+                        return access();
+                    }
+                    catch (...) {
+                        m_state.store(state_uninitialized, std::memory_order_release);
+                        throw;
+                    }
+                }
+            }
+            std::this_thread::yield();
+        }
+    }
+
+    void destroy() noexcept
+    {
+        if (is_initialized()) {
+            access().~impl();
+            m_state.store(state_uninitialized, std::memory_order_release);
+        }
+    }
+
+    typename std::aligned_storage<sizeof(impl), alignof(impl)>::type m_storage;
+    std::atomic<uint8_t> m_state{state_uninitialized};
 };
 
 
