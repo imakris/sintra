@@ -183,26 +183,52 @@ inline std::atomic<read_fn>& read_override()
     return fn;
 }
 
+inline int retrying_fcntl_get(int fd, int cmd)
+{
+    int rv;
+    do {
+        rv = ::fcntl(fd, cmd);
+    } while (rv == -1 && errno == EINTR);
+    return rv;
+}
+
+inline int retrying_fcntl_set(int fd, int cmd, int value)
+{
+    int rv;
+    do {
+        rv = ::fcntl(fd, cmd, value);
+    } while (rv == -1 && errno == EINTR);
+    return rv;
+}
+
 inline int system_pipe2(int pipefd[2], int flags)
 {
 #if defined(__linux__) || defined(__FreeBSD__) || defined(__DragonFly__) || defined(__NetBSD__) || defined(__OpenBSD__)
-    return ::pipe2(pipefd, flags);
+    int rv;
+    do {
+        rv = ::pipe2(pipefd, flags);
+    } while (rv == -1 && errno == EINTR);
+    return rv;
 #else
     if (flags & ~(O_CLOEXEC | O_NONBLOCK)) {
         errno = EINVAL;
         return -1;
     }
 
-    if (::pipe(pipefd) == -1) {
+    int rv;
+    do {
+        rv = ::pipe(pipefd);
+    } while (rv == -1 && errno == EINTR);
+    if (rv == -1) {
         return -1;
     }
 
     const auto set_flag = [&](int fd, int cmd, int value) {
-        int current = ::fcntl(fd, cmd == F_SETFD ? F_GETFD : F_GETFL);
+        int current = retrying_fcntl_get(fd, cmd == F_SETFD ? F_GETFD : F_GETFL);
         if (current == -1) {
             return -1;
         }
-        return ::fcntl(fd, cmd, current | value);
+        return retrying_fcntl_set(fd, cmd, current | value);
     };
 
     if (flags & O_CLOEXEC) {
@@ -381,7 +407,11 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
     }
 
     int ready_pipe[2] = {-1, -1};
-    if (detail::call_pipe2(ready_pipe, O_CLOEXEC) == -1) {
+    int pipe_rv;
+    do {
+        pipe_rv = detail::call_pipe2(ready_pipe, O_CLOEXEC);
+    } while (pipe_rv == -1 && errno == EINTR);
+    if (pipe_rv == -1) {
         return false;
     }
 
@@ -407,9 +437,15 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
         }
 
         // Ensure the status pipe closes on exec so the parent observes EOF
-        int flags = fcntl(ready_pipe[1], F_GETFD);
+        int flags;
+        do {
+            flags = ::fcntl(ready_pipe[1], F_GETFD);
+        } while (flags == -1 && errno == EINTR);
         if (flags != -1) {
-            fcntl(ready_pipe[1], F_SETFD, flags | FD_CLOEXEC);
+            int set_result;
+            do {
+                set_result = ::fcntl(ready_pipe[1], F_SETFD, flags | FD_CLOEXEC);
+            } while (set_result == -1 && errno == EINTR);
         }
 
         ::setsid();
