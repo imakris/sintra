@@ -45,7 +45,10 @@ jobs:
             foreach ($package in $packages) {
               Write-Host "Attempting to install $package via Chocolatey"
               choco install $package --no-progress -y --package-parameters "'ADDLOCAL=DebuggingTools'"
-              if ($LASTEXITCODE -eq 0) {
+              if ($LASTEXITCODE -in 0, 3010, 1641) {
+                if ($LASTEXITCODE -ne 0) {
+                  Write-Host "Chocolatey reported reboot-required exit code $LASTEXITCODE for $package; treating as success"
+                }
                 $installed = $true
                 break
               }
