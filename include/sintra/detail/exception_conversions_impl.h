@@ -5,6 +5,7 @@
 
 #include "exception_conversions.h"
 #include "message.h"
+#include "type_utils.h"
 
 #include <filesystem>
 #include <future>
@@ -13,11 +14,10 @@
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <variant>
 #include <typeinfo>
 #include <unordered_map>
 #include <utility>
-
-#include <boost/type_index/ctti_type_index.hpp>
 
 
 namespace sintra {
@@ -60,7 +60,7 @@ std::pair<type_id_type, std::string> exception_to_string(const T& ex)
     return std::make_pair(
         get_type_id<message_string>,
         std::string("Exception of type ") +
-        boost::typeindex::ctti_type_index::template type_id<T>().pretty_name() +
+        detail::type_name<T>() +
         ", which is not serialized by sintra"
     );
 }
