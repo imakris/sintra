@@ -130,7 +130,6 @@
 #include <vector>
 
 // ─── Boost.Interprocess ──────────────────────────────────────────────────────
-#include <boost/interprocess/detail/os_file_functions.hpp>
 #include <boost/interprocess/file_mapping.hpp>
 #include <boost/interprocess/mapped_region.hpp>
 #include <boost/interprocess/sync/interprocess_mutex.hpp>
@@ -151,6 +150,8 @@
   #include <sys/mman.h>  // ::mmap, ::munmap, MAP_FIXED, MAP_NOSYNC (if available)
   #include <unistd.h>    // ::sysconf
   #include <signal.h>    // ::kill
+  #include <fcntl.h>
+  #include <sys/stat.h>
   #if defined(__FreeBSD__)
     #include <sys/types.h>
     #include <sys/sysctl.h>
@@ -184,6 +185,121 @@ namespace sintra {
 
 namespace fs  = std::filesystem;
 namespace ipc = boost::interprocess;
+
+namespace os_file {
+
+#ifdef _WIN32
+using native_file_handle = HANDLE;
+
+inline native_file_handle invalid_file() noexcept
+{
+    return INVALID_HANDLE_VALUE;
+}
+
+inline native_file_handle create_new_file(const char* name, ipc::mode_t)
+{
+    return ::CreateFileA(
+        name,
+        GENERIC_READ | GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr,
+        CREATE_NEW,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+}
+
+inline bool truncate_file(native_file_handle handle, std::size_t size)
+{
+    if (size > static_cast<std::size_t>(std::numeric_limits<LONGLONG>::max())) {
+        ::SetLastError(ERROR_FILE_TOO_LARGE);
+        return false;
+    }
+    LARGE_INTEGER distance{};
+    distance.QuadPart = static_cast<LONGLONG>(size);
+    if (!::SetFilePointerEx(handle, distance, nullptr, FILE_BEGIN)) {
+        return false;
+    }
+    return ::SetEndOfFile(handle) != 0;
+}
+
+inline bool write_file(native_file_handle handle, const void* buffer, std::size_t size)
+{
+    const auto* bytes = static_cast<const char*>(buffer);
+    while (size > 0) {
+        DWORD chunk = size > std::numeric_limits<DWORD>::max()
+                          ? std::numeric_limits<DWORD>::max()
+                          : static_cast<DWORD>(size);
+        DWORD written = 0;
+        if (!::WriteFile(handle, bytes, chunk, &written, nullptr)) {
+            return false;
+        }
+        if (written == 0) {
+            return false;
+        }
+        bytes += written;
+        size -= written;
+    }
+    return true;
+}
+
+inline bool close_file(native_file_handle handle)
+{
+    return handle == INVALID_HANDLE_VALUE || ::CloseHandle(handle) != 0;
+}
+
+#else
+
+using native_file_handle = int;
+
+inline native_file_handle invalid_file() noexcept
+{
+    return -1;
+}
+
+inline native_file_handle create_new_file(const char* name, ipc::mode_t)
+{
+    return ::open(name, O_CREAT | O_EXCL | O_RDWR, 0666);
+}
+
+inline bool truncate_file(native_file_handle handle, std::size_t size)
+{
+    const auto as_off = static_cast<off_t>(size);
+    if (size != static_cast<std::size_t>(as_off)) {
+        errno = EFBIG;
+        return false;
+    }
+    return ::ftruncate(handle, as_off) == 0;
+}
+
+inline bool write_file(native_file_handle handle, const void* buffer, std::size_t size)
+{
+    const auto* bytes = static_cast<const char*>(buffer);
+    while (size > 0) {
+        const auto written = ::write(handle, bytes, size);
+        if (written < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return false;
+        }
+        if (written == 0) {
+            errno = EIO;
+            return false;
+        }
+        bytes += static_cast<std::size_t>(written);
+        size -= static_cast<std::size_t>(written);
+    }
+    return true;
+}
+
+inline bool close_file(native_file_handle handle)
+{
+    return handle < 0 || ::close(handle) == 0;
+}
+
+#endif
+
+}  // namespace os_file
 
 using sequence_counter_type = uint64_t;
 constexpr auto invalid_sequence = ~sequence_counter_type(0);
@@ -815,13 +931,12 @@ private:
             if (!check_or_create_directory(m_directory))
                 return false;
 
-            ipc::file_handle_t fh_data =
-                ipc::ipcdetail::create_new_file(m_data_filename.c_str(), ipc::read_write);
-            if (fh_data == ipc::ipcdetail::invalid_file())
+            auto fh_data = os_file::create_new_file(m_data_filename.c_str(), ipc::read_write);
+            if (fh_data == os_file::invalid_file())
                 return false;
 
 #ifdef NDEBUG
-            if (!ipc::ipcdetail::truncate_file(fh_data, m_data_region_size))
+            if (!os_file::truncate_file(fh_data, m_data_region_size))
                 return false;
 #else
             // Fill with a recognizable pattern to aid debugging
@@ -831,9 +946,9 @@ private:
             for (size_t i = 0; i < m_data_region_size; ++i) {
                 tmp[i] = ustr[i % dv];
             }
-            ipc::ipcdetail::write_file(fh_data, tmp.get(), m_data_region_size);
+            os_file::write_file(fh_data, tmp.get(), m_data_region_size);
 #endif
-            return ipc::ipcdetail::close_file(fh_data);
+            return os_file::close_file(fh_data);
         }
         catch (...) {
         }
@@ -1335,13 +1450,12 @@ private:
     bool create()
     {
         try {
-            ipc::file_handle_t fh_control =
-                ipc::ipcdetail::create_new_file(m_control_filename.c_str(), ipc::read_write);
-            if (fh_control == ipc::ipcdetail::invalid_file())
+            auto fh_control = os_file::create_new_file(m_control_filename.c_str(), ipc::read_write);
+            if (fh_control == os_file::invalid_file())
                 return false;
 
 #ifdef NDEBUG
-            if (!ipc::ipcdetail::truncate_file(fh_control, sizeof(Control)))
+            if (!os_file::truncate_file(fh_control, sizeof(Control)))
                 return false;
 #else
             const char* ustr = "UNINITIALIZED";
@@ -1350,9 +1464,9 @@ private:
             for (size_t i = 0; i < sizeof(Control); ++i) {
                 tmp[i] = ustr[i % dv];
             }
-            ipc::ipcdetail::write_file(fh_control, tmp.get(), sizeof(Control));
+            os_file::write_file(fh_control, tmp.get(), sizeof(Control));
 #endif
-            return ipc::ipcdetail::close_file(fh_control);
+            return os_file::close_file(fh_control);
         }
         catch (...) {
         }
