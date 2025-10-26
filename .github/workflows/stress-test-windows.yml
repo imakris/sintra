@@ -79,12 +79,10 @@ jobs:
           $found = @()
           foreach ($candidate in $candidates) {
             try {
-              $paths = (where.exe $candidate 2>$null)
-              if ($paths) {
-                Write-Host "$candidate -> $paths"
+              $command = Get-Command $candidate -ErrorAction Stop
+              if ($command) {
+                Write-Host "$candidate -> $($command.Source)"
                 $found += $candidate
-              } else {
-                Write-Warning "Unable to locate $candidate"
               }
             } catch {
               Write-Warning "Unable to locate $candidate"
