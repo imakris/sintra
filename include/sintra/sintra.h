@@ -57,6 +57,22 @@
 #error Inline variables are not supported. Sintra requires this and other C++17 features.
 #endif
 
+#if defined(__clang__)
+#   if !__has_feature(cxx_rtti)
+#       error "Sintra requires RTTI (Run-Time Type Information). Enable it for your build (e.g. remove -fno-rtti)."
+#   endif
+#elif defined(__GNUC__)
+#   if !defined(__GXX_RTTI)
+#       error "Sintra requires RTTI (Run-Time Type Information). Rebuild with -frtti."
+#   endif
+#elif defined(_MSC_VER)
+#   if !defined(_CPPRTTI)
+#       error "Sintra requires RTTI (Run-Time Type Information). Rebuild with /GR."
+#   endif
+#elif !defined(__cpp_rtti)
+#   error "Sintra requires RTTI (Run-Time Type Information)."
+#endif
+
 
 // -- Core coordination ------------------------------------------------------
 // The coordinator orchestrates the managed processes, keeps track of
