@@ -1019,6 +1019,12 @@ class TestRunner:
                 self._debugger_cache[cache_key] = result
                 return result
 
+        known_path = self._locate_windows_debugger_from_known_paths(executable)
+        if known_path:
+            result = (str(known_path), '')
+            self._debugger_cache[cache_key] = result
+            return result
+
         winget_error = ''
         winget_path = shutil.which('winget')
         if winget_path:
@@ -1038,16 +1044,25 @@ class TestRunner:
                     text=True,
                     timeout=300,
                 )
-                if install_result.returncode != 0:
+                acceptable_codes = {0, 2316632107}
+                if install_result.returncode not in acceptable_codes:
                     detail = install_result.stderr.strip() or install_result.stdout.strip()
                     winget_error = f"winget install returned {install_result.returncode}: {detail}"
-                else:
+                located_path = None
+                if install_result.returncode in acceptable_codes:
                     for name in candidates:
-                        located = shutil.which(name)
-                        if located:
-                            result = (located, '')
-                            self._debugger_cache[cache_key] = result
-                            return result
+                        located_path = shutil.which(name)
+                        if located_path:
+                            break
+                    if not located_path:
+                        known_path = self._locate_windows_debugger_from_known_paths(executable)
+                        if known_path:
+                            located_path = str(known_path)
+
+                if located_path:
+                    result = (located_path, '')
+                    self._debugger_cache[cache_key] = result
+                    return result
             except subprocess.SubprocessError as exc:
                 winget_error = f"winget install failed: {exc}"
             except OSError as exc:
@@ -1063,6 +1078,79 @@ class TestRunner:
         result = (None, error)
         self._debugger_cache[cache_key] = result
         return result
+
+    def _locate_windows_debugger_from_known_paths(self, executable: str) -> Optional[Path]:
+        """Search common installation directories for Windows debuggers."""
+
+        program_files_variants = [
+            os.environ.get('ProgramFiles'),
+            os.environ.get('ProgramFiles(x86)'),
+        ]
+
+        candidate_roots = []
+        for base in program_files_variants:
+            if not base:
+                continue
+            windows_kits = Path(base) / 'Windows Kits'
+            candidate_roots.append(windows_kits / '10' / 'Debuggers')
+            candidate_roots.append(windows_kits / '10' / 'Debuggers' / 'bin')
+
+            windows_apps = Path(base) / 'WindowsApps'
+            candidate_roots.append(windows_apps)
+
+        suffixes = [
+            Path('x64'),
+            Path('x86'),
+            Path('arm64'),
+            Path('dbg') / 'amd64',
+            Path('dbg') / 'x86',
+            Path(),
+        ]
+
+        executable_names = [executable]
+        if not executable.lower().endswith('.exe'):
+            executable_names.append(f"{executable}.exe")
+
+        for root in candidate_roots:
+            try:
+                if not root.exists():
+                    continue
+            except OSError:
+                continue
+
+            for suffix in suffixes:
+                directory = root / suffix
+                try:
+                    if not directory.exists():
+                        continue
+                except OSError:
+                    continue
+
+                for name in executable_names:
+                    candidate = directory / name
+                    try:
+                        if candidate.exists():
+                            return candidate
+                    except OSError:
+                        continue
+
+                try:
+                    entries = list(directory.iterdir())
+                except OSError:
+                    continue
+
+                for subdir in entries:
+                    if not subdir.is_dir():
+                        continue
+                    for name in executable_names:
+                        candidate = subdir / name
+                        try:
+                            if candidate.exists():
+                                return candidate
+                        except OSError:
+                            continue
+
+        return None
 
     def _prepare_windows_debuggers(self) -> None:
         """Ensure Windows debuggers are resolved before running any tests."""
