@@ -16,7 +16,7 @@
 #include <type_traits>
 #include <utility>
 
-#include <boost/fusion/container/vector.hpp>
+#include "message_args.h"
 
 
 
@@ -308,7 +308,7 @@ struct serializable_type_impl;
 template <typename SEQ_T, int I, typename... Args>
 struct serializable_type_impl<SEQ_T, I, I, Args...>
 {
-    using type = typename boost::fusion::template vector<Args...>;
+    using type = message_args<Args...>;
     static constexpr bool has_variable_buffers = false;
 };
 
@@ -316,7 +316,7 @@ struct serializable_type_impl<SEQ_T, I, I, Args...>
 template <typename SEQ_T, int I, int J, typename... Args>
 struct serializable_type_impl
 {
-    using arg_type = typename boost::fusion::result_of::value_at_c<SEQ_T, I>::type;
+    using arg_type = typename message_args_element<SEQ_T, I>::type;
     using transformed_type =
         typename transformer<typename remove_reference<arg_type>::type>::type;
     using aggregate_type =
@@ -335,12 +335,13 @@ template <
     typename AGGREGATE = serializable_type_impl<
         SEQ_T,
         0,
-        boost::fusion::result_of::template size<SEQ_T>::value
+        message_args_size<SEQ_T>::value
     >,
     typename BASE = typename AGGREGATE::type
 >
 struct serializable_type: BASE
 {
+    using base_type = BASE;
     using BASE::BASE;
     static constexpr bool has_variable_buffers = AGGREGATE::has_variable_buffers;
 };
@@ -348,7 +349,7 @@ struct serializable_type: BASE
 
 template<typename... Args>
 constexpr bool args_require_varbuffer =
-    serializable_type<typename boost::fusion::template vector<Args...> >::has_variable_buffers;
+    serializable_type<message_args<Args...>>::has_variable_buffers;
 
 
   //\       //\       //\       //\       //\       //\       //\       //
