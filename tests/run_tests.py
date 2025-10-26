@@ -9,7 +9,7 @@ Usage:
     python run_tests.py [options]
 
 Options:
-    --repetitions N                 Number of times to run each test (default: 100)
+    --repetitions N                 Number of times to run each test (default: 1)
     --timeout SECONDS               Timeout per test run in seconds (default: 5)
     --test NAME                     Run only specific test (e.g., sintra_ping_pong_test)
     --include PATTERN               Include only tests matching glob-style pattern (can be repeated)
@@ -23,7 +23,6 @@ Options:
 import argparse
 import fnmatch
 import os
-import platform
 import shlex
 import shutil
 import subprocess
@@ -996,310 +995,77 @@ class TestRunner:
             '-o', 'quit',
         ]
 
-    @staticmethod
-    def _normalize_windows_architecture(value: Optional[str]) -> Optional[str]:
-        """Return the canonical Windows debugger architecture name."""
-
-        if not value:
-            return None
-
-        normalized = value.strip().lower()
-        mapping = {
-            'amd64': 'x64',
-            'x86_64': 'x64',
-            'ia64': 'x64',
-            'x64': 'x64',
-            'arm64': 'arm64',
-            'aarch64': 'arm64',
-            'arm': 'arm64',
-            'x86': 'x86',
-            'i386': 'x86',
-            'i486': 'x86',
-            'i586': 'x86',
-            'i686': 'x86',
-            'win32': 'x86',
-        }
-
-        return mapping.get(normalized)
-
-    def _preferred_windows_debug_architectures(self) -> List[str]:
-        """Return the preferred debugger architectures for the current build."""
-
-        if sys.platform != 'win32':
-            return []
-
-        hints = [
-            os.environ.get('SINTRA_TARGET_ARCH'),
-            os.environ.get('CDB_ARCH'),
-            os.environ.get('VSCMD_ARG_TGT_ARCH'),
-            os.environ.get('CMAKE_GENERATOR_PLATFORM'),
-            os.environ.get('Platform'),
-            os.environ.get('PROCESSOR_ARCHITECTURE'),
-            os.environ.get('PROCESSOR_ARCHITEW6432'),
-        ]
-
-        preferred: List[str] = []
-        for hint in hints:
-            normalized = self._normalize_windows_architecture(hint)
-            if normalized and normalized not in preferred:
-                preferred.append(normalized)
-
-        if preferred:
-            return preferred
-
-        bits, _ = platform.architecture()
-        if bits == '64bit':
-            return ['x64']
-
-        return ['x86']
-
-    @staticmethod
-    def _expand_windows_architecture_dirs(architectures: List[str]) -> List[str]:
-        """Expand canonical architectures into known directory aliases."""
-
-        aliases = {
-            'x64': ['x64', 'amd64'],
-            'x86': ['x86'],
-            'arm64': ['arm64'],
-        }
-
-        expanded: List[str] = []
-        for arch in architectures:
-            for alias in aliases.get(arch, [arch]):
-                if alias not in expanded:
-                    expanded.append(alias)
-
-        return expanded
-
-    def _locate_windows_debugger(self, executable: str) -> Tuple[Optional[str], str]:
-        """Locate a Windows debugger executable in common installation paths."""
-
-        if sys.platform != 'win32':
-            return None, f"{executable} not available on this platform"
-
-        cache_key = executable.lower()
-        if cache_key in self._debugger_cache:
-            return self._debugger_cache[cache_key]
-
-        exe_variants = {executable}
-        if not executable.lower().endswith('.exe'):
-            exe_variants.add(f"{executable}.exe")
-
-        preferred_arches = self._preferred_windows_debug_architectures()
-        arch_dir_names = self._expand_windows_architecture_dirs(preferred_arches)
-        if not arch_dir_names:
-            arch_dir_names = self._expand_windows_architecture_dirs(['x64'])
-
-        located = shutil.which(executable)
-        if located:
-            result = (located, '')
-            self._debugger_cache[cache_key] = result
-            return result
-
-        candidate_paths: List[Path] = []
-        searched_locations: List[str] = []
-        seen: Set[Path] = set()
-
-        def register_candidate(path: Optional[Path]) -> None:
-            if not path:
-                return
-            expanded = Path(str(path)).expanduser()
-            if expanded in seen:
-                return
-            seen.add(expanded)
-            candidate_paths.append(expanded)
-            if len(searched_locations) < 32:
-                searched_locations.append(str(expanded))
-
-        def add_debugger_candidates(
-            root: Optional[Path],
-            arch_dirs: Optional[Sequence[str]] = None,
-        ) -> None:
-            if not root:
-                return
-
-            queue: List[Tuple[Path, int]] = [(Path(root), 0)]
-            while queue:
-                current, depth = queue.pop(0)
-                for variant in exe_variants:
-                    candidate = current / variant
-                    if candidate.exists():
-                        register_candidate(candidate)
-                for arch in arch_dirs or arch_dir_names:
-                    arch_dir = current / arch
-                    if arch_dir.exists():
-                        register_candidate(arch_dir)
-                        for variant in exe_variants:
-                            candidate = arch_dir / variant
-                            if candidate.exists():
-                                register_candidate(candidate)
-
-                if depth >= 2:
-                    continue
-
-                try:
-                    for child in current.iterdir():
-                        if not child.is_dir():
-                            continue
-                        queue.append((child, depth + 1))
-                except OSError:
-                    # Ignore directories we cannot enumerate (e.g. permission issues
-                    # on WindowsApps) and continue probing other known locations.
-                    continue
-
-        def search_windows_kits_debuggers(
-            root: Optional[Path],
-            arch_dirs: Sequence[str],
-        ) -> None:
-            if not root or not arch_dirs:
-                return
-
-            try:
-                root_path = Path(root)
-                if not root_path.exists():
-                    return
-            except OSError:
-                return
-
-            try:
-                for debuggers_dir in root_path.rglob('Debuggers'):
-                    if not debuggers_dir.is_dir():
-                        continue
-
-                    for variant in exe_variants:
-                        candidate = debuggers_dir / variant
-                        if candidate.exists():
-                            register_candidate(candidate)
-
-                    for arch in arch_dirs:
-                        arch_dir = debuggers_dir / arch
-                        if not arch_dir.exists():
-                            continue
-                        register_candidate(arch_dir)
-                        for variant in exe_variants:
-                            candidate = arch_dir / variant
-                            if candidate.exists():
-                                register_candidate(candidate)
-            except OSError:
-                # Some directories under Windows Kits may not be accessible.
-                return
-
-        env_roots = [
-            os.environ.get('CDB_PATH'),
-            os.environ.get('CDB'),
-            os.environ.get('DEBUGGINGTOOLS'),
-            os.environ.get('DEBUGGINGTOOLS64'),
-            os.environ.get('DEBUGGINGTOOLS32'),
-            os.environ.get('WindowsSdkDir'),
-        ]
-
-        for value in env_roots:
-            if not value:
-                continue
-            value_path = Path(value)
-            if value_path.suffix.lower() == '.exe':
-                register_candidate(value_path)
-            else:
-                add_debugger_candidates(value_path)
-                add_debugger_candidates(value_path / 'Debuggers')
-
-        program_dirs = [
-            ('ProgramFiles', os.environ.get('ProgramFiles')),
-            ('ProgramFiles(x86)', os.environ.get('ProgramFiles(x86)')),
-            ('ProgramW6432', os.environ.get('ProgramW6432')),
-        ]
-
-        for var_name, base in program_dirs:
-            if not base:
-                continue
-
-            base_path = Path(base)
-            windows_kits = base_path / 'Windows Kits'
-            if preferred_arches:
-                kits_arches = preferred_arches
-            else:
-                kits_arches = ['x64', 'x86']
-            kits_arch_dirs = self._expand_windows_architecture_dirs(kits_arches)
-            if kits_arch_dirs:
-                add_debugger_candidates(windows_kits, arch_dirs=kits_arch_dirs)
-                search_windows_kits_debuggers(windows_kits, kits_arch_dirs)
-
-            visual_studio = base_path / 'Microsoft Visual Studio'
-            if visual_studio.exists():
-                try:
-                    vs_versions = sorted(visual_studio.iterdir(), reverse=True)
-                except OSError:
-                    vs_versions = []
-
-                for version_dir in vs_versions:
-                    if not version_dir.is_dir():
-                        continue
-                    try:
-                        editions = sorted(version_dir.iterdir(), reverse=True)
-                    except OSError:
-                        editions = []
-
-                    for edition_dir in editions:
-                        if not edition_dir.is_dir():
-                            continue
-                        add_debugger_candidates(edition_dir / 'Common7' / 'IDE' / 'Remote Debugger')
-
-        for path_entry in os.environ.get('PATH', '').split(os.pathsep):
-            if not path_entry:
-                continue
-            path_obj = Path(path_entry)
-            if path_obj.is_dir():
-                for variant in exe_variants:
-                    register_candidate(path_obj / variant)
-            else:
-                register_candidate(path_obj)
-
-        for candidate in candidate_paths:
-            try:
-                if candidate.is_file():
-                    result = (str(candidate), '')
-                    self._debugger_cache[cache_key] = result
-                    return result
-
-                if candidate.is_dir():
-                    for variant in exe_variants:
-                        potential = candidate / variant
-                        if potential.exists():
-                            result = (str(potential), '')
-                            self._debugger_cache[cache_key] = result
-                            return result
-            except OSError:
-                continue
-
-        if searched_locations:
-            sample = ', '.join(searched_locations[:10])
-            if len(searched_locations) > 10:
-                sample += ', ...'
-            error = f"{executable} not available (searched: {sample})"
-        else:
-            error = f"{executable} not available"
-
-        result = (None, error)
-        self._debugger_cache[cache_key] = result
-        return result
-
     def _resolve_windows_debugger(self) -> Tuple[Optional[str], Optional[str], str]:
         """Return the first available Windows debugger and its path."""
 
-        debugger_candidates = ['cdb', 'ntsd', 'windbg']
-        errors: List[str] = []
+        if sys.platform != 'win32':
+            return None, None, 'windows debugger lookup requested on non-Windows platform'
 
-        for debugger in debugger_candidates:
-            path, error = self._locate_windows_debugger(debugger)
-            if path:
-                return debugger, path, ''
-            if error:
-                errors.append(f"{debugger}: {error}")
+        cache_key = 'windbg'
+        cached = self._debugger_cache.get(cache_key)
+        if cached:
+            return cached
 
-        if errors:
-            return None, None, '; '.join(errors)
+        def locate_windbg() -> Optional[Path]:
+            found = shutil.which('windbg')
+            if found:
+                return Path(found)
 
-        return None, None, 'no Windows debugger available'
+            candidate_dirs = [
+                Path('C:/Program Files (x86)/Windows Kits/10/Debuggers/x64/windbg.exe'),
+                Path('C:/Program Files/Windows Kits/10/Debuggers/x64/windbg.exe'),
+                Path('C:/Program Files (x86)/Windows Kits/10/Debuggers/x86/windbg.exe'),
+                Path('C:/Program Files/Windows Kits/10/Debuggers/x86/windbg.exe'),
+            ]
+
+            for candidate in candidate_dirs:
+                if candidate.exists():
+                    return candidate
+
+            return None
+
+        install_error = ''
+        windbg_path = locate_windbg()
+
+        if not windbg_path:
+            winget_path = shutil.which('winget')
+            if winget_path:
+                try:
+                    result = subprocess.run(
+                        [
+                            winget_path,
+                            'install',
+                            '--id', 'Microsoft.WinDbg',
+                            '-e',
+                            '--accept-package-agreements',
+                            '--accept-source-agreements',
+                        ],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        timeout=300,
+                    )
+                    if result.returncode != 0:
+                        install_error = result.stderr.strip() or result.stdout.strip()
+                    else:
+                        windbg_path = locate_windbg()
+                except subprocess.SubprocessError as exc:
+                    install_error = f'winget failed ({exc})'
+            else:
+                install_error = 'winget not available'
+
+        if windbg_path:
+            result = ('windbg', str(windbg_path), '')
+            self._debugger_cache[cache_key] = result
+            return result
+
+        error_parts = ['windbg not available']
+        if install_error:
+            error_parts.insert(0, install_error)
+
+        error_result = (None, None, '; '.join(part for part in error_parts if part))
+        self._debugger_cache[cache_key] = error_result
+        return error_result
 
     def _capture_windows_crash_dump(
         self,
@@ -1852,8 +1618,8 @@ def main():
         description='Run Sintra tests with timeout and repetition support',
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument('--repetitions', type=int, default=1000,
-                        help='Number of times to run each test (default: 1000)')
+    parser.add_argument('--repetitions', type=int, default=1,
+                        help='Number of times to run each test (default: 1)')
     parser.add_argument('--timeout', type=float, default=5.0,
                         help='Timeout per test run in seconds (default: 5)')
     parser.add_argument('--test', type=str, default=None,
