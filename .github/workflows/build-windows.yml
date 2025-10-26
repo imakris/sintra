@@ -46,10 +46,11 @@ jobs:
             "${env:ProgramFiles(x86)}\Windows Kits\10\Debuggers\x86"
           ) | Where-Object { $_ -and (Test-Path $_) }
           if (-not $debugDirs) {
-            throw 'Windows debugging tools not found after installation attempts.'
-          }
-          foreach ($dir in $debugDirs) {
-            Add-Content -Path $env:GITHUB_PATH -Value $dir
+            Write-Warning 'Windows debugging tools not found after installation attempts; continuing without debugger support.'
+          } else {
+            foreach ($dir in $debugDirs) {
+              Add-Content -Path $env:GITHUB_PATH -Value $dir
+            }
           }
 
       - name: Verify Windows debuggers
