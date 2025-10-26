@@ -49,21 +49,23 @@ jobs:
                 $installed = $true
                 break
               }
+              Write-Warning "Failed to install $package (exit code $LASTEXITCODE)."
+              $global:LASTEXITCODE = 0
             }
 
             if (-not $installed) {
-              throw "Windows debugging tools could not be installed. Packages tried: $($packages -join ', ')"
+              Write-Warning "Windows debugging tools could not be installed. Packages tried: $($packages -join ', ')"
             }
 
             $debugDirs = Get-DebugDirectories
           }
 
           if (-not $debugDirs) {
-            throw 'Windows debugging tools not found after installation.'
-          }
-
-          foreach ($dir in $debugDirs) {
-            Add-Content -Path $env:GITHUB_PATH -Value $dir
+            Write-Warning 'Windows debugging tools not found. Crash dump collection will be skipped during stress tests.'
+          } else {
+            foreach ($dir in $debugDirs) {
+              Add-Content -Path $env:GITHUB_PATH -Value $dir
+            }
           }
 
       - name: Verify Windows debuggers
@@ -85,7 +87,10 @@ jobs:
             }
           }
           if (-not $found) {
-            throw "No Windows debugger discovered. Checked: $($candidates -join ', ')"
+            Write-Warning "No Windows debugger discovered. Checked: $($candidates -join ', ')"
+            Add-Content -Path $env:GITHUB_ENV -Value 'SINTRA_WINDOWS_DEBUGGER_AVAILABLE=false'
+          } else {
+            Add-Content -Path $env:GITHUB_ENV -Value 'SINTRA_WINDOWS_DEBUGGER_AVAILABLE=true'
           }
 
       - name: Download build artifacts
