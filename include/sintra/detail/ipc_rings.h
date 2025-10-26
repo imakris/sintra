@@ -130,12 +130,12 @@
 #include <vector>
 
 // ─── Boost.Interprocess ──────────────────────────────────────────────────────
-#include <boost/interprocess/detail/os_file_functions.hpp>
 #include <boost/interprocess/file_mapping.hpp>
 #include <boost/interprocess/mapped_region.hpp>
 #include <boost/interprocess/sync/interprocess_mutex.hpp>
 
 #include "interprocess_semaphore.h"
+#include "native_file_ops.h"
 
 // ─── Platform headers (grouped) ──────────────────────────────────────────────
 #ifdef _WIN32
@@ -182,8 +182,9 @@
 
 namespace sintra {
 
-namespace fs  = std::filesystem;
-namespace ipc = boost::interprocess;
+namespace fs       = std::filesystem;
+namespace ipc      = boost::interprocess;
+namespace file_ops = detail::native_file_ops;
 
 using sequence_counter_type = uint64_t;
 constexpr auto invalid_sequence = ~sequence_counter_type(0);
@@ -815,13 +816,23 @@ private:
             if (!check_or_create_directory(m_directory))
                 return false;
 
-            ipc::file_handle_t fh_data =
-                ipc::ipcdetail::create_new_file(m_data_filename.c_str(), ipc::read_write);
-            if (fh_data == ipc::ipcdetail::invalid_file())
+            auto fh_data = file_ops::create_new_file(m_data_filename);
+            if (fh_data == file_ops::invalid_handle())
                 return false;
 
+            struct handle_guard {
+                file_ops::handle_type handle;
+                ~handle_guard()
+                {
+                    if (handle != file_ops::invalid_handle()) {
+                        (void)file_ops::close_file(handle);
+                    }
+                }
+                void release() { handle = file_ops::invalid_handle(); }
+            } guard{fh_data};
+
 #ifdef NDEBUG
-            if (!ipc::ipcdetail::truncate_file(fh_data, m_data_region_size))
+            if (!file_ops::truncate_file(fh_data, m_data_region_size))
                 return false;
 #else
             // Fill with a recognizable pattern to aid debugging
@@ -831,9 +842,12 @@ private:
             for (size_t i = 0; i < m_data_region_size; ++i) {
                 tmp[i] = ustr[i % dv];
             }
-            ipc::ipcdetail::write_file(fh_data, tmp.get(), m_data_region_size);
+            if (!file_ops::write_file(fh_data, tmp.get(), m_data_region_size))
+                return false;
 #endif
-            return ipc::ipcdetail::close_file(fh_data);
+            bool closed = file_ops::close_file(fh_data);
+            guard.release();
+            return closed;
         }
         catch (...) {
         }
@@ -1335,13 +1349,23 @@ private:
     bool create()
     {
         try {
-            ipc::file_handle_t fh_control =
-                ipc::ipcdetail::create_new_file(m_control_filename.c_str(), ipc::read_write);
-            if (fh_control == ipc::ipcdetail::invalid_file())
+            auto fh_control = file_ops::create_new_file(m_control_filename);
+            if (fh_control == file_ops::invalid_handle())
                 return false;
 
+            struct handle_guard {
+                file_ops::handle_type handle;
+                ~handle_guard()
+                {
+                    if (handle != file_ops::invalid_handle()) {
+                        (void)file_ops::close_file(handle);
+                    }
+                }
+                void release() { handle = file_ops::invalid_handle(); }
+            } guard{fh_control};
+
 #ifdef NDEBUG
-            if (!ipc::ipcdetail::truncate_file(fh_control, sizeof(Control)))
+            if (!file_ops::truncate_file(fh_control, sizeof(Control)))
                 return false;
 #else
             const char* ustr = "UNINITIALIZED";
@@ -1350,9 +1374,12 @@ private:
             for (size_t i = 0; i < sizeof(Control); ++i) {
                 tmp[i] = ustr[i % dv];
             }
-            ipc::ipcdetail::write_file(fh_control, tmp.get(), sizeof(Control));
+            if (!file_ops::write_file(fh_control, tmp.get(), sizeof(Control)))
+                return false;
 #endif
-            return ipc::ipcdetail::close_file(fh_control);
+            bool closed = file_ops::close_file(fh_control);
+            guard.release();
+            return closed;
         }
         catch (...) {
         }
