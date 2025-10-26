@@ -132,6 +132,7 @@ class TestRunner:
         self.preserve_on_timeout = preserve_on_timeout
         self._ipc_rings_cache: Dict[Path, List[Tuple[str, str]]] = {}
         self._debugger_cache: Dict[str, Tuple[Optional[str], str]] = {}
+        self._attempted_debugger_install = False
 
         # Determine test directory - check both with and without config subdirectory
         test_dir_with_config = build_dir / 'tests' / config
@@ -1108,8 +1109,7 @@ class TestRunner:
                 return
             seen.add(expanded)
             candidate_paths.append(expanded)
-            if len(searched_locations) < 32:
-                searched_locations.append(str(expanded))
+            searched_locations.append(str(expanded))
 
         def add_debugger_candidates(
             root: Optional[Path],
@@ -1271,13 +1271,30 @@ class TestRunner:
             except OSError:
                 continue
 
+        install_attempt_message = ''
+        if sys.platform == 'win32' and not self._attempted_debugger_install:
+            installed, install_message = self._ensure_windows_debugging_tools_installed()
+            if installed:
+                return self._locate_windows_debugger(executable)
+            install_attempt_message = install_message
+
         if searched_locations:
-            sample = ', '.join(searched_locations[:10])
-            if len(searched_locations) > 10:
-                sample += ', ...'
-            error = f"{executable} not available (searched: {sample})"
+            formatted_locations = '\n'.join(f"    {location}" for location in searched_locations)
+            error_lines = [f"{executable} not available.", "Searched locations:", formatted_locations]
+            if install_attempt_message:
+                formatted_install = '\n'.join(
+                    f"    {line}" for line in install_attempt_message.splitlines()
+                )
+                error_lines.append("Installation attempts:")
+                error_lines.append(formatted_install)
+            error = '\n'.join(line for line in error_lines if line)
         else:
             error = f"{executable} not available"
+            if install_attempt_message:
+                formatted_install = '\n'.join(
+                    f"    {line}" for line in install_attempt_message.splitlines()
+                )
+                error = f"{error}\nInstallation attempts:\n{formatted_install}"
 
         result = (None, error)
         self._debugger_cache[cache_key] = result
@@ -1294,12 +1311,54 @@ class TestRunner:
             if path:
                 return debugger, path, ''
             if error:
-                errors.append(f"{debugger}: {error}")
+                formatted_error = error.replace('\n', '\n    ')
+                errors.append(f"{debugger}: {formatted_error}")
 
         if errors:
-            return None, None, '; '.join(errors)
+            return None, None, '\n'.join(errors)
 
         return None, None, 'no Windows debugger available'
+
+    def _ensure_windows_debugging_tools_installed(self) -> Tuple[bool, str]:
+        """Attempt to install Windows debugging tools if they are missing."""
+
+        self._attempted_debugger_install = True
+
+        if sys.platform != 'win32':
+            return False, ''
+
+        winget_path = shutil.which('winget')
+        if not winget_path:
+            return False, 'winget: not available on PATH'
+
+        command = [
+            winget_path,
+            'install',
+            '--id',
+            'Microsoft.WinDbg',
+            '-e',
+            '--accept-package-agreements',
+            '--accept-source-agreements',
+            '--disable-interactivity',
+        ]
+
+        try:
+            result = subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=900,
+            )
+        except subprocess.SubprocessError as exc:
+            return False, f'winget install failed to start: {exc}'
+
+        if result.returncode == 0:
+            return True, 'winget: successfully installed Microsoft.WinDbg'
+
+        detail = result.stderr.strip() or result.stdout.strip()
+        return False, f'winget: exited with code {result.returncode}: {detail}'
+
 
     def _capture_windows_crash_dump(
         self,
