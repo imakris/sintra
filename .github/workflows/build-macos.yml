@@ -15,6 +15,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Verify LLDB availability
+        run: |
+          if ! xcrun -f lldb >/dev/null 2>&1; then
+            echo "::error::lldb not available via xcrun. Install Xcode Command Line Tools to provide LLDB." >&2
+            exit 1
+          fi
+          xcrun lldb --version
+
       - name: Configure CMake
         run: cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
 

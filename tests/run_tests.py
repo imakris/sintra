@@ -23,6 +23,7 @@ Options:
 import argparse
 import fnmatch
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -572,9 +573,9 @@ class TestRunner:
         if sys.platform == 'win32':
             return self._capture_process_stacks_windows(pid)
 
-        gdb_path = shutil.which('gdb')
-        if not gdb_path:
-            return "", "gdb not available"
+        debugger_name, debugger_command, debugger_error = self._resolve_unix_debugger()
+        if not debugger_command:
+            return "", debugger_error
 
         import signal
         try:
@@ -617,23 +618,20 @@ class TestRunner:
 
             try:
                 result = subprocess.run(
-                    [
-                        gdb_path,
-                        '--batch',
-                        '-p', str(target_pid),
-                        '-ex', 'set pagination off',
-                        '-ex', 'thread apply all bt',
-                        '-ex', 'detach',
-                    ],
+                    self._build_unix_live_debugger_command(
+                        debugger_name,
+                        debugger_command,
+                        target_pid,
+                    ),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
                     timeout=30,
                 )
-            except FileNotFoundError:
-                return "", "gdb not available"
             except subprocess.SubprocessError as exc:
-                capture_errors.append(f"PID {target_pid}: gdb failed ({exc})")
+                capture_errors.append(
+                    f"PID {target_pid}: {debugger_name} failed ({exc})"
+                )
                 continue
 
             output = result.stdout.strip()
@@ -642,7 +640,7 @@ class TestRunner:
 
             if result.returncode != 0:
                 capture_errors.append(
-                    f"PID {target_pid}: gdb exited with code {result.returncode}: {result.stderr.strip()}"
+                    f"PID {target_pid}: {debugger_name} exited with code {result.returncode}: {result.stderr.strip()}"
                 )
                 continue
 
@@ -676,9 +674,9 @@ class TestRunner:
         if sys.platform == 'win32':
             return "", "core dump stack capture not supported on Windows"
 
-        gdb_path = shutil.which('gdb')
-        if not gdb_path:
-            return "", "gdb not available"
+        debugger_name, debugger_command, debugger_error = self._resolve_unix_debugger()
+        if not debugger_command:
+            return "", debugger_error
 
         candidate_dirs = [invocation.path.parent, Path.cwd()]
         candidate_cores: List[Tuple[float, Path]] = []
@@ -731,21 +729,21 @@ class TestRunner:
         for _, core_path in candidate_cores:
             try:
                 result = subprocess.run(
-                    [
-                        gdb_path,
-                        '--batch',
-                        '-ex', 'set pagination off',
-                        '-ex', 'thread apply all bt',
-                        str(invocation.path),
-                        str(core_path),
-                    ],
+                    self._build_unix_core_debugger_command(
+                        debugger_name,
+                        debugger_command,
+                        invocation,
+                        core_path,
+                    ),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
                     timeout=60,
                 )
             except subprocess.SubprocessError as exc:
-                capture_errors.append(f"{core_path.name}: gdb failed ({exc})")
+                capture_errors.append(
+                    f"{core_path.name}: {debugger_name} failed ({exc})"
+                )
                 continue
 
             output = result.stdout.strip()
@@ -754,7 +752,7 @@ class TestRunner:
 
             if result.returncode != 0:
                 capture_errors.append(
-                    f"{core_path.name}: gdb exited with code {result.returncode}: {result.stderr.strip()}"
+                    f"{core_path.name}: {debugger_name} exited with code {result.returncode}: {result.stderr.strip()}"
                 )
                 continue
 
@@ -769,6 +767,86 @@ class TestRunner:
             return "", "; ".join(capture_errors)
 
         return "", "no usable core dump found"
+
+    def _resolve_unix_debugger(self) -> Tuple[Optional[str], Optional[List[str]], str]:
+        """Locate gdb or lldb on Unix-like platforms."""
+
+        if sys.platform == 'win32':
+            return None, None, 'debugger not available on this platform'
+
+        gdb_path = shutil.which('gdb')
+        if gdb_path:
+            return 'gdb', [gdb_path], ''
+
+        lldb_path = shutil.which('lldb')
+        if lldb_path:
+            return 'lldb', [lldb_path], ''
+
+        xcrun_path = shutil.which('xcrun')
+        if xcrun_path:
+            return 'lldb', [xcrun_path, 'lldb'], ''
+
+        return None, None, 'gdb or lldb not available (install gdb or the Xcode Command Line Tools)'
+
+    def _build_unix_live_debugger_command(
+        self,
+        debugger_name: str,
+        debugger_command: List[str],
+        pid: int,
+    ) -> List[str]:
+        """Construct the debugger command to attach to a live process."""
+
+        if debugger_name == 'gdb':
+            return [
+                *debugger_command,
+                '--batch',
+                '-p', str(pid),
+                '-ex', 'set pagination off',
+                '-ex', 'thread apply all bt',
+                '-ex', 'detach',
+            ]
+
+        # Fallback to lldb
+        return [
+            *debugger_command,
+            '--batch',
+            '-p', str(pid),
+            '-o', 'thread backtrace all',
+            '-o', 'detach',
+            '-o', 'quit',
+        ]
+
+    def _build_unix_core_debugger_command(
+        self,
+        debugger_name: str,
+        debugger_command: List[str],
+        invocation: TestInvocation,
+        core_path: Path,
+    ) -> List[str]:
+        """Construct the debugger command to inspect a generated core file."""
+
+        if debugger_name == 'gdb':
+            return [
+                *debugger_command,
+                '--batch',
+                '-ex', 'set pagination off',
+                '-ex', 'thread apply all bt',
+                str(invocation.path),
+                str(core_path),
+            ]
+
+        # Fallback to lldb
+        quoted_executable = shlex.quote(str(invocation.path))
+        quoted_core = shlex.quote(str(core_path))
+
+        return [
+            *debugger_command,
+            '--batch',
+            '-o', f'target create {quoted_executable}',
+            '-o', f'process attach -c {quoted_core}',
+            '-o', 'thread backtrace all',
+            '-o', 'quit',
+        ]
 
     def _resolve_cdb_path(self) -> Tuple[Optional[str], str]:
         """Locate the Windows cdb debugger in common installation paths."""
