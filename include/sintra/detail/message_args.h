@@ -10,6 +10,10 @@ namespace sintra {
 namespace detail {
 
 template <typename T>
+using remove_cvref_t = typename std::remove_cv<
+    typename std::remove_reference<T>::type>::type;
+
+template <typename T>
 using message_arg_storage_value_t = std::conditional_t<
     std::is_reference<T>::value,
     std::reference_wrapper<typename std::remove_reference<T>::type>,
@@ -75,7 +79,7 @@ struct message_args
 
 template <typename T>
 struct message_args_size
-    : message_args_size<typename std::remove_cv<T>::type::message_args_type>
+    : message_args_size<typename remove_cvref_t<T>::message_args_type>
 {};
 
 template <typename... Args>
@@ -85,7 +89,7 @@ struct message_args_size<message_args<Args...>>
 
 template <typename T, std::size_t I>
 struct message_args_nth_type
-    : message_args_nth_type<typename std::remove_cv<T>::type::message_args_type, I>
+    : message_args_nth_type<typename remove_cvref_t<T>::message_args_type, I>
 {};
 
 template <std::size_t I, typename... Args>
