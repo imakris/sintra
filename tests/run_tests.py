@@ -23,6 +23,7 @@ Options:
 import argparse
 import fnmatch
 import os
+import platform
 import shlex
 import shutil
 import subprocess
@@ -131,6 +132,7 @@ class TestRunner:
         self.preserve_on_timeout = preserve_on_timeout
         self._ipc_rings_cache: Dict[Path, List[Tuple[str, str]]] = {}
         self._debugger_cache: Dict[str, Tuple[Optional[str], str]] = {}
+        self._windows_debugger_arch: Optional[str] = None
 
         # Determine test directory - check both with and without config subdirectory
         test_dir_with_config = build_dir / 'tests' / config
@@ -995,6 +997,61 @@ class TestRunner:
             '-o', 'quit',
         ]
 
+    def _detect_windows_debugger_architecture(self) -> str:
+        """Detect the target Windows debugger architecture once per runner."""
+
+        if self._windows_debugger_arch:
+            return self._windows_debugger_arch
+
+        arch_candidates = [
+            os.environ.get('VSCMD_ARG_TGT_ARCH'),
+            os.environ.get('Platform'),
+            os.environ.get('PROCESSOR_ARCHITECTURE'),
+            os.environ.get('PROCESSOR_ARCHITEW6432'),
+        ]
+
+        try:
+            arch_candidates.append(platform.machine())
+        except OSError:
+            pass
+
+        alias_map = {
+            'x64': 'x64',
+            'amd64': 'x64',
+            'x86_64': 'x64',
+            'win64': 'x64',
+            'x86': 'x86',
+            'i386': 'x86',
+            'i686': 'x86',
+            'win32': 'x86',
+            'arm64': 'arm64',
+            'aarch64': 'arm64',
+        }
+
+        for candidate in arch_candidates:
+            if not candidate:
+                continue
+            normalized = candidate.strip().lower()
+            if normalized in alias_map:
+                self._windows_debugger_arch = alias_map[normalized]
+                return self._windows_debugger_arch
+
+        # Default to 64-bit debuggers when no explicit signal is available.
+        self._windows_debugger_arch = 'x64'
+        return self._windows_debugger_arch
+
+    @staticmethod
+    def _windows_architecture_aliases(arch: str) -> Tuple[str, ...]:
+        """Return folder name aliases for the target debugger architecture."""
+
+        alias_map = {
+            'x64': ('x64', 'amd64'),
+            'x86': ('x86',),
+            'arm64': ('arm64',),
+        }
+
+        return alias_map.get(arch, (arch,))
+
     def _locate_windows_debugger(self, executable: str) -> Tuple[Optional[str], str]:
         """Locate a Windows debugger executable in common installation paths."""
 
@@ -1015,17 +1072,22 @@ class TestRunner:
             self._debugger_cache[cache_key] = result
             return result
 
+        target_arch = self._detect_windows_debugger_architecture()
+        arch_aliases = self._windows_architecture_aliases(target_arch)
+        alias_lookup = {alias.lower() for alias in arch_aliases}
+
         candidate_paths: List[Path] = []
         searched_locations: List[str] = []
-        seen: Set[Path] = set()
+        candidate_seen: Set[Path] = set()
+        visited_roots: Set[Path] = set()
 
         def register_candidate(path: Optional[Path]) -> None:
             if not path:
                 return
             expanded = Path(str(path)).expanduser()
-            if expanded in seen:
+            if expanded in candidate_seen:
                 return
-            seen.add(expanded)
+            candidate_seen.add(expanded)
             candidate_paths.append(expanded)
             if len(searched_locations) < 32:
                 searched_locations.append(str(expanded))
@@ -1034,12 +1096,70 @@ class TestRunner:
             if not root:
                 return
 
-            queue: List[Tuple[Path, int]] = [(Path(root), 0)]
+            try:
+                root_path = Path(root)
+            except OSError:
+                return
+
+            if root_path in visited_roots:
+                return
+
+            visited_roots.add(root_path)
+
+            try:
+                if not root_path.exists():
+                    return
+            except OSError:
+                return
+
+            try:
+                if root_path.is_file():
+                    register_candidate(root_path)
+                    return
+            except OSError:
+                return
+
+            def search_windows_kits_debuggers(base: Path) -> None:
+                try:
+                    resolved = base
+                    if resolved.is_file():
+                        register_candidate(resolved)
+                        return
+                except OSError:
+                    return
+
+                debugger_dirs: Set[Path] = set()
+
+                try:
+                    if resolved.name.lower() == 'debuggers':
+                        debugger_dirs.add(resolved)
+                    for candidate_dir in resolved.glob('**/Debuggers'):
+                        debugger_dirs.add(candidate_dir)
+                except OSError:
+                    debugger_dirs = set()
+
+                for debugger_dir in debugger_dirs:
+                    for alias in arch_aliases:
+                        arch_dir = debugger_dir / alias
+                        for variant in exe_variants:
+                            register_candidate(arch_dir / variant)
+
+                lower_name = resolved.name.lower()
+                if lower_name in alias_lookup:
+                    for variant in exe_variants:
+                        register_candidate(resolved / variant)
+
+            parts_lower = {part.lower() for part in root_path.parts}
+            if 'windows kits' in parts_lower:
+                search_windows_kits_debuggers(root_path)
+                return
+
+            queue: List[Tuple[Path, int]] = [(root_path, 0)]
             while queue:
                 current, depth = queue.pop(0)
                 for variant in exe_variants:
                     register_candidate(current / variant)
-                for arch in ('x64', 'x86', 'arm64', 'amd64'):
+                for arch in arch_aliases:
                     for variant in exe_variants:
                         register_candidate(current / arch / variant)
 
