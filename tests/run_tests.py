@@ -346,6 +346,7 @@ class TestRunner:
         process = None
         try:
             start_time = time.time()
+            start_monotonic = time.monotonic()
 
             # Use Popen for better process control
             popen_kwargs = {
@@ -372,28 +373,45 @@ class TestRunner:
             postmortem_stack_error = ""
             failure_event = threading.Event()
             capture_lock = threading.Lock()
+            capture_pause_total = 0.0
+            capture_active_start: Optional[float] = None
             threads: List[threading.Thread] = []
 
             process = subprocess.Popen(invocation.command(), **popen_kwargs)
 
             def attempt_live_capture(trigger_line: str) -> None:
-                nonlocal live_stack_traces, live_stack_error
+                nonlocal live_stack_traces, live_stack_error, capture_pause_total, capture_active_start
                 if not trigger_line:
                     return
                 if not self._line_indicates_failure(trigger_line):
                     return
+                capture_started = time.monotonic()
                 with capture_lock:
                     if failure_event.is_set():
                         return
                     failure_event.set()
+                    capture_active_start = capture_started
+
+                traces = ""
+                error = ""
+                try:
                     traces, error = self._capture_process_stacks(process.pid)
-                    if traces:
+                finally:
+                    capture_finished = time.monotonic()
+                    with capture_lock:
+                        if capture_active_start is not None:
+                            capture_pause_total += capture_finished - capture_active_start
+                        capture_active_start = None
+
+                if traces:
+                    with capture_lock:
                         if live_stack_traces:
                             live_stack_traces = f"{live_stack_traces}\n\n{traces}"
                         else:
                             live_stack_traces = traces
                         live_stack_error = ""
-                    elif error and not live_stack_traces:
+                elif error and not live_stack_traces:
+                    with capture_lock:
                         live_stack_error = error
 
             def monitor_stream(stream, buffer: List[str]) -> None:
@@ -425,9 +443,33 @@ class TestRunner:
                 stderr_thread.start()
                 threads.append(stderr_thread)
 
-            # Wait with timeout
+            # Wait with timeout, extending the deadline for live stack captures
             try:
-                process.wait(timeout=self.timeout)
+                poll_interval = 0.1
+                while True:
+                    with capture_lock:
+                        pause_total = capture_pause_total
+                        active_start = capture_active_start
+
+                    now_monotonic = time.monotonic()
+                    active_extra = 0.0
+                    if active_start is not None:
+                        active_extra = now_monotonic - active_start
+
+                    adjusted_deadline = (
+                        start_monotonic + self.timeout + pause_total + active_extra
+                    )
+
+                    if process.poll() is not None:
+                        break
+
+                    remaining = adjusted_deadline - now_monotonic
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(process.args, self.timeout)
+
+                    time.sleep(min(poll_interval, remaining))
+
+                process.wait()
                 duration = time.time() - start_time
 
                 for thread in threads:
