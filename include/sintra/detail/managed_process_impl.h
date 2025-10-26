@@ -51,10 +51,10 @@ namespace {
         bool has_previous = false;
     };
 
-    inline std::array<signal_slot, 6>& signal_slots()
+    inline std::array<signal_slot, 7>& signal_slots()
     {
-        static std::array<signal_slot, 6> slots {{
-            {SIGABRT}, {SIGFPE}, {SIGILL}, {SIGINT}, {SIGSEGV}, {SIGTERM}
+        static std::array<signal_slot, 7> slots {{
+            {SIGABRT}, {SIGFPE}, {SIGILL}, {SIGINT}, {SIGSEGV}, {SIGTERM}, {SIGCHLD}
         }};
         return slots;
     }
@@ -65,10 +65,10 @@ namespace {
         bool has_previous = false;
     };
 
-    inline std::array<signal_slot, 6>& signal_slots()
+    inline std::array<signal_slot, 7>& signal_slots()
     {
-        static std::array<signal_slot, 6> slots {{
-            {SIGABRT}, {SIGFPE}, {SIGILL}, {SIGINT}, {SIGSEGV}, {SIGTERM}
+        static std::array<signal_slot, 7> slots {{
+            {SIGABRT}, {SIGFPE}, {SIGILL}, {SIGINT}, {SIGSEGV}, {SIGTERM}, {SIGCHLD}
         }};
         return slots;
     }
@@ -123,6 +123,14 @@ namespace {
     inline void dispatch_signal_number(int sig_number)
     {
         auto* mproc = s_mproc;
+#ifndef _WIN32
+        if (sig_number == SIGCHLD) {
+            if (mproc) {
+                mproc->reap_finished_children();
+            }
+            return;
+        }
+#endif
         if (mproc && mproc->m_out_req_c) {
             mproc->emit_remote<Managed_process::terminated_abnormally>(sig_number);
 
@@ -223,7 +231,8 @@ namespace {
     }
 #endif
 
-    inline signal_slot* find_slot(std::array<signal_slot, 6>& slots, int sig)
+    template <std::size_t N>
+    inline signal_slot* find_slot(std::array<signal_slot, N>& slots, int sig)
     {
         for (auto& candidate : slots) {
             if (candidate.sig == sig) {
@@ -265,7 +274,7 @@ static void s_signal_handler(int sig, siginfo_t* info, void* ctx)
     auto& slots = signal_slots();
 
     auto* mproc = s_mproc;
-    const bool should_wait_for_dispatch = mproc && mproc->m_out_req_c;
+    const bool should_wait_for_dispatch = mproc && mproc->m_out_req_c && sig != SIGCHLD;
     uint32_t dispatched_before = 0;
     if (should_wait_for_dispatch) {
         dispatched_before = dispatched_signal_counter().load(std::memory_order_relaxed);
@@ -381,6 +390,12 @@ void install_signal_handler()
 #ifdef SA_RESTART
             sa.sa_flags |= SA_RESTART;
 #endif
+            if (slot.sig == SIGCHLD) {
+#ifdef SA_NOCLDSTOP
+                sa.sa_flags |= SA_NOCLDSTOP;
+#endif
+            }
+
             if (sigaction(slot.sig, &sa, &slot.previous) == 0) {
                 slot.has_previous = slot.previous.sa_sigaction != s_signal_handler;
                 if (!slot.has_previous) {
@@ -570,6 +585,42 @@ Managed_process::~Managed_process()
     s_mproc = nullptr;
     s_mproc_id = 0;
 }
+
+#ifndef _WIN32
+inline void Managed_process::reap_finished_children()
+{
+    std::lock_guard<std::mutex> guard(m_spawned_child_pids_mutex);
+    if (m_spawned_child_pids.empty()) {
+        return;
+    }
+
+    std::vector<pid_t> remaining;
+    remaining.reserve(m_spawned_child_pids.size());
+
+    for (pid_t pid : m_spawned_child_pids) {
+        if (pid <= 0) {
+            continue;
+        }
+
+        int status = 0;
+        pid_t result = 0;
+        do {
+            result = ::waitpid(pid, &status, WNOHANG);
+        } while (result == -1 && errno == EINTR);
+
+        if (result == 0) {
+            remaining.push_back(pid);
+            continue;
+        }
+
+        if (result == -1 && errno != ECHILD) {
+            remaining.push_back(pid);
+        }
+    }
+
+    m_spawned_child_pids.swap(remaining);
+}
+#endif
 
 
 

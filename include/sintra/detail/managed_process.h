@@ -322,6 +322,7 @@ struct Managed_process: Derived_transceiver<Managed_process>
 #ifndef _WIN32
     std::vector<pid_t>                  m_spawned_child_pids;
     mutable std::mutex                  m_spawned_child_pids_mutex;
+    void                                reap_finished_children();
 #endif
 
 
