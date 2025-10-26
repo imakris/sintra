@@ -39,6 +39,7 @@ namespace detail {
         unpublish_transceiver,
         make_process_group,
         print,
+        get_abi_tag,
         barrier,
         enable_recovery,
         begin_process_draining,

@@ -72,11 +72,13 @@ if(MSVC)
         $<$<CONFIG:Debug>:/MDd>         # Debug runtime library
     )
     target_link_options(sintra INTERFACE $<$<CONFIG:Debug>:/DEBUG:FULL>)
+    target_compile_options(sintra INTERFACE /GR)
 else()
     target_compile_options(sintra INTERFACE
         $<$<CONFIG:Debug>:-g>
         $<$<CONFIG:Debug>:-O0>
     )
+    target_compile_options(sintra INTERFACE -frtti)
 endif()
 
 # OpenMP support - optional for timing

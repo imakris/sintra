@@ -5,6 +5,13 @@
 
 #include <cstddef>
 
+#ifndef SINTRA_RTTI_ENFORCED
+#define SINTRA_RTTI_ENFORCED
+#if !defined(__cpp_rtti) && !defined(__GXX_RTTI) && !defined(_CPPRTTI) && !defined(__RTTI)
+#error "Sintra requires RTTI. Please enable Run-Time Type Information (for example remove -fno-rtti or compile with /GR)."
+#endif
+#endif
+
 // Ring reading policy
 // ===================
 

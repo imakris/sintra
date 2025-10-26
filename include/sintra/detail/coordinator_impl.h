@@ -5,6 +5,7 @@
 
 #include "coordinator.h"
 #include "managed_process.h"
+#include "type_name.h"
 
 #include <cassert>
 #include <functional>
@@ -589,6 +590,12 @@ inline
 void Coordinator::print(const string& str)
 {
     cout << str;
+}
+
+inline
+std::string Coordinator::get_abi_tag()
+{
+    return detail::current_abi_tag();
 }
 
 

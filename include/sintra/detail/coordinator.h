@@ -12,6 +12,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <mutex>
+#include <string>
 #include <unordered_set>
 #include <vector>
 
@@ -151,6 +152,7 @@ private:
     // Returns the leading sequence of the coordinator process' request ring.
 
     void print(const string& str);
+    std::string get_abi_tag();
 
     mutex                                       m_type_resolution_mutex;
     mutex                                       m_publish_mutex;
@@ -200,6 +202,7 @@ public:
     SINTRA_RPC_EXPLICIT(make_process_group)
     SINTRA_RPC_EXPLICIT(print)
     SINTRA_RPC_EXPLICIT(enable_recovery)
+    SINTRA_RPC_EXPLICIT(get_abi_tag)
 
     bool is_process_draining(instance_id_type process_iid) const;
 

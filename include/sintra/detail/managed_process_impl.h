@@ -4,6 +4,7 @@
 #pragma once
 
 #include "deterministic_delay.h"
+#include "type_name.h"
 #include "utility.h"
 
 #include <array>
@@ -16,7 +17,9 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <sstream>
 #include <shared_mutex>
+#include <stdexcept>
 #include <thread>
 #include <utility>
 #ifndef _WIN32
@@ -28,8 +31,6 @@
 #include <time.h>
 #include <unistd.h>
 #endif
-
-#include <boost/type_index/ctti_type_index.hpp>
 
 namespace sintra {
 
@@ -414,8 +415,8 @@ void install_signal_handler()
 template <typename T>
 sintra::type_id_type get_type_id()
 {
-    const std::string pretty_name = boost::typeindex::ctti_type_index::template type_id<T>().pretty_name();
-    auto it = s_mproc->m_type_id_of_type_name.find(pretty_name);
+    const std::string type_key = detail::type_key<T>();
+    auto it = s_mproc->m_type_id_of_type_name.find(type_key);
     if (it != s_mproc->m_type_id_of_type_name.end()) {
         return it->second;
     }
@@ -423,11 +424,11 @@ sintra::type_id_type get_type_id()
     // Caution the Coordinator call will refer to the map that is being assigned,
     // if the Coordinator is local. Do not be tempted to simplify the temporary,
     // because depending on the order of evaluation, it may or it may not work.
-    auto tid = Coordinator::rpc_resolve_type(s_coord_id, pretty_name);
+    auto tid = Coordinator::rpc_resolve_type(s_coord_id, type_key);
 
     // if it is not invalid, cache it
     if (tid != invalid_type_id) {
-        s_mproc->m_type_id_of_type_name[pretty_name] = tid;
+        s_mproc->m_type_id_of_type_name[type_key] = tid;
     }
 
     return tid;
@@ -922,6 +923,17 @@ Managed process options:
     // of Transceiver base.
 
     this->Derived_transceiver<Managed_process>::construct("", m_instance_id);
+
+    const std::string local_abi = detail::current_abi_tag();
+    const std::string coordinator_abi = Coordinator::rpc_get_abi_tag(s_coord_id);
+    if (coordinator_abi != local_abi) {
+        std::ostringstream oss;
+        oss << "Sintra detected an ABI mismatch while connecting to the coordinator.\n"
+            << "Local ABI      : " << local_abi << '\n'
+            << "Coordinator ABI: " << coordinator_abi << '\n'
+            << "Cross-ABI communication is not supported. Rebuild all participating binaries with the same compiler, standard library, and architecture.";
+        throw std::runtime_error(oss.str());
+    }
 
     auto published_handler = [this](const Coordinator::instance_published& msg)
     {
