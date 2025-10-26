@@ -628,7 +628,8 @@ class TestRunner:
             )
 
     def _kill_process_tree(self, pid: int):
-        """Kill a process and all its children"""
+        """Kill a process and all of its descendants aggressively."""
+
         try:
             if sys.platform == 'win32':
                 # On Windows, use taskkill to kill process tree.
@@ -639,18 +640,53 @@ class TestRunner:
                     stderr=subprocess.DEVNULL,
                     timeout=5
                 )
-            else:
-                # On Unix, kill process group
-                import signal
-                try:
-                    pgid = os.getpgid(pid)
-                except ProcessLookupError:
-                    pgid = None
+                return
 
-                if pgid is not None:
-                    os.killpg(pgid, signal.SIGKILL)
-                else:
-                    os.kill(pid, signal.SIGKILL)
+            import signal
+
+            # Collect every process we know how to identify: the root process,
+            # anything that shares its process group, and all descendants even if
+            # they spawned new sessions of their own.
+            target_pids: Set[int] = {pid}
+
+            try:
+                pgid = os.getpgid(pid)
+            except ProcessLookupError:
+                pgid = None
+
+            if pgid is not None:
+                target_pids.update(self._collect_process_group_pids(pgid))
+
+            target_pids.update(self._collect_descendant_pids(pid))
+
+            # Also attempt to terminate the process groups that any of the
+            # discovered processes belong to. This ensures we catch helpers that
+            # re-parented themselves into their own groups.
+            target_pgids: Set[int] = set()
+            for target_pid in list(target_pids):
+                if target_pid <= 0:
+                    continue
+                try:
+                    target_pgids.add(os.getpgid(target_pid))
+                except (ProcessLookupError, PermissionError):
+                    continue
+
+            for target_pgid in target_pgids:
+                try:
+                    os.killpg(target_pgid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    continue
+
+            # Finally, send SIGKILL directly to each known PID in case the
+            # process group lookups missed any helpers.
+            for target_pid in target_pids:
+                if target_pid <= 0:
+                    continue
+                try:
+                    os.kill(target_pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    continue
+
         except Exception as e:
             # Log but don't fail if cleanup fails
             print(f"\n{Color.YELLOW}Warning: Failed to kill process {pid}: {e}{Color.RESET}")
