@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <memory>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -145,14 +146,17 @@ int controller_process()
     const std::string group = "_sintra_external_processes";
     barrier("processing-fence-setup", group);
 
-    std::promise<void> handler_done_promise;
-    auto handler_done_future = handler_done_promise.get_future();
-    std::atomic<bool> handler_done_recorded{false};
+    auto handler_done_promise = std::make_shared<std::promise<void>>();
+    auto handler_done_future = handler_done_promise->get_future();
+    auto handler_done_recorded = std::make_shared<std::atomic<bool>>(false);
 
-    activate_slot([&](const Handler_done&) {
+    auto handler_done_deactivator = activate_slot([
+        handler_done_promise,
+        handler_done_recorded
+    ](const Handler_done&) {
         bool expected = false;
-        if (handler_done_recorded.compare_exchange_strong(expected, true)) {
-            handler_done_promise.set_value();
+        if (handler_done_recorded->compare_exchange_strong(expected, true)) {
+            handler_done_promise->set_value();
         }
     });
 
@@ -173,6 +177,8 @@ int controller_process()
     out << (handler_done ? "done" : "pending") << '\n';
 
     barrier("processing-fence-test-done", "_sintra_all_processes");
+
+    handler_done_deactivator();
 
     return (barrier_result && handler_done) ? 0 : 1;
 }
