@@ -5,11 +5,7 @@
 
 #include <atomic>
 
-#include "deterministic_delay.h"
-
-
 namespace sintra {
-
 
 struct spinlock
 {
@@ -27,7 +23,6 @@ struct spinlock
     void lock()
     {
         while (m_locked.test_and_set(std::memory_order_acquire)) {
-            SINTRA_DELAY_FUZZ("spinlock.lock");
         }
     }
     void unlock() { m_locked.clear(std::memory_order_release);                  }
@@ -35,7 +30,6 @@ struct spinlock
 private:
     std::atomic_flag m_locked = ATOMIC_FLAG_INIT;
 };
-
 
 } // namespace sintra
 
