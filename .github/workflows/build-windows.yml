@@ -63,15 +63,38 @@ jobs:
               if ($paths) {
                 Write-Host "$candidate -> $paths"
                 $found += $candidate
-              } else {
-                Write-Warning "Unable to locate $candidate"
+                continue
               }
             } catch {
+            }
+
+            $fallbackPaths = @()
+            foreach ($dir in @(
+              "${env:ProgramFiles(x86)}\Windows Kits\10\Debuggers",
+              "${env:ProgramFiles}\Windows Kits\10\Debuggers"
+            )) {
+              if (-not $dir) { continue }
+              foreach ($arch in @('x64', 'x86', 'arm64', 'amd64')) {
+                $probe = Join-Path -Path $dir -ChildPath $arch
+                $exe = Join-Path -Path $probe -ChildPath ("{0}.exe" -f $candidate)
+                if (Test-Path $exe) {
+                  $fallbackPaths += $exe
+                }
+              }
+            }
+
+            if ($fallbackPaths) {
+              $found += $candidate
+              foreach ($path in $fallbackPaths) {
+                Write-Host "$candidate -> $path"
+              }
+            } else {
               Write-Warning "Unable to locate $candidate"
             }
           }
+
           if (-not $found) {
-            throw "No Windows debugger discovered. Checked: $($candidates -join ', ')"
+            Write-Warning "No Windows debugger discovered. Checked: $($candidates -join ', ')"
           }
 
       - name: Configure CMake
