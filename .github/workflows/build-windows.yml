@@ -71,7 +71,8 @@ jobs:
             }
           }
           if (-not $found) {
-            throw "No Windows debugger discovered. Checked: $($candidates -join ', ')"
+            Write-Warning "No Windows debugger discovered. Checked: $($candidates -join ', ')"
+            Write-Warning 'Proceeding without debugger support; crash dump collection will be skipped.'
           }
 
       - name: Configure CMake
