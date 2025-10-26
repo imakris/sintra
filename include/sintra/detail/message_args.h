@@ -74,8 +74,17 @@ struct message_args
 };
 
 template <typename T>
+struct message_args_decay
+{
+    using type = typename std::remove_cv<typename std::remove_reference<T>::type>::type;
+};
+
+template <typename T>
+using message_args_decay_t = typename message_args_decay<T>::type;
+
+template <typename T>
 struct message_args_size
-    : message_args_size<typename std::remove_cv<T>::type::message_args_type>
+    : message_args_size<typename message_args_decay_t<T>::message_args_type>
 {};
 
 template <typename... Args>
@@ -85,7 +94,7 @@ struct message_args_size<message_args<Args...>>
 
 template <typename T, std::size_t I>
 struct message_args_nth_type
-    : message_args_nth_type<typename std::remove_cv<T>::type::message_args_type, I>
+    : message_args_nth_type<typename message_args_decay_t<T>::message_args_type, I>
 {};
 
 template <std::size_t I, typename... Args>
