@@ -5,16 +5,15 @@
 
 #include <type_traits>
 
-#include <boost/fusion/sequence/intrinsic/at_c.hpp>
-#include <boost/fusion/include/vector.hpp>
+#include "message_args.h"
 
 
 namespace sintra {
 
     
 using std::enable_if_t;
-using boost::fusion::at_c;
-using boost::fusion::result_of::size;
+using detail::get;
+using detail::message_args_size;
 
 
  //////////////////////////////////////////////////////////////////////////
@@ -30,7 +29,7 @@ template <
     typename TVector,
     typename... Args,
     typename = enable_if_t<
-        size<TVector>::type::value == sizeof...(Args)
+        message_args_size<TVector>::value == sizeof...(Args)
     >
 >
 auto call_function_with_fusion_vector_args_sfb(
@@ -46,7 +45,7 @@ template <
     typename TVector,
     typename... Args,
     typename = enable_if_t<
-        size<TVector>::type::value != sizeof...(Args)
+        message_args_size<TVector>::value != sizeof...(Args)
     >
 >
 auto call_function_with_fusion_vector_args_sfb(
@@ -55,7 +54,7 @@ auto call_function_with_fusion_vector_args_sfb(
     const Args&... args)
 {
     return call_function_with_fusion_vector_args_sfb(
-        f, t, args..., at_c< sizeof...(Args) >(t));
+        f, t, args..., get< sizeof...(Args) >(t));
 }
 
 
@@ -63,7 +62,7 @@ template <
     typename TFunction,
     typename TVector,
     typename = enable_if_t<
-        size<TVector>::type::value != 0
+        message_args_size<TVector>::value != 0
     >
 >
 auto call_function_with_fusion_vector_args(const TFunction& f, const TVector& t)
@@ -73,7 +72,7 @@ auto call_function_with_fusion_vector_args(const TFunction& f, const TVector& t)
 
     // if the compiler complains here, make sure that the function you are trying to call has
     // no non-const references
-    return call_function_with_fusion_vector_args_sfb(f, t, at_c<0>(t));
+    return call_function_with_fusion_vector_args_sfb(f, t, get<0>(t));
 }
 
 
@@ -81,7 +80,7 @@ template <
     typename TFunction,
     typename TVector,
     typename = enable_if_t<
-        size<TVector>::type::value == 0
+        message_args_size<TVector>::value == 0
     >
 >
 auto call_function_with_fusion_vector_args(const TFunction& f, const TVector&) -> decltype(f())
@@ -115,7 +114,7 @@ template <
     typename TVector,
     typename... Args,
     typename = enable_if_t<
-        size<TVector>::type::value == sizeof...(Args)
+        message_args_size<TVector>::value == sizeof...(Args)
     >
 >
 auto call_function_with_fusion_vector_args_mfb(
@@ -134,7 +133,7 @@ template <
     typename TVector,
     typename... Args,
     typename = enable_if_t<
-        size<TVector>::type::value != sizeof...(Args)
+        message_args_size<TVector>::value != sizeof...(Args)
     >
 >
 auto call_function_with_fusion_vector_args_mfb(
@@ -144,7 +143,7 @@ auto call_function_with_fusion_vector_args_mfb(
     const Args&... args)
 {
     return call_function_with_fusion_vector_args_mfb(
-        obj, f, t, args..., at_c< sizeof...(Args) >(t));
+        obj, f, t, args..., get< sizeof...(Args) >(t));
 }
 
 
@@ -153,7 +152,7 @@ template <
     typename TFunction,
     typename TVector,
     typename = enable_if_t<
-        size<TVector>::type::value != 0
+        message_args_size<TVector>::value != 0
     >
 >
 auto call_function_with_fusion_vector_args(TObj& obj, const TFunction& f, const TVector& t)
@@ -164,7 +163,7 @@ auto call_function_with_fusion_vector_args(TObj& obj, const TFunction& f, const 
     // if the compiler complains here, make sure that none of the function arguments is either
     // - a non-const reference
     // - a non-POD and non STL container object
-    return call_function_with_fusion_vector_args_mfb(obj, f, t, at_c<0>(t));
+    return call_function_with_fusion_vector_args_mfb(obj, f, t, get<0>(t));
 }
 
 
@@ -173,7 +172,7 @@ template <
     typename TFunction,
     typename TVector,
     typename = enable_if_t<
-        size<TVector>::type::value == 0
+        message_args_size<TVector>::value == 0
     >
 >
 auto call_function_with_fusion_vector_args(

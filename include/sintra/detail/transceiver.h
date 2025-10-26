@@ -321,28 +321,19 @@ public:
     };
 
 
-    // Short note: It is fairly simple to change the message body from boost::fusion::vector to
-    // std::tuple, to avoid yet another boost dependency, but be aware of the implications.
-    // The implementation of fusion::vector is a plain struct. The tuple on the other hand will most
-    // likely use recursive inheritance, which may produce different memory layout. In some cases,
-    // the fusion::vector will be more compact. For example, the following
-    // 
-    //     std::cout <<
-    //        sizeof(boost::fusion::vector<int, char, double, char, short, int>) << ' ' <<
-    //        sizeof(std::tuple           <int, char, double, char, short, int>);
-    //
-    // on my system would print
-    // 24 40
+    // Short note: The message body is implemented with detail::message_args rather than std::tuple
+    // to retain the plain-struct layout that boost::fusion::vector previously provided. This keeps
+    // RPC argument packs as compact as possible in the ring buffer.
 
 
     template <
         typename RPCTC,   // <- the m in RPCTC makes it unique
         typename... Args
     >
-    struct unique_message_body: serializable_type<boost::fusion::vector<Args...> >
+    struct unique_message_body: serializable_type<detail::message_args<Args...>>
     {
-        using bfvec = serializable_type<boost::fusion::vector<Args...> >;
-        using bfvec::bfvec;
+        using body = serializable_type<detail::message_args<Args...>>;
+        using body::body;
     };
 
 
@@ -359,7 +350,7 @@ public:
     template <typename SEQ_T, int I, int J>
     struct warn_about_reference_args_impl {
 
-        using arg_type = typename boost::fusion::result_of::value_at_c<SEQ_T, I>::type;
+        using arg_type = typename detail::message_args_nth_type<SEQ_T, I>::type;
 
         static_assert(
             !is_reference<arg_type>::value ||
@@ -376,7 +367,7 @@ public:
     template <typename SEQ_T>
     void warn_about_reference_args()
     {
-        warn_about_reference_args_impl<SEQ_T, 0, boost::fusion::result_of::size<SEQ_T>::value>();
+        warn_about_reference_args_impl<SEQ_T, 0, detail::message_args_size<SEQ_T>::value>();
     }
 
 
