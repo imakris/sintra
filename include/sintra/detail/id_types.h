@@ -27,54 +27,59 @@ constexpr type_id_type        not_defined_type_id = ~0ull;
 
 namespace detail {
 
+    // NOTE: Values are assigned explicitly to preserve wire compatibility across
+    // releases. When adding new entries ensure existing numeric IDs stay
+    // unchanged.
     enum class reserved_id: type_id_type
     {
         invalid_type_id = invalid_type_id,
 
         // EXPLICITLY DEFINED RPC
-        resolve_type,
-        resolve_instance,
-        wait_for_instance,
-        publish_transceiver,
-        unpublish_transceiver,
-        make_process_group,
-        print,
-        get_abi_tag,
-        barrier,
-        enable_recovery,
-        begin_process_draining,
+        resolve_type                     = 1,
+        resolve_instance                 = 2,
+        wait_for_instance                = 3,
+        publish_transceiver              = 4,
+        unpublish_transceiver            = 5,
+        make_process_group               = 6,
+        print                            = 7,
+        barrier                          = 8,
+        enable_recovery                  = 9,
+        begin_process_draining           = 10,
+        // get_abi_tag is intentionally assigned a value beyond the legacy RPC
+        // range so older message IDs remain stable.
+        get_abi_tag                      = 28,
 
         // EXPLICITLY DEFINED SIGNALS
         //instance_invalidated, // sent by Transceiver on destruction
-        instance_published,   // sent by Coordinator when a transceiver is named
-                              // and can be subsequently looked up by its name.
-        instance_unpublished, // sent by Coordinator, always before the
-                              // Transceiver sends instance_invalidated
-        unpublish_transceiver_notify,
+        instance_published               = 11, // sent by Coordinator when a transceiver is named
+                                               // and can be subsequently looked up by its name.
+        instance_unpublished             = 12, // sent by Coordinator, always before the
+                                               // Transceiver sends instance_invalidated
+        unpublish_transceiver_notify     = 13,
 
         // SPECIAL MESSAGE IDENTIFIERS
-        exception,
-        deferral,
+        exception                        = 14,
+        deferral                         = 15,
 
         // EXCEPTION TYPES
-        std_invalid_argument,
-        std_domain_error,
-        std_length_error,
-        std_out_of_range,
-        std_range_error,
-        std_overflow_error,
-        std_underflow_error,
-        std_ios_base_failure,
-        std_logic_error,
-        std_runtime_error,
-        std_exception,
-        unknown_exception,
+        std_invalid_argument             = 16,
+        std_domain_error                 = 17,
+        std_length_error                 = 18,
+        std_out_of_range                 = 19,
+        std_range_error                  = 20,
+        std_overflow_error               = 21,
+        std_underflow_error              = 22,
+        std_ios_base_failure             = 23,
+        std_logic_error                  = 24,
+        std_runtime_error                = 25,
+        std_exception                    = 26,
+        unknown_exception                = 27,
 
         // EXPLICITLY DEFINED SIGNALS HANDLED BY COORDINATOR
         base_of_messages_handled_by_coordinator = 0x80000000,
-        terminated_abnormally,
+        terminated_abnormally            = base_of_messages_handled_by_coordinator + 1,
 
-        num_reserved_type_ids
+        num_reserved_type_ids            = terminated_abnormally + 1
     };
 }
 
