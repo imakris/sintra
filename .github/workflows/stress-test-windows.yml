@@ -32,9 +32,21 @@ jobs:
           }
           Add-Content -Path $env:GITHUB_PATH -Value $debugTools
 
-      - name: Verify cdb
+      - name: Verify Windows debuggers
         shell: pwsh
-        run: where cdb
+        run: |
+          $tools = @('cdb', 'ntsd', 'windbg')
+          $found = @()
+          foreach ($tool in $tools) {
+            $command = Get-Command $tool -ErrorAction SilentlyContinue
+            if ($command) {
+              Write-Host "$tool found at $($command.Source)"
+              $found += $command
+            }
+          }
+          if (-not $found) {
+            throw "No Windows debugger (cdb, ntsd, windbg) found in PATH"
+          }
 
       - name: Download build artifacts
         uses: actions/download-artifact@v4
