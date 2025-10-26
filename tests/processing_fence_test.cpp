@@ -5,6 +5,8 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <future>
+#include <memory>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -20,9 +22,9 @@
 
 namespace {
 
-struct Work_message
-{
-};
+struct Work_message {};
+
+struct Handler_done {};
 
 constexpr auto kHandlerDelay = std::chrono::milliseconds(300);
 constexpr std::string_view kEnvSharedDir = "SINTRA_PROCESSING_FENCE_DIR";
@@ -139,11 +141,24 @@ int controller_process()
     using namespace sintra;
 
     const auto& shared_dir = shared_directory();
-    const auto flag_path = shared_dir / "handler_done.txt";
     const auto result_path = shared_dir / "result.txt";
 
     const std::string group = "_sintra_external_processes";
     barrier("processing-fence-setup", group);
+
+    auto handler_done_promise = std::make_shared<std::promise<void>>();
+    auto handler_done_future = handler_done_promise->get_future();
+    auto handler_done_recorded = std::make_shared<std::atomic<bool>>(false);
+
+    auto handler_done_deactivator = activate_slot([
+        handler_done_promise,
+        handler_done_recorded
+    ](const Handler_done&) {
+        bool expected = false;
+        if (handler_done_recorded->compare_exchange_strong(expected, true)) {
+            handler_done_promise->set_value();
+        }
+    });
 
     world() << Work_message{};
 
@@ -153,7 +168,8 @@ int controller_process()
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - start);
 
-    const bool handler_done = std::filesystem::exists(flag_path);
+    const bool handler_done =
+        handler_done_future.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
 
     std::ofstream out(result_path, std::ios::binary | std::ios::trunc);
     out << (barrier_result && handler_done ? "ok" : "fail") << '\n';
@@ -162,6 +178,8 @@ int controller_process()
 
     barrier("processing-fence-test-done", "_sintra_all_processes");
 
+    handler_done_deactivator();
+
     return (barrier_result && handler_done) ? 0 : 1;
 }
 
@@ -169,13 +187,9 @@ int worker_process()
 {
     using namespace sintra;
 
-    const auto& shared_dir = shared_directory();
-    const auto flag_path = shared_dir / "handler_done.txt";
-
-    auto slot = [flag_path](const Work_message&) {
+    auto slot = [](const Work_message&) {
         std::this_thread::sleep_for(kHandlerDelay);
-        std::ofstream out(flag_path, std::ios::binary | std::ios::trunc);
-        out << "done";
+        world() << Handler_done{};
     };
     activate_slot(slot);
 
@@ -194,11 +208,9 @@ int main(int argc, char* argv[])
     const bool is_spawned = has_branch_flag(argc, argv);
     const auto shared_dir = resolve_shared_directory(argc, argv);
     shared_directory_storage() = shared_dir;
-    const auto flag_path = shared_dir / "handler_done.txt";
     const auto result_path = shared_dir / "result.txt";
 
     if (!is_spawned) {
-        std::filesystem::remove(flag_path);
         std::filesystem::remove(result_path);
     }
 
