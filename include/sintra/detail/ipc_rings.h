@@ -97,12 +97,10 @@
  *      - On ANY failure after reserving, munmap the 2× span before returning.
  */
 
-
 #pragma once
 
 // ─── Project config & utilities (kept as in original codebase) ───────────────
 #include "config.h"      // configuration constants for adaptive waiting, cache sizes, etc.
-#include "deterministic_delay.h"
 #include "get_wtime.h"   // high-res wall clock (used by adaptive reader policy)
 #include "id_types.h"    // ID and type aliases as used by the project
 
@@ -164,7 +162,6 @@
   #endif
 #endif
 
-
 // Enables the writer to forcefully evict readers that are too slow.
 #ifndef SINTRA_ENABLE_SLOW_READER_EVICTION
 #define SINTRA_ENABLE_SLOW_READER_EVICTION
@@ -180,7 +177,6 @@
 #ifndef SINTRA_EVICTION_LAG_RINGS
 #define SINTRA_EVICTION_LAG_RINGS 1u  // reader is "slow" if > N rings behind
 #endif
-
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -527,14 +523,12 @@ static inline bool remove_directory(const std::string& dir_name)
     return removed > 0;
 }
 
-
 static inline size_t mod_pos_i64(int64_t x, size_t m) {
     const int64_t mm = static_cast<int64_t>(m);
     int64_t r = x % mm;
     if (r < 0) r += mm;
     return static_cast<size_t>(r);
 }
-
 
 static inline size_t mod_u64(uint64_t x, size_t m) {
     return static_cast<size_t>(x % static_cast<uint64_t>(m));
@@ -613,7 +607,6 @@ class ring_acquisition_failure_exception : public std::runtime_error {
 public:
     ring_acquisition_failure_exception() : std::runtime_error("Failed to acquire ring buffer.") {}
 };
-
 
 class ring_reader_evicted_exception : public std::runtime_error {
 public:
@@ -750,14 +743,12 @@ private:
     std::atomic<uint8_t> m_state{state_uninitialized};
 };
 
-
  //////////////////////////////////////////////////////////////////////////
 ///// BEGIN Ring_data //////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////
 //////   \//////   \//////   \//////   \//////   \//////   \//////   \//////
  ////     \////     \////     \////     \////     \////     \////     \////
   //       \//       \//       \//       \//       \//       \//       \//
-
 
 //==============================================================================
 // Ring_data: file-backed data region with “magic” double mapping
@@ -994,7 +985,6 @@ private:
         }
     }
 
-
     ipc::mapped_region*                 m_data_region_0                 = nullptr;
     ipc::mapped_region*                 m_data_region_1                 = nullptr;
     std::string                         m_directory;
@@ -1020,8 +1010,6 @@ bool has_same_mapping(const RingT1& r1, const RingT2& r2)
     return r1.m_data_filename_hash == r2.m_data_filename_hash;
 }
 
-
-
   //\       //\       //\       //\       //\       //\       //\       //
  ////\     ////\     ////\     ////\     ////\     ////\     ////\     ////
 //////\   //////\   //////\   //////\   //////\   //////\   //////\   //////
@@ -1029,15 +1017,12 @@ bool has_same_mapping(const RingT1& r1, const RingT2& r2)
 ///// END Ring_data ////////////////////////////////////////////////////////
  //////////////////////////////////////////////////////////////////////////
 
-
  //////////////////////////////////////////////////////////////////////////
 ///// BEGIN Ring ///////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////
 //////   \//////   \//////   \//////   \//////   \//////   \//////   \//////
  ////     \////     \////     \////     \////     \////     \////     \////
   //       \//       \//       \//       \//       \//       \//       \//
-
-
 
 //==============================================================================
 // Ring: adds control region (atomics, semaphores, per-reader state)
@@ -1123,7 +1108,6 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         void rs_stack_lock()
         {
             while (rs_stack_spinlock.test_and_set(std::memory_order_acquire)) {
-                SINTRA_DELAY_FUZZ("ipc_rings.rs_stack_lock");
             }
         }
         void rs_stack_unlock() { rs_stack_spinlock.clear(std::memory_order_release); }
@@ -1225,11 +1209,9 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         void lock()
         {
             while (spinlock_flag.test_and_set(std::memory_order_acquire)) {
-                SINTRA_DELAY_FUZZ("ipc_rings.spinlock_lock");
             }
         }
         void unlock() { spinlock_flag.clear(std::memory_order_release); }
-
 
         Control()
         {
@@ -1241,7 +1223,6 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
             for (int i = 0; i < max_process_index; i++) { free_rs_stack[i] = i; }
 
             writer_pid.store(0, std::memory_order_relaxed);
-
 
             // See the 'Note' in N4713 32.5 [Lock-free property], Par. 4.
             // The program is only valid if the conditions below are true.
@@ -1300,7 +1281,6 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         // other processes still use it.
         m_control->num_attached.fetch_add(1, std::memory_order_acq_rel);
     }
-
 
     ~Ring()
     {
@@ -1407,8 +1387,6 @@ protected:
     Control*             m_control        = nullptr;
 };
 
-
-
   //\       //\       //\       //\       //\       //\       //\       //
  ////\     ////\     ////\     ////\     ////\     ////\     ////\     ////
 //////\   //////\   //////\   //////\   //////\   //////\   //////\   //////
@@ -1416,15 +1394,12 @@ protected:
 ///// END Ring /////////////////////////////////////////////////////////////
  //////////////////////////////////////////////////////////////////////////
 
-
  //////////////////////////////////////////////////////////////////////////
 ///// BEGIN Ring_R /////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////
 //////   \//////   \//////   \//////   \//////   \//////   \//////   \//////
  ////     \////     \////     \////     \////     \////     \////     \////
   //       \//       \//       \//       \//       \//       \//       \//
-
-
 
 //==============================================================================
 // Reader API
@@ -1478,7 +1453,6 @@ struct Ring_R : Ring<T, true>
         m_reading_sequence = &c.reading_sequences[m_rs_index].data.v;
     }
 
-
     // =========================================================================
     // MODIFIED DESTRUCTOR: Releases the reader slot.
     // =========================================================================
@@ -1531,7 +1505,6 @@ struct Ring_R : Ring<T, true>
         bool f = false;
         while (!m_reading_lock.compare_exchange_strong(f, true)) {
             f = false;
-            SINTRA_DELAY_FUZZ("ipc_rings.reader_lock");
         }
 
         if (m_reading.load(std::memory_order_acquire)) {
@@ -1637,7 +1610,6 @@ struct Ring_R : Ring<T, true>
                     std::memory_order_relaxed))
         {
             expected = false;
-            SINTRA_DELAY_FUZZ("ipc_rings.reader_unlock");
         }
 
         if (m_reading.load(std::memory_order_acquire)) {
@@ -1715,7 +1687,6 @@ struct Ring_R : Ring<T, true>
             if (should_shutdown()) {
                 return Range<T>{};
             }
-            SINTRA_DELAY_FUZZ("ipc_rings.fast_spin");
         }
 
         if (sequences_equal()) {
@@ -1736,7 +1707,6 @@ struct Ring_R : Ring<T, true>
                     return Range<T>{};
                 }
                 precision_sleep_for(std::chrono::duration<double>(precision_sleep_cycle));
-                SINTRA_DELAY_FUZZ("ipc_rings.precision_sleep");
             }
         }
 
@@ -1897,8 +1867,6 @@ private:
     typename Ring<T, true>::Control& c;
 };
 
-
-
   //\       //\       //\       //\       //\       //\       //\       //
  ////\     ////\     ////\     ////\     ////\     ////\     ////\     ////
 //////\   //////\   //////\   //////\   //////\   //////\   //////\   //////
@@ -1906,15 +1874,12 @@ private:
 ///// END Ring_R ///////////////////////////////////////////////////////////
  //////////////////////////////////////////////////////////////////////////
 
-
  //////////////////////////////////////////////////////////////////////////
 ///// BEGIN Ring_W /////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////
 //////   \//////   \//////   \//////   \//////   \//////   \//////   \//////
  ////     \////     \////     \////     \////     \////     \////     \////
   //       \//       \//       \//       \//       \//       \//       \//
-
-
 
 //==============================================================================
 // Writer API
@@ -2287,14 +2252,12 @@ private:
     typename Ring<T, false>::Control& c;
 };
 
-
   //\       //\       //\       //\       //\       //\       //\       //
  ////\     ////\     ////\     ////\     ////\     ////\     ////\     ////
 //////\   //////\   //////\   //////\   //////\   //////\   //////\   //////
 ////////////////////////////////////////////////////////////////////////////
 ///// END Ring_W ///////////////////////////////////////////////////////////
  //////////////////////////////////////////////////////////////////////////
-
 
  //////////////////////////////////////////////////////////////////////////
 ///// BEGIN Local_Ring_W ///////////////////////////////////////////////////
@@ -2313,7 +2276,6 @@ struct Local_Ring_W : Ring_W<T>
     using Ring_W<T>::Ring_W;
 };
 
-
   //\       //\       //\       //\       //\       //\       //\       //
  ////\     ////\     ////\     ////\     ////\     ////\     ////\     ////
 //////\   //////\   //////\   //////\   //////\   //////\   //////\   //////
@@ -2327,8 +2289,6 @@ struct Local_Ring_W : Ring_W<T>
 //////   \//////   \//////   \//////   \//////   \//////   \//////   \//////
  ////     \////     \////     \////     \////     \////     \////     \////
   //       \//       \//       \//       \//       \//       \//       \//
-
-
 
 #if __cplusplus >= 202002L
 #define SINTRA_NODISCARD [[nodiscard]]
@@ -2422,15 +2382,12 @@ try_snapshot_e(Reader& reader, Args&&... args) noexcept
     }
 }
 
-
-
   //\       //\       //\       //\       //\       //\       //\       //
  ////\     ////\     ////\     ////\     ////\     ////\     ////\     ////
 //////\   //////\   //////\   //////\   //////\   //////\   //////\   //////
 ////////////////////////////////////////////////////////////////////////////
 ///// END Convenience Utilities ////////////////////////////////////////////
  //////////////////////////////////////////////////////////////////////////
-
 
 } // namespace sintra
 

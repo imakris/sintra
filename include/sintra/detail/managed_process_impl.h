@@ -3,7 +3,6 @@
 
 #pragma once
 
-#include "deterministic_delay.h"
 #include "utility.h"
 
 #include <array>
@@ -243,8 +242,6 @@ namespace {
     }
 }
 
-
-
 #ifdef _WIN32
 inline
 static void s_signal_handler(int sig)
@@ -339,7 +336,6 @@ static void s_signal_handler(int sig, siginfo_t* info, void* ctx)
 }
 #endif
 
-
 inline
 void Managed_process::enable_recovery()
 {
@@ -348,7 +344,6 @@ void Managed_process::enable_recovery()
     Coordinator::rpc_enable_recovery(s_coord_id, process_of(m_instance_id));
     m_recoverable = true;
 }
-
 
 inline
 void install_signal_handler()
@@ -410,7 +405,6 @@ void install_signal_handler()
     });
 }
 
-
 template <typename T>
 sintra::type_id_type get_type_id()
 {
@@ -437,7 +431,6 @@ sintra::type_id_type get_type_id()
 template <typename T>
 sintra::type_id_type get_type_id(const T&) {return get_type_id<T>();}
 
-
 template <typename>
 sintra::instance_id_type get_instance_id(std::string&& assigned_name)
 {
@@ -458,8 +451,6 @@ sintra::instance_id_type get_instance_id(std::string&& assigned_name)
 
     return iid;
 }
-
-
 
 inline
 Managed_process::Managed_process():
@@ -485,8 +476,6 @@ Managed_process::Managed_process():
     // it is only implemented for Windows.
     m_time_instantiated = std::chrono::system_clock::now();
 }
-
-
 
 inline
 Managed_process::~Managed_process()
@@ -622,8 +611,6 @@ inline void Managed_process::reap_finished_children()
 }
 #endif
 
-
-
 // returns the argc/argv as a vector of strings
 inline
 std::vector<std::string> argc_argv_to_vector(int argc, const char* const* argv)
@@ -635,14 +622,11 @@ std::vector<std::string> argc_argv_to_vector(int argc, const char* const* argv)
     return ret;
 }
 
-
-
 struct Filtered_args
 {
     vector<string> remained;
     vector<string> extracted;
 };
-
 
 inline std::string join_strings(const std::vector<std::string>& parts, const std::string& delimiter)
 {
@@ -666,8 +650,6 @@ inline std::string join_strings(const std::vector<std::string>& parts, const std
 
     return result;
 }
-
-
 
 inline
 Filtered_args filter_option(
@@ -697,8 +679,6 @@ Filtered_args filter_option(
     }
     return ret;
 }
-
-
 
 inline
 void Managed_process::init(int argc, const char* const* argv)
@@ -951,7 +931,6 @@ Managed process options:
         }
     };
 
-
     auto unpublished_handler = [this](const Coordinator::instance_unpublished& msg)
     {
         auto iid = msg.instance_id;
@@ -1051,8 +1030,6 @@ Managed process options:
     m_start_stop_mutex.unlock();
 }
 
-
-
 inline
 bool Managed_process::spawn_swarm_process(
     const Spawn_swarm_process_args& s )
@@ -1122,8 +1099,6 @@ bool Managed_process::spawn_swarm_process(
 
     return success;
 }
-
-
 
 inline
 bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
@@ -1203,7 +1178,6 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
     return true;
 }
 
-
 inline
 void Managed_process::go()
 {
@@ -1222,16 +1196,12 @@ void Managed_process::go()
     }
 }
 
-
-
  //////////////////////////////////////////////////////////////////////////
 ///// BEGIN START/STOP /////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////
 //////   \//////   \//////   \//////   \//////   \//////   \//////   \//////
  ////     \////     \////     \////     \////     \////     \////     \////
   //       \//       \//       \//       \//       \//       \//       \//
-
-
 
 inline
 void Managed_process::pause()
@@ -1259,7 +1229,6 @@ void Managed_process::pause()
     m_delivery_condition.notify_all();
 }
 
-
 inline
 void Managed_process::stop()
 {
@@ -1285,18 +1254,14 @@ void Managed_process::stop()
     m_delivery_condition.notify_all();
 }
 
-
-
 inline
 void Managed_process::wait_for_stop()
 {
     std::unique_lock<mutex> start_stop_lock(m_start_stop_mutex);
     while (m_communication_state == COMMUNICATION_RUNNING) {
-        SINTRA_DELAY_FUZZ("managed_process.wait_for_stop");
         m_start_stop_condition.wait(start_stop_lock);
     }
 }
-
 
   //\       //\       //\       //\       //\       //\       //\       //
  ////\     ////\     ////\     ////\     ////\     ////\     ////\     ////
@@ -1304,8 +1269,6 @@ void Managed_process::wait_for_stop()
 ////////////////////////////////////////////////////////////////////////////
 ///// END START/STOP ///////////////////////////////////////////////////////
  //////////////////////////////////////////////////////////////////////////
-
-
 
 inline
 std::string Managed_process::obtain_swarm_directory()
@@ -1324,8 +1287,6 @@ std::string Managed_process::obtain_swarm_directory()
 
     return swarm_directory;
 }
-
-
 
 // Calls f when the specified transceiver becomes available.
 // if the transceiver is available, f is invoked immediately.
@@ -1411,17 +1372,14 @@ function<void()> Managed_process::call_on_availability(Named_instance<T> transce
     return ret;
 }
 
-
 inline
 void Managed_process::wait_until_all_external_readers_are_done(int extra_allowed_readers)
 {
     unique_lock<mutex> lock(m_num_active_readers_mutex);
     while (m_num_active_readers > 2 + extra_allowed_readers) {
-        SINTRA_DELAY_FUZZ("managed_process.wait_external_readers");
         m_num_active_readers_condition.wait(lock);
     }
 }
-
 
 inline void Managed_process::unpublish_all_transceivers()
 {
@@ -1493,7 +1451,6 @@ inline void Managed_process::flush(instance_id_type process_id, sequence_counter
     }
 }
 
-
 inline void Managed_process::run_after_current_handler(function<void()> task)
 {
     if (!task) {
@@ -1518,7 +1475,6 @@ inline void Managed_process::run_after_current_handler(function<void()> task)
         task();
     };
 }
-
 
 inline
 void Managed_process::wait_for_delivery_fence()
@@ -1634,12 +1590,10 @@ void Managed_process::wait_for_delivery_fence()
     }
 }
 
-
 inline void Managed_process::notify_delivery_progress()
 {
     m_delivery_condition.notify_all();
 }
-
 
 inline
 size_t Managed_process::unblock_rpc(instance_id_type process_instance_id)
@@ -1666,7 +1620,5 @@ size_t Managed_process::unblock_rpc(instance_id_type process_instance_id)
     return ret;
 }
 
-
 } // sintra
-
 
