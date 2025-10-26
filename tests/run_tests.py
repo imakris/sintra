@@ -494,7 +494,7 @@ class TestRunner:
                 duration = time.time() - start_time
 
                 for thread in threads:
-                    thread.join()
+                    thread.join(timeout=1)
 
                 stdout = ''.join(stdout_lines)
                 stderr = ''.join(stderr_lines)
@@ -590,7 +590,7 @@ class TestRunner:
                     pass
 
                 for thread in threads:
-                    thread.join()
+                    thread.join(timeout=1)
 
                 stdout = ''.join(stdout_lines)
                 stderr = ''.join(stderr_lines)
