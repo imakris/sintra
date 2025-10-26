@@ -28,6 +28,7 @@ import shutil
 import subprocess
 import sys
 import time
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
@@ -677,6 +678,14 @@ class TestRunner:
             return "", debugger_error
 
         candidate_dirs = [invocation.path.parent, Path.cwd()]
+
+        if sys.platform == 'darwin':
+            darwin_core_dirs = [Path('/cores')]
+            darwin_core_dirs.append(Path.home() / 'Library' / 'Logs' / 'DiagnosticReports')
+
+            for directory in darwin_core_dirs:
+                if directory not in candidate_dirs:
+                    candidate_dirs.append(directory)
         candidate_cores: List[Tuple[float, Path]] = []
 
         for directory in candidate_dirs:
@@ -1260,10 +1269,15 @@ class TestRunner:
             return pids
 
         proc_path = Path('/proc')
-        try:
-            entries = list(proc_path.iterdir())
-        except Exception:
-            return pids
+        entries: Optional[List[Path]] = None
+        if proc_path.exists():
+            try:
+                entries = list(proc_path.iterdir())
+            except Exception:
+                entries = None
+
+        if entries is None:
+            return self._collect_process_group_pids_via_ps(pgid)
 
         for entry in entries:
             if not entry.is_dir():
@@ -1296,10 +1310,15 @@ class TestRunner:
             return descendants
 
         proc_path = Path('/proc')
-        try:
-            entries = list(proc_path.iterdir())
-        except Exception:
-            return descendants
+        entries: Optional[List[Path]] = None
+        if proc_path.exists():
+            try:
+                entries = list(proc_path.iterdir())
+            except Exception:
+                entries = None
+
+        if entries is None:
+            return self._collect_descendant_pids_via_ps(root_pid)
 
         parent_to_children: Dict[int, List[int]] = {}
 
@@ -1345,6 +1364,77 @@ class TestRunner:
             if current in visited or current == root_pid:
                 continue
             visited.add(current)
+            descendants.append(current)
+            stack.extend(parent_to_children.get(current, []))
+
+        return descendants
+
+    def _snapshot_process_table_via_ps(self) -> List[Tuple[int, int, int]]:
+        """Return (pid, ppid, pgid) tuples using the portable ps command."""
+
+        if sys.platform == 'win32':
+            return []
+
+        ps_executable = shutil.which('ps')
+        if not ps_executable:
+            return []
+
+        try:
+            result = subprocess.run(
+                [ps_executable, '-eo', 'pid=,ppid=,pgid='],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=5,
+                check=True,
+            )
+        except subprocess.SubprocessError:
+            return []
+
+        snapshot: List[Tuple[int, int, int]] = []
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split()
+            if len(parts) != 3:
+                continue
+            try:
+                pid_value = int(parts[0])
+                ppid_value = int(parts[1])
+                pgid_value = int(parts[2])
+            except ValueError:
+                continue
+            snapshot.append((pid_value, ppid_value, pgid_value))
+
+        return snapshot
+
+    def _collect_process_group_pids_via_ps(self, pgid: int) -> List[int]:
+        """Collect process IDs that belong to the provided PGID using ps."""
+
+        snapshot = self._snapshot_process_table_via_ps()
+        if not snapshot:
+            return []
+
+        return [pid for pid, _, process_group in snapshot if process_group == pgid]
+
+    def _collect_descendant_pids_via_ps(self, root_pid: int) -> List[int]:
+        """Collect descendant process IDs for the provided root PID using ps."""
+
+        snapshot = self._snapshot_process_table_via_ps()
+        if not snapshot:
+            return []
+
+        parent_to_children: Dict[int, List[int]] = defaultdict(list)
+        for pid, ppid, _ in snapshot:
+            parent_to_children[ppid].append(pid)
+
+        descendants: List[int] = []
+        stack: List[int] = parent_to_children.get(root_pid, [])[:]
+        while stack:
+            current = stack.pop()
+            if current in descendants or current == root_pid:
+                continue
             descendants.append(current)
             stack.extend(parent_to_children.get(current, []))
 
