@@ -193,16 +193,33 @@ inline int system_pipe2(int pipefd[2], int flags)
         return -1;
     }
 
-    if (::pipe(pipefd) == -1) {
+    int pipe_result = 0;
+    do {
+        pipe_result = ::pipe(pipefd);
+    } while (pipe_result == -1 && errno == EINTR);
+
+    if (pipe_result == -1) {
         return -1;
     }
 
     const auto set_flag = [&](int fd, int cmd, int value) {
-        int current = ::fcntl(fd, cmd == F_SETFD ? F_GETFD : F_GETFL);
+        const auto get_command = cmd == F_SETFD ? F_GETFD : F_GETFL;
+
+        int current = -1;
+        do {
+            current = ::fcntl(fd, get_command);
+        } while (current == -1 && errno == EINTR);
+
         if (current == -1) {
             return -1;
         }
-        return ::fcntl(fd, cmd, current | value);
+
+        int set_result = -1;
+        do {
+            set_result = ::fcntl(fd, cmd, current | value);
+        } while (set_result == -1 && errno == EINTR);
+
+        return set_result;
     };
 
     if (flags & O_CLOEXEC) {
@@ -381,7 +398,10 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
     }
 
     int ready_pipe[2] = {-1, -1};
-    if (detail::call_pipe2(ready_pipe, O_CLOEXEC) == -1) {
+    while (detail::call_pipe2(ready_pipe, O_CLOEXEC) == -1) {
+        if (errno == EINTR) {
+            continue;
+        }
         return false;
     }
 
