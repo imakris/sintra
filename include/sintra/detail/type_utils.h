@@ -63,23 +63,17 @@ constexpr std::string_view ctti_name()
     begin += needle.size();
     auto end = begin;
     int depth = 0;
-    while (end < pretty.size()) {
-        switch (pretty[end]) {
-        case '<':
+    for (; end < pretty.size(); ++end) {
+        const auto ch = pretty[end];
+        if (ch == '<') {
             ++depth;
-            break;
-        case '>':
+        } else if (ch == '>') {
             if (depth == 0) {
-                goto done_parsing;
+                break;
             }
             --depth;
-            break;
-        default:
-            break;
         }
-        ++end;
     }
-done_parsing:
     if (end >= pretty.size()) {
         end = pretty.size();
     }
