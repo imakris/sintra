@@ -1316,6 +1316,42 @@ def _collect_patterns(raw_patterns: Optional[List[str]]) -> List[str]:
     return patterns
 
 
+def _resolve_git_metadata(start_dir: Path) -> Tuple[str, str]:
+    """Return the current git branch name and revision hash.
+
+    Falls back to ``"unknown"`` for each field if git is unavailable or the
+    directory is not part of a repository.
+    """
+
+    def _run_git_command(*args: str) -> Optional[str]:
+        try:
+            completed = subprocess.run(
+                ['git', *args],
+                cwd=start_dir,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                check=True,
+            )
+        except (subprocess.SubprocessError, FileNotFoundError, OSError):
+            return None
+
+        value = completed.stdout.strip()
+        return value or None
+
+    repo_root = _run_git_command('rev-parse', '--show-toplevel')
+    if repo_root:
+        start_dir = Path(repo_root)
+
+    branch = _run_git_command('rev-parse', '--abbrev-ref', 'HEAD') or 'unknown'
+    if branch == 'HEAD':
+        branch = 'detached HEAD'
+
+    revision = _run_git_command('rev-parse', 'HEAD') or 'unknown'
+
+    return branch, revision
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Run Sintra tests with timeout and repetition support',
@@ -1348,6 +1384,11 @@ def main():
 
     # Resolve build directory
     script_dir = Path(__file__).parent
+    print(f"{Color.BOLD}Sintra Test Runner{Color.RESET}")
+    branch, revision = _resolve_git_metadata(script_dir)
+    revision_display = revision if revision == 'unknown' else revision[:12]
+    print(f"Git branch: {branch}")
+    print(f"Git revision: {revision_display}")
     build_dir = (script_dir / args.build_dir).resolve()
 
     if not build_dir.exists():
@@ -1355,7 +1396,6 @@ def main():
         print(f"Please build the project first or specify correct --build-dir")
         return 1
 
-    print(f"{Color.BOLD}Sintra Test Runner{Color.RESET}")
     print(f"Build directory: {build_dir}")
     print(f"Configuration: {args.config}")
     print(f"Repetitions per test: {args.repetitions}")
