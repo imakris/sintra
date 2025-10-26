@@ -55,16 +55,34 @@ constexpr std::string_view ctti_name()
     return pretty.substr(start, end - start);
 #elif defined(_MSC_VER)
     constexpr std::string_view pretty = __FUNCSIG__;
-    auto begin = pretty.find('<');
-    if (begin == std::string_view::npos) {
+    auto paren = pretty.find('(');
+    if (paren == std::string_view::npos) {
         return pretty;
     }
-    ++begin;
-    auto end = pretty.find('>', begin);
+
+    auto end = pretty.rfind('>', paren);
     if (end == std::string_view::npos) {
-        end = pretty.size();
+        return pretty;
     }
-    return pretty.substr(begin, end - begin);
+
+    std::size_t depth = 0;
+    for (std::size_t i = end; i > 0; --i) {
+        char c = pretty[i - 1];
+        if (c == '>') {
+            ++depth;
+            continue;
+        }
+
+        if (c == '<') {
+            if (depth == 0) {
+                return pretty.substr(i, end - i);
+            }
+
+            --depth;
+        }
+    }
+
+    return pretty;
 #else
     return std::string_view{};
 #endif
