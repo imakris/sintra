@@ -158,6 +158,16 @@ bool spawn_fails_when_grandchild_cannot_report_readiness()
     return assert_true(!result, "write failures must be reported as spawn failures");
 }
 
+bool spawn_reports_exec_failure()
+{
+    const char* const args[] = {"/definitely/not/a/program", nullptr};
+    errno = 0;
+    bool result = sintra::spawn_detached("/definitely/not/a/program", args);
+    int saved_errno = errno;
+    return assert_true(!result, "spawn_detached must fail when execv cannot launch the target") &&
+           assert_true(saved_errno == ENOENT, "spawn_detached must surface the exec errno");
+}
+
 } // namespace
 
 int main()
@@ -167,6 +177,7 @@ int main()
     ok &= spawn_should_fail_when_pipe2_injected_failure();
     ok &= spawn_succeeds_under_eintr_pressure();
     ok &= spawn_fails_when_grandchild_cannot_report_readiness();
+    ok &= spawn_reports_exec_failure();
     return ok ? 0 : 1;
 }
 

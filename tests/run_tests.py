@@ -23,10 +23,12 @@ Options:
 import argparse
 import fnmatch
 import os
+import shlex
 import shutil
 import subprocess
 import sys
 import time
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
@@ -127,9 +129,7 @@ class TestRunner:
         self.verbose = verbose
         self.preserve_on_timeout = preserve_on_timeout
         self._ipc_rings_cache: Dict[Path, List[Tuple[str, str]]] = {}
-        self._cdb_search_attempted = False
-        self._cached_cdb_path: Optional[str] = None
-        self._cached_cdb_error: Optional[str] = None
+        self._debugger_cache: Dict[str, Tuple[Optional[str], str]] = {}
 
         # Determine test directory - check both with and without config subdirectory
         test_dir_with_config = build_dir / 'tests' / config
@@ -572,9 +572,9 @@ class TestRunner:
         if sys.platform == 'win32':
             return self._capture_process_stacks_windows(pid)
 
-        gdb_path = shutil.which('gdb')
-        if not gdb_path:
-            return "", "gdb not available"
+        debugger_name, debugger_command, debugger_error = self._resolve_unix_debugger()
+        if not debugger_command:
+            return "", debugger_error
 
         import signal
         try:
@@ -617,23 +617,20 @@ class TestRunner:
 
             try:
                 result = subprocess.run(
-                    [
-                        gdb_path,
-                        '--batch',
-                        '-p', str(target_pid),
-                        '-ex', 'set pagination off',
-                        '-ex', 'thread apply all bt',
-                        '-ex', 'detach',
-                    ],
+                    self._build_unix_live_debugger_command(
+                        debugger_name,
+                        debugger_command,
+                        target_pid,
+                    ),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
                     timeout=30,
                 )
-            except FileNotFoundError:
-                return "", "gdb not available"
             except subprocess.SubprocessError as exc:
-                capture_errors.append(f"PID {target_pid}: gdb failed ({exc})")
+                capture_errors.append(
+                    f"PID {target_pid}: {debugger_name} failed ({exc})"
+                )
                 continue
 
             output = result.stdout.strip()
@@ -642,7 +639,7 @@ class TestRunner:
 
             if result.returncode != 0:
                 capture_errors.append(
-                    f"PID {target_pid}: gdb exited with code {result.returncode}: {result.stderr.strip()}"
+                    f"PID {target_pid}: {debugger_name} exited with code {result.returncode}: {result.stderr.strip()}"
                 )
                 continue
 
@@ -676,11 +673,19 @@ class TestRunner:
         if sys.platform == 'win32':
             return "", "core dump stack capture not supported on Windows"
 
-        gdb_path = shutil.which('gdb')
-        if not gdb_path:
-            return "", "gdb not available"
+        debugger_name, debugger_command, debugger_error = self._resolve_unix_debugger()
+        if not debugger_command:
+            return "", debugger_error
 
         candidate_dirs = [invocation.path.parent, Path.cwd()]
+
+        if sys.platform == 'darwin':
+            darwin_core_dirs = [Path('/cores')]
+            darwin_core_dirs.append(Path.home() / 'Library' / 'Logs' / 'DiagnosticReports')
+
+            for directory in darwin_core_dirs:
+                if directory not in candidate_dirs:
+                    candidate_dirs.append(directory)
         candidate_cores: List[Tuple[float, Path]] = []
 
         for directory in candidate_dirs:
@@ -731,21 +736,21 @@ class TestRunner:
         for _, core_path in candidate_cores:
             try:
                 result = subprocess.run(
-                    [
-                        gdb_path,
-                        '--batch',
-                        '-ex', 'set pagination off',
-                        '-ex', 'thread apply all bt',
-                        str(invocation.path),
-                        str(core_path),
-                    ],
+                    self._build_unix_core_debugger_command(
+                        debugger_name,
+                        debugger_command,
+                        invocation,
+                        core_path,
+                    ),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
                     timeout=60,
                 )
             except subprocess.SubprocessError as exc:
-                capture_errors.append(f"{core_path.name}: gdb failed ({exc})")
+                capture_errors.append(
+                    f"{core_path.name}: {debugger_name} failed ({exc})"
+                )
                 continue
 
             output = result.stdout.strip()
@@ -754,7 +759,7 @@ class TestRunner:
 
             if result.returncode != 0:
                 capture_errors.append(
-                    f"{core_path.name}: gdb exited with code {result.returncode}: {result.stderr.strip()}"
+                    f"{core_path.name}: {debugger_name} exited with code {result.returncode}: {result.stderr.strip()}"
                 )
                 continue
 
@@ -770,26 +775,108 @@ class TestRunner:
 
         return "", "no usable core dump found"
 
-    def _resolve_cdb_path(self) -> Tuple[Optional[str], str]:
-        """Locate the Windows cdb debugger in common installation paths."""
+    def _resolve_unix_debugger(self) -> Tuple[Optional[str], Optional[List[str]], str]:
+        """Locate gdb or lldb on Unix-like platforms."""
+
+        if sys.platform == 'win32':
+            return None, None, 'debugger not available on this platform'
+
+        gdb_path = shutil.which('gdb')
+        if gdb_path:
+            return 'gdb', [gdb_path], ''
+
+        lldb_path = shutil.which('lldb')
+        if lldb_path:
+            return 'lldb', [lldb_path], ''
+
+        xcrun_path = shutil.which('xcrun')
+        if xcrun_path:
+            return 'lldb', [xcrun_path, 'lldb'], ''
+
+        return None, None, 'gdb or lldb not available (install gdb or the Xcode Command Line Tools)'
+
+    def _build_unix_live_debugger_command(
+        self,
+        debugger_name: str,
+        debugger_command: List[str],
+        pid: int,
+    ) -> List[str]:
+        """Construct the debugger command to attach to a live process."""
+
+        if debugger_name == 'gdb':
+            return [
+                *debugger_command,
+                '--batch',
+                '-p', str(pid),
+                '-ex', 'set pagination off',
+                '-ex', 'thread apply all bt',
+                '-ex', 'detach',
+            ]
+
+        # Fallback to lldb
+        return [
+            *debugger_command,
+            '--batch',
+            '-p', str(pid),
+            '-o', 'thread backtrace all',
+            '-o', 'detach',
+            '-o', 'quit',
+        ]
+
+    def _build_unix_core_debugger_command(
+        self,
+        debugger_name: str,
+        debugger_command: List[str],
+        invocation: TestInvocation,
+        core_path: Path,
+    ) -> List[str]:
+        """Construct the debugger command to inspect a generated core file."""
+
+        if debugger_name == 'gdb':
+            return [
+                *debugger_command,
+                '--batch',
+                '-ex', 'set pagination off',
+                '-ex', 'thread apply all bt',
+                str(invocation.path),
+                str(core_path),
+            ]
+
+        # Fallback to lldb
+        quoted_executable = shlex.quote(str(invocation.path))
+        quoted_core = shlex.quote(str(core_path))
+
+        return [
+            *debugger_command,
+            '--batch',
+            '-o', f'target create {quoted_executable}',
+            '-o', f'process attach -c {quoted_core}',
+            '-o', 'thread backtrace all',
+            '-o', 'quit',
+        ]
+
+    def _locate_windows_debugger(self, executable: str) -> Tuple[Optional[str], str]:
+        """Locate a Windows debugger executable in common installation paths."""
 
         if sys.platform != 'win32':
-            return None, 'cdb not available on this platform'
+            return None, f"{executable} not available on this platform"
 
-        if self._cdb_search_attempted:
-            cached_error = self._cached_cdb_error or 'cdb not available'
-            return self._cached_cdb_path, cached_error
+        cache_key = executable.lower()
+        if cache_key in self._debugger_cache:
+            return self._debugger_cache[cache_key]
 
-        self._cdb_search_attempted = True
+        exe_variants = {executable}
+        if not executable.lower().endswith('.exe'):
+            exe_variants.add(f"{executable}.exe")
 
-        cdb_path = shutil.which('cdb')
-        if cdb_path:
-            self._cached_cdb_path = cdb_path
-            self._cached_cdb_error = ''
-            return cdb_path, ''
+        located = shutil.which(executable)
+        if located:
+            result = (located, '')
+            self._debugger_cache[cache_key] = result
+            return result
 
-        searched_locations: List[str] = []
         candidate_paths: List[Path] = []
+        searched_locations: List[str] = []
         seen: Set[Path] = set()
 
         def register_candidate(path: Optional[Path]) -> None:
@@ -800,13 +887,34 @@ class TestRunner:
                 return
             seen.add(expanded)
             candidate_paths.append(expanded)
+            if len(searched_locations) < 32:
+                searched_locations.append(str(expanded))
 
         def add_debugger_candidates(root: Optional[Path]) -> None:
             if not root:
                 return
-            register_candidate(root / 'cdb.exe')
-            for arch in ('x64', 'x86', 'arm64', 'amd64'):
-                register_candidate(root / arch / 'cdb.exe')
+
+            queue: List[Tuple[Path, int]] = [(Path(root), 0)]
+            while queue:
+                current, depth = queue.pop(0)
+                for variant in exe_variants:
+                    register_candidate(current / variant)
+                for arch in ('x64', 'x86', 'arm64', 'amd64'):
+                    for variant in exe_variants:
+                        register_candidate(current / arch / variant)
+
+                if depth >= 2:
+                    continue
+
+                try:
+                    for child in current.iterdir():
+                        if not child.is_dir():
+                            continue
+                        queue.append((child, depth + 1))
+                except OSError:
+                    # Ignore directories we cannot enumerate (e.g. permission issues
+                    # on WindowsApps) and continue probing other known locations.
+                    continue
 
         env_roots = [
             os.environ.get('CDB_PATH'),
@@ -845,10 +953,24 @@ class TestRunner:
                 except OSError:
                     kit_versions = []
 
-                for kit_dir in kit_versions:
-                    if not kit_dir.is_dir():
+                for version_dir in kit_versions:
+                    if not version_dir.is_dir():
                         continue
-                    add_debugger_candidates(kit_dir / 'Debuggers')
+                    add_debugger_candidates(version_dir / 'Debuggers')
+                    add_debugger_candidates(version_dir)
+
+                    sdk_bin = version_dir / 'bin'
+                    if not sdk_bin.exists():
+                        continue
+
+                    try:
+                        sdk_subdirs = sorted(sdk_bin.iterdir(), reverse=True)
+                    except OSError:
+                        sdk_subdirs = []
+
+                    for sdk_subdir in sdk_subdirs:
+                        if sdk_subdir.is_dir():
+                            add_debugger_candidates(sdk_subdir)
 
             visual_studio = base_path / 'Microsoft Visual Studio'
             if visual_studio.exists():
@@ -870,25 +992,62 @@ class TestRunner:
                             continue
                         add_debugger_candidates(edition_dir / 'Common7' / 'IDE' / 'Remote Debugger')
 
+        for path_entry in os.environ.get('PATH', '').split(os.pathsep):
+            if not path_entry:
+                continue
+            path_obj = Path(path_entry)
+            if path_obj.is_dir():
+                for variant in exe_variants:
+                    register_candidate(path_obj / variant)
+            else:
+                register_candidate(path_obj)
+
         for candidate in candidate_paths:
-            searched_locations.append(str(candidate))
             try:
                 if candidate.is_file():
-                    self._cached_cdb_path = str(candidate)
-                    self._cached_cdb_error = ''
-                    return self._cached_cdb_path, ''
+                    result = (str(candidate), '')
+                    self._debugger_cache[cache_key] = result
+                    return result
+
+                if candidate.is_dir():
+                    for variant in exe_variants:
+                        potential = candidate / variant
+                        if potential.exists():
+                            result = (str(potential), '')
+                            self._debugger_cache[cache_key] = result
+                            return result
             except OSError:
                 continue
 
         if searched_locations:
-            sample = ', '.join(searched_locations[:3])
-            if len(searched_locations) > 3:
+            sample = ', '.join(searched_locations[:10])
+            if len(searched_locations) > 10:
                 sample += ', ...'
-            self._cached_cdb_error = f"cdb not available (searched: {sample})"
+            error = f"{executable} not available (searched: {sample})"
         else:
-            self._cached_cdb_error = 'cdb not available'
+            error = f"{executable} not available"
 
-        return None, self._cached_cdb_error
+        result = (None, error)
+        self._debugger_cache[cache_key] = result
+        return result
+
+    def _resolve_windows_debugger(self) -> Tuple[Optional[str], Optional[str], str]:
+        """Return the first available Windows debugger and its path."""
+
+        debugger_candidates = ['cdb', 'ntsd', 'windbg']
+        errors: List[str] = []
+
+        for debugger in debugger_candidates:
+            path, error = self._locate_windows_debugger(debugger)
+            if path:
+                return debugger, path, ''
+            if error:
+                errors.append(f"{debugger}: {error}")
+
+        if errors:
+            return None, None, '; '.join(errors)
+
+        return None, None, 'no Windows debugger available'
 
     def _capture_windows_crash_dump(
         self,
@@ -898,9 +1057,9 @@ class TestRunner:
     ) -> Tuple[str, str]:
         """Attempt to capture stack traces from recent Windows crash dump files."""
 
-        cdb_path, cdb_error = self._resolve_cdb_path()
-        if not cdb_path:
-            return "", cdb_error
+        debugger_name, debugger_path, debugger_error = self._resolve_windows_debugger()
+        if not debugger_path:
+            return "", debugger_error
 
         candidate_dirs = [invocation.path.parent, Path.cwd()]
 
@@ -959,19 +1118,20 @@ class TestRunner:
 
         for _, dump_path in candidate_dumps:
             try:
+                command = [debugger_path]
+                if debugger_name == 'windbg':
+                    command.append('-Q')
+                command.extend(['-z', str(dump_path), '-c', '.symfix; .reload; ~* k; qd'])
+
                 result = subprocess.run(
-                    [
-                        cdb_path,
-                        '-z', str(dump_path),
-                        '-c', '.symfix; .reload; ~* k; qd',
-                    ],
+                    command,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
                     timeout=120,
                 )
             except subprocess.SubprocessError as exc:
-                capture_errors.append(f"{dump_path.name}: cdb failed ({exc})")
+                capture_errors.append(f"{dump_path.name}: {debugger_name} failed ({exc})")
                 continue
 
             output = result.stdout.strip()
@@ -980,7 +1140,7 @@ class TestRunner:
 
             if result.returncode != 0:
                 capture_errors.append(
-                    f"{dump_path.name}: cdb exited with code {result.returncode}: {result.stderr.strip()}"
+                    f"{dump_path.name}: {debugger_name} exited with code {result.returncode}: {result.stderr.strip()}"
                 )
                 continue
 
@@ -997,11 +1157,11 @@ class TestRunner:
         return "", "no usable crash dump found"
 
     def _capture_process_stacks_windows(self, pid: int) -> Tuple[str, str]:
-        """Capture stack traces for a process tree on Windows using cdb."""
+        """Capture stack traces for a process tree on Windows using an installed debugger."""
 
-        cdb_path, cdb_error = self._resolve_cdb_path()
-        if not cdb_path:
-            return "", cdb_error
+        debugger_name, debugger_path, debugger_error = self._resolve_windows_debugger()
+        if not debugger_path:
+            return "", debugger_error
 
         target_pids = self._collect_windows_process_tree_pids(pid)
         target_pids.append(pid)
@@ -1011,21 +1171,23 @@ class TestRunner:
 
         for target_pid in sorted(set(target_pids)):
             try:
+                command = [debugger_path]
+                if debugger_name == 'windbg':
+                    command.append('-Q')
+                command.extend(['-p', str(target_pid), '-c', '.symfix; .reload; ~* k; qd'])
+
                 result = subprocess.run(
-                    [
-                        cdb_path,
-                        '-p', str(target_pid),
-                        '-c', '.symfix; .reload; ~* k; qd',
-                    ],
+                    command,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
                     timeout=60,
                 )
             except FileNotFoundError:
-                return "", cdb_error or "cdb not available"
+                fallback_error = debugger_error or f"{debugger_name} not available"
+                return "", fallback_error
             except subprocess.SubprocessError as exc:
-                capture_errors.append(f"PID {target_pid}: cdb failed ({exc})")
+                capture_errors.append(f"PID {target_pid}: {debugger_name} failed ({exc})")
                 continue
 
             output = result.stdout.strip()
@@ -1034,7 +1196,7 @@ class TestRunner:
 
             if result.returncode != 0:
                 capture_errors.append(
-                    f"PID {target_pid}: cdb exited with code {result.returncode}: {result.stderr.strip()}"
+                    f"PID {target_pid}: {debugger_name} exited with code {result.returncode}: {result.stderr.strip()}"
                 )
                 continue
 
@@ -1107,10 +1269,15 @@ class TestRunner:
             return pids
 
         proc_path = Path('/proc')
-        try:
-            entries = list(proc_path.iterdir())
-        except Exception:
-            return pids
+        entries: Optional[List[Path]] = None
+        if proc_path.exists():
+            try:
+                entries = list(proc_path.iterdir())
+            except Exception:
+                entries = None
+
+        if entries is None:
+            return self._collect_process_group_pids_via_ps(pgid)
 
         for entry in entries:
             if not entry.is_dir():
@@ -1143,10 +1310,15 @@ class TestRunner:
             return descendants
 
         proc_path = Path('/proc')
-        try:
-            entries = list(proc_path.iterdir())
-        except Exception:
-            return descendants
+        entries: Optional[List[Path]] = None
+        if proc_path.exists():
+            try:
+                entries = list(proc_path.iterdir())
+            except Exception:
+                entries = None
+
+        if entries is None:
+            return self._collect_descendant_pids_via_ps(root_pid)
 
         parent_to_children: Dict[int, List[int]] = {}
 
@@ -1192,6 +1364,77 @@ class TestRunner:
             if current in visited or current == root_pid:
                 continue
             visited.add(current)
+            descendants.append(current)
+            stack.extend(parent_to_children.get(current, []))
+
+        return descendants
+
+    def _snapshot_process_table_via_ps(self) -> List[Tuple[int, int, int]]:
+        """Return (pid, ppid, pgid) tuples using the portable ps command."""
+
+        if sys.platform == 'win32':
+            return []
+
+        ps_executable = shutil.which('ps')
+        if not ps_executable:
+            return []
+
+        try:
+            result = subprocess.run(
+                [ps_executable, '-eo', 'pid=,ppid=,pgid='],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=5,
+                check=True,
+            )
+        except subprocess.SubprocessError:
+            return []
+
+        snapshot: List[Tuple[int, int, int]] = []
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split()
+            if len(parts) != 3:
+                continue
+            try:
+                pid_value = int(parts[0])
+                ppid_value = int(parts[1])
+                pgid_value = int(parts[2])
+            except ValueError:
+                continue
+            snapshot.append((pid_value, ppid_value, pgid_value))
+
+        return snapshot
+
+    def _collect_process_group_pids_via_ps(self, pgid: int) -> List[int]:
+        """Collect process IDs that belong to the provided PGID using ps."""
+
+        snapshot = self._snapshot_process_table_via_ps()
+        if not snapshot:
+            return []
+
+        return [pid for pid, _, process_group in snapshot if process_group == pgid]
+
+    def _collect_descendant_pids_via_ps(self, root_pid: int) -> List[int]:
+        """Collect descendant process IDs for the provided root PID using ps."""
+
+        snapshot = self._snapshot_process_table_via_ps()
+        if not snapshot:
+            return []
+
+        parent_to_children: Dict[int, List[int]] = defaultdict(list)
+        for pid, ppid, _ in snapshot:
+            parent_to_children[ppid].append(pid)
+
+        descendants: List[int] = []
+        stack: List[int] = parent_to_children.get(root_pid, [])[:]
+        while stack:
+            current = stack.pop()
+            if current in descendants or current == root_pid:
+                continue
             descendants.append(current)
             stack.extend(parent_to_children.get(current, []))
 
