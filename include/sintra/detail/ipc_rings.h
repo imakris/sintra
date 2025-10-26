@@ -214,8 +214,48 @@ inline bool truncate_file(native_file_handle handle, std::size_t size)
         ::SetLastError(ERROR_FILE_TOO_LARGE);
         return false;
     }
+
+    LARGE_INTEGER current_size_li{};
+    if (!::GetFileSizeEx(handle, &current_size_li)) {
+        return false;
+    }
+
+    const LONGLONG current_size = current_size_li.QuadPart;
+    if (current_size < 0) {
+        ::SetLastError(ERROR_INVALID_PARAMETER);
+        return false;
+    }
+
+    const LONGLONG requested_size = static_cast<LONGLONG>(size);
+    if (requested_size > current_size) {
+        static constexpr DWORD kZeroChunkSize = 4096;
+        static const char kZeros[kZeroChunkSize] = {};
+
+        LARGE_INTEGER start_pos{};
+        start_pos.QuadPart = current_size;
+        if (!::SetFilePointerEx(handle, start_pos, nullptr, FILE_BEGIN)) {
+            return false;
+        }
+
+        ULONGLONG remaining = static_cast<ULONGLONG>(requested_size - current_size);
+        while (remaining > 0) {
+            const DWORD chunk = static_cast<DWORD>(std::min<ULONGLONG>(remaining, kZeroChunkSize));
+            DWORD written = 0;
+            if (!::WriteFile(handle, kZeros, chunk, &written, nullptr)) {
+                return false;
+            }
+            if (written != chunk) {
+                ::SetLastError(ERROR_WRITE_FAULT);
+                return false;
+            }
+            remaining -= written;
+        }
+
+        return true;
+    }
+
     LARGE_INTEGER distance{};
-    distance.QuadPart = static_cast<LONGLONG>(size);
+    distance.QuadPart = requested_size;
     if (!::SetFilePointerEx(handle, distance, nullptr, FILE_BEGIN)) {
         return false;
     }
