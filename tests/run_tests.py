@@ -9,7 +9,7 @@ Usage:
     python run_tests.py [options]
 
 Options:
-    --repetitions N                 Number of times to run each test (default: 100)
+    --repetitions N                 Number of times to run each test (default: 1)
     --timeout SECONDS               Timeout per test run in seconds (default: 5)
     --test NAME                     Run only specific test (e.g., sintra_ping_pong_test)
     --include PATTERN               Include only tests matching glob-style pattern (can be repeated)
@@ -23,17 +23,19 @@ Options:
 import argparse
 import fnmatch
 import os
-import platform
 import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+import urllib.error
+import urllib.request
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 class Color:
     """ANSI color codes for terminal output"""
@@ -75,6 +77,20 @@ TEST_WEIGHT_OVERRIDES = {
     "rpc_append_test_release": 100,
     "spawn_detached_test_release": 30,
 }
+
+WINDOWS_DEBUGGER_CACHE_ENV = 'SINTRA_WINDOWS_DEBUGGER_CACHE'
+WINSDK_INSTALLER_URL_ENV = 'SINTRA_WINSDK_INSTALLER_URL'
+WINSDK_FEATURE_ENV = 'SINTRA_WINSDK_FEATURE'
+WINSDK_DEBUGGER_MSI_ENV = 'SINTRA_WINSDK_DEBUGGER_MSI'
+WINSDK_INSTALLER_URL = os.environ.get(
+    WINSDK_INSTALLER_URL_ENV,
+    'https://download.microsoft.com/download/7/9/6/7962e9ce-cd69-4574-978c-1202654bd729/windowssdk/winsdksetup.exe',
+)
+WINSDK_FEATURE_ID = os.environ.get(WINSDK_FEATURE_ENV, 'OptionId.WindowsDesktopDebuggers')
+WINSDK_DEBUGGER_MSI_NAME = os.environ.get(
+    WINSDK_DEBUGGER_MSI_ENV,
+    'X64 Debuggers And Tools-x64_en-us.msi',
+)
 
 
 def _canonical_test_name(name: str) -> str:
@@ -132,6 +148,7 @@ class TestRunner:
         self.preserve_on_timeout = preserve_on_timeout
         self._ipc_rings_cache: Dict[Path, List[Tuple[str, str]]] = {}
         self._debugger_cache: Dict[str, Tuple[Optional[str], str]] = {}
+        self._downloaded_windows_debugger_root: Optional[Path] = None
 
         # Determine test directory - check both with and without config subdirectory
         test_dir_with_config = build_dir / 'tests' / config
@@ -144,6 +161,9 @@ class TestRunner:
 
         # Kill any existing sintra processes for a clean start
         self._kill_all_sintra_processes()
+
+        if sys.platform == 'win32':
+            self._prepare_windows_debuggers()
 
     def find_test_suites(
         self,
@@ -474,7 +494,7 @@ class TestRunner:
                 duration = time.time() - start_time
 
                 for thread in threads:
-                    thread.join()
+                    thread.join(timeout=1)
 
                 stdout = ''.join(stdout_lines)
                 stderr = ''.join(stderr_lines)
@@ -570,7 +590,7 @@ class TestRunner:
                     pass
 
                 for thread in threads:
-                    thread.join()
+                    thread.join(timeout=1)
 
                 stdout = ''.join(stdout_lines)
                 stderr = ''.join(stderr_lines)
@@ -742,7 +762,13 @@ class TestRunner:
         except ImportError:
             signal = None
 
-        if signal is not None:
+        debugger_is_macos_lldb = debugger_name == 'lldb' and sys.platform == 'darwin'
+        # Pausing processes helps capture coherent stacks, but LLDB on macOS fails
+        # to attach to tasks that are already SIGSTOPed. Skip the pause in that case
+        # and let LLDB suspend threads itself.
+        should_pause = signal is not None and not debugger_is_macos_lldb
+
+        if should_pause:
             for target_pid in sorted(target_pids):
                 if target_pid == os.getpid():
                     continue
@@ -752,9 +778,21 @@ class TestRunner:
                 except (ProcessLookupError, PermissionError):
                     continue
 
+        per_pid_timeout = 30
+        total_budget = 90 if debugger_is_macos_lldb else per_pid_timeout
+        capture_deadline = time.monotonic() + total_budget
+
         for target_pid in sorted(target_pids):
             if target_pid == os.getpid():
                 continue
+
+            remaining = capture_deadline - time.monotonic()
+            if remaining <= 0:
+                capture_errors.append(
+                    f"PID {target_pid}: skipped stack capture (overall debugger timeout exceeded)"
+                )
+                break
+            debugger_timeout = max(5, min(per_pid_timeout, remaining))
 
             try:
                 result = subprocess.run(
@@ -766,7 +804,7 @@ class TestRunner:
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
-                    timeout=30,
+                    timeout=debugger_timeout,
                 )
             except subprocess.SubprocessError as exc:
                 capture_errors.append(
@@ -788,7 +826,7 @@ class TestRunner:
                 stack_outputs.append(f"PID {target_pid}\n{output}")
 
         # Allow processes to continue so gdb can detach cleanly before killing
-        if signal is not None:
+        if should_pause:
             for target_pid in paused_pids:
                 try:
                     os.kill(target_pid, signal.SIGCONT)
@@ -948,16 +986,21 @@ class TestRunner:
             return [
                 *debugger_command,
                 '--batch',
+                '--quiet',
+                '--nx',
                 '-p', str(pid),
+                '-ex', 'set confirm off',
                 '-ex', 'set pagination off',
                 '-ex', 'thread apply all bt',
                 '-ex', 'detach',
+                '-ex', 'quit',
             ]
 
         # Fallback to lldb
         return [
             *debugger_command,
             '--batch',
+            '--no-lldbinit',
             '-p', str(pid),
             '-o', 'thread backtrace all',
             '-o', 'detach',
@@ -977,8 +1020,12 @@ class TestRunner:
             return [
                 *debugger_command,
                 '--batch',
+                '--quiet',
+                '--nx',
+                '-ex', 'set confirm off',
                 '-ex', 'set pagination off',
                 '-ex', 'thread apply all bt',
+                '-ex', 'quit',
                 str(invocation.path),
                 str(core_path),
             ]
@@ -990,89 +1037,14 @@ class TestRunner:
         return [
             *debugger_command,
             '--batch',
-            '-o', f'target create {quoted_executable}',
-            '-o', f'process attach -c {quoted_core}',
+            '--no-lldbinit',
+            '-o', f'target create --core {quoted_core} {quoted_executable}',
             '-o', 'thread backtrace all',
             '-o', 'quit',
         ]
 
-    @staticmethod
-    def _normalize_windows_architecture(value: Optional[str]) -> Optional[str]:
-        """Return the canonical Windows debugger architecture name."""
-
-        if not value:
-            return None
-
-        normalized = value.strip().lower()
-        mapping = {
-            'amd64': 'x64',
-            'x86_64': 'x64',
-            'ia64': 'x64',
-            'x64': 'x64',
-            'arm64': 'arm64',
-            'aarch64': 'arm64',
-            'arm': 'arm64',
-            'x86': 'x86',
-            'i386': 'x86',
-            'i486': 'x86',
-            'i586': 'x86',
-            'i686': 'x86',
-            'win32': 'x86',
-        }
-
-        return mapping.get(normalized)
-
-    def _preferred_windows_debug_architectures(self) -> List[str]:
-        """Return the preferred debugger architectures for the current build."""
-
-        if sys.platform != 'win32':
-            return []
-
-        hints = [
-            os.environ.get('SINTRA_TARGET_ARCH'),
-            os.environ.get('CDB_ARCH'),
-            os.environ.get('VSCMD_ARG_TGT_ARCH'),
-            os.environ.get('CMAKE_GENERATOR_PLATFORM'),
-            os.environ.get('Platform'),
-            os.environ.get('PROCESSOR_ARCHITECTURE'),
-            os.environ.get('PROCESSOR_ARCHITEW6432'),
-        ]
-
-        preferred: List[str] = []
-        for hint in hints:
-            normalized = self._normalize_windows_architecture(hint)
-            if normalized and normalized not in preferred:
-                preferred.append(normalized)
-
-        if preferred:
-            return preferred
-
-        bits, _ = platform.architecture()
-        if bits == '64bit':
-            return ['x64']
-
-        return ['x86']
-
-    @staticmethod
-    def _expand_windows_architecture_dirs(architectures: List[str]) -> List[str]:
-        """Expand canonical architectures into known directory aliases."""
-
-        aliases = {
-            'x64': ['x64', 'amd64'],
-            'x86': ['x86'],
-            'arm64': ['arm64'],
-        }
-
-        expanded: List[str] = []
-        for arch in architectures:
-            for alias in aliases.get(arch, [arch]):
-                if alias not in expanded:
-                    expanded.append(alias)
-
-        return expanded
-
     def _locate_windows_debugger(self, executable: str) -> Tuple[Optional[str], str]:
-        """Locate a Windows debugger executable in common installation paths."""
+        """Locate or install the requested Windows debugger executable."""
 
         if sys.platform != 'win32':
             return None, f"{executable} not available on this platform"
@@ -1081,207 +1053,295 @@ class TestRunner:
         if cache_key in self._debugger_cache:
             return self._debugger_cache[cache_key]
 
-        exe_variants = {executable}
-        if not executable.lower().endswith('.exe'):
-            exe_variants.add(f"{executable}.exe")
-
-        preferred_arches = self._preferred_windows_debug_architectures()
-        arch_dir_names = self._expand_windows_architecture_dirs(preferred_arches)
-        if not arch_dir_names:
-            arch_dir_names = self._expand_windows_architecture_dirs(['x64'])
-
-        located = shutil.which(executable)
-        if located:
-            result = (located, '')
+        debugger_root, prepare_error = self._ensure_downloaded_windows_debugger_root()
+        if not debugger_root:
+            error = prepare_error or f"failed to prepare debugger payload for {executable}"
+            result = (None, error)
             self._debugger_cache[cache_key] = result
             return result
 
-        candidate_paths: List[Path] = []
-        searched_locations: List[str] = []
-        seen: Set[Path] = set()
+        candidates = [executable]
+        if not executable.lower().endswith('.exe'):
+            candidates.append(f"{executable}.exe")
 
-        def register_candidate(path: Optional[Path]) -> None:
-            if not path:
-                return
-            expanded = Path(str(path)).expanduser()
-            if expanded in seen:
-                return
-            seen.add(expanded)
-            candidate_paths.append(expanded)
-            if len(searched_locations) < 32:
-                searched_locations.append(str(expanded))
+        located = self._find_downloaded_debugger_executable(debugger_root, candidates)
+        if located:
+            result = (str(located), '')
+            self._debugger_cache[cache_key] = result
+            return result
 
-        def add_debugger_candidates(
-            root: Optional[Path],
-            arch_dirs: Optional[Sequence[str]] = None,
-        ) -> None:
-            if not root:
-                return
-
-            queue: List[Tuple[Path, int]] = [(Path(root), 0)]
-            while queue:
-                current, depth = queue.pop(0)
-                for variant in exe_variants:
-                    candidate = current / variant
-                    if candidate.exists():
-                        register_candidate(candidate)
-                for arch in arch_dirs or arch_dir_names:
-                    arch_dir = current / arch
-                    if arch_dir.exists():
-                        register_candidate(arch_dir)
-                        for variant in exe_variants:
-                            candidate = arch_dir / variant
-                            if candidate.exists():
-                                register_candidate(candidate)
-
-                if depth >= 2:
-                    continue
-
-                try:
-                    for child in current.iterdir():
-                        if not child.is_dir():
-                            continue
-                        queue.append((child, depth + 1))
-                except OSError:
-                    # Ignore directories we cannot enumerate (e.g. permission issues
-                    # on WindowsApps) and continue probing other known locations.
-                    continue
-
-        def search_windows_kits_debuggers(
-            root: Optional[Path],
-            arch_dirs: Sequence[str],
-        ) -> None:
-            if not root or not arch_dirs:
-                return
-
-            try:
-                root_path = Path(root)
-                if not root_path.exists():
-                    return
-            except OSError:
-                return
-
-            try:
-                for debuggers_dir in root_path.rglob('Debuggers'):
-                    if not debuggers_dir.is_dir():
-                        continue
-
-                    for variant in exe_variants:
-                        candidate = debuggers_dir / variant
-                        if candidate.exists():
-                            register_candidate(candidate)
-
-                    for arch in arch_dirs:
-                        arch_dir = debuggers_dir / arch
-                        if not arch_dir.exists():
-                            continue
-                        register_candidate(arch_dir)
-                        for variant in exe_variants:
-                            candidate = arch_dir / variant
-                            if candidate.exists():
-                                register_candidate(candidate)
-            except OSError:
-                # Some directories under Windows Kits may not be accessible.
-                return
-
-        env_roots = [
-            os.environ.get('CDB_PATH'),
-            os.environ.get('CDB'),
-            os.environ.get('DEBUGGINGTOOLS'),
-            os.environ.get('DEBUGGINGTOOLS64'),
-            os.environ.get('DEBUGGINGTOOLS32'),
-            os.environ.get('WindowsSdkDir'),
-        ]
-
-        for value in env_roots:
-            if not value:
-                continue
-            value_path = Path(value)
-            if value_path.suffix.lower() == '.exe':
-                register_candidate(value_path)
-            else:
-                add_debugger_candidates(value_path)
-                add_debugger_candidates(value_path / 'Debuggers')
-
-        program_dirs = [
-            ('ProgramFiles', os.environ.get('ProgramFiles')),
-            ('ProgramFiles(x86)', os.environ.get('ProgramFiles(x86)')),
-            ('ProgramW6432', os.environ.get('ProgramW6432')),
-        ]
-
-        for var_name, base in program_dirs:
-            if not base:
-                continue
-
-            base_path = Path(base)
-            windows_kits = base_path / 'Windows Kits'
-            if preferred_arches:
-                kits_arches = preferred_arches
-            else:
-                kits_arches = ['x64', 'x86']
-            kits_arch_dirs = self._expand_windows_architecture_dirs(kits_arches)
-            if kits_arch_dirs:
-                add_debugger_candidates(windows_kits, arch_dirs=kits_arch_dirs)
-                search_windows_kits_debuggers(windows_kits, kits_arch_dirs)
-
-            visual_studio = base_path / 'Microsoft Visual Studio'
-            if visual_studio.exists():
-                try:
-                    vs_versions = sorted(visual_studio.iterdir(), reverse=True)
-                except OSError:
-                    vs_versions = []
-
-                for version_dir in vs_versions:
-                    if not version_dir.is_dir():
-                        continue
-                    try:
-                        editions = sorted(version_dir.iterdir(), reverse=True)
-                    except OSError:
-                        editions = []
-
-                    for edition_dir in editions:
-                        if not edition_dir.is_dir():
-                            continue
-                        add_debugger_candidates(edition_dir / 'Common7' / 'IDE' / 'Remote Debugger')
-
-        for path_entry in os.environ.get('PATH', '').split(os.pathsep):
-            if not path_entry:
-                continue
-            path_obj = Path(path_entry)
-            if path_obj.is_dir():
-                for variant in exe_variants:
-                    register_candidate(path_obj / variant)
-            else:
-                register_candidate(path_obj)
-
-        for candidate in candidate_paths:
-            try:
-                if candidate.is_file():
-                    result = (str(candidate), '')
-                    self._debugger_cache[cache_key] = result
-                    return result
-
-                if candidate.is_dir():
-                    for variant in exe_variants:
-                        potential = candidate / variant
-                        if potential.exists():
-                            result = (str(potential), '')
-                            self._debugger_cache[cache_key] = result
-                            return result
-            except OSError:
-                continue
-
-        if searched_locations:
-            sample = ', '.join(searched_locations[:10])
-            if len(searched_locations) > 10:
-                sample += ', ...'
-            error = f"{executable} not available (searched: {sample})"
-        else:
-            error = f"{executable} not available"
-
+        error = f"{executable} not found in downloaded debugger cache ({debugger_root})"
         result = (None, error)
         self._debugger_cache[cache_key] = result
         return result
+
+    def _ensure_downloaded_windows_debugger_root(self) -> Tuple[Optional[Path], str]:
+        """Ensure Debugging Tools for Windows are cached and return their root."""
+
+        if self._downloaded_windows_debugger_root:
+            return self._downloaded_windows_debugger_root, ''
+
+        cache_dir = self._get_windows_debugger_cache_dir()
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            return None, f"failed to create debugger cache directory {cache_dir}: {exc}"
+
+        install_root = cache_dir / 'winsdk_debuggers'
+        debugger_root = install_root / 'Windows Kits' / '10' / 'Debuggers'
+        sentinel = debugger_root / 'x64' / 'cdb.exe'
+        try:
+            if sentinel.exists():
+                self._downloaded_windows_debugger_root = debugger_root
+                return debugger_root, ''
+        except OSError:
+            pass
+
+        layout_dir = cache_dir / 'winsdk_layout'
+        msi_path = layout_dir / 'Installers' / WINSDK_DEBUGGER_MSI_NAME
+
+        if not msi_path.exists():
+            layout_error = self._ensure_winsdk_layout(layout_dir)
+            if layout_error:
+                return None, layout_error
+            if not msi_path.exists():
+                return None, f"expected debugger MSI {WINSDK_DEBUGGER_MSI_NAME} missing from layout ({layout_dir})"
+
+        extract_error = self._extract_debugger_msi(msi_path, install_root)
+        if extract_error:
+            return None, extract_error
+
+        try:
+            if not sentinel.exists():
+                return None, f"debugger executable not found at {sentinel}"
+        except OSError as exc:
+            return None, f"failed to verify debugger installation at {sentinel}: {exc}"
+
+        self._downloaded_windows_debugger_root = debugger_root
+        return debugger_root, ''
+
+    def _ensure_winsdk_layout(self, layout_dir: Path) -> Optional[str]:
+        """Run winsdksetup.exe to produce an offline layout containing the debugger MSI."""
+
+        installer_path, installer_error = self._ensure_winsdk_installer()
+        if installer_error:
+            return installer_error
+        assert installer_path is not None
+
+        if layout_dir.exists():
+            shutil.rmtree(layout_dir, ignore_errors=True)
+
+        try:
+            layout_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            return f"failed to create layout directory {layout_dir}: {exc}"
+
+        log_path = layout_dir.parent / 'winsdksetup-layout.log'
+        command = [
+            str(installer_path),
+            '/quiet',
+            '/norestart',
+            '/layout',
+            str(layout_dir),
+            '/features',
+            WINSDK_FEATURE_ID,
+            '/log',
+            str(log_path),
+        ]
+
+        try:
+            result = subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=3600,
+            )
+        except (subprocess.SubprocessError, OSError) as exc:
+            return f"winsdksetup.exe failed to create layout: {exc}"
+
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip()
+            return (
+                f"winsdksetup.exe layout failed with exit code {result.returncode}: "
+                f"{detail or f'see {log_path} for details'}"
+            )
+
+        return None
+
+    def _ensure_winsdk_installer(self) -> Tuple[Optional[Path], Optional[str]]:
+        """Download winsdksetup.exe if needed."""
+
+        cache_dir = self._get_windows_debugger_cache_dir()
+        installer_path = cache_dir / 'winsdksetup.exe'
+        if installer_path.exists():
+            return installer_path, None
+
+        download_error = self._download_file(WINSDK_INSTALLER_URL, installer_path)
+        if download_error:
+            return None, f"failed to download WinSDK installer: {download_error}"
+
+        return installer_path, None
+
+    def _extract_debugger_msi(self, msi_path: Path, destination: Path) -> Optional[str]:
+        """Extract the Debugging Tools MSI into the destination directory."""
+
+        if destination.exists():
+            shutil.rmtree(destination, ignore_errors=True)
+
+        extract_error = self._extract_msi_package(msi_path, destination)
+        if extract_error:
+            shutil.rmtree(destination, ignore_errors=True)
+            return extract_error
+
+        return None
+
+    def _get_windows_debugger_cache_dir(self) -> Path:
+        """Return the directory that stores downloaded debugger assets."""
+
+        override = os.environ.get(WINDOWS_DEBUGGER_CACHE_ENV)
+        if override:
+            return Path(override)
+
+        local_app_data = os.environ.get('LOCALAPPDATA')
+        if local_app_data:
+            base_dir = Path(local_app_data)
+        else:
+            base_dir = Path.home() / 'AppData' / 'Local'
+
+        return base_dir / 'sintra' / 'debugger_cache'
+
+    def _download_file(self, url: str, destination: Path) -> Optional[str]:
+        """Download a URL to a file atomically."""
+
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            return f"failed to create directory for {destination}: {exc}"
+
+        temp_file = tempfile.NamedTemporaryFile(delete=False, dir=str(destination.parent), suffix='.tmp')
+        temp_path = Path(temp_file.name)
+        try:
+            with urllib.request.urlopen(url) as response:
+                chunk_size = 1024 * 1024
+                while True:
+                    chunk = response.read(chunk_size)
+                    if not chunk:
+                        break
+                    temp_file.write(chunk)
+            temp_file.close()
+            os.replace(temp_path, destination)
+            return None
+        except urllib.error.URLError as exc:
+            temp_file.close()
+            try:
+                temp_path.unlink()
+            except FileNotFoundError:
+                pass
+            return f"failed to download {url}: {exc}"
+        except OSError as exc:
+            temp_file.close()
+            try:
+                temp_path.unlink()
+            except FileNotFoundError:
+                pass
+            return f"failed to write {destination}: {exc}"
+
+    def _extract_msi_package(self, package: Path, destination: Path) -> Optional[str]:
+        """Extract an MSI into the provided destination directory."""
+
+        msiexec = shutil.which('msiexec')
+        if not msiexec:
+            windir = os.environ.get('WINDIR')
+            if windir:
+                candidate = Path(windir) / 'System32' / 'msiexec.exe'
+                if candidate.exists():
+                    msiexec = str(candidate)
+
+        if not msiexec:
+            return "'msiexec' not available to extract debugger package"
+
+        try:
+            destination.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            return f"failed to create extraction directory {destination}: {exc}"
+
+        try:
+            result = subprocess.run(
+                [
+                    msiexec,
+                    '/a',
+                    str(package),
+                    '/qn',
+                    f'TARGETDIR={destination}',
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=900,
+            )
+        except (subprocess.SubprocessError, OSError) as exc:
+            return f"msiexec failed to extract debugger package: {exc}"
+
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip()
+            return f"msiexec exited with {result.returncode}: {detail}"
+
+        return None
+
+    def _find_downloaded_debugger_executable(
+        self,
+        debugger_root: Path,
+        executable_names: List[str],
+    ) -> Optional[Path]:
+        """Search the downloaded debugger payload for a specific executable."""
+
+        candidate_dirs = [
+            debugger_root / 'x64',
+            debugger_root / 'amd64',
+            debugger_root / 'dbg' / 'amd64',
+            debugger_root / 'bin' / 'x64',
+            debugger_root,
+        ]
+
+        for directory in candidate_dirs:
+            try:
+                if not directory.exists():
+                    continue
+            except OSError:
+                continue
+
+            for name in executable_names:
+                candidate = directory / name
+                try:
+                    if candidate.exists():
+                        return candidate
+                except OSError:
+                    continue
+
+        for name in executable_names:
+            try:
+                matches = list(debugger_root.rglob(name))
+            except OSError:
+                matches = []
+            if matches:
+                return matches[0]
+
+        return None
+
+    def _prepare_windows_debuggers(self) -> None:
+        """Ensure Windows debuggers are resolved before running any tests."""
+
+        debugger, path, error = self._resolve_windows_debugger()
+        if path and self.verbose:
+            print(
+                f"{Color.BLUE}Using Windows debugger '{debugger}' at {path}{Color.RESET}"
+            )
+        elif error:
+            print(
+                f"{Color.YELLOW}Warning: {error}. "
+                f"Stack capture may be unavailable.{Color.RESET}"
+            )
 
     def _resolve_windows_debugger(self) -> Tuple[Optional[str], Optional[str], str]:
         """Return the first available Windows debugger and its path."""
@@ -1852,8 +1912,8 @@ def main():
         description='Run Sintra tests with timeout and repetition support',
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument('--repetitions', type=int, default=1000,
-                        help='Number of times to run each test (default: 1000)')
+    parser.add_argument('--repetitions', type=int, default=1,
+                        help='Number of times to run each test (default: 1)')
     parser.add_argument('--timeout', type=float, default=5.0,
                         help='Timeout per test run in seconds (default: 5)')
     parser.add_argument('--test', type=str, default=None,
