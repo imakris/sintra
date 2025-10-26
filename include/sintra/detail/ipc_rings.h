@@ -698,9 +698,14 @@ private:
                                                 std::memory_order_acq_rel,
                                                 std::memory_order_acquire))
             {
-                new (get()) detail::interprocess_semaphore(0);
-                m_state.store(static_cast<uint8_t>(state::initialized), std::memory_order_release);
-                return get();
+                try {
+                    new (get()) detail::interprocess_semaphore(0);
+                    m_state.store(static_cast<uint8_t>(state::initialized), std::memory_order_release);
+                    return get();
+                } catch (...) {
+                    m_state.store(static_cast<uint8_t>(state::uninitialized), std::memory_order_release);
+                    throw;
+                }
             }
             current = expected;
         }
