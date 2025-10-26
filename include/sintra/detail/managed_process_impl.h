@@ -23,6 +23,7 @@
 #include <signal.h>
 #include <cerrno>
 #include <fcntl.h>
+#include <sys/wait.h>
 #include <sched.h>
 #include <time.h>
 #include <unistd.h>
@@ -536,6 +537,24 @@ Managed_process::~Managed_process()
     }
 
 #ifndef _WIN32
+    std::vector<pid_t> reap_targets;
+    {
+        std::lock_guard<std::mutex> guard(m_spawned_child_pids_mutex);
+        reap_targets.swap(m_spawned_child_pids);
+    }
+
+    for (pid_t pid : reap_targets) {
+        if (pid <= 0) {
+            continue;
+        }
+        int status = 0;
+        while (::waitpid(pid, &status, 0) == -1) {
+            if (errno != EINTR) {
+                break;
+            }
+        }
+    }
+
     // Close the signal dispatch pipe to allow the dispatch thread to exit cleanly
     auto& pipefd = signal_pipe();
     if (pipefd[1] != -1) {
@@ -1017,9 +1036,16 @@ bool Managed_process::spawn_swarm_process(
         reader->wait_until_ready();
     }
 
-    bool success = spawn_detached(s.binary_name.c_str(), cargs.v());
+    int spawned_pid = -1;
+    bool success = spawn_detached(s.binary_name.c_str(), cargs.v(), &spawned_pid);
 
     if (success) {
+#ifndef _WIN32
+        if (spawned_pid > 0) {
+            std::lock_guard<std::mutex> guard(m_spawned_child_pids_mutex);
+            m_spawned_child_pids.push_back(static_cast<pid_t>(spawned_pid));
+        }
+#endif
         // Create an entry in the coordinator's transceiver registry.
         // This is essential for the implementation of publish_transceiver()
         {
