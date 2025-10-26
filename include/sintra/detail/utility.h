@@ -474,7 +474,40 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
     }
 
     if (total_read == sizeof(handshake_value) && handshake_value == 0) {
-        read_success = true;
+        int extra_errno = 0;
+        size_t extra_read = 0;
+        bool pipe_closed_cleanly = false;
+        while (extra_read < sizeof(extra_errno)) {
+            ssize_t rv = detail::call_read(
+                ready_pipe[0],
+                reinterpret_cast<char*>(&extra_errno) + extra_read,
+                sizeof(extra_errno) - extra_read);
+            if (rv < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                exec_errno = errno;
+                break;
+            }
+            if (rv == 0) {
+                if (extra_read == 0) {
+                    pipe_closed_cleanly = true;
+                }
+                else {
+                    exec_errno = EPIPE;
+                }
+                break;
+            }
+            extra_read += static_cast<size_t>(rv);
+        }
+
+        if (pipe_closed_cleanly) {
+            read_success = true;
+        }
+        else if (extra_read == sizeof(extra_errno)) {
+            exec_errno = extra_errno > 0 ? extra_errno : -extra_errno;
+            read_success = false;
+        }
     }
     else if (total_read == sizeof(handshake_value) && handshake_value != 0) {
         exec_errno = handshake_value > 0 ? handshake_value : -handshake_value;
