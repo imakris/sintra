@@ -23,6 +23,7 @@ Options:
 import argparse
 import fnmatch
 import os
+import platform
 import shlex
 import shutil
 import subprocess
@@ -995,6 +996,44 @@ class TestRunner:
             '-o', 'quit',
         ]
 
+    def _preferred_windows_debugger_architectures(self) -> List[str]:
+        """Return canonical architectures to search for Windows debuggers."""
+
+        candidates: List[str] = []
+
+        env_overrides = [
+            os.environ.get('SINTRA_WINDOWS_DEBUGGER_ARCH'),
+            os.environ.get('PROCESSOR_ARCHITECTURE'),
+            os.environ.get('PROCESSOR_ARCHITEW6432'),
+        ]
+
+        for value in env_overrides:
+            if not value:
+                continue
+            normalized = value.strip().lower()
+            if normalized:
+                candidates.append(normalized)
+
+        machine = platform.machine().lower()
+        if machine:
+            candidates.append(machine)
+
+        normalized_arches: List[str] = []
+
+        def append_unique(value: str) -> None:
+            if value not in normalized_arches:
+                normalized_arches.append(value)
+
+        for candidate in candidates:
+            if candidate in {'x64', 'amd64', 'x86_64'}:
+                append_unique('x64')
+            elif candidate in {'x86', 'i386', 'i486', 'i586', 'i686'}:
+                append_unique('x86')
+            elif candidate in {'arm64', 'aarch64'}:
+                append_unique('arm64')
+
+        return normalized_arches
+
     def _locate_windows_debugger(self, executable: str) -> Tuple[Optional[str], str]:
         """Locate a Windows debugger executable in common installation paths."""
 
@@ -1019,6 +1058,25 @@ class TestRunner:
         searched_locations: List[str] = []
         seen: Set[Path] = set()
 
+        preferred_arches = self._preferred_windows_debugger_architectures()
+        arch_alias_map = {
+            'x64': ('x64', 'amd64'),
+            'arm64': ('arm64',),
+            'x86': ('x86',),
+        }
+
+        arch_search_tokens: List[str] = []
+        for arch in preferred_arches:
+            arch_search_tokens.extend(arch_alias_map.get(arch, (arch,)))
+
+        if not arch_search_tokens:
+            arch_search_tokens = ['x64', 'amd64', 'arm64', 'x86']
+
+        arch_search_tokens = list(dict.fromkeys(arch_search_tokens))
+        arch_search_tokens_with_case = list(dict.fromkeys(
+            arch_search_tokens + [token.upper() for token in arch_search_tokens]
+        ))
+
         def register_candidate(path: Optional[Path]) -> None:
             if not path:
                 return
@@ -1039,7 +1097,7 @@ class TestRunner:
                 current, depth = queue.pop(0)
                 for variant in exe_variants:
                     register_candidate(current / variant)
-                for arch in ('x64', 'x86', 'arm64', 'amd64'):
+                for arch in arch_search_tokens:
                     for variant in exe_variants:
                         register_candidate(current / arch / variant)
 
@@ -1055,6 +1113,29 @@ class TestRunner:
                     # Ignore directories we cannot enumerate (e.g. permission issues
                     # on WindowsApps) and continue probing other known locations.
                     continue
+
+        def search_windows_kits(root: Optional[Path]) -> None:
+            if not root:
+                return
+
+            root_path = Path(root)
+            if not root_path.exists():
+                return
+
+            try:
+                for arch in arch_search_tokens_with_case:
+                    for variant in exe_variants:
+                        pattern = f"**/{arch}/{variant}"
+                        for match in root_path.rglob(pattern):
+                            register_candidate(match)
+
+                if not preferred_arches:
+                    for variant in exe_variants:
+                        pattern = f"**/{variant}"
+                        for match in root_path.rglob(pattern):
+                            register_candidate(match)
+            except OSError:
+                return
 
         env_roots = [
             os.environ.get('CDB_PATH'),
@@ -1075,17 +1156,27 @@ class TestRunner:
                 add_debugger_candidates(value_path)
                 add_debugger_candidates(value_path / 'Debuggers')
 
-        program_dirs = {
-            os.environ.get('ProgramFiles'),
-            os.environ.get('ProgramFiles(x86)'),
-            os.environ.get('ProgramW6432'),
-        }
+        program_dir_specs: List[Tuple[str, Optional[Set[str]]]] = [
+            ('ProgramFiles', None),
+            ('ProgramW6432', {'x64', 'arm64'}),
+            ('ProgramFiles(x86)', {'x86'}),
+        ]
 
-        for base in filter(None, program_dirs):
-            base_path = Path(base)
+        preferred_arch_set = set(preferred_arches)
+
+        for env_var, required_arches in program_dir_specs:
+            base_value = os.environ.get(env_var)
+            if not base_value:
+                continue
+
+            if required_arches and preferred_arch_set and not (preferred_arch_set & required_arches):
+                continue
+
+            base_path = Path(base_value)
             windows_kits = base_path / 'Windows Kits'
 
             add_debugger_candidates(windows_kits)
+            search_windows_kits(windows_kits)
 
             if windows_kits.exists():
                 try:
@@ -1098,6 +1189,8 @@ class TestRunner:
                         continue
                     add_debugger_candidates(version_dir / 'Debuggers')
                     add_debugger_candidates(version_dir)
+                    search_windows_kits(version_dir / 'Debuggers')
+                    search_windows_kits(version_dir)
 
                     sdk_bin = version_dir / 'bin'
                     if not sdk_bin.exists():
@@ -1111,6 +1204,7 @@ class TestRunner:
                     for sdk_subdir in sdk_subdirs:
                         if sdk_subdir.is_dir():
                             add_debugger_candidates(sdk_subdir)
+                            search_windows_kits(sdk_subdir)
 
             visual_studio = base_path / 'Microsoft Visual Studio'
             if visual_studio.exists():
