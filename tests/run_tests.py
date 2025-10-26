@@ -968,16 +968,21 @@ class TestRunner:
             return [
                 *debugger_command,
                 '--batch',
+                '--quiet',
+                '--nx',
                 '-p', str(pid),
+                '-ex', 'set confirm off',
                 '-ex', 'set pagination off',
                 '-ex', 'thread apply all bt',
                 '-ex', 'detach',
+                '-ex', 'quit',
             ]
 
         # Fallback to lldb
         return [
             *debugger_command,
             '--batch',
+            '--no-lldbinit',
             '-p', str(pid),
             '-o', 'thread backtrace all',
             '-o', 'detach',
@@ -997,8 +1002,12 @@ class TestRunner:
             return [
                 *debugger_command,
                 '--batch',
+                '--quiet',
+                '--nx',
+                '-ex', 'set confirm off',
                 '-ex', 'set pagination off',
                 '-ex', 'thread apply all bt',
+                '-ex', 'quit',
                 str(invocation.path),
                 str(core_path),
             ]
@@ -1010,8 +1019,8 @@ class TestRunner:
         return [
             *debugger_command,
             '--batch',
-            '-o', f'target create {quoted_executable}',
-            '-o', f'process attach -c {quoted_core}',
+            '--no-lldbinit',
+            '-o', f'target create {quoted_executable} --core {quoted_core}',
             '-o', 'thread backtrace all',
             '-o', 'quit',
         ]
