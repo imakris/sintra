@@ -677,6 +677,19 @@ class TestRunner:
             return "", debugger_error
 
         candidate_dirs = [invocation.path.parent, Path.cwd()]
+
+        # On macOS, core files are commonly stored in /cores or the user's
+        # DiagnosticReports directory. Include these standard locations so
+        # we can automatically discover dumps produced by CI configuration.
+        extra_core_dirs = [
+            Path('/cores'),
+            Path('/corefiles'),
+            Path.home() / 'Library' / 'Logs' / 'DiagnosticReports',
+        ]
+
+        for directory in extra_core_dirs:
+            if directory not in candidate_dirs:
+                candidate_dirs.append(directory)
         candidate_cores: List[Tuple[float, Path]] = []
 
         for directory in candidate_dirs:

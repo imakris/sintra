@@ -31,6 +31,18 @@ jobs:
           fi
           xcrun lldb --version
 
+      - name: Configure debugging permissions and core dumps
+        run: |
+          sudo /usr/sbin/DevToolsSecurity -enable
+          if ! id -Gn "$USER" | tr ' ' '\n' | grep -q '^_developer$'; then
+            sudo dseditgroup -o edit -a "$USER" -t user _developer
+          fi
+          sudo mkdir -p /cores
+          sudo chmod 1777 /cores
+          sudo sysctl kern.coredump=1
+          sudo sysctl kern.corefile=/cores/core.%P
+          sudo killall taskgated || true
+
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
@@ -55,5 +67,6 @@ jobs:
       - name: Run stress tests with run_tests.py
         shell: bash
         run: |
+          ulimit -c unlimited
           cd tests
           python run_tests.py --repetitions 10 --timeout 30 --build-dir ../build --config Release
