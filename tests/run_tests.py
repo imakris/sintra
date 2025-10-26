@@ -350,21 +350,45 @@ class TestRunner:
         preemptive_stack_error = ""
         stack_capture_event = threading.Event()
         stack_capture_lock = threading.Lock()
+        stack_capture_thread: Optional[threading.Thread] = None
 
         def request_stack_capture() -> None:
-            nonlocal preemptive_stack_traces, preemptive_stack_error, process
+            nonlocal preemptive_stack_traces, preemptive_stack_error, process, stack_capture_thread
             if process is None or stack_capture_event.is_set():
                 return
             with stack_capture_lock:
                 if stack_capture_event.is_set() or process is None:
                     return
                 stack_capture_event.set()
-                traces, error = self._capture_process_stacks(process.pid)
-                if traces:
-                    preemptive_stack_traces = traces
-                    preemptive_stack_error = ""
-                elif error:
-                    preemptive_stack_error = error
+                
+                def _perform_stack_capture() -> None:
+                    nonlocal preemptive_stack_traces, preemptive_stack_error, process
+                    try:
+                        traces, error = self._capture_process_stacks(process.pid)
+                    except Exception as exc:
+                        preemptive_stack_traces = ""
+                        preemptive_stack_error = f"Unexpected stack capture error: {exc}"
+                        return
+                    if traces:
+                        preemptive_stack_traces = traces
+                        preemptive_stack_error = ""
+                    elif error:
+                        preemptive_stack_error = error
+
+                stack_capture_thread = threading.Thread(
+                    target=_perform_stack_capture,
+                    name="StackCaptureWorker",
+                    daemon=True,
+                )
+                stack_capture_thread.start()
+
+        def wait_for_stack_capture() -> None:
+            nonlocal stack_capture_thread
+            thread = stack_capture_thread
+            if thread is None:
+                return
+            thread.join()
+            stack_capture_thread = None
 
         def make_reader(stream, buffer: List[str], monitor_failure: bool) -> threading.Thread:
             def _reader() -> None:
@@ -435,6 +459,8 @@ class TestRunner:
 
             for thread in readers:
                 thread.join(timeout=1)
+
+            wait_for_stack_capture()
 
             stdout = ''.join(stdout_lines)
             stderr = ''.join(stderr_lines)
