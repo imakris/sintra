@@ -27,6 +27,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from collections import defaultdict
 from dataclasses import dataclass
@@ -364,16 +365,67 @@ class TestRunner:
 
             process = subprocess.Popen(invocation.command(), **popen_kwargs)
 
+            stdout_chunks: List[str] = []
+            stderr_chunks: List[str] = []
+
+            stack_capture_lock = threading.Lock()
+            stack_capture_data = {"traces": "", "error": ""}
+            output_stack_event = threading.Event()
+
+            def _record_stack_capture(traces: str, error: str) -> None:
+                with stack_capture_lock:
+                    if traces:
+                        stack_capture_data["traces"] = traces
+                        stack_capture_data["error"] = ""
+                    elif error and not stack_capture_data["traces"]:
+                        stack_capture_data["error"] = error
+
+            def _capture_stacks_if_needed() -> None:
+                if stack_capture_data["traces"]:
+                    return
+                traces, error = self._capture_process_stacks(process.pid)
+                _record_stack_capture(traces, error)
+
+            def _read_stream(stream, buffer: List[str], monitor_failure: bool) -> None:
+                try:
+                    for line in iter(stream.readline, ''):
+                        buffer.append(line)
+                        if monitor_failure and not output_stack_event.is_set():
+                            if self._should_capture_stack_on_output(line):
+                                output_stack_event.set()
+                                _capture_stacks_if_needed()
+                finally:
+                    try:
+                        stream.close()
+                    except Exception:
+                        pass
+
+            stdout_thread = threading.Thread(
+                target=_read_stream, args=(process.stdout, stdout_chunks, False), daemon=True
+            )
+            stderr_thread = threading.Thread(
+                target=_read_stream, args=(process.stderr, stderr_chunks, True), daemon=True
+            )
+
+            stdout_thread.start()
+            stderr_thread.start()
+
             # Wait with timeout
             try:
-                stdout, stderr = process.communicate(timeout=self.timeout)
+                process.wait(timeout=self.timeout)
                 duration = time.time() - start_time
+
+                stdout_thread.join()
+                stderr_thread.join()
+
+                stdout = ''.join(stdout_chunks)
+                stderr = ''.join(stderr_chunks)
 
                 success = (process.returncode == 0)
                 error_msg = stderr
 
-                live_stack_traces = ""
-                live_stack_error = ""
+                live_stack_traces = stack_capture_data["traces"]
+                live_stack_error = stack_capture_data["error"]
                 postmortem_stack_traces = ""
                 postmortem_stack_error = ""
 
@@ -390,7 +442,8 @@ class TestRunner:
                         error_msg = f"TEST FAILED: Exit code {process.returncode} after {duration:.2f}s\n{stderr}"
 
                     if self._is_crash_exit(process.returncode):
-                        live_stack_traces, live_stack_error = self._capture_process_stacks(process.pid)
+                        if not live_stack_traces and not live_stack_error:
+                            live_stack_traces, live_stack_error = self._capture_process_stacks(process.pid)
 
                         if sys.platform == 'win32':
                             (
@@ -420,7 +473,7 @@ class TestRunner:
                     error=error_msg
                 )
 
-            except subprocess.TimeoutExpired as e:
+            except subprocess.TimeoutExpired:
                 duration = self.timeout
 
                 if self.preserve_on_timeout:
@@ -428,35 +481,25 @@ class TestRunner:
                     print(f"{Color.YELLOW}Attach a debugger to PID {process.pid} or terminate it manually when done.{Color.RESET}")
                     sys.exit(2)
 
-                # Try to get output immediately before killing
-                stdout = ""
-                stderr = ""
                 stack_traces = ""
                 stack_error = ""
                 if process:
                     stack_traces, stack_error = self._capture_process_stacks(process.pid)
-                try:
-                    # Try to read from pipes before killing (non-blocking if possible)
-                    import select
-                    import os
-                    if hasattr(select, 'select'):
-                        # Unix: check if data is available
-                        pass  # Will use communicate after kill
-                except:
-                    pass
+                    _record_stack_capture(stack_traces, stack_error)
 
                 # Kill the process tree on timeout
                 self._kill_process_tree(process.pid)
 
-                # Try to get any buffered output after killing
                 try:
-                    stdout_data, stderr_data = process.communicate(timeout=1)
-                    stdout = stdout_data if stdout_data else ""
-                    stderr = stderr_data if stderr_data else ""
-                except:
-                    # Fall back to exception object
-                    stdout = e.stdout if e.stdout else ""
-                    stderr = e.stderr if e.stderr else ""
+                    process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    pass
+
+                stdout_thread.join()
+                stderr_thread.join()
+
+                stdout = ''.join(stdout_chunks)
+                stderr = ''.join(stderr_chunks)
 
                 # DEBUGGING: Print stderr immediately to terminal for ipc_rings_tests
                 if 'ipc_rings' in invocation.path.name:
@@ -470,6 +513,10 @@ class TestRunner:
                         print(f"{Color.YELLOW}stdout content:{Color.RESET}")
                         print(stdout)
                     print(f"{Color.RED}=== END TIMEOUT DEBUG ==={Color.RESET}\n")
+
+                if not stack_traces and not stack_error:
+                    stack_traces = stack_capture_data["traces"]
+                    stack_error = stack_capture_data["error"]
 
                 if stack_traces:
                     stderr = f"{stderr}\n\n=== Captured stack traces ===\n{stack_traces}"
@@ -486,6 +533,11 @@ class TestRunner:
         except Exception as e:
             if process:
                 self._kill_process_tree(process.pid)
+            try:
+                stdout_thread.join(timeout=1)
+                stderr_thread.join(timeout=1)
+            except Exception:
+                pass
             return TestResult(
                 success=False,
                 duration=0,
@@ -565,6 +617,18 @@ class TestRunner:
         # POSIX: negative return codes indicate termination by signal.
         # Codes > 128 are also commonly used to report signal-based exits.
         return returncode < 0 or returncode > 128
+
+    def _should_capture_stack_on_output(self, text: str) -> bool:
+        """Determine whether a line of process output should trigger live stack capture."""
+
+        lowered = text.lower()
+        return (
+            '[fail]' in lowered
+            or '[  failed  ]' in lowered
+            or 'assertion failed' in lowered
+            or 'fatal:' in lowered
+            or 'terminating due to signal' in lowered
+        )
 
     def _capture_process_stacks(self, pid: int) -> Tuple[str, str]:
         """Attempt to capture stack traces for the test process and all of its helpers."""
