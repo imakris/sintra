@@ -24,23 +24,56 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
 
-      - name: Select full Xcode toolchain
-        run: |
-          set -euo pipefail
-          sudo xcode-select --switch "$(ls -d /Applications/Xcode*.app/Contents/Developer | sort -V | tail -n1)"
-          xcode-select -p
-
-      - name: Determine macOS SDK
+      - name: Select Xcode toolchain with sys/ulock.h
         id: macos-sdk
         run: |
           set -euo pipefail
-          SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
-          echo "sdkroot=$SDKROOT" >> "$GITHUB_OUTPUT"
-          if [ ! -f "$SDKROOT/usr/include/sys/ulock.h" ]; then
-            echo "::error::sys/ulock.h not found in $SDKROOT. Ensure a full Xcode installation is available." >&2
+
+          if ! command -v xcode-select >/dev/null; then
+            echo "::error::xcode-select not available" >&2
             exit 1
           fi
-          ls "$SDKROOT/usr/include/sys/ulock.h"
+
+          selected=""
+          sdkroot=""
+          found_any=0
+          while IFS= read -r app; do
+            found_any=1
+            developer_dir="$app/Contents/Developer"
+            if [ ! -d "$developer_dir" ]; then
+              continue
+            fi
+
+            if SDKROOT="$(DEVELOPER_DIR="$developer_dir" xcrun --sdk macosx --show-sdk-path 2>/dev/null)"; then
+              if [ -f "$SDKROOT/usr/include/sys/ulock.h" ]; then
+                selected="$developer_dir"
+                sdkroot="$SDKROOT"
+                break
+              else
+                echo "Skipping $developer_dir: sys/ulock.h not found in $SDKROOT" >&2
+              fi
+            else
+              echo "Skipping $developer_dir: unable to determine macOS SDK" >&2
+            fi
+          done < <(find /Applications -maxdepth 1 -type d -name 'Xcode*.app' -print | sort -r)
+
+          if [ "$found_any" -eq 0 ]; then
+            echo "::error::No Xcode installations found under /Applications" >&2
+            exit 1
+          fi
+
+          if [ -z "$selected" ] || [ -z "$sdkroot" ]; then
+            echo "::error::None of the installed Xcode toolchains provide sys/ulock.h" >&2
+            exit 1
+          fi
+
+          echo "Selecting $selected"
+          sudo xcode-select --switch "$selected"
+          xcode-select -p
+          echo "Found sys/ulock.h in $sdkroot"
+
+          echo "developer_dir=$selected" >> "$GITHUB_OUTPUT"
+          echo "sdkroot=$sdkroot" >> "$GITHUB_OUTPUT"
 
       - name: Determine diff base
         id: diff-base
