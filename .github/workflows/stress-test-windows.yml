@@ -36,6 +36,8 @@ jobs:
               - 'include/**'
               - 'cmake/**'
               - 'CMakeLists.txt'
+              - 'CMakePresets.json'
+              - 'third_party/**'
             tests:
               - 'tests/**'
             examples:
@@ -135,7 +137,7 @@ jobs:
           python-version: '3.x'
 
       - name: Run stress tests with run_tests.py
-        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true'
+        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.core == 'true' || steps.changed.outputs.workflows == 'true'
         shell: bash
         run: |
           cd tests

@@ -8,9 +8,11 @@ on:
       - 'include/**'
       - 'cmake/**'
       - 'CMakeLists.txt'
+      - 'CMakePresets.json'
       - 'tests/**'
       - 'example/**'
       - '.github/workflows/**'
+      - 'third_party/**'
   pull_request:
     branches: ['*']
     paths:
@@ -18,9 +20,11 @@ on:
       - 'include/**'
       - 'cmake/**'
       - 'CMakeLists.txt'
+      - 'CMakePresets.json'
       - 'tests/**'
       - 'example/**'
       - '.github/workflows/**'
+      - 'third_party/**'
 
 jobs:
   build:
@@ -43,6 +47,8 @@ jobs:
               - 'include/**'
               - 'cmake/**'
               - 'CMakeLists.txt'
+              - 'CMakePresets.json'
+              - 'third_party/**'
             tests:
               - 'tests/**'
             examples:
@@ -56,7 +62,7 @@ jobs:
         run: |
           CT="-DSINTRA_BUILD_TESTS=OFF -DSINTRA_TEST_MATRIX=quick"
           CE="-DSINTRA_BUILD_EXAMPLES=OFF"
-          if [ "${{ steps.changed.outputs.tests }}" = "true" ] || [ "${{ steps.changed.outputs.core }}" = "true" ]; then
+          if [ "${{ steps.changed.outputs.tests }}" = "true" ] || [ "${{ steps.changed.outputs.core }}" = "true" ] || [ "${{ steps.changed.outputs.workflows }}" = "true" ]; then
             CT="-DSINTRA_BUILD_TESTS=ON -DSINTRA_TEST_MATRIX=quick"
           fi
           if [ "${{ steps.changed.outputs.examples }}" = "true" ]; then
@@ -79,7 +85,7 @@ jobs:
         run: cmake --build build --config Release
 
       - name: Run tests
-        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.core == 'true'
+        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.core == 'true' || steps.changed.outputs.workflows == 'true'
         shell: bash
         run: ctest --test-dir build -C Release --output-on-failure --timeout 60
 
