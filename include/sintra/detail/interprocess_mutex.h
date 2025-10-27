@@ -24,10 +24,7 @@ public:
     interprocess_mutex(const interprocess_mutex&) = delete;
     interprocess_mutex& operator=(const interprocess_mutex&) = delete;
 
-    ~interprocess_mutex() noexcept
-    {
-        reset();
-    }
+    ~interprocess_mutex() noexcept = default;
 
     void lock() noexcept
     {
