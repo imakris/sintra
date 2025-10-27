@@ -151,6 +151,7 @@ class TestRunner:
         self._downloaded_windows_debugger_root: Optional[Path] = None
         self._stack_capture_history: Dict[str, Set[str]] = defaultdict(set)
         self._stack_capture_history_lock = threading.Lock()
+        self._sudo_capability: Optional[bool] = None
 
         # Determine test directory - check both with and without config subdirectory
         test_dir_with_config = build_dir / 'tests' / config
@@ -909,14 +910,22 @@ class TestRunner:
             debugger_success = False
 
             max_attempts = 3 if debugger_is_macos_lldb else 1
-            for attempt in range(max_attempts):
+            base_command = self._build_unix_live_debugger_command(
+                debugger_name,
+                debugger_command,
+                target_pid,
+            )
+            attempt = 0
+            use_sudo = False
+            while attempt < max_attempts:
+                command = (
+                    self._wrap_command_with_sudo(base_command)
+                    if use_sudo
+                    else base_command
+                )
                 try:
                     result = subprocess.run(
-                        self._build_unix_live_debugger_command(
-                            debugger_name,
-                            debugger_command,
-                            target_pid,
-                        ),
+                        command,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
                         text=True,
@@ -938,6 +947,13 @@ class TestRunner:
                     f"{debugger_name} exited with code {result.returncode}: {result.stderr.strip()}"
                 )
 
+                if (
+                    not use_sudo
+                    and self._should_retry_with_sudo(result.stderr, result.stdout)
+                ):
+                    use_sudo = True
+                    continue
+
                 if not debugger_is_macos_lldb:
                     break
 
@@ -950,11 +966,11 @@ class TestRunner:
 
                 time.sleep(0.5)
 
-            if debugger_success and debugger_output:
-                stack_outputs.append(f"PID {target_pid}\n{debugger_output}")
-                continue
+                attempt += 1
 
             if debugger_success:
+                if debugger_output:
+                    stack_outputs.append(f"PID {target_pid}\n{debugger_output}")
                 continue
 
             fallback_output = ""
@@ -1152,28 +1168,102 @@ class TestRunner:
             '-mayDie',
         ]
 
+        sudo_supported = self._supports_passwordless_sudo()
+        for use_sudo in (False, True) if sudo_supported else (False,):
+            actual_command = (
+                self._wrap_command_with_sudo(command) if use_sudo else command
+            )
+
+            try:
+                result = subprocess.run(
+                    actual_command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=duration + 5,
+                )
+            except subprocess.SubprocessError as exc:
+                error = f"sample failed ({exc})"
+                if not use_sudo and sudo_supported:
+                    continue
+                return "", error
+
+            if result.returncode == 0:
+                output = result.stdout.strip()
+                if not output:
+                    return "", "sample produced no output"
+                return output, ""
+
+            detail = result.stderr.strip() or result.stdout.strip()
+            error_message = (
+                f"sample exited with code {result.returncode}: {detail}"
+                if detail
+                else f"sample exited with code {result.returncode}"
+            )
+
+            if use_sudo or not self._should_retry_with_sudo(result.stderr, result.stdout):
+                return "", error_message
+
+        return "", "sample exited without producing output"
+
+    def _supports_passwordless_sudo(self) -> bool:
+        if self._sudo_capability is not None:
+            return self._sudo_capability
+
+        if sys.platform != 'darwin':
+            self._sudo_capability = False
+            return False
+
+        if os.geteuid() == 0:
+            self._sudo_capability = False
+            return False
+
+        sudo_path = shutil.which('sudo')
+        if not sudo_path:
+            self._sudo_capability = False
+            return False
+
         try:
             result = subprocess.run(
-                command,
+                [sudo_path, '-n', 'true'],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                timeout=duration + 5,
+                timeout=5,
             )
-        except subprocess.SubprocessError as exc:
-            return "", f"sample failed ({exc})"
+        except subprocess.SubprocessError:
+            self._sudo_capability = False
+            return False
 
-        if result.returncode != 0:
-            detail = result.stderr.strip() or result.stdout.strip()
-            if detail:
-                return "", f"sample exited with code {result.returncode}: {detail}"
-            return "", f"sample exited with code {result.returncode}"
+        self._sudo_capability = result.returncode == 0
+        return self._sudo_capability
 
-        output = result.stdout.strip()
-        if not output:
-            return "", "sample produced no output"
+    def _wrap_command_with_sudo(self, command: List[str]) -> List[str]:
+        if not self._supports_passwordless_sudo():
+            return command
+        return ['sudo', '-n', *command]
 
-        return output, ""
+    def _should_retry_with_sudo(self, stderr: str, stdout: str) -> bool:
+        if not self._supports_passwordless_sudo():
+            return False
+
+        combined = f"{stderr}\n{stdout}".lower()
+        keywords = [
+            'operation not permitted',
+            'not permitted',
+            'permission denied',
+            'access denied',
+            'try running with `sudo`',
+            "try running with 'sudo'",
+            'requires root',
+            'must be run as root',
+            'security policy prevents',
+            'code signature may be invalid',
+            'cannot examine process',
+            'failed to get task for process',
+        ]
+
+        return any(keyword in combined for keyword in keywords)
 
     def _ensure_macos_dsym(self, executable: Path) -> Optional[str]:
         """Ensure a dSYM bundle exists for the provided executable on macOS."""
