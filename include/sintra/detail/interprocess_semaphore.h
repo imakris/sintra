@@ -22,11 +22,21 @@
   #include <unordered_map>
 #elif defined(__APPLE__)
   #include <cerrno>
-  #include <fcntl.h>
-  #include <semaphore.h>
-  #include <mutex>
-  #include <unordered_map>
-  #include <cstdio>
+  #if defined(__has_include)
+    #if __has_include(<os/os_sync_wait_on_address.h>) && __has_include(<os/clock.h>)
+      #include <os/os_sync_wait_on_address.h>
+      #include <os/clock.h>
+      #define SINTRA_HAS_OS_SYNC_WAIT_ON_ADDRESS 1
+    #endif
+  #endif
+  #if !defined(SINTRA_HAS_OS_SYNC_WAIT_ON_ADDRESS)
+    #define SINTRA_HAS_OS_SYNC_WAIT_ON_ADDRESS 0
+    #include <fcntl.h>
+    #include <semaphore.h>
+    #include <mutex>
+    #include <unordered_map>
+    #include <cstdio>
+  #endif
 #else
   #include <cerrno>
   #include <semaphore.h>
@@ -126,7 +136,7 @@ namespace interprocess_semaphore_detail
             ::CloseHandle(handle);
         }
     }
-#elif defined(__APPLE__)
+#elif defined(__APPLE__) && !SINTRA_HAS_OS_SYNC_WAIT_ON_ADDRESS
     inline std::mutex& handle_mutex()
     {
         static std::mutex mtx;
@@ -191,6 +201,8 @@ public:
     {
 #if defined(_WIN32)
         initialise_windows(initial_count);
+#elif defined(__APPLE__) && SINTRA_HAS_OS_SYNC_WAIT_ON_ADDRESS
+        initialise_os_sync(initial_count);
 #elif defined(__APPLE__)
         initialise_named(initial_count);
 #else
@@ -205,6 +217,8 @@ public:
     {
 #if defined(_WIN32)
         teardown_windows();
+#elif defined(__APPLE__) && SINTRA_HAS_OS_SYNC_WAIT_ON_ADDRESS
+        teardown_os_sync();
 #elif defined(__APPLE__)
         teardown_named();
 #else
@@ -216,6 +230,8 @@ public:
     {
 #if defined(_WIN32)
         interprocess_semaphore_detail::close_handle(m_windows.id);
+#elif defined(__APPLE__) && SINTRA_HAS_OS_SYNC_WAIT_ON_ADDRESS
+        // Nothing to do for the os_sync based implementation.
 #elif defined(__APPLE__)
         interprocess_semaphore_detail::close_handle(m_named.id);
 #else
@@ -230,6 +246,8 @@ public:
         if (!::ReleaseSemaphore(handle, 1, nullptr)) {
             throw std::system_error(::GetLastError(), std::system_category(), "ReleaseSemaphore");
         }
+#elif defined(__APPLE__) && SINTRA_HAS_OS_SYNC_WAIT_ON_ADDRESS
+        post_os_sync();
 #elif defined(__APPLE__)
         sem_t* sem = named_handle();
         while (sem_post(sem) == -1) {
@@ -256,6 +274,8 @@ public:
         if (result != WAIT_OBJECT_0) {
             throw std::system_error(::GetLastError(), std::system_category(), "WaitForSingleObject");
         }
+#elif defined(__APPLE__) && SINTRA_HAS_OS_SYNC_WAIT_ON_ADDRESS
+        wait_os_sync();
 #elif defined(__APPLE__)
         sem_t* sem = named_handle();
         while (sem_wait(sem) == -1) {
@@ -286,6 +306,8 @@ public:
             return false;
         }
         throw std::system_error(::GetLastError(), std::system_category(), "WaitForSingleObject");
+#elif defined(__APPLE__) && SINTRA_HAS_OS_SYNC_WAIT_ON_ADDRESS
+        return try_acquire_os_sync();
 #elif defined(__APPLE__)
         sem_t* sem = named_handle();
         while (sem_trywait(sem) == -1) {
@@ -341,19 +363,22 @@ public:
             return false;
         }
         throw std::system_error(::GetLastError(), std::system_category(), "WaitForSingleObject");
-#elif defined(__APPLE__)
-        sem_t* sem = named_handle();
-        auto ts = make_abs_timespec(abs_time);
-        while (sem_timedwait(sem, &ts) == -1) {
-            if (errno == EINTR) {
-                continue;
+#elif defined(__APPLE__) && SINTRA_HAS_OS_SYNC_WAIT_ON_ADDRESS
+        while (true) {
+            if (try_acquire_os_sync()) {
+                return true;
             }
-            if (errno == ETIMEDOUT) {
+
+            auto now = Clock::now();
+            if (abs_time <= now) {
                 return false;
             }
-            throw std::system_error(errno, std::generic_category(), "sem_timedwait");
+
+            auto remaining = std::chrono::ceil<std::chrono::nanoseconds>(abs_time - now);
+            if (!wait_os_sync_with_timeout(remaining)) {
+                return false;
+            }
         }
-        return true;
 #else
         auto ts = make_abs_timespec(abs_time);
         while (sem_timedwait(&m_sem, &ts) == -1) {
@@ -420,6 +445,138 @@ private:
     {
         interprocess_semaphore_detail::close_handle(m_windows.id);
     }
+#elif defined(__APPLE__) && SINTRA_HAS_OS_SYNC_WAIT_ON_ADDRESS
+    struct os_sync_storage
+    {
+        std::atomic<int32_t> count{0};
+    };
+
+    os_sync_storage m_os_sync{};
+
+    static constexpr os_sync_wait_on_address_flags_t wait_flags = OS_SYNC_WAIT_ON_ADDRESS_SHARED;
+    static constexpr os_sync_wake_by_address_flags_t wake_flags = OS_SYNC_WAKE_BY_ADDRESS_SHARED;
+
+    void initialise_os_sync(unsigned int initial_count)
+    {
+        m_os_sync.count.store(static_cast<int32_t>(initial_count), std::memory_order_relaxed);
+    }
+
+    void teardown_os_sync() noexcept {}
+
+    void post_os_sync()
+    {
+        int32_t previous = m_os_sync.count.fetch_add(1, std::memory_order_release);
+        if (previous <= 0) {
+            wake_one_waiter();
+        }
+    }
+
+    void wait_os_sync()
+    {
+        while (true) {
+            if (try_acquire_os_sync()) {
+                return;
+            }
+
+            if (m_os_sync.count.load(std::memory_order_acquire) > 0) {
+                continue;
+            }
+
+            wait_on_address_blocking();
+        }
+    }
+
+    bool try_acquire_os_sync()
+    {
+        int32_t expected = m_os_sync.count.load(std::memory_order_acquire);
+        while (expected > 0) {
+            if (m_os_sync.count.compare_exchange_weak(expected,
+                                                      expected - 1,
+                                                      std::memory_order_acq_rel,
+                                                      std::memory_order_acquire)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool wait_os_sync_with_timeout(std::chrono::nanoseconds remaining)
+    {
+        if (remaining <= std::chrono::nanoseconds::zero()) {
+            return false;
+        }
+
+        if (m_os_sync.count.load(std::memory_order_acquire) > 0) {
+            return true;
+        }
+
+        auto count = remaining.count();
+        if (count <= 0) {
+            return false;
+        }
+
+        uint64_t timeout_ns = static_cast<uint64_t>(count);
+
+        while (true) {
+            int rc = os_sync_wait_on_address_with_timeout(
+                reinterpret_cast<void*>(&m_os_sync.count),
+                0,
+                sizeof(int32_t),
+                wait_flags,
+                OS_CLOCK_REALTIME,
+                timeout_ns);
+            if (rc >= 0) {
+                return true;
+            }
+            if (errno == ETIMEDOUT) {
+                return false;
+            }
+            if (errno == EINTR || errno == EFAULT) {
+                continue;
+            }
+            throw std::system_error(errno, std::generic_category(), "os_sync_wait_on_address_with_timeout");
+        }
+    }
+
+    void wait_on_address_blocking()
+    {
+        while (true) {
+            int rc = os_sync_wait_on_address(
+                reinterpret_cast<void*>(&m_os_sync.count),
+                0,
+                sizeof(int32_t),
+                wait_flags);
+            if (rc >= 0) {
+                return;
+            }
+            if (errno == EINTR || errno == EFAULT) {
+                continue;
+            }
+            throw std::system_error(errno, std::generic_category(), "os_sync_wait_on_address");
+        }
+    }
+
+    void wake_one_waiter()
+    {
+        while (true) {
+            int rc = os_sync_wake_by_address_any(
+                reinterpret_cast<void*>(&m_os_sync.count),
+                sizeof(int32_t),
+                wake_flags);
+            if (rc == 0) {
+                return;
+            }
+            if (rc == -1) {
+                if (errno == ENOENT) {
+                    return;
+                }
+                if (errno == EINTR) {
+                    continue;
+                }
+            }
+            throw std::system_error(errno, std::generic_category(), "os_sync_wake_by_address_any");
+        }
+    }
 #elif defined(__APPLE__)
     struct named_storage
     {
@@ -473,6 +630,10 @@ private:
         sem_destroy(&m_sem);
     }
 #endif
-};
+}; 
 
 } // namespace sintra::detail
+
+#if defined(__APPLE__) && defined(SINTRA_HAS_OS_SYNC_WAIT_ON_ADDRESS)
+#  undef SINTRA_HAS_OS_SYNC_WAIT_ON_ADDRESS
+#endif
