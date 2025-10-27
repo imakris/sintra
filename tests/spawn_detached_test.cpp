@@ -60,7 +60,12 @@ struct OverrideGuard {
 bool assert_true(bool condition, const std::string& message)
 {
     if (!condition) {
-        std::cerr << "spawn_detached_test: " << message << std::endl;
+        int saved_errno = errno;
+        std::cerr << "spawn_detached_test: " << message;
+        if (saved_errno != 0) {
+            std::cerr << " (errno=" << saved_errno << " " << std::strerror(saved_errno) << ")";
+        }
+        std::cerr << std::endl;
     }
     return condition;
 }
