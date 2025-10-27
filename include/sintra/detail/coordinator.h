@@ -11,6 +11,7 @@
 #include <array>
 #include <atomic>
 #include <condition_variable>
+#include <memory>
 #include <mutex>
 #include <unordered_set>
 #include <vector>
@@ -21,7 +22,9 @@ namespace sintra {
 
 using std::condition_variable;
 using std::mutex;
+using std::shared_ptr;
 using std::string;
+using std::unordered_map;
 using std::unordered_set;
 
 
@@ -65,7 +68,7 @@ struct Process_group: Derived_transceiver<Process_group>
         std::vector<instance_id_type>           recipients;
     };
 
-    unordered_map<string, Barrier>              m_barriers;
+    unordered_map<string, shared_ptr<Barrier>>  m_barriers;
     unordered_set<instance_id_type>             m_process_ids;
 
     mutex m_call_mutex;
