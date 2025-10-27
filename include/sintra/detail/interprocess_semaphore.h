@@ -307,15 +307,23 @@ private:
     void initialise_windows(unsigned int initial_count)
     {
         m_windows.id = interprocess_semaphore_detail::generate_global_identifier();
-        std::swprintf(m_windows.name,
-                      sizeof(m_windows.name) / sizeof(m_windows.name[0]),
-                      L"SintraSemaphore_%016llX",
-                      static_cast<unsigned long long>(m_windows.id));
+        const auto name_capacity = sizeof(m_windows.name) / sizeof(m_windows.name[0]);
+        int written = std::swprintf(m_windows.name,
+                                    name_capacity,
+                                    L"SintraSemaphore_%016llX",
+                                    static_cast<unsigned long long>(m_windows.id));
+        if (written < 0 || static_cast<size_t>(written) >= name_capacity) {
+            throw std::runtime_error("Failed to format semaphore name");
+        }
 
         HANDLE handle = ::CreateSemaphoreW(nullptr, static_cast<LONG>(initial_count), LONG_MAX, m_windows.name);
         if (!handle) {
             throw std::system_error(::GetLastError(), std::system_category(), "CreateSemaphoreW");
         }
+
+        // Named semaphores are required so that processes mapping the ring at different
+        // addresses can still synchronise via the kernel.  Keep the handle cached per
+        // process to avoid reopening it on every wait/post.
 
         interprocess_semaphore_detail::register_handle(m_windows.id, handle);
     }
