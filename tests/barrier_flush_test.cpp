@@ -39,6 +39,7 @@ namespace {
 
 constexpr std::size_t kWorkerCount         = 2;
 constexpr std::size_t kIterations          = 128;
+constexpr auto        kIterationTimeout    = std::chrono::seconds(10);
 
 struct Iteration_marker
 {
@@ -144,6 +145,7 @@ int coordinator_process()
     Coordinator_state state;
     bool success = true;
     std::string failure_reason;
+    std::size_t iterations_completed = 0;
 
     activate_slot([&](const Iteration_marker&) {
         std::lock_guard<std::mutex> lock(state.mutex);
@@ -162,26 +164,48 @@ int coordinator_process()
 
 
         std::unique_lock<std::mutex> lock(state.mutex);
-        state.cv.wait(lock, [&] {
+        const auto iteration_deadline = std::chrono::steady_clock::now() + kIterationTimeout;
+        const bool wait_completed = state.cv.wait_until(lock, iteration_deadline, [&] {
             return state.messages_in_iteration == kWorkerCount || state.too_many_messages;
         });
-        if (state.too_many_messages && success) {
+
+        const std::size_t messages_observed = state.messages_in_iteration;
+        const bool observed_excess = state.too_many_messages;
+
+        if (!wait_completed && success) {
+            success = false;
+            std::ostringstream oss;
+            oss << "Timed out waiting for iteration " << (iteration + 1)
+                << ": observed " << messages_observed << '/' << kWorkerCount
+                << " markers (total messages=" << state.total_messages << ')';
+            failure_reason = oss.str();
+            std::fprintf(stderr, "%s\n", failure_reason.c_str());
+        }
+
+        if (observed_excess && success) {
             success = false;
             failure_reason = "coordinator observed more messages than expected during an iteration";
+            std::fprintf(stderr, "%s\n", failure_reason.c_str());
         }
+
         state.messages_in_iteration = 0;
         state.too_many_messages = false;
         lock.unlock();
 
         barrier("barrier-flush-iteration");
 
+        if (!wait_completed) {
+            break;
+        }
+
+        ++iterations_completed;
     }
 
     barrier("barrier-flush-done", "_sintra_all_processes");
     deactivate_all_slots();
 
     const auto shared_dir = get_shared_directory();
-    write_result(shared_dir, success, kIterations, state.total_messages, failure_reason);
+    write_result(shared_dir, success, iterations_completed, state.total_messages, failure_reason);
     return success ? 0 : 1;
 }
 
