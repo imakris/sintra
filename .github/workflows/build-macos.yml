@@ -34,6 +34,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Detect changed areas
         id: changed
@@ -60,7 +62,7 @@ jobs:
         run: |
           CT="-DSINTRA_BUILD_TESTS=OFF -DSINTRA_TEST_MATRIX=quick"
           CE="-DSINTRA_BUILD_EXAMPLES=OFF"
-          if [ "${{ steps.changed.outputs.tests }}" = "true" ] || [ "${{ steps.changed.outputs.core }}" = "true" ]; then
+          if [ "${{ steps.changed.outputs.tests }}" = "true" ] || [ "${{ steps.changed.outputs.core }}" = "true" ] || [ "${{ steps.changed.outputs.workflows }}" = "true" ]; then
             CT="-DSINTRA_BUILD_TESTS=ON -DSINTRA_TEST_MATRIX=quick"
           fi
           if [ "${{ steps.changed.outputs.examples }}" = "true" ]; then
