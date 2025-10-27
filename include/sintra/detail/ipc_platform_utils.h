@@ -162,6 +162,38 @@ inline bool close_file(native_file_handle handle)
 
 } // namespace detail
 
+inline std::size_t system_page_size() noexcept
+{
+    static const std::size_t value = []() noexcept -> std::size_t {
+#ifdef _WIN32
+        SYSTEM_INFO info;
+        ::GetSystemInfo(&info);
+        std::size_t granularity = static_cast<std::size_t>(info.dwAllocationGranularity);
+        if (granularity == 0) {
+            granularity = static_cast<std::size_t>(info.dwPageSize);
+        }
+        if (granularity == 0) {
+            granularity = 65536u;
+        }
+        return granularity;
+#else
+        long page = ::sysconf(_SC_PAGESIZE);
+        if (page <= 0) {
+#if defined(__APPLE__) || defined(__FreeBSD__)
+            int fallback = ::getpagesize();
+            if (fallback > 0) {
+                return static_cast<std::size_t>(fallback);
+            }
+#endif
+            return static_cast<std::size_t>(4096);
+        }
+        return static_cast<std::size_t>(page);
+#endif
+    }();
+
+    return value;
+}
+
 #if defined(__APPLE__)
 inline void precision_sleep_for(std::chrono::duration<double> duration)
 {
