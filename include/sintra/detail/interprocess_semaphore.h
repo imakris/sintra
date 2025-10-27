@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <random>
 #include <stdexcept>
 #include <system_error>
 
@@ -19,8 +20,11 @@
     #define _WIN32_WINNT 0x0602
   #endif
   #include <Windows.h>
-  #include <synchapi.h>
+  #include <climits>
+  #include <cwchar>
   #include <limits>
+  #include <mutex>
+  #include <unordered_map>
 #elif defined(__APPLE__)
   #include <cerrno>
   #include <cstdint>
@@ -41,13 +45,96 @@
 namespace sintra::detail
 {
 
+#if defined(_WIN32)
+namespace interprocess_semaphore_detail
+{
+    inline uint64_t generate_global_identifier()
+    {
+        static const uint64_t process_entropy = [] {
+            uint64_t value = static_cast<uint64_t>(::GetCurrentProcessId()) << 32;
+
+            std::random_device rd;
+            value ^= (static_cast<uint64_t>(rd()) << 32);
+            value ^= static_cast<uint64_t>(rd());
+
+            value ^= static_cast<uint64_t>(
+                std::chrono::high_resolution_clock::now().time_since_epoch().count());
+
+            if (value == 0) {
+                value = 0x8000000000000000ULL;
+            }
+
+            return value;
+        }();
+
+        static std::atomic<uint64_t> counter{0};
+        return process_entropy + counter.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    inline std::mutex& handle_mutex()
+    {
+        static std::mutex mtx;
+        return mtx;
+    }
+
+    inline std::unordered_map<uint64_t, HANDLE>& handle_map()
+    {
+        static std::unordered_map<uint64_t, HANDLE> map;
+        return map;
+    }
+
+    inline HANDLE register_handle(uint64_t id, HANDLE handle)
+    {
+        std::lock_guard<std::mutex> lock(handle_mutex());
+        handle_map()[id] = handle;
+        return handle;
+    }
+
+    inline HANDLE ensure_handle(uint64_t id, const wchar_t* name)
+    {
+        {
+            std::lock_guard<std::mutex> lock(handle_mutex());
+            auto it = handle_map().find(id);
+            if (it != handle_map().end()) {
+                return it->second;
+            }
+        }
+
+        HANDLE handle = ::OpenSemaphoreW(SYNCHRONIZE | SEMAPHORE_MODIFY_STATE, FALSE, name);
+        if (!handle) {
+            throw std::system_error(::GetLastError(), std::system_category(), "OpenSemaphoreW");
+        }
+
+        std::lock_guard<std::mutex> lock(handle_mutex());
+        return handle_map().emplace(id, handle).first->second;
+    }
+
+    inline void close_handle(uint64_t id)
+    {
+        HANDLE handle = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(handle_mutex());
+            auto it = handle_map().find(id);
+            if (it != handle_map().end()) {
+                handle = it->second;
+                handle_map().erase(it);
+            }
+        }
+
+        if (handle) {
+            ::CloseHandle(handle);
+        }
+    }
+} // namespace interprocess_semaphore_detail
+#endif
+
 class interprocess_semaphore
 {
 public:
     explicit interprocess_semaphore(unsigned int initial_count = 0)
     {
 #if defined(_WIN32)
-        initialise_wait_on_address(initial_count);
+        initialise_windows(initial_count);
 #elif defined(__APPLE__)
         initialise_ulock(initial_count);
 #else
@@ -61,7 +148,7 @@ public:
     ~interprocess_semaphore() noexcept
     {
 #if defined(_WIN32)
-        teardown_wait_on_address();
+        teardown_windows();
 #elif defined(__APPLE__)
         teardown_ulock();
 #else
@@ -71,7 +158,9 @@ public:
 
     void release_local_handle() noexcept
     {
-#if defined(_WIN32) || defined(__APPLE__)
+#if defined(_WIN32)
+        interprocess_semaphore_detail::close_handle(m_windows.id);
+#elif defined(__APPLE__)
         // All state lives in shared memory; nothing to release locally.
 #else
         // Nothing to do for POSIX unnamed semaphores.
@@ -81,7 +170,10 @@ public:
     void post()
     {
 #if defined(_WIN32)
-        post_wait_on_address();
+        HANDLE handle = windows_handle();
+        if (!::ReleaseSemaphore(handle, 1, nullptr)) {
+            throw std::system_error(::GetLastError(), std::system_category(), "ReleaseSemaphore");
+        }
 #elif defined(__APPLE__)
         post_ulock();
 #else
@@ -96,7 +188,11 @@ public:
     void wait()
     {
 #if defined(_WIN32)
-        wait_wait_on_address(INFINITE);
+        HANDLE handle = windows_handle();
+        DWORD result = ::WaitForSingleObject(handle, INFINITE);
+        if (result != WAIT_OBJECT_0) {
+            throw std::system_error(::GetLastError(), std::system_category(), "WaitForSingleObject");
+        }
 #elif defined(__APPLE__)
         wait_ulock();
 #else
@@ -111,7 +207,15 @@ public:
     bool try_wait()
     {
 #if defined(_WIN32)
-        return try_wait_wait_on_address();
+        HANDLE handle = windows_handle();
+        DWORD result = ::WaitForSingleObject(handle, 0);
+        if (result == WAIT_OBJECT_0) {
+            return true;
+        }
+        if (result == WAIT_TIMEOUT) {
+            return false;
+        }
+        throw std::system_error(::GetLastError(), std::system_category(), "WaitForSingleObject");
 #elif defined(__APPLE__)
         return try_wait_ulock();
 #else
@@ -132,7 +236,31 @@ public:
     bool timed_wait(const std::chrono::time_point<Clock, Duration>& abs_time)
     {
 #if defined(_WIN32)
-        return timed_wait_wait_on_address(abs_time);
+        HANDLE handle = windows_handle();
+        auto now = Clock::now();
+        if (abs_time <= now) {
+            return try_wait();
+        }
+        auto remaining = std::chrono::ceil<std::chrono::milliseconds>(abs_time - now);
+        DWORD timeout;
+        if (remaining.count() < 0) {
+            timeout = 0;
+        }
+        else if (remaining.count() >= static_cast<long long>(std::numeric_limits<DWORD>::max())) {
+            timeout = INFINITE;
+        }
+        else {
+            timeout = static_cast<DWORD>(remaining.count());
+        }
+
+        DWORD result = ::WaitForSingleObject(handle, timeout);
+        if (result == WAIT_OBJECT_0) {
+            return true;
+        }
+        if (result == WAIT_TIMEOUT) {
+            return false;
+        }
+        throw std::system_error(::GetLastError(), std::system_category(), "WaitForSingleObject");
 #elif defined(__APPLE__)
         return timed_wait_ulock(abs_time);
 #else
@@ -168,138 +296,38 @@ private:
 #endif
 
 #if defined(_WIN32)
-    struct wait_on_address_storage
+    struct windows_storage
     {
-        std::atomic<int32_t>  count{0};
-        std::atomic<uint32_t> sequence{0};
+        uint64_t id = 0;
+        wchar_t  name[64]{};
     };
 
-    wait_on_address_storage m_wait_on_address;
+    windows_storage m_windows;
 
-    static volatile VOID* wait_address(std::atomic<uint32_t>& value)
+    void initialise_windows(unsigned int initial_count)
     {
-        return static_cast<volatile VOID*>(static_cast<void*>(std::addressof(value)));
-    }
+        m_windows.id = interprocess_semaphore_detail::generate_global_identifier();
+        std::swprintf(m_windows.name,
+                      sizeof(m_windows.name) / sizeof(m_windows.name[0]),
+                      L"SintraSemaphore_%016llX",
+                      static_cast<unsigned long long>(m_windows.id));
 
-    void initialise_wait_on_address(unsigned int initial_count)
-    {
-        m_wait_on_address.count.store(static_cast<int32_t>(initial_count), std::memory_order_relaxed);
-        m_wait_on_address.sequence.store(0, std::memory_order_relaxed);
-    }
-
-    void teardown_wait_on_address() noexcept {}
-
-    void post_wait_on_address()
-    {
-        m_wait_on_address.count.fetch_add(1, std::memory_order_release);
-        m_wait_on_address.sequence.fetch_add(1, std::memory_order_release);
-        ::WakeByAddressSingle(wait_address(m_wait_on_address.sequence));
-    }
-
-    bool try_wait_wait_on_address()
-    {
-        int32_t expected = m_wait_on_address.count.load(std::memory_order_acquire);
-        while (expected > 0) {
-            if (m_wait_on_address.count.compare_exchange_weak(
-                    expected,
-                    expected - 1,
-                    std::memory_order_acquire,
-                    std::memory_order_relaxed)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    void wait_wait_on_address(DWORD timeout)
-    {
-        while (true) {
-            int32_t expected = m_wait_on_address.count.load(std::memory_order_acquire);
-            while (expected > 0) {
-                if (m_wait_on_address.count.compare_exchange_weak(
-                        expected,
-                        expected - 1,
-                        std::memory_order_acquire,
-                        std::memory_order_relaxed)) {
-                    return;
-                }
-            }
-
-            uint32_t sequence = m_wait_on_address.sequence.load(std::memory_order_acquire);
-            BOOL result = ::WaitOnAddress(
-                wait_address(m_wait_on_address.sequence),
-                &sequence,
-                sizeof(sequence),
-                timeout);
-
-            if (result) {
-                continue;
-            }
-
-            DWORD err = ::GetLastError();
-            if (err == ERROR_TIMEOUT && timeout != INFINITE) {
-                throw std::system_error(err, std::system_category(), "WaitOnAddress");
-            }
-            if (err == ERROR_TIMEOUT) {
-                continue;
-            }
-            throw std::system_error(err, std::system_category(), "WaitOnAddress");
-        }
-    }
-
-    template <typename Clock, typename Duration>
-    bool timed_wait_wait_on_address(const std::chrono::time_point<Clock, Duration>& abs_time)
-    {
-        auto now = Clock::now();
-        if (abs_time <= now) {
-            return try_wait_wait_on_address();
+        HANDLE handle = ::CreateSemaphoreW(nullptr, static_cast<LONG>(initial_count), LONG_MAX, m_windows.name);
+        if (!handle) {
+            throw std::system_error(::GetLastError(), std::system_category(), "CreateSemaphoreW");
         }
 
-        while (true) {
-            int32_t expected = m_wait_on_address.count.load(std::memory_order_acquire);
-            while (expected > 0) {
-                if (m_wait_on_address.count.compare_exchange_weak(
-                        expected,
-                        expected - 1,
-                        std::memory_order_acquire,
-                        std::memory_order_relaxed)) {
-                    return true;
-                }
-            }
+        interprocess_semaphore_detail::register_handle(m_windows.id, handle);
+    }
 
-            now = Clock::now();
-            if (abs_time <= now) {
-                return false;
-            }
+    HANDLE windows_handle() const
+    {
+        return interprocess_semaphore_detail::ensure_handle(m_windows.id, m_windows.name);
+    }
 
-            auto remaining = abs_time - now;
-            auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(remaining);
-            int64_t clamped = std::clamp<int64_t>(
-                millis.count(),
-                int64_t{0},
-                static_cast<int64_t>(std::numeric_limits<DWORD>::max() - 1));
-            DWORD timeout_ms = static_cast<DWORD>(clamped);
-            if (timeout_ms == 0 && millis.count() > 0) {
-                timeout_ms = 1;
-            }
-
-            uint32_t sequence = m_wait_on_address.sequence.load(std::memory_order_acquire);
-            BOOL result = ::WaitOnAddress(
-                wait_address(m_wait_on_address.sequence),
-                &sequence,
-                sizeof(sequence),
-                timeout_ms);
-
-            if (result) {
-                continue;
-            }
-
-            DWORD err = ::GetLastError();
-            if (err == ERROR_TIMEOUT) {
-                return false;
-            }
-            throw std::system_error(err, std::system_category(), "WaitOnAddress");
-        }
+    void teardown_windows() noexcept
+    {
+        interprocess_semaphore_detail::close_handle(m_windows.id);
     }
 #elif defined(__APPLE__)
     struct ulock_storage
