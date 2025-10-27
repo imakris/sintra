@@ -17,7 +17,7 @@
 namespace {
 
 struct OverrideGuard {
-    enum class Kind { Pipe2, Write, Read };
+    enum class Kind { Pipe2, Write, Read, SpawnDebug };
 
     OverrideGuard(Kind k, void* fn) : kind(k)
     {
@@ -30,6 +30,9 @@ struct OverrideGuard {
                 break;
             case Kind::Read:
                 previous.read = sintra::testing::set_read_override(reinterpret_cast<sintra::detail::read_fn>(fn));
+                break;
+            case Kind::SpawnDebug:
+                previous.spawn_debug = sintra::testing::set_spawn_detached_debug(reinterpret_cast<sintra::detail::spawn_detached_debug_fn>(fn));
                 break;
         }
     }
@@ -46,6 +49,9 @@ struct OverrideGuard {
             case Kind::Read:
                 sintra::testing::set_read_override(previous.read);
                 break;
+            case Kind::SpawnDebug:
+                sintra::testing::set_spawn_detached_debug(previous.spawn_debug);
+                break;
         }
     }
 
@@ -54,6 +60,7 @@ struct OverrideGuard {
         sintra::detail::pipe2_fn pipe2;
         sintra::detail::write_fn write;
         sintra::detail::read_fn read;
+        sintra::detail::spawn_detached_debug_fn spawn_debug;
     } previous{};
 };
 
@@ -65,8 +72,75 @@ bool assert_true(bool condition, const std::string& message)
     return condition;
 }
 
+const char* resolve_true_program()
+{
+    static const char* cached = []() -> const char* {
+        const char* candidates[] = {"/usr/bin/true", "/bin/true"};
+        for (const char* candidate : candidates) {
+            if (::access(candidate, X_OK) == 0) {
+                return candidate;
+            }
+        }
+        return nullptr;
+    }();
+    return cached;
+}
+
+bool get_true_program(const char** program_out)
+{
+    const char* program = resolve_true_program();
+    if (!assert_true(program != nullptr, "could not locate a usable '/bin/true' or '/usr/bin/true' executable")) {
+        return false;
+    }
+    *program_out = program;
+    return true;
+}
+
+namespace {
+
+bool debug_captured = false;
+sintra::detail::spawn_detached_debug_info last_debug_info{};
+
+void capture_spawn_debug(const sintra::detail::spawn_detached_debug_info& info)
+{
+    debug_captured = true;
+    last_debug_info = info;
+}
+
+void reset_spawn_debug_capture()
+{
+    debug_captured = false;
+    last_debug_info = {};
+}
+
+const char* stage_to_string(sintra::detail::spawn_detached_debug_info::Stage stage)
+{
+    using Stage = sintra::detail::spawn_detached_debug_info::Stage;
+    switch (stage) {
+        case Stage::PipeCreation:
+            return "PipeCreation";
+        case Stage::Fork:
+            return "Fork";
+        case Stage::ChildReadyPipeWrite:
+            return "ChildReadyPipeWrite";
+        case Stage::ParentReadReadyStatus:
+            return "ParentReadReadyStatus";
+        case Stage::ParentReadExecStatus:
+            return "ParentReadExecStatus";
+        case Stage::ParentWaitpid:
+            return "ParentWaitpid";
+    }
+    return "Unknown";
+}
+
+} // namespace
+
 bool spawn_should_fail_due_to_fd_exhaustion()
 {
+    const char* program = nullptr;
+    if (!get_true_program(&program)) {
+        return false;
+    }
     int sentinel = ::open("/dev/null", O_RDONLY);
     if (sentinel == -1) {
         std::perror("open");
@@ -85,8 +159,8 @@ bool spawn_should_fail_due_to_fd_exhaustion()
         handles.push_back(fd);
     }
 
-    const char* const args[] = {"/bin/true", nullptr};
-    bool result = sintra::spawn_detached("/bin/true", args);
+    const char* const args[] = {program, nullptr};
+    bool result = sintra::spawn_detached(program, args);
 
     bool sentinel_ok = (::fcntl(sentinel, F_GETFD) != -1);
 
@@ -108,9 +182,13 @@ int failing_pipe2(int[2], int)
 
 bool spawn_should_fail_when_pipe2_injected_failure()
 {
+    const char* program = nullptr;
+    if (!get_true_program(&program)) {
+        return false;
+    }
     OverrideGuard guard(OverrideGuard::Kind::Pipe2, reinterpret_cast<void*>(&failing_pipe2));
-    const char* const args[] = {"/bin/true", nullptr};
-    bool result = sintra::spawn_detached("/bin/true", args);
+    const char* const args[] = {program, nullptr};
+    bool result = sintra::spawn_detached(program, args);
     return assert_true(!result, "spawn_detached must report failure when pipe2 fails");
 }
 
@@ -136,11 +214,23 @@ ssize_t flaky_read(int fd, void* buf, size_t count)
 
 bool spawn_succeeds_under_eintr_pressure()
 {
+    const char* program = nullptr;
+    if (!get_true_program(&program)) {
+        return false;
+    }
     OverrideGuard write_guard(OverrideGuard::Kind::Write, reinterpret_cast<void*>(&flaky_write));
     OverrideGuard read_guard(OverrideGuard::Kind::Read, reinterpret_cast<void*>(&flaky_read));
+    reset_spawn_debug_capture();
+    OverrideGuard debug_guard(OverrideGuard::Kind::SpawnDebug, reinterpret_cast<void*>(&capture_spawn_debug));
 
-    const char* const args[] = {"/bin/true", nullptr};
-    bool result = sintra::spawn_detached("/bin/true", args);
+    const char* const args[] = {program, nullptr};
+    bool result = sintra::spawn_detached(program, args);
+    if (!result && debug_captured) {
+        std::cerr << "spawn_detached_test: debug stage=" << stage_to_string(last_debug_info.stage)
+                  << ", errno=" << last_debug_info.errno_value
+                  << ", exec_errno=" << last_debug_info.exec_errno
+                  << std::endl;
+    }
     return assert_true(result, "spawn_detached must retry on EINTR and eventually succeed");
 }
 
@@ -152,9 +242,13 @@ ssize_t broken_write(int, const void*, size_t)
 
 bool spawn_fails_when_grandchild_cannot_report_readiness()
 {
+    const char* program = nullptr;
+    if (!get_true_program(&program)) {
+        return false;
+    }
     OverrideGuard guard(OverrideGuard::Kind::Write, reinterpret_cast<void*>(&broken_write));
-    const char* const args[] = {"/bin/true", nullptr};
-    bool result = sintra::spawn_detached("/bin/true", args);
+    const char* const args[] = {program, nullptr};
+    bool result = sintra::spawn_detached(program, args);
     return assert_true(!result, "write failures must be reported as spawn failures");
 }
 
