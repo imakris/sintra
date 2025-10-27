@@ -876,7 +876,18 @@ class TestRunner:
         total_budget = 90 if debugger_is_macos_lldb else per_pid_timeout
         capture_deadline = time.monotonic() + total_budget
 
-        for target_pid in sorted(target_pids):
+        if debugger_is_macos_lldb:
+            # On macOS LLDB fails to attach to processes that are already stopped,
+            # so we let the debugger suspend threads itself. The helper processes
+            # for a test typically have higher PIDs than the main test binary and
+            # may exit quickly once the parent crashes. Capture those helpers
+            # first to maximise the chance of getting a stack trace before they
+            # disappear.
+            ordered_target_pids = sorted(target_pids, reverse=True)
+        else:
+            ordered_target_pids = sorted(target_pids)
+
+        for target_pid in ordered_target_pids:
             if target_pid == os.getpid():
                 continue
             if not _pid_exists(target_pid):
