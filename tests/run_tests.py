@@ -1084,7 +1084,7 @@ class TestRunner:
                 '-p', str(pid),
                 '-ex', 'set confirm off',
                 '-ex', 'set pagination off',
-                '-ex', 'thread apply all bt',
+                '-ex', 'thread apply all bt full',
                 '-ex', 'detach',
                 '-ex', 'quit',
             ]
@@ -1095,7 +1095,7 @@ class TestRunner:
             '--batch',
             '--no-lldbinit',
             '-p', str(pid),
-            '-o', 'thread backtrace all',
+            '-o', 'thread backtrace all -c 256 -e',
             '-o', 'detach',
             '-o', 'quit',
         ]
@@ -1117,7 +1117,7 @@ class TestRunner:
                 '--nx',
                 '-ex', 'set confirm off',
                 '-ex', 'set pagination off',
-                '-ex', 'thread apply all bt',
+                '-ex', 'thread apply all bt full',
                 '-ex', 'quit',
                 str(invocation.path),
                 str(core_path),
@@ -1132,7 +1132,7 @@ class TestRunner:
             '--batch',
             '--no-lldbinit',
             '-o', f'target create --core {quoted_core} {quoted_executable}',
-            '-o', 'thread backtrace all',
+            '-o', 'thread backtrace all -c 256 -e',
             '-o', 'quit',
         ]
 
