@@ -36,15 +36,30 @@ jobs:
         id: payload
         shell: pwsh
         run: |
-          $hasTests = Test-Path -Path 'build/tests' -PathType Container
-          if (-not $hasTests) {
-            $hasTests = Test-Path -Path 'build/tests/Release' -PathType Container
+          $buildRoot = 'build'
+          if (Test-Path -Path 'build/build/CMakeCache.txt' -PathType Leaf) {
+            $buildRoot = 'build/build'
           }
-          if ($hasTests) {
-            Add-Content -Path $env:GITHUB_OUTPUT -Value 'has-tests=true'
-          } else {
-            Add-Content -Path $env:GITHUB_OUTPUT -Value 'has-tests=false'
+
+          $candidates = @(
+            Join-Path $buildRoot 'tests',
+            Join-Path $buildRoot 'tests/Release',
+            Join-Path $buildRoot 'tests/Debug'
+          )
+
+          $hasTests = $false
+          foreach ($candidate in $candidates) {
+            if (Test-Path -Path $candidate -PathType Container) {
+              $files = Get-ChildItem -Path $candidate -File -ErrorAction SilentlyContinue -Force | Select-Object -First 1
+              if ($files) {
+                $hasTests = $true
+                break
+              }
+            }
           }
+
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "build-root=$buildRoot"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "has-tests=$($hasTests.ToString().ToLower())"
 
       - name: No tests to stress
         if: steps.payload.outputs.has-tests != 'true'
@@ -140,5 +155,11 @@ jobs:
         if: steps.payload.outputs.has-tests == 'true'
         shell: bash
         run: |
+          set -euo pipefail
+          build_root="${{ steps.payload.outputs['build-root'] }}"
+          if [ ! -d "$build_root/tests" ] && [ ! -d "$build_root/tests/Release" ] && [ ! -d "$build_root/tests/Debug" ]; then
+            echo "Stress tests skipped because no test executables were present after download."
+            exit 0
+          fi
           cd tests
-          python run_tests.py --repetitions 10 --timeout 30 --build-dir ../build --config Release
+          python run_tests.py --repetitions 10 --timeout 30 --build-dir "../$build_root" --config Release

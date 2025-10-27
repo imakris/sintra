@@ -36,12 +36,26 @@ jobs:
         id: payload
         shell: bash
         run: |
-          has_tests=false
-          if [ -d build/tests ]; then
-            has_tests=true
-          elif [ -d build/tests/Release ]; then
-            has_tests=true
+          set -euo pipefail
+
+          build_root="build"
+          if [ -d "$build_root/build" ] && [ -f "$build_root/build/CMakeCache.txt" ]; then
+            build_root="$build_root/build"
           fi
+
+          has_tests=false
+          for candidate in \
+            "$build_root/tests" \
+            "$build_root/tests/Release" \
+            "$build_root/tests/Debug"
+          do
+            if [ -d "$candidate" ] && find "$candidate" -type f -print -quit | grep -q .; then
+              has_tests=true
+              break
+            fi
+          done
+
+          echo "build-root=$build_root" >> "$GITHUB_OUTPUT"
           echo "has-tests=$has_tests" >> "$GITHUB_OUTPUT"
 
       - name: No tests to stress
@@ -115,13 +129,27 @@ jobs:
         if: steps.payload.outputs.has-tests == 'true'
         shell: bash
         run: |
-          if [ -d build/tests ]; then
-            find build/tests -type f -exec chmod +x {} +
-          fi
+          set -euo pipefail
+          build_root="${{ steps.payload.outputs.build-root }}"
+          for candidate in \
+            "$build_root/tests" \
+            "$build_root/tests/Release" \
+            "$build_root/tests/Debug"
+          do
+            if [ -d "$candidate" ]; then
+              find "$candidate" -type f -exec chmod +x {} +
+            fi
+          done
 
       - name: Run stress tests with run_tests.py
         if: steps.payload.outputs.has-tests == 'true'
         shell: bash
         run: |
+          set -euo pipefail
+          build_root="${{ steps.payload.outputs.build-root }}"
+          if [ ! -d "$build_root/tests" ] && [ ! -d "$build_root/tests/Release" ] && [ ! -d "$build_root/tests/Debug" ]; then
+            echo "Stress tests skipped because no test executables were present after download."
+            exit 0
+          fi
           cd tests
-          python run_tests.py --repetitions 10 --timeout 30 --build-dir ../build --config Release
+          python run_tests.py --repetitions 10 --timeout 30 --build-dir "../$build_root" --config Release
