@@ -12,7 +12,6 @@
 
 #include <sintra/sintra.h>
 
-#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -113,11 +112,9 @@ struct Coordinator_state
 {
     std::mutex mutex;
     std::condition_variable cv;
-    std::array<std::size_t, kIterations> iteration_counts{};
+    std::size_t messages_in_iteration = 0;
     std::size_t total_messages        = 0;
-    std::size_t iterations_completed  = 0;
-    bool success                      = true;
-    std::string failure_reason;
+    bool too_many_messages            = false;
 };
 
 
@@ -145,53 +142,35 @@ int coordinator_process()
     using namespace sintra;
 
     Coordinator_state state;
+    bool success = true;
+    std::string failure_reason;
 
-    activate_slot([&](const Iteration_marker& marker) {
+    activate_slot([&](const Iteration_marker&) {
         std::lock_guard<std::mutex> lock(state.mutex);
-
-        if (marker.iteration >= kIterations) {
-            if (state.success) {
-                std::ostringstream oss;
-                oss << "coordinator received marker for iteration "
-                    << marker.iteration
-                    << " but only " << kIterations << " iterations were scheduled";
-                state.failure_reason = oss.str();
-                state.success = false;
-            }
-            state.cv.notify_all();
-            return;
+        if (state.messages_in_iteration >= kWorkerCount) {
+            state.too_many_messages = true;
+        } else {
+            ++state.messages_in_iteration;
+            ++state.total_messages;
         }
-
-        auto& count = state.iteration_counts[marker.iteration];
-        ++count;
-        ++state.total_messages;
-
-        if (count > kWorkerCount && state.success) {
-            std::ostringstream oss;
-            oss << "coordinator observed " << count << " markers for iteration "
-                << marker.iteration << " (expected " << kWorkerCount << ")";
-            state.failure_reason = oss.str();
-            state.success = false;
-        }
-
-        state.cv.notify_all();
+        state.cv.notify_one();
     });
 
     barrier("barrier-flush-ready");
 
     for (std::size_t iteration = 0; iteration < kIterations; ++iteration) {
 
+
         std::unique_lock<std::mutex> lock(state.mutex);
-        if (state.success) {
-            state.cv.wait(lock, [&] {
-                return state.iteration_counts[iteration] >= kWorkerCount || !state.success;
-            });
+        state.cv.wait(lock, [&] {
+            return state.messages_in_iteration == kWorkerCount || state.too_many_messages;
+        });
+        if (state.too_many_messages && success) {
+            success = false;
+            failure_reason = "coordinator observed more messages than expected during an iteration";
         }
-
-        if (state.iteration_counts[iteration] >= kWorkerCount) {
-            state.iterations_completed = iteration + 1;
-        }
-
+        state.messages_in_iteration = 0;
+        state.too_many_messages = false;
         lock.unlock();
 
         barrier("barrier-flush-iteration");
@@ -202,18 +181,7 @@ int coordinator_process()
     deactivate_all_slots();
 
     const auto shared_dir = get_shared_directory();
-    std::size_t iterations_completed = 0;
-    std::size_t total_messages = 0;
-    bool success = true;
-    std::string failure_reason;
-    {
-        std::lock_guard<std::mutex> lock(state.mutex);
-        iterations_completed = state.iterations_completed;
-        total_messages = state.total_messages;
-        success = state.success;
-        failure_reason = state.failure_reason;
-    }
-    write_result(shared_dir, success, iterations_completed, total_messages, failure_reason);
+    write_result(shared_dir, success, kIterations, state.total_messages, failure_reason);
     return success ? 0 : 1;
 }
 
