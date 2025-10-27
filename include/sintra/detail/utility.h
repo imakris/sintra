@@ -28,6 +28,7 @@
 #else
     #include <atomic>
     #include <cerrno>
+    #include <cstdio>
     #include <cstring>
     #include <signal.h>
     #include <fcntl.h>
@@ -164,6 +165,23 @@ namespace detail {
 using pipe2_fn = int(*)(int[2], int);
 using write_fn = ssize_t(*)(int, const void*, size_t);
 using read_fn = ssize_t(*)(int, void*, size_t);
+using spawn_detached_debug_fn = void(*)(const struct spawn_detached_debug_info&);
+
+struct spawn_detached_debug_info
+{
+    enum class Stage {
+        PipeCreation,
+        Fork,
+        ChildReadyPipeWrite,
+        ParentReadReadyStatus,
+        ParentReadExecStatus,
+        ParentWaitpid,
+    };
+
+    Stage stage{Stage::PipeCreation};
+    int errno_value{0};
+    int exec_errno{0};
+};
 
 inline std::atomic<pipe2_fn>& pipe2_override()
 {
@@ -181,6 +199,19 @@ inline std::atomic<read_fn>& read_override()
 {
     static std::atomic<read_fn> fn{nullptr};
     return fn;
+}
+
+inline std::atomic<spawn_detached_debug_fn>& spawn_detached_debug_override()
+{
+    static std::atomic<spawn_detached_debug_fn> fn{nullptr};
+    return fn;
+}
+
+inline void emit_spawn_detached_debug(const spawn_detached_debug_info& info)
+{
+    if (auto fn = spawn_detached_debug_override().load(std::memory_order_acquire)) {
+        fn(info);
+    }
 }
 
 inline int fcntl_retry(int fd, int cmd)
@@ -344,6 +375,11 @@ inline detail::read_fn set_read_override(detail::read_fn fn)
     return detail::read_override().exchange(fn, std::memory_order_acq_rel);
 }
 
+inline detail::spawn_detached_debug_fn set_spawn_detached_debug(detail::spawn_detached_debug_fn fn)
+{
+    return detail::spawn_detached_debug_override().exchange(fn, std::memory_order_acq_rel);
+}
+
 } // namespace testing
 
 #endif // !_WIN32
@@ -406,6 +442,14 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
         return false;
     }
 
+    auto report_failure = [&](detail::spawn_detached_debug_info::Stage stage, int error, int exec_error) {
+        detail::spawn_detached_debug_info info;
+        info.stage = stage;
+        info.errno_value = error;
+        info.exec_errno = exec_error;
+        detail::emit_spawn_detached_debug(info);
+    };
+
     int ready_pipe[2] = {-1, -1};
     while (true) {
         if (detail::call_pipe2(ready_pipe, O_CLOEXEC) == 0) {
@@ -421,6 +465,7 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
             ready_pipe[1] = -1;
         }
         if (saved_errno != EINTR) {
+            report_failure(detail::spawn_detached_debug_info::Stage::PipeCreation, saved_errno, saved_errno);
             errno = saved_errno;
             return false;
         }
@@ -437,6 +482,7 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
         if (ready_pipe[1] >= 0) {
             close(ready_pipe[1]);
         }
+        report_failure(detail::spawn_detached_debug_info::Stage::Fork, errno, errno);
         return false;
     }
 
@@ -467,6 +513,7 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
 
         int ready_status = 0;
         if (!detail::write_fully(ready_pipe[1], &ready_status, sizeof(ready_status))) {
+            report_failure(detail::spawn_detached_debug_info::Stage::ChildReadyPipeWrite, errno, 0);
             if (ready_pipe[1] >= 0) {
                 close(ready_pipe[1]);
             }
@@ -537,6 +584,8 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
 
     int exec_errno = 0;
     bool spawn_failed = false;
+    int observed_errno = 0;
+    auto failure_stage = detail::spawn_detached_debug_info::Stage::ParentReadReadyStatus;
 
     int ready_status = 0;
     switch (read_int(&ready_status, &exec_errno)) {
@@ -545,15 +594,21 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
         case Read_result::Eof:
             spawn_failed = true;
             exec_errno = exec_errno ? exec_errno : EPIPE;
+            observed_errno = exec_errno;
+            failure_stage = detail::spawn_detached_debug_info::Stage::ParentReadReadyStatus;
             break;
         case Read_result::Error:
             spawn_failed = true;
+            observed_errno = exec_errno;
+            failure_stage = detail::spawn_detached_debug_info::Stage::ParentReadReadyStatus;
             break;
     }
 
     if (!spawn_failed && ready_status != 0) {
         exec_errno = ready_status > 0 ? ready_status : -ready_status;
         spawn_failed = true;
+        observed_errno = exec_errno;
+        failure_stage = detail::spawn_detached_debug_info::Stage::ParentReadReadyStatus;
     }
 
     if (!spawn_failed) {
@@ -562,11 +617,15 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
             case Read_result::Value:
                 exec_errno = exec_status > 0 ? exec_status : -exec_status;
                 spawn_failed = true;
+                observed_errno = exec_errno;
+                failure_stage = detail::spawn_detached_debug_info::Stage::ParentReadExecStatus;
                 break;
             case Read_result::Eof:
                 break;
             case Read_result::Error:
                 spawn_failed = true;
+                observed_errno = exec_errno;
+                failure_stage = detail::spawn_detached_debug_info::Stage::ParentReadExecStatus;
                 break;
         }
     }
@@ -584,6 +643,10 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
                 break;
             }
         }
+        if (!observed_errno) {
+            observed_errno = exec_errno ? exec_errno : errno;
+        }
+        report_failure(failure_stage, observed_errno, exec_errno);
         errno = exec_errno ? exec_errno : errno;
         return false;
     }
@@ -597,6 +660,9 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
 
     if (wait_result == child_pid) {
         if (!(WIFEXITED(wait_status) && WEXITSTATUS(wait_status) == 0)) {
+            report_failure(detail::spawn_detached_debug_info::Stage::ParentWaitpid,
+                           exec_errno ? exec_errno : ECHILD,
+                           exec_errno);
             errno = exec_errno ? exec_errno : ECHILD;
             return false;
         }
@@ -607,6 +673,7 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
     }
 
     if (wait_result == -1) {
+        report_failure(detail::spawn_detached_debug_info::Stage::ParentWaitpid, errno, exec_errno);
         return false;
     }
 #endif
