@@ -472,6 +472,12 @@ int worker_process_impl(int worker_index)
         }
         if (stop_requested.load(std::memory_order_acquire))
         {
+            // The stop signal means the conductor is winding down, but the worker has not
+            // entered the library's draining path. Other participants may already be parked on
+            // the processing fence for this round, so the worker still has to rendezvous before
+            // exiting to avoid leaving the barrier short-handed.
+            sintra::barrier<sintra::processing_fence_t>(barrier_round_complete_name(round),
+                                                        group);
             break;
         }
 
@@ -483,6 +489,10 @@ int worker_process_impl(int worker_index)
         }
         if (stop_requested.load(std::memory_order_acquire))
         {
+            // See comment above: we must still participate in the in-flight processing fence
+            // before breaking out once a stop is observed.
+            sintra::barrier<sintra::processing_fence_t>(barrier_round_complete_name(round),
+                                                        group);
             break;
         }
 
