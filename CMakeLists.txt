@@ -4,6 +4,37 @@ project(sintra LANGUAGES CXX)
 
 find_package(Threads REQUIRED)
 
+if(APPLE)
+    # Ensure we compile against a macOS SDK that provides sys/ulock.h, which lives inside the
+    # SDK sysroot rather than /usr/include on modern macOS installations.
+    if(NOT CMAKE_OSX_SYSROOT)
+        execute_process(
+            COMMAND xcrun --show-sdk-path
+            OUTPUT_VARIABLE SINTRA_DETECTED_OSX_SYSROOT
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            RESULT_VARIABLE SINTRA_DETECTED_OSX_SYSROOT_RESULT
+        )
+        if(SINTRA_DETECTED_OSX_SYSROOT_RESULT EQUAL 0 AND EXISTS "${SINTRA_DETECTED_OSX_SYSROOT}")
+            set(CMAKE_OSX_SYSROOT "${SINTRA_DETECTED_OSX_SYSROOT}" CACHE PATH "Path to the macOS SDK" FORCE)
+        else()
+            message(WARNING "Failed to detect macOS SDK with xcrun; relying on the toolchain defaults.")
+        endif()
+    endif()
+
+    if(NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+        set(CMAKE_OSX_DEPLOYMENT_TARGET "10.13" CACHE STRING "Minimum macOS deployment target" FORCE)
+    endif()
+
+    include(CheckIncludeFileCXX)
+    check_include_file_cxx("sys/ulock.h" SINTRA_HAVE_SYS_ULOCK_H)
+    if(NOT SINTRA_HAVE_SYS_ULOCK_H)
+        message(FATAL_ERROR
+            "sintra requires sys/ulock.h on macOS. Ensure that the Command Line Tools or Xcode "
+            "are installed and that the SDK sysroot is available (try 'xcode-select --install' "
+            "and verifying 'xcrun --show-sdk-path').")
+    endif()
+endif()
+
 option(SINTRA_RELEASE_WITH_DEBUG_SYMBOLS "Emit debug symbols when building Release configuration" OFF)
 
 # Force Debug build by default
