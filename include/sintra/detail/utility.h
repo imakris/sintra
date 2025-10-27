@@ -25,6 +25,8 @@
     #endif
     #include <windows.h>
     #include <process.h>
+    #include <cerrno>
+    #include <thread>
 #else
     #include <atomic>
     #include <cerrno>
@@ -394,29 +396,54 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
     }
 
     char full_path[_MAX_PATH];
-    if( _fullpath(full_path, prog, _MAX_PATH ) != NULL ) {
-
-        size_t argv_size=0;
-        for (size_t i=0; argv[i] != nullptr; i++) {
-            argv_size++;
-        }
-
-        const char** argv_with_prog = new const char*[argv_size+2];
-        argv_with_prog[0] = full_path;
-
-        for (size_t i=0; i!=argv_size; i++) {
-            argv_with_prog[i+1] = argv[i];
-        }
-        argv_with_prog[argv_size+1] = nullptr;
-        auto spawned = _spawnv(P_DETACH, full_path, argv_with_prog);
-        if (child_pid_out) {
-            *child_pid_out = static_cast<int>(spawned);
-        }
-        auto ret = spawned != -1;
-        delete [] argv_with_prog;
-        return ret;
+    if (_fullpath(full_path, prog, _MAX_PATH) == nullptr) {
+        return false;
     }
 
+    size_t argv_size = 0;
+    for (size_t i = 0; argv[i] != nullptr; ++i) {
+        ++argv_size;
+    }
+
+    const char** argv_with_prog = new const char*[argv_size + 2];
+    argv_with_prog[0] = full_path;
+
+    for (size_t i = 0; i != argv_size; ++i) {
+        argv_with_prog[i + 1] = argv[i];
+    }
+    argv_with_prog[argv_size + 1] = nullptr;
+
+    constexpr int kMaxAttempts = 5;
+    constexpr auto kInitialDelay = std::chrono::milliseconds(20);
+    int last_errno = 0;
+
+    for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
+        auto spawned = _spawnv(P_DETACH, full_path, argv_with_prog);
+        if (spawned != -1) {
+            if (child_pid_out) {
+                *child_pid_out = static_cast<int>(spawned);
+            }
+            delete[] argv_with_prog;
+            return true;
+        }
+
+        last_errno = errno;
+        if (child_pid_out) {
+            *child_pid_out = -1;
+        }
+
+        if (last_errno != EAGAIN && last_errno != ENOMEM) {
+            break;
+        }
+
+        const auto delay = kInitialDelay * (1 << attempt);
+        std::this_thread::sleep_for(delay);
+    }
+
+    delete[] argv_with_prog;
+    if (last_errno != 0) {
+        errno = last_errno;
+    }
     return false;
 #else
 
