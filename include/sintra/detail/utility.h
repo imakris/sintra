@@ -164,6 +164,7 @@ namespace detail {
 using pipe2_fn = int(*)(int[2], int);
 using write_fn = ssize_t(*)(int, const void*, size_t);
 using read_fn = ssize_t(*)(int, void*, size_t);
+using waitpid_fn = pid_t(*)(pid_t, int*, int);
 
 inline std::atomic<pipe2_fn>& pipe2_override()
 {
@@ -180,6 +181,12 @@ inline std::atomic<write_fn>& write_override()
 inline std::atomic<read_fn>& read_override()
 {
     static std::atomic<read_fn> fn{nullptr};
+    return fn;
+}
+
+inline std::atomic<waitpid_fn>& waitpid_override()
+{
+    static std::atomic<waitpid_fn> fn{nullptr};
     return fn;
 }
 
@@ -281,6 +288,14 @@ inline ssize_t call_read(int fd, void* buf, size_t count)
     return ::read(fd, buf, count);
 }
 
+inline pid_t call_waitpid(pid_t pid, int* status, int options)
+{
+    if (auto override = waitpid_override().load(std::memory_order_acquire)) {
+        return override(pid, status, options);
+    }
+    return ::waitpid(pid, status, options);
+}
+
 inline bool write_fully(int fd, const void* buf, size_t count)
 {
     const char* ptr = static_cast<const char*>(buf);
@@ -342,6 +357,11 @@ inline detail::write_fn set_write_override(detail::write_fn fn)
 inline detail::read_fn set_read_override(detail::read_fn fn)
 {
     return detail::read_override().exchange(fn, std::memory_order_acq_rel);
+}
+
+inline detail::waitpid_fn set_waitpid_override(detail::waitpid_fn fn)
+{
+    return detail::waitpid_override().exchange(fn, std::memory_order_acq_rel);
 }
 
 } // namespace testing
@@ -579,7 +599,7 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
 
     if (!read_success) {
         int status = 0;
-        while (::waitpid(child_pid, &status, 0) == -1) {
+        while (detail::call_waitpid(child_pid, &status, 0) == -1) {
             if (errno != EINTR) {
                 break;
             }
@@ -592,7 +612,7 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
     int wait_status = 0;
     pid_t wait_result = 0;
     do {
-        wait_result = ::waitpid(child_pid, &wait_status, WNOHANG);
+        wait_result = detail::call_waitpid(child_pid, &wait_status, WNOHANG);
     } while (wait_result == -1 && errno == EINTR);
 
     if (wait_result == child_pid) {
@@ -607,6 +627,13 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
     }
 
     if (wait_result == -1) {
+        if (errno == ECHILD) {
+            if (child_pid_out) {
+                *child_pid_out = -1;
+            }
+            errno = 0;
+            return true;
+        }
         return false;
     }
 #endif

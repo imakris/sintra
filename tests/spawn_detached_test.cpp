@@ -17,7 +17,7 @@
 namespace {
 
 struct OverrideGuard {
-    enum class Kind { Pipe2, Write, Read };
+    enum class Kind { Pipe2, Write, Read, Waitpid };
 
     OverrideGuard(Kind k, void* fn) : kind(k)
     {
@@ -30,6 +30,9 @@ struct OverrideGuard {
                 break;
             case Kind::Read:
                 previous.read = sintra::testing::set_read_override(reinterpret_cast<sintra::detail::read_fn>(fn));
+                break;
+            case Kind::Waitpid:
+                previous.waitpid = sintra::testing::set_waitpid_override(reinterpret_cast<sintra::detail::waitpid_fn>(fn));
                 break;
         }
     }
@@ -46,6 +49,9 @@ struct OverrideGuard {
             case Kind::Read:
                 sintra::testing::set_read_override(previous.read);
                 break;
+            case Kind::Waitpid:
+                sintra::testing::set_waitpid_override(previous.waitpid);
+                break;
         }
     }
 
@@ -54,6 +60,7 @@ struct OverrideGuard {
         sintra::detail::pipe2_fn pipe2;
         sintra::detail::write_fn write;
         sintra::detail::read_fn read;
+        sintra::detail::waitpid_fn waitpid;
     } previous{};
 };
 
@@ -144,6 +151,20 @@ bool spawn_succeeds_under_eintr_pressure()
     return assert_true(result, "spawn_detached must retry on EINTR and eventually succeed");
 }
 
+pid_t waitpid_returns_echild(pid_t, int*, int)
+{
+    errno = ECHILD;
+    return -1;
+}
+
+bool spawn_succeeds_when_waitpid_reports_echild()
+{
+    OverrideGuard guard(OverrideGuard::Kind::Waitpid, reinterpret_cast<void*>(&waitpid_returns_echild));
+    const char* const args[] = {"/bin/true", nullptr};
+    bool result = sintra::spawn_detached("/bin/true", args);
+    return assert_true(result, "spawn_detached must tolerate waitpid reporting ECHILD after a successful exec");
+}
+
 ssize_t broken_write(int, const void*, size_t)
 {
     errno = EPIPE;
@@ -176,6 +197,7 @@ int main()
     ok &= spawn_should_fail_due_to_fd_exhaustion();
     ok &= spawn_should_fail_when_pipe2_injected_failure();
     ok &= spawn_succeeds_under_eintr_pressure();
+    ok &= spawn_succeeds_when_waitpid_reports_echild();
     ok &= spawn_fails_when_grandchild_cannot_report_readiness();
     ok &= spawn_reports_exec_failure();
     return ok ? 0 : 1;
