@@ -23,6 +23,7 @@ Options:
 import argparse
 import fnmatch
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -1927,6 +1928,11 @@ def _resolve_git_metadata(start_dir: Path) -> Tuple[str, str]:
     branch = _run_git_command('rev-parse', '--abbrev-ref', 'HEAD') or 'unknown'
     if branch == 'HEAD':
         branch = 'detached HEAD'
+        name_rev = _run_git_command('name-rev', '--name-only', 'HEAD')
+        if name_rev and name_rev != 'undefined':
+            simple_name = re.split(r'[~^]', name_rev, 1)[0]
+            if simple_name:
+                branch = f"detached HEAD ({simple_name})"
 
     revision = _run_git_command('rev-parse', 'HEAD') or 'unknown'
 
