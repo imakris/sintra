@@ -554,13 +554,45 @@ Managed_process::~Managed_process()
         reap_targets.swap(m_spawned_child_pids);
     }
 
+    // On macOS the crash reporter may keep a crashed child alive for a short
+    // period, causing a blocking waitpid call to stall far beyond the test
+    // timeout. Allow a brief grace period with non-blocking polling before
+    // escalating to SIGKILL so finalization always completes in bounded time.
+    constexpr auto reap_retry_interval = std::chrono::milliseconds(10);
+    constexpr auto reap_grace_period = std::chrono::seconds(5);
+
     for (pid_t pid : reap_targets) {
         if (pid <= 0) {
             continue;
         }
+
         int status = 0;
-        while (::waitpid(pid, &status, 0) == -1) {
-            if (errno != EINTR) {
+        const auto deadline = std::chrono::steady_clock::now() + reap_grace_period;
+
+        while (true) {
+            pid_t result = ::waitpid(pid, &status, WNOHANG);
+            if (result == pid) {
+                break;
+            }
+            if (result == 0) {
+                if (std::chrono::steady_clock::now() >= deadline) {
+                    ::kill(pid, SIGKILL);
+                    while (::waitpid(pid, &status, 0) == -1) {
+                        if (errno != EINTR) {
+                            break;
+                        }
+                    }
+                    break;
+                }
+
+                std::this_thread::sleep_for(reap_retry_interval);
+                continue;
+            }
+
+            if (result == -1) {
+                if (errno == EINTR) {
+                    continue;
+                }
                 break;
             }
         }
