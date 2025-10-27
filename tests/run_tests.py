@@ -831,6 +831,10 @@ class TestRunner:
         total_budget = 90 if debugger_is_macos_lldb else per_pid_timeout
         capture_deadline = time.monotonic() + total_budget
 
+        sample_path: Optional[str] = None
+        if debugger_is_macos_lldb:
+            sample_path = shutil.which('sample')
+
         for target_pid in sorted(target_pids):
             if target_pid == os.getpid():
                 continue
@@ -842,6 +846,9 @@ class TestRunner:
                 )
                 break
             debugger_timeout = max(5, min(per_pid_timeout, remaining))
+
+            debugger_output = ""
+            debugger_error_message = ""
 
             try:
                 result = subprocess.run(
@@ -856,23 +863,49 @@ class TestRunner:
                     timeout=debugger_timeout,
                 )
             except subprocess.SubprocessError as exc:
-                capture_errors.append(
-                    f"PID {target_pid}: {debugger_name} failed ({exc})"
-                )
+                debugger_error_message = f"{debugger_name} failed ({exc})"
+            else:
+                debugger_output = result.stdout.strip()
+                if not debugger_output and result.stderr:
+                    debugger_output = result.stderr.strip()
+
+                if result.returncode != 0:
+                    stderr_detail = result.stderr.strip()
+                    if stderr_detail:
+                        debugger_error_message = (
+                            f"{debugger_name} exited with code {result.returncode}: {stderr_detail}"
+                        )
+                    else:
+                        debugger_error_message = (
+                            f"{debugger_name} exited with code {result.returncode}"
+                        )
+                elif not debugger_output:
+                    debugger_error_message = f"{debugger_name} produced no output"
+
+            if debugger_output and not debugger_error_message:
+                stack_outputs.append(f"PID {target_pid}\n{debugger_output}")
                 continue
 
-            output = result.stdout.strip()
-            if not output and result.stderr:
-                output = result.stderr.strip()
-
-            if result.returncode != 0:
-                capture_errors.append(
-                    f"PID {target_pid}: {debugger_name} exited with code {result.returncode}: {result.stderr.strip()}"
+            sample_output = ""
+            sample_error = ""
+            if debugger_is_macos_lldb and sample_path:
+                sample_output, sample_error = self._capture_process_stack_with_sample(
+                    target_pid,
+                    min(debugger_timeout, max(5, remaining)),
+                    sample_path,
                 )
-                continue
+                if sample_output:
+                    stack_outputs.append(f"PID {target_pid} (sample)\n{sample_output}")
+                    continue
 
-            if output:
-                stack_outputs.append(f"PID {target_pid}\n{output}")
+            error_components = []
+            if debugger_error_message:
+                error_components.append(f"PID {target_pid}: {debugger_error_message}")
+            if sample_error:
+                error_components.append(f"PID {target_pid}: sample failed: {sample_error}")
+
+            if error_components:
+                capture_errors.append("; ".join(error_components))
 
         # Allow processes to continue so gdb can detach cleanly before killing
         if should_pause:
@@ -889,6 +922,43 @@ class TestRunner:
             return "", "; ".join(capture_errors)
 
         return "", "no stack data captured"
+
+    def _capture_process_stack_with_sample(
+        self,
+        pid: int,
+        timeout: float,
+        sample_path: str,
+    ) -> Tuple[str, str]:
+        """Use the macOS 'sample' tool to obtain a stack trace for a PID."""
+
+        sample_command = [sample_path, str(pid), '1', '-mayDie']
+
+        try:
+            result = subprocess.run(
+                sample_command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=timeout,
+            )
+        except subprocess.SubprocessError as exc:
+            return "", f"sample invocation failed ({exc})"
+
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip()
+            if detail:
+                return "", f"sample exited with code {result.returncode}: {detail}"
+            return "", f"sample exited with code {result.returncode}"
+
+        output = result.stdout.strip()
+        if output:
+            return output, ""
+
+        detail = result.stderr.strip()
+        if detail:
+            return "", detail
+
+        return "", "sample produced no output"
 
     def _capture_core_dump_stack(
         self,
