@@ -6,6 +6,7 @@
 #include <ctime>
 #include <random>
 #include <system_error>
+#include <thread>
 
 #if defined(_WIN32)
   #ifndef NOMINMAX
@@ -23,7 +24,7 @@
   #include <cstdio>
   #include <fcntl.h>
   #include <mutex>
-  #include <semaphore.h>
+  #include <sys/file.h>
   #include <unordered_map>
 #else
   #include <cerrno>
@@ -131,20 +132,20 @@ namespace interprocess_mutex_detail
         return mtx;
     }
 
-    inline std::unordered_map<std::uint64_t, sem_t*>& handle_map()
+    inline std::unordered_map<std::uint64_t, int>& handle_map()
     {
-        static std::unordered_map<std::uint64_t, sem_t*> map;
+        static std::unordered_map<std::uint64_t, int> map;
         return map;
     }
 
-    inline sem_t* register_handle(std::uint64_t id, sem_t* handle)
+    inline int register_handle(std::uint64_t id, int handle)
     {
         std::lock_guard<std::mutex> lock(handle_mutex());
         handle_map()[id] = handle;
         return handle;
     }
 
-    inline sem_t* ensure_handle(std::uint64_t id, const char* name)
+    inline int ensure_handle(std::uint64_t id, const char* name)
     {
         {
             std::lock_guard<std::mutex> lock(handle_mutex());
@@ -154,29 +155,29 @@ namespace interprocess_mutex_detail
             }
         }
 
-        sem_t* sem = sem_open(name, 0);
-        if (sem == SEM_FAILED) {
-            throw std::system_error(errno, std::generic_category(), "sem_open");
+        int fd = ::open(name, O_RDWR);
+        if (fd == -1) {
+            throw std::system_error(errno, std::generic_category(), "open");
         }
 
         std::lock_guard<std::mutex> lock(handle_mutex());
-        return handle_map().emplace(id, sem).first->second;
+        return handle_map().emplace(id, fd).first->second;
     }
 
     inline void close_handle(std::uint64_t id)
     {
-        sem_t* sem = nullptr;
+        int fd = -1;
         {
             std::lock_guard<std::mutex> lock(handle_mutex());
             auto it = handle_map().find(id);
             if (it != handle_map().end()) {
-                sem = it->second;
+                fd = it->second;
                 handle_map().erase(it);
             }
         }
 
-        if (sem) {
-            while (sem_close(sem) == -1 && errno == EINTR) {
+        if (fd != -1) {
+            while (::close(fd) == -1 && errno == EINTR) {
             }
         }
     }
@@ -224,12 +225,12 @@ public:
         }
         throw std::system_error(::GetLastError(), std::system_category(), "WaitForSingleObject");
 #elif defined(__APPLE__)
-        sem_t* sem = named_handle();
-        while (sem_wait(sem) == -1) {
+        int fd = named_handle();
+        while (::flock(fd, LOCK_EX) == -1) {
             if (errno == EINTR) {
                 continue;
             }
-            throw std::system_error(errno, std::generic_category(), "sem_wait");
+            throw std::system_error(errno, std::generic_category(), "flock");
         }
 #else
         int rc = ::pthread_mutex_lock(&m_mutex);
@@ -263,15 +264,15 @@ public:
         }
         throw std::system_error(::GetLastError(), std::system_category(), "WaitForSingleObject");
 #elif defined(__APPLE__)
-        sem_t* sem = named_handle();
-        while (sem_trywait(sem) == -1) {
+        int fd = named_handle();
+        while (::flock(fd, LOCK_EX | LOCK_NB) == -1) {
             if (errno == EINTR) {
                 continue;
             }
-            if (errno == EAGAIN) {
+            if (errno == EWOULDBLOCK) {
                 return false;
             }
-            throw std::system_error(errno, std::generic_category(), "sem_trywait");
+            throw std::system_error(errno, std::generic_category(), "flock");
         }
         return true;
 #else
@@ -326,18 +327,38 @@ public:
         }
         throw std::system_error(::GetLastError(), std::system_category(), "WaitForSingleObject");
 #elif defined(__APPLE__)
-        sem_t* sem = named_handle();
-        auto ts = make_abs_timespec(abs_time);
-        while (sem_timedwait(sem, &ts) == -1) {
+        int fd = named_handle();
+        auto now = Clock::now();
+        if (abs_time <= now) {
+            return try_lock();
+        }
+
+        while (true) {
+            if (::flock(fd, LOCK_EX | LOCK_NB) == 0) {
+                return true;
+            }
+
             if (errno == EINTR) {
                 continue;
             }
-            if (errno == ETIMEDOUT) {
-                return false;
+
+            if (errno == EWOULDBLOCK) {
+                now = Clock::now();
+                if (now >= abs_time) {
+                    return false;
+                }
+
+                auto remaining = abs_time - now;
+                auto sleep_duration = std::chrono::duration_cast<std::chrono::milliseconds>(remaining);
+                if (sleep_duration.count() <= 0) {
+                    sleep_duration = std::chrono::milliseconds(1);
+                }
+                std::this_thread::sleep_for(sleep_duration);
+                continue;
             }
-            throw std::system_error(errno, std::generic_category(), "sem_timedwait");
+
+            throw std::system_error(errno, std::generic_category(), "flock");
         }
-        return true;
 #else
         auto ts = make_abs_timespec(abs_time);
         int rc = ::pthread_mutex_timedlock(&m_mutex, &ts);
@@ -370,12 +391,12 @@ public:
             throw std::system_error(::GetLastError(), std::system_category(), "ReleaseMutex");
         }
 #elif defined(__APPLE__)
-        sem_t* sem = named_handle();
-        while (sem_post(sem) == -1) {
+        int fd = named_handle();
+        while (::flock(fd, LOCK_UN) == -1) {
             if (errno == EINTR) {
                 continue;
             }
-            throw std::system_error(errno, std::generic_category(), "sem_post");
+            throw std::system_error(errno, std::generic_category(), "flock");
         }
 #else
         int rc = ::pthread_mutex_unlock(&m_mutex);
@@ -441,7 +462,7 @@ private:
     struct named_storage
     {
         std::uint64_t id = 0;
-        char          name[32]{};
+        char          name[64]{};
     };
 
     named_storage m_named{};
@@ -451,19 +472,19 @@ private:
         m_named.id = interprocess_mutex_detail::generate_global_identifier();
         std::snprintf(m_named.name,
                       sizeof(m_named.name) / sizeof(m_named.name[0]),
-                      "/sintra_mutex_%016llx",
+                      "/tmp/sintra_mutex_%016llx",
                       static_cast<unsigned long long>(m_named.id));
 
-        sem_unlink(m_named.name);
-        sem_t* sem = sem_open(m_named.name, O_CREAT | O_EXCL, 0600, 1);
-        if (sem == SEM_FAILED) {
-            throw std::system_error(errno, std::generic_category(), "sem_open");
+        ::unlink(m_named.name);
+        int fd = ::open(m_named.name, O_CREAT | O_RDWR, 0600);
+        if (fd == -1) {
+            throw std::system_error(errno, std::generic_category(), "open");
         }
 
-        interprocess_mutex_detail::register_handle(m_named.id, sem);
+        interprocess_mutex_detail::register_handle(m_named.id, fd);
     }
 
-    sem_t* named_handle() const
+    int named_handle() const
     {
         return interprocess_mutex_detail::ensure_handle(m_named.id, m_named.name);
     }
@@ -472,7 +493,7 @@ private:
     {
         interprocess_mutex_detail::close_handle(m_named.id);
         if (m_named.name[0] != '\0') {
-            sem_unlink(m_named.name);
+            ::unlink(m_named.name);
         }
     }
 #else
