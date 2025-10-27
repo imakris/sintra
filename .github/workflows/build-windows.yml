@@ -8,6 +8,8 @@ on:
       - 'include/**'
       - 'cmake/**'
       - 'CMakeLists.txt'
+      - 'CMakePresets.json'
+      - 'third_party/**'
       - 'tests/**'
       - 'example/**'
       - '.github/workflows/**'
@@ -18,6 +20,8 @@ on:
       - 'include/**'
       - 'cmake/**'
       - 'CMakeLists.txt'
+      - 'CMakePresets.json'
+      - 'third_party/**'
       - 'tests/**'
       - 'example/**'
       - '.github/workflows/**'
@@ -41,6 +45,8 @@ jobs:
               - 'include/**'
               - 'cmake/**'
               - 'CMakeLists.txt'
+              - 'CMakePresets.json'
+              - 'third_party/**'
             tests:
               - 'tests/**'
             examples:
