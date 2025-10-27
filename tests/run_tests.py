@@ -1095,7 +1095,8 @@ class TestRunner:
             '--batch',
             '--no-lldbinit',
             '-p', str(pid),
-            '-o', 'thread backtrace all',
+            '-o', 'settings set target.process.thread.backtrace-depth 256',
+            '-o', 'thread backtrace all -e true -E true',
             '-o', 'detach',
             '-o', 'quit',
         ]
@@ -1132,7 +1133,8 @@ class TestRunner:
             '--batch',
             '--no-lldbinit',
             '-o', f'target create --core {quoted_core} {quoted_executable}',
-            '-o', 'thread backtrace all',
+            '-o', 'settings set target.process.thread.backtrace-depth 256',
+            '-o', 'thread backtrace all -e true -E true',
             '-o', 'quit',
         ]
 
