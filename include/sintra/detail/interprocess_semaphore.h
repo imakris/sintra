@@ -353,6 +353,9 @@ private:
 
     void initialise_ulock(unsigned int initial_count)
     {
+        if (initial_count > static_cast<unsigned int>(std::numeric_limits<int32_t>::max())) {
+            throw std::out_of_range("initial_count exceeds Darwin semaphore capacity");
+        }
         m_ulock.count.store(static_cast<int32_t>(initial_count), std::memory_order_relaxed);
         m_ulock.sequence.store(0, std::memory_order_relaxed);
     }
