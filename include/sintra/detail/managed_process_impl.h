@@ -5,6 +5,7 @@
 
 #include "utility.h"
 #include "type_utils.h"
+#include "ipc_platform_utils.h"
 
 #include <array>
 #include <atomic>
