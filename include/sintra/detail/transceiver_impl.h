@@ -986,9 +986,18 @@ void
 Transceiver::replace_return_handler_id(instance_id_type old_id, instance_id_type new_id)
 {
     lock_guard<mutex> sl(m_return_handlers_mutex);
-    auto node_handler = m_active_return_handlers.extract(old_id);
-    node_handler.key() = new_id;
-    m_active_return_handlers.insert(std::move(node_handler));
+    auto it = m_active_return_handlers.find(old_id);
+    if (it == m_active_return_handlers.end()) {
+        // The handler may have already been remapped by a previous deferral or
+        // unblocked due to coordinator shutdown. In that case there's nothing
+        // left to move and the existing state already reflects the most recent
+        // function id.
+        return;
+    }
+
+    auto handler = std::move(it->second);
+    m_active_return_handlers.erase(it);
+    m_active_return_handlers[new_id] = std::move(handler);
 }
 
 
