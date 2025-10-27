@@ -23,10 +23,47 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
 
-      - name: Install crash debugging tools
+      - name: Restore cached gdb toolchain
+        id: cache-gdb
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/sintra-gdb
+          key: linux-gdb-${{ runner.os }}-v2024-04-03
+
+      - name: Bootstrap gdb toolchain cache
+        if: steps.cache-gdb.outputs.cache-hit != 'true'
         run: |
+          set -euxo pipefail
+          cache_root="$HOME/.cache/sintra-gdb"
+          rm -rf "$cache_root"
+          mkdir -p "$cache_root/debs" "$cache_root/root"
+          sudo rm -f /var/cache/apt/archives/*.deb
           sudo apt-get update
-          sudo apt-get install -y gdb
+          sudo apt-get install -y --download-only gdb
+          sudo cp /var/cache/apt/archives/*.deb "$cache_root/debs/"
+          sudo chown -R "$(id -u)":"$(id -g)" "$cache_root"
+          shopt -s nullglob
+          for deb in "$cache_root"/debs/*.deb; do
+            dpkg-deb -x "$deb" "$cache_root/root"
+          done
+          sudo apt-get clean
+
+      - name: Activate cached gdb toolchain
+        run: |
+          set -euxo pipefail
+          cache_prefix="$HOME/.cache/sintra-gdb/root"
+          echo "$cache_prefix/usr/bin" >> "$GITHUB_PATH"
+          lib_paths=(
+            "$cache_prefix/usr/lib/x86_64-linux-gnu"
+            "$cache_prefix/usr/lib"
+            "$cache_prefix/lib/x86_64-linux-gnu"
+            "$cache_prefix/lib"
+          )
+          ld_path="$(IFS=:; echo "${lib_paths[*]}")"
+          if [ -n "${LD_LIBRARY_PATH:-}" ]; then
+            ld_path="$ld_path:$LD_LIBRARY_PATH"
+          fi
+          echo "LD_LIBRARY_PATH=$ld_path" >> "$GITHUB_ENV"
 
       - name: Allow ptrace attachments for crash debugging
         run: |
