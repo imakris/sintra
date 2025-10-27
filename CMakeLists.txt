@@ -5,6 +5,17 @@ project(sintra LANGUAGES CXX)
 find_package(Threads REQUIRED)
 
 if(APPLE)
+    set(SINTRA_CONFIGURING_FOR_MACOS OFF)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+        set(SINTRA_CONFIGURING_FOR_MACOS ON)
+    elseif(CMAKE_OSX_SYSROOT)
+        string(FIND "${CMAKE_OSX_SYSROOT}" "MacOSX" SINTRA_SYSROOT_CONTAINS_MACOSX)
+        if(NOT SINTRA_SYSROOT_CONTAINS_MACOSX EQUAL -1)
+            set(SINTRA_CONFIGURING_FOR_MACOS ON)
+        endif()
+        unset(SINTRA_SYSROOT_CONTAINS_MACOSX)
+    endif()
+
     # Ensure we compile against a macOS SDK that provides sys/ulock.h, which lives inside the
     # SDK sysroot rather than /usr/include on modern macOS installations.
     if(NOT CMAKE_OSX_SYSROOT)
@@ -21,7 +32,7 @@ if(APPLE)
         endif()
     endif()
 
-    if(NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+    if(SINTRA_CONFIGURING_FOR_MACOS AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
         set(CMAKE_OSX_DEPLOYMENT_TARGET "10.13" CACHE STRING "Minimum macOS deployment target" FORCE)
     endif()
 
