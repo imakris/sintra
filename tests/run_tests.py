@@ -1901,7 +1901,9 @@ def _resolve_git_metadata(start_dir: Path) -> Tuple[str, str]:
     """Return the current git branch name and revision hash.
 
     Falls back to ``"unknown"`` for each field if git is unavailable or the
-    directory is not part of a repository.
+    directory is not part of a repository. When the checkout is detached (as in
+    many CI environments), the function also consults common CI environment
+    variables to surface the original branch name.
     """
 
     def _run_git_command(*args: str) -> Optional[str]:
@@ -1920,6 +1922,43 @@ def _resolve_git_metadata(start_dir: Path) -> Tuple[str, str]:
         value = completed.stdout.strip()
         return value or None
 
+    def _normalize_ref(ref: Optional[str]) -> Optional[str]:
+        if not ref:
+            return None
+
+        ref = ref.strip()
+        for prefix in ('refs/heads/', 'refs/tags/'):
+            if ref.startswith(prefix):
+                return ref[len(prefix):]
+
+        # For pull requests in GitHub Actions ``refs/pull/<id>/merge`` does not
+        # expose the branch name. We rely on ``GITHUB_HEAD_REF`` in that case.
+        if ref.startswith('refs/pull/'):
+            return None
+
+        return ref or None
+
+    def _resolve_ci_branch() -> Optional[str]:
+        env = os.environ
+        candidates = [
+            env.get('GITHUB_HEAD_REF'),
+            env.get('GITHUB_REF_NAME'),
+            _normalize_ref(env.get('GITHUB_REF')),
+            env.get('CIRRUS_BRANCH'),
+            env.get('BUILDKITE_BRANCH'),
+            env.get('CI_COMMIT_REF_NAME'),
+            env.get('CI_BRANCH'),
+            env.get('BRANCH_NAME'),
+        ]
+
+        for candidate in candidates:
+            if candidate:
+                candidate = candidate.strip()
+                if candidate:
+                    return candidate
+
+        return None
+
     repo_root = _run_git_command('rev-parse', '--show-toplevel')
     if repo_root:
         start_dir = Path(repo_root)
@@ -1927,6 +1966,10 @@ def _resolve_git_metadata(start_dir: Path) -> Tuple[str, str]:
     branch = _run_git_command('rev-parse', '--abbrev-ref', 'HEAD') or 'unknown'
     if branch == 'HEAD':
         branch = 'detached HEAD'
+
+    ci_branch = _resolve_ci_branch()
+    if ci_branch and branch in {'detached HEAD', 'unknown'}:
+        branch = ci_branch
 
     revision = _run_git_command('rev-parse', 'HEAD') or 'unknown'
 
