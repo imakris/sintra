@@ -19,6 +19,7 @@
   #include <cwchar>
   #include <limits>
   #include <mutex>
+  #include <thread>
   #include <unordered_map>
 #elif defined(__APPLE__)
   #include <cerrno>
@@ -112,13 +113,35 @@ namespace interprocess_semaphore_detail
             }
         }
 
-        HANDLE handle = ::OpenSemaphoreW(SYNCHRONIZE | SEMAPHORE_MODIFY_STATE, FALSE, name);
-        if (!handle) {
-            throw std::system_error(::GetLastError(), std::system_category(), "OpenSemaphoreW");
+        // Opening a named semaphore can occasionally race with the creator on
+        // Windows when the object has just been published.  Retry a few times
+        // on transient errors instead of failing immediately so that newly
+        // spawned processes don't abort before joining the barrier network.
+        constexpr unsigned kMaxAttempts = 64;
+        constexpr auto kRetryDelay = std::chrono::milliseconds(1);
+
+        DWORD last_error = ERROR_SUCCESS;
+        for (unsigned attempt = 0; attempt < kMaxAttempts; ++attempt) {
+            HANDLE handle = ::OpenSemaphoreW(SYNCHRONIZE | SEMAPHORE_MODIFY_STATE, FALSE, name);
+            if (handle) {
+                std::lock_guard<std::mutex> lock(handle_mutex());
+                return handle_map().emplace(id, handle).first->second;
+            }
+
+            last_error = ::GetLastError();
+            const bool transient =
+                (last_error == ERROR_FILE_NOT_FOUND) ||
+                (last_error == ERROR_INVALID_HANDLE) ||
+                (last_error == ERROR_ACCESS_DENIED);
+
+            if (!transient) {
+                break;
+            }
+
+            std::this_thread::sleep_for(kRetryDelay);
         }
 
-        std::lock_guard<std::mutex> lock(handle_mutex());
-        return handle_map().emplace(id, handle).first->second;
+        throw std::system_error(last_error, std::system_category(), "OpenSemaphoreW");
     }
 
     inline void close_handle(uint64_t id)
