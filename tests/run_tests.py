@@ -961,6 +961,11 @@ class TestRunner:
         stack_outputs: List[str] = []
         capture_errors: List[str] = []
 
+        if sys.platform == 'darwin':
+            dsym_error = self._ensure_macos_dsym(invocation.path)
+            if dsym_error:
+                capture_errors.append(f"{invocation.path.name}: {dsym_error}")
+
         for _, core_path in candidate_cores:
             try:
                 result = subprocess.run(
@@ -1022,6 +1027,45 @@ class TestRunner:
             return 'lldb', [xcrun_path, 'lldb'], ''
 
         return None, None, 'gdb or lldb not available (install gdb or the Xcode Command Line Tools)'
+
+    def _ensure_macos_dsym(self, executable: Path) -> Optional[str]:
+        """Ensure a dSYM bundle exists for the provided executable on macOS."""
+
+        dsym_dir = executable.with_name(f"{executable.name}.dSYM")
+        if dsym_dir.exists():
+            return None
+
+        dsym_command: Optional[List[str]] = None
+
+        dsymutil_path = shutil.which('dsymutil')
+        if dsymutil_path:
+            dsym_command = [dsymutil_path, str(executable)]
+        else:
+            xcrun_path = shutil.which('xcrun')
+            if xcrun_path:
+                dsym_command = [xcrun_path, 'dsymutil', str(executable)]
+
+        if dsym_command is None:
+            return 'dsymutil not available (install Xcode Command Line Tools)'
+
+        try:
+            result = subprocess.run(
+                dsym_command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=120,
+            )
+        except subprocess.SubprocessError as exc:
+            return f'dsymutil invocation failed ({exc})'
+
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip()
+            if detail:
+                return f'dsymutil exited with code {result.returncode}: {detail}'
+            return f'dsymutil exited with code {result.returncode}'
+
+        return None
 
     def _build_unix_live_debugger_command(
         self,
