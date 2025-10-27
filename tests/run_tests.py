@@ -1606,6 +1606,7 @@ class TestRunner:
 
         stack_outputs: List[str] = []
         capture_errors: List[str] = []
+        fallback_outputs: List[Tuple[str, str, int, str]] = []
 
         for _, dump_path in candidate_dumps:
             try:
@@ -1625,22 +1626,63 @@ class TestRunner:
                 capture_errors.append(f"{dump_path.name}: {debugger_name} failed ({exc})")
                 continue
 
-            output = result.stdout.strip()
-            if not output and result.stderr:
-                output = result.stderr.strip()
+            stdout = result.stdout.strip()
+            stderr = result.stderr.strip()
 
-            if result.returncode != 0:
-                capture_errors.append(
-                    f"{dump_path.name}: {debugger_name} exited with code {result.returncode}: {result.stderr.strip()}"
-                )
+            output = stdout
+            output_from_stderr = False
+            if not output and stderr:
+                output = stderr
+                output_from_stderr = True
+
+            normalized_code = self._normalize_windows_returncode(result.returncode)
+            exit_ok = normalized_code in self._WINDOWS_DEBUGGER_SUCCESS_CODES
+
+            if exit_ok:
+                if output:
+                    note = ""
+                    if normalized_code != 0:
+                        note = (
+                            f"\n\n[Debugger exited with code {self._format_windows_returncode(normalized_code)};"
+                            " treated as success]"
+                        )
+                    stack_outputs.append(f"dump file: {dump_path}\n{output}{note}")
+                    break
                 continue
 
             if output:
-                stack_outputs.append(f"dump file: {dump_path}\n{output}")
-                break
+                if not output_from_stderr:
+                    fallback_outputs.append((f"dump file: {dump_path}", output, normalized_code, stderr))
+                else:
+                    capture_errors.append(
+                        self._format_windows_debugger_failure(
+                            debugger_name,
+                            dump_path.name,
+                            normalized_code,
+                            stderr,
+                        )
+                    )
+            else:
+                capture_errors.append(
+                    self._format_windows_debugger_failure(
+                        debugger_name,
+                        dump_path.name,
+                        normalized_code,
+                        stderr,
+                    )
+                )
 
         if stack_outputs:
             return "\n\n".join(stack_outputs), ""
+
+        if fallback_outputs:
+            annotated = []
+            for label, output, normalized_code, stderr in fallback_outputs:
+                detail = f"; stderr: {stderr}" if stderr else ""
+                annotated.append(
+                    f"{label}\n{output}\n\n[Debugger exited with code {self._format_windows_returncode(normalized_code)}; output may be incomplete{detail}]"
+                )
+            return "\n\n".join(annotated), "; ".join(capture_errors) if capture_errors else ""
 
         if capture_errors:
             return "", "; ".join(capture_errors)
@@ -1659,13 +1701,14 @@ class TestRunner:
 
         stack_outputs: List[str] = []
         capture_errors: List[str] = []
+        fallback_outputs: List[Tuple[str, str, int, str]] = []
 
         for target_pid in sorted(set(target_pids)):
             try:
                 command = [debugger_path]
                 if debugger_name == 'windbg':
                     command.append('-Q')
-                command.extend(['-p', str(target_pid), '-c', '.symfix; .reload; ~* k; qd'])
+                command.extend(['-pv', '-p', str(target_pid), '-c', '.symfix; .reload; ~* k; qd'])
 
                 result = subprocess.run(
                     command,
@@ -1681,26 +1724,94 @@ class TestRunner:
                 capture_errors.append(f"PID {target_pid}: {debugger_name} failed ({exc})")
                 continue
 
-            output = result.stdout.strip()
-            if not output and result.stderr:
-                output = result.stderr.strip()
+            stdout = result.stdout.strip()
+            stderr = result.stderr.strip()
 
-            if result.returncode != 0:
-                capture_errors.append(
-                    f"PID {target_pid}: {debugger_name} exited with code {result.returncode}: {result.stderr.strip()}"
-                )
+            output = stdout
+            output_from_stderr = False
+            if not output and stderr:
+                output = stderr
+                output_from_stderr = True
+
+            normalized_code = self._normalize_windows_returncode(result.returncode)
+            exit_ok = normalized_code in self._WINDOWS_DEBUGGER_SUCCESS_CODES
+
+            if exit_ok:
+                if output:
+                    note = ""
+                    if normalized_code != 0:
+                        note = (
+                            f"\n\n[Debugger exited with code {self._format_windows_returncode(normalized_code)};"
+                            " treated as success]"
+                        )
+                    stack_outputs.append(f"PID {target_pid}\n{output}{note}")
                 continue
 
             if output:
-                stack_outputs.append(f"PID {target_pid}\n{output}")
+                if not output_from_stderr:
+                    fallback_outputs.append((f"PID {target_pid}", output, normalized_code, stderr))
+                else:
+                    capture_errors.append(
+                        self._format_windows_debugger_failure(
+                            debugger_name,
+                            f"PID {target_pid}",
+                            normalized_code,
+                            stderr,
+                        )
+                    )
+            else:
+                capture_errors.append(
+                    self._format_windows_debugger_failure(
+                        debugger_name,
+                        f"PID {target_pid}",
+                        normalized_code,
+                        stderr,
+                    )
+                )
 
         if stack_outputs:
             return "\n\n".join(stack_outputs), ""
+
+        if fallback_outputs:
+            annotated = []
+            for label, output, normalized_code, stderr in fallback_outputs:
+                detail = f"; stderr: {stderr}" if stderr else ""
+                annotated.append(
+                    f"{label}\n{output}\n\n[Debugger exited with code {self._format_windows_returncode(normalized_code)}; output may be incomplete{detail}]"
+                )
+            return "\n\n".join(annotated), "; ".join(capture_errors) if capture_errors else ""
 
         if capture_errors:
             return "", "; ".join(capture_errors)
 
         return "", "no stack data captured"
+
+    @staticmethod
+    def _normalize_windows_returncode(returncode: int) -> int:
+        """Normalize signed Windows return codes to their unsigned 32-bit representation."""
+
+        return returncode & 0xFFFFFFFF
+
+    @staticmethod
+    def _format_windows_returncode(returncode: int) -> str:
+        """Format a Windows return code for display."""
+
+        return f"0x{returncode:08X}"
+
+    @classmethod
+    def _format_windows_debugger_failure(
+        cls,
+        debugger_name: str,
+        target: str,
+        returncode: int,
+        stderr: str,
+    ) -> str:
+        detail = f": {stderr.strip()}" if stderr else ""
+        return (
+            f"{target}: {debugger_name} exited with code {cls._format_windows_returncode(returncode)}{detail}"
+        )
+
+    _WINDOWS_DEBUGGER_SUCCESS_CODES = {0x00000000, 0xD000010A}
 
     def _collect_windows_process_tree_pids(self, pid: int) -> List[int]:
         """Return all descendant process IDs for the provided Windows process."""
