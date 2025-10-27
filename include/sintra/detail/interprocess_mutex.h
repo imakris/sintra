@@ -169,7 +169,9 @@ public:
         int res = ::pthread_mutex_lock(&m_mutex);
     #if defined(PTHREAD_MUTEX_ROBUST) || defined(PTHREAD_MUTEX_ROBUST_NP)
         if (res == EOWNERDEAD) {
-            make_mutex_consistent();
+            if (m_posix_robust_enabled) {
+                make_mutex_consistent();
+            }
             return;
         }
     #endif
@@ -196,7 +198,9 @@ public:
         int res = ::pthread_mutex_trylock(&m_mutex);
     #if defined(PTHREAD_MUTEX_ROBUST) || defined(PTHREAD_MUTEX_ROBUST_NP)
         if (res == EOWNERDEAD) {
-            make_mutex_consistent();
+            if (m_posix_robust_enabled) {
+                make_mutex_consistent();
+            }
             return true;
         }
     #endif
@@ -293,7 +297,9 @@ public:
         int res = ::pthread_mutex_timedlock(&m_mutex, &ts);
     #if defined(PTHREAD_MUTEX_ROBUST) || defined(PTHREAD_MUTEX_ROBUST_NP)
         if (res == EOWNERDEAD) {
-            make_mutex_consistent();
+            if (m_posix_robust_enabled) {
+                make_mutex_consistent();
+            }
             return true;
         }
     #endif
@@ -360,6 +366,9 @@ private:
     }
 #else
     pthread_mutex_t m_mutex{};
+#if defined(PTHREAD_MUTEX_ROBUST) || defined(PTHREAD_MUTEX_ROBUST_NP)
+    bool m_posix_robust_enabled = false;
+#endif
 
     void initialise_posix()
     {
@@ -376,12 +385,19 @@ private:
         }
 
 #if defined(PTHREAD_MUTEX_ROBUST) || defined(PTHREAD_MUTEX_ROBUST_NP)
+        m_posix_robust_enabled = false;
     #if defined(PTHREAD_MUTEX_ROBUST)
         res = ::pthread_mutexattr_setrobust(&attr, PTHREAD_MUTEX_ROBUST);
     #else
         res = ::pthread_mutexattr_setrobust_np(&attr, PTHREAD_MUTEX_ROBUST_NP);
     #endif
-        if (res != 0) {
+        if (res == 0) {
+            m_posix_robust_enabled = true;
+        }
+        else if (res == ENOTSUP || res == EINVAL) {
+            m_posix_robust_enabled = false;
+        }
+        else {
             ::pthread_mutexattr_destroy(&attr);
             throw std::system_error(res, std::generic_category(), "pthread_mutexattr_setrobust");
         }
