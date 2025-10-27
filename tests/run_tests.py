@@ -1925,8 +1925,37 @@ def _resolve_git_metadata(start_dir: Path) -> Tuple[str, str]:
         start_dir = Path(repo_root)
 
     branch = _run_git_command('rev-parse', '--abbrev-ref', 'HEAD') or 'unknown'
+
+    def _env_branch_hint() -> Optional[str]:
+        """Return the branch name advertised by common CI environment variables."""
+
+        def _normalize_ref(ref: str) -> str:
+            # GitHub and similar providers expose fully qualified refs (e.g. refs/heads/main).
+            if ref.startswith('refs/'):
+                return ref.rsplit('/', 1)[-1]
+            return ref
+
+        ci_branch_vars = [
+            'GITHUB_HEAD_REF',  # Pull request branch on GitHub Actions
+            'GITHUB_REF_NAME',  # Branch or tag name on GitHub Actions
+            'GITHUB_REF',       # Fully qualified ref on GitHub Actions
+            'CI_COMMIT_REF_NAME',  # GitLab CI
+            'BUILDKITE_BRANCH',    # Buildkite
+            'APPVEYOR_REPO_BRANCH',  # AppVeyor
+            'CIRCLE_BRANCH',        # CircleCI
+        ]
+
+        for var in ci_branch_vars:
+            value = os.environ.get(var)
+            if value:
+                return _normalize_ref(value)
+
+        return None
+
     if branch == 'HEAD':
-        branch = 'detached HEAD'
+        branch = _env_branch_hint() or 'detached HEAD'
+    elif branch == 'unknown':
+        branch = _env_branch_hint() or 'unknown'
 
     revision = _run_git_command('rev-parse', 'HEAD') or 'unknown'
 
