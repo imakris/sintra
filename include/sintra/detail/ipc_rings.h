@@ -137,10 +137,6 @@
 
 #include "interprocess_semaphore.h"
 
-#if defined(_WIN32)
-  #include <synchapi.h>
-#endif
-
 #include "ipc_platform_utils.h"
 
 // Enables the writer to forcefully evict readers that are too slow.
@@ -357,73 +353,6 @@ public:
     }
 
 private:
-#if defined(_WIN32)
-    struct impl
-    {
-        impl() = default;
-
-        void post_ordered()
-        {
-            if (unordered.load(std::memory_order_acquire)) {
-                unordered.store(false, std::memory_order_release);
-            }
-            else if (!posted.test_and_set(std::memory_order_acquire)) {
-                signal();
-            }
-        }
-
-        void post_unordered()
-        {
-            if (!posted.test_and_set(std::memory_order_acquire)) {
-                unordered.store(true, std::memory_order_release);
-                signal();
-            }
-        }
-
-        bool wait()
-        {
-            wait_for_signal();
-            signal_state.store(0, std::memory_order_release);
-            posted.clear(std::memory_order_release);
-            return unordered.exchange(false, std::memory_order_acq_rel);
-        }
-
-        void release_local_handle() noexcept {}
-
-        std::atomic_flag posted = ATOMIC_FLAG_INIT;
-        std::atomic<bool> unordered{false};
-
-    private:
-        void wait_for_signal()
-        {
-            while (true) {
-                if (signal_state.load(std::memory_order_acquire) != 0) {
-                    return;
-                }
-
-                uint32_t expected = 0;
-                if (!::WaitOnAddress(reinterpret_cast<volatile VOID*>(&signal_state),
-                                     &expected,
-                                     sizeof(expected),
-                                     INFINITE)) {
-                    DWORD error = ::GetLastError();
-                    if (error == ERROR_TIMEOUT) {
-                        continue;
-                    }
-                    throw std::system_error(static_cast<int>(error), std::system_category(), "WaitOnAddress");
-                }
-            }
-        }
-
-        void signal()
-        {
-            signal_state.store(1, std::memory_order_release);
-            ::WakeByAddressSingle(reinterpret_cast<volatile VOID*>(&signal_state));
-        }
-
-        std::atomic<uint32_t> signal_state{0};
-    };
-#else
     struct impl : detail::interprocess_semaphore
     {
         impl() : detail::interprocess_semaphore(0) {}
@@ -453,10 +382,14 @@ private:
             return unordered.exchange(false, std::memory_order_acq_rel);
         }
 
+        void release_local_handle() noexcept
+        {
+            detail::interprocess_semaphore::release_local_handle();
+        }
+
         std::atomic_flag posted = ATOMIC_FLAG_INIT;
         std::atomic<bool> unordered{false};
     };
-#endif
 
     static constexpr uint8_t state_uninitialized = 0;
     static constexpr uint8_t state_initializing  = 1;
