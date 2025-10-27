@@ -28,6 +28,7 @@
 #else
     #include <atomic>
     #include <cerrno>
+    #include <cstdio>
     #include <cstring>
     #include <signal.h>
     #include <fcntl.h>
@@ -406,6 +407,40 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
         return false;
     }
 
+    const bool spawn_debug_enabled = std::getenv("SINTRA_SPAWN_DETACHED_DEBUG") != nullptr;
+
+    const auto describe_errno = [](int err) -> std::string {
+        if (err == 0) {
+            return std::string("success");
+        }
+
+        std::array<char, 128> buffer{};
+
+#if defined(__GLIBC__) && defined(_GNU_SOURCE)
+        return std::string(::strerror_r(err, buffer.data(), buffer.size()));
+#else
+        if (::strerror_r(err, buffer.data(), buffer.size()) == 0) {
+            return std::string(buffer.data());
+        }
+        return std::string("unknown");
+#endif
+    };
+
+    const auto log_spawn_failure = [&](const char* stage, int err) {
+        if (!spawn_debug_enabled) {
+            return;
+        }
+
+        const int error_code = err ? err : errno;
+        const auto description = describe_errno(error_code);
+        std::fprintf(stderr,
+                     "spawn_detached(%s): %s (errno=%d: %s)\n",
+                     prog ? prog : "<null>",
+                     stage,
+                     error_code,
+                     description.c_str());
+    };
+
     int ready_pipe[2] = {-1, -1};
     while (true) {
         if (detail::call_pipe2(ready_pipe, O_CLOEXEC) == 0) {
@@ -421,6 +456,7 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
             ready_pipe[1] = -1;
         }
         if (saved_errno != EINTR) {
+            log_spawn_failure("failed to create ready pipe", saved_errno);
             errno = saved_errno;
             return false;
         }
@@ -431,6 +467,7 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
         child_pid = ::fork();
     } while (child_pid == -1 && errno == EINTR);
     if (child_pid == -1) {
+        log_spawn_failure("fork failed", errno);
         if (ready_pipe[0] >= 0) {
             close(ready_pipe[0]);
         }
@@ -467,6 +504,7 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
 
         int ready_status = 0;
         if (!detail::write_fully(ready_pipe[1], &ready_status, sizeof(ready_status))) {
+            log_spawn_failure("child failed to publish readiness", errno);
             if (ready_pipe[1] >= 0) {
                 close(ready_pipe[1]);
             }
@@ -487,7 +525,9 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
         }
         delete[] argv_copy;
 
-        detail::write_fully(ready_pipe[1], &exec_errno, sizeof(exec_errno));
+        if (!detail::write_fully(ready_pipe[1], &exec_errno, sizeof(exec_errno))) {
+            log_spawn_failure("child failed to report exec errno", errno);
+        }
         if (ready_pipe[1] >= 0) {
             close(ready_pipe[1]);
         }
@@ -543,16 +583,19 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
         case Read_result::Value:
             break;
         case Read_result::Eof:
+            log_spawn_failure("ready pipe closed before readiness", exec_errno ? exec_errno : EPIPE);
             spawn_failed = true;
             exec_errno = exec_errno ? exec_errno : EPIPE;
             break;
         case Read_result::Error:
+            log_spawn_failure("failed to read child readiness", exec_errno);
             spawn_failed = true;
             break;
     }
 
     if (!spawn_failed && ready_status != 0) {
         exec_errno = ready_status > 0 ? ready_status : -ready_status;
+        log_spawn_failure("child reported non-zero readiness status", exec_errno);
         spawn_failed = true;
     }
 
@@ -561,11 +604,13 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
         switch (read_int(&exec_status, &exec_errno)) {
             case Read_result::Value:
                 exec_errno = exec_status > 0 ? exec_status : -exec_status;
+                log_spawn_failure("child reported exec failure", exec_errno);
                 spawn_failed = true;
                 break;
             case Read_result::Eof:
                 break;
             case Read_result::Error:
+                log_spawn_failure("failed to read child exec status", exec_errno);
                 spawn_failed = true;
                 break;
         }
@@ -581,6 +626,7 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
         int status = 0;
         while (::waitpid(child_pid, &status, 0) == -1) {
             if (errno != EINTR) {
+                log_spawn_failure("waitpid failed while cleaning up child", errno);
                 break;
             }
         }
@@ -597,6 +643,7 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
 
     if (wait_result == child_pid) {
         if (!(WIFEXITED(wait_status) && WEXITSTATUS(wait_status) == 0)) {
+            log_spawn_failure("intermediate child exited abnormally", exec_errno ? exec_errno : ECHILD);
             errno = exec_errno ? exec_errno : ECHILD;
             return false;
         }
@@ -607,6 +654,7 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
     }
 
     if (wait_result == -1) {
+        log_spawn_failure("waitpid with WNOHANG failed", errno);
         return false;
     }
 #endif
