@@ -11,6 +11,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -25,6 +26,8 @@
     #endif
     #include <windows.h>
     #include <process.h>
+    #include <cerrno>
+    #include <chrono>
 #else
     #include <atomic>
     #include <cerrno>
@@ -408,13 +411,47 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
             argv_with_prog[i+1] = argv[i];
         }
         argv_with_prog[argv_size+1] = nullptr;
-        auto spawned = _spawnv(P_DETACH, full_path, argv_with_prog);
-        if (child_pid_out) {
-            *child_pid_out = static_cast<int>(spawned);
+        constexpr unsigned kMaxSpawnRetries = 5;
+        const auto retry_delay = std::chrono::milliseconds(50);
+
+        int spawned = -1;
+        int last_errno = 0;
+        unsigned long last_doserrno = 0;
+
+        for (unsigned attempt = 0; attempt < kMaxSpawnRetries; ++attempt) {
+            spawned = _spawnv(P_DETACH, full_path, argv_with_prog);
+            if (spawned != -1) {
+                break;
+            }
+
+            last_errno = errno;
+            last_doserrno = _doserrno;
+
+            const bool access_denied = (last_errno == EACCES) &&
+                (last_doserrno == ERROR_ACCESS_DENIED ||
+                 last_doserrno == ERROR_SHARING_VIOLATION ||
+                 last_doserrno == ERROR_LOCK_VIOLATION);
+            const bool transient = access_denied || (last_errno == EAGAIN);
+
+            if (attempt + 1 >= kMaxSpawnRetries || !transient) {
+                break;
+            }
+
+            std::this_thread::sleep_for(retry_delay);
         }
-        auto ret = spawned != -1;
+
+        if (spawned != -1) {
+            if (child_pid_out) {
+                *child_pid_out = static_cast<int>(spawned);
+            }
+            delete [] argv_with_prog;
+            return true;
+        }
+
+        errno = last_errno;
+        _doserrno = last_doserrno;
         delete [] argv_with_prog;
-        return ret;
+        return false;
     }
 
     return false;
