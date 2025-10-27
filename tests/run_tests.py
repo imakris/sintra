@@ -1543,15 +1543,16 @@ class TestRunner:
             if not output and result.stderr:
                 output = result.stderr.strip()
 
-            if result.returncode != 0:
-                capture_errors.append(
-                    f"{dump_path.name}: {debugger_name} exited with code {result.returncode}: {result.stderr.strip()}"
-                )
-                continue
-
+            normalized_code = self._normalize_windows_debugger_returncode(result.returncode)
             if output:
                 stack_outputs.append(f"dump file: {dump_path}\n{output}")
                 break
+
+            if not self._windows_debugger_returncode_indicates_success(normalized_code):
+                capture_errors.append(
+                    f"{dump_path.name}: {debugger_name} exited with code {normalized_code}: {result.stderr.strip()}"
+                )
+                continue
 
         if stack_outputs:
             return "\n\n".join(stack_outputs), ""
@@ -1599,14 +1600,16 @@ class TestRunner:
             if not output and result.stderr:
                 output = result.stderr.strip()
 
-            if result.returncode != 0:
-                capture_errors.append(
-                    f"PID {target_pid}: {debugger_name} exited with code {result.returncode}: {result.stderr.strip()}"
-                )
-                continue
-
+            normalized_code = self._normalize_windows_debugger_returncode(result.returncode)
             if output:
                 stack_outputs.append(f"PID {target_pid}\n{output}")
+                continue
+
+            if not self._windows_debugger_returncode_indicates_success(normalized_code):
+                capture_errors.append(
+                    f"PID {target_pid}: {debugger_name} exited with code {normalized_code}: {result.stderr.strip()}"
+                )
+                continue
 
         if stack_outputs:
             return "\n\n".join(stack_outputs), ""
@@ -1615,6 +1618,22 @@ class TestRunner:
             return "", "; ".join(capture_errors)
 
         return "", "no stack data captured"
+
+    def _normalize_windows_debugger_returncode(self, returncode: int) -> int:
+        """Return the unsigned 32-bit representation of a debugger exit code."""
+
+        if returncode < 0:
+            return (returncode + (1 << 32)) & 0xFFFFFFFF
+        return returncode
+
+    def _windows_debugger_returncode_indicates_success(self, returncode: int) -> bool:
+        """Return True if the debugger exit code should be treated as success."""
+
+        # Certain debuggers, notably CDB, return STATUS_TIMEOUT (0xD000010A)
+        # after executing commands even though the requested stack output is
+        # written to stdout. Treat these codes as successful so we do not lose
+        # the captured stack traces.
+        return returncode in {0, 0xD000010A}
 
     def _collect_windows_process_tree_pids(self, pid: int) -> List[int]:
         """Return all descendant process IDs for the provided Windows process."""
