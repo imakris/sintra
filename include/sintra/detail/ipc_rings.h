@@ -266,7 +266,7 @@ std::vector<size_t> get_ring_configurations(
         return m / gcd(m, n) * n;
     };
 
-    size_t page_size = ipc::mapped_region::get_page_size();
+    size_t page_size = system_page_size();
     // Round up to a page-size multiple that is also a multiple of sizeof(T)
     size_t base_size = lcm(sizeof(T), page_size);
 
@@ -575,7 +575,7 @@ private:
             }
 
             // NOTE: On Windows, Boost's "page size" here is the allocation granularity.
-            size_t page_size = ipc::mapped_region::get_page_size();
+            size_t page_size = system_page_size();
 
             // Enforce the “multiple of page/granularity” constraint explicitly.
             assert((m_data_region_size % page_size) == 0 &&
