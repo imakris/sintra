@@ -48,6 +48,43 @@ namespace sintra {
 namespace detail {
 
 #ifdef _WIN32
+inline std::size_t query_system_page_size() noexcept
+{
+    SYSTEM_INFO info{};
+    ::GetSystemInfo(&info);
+
+    std::size_t granularity = static_cast<std::size_t>(info.dwAllocationGranularity);
+    if (granularity == 0) {
+        granularity = static_cast<std::size_t>(info.dwPageSize);
+    }
+
+    return granularity != 0 ? granularity : std::size_t(4096);
+}
+#else
+inline std::size_t query_system_page_size() noexcept
+{
+    long page = ::sysconf(_SC_PAGESIZE);
+    if (page <= 0) {
+#ifdef _SC_PAGE_SIZE
+        page = ::sysconf(_SC_PAGE_SIZE);
+#endif
+    }
+
+#if defined(__APPLE__) || defined(__FreeBSD__)
+    if (page <= 0) {
+        page = ::getpagesize();
+    }
+#endif
+
+    if (page <= 0) {
+        page = 4096;
+    }
+
+    return static_cast<std::size_t>(page);
+}
+#endif
+
+#ifdef _WIN32
 using native_file_handle = HANDLE;
 
 inline native_file_handle invalid_file() noexcept
@@ -161,6 +198,12 @@ inline bool close_file(native_file_handle handle)
 #endif
 
 } // namespace detail
+
+inline std::size_t system_page_size() noexcept
+{
+    static const std::size_t cached = detail::query_system_page_size();
+    return cached;
+}
 
 #if defined(__APPLE__)
 inline void precision_sleep_for(std::chrono::duration<double> duration)
