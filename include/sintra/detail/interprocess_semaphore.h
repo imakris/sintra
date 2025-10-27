@@ -22,6 +22,7 @@
   #include <unordered_map>
 #elif defined(__APPLE__)
   #include <cerrno>
+  #include <ctime>
   #if defined(__has_include)
     #if __has_include(<os/os_sync_wait_on_address.h>) && __has_include(<os/clock.h>)
       #include <os/os_sync_wait_on_address.h>
@@ -456,6 +457,12 @@ private:
     static constexpr os_sync_wait_on_address_flags_t wait_flags = OS_SYNC_WAIT_ON_ADDRESS_SHARED;
     static constexpr os_sync_wake_by_address_flags_t wake_flags = OS_SYNC_WAKE_BY_ADDRESS_SHARED;
 
+#    ifdef OS_CLOCK_REALTIME
+    static constexpr os_clockid_t wait_clock = OS_CLOCK_REALTIME;
+#    else
+    static constexpr os_clockid_t wait_clock = static_cast<os_clockid_t>(CLOCK_REALTIME);
+#    endif
+
     void initialise_os_sync(unsigned int initial_count)
     {
         m_os_sync.count.store(static_cast<int32_t>(initial_count), std::memory_order_relaxed);
@@ -523,7 +530,7 @@ private:
                 0,
                 sizeof(int32_t),
                 wait_flags,
-                OS_CLOCK_REALTIME,
+                wait_clock,
                 timeout_ns);
             if (rc >= 0) {
                 return true;
