@@ -14,6 +14,7 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+#include <thread>
 
 
 #ifdef _WIN32
@@ -25,6 +26,8 @@
     #endif
     #include <windows.h>
     #include <process.h>
+    #include <cerrno>
+    #include <errno.h>
 #else
     #include <atomic>
     #include <cerrno>
@@ -394,30 +397,50 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
     }
 
     char full_path[_MAX_PATH];
-    if( _fullpath(full_path, prog, _MAX_PATH ) != NULL ) {
-
-        size_t argv_size=0;
-        for (size_t i=0; argv[i] != nullptr; i++) {
-            argv_size++;
-        }
-
-        const char** argv_with_prog = new const char*[argv_size+2];
-        argv_with_prog[0] = full_path;
-
-        for (size_t i=0; i!=argv_size; i++) {
-            argv_with_prog[i+1] = argv[i];
-        }
-        argv_with_prog[argv_size+1] = nullptr;
-        auto spawned = _spawnv(P_DETACH, full_path, argv_with_prog);
-        if (child_pid_out) {
-            *child_pid_out = static_cast<int>(spawned);
-        }
-        auto ret = spawned != -1;
-        delete [] argv_with_prog;
-        return ret;
+    if( _fullpath(full_path, prog, _MAX_PATH ) == NULL ) {
+        return false;
     }
 
-    return false;
+    size_t argv_size = 0;
+    while (argv[argv_size] != nullptr) {
+        ++argv_size;
+    }
+
+    const char** argv_with_prog = new const char*[argv_size + 2];
+    argv_with_prog[0] = full_path;
+    for (size_t i = 0; i != argv_size; ++i) {
+        argv_with_prog[i + 1] = argv[i];
+    }
+    argv_with_prog[argv_size + 1] = nullptr;
+
+    constexpr int max_attempts = 3;
+    int spawned = -1;
+    bool success = false;
+    for (int attempt = 0; attempt < max_attempts; ++attempt) {
+        spawned = _spawnv(P_DETACH, full_path, argv_with_prog);
+        if (spawned != -1) {
+            success = true;
+            break;
+        }
+
+        const int current_errno = errno;
+        const unsigned long os_error = _doserrno;
+        const bool retryable = (current_errno == EAGAIN) || (current_errno == ENOMEM) ||
+                               (os_error == ERROR_RETRY) || (os_error == ERROR_NOT_ENOUGH_MEMORY);
+        if (attempt + 1 >= max_attempts || !retryable) {
+            break;
+        }
+
+        const auto backoff = std::chrono::milliseconds(50 * (attempt + 1));
+        std::this_thread::sleep_for(backoff);
+    }
+
+    if (child_pid_out) {
+        *child_pid_out = success ? static_cast<int>(spawned) : -1;
+    }
+
+    delete [] argv_with_prog;
+    return success;
 #else
 
     // 1. we fork to obtain an inbetween process
