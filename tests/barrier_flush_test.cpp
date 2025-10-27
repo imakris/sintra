@@ -12,6 +12,7 @@
 
 #include <sintra/sintra.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -112,9 +113,12 @@ struct Coordinator_state
 {
     std::mutex mutex;
     std::condition_variable cv;
+    std::array<std::uint32_t, kWorkerCount> next_expected_iteration{};
     std::size_t messages_in_iteration = 0;
     std::size_t total_messages        = 0;
-    bool too_many_messages            = false;
+    bool iteration_failed             = false;
+    bool abort_requested              = false;
+    std::size_t current_iteration     = 0;
 };
 
 
@@ -145,35 +149,128 @@ int coordinator_process()
     bool success = true;
     std::string failure_reason;
 
-    activate_slot([&](const Iteration_marker&) {
+    activate_slot([&](const Iteration_marker& marker) {
         std::lock_guard<std::mutex> lock(state.mutex);
-        if (state.messages_in_iteration >= kWorkerCount) {
-            state.too_many_messages = true;
-        } else {
+
+        if (state.abort_requested) {
+            state.cv.notify_all();
+            return;
+        }
+
+        auto mark_failure = [&](const std::string& reason) {
+            if (success) {
+                success = false;
+                failure_reason = reason;
+            }
+            state.iteration_failed = true;
+            state.abort_requested = true;
+        };
+
+        if (marker.worker >= kWorkerCount) {
+            std::ostringstream oss;
+            oss << "Invalid worker index " << marker.worker << " (expected < " << kWorkerCount
+                << ")";
+            mark_failure(oss.str());
+            state.cv.notify_all();
+            return;
+        }
+
+        auto& expected = state.next_expected_iteration[marker.worker];
+
+        if (marker.iteration == expected) {
+            ++expected;
             ++state.messages_in_iteration;
             ++state.total_messages;
+            state.cv.notify_all();
+            return;
         }
-        state.cv.notify_one();
+
+        if (marker.iteration < expected) {
+            std::ostringstream oss;
+            oss << "Worker " << marker.worker << " sent duplicate marker for iteration "
+                << marker.iteration;
+            mark_failure(oss.str());
+            state.cv.notify_all();
+            return;
+        }
+
+        std::ostringstream oss;
+        oss << "Worker " << marker.worker << " skipped from iteration " << expected
+            << " to " << marker.iteration;
+        mark_failure(oss.str());
+        state.cv.notify_all();
     });
 
     barrier("barrier-flush-ready");
 
+    bool aborted = false;
+    constexpr auto iteration_timeout = std::chrono::seconds(10);
+
     for (std::size_t iteration = 0; iteration < kIterations; ++iteration) {
 
+        if (aborted) {
+            barrier("barrier-flush-iteration");
+            continue;
+        }
+
+
+        {
+            std::lock_guard<std::mutex> guard(state.mutex);
+            state.current_iteration = iteration;
+            state.messages_in_iteration = 0;
+        }
 
         std::unique_lock<std::mutex> lock(state.mutex);
-        state.cv.wait(lock, [&] {
-            return state.messages_in_iteration == kWorkerCount || state.too_many_messages;
+        const bool completed = state.cv.wait_for(lock, iteration_timeout, [&] {
+            if (state.abort_requested || state.iteration_failed) {
+                return true;
+            }
+            for (std::size_t worker = 0; worker < kWorkerCount; ++worker) {
+                if (state.next_expected_iteration[worker] <= state.current_iteration) {
+                    return false;
+                }
+            }
+            return true;
         });
-        if (state.too_many_messages && success) {
-            success = false;
-            failure_reason = "coordinator observed more messages than expected during an iteration";
+
+        if (!completed && !state.abort_requested && !state.iteration_failed) {
+            if (success) {
+                success = false;
+                std::ostringstream oss;
+                oss << "Timed out waiting for iteration " << iteration << " markers. Missing workers:";
+                bool any_missing = false;
+                for (std::size_t worker = 0; worker < kWorkerCount; ++worker) {
+                    if (state.next_expected_iteration[worker] <= state.current_iteration) {
+                        oss << (any_missing ? " " : " ") << worker;
+                        any_missing = true;
+                    }
+                }
+                if (!any_missing) {
+                    oss << " (none)";
+                }
+                failure_reason = oss.str();
+            }
+            state.abort_requested = true;
         }
+
+        if (state.iteration_failed && success) {
+            if (failure_reason.empty()) {
+                failure_reason = "coordinator observed invalid marker sequence";
+            }
+            success = false;
+        }
+
+        const bool should_abort = state.abort_requested || state.iteration_failed;
+
         state.messages_in_iteration = 0;
-        state.too_many_messages = false;
         lock.unlock();
 
         barrier("barrier-flush-iteration");
+
+        if (should_abort) {
+            aborted = true;
+            continue;
+        }
 
     }
 
