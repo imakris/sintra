@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <functional>
+#include <iostream>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -504,6 +505,21 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
         Error,
     };
 
+    auto read_result_name = [](Read_result result) {
+        switch (result) {
+            case Read_result::Value:
+                return "Value";
+            case Read_result::Eof:
+                return "Eof";
+            case Read_result::Error:
+                return "Error";
+        }
+        return "<unknown>";
+    };
+
+    auto debug_env = std::getenv("SINTRA_SPAWN_DEBUG");
+    bool debug_enabled = debug_env && debug_env[0] != '\0';
+
     auto read_int = [&](int* value, int* error_out) -> Read_result {
         std::array<char, sizeof(int)> buffer{};
         size_t offset = 0;
@@ -539,7 +555,8 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
     bool spawn_failed = false;
 
     int ready_status = 0;
-    switch (read_int(&ready_status, &exec_errno)) {
+    Read_result ready_result = read_int(&ready_status, &exec_errno);
+    switch (ready_result) {
         case Read_result::Value:
             break;
         case Read_result::Eof:
@@ -556,9 +573,11 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
         spawn_failed = true;
     }
 
+    int exec_status = 0;
+    Read_result exec_result = Read_result::Eof;
     if (!spawn_failed) {
-        int exec_status = 0;
-        switch (read_int(&exec_status, &exec_errno)) {
+        exec_result = read_int(&exec_status, &exec_errno);
+        switch (exec_result) {
             case Read_result::Value:
                 exec_errno = exec_status > 0 ? exec_status : -exec_status;
                 spawn_failed = true;
@@ -584,6 +603,15 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
                 break;
             }
         }
+        if (debug_enabled) {
+            std::cerr << "spawn_detached failure during readiness handshake: ready_result="
+                      << read_result_name(ready_result)
+                      << " ready_status=" << ready_status
+                      << " exec_result=" << read_result_name(exec_result)
+                      << " exec_status=" << exec_status
+                      << " exec_errno=" << exec_errno
+                      << " errno=" << errno << std::endl;
+        }
         errno = exec_errno ? exec_errno : errno;
         return false;
     }
@@ -597,6 +625,10 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
 
     if (wait_result == child_pid) {
         if (!(WIFEXITED(wait_status) && WEXITSTATUS(wait_status) == 0)) {
+            if (debug_enabled) {
+                std::cerr << "spawn_detached intermediate wait failure: wait_status=" << wait_status
+                          << " exec_errno=" << exec_errno << " errno=" << errno << std::endl;
+            }
             errno = exec_errno ? exec_errno : ECHILD;
             return false;
         }
@@ -607,6 +639,9 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
     }
 
     if (wait_result == -1) {
+        if (debug_enabled) {
+            std::cerr << "spawn_detached waitpid error: errno=" << errno << std::endl;
+        }
         return false;
     }
 #endif
