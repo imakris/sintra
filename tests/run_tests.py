@@ -843,36 +843,74 @@ class TestRunner:
                 break
             debugger_timeout = max(5, min(per_pid_timeout, remaining))
 
-            try:
-                result = subprocess.run(
-                    self._build_unix_live_debugger_command(
-                        debugger_name,
-                        debugger_command,
-                        target_pid,
-                    ),
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    timeout=debugger_timeout,
+            debugger_output = ""
+            debugger_error = ""
+            debugger_success = False
+
+            max_attempts = 3 if debugger_is_macos_lldb else 1
+            for attempt in range(max_attempts):
+                try:
+                    result = subprocess.run(
+                        self._build_unix_live_debugger_command(
+                            debugger_name,
+                            debugger_command,
+                            target_pid,
+                        ),
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        timeout=debugger_timeout,
+                    )
+                except subprocess.SubprocessError as exc:
+                    debugger_error = f"{debugger_name} failed ({exc})"
+                    break
+
+                debugger_output = result.stdout.strip()
+                if not debugger_output and result.stderr:
+                    debugger_output = result.stderr.strip()
+
+                if result.returncode == 0:
+                    debugger_success = True
+                    break
+
+                debugger_error = (
+                    f"{debugger_name} exited with code {result.returncode}: {result.stderr.strip()}"
                 )
-            except subprocess.SubprocessError as exc:
-                capture_errors.append(
-                    f"PID {target_pid}: {debugger_name} failed ({exc})"
-                )
+
+                if not debugger_is_macos_lldb:
+                    break
+
+                if not self._process_exists(target_pid):
+                    break
+
+                lowered_error = result.stderr.strip().lower()
+                if 'no such process' not in lowered_error and 'does not exist' not in lowered_error:
+                    break
+
+                time.sleep(0.5)
+
+            if debugger_success and debugger_output:
+                stack_outputs.append(f"PID {target_pid}\n{debugger_output}")
                 continue
 
-            output = result.stdout.strip()
-            if not output and result.stderr:
-                output = result.stderr.strip()
-
-            if result.returncode != 0:
-                capture_errors.append(
-                    f"PID {target_pid}: {debugger_name} exited with code {result.returncode}: {result.stderr.strip()}"
-                )
+            if debugger_success:
                 continue
 
-            if output:
-                stack_outputs.append(f"PID {target_pid}\n{output}")
+            fallback_output = ""
+            fallback_error = debugger_error
+
+            if debugger_is_macos_lldb and self._process_exists(target_pid):
+                fallback_output, fallback_error = self._capture_macos_sample_stack(
+                    target_pid,
+                    debugger_timeout,
+                )
+
+            if fallback_output:
+                stack_outputs.append(f"PID {target_pid}\n{fallback_output}")
+                continue
+
+            if fallback_error:
+                capture_errors.append(f"PID {target_pid}: {fallback_error}")
 
         # Allow processes to continue so gdb can detach cleanly before killing
         if should_pause:
@@ -1027,6 +1065,54 @@ class TestRunner:
             return 'lldb', [xcrun_path, 'lldb'], ''
 
         return None, None, 'gdb or lldb not available (install gdb or the Xcode Command Line Tools)'
+
+    def _process_exists(self, pid: int) -> bool:
+        """Best-effort check whether a PID still refers to a running process."""
+
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+
+    def _capture_macos_sample_stack(self, pid: int, timeout: float) -> Tuple[str, str]:
+        """Attempt to capture stack traces using the macOS sample utility."""
+
+        sample_path = shutil.which('sample')
+        if not sample_path:
+            return "", "sample utility not available"
+
+        duration = max(1, min(10, int(timeout)))
+        command = [
+            sample_path,
+            str(pid),
+            str(duration),
+            '1',
+            '-mayDie',
+        ]
+
+        try:
+            result = subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=duration + 5,
+            )
+        except subprocess.SubprocessError as exc:
+            return "", f"sample failed ({exc})"
+
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip()
+            if detail:
+                return "", f"sample exited with code {result.returncode}: {detail}"
+            return "", f"sample exited with code {result.returncode}"
+
+        output = result.stdout.strip()
+        if not output:
+            return "", "sample produced no output"
+
+        return output, ""
 
     def _ensure_macos_dsym(self, executable: Path) -> Optional[str]:
         """Ensure a dSYM bundle exists for the provided executable on macOS."""
