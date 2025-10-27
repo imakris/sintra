@@ -1924,11 +1924,46 @@ def _resolve_git_metadata(start_dir: Path) -> Tuple[str, str]:
     if repo_root:
         start_dir = Path(repo_root)
 
+    revision = _run_git_command('rev-parse', 'HEAD') or 'unknown'
+
     branch = _run_git_command('rev-parse', '--abbrev-ref', 'HEAD') or 'unknown'
     if branch == 'HEAD':
         branch = 'detached HEAD'
+        commit_ref = revision if revision != 'unknown' else 'HEAD'
 
-    revision = _run_git_command('rev-parse', 'HEAD') or 'unknown'
+        def _first_containing_ref(*patterns: str) -> Optional[str]:
+            if not patterns:
+                return None
+
+            refs_output = _run_git_command(
+                'for-each-ref',
+                f'--contains={commit_ref}',
+                '--sort=-committerdate',
+                '--format=%(refname:short)',
+                *patterns,
+            )
+            if not refs_output:
+                return None
+
+            for ref in refs_output.splitlines():
+                ref = ref.strip()
+                if ref and ref != 'HEAD':
+                    return ref
+
+            return None
+
+        containing_ref = _first_containing_ref('refs/heads')
+        if not containing_ref:
+            containing_ref = _first_containing_ref('refs/remotes')
+        if not containing_ref:
+            containing_ref = _run_git_command(
+                'describe', '--all', '--always', commit_ref,
+            )
+            if containing_ref == 'HEAD':
+                containing_ref = None
+
+        if containing_ref:
+            branch = f"{branch} (from {containing_ref})"
 
     return branch, revision
 
