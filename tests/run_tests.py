@@ -1095,7 +1095,7 @@ class TestRunner:
             '--batch',
             '--no-lldbinit',
             '-p', str(pid),
-            '-o', 'thread backtrace all -c 256 -e true',
+            '-o', 'thread backtrace all -c 256 -e',
             '-o', 'detach',
             '-o', 'quit',
         ]
@@ -1132,7 +1132,7 @@ class TestRunner:
             '--batch',
             '--no-lldbinit',
             '-o', f'target create --core {quoted_core} {quoted_executable}',
-            '-o', 'thread backtrace all -c 256 -e true',
+            '-o', 'thread backtrace all -c 256 -e',
             '-o', 'quit',
         ]
 
