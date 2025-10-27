@@ -161,6 +161,7 @@
     #include <libproc.h>
     #include <mach/mach.h>
     #include <mach/mach_time.h>
+    #include <sys/sysctl.h>
   #endif
 #endif
 
@@ -552,7 +553,7 @@ static inline bool is_process_alive(uint32_t pid)
 #endif
 
 //==============================================================================
-// Linux-only runtime cache-line helpers (placed AFTER includes, as required)
+// Platform-specific runtime cache-line helpers (placed AFTER includes)
 //==============================================================================
 #if defined(__linux__)
 /**
@@ -607,7 +608,58 @@ static inline void sintra_warn_if_cacheline_mismatch_linux(size_t assumed_cache_
             detected, assumed_cache_line_size);
     }
 }
-#endif // __linux__
+#elif defined(__APPLE__)
+/**
+ * Attempt to detect the L1 data cache line size on macOS at runtime.
+ * Order:
+ *   1) sysctl(CTL_HW, HW_CACHELINE)
+ *   2) sysctlbyname("hw.cachelinesize")
+ *   3) sysctlbyname("machdep.cpu.cache.linesize")
+ *   4) Fallback: 64 bytes
+ */
+static inline size_t sintra_detect_cache_line_size_macos()
+{
+    auto sysctl_fetch = [](const int* mib, unsigned int mib_len) -> size_t {
+        size_t value = 0;
+        size_t len = sizeof(value);
+        if (::sysctl(mib, mib_len, &value, &len, nullptr, 0) == 0 && value > 0) {
+            return value;
+        }
+        return 0;
+    };
+
+    int cacheline_mib[2] = {CTL_HW, HW_CACHELINE};
+    size_t value = sysctl_fetch(cacheline_mib, 2);
+    if (value) {
+        return value;
+    }
+
+    value = 0;
+    size_t len = sizeof(value);
+    if (::sysctlbyname("hw.cachelinesize", &value, &len, nullptr, 0) == 0 && value > 0) {
+        return value;
+    }
+
+    uint32_t legacy_value = 0;
+    len = sizeof(legacy_value);
+    if (::sysctlbyname("machdep.cpu.cache.linesize", &legacy_value, &len, nullptr, 0) == 0 && legacy_value > 0) {
+        return static_cast<size_t>(legacy_value);
+    }
+
+    return 64;
+}
+
+static inline void sintra_warn_if_cacheline_mismatch_macos(size_t assumed_cache_line_size)
+{
+    size_t detected = sintra_detect_cache_line_size_macos();
+    if (detected && detected != assumed_cache_line_size) {
+        std::fprintf(stderr,
+            "sintra(ipc_rings): warning: detected L1D line %zu != assumed %zu; "
+            "performance may be suboptimal.\n",
+            detected, assumed_cache_line_size);
+    }
+}
+#endif // platform runtime cache-line helpers
 
 //==============================================================================
 // Utility: project-consistent filesystem helpers
@@ -1103,6 +1155,11 @@ private:
             static std::once_flag once;
             std::call_once(once, []{
                 sintra_warn_if_cacheline_mismatch_linux(assumed_cache_line_size);
+            });
+#elif defined(__APPLE__) && defined(SINTRA_RUNTIME_CACHELINE_CHECK)
+            static std::once_flag once;
+            std::call_once(once, []{
+                sintra_warn_if_cacheline_mismatch_macos(assumed_cache_line_size);
             });
 #endif
             return true;
