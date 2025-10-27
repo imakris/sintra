@@ -22,7 +22,7 @@ public:
 
     void lock()
     {
-        const uint32_t self = get_current_pid();
+        const owner_token self = make_owner_token();
         if (try_acquire(self)) {
             return;
         }
@@ -38,16 +38,16 @@ public:
 
     bool try_lock()
     {
-        const uint32_t self = get_current_pid();
+        const owner_token self = make_owner_token();
         return try_acquire(self);
     }
 
     void unlock()
     {
-        const uint32_t self = get_current_pid();
-        uint32_t       expected = self;
+        const owner_token self = make_owner_token();
+        owner_token       expected = self;
         if (!m_owner.compare_exchange_strong(expected,
-                                              0,
+                                              k_unowned,
                                               std::memory_order_release,
                                               std::memory_order_relaxed))
         {
@@ -69,9 +69,24 @@ private:
         std::this_thread::sleep_for(sleep_us);
     }
 
-    bool try_acquire(uint32_t self)
+    using owner_token = std::uint64_t;
+    static constexpr owner_token k_unowned = 0;
+
+    static owner_token make_owner_token()
     {
-        uint32_t expected = 0;
+        const owner_token pid = static_cast<owner_token>(get_current_pid());
+        const owner_token tid = static_cast<owner_token>(get_current_tid());
+        return (pid << 32u) | (tid & 0xFFFFFFFFull);
+    }
+
+    static uint32_t owner_pid(owner_token token)
+    {
+        return static_cast<uint32_t>(token >> 32u);
+    }
+
+    bool try_acquire(owner_token self)
+    {
+        owner_token expected = k_unowned;
         if (m_owner.compare_exchange_strong(expected,
                                              self,
                                              std::memory_order_acquire,
@@ -85,8 +100,8 @@ private:
                                     "interprocess_mutex recursive locking detected");
         }
 
-        if (expected != 0 && try_recover(expected, self)) {
-            expected = 0;
+        if (expected != k_unowned && try_recover(expected, self)) {
+            expected = k_unowned;
             if (m_owner.compare_exchange_strong(expected,
                                                  self,
                                                  std::memory_order_acquire,
@@ -99,15 +114,16 @@ private:
         return false;
     }
 
-    bool try_recover(uint32_t observed_owner, uint32_t self)
+    bool try_recover(owner_token observed_owner, owner_token self)
     {
-        if (observed_owner == 0) {
+        if (observed_owner == k_unowned) {
             return false;
         }
 
         uint32_t expected = 0;
+        const uint32_t caller_pid = owner_pid(self);
         if (!m_recovering.compare_exchange_strong(expected,
-                                                   self,
+                                                   caller_pid,
                                                    std::memory_order_acq_rel,
                                                    std::memory_order_relaxed))
         {
@@ -115,12 +131,14 @@ private:
         }
 
         bool recovered = false;
-        uint32_t current_owner = m_owner.load(std::memory_order_acquire);
-        if (current_owner == 0) {
+        owner_token current_owner = m_owner.load(std::memory_order_acquire);
+        if (current_owner == k_unowned) {
             recovered = true;
-        } else if (current_owner == observed_owner && !is_process_alive(observed_owner)) {
+        } else if (current_owner == observed_owner &&
+                   !is_process_alive(owner_pid(observed_owner)))
+        {
             recovered = m_owner.compare_exchange_strong(current_owner,
-                                                        0,
+                                                        k_unowned,
                                                         std::memory_order_acq_rel,
                                                         std::memory_order_relaxed);
         }
@@ -129,7 +147,7 @@ private:
         return recovered;
     }
 
-    std::atomic<uint32_t> m_owner{0};
+    std::atomic<owner_token> m_owner{k_unowned};
     std::atomic<uint32_t> m_recovering{0};
 };
 
