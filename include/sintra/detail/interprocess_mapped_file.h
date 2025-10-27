@@ -66,7 +66,7 @@ public:
             protect = PAGE_READWRITE;
             break;
         case copy_on_write:
-            desired_access = GENERIC_READ | GENERIC_WRITE;
+            desired_access = GENERIC_READ;
             protect = PAGE_WRITECOPY;
             break;
         default:
@@ -112,7 +112,7 @@ public:
             flags = O_RDWR;
             break;
         case copy_on_write:
-            flags = O_RDWR;
+            flags = O_RDONLY;
             break;
         default:
             throw std::invalid_argument("invalid file_mapping mode");
