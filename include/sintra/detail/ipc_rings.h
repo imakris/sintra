@@ -1939,12 +1939,13 @@ private:
                                 if (c.reading_sequences[i].data.has_guard.compare_exchange_strong(
                                         expected, uint8_t{0}, std::memory_order_acq_rel))
                                 {
-                                    c.reading_sequences[i].data.status.store(
-                                        Ring<T, false>::READER_STATE_EVICTED, std::memory_order_release);
-
                                     size_t evicted_reader_octile =
                                         c.reading_sequences[i].data.trailing_octile.load(std::memory_order_relaxed);
-                                    c.read_access.fetch_sub(uint64_t(1) << (8 * evicted_reader_octile), std::memory_order_acq_rel);
+                                    c.read_access.fetch_sub(
+                                        uint64_t(1) << (8 * evicted_reader_octile), std::memory_order_acq_rel);
+
+                                    c.reading_sequences[i].data.status.store(
+                                        Ring<T, false>::READER_STATE_EVICTED, std::memory_order_release);
                                 }
                             }
                         }
