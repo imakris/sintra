@@ -45,6 +45,43 @@
 
 namespace sintra {
 
+inline std::size_t system_page_size()
+{
+    static const std::size_t cached = []() -> std::size_t {
+#ifdef _WIN32
+        SYSTEM_INFO info;
+        ::GetSystemInfo(&info);
+        return static_cast<std::size_t>(info.dwAllocationGranularity);
+#else
+        errno = 0;
+        long page_size = ::sysconf(_SC_PAGESIZE);
+        if (page_size <= 0) {
+            errno = 0;
+            page_size = ::sysconf(_SC_PAGE_SIZE);
+        }
+
+#if defined(__FreeBSD__)
+        if (page_size <= 0) {
+            int value = 0;
+            size_t len = sizeof(value);
+            int mib[2] = {CTL_HW, HW_PAGESIZE};
+            if (::sysctl(mib, 2, &value, &len, nullptr, 0) == 0 && value > 0) {
+                return static_cast<std::size_t>(value);
+            }
+        }
+#endif
+
+        if (page_size <= 0) {
+            const int err = errno ? errno : EINVAL;
+            throw std::system_error(err, std::generic_category(), "sysconf(_SC_PAGESIZE) failed");
+        }
+        return static_cast<std::size_t>(page_size);
+#endif
+    }();
+
+    return cached;
+}
+
 namespace detail {
 
 #ifdef _WIN32

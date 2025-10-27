@@ -23,6 +23,7 @@
 #define SINTRA_EVICTION_SPIN_THRESHOLD 0
 #define private public
 #define protected public
+#include "sintra/detail/ipc_platform_utils.h"
 #include "sintra/detail/ipc_rings.h"
 #undef private
 #undef protected
@@ -158,7 +159,7 @@ struct Temp_ring_dir {
 template <typename T>
 size_t pick_ring_elements(size_t min_elements = 8)
 {
-    size_t page_size = boost::interprocess::mapped_region::get_page_size();
+    size_t page_size = sintra::system_page_size();
     size_t ring_bytes = page_size;
     while (true) {
         if (ring_bytes % sizeof(T) == 0) {
@@ -177,7 +178,7 @@ size_t pick_ring_elements(size_t min_elements = 8)
 TEST_CASE(test_get_ring_configurations_properties)
 {
     constexpr size_t min_elements = 64;
-    size_t page_size = boost::interprocess::mapped_region::get_page_size();
+    size_t page_size = sintra::system_page_size();
     auto configs = sintra::get_ring_configurations<uint32_t>(min_elements, page_size * 8, 6);
     ASSERT_FALSE(configs.empty());
     ASSERT_LE(configs.size(), 6u);
