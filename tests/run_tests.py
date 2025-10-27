@@ -374,7 +374,6 @@ class TestRunner:
                 'stdout': subprocess.PIPE,
                 'stderr': subprocess.PIPE,
                 'text': True,
-                'bufsize': 1,
                 'cwd': invocation.path.parent,
             }
 
