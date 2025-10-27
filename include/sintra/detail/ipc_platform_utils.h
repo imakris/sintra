@@ -30,6 +30,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/param.h>
 #include <unistd.h>
 
   #if defined(__FreeBSD__)
@@ -46,6 +47,42 @@
 namespace sintra {
 
 namespace detail {
+
+#ifdef _WIN32
+inline std::size_t system_page_size() noexcept
+{
+    static const std::size_t cached = [] {
+        SYSTEM_INFO info;
+        ::GetSystemInfo(&info);
+        return static_cast<std::size_t>(info.dwAllocationGranularity);
+    }();
+    return cached;
+}
+#else
+inline std::size_t system_page_size() noexcept
+{
+    auto query = []() -> std::size_t {
+#if defined(_SC_PAGESIZE)
+        long value = ::sysconf(_SC_PAGESIZE);
+#elif defined(_SC_PAGE_SIZE)
+        long value = ::sysconf(_SC_PAGE_SIZE);
+#else
+        long value = -1;
+#endif
+        if (value <= 0) {
+#ifdef PAGE_SIZE
+            return static_cast<std::size_t>(PAGE_SIZE);
+#else
+            return static_cast<std::size_t>(4096);
+#endif
+        }
+        return static_cast<std::size_t>(value);
+    };
+
+    static const std::size_t cached = query();
+    return cached;
+}
+#endif
 
 #ifdef _WIN32
 using native_file_handle = HANDLE;
