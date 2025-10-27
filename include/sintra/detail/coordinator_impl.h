@@ -495,9 +495,12 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
         // where resetting too early allows concurrent barriers to include a dying process.
 
         // remove all group associations of unpublished process
-        auto groups_it = m_groups_of_process.find(iid);
-        if (groups_it != m_groups_of_process.end()) {
-            m_groups_of_process.erase(groups_it);
+        {
+            std::lock_guard<mutex> groups_lock(m_groups_mutex);
+            auto groups_it = m_groups_of_process.find(iid);
+            if (groups_it != m_groups_of_process.end()) {
+                m_groups_of_process.erase(groups_it);
+            }
         }
 
         //// and finally, if the process was being read, stop reading from it
