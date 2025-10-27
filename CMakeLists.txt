@@ -4,6 +4,8 @@ project(sintra LANGUAGES CXX)
 
 find_package(Threads REQUIRED)
 
+option(SINTRA_RELEASE_WITH_DEBUG_SYMBOLS "Emit debug symbols when building Release configuration" OFF)
+
 # Force Debug build by default
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Debug CACHE STRING "Choose the type of build." FORCE)
@@ -76,12 +78,17 @@ if(MSVC)
         $<$<CONFIG:Debug>:/Od>          # Disable optimizations
         $<$<CONFIG:Debug>:/RTC1>        # Runtime checks
         $<$<CONFIG:Debug>:/MDd>         # Debug runtime library
+        $<$<AND:$<CONFIG:Release>,$<BOOL:${SINTRA_RELEASE_WITH_DEBUG_SYMBOLS}>>:/Zi>
     )
-    target_link_options(sintra INTERFACE $<$<CONFIG:Debug>:/DEBUG:FULL>)
+    target_link_options(sintra INTERFACE
+        $<$<CONFIG:Debug>:/DEBUG:FULL>
+        $<$<AND:$<CONFIG:Release>,$<BOOL:${SINTRA_RELEASE_WITH_DEBUG_SYMBOLS}>>:/DEBUG:FULL>
+    )
 else()
     target_compile_options(sintra INTERFACE
         $<$<CONFIG:Debug>:-g>
         $<$<CONFIG:Debug>:-O0>
+        $<$<AND:$<CONFIG:Release>,$<BOOL:${SINTRA_RELEASE_WITH_DEBUG_SYMBOLS}>>:-g>
     )
 endif()
 
