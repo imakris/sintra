@@ -161,6 +161,7 @@
     #include <libproc.h>
     #include <mach/mach.h>
     #include <mach/mach_time.h>
+    #include <sys/sysctl.h>
   #endif
 #endif
 
@@ -552,7 +553,7 @@ static inline bool is_process_alive(uint32_t pid)
 #endif
 
 //==============================================================================
-// Linux-only runtime cache-line helpers (placed AFTER includes, as required)
+// Runtime cache-line helpers (placed AFTER includes, as required)
 //==============================================================================
 #if defined(__linux__)
 /**
@@ -607,7 +608,50 @@ static inline void sintra_warn_if_cacheline_mismatch_linux(size_t assumed_cache_
             detected, assumed_cache_line_size);
     }
 }
-#endif // __linux__
+#elif defined(__APPLE__)
+/**
+ * Attempt to detect the L1 data cache line size at runtime on macOS.
+ * Order:
+ *   1) sysctl hw.cachelinesize (documented public interface).
+ *   2) sysctl machdep.cpu.cache.linesize (legacy x86 alias).
+ *   3) Fallback: 64 bytes (conservative default that matches many systems).
+ */
+static inline size_t sintra_detect_cache_line_size_macos()
+{
+    auto query_size = [](const char* name) -> size_t {
+        size_t value = 0;
+        size_t len = sizeof(value);
+        if (::sysctlbyname(name, &value, &len, nullptr, 0) == 0 && value > 0) {
+            return value;
+        }
+        return 0;
+    };
+
+    if (size_t s = query_size("hw.cachelinesize")) {
+        return s;
+    }
+    if (size_t s = query_size("machdep.cpu.cache.linesize")) {
+        return s;
+    }
+
+    return 64; // conservative default
+}
+
+/**
+ * Under SINTRA_RUNTIME_CACHELINE_CHECK, warn ONCE after a successful attach()
+ * if the detected cache-line size differs from assumed_cache_line_size.
+ */
+static inline void sintra_warn_if_cacheline_mismatch_macos(size_t assumed_cache_line_size)
+{
+    size_t detected = sintra_detect_cache_line_size_macos();
+    if (detected && detected != assumed_cache_line_size) {
+        std::fprintf(stderr,
+            "sintra(ipc_rings): warning: detected L1D line %zu != assumed %zu; "
+            "performance may be suboptimal.\n",
+            detected, assumed_cache_line_size);
+    }
+}
+#endif // __APPLE__
 
 //==============================================================================
 // Utility: project-consistent filesystem helpers
@@ -1098,11 +1142,15 @@ private:
                 return false;
             }
 
-#if defined(__linux__) && defined(SINTRA_RUNTIME_CACHELINE_CHECK)
+#if defined(SINTRA_RUNTIME_CACHELINE_CHECK) && (defined(__linux__) || defined(__APPLE__))
             // Warn ONCE per process if we detect a cache-line mismatch.
             static std::once_flag once;
             std::call_once(once, []{
-                sintra_warn_if_cacheline_mismatch_linux(assumed_cache_line_size);
+                #if defined(__linux__)
+                    sintra_warn_if_cacheline_mismatch_linux(assumed_cache_line_size);
+                #elif defined(__APPLE__)
+                    sintra_warn_if_cacheline_mismatch_macos(assumed_cache_line_size);
+                #endif
             });
 #endif
             return true;
