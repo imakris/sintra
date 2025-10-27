@@ -24,6 +24,7 @@ import argparse
 import json
 import fnmatch
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -1927,6 +1928,42 @@ def _resolve_git_metadata(start_dir: Path) -> Tuple[str, str]:
 
     branch = _run_git_command('rev-parse', '--abbrev-ref', 'HEAD') or 'unknown'
 
+    def _github_pr_branch_from_api() -> Optional[str]:
+        """Return the source branch of a pull request using the GitHub API."""
+
+        ref_name = os.environ.get('GITHUB_REF')
+        repo = os.environ.get('GITHUB_REPOSITORY')
+        token = os.environ.get('GITHUB_TOKEN')
+        if not (ref_name and repo and token):
+            return None
+
+        match = re.fullmatch(r'refs/pull/(\d+)/(merge|head)', ref_name)
+        if not match:
+            return None
+
+        pr_number = match.group(1)
+        api_base = os.environ.get('GITHUB_API_URL', 'https://api.github.com').rstrip('/')
+        pr_url = f"{api_base}/repos/{repo}/pulls/{pr_number}"
+
+        request = urllib.request.Request(pr_url)
+        request.add_header('Authorization', f'Bearer {token}')
+        request.add_header('Accept', 'application/vnd.github+json')
+
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                payload = json.load(response)
+        except (urllib.error.URLError, json.JSONDecodeError, TimeoutError, ValueError, OSError):
+            return None
+
+        if isinstance(payload, dict):
+            head_info = payload.get('head')
+            if isinstance(head_info, dict):
+                branch_name = head_info.get('ref')
+                if isinstance(branch_name, str) and branch_name:
+                    return branch_name
+
+        return None
+
     def _env_branch_hint() -> Optional[str]:
         """Return the branch name advertised by common CI environment variables."""
 
@@ -1969,6 +2006,10 @@ def _resolve_git_metadata(start_dir: Path) -> Tuple[str, str]:
                         return _normalize_ref(ref)
             except (OSError, json.JSONDecodeError, TypeError):
                 pass
+
+        branch_from_api = _github_pr_branch_from_api()
+        if branch_from_api:
+            return branch_from_api
 
         return None
 
