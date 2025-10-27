@@ -569,10 +569,7 @@ private:
 
     void cancel_wait_os_sync()
     {
-        int32_t value = m_os_sync.count.fetch_add(1, std::memory_order_acq_rel);
-        if (value < 0) {
-            wake_one_os_sync();
-        }
+        m_os_sync.count.fetch_add(1, std::memory_order_acq_rel);
     }
 
     template <typename Clock, typename Duration>
