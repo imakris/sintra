@@ -71,6 +71,19 @@ jobs:
           fi
           echo "CMAKE_FLAGS=$CT $CE $CS" >> "$GITHUB_OUTPUT"
 
+      - name: Select Xcode toolchain and verify SDK
+        run: |
+          if ! sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer; then
+            echo "::error::Failed to switch to bundled Xcode toolchain." >&2
+            exit 1
+          fi
+          SDK_PATH="$(xcrun --sdk macosx --show-sdk-path)"
+          if [ ! -f "$SDK_PATH/usr/include/sys/ulock.h" ]; then
+            echo "::error::sys/ulock.h not found in $SDK_PATH. Ensure the macOS SDK is installed." >&2
+            exit 1
+          fi
+          echo "SDKROOT=$SDK_PATH" >> "$GITHUB_ENV"
+
       - name: Verify LLDB availability
         run: |
           if ! xcrun -f lldb >/dev/null 2>&1; then
