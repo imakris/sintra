@@ -558,9 +558,61 @@ Managed_process::~Managed_process()
         if (pid <= 0) {
             continue;
         }
-        int status = 0;
-        while (::waitpid(pid, &status, 0) == -1) {
-            if (errno != EINTR) {
+
+        const auto poll_delay = std::chrono::milliseconds(10);
+        auto graceful_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        auto forceful_deadline = graceful_deadline + std::chrono::seconds(1);
+        bool sent_sigterm = false;
+        bool sent_sigkill = false;
+
+        while (true) {
+            int status = 0;
+            pid_t result = ::waitpid(pid, &status, sent_sigkill ? 0 : WNOHANG);
+
+            if (result == pid) {
+                break;
+            }
+
+            if (result == 0) {
+                auto now = std::chrono::steady_clock::now();
+                if (!sent_sigterm && now >= graceful_deadline) {
+                    if (::kill(pid, SIGTERM) == -1 && errno == ESRCH) {
+                        break;
+                    }
+                    sent_sigterm = true;
+                    forceful_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+                    continue;
+                }
+
+                if (sent_sigterm && !sent_sigkill && now >= forceful_deadline) {
+                    if (::kill(pid, SIGKILL) == -1 && errno == ESRCH) {
+                        break;
+                    }
+                    sent_sigkill = true;
+                    continue;
+                }
+
+                std::this_thread::sleep_for(poll_delay);
+                continue;
+            }
+
+            if (result == -1) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                if (errno == ECHILD || errno == ESRCH) {
+                    break;
+                }
+
+                // Unexpected error: escalate to SIGKILL once before aborting the loop.
+                if (!sent_sigkill) {
+                    if (::kill(pid, SIGKILL) == -1 && errno == ESRCH) {
+                        break;
+                    }
+                    sent_sigkill = true;
+                    continue;
+                }
+
                 break;
             }
         }
