@@ -554,13 +554,49 @@ Managed_process::~Managed_process()
         reap_targets.swap(m_spawned_child_pids);
     }
 
+    using clock = std::chrono::steady_clock;
+    constexpr auto kPollInterval = std::chrono::milliseconds(10);
+    constexpr auto kKillAfter = std::chrono::seconds(5);
+    constexpr auto kGiveUpAfter = std::chrono::seconds(10);
+
     for (pid_t pid : reap_targets) {
         if (pid <= 0) {
             continue;
         }
+
         int status = 0;
-        while (::waitpid(pid, &status, 0) == -1) {
-            if (errno != EINTR) {
+        auto start = clock::now();
+        bool sent_kill = false;
+
+        while (true) {
+            pid_t result = detail::call_waitpid(pid, &status, WNOHANG);
+
+            if (result == pid) {
+                break;
+            }
+
+            if (result == 0) {
+                const auto elapsed = clock::now() - start;
+
+                if (!sent_kill && elapsed >= kKillAfter) {
+                    ::kill(pid, SIGKILL);
+                    sent_kill = true;
+                }
+
+                if (elapsed >= kGiveUpAfter) {
+                    std::cerr << "Managed_process: timed out waiting for child pid "
+                              << pid << " to exit" << std::endl;
+                    break;
+                }
+
+                std::this_thread::sleep_for(kPollInterval);
+                continue;
+            }
+
+            if (result == -1) {
+                if (errno == EINTR) {
+                    continue;
+                }
                 break;
             }
         }
