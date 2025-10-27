@@ -22,6 +22,59 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+
+      - name: Determine diff base
+        id: diff-base
+        shell: bash
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          PR_BASE_SHA: ${{ github.event.workflow_run.pull_requests[0].base.sha || '' }}
+        run: |
+          set -euo pipefail
+          if [ -n "$PR_BASE_SHA" ]; then
+            base_commit="$PR_BASE_SHA"
+          elif git rev-parse "${HEAD_SHA}^" >/dev/null 2>&1; then
+            base_commit="$(git rev-parse "${HEAD_SHA}^")"
+          else
+            base_commit="$HEAD_SHA"
+          fi
+          echo "base=$base_commit" >> "$GITHUB_OUTPUT"
+
+      - name: Detect changed areas
+        id: changed
+        uses: dorny/paths-filter@v3
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          base: ${{ steps.diff-base.outputs.base }}
+          filters: |
+            core:
+              - 'src/**'
+              - 'include/**'
+              - 'cmake/**'
+              - 'CMakeLists.txt'
+              - 'CMakePresets.json'
+              - 'third_party/**'
+            tests:
+              - 'tests/**'
+            examples:
+              - 'example/**'
+            workflows:
+              - '.github/workflows/**'
+
+      - name: Compute CMake flags
+        id: flags
+        shell: bash
+        run: |
+          CT="-DSINTRA_BUILD_TESTS=OFF -DSINTRA_TEST_MATRIX=quick"
+          CE="-DSINTRA_BUILD_EXAMPLES=OFF"
+          if [ "${{ steps.changed.outputs.tests }}" = "true" ] || [ "${{ steps.changed.outputs.core }}" = "true" ] || [ "${{ steps.changed.outputs.workflows }}" = "true" ]; then
+            CT="-DSINTRA_BUILD_TESTS=ON -DSINTRA_TEST_MATRIX=quick"
+          fi
+          if [ "${{ steps.changed.outputs.examples }}" = "true" ]; then
+            CE="-DSINTRA_BUILD_EXAMPLES=ON"
+          fi
+          echo "CMAKE_FLAGS=$CT $CE" >> "$GITHUB_OUTPUT"
 
       - name: Restore cached gdb toolchain
         id: cache-gdb
@@ -97,6 +150,7 @@ jobs:
           fi
 
       - name: Run stress tests with run_tests.py
+        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.core == 'true' || steps.changed.outputs.workflows == 'true'
         shell: bash
         run: |
           cd tests
