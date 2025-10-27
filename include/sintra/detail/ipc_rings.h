@@ -130,12 +130,20 @@
 #include <utility>
 #include <vector>
 
+#if defined(_WIN32)
+  #include <synchapi.h>
+#elif defined(__linux__)
+  #include <linux/futex.h>
+  #include <sys/syscall.h>
+  #include <unistd.h>
+#elif defined(__APPLE__)
+  #include <sys/ulock.h>
+#endif
+
 // ─── Boost.Interprocess ──────────────────────────────────────────────────────
 #include <boost/interprocess/file_mapping.hpp>
 #include <boost/interprocess/mapped_region.hpp>
 #include <boost/interprocess/sync/interprocess_mutex.hpp>
-
-#include "interprocess_semaphore.h"
 
 #include "ipc_platform_utils.h"
 
@@ -353,36 +361,200 @@ public:
     }
 
 private:
-    struct impl : detail::interprocess_semaphore
+    struct impl
     {
-        impl() : detail::interprocess_semaphore(0) {}
-
         void post_ordered()
         {
             if (unordered.load(std::memory_order_acquire)) {
                 unordered.store(false, std::memory_order_release);
             }
-            else if (!posted.test_and_set(std::memory_order_acquire)) {
-                this->post();
+            else if (!posted.exchange(true, std::memory_order_acq_rel)) {
+                blocker.signal();
             }
         }
 
         void post_unordered()
         {
-            if (!posted.test_and_set(std::memory_order_acquire)) {
+            if (!posted.exchange(true, std::memory_order_acq_rel)) {
                 unordered.store(true, std::memory_order_release);
-                this->post();
+                blocker.signal();
             }
         }
 
         bool wait()
         {
-            detail::interprocess_semaphore::wait();
-            posted.clear(std::memory_order_release);
+            uint32_t observed = blocker.sequence.load(std::memory_order_acquire);
+            while (!posted.load(std::memory_order_acquire)) {
+                blocker.wait(observed);
+                observed = blocker.sequence.load(std::memory_order_acquire);
+            }
+
+            posted.store(false, std::memory_order_release);
             return unordered.exchange(false, std::memory_order_acq_rel);
         }
 
-        std::atomic_flag posted = ATOMIC_FLAG_INIT;
+        void release_local_handle() noexcept {}
+
+    private:
+        struct wait_blocker
+        {
+            alignas(4) std::atomic<uint32_t> sequence{0};
+#if defined(__APPLE__)
+            alignas(4) std::atomic<uint32_t> waiters{0};
+#endif
+
+            void signal()
+            {
+                sequence.fetch_add(1, std::memory_order_release);
+                platform_wake();
+            }
+
+            void wait(uint32_t observed)
+            {
+                while (sequence.load(std::memory_order_acquire) == observed) {
+                    platform_wait(observed);
+                }
+            }
+
+#if defined(_WIN32)
+            using wait_on_address_fn = BOOL(WINAPI*)(volatile VOID*, PVOID, SIZE_T, DWORD);
+            using wake_by_address_single_fn = VOID(WINAPI*)(PVOID);
+
+            static wait_on_address_fn wait_on_address()
+            {
+                static wait_on_address_fn fn = [] {
+                    HMODULE mod = ::GetModuleHandleW(L"kernel32.dll");
+                    if (!mod) {
+                        throw std::system_error(::GetLastError(), std::system_category(), "GetModuleHandleW");
+                    }
+                    auto ptr = reinterpret_cast<wait_on_address_fn>(::GetProcAddress(mod, "WaitOnAddress"));
+                    if (!ptr) {
+                        throw std::runtime_error("WaitOnAddress not available");
+                    }
+                    return ptr;
+                }();
+                return fn;
+            }
+
+            static wake_by_address_single_fn wake_by_address_single()
+            {
+                static wake_by_address_single_fn fn = [] {
+                    HMODULE mod = ::GetModuleHandleW(L"kernel32.dll");
+                    if (!mod) {
+                        throw std::system_error(::GetLastError(), std::system_category(), "GetModuleHandleW");
+                    }
+                    auto ptr = reinterpret_cast<wake_by_address_single_fn>(::GetProcAddress(mod, "WakeByAddressSingle"));
+                    if (!ptr) {
+                        throw std::runtime_error("WakeByAddressSingle not available");
+                    }
+                    return ptr;
+                }();
+                return fn;
+            }
+
+            void platform_wait(uint32_t observed)
+            {
+                auto fn = wait_on_address();
+                while (sequence.load(std::memory_order_acquire) == observed) {
+                    uint32_t expected = observed;
+                    BOOL ok = fn(reinterpret_cast<volatile VOID*>(&sequence),
+                                 &expected,
+                                 sizeof(expected),
+                                 INFINITE);
+                    if (!ok) {
+                        DWORD err = ::GetLastError();
+                        if (err == ERROR_TIMEOUT) {
+                            continue;
+                        }
+                        throw std::system_error(err, std::system_category(), "WaitOnAddress");
+                    }
+                }
+            }
+
+            void platform_wake()
+            {
+                wake_by_address_single()(reinterpret_cast<PVOID>(&sequence));
+            }
+#elif defined(__APPLE__)
+            void platform_wait(uint32_t observed)
+            {
+                constexpr uint32_t wait_flags = UL_COMPARE_AND_WAIT | ULF_NO_ERRNO | ULF_SHARED;
+
+                waiters.fetch_add(1, std::memory_order_acq_rel);
+                while (true) {
+                    int rc = __ulock_wait(wait_flags,
+                                          reinterpret_cast<void*>(&sequence),
+                                          static_cast<uint64_t>(observed),
+                                          0);
+                    if (rc == 0 || rc == EAGAIN) {
+                        waiters.fetch_sub(1, std::memory_order_acq_rel);
+                        return;
+                    }
+                    if (rc == EINTR) {
+                        continue;
+                    }
+                    waiters.fetch_sub(1, std::memory_order_acq_rel);
+                    throw std::system_error(rc, std::generic_category(), "__ulock_wait");
+                }
+            }
+
+            void platform_wake()
+            {
+                if (waiters.load(std::memory_order_acquire) == 0) {
+                    return;
+                }
+
+                constexpr uint32_t wake_flags = UL_COMPARE_AND_WAIT | ULF_NO_ERRNO | ULF_SHARED;
+                int rc = __ulock_wake(wake_flags, reinterpret_cast<void*>(&sequence), 0);
+                if (rc != 0 && rc != ENOENT) {
+                    throw std::system_error(rc, std::generic_category(), "__ulock_wake");
+                }
+            }
+#else
+            void platform_wait(uint32_t observed)
+            {
+                while (true) {
+                    int rc = static_cast<int>(::syscall(SYS_futex,
+                                                        reinterpret_cast<int*>(&sequence),
+                                                        FUTEX_WAIT,
+                                                        static_cast<int>(observed),
+                                                        nullptr,
+                                                        nullptr,
+                                                        0));
+                    if (rc == 0) {
+                        return;
+                    }
+
+                    if (rc == -1) {
+                        int err = errno;
+                        if (err == EINTR) {
+                            continue;
+                        }
+                        if (err == EAGAIN) {
+                            return;
+                        }
+                        throw std::system_error(err, std::generic_category(), "futex(FUTEX_WAIT)");
+                    }
+                }
+            }
+
+            void platform_wake()
+            {
+                int rc = static_cast<int>(::syscall(SYS_futex,
+                                                     reinterpret_cast<int*>(&sequence),
+                                                     FUTEX_WAKE,
+                                                     1,
+                                                     nullptr,
+                                                     nullptr,
+                                                     0));
+                if (rc == -1) {
+                    throw std::system_error(errno, std::generic_category(), "futex(FUTEX_WAKE)");
+                }
+            }
+#endif
+        } blocker{};
+
+        std::atomic<bool> posted{false};
         std::atomic<bool> unordered{false};
     };
 
