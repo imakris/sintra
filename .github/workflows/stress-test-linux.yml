@@ -28,7 +28,7 @@ jobs:
         id: changed
         uses: dorny/paths-filter@v3
         with:
-          base: ${{ github.event.workflow_run.pull_requests[0].base.sha || format('{0}^', github.event.workflow_run.head_sha) }}
+          base: ${{ github.event.workflow_run.pull_requests[0].base.sha || github.event.workflow_run.before || format('{0}^', github.event.workflow_run.head_sha) }}
           ref: ${{ github.event.workflow_run.head_sha }}
           filters: |
             core:
