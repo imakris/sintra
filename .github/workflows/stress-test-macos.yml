@@ -32,27 +32,29 @@ jobs:
           PR_BASE_SHA: ${{ github.event.workflow_run.pull_requests[0].base.sha || '' }}
         run: |
           set -euo pipefail
-          if git rev-parse "${HEAD_SHA}^" >/dev/null 2>&1; then
+          if [ -n "$PR_BASE_SHA" ]; then
+            base_commit="$PR_BASE_SHA"
+          elif git rev-parse "${HEAD_SHA}^" >/dev/null 2>&1; then
             base_commit="$(git rev-parse "${HEAD_SHA}^")"
-            echo "base=$base_commit" >> "$GITHUB_OUTPUT"
-          elif [ -n "$PR_BASE_SHA" ]; then
-            echo "base=$PR_BASE_SHA" >> "$GITHUB_OUTPUT"
           else
-            echo "base=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+            base_commit="$HEAD_SHA"
           fi
+          echo "base=$base_commit" >> "$GITHUB_OUTPUT"
 
       - name: Detect changed areas
         id: changed
         uses: dorny/paths-filter@v3
         with:
+          ref: ${{ github.event.workflow_run.head_sha }}
           base: ${{ steps.diff-base.outputs.base }}
-          head: ${{ github.event.workflow_run.head_sha }}
           filters: |
             core:
               - 'src/**'
               - 'include/**'
               - 'cmake/**'
               - 'CMakeLists.txt'
+              - 'CMakePresets.json'
+              - 'third_party/**'
             tests:
               - 'tests/**'
             examples:
@@ -66,7 +68,7 @@ jobs:
         run: |
           CT="-DSINTRA_BUILD_TESTS=OFF -DSINTRA_TEST_MATRIX=quick"
           CE="-DSINTRA_BUILD_EXAMPLES=OFF"
-          if [ "${{ steps.changed.outputs.tests }}" = "true" ] || [ "${{ steps.changed.outputs.core }}" = "true" ]; then
+          if [ "${{ steps.changed.outputs.tests }}" = "true" ] || [ "${{ steps.changed.outputs.core }}" = "true" ] || [ "${{ steps.changed.outputs.workflows }}" = "true" ]; then
             CT="-DSINTRA_BUILD_TESTS=ON -DSINTRA_TEST_MATRIX=quick"
           fi
           if [ "${{ steps.changed.outputs.examples }}" = "true" ]; then
