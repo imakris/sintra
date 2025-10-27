@@ -18,33 +18,41 @@ jobs:
       - name: Ensure Windows debugging tools
         shell: pwsh
         run: |
-          $packageParameters = "'ADDLOCAL=DebuggingTools'"
-          $packages = @(
-            'windows-sdk-10-version-10.0.26100.1',
-            'windows-sdk-10-version-10.0.22621.0',
-            'windows-sdk-10-version-10.0.22000.832',
-            'windows-sdk-10-version-2004-all',
-            'windows-sdk-10'
-          )
-          $installed = $false
-          foreach ($package in $packages) {
-            Write-Host "Attempting to install $package via Chocolatey"
-            choco install $package --no-progress -y --package-parameters=$packageParameters
-            if ($LASTEXITCODE -eq 0) {
-              $installed = $true
-              break
-            }
-            Write-Warning "Failed to install $package (exit code $LASTEXITCODE)."
-            $global:LASTEXITCODE = 0
-          }
-          if (-not $installed) {
-            Write-Warning 'Unable to install the Windows SDK via Chocolatey. Proceeding with any pre-installed debugging tools.'
+          function Get-WindowsDebuggerDirectories {
+            @(
+              "${env:ProgramFiles(x86)}\Windows Kits\10\Debuggers\x64",
+              "${env:ProgramFiles(x86)}\Windows Kits\10\Debuggers\x86"
+            ) | Where-Object { $_ -and (Test-Path $_) }
           }
 
-          $debugDirs = @(
-            "${env:ProgramFiles(x86)}\Windows Kits\10\Debuggers\x64",
-            "${env:ProgramFiles(x86)}\Windows Kits\10\Debuggers\x86"
-          ) | Where-Object { $_ -and (Test-Path $_) }
+          $debugDirs = Get-WindowsDebuggerDirectories
+          if ($debugDirs) {
+            Write-Host 'Windows debugging tools already available. Skipping Chocolatey installation.'
+          } else {
+            $packageParameters = "'ADDLOCAL=DebuggingTools'"
+            $packages = @(
+              'windows-sdk-10-version-10.0.26100.1',
+              'windows-sdk-10-version-10.0.22621.0',
+              'windows-sdk-10-version-10.0.22000.832',
+              'windows-sdk-10-version-2004-all',
+              'windows-sdk-10'
+            )
+            $installed = $false
+            foreach ($package in $packages) {
+              Write-Host "Attempting to install $package via Chocolatey"
+              choco install $package --no-progress -y --package-parameters=$packageParameters
+              if ($LASTEXITCODE -eq 0) {
+                $installed = $true
+                break
+              }
+              Write-Warning "Failed to install $package (exit code $LASTEXITCODE)."
+              $global:LASTEXITCODE = 0
+            }
+            if (-not $installed) {
+              Write-Warning 'Unable to install the Windows SDK via Chocolatey. Proceeding with any pre-installed debugging tools.'
+            }
+            $debugDirs = Get-WindowsDebuggerDirectories
+          }
 
           if (-not $debugDirs) {
             Write-Warning 'Windows debugging tools directory not found. Crash dump collection will be skipped.'
