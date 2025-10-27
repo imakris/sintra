@@ -548,6 +548,8 @@ Managed_process::~Managed_process()
     }
 
 #ifndef _WIN32
+    reap_finished_children();
+
     std::vector<pid_t> reap_targets;
     {
         std::lock_guard<std::mutex> guard(m_spawned_child_pids_mutex);
@@ -559,9 +561,50 @@ Managed_process::~Managed_process()
             continue;
         }
         int status = 0;
-        while (::waitpid(pid, &status, 0) == -1) {
-            if (errno != EINTR) {
+        const auto start_time = std::chrono::steady_clock::now();
+        bool sent_sigterm = false;
+        bool sent_sigkill = false;
+
+        while (true) {
+            pid_t result = ::waitpid(pid, &status, WNOHANG);
+            if (result == pid) {
                 break;
+            }
+
+            if (result == 0) {
+                const auto now = std::chrono::steady_clock::now();
+                const auto elapsed = now - start_time;
+
+                if (!sent_sigterm && elapsed >= std::chrono::seconds(2)) {
+                    ::kill(pid, SIGTERM);
+                    sent_sigterm = true;
+                }
+                if (!sent_sigkill && elapsed >= std::chrono::seconds(10)) {
+                    ::kill(pid, SIGKILL);
+                    sent_sigkill = true;
+                }
+
+                if (elapsed >= std::chrono::seconds(30)) {
+                    break;
+                }
+
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                continue;
+            }
+
+            if (result == -1) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                if (errno == ECHILD) {
+                    break;
+                }
+                break;
+            }
+        }
+
+        if (sent_sigkill) {
+            while (::waitpid(pid, &status, 0) == -1 && errno == EINTR) {
             }
         }
     }
