@@ -607,6 +607,12 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
     }
 
     if (wait_result == -1) {
+        if (errno == ECHILD) {
+            if (child_pid_out) {
+                *child_pid_out = -1;
+            }
+            return true;
+        }
         return false;
     }
 #endif
