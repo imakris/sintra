@@ -1897,11 +1897,64 @@ def _collect_patterns(raw_patterns: Optional[List[str]]) -> List[str]:
     return patterns
 
 
-def _resolve_git_metadata(start_dir: Path) -> Tuple[str, str]:
+def _resolve_ci_branch() -> Optional[Tuple[str, str]]:
+    """Return a CI-provided branch name if available.
+
+    Many continuous-integration systems expose the source branch through
+    environment variables even when the local checkout is in a detached
+    ``HEAD`` state.  This helper looks for the most common variables and, when
+    found, returns the detected branch name together with the environment
+    variable that provided it.
+    """
+
+    def _strip_ref(value: str) -> Optional[str]:
+        value = value.strip()
+        if not value:
+            return None
+        if value.startswith('refs/heads/'):
+            return value[len('refs/heads/'):]
+        if value.startswith('refs/tags/'):
+            return value[len('refs/tags/'):]
+        if value.startswith('refs/'):
+            # For other refs we fall back to the last component (e.g. release
+            # branches in Gerrit style refs).  GitHub pull request refs have the
+            # shape ``refs/pull/<id>/merge``; in that case the final component is
+            # ``merge`` which is not helpful, so we ignore those.
+            parts = value.split('/')
+            if len(parts) >= 3 and parts[1] == 'pull':
+                return None
+            return parts[-1]
+        return value
+
+    env = os.environ
+    candidates = [
+        ('GITHUB_HEAD_REF', env.get('GITHUB_HEAD_REF')),
+        ('GITHUB_REF_NAME', env.get('GITHUB_REF_NAME')),
+        ('GITHUB_REF', _strip_ref(env.get('GITHUB_REF') or '')),
+        ('BUILD_SOURCEBRANCHNAME', env.get('BUILD_SOURCEBRANCHNAME')),
+        ('CI_COMMIT_REF_NAME', env.get('CI_COMMIT_REF_NAME')),
+        ('BUILDKITE_BRANCH', env.get('BUILDKITE_BRANCH')),
+        ('CIRCLE_BRANCH', env.get('CIRCLE_BRANCH')),
+        ('BITBUCKET_BRANCH', env.get('BITBUCKET_BRANCH')),
+        ('BRANCH_NAME', env.get('BRANCH_NAME')),
+    ]
+
+    for source, branch in candidates:
+        if branch:
+            branch = branch.strip()
+            if branch:
+                return branch, source
+
+    return None
+
+
+def _resolve_git_metadata(start_dir: Path) -> Tuple[str, str, Optional[str]]:
     """Return the current git branch name and revision hash.
 
     Falls back to ``"unknown"`` for each field if git is unavailable or the
-    directory is not part of a repository.
+    directory is not part of a repository.  When the checkout is detached (as
+    commonly seen on CI systems), the branch name is taken from well-known
+    environment variables when available.
     """
 
     def _run_git_command(*args: str) -> Optional[str]:
@@ -1924,13 +1977,19 @@ def _resolve_git_metadata(start_dir: Path) -> Tuple[str, str]:
     if repo_root:
         start_dir = Path(repo_root)
 
+    branch_source: Optional[str] = 'git'
     branch = _run_git_command('rev-parse', '--abbrev-ref', 'HEAD') or 'unknown'
     if branch == 'HEAD':
         branch = 'detached HEAD'
 
+    if branch in ('unknown', 'detached HEAD'):
+        env_branch = _resolve_ci_branch()
+        if env_branch:
+            branch, branch_source = env_branch
+
     revision = _run_git_command('rev-parse', 'HEAD') or 'unknown'
 
-    return branch, revision
+    return branch, revision, branch_source
 
 
 def main():
@@ -1966,9 +2025,12 @@ def main():
     # Resolve build directory
     script_dir = Path(__file__).parent
     print(f"{Color.BOLD}Sintra Test Runner{Color.RESET}")
-    branch, revision = _resolve_git_metadata(script_dir)
+    branch, revision, branch_source = _resolve_git_metadata(script_dir)
     revision_display = revision if revision == 'unknown' else revision[:12]
-    print(f"Git branch: {branch}")
+    if branch_source and branch_source != 'git':
+        print(f"Git branch: {branch} (from {branch_source})")
+    else:
+        print(f"Git branch: {branch}")
     print(f"Git revision: {revision_display}")
     build_dir = (script_dir / args.build_dir).resolve()
 
