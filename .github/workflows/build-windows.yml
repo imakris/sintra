@@ -2,9 +2,25 @@ name: Build - Windows
 
 on:
   push:
-    branches: [ '*' ]
+    branches: ['*']
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'cmake/**'
+      - 'CMakeLists.txt'
+      - 'tests/**'
+      - 'example/**'
+      - '.github/workflows/**'
   pull_request:
-    branches: [ '*' ]
+    branches: ['*']
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'cmake/**'
+      - 'CMakeLists.txt'
+      - 'tests/**'
+      - 'example/**'
+      - '.github/workflows/**'
 
 jobs:
   build:
@@ -14,6 +30,48 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Detect changed areas
+        id: changed
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            core:
+              - 'src/**'
+              - 'include/**'
+              - 'cmake/**'
+              - 'CMakeLists.txt'
+            tests:
+              - 'tests/**'
+            examples:
+              - 'example/**'
+            workflows:
+              - '.github/workflows/**'
+
+      - name: Compute CMake flags
+        id: flags
+        shell: bash
+        run: |
+          CT="-DSINTRA_BUILD_TESTS=OFF -DSINTRA_TEST_MATRIX=quick"
+          CE="-DSINTRA_BUILD_EXAMPLES=OFF"
+          if [ "${{ steps.changed.outputs.tests }}" = "true" ] || [ "${{ steps.changed.outputs.core }}" = "true" ]; then
+            CT="-DSINTRA_BUILD_TESTS=ON -DSINTRA_TEST_MATRIX=quick"
+          fi
+          if [ "${{ steps.changed.outputs.examples }}" = "true" ]; then
+            CE="-DSINTRA_BUILD_EXAMPLES=ON"
+          fi
+          echo "CMAKE_FLAGS=$CT $CE" >> "$GITHUB_OUTPUT"
+
+      - name: Save change summary
+        shell: bash
+        run: |
+          mkdir -p build
+          {
+            echo "core=${{ steps.changed.outputs.core }}";
+            echo "tests=${{ steps.changed.outputs.tests }}";
+            echo "examples=${{ steps.changed.outputs.examples }}";
+            echo "workflows=${{ steps.changed.outputs.workflows }}";
+          } > build/changed-areas.env
 
       - name: Ensure Windows debugging tools
         shell: pwsh
@@ -91,7 +149,7 @@ jobs:
           }
 
       - name: Configure CMake
-        run: cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
+        run: cmake -B build -S . -DCMAKE_BUILD_TYPE=Release ${{ steps.flags.outputs.CMAKE_FLAGS }}
 
       - name: Build
         run: cmake --build build --config Release

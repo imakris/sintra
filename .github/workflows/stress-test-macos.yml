@@ -23,24 +23,6 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
 
-      - name: Verify LLDB availability
-        run: |
-          if ! xcrun -f lldb >/dev/null 2>&1; then
-            echo "::error::lldb not available via xcrun. Install Xcode Command Line Tools to provide LLDB." >&2
-            exit 1
-          fi
-          xcrun lldb --version
-
-      - name: Enable debugger attachments and core dumps
-        shell: bash
-        run: |
-          sudo /usr/sbin/DevToolsSecurity -enable
-          sudo dscl . append /Groups/_developer GroupMembership "$(whoami)" || true
-          sudo mkdir -p /cores
-          sudo chmod 1777 /cores
-          sudo launchctl limit core unlimited unlimited
-          sudo sysctl kern.corefile=core.%P || true
-
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
@@ -50,12 +32,58 @@ jobs:
           run-id: ${{ github.event.workflow_run.id }}
           if-no-artifact-found: error
 
+      - name: Read change summary
+        id: changed
+        shell: bash
+        run: |
+          file="build/changed-areas.env"
+          core=false
+          tests=false
+          examples=false
+          workflows=false
+          if [ -f "$file" ]; then
+            while IFS='=' read -r name value; do
+              case "$name" in
+                core) core="$value" ;;
+                tests) tests="$value" ;;
+                examples) examples="$value" ;;
+                workflows) workflows="$value" ;;
+              esac
+            done < "$file"
+          fi
+          echo "core=$core" >> "$GITHUB_OUTPUT"
+          echo "tests=$tests" >> "$GITHUB_OUTPUT"
+          echo "examples=$examples" >> "$GITHUB_OUTPUT"
+          echo "workflows=$workflows" >> "$GITHUB_OUTPUT"
+
+      - name: Verify LLDB availability
+        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true'
+        run: |
+          if ! xcrun -f lldb >/dev/null 2>&1; then
+            echo "::error::lldb not available via xcrun. Install Xcode Command Line Tools to provide LLDB." >&2
+            exit 1
+          fi
+          xcrun lldb --version
+
+      - name: Enable debugger attachments and core dumps
+        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true'
+        shell: bash
+        run: |
+          sudo /usr/sbin/DevToolsSecurity -enable
+          sudo dscl . append /Groups/_developer GroupMembership "$(whoami)" || true
+          sudo mkdir -p /cores
+          sudo chmod 1777 /cores
+          sudo launchctl limit core unlimited unlimited
+          sudo sysctl kern.corefile=core.%P || true
+
       - name: Setup Python
+        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.x'
 
       - name: Make test executables executable
+        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true'
         shell: bash
         run: |
           if [ -d build/tests ]; then
@@ -63,6 +91,7 @@ jobs:
           fi
 
       - name: Run stress tests with run_tests.py
+        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true'
         shell: bash
         run: |
           ulimit -c unlimited

@@ -23,7 +23,41 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
 
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-build-${{ github.event.workflow_run.head_sha }}
+          path: build/
+          github-token: ${{ github.token }}
+          run-id: ${{ github.event.workflow_run.id }}
+          if-no-artifact-found: error
+
+      - name: Read change summary
+        id: changed
+        shell: bash
+        run: |
+          file="build/changed-areas.env"
+          core=false
+          tests=false
+          examples=false
+          workflows=false
+          if [ -f "$file" ]; then
+            while IFS='=' read -r name value; do
+              case "$name" in
+                core) core="$value" ;;
+                tests) tests="$value" ;;
+                examples) examples="$value" ;;
+                workflows) workflows="$value" ;;
+              esac
+            done < "$file"
+          fi
+          echo "core=$core" >> "$GITHUB_OUTPUT"
+          echo "tests=$tests" >> "$GITHUB_OUTPUT"
+          echo "examples=$examples" >> "$GITHUB_OUTPUT"
+          echo "workflows=$workflows" >> "$GITHUB_OUTPUT"
+
       - name: Ensure Windows debugging tools
+        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true'
         shell: pwsh
         run: |
           function Get-DebugDirectories {
@@ -73,6 +107,7 @@ jobs:
           }
 
       - name: Verify Windows debuggers
+        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true'
         shell: pwsh
         run: |
           $candidates = @('cdb', 'ntsd', 'windbg')
@@ -100,21 +135,14 @@ jobs:
             Add-Content -Path $env:GITHUB_ENV -Value 'SINTRA_WINDOWS_DEBUGGER_AVAILABLE=true'
           }
 
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: windows-build-${{ github.event.workflow_run.head_sha }}
-          path: build/
-          github-token: ${{ github.token }}
-          run-id: ${{ github.event.workflow_run.id }}
-          if-no-artifact-found: error
-
       - name: Setup Python
+        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.x'
 
       - name: Run stress tests with run_tests.py
+        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true'
         shell: bash
         run: |
           cd tests
