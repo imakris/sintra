@@ -396,6 +396,7 @@ int main(int argc, char* argv[])
         in >> iterations_completed;
         in >> total_messages;
         std::getline(in >> std::ws, reason);
+        in.close();
 
         cleanup_directory_with_retries(shared_dir);
 
