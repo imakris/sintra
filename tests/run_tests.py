@@ -513,16 +513,18 @@ class TestRunner:
                         start_monotonic + self.timeout + pause_total + active_extra
                     )
 
-                    if process.poll() is not None:
-                        break
-
                     remaining = adjusted_deadline - now_monotonic
                     if remaining <= 0:
                         raise subprocess.TimeoutExpired(process.args, self.timeout)
 
-                    time.sleep(min(poll_interval, remaining))
+                    wait_timeout = min(poll_interval, remaining)
 
-                process.wait()
+                    try:
+                        process.wait(timeout=wait_timeout)
+                        break
+                    except subprocess.TimeoutExpired:
+                        continue
+
                 duration = time.time() - start_time
 
                 shutdown_reader_threads()
