@@ -193,6 +193,7 @@ bool spawn_succeeds_under_eintr_pressure()
         std::cerr << "spawn_detached_test: debug stage=" << stage_to_string(last_debug_info.stage)
                   << ", errno=" << last_debug_info.errno_value
                   << ", exec_errno=" << last_debug_info.exec_errno
+                  << ", aux_value=" << last_debug_info.aux_value
                   << std::endl;
     }
     return assert_true(result, "spawn_detached must retry on EINTR and eventually succeed");

@@ -181,6 +181,7 @@ struct spawn_detached_debug_info
     Stage stage{Stage::PipeCreation};
     int errno_value{0};
     int exec_errno{0};
+    int aux_value{0};
 };
 
 inline std::atomic<pipe2_fn>& pipe2_override()
@@ -442,11 +443,15 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
         return false;
     }
 
-    auto report_failure = [&](detail::spawn_detached_debug_info::Stage stage, int error, int exec_error) {
+    auto report_failure = [&](detail::spawn_detached_debug_info::Stage stage,
+                             int error,
+                             int exec_error,
+                             int aux_value = 0) {
         detail::spawn_detached_debug_info info;
         info.stage = stage;
         info.errno_value = error;
         info.exec_errno = exec_error;
+        info.aux_value = aux_value;
         detail::emit_spawn_detached_debug(info);
     };
 
@@ -611,10 +616,15 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
         failure_stage = detail::spawn_detached_debug_info::Stage::ParentReadReadyStatus;
     }
 
+    int exec_status_value = 0;
+    bool exec_status_available = false;
+
     if (!spawn_failed) {
         int exec_status = 0;
         switch (read_int(&exec_status, &exec_errno)) {
             case Read_result::Value:
+                exec_status_value = exec_status;
+                exec_status_available = true;
                 exec_errno = exec_status > 0 ? exec_status : -exec_status;
                 spawn_failed = true;
                 observed_errno = exec_errno;
@@ -646,7 +656,18 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
         if (!observed_errno) {
             observed_errno = exec_errno ? exec_errno : errno;
         }
-        report_failure(failure_stage, observed_errno, exec_errno);
+        int aux_value = 0;
+        switch (failure_stage) {
+            case detail::spawn_detached_debug_info::Stage::ParentReadReadyStatus:
+                aux_value = ready_status;
+                break;
+            case detail::spawn_detached_debug_info::Stage::ParentReadExecStatus:
+                aux_value = exec_status_available ? exec_status_value : exec_errno;
+                break;
+            default:
+                break;
+        }
+        report_failure(failure_stage, observed_errno, exec_errno, aux_value);
         errno = exec_errno ? exec_errno : errno;
         return false;
     }
