@@ -1575,38 +1575,75 @@ class TestRunner:
         capture_errors: List[str] = []
 
         for target_pid in sorted(set(target_pids)):
-            try:
-                command = [debugger_path]
-                if debugger_name == 'windbg':
-                    command.append('-Q')
-                command.extend(['-p', str(target_pid), '-c', '.symfix; .reload; ~* k; qd'])
+            attach_commands: List[List[str]] = [
+                ['-p', str(target_pid), '-c', '.symfix; .reload; ~* k; qd']
+            ]
 
-                result = subprocess.run(
-                    command,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    timeout=60,
-                )
-            except FileNotFoundError:
-                fallback_error = debugger_error or f"{debugger_name} not available"
-                return "", fallback_error
-            except subprocess.SubprocessError as exc:
-                capture_errors.append(f"PID {target_pid}: {debugger_name} failed ({exc})")
-                continue
+            # Attempt a non-invasive attach if the standard attach path fails. Using
+            # "-pv" combined with an explicit break-in helps when the debugger times
+            # out waiting for the initial debug event while the process is still
+            # running (a situation that previously resulted in 0xD000046A).
+            attach_commands.append(
+                ['-pv', '-p', str(target_pid), '-c', '.symfix; .reload; .breakin; ~* k; qd']
+            )
 
-            output = result.stdout.strip()
-            if not output and result.stderr:
-                output = result.stderr.strip()
+            last_output: str = ''
+            last_exit_code: Optional[int] = None
+            attempt_failures: List[str] = []
 
-            if result.returncode != 0:
-                capture_errors.append(
+            for command_args in attach_commands:
+                try:
+                    command = [debugger_path]
+                    if debugger_name == 'windbg':
+                        command.append('-Q')
+                    command.extend(command_args)
+
+                    result = subprocess.run(
+                        command,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        timeout=90,
+                    )
+                except FileNotFoundError:
+                    fallback_error = debugger_error or f"{debugger_name} not available"
+                    return "", fallback_error
+                except subprocess.SubprocessError as exc:
+                    attempt_failures.append(
+                        f"PID {target_pid}: {debugger_name} failed ({exc})"
+                    )
+                    continue
+
+                output = result.stdout.strip()
+                if not output and result.stderr:
+                    output = result.stderr.strip()
+
+                if output:
+                    last_output = output
+                    last_exit_code = result.returncode
+
+                if result.returncode == 0:
+                    if output:
+                        stack_outputs.append(f"PID {target_pid}\n{output}")
+                    break
+
+                attempt_failures.append(
                     f"PID {target_pid}: {debugger_name} exited with code {result.returncode}: {result.stderr.strip()}"
                 )
+            else:
+                if last_output:
+                    exit_detail = (
+                        f" (debugger exited with code {last_exit_code})"
+                        if last_exit_code is not None
+                        else ""
+                    )
+                    stack_outputs.append(f"PID {target_pid}{exit_detail}\n{last_output}")
+                elif attempt_failures:
+                    capture_errors.extend(attempt_failures)
                 continue
 
-            if output:
-                stack_outputs.append(f"PID {target_pid}\n{output}")
+            # Successful attach handled in-loop; skip the failure reporting for this PID.
+            continue
 
         if stack_outputs:
             return "\n\n".join(stack_outputs), ""
