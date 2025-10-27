@@ -28,7 +28,7 @@ jobs:
         id: changed
         uses: dorny/paths-filter@v3
         with:
-          base: ${{ github.event.workflow_run.pull_requests[0].base.sha || github.event.workflow_run.before || format('{0}^', github.event.workflow_run.head_sha) }}
+          base: ${{ github.event.workflow_run.pull_requests[0].base.sha || (github.event.workflow_run.before && github.event.workflow_run.before != '0000000000000000000000000000000000000000' && github.event.workflow_run.before) || format('{0}^', github.event.workflow_run.head_sha) }}
           ref: ${{ github.event.workflow_run.head_sha }}
           filters: |
             core:
@@ -45,7 +45,24 @@ jobs:
             workflows:
               - '.github/workflows/**'
 
+      - name: Decide whether to run stress tests
+        id: stress-gate
+        shell: bash
+        run: |
+          should_run=false
+          if [ "${{ steps.changed.outputs.core }}" = "true" ] || \
+             [ "${{ steps.changed.outputs.tests }}" = "true" ] || \
+             [ "${{ steps.changed.outputs.examples }}" = "true" ]; then
+            should_run=true
+          fi
+          echo "run=$should_run" >> "$GITHUB_OUTPUT"
+
+      - name: Skip stress suite for workflow-only changes
+        if: steps.stress-gate.outputs.run != 'true'
+        run: echo "No core, test, or example changes detected; skipping stress execution."
+
       - name: Restore cached gdb toolchain
+        if: steps.stress-gate.outputs.run == 'true'
         id: cache-gdb
         uses: actions/cache@v4
         with:
@@ -53,7 +70,7 @@ jobs:
           key: linux-gdb-${{ runner.os }}-v2024-04-03
 
       - name: Bootstrap gdb toolchain cache
-        if: steps.cache-gdb.outputs.cache-hit != 'true'
+        if: steps.stress-gate.outputs.run == 'true' && steps.cache-gdb.outputs.cache-hit != 'true'
         run: |
           set -euxo pipefail
           cache_root="$HOME/.cache/sintra-gdb"
@@ -71,6 +88,7 @@ jobs:
           sudo apt-get clean
 
       - name: Activate cached gdb toolchain
+        if: steps.stress-gate.outputs.run == 'true'
         run: |
           set -euxo pipefail
           cache_prefix="$HOME/.cache/sintra-gdb/root"
@@ -88,16 +106,20 @@ jobs:
           echo "LD_LIBRARY_PATH=$ld_path" >> "$GITHUB_ENV"
 
       - name: Allow ptrace attachments for crash debugging
+        if: steps.stress-gate.outputs.run == 'true'
         run: |
           sudo sysctl -w kernel.yama.ptrace_scope=0
 
       - name: Verify ptrace scope
+        if: steps.stress-gate.outputs.run == 'true'
         run: sysctl kernel.yama.ptrace_scope
 
       - name: Verify gdb
+        if: steps.stress-gate.outputs.run == 'true'
         run: gdb --version
 
       - name: Download build artifacts
+        if: steps.stress-gate.outputs.run == 'true'
         uses: actions/download-artifact@v4
         with:
           name: linux-build-${{ github.event.workflow_run.head_sha }}
@@ -107,11 +129,13 @@ jobs:
           if-no-artifact-found: error
 
       - name: Setup Python
+        if: steps.stress-gate.outputs.run == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.x'
 
       - name: Make test executables executable
+        if: steps.stress-gate.outputs.run == 'true'
         shell: bash
         run: |
           if [ -d build/tests ]; then
@@ -119,7 +143,7 @@ jobs:
           fi
 
       - name: Run stress tests with run_tests.py
-        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.core == 'true' || steps.changed.outputs.workflows == 'true'
+        if: steps.stress-gate.outputs.run == 'true'
         shell: bash
         run: |
           cd tests
