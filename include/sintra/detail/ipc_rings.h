@@ -861,7 +861,7 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
                     if (slot.has_guard.compare_exchange_strong(
                             expected, uint8_t{0}, std::memory_order_acq_rel))
                     {
-                        uint8_t oct = slot.trailing_octile.load(std::memory_order_relaxed);
+                        uint8_t oct = slot.trailing_octile.load(std::memory_order_acquire);
                         read_access.fetch_sub(uint64_t(1) << (8 * oct), std::memory_order_acq_rel);
                     }
 
@@ -1883,7 +1883,7 @@ private:
                 bool has_blocking_reader = false;
                 for (int i = 0; i < max_process_index; ++i) {
                     if (c.reading_sequences[i].data.has_guard.load(std::memory_order_acquire) != 0 &&
-                        c.reading_sequences[i].data.trailing_octile.load(std::memory_order_relaxed) == new_octile)
+                        c.reading_sequences[i].data.trailing_octile.load(std::memory_order_acquire) == new_octile)
                     {
                         has_blocking_reader = true;
                         break;
@@ -1928,7 +1928,7 @@ private:
                             uint8_t guard_flag =
                                 c.reading_sequences[i].data.has_guard.load(std::memory_order_acquire);
                             uint8_t reader_octile =
-                                c.reading_sequences[i].data.trailing_octile.load(std::memory_order_relaxed);
+                                c.reading_sequences[i].data.trailing_octile.load(std::memory_order_acquire);
 
                             bool blocking_current_octile =
                                 (guard_flag != 0) && (reader_octile == new_octile);
@@ -1943,7 +1943,7 @@ private:
                                         Ring<T, false>::READER_STATE_EVICTED, std::memory_order_release);
 
                                     size_t evicted_reader_octile =
-                                        c.reading_sequences[i].data.trailing_octile.load(std::memory_order_relaxed);
+                                        c.reading_sequences[i].data.trailing_octile.load(std::memory_order_acquire);
                                     c.read_access.fetch_sub(uint64_t(1) << (8 * evicted_reader_octile), std::memory_order_acq_rel);
                                 }
                             }
