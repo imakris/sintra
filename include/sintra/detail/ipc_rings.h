@@ -1946,6 +1946,15 @@ private:
 
                                     c.reading_sequences[i].data.status.store(
                                         Ring<T, false>::READER_STATE_EVICTED, std::memory_order_release);
+
+                                    if (c.reading_sequences[i].data.has_guard.load(
+                                            std::memory_order_acquire)
+                                        != 0)
+                                    {
+                                        c.reading_sequences[i].data.status.store(
+                                            Ring<T, false>::READER_STATE_ACTIVE,
+                                            std::memory_order_release);
+                                    }
                                 }
                             }
                         }
