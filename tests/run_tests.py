@@ -78,6 +78,14 @@ TEST_WEIGHT_OVERRIDES = {
     "spawn_detached_test_release": 30,
 }
 
+# Tests that need extended timeouts beyond the global ``--timeout`` argument.
+# Values represent the minimum timeout (in seconds) that should be enforced for
+# the corresponding test invocation.
+TEST_TIMEOUT_OVERRIDES = {
+    "recovery_test_debug": 120.0,
+    "recovery_test_release": 120.0,
+}
+
 WINDOWS_DEBUGGER_CACHE_ENV = 'SINTRA_WINDOWS_DEBUGGER_CACHE'
 WINSDK_INSTALLER_URL_ENV = 'SINTRA_WINSDK_INSTALLER_URL'
 WINSDK_FEATURE_ENV = 'SINTRA_WINSDK_FEATURE'
@@ -109,6 +117,16 @@ def _lookup_test_weight(name: str) -> int:
 
     canonical = _canonical_test_name(name)
     return TEST_WEIGHT_OVERRIDES.get(canonical, 1)
+
+
+def _lookup_test_timeout(name: str, default: float) -> float:
+    """Return the timeout for the provided test invocation."""
+
+    canonical = _canonical_test_name(name)
+    override = TEST_TIMEOUT_OVERRIDES.get(canonical)
+    if override is None:
+        return default
+    return max(default, override)
 
 def format_duration(seconds: float) -> str:
     """Format duration in human-readable format"""
@@ -366,6 +384,7 @@ class TestRunner:
 
     def run_test_once(self, invocation: TestInvocation) -> TestResult:
         """Run a single test with timeout and proper cleanup"""
+        timeout = _lookup_test_timeout(invocation.name, self.timeout)
         process = None
         try:
             start_time = time.time()
@@ -523,7 +542,7 @@ class TestRunner:
                         active_extra = now_monotonic - active_start
 
                     adjusted_deadline = (
-                        start_monotonic + self.timeout + pause_total + active_extra
+                        start_monotonic + timeout + pause_total + active_extra
                     )
 
                     if process.poll() is not None:
@@ -531,7 +550,7 @@ class TestRunner:
 
                     remaining = adjusted_deadline - now_monotonic
                     if remaining <= 0:
-                        raise subprocess.TimeoutExpired(process.args, self.timeout)
+                        raise subprocess.TimeoutExpired(process.args, timeout)
 
                     try:
                         process.wait(timeout=remaining)
@@ -619,10 +638,10 @@ class TestRunner:
                 )
 
             except subprocess.TimeoutExpired as e:
-                duration = self.timeout
+                duration = timeout
 
                 if self.preserve_on_timeout:
-                    print(f"\n{Color.RED}TIMEOUT: Process exceeded timeout of {self.timeout}s (PID {process.pid}). Preserving for debugging as requested.{Color.RESET}")
+                    print(f"\n{Color.RED}TIMEOUT: Process exceeded timeout of {timeout}s (PID {process.pid}). Preserving for debugging as requested.{Color.RESET}")
                     print(f"{Color.YELLOW}Attach a debugger to PID {process.pid} or terminate it manually when done.{Color.RESET}")
                     sys.exit(2)
 
@@ -665,7 +684,7 @@ class TestRunner:
                     success=False,
                     duration=duration,
                     output=stdout,
-                    error=f"TIMEOUT: Test exceeded {self.timeout}s and was terminated.\n{stderr}"
+                    error=f"TIMEOUT: Test exceeded {timeout}s and was terminated.\n{stderr}"
                 )
 
         except Exception as e:
