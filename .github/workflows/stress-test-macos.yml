@@ -37,13 +37,33 @@ jobs:
           selected=""
           sdkroot=""
           found_any=0
-          while IFS= read -r app; do
-            found_any=1
-            developer_dir="$app/Contents/Developer"
-            if [ ! -d "$developer_dir" ]; then
-              continue
-            fi
+          declare -a candidate_dirs=()
 
+          current_dir="$(xcode-select -p 2>/dev/null || true)"
+          if [ -n "$current_dir" ]; then
+            candidate_dirs+=("$current_dir")
+          fi
+
+          if [ -d /Applications ]; then
+            while IFS= read -r app; do
+              developer_dir="$app/Contents/Developer"
+              if [ -d "$developer_dir" ]; then
+                candidate_dirs+=("$developer_dir")
+              fi
+            done < <(find /Applications -maxdepth 1 -type d -name 'Xcode*.app' -print | sort -r)
+          fi
+
+          if [ -d /Library/Developer/CommandLineTools ]; then
+            candidate_dirs+=("/Library/Developer/CommandLineTools")
+          fi
+
+          if [ ${#candidate_dirs[@]} -eq 0 ]; then
+            echo "::error::No candidate developer directories found" >&2
+            exit 1
+          fi
+
+          while IFS= read -r developer_dir; do
+            found_any=1
             if SDKROOT="$(DEVELOPER_DIR="$developer_dir" xcrun --sdk macosx --show-sdk-path 2>/dev/null)"; then
               if [ -f "$SDKROOT/usr/include/sys/ulock.h" ]; then
                 selected="$developer_dir"
@@ -55,10 +75,10 @@ jobs:
             else
               echo "Skipping $developer_dir: unable to determine macOS SDK" >&2
             fi
-          done < <(find /Applications -maxdepth 1 -type d -name 'Xcode*.app' -print | sort -r)
+          done < <(printf '%s\n' "${candidate_dirs[@]}" | awk '!seen[$0]++')
 
           if [ "$found_any" -eq 0 ]; then
-            echo "::error::No Xcode installations found under /Applications" >&2
+            echo "::error::No developer directories evaluated" >&2
             exit 1
           fi
 
@@ -68,12 +88,18 @@ jobs:
           fi
 
           echo "Selecting $selected"
-          sudo xcode-select --switch "$selected"
+          if [ "$(xcode-select -p 2>/dev/null || true)" != "$selected" ]; then
+            sudo xcode-select --switch "$selected"
+          fi
           xcode-select -p
           echo "Found sys/ulock.h in $sdkroot"
 
           echo "developer_dir=$selected" >> "$GITHUB_OUTPUT"
           echo "sdkroot=$sdkroot" >> "$GITHUB_OUTPUT"
+
+      - name: Export developer dir
+        if: ${{ steps.macos-sdk.outputs.developer_dir != '' }}
+        run: echo "DEVELOPER_DIR=${{ steps.macos-sdk.outputs.developer_dir }}" >> "$GITHUB_ENV"
 
       - name: Determine diff base
         id: diff-base
@@ -129,6 +155,8 @@ jobs:
           echo "CMAKE_FLAGS=$CT $CE $CS" >> "$GITHUB_OUTPUT"
 
       - name: Verify LLDB availability
+        env:
+          DEVELOPER_DIR: ${{ steps.macos-sdk.outputs.developer_dir }}
         run: |
           if ! xcrun -f lldb >/dev/null 2>&1; then
             echo "::error::lldb not available via xcrun. Install Xcode Command Line Tools to provide LLDB." >&2
