@@ -1543,15 +1543,20 @@ class TestRunner:
             if not output and result.stderr:
                 output = result.stderr.strip()
 
+            if output:
+                if result.returncode != 0:
+                    formatted_code = f"0x{(result.returncode & 0xFFFFFFFF):08X}"
+                    output = (
+                        f"{output}\n\n[Debugger exited with code {formatted_code}; proceeding with captured output]"
+                    )
+                stack_outputs.append(f"dump file: {dump_path}\n{output}")
+                break
+
             if result.returncode != 0:
                 capture_errors.append(
                     f"{dump_path.name}: {debugger_name} exited with code {result.returncode}: {result.stderr.strip()}"
                 )
                 continue
-
-            if output:
-                stack_outputs.append(f"dump file: {dump_path}\n{output}")
-                break
 
         if stack_outputs:
             return "\n\n".join(stack_outputs), ""
@@ -1599,14 +1604,20 @@ class TestRunner:
             if not output and result.stderr:
                 output = result.stderr.strip()
 
+            if output:
+                if result.returncode != 0:
+                    formatted_code = f"0x{(result.returncode & 0xFFFFFFFF):08X}"
+                    output = (
+                        f"{output}\n\n[Debugger exited with code {formatted_code}; proceeding with captured output]"
+                    )
+                stack_outputs.append(f"PID {target_pid}\n{output}")
+                continue
+
             if result.returncode != 0:
                 capture_errors.append(
                     f"PID {target_pid}: {debugger_name} exited with code {result.returncode}: {result.stderr.strip()}"
                 )
                 continue
-
-            if output:
-                stack_outputs.append(f"PID {target_pid}\n{output}")
 
         if stack_outputs:
             return "\n\n".join(stack_outputs), ""
