@@ -24,6 +24,24 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
 
+      - name: Select full Xcode toolchain
+        run: |
+          set -euo pipefail
+          sudo xcode-select --switch "$(ls -d /Applications/Xcode*.app/Contents/Developer | sort -V | tail -n1)"
+          xcode-select -p
+
+      - name: Determine macOS SDK
+        id: macos-sdk
+        run: |
+          set -euo pipefail
+          SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+          echo "sdkroot=$SDKROOT" >> "$GITHUB_OUTPUT"
+          if [ ! -f "$SDKROOT/usr/include/sys/ulock.h" ]; then
+            echo "::error::sys/ulock.h not found in $SDKROOT. Ensure a full Xcode installation is available." >&2
+            exit 1
+          fi
+          ls "$SDKROOT/usr/include/sys/ulock.h"
+
       - name: Determine diff base
         id: diff-base
         shell: bash
