@@ -150,7 +150,7 @@ jobs:
           fi
 
       - name: Run stress tests with run_tests.py
-        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true'
+        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.core == 'true' || steps.changed.outputs.workflows == 'true'
         shell: bash
         run: |
           cd tests
