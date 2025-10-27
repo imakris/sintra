@@ -27,6 +27,32 @@
   #include <mutex>
   #include <unordered_map>
   #include <cstdio>
+
+  #if defined(__has_include)
+    #if __has_include(<sys/ulock.h>)
+      #include <sys/ulock.h>
+      #define SINTRA_DETAIL_HAS_SYS_ULOCK 1
+    #else
+      #define SINTRA_DETAIL_HAS_SYS_ULOCK 0
+    #endif
+  #else
+    #include <sys/ulock.h>
+    #define SINTRA_DETAIL_HAS_SYS_ULOCK 1
+  #endif
+
+  #if SINTRA_DETAIL_HAS_SYS_ULOCK
+    #ifdef ulock_wait
+      #undef ulock_wait
+    #endif
+    #define SINTRA_DETAIL_DEFINED_ULOCK_WAIT
+    #define ulock_wait __ulock_wait
+
+    #ifdef ulock_wake
+      #undef ulock_wake
+    #endif
+    #define SINTRA_DETAIL_DEFINED_ULOCK_WAKE
+    #define ulock_wake __ulock_wake
+  #endif
 #else
   #include <cerrno>
   #include <semaphore.h>
@@ -476,3 +502,17 @@ private:
 };
 
 } // namespace sintra::detail
+
+#ifdef SINTRA_DETAIL_HAS_SYS_ULOCK
+  #if SINTRA_DETAIL_HAS_SYS_ULOCK
+    #ifdef SINTRA_DETAIL_DEFINED_ULOCK_WAKE
+      #undef ulock_wake
+      #undef SINTRA_DETAIL_DEFINED_ULOCK_WAKE
+    #endif
+    #ifdef SINTRA_DETAIL_DEFINED_ULOCK_WAIT
+      #undef ulock_wait
+      #undef SINTRA_DETAIL_DEFINED_ULOCK_WAIT
+    #endif
+  #endif
+  #undef SINTRA_DETAIL_HAS_SYS_ULOCK
+#endif
