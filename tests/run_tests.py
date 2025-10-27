@@ -22,6 +22,7 @@ Options:
 
 import argparse
 import fnmatch
+import json
 import os
 import shlex
 import shutil
@@ -1046,6 +1047,14 @@ class TestRunner:
                 candidate_cores.append((stat_info.st_mtime, entry))
 
         if not candidate_cores:
+            if sys.platform == 'darwin':
+                crash_output, crash_error = self._capture_macos_crash_report_stack(
+                    invocation,
+                    start_time,
+                    pid,
+                )
+                if crash_output or crash_error:
+                    return crash_output, crash_error
             return "", "no recent core dump found"
 
         # Prefer cores whose filename contains the PID of the crashed process.
@@ -1106,6 +1115,207 @@ class TestRunner:
             return "", "; ".join(capture_errors)
 
         return "", "no usable core dump found"
+
+    def _capture_macos_crash_report_stack(
+        self,
+        invocation: TestInvocation,
+        start_time: float,
+        pid: int,
+    ) -> Tuple[str, str]:
+        """Attempt to extract stack traces from recent macOS crash reports."""
+
+        crash_dirs = [
+            Path.home() / 'Library' / 'Logs' / 'DiagnosticReports',
+            Path('/Library/Logs/DiagnosticReports'),
+        ]
+
+        process_stem = invocation.path.stem
+        stem_lower = process_stem.lower()
+        name_lower = invocation.path.name.lower()
+        candidates: List[Tuple[float, Path]] = []
+
+        for directory in crash_dirs:
+            try:
+                entries = list(directory.iterdir())
+            except OSError:
+                continue
+
+            for entry in entries:
+                if not entry.is_file():
+                    continue
+
+                entry_lower = entry.name.lower()
+                if stem_lower not in entry_lower and name_lower not in entry_lower:
+                    continue
+
+                if entry.suffix.lower() not in {'.ips', '.crash'}:
+                    continue
+
+                try:
+                    stat_info = entry.stat()
+                except OSError:
+                    continue
+
+                if stat_info.st_mtime + 0.001 < start_time:
+                    continue
+
+                candidates.append((stat_info.st_mtime, entry))
+
+        if not candidates:
+            return "", "no recent macOS crash report found"
+
+        candidates.sort(key=lambda item: item[0], reverse=True)
+
+        parse_errors: List[str] = []
+
+        for _, crash_path in candidates:
+            if crash_path.suffix.lower() == '.ips':
+                stack, error = self._parse_macos_ips_report(crash_path, pid)
+            else:
+                stack, error = self._parse_macos_crash_report(crash_path, pid)
+
+            if stack:
+                return f"crash report: {crash_path}\n{stack}", ""
+            if error:
+                parse_errors.append(f"{crash_path.name}: {error}")
+
+        if parse_errors:
+            return "", "; ".join(parse_errors)
+
+        return "", "macOS crash report did not contain stack information"
+
+    def _parse_macos_crash_report(self, path: Path, pid: int) -> Tuple[str, str]:
+        """Parse legacy text-based crash reports produced by Crash Reporter."""
+
+        try:
+            content = path.read_text(errors='replace')
+        except OSError as exc:
+            return "", f"failed to read crash report: {exc}"
+
+        lines = content.splitlines()
+        crash_section: List[str] = []
+        collecting = False
+
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith('Thread') and 'Crashed' in stripped:
+                crash_section = [stripped]
+                collecting = True
+                continue
+
+            if not collecting:
+                continue
+
+            if not stripped:
+                break
+
+            crash_section.append(stripped)
+
+        if crash_section:
+            return '\n'.join(crash_section), ""
+
+        if str(pid) in content:
+            # Provide the tail of the report as a best-effort diagnostic.
+            tail = '\n'.join(lines[-20:])
+            return tail, ""
+
+        return "", "crash report did not contain a crashed thread section"
+
+    def _parse_macos_ips_report(self, path: Path, pid: int) -> Tuple[str, str]:
+        """Parse modern structured .ips crash reports to extract stack traces."""
+
+        try:
+            content = path.read_text()
+        except OSError as exc:
+            return "", f"failed to read crash report: {exc}"
+
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError as exc:
+            return "", f"invalid JSON in crash report: {exc}"
+
+        roots = []
+        if isinstance(data, dict):
+            if isinstance(data.get('roots'), list):
+                roots = [item for item in data['roots'] if isinstance(item, dict)]
+            else:
+                roots = [data]
+
+        if not roots:
+            return "", "unexpected .ips crash report structure"
+
+        errors: List[str] = []
+
+        for root in roots:
+            threads = root.get('threads')
+            if not isinstance(threads, list):
+                continue
+
+            triggered_thread = None
+            for thread in threads:
+                if not isinstance(thread, dict):
+                    continue
+                if thread.get('triggered'):
+                    triggered_thread = thread
+                    break
+            if triggered_thread is None:
+                triggered_thread = next((t for t in threads if isinstance(t, dict)), None)
+            if triggered_thread is None:
+                continue
+
+            frames = triggered_thread.get('frames')
+            if not isinstance(frames, list) or not frames:
+                continue
+
+            image_map: Dict[int, str] = {}
+            for image in root.get('binaryImages', []):
+                if not isinstance(image, dict):
+                    continue
+                index = image.get('imageIndex')
+                if index is None:
+                    index = image.get('index')
+                if index is None:
+                    continue
+                name = image.get('name') or image.get('path') or image.get('imageName')
+                if not name:
+                    name = image.get('uuid') or 'unknown image'
+                image_map[int(index)] = str(name)
+
+            formatted_frames: List[str] = []
+            for frame_index, frame in enumerate(frames):
+                if not isinstance(frame, dict):
+                    continue
+                symbol = frame.get('symbol') or frame.get('function') or '<unknown>'
+                symbol_location = frame.get('symbolLocation')
+                if symbol_location is None:
+                    symbol_location = frame.get('offset')
+                image_index = frame.get('imageIndex')
+                if image_index is None:
+                    image_index = frame.get('binaryImageIndex')
+                image_name = image_map.get(int(image_index)) if image_index is not None else None
+                image_offset = frame.get('imageOffset')
+
+                parts = [f"{frame_index:02d} {symbol}"]
+                if symbol_location is not None:
+                    parts.append(f"+ {symbol_location}")
+                elif image_offset is not None:
+                    parts.append(f"@ {image_offset}")
+                if image_name:
+                    parts.append(f"({image_name})")
+
+                formatted_frames.append(' '.join(str(part) for part in parts if part))
+
+            if formatted_frames:
+                thread_name = triggered_thread.get('name') or triggered_thread.get('id')
+                header = f"Thread: {thread_name}" if thread_name else "Thread"
+                return f"{header}\n" + '\n'.join(formatted_frames), ""
+
+            errors.append('no frames in triggered thread')
+
+        if errors:
+            return "", '; '.join(errors)
+
+        return "", "no triggered thread found in .ips crash report"
 
     def _resolve_unix_debugger(self) -> Tuple[Optional[str], Optional[List[str]], str]:
         """Locate gdb or lldb on Unix-like platforms."""
