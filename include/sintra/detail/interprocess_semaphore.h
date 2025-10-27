@@ -365,20 +365,34 @@ public:
         }
         throw std::system_error(::GetLastError(), std::system_category(), "WaitForSingleObject");
 #elif defined(__APPLE__) && SINTRA_HAS_OS_SYNC_WAIT_ON_ADDRESS
-        while (true) {
-            if (try_acquire_os_sync()) {
-                return true;
-            }
+        int32_t previous = m_os_sync.count.fetch_sub(1, std::memory_order_acq_rel);
+        if (previous > 0) {
+            return true;
+        }
 
+        int32_t expected = previous - 1;
+        while (true) {
             auto now = Clock::now();
             if (abs_time <= now) {
+                cancel_wait_os_sync();
                 return false;
             }
 
             auto remaining = std::chrono::ceil<std::chrono::nanoseconds>(abs_time - now);
-            if (!wait_os_sync_with_timeout(remaining)) {
+            int32_t observed = expected;
+            if (!wait_os_sync_with_timeout(expected, remaining, observed)) {
+                if (observed >= 0) {
+                    return true;
+                }
+                cancel_wait_os_sync();
                 return false;
             }
+
+            if (observed >= 0) {
+                return true;
+            }
+
+            expected = observed;
         }
 #else
         auto ts = make_abs_timespec(abs_time);
@@ -459,8 +473,12 @@ private:
 
 #    ifdef OS_CLOCK_REALTIME
     static constexpr os_clockid_t wait_clock = OS_CLOCK_REALTIME;
-#    else
+#    elif defined(CLOCK_REALTIME)
     static constexpr os_clockid_t wait_clock = static_cast<os_clockid_t>(CLOCK_REALTIME);
+#    elif defined(OS_CLOCK_MACH_ABSOLUTE_TIME)
+    static constexpr os_clockid_t wait_clock = OS_CLOCK_MACH_ABSOLUTE_TIME;
+#    else
+#      error "No supported clock id available for os_sync_wait_on_address_with_timeout"
 #    endif
 
     void initialise_os_sync(unsigned int initial_count)
@@ -473,23 +491,25 @@ private:
     void post_os_sync()
     {
         int32_t previous = m_os_sync.count.fetch_add(1, std::memory_order_release);
-        if (previous <= 0) {
+        if (previous < 0) {
             wake_one_waiter();
         }
     }
 
     void wait_os_sync()
     {
+        int32_t previous = m_os_sync.count.fetch_sub(1, std::memory_order_acq_rel);
+        if (previous > 0) {
+            return;
+        }
+
+        int32_t expected = previous - 1;
         while (true) {
-            if (try_acquire_os_sync()) {
+            int32_t observed = wait_on_address_blocking(expected);
+            if (observed >= 0) {
                 return;
             }
-
-            if (m_os_sync.count.load(std::memory_order_acquire) > 0) {
-                continue;
-            }
-
-            wait_on_address_blocking();
+            expected = observed;
         }
     }
 
@@ -507,18 +527,16 @@ private:
         return false;
     }
 
-    bool wait_os_sync_with_timeout(std::chrono::nanoseconds remaining)
+    bool wait_os_sync_with_timeout(int32_t expected, std::chrono::nanoseconds remaining, int32_t& observed)
     {
         if (remaining <= std::chrono::nanoseconds::zero()) {
+            observed = m_os_sync.count.load(std::memory_order_acquire);
             return false;
-        }
-
-        if (m_os_sync.count.load(std::memory_order_acquire) > 0) {
-            return true;
         }
 
         auto count = remaining.count();
         if (count <= 0) {
+            observed = m_os_sync.count.load(std::memory_order_acquire);
             return false;
         }
 
@@ -527,15 +545,17 @@ private:
         while (true) {
             int rc = os_sync_wait_on_address_with_timeout(
                 reinterpret_cast<void*>(&m_os_sync.count),
-                0,
+                expected,
                 sizeof(int32_t),
                 wait_flags,
                 wait_clock,
                 timeout_ns);
             if (rc >= 0) {
+                observed = m_os_sync.count.load(std::memory_order_acquire);
                 return true;
             }
             if (errno == ETIMEDOUT) {
+                observed = m_os_sync.count.load(std::memory_order_acquire);
                 return false;
             }
             if (errno == EINTR || errno == EFAULT) {
@@ -545,16 +565,21 @@ private:
         }
     }
 
-    void wait_on_address_blocking()
+    void cancel_wait_os_sync()
+    {
+        m_os_sync.count.fetch_add(1, std::memory_order_acq_rel);
+    }
+
+    int32_t wait_on_address_blocking(int32_t expected)
     {
         while (true) {
             int rc = os_sync_wait_on_address(
                 reinterpret_cast<void*>(&m_os_sync.count),
-                0,
+                expected,
                 sizeof(int32_t),
                 wait_flags);
             if (rc >= 0) {
-                return;
+                return m_os_sync.count.load(std::memory_order_acquire);
             }
             if (errno == EINTR || errno == EFAULT) {
                 continue;
