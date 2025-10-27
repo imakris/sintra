@@ -399,6 +399,7 @@ class TestRunner:
             capture_pause_total = 0.0
             capture_active_start: Optional[float] = None
             threads: List[Tuple[threading.Thread, IO[str]]] = []
+            process_group_id: Optional[int] = None
 
             def shutdown_reader_threads() -> None:
                 """Ensure log reader threads terminate to avoid leaking resources."""
@@ -428,6 +429,12 @@ class TestRunner:
 
             process = subprocess.Popen(invocation.command(), **popen_kwargs)
 
+            if hasattr(os, 'getpgid'):
+                try:
+                    process_group_id = os.getpgid(process.pid)
+                except (ProcessLookupError, PermissionError, OSError):
+                    process_group_id = None
+
             def attempt_live_capture(trigger_line: str) -> None:
                 nonlocal live_stack_traces, live_stack_error, capture_pause_total, capture_active_start
                 if not trigger_line:
@@ -446,7 +453,10 @@ class TestRunner:
                 traces = ""
                 error = ""
                 try:
-                    traces, error = self._capture_process_stacks(process.pid)
+                    traces, error = self._capture_process_stacks(
+                        process.pid,
+                        process_group_id,
+                    )
                 finally:
                     capture_finished = time.monotonic()
                     with capture_lock:
@@ -554,7 +564,10 @@ class TestRunner:
 
                     if not live_stack_traces and not live_stack_error:
                         if self._should_attempt_stack_capture(invocation, 'post_failure'):
-                            traces, error = self._capture_process_stacks(process.pid)
+                            traces, error = self._capture_process_stacks(
+                                process.pid,
+                                process_group_id,
+                            )
                             if traces:
                                 live_stack_traces = traces
                             elif error:
@@ -562,7 +575,10 @@ class TestRunner:
 
                     if self._is_crash_exit(process.returncode):
                         if self._should_attempt_stack_capture(invocation, 'crash'):
-                            traces, error = self._capture_process_stacks(process.pid)
+                            traces, error = self._capture_process_stacks(
+                                process.pid,
+                                process_group_id,
+                            )
                             if traces:
                                 if live_stack_traces:
                                     live_stack_traces = f"{live_stack_traces}\n\n{traces}"
@@ -614,7 +630,10 @@ class TestRunner:
                 stack_error = live_stack_error
                 if process:
                     if self._should_attempt_stack_capture(invocation, 'timeout'):
-                        extra_traces, extra_error = self._capture_process_stacks(process.pid)
+                        extra_traces, extra_error = self._capture_process_stacks(
+                            process.pid,
+                            process_group_id,
+                        )
                         if extra_traces:
                             if stack_traces:
                                 stack_traces = f"{stack_traces}\n\n{extra_traces}"
@@ -776,7 +795,11 @@ class TestRunner:
         # Codes > 128 are also commonly used to report signal-based exits.
         return returncode < 0 or returncode > 128
 
-    def _capture_process_stacks(self, pid: int) -> Tuple[str, str]:
+    def _capture_process_stacks(
+        self,
+        pid: int,
+        process_group: Optional[int] = None,
+    ) -> Tuple[str, str]:
         """Attempt to capture stack traces for the test process and all of its helpers."""
 
         if sys.platform == 'win32':
@@ -787,18 +810,38 @@ class TestRunner:
             return "", debugger_error
 
         import signal
-        try:
-            pgid = os.getpgid(pid)
-        except ProcessLookupError:
-            return "", "process exited before stack capture"
+        pgid: Optional[int] = None
+        if process_group is not None:
+            pgid = process_group
+        else:
+            try:
+                pgid = os.getpgid(pid)
+            except ProcessLookupError:
+                return "", "process exited before stack capture"
 
         target_pids = set()
         target_pids.add(pid)
-        target_pids.update(self._collect_process_group_pids(pgid))
+        if pgid is not None:
+            target_pids.update(self._collect_process_group_pids(pgid))
         target_pids.update(self._collect_descendant_pids(pid))
 
         if not target_pids:
             target_pids = {pid}
+
+        def _pid_exists(target_pid: int) -> bool:
+            if target_pid <= 0:
+                return False
+            if sys.platform == 'win32':
+                return True
+            try:
+                os.kill(target_pid, 0)
+            except ProcessLookupError:
+                return False
+            except PermissionError:
+                return True
+            except OSError:
+                return False
+            return True
 
         paused_pids = []
         stack_outputs = []
@@ -821,6 +864,8 @@ class TestRunner:
             for target_pid in sorted(target_pids):
                 if target_pid == os.getpid():
                     continue
+                if not _pid_exists(target_pid):
+                    continue
                 try:
                     os.kill(target_pid, signal.SIGSTOP)
                     paused_pids.append(target_pid)
@@ -833,6 +878,11 @@ class TestRunner:
 
         for target_pid in sorted(target_pids):
             if target_pid == os.getpid():
+                continue
+            if not _pid_exists(target_pid):
+                capture_errors.append(
+                    f"PID {target_pid}: process exited before stack capture"
+                )
                 continue
 
             remaining = capture_deadline - time.monotonic()
