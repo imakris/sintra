@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <stdexcept>
 #include <system_error>
@@ -24,19 +25,57 @@
   #include <cerrno>
   #include <ctime>
   #if defined(__has_include)
-    #if __has_include(<os/os_sync_wait_on_address.h>) && __has_include(<os/clock.h>)
+    #if __has_include(<os/os_sync_wait_on_address.h>)
       #include <os/os_sync_wait_on_address.h>
-      #include <os/clock.h>
       #define SINTRA_HAS_OS_SYNC_WAIT_ON_ADDRESS 1
+    #endif
+    #if __has_include(<os/clock.h>)
+      #include <os/clock.h>
     #endif
   #endif
   #if !defined(SINTRA_HAS_OS_SYNC_WAIT_ON_ADDRESS)
-    #define SINTRA_HAS_OS_SYNC_WAIT_ON_ADDRESS 0
-    #include <fcntl.h>
-    #include <semaphore.h>
-    #include <mutex>
-    #include <unordered_map>
-    #include <cstdio>
+    #define SINTRA_HAS_OS_SYNC_WAIT_ON_ADDRESS 1
+    #include <stddef.h>
+    #include <stdint.h>
+    extern "C" {
+        typedef uint32_t os_sync_wait_on_address_flags_t;
+        typedef uint32_t os_sync_wake_by_address_flags_t;
+        typedef uint32_t os_clockid_t;
+
+        int os_sync_wait_on_address(void* addr,
+                                    uint64_t value,
+                                    size_t size,
+                                    os_sync_wait_on_address_flags_t flags);
+
+        int os_sync_wait_on_address_with_timeout(void* addr,
+                                                 uint64_t value,
+                                                 size_t size,
+                                                 os_sync_wait_on_address_flags_t flags,
+                                                 os_clockid_t clockid,
+                                                 uint64_t timeout_ns);
+
+        int os_sync_wake_by_address_any(void* addr,
+                                        size_t size,
+                                        os_sync_wake_by_address_flags_t flags);
+
+        int os_sync_wake_by_address_all(void* addr,
+                                        size_t size,
+                                        os_sync_wake_by_address_flags_t flags);
+    }
+
+    #ifndef OS_SYNC_WAIT_ON_ADDRESS_NONE
+      #define OS_SYNC_WAIT_ON_ADDRESS_NONE 0x00000000u
+    #endif
+    #ifndef OS_SYNC_WAIT_ON_ADDRESS_SHARED
+      #define OS_SYNC_WAIT_ON_ADDRESS_SHARED 0x00000001u
+    #endif
+
+    #ifndef OS_SYNC_WAKE_BY_ADDRESS_NONE
+      #define OS_SYNC_WAKE_BY_ADDRESS_NONE 0x00000000u
+    #endif
+    #ifndef OS_SYNC_WAKE_BY_ADDRESS_SHARED
+      #define OS_SYNC_WAKE_BY_ADDRESS_SHARED 0x00000001u
+    #endif
   #endif
 #else
   #include <cerrno>
