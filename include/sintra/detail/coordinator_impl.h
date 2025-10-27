@@ -453,22 +453,54 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
             m_draining_process_states[slot].store(1, std::memory_order_release);
         }
 
-        lock_guard<mutex> lock(m_groups_mutex);
+        struct Pending_completion
+        {
+            std::string group_name;
+            std::vector<Process_group::Barrier_completion> completions;
+        };
 
-        for (auto& group_entry : m_groups) {
-            group_entry.second.remove_process(process_iid);
+        std::vector<Pending_completion> pending_completions;
+
+        {
+            lock_guard<mutex> lock(m_groups_mutex);
+            pending_completions.reserve(m_groups.size());
+
+            for (auto& [name, group] : m_groups) {
+                std::vector<Process_group::Barrier_completion> completions;
+                group.drop_from_inflight_barriers(process_iid, completions);
+                if (!completions.empty()) {
+                    pending_completions.push_back({name, std::move(completions)});
+                }
+                group.remove_process(process_iid);
+            }
+
+            m_groups_of_process.erase(process_iid);
         }
 
-        m_groups_of_process.erase(process_iid);
+        if (!pending_completions.empty() && s_mproc) {
+            s_mproc->run_after_current_handler(
+                [this, pending = std::move(pending_completions)]() mutable {
+                    std::lock_guard<mutex> groups_lock(m_groups_mutex);
+                    for (auto& entry : pending) {
+                        auto it = m_groups.find(entry.group_name);
+                        if (it != m_groups.end()) {
+                            it->second.emit_barrier_completions(entry.completions);
+                        }
+                    }
+                });
+        }
 
         // Keep the draining bit set; it will be re-initialized to 0 (ACTIVE)
         // when a new process is published into this slot. This prevents the race
         // where resetting too early allows concurrent barriers to include a dying process.
 
         // remove all group associations of unpublished process
-        auto groups_it = m_groups_of_process.find(iid);
-        if (groups_it != m_groups_of_process.end()) {
-            m_groups_of_process.erase(groups_it);
+        {
+            std::lock_guard<mutex> groups_lock(m_groups_mutex);
+            auto groups_it = m_groups_of_process.find(iid);
+            if (groups_it != m_groups_of_process.end()) {
+                m_groups_of_process.erase(groups_it);
+            }
         }
 
         //// and finally, if the process was being read, stop reading from it
