@@ -149,6 +149,8 @@ class TestRunner:
         self._ipc_rings_cache: Dict[Path, List[Tuple[str, str]]] = {}
         self._debugger_cache: Dict[str, Tuple[Optional[str], str]] = {}
         self._downloaded_windows_debugger_root: Optional[Path] = None
+        self._stack_capture_history: Dict[str, Set[str]] = defaultdict(set)
+        self._stack_capture_history_lock = threading.Lock()
 
         # Determine test directory - check both with and without config subdirectory
         test_dir_with_config = build_dir / 'tests' / config
@@ -432,6 +434,8 @@ class TestRunner:
                     return
                 if not self._line_indicates_failure(trigger_line):
                     return
+                if not self._should_attempt_stack_capture(invocation, 'live_failure'):
+                    return
                 capture_started = time.monotonic()
                 with capture_lock:
                     if failure_event.is_set():
@@ -546,33 +550,37 @@ class TestRunner:
                         error_msg = f"TEST FAILED: Exit code {process.returncode} after {duration:.2f}s\n{stderr}"
 
                     if not live_stack_traces and not live_stack_error:
-                        traces, error = self._capture_process_stacks(process.pid)
-                        if traces:
-                            live_stack_traces = traces
-                        elif error:
-                            live_stack_error = error
+                        if self._should_attempt_stack_capture(invocation, 'post_failure'):
+                            traces, error = self._capture_process_stacks(process.pid)
+                            if traces:
+                                live_stack_traces = traces
+                            elif error:
+                                live_stack_error = error
 
                     if self._is_crash_exit(process.returncode):
-                        traces, error = self._capture_process_stacks(process.pid)
-                        if traces:
-                            if live_stack_traces:
-                                live_stack_traces = f"{live_stack_traces}\n\n{traces}"
-                            else:
-                                live_stack_traces = traces
-                            live_stack_error = ""
-                        elif error and not live_stack_traces:
-                            live_stack_error = error
+                        if self._should_attempt_stack_capture(invocation, 'crash'):
+                            traces, error = self._capture_process_stacks(process.pid)
+                            if traces:
+                                if live_stack_traces:
+                                    live_stack_traces = f"{live_stack_traces}\n\n{traces}"
+                                else:
+                                    live_stack_traces = traces
+                                live_stack_error = ""
+                            elif error and not live_stack_traces:
+                                live_stack_error = error
 
                         if sys.platform == 'win32':
-                            (
-                                postmortem_stack_traces,
-                                postmortem_stack_error,
-                            ) = self._capture_windows_crash_dump(invocation, start_time, process.pid)
+                            if self._should_attempt_stack_capture(invocation, 'postmortem'):
+                                (
+                                    postmortem_stack_traces,
+                                    postmortem_stack_error,
+                                ) = self._capture_windows_crash_dump(invocation, start_time, process.pid)
                         else:
-                            (
-                                postmortem_stack_traces,
-                                postmortem_stack_error,
-                            ) = self._capture_core_dump_stack(invocation, start_time, process.pid)
+                            if self._should_attempt_stack_capture(invocation, 'postmortem'):
+                                (
+                                    postmortem_stack_traces,
+                                    postmortem_stack_error,
+                                ) = self._capture_core_dump_stack(invocation, start_time, process.pid)
 
                 if live_stack_traces:
                     error_msg = f"{error_msg}\n\n=== Captured stack traces ===\n{live_stack_traces}"
@@ -602,15 +610,16 @@ class TestRunner:
                 stack_traces = live_stack_traces
                 stack_error = live_stack_error
                 if process:
-                    extra_traces, extra_error = self._capture_process_stacks(process.pid)
-                    if extra_traces:
-                        if stack_traces:
-                            stack_traces = f"{stack_traces}\n\n{extra_traces}"
-                        else:
-                            stack_traces = extra_traces
-                        stack_error = ""
-                    elif extra_error and not stack_traces:
-                        stack_error = extra_error
+                    if self._should_attempt_stack_capture(invocation, 'timeout'):
+                        extra_traces, extra_error = self._capture_process_stacks(process.pid)
+                        if extra_traces:
+                            if stack_traces:
+                                stack_traces = f"{stack_traces}\n\n{extra_traces}"
+                            else:
+                                stack_traces = extra_traces
+                            stack_error = ""
+                        elif extra_error and not stack_traces:
+                            stack_error = extra_error
 
                 # Kill the process tree on timeout
                 self._kill_process_tree(process.pid)
@@ -738,6 +747,17 @@ class TestRunner:
         )
 
         return any(marker in lowered for marker in failure_markers)
+
+    def _should_attempt_stack_capture(self, invocation: TestInvocation, reason: str) -> bool:
+        """Return True if stack capture for the invocation/reason has not run yet."""
+
+        key = invocation.name
+        with self._stack_capture_history_lock:
+            attempted = self._stack_capture_history[key]
+            if reason in attempted:
+                return False
+            attempted.add(reason)
+            return True
 
     def _is_crash_exit(self, returncode: int) -> bool:
         """Return True if the exit code represents an abnormal termination."""
