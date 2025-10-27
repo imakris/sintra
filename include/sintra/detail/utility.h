@@ -11,6 +11,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -25,6 +26,7 @@
     #endif
     #include <windows.h>
     #include <process.h>
+    #include <cerrno>
 #else
     #include <atomic>
     #include <cerrno>
@@ -394,29 +396,50 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
     }
 
     char full_path[_MAX_PATH];
-    if( _fullpath(full_path, prog, _MAX_PATH ) != NULL ) {
-
-        size_t argv_size=0;
-        for (size_t i=0; argv[i] != nullptr; i++) {
-            argv_size++;
-        }
-
-        const char** argv_with_prog = new const char*[argv_size+2];
-        argv_with_prog[0] = full_path;
-
-        for (size_t i=0; i!=argv_size; i++) {
-            argv_with_prog[i+1] = argv[i];
-        }
-        argv_with_prog[argv_size+1] = nullptr;
-        auto spawned = _spawnv(P_DETACH, full_path, argv_with_prog);
+    if (_fullpath(full_path, prog, _MAX_PATH) == nullptr) {
         if (child_pid_out) {
-            *child_pid_out = static_cast<int>(spawned);
+            *child_pid_out = -1;
         }
-        auto ret = spawned != -1;
-        delete [] argv_with_prog;
-        return ret;
+        return false;
     }
 
+    size_t argv_size = 0;
+    for (size_t i = 0; argv[i] != nullptr; ++i) {
+        ++argv_size;
+    }
+
+    std::vector<const char*> argv_with_prog(argv_size + 2, nullptr);
+    argv_with_prog[0] = full_path;
+    for (size_t i = 0; i != argv_size; ++i) {
+        argv_with_prog[i + 1] = argv[i];
+    }
+
+    constexpr int kMaxAttempts = 3;
+    int last_errno = 0;
+    for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
+        auto spawned = _spawnv(P_DETACH, full_path, argv_with_prog.data());
+        if (spawned != -1) {
+            if (child_pid_out) {
+                *child_pid_out = static_cast<int>(spawned);
+            }
+            return true;
+        }
+
+        _get_errno(&last_errno);
+        if (attempt + 1 < kMaxAttempts &&
+            (last_errno == EAGAIN || last_errno == EACCES)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            continue;
+        }
+        break;
+    }
+
+    if (child_pid_out) {
+        *child_pid_out = -1;
+    }
+    if (last_errno != 0) {
+        _set_errno(last_errno);
+    }
     return false;
 #else
 

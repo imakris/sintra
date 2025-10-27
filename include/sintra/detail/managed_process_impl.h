@@ -19,8 +19,13 @@
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
+#include <system_error>
 #include <thread>
 #include <utility>
+#include <iostream>
+#ifdef _WIN32
+#include <errno.h>
+#endif
 #ifndef _WIN32
 #include <signal.h>
 #include <cerrno>
@@ -1130,7 +1135,19 @@ bool Managed_process::spawn_swarm_process(
         m_cached_spawns[s.piid].occurrence++;
     }
     else {
-        std::cerr << "failed to launch " << s.binary_name << std::endl;
+        int saved_errno = 0;
+#ifdef _WIN32
+        _get_errno(&saved_errno);
+#else
+        saved_errno = errno;
+#endif
+
+        std::cerr << "failed to launch " << s.binary_name;
+        if (saved_errno != 0) {
+            std::error_code ec(saved_errno, std::system_category());
+            std::cerr << " (errno " << saved_errno << ": " << ec.message() << ')';
+        }
+        std::cerr << std::endl;
 
         //m_readers.pop_back();
         std::unique_lock<std::shared_mutex> readers_lock(m_readers_mutex);
