@@ -22,11 +22,15 @@
   #include <unordered_map>
 #elif defined(__APPLE__)
   #include <cerrno>
-  #include <fcntl.h>
-  #include <semaphore.h>
-  #include <mutex>
-  #include <unordered_map>
-  #include <cstdio>
+  #if __has_include(<os/os_sync_wait_on_address.h>)
+    #include <os/os_sync_wait_on_address.h>
+  #else
+    #include <fcntl.h>
+    #include <semaphore.h>
+    #include <mutex>
+    #include <unordered_map>
+    #include <cstdio>
+  #endif
 #else
   #include <cerrno>
   #include <semaphore.h>
@@ -127,6 +131,9 @@ namespace interprocess_semaphore_detail
         }
     }
 #elif defined(__APPLE__)
+  #if __has_include(<os/os_sync_wait_on_address.h>)
+    inline void close_handle(uint64_t) noexcept {}
+  #else
     inline std::mutex& handle_mutex()
     {
         static std::mutex mtx;
@@ -181,6 +188,7 @@ namespace interprocess_semaphore_detail
             while (sem_close(sem) == -1 && errno == EINTR) {}
         }
     }
+  #endif
 #endif
 }
 
@@ -191,6 +199,8 @@ public:
     {
 #if defined(_WIN32)
         initialise_windows(initial_count);
+#elif defined(__APPLE__) && __has_include(<os/os_sync_wait_on_address.h>)
+        initialise_os_sync(initial_count);
 #elif defined(__APPLE__)
         initialise_named(initial_count);
 #else
@@ -205,6 +215,8 @@ public:
     {
 #if defined(_WIN32)
         teardown_windows();
+#elif defined(__APPLE__) && __has_include(<os/os_sync_wait_on_address.h>)
+        teardown_os_sync();
 #elif defined(__APPLE__)
         teardown_named();
 #else
@@ -216,6 +228,8 @@ public:
     {
 #if defined(_WIN32)
         interprocess_semaphore_detail::close_handle(m_windows.id);
+#elif defined(__APPLE__) && __has_include(<os/os_sync_wait_on_address.h>)
+        // Nothing to do for os_sync backed implementation.
 #elif defined(__APPLE__)
         interprocess_semaphore_detail::close_handle(m_named.id);
 #else
@@ -230,6 +244,8 @@ public:
         if (!::ReleaseSemaphore(handle, 1, nullptr)) {
             throw std::system_error(::GetLastError(), std::system_category(), "ReleaseSemaphore");
         }
+#elif defined(__APPLE__) && __has_include(<os/os_sync_wait_on_address.h>)
+        post_os_sync();
 #elif defined(__APPLE__)
         sem_t* sem = named_handle();
         while (sem_post(sem) == -1) {
@@ -256,6 +272,8 @@ public:
         if (result != WAIT_OBJECT_0) {
             throw std::system_error(::GetLastError(), std::system_category(), "WaitForSingleObject");
         }
+#elif defined(__APPLE__) && __has_include(<os/os_sync_wait_on_address.h>)
+        wait_os_sync();
 #elif defined(__APPLE__)
         sem_t* sem = named_handle();
         while (sem_wait(sem) == -1) {
@@ -286,6 +304,8 @@ public:
             return false;
         }
         throw std::system_error(::GetLastError(), std::system_category(), "WaitForSingleObject");
+#elif defined(__APPLE__) && __has_include(<os/os_sync_wait_on_address.h>)
+        return try_wait_os_sync();
 #elif defined(__APPLE__)
         sem_t* sem = named_handle();
         while (sem_trywait(sem) == -1) {
@@ -341,6 +361,8 @@ public:
             return false;
         }
         throw std::system_error(::GetLastError(), std::system_category(), "WaitForSingleObject");
+#elif defined(__APPLE__) && __has_include(<os/os_sync_wait_on_address.h>)
+        return timed_wait_os_sync(abs_time);
 #elif defined(__APPLE__)
         sem_t* sem = named_handle();
         auto ts = make_abs_timespec(abs_time);
@@ -420,6 +442,154 @@ private:
     {
         interprocess_semaphore_detail::close_handle(m_windows.id);
     }
+#elif defined(__APPLE__) && __has_include(<os/os_sync_wait_on_address.h>)
+    struct os_sync_storage
+    {
+        std::atomic<int32_t> count{0};
+    };
+
+    os_sync_storage m_os_sync{};
+
+    void initialise_os_sync(unsigned int initial_count)
+    {
+        m_os_sync.count.store(static_cast<int32_t>(initial_count), std::memory_order_relaxed);
+    }
+
+    void teardown_os_sync() noexcept {}
+
+    static uint64_t encode_wait_value(int32_t value) noexcept
+    {
+        return static_cast<uint64_t>(static_cast<uint32_t>(value));
+    }
+
+    void wake_one_os_sync()
+    {
+        int result = os_sync_wake_by_address_any(&m_os_sync.count,
+                                                 sizeof(int32_t),
+                                                 OS_SYNC_WAKE_BY_ADDRESS_SHARED);
+        if (result == -1 && errno != ENOENT) {
+            throw std::system_error(errno, std::generic_category(), "os_sync_wake_by_address_any");
+        }
+    }
+
+    void post_os_sync()
+    {
+        int32_t previous = m_os_sync.count.fetch_add(1, std::memory_order_release);
+        if (previous < 0) {
+            wake_one_os_sync();
+        }
+    }
+
+    void wait_os_sync()
+    {
+        int32_t previous = m_os_sync.count.fetch_sub(1, std::memory_order_acq_rel);
+        if (previous > 0) {
+            return;
+        }
+
+        const int32_t expected = previous - 1;
+        while (true) {
+            int result = os_sync_wait_on_address(&m_os_sync.count,
+                                                 encode_wait_value(expected),
+                                                 sizeof(expected),
+                                                 OS_SYNC_WAIT_ON_ADDRESS_SHARED);
+            if (result == -1) {
+                if (errno == EINTR || errno == EFAULT) {
+                    continue;
+                }
+                throw std::system_error(errno, std::generic_category(), "os_sync_wait_on_address");
+            }
+            return;
+        }
+    }
+
+    bool try_wait_os_sync()
+    {
+        int32_t expected = m_os_sync.count.load(std::memory_order_acquire);
+        while (expected > 0) {
+            if (m_os_sync.count.compare_exchange_weak(expected,
+                                                      expected - 1,
+                                                      std::memory_order_acq_rel,
+                                                      std::memory_order_acquire)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    template <typename Clock, typename Duration>
+    bool timed_wait_os_sync(const std::chrono::time_point<Clock, Duration>& abs_time)
+    {
+        if (try_wait_os_sync()) {
+            return true;
+        }
+
+        int32_t previous = m_os_sync.count.fetch_sub(1, std::memory_order_acq_rel);
+        if (previous > 0) {
+            return true;
+        }
+
+        const int32_t expected = previous - 1;
+        while (true) {
+            auto remaining = remaining_time_ns(abs_time);
+            if (remaining <= std::chrono::nanoseconds::zero()) {
+                cancel_wait_os_sync();
+                return false;
+            }
+
+            uint64_t timeout_ns = static_cast<uint64_t>(remaining.count());
+            if (timeout_ns == 0) {
+                timeout_ns = 1;
+            }
+
+            int result = os_sync_wait_on_address_with_timeout(&m_os_sync.count,
+                                                              encode_wait_value(expected),
+                                                              sizeof(expected),
+                                                              OS_SYNC_WAIT_ON_ADDRESS_SHARED,
+                                                              OS_CLOCK_MONOTONIC,
+                                                              timeout_ns);
+            if (result == 0) {
+                return true;
+            }
+
+            if (result == -1) {
+                if (errno == ETIMEDOUT) {
+                    cancel_wait_os_sync();
+                    return false;
+                }
+                if (errno == EINTR || errno == EFAULT) {
+                    continue;
+                }
+                throw std::system_error(errno,
+                                        std::generic_category(),
+                                        "os_sync_wait_on_address_with_timeout");
+            }
+        }
+    }
+
+    void cancel_wait_os_sync()
+    {
+        int32_t value = m_os_sync.count.fetch_add(1, std::memory_order_acq_rel);
+        if (value < 0) {
+            wake_one_os_sync();
+        }
+    }
+
+    template <typename Clock, typename Duration>
+    static std::chrono::nanoseconds remaining_time_ns(
+        const std::chrono::time_point<Clock, Duration>& abs_time)
+    {
+        using namespace std::chrono;
+        auto now_clock = Clock::now();
+        auto delta = abs_time > now_clock ? abs_time - now_clock : Clock::duration::zero();
+        auto deadline = steady_clock::now() + duration_cast<steady_clock::duration>(delta);
+        auto remaining = deadline - steady_clock::now();
+        if (remaining <= steady_clock::duration::zero()) {
+            return nanoseconds::zero();
+        }
+        return duration_cast<nanoseconds>(remaining);
+    }
+
 #elif defined(__APPLE__)
     struct named_storage
     {

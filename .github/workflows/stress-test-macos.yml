@@ -77,14 +77,6 @@ jobs:
           fi
           echo "CMAKE_FLAGS=$CT $CE $CS" >> "$GITHUB_OUTPUT"
 
-      - name: Verify LLDB availability
-        run: |
-          if ! xcrun -f lldb >/dev/null 2>&1; then
-            echo "::error::lldb not available via xcrun. Install Xcode Command Line Tools to provide LLDB." >&2
-            exit 1
-          fi
-          xcrun lldb --version
-
       - name: Enable debugger attachments and core dumps
         shell: bash
         run: |
