@@ -57,7 +57,7 @@ jobs:
           echo "workflows=$workflows" >> "$GITHUB_OUTPUT"
 
       - name: Verify LLDB availability
-        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true'
+        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true' || steps.changed.outputs.core == 'true'
         run: |
           if ! xcrun -f lldb >/dev/null 2>&1; then
             echo "::error::lldb not available via xcrun. Install Xcode Command Line Tools to provide LLDB." >&2
@@ -66,7 +66,7 @@ jobs:
           xcrun lldb --version
 
       - name: Enable debugger attachments and core dumps
-        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true'
+        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true' || steps.changed.outputs.core == 'true'
         shell: bash
         run: |
           sudo /usr/sbin/DevToolsSecurity -enable
@@ -77,13 +77,13 @@ jobs:
           sudo sysctl kern.corefile=core.%P || true
 
       - name: Setup Python
-        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true'
+        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true' || steps.changed.outputs.core == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.x'
 
       - name: Make test executables executable
-        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true'
+        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true' || steps.changed.outputs.core == 'true'
         shell: bash
         run: |
           if [ -d build/tests ]; then
@@ -91,7 +91,7 @@ jobs:
           fi
 
       - name: Run stress tests with run_tests.py
-        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true'
+        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true' || steps.changed.outputs.core == 'true'
         shell: bash
         run: |
           ulimit -c unlimited

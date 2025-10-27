@@ -57,7 +57,7 @@ jobs:
           echo "workflows=$workflows" >> "$GITHUB_OUTPUT"
 
       - name: Ensure Windows debugging tools
-        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true'
+        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true' || steps.changed.outputs.core == 'true'
         shell: pwsh
         run: |
           function Get-DebugDirectories {
@@ -107,7 +107,7 @@ jobs:
           }
 
       - name: Verify Windows debuggers
-        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true'
+        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true' || steps.changed.outputs.core == 'true'
         shell: pwsh
         run: |
           $candidates = @('cdb', 'ntsd', 'windbg')
@@ -136,13 +136,13 @@ jobs:
           }
 
       - name: Setup Python
-        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true'
+        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true' || steps.changed.outputs.core == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.x'
 
       - name: Run stress tests with run_tests.py
-        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true'
+        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true' || steps.changed.outputs.core == 'true'
         shell: bash
         run: |
           cd tests

@@ -57,7 +57,7 @@ jobs:
           echo "workflows=$workflows" >> "$GITHUB_OUTPUT"
 
       - name: Restore cached gdb toolchain
-        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true'
+        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true' || steps.changed.outputs.core == 'true'
         id: cache-gdb
         uses: actions/cache@v4
         with:
@@ -65,7 +65,7 @@ jobs:
           key: linux-gdb-${{ runner.os }}-v2024-04-03
 
       - name: Bootstrap gdb toolchain cache
-        if: (steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true') && steps.cache-gdb.outputs.cache-hit != 'true'
+        if: (steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true' || steps.changed.outputs.core == 'true') && steps.cache-gdb.outputs.cache-hit != 'true'
         run: |
           set -euxo pipefail
           cache_root="$HOME/.cache/sintra-gdb"
@@ -83,7 +83,7 @@ jobs:
           sudo apt-get clean
 
       - name: Activate cached gdb toolchain
-        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true'
+        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true' || steps.changed.outputs.core == 'true'
         run: |
           set -euxo pipefail
           cache_prefix="$HOME/.cache/sintra-gdb/root"
@@ -101,26 +101,26 @@ jobs:
           echo "LD_LIBRARY_PATH=$ld_path" >> "$GITHUB_ENV"
 
       - name: Allow ptrace attachments for crash debugging
-        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true'
+        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true' || steps.changed.outputs.core == 'true'
         run: |
           sudo sysctl -w kernel.yama.ptrace_scope=0
 
       - name: Verify ptrace scope
-        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true'
+        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true' || steps.changed.outputs.core == 'true'
         run: sysctl kernel.yama.ptrace_scope
 
       - name: Verify gdb
-        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true'
+        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true' || steps.changed.outputs.core == 'true'
         run: gdb --version
 
       - name: Setup Python
-        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true'
+        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true' || steps.changed.outputs.core == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.x'
 
       - name: Make test executables executable
-        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true'
+        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true' || steps.changed.outputs.core == 'true'
         shell: bash
         run: |
           if [ -d build/tests ]; then
@@ -128,7 +128,7 @@ jobs:
           fi
 
       - name: Run stress tests with run_tests.py
-        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true'
+        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true' || steps.changed.outputs.core == 'true'
         shell: bash
         run: |
           cd tests
