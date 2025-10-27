@@ -149,6 +149,9 @@ public:
     void post()
     {
         HANDLE handle = windows_handle();
+        // WaitOnAddress only synchronizes threads within a single process, so we rely on
+        // the named kernel semaphore to ensure posts in one process release waiters in
+        // another process that shares the ring buffer.
         if (!::ReleaseSemaphore(handle, 1, nullptr)) {
             throw std::system_error(::GetLastError(), std::system_category(), "ReleaseSemaphore");
         }
