@@ -4,7 +4,7 @@ project(sintra LANGUAGES CXX)
 
 find_package(Threads REQUIRED)
 
-option(SINTRA_RELEASE_WITH_DEBUG_SYMBOLS "Emit debug symbols when building Release configuration" OFF)
+option(SINTRA_RELEASE_WITH_DEBUG_SYMBOLS "Emit debug symbols when building Release configuration" ON)
 
 # Force Debug build by default
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
