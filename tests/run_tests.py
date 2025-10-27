@@ -882,6 +882,67 @@ class TestRunner:
                 except (ProcessLookupError, PermissionError):
                     continue
 
+        if not stack_outputs and sys.platform == 'darwin':
+            sample_path = shutil.which('sample')
+            if sample_path:
+                sample_outputs: List[str] = []
+                sample_errors: List[str] = []
+
+                for target_pid in sorted(target_pids):
+                    if target_pid == os.getpid():
+                        continue
+
+                    remaining = capture_deadline - time.monotonic()
+                    if remaining <= 0:
+                        sample_errors.append(
+                            f"PID {target_pid}: skipped sample capture (overall debugger timeout exceeded)"
+                        )
+                        break
+
+                    sample_seconds = max(1, min(int(remaining), 5))
+                    sample_timeout = max(sample_seconds + 2, 5)
+                    sample_timeout = min(sample_timeout, per_pid_timeout)
+                    sample_command = [
+                        sample_path,
+                        str(target_pid),
+                        str(sample_seconds),
+                        '1',
+                        '-mayDie',
+                    ]
+
+                    try:
+                        result = subprocess.run(
+                            sample_command,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            text=True,
+                            timeout=sample_timeout,
+                        )
+                    except subprocess.SubprocessError as exc:
+                        sample_errors.append(
+                            f"PID {target_pid}: sample failed ({exc})"
+                        )
+                        continue
+
+                    output = result.stdout.strip()
+                    if not output and result.stderr:
+                        output = result.stderr.strip()
+
+                    if result.returncode == 0 and output:
+                        sample_outputs.append(f"PID {target_pid}\n{output}")
+                    else:
+                        error_detail = result.stderr.strip() or result.stdout.strip()
+                        if not error_detail:
+                            error_detail = f"sample exited with code {result.returncode}"
+                        sample_errors.append(
+                            f"PID {target_pid}: {error_detail}"
+                        )
+
+                if sample_outputs:
+                    stack_outputs.extend(sample_outputs)
+                elif sample_errors:
+                    capture_errors.extend(sample_errors)
+
         if stack_outputs:
             return "\n\n".join(stack_outputs), ""
 
