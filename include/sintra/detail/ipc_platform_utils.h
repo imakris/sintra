@@ -9,6 +9,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <limits>
 #include <string>
 #include <system_error>
@@ -26,15 +27,21 @@
 #else
 #include <cerrno>
 #include <fcntl.h>
+#include <pthread.h>
 #include <signal.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 
+  #if defined(__linux__)
+    #include <sys/syscall.h>
+  #endif
+
   #if defined(__FreeBSD__)
     #include <sys/sysctl.h>
     #include <sys/user.h>
+    #include <pthread_np.h>
   #elif defined(__APPLE__)
     #include <libproc.h>
     #include <mach/mach.h>
@@ -270,6 +277,31 @@ public:
     explicit Scoped_timer_resolution(unsigned int) {}
 };
 #endif
+
+inline uint32_t get_current_tid()
+{
+#ifdef _WIN32
+    return static_cast<uint32_t>(::GetCurrentThreadId());
+#elif defined(__APPLE__)
+    uint64_t tid = 0;
+    (void)pthread_threadid_np(nullptr, &tid);
+    return static_cast<uint32_t>(tid);
+#elif defined(__FreeBSD__)
+    long tid = 0;
+    if (::thr_self(&tid) == 0) {
+        return static_cast<uint32_t>(tid);
+    }
+    return static_cast<uint32_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+#elif defined(__linux__)
+#ifdef SYS_gettid
+    return static_cast<uint32_t>(::syscall(SYS_gettid));
+#else
+    return static_cast<uint32_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+#endif
+#else
+    return static_cast<uint32_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+#endif
+}
 
 inline uint32_t get_current_pid()
 {
