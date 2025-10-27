@@ -9,6 +9,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <limits>
 #include <string>
 #include <system_error>
@@ -26,13 +27,19 @@
 #else
 #include <cerrno>
 #include <fcntl.h>
+#include <pthread.h>
 #include <signal.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 
+  #if defined(__linux__)
+    #include <sys/syscall.h>
+  #endif
+
   #if defined(__FreeBSD__)
+    #include <pthread_np.h>
     #include <sys/sysctl.h>
     #include <sys/user.h>
   #elif defined(__APPLE__)
@@ -277,6 +284,25 @@ inline uint32_t get_current_pid()
     return static_cast<uint32_t>(::GetCurrentProcessId());
 #else
     return static_cast<uint32_t>(::getpid());
+#endif
+}
+
+inline uint32_t get_current_tid()
+{
+#ifdef _WIN32
+    return static_cast<uint32_t>(::GetCurrentThreadId());
+#elif defined(__APPLE__)
+    uint64_t tid = 0;
+    if (::pthread_threadid_np(nullptr, &tid) == 0) {
+        return static_cast<uint32_t>(tid);
+    }
+    return static_cast<uint32_t>(::mach_thread_self());
+#elif defined(__linux__)
+    return static_cast<uint32_t>(::syscall(SYS_gettid));
+#elif defined(__FreeBSD__)
+    return static_cast<uint32_t>(::pthread_getthreadid_np());
+#else
+    return static_cast<uint32_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
 #endif
 }
 

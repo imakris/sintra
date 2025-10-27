@@ -22,15 +22,16 @@ public:
 
     void lock()
     {
-        const uint32_t self = get_current_pid();
-        if (try_acquire(self)) {
+        const uint32_t self_pid = get_current_pid();
+        const uint32_t self_tid = get_current_tid();
+        if (try_acquire(self_pid, self_tid)) {
             return;
         }
 
         std::size_t iteration = 0;
         for (;;) {
             adaptive_wait(iteration++);
-            if (try_acquire(self)) {
+            if (try_acquire(self_pid, self_tid)) {
                 return;
             }
         }
@@ -38,14 +39,15 @@ public:
 
     bool try_lock()
     {
-        const uint32_t self = get_current_pid();
-        return try_acquire(self);
+        const uint32_t self_pid = get_current_pid();
+        const uint32_t self_tid = get_current_tid();
+        return try_acquire(self_pid, self_tid);
     }
 
     void unlock()
     {
-        const uint32_t self = get_current_pid();
-        uint32_t       expected = self;
+        const uint64_t self_owner = make_owner_id(get_current_pid(), get_current_tid());
+        uint64_t       expected = self_owner;
         if (!m_owner.compare_exchange_strong(expected,
                                               0,
                                               std::memory_order_release,
@@ -69,26 +71,32 @@ private:
         std::this_thread::sleep_for(sleep_us);
     }
 
-    bool try_acquire(uint32_t self)
+    static uint64_t make_owner_id(uint32_t pid, uint32_t tid) noexcept
     {
-        uint32_t expected = 0;
+        return (static_cast<uint64_t>(pid) << 32) | static_cast<uint64_t>(tid);
+    }
+
+    bool try_acquire(uint32_t self_pid, uint32_t self_tid)
+    {
+        const uint64_t self_owner = make_owner_id(self_pid, self_tid);
+        uint64_t       expected = 0;
         if (m_owner.compare_exchange_strong(expected,
-                                             self,
+                                             self_owner,
                                              std::memory_order_acquire,
                                              std::memory_order_relaxed))
         {
             return true;
         }
 
-        if (expected == self) {
+        if (expected == self_owner) {
             throw std::system_error(std::make_error_code(std::errc::resource_deadlock_would_occur),
                                     "interprocess_mutex recursive locking detected");
         }
 
-        if (expected != 0 && try_recover(expected, self)) {
+        if (expected != 0 && try_recover(expected, self_pid)) {
             expected = 0;
             if (m_owner.compare_exchange_strong(expected,
-                                                 self,
+                                                 self_owner,
                                                  std::memory_order_acquire,
                                                  std::memory_order_relaxed))
             {
@@ -99,7 +107,12 @@ private:
         return false;
     }
 
-    bool try_recover(uint32_t observed_owner, uint32_t self)
+    static uint32_t owner_pid(uint64_t owner) noexcept
+    {
+        return static_cast<uint32_t>(owner >> 32);
+    }
+
+    bool try_recover(uint64_t observed_owner, uint32_t self_pid)
     {
         if (observed_owner == 0) {
             return false;
@@ -107,7 +120,7 @@ private:
 
         uint32_t expected = 0;
         if (!m_recovering.compare_exchange_strong(expected,
-                                                   self,
+                                                   self_pid,
                                                    std::memory_order_acq_rel,
                                                    std::memory_order_relaxed))
         {
@@ -115,21 +128,24 @@ private:
         }
 
         bool recovered = false;
-        uint32_t current_owner = m_owner.load(std::memory_order_acquire);
+        uint64_t current_owner = m_owner.load(std::memory_order_acquire);
         if (current_owner == 0) {
             recovered = true;
-        } else if (current_owner == observed_owner && !is_process_alive(observed_owner)) {
-            recovered = m_owner.compare_exchange_strong(current_owner,
-                                                        0,
-                                                        std::memory_order_acq_rel,
-                                                        std::memory_order_relaxed);
+        } else if (current_owner == observed_owner) {
+            const uint32_t observed_pid = owner_pid(observed_owner);
+            if (!is_process_alive(observed_pid)) {
+                recovered = m_owner.compare_exchange_strong(current_owner,
+                                                            0,
+                                                            std::memory_order_acq_rel,
+                                                            std::memory_order_relaxed);
+            }
         }
 
         m_recovering.store(0, std::memory_order_release);
         return recovered;
     }
 
-    std::atomic<uint32_t> m_owner{0};
+    std::atomic<uint64_t> m_owner{0};
     std::atomic<uint32_t> m_recovering{0};
 };
 
