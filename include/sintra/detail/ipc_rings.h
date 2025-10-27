@@ -353,6 +353,9 @@ public:
     }
 
 private:
+    // NOTE: On Windows the shared control block is mapped at per-process addresses,
+    // so we rely on detail::interprocess_semaphore's named-kernel backend instead of
+    // WaitOnAddress to guarantee that posts from one process wake readers in another.
     struct impl : detail::interprocess_semaphore
     {
         impl() : detail::interprocess_semaphore(0) {}
