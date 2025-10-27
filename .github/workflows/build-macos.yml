@@ -3,8 +3,28 @@ name: Build - macOS
 on:
   push:
     branches: [ '*' ]
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'cmake/**'
+      - 'CMakeLists.txt'
+      - 'CMakePresets.json'
+      - 'third_party/**'
+      - 'tests/**'
+      - 'example/**'
+      - '.github/workflows/**'
   pull_request:
     branches: [ '*' ]
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'cmake/**'
+      - 'CMakeLists.txt'
+      - 'CMakePresets.json'
+      - 'third_party/**'
+      - 'tests/**'
+      - 'example/**'
+      - '.github/workflows/**'
 
 jobs:
   build:
@@ -14,6 +34,41 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed areas
+        id: changed
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            core:
+              - 'src/**'
+              - 'include/**'
+              - 'cmake/**'
+              - 'CMakeLists.txt'
+              - 'CMakePresets.json'
+              - 'third_party/**'
+            tests:
+              - 'tests/**'
+            examples:
+              - 'example/**'
+            workflows:
+              - '.github/workflows/**'
+
+      - name: Compute CMake flags
+        id: flags
+        shell: bash
+        run: |
+          CT="-DSINTRA_BUILD_TESTS=OFF -DSINTRA_TEST_MATRIX=quick"
+          CE="-DSINTRA_BUILD_EXAMPLES=OFF"
+          if [ "${{ steps.changed.outputs.tests }}" = "true" ] || [ "${{ steps.changed.outputs.core }}" = "true" ] || [ "${{ steps.changed.outputs.workflows }}" = "true" ]; then
+            CT="-DSINTRA_BUILD_TESTS=ON -DSINTRA_TEST_MATRIX=quick"
+          fi
+          if [ "${{ steps.changed.outputs.examples }}" = "true" ]; then
+            CE="-DSINTRA_BUILD_EXAMPLES=ON"
+          fi
+          echo "CMAKE_FLAGS=$CT $CE" >> "$GITHUB_OUTPUT"
 
       - name: Verify LLDB availability
         run: |
@@ -24,10 +79,14 @@ jobs:
           xcrun lldb --version
 
       - name: Configure CMake
-        run: cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
+        run: cmake -B build -S . -DCMAKE_BUILD_TYPE=Release ${{ steps.flags.outputs.CMAKE_FLAGS }}
 
       - name: Build
         run: cmake --build build --config Release
+
+      - name: Run tests
+        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.core == 'true' || steps.changed.outputs.workflows == 'true'
+        run: ctest --test-dir build -C Release --output-on-failure --timeout 60
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
