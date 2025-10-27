@@ -32,32 +32,27 @@ jobs:
           run-id: ${{ github.event.workflow_run.id }}
           if-no-artifact-found: error
 
-      - name: Read change summary
-        id: changed
-        shell: bash
+      - name: Detect built tests
+        id: payload
+        shell: pwsh
         run: |
-          file="build/changed-areas.env"
-          core=false
-          tests=false
-          examples=false
-          workflows=false
-          if [ -f "$file" ]; then
-            while IFS='=' read -r name value; do
-              case "$name" in
-                core) core="$value" ;;
-                tests) tests="$value" ;;
-                examples) examples="$value" ;;
-                workflows) workflows="$value" ;;
-              esac
-            done < "$file"
-          fi
-          echo "core=$core" >> "$GITHUB_OUTPUT"
-          echo "tests=$tests" >> "$GITHUB_OUTPUT"
-          echo "examples=$examples" >> "$GITHUB_OUTPUT"
-          echo "workflows=$workflows" >> "$GITHUB_OUTPUT"
+          $hasTests = Test-Path -Path 'build/tests' -PathType Container
+          if (-not $hasTests) {
+            $hasTests = Test-Path -Path 'build/tests/Release' -PathType Container
+          }
+          if ($hasTests) {
+            Add-Content -Path $env:GITHUB_OUTPUT -Value 'has-tests=true'
+          } else {
+            Add-Content -Path $env:GITHUB_OUTPUT -Value 'has-tests=false'
+          }
+
+      - name: No tests to stress
+        if: steps.payload.outputs.has-tests != 'true'
+        shell: pwsh
+        run: Write-Host 'Stress tests skipped because no test executables were present in the build artifact.'
 
       - name: Ensure Windows debugging tools
-        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true' || steps.changed.outputs.core == 'true'
+        if: steps.payload.outputs.has-tests == 'true'
         shell: pwsh
         run: |
           function Get-DebugDirectories {
@@ -107,7 +102,7 @@ jobs:
           }
 
       - name: Verify Windows debuggers
-        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true' || steps.changed.outputs.core == 'true'
+        if: steps.payload.outputs.has-tests == 'true'
         shell: pwsh
         run: |
           $candidates = @('cdb', 'ntsd', 'windbg')
@@ -136,13 +131,13 @@ jobs:
           }
 
       - name: Setup Python
-        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true' || steps.changed.outputs.core == 'true'
+        if: steps.payload.outputs.has-tests == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.x'
 
       - name: Run stress tests with run_tests.py
-        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true' || steps.changed.outputs.core == 'true'
+        if: steps.payload.outputs.has-tests == 'true'
         shell: bash
         run: |
           cd tests

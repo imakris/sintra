@@ -8,8 +8,10 @@ on:
       - 'include/**'
       - 'cmake/**'
       - 'CMakeLists.txt'
+      - 'CMakePresets.json'
       - 'tests/**'
       - 'example/**'
+      - 'third_party/**'
       - '.github/workflows/**'
   pull_request:
     branches: ['*']
@@ -18,8 +20,10 @@ on:
       - 'include/**'
       - 'cmake/**'
       - 'CMakeLists.txt'
+      - 'CMakePresets.json'
       - 'tests/**'
       - 'example/**'
+      - 'third_party/**'
       - '.github/workflows/**'
 
 jobs:
@@ -30,6 +34,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Detect changed areas
         id: changed
@@ -41,6 +47,8 @@ jobs:
               - 'include/**'
               - 'cmake/**'
               - 'CMakeLists.txt'
+              - 'CMakePresets.json'
+              - 'third_party/**'
             tests:
               - 'tests/**'
             examples:
@@ -54,24 +62,16 @@ jobs:
         run: |
           CT="-DSINTRA_BUILD_TESTS=OFF -DSINTRA_TEST_MATRIX=quick"
           CE="-DSINTRA_BUILD_EXAMPLES=OFF"
+          build_tests=false
           if [ "${{ steps.changed.outputs.tests }}" = "true" ] || [ "${{ steps.changed.outputs.core }}" = "true" ]; then
             CT="-DSINTRA_BUILD_TESTS=ON -DSINTRA_TEST_MATRIX=quick"
+            build_tests=true
           fi
           if [ "${{ steps.changed.outputs.examples }}" = "true" ]; then
             CE="-DSINTRA_BUILD_EXAMPLES=ON"
           fi
           echo "CMAKE_FLAGS=$CT $CE" >> "$GITHUB_OUTPUT"
-
-      - name: Save change summary
-        shell: bash
-        run: |
-          mkdir -p build
-          {
-            echo "core=${{ steps.changed.outputs.core }}";
-            echo "tests=${{ steps.changed.outputs.tests }}";
-            echo "examples=${{ steps.changed.outputs.examples }}";
-            echo "workflows=${{ steps.changed.outputs.workflows }}";
-          } > build/changed-areas.env
+          echo "build_tests=$build_tests" >> "$GITHUB_OUTPUT"
 
       - name: Restore cached gdb toolchain
         id: cache-gdb
@@ -130,6 +130,10 @@ jobs:
 
       - name: Build
         run: cmake --build build --config Release
+
+      - name: Run quick tests
+        if: steps.flags.outputs.build_tests == 'true'
+        run: ctest --test-dir build --build-config Release --output-on-failure
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
