@@ -120,14 +120,38 @@ private:
             return false;
         }
 
-        uint32_t expected = 0;
         const uint32_t caller_pid = owner_pid(self);
-        if (!m_recovering.compare_exchange_strong(expected,
+
+        uint32_t expected = 0;
+        while (!m_recovering.compare_exchange_weak(expected,
                                                    caller_pid,
                                                    std::memory_order_acq_rel,
                                                    std::memory_order_relaxed))
         {
-            return false;
+            if (expected == caller_pid) {
+                return false;
+            }
+
+            if (expected == 0) {
+                continue;
+            }
+
+            if (is_process_alive(expected)) {
+                return false;
+            }
+
+            // Another process started recovery but died before clearing the guard.
+            // Attempt to take ownership so progress can resume.
+            uint32_t observed = expected;
+            if (m_recovering.compare_exchange_strong(observed,
+                                                     caller_pid,
+                                                     std::memory_order_acq_rel,
+                                                     std::memory_order_relaxed))
+            {
+                break;
+            }
+
+            expected = observed;
         }
 
         bool recovered = false;
