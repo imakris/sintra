@@ -122,12 +122,16 @@ private:
 
         const uint32_t caller_pid = owner_pid(self);
 
-        uint32_t expected = 0;
-        while (!m_recovering.compare_exchange_weak(expected,
+        while (true) {
+            uint32_t expected = 0;
+            if (m_recovering.compare_exchange_weak(expected,
                                                    caller_pid,
                                                    std::memory_order_acq_rel,
                                                    std::memory_order_relaxed))
-        {
+            {
+                break;
+            }
+
             if (expected == caller_pid) {
                 return false;
             }
@@ -150,8 +154,6 @@ private:
             {
                 break;
             }
-
-            expected = observed;
         }
 
         bool recovered = false;
