@@ -1924,9 +1924,33 @@ def _resolve_git_metadata(start_dir: Path) -> Tuple[str, str]:
     if repo_root:
         start_dir = Path(repo_root)
 
-    branch = _run_git_command('rev-parse', '--abbrev-ref', 'HEAD') or 'unknown'
-    if branch == 'HEAD':
-        branch = 'detached HEAD'
+    branch = _run_git_command('rev-parse', '--abbrev-ref', 'HEAD')
+
+    ci_branch_env_vars = [
+        'GITHUB_HEAD_REF',        # GitHub Actions (pull_request)
+        'GITHUB_REF_NAME',        # GitHub Actions (push / workflow_dispatch)
+        'CI_COMMIT_BRANCH',       # GitLab CI
+        'CI_COMMIT_REF_NAME',     # GitLab CI merge requests
+        'BRANCH_NAME',            # Jenkins
+        'BITBUCKET_BRANCH',       # Bitbucket Pipelines
+        'CIRCLE_BRANCH',          # CircleCI
+        'TRAVIS_BRANCH',          # Travis CI
+        'BUILD_SOURCEBRANCHNAME', # Azure Pipelines
+    ]
+
+    env_branch = next(
+        (os.environ.get(name) for name in ci_branch_env_vars if os.environ.get(name)),
+        None,
+    )
+
+    if not branch or branch in {'HEAD', 'detached HEAD'}:
+        if env_branch:
+            branch = env_branch
+        elif branch == 'HEAD':
+            branch = 'detached HEAD'
+
+    if not branch:
+        branch = 'unknown'
 
     revision = _run_git_command('rev-parse', 'HEAD') or 'unknown'
 
