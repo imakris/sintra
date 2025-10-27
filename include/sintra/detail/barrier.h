@@ -20,6 +20,8 @@ inline bool should_treat_rpc_failure_as_satisfied()
            s_mproc->m_communication_state != Managed_process::COMMUNICATION_RUNNING;
 }
 
+inline void wait_for_processing_quiescence();
+
 inline bool rendezvous_barrier(const std::string& barrier_name, const std::string& group_name)
 {
     sequence_counter_type flush_seq = invalid_sequence;
