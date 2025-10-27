@@ -71,6 +71,22 @@ function(add_test_suite SUFFIX IS_DEBUG)
         get_filename_component(TEST_NAME "${TEST_FILE}" NAME_WE)
         add_executable(sintra_${TEST_NAME}_${SUFFIX} ${TEST_FILE})
         target_link_libraries(sintra_${TEST_NAME}_${SUFFIX} PRIVATE ${LIB_TARGET})
+
+        if(APPLE AND SINTRA_RELEASE_WITH_DEBUG_SYMBOLS AND NOT IS_DEBUG)
+            if(NOT DEFINED SINTRA_DSYMUTIL_EXECUTABLE)
+                find_program(SINTRA_DSYMUTIL_EXECUTABLE dsymutil)
+                if(NOT SINTRA_DSYMUTIL_EXECUTABLE)
+                    message(FATAL_ERROR "dsymutil is required to generate debug symbols for Release builds on macOS")
+                endif()
+            endif()
+
+            add_custom_command(TARGET sintra_${TEST_NAME}_${SUFFIX}
+                POST_BUILD
+                COMMAND "${SINTRA_DSYMUTIL_EXECUTABLE}" "$<TARGET_FILE:sintra_${TEST_NAME}_${SUFFIX}>"
+                COMMENT "Generating dSYM for $<TARGET_FILE_NAME:sintra_${TEST_NAME}_${SUFFIX}>"
+                VERBATIM
+            )
+        endif()
     endforeach()
 
 endfunction()
