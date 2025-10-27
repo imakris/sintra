@@ -17,7 +17,7 @@
 namespace {
 
 struct OverrideGuard {
-    enum class Kind { Pipe2, Write, Read };
+    enum class Kind { Pipe2, Write, Read, SpawnDebug };
 
     OverrideGuard(Kind k, void* fn) : kind(k)
     {
@@ -30,6 +30,9 @@ struct OverrideGuard {
                 break;
             case Kind::Read:
                 previous.read = sintra::testing::set_read_override(reinterpret_cast<sintra::detail::read_fn>(fn));
+                break;
+            case Kind::SpawnDebug:
+                previous.spawn_debug = sintra::testing::set_spawn_detached_debug(reinterpret_cast<sintra::detail::spawn_detached_debug_fn>(fn));
                 break;
         }
     }
@@ -46,6 +49,9 @@ struct OverrideGuard {
             case Kind::Read:
                 sintra::testing::set_read_override(previous.read);
                 break;
+            case Kind::SpawnDebug:
+                sintra::testing::set_spawn_detached_debug(previous.spawn_debug);
+                break;
         }
     }
 
@@ -54,6 +60,7 @@ struct OverrideGuard {
         sintra::detail::pipe2_fn pipe2;
         sintra::detail::write_fn write;
         sintra::detail::read_fn read;
+        sintra::detail::spawn_detached_debug_fn spawn_debug;
     } previous{};
 };
 
@@ -64,6 +71,45 @@ bool assert_true(bool condition, const std::string& message)
     }
     return condition;
 }
+
+namespace {
+
+bool debug_captured = false;
+sintra::detail::spawn_detached_debug_info last_debug_info{};
+
+void capture_spawn_debug(const sintra::detail::spawn_detached_debug_info& info)
+{
+    debug_captured = true;
+    last_debug_info = info;
+}
+
+void reset_spawn_debug_capture()
+{
+    debug_captured = false;
+    last_debug_info = {};
+}
+
+const char* stage_to_string(sintra::detail::spawn_detached_debug_info::Stage stage)
+{
+    using Stage = sintra::detail::spawn_detached_debug_info::Stage;
+    switch (stage) {
+        case Stage::PipeCreation:
+            return "PipeCreation";
+        case Stage::Fork:
+            return "Fork";
+        case Stage::ChildReadyPipeWrite:
+            return "ChildReadyPipeWrite";
+        case Stage::ParentReadReadyStatus:
+            return "ParentReadReadyStatus";
+        case Stage::ParentReadExecStatus:
+            return "ParentReadExecStatus";
+        case Stage::ParentWaitpid:
+            return "ParentWaitpid";
+    }
+    return "Unknown";
+}
+
+} // namespace
 
 bool spawn_should_fail_due_to_fd_exhaustion()
 {
@@ -138,9 +184,17 @@ bool spawn_succeeds_under_eintr_pressure()
 {
     OverrideGuard write_guard(OverrideGuard::Kind::Write, reinterpret_cast<void*>(&flaky_write));
     OverrideGuard read_guard(OverrideGuard::Kind::Read, reinterpret_cast<void*>(&flaky_read));
+    reset_spawn_debug_capture();
+    OverrideGuard debug_guard(OverrideGuard::Kind::SpawnDebug, reinterpret_cast<void*>(&capture_spawn_debug));
 
     const char* const args[] = {"/bin/true", nullptr};
     bool result = sintra::spawn_detached("/bin/true", args);
+    if (!result && debug_captured) {
+        std::cerr << "spawn_detached_test: debug stage=" << stage_to_string(last_debug_info.stage)
+                  << ", errno=" << last_debug_info.errno_value
+                  << ", exec_errno=" << last_debug_info.exec_errno
+                  << std::endl;
+    }
     return assert_true(result, "spawn_detached must retry on EINTR and eventually succeed");
 }
 
