@@ -18,8 +18,10 @@ jobs:
       - name: Ensure crash debugging tools
         run: |
           if ! command -v gdb >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y gdb
+            if ! sudo apt-get install -y --no-install-recommends gdb; then
+              sudo apt-get update
+              sudo apt-get install -y --no-install-recommends gdb
+            fi
           else
             echo "gdb already installed"
           fi
