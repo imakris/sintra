@@ -23,6 +23,7 @@
   #include <cerrno>
   #include <cstdio>
   #include <fcntl.h>
+  #include <memory>
   #include <mutex>
   #include <sys/file.h>
   #include <unordered_map>
@@ -126,26 +127,34 @@ namespace interprocess_mutex_detail
         }
     }
 #elif defined(__APPLE__)
+    struct mac_handle_entry
+    {
+        int                                        fd = -1;
+        std::shared_ptr<std::timed_mutex>          local_mutex;
+    };
+
     inline std::mutex& handle_mutex()
     {
         static std::mutex mtx;
         return mtx;
     }
 
-    inline std::unordered_map<std::uint64_t, int>& handle_map()
+    inline std::unordered_map<std::uint64_t, mac_handle_entry>& handle_map()
     {
-        static std::unordered_map<std::uint64_t, int> map;
+        static std::unordered_map<std::uint64_t, mac_handle_entry> map;
         return map;
     }
 
-    inline int register_handle(std::uint64_t id, int handle)
+    inline mac_handle_entry register_handle(std::uint64_t id, int handle)
     {
+        mac_handle_entry entry{handle, std::make_shared<std::timed_mutex>()};
+
         std::lock_guard<std::mutex> lock(handle_mutex());
-        handle_map()[id] = handle;
-        return handle;
+        handle_map()[id] = entry;
+        return entry;
     }
 
-    inline int ensure_handle(std::uint64_t id, const char* name)
+    inline mac_handle_entry ensure_handle(std::uint64_t id, const char* name)
     {
         {
             std::lock_guard<std::mutex> lock(handle_mutex());
@@ -160,24 +169,34 @@ namespace interprocess_mutex_detail
             throw std::system_error(errno, std::generic_category(), "open");
         }
 
+        mac_handle_entry entry{fd, std::make_shared<std::timed_mutex>()};
+
         std::lock_guard<std::mutex> lock(handle_mutex());
-        return handle_map().emplace(id, fd).first->second;
+        auto [it, inserted] = handle_map().emplace(id, entry);
+        if (!inserted) {
+            while (::close(fd) == -1 && errno == EINTR) {
+            }
+            return it->second;
+        }
+        return it->second;
     }
 
     inline void close_handle(std::uint64_t id)
     {
-        int fd = -1;
+        mac_handle_entry entry{};
+        bool             have_entry = false;
         {
             std::lock_guard<std::mutex> lock(handle_mutex());
             auto it = handle_map().find(id);
             if (it != handle_map().end()) {
-                fd = it->second;
+                entry = it->second;
                 handle_map().erase(it);
+                have_entry = true;
             }
         }
 
-        if (fd != -1) {
-            while (::close(fd) == -1 && errno == EINTR) {
+        if (have_entry && entry.fd != -1) {
+            while (::close(entry.fd) == -1 && errno == EINTR) {
             }
         }
     }
@@ -225,13 +244,15 @@ public:
         }
         throw std::system_error(::GetLastError(), std::system_category(), "WaitForSingleObject");
 #elif defined(__APPLE__)
-        int fd = named_handle();
-        while (::flock(fd, LOCK_EX) == -1) {
+        auto handle = named_handle();
+        std::unique_lock<std::timed_mutex> local_lock(*handle.local_mutex);
+        while (::flock(handle.fd, LOCK_EX) == -1) {
             if (errno == EINTR) {
                 continue;
             }
             throw std::system_error(errno, std::generic_category(), "flock");
         }
+        local_lock.release();
 #else
         int rc = ::pthread_mutex_lock(&m_mutex);
 #if defined(PTHREAD_MUTEX_ROBUST)
@@ -264,16 +285,23 @@ public:
         }
         throw std::system_error(::GetLastError(), std::system_category(), "WaitForSingleObject");
 #elif defined(__APPLE__)
-        int fd = named_handle();
-        while (::flock(fd, LOCK_EX | LOCK_NB) == -1) {
+        auto handle = named_handle();
+        if (!handle.local_mutex->try_lock()) {
+            return false;
+        }
+        std::unique_lock<std::timed_mutex> local_lock(*handle.local_mutex, std::adopt_lock);
+        while (::flock(handle.fd, LOCK_EX | LOCK_NB) == -1) {
             if (errno == EINTR) {
                 continue;
             }
             if (errno == EWOULDBLOCK) {
+                local_lock.unlock();
                 return false;
             }
+            local_lock.unlock();
             throw std::system_error(errno, std::generic_category(), "flock");
         }
+        local_lock.release();
         return true;
 #else
         int rc = ::pthread_mutex_trylock(&m_mutex);
@@ -327,14 +355,31 @@ public:
         }
         throw std::system_error(::GetLastError(), std::system_category(), "WaitForSingleObject");
 #elif defined(__APPLE__)
-        int fd = named_handle();
+        auto handle = named_handle();
+        if (!handle.local_mutex->try_lock_until(abs_time)) {
+            return false;
+        }
+        std::unique_lock<std::timed_mutex> local_lock(*handle.local_mutex, std::adopt_lock);
         auto now = Clock::now();
         if (abs_time <= now) {
-            return try_lock();
+            while (::flock(handle.fd, LOCK_EX | LOCK_NB) == -1) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                if (errno == EWOULDBLOCK) {
+                    local_lock.unlock();
+                    return false;
+                }
+                local_lock.unlock();
+                throw std::system_error(errno, std::generic_category(), "flock");
+            }
+            local_lock.release();
+            return true;
         }
 
         while (true) {
-            if (::flock(fd, LOCK_EX | LOCK_NB) == 0) {
+            if (::flock(handle.fd, LOCK_EX | LOCK_NB) == 0) {
+                local_lock.release();
                 return true;
             }
 
@@ -345,6 +390,7 @@ public:
             if (errno == EWOULDBLOCK) {
                 now = Clock::now();
                 if (now >= abs_time) {
+                    local_lock.unlock();
                     return false;
                 }
 
@@ -357,6 +403,7 @@ public:
                 continue;
             }
 
+            local_lock.unlock();
             throw std::system_error(errno, std::generic_category(), "flock");
         }
 #else
@@ -391,13 +438,14 @@ public:
             throw std::system_error(::GetLastError(), std::system_category(), "ReleaseMutex");
         }
 #elif defined(__APPLE__)
-        int fd = named_handle();
-        while (::flock(fd, LOCK_UN) == -1) {
+        auto handle = named_handle();
+        while (::flock(handle.fd, LOCK_UN) == -1) {
             if (errno == EINTR) {
                 continue;
             }
             throw std::system_error(errno, std::generic_category(), "flock");
         }
+        handle.local_mutex->unlock();
 #else
         int rc = ::pthread_mutex_unlock(&m_mutex);
         if (rc != 0) {
@@ -484,7 +532,7 @@ private:
         interprocess_mutex_detail::register_handle(m_named.id, fd);
     }
 
-    int named_handle() const
+    interprocess_mutex_detail::mac_handle_entry named_handle() const
     {
         return interprocess_mutex_detail::ensure_handle(m_named.id, m_named.name);
     }
