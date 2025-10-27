@@ -167,6 +167,12 @@ public:
         throw std::system_error(::GetLastError(), std::system_category(), "WaitForSingleObject");
 #else
         int res = ::pthread_mutex_lock(&m_mutex);
+    #if defined(PTHREAD_MUTEX_ROBUST) || defined(PTHREAD_MUTEX_ROBUST_NP)
+        if (res == EOWNERDEAD) {
+            make_mutex_consistent();
+            return;
+        }
+    #endif
         if (res == 0) {
             return;
         }
@@ -188,6 +194,12 @@ public:
         throw std::system_error(::GetLastError(), std::system_category(), "WaitForSingleObject");
 #else
         int res = ::pthread_mutex_trylock(&m_mutex);
+    #if defined(PTHREAD_MUTEX_ROBUST) || defined(PTHREAD_MUTEX_ROBUST_NP)
+        if (res == EOWNERDEAD) {
+            make_mutex_consistent();
+            return true;
+        }
+    #endif
         if (res == 0) {
             return true;
         }
@@ -279,6 +291,12 @@ public:
     #else
         auto ts = make_abs_timespec(abs_time);
         int res = ::pthread_mutex_timedlock(&m_mutex, &ts);
+    #if defined(PTHREAD_MUTEX_ROBUST) || defined(PTHREAD_MUTEX_ROBUST_NP)
+        if (res == EOWNERDEAD) {
+            make_mutex_consistent();
+            return true;
+        }
+    #endif
         if (res == 0) {
             return true;
         }
@@ -357,6 +375,18 @@ private:
             throw std::system_error(res, std::generic_category(), "pthread_mutexattr_setpshared");
         }
 
+#if defined(PTHREAD_MUTEX_ROBUST) || defined(PTHREAD_MUTEX_ROBUST_NP)
+    #if defined(PTHREAD_MUTEX_ROBUST)
+        res = ::pthread_mutexattr_setrobust(&attr, PTHREAD_MUTEX_ROBUST);
+    #else
+        res = ::pthread_mutexattr_setrobust_np(&attr, PTHREAD_MUTEX_ROBUST_NP);
+    #endif
+        if (res != 0) {
+            ::pthread_mutexattr_destroy(&attr);
+            throw std::system_error(res, std::generic_category(), "pthread_mutexattr_setrobust");
+        }
+#endif
+
         res = ::pthread_mutex_init(&m_mutex, &attr);
         ::pthread_mutexattr_destroy(&attr);
         if (res != 0) {
@@ -368,6 +398,20 @@ private:
     {
         ::pthread_mutex_destroy(&m_mutex);
     }
+
+#if defined(PTHREAD_MUTEX_ROBUST) || defined(PTHREAD_MUTEX_ROBUST_NP)
+    void make_mutex_consistent()
+    {
+    #if defined(PTHREAD_MUTEX_ROBUST)
+        int res = ::pthread_mutex_consistent(&m_mutex);
+    #else
+        int res = ::pthread_mutex_consistent_np(&m_mutex);
+    #endif
+        if (res != 0) {
+            throw std::system_error(res, std::generic_category(), "pthread_mutex_consistent");
+        }
+    }
+#endif
 
     template <typename Clock, typename Duration>
     static timespec make_abs_timespec(const std::chrono::time_point<Clock, Duration>& abs_time)
