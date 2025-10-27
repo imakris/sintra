@@ -1927,6 +1927,17 @@ def _resolve_git_metadata(start_dir: Path) -> Tuple[str, str]:
     branch = _run_git_command('rev-parse', '--abbrev-ref', 'HEAD') or 'unknown'
     if branch == 'HEAD':
         branch = 'detached HEAD'
+        # ``git name-rev`` provides the most descriptive ref that points to the
+        # current commit.  We exclude tags to prefer branches, strip the
+        # ``remotes/`` prefix if present, and surface the information inline so
+        # users can see which branch the detached HEAD is derived from.
+        annotated_branch = _run_git_command(
+            'name-rev', '--name-only', '--exclude', 'tags/*', 'HEAD'
+        )
+        if annotated_branch:
+            if annotated_branch.startswith('remotes/'):
+                annotated_branch = annotated_branch[len('remotes/'):]
+            branch = f"{branch} ({annotated_branch})"
 
     revision = _run_git_command('rev-parse', 'HEAD') or 'unknown'
 
