@@ -21,6 +21,7 @@ Options:
 """
 
 import argparse
+import json
 import fnmatch
 import os
 import shlex
@@ -1925,8 +1926,56 @@ def _resolve_git_metadata(start_dir: Path) -> Tuple[str, str]:
         start_dir = Path(repo_root)
 
     branch = _run_git_command('rev-parse', '--abbrev-ref', 'HEAD') or 'unknown'
+
+    def _env_branch_hint() -> Optional[str]:
+        """Return the branch name advertised by common CI environment variables."""
+
+        def _normalize_ref(ref: str) -> str:
+            # GitHub and similar providers expose fully qualified refs (e.g. refs/heads/main).
+            if ref.startswith('refs/'):
+                return ref.rsplit('/', 1)[-1]
+            return ref
+
+        ci_branch_vars = [
+            'GITHUB_HEAD_REF',  # Pull request branch on GitHub Actions
+            'GITHUB_REF_NAME',  # Branch or tag name on GitHub Actions
+            'GITHUB_REF',       # Fully qualified ref on GitHub Actions
+            'CI_COMMIT_REF_NAME',  # GitLab CI
+            'BUILDKITE_BRANCH',    # Buildkite
+            'APPVEYOR_REPO_BRANCH',  # AppVeyor
+            'CIRCLE_BRANCH',        # CircleCI
+        ]
+
+        for var in ci_branch_vars:
+            value = os.environ.get(var)
+            if value:
+                return _normalize_ref(value)
+
+        github_event_path = os.environ.get('GITHUB_EVENT_PATH')
+        if github_event_path:
+            try:
+                with open(github_event_path, 'r', encoding='utf-8') as event_file:
+                    event_payload = json.load(event_file)
+                if isinstance(event_payload, dict):
+                    pull_request = event_payload.get('pull_request')
+                    if isinstance(pull_request, dict):
+                        head = pull_request.get('head')
+                        if isinstance(head, dict):
+                            branch_name = head.get('ref')
+                            if isinstance(branch_name, str) and branch_name:
+                                return branch_name
+                    ref = event_payload.get('ref')
+                    if isinstance(ref, str) and ref:
+                        return _normalize_ref(ref)
+            except (OSError, json.JSONDecodeError, TypeError):
+                pass
+
+        return None
+
     if branch == 'HEAD':
-        branch = 'detached HEAD'
+        branch = _env_branch_hint() or 'detached HEAD'
+    elif branch == 'unknown':
+        branch = _env_branch_hint() or 'unknown'
 
     revision = _run_git_command('rev-parse', 'HEAD') or 'unknown'
 
