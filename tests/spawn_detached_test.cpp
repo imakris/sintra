@@ -16,46 +16,26 @@
 
 namespace {
 
-struct OverrideGuard {
-    enum class Kind { Pipe2, Write, Read };
+template <typename Fn, Fn (*Setter)(Fn)>
+class OverrideGuard {
+public:
+    explicit OverrideGuard(Fn fn) : previous_(Setter(fn)) {}
 
-    OverrideGuard(Kind k, void* fn) : kind(k)
-    {
-        switch (kind) {
-            case Kind::Pipe2:
-                previous.pipe2 = sintra::testing::set_pipe2_override(reinterpret_cast<sintra::detail::pipe2_fn>(fn));
-                break;
-            case Kind::Write:
-                previous.write = sintra::testing::set_write_override(reinterpret_cast<sintra::detail::write_fn>(fn));
-                break;
-            case Kind::Read:
-                previous.read = sintra::testing::set_read_override(reinterpret_cast<sintra::detail::read_fn>(fn));
-                break;
-        }
-    }
+    OverrideGuard(const OverrideGuard&) = delete;
+    OverrideGuard& operator=(const OverrideGuard&) = delete;
 
     ~OverrideGuard()
     {
-        switch (kind) {
-            case Kind::Pipe2:
-                sintra::testing::set_pipe2_override(previous.pipe2);
-                break;
-            case Kind::Write:
-                sintra::testing::set_write_override(previous.write);
-                break;
-            case Kind::Read:
-                sintra::testing::set_read_override(previous.read);
-                break;
-        }
+        Setter(previous_);
     }
 
-    Kind kind;
-    union {
-        sintra::detail::pipe2_fn pipe2;
-        sintra::detail::write_fn write;
-        sintra::detail::read_fn read;
-    } previous{};
+private:
+    Fn previous_{};
 };
+
+using Pipe2OverrideGuard = OverrideGuard<sintra::detail::pipe2_fn, sintra::testing::set_pipe2_override>;
+using WriteOverrideGuard = OverrideGuard<sintra::detail::write_fn, sintra::testing::set_write_override>;
+using ReadOverrideGuard = OverrideGuard<sintra::detail::read_fn, sintra::testing::set_read_override>;
 
 bool assert_true(bool condition, const std::string& message)
 {
@@ -108,7 +88,7 @@ int failing_pipe2(int[2], int)
 
 bool spawn_should_fail_when_pipe2_injected_failure()
 {
-    OverrideGuard guard(OverrideGuard::Kind::Pipe2, reinterpret_cast<void*>(&failing_pipe2));
+    Pipe2OverrideGuard guard(&failing_pipe2);
     const char* const args[] = {"/bin/true", nullptr};
     bool result = sintra::spawn_detached("/bin/true", args);
     return assert_true(!result, "spawn_detached must report failure when pipe2 fails");
@@ -136,8 +116,8 @@ ssize_t flaky_read(int fd, void* buf, size_t count)
 
 bool spawn_succeeds_under_eintr_pressure()
 {
-    OverrideGuard write_guard(OverrideGuard::Kind::Write, reinterpret_cast<void*>(&flaky_write));
-    OverrideGuard read_guard(OverrideGuard::Kind::Read, reinterpret_cast<void*>(&flaky_read));
+    WriteOverrideGuard write_guard(&flaky_write);
+    ReadOverrideGuard read_guard(&flaky_read);
 
     const char* const args[] = {"/bin/true", nullptr};
     bool result = sintra::spawn_detached("/bin/true", args);
@@ -152,7 +132,7 @@ ssize_t broken_write(int, const void*, size_t)
 
 bool spawn_fails_when_grandchild_cannot_report_readiness()
 {
-    OverrideGuard guard(OverrideGuard::Kind::Write, reinterpret_cast<void*>(&broken_write));
+    WriteOverrideGuard guard(&broken_write);
     const char* const args[] = {"/bin/true", nullptr};
     bool result = sintra::spawn_detached("/bin/true", args);
     return assert_true(!result, "write failures must be reported as spawn failures");
