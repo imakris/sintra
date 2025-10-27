@@ -498,7 +498,6 @@ class TestRunner:
 
             # Wait with timeout, extending the deadline for live stack captures
             try:
-                poll_interval = 0.1
                 while True:
                     with capture_lock:
                         pause_total = capture_pause_total
@@ -520,7 +519,11 @@ class TestRunner:
                     if remaining <= 0:
                         raise subprocess.TimeoutExpired(process.args, self.timeout)
 
-                    time.sleep(min(poll_interval, remaining))
+                    try:
+                        process.wait(timeout=remaining)
+                        break
+                    except subprocess.TimeoutExpired:
+                        continue
 
                 process.wait()
                 duration = time.time() - start_time
