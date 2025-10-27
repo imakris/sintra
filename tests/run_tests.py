@@ -1924,11 +1924,28 @@ def _resolve_git_metadata(start_dir: Path) -> Tuple[str, str]:
     if repo_root:
         start_dir = Path(repo_root)
 
+    revision = _run_git_command('rev-parse', 'HEAD') or 'unknown'
+
     branch = _run_git_command('rev-parse', '--abbrev-ref', 'HEAD') or 'unknown'
     if branch == 'HEAD':
         branch = 'detached HEAD'
 
-    revision = _run_git_command('rev-parse', 'HEAD') or 'unknown'
+        if revision != 'unknown':
+            containing_refs = _run_git_command(
+                'for-each-ref',
+                '--sort=-committerdate',
+                '--format=%(refname:short)',
+                f'--contains={revision}'
+            )
+            if containing_refs:
+                ref_candidates = [ref.strip() for ref in containing_refs.splitlines() if ref.strip()]
+                if ref_candidates:
+                    preferred_branch = next(
+                        (ref for ref in ref_candidates if not ref.startswith('origin/')),
+                        None,
+                    )
+                    branch_target = preferred_branch or ref_candidates[0]
+                    branch = f"detached HEAD ({branch_target})"
 
     return branch, revision
 
