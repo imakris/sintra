@@ -145,6 +145,9 @@ private:
         return recovered;
     }
 
+    static_assert(std::atomic<uint64_t>::is_always_lock_free,
+                  "sintra::detail::interprocess_mutex requires lock-free 64-bit atomics");
+
     std::atomic<uint64_t> m_owner{0};
     std::atomic<uint32_t> m_recovering{0};
 };
