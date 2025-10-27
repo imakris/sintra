@@ -843,6 +843,12 @@ class TestRunner:
                 break
             debugger_timeout = max(5, min(per_pid_timeout, remaining))
 
+            if not self._pid_exists(target_pid):
+                capture_errors.append(
+                    f"PID {target_pid}: process exited before stack capture"
+                )
+                continue
+
             try:
                 result = subprocess.run(
                     self._build_unix_live_debugger_command(
@@ -866,6 +872,20 @@ class TestRunner:
                 output = result.stderr.strip()
 
             if result.returncode != 0:
+                if debugger_is_macos_lldb:
+                    sample_output, sample_error = self._capture_stack_with_sample(
+                        target_pid,
+                        debugger_timeout,
+                    )
+                    if sample_output:
+                        stack_outputs.append(f"PID {target_pid}\n{sample_output}")
+                        continue
+                    if sample_error:
+                        capture_errors.append(
+                            f"PID {target_pid}: {sample_error}"
+                        )
+                        continue
+
                 capture_errors.append(
                     f"PID {target_pid}: {debugger_name} exited with code {result.returncode}: {result.stderr.strip()}"
                 )
@@ -1099,6 +1119,65 @@ class TestRunner:
             '-o', 'detach',
             '-o', 'quit',
         ]
+
+    def _pid_exists(self, pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        else:
+            return True
+
+    def _capture_stack_with_sample(
+        self,
+        pid: int,
+        debugger_timeout: float,
+    ) -> Tuple[str, str]:
+        if sys.platform != 'darwin':
+            return "", 'sample fallback not supported on this platform'
+
+        sample_path = shutil.which('sample')
+        if not sample_path:
+            return "", 'sample tool not available'
+
+        # Leave a small buffer so the subprocess timeout accounts for command startup.
+        sample_duration = max(1, min(5, int(max(1, debugger_timeout - 1))))
+        sample_timeout = max(sample_duration + 2, int(debugger_timeout))
+
+        command = [
+            sample_path,
+            str(pid),
+            str(sample_duration),
+            '-mayDie',
+            '-fullStacks',
+        ]
+
+        try:
+            result = subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=sample_timeout,
+            )
+        except subprocess.SubprocessError as exc:
+            return "", f'sample invocation failed ({exc})'
+
+        output = result.stdout.strip()
+        if not output and result.stderr:
+            output = result.stderr.strip()
+
+        if result.returncode != 0:
+            if output:
+                return "", f'sample exited with code {result.returncode}: {output}'
+            return "", f'sample exited with code {result.returncode}'
+
+        if output:
+            return output, ""
+
+        return "", 'sample produced no output'
 
     def _build_unix_core_debugger_command(
         self,
