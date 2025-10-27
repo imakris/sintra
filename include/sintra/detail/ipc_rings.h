@@ -1264,7 +1264,7 @@ struct Ring_R : Ring<T, true>
 
             // Publish the octile index to our shared slot for the writer to see.
             c.reading_sequences[m_rs_index].data.trailing_octile.store(
-                trailing_octile, std::memory_order_relaxed);
+                trailing_octile, std::memory_order_release);
             c.reading_sequences[m_rs_index].data.has_guard.store(1, std::memory_order_release);
 
             auto confirmed_leading_sequence = c.leading_sequence.load(std::memory_order_acquire);
@@ -1524,7 +1524,7 @@ struct Ring_R : Ring<T, true>
             const uint64_t old_mask = uint64_t(1) << (8 * m_trailing_octile);
             c.read_access.fetch_add(new_mask, std::memory_order_acq_rel);
             c.reading_sequences[m_rs_index].data.trailing_octile.store(
-                static_cast<uint8_t>(new_trailing_octile), std::memory_order_relaxed);
+                static_cast<uint8_t>(new_trailing_octile), std::memory_order_release);
             c.read_access.fetch_sub(old_mask, std::memory_order_acq_rel);
 
             m_trailing_octile = new_trailing_octile;
@@ -1536,7 +1536,7 @@ struct Ring_R : Ring<T, true>
         const uint64_t mask = uint64_t(1) << (8 * m_trailing_octile);
         c.read_access.fetch_add(mask, std::memory_order_acq_rel);
         c.reading_sequences[m_rs_index].data.trailing_octile.store(
-            static_cast<uint8_t>(m_trailing_octile), std::memory_order_relaxed);
+            static_cast<uint8_t>(m_trailing_octile), std::memory_order_release);
         c.reading_sequences[m_rs_index].data.has_guard.store(1, std::memory_order_release);
 #ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
         c.reading_sequences[m_rs_index].data.status.store(
