@@ -55,6 +55,45 @@ inline bool rendezvous_barrier(const std::string& barrier_name, const std::strin
     return true;
 }
 
+inline bool barrier_dispatch(rendezvous_t,
+                             const std::string& barrier_name,
+                             const std::string& group_name)
+{
+    return rendezvous_barrier(barrier_name, group_name);
+}
+
+inline bool barrier_dispatch(delivery_fence_t,
+                             const std::string& barrier_name,
+                             const std::string& group_name)
+{
+    const bool rendezvous_completed = barrier_dispatch(rendezvous_t{}, barrier_name, group_name);
+    if (!rendezvous_completed) {
+        return false;
+    }
+
+    if (!s_mproc) {
+        return true;
+    }
+
+    s_mproc->wait_for_delivery_fence();
+    return true;
+}
+
+inline bool barrier_dispatch(processing_fence_t,
+                             const std::string& barrier_name,
+                             const std::string& group_name)
+{
+    const bool rendezvous_completed = barrier_dispatch(rendezvous_t{}, barrier_name, group_name);
+    if (!rendezvous_completed) {
+        return false;
+    }
+
+    wait_for_processing_quiescence();
+
+    const std::string processing_phase_name = barrier_name + "/processing";
+    return barrier_dispatch(rendezvous_t{}, processing_phase_name, group_name);
+}
+
 inline void wait_for_processing_quiescence()
 {
     if (!s_mproc ||
@@ -74,43 +113,25 @@ inline void wait_for_processing_quiescence()
 template <>
 inline bool barrier<rendezvous_t>(const std::string& barrier_name, const std::string& group_name)
 {
-    return detail::rendezvous_barrier(barrier_name, group_name);
+    return detail::barrier_dispatch(rendezvous_t{}, barrier_name, group_name);
 }
 
 template <>
 inline bool barrier<delivery_fence_t>(const std::string& barrier_name, const std::string& group_name)
 {
-    const bool rendezvous_completed = barrier<rendezvous_t>(barrier_name, group_name);
-    if (!rendezvous_completed) {
-        return false;
-    }
-
-    if (!s_mproc) {
-        return true;
-    }
-
-    s_mproc->wait_for_delivery_fence();
-    return true;
+    return detail::barrier_dispatch(delivery_fence_t{}, barrier_name, group_name);
 }
 
 template <>
 inline bool barrier<processing_fence_t>(const std::string& barrier_name, const std::string& group_name)
 {
-    const bool rendezvous_completed = barrier<rendezvous_t>(barrier_name, group_name);
-    if (!rendezvous_completed) {
-        return false;
-    }
-
-    detail::wait_for_processing_quiescence();
-
-    const std::string processing_phase_name = barrier_name + "/processing";
-    return barrier<rendezvous_t>(processing_phase_name, group_name);
+    return detail::barrier_dispatch(processing_fence_t{}, barrier_name, group_name);
 }
 
 template <typename BarrierMode>
 inline bool barrier(const std::string& barrier_name, const std::string& group_name)
 {
-    return barrier<rendezvous_t>(barrier_name, group_name);
+    return detail::barrier_dispatch(BarrierMode{}, barrier_name, group_name);
 }
 
 } // namespace sintra
