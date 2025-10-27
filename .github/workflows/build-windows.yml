@@ -62,13 +62,14 @@ jobs:
         run: |
           CT="-DSINTRA_BUILD_TESTS=OFF -DSINTRA_TEST_MATRIX=quick"
           CE="-DSINTRA_BUILD_EXAMPLES=OFF"
+          CS="-DSINTRA_RELEASE_WITH_DEBUG_SYMBOLS=ON"
           if [ "${{ steps.changed.outputs.tests }}" = "true" ] || [ "${{ steps.changed.outputs.core }}" = "true" ] || [ "${{ steps.changed.outputs.workflows }}" = "true" ]; then
             CT="-DSINTRA_BUILD_TESTS=ON -DSINTRA_TEST_MATRIX=quick"
           fi
           if [ "${{ steps.changed.outputs.examples }}" = "true" ]; then
             CE="-DSINTRA_BUILD_EXAMPLES=ON"
           fi
-          echo "CMAKE_FLAGS=$CT $CE" >> "$GITHUB_OUTPUT"
+          echo "CMAKE_FLAGS=$CT $CE $CS" >> "$GITHUB_OUTPUT"
 
       - name: Ensure Windows debugging tools
         shell: pwsh
