@@ -22,6 +22,57 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+
+      - name: Determine diff base
+        id: diff-base
+        shell: bash
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          PR_BASE_SHA: ${{ github.event.workflow_run.pull_requests[0].base.sha || '' }}
+        run: |
+          set -euo pipefail
+          if git rev-parse "${HEAD_SHA}^" >/dev/null 2>&1; then
+            base_commit="$(git rev-parse "${HEAD_SHA}^")"
+            echo "base=$base_commit" >> "$GITHUB_OUTPUT"
+          elif [ -n "$PR_BASE_SHA" ]; then
+            echo "base=$PR_BASE_SHA" >> "$GITHUB_OUTPUT"
+          else
+            echo "base=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Detect changed areas
+        id: changed
+        uses: dorny/paths-filter@v3
+        with:
+          base: ${{ steps.diff-base.outputs.base }}
+          head: ${{ github.event.workflow_run.head_sha }}
+          filters: |
+            core:
+              - 'src/**'
+              - 'include/**'
+              - 'cmake/**'
+              - 'CMakeLists.txt'
+            tests:
+              - 'tests/**'
+            examples:
+              - 'example/**'
+            workflows:
+              - '.github/workflows/**'
+
+      - name: Compute CMake flags
+        id: flags
+        shell: bash
+        run: |
+          CT="-DSINTRA_BUILD_TESTS=OFF -DSINTRA_TEST_MATRIX=quick"
+          CE="-DSINTRA_BUILD_EXAMPLES=OFF"
+          if [ "${{ steps.changed.outputs.tests }}" = "true" ] || [ "${{ steps.changed.outputs.core }}" = "true" ]; then
+            CT="-DSINTRA_BUILD_TESTS=ON -DSINTRA_TEST_MATRIX=quick"
+          fi
+          if [ "${{ steps.changed.outputs.examples }}" = "true" ]; then
+            CE="-DSINTRA_BUILD_EXAMPLES=ON"
+          fi
+          echo "CMAKE_FLAGS=$CT $CE" >> "$GITHUB_OUTPUT"
 
       - name: Ensure Windows debugging tools
         shell: pwsh
@@ -115,6 +166,7 @@ jobs:
           python-version: '3.x'
 
       - name: Run stress tests with run_tests.py
+        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.workflows == 'true'
         shell: bash
         run: |
           cd tests
