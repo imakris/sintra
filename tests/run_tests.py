@@ -1955,15 +1955,51 @@ def _resolve_git_metadata(start_dir: Path) -> Tuple[str, str]:
         containing_ref = _first_containing_ref('refs/heads')
         if not containing_ref:
             containing_ref = _first_containing_ref('refs/remotes')
+
         if not containing_ref:
             containing_ref = _run_git_command(
                 'describe', '--all', '--always', commit_ref,
             )
-            if containing_ref == 'HEAD':
-                containing_ref = None
+            if containing_ref:
+                if containing_ref == 'HEAD':
+                    containing_ref = None
+                elif revision != 'unknown':
+                    revision_prefix = revision[: len(containing_ref)]
+                    if containing_ref == revision or containing_ref == revision_prefix:
+                        containing_ref = None
 
-        if containing_ref:
-            branch = f"{branch} (from {containing_ref})"
+        def _branch_hint_from_env() -> Optional[str]:
+            def _clean_ref(value: str) -> str:
+                if value.startswith('refs/heads/'):
+                    return value[len('refs/heads/'):]
+                if value.startswith('refs/remotes/'):
+                    return value[len('refs/remotes/'):]
+                if value.startswith('refs/'):
+                    return value[len('refs/'):]
+                return value
+
+            for key in (
+                'GITHUB_HEAD_REF',
+                'GITHUB_REF_NAME',
+                'GITHUB_REF',
+                'CI_COMMIT_REF_NAME',
+                'BRANCH_NAME',
+                'BUILD_SOURCEBRANCHNAME',
+                'APPVEYOR_REPO_BRANCH',
+                'BITBUCKET_BRANCH',
+                'CIRCLE_BRANCH',
+            ):
+                value = os.environ.get(key)
+                if not value:
+                    continue
+                cleaned = _clean_ref(value.strip())
+                if cleaned:
+                    return cleaned
+            return None
+
+        hint = containing_ref or _branch_hint_from_env()
+        if hint:
+            branch = f"{branch} (from {hint})"
 
     return branch, revision
 
