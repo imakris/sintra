@@ -1579,7 +1579,19 @@ class TestRunner:
                 command = [debugger_path]
                 if debugger_name == 'windbg':
                     command.append('-Q')
-                command.extend(['-p', str(target_pid), '-c', '.symfix; .reload; ~* k; qd'])
+
+                # Use a non-invasive attach so the target process can continue running
+                # once the debugger has harvested the stacks. Without -pv, cdb/ntsd/windbg
+                # may bail out with Control-C related status codes (for example 0xD000010A)
+                # before executing the command script, which prevented us from gathering
+                # any thread stacks on Windows CI.
+                command.extend([
+                    '-pv',
+                    '-p',
+                    str(target_pid),
+                    '-c',
+                    '.symfix; .reload; ~* kP; qd',
+                ])
 
                 result = subprocess.run(
                     command,
