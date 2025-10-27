@@ -12,6 +12,7 @@
 
 #include <sintra/sintra.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -27,6 +28,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #ifdef _WIN32
@@ -114,7 +116,10 @@ struct Coordinator_state
     std::condition_variable cv;
     std::size_t messages_in_iteration = 0;
     std::size_t total_messages        = 0;
-    bool too_many_messages            = false;
+    std::array<int32_t, kWorkerCount> last_iteration{};
+    std::uint32_t current_iteration   = 0;
+    bool error_detected               = false;
+    std::string error_message;
 };
 
 
@@ -142,35 +147,78 @@ int coordinator_process()
     using namespace sintra;
 
     Coordinator_state state;
+    state.last_iteration.fill(-1);
+    state.current_iteration = 0;
     bool success = true;
     std::string failure_reason;
 
-    activate_slot([&](const Iteration_marker&) {
+    activate_slot([&](const Iteration_marker& marker) {
         std::lock_guard<std::mutex> lock(state.mutex);
-        if (state.messages_in_iteration >= kWorkerCount) {
-            state.too_many_messages = true;
+
+        auto set_error = [&](std::string message) {
+            if (!state.error_detected) {
+                state.error_detected = true;
+                state.error_message  = std::move(message);
+            }
+        };
+
+        if (marker.worker >= kWorkerCount) {
+            set_error("coordinator received marker with invalid worker index");
         } else {
-            ++state.messages_in_iteration;
-            ++state.total_messages;
+            const auto worker_index = static_cast<std::size_t>(marker.worker);
+            if (marker.iteration < state.current_iteration) {
+                std::ostringstream oss;
+                oss << "coordinator received stale marker from worker " << worker_index
+                    << " for iteration " << marker.iteration
+                    << ", expected iteration " << state.current_iteration;
+                set_error(oss.str());
+            } else if (marker.iteration > state.current_iteration) {
+                std::ostringstream oss;
+                oss << "coordinator received future marker from worker " << worker_index
+                    << " for iteration " << marker.iteration
+                    << ", expected iteration " << state.current_iteration;
+                set_error(oss.str());
+            } else if (state.last_iteration[worker_index] == static_cast<int32_t>(marker.iteration)) {
+                std::ostringstream oss;
+                oss << "coordinator received duplicate marker for worker " << worker_index
+                    << " at iteration " << marker.iteration;
+                set_error(oss.str());
+            } else {
+                state.last_iteration[worker_index] = static_cast<int32_t>(marker.iteration);
+                ++state.messages_in_iteration;
+                ++state.total_messages;
+            }
         }
-        state.cv.notify_one();
+
+        if (state.messages_in_iteration == kWorkerCount || state.error_detected) {
+            state.cv.notify_one();
+        }
     });
 
     barrier("barrier-flush-ready");
 
     for (std::size_t iteration = 0; iteration < kIterations; ++iteration) {
 
-
         std::unique_lock<std::mutex> lock(state.mutex);
+        state.current_iteration = static_cast<std::uint32_t>(iteration);
         state.cv.wait(lock, [&] {
-            return state.messages_in_iteration == kWorkerCount || state.too_many_messages;
+            return state.messages_in_iteration == kWorkerCount || state.error_detected;
         });
-        if (state.too_many_messages && success) {
+
+        if (state.error_detected && success) {
             success = false;
-            failure_reason = "coordinator observed more messages than expected during an iteration";
+            failure_reason = state.error_message.empty()
+                                 ? std::string("coordinator detected an ordering issue during an iteration")
+                                 : state.error_message;
+        } else if (state.messages_in_iteration != kWorkerCount && success) {
+            success = false;
+            failure_reason = "coordinator did not receive the expected number of messages during an iteration";
         }
+
         state.messages_in_iteration = 0;
-        state.too_many_messages = false;
+        state.error_detected        = false;
+        state.error_message.clear();
+        state.current_iteration = static_cast<std::uint32_t>(iteration + 1);
         lock.unlock();
 
         barrier("barrier-flush-iteration");
@@ -299,6 +347,7 @@ int main(int argc, char* argv[])
         in >> iterations_completed;
         in >> total_messages;
         std::getline(in >> std::ws, reason);
+        in.close();
 
         cleanup_directory_with_retries(shared_dir);
 
