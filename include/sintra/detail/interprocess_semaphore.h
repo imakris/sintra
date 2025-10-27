@@ -14,6 +14,9 @@
   #ifndef WIN32_LEAN_AND_MEAN
     #define WIN32_LEAN_AND_MEAN
   #endif
+  #ifndef _WIN32_WINNT
+    #define _WIN32_WINNT 0x0602
+  #endif
   #include <Windows.h>
   #include <climits>
   #include <cwchar>
@@ -22,11 +25,8 @@
   #include <unordered_map>
 #elif defined(__APPLE__)
   #include <cerrno>
-  #include <fcntl.h>
-  #include <semaphore.h>
-  #include <mutex>
-  #include <unordered_map>
-  #include <cstdio>
+  #include <limits>
+  #include <sys/ulock.h>
 #else
   #include <cerrno>
   #include <semaphore.h>
@@ -126,61 +126,6 @@ namespace interprocess_semaphore_detail
             ::CloseHandle(handle);
         }
     }
-#elif defined(__APPLE__)
-    inline std::mutex& handle_mutex()
-    {
-        static std::mutex mtx;
-        return mtx;
-    }
-
-    inline std::unordered_map<uint64_t, sem_t*>& handle_map()
-    {
-        static std::unordered_map<uint64_t, sem_t*> map;
-        return map;
-    }
-
-    inline sem_t* register_handle(uint64_t id, sem_t* handle)
-    {
-        std::lock_guard<std::mutex> lock(handle_mutex());
-        handle_map()[id] = handle;
-        return handle;
-    }
-
-    inline sem_t* ensure_handle(uint64_t id, const char* name)
-    {
-        {
-            std::lock_guard<std::mutex> lock(handle_mutex());
-            auto it = handle_map().find(id);
-            if (it != handle_map().end()) {
-                return it->second;
-            }
-        }
-
-        sem_t* sem = sem_open(name, 0);
-        if (sem == SEM_FAILED) {
-            throw std::system_error(errno, std::generic_category(), "sem_open");
-        }
-
-        std::lock_guard<std::mutex> lock(handle_mutex());
-        return handle_map().emplace(id, sem).first->second;
-    }
-
-    inline void close_handle(uint64_t id)
-    {
-        sem_t* sem = nullptr;
-        {
-            std::lock_guard<std::mutex> lock(handle_mutex());
-            auto it = handle_map().find(id);
-            if (it != handle_map().end()) {
-                sem = it->second;
-                handle_map().erase(it);
-            }
-        }
-
-        if (sem) {
-            while (sem_close(sem) == -1 && errno == EINTR) {}
-        }
-    }
 #endif
 }
 
@@ -192,7 +137,7 @@ public:
 #if defined(_WIN32)
         initialise_windows(initial_count);
 #elif defined(__APPLE__)
-        initialise_named(initial_count);
+        initialise_darwin(initial_count);
 #else
         initialise_posix(initial_count);
 #endif
@@ -206,7 +151,7 @@ public:
 #if defined(_WIN32)
         teardown_windows();
 #elif defined(__APPLE__)
-        teardown_named();
+        teardown_darwin();
 #else
         teardown_posix();
 #endif
@@ -217,7 +162,7 @@ public:
 #if defined(_WIN32)
         interprocess_semaphore_detail::close_handle(m_windows.id);
 #elif defined(__APPLE__)
-        interprocess_semaphore_detail::close_handle(m_named.id);
+        // Nothing to do for the Darwin wait-based backend.
 #else
         // Nothing to do for POSIX unnamed semaphores.
 #endif
@@ -231,13 +176,7 @@ public:
             throw std::system_error(::GetLastError(), std::system_category(), "ReleaseSemaphore");
         }
 #elif defined(__APPLE__)
-        sem_t* sem = named_handle();
-        while (sem_post(sem) == -1) {
-            if (errno == EINTR) {
-                continue;
-            }
-            throw std::system_error(errno, std::generic_category(), "sem_post");
-        }
+        darwin_post();
 #else
         while (sem_post(&m_sem) == -1) {
             if (errno == EINTR) {
@@ -257,13 +196,7 @@ public:
             throw std::system_error(::GetLastError(), std::system_category(), "WaitForSingleObject");
         }
 #elif defined(__APPLE__)
-        sem_t* sem = named_handle();
-        while (sem_wait(sem) == -1) {
-            if (errno == EINTR) {
-                continue;
-            }
-            throw std::system_error(errno, std::generic_category(), "sem_wait");
-        }
+        darwin_wait();
 #else
         while (sem_wait(&m_sem) == -1) {
             if (errno == EINTR) {
@@ -287,17 +220,7 @@ public:
         }
         throw std::system_error(::GetLastError(), std::system_category(), "WaitForSingleObject");
 #elif defined(__APPLE__)
-        sem_t* sem = named_handle();
-        while (sem_trywait(sem) == -1) {
-            if (errno == EINTR) {
-                continue;
-            }
-            if (errno == EAGAIN) {
-                return false;
-            }
-            throw std::system_error(errno, std::generic_category(), "sem_trywait");
-        }
-        return true;
+        return darwin_try_wait();
 #else
         while (sem_trywait(&m_sem) == -1) {
             if (errno == EINTR) {
@@ -342,18 +265,7 @@ public:
         }
         throw std::system_error(::GetLastError(), std::system_category(), "WaitForSingleObject");
 #elif defined(__APPLE__)
-        sem_t* sem = named_handle();
-        auto ts = make_abs_timespec(abs_time);
-        while (sem_timedwait(sem, &ts) == -1) {
-            if (errno == EINTR) {
-                continue;
-            }
-            if (errno == ETIMEDOUT) {
-                return false;
-            }
-            throw std::system_error(errno, std::generic_category(), "sem_timedwait");
-        }
-        return true;
+        return darwin_timed_wait(abs_time);
 #else
         auto ts = make_abs_timespec(abs_time);
         while (sem_timedwait(&m_sem, &ts) == -1) {
@@ -421,41 +333,192 @@ private:
         interprocess_semaphore_detail::close_handle(m_windows.id);
     }
 #elif defined(__APPLE__)
-    struct named_storage
+    struct darwin_storage
     {
-        uint64_t id = 0;
-        char     name[32]{};
+        std::atomic<int32_t> count{0};
+        std::atomic<uint32_t> wake_sequence{0};
+        std::atomic<int32_t> waiters{0};
     };
 
-    named_storage m_named;
+    darwin_storage m_darwin;
 
-    void initialise_named(unsigned int initial_count)
+    void initialise_darwin(unsigned int initial_count)
     {
-        m_named.id = interprocess_semaphore_detail::generate_global_identifier();
-        std::snprintf(m_named.name,
-                      sizeof(m_named.name) / sizeof(m_named.name[0]),
-                      "/sintra_sem_%016llx",
-                      static_cast<unsigned long long>(m_named.id));
+        if (initial_count > static_cast<unsigned int>(std::numeric_limits<int32_t>::max())) {
+            throw std::system_error(EINVAL, std::generic_category(), "initial_count too large");
+        }
+        m_darwin.count.store(static_cast<int32_t>(initial_count), std::memory_order_relaxed);
+        m_darwin.wake_sequence.store(0, std::memory_order_relaxed);
+        m_darwin.waiters.store(0, std::memory_order_relaxed);
+    }
 
-        sem_unlink(m_named.name);
-        sem_t* sem = sem_open(m_named.name, O_CREAT | O_EXCL, 0600, initial_count);
-        if (sem == SEM_FAILED) {
-            throw std::system_error(errno, std::generic_category(), "sem_open");
+    void teardown_darwin() noexcept {}
+
+    struct darwin_waiter_guard
+    {
+        explicit darwin_waiter_guard(std::atomic<int32_t>& waiters) noexcept
+            : m_waiters(waiters)
+        {
+            m_waiters.fetch_add(1, std::memory_order_acq_rel);
         }
 
-        interprocess_semaphore_detail::register_handle(m_named.id, sem);
+        darwin_waiter_guard(const darwin_waiter_guard&) = delete;
+        darwin_waiter_guard& operator=(const darwin_waiter_guard&) = delete;
+
+        ~darwin_waiter_guard()
+        {
+            release();
+        }
+
+        void release() noexcept
+        {
+            if (m_active) {
+                m_waiters.fetch_sub(1, std::memory_order_acq_rel);
+                m_active = false;
+            }
+        }
+
+    private:
+        std::atomic<int32_t>& m_waiters;
+        bool                  m_active{true};
+    };
+
+    bool darwin_try_acquire()
+    {
+        int32_t available = m_darwin.count.load(std::memory_order_acquire);
+        while (available > 0) {
+            if (m_darwin.count.compare_exchange_weak(available,
+                                                     available - 1,
+                                                     std::memory_order_acquire,
+                                                     std::memory_order_relaxed)) {
+                return true;
+            }
+        }
+        return false;
     }
 
-    sem_t* named_handle() const
+    void darwin_post()
     {
-        return interprocess_semaphore_detail::ensure_handle(m_named.id, m_named.name);
+        m_darwin.count.fetch_add(1, std::memory_order_release);
+        if (m_darwin.waiters.load(std::memory_order_acquire) > 0) {
+            m_darwin.wake_sequence.fetch_add(1, std::memory_order_acq_rel);
+            int rc = __ulock_wake(UL_COMPARE_AND_WAIT | ULF_SHARED,
+                                   reinterpret_cast<void*>(&m_darwin.wake_sequence),
+                                   0);
+            if (rc != 0) {
+                int err = errno;
+                if (err != ENOENT) {
+                    throw std::system_error(err, std::generic_category(), "__ulock_wake");
+                }
+            }
+        }
     }
 
-    void teardown_named() noexcept
+    void darwin_wait()
     {
-        interprocess_semaphore_detail::close_handle(m_named.id);
-        if (m_named.name[0] != '\0') {
-            sem_unlink(m_named.name);
+        if (darwin_try_acquire()) {
+            return;
+        }
+
+        while (true) {
+            const uint32_t seq = m_darwin.wake_sequence.load(std::memory_order_acquire);
+            darwin_waiter_guard guard(m_darwin.waiters);
+
+            if (darwin_try_acquire()) {
+                guard.release();
+                return;
+            }
+
+            int rc;
+            do {
+                rc = __ulock_wait(UL_COMPARE_AND_WAIT | ULF_SHARED,
+                                   reinterpret_cast<void*>(&m_darwin.wake_sequence),
+                                   seq,
+                                   0);
+            } while (rc == -1 && errno == EINTR);
+
+            guard.release();
+
+            if (rc == 0 || (rc == -1 && errno == EAGAIN)) {
+                continue;
+            }
+
+            if (rc == -1) {
+                throw std::system_error(errno, std::generic_category(), "__ulock_wait");
+            }
+        }
+    }
+
+    bool darwin_try_wait()
+    {
+        return darwin_try_acquire();
+    }
+
+    template <typename Clock, typename Duration>
+    bool darwin_timed_wait(const std::chrono::time_point<Clock, Duration>& abs_time)
+    {
+        if (darwin_try_acquire()) {
+            return true;
+        }
+
+        while (true) {
+            auto now = Clock::now();
+            if (abs_time <= now) {
+                return false;
+            }
+
+            const uint32_t seq = m_darwin.wake_sequence.load(std::memory_order_acquire);
+            darwin_waiter_guard guard(m_darwin.waiters);
+
+            if (darwin_try_acquire()) {
+                guard.release();
+                return true;
+            }
+
+            now = Clock::now();
+            if (abs_time <= now) {
+                guard.release();
+                return false;
+            }
+
+            auto remaining = std::chrono::duration_cast<std::chrono::microseconds>(abs_time - now);
+            if (remaining <= std::chrono::microseconds::zero()) {
+                guard.release();
+                return false;
+            }
+
+            uint64_t timeout_us = static_cast<uint64_t>(remaining.count());
+            if (timeout_us == 0) {
+                timeout_us = 1;
+            }
+            if (timeout_us > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
+                timeout_us = std::numeric_limits<uint32_t>::max();
+            }
+
+            int rc;
+            do {
+                rc = __ulock_wait(UL_COMPARE_AND_WAIT | ULF_SHARED,
+                                   reinterpret_cast<void*>(&m_darwin.wake_sequence),
+                                   seq,
+                                   static_cast<uint32_t>(timeout_us));
+            } while (rc == -1 && errno == EINTR);
+
+            guard.release();
+
+            if (rc == 0 || (rc == -1 && errno == EAGAIN)) {
+                continue;
+            }
+
+            if (rc == -1 && errno == ETIMEDOUT) {
+                if (Clock::now() >= abs_time) {
+                    return false;
+                }
+                continue;
+            }
+
+            if (rc == -1) {
+                throw std::system_error(errno, std::generic_category(), "__ulock_wait");
+            }
         }
     }
 #else
