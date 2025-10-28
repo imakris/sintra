@@ -91,6 +91,14 @@ TEST_TIMEOUT_OVERRIDES = {
     "recovery_test_release": 120.0,
 }
 
+# Configure the maximum amount of wall time the runner spends attaching live
+# debuggers before declaring stack capture unavailable. Users can extend this by
+# setting ``SINTRA_LIVE_STACK_ATTACH_TIMEOUT`` (in seconds) when particularly
+# heavy stress suites need more time.
+LIVE_STACK_ATTACH_TIMEOUT_ENV = 'SINTRA_LIVE_STACK_ATTACH_TIMEOUT'
+DEFAULT_LIVE_STACK_ATTACH_TIMEOUT = 30.0
+DEFAULT_LLDB_LIVE_STACK_ATTACH_TIMEOUT = 90.0
+
 WINDOWS_DEBUGGER_CACHE_ENV = 'SINTRA_WINDOWS_DEBUGGER_CACHE'
 WINSDK_INSTALLER_URL_ENV = 'SINTRA_WINSDK_INSTALLER_URL'
 WINSDK_FEATURE_ENV = 'SINTRA_WINSDK_FEATURE'
@@ -928,10 +936,6 @@ class TestRunner:
                 except (ProcessLookupError, PermissionError):
                     continue
 
-        per_pid_timeout = 30
-        total_budget = 90 if debugger_is_macos_lldb else per_pid_timeout
-        capture_deadline = time.monotonic() + total_budget
-
         if debugger_is_macos_lldb:
             # On macOS LLDB fails to attach to processes that are already stopped,
             # so we let the debugger suspend threads itself. The helper processes
@@ -942,6 +946,27 @@ class TestRunner:
             ordered_target_pids = sorted(target_pids, reverse=True)
         else:
             ordered_target_pids = sorted(target_pids)
+
+        env_timeout = os.environ.get(LIVE_STACK_ATTACH_TIMEOUT_ENV)
+        attach_timeout = 0.0
+        if env_timeout:
+            try:
+                attach_timeout = float(env_timeout)
+            except ValueError:
+                attach_timeout = 0.0
+
+        if attach_timeout <= 0.0:
+            if debugger_is_macos_lldb:
+                attach_timeout = DEFAULT_LLDB_LIVE_STACK_ATTACH_TIMEOUT
+            else:
+                attach_timeout = DEFAULT_LIVE_STACK_ATTACH_TIMEOUT
+
+        per_pid_timeout = min(30.0, attach_timeout)
+        total_budget = attach_timeout
+        capture_deadline = time.monotonic() + total_budget
+        attach_timeout_seconds = attach_timeout
+
+        attach_timeout_hint_needed = False
 
         for target_pid in ordered_target_pids:
             if target_pid == os.getpid():
@@ -957,8 +982,12 @@ class TestRunner:
                 capture_errors.append(
                     f"PID {target_pid}: skipped stack capture (overall debugger timeout exceeded)"
                 )
+                attach_timeout_hint_needed = True
                 break
-            debugger_timeout = max(5, min(per_pid_timeout, remaining))
+            debugger_timeout = min(
+                remaining,
+                max(5.0, min(per_pid_timeout, remaining)),
+            )
 
             debugger_output = ""
             debugger_error = ""
@@ -986,6 +1015,12 @@ class TestRunner:
                         text=True,
                         timeout=debugger_timeout,
                     )
+                except subprocess.TimeoutExpired:
+                    debugger_error = (
+                        f"{debugger_name} timed out after {debugger_timeout:.1f}s while attaching"
+                    )
+                    attach_timeout_hint_needed = True
+                    break
                 except subprocess.SubprocessError as exc:
                     debugger_error = f"{debugger_name} failed ({exc})"
                     break
@@ -1061,6 +1096,15 @@ class TestRunner:
 
         if stack_outputs:
             return "\n\n".join(stack_outputs), ""
+
+        if attach_timeout_hint_needed:
+            capture_errors.append(
+                (
+                    "Live stack capture timed out after "
+                    f"{attach_timeout_seconds:.1f}s; increase "
+                    f"{LIVE_STACK_ATTACH_TIMEOUT_ENV} to allow more debugger time"
+                )
+            )
 
         if capture_errors:
             return "", "; ".join(capture_errors)
