@@ -316,7 +316,7 @@ int process_conductor()
         }
     });
 
-    sintra::barrier("extreme-choreo-slots-ready");
+    sintra::barrier<sintra::rendezvous_t>("extreme-choreo-slots-ready");
 
     for (int phase = 0; phase < kPhaseCount; ++phase) {
         const auto& plan = kPhasePlans[phase];
@@ -395,7 +395,7 @@ int process_conductor()
     }
     summary_out.flush();
 
-    sintra::barrier("extreme-choreo-finished", "_sintra_all_processes");
+    sintra::barrier<sintra::rendezvous_t>("extreme-choreo-finished", "_sintra_all_processes");
     return 0;
 }
 
@@ -569,7 +569,7 @@ int process_aggregator()
         exit_cv.notify_all();
     });
 
-    sintra::barrier("extreme-choreo-slots-ready");
+    sintra::barrier<sintra::rendezvous_t>("extreme-choreo-slots-ready");
 
     {
         std::unique_lock<std::mutex> lk(state_mutex);
@@ -591,7 +591,7 @@ int process_aggregator()
     }
     aggregator_out.flush();
 
-    sintra::barrier("extreme-choreo-finished", "_sintra_all_processes");
+    sintra::barrier<sintra::rendezvous_t>("extreme-choreo-finished", "_sintra_all_processes");
     return 0;
 }
 
@@ -675,7 +675,7 @@ int run_producer(int producer_index)
         complete_cv.notify_all();
     });
 
-    sintra::barrier("extreme-choreo-slots-ready");
+    sintra::barrier<sintra::rendezvous_t>("extreme-choreo-slots-ready");
 
     for (int phase = 0; phase < kPhaseCount; ++phase) {
         {
@@ -712,7 +712,7 @@ int run_producer(int producer_index)
     }
 
     sintra::deactivate_all_slots();
-    sintra::barrier("extreme-choreo-finished", "_sintra_all_processes");
+    sintra::barrier<sintra::rendezvous_t>("extreme-choreo-finished", "_sintra_all_processes");
     return 0;
 }
 
@@ -792,7 +792,7 @@ int process_chaos()
         complete_cv.notify_all();
     });
 
-    sintra::barrier("extreme-choreo-slots-ready");
+    sintra::barrier<sintra::rendezvous_t>("extreme-choreo-slots-ready");
 
     for (int phase = 0; phase < kPhaseCount; ++phase) {
         {
@@ -832,7 +832,7 @@ int process_chaos()
     }
 
     sintra::deactivate_all_slots();
-    sintra::barrier("extreme-choreo-finished", "_sintra_all_processes");
+    sintra::barrier<sintra::rendezvous_t>("extreme-choreo-finished", "_sintra_all_processes");
     return 0;
 }
 
@@ -1019,7 +1019,7 @@ int main(int argc, char* argv[])
     sintra::init(argc, argv, processes);
 
     if (!is_spawned) {
-        sintra::barrier("extreme-choreo-finished", "_sintra_all_processes");
+        sintra::barrier<sintra::rendezvous_t>("extreme-choreo-finished", "_sintra_all_processes");
     }
 
     sintra::finalize();
