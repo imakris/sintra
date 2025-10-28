@@ -132,11 +132,13 @@ struct Terminate {};
 
 constexpr std::string_view kEnvSharedDir = "SINTRA_TEST_SHARED_DIR";
 
+std::filesystem::path ensure_shared_directory();
+
 std::filesystem::path get_shared_directory()
 {
     const char* value = std::getenv(kEnvSharedDir.data());
-    if (!value) {
-        throw std::runtime_error("SINTRA_TEST_SHARED_DIR is not set");
+    if (!value || !*value) {
+        return ensure_shared_directory();
     }
     return std::filesystem::path(value);
 }
