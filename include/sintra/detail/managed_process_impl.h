@@ -1601,6 +1601,7 @@ void Managed_process::wait_for_delivery_fence()
         auto it = std::find_if(reply_progress_skips.begin(), reply_progress_skips.end(),
             [&](const Reply_progress_skip& skip) { return skip.progress == progress_address && target_sequence <= skip.upto; });
         if (it != reply_progress_skips.end()) {
+            reply_progress_skips.erase(it);
             return true;
         }
         return false;
