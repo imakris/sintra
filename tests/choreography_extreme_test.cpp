@@ -501,8 +501,11 @@ int process_aggregator()
         std::optional<AuditOutcome> audit;
         {
             std::lock_guard<std::mutex> lk(state_mutex);
-            if (!active || msg.phase != current_phase) {
+            if (msg.phase != current_phase) {
                 return;
+            }
+            if (!active) {
+                phase_ok = false;
             }
             if (msg.producer < 0 || msg.producer >= kProducerCount) {
                 phase_ok = false;
