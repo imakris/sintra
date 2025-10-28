@@ -429,8 +429,7 @@ private:
                 return false;
             }
 
-            count_type clamped = std::min<count_type>(count, static_cast<count_type>(std::numeric_limits<uint64_t>::max()));
-            uint64_t timeout_ns = static_cast<uint64_t>(clamped);
+            uint64_t timeout_ns = static_cast<uint64_t>(count);
             auto start_time = std::chrono::steady_clock::now();
             int rc = __ulock_wait2(
                 UL_COMPARE_AND_WAIT_SHARED,
