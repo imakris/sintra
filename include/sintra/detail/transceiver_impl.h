@@ -865,6 +865,7 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
             auto progress = reader->delivery_progress();
             if (progress) {
                 orpcc.reply_delivery_progress = progress.get();
+                orpcc.reply_delivery_sequence = progress->reply_sequence.load(std::memory_order_acquire);
             }
         }
     };
@@ -946,9 +947,10 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
     s_mproc->deactivate_return_handler(function_instance_id);
 
     if (orpcc.success) {
-        register_reply_progress_skip(orpcc.reply_delivery_progress);
+        register_reply_progress_skip(orpcc.reply_delivery_progress, orpcc.reply_delivery_sequence);
     } else {
         orpcc.reply_delivery_progress = nullptr;
+        orpcc.reply_delivery_sequence = invalid_sequence;
     }
 
     if (!orpcc.success) {

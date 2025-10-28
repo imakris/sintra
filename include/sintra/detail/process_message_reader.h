@@ -56,18 +56,24 @@ static inline thread_local instance_id_type s_tl_common_function_iid = invalid_i
     static inline thread_local Process_message_reader* s_tl_current_request_reader = nullptr;
     static inline thread_local Process_message_reader* s_tl_current_reply_reader = nullptr;
 
-static inline thread_local std::vector<const void*> s_tl_reply_progress_to_skip;
+struct Reply_progress_skip
+{
+    const void* progress = nullptr;
+    sequence_counter_type upto = invalid_sequence;
+};
 
-inline void register_reply_progress_skip(const void* progress_address)
+static inline thread_local std::vector<Reply_progress_skip> s_tl_reply_progress_to_skip;
+
+inline void register_reply_progress_skip(const void* progress_address, sequence_counter_type upto)
 {
     if (!progress_address) {
         return;
     }
 
-    s_tl_reply_progress_to_skip.push_back(progress_address);
+    s_tl_reply_progress_to_skip.push_back({progress_address, upto});
 }
 
-inline std::vector<const void*> take_reply_progress_skips()
+inline std::vector<Reply_progress_skip> take_reply_progress_skips()
 {
     auto skips = std::move(s_tl_reply_progress_to_skip);
     s_tl_reply_progress_to_skip.clear();

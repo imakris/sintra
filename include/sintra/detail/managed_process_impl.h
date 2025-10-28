@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <csignal>
 #include <fstream>
+#include <algorithm>
 #include <functional>
 #include <list>
 #include <vector>
@@ -1592,13 +1593,17 @@ void Managed_process::wait_for_delivery_fence()
 {
     auto reply_progress_skips = take_reply_progress_skips();
 
-    auto should_skip_reply_progress = [&](const void* progress_address) {
+    auto should_skip_reply_progress = [&](const void* progress_address, sequence_counter_type target_sequence) {
         if (!progress_address) {
             return false;
         }
 
-        return std::find(reply_progress_skips.begin(), reply_progress_skips.end(), progress_address) !=
-               reply_progress_skips.end();
+        auto it = std::find_if(reply_progress_skips.begin(), reply_progress_skips.end(),
+            [&](const Reply_progress_skip& skip) { return skip.progress == progress_address && target_sequence <= skip.upto; });
+        if (it != reply_progress_skips.end()) {
+            return true;
+        }
+        return false;
     };
 
     while (true) {
@@ -1633,7 +1638,7 @@ void Managed_process::wait_for_delivery_fence()
                     rep_target);
                 if (rep_target_info.wait_needed) {
                     if (auto progress = rep_target_info.progress.lock()) {
-                        if (should_skip_reply_progress(progress.get())) {
+                        if (should_skip_reply_progress(progress.get(), rep_target_info.target)) {
                             rep_target_info.wait_needed = false;
                         }
                     }

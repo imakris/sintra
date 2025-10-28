@@ -711,6 +711,7 @@ struct Outstanding_rpc_control
     bool                success = false;
     bool                cancelled = false;
     const void*         reply_delivery_progress = nullptr;
+    sequence_counter_type reply_delivery_sequence = invalid_sequence;
 };
 
 
