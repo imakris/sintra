@@ -575,8 +575,9 @@ STRESS_TEST(stress_multi_reader_throughput)
     std::vector<std::vector<uint64_t>> reader_results(reader_count);
     std::vector<std::exception_ptr> reader_errors(reader_count);
     std::vector<std::atomic<bool>> reader_ready(reader_count);
+    std::vector<std::atomic<bool>> reader_evicted(reader_count);
     for (auto& flag : reader_ready) { flag.store(false, std::memory_order_relaxed); }
-    std::atomic<bool> eviction_observed{false};
+    for (auto& flag : reader_evicted) { flag.store(false, std::memory_order_relaxed); }
 
     std::vector<std::thread> reader_threads;
     reader_threads.reserve(reader_count);
@@ -591,7 +592,7 @@ STRESS_TEST(stress_multi_reader_throughput)
                 while (!writer_done.load(std::memory_order_acquire) || reader_results[rid].size() < total_messages) {
                     auto range = reader.wait_for_new_data();
                     if (reader.consume_eviction_notification()) {
-                        eviction_observed.store(true, std::memory_order_release);
+                        reader_evicted[rid].store(true, std::memory_order_release);
                         continue;
                     }
                     if (!range.begin || range.begin == range.end) {
@@ -606,7 +607,7 @@ STRESS_TEST(stress_multi_reader_throughput)
                 }
                 reader.done_reading();
                 if (reader.consume_eviction_notification()) {
-                    eviction_observed.store(true, std::memory_order_release);
+                    reader_evicted[rid].store(true, std::memory_order_release);
                 }
             }
             catch (...) {
@@ -653,7 +654,6 @@ STRESS_TEST(stress_multi_reader_throughput)
     const bool has_overflow = diagnostics.reader_lag_overflow_count > 0;
     const bool has_regressions = diagnostics.reader_sequence_regressions > 0;
     const bool has_evictions = diagnostics.reader_eviction_count > 0;
-    const bool reader_detected_eviction = eviction_observed.load(std::memory_order_acquire);
     if (has_overflow || has_regressions || has_evictions) {
         std::cerr << "[sintra::ring] diagnostics: max_reader_lag="
                   << diagnostics.max_reader_lag
@@ -689,10 +689,28 @@ STRESS_TEST(stress_multi_reader_throughput)
         }
     }
 
-    if (reader_detected_eviction) {
-        ASSERT_GT(diagnostics.reader_eviction_count, 0u);
+    bool any_reader_evicted = false;
+    for (auto& flag : reader_evicted) {
+        any_reader_evicted = any_reader_evicted || flag.load(std::memory_order_acquire);
+    }
+
+    for (auto& results : reader_results) {
+        for (size_t i = 0; i < results.size(); ++i) {
+            ASSERT_LT(results[i], total_messages);
+            if (i > 0) {
+                ASSERT_GT(results[i], results[i - 1]);
+            }
+        }
+    }
+
+    const bool diagnostics_recorded_eviction = diagnostics.reader_eviction_count > 0u;
+
+    if (any_reader_evicted) {
+        ASSERT_TRUE(diagnostics_recorded_eviction);
         return;
     }
+
+    ASSERT_FALSE(diagnostics_recorded_eviction);
 
     for (auto& results : reader_results) {
         ASSERT_EQ(results.size(), total_messages);
