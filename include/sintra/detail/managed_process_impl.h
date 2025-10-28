@@ -24,6 +24,7 @@
 #include <thread>
 #include <utility>
 #include <iostream>
+#include <algorithm>
 #ifdef _WIN32
 #include <errno.h>
 #endif
@@ -1589,6 +1590,17 @@ inline void Managed_process::run_after_current_handler(function<void()> task)
 inline
 void Managed_process::wait_for_delivery_fence()
 {
+    auto reply_progress_skips = take_reply_progress_skips();
+
+    auto should_skip_reply_progress = [&](const void* progress_address) {
+        if (!progress_address) {
+            return false;
+        }
+
+        return std::find(reply_progress_skips.begin(), reply_progress_skips.end(), progress_address) !=
+               reply_progress_skips.end();
+    };
+
     while (true) {
         std::vector<Process_message_reader::Delivery_target> targets;
 
@@ -1619,6 +1631,13 @@ void Managed_process::wait_for_delivery_fence()
                 auto rep_target_info = reader.prepare_delivery_target(
                     Process_message_reader::Delivery_stream::Reply,
                     rep_target);
+                if (rep_target_info.wait_needed) {
+                    if (auto progress = rep_target_info.progress.lock()) {
+                        if (should_skip_reply_progress(progress.get())) {
+                            rep_target_info.wait_needed = false;
+                        }
+                    }
+                }
                 if (rep_target_info.wait_needed) {
                     targets.emplace_back(std::move(rep_target_info));
                 }
