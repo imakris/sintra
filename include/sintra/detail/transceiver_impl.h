@@ -861,6 +861,12 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
         orpcc.success = true;
         orpcc.keep_waiting = false;
         orpcc.keep_waiting_condition.notify_all();
+        if (auto* reader = s_tl_current_reply_reader) {
+            auto progress = reader->delivery_progress();
+            if (progress) {
+                orpcc.reply_delivery_progress = progress.get();
+            }
+        }
     };
     rh.exception_handler = [&] (const Message_prefix& msg) {
         const auto& returned_message = (const exception&)(msg);
@@ -938,6 +944,12 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
 
     // we can now disable the return message handler
     s_mproc->deactivate_return_handler(function_instance_id);
+
+    if (orpcc.success) {
+        register_reply_progress_skip(orpcc.reply_delivery_progress);
+    } else {
+        orpcc.reply_delivery_progress = nullptr;
+    }
 
     if (!orpcc.success) {
         if (ex_tid != not_defined_type_id) {
