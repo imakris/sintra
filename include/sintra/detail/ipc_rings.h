@@ -148,7 +148,11 @@
 // the writer will tolerate before triggering an eviction scan. Override with a
 // compile-time value tailored to your deployment if desired.
 #ifndef SINTRA_EVICTION_SPIN_BUDGET_US
-#define SINTRA_EVICTION_SPIN_BUDGET_US 500u
+// Give readers a wider scheduling window (5ms by default) before the writer
+// initiates an eviction pass. The previous 500µs budget was occasionally too
+// tight on heavily loaded macOS runners, where short deschedules allowed the
+// writer to evict still-progressing readers and triggered data overflows.
+#define SINTRA_EVICTION_SPIN_BUDGET_US 5000u
 #endif
 
 #ifndef SINTRA_EVICTION_LAG_RINGS
