@@ -48,8 +48,12 @@ class Color:
     BOLD = '\033[1m'
 
 
-# Tests that should receive additional repetition weight. The multiplier value
-# is applied on top of the global ``--repetitions`` argument.
+# Tests that should receive additional repetition weight. Each value represents
+# the minimum number of times that the corresponding test should run when the
+# global ``--repetitions`` argument is set to 1. Larger ``--repetitions`` values
+# can still increase the total runs for a test, but the override no longer
+# multiplies the global value directly (which previously caused runaway runtimes
+# when soak runs used high repetition counts).
 TEST_WEIGHT_OVERRIDES = {
     # ipc_rings release stress tests
     "ipc_rings_tests_release:stress:stress_attach_detach_readers": 200,
@@ -86,6 +90,13 @@ TEST_TIMEOUT_OVERRIDES = {
     "recovery_test_debug": 120.0,
     "recovery_test_release": 120.0,
 }
+
+# Limit the number of processes that participate in live stack captures. Some
+# stress tests spawn large helper fleets and attempting to attach a debugger to
+# every descendant can stall the runner for minutes. Capturing the primary test
+# process and a handful of helpers still provides actionable diagnostics while
+# keeping the feedback loop tight.
+MAX_STACK_CAPTURE_PROCESSES = 12
 
 WINDOWS_DEBUGGER_CACHE_ENV = 'SINTRA_WINDOWS_DEBUGGER_CACHE'
 WINSDK_INSTALLER_URL_ENV = 'SINTRA_WINSDK_INSTALLER_URL'
@@ -128,6 +139,28 @@ def _lookup_test_timeout(name: str, default: float) -> float:
     if override is None:
         return default
     return max(default, override)
+
+
+def _calculate_target_repetitions(base_repetitions: int, weight: int) -> int:
+    """Return the total repetitions to run for a test.
+
+    ``weight`` expresses the desired run count when ``base_repetitions`` is 1.
+    Increasing ``base_repetitions`` beyond 1 no longer multiplies the weight,
+    preventing exponential growth in soak runs with large weight overrides.
+    ``base_repetitions`` can still override the weight when set higher.
+    """
+
+    base = max(base_repetitions, 0)
+    if base == 0:
+        return 0
+
+    if weight <= 1:
+        return base
+
+    if base == 1:
+        return weight
+
+    return max(base, weight)
 
 def format_duration(seconds: float) -> str:
     """Format duration in human-readable format"""
@@ -917,6 +950,32 @@ class TestRunner:
         else:
             ordered_target_pids = sorted(target_pids)
 
+        skip_notice = ""
+        if (
+            MAX_STACK_CAPTURE_PROCESSES > 0
+            and len(ordered_target_pids) > MAX_STACK_CAPTURE_PROCESSES
+        ):
+            primary_pid = pid
+            limited: List[int] = []
+
+            if primary_pid in ordered_target_pids:
+                limited.append(primary_pid)
+
+            for candidate in ordered_target_pids:
+                if candidate == primary_pid and limited and limited[0] == primary_pid:
+                    continue
+                limited.append(candidate)
+                if len(limited) >= MAX_STACK_CAPTURE_PROCESSES:
+                    break
+
+            skipped = len(ordered_target_pids) - len(limited)
+            ordered_target_pids = limited
+            if skipped > 0:
+                skip_notice = (
+                    f"[Stack capture truncated: skipped {skipped} additional process(es) "
+                    f"(limit {MAX_STACK_CAPTURE_PROCESSES})]"
+                )
+
         for target_pid in ordered_target_pids:
             if target_pid == os.getpid():
                 continue
@@ -1034,10 +1093,17 @@ class TestRunner:
                     continue
 
         if stack_outputs:
+            if skip_notice:
+                stack_outputs.append(skip_notice)
             return "\n\n".join(stack_outputs), ""
 
         if capture_errors:
+            if skip_notice:
+                capture_errors.append(skip_notice)
             return "", "; ".join(capture_errors)
+
+        if skip_notice:
+            return "", skip_notice
 
         return "", "no stack data captured"
 
@@ -2689,7 +2755,7 @@ def main():
         }
         test_weights = {invocation.name: _lookup_test_weight(invocation.name) for invocation in tests}
         target_repetitions = {
-            name: max(args.repetitions * weight, 0)
+            name: _calculate_target_repetitions(args.repetitions, weight)
             for name, weight in test_weights.items()
         }
         remaining_repetitions = target_repetitions.copy()
