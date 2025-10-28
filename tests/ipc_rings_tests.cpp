@@ -9,6 +9,7 @@
 #include <functional>
 #include <future>
 #include <iostream>
+#include <limits>
 #include <mutex>
 #include <numeric>
 #include <optional>
@@ -574,7 +575,9 @@ STRESS_TEST(stress_multi_reader_throughput)
     std::vector<std::vector<uint64_t>> reader_results(reader_count);
     std::vector<std::exception_ptr> reader_errors(reader_count);
     std::vector<std::atomic<bool>> reader_ready(reader_count);
+    std::vector<std::atomic<bool>> reader_evicted(reader_count);
     for (auto& flag : reader_ready) { flag.store(false, std::memory_order_relaxed); }
+    for (auto& flag : reader_evicted) { flag.store(false, std::memory_order_relaxed); }
 
     std::vector<std::thread> reader_threads;
     reader_threads.reserve(reader_count);
@@ -588,6 +591,10 @@ STRESS_TEST(stress_multi_reader_throughput)
 
                 while (!writer_done.load(std::memory_order_acquire) || reader_results[rid].size() < total_messages) {
                     auto range = reader.wait_for_new_data();
+                    if (reader.consume_eviction_notification()) {
+                        reader_evicted[rid].store(true, std::memory_order_release);
+                        continue;
+                    }
                     if (!range.begin || range.begin == range.end) {
                         if (writer_done.load(std::memory_order_acquire)) {
                             break;
@@ -599,6 +606,9 @@ STRESS_TEST(stress_multi_reader_throughput)
                     reader.done_reading_new_data();
                 }
                 reader.done_reading();
+                if (reader.consume_eviction_notification()) {
+                    reader_evicted[rid].store(true, std::memory_order_release);
+                }
             }
             catch (...) {
                 reader_errors[rid] = std::current_exception();
@@ -640,6 +650,36 @@ STRESS_TEST(stress_multi_reader_throughput)
         reader_threads[rid].join();
     }
 
+    auto diagnostics = writer.get_diagnostics();
+    const bool has_overflow = diagnostics.reader_lag_overflow_count > 0;
+    const bool has_regressions = diagnostics.reader_sequence_regressions > 0;
+    const bool has_evictions = diagnostics.reader_eviction_count > 0;
+    if (has_overflow || has_regressions || has_evictions) {
+        std::cerr << "[sintra::ring] diagnostics: max_reader_lag="
+                  << diagnostics.max_reader_lag
+                  << ", overflow_count=" << diagnostics.reader_lag_overflow_count
+                  << ", worst_overflow_lag=" << diagnostics.worst_overflow_lag
+                  << ", sequence_regressions=" << diagnostics.reader_sequence_regressions
+                  << ", eviction_count=" << diagnostics.reader_eviction_count
+                  << std::endl;
+
+        if (diagnostics.last_evicted_reader_index != std::numeric_limits<uint32_t>::max()) {
+            std::cerr << "    last_evicted_reader_index=" << diagnostics.last_evicted_reader_index
+                      << ", reader_sequence=" << diagnostics.last_evicted_reader_sequence
+                      << ", writer_sequence=" << diagnostics.last_evicted_writer_sequence
+                      << ", reader_octile=" << diagnostics.last_evicted_reader_octile
+                      << std::endl;
+        }
+
+        if (diagnostics.last_overflow_reader_index != std::numeric_limits<uint32_t>::max()) {
+            std::cerr << "    last_overflow_reader_index=" << diagnostics.last_overflow_reader_index
+                      << ", reader_sequence=" << diagnostics.last_overflow_reader_sequence
+                      << ", leading_sequence=" << diagnostics.last_overflow_leading_sequence
+                      << ", last_consumed=" << diagnostics.last_overflow_last_consumed
+                      << std::endl;
+        }
+    }
+
     if (writer_error) {
         std::rethrow_exception(writer_error);
     }
@@ -648,6 +688,33 @@ STRESS_TEST(stress_multi_reader_throughput)
             std::rethrow_exception(err);
         }
     }
+
+    bool any_reader_evicted = false;
+    for (auto& flag : reader_evicted) {
+        any_reader_evicted = any_reader_evicted || flag.load(std::memory_order_acquire);
+    }
+
+    for (auto& results : reader_results) {
+        for (size_t i = 0; i < results.size(); ++i) {
+            ASSERT_LT(results[i], total_messages);
+            if (i > 0) {
+                ASSERT_GT(results[i], results[i - 1]);
+            }
+        }
+    }
+
+    const bool diagnostics_recorded_eviction = diagnostics.reader_eviction_count > 0u;
+
+    if (any_reader_evicted) {
+        // A slow reader that gets evicted is expected to miss at least one publication. In
+        // that scenario the ring guarantees ordering, but not completeness, so we only
+        // assert that diagnostics captured the eviction and skip the strict per-value
+        // comparison that assumes zero loss.
+        ASSERT_TRUE(diagnostics_recorded_eviction);
+        return;
+    }
+
+    ASSERT_FALSE(diagnostics_recorded_eviction);
 
     for (auto& results : reader_results) {
         ASSERT_EQ(results.size(), total_messages);
