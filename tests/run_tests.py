@@ -48,8 +48,12 @@ class Color:
     BOLD = '\033[1m'
 
 
-# Tests that should receive additional repetition weight. The multiplier value
-# is applied on top of the global ``--repetitions`` argument.
+# Tests that should receive additional repetition weight. Each value represents
+# the minimum number of times that the corresponding test should run when the
+# global ``--repetitions`` argument is set to 1. Larger ``--repetitions`` values
+# can still increase the total runs for a test, but the override no longer
+# multiplies the global value directly (which previously caused runaway runtimes
+# when soak runs used high repetition counts).
 TEST_WEIGHT_OVERRIDES = {
     # ipc_rings release stress tests
     "ipc_rings_tests_release:stress:stress_attach_detach_readers": 200,
@@ -128,6 +132,28 @@ def _lookup_test_timeout(name: str, default: float) -> float:
     if override is None:
         return default
     return max(default, override)
+
+
+def _calculate_target_repetitions(base_repetitions: int, weight: int) -> int:
+    """Return the total repetitions to run for a test.
+
+    ``weight`` expresses the desired run count when ``base_repetitions`` is 1.
+    Increasing ``base_repetitions`` beyond 1 no longer multiplies the weight,
+    preventing exponential growth in soak runs with large weight overrides.
+    ``base_repetitions`` can still override the weight when set higher.
+    """
+
+    base = max(base_repetitions, 0)
+    if base == 0:
+        return 0
+
+    if weight <= 1:
+        return base
+
+    if base == 1:
+        return weight
+
+    return max(base, weight)
 
 def format_duration(seconds: float) -> str:
     """Format duration in human-readable format"""
@@ -2689,7 +2715,7 @@ def main():
         }
         test_weights = {invocation.name: _lookup_test_weight(invocation.name) for invocation in tests}
         target_repetitions = {
-            name: max(args.repetitions * weight, 0)
+            name: _calculate_target_repetitions(args.repetitions, weight)
             for name, weight in test_weights.items()
         }
         remaining_repetitions = target_repetitions.copy()
