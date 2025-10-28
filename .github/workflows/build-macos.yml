@@ -30,6 +30,8 @@ jobs:
   build:
     name: Build
     runs-on: macos-latest
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '13.3'
 
     steps:
       - name: Checkout repository
@@ -79,8 +81,17 @@ jobs:
           fi
           xcrun lldb --version
 
+      - name: Verify os_sync_wait_on_address availability
+        run: |
+          SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+          HEADER_PATH="$SDKROOT/usr/include/os/os_sync_wait_on_address.h"
+          if [ ! -f "$HEADER_PATH" ]; then
+            echo "::error::os_sync_wait_on_address.h not found in macOS SDK at $SDKROOT" >&2
+            exit 1
+          fi
+
       - name: Configure CMake
-        run: cmake -B build -S . -DCMAKE_BUILD_TYPE=Release ${{ steps.flags.outputs.CMAKE_FLAGS }}
+        run: cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_DEPLOYMENT_TARGET=13.3 ${{ steps.flags.outputs.CMAKE_FLAGS }}
 
       - name: Build
         run: cmake --build build --config Release
