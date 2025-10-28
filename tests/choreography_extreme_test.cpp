@@ -660,7 +660,7 @@ int run_producer(int producer_index)
         bool reply = false;
         {
             std::lock_guard<std::mutex> lk(state_mutex);
-            reply = (msg.phase == current_phase && !terminate_requested);
+            reply = (!terminate_requested && msg.phase >= 0 && msg.phase <= current_phase);
         }
         if (reply) {
             sintra::world() << ChaosReply{msg.phase, msg.token, producer_index};
