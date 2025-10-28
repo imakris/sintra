@@ -12,6 +12,7 @@
 
 #include <sintra/sintra.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -204,7 +205,10 @@ int coordinator_process()
     barrier("barrier-flush-ready");
 
     bool aborted = false;
-    constexpr auto iteration_timeout = std::chrono::seconds(10);
+    constexpr auto base_iteration_timeout   = std::chrono::seconds(10);
+    constexpr auto progress_extension       = std::chrono::seconds(5);
+    constexpr auto max_iteration_timeout    = std::chrono::seconds(30);
+    constexpr auto wait_slice               = std::chrono::milliseconds(200);
 
     for (std::size_t iteration = 0; iteration < kIterations; ++iteration) {
 
@@ -221,7 +225,12 @@ int coordinator_process()
         }
 
         std::unique_lock<std::mutex> lock(state.mutex);
-        const bool completed = state.cv.wait_for(lock, iteration_timeout, [&] {
+        const auto start_time   = std::chrono::steady_clock::now();
+        auto       deadline     = start_time + base_iteration_timeout;
+        const auto max_deadline = start_time + max_iteration_timeout;
+        std::size_t last_progress = 0;
+
+        auto predicate = [&] {
             if (state.abort_requested || state.iteration_failed) {
                 return true;
             }
@@ -231,7 +240,43 @@ int coordinator_process()
                 }
             }
             return true;
-        });
+        };
+
+        bool completed = false;
+
+        while (!completed) {
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= deadline) {
+                break;
+            }
+
+            const auto remaining = deadline - now;
+            const auto wait_window = std::min(
+                remaining,
+                std::chrono::duration_cast<std::chrono::steady_clock::duration>(wait_slice));
+
+            if (wait_window <= std::chrono::steady_clock::duration::zero()) {
+                continue;
+            }
+
+            if (state.cv.wait_for(lock, wait_window, predicate)) {
+                completed = true;
+                break;
+            }
+
+            if (state.abort_requested || state.iteration_failed) {
+                completed = true;
+                break;
+            }
+
+            if (state.messages_in_iteration > last_progress) {
+                last_progress = state.messages_in_iteration;
+                const auto extended_deadline = now + progress_extension;
+                if (extended_deadline > deadline) {
+                    deadline = std::min(extended_deadline, max_deadline);
+                }
+            }
+        }
 
         if (!completed && !state.abort_requested && !state.iteration_failed) {
             if (success) {
