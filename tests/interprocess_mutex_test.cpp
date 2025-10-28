@@ -188,7 +188,9 @@ int main()
 
     // Recovery from a dead owner should succeed.
     test_mutex recovery;
-    const auto dead_pid = static_cast<uint32_t>(999999);
+    const auto dead_pid = static_cast<uint32_t>(0);
+    // PID 0 is reserved on all supported platforms and treated as always-dead by
+    // is_process_alive, guaranteeing deterministic recovery behaviour.
     const test_mutex::owner_token dead_owner =
         (static_cast<test_mutex::owner_token>(dead_pid) << 32u) | 0x12345678ull;
 
