@@ -57,6 +57,7 @@ function(add_test_suite SUFFIX IS_DEBUG)
         dummy_test.cpp
         extreme_choreography_test.cpp
         ipc_rings_tests.cpp
+        macos_semaphore_benchmark.cpp
         message_args_traits_test.cpp
         ping_pong_multi_test.cpp
         ping_pong_test.cpp
