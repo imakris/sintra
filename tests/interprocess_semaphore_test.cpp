@@ -39,10 +39,6 @@
 #include <vector>
 #include <cwchar>
 
-#if defined(_WIN32)
-constexpr std::size_t kWindowsNameChars = 64;
-#endif
-
 #if defined(__unix__) || defined(__APPLE__)
     #include <sys/mman.h>
     #include <sys/wait.h>
