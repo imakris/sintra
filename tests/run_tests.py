@@ -2757,6 +2757,11 @@ def main():
                 if not suite_all_passed:
                     break
 
+            round_elapsed = time.time() - suite_start_time
+            print(
+                f"    {Color.BLUE}Round complete - total elapsed: {format_duration(round_elapsed)}{Color.RESET}"
+            )
+
             if not suite_all_passed:
                 break
 
