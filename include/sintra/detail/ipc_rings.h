@@ -1628,6 +1628,8 @@ struct Ring_W : Ring<T, false>
         }
 
         c.writer_pid.store(get_current_pid(), std::memory_order_release);
+
+        m_last_seen_reader_sequences.fill(invalid_sequence);
     }
 
     ~Ring_W()
@@ -1919,33 +1921,41 @@ private:
                             : 0;
 
                     for (int i = 0; i < max_process_index; ++i) {
-                        // Check if this reader slot is active
-                        if (c.reading_sequences[i].data.status.load(std::memory_order_acquire)
-                            == Ring<T, false>::READER_STATE_ACTIVE)
+                        auto& slot = c.reading_sequences[i].data;
+                        if (slot.status.load(std::memory_order_acquire)
+                            != Ring<T, false>::READER_STATE_ACTIVE)
                         {
-                            sequence_counter_type reader_seq =
-                                c.reading_sequences[i].data.v.load(std::memory_order_acquire);
-                            uint8_t guard_flag =
-                                c.reading_sequences[i].data.has_guard.load(std::memory_order_acquire);
-                            uint8_t reader_octile =
-                                c.reading_sequences[i].data.trailing_octile.load(std::memory_order_acquire);
+                            m_last_seen_reader_sequences[i] = invalid_sequence;
+                            continue;
+                        }
 
-                            bool blocking_current_octile =
-                                (guard_flag != 0) && (reader_octile == new_octile);
+                        sequence_counter_type reader_seq =
+                            slot.v.load(std::memory_order_acquire);
+                        uint8_t guard_flag = slot.has_guard.load(std::memory_order_acquire);
+                        uint8_t reader_octile = slot.trailing_octile.load(std::memory_order_acquire);
 
-                            if (reader_seq < eviction_threshold || blocking_current_octile) {
-                                // Evict only if the reader currently holds a guard
-                                uint8_t expected = 1;
-                                if (c.reading_sequences[i].data.has_guard.compare_exchange_strong(
-                                        expected, uint8_t{0}, std::memory_order_acq_rel))
-                                {
-                                    c.reading_sequences[i].data.status.store(
-                                        Ring<T, false>::READER_STATE_EVICTED, std::memory_order_release);
+                        bool blocking_current_octile =
+                            (guard_flag != 0) && (reader_octile == new_octile);
 
-                                    size_t evicted_reader_octile =
-                                        c.reading_sequences[i].data.trailing_octile.load(std::memory_order_acquire);
-                                    c.read_access.fetch_sub(uint64_t(1) << (8 * evicted_reader_octile), std::memory_order_acq_rel);
-                                }
+                        sequence_counter_type previous_seq = m_last_seen_reader_sequences[i];
+                        bool reader_made_progress = (reader_seq != previous_seq);
+                        m_last_seen_reader_sequences[i] = reader_seq;
+
+                        if (reader_seq < eviction_threshold ||
+                            (blocking_current_octile && !reader_made_progress))
+                        {
+                            // Evict only if the reader currently holds a guard
+                            uint8_t expected = 1;
+                            if (slot.has_guard.compare_exchange_strong(
+                                    expected, uint8_t{0}, std::memory_order_acq_rel))
+                            {
+                                slot.status.store(
+                                    Ring<T, false>::READER_STATE_EVICTED, std::memory_order_release);
+
+                                size_t evicted_reader_octile =
+                                    slot.trailing_octile.load(std::memory_order_acquire);
+                                c.read_access.fetch_sub(
+                                    uint64_t(1) << (8 * evicted_reader_octile), std::memory_order_acq_rel);
                             }
                         }
                     }
@@ -1965,6 +1975,7 @@ private:
     std::atomic<uint32_t>           m_writing_thread_index   = {0};
     size_t                          m_octile                 = 0;
     sequence_counter_type           m_pending_new_sequence   = 0;
+    std::array<sequence_counter_type, max_process_index> m_last_seen_reader_sequences{};
 
     typename Ring<T, false>::Control& c;
 };
