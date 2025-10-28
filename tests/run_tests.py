@@ -865,6 +865,7 @@ class TestRunner:
             return True
 
         paused_pids = []
+        paused_groups: List[int] = []
         stack_outputs = []
         capture_errors = []
 
@@ -882,6 +883,14 @@ class TestRunner:
         should_pause = signal is not None and not debugger_is_macos_lldb
 
         if should_pause:
+            if pgid is not None and pgid > 0:
+                try:
+                    if os.getpgrp() != pgid:
+                        os.killpg(pgid, signal.SIGSTOP)
+                        paused_groups.append(pgid)
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
+
             for target_pid in sorted(target_pids):
                 if target_pid == os.getpid():
                     continue
@@ -1015,6 +1024,13 @@ class TestRunner:
                 try:
                     os.kill(target_pid, signal.SIGCONT)
                 except (ProcessLookupError, PermissionError):
+                    continue
+
+            for group_id in paused_groups:
+                try:
+                    if os.getpgrp() != group_id:
+                        os.killpg(group_id, signal.SIGCONT)
+                except (ProcessLookupError, PermissionError, OSError):
                     continue
 
         if stack_outputs:
