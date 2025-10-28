@@ -50,7 +50,8 @@ bool on_request_reader_thread();
 static inline thread_local Message_prefix* s_tl_current_message = nullptr;
 static inline thread_local instance_id_type s_tl_common_function_iid = invalid_instance_id;
 
-static inline thread_local Process_message_reader* s_tl_current_request_reader = nullptr;
+    static inline thread_local Process_message_reader* s_tl_current_request_reader = nullptr;
+    static inline thread_local Process_message_reader* s_tl_current_reply_reader = nullptr;
 
 static inline thread_local instance_id_type s_tl_additional_piids[max_process_index];
 static inline thread_local size_t s_tl_additional_piids_size = 0;
