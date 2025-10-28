@@ -40,6 +40,7 @@
 
   #if defined(__FreeBSD__)
     #include <sys/sysctl.h>
+    #include <sys/thr.h>
     #include <sys/user.h>
     #include <pthread_np.h>
   #elif defined(__APPLE__)
