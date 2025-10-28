@@ -1422,8 +1422,8 @@ struct Ring_R : Ring<T, true>
     const Range<T> wait_for_new_data()
     {
         auto produce_range = [&]() -> Range<T> {
-            if (c.reading_sequences[m_rs_index].data.has_guard.load(std::memory_order_acquire) == 0) {
-                reattach_after_eviction();
+            if (handle_eviction_if_needed(/*reset_sequence=*/true)) {
+                return {};
             }
 
             auto start_sequence = m_reading_sequence->load(std::memory_order_acquire);
@@ -1609,9 +1609,7 @@ struct Ring_R : Ring<T, true>
 
         const size_t new_trailing_octile = (8 * t_idx) / this->m_num_elements;
 
-        if (c.reading_sequences[m_rs_index].data.has_guard.load(std::memory_order_acquire) == 0) {
-            reattach_after_eviction();
-        }
+        handle_eviction_if_needed(/*reset_sequence=*/true);
 
         if (new_trailing_octile != m_trailing_octile) {
             const uint64_t new_mask = uint64_t(1) << (8 * new_trailing_octile);
@@ -1625,6 +1623,38 @@ struct Ring_R : Ring<T, true>
         }
     }
 
+    bool handle_eviction_if_needed(bool reset_sequence)
+    {
+        auto& slot = c.reading_sequences[m_rs_index].data;
+        if (slot.has_guard.load(std::memory_order_acquire) != 0) {
+            return false;
+        }
+
+#ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
+        if (slot.status.load(std::memory_order_acquire) == Ring<T, false>::READER_STATE_EVICTED) {
+            sequence_counter_type new_seq = c.leading_sequence.load(std::memory_order_acquire);
+            if (reset_sequence) {
+                slot.v.store(new_seq, std::memory_order_release);
+                m_reading_sequence->store(new_seq, std::memory_order_release);
+                m_last_consumed_sequence = new_seq;
+            }
+            else {
+                // Even if we do not need to rewind the local sequence, make sure the shared
+                // slot reflects the writer's latest publication so future snapshots start
+                // from a consistent point.
+                slot.v.store(m_reading_sequence->load(std::memory_order_acquire),
+                             std::memory_order_release);
+            }
+            reattach_after_eviction();
+            m_evicted_since_last_wait.store(true, std::memory_order_release);
+            return true;
+        }
+#endif
+
+        reattach_after_eviction();
+        return false;
+    }
+
     void reattach_after_eviction()
     {
         const uint64_t mask = uint64_t(1) << (8 * m_trailing_octile);
@@ -1636,6 +1666,17 @@ struct Ring_R : Ring<T, true>
         c.reading_sequences[m_rs_index].data.status.store(
             Ring<T, false>::READER_STATE_ACTIVE, std::memory_order_release);
 #endif
+    }
+
+public:
+    bool consume_eviction_notification()
+    {
+        return m_evicted_since_last_wait.exchange(false, std::memory_order_acq_rel);
+    }
+
+    bool eviction_pending() const
+    {
+        return m_evicted_since_last_wait.load(std::memory_order_acquire);
     }
 
     /**
@@ -1664,6 +1705,7 @@ private:
     size_t                              m_trailing_octile       = 0;
     uint64_t                            m_seen_unblock_sequence = 0;
     sequence_counter_type               m_last_consumed_sequence = 0;
+    std::atomic<bool>                   m_evicted_since_last_wait{false};
 
 protected:
     std::atomic<bool>                   m_reading               = false;

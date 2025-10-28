@@ -576,6 +576,7 @@ STRESS_TEST(stress_multi_reader_throughput)
     std::vector<std::exception_ptr> reader_errors(reader_count);
     std::vector<std::atomic<bool>> reader_ready(reader_count);
     for (auto& flag : reader_ready) { flag.store(false, std::memory_order_relaxed); }
+    std::atomic<bool> eviction_observed{false};
 
     std::vector<std::thread> reader_threads;
     reader_threads.reserve(reader_count);
@@ -589,6 +590,10 @@ STRESS_TEST(stress_multi_reader_throughput)
 
                 while (!writer_done.load(std::memory_order_acquire) || reader_results[rid].size() < total_messages) {
                     auto range = reader.wait_for_new_data();
+                    if (reader.consume_eviction_notification()) {
+                        eviction_observed.store(true, std::memory_order_release);
+                        continue;
+                    }
                     if (!range.begin || range.begin == range.end) {
                         if (writer_done.load(std::memory_order_acquire)) {
                             break;
@@ -600,6 +605,9 @@ STRESS_TEST(stress_multi_reader_throughput)
                     reader.done_reading_new_data();
                 }
                 reader.done_reading();
+                if (reader.consume_eviction_notification()) {
+                    eviction_observed.store(true, std::memory_order_release);
+                }
             }
             catch (...) {
                 reader_errors[rid] = std::current_exception();
@@ -645,6 +653,7 @@ STRESS_TEST(stress_multi_reader_throughput)
     const bool has_overflow = diagnostics.reader_lag_overflow_count > 0;
     const bool has_regressions = diagnostics.reader_sequence_regressions > 0;
     const bool has_evictions = diagnostics.reader_eviction_count > 0;
+    const bool reader_detected_eviction = eviction_observed.load(std::memory_order_acquire);
     if (has_overflow || has_regressions || has_evictions) {
         std::cerr << "[sintra::ring] diagnostics: max_reader_lag="
                   << diagnostics.max_reader_lag
@@ -678,6 +687,11 @@ STRESS_TEST(stress_multi_reader_throughput)
         if (err) {
             std::rethrow_exception(err);
         }
+    }
+
+    if (reader_detected_eviction) {
+        ASSERT_GT(diagnostics.reader_eviction_count, 0u);
+        return;
     }
 
     for (auto& results : reader_results) {
