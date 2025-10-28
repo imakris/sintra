@@ -56,6 +56,7 @@ function(add_test_suite SUFFIX IS_DEBUG)
         choreography_extreme_test.cpp
         dummy_test.cpp
         extreme_choreography_test.cpp
+        interprocess_file_mapping_test.cpp
         interprocess_mutex_test.cpp
         ipc_rings_tests.cpp
         macos_named_semaphore_benchmark.cpp
