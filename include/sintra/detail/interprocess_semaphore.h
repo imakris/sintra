@@ -403,12 +403,12 @@ private:
 
 #    ifdef OS_CLOCK_MACH_ABSOLUTE_TIME
     static constexpr os_clockid_t wait_clock = OS_CLOCK_MACH_ABSOLUTE_TIME;
-#    elif defined(OS_CLOCK_REALTIME)
-    static constexpr os_clockid_t wait_clock = OS_CLOCK_REALTIME;
-#    elif defined(CLOCK_REALTIME)
-    static constexpr os_clockid_t wait_clock = static_cast<os_clockid_t>(CLOCK_REALTIME);
+#    elif defined(OS_CLOCK_MONOTONIC)
+    static constexpr os_clockid_t wait_clock = OS_CLOCK_MONOTONIC;
+#    elif defined(CLOCK_MONOTONIC)
+    static constexpr os_clockid_t wait_clock = static_cast<os_clockid_t>(CLOCK_MONOTONIC);
 #    else
-#      error "No supported clock id available for os_sync_wait_on_address_with_timeout"
+#      error "No supported monotonic clock id available for os_sync_wait_on_address_with_timeout"
 #    endif
 
     void initialise_os_sync(unsigned int initial_count)
