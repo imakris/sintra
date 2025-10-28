@@ -140,6 +140,10 @@ Processing fences are safe to call from any thread, including handlers themselve
 Because everything ships as headers, Sintra works well in monorepos or projects that
 prefer vendoring dependencies as git submodules or fetching them during configuration.
 
+## Platform requirements
+
+* **macOS** – Sintra always uses `os_sync_wait_on_address` for its interprocess semaphore implementation. The build fails if `<os/os_sync_wait_on_address.h>` or `<os/clock.h>` is missing, so ensure the runner has macOS 13 or newer with the Xcode 15 (or newer) Command Line Tools installed. No legacy semaphore fallback is provided or supported.
+
 ## Tests and continuous integration
 
 The library ships with a small suite of integration tests that exercise the
