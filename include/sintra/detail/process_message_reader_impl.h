@@ -447,6 +447,10 @@ Process_message_reader::Delivery_target Process_message_reader::prepare_delivery
 
     target.progress = progress;
 
+    if (stream == Delivery_stream::Reply && s_tl_current_reply_reader == this) {
+        return target;
+    }
+
     if (stream == Delivery_stream::Request && s_tl_current_request_reader == this) {
         return target;
     }
@@ -460,6 +464,8 @@ Process_message_reader::Delivery_target Process_message_reader::prepare_delivery
     const auto observed = (stream == Delivery_stream::Request)
         ? strong_progress->request_sequence.load(std::memory_order_acquire)
         : strong_progress->reply_sequence.load(std::memory_order_acquire);
+
+    target.observed = observed;
 
     if (observed >= target_sequence) {
         return target;
@@ -475,6 +481,8 @@ inline
 void Process_message_reader::reply_reader_function()
 {
     install_signal_handler();
+
+    s_tl_current_reply_reader = this;
 
     s_mproc->m_num_active_readers_mutex.lock();
     s_mproc->m_num_active_readers++;
@@ -641,6 +649,8 @@ void Process_message_reader::reply_reader_function()
     if (s_mproc) {
         s_mproc->notify_delivery_progress();
     }
+
+    s_tl_current_reply_reader = nullptr;
 }
 
 
