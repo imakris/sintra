@@ -4,6 +4,8 @@
 #include <vector>
 #include <atomic>
 #include <cstring>
+#include <cstdint>
+#include <stdexcept>
 
 #ifdef __APPLE__
 #include <cerrno>
