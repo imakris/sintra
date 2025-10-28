@@ -9,6 +9,7 @@
 #include <functional>
 #include <future>
 #include <iostream>
+#include <limits>
 #include <mutex>
 #include <numeric>
 #include <optional>
@@ -641,15 +642,33 @@ STRESS_TEST(stress_multi_reader_throughput)
     }
 
     auto diagnostics = writer.get_diagnostics();
-    if (diagnostics.reader_lag_overflow_count > 0 ||
-        diagnostics.reader_sequence_regressions > 0)
-    {
+    const bool has_overflow = diagnostics.reader_lag_overflow_count > 0;
+    const bool has_regressions = diagnostics.reader_sequence_regressions > 0;
+    const bool has_evictions = diagnostics.reader_eviction_count > 0;
+    if (has_overflow || has_regressions || has_evictions) {
         std::cerr << "[sintra::ring] diagnostics: max_reader_lag="
                   << diagnostics.max_reader_lag
                   << ", overflow_count=" << diagnostics.reader_lag_overflow_count
                   << ", worst_overflow_lag=" << diagnostics.worst_overflow_lag
                   << ", sequence_regressions=" << diagnostics.reader_sequence_regressions
+                  << ", eviction_count=" << diagnostics.reader_eviction_count
                   << std::endl;
+
+        if (diagnostics.last_evicted_reader_index != std::numeric_limits<uint32_t>::max()) {
+            std::cerr << "    last_evicted_reader_index=" << diagnostics.last_evicted_reader_index
+                      << ", reader_sequence=" << diagnostics.last_evicted_reader_sequence
+                      << ", writer_sequence=" << diagnostics.last_evicted_writer_sequence
+                      << ", reader_octile=" << diagnostics.last_evicted_reader_octile
+                      << std::endl;
+        }
+
+        if (diagnostics.last_overflow_reader_index != std::numeric_limits<uint32_t>::max()) {
+            std::cerr << "    last_overflow_reader_index=" << diagnostics.last_overflow_reader_index
+                      << ", reader_sequence=" << diagnostics.last_overflow_reader_sequence
+                      << ", leading_sequence=" << diagnostics.last_overflow_leading_sequence
+                      << ", last_consumed=" << diagnostics.last_overflow_last_consumed
+                      << std::endl;
+        }
     }
 
     if (writer_error) {

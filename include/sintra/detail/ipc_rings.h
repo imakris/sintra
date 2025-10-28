@@ -170,6 +170,15 @@ struct Ring_diagnostics
     sequence_counter_type worst_overflow_lag         = 0;
     uint64_t              reader_lag_overflow_count  = 0;
     uint64_t              reader_sequence_regressions = 0;
+    uint64_t              reader_eviction_count      = 0;
+    uint32_t              last_evicted_reader_index  = std::numeric_limits<uint32_t>::max();
+    sequence_counter_type last_evicted_reader_sequence = 0;
+    sequence_counter_type last_evicted_writer_sequence = 0;
+    uint32_t              last_evicted_reader_octile = std::numeric_limits<uint32_t>::max();
+    uint32_t              last_overflow_reader_index = std::numeric_limits<uint32_t>::max();
+    sequence_counter_type last_overflow_reader_sequence = 0;
+    sequence_counter_type last_overflow_leading_sequence = 0;
+    sequence_counter_type last_overflow_last_consumed = 0;
 };
 constexpr auto invalid_sequence = ~sequence_counter_type(0);
 
@@ -822,6 +831,15 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         std::atomic<sequence_counter_type>   worst_overflow_lag{0};
         std::atomic<uint64_t>                reader_lag_overflow_count{0};
         std::atomic<uint64_t>                reader_sequence_regressions{0};
+        std::atomic<uint64_t>                reader_eviction_count{0};
+        std::atomic<uint32_t>                last_evicted_reader_index{std::numeric_limits<uint32_t>::max()};
+        std::atomic<sequence_counter_type>   last_evicted_reader_sequence{0};
+        std::atomic<sequence_counter_type>   last_evicted_writer_sequence{0};
+        std::atomic<uint32_t>                last_evicted_reader_octile{std::numeric_limits<uint32_t>::max()};
+        std::atomic<uint32_t>                last_overflow_reader_index{std::numeric_limits<uint32_t>::max()};
+        std::atomic<sequence_counter_type>   last_overflow_reader_sequence{0};
+        std::atomic<sequence_counter_type>   last_overflow_leading_sequence{0};
+        std::atomic<sequence_counter_type>   last_overflow_last_consumed{0};
 
         // Per-reader currently visible (snapshot) sequence. Cache-line sized to minimize
         // false sharing between reader slots. A reader sets its slot to the snapshot head
@@ -1129,6 +1147,15 @@ public:
         diag.worst_overflow_lag = m_control->worst_overflow_lag.load(std::memory_order_acquire);
         diag.reader_lag_overflow_count = m_control->reader_lag_overflow_count.load(std::memory_order_acquire);
         diag.reader_sequence_regressions = m_control->reader_sequence_regressions.load(std::memory_order_acquire);
+        diag.reader_eviction_count = m_control->reader_eviction_count.load(std::memory_order_acquire);
+        diag.last_evicted_reader_index = m_control->last_evicted_reader_index.load(std::memory_order_acquire);
+        diag.last_evicted_reader_sequence = m_control->last_evicted_reader_sequence.load(std::memory_order_acquire);
+        diag.last_evicted_writer_sequence = m_control->last_evicted_writer_sequence.load(std::memory_order_acquire);
+        diag.last_evicted_reader_octile = m_control->last_evicted_reader_octile.load(std::memory_order_acquire);
+        diag.last_overflow_reader_index = m_control->last_overflow_reader_index.load(std::memory_order_acquire);
+        diag.last_overflow_reader_sequence = m_control->last_overflow_reader_sequence.load(std::memory_order_acquire);
+        diag.last_overflow_leading_sequence = m_control->last_overflow_leading_sequence.load(std::memory_order_acquire);
+        diag.last_overflow_last_consumed = m_control->last_overflow_last_consumed.load(std::memory_order_acquire);
         return diag;
     }
 };
@@ -1397,6 +1424,7 @@ struct Ring_R : Ring<T, true>
 
             auto start_sequence = m_reading_sequence->load(std::memory_order_acquire);
             auto leading_sequence = c.leading_sequence.load(std::memory_order_acquire);
+            const auto last_consumed_before = m_last_consumed_sequence;
 
             auto update_max_relaxed = [](auto& target, sequence_counter_type value) {
                 auto current = target.load(std::memory_order_relaxed);
@@ -1421,6 +1449,10 @@ struct Ring_R : Ring<T, true>
             if (clamped_lag > sequence_counter_type(this->m_num_elements)) {
                 c.reader_lag_overflow_count.fetch_add(1, std::memory_order_relaxed);
                 update_max_relaxed(c.worst_overflow_lag, full_lag);
+                c.last_overflow_reader_index.store(static_cast<uint32_t>(m_rs_index), std::memory_order_relaxed);
+                c.last_overflow_reader_sequence.store(start_sequence, std::memory_order_relaxed);
+                c.last_overflow_leading_sequence.store(leading_sequence, std::memory_order_relaxed);
+                c.last_overflow_last_consumed.store(last_consumed_before, std::memory_order_relaxed);
                 clamped_lag = sequence_counter_type(this->m_num_elements);
             }
 
@@ -2004,6 +2036,11 @@ private:
                                     size_t evicted_reader_octile =
                                         c.reading_sequences[i].data.trailing_octile.load(std::memory_order_acquire);
                                     c.read_access.fetch_sub(uint64_t(1) << (8 * evicted_reader_octile), std::memory_order_acq_rel);
+                                    c.reader_eviction_count.fetch_add(1, std::memory_order_relaxed);
+                                    c.last_evicted_reader_index.store(static_cast<uint32_t>(i), std::memory_order_relaxed);
+                                    c.last_evicted_reader_sequence.store(reader_seq, std::memory_order_relaxed);
+                                    c.last_evicted_writer_sequence.store(m_pending_new_sequence, std::memory_order_relaxed);
+                                    c.last_evicted_reader_octile.store(static_cast<uint32_t>(evicted_reader_octile), std::memory_order_relaxed);
                                 }
                             }
                         }
