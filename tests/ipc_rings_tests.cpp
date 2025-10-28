@@ -640,6 +640,18 @@ STRESS_TEST(stress_multi_reader_throughput)
         reader_threads[rid].join();
     }
 
+    auto diagnostics = writer.get_diagnostics();
+    if (diagnostics.reader_lag_overflow_count > 0 ||
+        diagnostics.reader_sequence_regressions > 0)
+    {
+        std::cerr << "[sintra::ring] diagnostics: max_reader_lag="
+                  << diagnostics.max_reader_lag
+                  << ", overflow_count=" << diagnostics.reader_lag_overflow_count
+                  << ", worst_overflow_lag=" << diagnostics.worst_overflow_lag
+                  << ", sequence_regressions=" << diagnostics.reader_sequence_regressions
+                  << std::endl;
+    }
+
     if (writer_error) {
         std::rethrow_exception(writer_error);
     }

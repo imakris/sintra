@@ -163,6 +163,14 @@ namespace fs  = std::filesystem;
 namespace ipc = boost::interprocess;
 
 using sequence_counter_type = uint64_t;
+
+struct Ring_diagnostics
+{
+    sequence_counter_type max_reader_lag             = 0;
+    sequence_counter_type worst_overflow_lag         = 0;
+    uint64_t              reader_lag_overflow_count  = 0;
+    uint64_t              reader_sequence_regressions = 0;
+};
 constexpr auto invalid_sequence = ~sequence_counter_type(0);
 
 #ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
@@ -809,6 +817,12 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         // Should equal the sum of the eight bytes in read_access. Not used for correctness.
         std::atomic<uint32_t>                num_readers{0};
 
+        // Diagnostic counters (best-effort, relaxed atomics).
+        std::atomic<sequence_counter_type>   max_reader_lag{0};
+        std::atomic<sequence_counter_type>   worst_overflow_lag{0};
+        std::atomic<uint64_t>                reader_lag_overflow_count{0};
+        std::atomic<uint64_t>                reader_sequence_regressions{0};
+
         // Per-reader currently visible (snapshot) sequence. Cache-line sized to minimize
         // false sharing between reader slots. A reader sets its slot to the snapshot head
         // and advances it as it consumes ranges.
@@ -1102,6 +1116,21 @@ private:
     std::string          m_control_filename;
 protected:
     Control*             m_control        = nullptr;
+
+public:
+    Ring_diagnostics get_diagnostics() const noexcept
+    {
+        Ring_diagnostics diag;
+        if (!m_control) {
+            return diag;
+        }
+
+        diag.max_reader_lag = m_control->max_reader_lag.load(std::memory_order_acquire);
+        diag.worst_overflow_lag = m_control->worst_overflow_lag.load(std::memory_order_acquire);
+        diag.reader_lag_overflow_count = m_control->reader_lag_overflow_count.load(std::memory_order_acquire);
+        diag.reader_sequence_regressions = m_control->reader_sequence_regressions.load(std::memory_order_acquire);
+        return diag;
+    }
 };
 
   //\       //\       //\       //\       //\       //\       //\       //
@@ -1283,6 +1312,7 @@ struct Ring_R : Ring<T, true>
 
                 m_trailing_octile = trailing_octile;
                 m_reading_sequence->store(confirmed_leading_sequence);
+                m_last_consumed_sequence = confirmed_leading_sequence;
                 break;
             }
 
@@ -1365,22 +1395,50 @@ struct Ring_R : Ring<T, true>
                 reattach_after_eviction();
             }
 
-            auto num_range_elements =
-                size_t(c.leading_sequence.load(std::memory_order_acquire) - m_reading_sequence->load());
+            auto start_sequence = m_reading_sequence->load(std::memory_order_acquire);
+            auto leading_sequence = c.leading_sequence.load(std::memory_order_acquire);
 
-            if (num_range_elements > this->m_num_elements) {
-                num_range_elements = this->m_num_elements;
-            }
+            auto update_max_relaxed = [](auto& target, sequence_counter_type value) {
+                auto current = target.load(std::memory_order_relaxed);
+                while (value > current &&
+                       !target.compare_exchange_weak(current, value, std::memory_order_relaxed)) {
+                }
+            };
 
             Range<T> ret;
+
+            sequence_counter_type full_lag = 0;
+            if (leading_sequence >= start_sequence) {
+                full_lag = leading_sequence - start_sequence;
+            }
+            else {
+                c.reader_sequence_regressions.fetch_add(1, std::memory_order_relaxed);
+            }
+
+            update_max_relaxed(c.max_reader_lag, full_lag);
+
+            sequence_counter_type clamped_lag = full_lag;
+            if (clamped_lag > sequence_counter_type(this->m_num_elements)) {
+                c.reader_lag_overflow_count.fetch_add(1, std::memory_order_relaxed);
+                update_max_relaxed(c.worst_overflow_lag, full_lag);
+                clamped_lag = sequence_counter_type(this->m_num_elements);
+            }
+
+            if (start_sequence < m_last_consumed_sequence) {
+                c.reader_sequence_regressions.fetch_add(1, std::memory_order_relaxed);
+            }
+
+            size_t num_range_elements = static_cast<size_t>(clamped_lag);
+
             if (num_range_elements == 0) {
                 // Could happen if we were explicitly unblocked
                 return ret;
             }
 
-            ret.begin = this->m_data + mod_u64(m_reading_sequence->load(), this->m_num_elements);
+            ret.begin = this->m_data + mod_u64(start_sequence, this->m_num_elements);
             ret.end   = ret.begin + num_range_elements;
             m_reading_sequence->fetch_add(num_range_elements);  // +=
+            m_last_consumed_sequence = start_sequence + sequence_counter_type(num_range_elements);
             return ret;
         };
 
@@ -1569,6 +1627,7 @@ private:
     std::atomic<sequence_counter_type>* m_reading_sequence      = &s_zero_rs;
     size_t                              m_trailing_octile       = 0;
     uint64_t                            m_seen_unblock_sequence = 0;
+    sequence_counter_type               m_last_consumed_sequence = 0;
 
 protected:
     std::atomic<bool>                   m_reading               = false;
