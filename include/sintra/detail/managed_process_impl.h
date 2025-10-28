@@ -1664,15 +1664,19 @@ void Managed_process::wait_for_delivery_fence()
             return true;
         };
 
+        bool waited_for_progress = false;
+
         if (!all_targets_satisfied()) {
             std::unique_lock<std::mutex> lk(m_delivery_mutex);
 
             if (!tl_is_req_thread) {
+                waited_for_progress = true;
                 m_delivery_condition.wait(lk, all_targets_satisfied);
             }
             else {
                 while (!all_targets_satisfied()) {
                     if (tl_post_handler_function) {
+                        waited_for_progress = true;
                         auto post_handler = std::move(tl_post_handler_function);
                         tl_post_handler_function = {};
 
@@ -1693,56 +1697,19 @@ void Managed_process::wait_for_delivery_fence()
                     // targets on each iteration rather than relying on the condition's
                     // predicate form. This keeps the post-handler draining path symmetric
                     // with the non-request thread case.
+                    waited_for_progress = true;
                     m_delivery_condition.wait(lk);
                 }
             }
         }
 
-        bool pending_work_detected = false;
-
-        {
-            std::shared_lock<std::shared_mutex> readers_lock(m_readers_mutex);
-
-            for (auto& [process_id, reader_ptr] : m_readers) {
-                (void)process_id;
-                if (!reader_ptr) {
-                    continue;
-                }
-
-                auto& reader = *reader_ptr;
-                if (reader.state() != Process_message_reader::READER_NORMAL) {
-                    continue;
-                }
-
-                const auto req_leading = reader.get_request_leading_sequence();
-                const auto req_reading = reader.get_request_reading_sequence();
-                if (req_leading != invalid_sequence &&
-                    req_reading != invalid_sequence &&
-                    req_reading < req_leading)
-                {
-                    pending_work_detected = true;
-                    break;
-                }
-
-                const auto rep_leading = reader.get_reply_leading_sequence();
-                const auto rep_reading = reader.get_reply_reading_sequence();
-                if (rep_leading != invalid_sequence &&
-                    rep_reading != invalid_sequence &&
-                    rep_reading < rep_leading)
-                {
-                    pending_work_detected = true;
-                    break;
-                }
-            }
-        }
-
-        if (!pending_work_detected) {
+        if (!waited_for_progress) {
             return;
         }
 
-        // Loop again to drain any work that arrived while waiting for the
-        // previous snapshot of targets. This captures messages spawned by
-        // handlers that were already in flight when the barrier was entered.
+        // Loop again to drain any work that arrived while waiting for the previous
+        // snapshot of targets. This captures messages spawned by handlers that were
+        // already in flight when the barrier was entered.
     }
 }
 
