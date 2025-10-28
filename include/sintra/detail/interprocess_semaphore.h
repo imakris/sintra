@@ -401,14 +401,14 @@ private:
     static constexpr os_sync_wait_on_address_flags_t wait_flags = OS_SYNC_WAIT_ON_ADDRESS_SHARED;
     static constexpr os_sync_wake_by_address_flags_t wake_flags = OS_SYNC_WAKE_BY_ADDRESS_SHARED;
 
-#    ifdef OS_CLOCK_REALTIME
-    static constexpr os_clockid_t wait_clock = OS_CLOCK_REALTIME;
-#    elif defined(CLOCK_REALTIME)
-    static constexpr os_clockid_t wait_clock = static_cast<os_clockid_t>(CLOCK_REALTIME);
-#    elif defined(OS_CLOCK_MACH_ABSOLUTE_TIME)
+#    ifdef OS_CLOCK_MACH_ABSOLUTE_TIME
     static constexpr os_clockid_t wait_clock = OS_CLOCK_MACH_ABSOLUTE_TIME;
+#    elif defined(OS_CLOCK_MONOTONIC)
+    static constexpr os_clockid_t wait_clock = OS_CLOCK_MONOTONIC;
+#    elif defined(CLOCK_MONOTONIC)
+    static constexpr os_clockid_t wait_clock = static_cast<os_clockid_t>(CLOCK_MONOTONIC);
 #    else
-#      error "No supported clock id available for os_sync_wait_on_address_with_timeout"
+#      error "No supported monotonic clock id available for os_sync_wait_on_address_with_timeout"
 #    endif
 
     void initialise_os_sync(unsigned int initial_count)
@@ -473,9 +473,10 @@ private:
         uint64_t timeout_ns = static_cast<uint64_t>(count);
 
         while (true) {
+            uint64_t expected_value = static_cast<uint32_t>(expected);
             int rc = os_sync_wait_on_address_with_timeout(
                 reinterpret_cast<void*>(&m_os_sync.count),
-                expected,
+                expected_value,
                 sizeof(int32_t),
                 wait_flags,
                 wait_clock,
@@ -503,9 +504,10 @@ private:
     int32_t wait_on_address_blocking(int32_t expected)
     {
         while (true) {
+            uint64_t expected_value = static_cast<uint32_t>(expected);
             int rc = os_sync_wait_on_address(
                 reinterpret_cast<void*>(&m_os_sync.count),
-                expected,
+                expected_value,
                 sizeof(int32_t),
                 wait_flags);
             if (rc >= 0) {
