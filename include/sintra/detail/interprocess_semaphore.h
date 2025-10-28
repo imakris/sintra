@@ -1,5 +1,42 @@
 #pragma once
 
+// ═══════════════════════════════════════════════════════════════════════════
+// PLATFORM SYNCHRONIZATION REQUIREMENTS
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file implements cross-process semaphore synchronization primitives.
+//
+// macOS POLICY:
+// ─────────────
+// ⚠️  os_sync_wait_on_address is REQUIRED. NO fallback will be maintained.
+//
+// Historical Context:
+//   - Multiple attempts were made to provide fallback implementations for
+//     older macOS versions (e.g., using POSIX named semaphores).
+//   - These fallbacks added significant complexity and maintenance burden.
+//   - CI/CD configuration difficulties and inconsistent availability made
+//     the fallback approach impractical.
+//
+// Current Policy:
+//   - macOS builds REQUIRE <os/os_sync_wait_on_address.h> and <os/clock.h>
+//   - Minimum supported macOS version: 10.16+ / Big Sur 11.0+
+//   - If these headers are unavailable, the build will fail with a clear
+//     error message directing users to upgrade their system.
+//   - No runtime symbol detection or conditional fallback logic is provided.
+//
+// Rationale:
+//   - Simplicity: Eliminates conditional compilation paths and runtime checks
+//   - Maintainability: No need to maintain legacy fallback code paths
+//   - Performance: Uses the fastest available synchronization primitive
+//   - Clear Requirements: Users know exactly what is needed
+//
+// If you encounter build failures related to os_sync on macOS, your options:
+//   1. Upgrade to macOS 10.16+ / Big Sur 11.0+ (recommended)
+//   2. Use a different platform (Linux, FreeBSD, Windows)
+//   3. Fork and maintain your own fallback implementation (not supported)
+//
+// ═══════════════════════════════════════════════════════════════════════════
+
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -24,21 +61,14 @@
 #elif defined(__APPLE__)
   #include <cerrno>
   #include <ctime>
-  #if defined(__has_include)
-    #if __has_include(<os/os_sync_wait_on_address.h>) && __has_include(<os/clock.h>)
-      #include <os/os_sync_wait_on_address.h>
-      #include <os/clock.h>
-      #define SINTRA_HAS_OS_SYNC_WAIT_ON_ADDRESS 1
-    #endif
+  // macOS: os_sync_wait_on_address is REQUIRED. No fallback will be maintained.
+  // If your system does not support os_sync headers, you must upgrade to macOS 10.16+
+  // or Big Sur 11.0+ where os_sync_wait_on_address is available.
+  #if !__has_include(<os/os_sync_wait_on_address.h>) || !__has_include(<os/clock.h>)
+    #error "macOS build requires <os/os_sync_wait_on_address.h> and <os/clock.h>. Please upgrade to macOS 10.16+ / Big Sur 11.0+"
   #endif
-  #if !defined(SINTRA_HAS_OS_SYNC_WAIT_ON_ADDRESS)
-    #define SINTRA_HAS_OS_SYNC_WAIT_ON_ADDRESS 0
-    #include <fcntl.h>
-    #include <semaphore.h>
-    #include <mutex>
-    #include <unordered_map>
-    #include <cstdio>
-  #endif
+  #include <os/os_sync_wait_on_address.h>
+  #include <os/clock.h>
 #else
   #include <cerrno>
   #include <semaphore.h>
@@ -160,61 +190,6 @@ namespace interprocess_semaphore_detail
             ::CloseHandle(handle);
         }
     }
-#elif defined(__APPLE__) && !SINTRA_HAS_OS_SYNC_WAIT_ON_ADDRESS
-    inline std::mutex& handle_mutex()
-    {
-        static std::mutex mtx;
-        return mtx;
-    }
-
-    inline std::unordered_map<uint64_t, sem_t*>& handle_map()
-    {
-        static std::unordered_map<uint64_t, sem_t*> map;
-        return map;
-    }
-
-    inline sem_t* register_handle(uint64_t id, sem_t* handle)
-    {
-        std::lock_guard<std::mutex> lock(handle_mutex());
-        handle_map()[id] = handle;
-        return handle;
-    }
-
-    inline sem_t* ensure_handle(uint64_t id, const char* name)
-    {
-        {
-            std::lock_guard<std::mutex> lock(handle_mutex());
-            auto it = handle_map().find(id);
-            if (it != handle_map().end()) {
-                return it->second;
-            }
-        }
-
-        sem_t* sem = sem_open(name, 0);
-        if (sem == SEM_FAILED) {
-            throw std::system_error(errno, std::generic_category(), "sem_open");
-        }
-
-        std::lock_guard<std::mutex> lock(handle_mutex());
-        return handle_map().emplace(id, sem).first->second;
-    }
-
-    inline void close_handle(uint64_t id)
-    {
-        sem_t* sem = nullptr;
-        {
-            std::lock_guard<std::mutex> lock(handle_mutex());
-            auto it = handle_map().find(id);
-            if (it != handle_map().end()) {
-                sem = it->second;
-                handle_map().erase(it);
-            }
-        }
-
-        if (sem) {
-            while (sem_close(sem) == -1 && errno == EINTR) {}
-        }
-    }
 #endif
 }
 
@@ -225,10 +200,8 @@ public:
     {
 #if defined(_WIN32)
         initialise_windows(initial_count);
-#elif defined(__APPLE__) && SINTRA_HAS_OS_SYNC_WAIT_ON_ADDRESS
-        initialise_os_sync(initial_count);
 #elif defined(__APPLE__)
-        initialise_named(initial_count);
+        initialise_os_sync(initial_count);
 #else
         initialise_posix(initial_count);
 #endif
@@ -241,10 +214,8 @@ public:
     {
 #if defined(_WIN32)
         teardown_windows();
-#elif defined(__APPLE__) && SINTRA_HAS_OS_SYNC_WAIT_ON_ADDRESS
-        teardown_os_sync();
 #elif defined(__APPLE__)
-        teardown_named();
+        teardown_os_sync();
 #else
         teardown_posix();
 #endif
@@ -254,10 +225,8 @@ public:
     {
 #if defined(_WIN32)
         interprocess_semaphore_detail::close_handle(m_windows.id);
-#elif defined(__APPLE__) && SINTRA_HAS_OS_SYNC_WAIT_ON_ADDRESS
-        // Nothing to do for the os_sync based implementation.
 #elif defined(__APPLE__)
-        interprocess_semaphore_detail::close_handle(m_named.id);
+        // Nothing to do for the os_sync based implementation.
 #else
         // Nothing to do for POSIX unnamed semaphores.
 #endif
@@ -270,16 +239,8 @@ public:
         if (!::ReleaseSemaphore(handle, 1, nullptr)) {
             throw std::system_error(::GetLastError(), std::system_category(), "ReleaseSemaphore");
         }
-#elif defined(__APPLE__) && SINTRA_HAS_OS_SYNC_WAIT_ON_ADDRESS
-        post_os_sync();
 #elif defined(__APPLE__)
-        sem_t* sem = named_handle();
-        while (sem_post(sem) == -1) {
-            if (errno == EINTR) {
-                continue;
-            }
-            throw std::system_error(errno, std::generic_category(), "sem_post");
-        }
+        post_os_sync();
 #else
         while (sem_post(&m_sem) == -1) {
             if (errno == EINTR) {
@@ -298,16 +259,8 @@ public:
         if (result != WAIT_OBJECT_0) {
             throw std::system_error(::GetLastError(), std::system_category(), "WaitForSingleObject");
         }
-#elif defined(__APPLE__) && SINTRA_HAS_OS_SYNC_WAIT_ON_ADDRESS
-        wait_os_sync();
 #elif defined(__APPLE__)
-        sem_t* sem = named_handle();
-        while (sem_wait(sem) == -1) {
-            if (errno == EINTR) {
-                continue;
-            }
-            throw std::system_error(errno, std::generic_category(), "sem_wait");
-        }
+        wait_os_sync();
 #else
         while (sem_wait(&m_sem) == -1) {
             if (errno == EINTR) {
@@ -330,20 +283,8 @@ public:
             return false;
         }
         throw std::system_error(::GetLastError(), std::system_category(), "WaitForSingleObject");
-#elif defined(__APPLE__) && SINTRA_HAS_OS_SYNC_WAIT_ON_ADDRESS
-        return try_acquire_os_sync();
 #elif defined(__APPLE__)
-        sem_t* sem = named_handle();
-        while (sem_trywait(sem) == -1) {
-            if (errno == EINTR) {
-                continue;
-            }
-            if (errno == EAGAIN) {
-                return false;
-            }
-            throw std::system_error(errno, std::generic_category(), "sem_trywait");
-        }
-        return true;
+        return try_acquire_os_sync();
 #else
         while (sem_trywait(&m_sem) == -1) {
             if (errno == EINTR) {
@@ -387,7 +328,7 @@ public:
             return false;
         }
         throw std::system_error(::GetLastError(), std::system_category(), "WaitForSingleObject");
-#elif defined(__APPLE__) && SINTRA_HAS_OS_SYNC_WAIT_ON_ADDRESS
+#elif defined(__APPLE__)
         int32_t previous = m_os_sync.count.fetch_sub(1, std::memory_order_acq_rel);
         if (previous > 0) {
             return true;
@@ -483,7 +424,7 @@ private:
     {
         interprocess_semaphore_detail::close_handle(m_windows.id);
     }
-#elif defined(__APPLE__) && SINTRA_HAS_OS_SYNC_WAIT_ON_ADDRESS
+#elif defined(__APPLE__)
     struct os_sync_storage
     {
         std::atomic<int32_t> count{0};
@@ -632,44 +573,6 @@ private:
             throw std::system_error(errno, std::generic_category(), "os_sync_wake_by_address_any");
         }
     }
-#elif defined(__APPLE__)
-    struct named_storage
-    {
-        uint64_t id = 0;
-        char     name[32]{};
-    };
-
-    named_storage m_named;
-
-    void initialise_named(unsigned int initial_count)
-    {
-        m_named.id = interprocess_semaphore_detail::generate_global_identifier();
-        std::snprintf(m_named.name,
-                      sizeof(m_named.name) / sizeof(m_named.name[0]),
-                      "/sintra_sem_%016llx",
-                      static_cast<unsigned long long>(m_named.id));
-
-        sem_unlink(m_named.name);
-        sem_t* sem = sem_open(m_named.name, O_CREAT | O_EXCL, 0600, initial_count);
-        if (sem == SEM_FAILED) {
-            throw std::system_error(errno, std::generic_category(), "sem_open");
-        }
-
-        interprocess_semaphore_detail::register_handle(m_named.id, sem);
-    }
-
-    sem_t* named_handle() const
-    {
-        return interprocess_semaphore_detail::ensure_handle(m_named.id, m_named.name);
-    }
-
-    void teardown_named() noexcept
-    {
-        interprocess_semaphore_detail::close_handle(m_named.id);
-        if (m_named.name[0] != '\0') {
-            sem_unlink(m_named.name);
-        }
-    }
 #else
     sem_t m_sem{};
 
@@ -688,7 +591,3 @@ private:
 }; 
 
 } // namespace sintra::detail
-
-#if defined(__APPLE__) && defined(SINTRA_HAS_OS_SYNC_WAIT_ON_ADDRESS)
-#  undef SINTRA_HAS_OS_SYNC_WAIT_ON_ADDRESS
-#endif
