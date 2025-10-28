@@ -117,6 +117,7 @@ struct Process_message_reader
         Delivery_progress_weak_ptr progress;
         Delivery_stream stream = Delivery_stream::Request;
         sequence_counter_type target = invalid_sequence;
+        sequence_counter_type observed = invalid_sequence;
         bool wait_needed = false;
     };
 

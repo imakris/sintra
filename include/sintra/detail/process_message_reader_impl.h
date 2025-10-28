@@ -461,6 +461,8 @@ Process_message_reader::Delivery_target Process_message_reader::prepare_delivery
         ? strong_progress->request_sequence.load(std::memory_order_acquire)
         : strong_progress->reply_sequence.load(std::memory_order_acquire);
 
+    target.observed = observed;
+
     if (observed >= target_sequence) {
         return target;
     }

@@ -1664,19 +1664,46 @@ void Managed_process::wait_for_delivery_fence()
             return true;
         };
 
-        bool waited_for_progress = false;
+        const auto targets_made_progress = [&]() {
+            for (const auto& target : targets) {
+                auto progress = target.progress.lock();
+                if (!progress) {
+                    return true;
+                }
+
+                const auto current = (target.stream == Process_message_reader::Delivery_stream::Request)
+                    ? progress->request_sequence.load(std::memory_order_acquire)
+                    : progress->reply_sequence.load(std::memory_order_acquire);
+
+                if (current > target.observed) {
+                    return true;
+                }
+
+                const auto stopped = (target.stream == Process_message_reader::Delivery_stream::Request)
+                    ? progress->request_stopped.load(std::memory_order_acquire)
+                    : progress->reply_stopped.load(std::memory_order_acquire);
+
+                if (stopped) {
+                    return true;
+                }
+            }
+
+            return false;
+        };
+
+        bool waited_for_targets = false;
 
         if (!all_targets_satisfied()) {
             std::unique_lock<std::mutex> lk(m_delivery_mutex);
 
             if (!tl_is_req_thread) {
-                waited_for_progress = true;
+                waited_for_targets = true;
                 m_delivery_condition.wait(lk, all_targets_satisfied);
             }
             else {
                 while (!all_targets_satisfied()) {
                     if (tl_post_handler_function) {
-                        waited_for_progress = true;
+                        waited_for_targets = true;
                         auto post_handler = std::move(tl_post_handler_function);
                         tl_post_handler_function = {};
 
@@ -1697,13 +1724,17 @@ void Managed_process::wait_for_delivery_fence()
                     // targets on each iteration rather than relying on the condition's
                     // predicate form. This keeps the post-handler draining path symmetric
                     // with the non-request thread case.
-                    waited_for_progress = true;
+                    waited_for_targets = true;
                     m_delivery_condition.wait(lk);
                 }
             }
         }
 
-        if (!waited_for_progress) {
+        if (!waited_for_targets) {
+            return;
+        }
+
+        if (!targets_made_progress()) {
             return;
         }
 
