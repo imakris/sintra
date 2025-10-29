@@ -1350,7 +1350,7 @@ struct Ring_R : Ring<T, true>
     const Range<T> wait_for_new_data()
     {
         auto produce_range = [&]() -> Range<T> {
-            if (handle_eviction_if_needed(/*reset_sequence=*/true)) {
+            if (handle_eviction_if_needed()) {
                 return {};
             }
 
@@ -1537,7 +1537,7 @@ struct Ring_R : Ring<T, true>
 
         const size_t new_trailing_octile = (8 * t_idx) / this->m_num_elements;
 
-        handle_eviction_if_needed(/*reset_sequence=*/true);
+        handle_eviction_if_needed();
 
         if (new_trailing_octile != m_trailing_octile) {
             const uint64_t new_mask = uint64_t(1) << (8 * new_trailing_octile);
@@ -1551,7 +1551,7 @@ struct Ring_R : Ring<T, true>
         }
     }
 
-    bool handle_eviction_if_needed(bool reset_sequence)
+    bool handle_eviction_if_needed()
     {
         auto& slot = c.reading_sequences[m_rs_index].data;
         if (slot.has_guard.load(std::memory_order_acquire) != 0) {
@@ -1560,19 +1560,13 @@ struct Ring_R : Ring<T, true>
 
 #ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
         if (slot.status.load(std::memory_order_acquire) == Ring<T, false>::READER_STATE_EVICTED) {
+            // Reader was evicted by writer for being too slow.
+            // Skip all missed data and jump to writer's current position.
+            // This is the only safe recovery strategy since old data has been overwritten.
             sequence_counter_type new_seq = c.leading_sequence.load(std::memory_order_acquire);
-            if (reset_sequence) {
-                slot.v.store(new_seq, std::memory_order_release);
-                m_reading_sequence->store(new_seq, std::memory_order_release);
-                m_last_consumed_sequence = new_seq;
-            }
-            else {
-                // Even if we do not need to rewind the local sequence, make sure the shared
-                // slot reflects the writer's latest publication so future snapshots start
-                // from a consistent point.
-                slot.v.store(m_reading_sequence->load(std::memory_order_acquire),
-                             std::memory_order_release);
-            }
+            slot.v.store(new_seq, std::memory_order_release);
+            m_reading_sequence->store(new_seq, std::memory_order_release);
+            m_last_consumed_sequence = new_seq;
             reattach_after_eviction();
             m_evicted_since_last_wait.store(true, std::memory_order_release);
             return true;
