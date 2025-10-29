@@ -227,6 +227,12 @@ class TestRunner:
                     f"{Color.YELLOW}Warning: {dump_error}. "
                     f"Crash dumps may be unavailable.{Color.RESET}"
                 )
+            jit_error = self._configure_windows_jit_debugging()
+            if jit_error:
+                print(
+                    f"{Color.YELLOW}Warning: {jit_error}. "
+                    f"JIT prompts may still block crash dumps.{Color.RESET}"
+                )
 
     def find_test_suites(
         self,
@@ -2004,96 +2010,143 @@ class TestRunner:
         if self._windows_crash_dump_dir is not None:
             return None
 
-        local_app_data = os.environ.get('LOCALAPPDATA')
-        if local_app_data:
-            base_dir = Path(local_app_data)
-        else:
-            base_dir = Path.home() / 'AppData' / 'Local'
+        try:
+            import winreg  # type: ignore
+        except ImportError as exc:  # pragma: no cover - Windows specific
+            return f"winreg unavailable: {exc}"
 
-        dump_dir = base_dir / 'sintra' / 'CrashDumps'
+        reg_subkey = r"Software\Microsoft\Windows\Windows Error Reporting\LocalDumps"
+        desired_folder_value = r"%LOCALAPPDATA%\CrashDumps"
+
+        access_flags = winreg.KEY_READ | winreg.KEY_SET_VALUE
+        try:
+            key = winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, reg_subkey, 0, access_flags)
+        except OSError as exc:
+            return f"failed to open registry key HKCU\\{reg_subkey}: {exc}"
+
+        with key:
+            local_app_data = os.environ.get('LOCALAPPDATA')
+            if local_app_data:
+                default_dump_dir = Path(local_app_data) / 'CrashDumps'
+                folder_value_to_set = desired_folder_value
+                folder_value_type = winreg.REG_EXPAND_SZ
+            else:
+                default_dump_dir = Path.home() / 'AppData' / 'Local' / 'CrashDumps'
+                folder_value_to_set = str(default_dump_dir)
+                folder_value_type = winreg.REG_SZ
+
+            existing_folder_value: Optional[str]
+            try:
+                existing_folder_value, existing_type = winreg.QueryValueEx(key, "DumpFolder")
+            except FileNotFoundError:
+                existing_folder_value = None
+
+            dump_dir: Path
+            if existing_folder_value:
+                expanded = os.path.expandvars(existing_folder_value)
+                dump_dir = Path(expanded).expanduser()
+                if not dump_dir.is_absolute():
+                    dump_dir = default_dump_dir
+            else:
+                dump_dir = default_dump_dir
+                try:
+                    winreg.SetValueEx(
+                        key,
+                        "DumpFolder",
+                        0,
+                        folder_value_type,
+                        folder_value_to_set,
+                    )
+                except OSError as exc:
+                    return f"failed to set DumpFolder value: {exc}"
+
+            value_expectations = (
+                ("DumpType", 2, winreg.REG_DWORD),
+                ("DumpCount", 10, winreg.REG_DWORD),
+            )
+            for value_name, expected, reg_type in value_expectations:
+                try:
+                    current_value, _ = winreg.QueryValueEx(key, value_name)
+                except FileNotFoundError:
+                    current_value = None
+                if current_value != expected:
+                    try:
+                        winreg.SetValueEx(key, value_name, 0, reg_type, expected)
+                    except OSError as exc:
+                        return f"failed to set {value_name} value: {exc}"
 
         try:
             dump_dir.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             return f"failed to create crash dump directory {dump_dir}: {exc}"
 
-        reg_key = (
-            r'HKCU\Software\Microsoft\Windows\Windows Error Reporting\LocalDumps'
+        self._windows_crash_dump_dir = dump_dir
+        return None
+
+    def _configure_windows_jit_debugging(self) -> Optional[str]:
+        """Disable intrusive JIT prompts so crash dumps complete automatically."""
+
+        if sys.platform != 'win32':
+            return None
+
+        try:
+            import winreg  # type: ignore
+        except ImportError as exc:  # pragma: no cover - Windows specific
+            return f"winreg unavailable: {exc}"
+
+        errors: List[str] = []
+
+        def set_dword(
+            root: "winreg.HKEYType",
+            subkey: str,
+            value_name: str,
+            value: int,
+            access: int,
+        ) -> None:
+            try:
+                key = winreg.CreateKeyEx(root, subkey, 0, access)
+            except OSError as exc:
+                errors.append(f"failed to open {subkey}: {exc}")
+                return
+
+            try:
+                with key:
+                    winreg.SetValueEx(key, value_name, 0, winreg.REG_DWORD, value)
+            except OSError as exc:
+                errors.append(f"failed to set {subkey}\\{value_name}: {exc}")
+
+        set_dword(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"Software\Microsoft\Windows NT\CurrentVersion\AeDebug",
+            "Auto",
+            1,
+            winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY,
         )
 
-        operations = [
-            (
-                'DumpFolder',
-                [
-                    'reg',
-                    'add',
-                    reg_key,
-                    '/f',
-                    '/v',
-                    'DumpFolder',
-                    '/t',
-                    'REG_EXPAND_SZ',
-                    '/d',
-                    str(dump_dir),
-                ],
-            ),
-            (
-                'DumpType',
-                [
-                    'reg',
-                    'add',
-                    reg_key,
-                    '/f',
-                    '/v',
-                    'DumpType',
-                    '/t',
-                    'REG_DWORD',
-                    '/d',
-                    '2',
-                ],
-            ),
-            (
-                'DumpCount',
-                [
-                    'reg',
-                    'add',
-                    reg_key,
-                    '/f',
-                    '/v',
-                    'DumpCount',
-                    '/t',
-                    'REG_DWORD',
-                    '/d',
-                    '10',
-                ],
-            ),
+        set_dword(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"Software\Microsoft\Windows\Windows Error Reporting",
+            "DontShowUI",
+            1,
+            winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY,
+        )
+
+        jit_subkeys = [
+            (winreg.HKEY_LOCAL_MACHINE, r"Software\Microsoft\.NETFramework"),
+            (winreg.HKEY_LOCAL_MACHINE, r"Software\Wow6432Node\Microsoft\.NETFramework"),
+            (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\.NETFramework"),
         ]
+        for root, subkey in jit_subkeys:
+            access = winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY
+            if root == winreg.HKEY_CURRENT_USER:
+                access = winreg.KEY_SET_VALUE
+            elif "Wow6432Node" in subkey:
+                access = winreg.KEY_SET_VALUE | winreg.KEY_WOW64_32KEY
+            set_dword(root, subkey, "DbgJITDebugLaunchSetting", 2, access)
 
-        for value_name, command in operations:
-            try:
-                result = subprocess.run(
-                    command,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    timeout=15,
-                )
-            except (OSError, subprocess.SubprocessError) as exc:
-                return (
-                    f"failed to configure {value_name} crash dump setting via reg: {exc}"
-                )
+        if errors:
+            return "; ".join(errors)
 
-            if result.returncode != 0:
-                detail = result.stderr.strip() or result.stdout.strip()
-                if detail:
-                    return (
-                        f"reg exited with code {result.returncode} while setting {value_name}: {detail}"
-                    )
-                return (
-                    f"reg exited with code {result.returncode} while setting {value_name}"
-                )
-
-        self._windows_crash_dump_dir = dump_dir
         return None
 
     def _resolve_windows_debugger(self) -> Tuple[Optional[str], Optional[str], str]:
