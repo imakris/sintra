@@ -11,6 +11,8 @@
 #include "sintra/detail/interprocess_file_mapping.h"
 #include "sintra/detail/ipc_platform_utils.h"
 
+#include "test_environment.h"
+
 namespace
 {
 
@@ -40,7 +42,7 @@ void expect_error_code(const std::system_error& error,
 
 std::filesystem::path make_unique_path()
 {
-    auto dir = std::filesystem::temp_directory_path();
+    auto dir = sintra::test::scratch_subdirectory("interprocess_file_mapping");
     std::random_device rd;
     for (int attempt = 0; attempt < 128; ++attempt) {
         auto candidate =
