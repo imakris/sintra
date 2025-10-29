@@ -23,6 +23,7 @@ Options:
 import argparse
 import fnmatch
 import importlib
+import importlib.util
 import json
 import os
 import shlex
