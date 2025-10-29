@@ -1595,38 +1595,32 @@ void Managed_process::wait_for_delivery_fence()
     auto consume_reply_skip = [&](Process_message_reader::Delivery_progress& progress,
                                  sequence_counter_type target_sequence,
                                  sequence_counter_type observed_sequence) {
-        auto it = std::find_if(reply_progress_skips.begin(), reply_progress_skips.end(),
-            [&](const Reply_progress_skip& skip) {
-                return skip.progress == &progress;
-            });
+        for (auto it = reply_progress_skips.begin(); it != reply_progress_skips.end();) {
+            if (it->progress != &progress) {
+                ++it;
+                continue;
+            }
 
-        if (it == reply_progress_skips.end()) {
-            return false;
+            const auto skip_sequence = it->sequence;
+            if (skip_sequence == invalid_sequence) {
+                it = reply_progress_skips.erase(it);
+                continue;
+            }
+
+            if (target_sequence != invalid_sequence && skip_sequence == target_sequence) {
+                reply_progress_skips.erase(it);
+                return true;
+            }
+
+            if (observed_sequence != invalid_sequence && observed_sequence >= skip_sequence) {
+                it = reply_progress_skips.erase(it);
+                continue;
+            }
+
+            ++it;
         }
 
-        const auto skip_observed = it->observed;
-        if (skip_observed == invalid_sequence) {
-            reply_progress_skips.erase(it);
-            return false;
-        }
-
-        if (observed_sequence > skip_observed) {
-            reply_progress_skips.erase(it);
-            return false;
-        }
-
-        if (observed_sequence < skip_observed) {
-            return false;
-        }
-
-        const auto published = progress.reply_sequence.load(std::memory_order_acquire);
-        if (published <= skip_observed) {
-            return false;
-        }
-
-        reply_progress_skips.erase(it);
-
-        return published >= target_sequence;
+        return false;
     };
 
     while (true) {
