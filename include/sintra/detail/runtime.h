@@ -76,9 +76,7 @@ public:
 
     ~Cleanup_guard()
     {
-        std::fprintf(stderr, "Cleanup_guard destructor executing (after main exit)\n");
         m_callback();
-        std::fprintf(stderr, "Cleanup_guard destructor completed successfully\n");
     }
 
 private:

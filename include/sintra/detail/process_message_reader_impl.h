@@ -400,10 +400,6 @@ void Process_message_reader::request_reader_function()
     s_mproc->m_num_active_readers_condition.notify_all();
 
     std::lock_guard<std::mutex> lk(m_stop_mutex);
-    if (m_reader_state.load(std::memory_order_acquire) == READER_STOPPING) {
-        std::fprintf(stderr, "request_reader_function(pid=%llu) exiting normally after stop.\n",
-            static_cast<unsigned long long>(m_process_instance_id));
-    }
     m_req_running.store(false, std::memory_order_release);
     m_ready_condition.notify_all();
     m_stop_condition.notify_one();
