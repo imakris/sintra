@@ -346,6 +346,33 @@ static void s_signal_handler(int sig, siginfo_t* info, void* ctx)
 inline
 void Managed_process::enable_recovery()
 {
+    /*
+     * Recovery overview
+     * -----------------
+     *  • enable_recovery() RPCs the coordinator so the caller's process slot is
+     *    added to Coordinator::m_requested_recovery. When a crash is observed the
+     *    coordinator routes the cached Spawn_swarm_process_args back through
+     *    Coordinator::recover_if_required(), which in turn calls
+     *    Managed_process::spawn_swarm_process().
+     *  • spawn_swarm_process() persists the executable + argument vector in
+     *    m_cached_spawns and bumps the occurrence counter so every respawn uses a
+     *    fresh ``req``/``rep`` ring name (see Message_ring_{R,W}::get_base_filename
+     *    adding the ``_occN`` suffix). Before a replacement child is launched we
+     *    tear down any previous Process_message_reader for that slot (see the
+     *    erase() call just above) so the old occurrence's shared memory is
+     *    unmapped before a fresh reader is created.
+     *  • The coordinator pre-attaches new Process_message_reader instances before
+     *    the child is launched, ensuring the new process sees ready request/reply
+     *    channels the moment it starts. There is no pre-allocation for future
+     *    occurrences; only the rings for the active occurrence stay mapped.
+     *  • Each reader/writer ring is implemented via Ring_data::attach(), which
+     *    reserves a 2× span and double maps the 2 MiB data file so wrap-around is
+     *    linear for zero-copy reads. Those double-mapped spans are what appear as
+     *    "guard"/reserved regions inside Mach-O cores—the mapping design is
+     *    required for the ring abstraction rather than recovery itself, but the
+     *    recovery harness crashes the process often enough that the platform
+     *    keeps dumping them.
+     */
     // Mark this process as recoverable in the coordinator
     // so that abnormal termination triggers a respawn.
     Coordinator::rpc_enable_recovery(s_coord_id, process_of(m_instance_id));
