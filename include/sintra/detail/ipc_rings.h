@@ -186,87 +186,6 @@ struct Ring_diagnostics
 };
 constexpr auto invalid_sequence = ~sequence_counter_type(0);
 
-#ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
-namespace ring_detail {
-
-inline uint64_t calibrate_spin_loops_per_microsecond()
-{
-    static std::atomic<uint64_t> cached{0};
-    uint64_t loops = cached.load(std::memory_order_acquire);
-    if (loops != 0) {
-        return loops;
-    }
-
-    constexpr uint64_t initial_iterations = 1u << 20;
-    constexpr uint64_t max_iterations     = 1u << 28;
-
-    volatile uint64_t sink = 0;
-    uint64_t iterations     = initial_iterations;
-    uint64_t computed       = 1;
-
-    while (true) {
-        sink = 0;
-        double start = get_wtime();
-        for (uint64_t i = 0; i < iterations; ++i) {
-            sink += i;
-        }
-        double elapsed = get_wtime() - start;
-        (void)sink;
-
-        if (elapsed > 0.0) {
-            double loops_per_us = static_cast<double>(iterations) / (elapsed * 1e6);
-            computed = (loops_per_us >= 1.0) ? static_cast<uint64_t>(loops_per_us) : 1;
-            break;
-        }
-
-        if (iterations >= max_iterations) {
-            computed = 1;
-            break;
-        }
-
-        iterations <<= 1;
-    }
-
-    uint64_t expected = 0;
-    if (cached.compare_exchange_strong(expected, computed, std::memory_order_release, std::memory_order_relaxed)) {
-        return computed;
-    }
-
-    return cached.load(std::memory_order_acquire);
-}
-
-inline uint64_t get_eviction_spin_loop_budget()
-{
-#if defined(SINTRA_EVICTION_SPIN_THRESHOLD) && SINTRA_EVICTION_SPIN_THRESHOLD > 0
-    // Backwards compatibility: allow callers to supply a raw iteration budget.
-    return SINTRA_EVICTION_SPIN_THRESHOLD;
-#else
-    static std::atomic<uint64_t> cached{0};
-    uint64_t loops = cached.load(std::memory_order_acquire);
-    if (loops != 0) {
-        return loops;
-    }
-
-    const uint64_t loops_per_us = calibrate_spin_loops_per_microsecond();
-    uint64_t computed = loops_per_us * static_cast<uint64_t>(SINTRA_EVICTION_SPIN_BUDGET_US);
-    if (computed == 0) {
-        computed = loops_per_us != 0 ? loops_per_us : 1;
-    }
-
-    uint64_t expected = 0;
-    if (cached.compare_exchange_strong(expected, computed, std::memory_order_release, std::memory_order_relaxed)) {
-        return computed;
-    }
-
-    return cached.load(std::memory_order_acquire);
-#endif
-}
-
-} // namespace ring_detail
-#endif // SINTRA_ENABLE_SLOW_READER_EVICTION
-
-
-
 //==============================================================================
 // Suggested ring configurations helper
 //==============================================================================
@@ -2022,8 +1941,63 @@ private:
 #endif
             auto range_mask = (uint64_t(0xff) << (8 * new_octile));
 #ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
+            auto run_eviction_pass = [&]() {
+                sequence_counter_type eviction_threshold =
+                    (m_pending_new_sequence >
+                     sequence_counter_type(SINTRA_EVICTION_LAG_RINGS) * this->m_num_elements)
+                        ? (m_pending_new_sequence - sequence_counter_type(SINTRA_EVICTION_LAG_RINGS) *
+                                                       this->m_num_elements)
+                        : 0;
+
+                for (int i = 0; i < max_process_index; ++i) {
+                    // Check if this reader slot is active
+                    if (c.reading_sequences[i].data.status.load(std::memory_order_acquire)
+                        == Ring<T, false>::READER_STATE_ACTIVE)
+                    {
+                        sequence_counter_type reader_seq =
+                            c.reading_sequences[i].data.v.load(std::memory_order_acquire);
+                        uint8_t guard_flag =
+                            c.reading_sequences[i].data.has_guard.load(std::memory_order_acquire);
+                        uint8_t reader_octile =
+                            c.reading_sequences[i].data.trailing_octile.load(std::memory_order_acquire);
+
+                        bool blocking_current_octile =
+                            (guard_flag != 0) && (reader_octile == new_octile);
+
+                        if (reader_seq < eviction_threshold || blocking_current_octile) {
+                            // Evict only if the reader currently holds a guard
+                            uint8_t expected = 1;
+                            if (c.reading_sequences[i].data.has_guard.compare_exchange_strong(
+                                    expected, uint8_t{0}, std::memory_order_acq_rel))
+                            {
+                                c.reading_sequences[i].data.status.store(
+                                    Ring<T, false>::READER_STATE_EVICTED, std::memory_order_release);
+
+                                size_t evicted_reader_octile =
+                                    c.reading_sequences[i].data.trailing_octile.load(std::memory_order_acquire);
+                                c.read_access.fetch_sub(uint64_t(1) << (8 * evicted_reader_octile), std::memory_order_acq_rel);
+                                c.reader_eviction_count.fetch_add(1, std::memory_order_relaxed);
+                                c.last_evicted_reader_index.store(static_cast<uint32_t>(i), std::memory_order_relaxed);
+                                c.last_evicted_reader_sequence.store(reader_seq, std::memory_order_relaxed);
+                                c.last_evicted_writer_sequence.store(m_pending_new_sequence, std::memory_order_relaxed);
+                                c.last_evicted_reader_octile.store(static_cast<uint32_t>(evicted_reader_octile), std::memory_order_relaxed);
+                            }
+                        }
+                    }
+                }
+
+                c.scavenge_orphans();
+            };
+
+#if defined(SINTRA_EVICTION_SPIN_THRESHOLD) && SINTRA_EVICTION_SPIN_THRESHOLD > 0
             uint64_t spin_count = 0;
-            const uint64_t spin_loop_budget = ring_detail::get_eviction_spin_loop_budget();
+            constexpr uint64_t spin_loop_budget = SINTRA_EVICTION_SPIN_THRESHOLD;
+#else
+            using eviction_clock = std::chrono::steady_clock;
+            const auto eviction_budget = std::chrono::microseconds{SINTRA_EVICTION_SPIN_BUDGET_US};
+            auto eviction_deadline = eviction_clock::time_point{};
+            bool eviction_deadline_armed = false;
+#endif
 #endif
             while (c.read_access.load(std::memory_order_acquire) & range_mask) {
                 bool has_blocking_reader = false;
@@ -2045,64 +2019,39 @@ private:
                     // trailing octile has not yet been published. Keep spinning until the guard count drops
                     // (or an eviction occurs) so that the writer never writes into an octile that is still
                     // protected by a reader.
+#ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
+#if defined(SINTRA_EVICTION_SPIN_THRESHOLD) && SINTRA_EVICTION_SPIN_THRESHOLD > 0
+                    spin_count = 0;
+#else
+                    eviction_deadline_armed = false;
+#endif
+#endif
                     continue;
                 }
 
                 // Busy-wait until the target octile is unguarded
 #ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
+#if defined(SINTRA_EVICTION_SPIN_THRESHOLD) && SINTRA_EVICTION_SPIN_THRESHOLD > 0
                 if (++spin_count > spin_loop_budget) {
                     // Writer is stuck. Time to find and evict the slow reader(s).
                     // This is a slow path, taken only in exceptional circumstances.
-
-                    // The sequence number that marks a reader as "too far behind".
-                    // Any reader with a sequence older than this is a candidate for eviction.
-                    // A safe threshold is one full ring buffer behind the writer's current head.
-                    sequence_counter_type eviction_threshold =
-                        (m_pending_new_sequence >
-                         sequence_counter_type(SINTRA_EVICTION_LAG_RINGS) * this->m_num_elements)
-                            ? (m_pending_new_sequence - sequence_counter_type(SINTRA_EVICTION_LAG_RINGS) *
-                                                           this->m_num_elements)
-                            : 0;
-
-                    for (int i = 0; i < max_process_index; ++i) {
-                        // Check if this reader slot is active
-                        if (c.reading_sequences[i].data.status.load(std::memory_order_acquire)
-                            == Ring<T, false>::READER_STATE_ACTIVE)
-                        {
-                            sequence_counter_type reader_seq =
-                                c.reading_sequences[i].data.v.load(std::memory_order_acquire);
-                            uint8_t guard_flag =
-                                c.reading_sequences[i].data.has_guard.load(std::memory_order_acquire);
-                            uint8_t reader_octile =
-                                c.reading_sequences[i].data.trailing_octile.load(std::memory_order_acquire);
-
-                            bool blocking_current_octile =
-                                (guard_flag != 0) && (reader_octile == new_octile);
-
-                            if (reader_seq < eviction_threshold || blocking_current_octile) {
-                                // Evict only if the reader currently holds a guard
-                                uint8_t expected = 1;
-                                if (c.reading_sequences[i].data.has_guard.compare_exchange_strong(
-                                        expected, uint8_t{0}, std::memory_order_acq_rel))
-                                {
-                                    c.reading_sequences[i].data.status.store(
-                                        Ring<T, false>::READER_STATE_EVICTED, std::memory_order_release);
-
-                                    size_t evicted_reader_octile =
-                                        c.reading_sequences[i].data.trailing_octile.load(std::memory_order_acquire);
-                                    c.read_access.fetch_sub(uint64_t(1) << (8 * evicted_reader_octile), std::memory_order_acq_rel);
-                                    c.reader_eviction_count.fetch_add(1, std::memory_order_relaxed);
-                                    c.last_evicted_reader_index.store(static_cast<uint32_t>(i), std::memory_order_relaxed);
-                                    c.last_evicted_reader_sequence.store(reader_seq, std::memory_order_relaxed);
-                                    c.last_evicted_writer_sequence.store(m_pending_new_sequence, std::memory_order_relaxed);
-                                    c.last_evicted_reader_octile.store(static_cast<uint32_t>(evicted_reader_octile), std::memory_order_relaxed);
-                                }
-                            }
-                        }
-                    }
+                    run_eviction_pass();
                     spin_count = 0; // Reset spin count after an eviction pass
-                    c.scavenge_orphans();
                 }
+#else
+                auto now = eviction_clock::now();
+                if (eviction_budget.count() == 0) {
+                    run_eviction_pass();
+                }
+                else if (!eviction_deadline_armed) {
+                    eviction_deadline = now + eviction_budget;
+                    eviction_deadline_armed = true;
+                }
+                else if (now >= eviction_deadline) {
+                    run_eviction_pass();
+                    eviction_deadline = now + eviction_budget;
+                }
+#endif
 #endif
             }
             m_octile = new_octile;
