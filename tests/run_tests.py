@@ -227,6 +227,12 @@ class TestRunner:
                     f"{Color.YELLOW}Warning: {dump_error}. "
                     f"Crash dumps may be unavailable.{Color.RESET}"
                 )
+            jit_error = self._configure_windows_jit_debugging()
+            if jit_error:
+                print(
+                    f"{Color.YELLOW}Warning: {jit_error}. "
+                    f"JIT prompts may still block crash dumps.{Color.RESET}"
+                )
 
     def find_test_suites(
         self,
@@ -2075,6 +2081,72 @@ class TestRunner:
             return f"failed to create crash dump directory {dump_dir}: {exc}"
 
         self._windows_crash_dump_dir = dump_dir
+        return None
+
+    def _configure_windows_jit_debugging(self) -> Optional[str]:
+        """Disable intrusive JIT prompts so crash dumps complete automatically."""
+
+        if sys.platform != 'win32':
+            return None
+
+        try:
+            import winreg  # type: ignore
+        except ImportError as exc:  # pragma: no cover - Windows specific
+            return f"winreg unavailable: {exc}"
+
+        errors: List[str] = []
+
+        def set_dword(
+            root: "winreg.HKEYType",
+            subkey: str,
+            value_name: str,
+            value: int,
+            access: int,
+        ) -> None:
+            try:
+                key = winreg.CreateKeyEx(root, subkey, 0, access)
+            except OSError as exc:
+                errors.append(f"failed to open {subkey}: {exc}")
+                return
+
+            try:
+                with key:
+                    winreg.SetValueEx(key, value_name, 0, winreg.REG_DWORD, value)
+            except OSError as exc:
+                errors.append(f"failed to set {subkey}\\{value_name}: {exc}")
+
+        set_dword(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"Software\Microsoft\Windows NT\CurrentVersion\AeDebug",
+            "Auto",
+            1,
+            winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY,
+        )
+
+        set_dword(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"Software\Microsoft\Windows\Windows Error Reporting",
+            "DontShowUI",
+            1,
+            winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY,
+        )
+
+        jit_subkeys = [
+            (winreg.HKEY_LOCAL_MACHINE, r"Software\Microsoft\.NETFramework"),
+            (winreg.HKEY_LOCAL_MACHINE, r"Software\Wow6432Node\Microsoft\.NETFramework"),
+            (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\.NETFramework"),
+        ]
+        for root, subkey in jit_subkeys:
+            access = winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY
+            if root == winreg.HKEY_CURRENT_USER:
+                access = winreg.KEY_SET_VALUE
+            elif "Wow6432Node" in subkey:
+                access = winreg.KEY_SET_VALUE | winreg.KEY_WOW64_32KEY
+            set_dword(root, subkey, "DbgJITDebugLaunchSetting", 2, access)
+
+        if errors:
+            return "; ".join(errors)
+
         return None
 
     def _resolve_windows_debugger(self) -> Tuple[Optional[str], Optional[str], str]:
