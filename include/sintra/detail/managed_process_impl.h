@@ -6,6 +6,7 @@
 #include "utility.h"
 #include "type_utils.h"
 #include "ipc_platform_utils.h"
+#include "console.h"
 
 #include <array>
 #include <atomic>
@@ -24,6 +25,7 @@
 #include <thread>
 #include <utility>
 #include <iostream>
+#include <algorithm>
 #ifdef _WIN32
 #include <errno.h>
 #endif
@@ -1589,114 +1591,230 @@ inline void Managed_process::run_after_current_handler(function<void()> task)
 inline
 void Managed_process::wait_for_delivery_fence()
 {
-    std::vector<Process_message_reader::Delivery_target> targets;
+    auto reply_progress_skips = take_reply_progress_skips();
 
-    {
-        std::shared_lock<std::shared_mutex> readers_lock(m_readers_mutex);
-        targets.reserve(m_readers.size() * 2);
+    auto take_reply_progress_skip = [&](const Process_message_reader::Delivery_progress* progress_ptr,
+                                         sequence_counter_type target_sequence,
+                                         sequence_counter_type observed_sequence)
+        -> std::optional<Reply_progress_skip> {
+        if (!progress_ptr) {
+            return std::nullopt;
+        }
 
-        for (auto& [process_id, reader_ptr] : m_readers) {
-            (void)process_id;
-            if (!reader_ptr) {
-                continue;
-            }
+        auto it = std::find_if(reply_progress_skips.begin(), reply_progress_skips.end(),
+            [&](const Reply_progress_skip& skip) {
+                return skip.progress == progress_ptr;
+            });
 
-            auto& reader = *reader_ptr;
-            if (reader.state() != Process_message_reader::READER_NORMAL) {
-                continue;
-            }
+        if (it == reply_progress_skips.end()) {
+            return std::nullopt;
+        }
 
-            const auto req_target = reader.get_request_leading_sequence();
-            auto req_target_info = reader.prepare_delivery_target(
-                Process_message_reader::Delivery_stream::Request,
-                req_target);
-            if (req_target_info.wait_needed) {
-                targets.emplace_back(std::move(req_target_info));
-            }
+        const Reply_progress_skip skip = *it;
+        const auto reply_sequence = progress_ptr->reply_sequence.load(std::memory_order_acquire);
 
-            const auto rep_target = reader.get_reply_leading_sequence();
-            auto rep_target_info = reader.prepare_delivery_target(
-                Process_message_reader::Delivery_stream::Reply,
-                rep_target);
-            if (rep_target_info.wait_needed) {
-                targets.emplace_back(std::move(rep_target_info));
+        auto log_decision = [&](const char* decision) {
+            sintra::console()
+                << "[delivery-fence] reply-skip decision=" << decision
+                << " progress=" << static_cast<const void*>(skip.progress)
+                << " skip_seq=" << skip.sequence
+                << " target=" << target_sequence
+                << " observed=" << observed_sequence
+                << " reply=" << reply_sequence
+                << '\n';
+        };
+
+        if (skip.sequence == invalid_sequence) {
+            log_decision("discard-invalid");
+            reply_progress_skips.erase(it);
+            return std::nullopt;
+        }
+
+        if (target_sequence > skip.sequence) {
+            log_decision("discard-target-advanced");
+            reply_progress_skips.erase(it);
+            return std::nullopt;
+        }
+
+        if (target_sequence != skip.sequence) {
+            log_decision("defer-target-mismatch");
+            return std::nullopt;
+        }
+
+        if (observed_sequence > skip.sequence) {
+            log_decision("discard-observed-advanced");
+            reply_progress_skips.erase(it);
+            return std::nullopt;
+        }
+
+        reply_progress_skips.erase(it);
+        if (reply_sequence < skip.sequence) {
+            log_decision("consume-pending-reply");
+        } else {
+            log_decision("consume");
+        }
+        return skip;
+    };
+
+    while (true) {
+        std::vector<Process_message_reader::Delivery_target> targets;
+
+        {
+            std::shared_lock<std::shared_mutex> readers_lock(m_readers_mutex);
+            targets.reserve(m_readers.size() * 2);
+
+            for (auto& [process_id, reader_ptr] : m_readers) {
+                (void)process_id;
+                if (!reader_ptr) {
+                    continue;
+                }
+
+                auto& reader = *reader_ptr;
+                if (reader.state() != Process_message_reader::READER_NORMAL) {
+                    continue;
+                }
+
+                const auto req_target = reader.get_request_leading_sequence();
+                auto req_target_info = reader.prepare_delivery_target(
+                    Process_message_reader::Delivery_stream::Request,
+                    req_target);
+                if (req_target_info.wait_needed) {
+                    targets.emplace_back(std::move(req_target_info));
+                }
+
+                const auto rep_target = reader.get_reply_leading_sequence();
+                auto rep_target_info = reader.prepare_delivery_target(
+                    Process_message_reader::Delivery_stream::Reply,
+                    rep_target);
+                if (rep_target_info.wait_needed) {
+                    if (auto progress = rep_target_info.progress.lock()) {
+                        if (auto skip = take_reply_progress_skip(
+                                progress.get(), rep_target_info.target, rep_target_info.observed)) {
+                            rep_target_info.wait_needed = false;
+                        }
+                    }
+                }
+                if (rep_target_info.wait_needed) {
+                    targets.emplace_back(std::move(rep_target_info));
+                }
             }
         }
-    }
 
-    if (targets.empty()) {
-        return;
-    }
+        if (targets.empty()) {
+            return;
+        }
 
-    auto all_targets_satisfied = [&]() {
-        if (m_communication_state != COMMUNICATION_RUNNING) {
+        auto all_targets_satisfied = [&]() {
+            if (m_communication_state != COMMUNICATION_RUNNING) {
+                return true;
+            }
+
+            for (const auto& target : targets) {
+                auto progress = target.progress.lock();
+                if (!progress) {
+                    // Reader was replaced or destroyed; treat as satisfied because
+                    // no further progress is possible on the captured stream.
+                    continue;
+                }
+
+                const auto observed = (target.stream == Process_message_reader::Delivery_stream::Request)
+                    ? progress->request_sequence.load(std::memory_order_acquire)
+                    : progress->reply_sequence.load(std::memory_order_acquire);
+
+                if (observed >= target.target) {
+                    continue;
+                }
+
+                const auto stopped = (target.stream == Process_message_reader::Delivery_stream::Request)
+                    ? progress->request_stopped.load(std::memory_order_acquire)
+                    : progress->reply_stopped.load(std::memory_order_acquire);
+
+                if (stopped) {
+                    continue;
+                }
+
+                return false;
+            }
+
             return true;
+        };
+
+        if (all_targets_satisfied()) {
+            return;
         }
 
-        for (const auto& target : targets) {
-            auto progress = target.progress.lock();
-            if (!progress) {
-                // Reader was replaced or destroyed; treat as satisfied because
-                // no further progress is possible on the captured stream.
-                continue;
-            }
+        auto targets_made_progress = [&]() {
+            for (const auto& target : targets) {
+                auto progress = target.progress.lock();
+                if (!progress) {
+                    return true;
+                }
 
-            const auto observed = (target.stream == Process_message_reader::Delivery_stream::Request)
-                ? progress->request_sequence.load(std::memory_order_acquire)
-                : progress->reply_sequence.load(std::memory_order_acquire);
+                const auto current = (target.stream == Process_message_reader::Delivery_stream::Request)
+                    ? progress->request_sequence.load(std::memory_order_acquire)
+                    : progress->reply_sequence.load(std::memory_order_acquire);
 
-            if (observed >= target.target) {
-                continue;
-            }
+                if (current > target.observed) {
+                    return true;
+                }
 
-            const auto stopped = (target.stream == Process_message_reader::Delivery_stream::Request)
-                ? progress->request_stopped.load(std::memory_order_acquire)
-                : progress->reply_stopped.load(std::memory_order_acquire);
+                const auto stopped = (target.stream == Process_message_reader::Delivery_stream::Request)
+                    ? progress->request_stopped.load(std::memory_order_acquire)
+                    : progress->reply_stopped.load(std::memory_order_acquire);
 
-            if (stopped) {
-                continue;
+                if (stopped) {
+                    return true;
+                }
             }
 
             return false;
+        };
+
+        std::unique_lock<std::mutex> lk(m_delivery_mutex);
+        bool waited_for_targets = false;
+
+        if (!tl_is_req_thread) {
+            waited_for_targets = true;
+            m_delivery_condition.wait(lk, all_targets_satisfied);
+        }
+        else {
+            while (!all_targets_satisfied()) {
+                if (tl_post_handler_function) {
+                    waited_for_targets = true;
+                    auto post_handler = std::move(tl_post_handler_function);
+                    tl_post_handler_function = {};
+
+                    lk.unlock();
+                    try {
+                        post_handler();
+                    }
+                    catch (...) {
+                        lk.lock();
+                        throw;
+                    }
+                    lk.lock();
+
+                    continue;
+                }
+
+                waited_for_targets = true;
+                // Spurious wake-ups are possible here, so re-evaluate the delivery
+                // targets on each iteration rather than relying on the condition's
+                // predicate form. This keeps the post-handler draining path symmetric
+                // with the non-request thread case.
+                m_delivery_condition.wait(lk);
+            }
         }
 
-        return true;
-    };
-
-    if (all_targets_satisfied()) {
-        return;
-    }
-
-    std::unique_lock<std::mutex> lk(m_delivery_mutex);
-
-    if (!tl_is_req_thread) {
-        m_delivery_condition.wait(lk, all_targets_satisfied);
-        return;
-    }
-
-    while (!all_targets_satisfied()) {
-        if (tl_post_handler_function) {
-            auto post_handler = std::move(tl_post_handler_function);
-            tl_post_handler_function = {};
-
-            lk.unlock();
-            try {
-                post_handler();
-            }
-            catch (...) {
-                lk.lock();
-                throw;
-            }
-            lk.lock();
-
-            continue;
+        if (!waited_for_targets) {
+            return;
         }
 
-        // Spurious wake-ups are possible here, so re-evaluate the delivery
-        // targets on each iteration rather than relying on the condition's
-        // predicate form. This keeps the post-handler draining path symmetric
-        // with the non-request thread case.
-        m_delivery_condition.wait(lk);
+        if (!targets_made_progress()) {
+            return;
+        }
+
+        // Progress has been observed; resnapshot targets to ensure any new deliveries are captured.
     }
 }
 
