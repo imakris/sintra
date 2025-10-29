@@ -1601,6 +1601,11 @@ void Managed_process::wait_for_delivery_fence()
                 continue;
             }
 
+            if (it->generation != progress.generation) {
+                it = reply_progress_skips.erase(it);
+                continue;
+            }
+
             const auto skip_sequence = it->sequence;
             if (skip_sequence == invalid_sequence) {
                 it = reply_progress_skips.erase(it);

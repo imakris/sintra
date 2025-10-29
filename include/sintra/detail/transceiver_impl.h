@@ -865,6 +865,7 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
             auto progress = reader->delivery_progress();
             if (progress) {
                 orpcc.reply_delivery_progress = progress.get();
+                orpcc.reply_delivery_generation = progress->generation;
                 orpcc.reply_observed_sequence = progress->reply_sequence.load(std::memory_order_acquire);
                 orpcc.reply_target_sequence = reader->get_reply_leading_sequence();
                 if (orpcc.reply_target_sequence == invalid_sequence) {
@@ -951,12 +952,16 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
     s_mproc->deactivate_return_handler(function_instance_id);
 
     if (orpcc.success) {
-        register_reply_progress_skip(orpcc.reply_delivery_progress,
+        register_reply_progress_skip(
+            static_cast<const Process_message_reader::Delivery_progress*>(
+                orpcc.reply_delivery_progress),
+            orpcc.reply_delivery_generation,
             orpcc.reply_target_sequence,
             orpcc.reply_observed_sequence);
     }
     else {
         orpcc.reply_delivery_progress = nullptr;
+        orpcc.reply_delivery_generation = 0;
         orpcc.reply_target_sequence = invalid_sequence;
         orpcc.reply_observed_sequence = invalid_sequence;
     }
