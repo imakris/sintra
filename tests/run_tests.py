@@ -46,6 +46,9 @@ if importlib.util.find_spec("psutil") is not None:
     _PSUTIL = importlib.import_module("psutil")
 
 
+PRESERVE_CORES_ENV = "SINTRA_PRESERVE_CORES"
+
+
 def _format_size(num_bytes: Optional[int]) -> str:
     """Return a human-friendly representation of ``num_bytes``."""
 
@@ -129,6 +132,20 @@ def _available_disk_bytes(path: Path) -> Optional[int]:
     except Exception:
         return None
     return usage.free
+
+
+def _env_flag(name: str) -> bool:
+    """Return True if the specified environment variable is truthy."""
+
+    value = os.environ.get(name)
+    if value is None:
+        return False
+
+    normalized = value.strip().lower()
+    if not normalized:
+        return False
+
+    return normalized not in {"0", "false", "no", "off"}
 
 
 def _find_lingering_processes(prefixes: Sequence[str]) -> List[Tuple[int, str]]:
@@ -354,6 +371,10 @@ class TestRunner:
         self._stack_capture_history_lock = threading.Lock()
         self._sudo_capability: Optional[bool] = None
         self._windows_crash_dump_dir: Optional[Path] = None
+        self._preserve_core_dumps = _env_flag(PRESERVE_CORES_ENV)
+        self._core_cleanup_lock = threading.Lock()
+        self._core_cleanup_messages: List[Tuple[str, str]] = []
+        self._core_cleanup_bytes_freed = 0
 
         # Determine test directory - check both with and without config subdirectory
         test_dir_with_config = build_dir / 'tests' / config
@@ -413,10 +434,179 @@ class TestRunner:
                 f"\n{Color.YELLOW}Warning: Failed to remove scratch directory {directory}: {exc}{Color.RESET}"
             )
 
+    def _core_dump_search_directories(self, invocation: TestInvocation) -> List[Path]:
+        """Return directories that may contain core dumps for ``invocation``."""
+
+        candidates: Set[Path] = {
+            invocation.path.parent.resolve(),
+            Path.cwd().resolve(),
+            self.build_dir.resolve(),
+            self._scratch_base,
+        }
+
+        if sys.platform == "darwin":
+            candidates.add(Path("/cores"))
+            candidates.add(Path.home() / "Library" / "Logs" / "DiagnosticReports")
+        elif sys.platform.startswith("linux"):
+            candidates.add(Path("/var/lib/systemd/coredump"))
+
+        return [path for path in candidates if path]
+
+    @staticmethod
+    def _is_core_dump_file(path: Path) -> bool:
+        """Return True if ``path`` appears to be a core dump file."""
+
+        name = path.name
+        return (
+            name == "core"
+            or name.startswith("core.")
+            or name.startswith("core-")
+            or name.endswith(".core")
+        )
+
+    @staticmethod
+    def _normalize_core_path(path: Path) -> Path:
+        """Return a canonical representation for core dump paths."""
+
+        try:
+            return path.resolve()
+        except OSError:
+            return path
+
+    def _snapshot_core_dumps(self, invocation: TestInvocation) -> Set[Path]:
+        """Capture the set of core dump files before launching a test."""
+
+        snapshot: Set[Path] = set()
+        for directory in self._core_dump_search_directories(invocation):
+            try:
+                entries = list(directory.iterdir())
+            except OSError:
+                continue
+
+            for entry in entries:
+                if not entry.is_file():
+                    continue
+                if not self._is_core_dump_file(entry):
+                    continue
+                snapshot.add(self._normalize_core_path(entry))
+
+        return snapshot
+
+    def _find_new_core_dumps(
+        self,
+        invocation: TestInvocation,
+        snapshot: Set[Path],
+        start_time: float,
+    ) -> List[Tuple[Path, float, int]]:
+        """Return newly created core dumps after a test run."""
+
+        new_dumps: List[Tuple[Path, float, int]] = []
+        for directory in self._core_dump_search_directories(invocation):
+            try:
+                entries = list(directory.iterdir())
+            except OSError:
+                continue
+
+            for entry in entries:
+                if not entry.is_file():
+                    continue
+                if not self._is_core_dump_file(entry):
+                    continue
+
+                normalized = self._normalize_core_path(entry)
+                if normalized in snapshot:
+                    continue
+
+                try:
+                    stat_info = entry.stat()
+                except OSError:
+                    continue
+
+                if stat_info.st_mtime + 0.001 < start_time:
+                    continue
+
+                new_dumps.append((normalized, stat_info.st_mtime, stat_info.st_size))
+
+        return new_dumps
+
+    def _record_core_cleanup(self, level: str, message: str, freed_bytes: int = 0) -> None:
+        """Record a core cleanup message to be emitted later."""
+
+        with self._core_cleanup_lock:
+            self._core_cleanup_messages.append((level, message))
+            if freed_bytes:
+                self._core_cleanup_bytes_freed += freed_bytes
+
+    def _cleanup_new_core_dumps(
+        self,
+        invocation: TestInvocation,
+        snapshot: Set[Path],
+        start_time: float,
+    ) -> None:
+        """Remove new core dumps to avoid exhausting disk space."""
+
+        new_dumps = self._find_new_core_dumps(invocation, snapshot, start_time)
+        if not new_dumps:
+            return
+
+        total_size = sum(size for _, _, size in new_dumps if size is not None)
+
+        if self._preserve_core_dumps:
+            message = (
+                "Core dumps: detected "
+                f"{len(new_dumps)} file(s) totalling {_format_size(total_size)} "
+                f"(preserved due to {PRESERVE_CORES_ENV})"
+            )
+            self._record_core_cleanup("info", message)
+            return
+
+        removed: List[str] = []
+        freed_bytes = 0
+        errors: List[str] = []
+
+        for path, _, size in new_dumps:
+            try:
+                if size is None:
+                    size = 0
+                path.unlink()
+                removed.append(path.name)
+                freed_bytes += size
+            except OSError as exc:
+                errors.append(f"Core dumps: failed to remove {path}: {exc}")
+
+        if removed:
+            removed.sort()
+            message = (
+                "Core dumps: removed "
+                f"{len(removed)} file(s) totalling {_format_size(freed_bytes)} "
+                f"({', '.join(removed)})"
+            )
+            self._record_core_cleanup("info", message, freed_bytes=freed_bytes)
+        else:
+            # Nothing removed; still report total detected to aid diagnostics.
+            message = (
+                "Core dumps: detected "
+                f"{len(new_dumps)} file(s) totalling {_format_size(total_size)}"
+            )
+            self._record_core_cleanup("info", message)
+
+        for error in errors:
+            self._record_core_cleanup("warning", error)
+
     def cleanup(self) -> None:
         """Remove the root scratch directory for this runner."""
 
         self._cleanup_scratch_directory(self._scratch_base)
+
+    def consume_core_cleanup_reports(self) -> Tuple[int, List[Tuple[str, str]]]:
+        """Return accumulated core cleanup messages and reset the state."""
+
+        with self._core_cleanup_lock:
+            freed = self._core_cleanup_bytes_freed
+            messages = list(self._core_cleanup_messages)
+            self._core_cleanup_messages.clear()
+            self._core_cleanup_bytes_freed = 0
+        return freed, messages
 
     def find_test_suites(
         self,
@@ -621,6 +811,8 @@ class TestRunner:
         scratch_dir = self._allocate_scratch_directory(invocation)
         process = None
         cleanup_scratch_dir = True
+        core_snapshot = self._snapshot_core_dumps(invocation)
+        start_time = time.time()
         try:
             popen_env = self._build_test_environment(scratch_dir)
             start_time = time.time()
@@ -943,6 +1135,7 @@ class TestRunner:
         finally:
             if cleanup_scratch_dir:
                 self._cleanup_scratch_directory(scratch_dir)
+            self._cleanup_new_core_dumps(invocation, core_snapshot, start_time)
 
     def _kill_process_tree(self, pid: int):
         """Kill a process and all its children"""
@@ -2895,6 +3088,13 @@ class TestRunner:
 
         print()  # Final newline
 
+        _, cleanup_messages = self.consume_core_cleanup_reports()
+        for level, message in cleanup_messages:
+            if level == 'warning':
+                print(f"  {Color.YELLOW}{message}{Color.RESET}")
+            else:
+                print(f"  {message}")
+
         return passed, failed, results
 
     def print_summary(self, invocation: TestInvocation, passed: int, failed: int, results: List[TestResult]):
@@ -3202,6 +3402,13 @@ def main():
                     f"    Diagnostics: available memory={_format_size(available_memory)}, "
                     f"free disk={_format_size(disk_space)}"
                 )
+
+                _, cleanup_messages = runner.consume_core_cleanup_reports()
+                for level, message in cleanup_messages:
+                    if level == 'warning':
+                        print(f"    {Color.YELLOW}{message}{Color.RESET}")
+                    else:
+                        print(f"    {message}")
 
                 if not suite_all_passed:
                     break
