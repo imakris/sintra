@@ -6,6 +6,7 @@
 #include "globals.h"
 #include "id_types.h"
 #include "message.h"
+#include "process_message_reader.h"
 #include "spinlocked_containers.h"
 
 #include <condition_variable>
@@ -710,6 +711,10 @@ struct Outstanding_rpc_control
     bool                keep_waiting = true;
     bool                success = false;
     bool                cancelled = false;
+    const Process_message_reader::Delivery_progress* reply_delivery_progress = nullptr;
+    sequence_counter_type reply_target_sequence = invalid_sequence;
+    sequence_counter_type reply_observed_sequence = invalid_sequence;
+    std::uint64_t       reply_progress_generation = 0;
 };
 
 

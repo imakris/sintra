@@ -6,6 +6,7 @@
 #include "utility.h"
 #include "type_utils.h"
 #include "ipc_platform_utils.h"
+#include "process_message_reader.h"
 
 #include <array>
 #include <atomic>
@@ -1638,6 +1639,8 @@ inline void Managed_process::run_after_current_handler(function<void()> task)
 inline
 void Managed_process::wait_for_delivery_fence()
 {
+    auto reply_progress_skips = take_reply_progress_skips();
+
     while (true) {
         std::vector<Process_message_reader::Delivery_target> targets;
 
@@ -1669,6 +1672,17 @@ void Managed_process::wait_for_delivery_fence()
                     Process_message_reader::Delivery_stream::Reply,
                     rep_target);
                 if (rep_target_info.wait_needed) {
+                    if (auto progress = rep_target_info.progress.lock()) {
+                        if (detail::consume_reply_progress_skip(
+                                reply_progress_skips,
+                                progress.get(),
+                                rep_target_info.progress_generation,
+                                rep_target_info.target,
+                                rep_target_info.observed))
+                        {
+                            rep_target_info.wait_needed = false;
+                        }
+                    }
                     targets.emplace_back(std::move(rep_target_info));
                 }
             }

@@ -462,6 +462,7 @@ Process_message_reader::Delivery_target Process_message_reader::prepare_delivery
         : strong_progress->reply_sequence.load(std::memory_order_acquire);
 
     target.observed = observed;
+    target.progress_generation = strong_progress->generation;
 
     if (observed >= target_sequence) {
         return target;
