@@ -864,11 +864,8 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
         if (auto* reader = s_tl_current_reply_reader) {
             auto progress = reader->delivery_progress();
             if (progress) {
-                auto skip_sequence = reader->get_reply_leading_sequence();
-                if (skip_sequence == invalid_sequence) {
-                    skip_sequence = progress->reply_sequence.load(std::memory_order_acquire);
-                }
-                progress->reply_skip_sequence.store(skip_sequence, std::memory_order_release);
+                orpcc.reply_delivery_progress = progress.get();
+                orpcc.reply_observed_sequence = progress->reply_sequence.load(std::memory_order_acquire);
             }
         }
     };
@@ -948,6 +945,14 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
 
     // we can now disable the return message handler
     s_mproc->deactivate_return_handler(function_instance_id);
+
+    if (orpcc.success) {
+        register_reply_progress_skip(orpcc.reply_delivery_progress, orpcc.reply_observed_sequence);
+    }
+    else {
+        orpcc.reply_delivery_progress = nullptr;
+        orpcc.reply_observed_sequence = invalid_sequence;
+    }
 
     if (!orpcc.success) {
         if (ex_tid != not_defined_type_id) {

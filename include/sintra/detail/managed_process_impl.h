@@ -10,6 +10,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <algorithm>
 #include <filesystem>
 #include <csignal>
 #include <fstream>
@@ -1589,54 +1590,43 @@ inline void Managed_process::run_after_current_handler(function<void()> task)
 inline
 void Managed_process::wait_for_delivery_fence()
 {
-    auto consume_reply_skip = [](Process_message_reader::Delivery_progress& progress,
+    auto reply_progress_skips = take_reply_progress_skips();
+
+    auto consume_reply_skip = [&](Process_message_reader::Delivery_progress& progress,
                                  sequence_counter_type target_sequence,
                                  sequence_counter_type observed_sequence) {
-        if (target_sequence == invalid_sequence) {
+        auto it = std::find_if(reply_progress_skips.begin(), reply_progress_skips.end(),
+            [&](const Reply_progress_skip& skip) {
+                return skip.progress == &progress;
+            });
+
+        if (it == reply_progress_skips.end()) {
             return false;
         }
 
-        auto skip_sequence = progress.reply_skip_sequence.load(std::memory_order_acquire);
-        while (skip_sequence != invalid_sequence) {
-            if (target_sequence < skip_sequence) {
-                // The skip applies to a future delivery target; leave it in place.
-                return false;
-            }
-
-            if (target_sequence > skip_sequence) {
-                // The target has advanced beyond the recorded skip. If we've already
-                // observed or published past the skip, clear it to avoid keeping stale
-                // hints that can no longer be consumed.
-                const auto published = progress.reply_sequence.load(std::memory_order_acquire);
-                if (observed_sequence >= skip_sequence || published >= skip_sequence) {
-                    progress.reply_skip_sequence.compare_exchange_strong(
-                        skip_sequence, invalid_sequence, std::memory_order_acq_rel);
-                }
-                return false;
-            }
-
-            // target_sequence == skip_sequence
-            if (observed_sequence != skip_sequence) {
-                // The delivery fence snapshot has not yet seen the skipped sequence.
-                return false;
-            }
-
-            const auto published = progress.reply_sequence.load(std::memory_order_acquire);
-            if (published < skip_sequence) {
-                // Reply reader still draining the handler; wait until it publishes.
-                return false;
-            }
-
-            if (progress.reply_skip_sequence.compare_exchange_strong(
-                    skip_sequence, invalid_sequence, std::memory_order_acq_rel)) {
-                return true;
-            }
-
-            // Another thread updated the skip hint; reload and evaluate again.
-            skip_sequence = progress.reply_skip_sequence.load(std::memory_order_acquire);
+        const auto skip_observed = it->observed;
+        if (skip_observed == invalid_sequence) {
+            reply_progress_skips.erase(it);
+            return false;
         }
 
-        return false;
+        if (observed_sequence > skip_observed) {
+            reply_progress_skips.erase(it);
+            return false;
+        }
+
+        if (observed_sequence < skip_observed) {
+            return false;
+        }
+
+        const auto published = progress.reply_sequence.load(std::memory_order_acquire);
+        if (published <= skip_observed) {
+            return false;
+        }
+
+        reply_progress_skips.erase(it);
+
+        return published >= target_sequence;
     };
 
     while (true) {
@@ -1694,8 +1684,6 @@ void Managed_process::wait_for_delivery_fence()
             for (const auto& target : targets) {
                 auto progress = target.progress.lock();
                 if (!progress) {
-                    // Reader was replaced or destroyed; treat as satisfied because
-                    // no further progress is possible on the captured stream.
                     continue;
                 }
 
@@ -1780,10 +1768,6 @@ void Managed_process::wait_for_delivery_fence()
                 }
 
                 waited_for_targets = true;
-                // Spurious wake-ups are possible here, so re-evaluate the delivery
-                // targets on each iteration rather than relying on the condition's
-                // predicate form. This keeps the post-handler draining path symmetric
-                // with the non-request thread case.
                 m_delivery_condition.wait(lk);
             }
         }
@@ -1793,10 +1777,11 @@ void Managed_process::wait_for_delivery_fence()
         }
 
         if (!targets_made_progress()) {
-            return;
+            continue;
         }
 
-        // Progress has been observed; resnapshot targets to ensure any new deliveries are captured.
+        // Progress has been observed; resnapshot delivery targets to ensure we capture
+        // any additional work generated while draining the fence.
     }
 }
 
