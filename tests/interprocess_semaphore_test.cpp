@@ -323,7 +323,7 @@ void test_multithreaded_contention()
                     sem.post();
                     posted.fetch_add(1, std::memory_order_relaxed);
                 } else {
-                    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
+                    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(3);
                     if (sem.timed_wait(deadline)) {
                         acquired.fetch_add(1, std::memory_order_relaxed);
                     }
