@@ -11,7 +11,6 @@
 #include <cassert>
 #include <chrono>
 #include <csignal>
-#include <cstdio>
 #include <cstring>
 #include <functional>
 #include <iostream>

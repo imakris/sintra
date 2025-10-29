@@ -112,7 +112,6 @@
 #include <cerrno>
 #include <chrono>
 #include <cstddef>       // std::byte
-#include <cstdio>        // std::FILE, std::fprintf
 #include <cstring>       // std::strlen
 #include <cstdint>
 #include <filesystem>
