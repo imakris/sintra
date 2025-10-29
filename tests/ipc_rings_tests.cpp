@@ -447,9 +447,9 @@ TEST_CASE(test_reader_eviction_does_not_underflow_octile_counter)
             }
             std::this_thread::yield();
         }
-        guard_ready.store(true, std::memory_order_release);
-
         ASSERT_TRUE(guard_observed);
+
+        guard_ready.store(true, std::memory_order_release);
 
         auto eviction_deadline = std::chrono::steady_clock::now() + 2s;
         bool eviction_observed = false;
