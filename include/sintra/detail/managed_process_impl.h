@@ -10,6 +10,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <algorithm>
 #include <filesystem>
 #include <csignal>
 #include <fstream>
@@ -346,6 +347,33 @@ static void s_signal_handler(int sig, siginfo_t* info, void* ctx)
 inline
 void Managed_process::enable_recovery()
 {
+    /*
+     * Recovery overview
+     * -----------------
+     *  • enable_recovery() RPCs the coordinator so the caller's process slot is
+     *    added to Coordinator::m_requested_recovery. When a crash is observed the
+     *    coordinator routes the cached Spawn_swarm_process_args back through
+     *    Coordinator::recover_if_required(), which in turn calls
+     *    Managed_process::spawn_swarm_process().
+     *  • spawn_swarm_process() persists the executable + argument vector in
+     *    m_cached_spawns and bumps the occurrence counter so every respawn uses a
+     *    fresh ``req``/``rep`` ring name (see Message_ring_{R,W}::get_base_filename
+     *    adding the ``_occN`` suffix). Before a replacement child is launched we
+     *    tear down any previous Process_message_reader for that slot (see the
+     *    erase() call just above) so the old occurrence's shared memory is
+     *    unmapped before a fresh reader is created.
+     *  • The coordinator pre-attaches new Process_message_reader instances before
+     *    the child is launched, ensuring the new process sees ready request/reply
+     *    channels the moment it starts. There is no pre-allocation for future
+     *    occurrences; only the rings for the active occurrence stay mapped.
+     *  • Each reader/writer ring is implemented via Ring_data::attach(), which
+     *    reserves a 2× span and double maps the 2 MiB data file so wrap-around is
+     *    linear for zero-copy reads. Those double-mapped spans are what appear as
+     *    "guard"/reserved regions inside Mach-O cores—the mapping design is
+     *    required for the ring abstraction rather than recovery itself, but the
+     *    recovery harness crashes the process often enough that the platform
+     *    keeps dumping them.
+     */
     // Mark this process as recoverable in the coordinator
     // so that abnormal termination triggers a respawn.
     Coordinator::rpc_enable_recovery(s_coord_id, process_of(m_instance_id));
@@ -476,6 +504,9 @@ Managed_process::Managed_process():
     s_mproc = this;
 
     m_pid = detail::get_current_process_id();
+    if (auto start_stamp = current_process_start_stamp()) {
+        m_process_start_stamp = *start_stamp;
+    }
 
     install_signal_handler();
 
@@ -542,6 +573,8 @@ Managed_process::~Managed_process()
         // now it's safe to delete the Coordinator.
         delete s_coord;
         s_coord = 0;
+
+        mark_run_directory_for_cleanup(std::filesystem::path(m_directory));
 
         // removes the swarm directory
         remove_directory(m_directory);
@@ -937,6 +970,17 @@ Managed process options:
     const std::string current_abi = detail::abi_token();
 
     if (coordinator_is_local) {
+        run_marker_record run_marker{};
+        run_marker.pid = static_cast<uint32_t>(m_pid);
+        run_marker.start_stamp = m_process_start_stamp;
+        run_marker.created_monotonic_ns = monotonic_now_ns();
+        run_marker.recovery_occurrence = static_cast<uint32_t>(s_recovery_occurrence);
+
+        if (!write_run_marker(std::filesystem::path(m_directory), run_marker)) {
+            throw std::runtime_error(
+                "Sintra failed to persist the coordinator run marker at " + m_directory);
+        }
+
         std::ofstream marker(abi_path, std::ios::out | std::ios::trunc);
         if (!marker) {
             throw std::runtime_error(
@@ -1383,19 +1427,24 @@ void Managed_process::wait_for_stop()
 inline
 std::string Managed_process::obtain_swarm_directory()
 {
-    std::string sintra_directory = fs::temp_directory_path().string() + "/sintra/";
-    if (!check_or_create_directory(sintra_directory)) {
+    const std::filesystem::path sintra_directory = std::filesystem::temp_directory_path() / "sintra";
+    if (!check_or_create_directory(sintra_directory.string())) {
         throw std::runtime_error("access to a working directory failed");
     }
+
+    cleanup_stale_swarm_directories(
+        sintra_directory,
+        static_cast<uint32_t>(m_pid),
+        m_process_start_stamp);
 
     std::stringstream stream;
     stream << std::hex << m_swarm_id;
-    auto swarm_directory = sintra_directory + stream.str();
-    if (!check_or_create_directory(swarm_directory)) {
+    const std::filesystem::path swarm_directory = sintra_directory / stream.str();
+    if (!check_or_create_directory(swarm_directory.string())) {
         throw std::runtime_error("access to a working directory failed");
     }
 
-    return swarm_directory;
+    return swarm_directory.string();
 }
 
 // Calls f when the specified transceiver becomes available.
@@ -1589,114 +1638,152 @@ inline void Managed_process::run_after_current_handler(function<void()> task)
 inline
 void Managed_process::wait_for_delivery_fence()
 {
-    std::vector<Process_message_reader::Delivery_target> targets;
+    while (true) {
+        std::vector<Process_message_reader::Delivery_target> targets;
 
-    {
-        std::shared_lock<std::shared_mutex> readers_lock(m_readers_mutex);
-        targets.reserve(m_readers.size() * 2);
+        {
+            std::shared_lock<std::shared_mutex> readers_lock(m_readers_mutex);
+            targets.reserve(m_readers.size() * 2);
 
-        for (auto& [process_id, reader_ptr] : m_readers) {
-            (void)process_id;
-            if (!reader_ptr) {
-                continue;
-            }
+            for (auto& [process_id, reader_ptr] : m_readers) {
+                (void)process_id;
+                if (!reader_ptr) {
+                    continue;
+                }
 
-            auto& reader = *reader_ptr;
-            if (reader.state() != Process_message_reader::READER_NORMAL) {
-                continue;
-            }
+                auto& reader = *reader_ptr;
+                if (reader.state() != Process_message_reader::READER_NORMAL) {
+                    continue;
+                }
 
-            const auto req_target = reader.get_request_leading_sequence();
-            auto req_target_info = reader.prepare_delivery_target(
-                Process_message_reader::Delivery_stream::Request,
-                req_target);
-            if (req_target_info.wait_needed) {
-                targets.emplace_back(std::move(req_target_info));
-            }
+                const auto req_target = reader.get_request_leading_sequence();
+                auto req_target_info = reader.prepare_delivery_target(
+                    Process_message_reader::Delivery_stream::Request,
+                    req_target);
+                if (req_target_info.wait_needed) {
+                    targets.emplace_back(std::move(req_target_info));
+                }
 
-            const auto rep_target = reader.get_reply_leading_sequence();
-            auto rep_target_info = reader.prepare_delivery_target(
-                Process_message_reader::Delivery_stream::Reply,
-                rep_target);
-            if (rep_target_info.wait_needed) {
-                targets.emplace_back(std::move(rep_target_info));
+                const auto rep_target = reader.get_reply_leading_sequence();
+                auto rep_target_info = reader.prepare_delivery_target(
+                    Process_message_reader::Delivery_stream::Reply,
+                    rep_target);
+                if (rep_target_info.wait_needed) {
+                    targets.emplace_back(std::move(rep_target_info));
+                }
             }
         }
-    }
 
-    if (targets.empty()) {
-        return;
-    }
+        if (targets.empty()) {
+            return;
+        }
 
-    auto all_targets_satisfied = [&]() {
-        if (m_communication_state != COMMUNICATION_RUNNING) {
+        auto all_targets_satisfied = [&]() {
+            if (m_communication_state != COMMUNICATION_RUNNING) {
+                return true;
+            }
+
+            for (const auto& target : targets) {
+                auto progress = target.progress.lock();
+                if (!progress) {
+                    continue;
+                }
+
+                const auto observed = (target.stream == Process_message_reader::Delivery_stream::Request)
+                    ? progress->request_sequence.load(std::memory_order_acquire)
+                    : progress->reply_sequence.load(std::memory_order_acquire);
+
+                if (observed >= target.target) {
+                    continue;
+                }
+
+                const auto stopped = (target.stream == Process_message_reader::Delivery_stream::Request)
+                    ? progress->request_stopped.load(std::memory_order_acquire)
+                    : progress->reply_stopped.load(std::memory_order_acquire);
+
+                if (stopped) {
+                    continue;
+                }
+
+                return false;
+            }
+
             return true;
+        };
+
+        if (all_targets_satisfied()) {
+            return;
         }
 
-        for (const auto& target : targets) {
-            auto progress = target.progress.lock();
-            if (!progress) {
-                // Reader was replaced or destroyed; treat as satisfied because
-                // no further progress is possible on the captured stream.
-                continue;
-            }
+        auto targets_made_progress = [&]() {
+            for (const auto& target : targets) {
+                auto progress = target.progress.lock();
+                if (!progress) {
+                    return true;
+                }
 
-            const auto observed = (target.stream == Process_message_reader::Delivery_stream::Request)
-                ? progress->request_sequence.load(std::memory_order_acquire)
-                : progress->reply_sequence.load(std::memory_order_acquire);
+                const auto current = (target.stream == Process_message_reader::Delivery_stream::Request)
+                    ? progress->request_sequence.load(std::memory_order_acquire)
+                    : progress->reply_sequence.load(std::memory_order_acquire);
 
-            if (observed >= target.target) {
-                continue;
-            }
+                if (current > target.observed) {
+                    return true;
+                }
 
-            const auto stopped = (target.stream == Process_message_reader::Delivery_stream::Request)
-                ? progress->request_stopped.load(std::memory_order_acquire)
-                : progress->reply_stopped.load(std::memory_order_acquire);
+                const auto stopped = (target.stream == Process_message_reader::Delivery_stream::Request)
+                    ? progress->request_stopped.load(std::memory_order_acquire)
+                    : progress->reply_stopped.load(std::memory_order_acquire);
 
-            if (stopped) {
-                continue;
+                if (stopped) {
+                    return true;
+                }
             }
 
             return false;
+        };
+
+        std::unique_lock<std::mutex> lk(m_delivery_mutex);
+        bool waited_for_targets = false;
+
+        if (!tl_is_req_thread) {
+            waited_for_targets = true;
+            m_delivery_condition.wait(lk, all_targets_satisfied);
+        }
+        else {
+            while (!all_targets_satisfied()) {
+                if (tl_post_handler_function) {
+                    waited_for_targets = true;
+                    auto post_handler = std::move(tl_post_handler_function);
+                    tl_post_handler_function = {};
+
+                    lk.unlock();
+                    try {
+                        post_handler();
+                    }
+                    catch (...) {
+                        lk.lock();
+                        throw;
+                    }
+                    lk.lock();
+
+                    continue;
+                }
+
+                waited_for_targets = true;
+                m_delivery_condition.wait(lk);
+            }
         }
 
-        return true;
-    };
+        if (!waited_for_targets) {
+            return;
+        }
 
-    if (all_targets_satisfied()) {
-        return;
-    }
-
-    std::unique_lock<std::mutex> lk(m_delivery_mutex);
-
-    if (!tl_is_req_thread) {
-        m_delivery_condition.wait(lk, all_targets_satisfied);
-        return;
-    }
-
-    while (!all_targets_satisfied()) {
-        if (tl_post_handler_function) {
-            auto post_handler = std::move(tl_post_handler_function);
-            tl_post_handler_function = {};
-
-            lk.unlock();
-            try {
-                post_handler();
-            }
-            catch (...) {
-                lk.lock();
-                throw;
-            }
-            lk.lock();
-
+        if (!targets_made_progress()) {
             continue;
         }
 
-        // Spurious wake-ups are possible here, so re-evaluate the delivery
-        // targets on each iteration rather than relying on the condition's
-        // predicate form. This keeps the post-handler draining path symmetric
-        // with the non-request thread case.
-        m_delivery_condition.wait(lk);
+        // Progress has been observed; resnapshot delivery targets to ensure we capture
+        // any additional work generated while draining the fence.
     }
 }
 

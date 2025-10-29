@@ -22,6 +22,8 @@ Options:
 
 import argparse
 import fnmatch
+import importlib
+import importlib.util
 import json
 import os
 import shlex
@@ -36,7 +38,186 @@ import urllib.request
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, IO, List, Optional, Set, Tuple
+from typing import Dict, IO, Iterable, List, Optional, Sequence, Set, Tuple
+
+
+_PSUTIL = None
+if importlib.util.find_spec("psutil") is not None:
+    _PSUTIL = importlib.import_module("psutil")
+
+
+PRESERVE_CORES_ENV = "SINTRA_PRESERVE_CORES"
+
+# macOS emits Mach-O core files that snapshot every virtual memory region of the
+# crashing process. Two platform effects make Sintra dumps look enormous even
+# when very little physical memory is dirtied:
+#
+#   • The dynamic loader reserves a 4 GiB ``__PAGEZERO`` segment on every
+#     process. That reservation is always recorded in the core image even though
+#     it contains no data.
+#   • Every request/reply ring that ``Managed_process`` touches is "double
+#     mapped" by ``Ring_data::attach``: we reserve a 2× span and map the 2 MiB
+#     data file twice so wrap-around reads stay linear. Each active channel
+#     therefore contributes roughly 4 MiB of virtual address space. During the
+#     recovery test the coordinator plus the watchdog/crasher pair keep dozens of
+#     these channels open concurrently (outgoing rings for the local process plus
+#     readers for every remote process slot), which adds roughly another 250 MiB
+#     of reservations.
+#
+# GitHub Actions used to report the logical size of that 4 GiB + ~250 MiB address
+# space (~4.24 GiB) as soon as a Mach-O core was written even though the rings
+# are sparse files on APFS. ``MADV_DONTDUMP`` handles this automatically on
+# Linux. macOS does not expose the flag, so ``recovery_test`` disables core
+# dumps immediately before its intentional ``std::abort()`` to keep runners from
+# filling their disks with Mach-O artifacts.
+
+
+def _format_size(num_bytes: Optional[int]) -> str:
+    """Return a human-friendly representation of ``num_bytes``."""
+
+    if num_bytes is None:
+        return "unknown"
+
+    if num_bytes < 0:
+        return "unknown"
+
+    units = ["B", "KB", "MB", "GB", "TB", "PB"]
+    value = float(num_bytes)
+    for unit in units:
+        if value < 1024.0:
+            return f"{value:.2f} {unit}"
+        value /= 1024.0
+    return f"{value:.2f} EB"
+
+
+def _available_memory_bytes() -> Optional[int]:
+    """Best-effort determination of available physical memory."""
+
+    if _PSUTIL is not None:
+        try:
+            return int(_PSUTIL.virtual_memory().available)
+        except Exception:
+            pass
+
+    try:
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        avail_pages = os.sysconf("SC_AVPHYS_PAGES")
+    except (AttributeError, OSError, ValueError):
+        page_size = None
+        avail_pages = None
+
+    if isinstance(page_size, int) and isinstance(avail_pages, int):
+        return page_size * avail_pages
+
+    if sys.platform == "darwin":
+        try:
+            vm_stat = subprocess.run(
+                ["vm_stat"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except Exception:
+            return None
+
+        page_size_bytes = 4096
+        for line in vm_stat.stdout.splitlines():
+            if line.startswith("page size of"):
+                parts = line.split()
+                try:
+                    page_size_bytes = int(parts[3])
+                except (IndexError, ValueError):
+                    page_size_bytes = 4096
+                break
+
+        free_pages = 0
+        inactive_pages = 0
+        speculative_pages = 0
+
+        for line in vm_stat.stdout.splitlines():
+            if line.startswith("Pages free"):
+                free_pages = int(line.split(":")[1].strip().strip("."))
+            elif line.startswith("Pages inactive"):
+                inactive_pages = int(line.split(":")[1].strip().strip("."))
+            elif line.startswith("Pages speculative"):
+                speculative_pages = int(line.split(":")[1].strip().strip("."))
+
+        return page_size_bytes * (free_pages + inactive_pages + speculative_pages)
+
+    return None
+
+
+def _available_disk_bytes(path: Path) -> Optional[int]:
+    """Return free disk space for ``path``."""
+
+    try:
+        usage = shutil.disk_usage(path)
+    except Exception:
+        return None
+    return usage.free
+
+
+def _env_flag(name: str) -> bool:
+    """Return True if the specified environment variable is truthy."""
+
+    value = os.environ.get(name)
+    if value is None:
+        return False
+
+    normalized = value.strip().lower()
+    if not normalized:
+        return False
+
+    return normalized not in {"0", "false", "no", "off"}
+
+
+def _find_lingering_processes(prefixes: Sequence[str]) -> List[Tuple[int, str]]:
+    """Return processes whose names start with one of ``prefixes``."""
+
+    normalized_prefixes = tuple(prefixes)
+    matches: List[Tuple[int, str]] = []
+
+    if _PSUTIL is not None:
+        try:
+            for proc in _PSUTIL.process_iter(["name"]):
+                name = proc.info.get("name") or ""
+                if name.startswith(normalized_prefixes):
+                    matches.append((proc.pid, name))
+        except Exception:
+            pass
+        if matches:
+            return matches
+
+    try:
+        ps_output = subprocess.run(
+            ["ps", "-axo", "pid=,comm="],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        return matches
+
+    for line in ps_output.stdout.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2:
+            continue
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        name = parts[1]
+        if name.startswith(normalized_prefixes):
+            matches.append((pid, name))
+
+    return matches
+
+
+def _describe_processes(processes: Iterable[Tuple[int, str]]) -> str:
+    """Return a compact string description of ``processes``."""
+
+    formatted = [f"{name} (pid={pid})" for pid, name in processes]
+    return ", ".join(formatted) if formatted else ""
 
 class Color:
     """ANSI color codes for terminal output"""
@@ -48,8 +229,12 @@ class Color:
     BOLD = '\033[1m'
 
 
-# Tests that should receive additional repetition weight. The multiplier value
-# is applied on top of the global ``--repetitions`` argument.
+# Tests that should receive additional repetition weight. Each value represents
+# the minimum number of times that the corresponding test should run when the
+# global ``--repetitions`` argument is set to 1. Larger ``--repetitions`` values
+# can still increase the total runs for a test, but the override no longer
+# multiplies the global value directly (which previously caused runaway runtimes
+# when soak runs used high repetition counts).
 TEST_WEIGHT_OVERRIDES = {
     # ipc_rings release stress tests
     "ipc_rings_tests_release:stress:stress_attach_detach_readers": 200,
@@ -86,6 +271,14 @@ TEST_TIMEOUT_OVERRIDES = {
     "recovery_test_debug": 120.0,
     "recovery_test_release": 120.0,
 }
+
+# Configure the maximum amount of wall time the runner spends attaching live
+# debuggers before declaring stack capture unavailable. Users can extend this by
+# setting ``SINTRA_LIVE_STACK_ATTACH_TIMEOUT`` (in seconds) when particularly
+# heavy stress suites need more time.
+LIVE_STACK_ATTACH_TIMEOUT_ENV = 'SINTRA_LIVE_STACK_ATTACH_TIMEOUT'
+DEFAULT_LIVE_STACK_ATTACH_TIMEOUT = 30.0
+DEFAULT_LLDB_LIVE_STACK_ATTACH_TIMEOUT = 90.0
 
 WINDOWS_DEBUGGER_CACHE_ENV = 'SINTRA_WINDOWS_DEBUGGER_CACHE'
 WINSDK_INSTALLER_URL_ENV = 'SINTRA_WINSDK_INSTALLER_URL'
@@ -129,6 +322,28 @@ def _lookup_test_timeout(name: str, default: float) -> float:
         return default
     return max(default, override)
 
+
+def _calculate_target_repetitions(base_repetitions: int, weight: int) -> int:
+    """Return the total repetitions to run for a test.
+
+    ``weight`` expresses the desired run count when ``base_repetitions`` is 1.
+    Increasing ``base_repetitions`` beyond 1 no longer multiplies the weight,
+    preventing exponential growth in soak runs with large weight overrides.
+    ``base_repetitions`` can still override the weight when set higher.
+    """
+
+    base = max(base_repetitions, 0)
+    if base == 0:
+        return 0
+
+    if weight <= 1:
+        return base
+
+    if base == 1:
+        return weight
+
+    return max(base, weight)
+
 def format_duration(seconds: float) -> str:
     """Format duration in human-readable format"""
     if seconds < 1:
@@ -165,12 +380,27 @@ class TestRunner:
         self.timeout = timeout
         self.verbose = verbose
         self.preserve_on_timeout = preserve_on_timeout
+        sanitized_config = ''.join(c.lower() if c.isalnum() else '_' for c in config)
+        timestamp_ms = int(time.time() * 1000)
+        scratch_dir_name = f".sintra-test-scratch-{sanitized_config}-{timestamp_ms}-{os.getpid()}"
+        self._scratch_base = (self.build_dir / scratch_dir_name).resolve()
+        self._scratch_base.mkdir(parents=True, exist_ok=True)
+        self._scratch_lock = threading.Lock()
+        self._scratch_counter = 0
         self._ipc_rings_cache: Dict[Path, List[Tuple[str, str]]] = {}
         self._debugger_cache: Dict[str, Tuple[Optional[str], str]] = {}
         self._downloaded_windows_debugger_root: Optional[Path] = None
         self._stack_capture_history: Dict[str, Set[str]] = defaultdict(set)
         self._stack_capture_history_lock = threading.Lock()
         self._sudo_capability: Optional[bool] = None
+        self._windows_crash_dump_dir: Optional[Path] = None
+        self._preserve_core_dumps = _env_flag(PRESERVE_CORES_ENV)
+        self._core_cleanup_lock = threading.Lock()
+        self._core_cleanup_messages: List[Tuple[str, str]] = []
+        self._core_cleanup_bytes_freed = 0
+        self._scratch_cleanup_lock = threading.Lock()
+        self._scratch_cleanup_dirs_removed = 0
+        self._scratch_cleanup_bytes_freed = 0
 
         # Determine test directory - check both with and without config subdirectory
         test_dir_with_config = build_dir / 'tests' / config
@@ -186,6 +416,287 @@ class TestRunner:
 
         if sys.platform == 'win32':
             self._prepare_windows_debuggers()
+            dump_error = self._ensure_windows_local_dumps()
+            if dump_error:
+                print(
+                    f"{Color.YELLOW}Warning: {dump_error}. "
+                    f"Crash dumps may be unavailable.{Color.RESET}"
+                )
+            jit_error = self._configure_windows_jit_debugging()
+            if jit_error:
+                print(
+                    f"{Color.YELLOW}Warning: {jit_error}. "
+                    f"JIT prompts may still block crash dumps.{Color.RESET}"
+                )
+
+    def _allocate_scratch_directory(self, invocation: TestInvocation) -> Path:
+        """Create a per-invocation scratch directory for test artifacts."""
+
+        safe_name = ''.join(c if c.isalnum() or c in ('-', '_') else '_' for c in invocation.name)
+        with self._scratch_lock:
+            index = self._scratch_counter
+            self._scratch_counter += 1
+
+        directory = self._scratch_base / f"{safe_name}_{index}"
+        directory.mkdir(parents=True, exist_ok=True)
+        return directory
+
+    def _build_test_environment(self, scratch_dir: Path) -> Dict[str, str]:
+        """Return the environment variables for a test invocation."""
+
+        env = os.environ.copy()
+        env['SINTRA_TEST_ROOT'] = str(scratch_dir)
+        return env
+
+    @staticmethod
+    def _estimate_directory_size(directory: Path) -> int:
+        """Return a best-effort estimate of ``directory`` size in bytes."""
+
+        total = 0
+        if not directory.exists():
+            return total
+
+        try:
+            for root, _, files in os.walk(directory):
+                root_path = Path(root)
+                for name in files:
+                    file_path = root_path / name
+                    try:
+                        total += file_path.stat().st_size
+                    except OSError:
+                        continue
+        except OSError:
+            return total
+
+        return total
+
+    def _record_scratch_cleanup(self, freed_bytes: int) -> None:
+        """Track scratch-directory cleanup statistics for later reporting."""
+
+        with self._scratch_cleanup_lock:
+            self._scratch_cleanup_dirs_removed += 1
+            if freed_bytes > 0:
+                self._scratch_cleanup_bytes_freed += freed_bytes
+
+    def _cleanup_scratch_directory(self, directory: Path) -> None:
+        """Best-effort removal of a scratch directory."""
+
+        size_estimate = self._estimate_directory_size(directory)
+
+        try:
+            shutil.rmtree(directory)
+        except FileNotFoundError:
+            return
+        except Exception as exc:
+            print(
+                f"\n{Color.YELLOW}Warning: Failed to remove scratch directory {directory}: {exc}{Color.RESET}"
+            )
+            return
+
+        self._record_scratch_cleanup(size_estimate)
+
+    def _core_dump_search_directories(self, invocation: TestInvocation) -> List[Path]:
+        """Return directories that may contain core dumps for ``invocation``."""
+
+        candidates: Set[Path] = {
+            invocation.path.parent.resolve(),
+            Path.cwd().resolve(),
+            self.build_dir.resolve(),
+            self._scratch_base,
+        }
+
+        if sys.platform == "darwin":
+            candidates.add(Path("/cores"))
+            candidates.add(Path.home() / "Library" / "Logs" / "DiagnosticReports")
+        elif sys.platform.startswith("linux"):
+            candidates.add(Path("/var/lib/systemd/coredump"))
+
+        return [path for path in candidates if path]
+
+    @staticmethod
+    def _is_core_dump_file(path: Path) -> bool:
+        """Return True if ``path`` appears to be a core dump file."""
+
+        name = path.name
+        return (
+            name == "core"
+            or name.startswith("core.")
+            or name.startswith("core-")
+            or name.endswith(".core")
+        )
+
+    @staticmethod
+    def _normalize_core_path(path: Path) -> Path:
+        """Return a canonical representation for core dump paths."""
+
+        try:
+            return path.resolve()
+        except OSError:
+            return path
+
+    def _snapshot_core_dumps(self, invocation: TestInvocation) -> Set[Path]:
+        """Capture the set of core dump files before launching a test."""
+
+        snapshot: Set[Path] = set()
+        for directory in self._core_dump_search_directories(invocation):
+            try:
+                entries = list(directory.iterdir())
+            except OSError:
+                continue
+
+            for entry in entries:
+                if not entry.is_file():
+                    continue
+                if not self._is_core_dump_file(entry):
+                    continue
+                snapshot.add(self._normalize_core_path(entry))
+
+        return snapshot
+
+    def _find_new_core_dumps(
+        self,
+        invocation: TestInvocation,
+        snapshot: Set[Path],
+        start_time: float,
+    ) -> List[Tuple[Path, float, int]]:
+        """Return newly created core dumps after a test run."""
+
+        new_dumps: List[Tuple[Path, float, int]] = []
+        for directory in self._core_dump_search_directories(invocation):
+            try:
+                entries = list(directory.iterdir())
+            except OSError:
+                continue
+
+            for entry in entries:
+                if not entry.is_file():
+                    continue
+                if not self._is_core_dump_file(entry):
+                    continue
+
+                normalized = self._normalize_core_path(entry)
+                if normalized in snapshot:
+                    continue
+
+                try:
+                    stat_info = entry.stat()
+                except OSError:
+                    continue
+
+                if stat_info.st_mtime + 0.001 < start_time:
+                    continue
+
+                new_dumps.append((normalized, stat_info.st_mtime, stat_info.st_size))
+
+        return new_dumps
+
+    def _record_core_cleanup(self, level: str, message: str, freed_bytes: int = 0) -> None:
+        """Record a core cleanup message to be emitted later."""
+
+        with self._core_cleanup_lock:
+            self._core_cleanup_messages.append((level, message))
+            if freed_bytes:
+                self._core_cleanup_bytes_freed += freed_bytes
+
+    def _cleanup_new_core_dumps(
+        self,
+        invocation: TestInvocation,
+        snapshot: Set[Path],
+        start_time: float,
+        result_success: Optional[bool],
+    ) -> None:
+        """Remove new core dumps to avoid exhausting disk space."""
+
+        new_dumps = self._find_new_core_dumps(invocation, snapshot, start_time)
+        if not new_dumps:
+            return
+
+        total_size = sum(size for _, _, size in new_dumps if size is not None)
+
+        message_prefix = f"Core dumps ({invocation.name})"
+        if result_success:
+            message_prefix = f"{message_prefix} - test reported success"
+
+        if self._preserve_core_dumps:
+            message = (
+                f"{message_prefix}: detected "
+                f"{len(new_dumps)} file(s) totalling {_format_size(total_size)}"
+                f" (preserved due to {PRESERVE_CORES_ENV})"
+            )
+            level = "warning" if result_success else "info"
+            self._record_core_cleanup(level, message)
+            return
+
+        removed: List[str] = []
+        freed_bytes = 0
+        errors: List[str] = []
+
+        for path, _, size in new_dumps:
+            try:
+                if size is None:
+                    size = 0
+                path.unlink()
+                removed.append(path.name)
+                freed_bytes += size
+            except OSError as exc:
+                errors.append(f"Core dumps: failed to remove {path}: {exc}")
+
+        if removed:
+            removed.sort()
+            message = (
+                f"{message_prefix}: removed "
+                f"{len(removed)} file(s) totalling {_format_size(freed_bytes)}"
+                f" ({', '.join(removed)})"
+            )
+            level = "warning" if result_success else "info"
+            self._record_core_cleanup(level, message, freed_bytes=freed_bytes)
+        else:
+            # Nothing removed; still report total detected to aid diagnostics.
+            message = (
+                f"{message_prefix}: detected "
+                f"{len(new_dumps)} file(s) totalling {_format_size(total_size)}"
+            )
+            level = "warning" if result_success else "info"
+            self._record_core_cleanup(level, message)
+
+        for error in errors:
+            self._record_core_cleanup("warning", error)
+
+    def cleanup(self) -> None:
+        """Remove the root scratch directory for this runner."""
+
+        self._cleanup_scratch_directory(self._scratch_base)
+
+    def consume_core_cleanup_reports(self) -> Tuple[int, List[Tuple[str, str]]]:
+        """Return accumulated core cleanup messages and reset the state."""
+
+        with self._core_cleanup_lock:
+            freed = self._core_cleanup_bytes_freed
+            messages = list(self._core_cleanup_messages)
+            self._core_cleanup_messages.clear()
+            self._core_cleanup_bytes_freed = 0
+
+        with self._scratch_cleanup_lock:
+            scratch_dirs = self._scratch_cleanup_dirs_removed
+            scratch_bytes = self._scratch_cleanup_bytes_freed
+            self._scratch_cleanup_dirs_removed = 0
+            self._scratch_cleanup_bytes_freed = 0
+
+        total_freed = freed + scratch_bytes
+
+        if scratch_dirs:
+            noun = "directory" if scratch_dirs == 1 else "directories"
+            messages.append(
+                (
+                    "info",
+                    (
+                        "Scratch: removed "
+                        f"{scratch_dirs} {noun} totalling {_format_size(scratch_bytes)}"
+                    ),
+                )
+            )
+
+        return total_freed, messages
 
     def find_test_suites(
         self,
@@ -200,8 +711,8 @@ class TestRunner:
 
         # 2 configurations: adaptive policy in release and debug builds
         configurations = [
-            'release',
-            'debug'
+            'debug',
+            'release'
         ]
 
         # Discover available tests dynamically so the runner adapts to new or removed binaries
@@ -387,8 +898,14 @@ class TestRunner:
     def run_test_once(self, invocation: TestInvocation) -> TestResult:
         """Run a single test with timeout and proper cleanup"""
         timeout = _lookup_test_timeout(invocation.name, self.timeout)
+        scratch_dir = self._allocate_scratch_directory(invocation)
         process = None
+        cleanup_scratch_dir = True
+        core_snapshot = self._snapshot_core_dumps(invocation)
+        start_time = time.time()
+        result_success: Optional[bool] = None
         try:
+            popen_env = self._build_test_environment(scratch_dir)
             start_time = time.time()
             start_monotonic = time.monotonic()
 
@@ -408,6 +925,7 @@ class TestRunner:
                 popen_kwargs['creationflags'] = creationflags
             else:
                 popen_kwargs['start_new_session'] = True
+            popen_kwargs['env'] = popen_env
 
             stdout_lines: List[str] = []
             stderr_lines: List[str] = []
@@ -632,6 +1150,7 @@ class TestRunner:
                 elif postmortem_stack_error:
                     error_msg = f"{error_msg}\n\n[Post-mortem stack capture unavailable: {postmortem_stack_error}]"
 
+                result_success = success
                 return TestResult(
                     success=success,
                     duration=duration,
@@ -645,6 +1164,7 @@ class TestRunner:
                 if self.preserve_on_timeout:
                     print(f"\n{Color.RED}TIMEOUT: Process exceeded timeout of {timeout}s (PID {process.pid}). Preserving for debugging as requested.{Color.RESET}")
                     print(f"{Color.YELLOW}Attach a debugger to PID {process.pid} or terminate it manually when done.{Color.RESET}")
+                    cleanup_scratch_dir = False
                     sys.exit(2)
 
                 stack_traces = live_stack_traces
@@ -682,6 +1202,7 @@ class TestRunner:
                 elif stack_error:
                     stderr = f"{stderr}\n\n[Stack capture unavailable: {stack_error}]"
 
+                result_success = False
                 return TestResult(
                     success=False,
                     duration=duration,
@@ -698,12 +1219,17 @@ class TestRunner:
             error_msg = f"Exception: {str(e)}"
             if stderr:
                 error_msg = f"{error_msg}\n{stderr}"
+            result_success = False
             return TestResult(
                 success=False,
                 duration=0,
                 output=stdout,
                 error=error_msg
             )
+        finally:
+            if cleanup_scratch_dir:
+                self._cleanup_scratch_directory(scratch_dir)
+            self._cleanup_new_core_dumps(invocation, core_snapshot, start_time, result_success)
 
     def _kill_process_tree(self, pid: int):
         """Kill a process and all its children"""
@@ -902,10 +1428,6 @@ class TestRunner:
                 except (ProcessLookupError, PermissionError):
                     continue
 
-        per_pid_timeout = 30
-        total_budget = 90 if debugger_is_macos_lldb else per_pid_timeout
-        capture_deadline = time.monotonic() + total_budget
-
         if debugger_is_macos_lldb:
             # On macOS LLDB fails to attach to processes that are already stopped,
             # so we let the debugger suspend threads itself. The helper processes
@@ -916,6 +1438,27 @@ class TestRunner:
             ordered_target_pids = sorted(target_pids, reverse=True)
         else:
             ordered_target_pids = sorted(target_pids)
+
+        env_timeout = os.environ.get(LIVE_STACK_ATTACH_TIMEOUT_ENV)
+        attach_timeout = 0.0
+        if env_timeout:
+            try:
+                attach_timeout = float(env_timeout)
+            except ValueError:
+                attach_timeout = 0.0
+
+        if attach_timeout <= 0.0:
+            if debugger_is_macos_lldb:
+                attach_timeout = DEFAULT_LLDB_LIVE_STACK_ATTACH_TIMEOUT
+            else:
+                attach_timeout = DEFAULT_LIVE_STACK_ATTACH_TIMEOUT
+
+        per_pid_timeout = min(30.0, attach_timeout)
+        total_budget = attach_timeout
+        capture_deadline = time.monotonic() + total_budget
+        attach_timeout_seconds = attach_timeout
+
+        attach_timeout_hint_needed = False
 
         for target_pid in ordered_target_pids:
             if target_pid == os.getpid():
@@ -931,8 +1474,12 @@ class TestRunner:
                 capture_errors.append(
                     f"PID {target_pid}: skipped stack capture (overall debugger timeout exceeded)"
                 )
+                attach_timeout_hint_needed = True
                 break
-            debugger_timeout = max(5, min(per_pid_timeout, remaining))
+            debugger_timeout = min(
+                remaining,
+                max(5.0, min(per_pid_timeout, remaining)),
+            )
 
             debugger_output = ""
             debugger_error = ""
@@ -960,6 +1507,12 @@ class TestRunner:
                         text=True,
                         timeout=debugger_timeout,
                     )
+                except subprocess.TimeoutExpired:
+                    debugger_error = (
+                        f"{debugger_name} timed out after {debugger_timeout:.1f}s while attaching"
+                    )
+                    attach_timeout_hint_needed = True
+                    break
                 except subprocess.SubprocessError as exc:
                     debugger_error = f"{debugger_name} failed ({exc})"
                     break
@@ -1035,6 +1588,15 @@ class TestRunner:
 
         if stack_outputs:
             return "\n\n".join(stack_outputs), ""
+
+        if attach_timeout_hint_needed:
+            capture_errors.append(
+                (
+                    "Live stack capture timed out after "
+                    f"{attach_timeout_seconds:.1f}s; increase "
+                    f"{LIVE_STACK_ATTACH_TIMEOUT_ENV} to allow more debugger time"
+                )
+            )
 
         if capture_errors:
             return "", "; ".join(capture_errors)
@@ -1918,6 +2480,154 @@ class TestRunner:
                 f"Stack capture may be unavailable.{Color.RESET}"
             )
 
+    def _ensure_windows_local_dumps(self) -> Optional[str]:
+        """Configure Windows Error Reporting to create crash dumps for tests."""
+
+        if sys.platform != 'win32':
+            return None
+
+        if self._windows_crash_dump_dir is not None:
+            return None
+
+        try:
+            import winreg  # type: ignore
+        except ImportError as exc:  # pragma: no cover - Windows specific
+            return f"winreg unavailable: {exc}"
+
+        reg_subkey = r"Software\Microsoft\Windows\Windows Error Reporting\LocalDumps"
+        desired_folder_value = r"%LOCALAPPDATA%\CrashDumps"
+
+        access_flags = winreg.KEY_READ | winreg.KEY_SET_VALUE
+        try:
+            key = winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, reg_subkey, 0, access_flags)
+        except OSError as exc:
+            return f"failed to open registry key HKCU\\{reg_subkey}: {exc}"
+
+        with key:
+            local_app_data = os.environ.get('LOCALAPPDATA')
+            if local_app_data:
+                default_dump_dir = Path(local_app_data) / 'CrashDumps'
+                folder_value_to_set = desired_folder_value
+                folder_value_type = winreg.REG_EXPAND_SZ
+            else:
+                default_dump_dir = Path.home() / 'AppData' / 'Local' / 'CrashDumps'
+                folder_value_to_set = str(default_dump_dir)
+                folder_value_type = winreg.REG_SZ
+
+            existing_folder_value: Optional[str]
+            try:
+                existing_folder_value, existing_type = winreg.QueryValueEx(key, "DumpFolder")
+            except FileNotFoundError:
+                existing_folder_value = None
+
+            dump_dir: Path
+            if existing_folder_value:
+                expanded = os.path.expandvars(existing_folder_value)
+                dump_dir = Path(expanded).expanduser()
+                if not dump_dir.is_absolute():
+                    dump_dir = default_dump_dir
+            else:
+                dump_dir = default_dump_dir
+                try:
+                    winreg.SetValueEx(
+                        key,
+                        "DumpFolder",
+                        0,
+                        folder_value_type,
+                        folder_value_to_set,
+                    )
+                except OSError as exc:
+                    return f"failed to set DumpFolder value: {exc}"
+
+            value_expectations = (
+                ("DumpType", 2, winreg.REG_DWORD),
+                ("DumpCount", 10, winreg.REG_DWORD),
+            )
+            for value_name, expected, reg_type in value_expectations:
+                try:
+                    current_value, _ = winreg.QueryValueEx(key, value_name)
+                except FileNotFoundError:
+                    current_value = None
+                if current_value != expected:
+                    try:
+                        winreg.SetValueEx(key, value_name, 0, reg_type, expected)
+                    except OSError as exc:
+                        return f"failed to set {value_name} value: {exc}"
+
+        try:
+            dump_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            return f"failed to create crash dump directory {dump_dir}: {exc}"
+
+        self._windows_crash_dump_dir = dump_dir
+        return None
+
+    def _configure_windows_jit_debugging(self) -> Optional[str]:
+        """Disable intrusive JIT prompts so crash dumps complete automatically."""
+
+        if sys.platform != 'win32':
+            return None
+
+        try:
+            import winreg  # type: ignore
+        except ImportError as exc:  # pragma: no cover - Windows specific
+            return f"winreg unavailable: {exc}"
+
+        errors: List[str] = []
+
+        def set_dword(
+            root: "winreg.HKEYType",
+            subkey: str,
+            value_name: str,
+            value: int,
+            access: int,
+        ) -> None:
+            try:
+                key = winreg.CreateKeyEx(root, subkey, 0, access)
+            except OSError as exc:
+                errors.append(f"failed to open {subkey}: {exc}")
+                return
+
+            try:
+                with key:
+                    winreg.SetValueEx(key, value_name, 0, winreg.REG_DWORD, value)
+            except OSError as exc:
+                errors.append(f"failed to set {subkey}\\{value_name}: {exc}")
+
+        set_dword(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"Software\Microsoft\Windows NT\CurrentVersion\AeDebug",
+            "Auto",
+            1,
+            winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY,
+        )
+
+        set_dword(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"Software\Microsoft\Windows\Windows Error Reporting",
+            "DontShowUI",
+            1,
+            winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY,
+        )
+
+        jit_subkeys = [
+            (winreg.HKEY_LOCAL_MACHINE, r"Software\Microsoft\.NETFramework"),
+            (winreg.HKEY_LOCAL_MACHINE, r"Software\Wow6432Node\Microsoft\.NETFramework"),
+            (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\.NETFramework"),
+        ]
+        for root, subkey in jit_subkeys:
+            access = winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY
+            if root == winreg.HKEY_CURRENT_USER:
+                access = winreg.KEY_SET_VALUE
+            elif "Wow6432Node" in subkey:
+                access = winreg.KEY_SET_VALUE | winreg.KEY_WOW64_32KEY
+            set_dword(root, subkey, "DbgJITDebugLaunchSetting", 2, access)
+
+        if errors:
+            return "; ".join(errors)
+
+        return None
+
     def _resolve_windows_debugger(self) -> Tuple[Optional[str], Optional[str], str]:
         """Return the first available Windows debugger and its path."""
 
@@ -1949,6 +2659,9 @@ class TestRunner:
             return "", debugger_error
 
         candidate_dirs = [invocation.path.parent, Path.cwd()]
+
+        if self._windows_crash_dump_dir:
+            candidate_dirs.insert(0, self._windows_crash_dump_dir)
 
         local_app_data = os.environ.get('LOCALAPPDATA')
         if local_app_data:
@@ -2469,6 +3182,13 @@ class TestRunner:
 
         print()  # Final newline
 
+        _, cleanup_messages = self.consume_core_cleanup_reports()
+        for level, message in cleanup_messages:
+            if level == 'warning':
+                print(f"  {Color.YELLOW}{message}{Color.RESET}")
+            else:
+                print(f"  {message}")
+
         return passed, failed, results
 
     def print_summary(self, invocation: TestInvocation, passed: int, failed: int, results: List[TestResult]):
@@ -2656,225 +3376,254 @@ def main():
 
     preserve_on_timeout = args.preserve_stalled_processes
     runner = TestRunner(build_dir, args.config, args.timeout, args.verbose, preserve_on_timeout)
-    test_suites = runner.find_test_suites(
-        test_name=args.test,
-        include_patterns=include_patterns,
-        exclude_patterns=exclude_patterns,
-    )
+    try:
+        test_suites = runner.find_test_suites(
+            test_name=args.test,
+            include_patterns=include_patterns,
+            exclude_patterns=exclude_patterns,
+        )
 
-    if not test_suites:
-        print(f"{Color.RED}No test suites found to run{Color.RESET}")
-        return 1
+        if not test_suites:
+            print(f"{Color.RED}No test suites found to run{Color.RESET}")
+            return 1
 
-    total_configs = len(test_suites)
-    print(f"Found {total_configs} configuration suite(s) to run")
+        total_configs = len(test_suites)
+        print(f"Found {total_configs} configuration suite(s) to run")
 
-    overall_start_time = time.time()
-    overall_all_passed = True
+        overall_start_time = time.time()
+        overall_all_passed = True
 
-    # Run each configuration suite independently
-    for config_idx, (config_name, tests) in enumerate(test_suites.items(), 1):
-        print(f"\n{'=' * 80}")
-        print(f"{Color.BOLD}{Color.BLUE}Configuration {config_idx}/{total_configs}: {config_name}{Color.RESET}")
-        print(f"  Tests in suite: {len(tests)}")
-        print(f"  Repetitions: {args.repetitions}")
-        print(f"{'=' * 80}")
+        # Run each configuration suite independently
+        for config_idx, (config_name, tests) in enumerate(test_suites.items(), 1):
+            print(f"\n{'=' * 80}")
+            print(f"{Color.BOLD}{Color.BLUE}Configuration {config_idx}/{total_configs}: {config_name}{Color.RESET}")
+            print(f"  Tests in suite: {len(tests)}")
+            print(f"  Repetitions: {args.repetitions}")
+            print(f"{'=' * 80}")
 
-        suite_start_time = time.time()
+            suite_start_time = time.time()
 
-        # Adaptive soak test for this suite
-        accumulated_results = {
-            invocation.name: {'passed': 0, 'failed': 0, 'durations': [], 'failures': []}
-            for invocation in tests
-        }
-        test_weights = {invocation.name: _lookup_test_weight(invocation.name) for invocation in tests}
-        target_repetitions = {
-            name: max(args.repetitions * weight, 0)
-            for name, weight in test_weights.items()
-        }
-        remaining_repetitions = target_repetitions.copy()
-        suite_all_passed = True
-        batch_size = 1
+            # Adaptive soak test for this suite
+            accumulated_results = {
+                invocation.name: {'passed': 0, 'failed': 0, 'durations': [], 'failures': []}
+                for invocation in tests
+            }
+            test_weights = {invocation.name: _lookup_test_weight(invocation.name) for invocation in tests}
+            target_repetitions = {
+                name: _calculate_target_repetitions(args.repetitions, weight)
+                for name, weight in test_weights.items()
+            }
+            remaining_repetitions = target_repetitions.copy()
+            suite_all_passed = True
+            batch_size = 1
 
-        weighted_tests = [
-            (_canonical_test_name(name), weight, target_repetitions[name])
-            for name, weight in test_weights.items()
-            if weight != 1
-        ]
-        if weighted_tests:
-            print(f"  Weighted tests:")
-            for display_name, weight, total in sorted(weighted_tests):
-                print(f"    {display_name}: x{weight} -> {total} repetition(s)")
+            weighted_tests = [
+                (_canonical_test_name(name), weight, target_repetitions[name])
+                for name, weight in test_weights.items()
+                if weight != 1
+            ]
+            if weighted_tests:
+                print(f"  Weighted tests:")
+                for display_name, weight, total in sorted(weighted_tests):
+                    print(f"    {display_name}: x{weight} -> {total} repetition(s)")
 
-        while True:
-            remaining_counts = [count for count in remaining_repetitions.values() if count > 0]
-            if not remaining_counts:
-                break
+            while True:
+                remaining_counts = [count for count in remaining_repetitions.values() if count > 0]
+                if not remaining_counts:
+                    break
 
-            max_remaining = max(remaining_counts)
-            reps_in_this_round = min(batch_size, max_remaining)
-            print(f"\n{Color.BLUE}--- Round: {reps_in_this_round} repetition(s) ---{Color.RESET}")
+                max_remaining = max(remaining_counts)
+                reps_in_this_round = min(batch_size, max_remaining)
+                print(f"\n{Color.BLUE}--- Round: {reps_in_this_round} repetition(s) ---{Color.RESET}")
 
-            for i in range(reps_in_this_round):
-                print(f"  Rep {i + 1}/{reps_in_this_round}: ", end="", flush=True)
-                for invocation in tests:
-                    test_name = invocation.name
-                    if remaining_repetitions[test_name] <= 0:
-                        continue
+                lingering = _find_lingering_processes(("sintra_",))
+                if lingering:
+                    details = _describe_processes(lingering)
+                    print(
+                        f"  {Color.YELLOW}Warning: Detected lingering sintra processes before starting the round: {details}{Color.RESET}"
+                    )
 
-                    result = runner.run_test_once(invocation)
+                for i in range(reps_in_this_round):
+                    print(f"  Rep {i + 1}/{reps_in_this_round}: ", end="", flush=True)
+                    for invocation in tests:
+                        test_name = invocation.name
+                        if remaining_repetitions[test_name] <= 0:
+                            continue
 
-                    accumulated_results[test_name]['durations'].append(result.duration)
+                        result = runner.run_test_once(invocation)
 
-                    result_bucket = accumulated_results[test_name]
+                        accumulated_results[test_name]['durations'].append(result.duration)
 
-                    if result.success:
-                        result_bucket['passed'] += 1
-                        print(f"{Color.GREEN}.{Color.RESET}", end="", flush=True)
-                    else:
-                        result_bucket['failed'] += 1
-                        suite_all_passed = False
-                        overall_all_passed = False
+                        result_bucket = accumulated_results[test_name]
 
-                        run_index = result_bucket['passed'] + result_bucket['failed']
-                        error_message = (result.error or '').strip()
-                        if error_message:
-                            first_line = error_message.splitlines()[0]
+                        if result.success:
+                            result_bucket['passed'] += 1
+                            print(f"{Color.GREEN}.{Color.RESET}", end="", flush=True)
                         else:
-                            first_line = 'No error output captured'
+                            result_bucket['failed'] += 1
+                            suite_all_passed = False
+                            overall_all_passed = False
 
-                        result_bucket['failures'].append({
-                            'run': run_index,
-                            'summary': first_line,
-                            'message': error_message if error_message else first_line,
-                        })
+                            run_index = result_bucket['passed'] + result_bucket['failed']
+                            error_message = (result.error or '').strip()
+                            if error_message:
+                                first_line = error_message.splitlines()[0]
+                            else:
+                                first_line = 'No error output captured'
 
-                        print(f"{Color.RED}F{Color.RESET}", end="", flush=True)
+                            result_bucket['failures'].append({
+                                'run': run_index,
+                                'summary': first_line,
+                                'message': error_message if error_message else first_line,
+                            })
 
-                    remaining_repetitions[test_name] -= 1
+                            print(f"{Color.RED}F{Color.RESET}", end="", flush=True)
 
-                print()
+                        remaining_repetitions[test_name] -= 1
+
+                    print()
+                    if not suite_all_passed:
+                        break
+
+                round_elapsed = time.time() - suite_start_time
+                print(
+                    f"    {Color.BLUE}Round complete - total elapsed: {format_duration(round_elapsed)}{Color.RESET}"
+                )
+
+                available_memory = _available_memory_bytes()
+                disk_space = _available_disk_bytes(runner.build_dir)
+                print(
+                    f"    Diagnostics: available memory={_format_size(available_memory)}, "
+                    f"free disk={_format_size(disk_space)}"
+                )
+
+                _, cleanup_messages = runner.consume_core_cleanup_reports()
+                for level, message in cleanup_messages:
+                    if level == 'warning':
+                        print(f"    {Color.YELLOW}{message}{Color.RESET}")
+                    else:
+                        print(f"    {message}")
+
                 if not suite_all_passed:
                     break
 
-            if not suite_all_passed:
+                batch_size = min(batch_size * 2, max_remaining)
+
+            # Print suite results
+            suite_duration = time.time() - suite_start_time
+            def format_test_name(test_name):
+                """Format the raw test name for display in the summary table."""
+
+                formatted = test_name
+                if formatted.startswith("sintra_"):
+                    formatted = formatted[len("sintra_"):]
+
+                if formatted.startswith("ipc_rings_tests_"):
+                    formatted = formatted.replace("_release_adaptive", "_release", 1)
+                    formatted = formatted.replace("_debug_adaptive", "_debug", 1)
+                    if formatted.endswith("_release"):
+                        formatted = formatted[:-len("_release")] + " (release)"
+                    elif formatted.endswith("_debug"):
+                        formatted = formatted[:-len("_debug")] + " (debug)"
+
+                return formatted
+
+            def sort_key(test_name):
+                formatted = format_test_name(test_name)
+                if formatted.startswith("dummy_test"):
+                    group = 0
+                elif formatted.startswith("ipc_rings_tests"):
+                    group = 1
+                else:
+                    group = 2
+                return group, formatted
+
+            print(f"\n{Color.BOLD}Results for {config_name}:{Color.RESET}")
+
+            ordered_test_names = sorted(accumulated_results.keys(), key=sort_key)
+            formatted_names = [format_test_name(name) for name in ordered_test_names]
+
+            test_col_width = max([len(name) for name in formatted_names] + [4]) + 2
+            passrate_col_width = 20
+            avg_runtime_col_width = 17
+
+            header_fmt = (
+                f"{{:<{test_col_width}}}"
+                f" {{:>{passrate_col_width}}}"
+                f" {{:>{avg_runtime_col_width}}}"
+            )
+            row_fmt = header_fmt
+            table_width = test_col_width + passrate_col_width + avg_runtime_col_width + 2
+
+            print("=" * table_width)
+            print(header_fmt.format('Test', 'Pass rate', 'Avg runtime (s)'))
+            print("=" * table_width)
+
+            for test_name, display_name in zip(ordered_test_names, formatted_names):
+                passed = accumulated_results[test_name]['passed']
+                failed = accumulated_results[test_name]['failed']
+                total = passed + failed
+                pass_rate = (passed / total * 100) if total > 0 else 0
+
+                durations = accumulated_results[test_name]['durations']
+                avg_duration = sum(durations) / len(durations) if durations else 0
+
+                pass_rate_str = f"{passed}/{total} ({pass_rate:6.2f}%)"
+                avg_duration_str = f"{avg_duration:.2f}"
+                print(row_fmt.format(display_name, pass_rate_str, avg_duration_str))
+
+            print("=" * table_width)
+            print(f"Suite duration: {format_duration(suite_duration)}")
+
+            if suite_all_passed:
+                print(f"Suite result: {Color.GREEN}PASSED{Color.RESET}")
+            else:
+                print(f"Suite result: {Color.RED}FAILED{Color.RESET}")
+                failing_tests = {
+                    name: data['failures']
+                    for name, data in accumulated_results.items()
+                    if data['failures']
+                }
+
+                if failing_tests:
+                    print(f"\n{Color.YELLOW}Failure summary:{Color.RESET}")
+                    for test_name, failures in failing_tests.items():
+                        print(f"  {test_name}:")
+                        for failure in failures[:5]:
+                            message = failure.get('message') or ''
+                            summary = failure.get('summary') or message
+                            lines = message.splitlines() if message else []
+
+                            print(f"    Run #{failure['run']}: {summary}")
+
+                            if lines:
+                                if summary == lines[0]:
+                                    extra_lines = lines[1:]
+                                else:
+                                    extra_lines = lines
+                                for line in extra_lines:
+                                    print(f"      {line}")
+
+                        if len(failures) > 5:
+                            remaining = len(failures) - 5
+                            print(f"    ... and {remaining} more failure(s)")
+                print(f"\n{Color.RED}Stopping - suite {config_name} failed{Color.RESET}")
                 break
 
-            batch_size = min(batch_size * 2, max_remaining)
+        # Final summary
+        total_duration = time.time() - overall_start_time
+        print(f"\n{'=' * 80}")
+        print(f"{Color.BOLD}OVERALL SUMMARY{Color.RESET}")
+        print(f"Total duration: {format_duration(total_duration)}")
 
-        # Print suite results
-        suite_duration = time.time() - suite_start_time
-        def format_test_name(test_name):
-            """Format the raw test name for display in the summary table."""
-
-            formatted = test_name
-            if formatted.startswith("sintra_"):
-                formatted = formatted[len("sintra_"):]
-
-            if formatted.startswith("ipc_rings_tests_"):
-                formatted = formatted.replace("_release_adaptive", "_release", 1)
-                formatted = formatted.replace("_debug_adaptive", "_debug", 1)
-                if formatted.endswith("_release"):
-                    formatted = formatted[:-len("_release")] + " (release)"
-                elif formatted.endswith("_debug"):
-                    formatted = formatted[:-len("_debug")] + " (debug)"
-
-            return formatted
-
-        def sort_key(test_name):
-            formatted = format_test_name(test_name)
-            if formatted.startswith("dummy_test"):
-                group = 0
-            elif formatted.startswith("ipc_rings_tests"):
-                group = 1
-            else:
-                group = 2
-            return group, formatted
-
-        print(f"\n{Color.BOLD}Results for {config_name}:{Color.RESET}")
-
-        ordered_test_names = sorted(accumulated_results.keys(), key=sort_key)
-        formatted_names = [format_test_name(name) for name in ordered_test_names]
-
-        test_col_width = max([len(name) for name in formatted_names] + [4]) + 2
-        passrate_col_width = 20
-        avg_runtime_col_width = 17
-
-        header_fmt = (
-            f"{{:<{test_col_width}}}"
-            f" {{:>{passrate_col_width}}}"
-            f" {{:>{avg_runtime_col_width}}}"
-        )
-        row_fmt = header_fmt
-        table_width = test_col_width + passrate_col_width + avg_runtime_col_width + 2
-
-        print("=" * table_width)
-        print(header_fmt.format('Test', 'Pass rate', 'Avg runtime (s)'))
-        print("=" * table_width)
-
-        for test_name, display_name in zip(ordered_test_names, formatted_names):
-            passed = accumulated_results[test_name]['passed']
-            failed = accumulated_results[test_name]['failed']
-            total = passed + failed
-            pass_rate = (passed / total * 100) if total > 0 else 0
-
-            durations = accumulated_results[test_name]['durations']
-            avg_duration = sum(durations) / len(durations) if durations else 0
-
-            pass_rate_str = f"{passed}/{total} ({pass_rate:6.2f}%)"
-            avg_duration_str = f"{avg_duration:.2f}"
-            print(row_fmt.format(display_name, pass_rate_str, avg_duration_str))
-
-        print("=" * table_width)
-        print(f"Suite duration: {format_duration(suite_duration)}")
-
-        if suite_all_passed:
-            print(f"Suite result: {Color.GREEN}PASSED{Color.RESET}")
+        if overall_all_passed:
+            print(f"Overall result: {Color.GREEN}ALL SUITES PASSED{Color.RESET}")
+            return 0
         else:
-            print(f"Suite result: {Color.RED}FAILED{Color.RESET}")
-            failing_tests = {
-                name: data['failures']
-                for name, data in accumulated_results.items()
-                if data['failures']
-            }
-
-            if failing_tests:
-                print(f"\n{Color.YELLOW}Failure summary:{Color.RESET}")
-                for test_name, failures in failing_tests.items():
-                    print(f"  {test_name}:")
-                    for failure in failures[:5]:
-                        message = failure.get('message') or ''
-                        summary = failure.get('summary') or message
-                        lines = message.splitlines() if message else []
-
-                        print(f"    Run #{failure['run']}: {summary}")
-
-                        if lines:
-                            if summary == lines[0]:
-                                extra_lines = lines[1:]
-                            else:
-                                extra_lines = lines
-                            for line in extra_lines:
-                                print(f"      {line}")
-
-                    if len(failures) > 5:
-                        remaining = len(failures) - 5
-                        print(f"    ... and {remaining} more failure(s)")
-            print(f"\n{Color.RED}Stopping - suite {config_name} failed{Color.RESET}")
-            break
-
-    # Final summary
-    total_duration = time.time() - overall_start_time
-    print(f"\n{'=' * 80}")
-    print(f"{Color.BOLD}OVERALL SUMMARY{Color.RESET}")
-    print(f"Total duration: {format_duration(total_duration)}")
-
-    if overall_all_passed:
-        print(f"Overall result: {Color.GREEN}ALL SUITES PASSED{Color.RESET}")
-        return 0
-    else:
-        print(f"Overall result: {Color.RED}FAILED{Color.RESET}")
-        return 1
+            print(f"Overall result: {Color.RED}FAILED{Color.RESET}")
+            return 1
+    finally:
+        runner.cleanup()
 
 if __name__ == '__main__':
     sys.exit(main())

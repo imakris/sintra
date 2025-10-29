@@ -57,13 +57,18 @@ function(add_test_suite SUFFIX IS_DEBUG)
         dummy_test.cpp
         extreme_choreography_test.cpp
         interprocess_semaphore_test.cpp
+        interprocess_file_mapping_test.cpp
+        interprocess_mutex_test.cpp
         ipc_rings_tests.cpp
+        macos_named_semaphore_benchmark.cpp
+        macos_os_sync_semaphore_benchmark.cpp
         message_args_traits_test.cpp
         ping_pong_multi_test.cpp
         ping_pong_test.cpp
         processing_fence_test.cpp
         recovery_test.cpp
         rpc_append_test.cpp
+        ring_cleanup_stress_test.cpp
         spawn_detached_test.cpp
         variable_buffer_alignment_test.cpp
     )

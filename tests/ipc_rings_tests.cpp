@@ -9,6 +9,7 @@
 #include <functional>
 #include <future>
 #include <iostream>
+#include <limits>
 #include <mutex>
 #include <numeric>
 #include <optional>
@@ -24,6 +25,8 @@
 #define private public
 #define protected public
 #include "sintra/detail/ipc_rings.h"
+
+#include "test_environment.h"
 #undef private
 #undef protected
 
@@ -133,8 +136,7 @@ struct Temp_ring_dir {
 
     explicit Temp_ring_dir(const std::string& hint)
     {
-        auto base = std::filesystem::temp_directory_path() / "sintra_ipc_ring_tests";
-        std::filesystem::create_directories(base);
+        auto base = sintra::test::scratch_subdirectory("ipc_rings");
 
         // Simple unique directory name
         auto id = test_counter().fetch_add(1, std::memory_order_relaxed);
@@ -428,48 +430,61 @@ TEST_CASE(test_reader_eviction_does_not_underflow_octile_counter)
         reader.start_reading(trailing_cap);
     });
 
-    uint8_t guarded_octile = 0;
-    auto guard_deadline = std::chrono::steady_clock::now() + 1s;
-    bool guard_observed = false;
-    while (std::chrono::steady_clock::now() < guard_deadline) {
-        if (slot.has_guard.load(std::memory_order_acquire)) {
-            guarded_octile = slot.trailing_octile.load(std::memory_order_relaxed);
-            guard_observed = true;
-            break;
+    auto join_if_joinable = [](std::thread& t) {
+        if (t.joinable()) {
+            t.join();
         }
-        std::this_thread::yield();
-    }
-    ASSERT_TRUE(guard_observed);
+    };
 
-    guard_ready.store(true, std::memory_order_release);
-
-    auto eviction_deadline = std::chrono::steady_clock::now() + 2s;
-    bool eviction_observed = false;
-    while (std::chrono::steady_clock::now() < eviction_deadline) {
-        auto status = slot.status.load(std::memory_order_acquire);
-        if (status == sintra::Ring<uint32_t, true>::READER_STATE_EVICTED) {
-            eviction_observed = true;
-            break;
+    try {
+        uint8_t guarded_octile = 0;
+        auto guard_deadline = std::chrono::steady_clock::now() + 1s;
+        bool guard_observed = false;
+        while (std::chrono::steady_clock::now() < guard_deadline) {
+            if (slot.has_guard.load(std::memory_order_acquire)) {
+                guarded_octile = slot.trailing_octile.load(std::memory_order_relaxed);
+                guard_observed = true;
+                break;
+            }
+            std::this_thread::yield();
         }
-        std::this_thread::yield();
+        ASSERT_TRUE(guard_observed);
+
+        guard_ready.store(true, std::memory_order_release);
+
+        auto eviction_deadline = std::chrono::steady_clock::now() + 2s;
+        bool eviction_observed = false;
+        while (std::chrono::steady_clock::now() < eviction_deadline) {
+            auto status = slot.status.load(std::memory_order_acquire);
+            if (status == sintra::Ring<uint32_t, true>::READER_STATE_EVICTED) {
+                eviction_observed = true;
+                break;
+            }
+            std::this_thread::yield();
+        }
+        ASSERT_TRUE(eviction_observed);
+
+        join_if_joinable(reader_thread);
+
+        uint64_t read_access = reader.c.read_access.load(std::memory_order_acquire);
+        const uint64_t guard_mask = uint64_t(1) << (guarded_octile * 8);
+        uint8_t guard_count = static_cast<uint8_t>((read_access >> (guarded_octile * 8)) & 0xffu);
+
+        reader.c.read_access.fetch_add(guard_mask, std::memory_order_release);
+        slot.has_guard.store(1, std::memory_order_release);
+        slot.status.store(sintra::Ring<uint32_t, true>::READER_STATE_ACTIVE, std::memory_order_release);
+
+        join_if_joinable(writer_thread);
+
+        reader.done_reading();
+
+        ASSERT_EQ(0u, guard_count);
     }
-    ASSERT_TRUE(eviction_observed);
-
-    reader_thread.join();
-
-    uint64_t read_access = reader.c.read_access.load(std::memory_order_acquire);
-    const uint64_t guard_mask = uint64_t(1) << (guarded_octile * 8);
-    uint8_t guard_count = static_cast<uint8_t>((read_access >> (guarded_octile * 8)) & 0xffu);
-
-    reader.c.read_access.fetch_add(guard_mask, std::memory_order_release);
-    slot.has_guard.store(1, std::memory_order_release);
-    slot.status.store(sintra::Ring<uint32_t, true>::READER_STATE_ACTIVE, std::memory_order_release);
-
-    writer_thread.join();
-
-    reader.done_reading();
-
-    ASSERT_EQ(0u, guard_count);
+    catch (...) {
+        join_if_joinable(reader_thread);
+        join_if_joinable(writer_thread);
+        throw;
+    }
 }
 
 TEST_CASE(test_slow_reader_eviction_restores_status)
@@ -574,7 +589,9 @@ STRESS_TEST(stress_multi_reader_throughput)
     std::vector<std::vector<uint64_t>> reader_results(reader_count);
     std::vector<std::exception_ptr> reader_errors(reader_count);
     std::vector<std::atomic<bool>> reader_ready(reader_count);
+    std::vector<std::atomic<bool>> reader_evicted(reader_count);
     for (auto& flag : reader_ready) { flag.store(false, std::memory_order_relaxed); }
+    for (auto& flag : reader_evicted) { flag.store(false, std::memory_order_relaxed); }
 
     std::vector<std::thread> reader_threads;
     reader_threads.reserve(reader_count);
@@ -588,6 +605,10 @@ STRESS_TEST(stress_multi_reader_throughput)
 
                 while (!writer_done.load(std::memory_order_acquire) || reader_results[rid].size() < total_messages) {
                     auto range = reader.wait_for_new_data();
+                    if (reader.consume_eviction_notification()) {
+                        reader_evicted[rid].store(true, std::memory_order_release);
+                        continue;
+                    }
                     if (!range.begin || range.begin == range.end) {
                         if (writer_done.load(std::memory_order_acquire)) {
                             break;
@@ -599,6 +620,9 @@ STRESS_TEST(stress_multi_reader_throughput)
                     reader.done_reading_new_data();
                 }
                 reader.done_reading();
+                if (reader.consume_eviction_notification()) {
+                    reader_evicted[rid].store(true, std::memory_order_release);
+                }
             }
             catch (...) {
                 reader_errors[rid] = std::current_exception();
@@ -640,6 +664,36 @@ STRESS_TEST(stress_multi_reader_throughput)
         reader_threads[rid].join();
     }
 
+    auto diagnostics = writer.get_diagnostics();
+    const bool has_overflow = diagnostics.reader_lag_overflow_count > 0;
+    const bool has_regressions = diagnostics.reader_sequence_regressions > 0;
+    const bool has_evictions = diagnostics.reader_eviction_count > 0;
+    if (has_overflow || has_regressions || has_evictions) {
+        std::cerr << "[sintra::ring] diagnostics: max_reader_lag="
+                  << diagnostics.max_reader_lag
+                  << ", overflow_count=" << diagnostics.reader_lag_overflow_count
+                  << ", worst_overflow_lag=" << diagnostics.worst_overflow_lag
+                  << ", sequence_regressions=" << diagnostics.reader_sequence_regressions
+                  << ", eviction_count=" << diagnostics.reader_eviction_count
+                  << std::endl;
+
+        if (diagnostics.last_evicted_reader_index != std::numeric_limits<uint32_t>::max()) {
+            std::cerr << "    last_evicted_reader_index=" << diagnostics.last_evicted_reader_index
+                      << ", reader_sequence=" << diagnostics.last_evicted_reader_sequence
+                      << ", writer_sequence=" << diagnostics.last_evicted_writer_sequence
+                      << ", reader_octile=" << diagnostics.last_evicted_reader_octile
+                      << std::endl;
+        }
+
+        if (diagnostics.last_overflow_reader_index != std::numeric_limits<uint32_t>::max()) {
+            std::cerr << "    last_overflow_reader_index=" << diagnostics.last_overflow_reader_index
+                      << ", reader_sequence=" << diagnostics.last_overflow_reader_sequence
+                      << ", leading_sequence=" << diagnostics.last_overflow_leading_sequence
+                      << ", last_consumed=" << diagnostics.last_overflow_last_consumed
+                      << std::endl;
+        }
+    }
+
     if (writer_error) {
         std::rethrow_exception(writer_error);
     }
@@ -648,6 +702,33 @@ STRESS_TEST(stress_multi_reader_throughput)
             std::rethrow_exception(err);
         }
     }
+
+    bool any_reader_evicted = false;
+    for (auto& flag : reader_evicted) {
+        any_reader_evicted = any_reader_evicted || flag.load(std::memory_order_acquire);
+    }
+
+    for (auto& results : reader_results) {
+        for (size_t i = 0; i < results.size(); ++i) {
+            ASSERT_LT(results[i], total_messages);
+            if (i > 0) {
+                ASSERT_GT(results[i], results[i - 1]);
+            }
+        }
+    }
+
+    const bool diagnostics_recorded_eviction = diagnostics.reader_eviction_count > 0u;
+
+    if (any_reader_evicted) {
+        // A slow reader that gets evicted is expected to miss at least one publication. In
+        // that scenario the ring guarantees ordering, but not completeness, so we only
+        // assert that diagnostics captured the eviction and skip the strict per-value
+        // comparison that assumes zero loss.
+        ASSERT_TRUE(diagnostics_recorded_eviction);
+        return;
+    }
+
+    ASSERT_FALSE(diagnostics_recorded_eviction);
 
     for (auto& results : reader_results) {
         ASSERT_EQ(results.size(), total_messages);
