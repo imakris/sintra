@@ -418,6 +418,40 @@ inline instance_id_type make_instance_id() {
 
 * The **upper** `num_process_index_bits` encode the process slot together with complement/wildcard flags. The top bit is
   reserved for the complement encoding, which is why `max_process_index` is smaller than `2^(num_process_index_bits)`.
+
+## Process Recovery
+
+1. A worker opts into crash recovery by calling `sintra::enable_recovery()`, which forwards the request to the
+   coordinator (`Managed_process::enable_recovery`). The coordinator records the process slot in
+   `Coordinator::m_requested_recovery`, so a later abnormal termination routes through `Coordinator::recover_if_required()`
+   instead of being treated as a permanent shutdown.
+2. `Managed_process::spawn_swarm_process()` caches the executable + argument vector for each spawned child in
+   `m_cached_spawns` and increments a per-process occurrence counter. The counter is appended to the `req`/`rep` ring
+   filenames (`Message_ring_{R,W}::get_base_filename`) so every recovery attempt attaches to a fresh pair of shared-memory
+   files while previous rings remain available for post-mortem inspection.
+3. Before launching the replacement child the coordinator spins up new `Process_message_reader` instances for the target
+   process, ensuring its request/reply channels are mapped and ready the moment the binary starts executing.
+4. We dismantle the previous occurrence's plumbing before a respawn. `spawn_swarm_process()` explicitly erases any
+   existing `Process_message_reader` for the crashing slot, which drops the shared_ptr references and unmaps the old
+   occurrence's rings before new readers are created. Only the currently active occurrence consumes address space; there is
+   no "bank" of pre-reserved mappings for future recoveries.
+5. Each IPC ring is double-mapped (`Ring_data::attach`) by reserving a 2× span and mapping the 2 MiB data file twice. The
+   contiguous view is what makes zero-copy wrap-around reads work; it is unrelated to recovery itself but explains the
+   large "guard"/reserved ranges seen in macOS cores. Every request/reply channel therefore claims ~4 MiB of virtual
+   address space. Prior to 2025-03 we saw ~4.24 GiB logical cores in CI because those spans appeared alongside the
+   platform's 4 GiB `__PAGEZERO` reservation. We now call `madvise(..., MADV_DONTDUMP)` on both the data and control
+   mappings so the rings are excluded from future cores by default; stack/code/heap pages still participate, so stack
+   traces remain intact while the dumps shrink to the tens-of-megabytes range.
+
+**What “safe respawn” means**: by pre-mapping the request/reply readers before `spawn_detached()` the coordinator guarantees
+that the recovering child sees ready-to-use channels as soon as it reaches user code. No address-space layout promises are
+required beyond the double-mapped rings themselves, and the respawned process inherits only the fresh occurrence's mappings.
+
+**How many rings stay mapped during `recovery_test`?** The watchdog, coordinator, and crasher each hold two outgoing rings
+(`Message_ring_W`) plus request/reply readers for every other live process. At the point where the crasher aborts that
+amounts to a few dozen 4 MiB spans in total—on the order of 250 MiB of virtual address space. Those ranges used to inflate
+macOS cores to ~4.24 GiB (4 GiB `__PAGEZERO` + ~0.25 GiB of double-mapped rings + stacks/segments); with `MADV_DONTDUMP`
+applied they are skipped entirely, so only the usual executable/stack/heap mappings remain in the crash artifact.
 * The **lower** `num_transceiver_index_bits` track the transceiver within that process slot. Index `1` is reserved for the
   `Managed_process` itself; other transceivers start at `2`.
 * Convenience constants (e.g. `any_local`, `any_remote`, `any_local_or_remote`) and helpers such as `compose_instance()` and
