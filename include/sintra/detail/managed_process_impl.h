@@ -1608,8 +1608,12 @@ void Managed_process::wait_for_delivery_fence()
             }
 
             if (target_sequence != invalid_sequence && skip_sequence == target_sequence) {
-                reply_progress_skips.erase(it);
-                return true;
+                const auto published = progress.reply_sequence.load(std::memory_order_acquire);
+                if (published >= skip_sequence) {
+                    reply_progress_skips.erase(it);
+                    return true;
+                }
+                return false;
             }
 
             if (observed_sequence != invalid_sequence && observed_sequence >= skip_sequence) {
