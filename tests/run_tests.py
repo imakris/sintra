@@ -241,8 +241,8 @@ class TestRunner:
 
         # 2 configurations: adaptive policy in release and debug builds
         configurations = [
-            'release',
-            'debug'
+            'debug',
+            'release'
         ]
 
         # Discover available tests dynamically so the runner adapts to new or removed binaries
