@@ -199,6 +199,13 @@ class TestRunner:
         self.timeout = timeout
         self.verbose = verbose
         self.preserve_on_timeout = preserve_on_timeout
+        sanitized_config = ''.join(c.lower() if c.isalnum() else '_' for c in config)
+        timestamp_ms = int(time.time() * 1000)
+        scratch_dir_name = f".sintra-test-scratch-{sanitized_config}-{timestamp_ms}-{os.getpid()}"
+        self._scratch_base = (self.build_dir / scratch_dir_name).resolve()
+        self._scratch_base.mkdir(parents=True, exist_ok=True)
+        self._scratch_lock = threading.Lock()
+        self._scratch_counter = 0
         self._ipc_rings_cache: Dict[Path, List[Tuple[str, str]]] = {}
         self._debugger_cache: Dict[str, Tuple[Optional[str], str]] = {}
         self._downloaded_windows_debugger_root: Optional[Path] = None
@@ -233,6 +240,42 @@ class TestRunner:
                     f"{Color.YELLOW}Warning: {jit_error}. "
                     f"JIT prompts may still block crash dumps.{Color.RESET}"
                 )
+
+    def _allocate_scratch_directory(self, invocation: TestInvocation) -> Path:
+        """Create a per-invocation scratch directory for test artifacts."""
+
+        safe_name = ''.join(c if c.isalnum() or c in ('-', '_') else '_' for c in invocation.name)
+        with self._scratch_lock:
+            index = self._scratch_counter
+            self._scratch_counter += 1
+
+        directory = self._scratch_base / f"{safe_name}_{index}"
+        directory.mkdir(parents=True, exist_ok=True)
+        return directory
+
+    def _build_test_environment(self, scratch_dir: Path) -> Dict[str, str]:
+        """Return the environment variables for a test invocation."""
+
+        env = os.environ.copy()
+        env['SINTRA_TEST_ROOT'] = str(scratch_dir)
+        return env
+
+    def _cleanup_scratch_directory(self, directory: Path) -> None:
+        """Best-effort removal of a scratch directory."""
+
+        try:
+            shutil.rmtree(directory)
+        except FileNotFoundError:
+            return
+        except Exception as exc:
+            print(
+                f"\n{Color.YELLOW}Warning: Failed to remove scratch directory {directory}: {exc}{Color.RESET}"
+            )
+
+    def cleanup(self) -> None:
+        """Remove the root scratch directory for this runner."""
+
+        self._cleanup_scratch_directory(self._scratch_base)
 
     def find_test_suites(
         self,
@@ -434,8 +477,10 @@ class TestRunner:
     def run_test_once(self, invocation: TestInvocation) -> TestResult:
         """Run a single test with timeout and proper cleanup"""
         timeout = _lookup_test_timeout(invocation.name, self.timeout)
+        scratch_dir = self._allocate_scratch_directory(invocation)
         process = None
         try:
+            popen_env = self._build_test_environment(scratch_dir)
             start_time = time.time()
             start_monotonic = time.monotonic()
 
@@ -455,6 +500,7 @@ class TestRunner:
                 popen_kwargs['creationflags'] = creationflags
             else:
                 popen_kwargs['start_new_session'] = True
+            popen_kwargs['env'] = popen_env
 
             stdout_lines: List[str] = []
             stderr_lines: List[str] = []
@@ -751,6 +797,8 @@ class TestRunner:
                 output=stdout,
                 error=error_msg
             )
+        finally:
+            self._cleanup_scratch_directory(scratch_dir)
 
     def _kill_process_tree(self, pid: int):
         """Kill a process and all its children"""
@@ -2890,230 +2938,233 @@ def main():
 
     preserve_on_timeout = args.preserve_stalled_processes
     runner = TestRunner(build_dir, args.config, args.timeout, args.verbose, preserve_on_timeout)
-    test_suites = runner.find_test_suites(
-        test_name=args.test,
-        include_patterns=include_patterns,
-        exclude_patterns=exclude_patterns,
-    )
+    try:
+        test_suites = runner.find_test_suites(
+            test_name=args.test,
+            include_patterns=include_patterns,
+            exclude_patterns=exclude_patterns,
+        )
 
-    if not test_suites:
-        print(f"{Color.RED}No test suites found to run{Color.RESET}")
-        return 1
+        if not test_suites:
+            print(f"{Color.RED}No test suites found to run{Color.RESET}")
+            return 1
 
-    total_configs = len(test_suites)
-    print(f"Found {total_configs} configuration suite(s) to run")
+        total_configs = len(test_suites)
+        print(f"Found {total_configs} configuration suite(s) to run")
 
-    overall_start_time = time.time()
-    overall_all_passed = True
+        overall_start_time = time.time()
+        overall_all_passed = True
 
-    # Run each configuration suite independently
-    for config_idx, (config_name, tests) in enumerate(test_suites.items(), 1):
-        print(f"\n{'=' * 80}")
-        print(f"{Color.BOLD}{Color.BLUE}Configuration {config_idx}/{total_configs}: {config_name}{Color.RESET}")
-        print(f"  Tests in suite: {len(tests)}")
-        print(f"  Repetitions: {args.repetitions}")
-        print(f"{'=' * 80}")
+        # Run each configuration suite independently
+        for config_idx, (config_name, tests) in enumerate(test_suites.items(), 1):
+            print(f"\n{'=' * 80}")
+            print(f"{Color.BOLD}{Color.BLUE}Configuration {config_idx}/{total_configs}: {config_name}{Color.RESET}")
+            print(f"  Tests in suite: {len(tests)}")
+            print(f"  Repetitions: {args.repetitions}")
+            print(f"{'=' * 80}")
 
-        suite_start_time = time.time()
+            suite_start_time = time.time()
 
-        # Adaptive soak test for this suite
-        accumulated_results = {
-            invocation.name: {'passed': 0, 'failed': 0, 'durations': [], 'failures': []}
-            for invocation in tests
-        }
-        test_weights = {invocation.name: _lookup_test_weight(invocation.name) for invocation in tests}
-        target_repetitions = {
-            name: _calculate_target_repetitions(args.repetitions, weight)
-            for name, weight in test_weights.items()
-        }
-        remaining_repetitions = target_repetitions.copy()
-        suite_all_passed = True
-        batch_size = 1
+            # Adaptive soak test for this suite
+            accumulated_results = {
+                invocation.name: {'passed': 0, 'failed': 0, 'durations': [], 'failures': []}
+                for invocation in tests
+            }
+            test_weights = {invocation.name: _lookup_test_weight(invocation.name) for invocation in tests}
+            target_repetitions = {
+                name: _calculate_target_repetitions(args.repetitions, weight)
+                for name, weight in test_weights.items()
+            }
+            remaining_repetitions = target_repetitions.copy()
+            suite_all_passed = True
+            batch_size = 1
 
-        weighted_tests = [
-            (_canonical_test_name(name), weight, target_repetitions[name])
-            for name, weight in test_weights.items()
-            if weight != 1
-        ]
-        if weighted_tests:
-            print(f"  Weighted tests:")
-            for display_name, weight, total in sorted(weighted_tests):
-                print(f"    {display_name}: x{weight} -> {total} repetition(s)")
+            weighted_tests = [
+                (_canonical_test_name(name), weight, target_repetitions[name])
+                for name, weight in test_weights.items()
+                if weight != 1
+            ]
+            if weighted_tests:
+                print(f"  Weighted tests:")
+                for display_name, weight, total in sorted(weighted_tests):
+                    print(f"    {display_name}: x{weight} -> {total} repetition(s)")
 
-        while True:
-            remaining_counts = [count for count in remaining_repetitions.values() if count > 0]
-            if not remaining_counts:
-                break
+            while True:
+                remaining_counts = [count for count in remaining_repetitions.values() if count > 0]
+                if not remaining_counts:
+                    break
 
-            max_remaining = max(remaining_counts)
-            reps_in_this_round = min(batch_size, max_remaining)
-            print(f"\n{Color.BLUE}--- Round: {reps_in_this_round} repetition(s) ---{Color.RESET}")
+                max_remaining = max(remaining_counts)
+                reps_in_this_round = min(batch_size, max_remaining)
+                print(f"\n{Color.BLUE}--- Round: {reps_in_this_round} repetition(s) ---{Color.RESET}")
 
-            for i in range(reps_in_this_round):
-                print(f"  Rep {i + 1}/{reps_in_this_round}: ", end="", flush=True)
-                for invocation in tests:
-                    test_name = invocation.name
-                    if remaining_repetitions[test_name] <= 0:
-                        continue
+                for i in range(reps_in_this_round):
+                    print(f"  Rep {i + 1}/{reps_in_this_round}: ", end="", flush=True)
+                    for invocation in tests:
+                        test_name = invocation.name
+                        if remaining_repetitions[test_name] <= 0:
+                            continue
 
-                    result = runner.run_test_once(invocation)
+                        result = runner.run_test_once(invocation)
 
-                    accumulated_results[test_name]['durations'].append(result.duration)
+                        accumulated_results[test_name]['durations'].append(result.duration)
 
-                    result_bucket = accumulated_results[test_name]
+                        result_bucket = accumulated_results[test_name]
 
-                    if result.success:
-                        result_bucket['passed'] += 1
-                        print(f"{Color.GREEN}.{Color.RESET}", end="", flush=True)
-                    else:
-                        result_bucket['failed'] += 1
-                        suite_all_passed = False
-                        overall_all_passed = False
-
-                        run_index = result_bucket['passed'] + result_bucket['failed']
-                        error_message = (result.error or '').strip()
-                        if error_message:
-                            first_line = error_message.splitlines()[0]
+                        if result.success:
+                            result_bucket['passed'] += 1
+                            print(f"{Color.GREEN}.{Color.RESET}", end="", flush=True)
                         else:
-                            first_line = 'No error output captured'
+                            result_bucket['failed'] += 1
+                            suite_all_passed = False
+                            overall_all_passed = False
 
-                        result_bucket['failures'].append({
-                            'run': run_index,
-                            'summary': first_line,
-                            'message': error_message if error_message else first_line,
-                        })
+                            run_index = result_bucket['passed'] + result_bucket['failed']
+                            error_message = (result.error or '').strip()
+                            if error_message:
+                                first_line = error_message.splitlines()[0]
+                            else:
+                                first_line = 'No error output captured'
 
-                        print(f"{Color.RED}F{Color.RESET}", end="", flush=True)
+                            result_bucket['failures'].append({
+                                'run': run_index,
+                                'summary': first_line,
+                                'message': error_message if error_message else first_line,
+                            })
 
-                    remaining_repetitions[test_name] -= 1
+                            print(f"{Color.RED}F{Color.RESET}", end="", flush=True)
 
-                print()
+                        remaining_repetitions[test_name] -= 1
+
+                    print()
+                    if not suite_all_passed:
+                        break
+
+                round_elapsed = time.time() - suite_start_time
+                print(
+                    f"    {Color.BLUE}Round complete - total elapsed: {format_duration(round_elapsed)}{Color.RESET}"
+                )
+
                 if not suite_all_passed:
                     break
 
-            round_elapsed = time.time() - suite_start_time
-            print(
-                f"    {Color.BLUE}Round complete - total elapsed: {format_duration(round_elapsed)}{Color.RESET}"
-            )
+                batch_size = min(batch_size * 2, max_remaining)
 
-            if not suite_all_passed:
+            # Print suite results
+            suite_duration = time.time() - suite_start_time
+            def format_test_name(test_name):
+                """Format the raw test name for display in the summary table."""
+
+                formatted = test_name
+                if formatted.startswith("sintra_"):
+                    formatted = formatted[len("sintra_"):]
+
+                if formatted.startswith("ipc_rings_tests_"):
+                    formatted = formatted.replace("_release_adaptive", "_release", 1)
+                    formatted = formatted.replace("_debug_adaptive", "_debug", 1)
+                    if formatted.endswith("_release"):
+                        formatted = formatted[:-len("_release")] + " (release)"
+                    elif formatted.endswith("_debug"):
+                        formatted = formatted[:-len("_debug")] + " (debug)"
+
+                return formatted
+
+            def sort_key(test_name):
+                formatted = format_test_name(test_name)
+                if formatted.startswith("dummy_test"):
+                    group = 0
+                elif formatted.startswith("ipc_rings_tests"):
+                    group = 1
+                else:
+                    group = 2
+                return group, formatted
+
+            print(f"\n{Color.BOLD}Results for {config_name}:{Color.RESET}")
+
+            ordered_test_names = sorted(accumulated_results.keys(), key=sort_key)
+            formatted_names = [format_test_name(name) for name in ordered_test_names]
+
+            test_col_width = max([len(name) for name in formatted_names] + [4]) + 2
+            passrate_col_width = 20
+            avg_runtime_col_width = 17
+
+            header_fmt = (
+                f"{{:<{test_col_width}}}"
+                f" {{:>{passrate_col_width}}}"
+                f" {{:>{avg_runtime_col_width}}}"
+            )
+            row_fmt = header_fmt
+            table_width = test_col_width + passrate_col_width + avg_runtime_col_width + 2
+
+            print("=" * table_width)
+            print(header_fmt.format('Test', 'Pass rate', 'Avg runtime (s)'))
+            print("=" * table_width)
+
+            for test_name, display_name in zip(ordered_test_names, formatted_names):
+                passed = accumulated_results[test_name]['passed']
+                failed = accumulated_results[test_name]['failed']
+                total = passed + failed
+                pass_rate = (passed / total * 100) if total > 0 else 0
+
+                durations = accumulated_results[test_name]['durations']
+                avg_duration = sum(durations) / len(durations) if durations else 0
+
+                pass_rate_str = f"{passed}/{total} ({pass_rate:6.2f}%)"
+                avg_duration_str = f"{avg_duration:.2f}"
+                print(row_fmt.format(display_name, pass_rate_str, avg_duration_str))
+
+            print("=" * table_width)
+            print(f"Suite duration: {format_duration(suite_duration)}")
+
+            if suite_all_passed:
+                print(f"Suite result: {Color.GREEN}PASSED{Color.RESET}")
+            else:
+                print(f"Suite result: {Color.RED}FAILED{Color.RESET}")
+                failing_tests = {
+                    name: data['failures']
+                    for name, data in accumulated_results.items()
+                    if data['failures']
+                }
+
+                if failing_tests:
+                    print(f"\n{Color.YELLOW}Failure summary:{Color.RESET}")
+                    for test_name, failures in failing_tests.items():
+                        print(f"  {test_name}:")
+                        for failure in failures[:5]:
+                            message = failure.get('message') or ''
+                            summary = failure.get('summary') or message
+                            lines = message.splitlines() if message else []
+
+                            print(f"    Run #{failure['run']}: {summary}")
+
+                            if lines:
+                                if summary == lines[0]:
+                                    extra_lines = lines[1:]
+                                else:
+                                    extra_lines = lines
+                                for line in extra_lines:
+                                    print(f"      {line}")
+
+                        if len(failures) > 5:
+                            remaining = len(failures) - 5
+                            print(f"    ... and {remaining} more failure(s)")
+                print(f"\n{Color.RED}Stopping - suite {config_name} failed{Color.RESET}")
                 break
 
-            batch_size = min(batch_size * 2, max_remaining)
+        # Final summary
+        total_duration = time.time() - overall_start_time
+        print(f"\n{'=' * 80}")
+        print(f"{Color.BOLD}OVERALL SUMMARY{Color.RESET}")
+        print(f"Total duration: {format_duration(total_duration)}")
 
-        # Print suite results
-        suite_duration = time.time() - suite_start_time
-        def format_test_name(test_name):
-            """Format the raw test name for display in the summary table."""
-
-            formatted = test_name
-            if formatted.startswith("sintra_"):
-                formatted = formatted[len("sintra_"):]
-
-            if formatted.startswith("ipc_rings_tests_"):
-                formatted = formatted.replace("_release_adaptive", "_release", 1)
-                formatted = formatted.replace("_debug_adaptive", "_debug", 1)
-                if formatted.endswith("_release"):
-                    formatted = formatted[:-len("_release")] + " (release)"
-                elif formatted.endswith("_debug"):
-                    formatted = formatted[:-len("_debug")] + " (debug)"
-
-            return formatted
-
-        def sort_key(test_name):
-            formatted = format_test_name(test_name)
-            if formatted.startswith("dummy_test"):
-                group = 0
-            elif formatted.startswith("ipc_rings_tests"):
-                group = 1
-            else:
-                group = 2
-            return group, formatted
-
-        print(f"\n{Color.BOLD}Results for {config_name}:{Color.RESET}")
-
-        ordered_test_names = sorted(accumulated_results.keys(), key=sort_key)
-        formatted_names = [format_test_name(name) for name in ordered_test_names]
-
-        test_col_width = max([len(name) for name in formatted_names] + [4]) + 2
-        passrate_col_width = 20
-        avg_runtime_col_width = 17
-
-        header_fmt = (
-            f"{{:<{test_col_width}}}"
-            f" {{:>{passrate_col_width}}}"
-            f" {{:>{avg_runtime_col_width}}}"
-        )
-        row_fmt = header_fmt
-        table_width = test_col_width + passrate_col_width + avg_runtime_col_width + 2
-
-        print("=" * table_width)
-        print(header_fmt.format('Test', 'Pass rate', 'Avg runtime (s)'))
-        print("=" * table_width)
-
-        for test_name, display_name in zip(ordered_test_names, formatted_names):
-            passed = accumulated_results[test_name]['passed']
-            failed = accumulated_results[test_name]['failed']
-            total = passed + failed
-            pass_rate = (passed / total * 100) if total > 0 else 0
-
-            durations = accumulated_results[test_name]['durations']
-            avg_duration = sum(durations) / len(durations) if durations else 0
-
-            pass_rate_str = f"{passed}/{total} ({pass_rate:6.2f}%)"
-            avg_duration_str = f"{avg_duration:.2f}"
-            print(row_fmt.format(display_name, pass_rate_str, avg_duration_str))
-
-        print("=" * table_width)
-        print(f"Suite duration: {format_duration(suite_duration)}")
-
-        if suite_all_passed:
-            print(f"Suite result: {Color.GREEN}PASSED{Color.RESET}")
+        if overall_all_passed:
+            print(f"Overall result: {Color.GREEN}ALL SUITES PASSED{Color.RESET}")
+            return 0
         else:
-            print(f"Suite result: {Color.RED}FAILED{Color.RESET}")
-            failing_tests = {
-                name: data['failures']
-                for name, data in accumulated_results.items()
-                if data['failures']
-            }
-
-            if failing_tests:
-                print(f"\n{Color.YELLOW}Failure summary:{Color.RESET}")
-                for test_name, failures in failing_tests.items():
-                    print(f"  {test_name}:")
-                    for failure in failures[:5]:
-                        message = failure.get('message') or ''
-                        summary = failure.get('summary') or message
-                        lines = message.splitlines() if message else []
-
-                        print(f"    Run #{failure['run']}: {summary}")
-
-                        if lines:
-                            if summary == lines[0]:
-                                extra_lines = lines[1:]
-                            else:
-                                extra_lines = lines
-                            for line in extra_lines:
-                                print(f"      {line}")
-
-                    if len(failures) > 5:
-                        remaining = len(failures) - 5
-                        print(f"    ... and {remaining} more failure(s)")
-            print(f"\n{Color.RED}Stopping - suite {config_name} failed{Color.RESET}")
-            break
-
-    # Final summary
-    total_duration = time.time() - overall_start_time
-    print(f"\n{'=' * 80}")
-    print(f"{Color.BOLD}OVERALL SUMMARY{Color.RESET}")
-    print(f"Total duration: {format_duration(total_duration)}")
-
-    if overall_all_passed:
-        print(f"Overall result: {Color.GREEN}ALL SUITES PASSED{Color.RESET}")
-        return 0
-    else:
-        print(f"Overall result: {Color.RED}FAILED{Color.RESET}")
-        return 1
+            print(f"Overall result: {Color.RED}FAILED{Color.RESET}")
+            return 1
+    finally:
+        runner.cleanup()
 
 if __name__ == '__main__':
     sys.exit(main())

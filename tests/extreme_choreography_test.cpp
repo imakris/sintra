@@ -20,6 +20,8 @@
 
 #include <sintra/sintra.h>
 
+#include "test_environment.h"
+
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -202,7 +204,7 @@ std::filesystem::path ensure_shared_directory()
         return dir;
     }
 
-    auto base = std::filesystem::temp_directory_path() / "sintra_extreme_choreography";
+    auto base = sintra::test::scratch_subdirectory("extreme_choreography");
     std::filesystem::create_directories(base);
 
     const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(

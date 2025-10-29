@@ -19,6 +19,8 @@
 
 #include <sintra/sintra.h>
 
+#include "test_environment.h"
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -88,8 +90,7 @@ std::filesystem::path ensure_shared_directory()
         return dir;
     }
 
-    auto base = std::filesystem::temp_directory_path() / "sintra_tests";
-    std::filesystem::create_directories(base);
+    auto base = sintra::test::scratch_subdirectory("basic_pub_sub");
 
     // Generate a highly unique suffix combining timestamp, PID, and a monotonic counter
     auto unique_suffix = std::chrono::duration_cast<std::chrono::nanoseconds>(

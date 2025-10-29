@@ -1,5 +1,7 @@
 #include <sintra/sintra.h>
 
+#include "test_environment.h"
+
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
@@ -63,7 +65,7 @@ std::filesystem::path ensure_shared_directory()
         return dir;
     }
 
-    auto base = std::filesystem::temp_directory_path() / "sintra_processing_fence";
+    auto base = sintra::test::scratch_subdirectory("processing_fence");
     std::filesystem::create_directories(base);
 
     const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(

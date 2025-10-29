@@ -29,6 +29,8 @@
 //
 #include <sintra/sintra.h>
 
+#include "test_environment.h"
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -174,7 +176,7 @@ std::filesystem::path ensure_shared_directory()
         return dir;
     }
 
-    auto base = std::filesystem::temp_directory_path() / "sintra_complex";
+    auto base = sintra::test::scratch_subdirectory("complex_choreography_stress");
     std::filesystem::create_directories(base);
 
     const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
