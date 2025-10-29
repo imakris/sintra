@@ -7,6 +7,8 @@
 
 #include <sintra/sintra.h>
 
+#include "test_environment.h"
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -84,7 +86,7 @@ std::filesystem::path ensure_shared_directory()
         return dir;
     }
 
-    auto base = std::filesystem::temp_directory_path() / "sintra_pathological_tests";
+    auto base = sintra::test::scratch_subdirectory("barrier_pathological");
     std::filesystem::create_directories(base);
 
     auto unique_suffix = std::chrono::duration_cast<std::chrono::nanoseconds>(
