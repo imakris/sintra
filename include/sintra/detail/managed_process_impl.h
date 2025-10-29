@@ -6,7 +6,6 @@
 #include "utility.h"
 #include "type_utils.h"
 #include "ipc_platform_utils.h"
-#include "console.h"
 
 #include <array>
 #include <atomic>
@@ -25,7 +24,6 @@
 #include <thread>
 #include <utility>
 #include <iostream>
-#include <algorithm>
 #ifdef _WIN32
 #include <errno.h>
 #endif
@@ -1591,101 +1589,57 @@ inline void Managed_process::run_after_current_handler(function<void()> task)
 inline
 void Managed_process::wait_for_delivery_fence()
 {
-    auto reply_progress_skips = take_reply_progress_skips();
-
-    auto refresh_reply_progress_skips = [&]() {
-        auto new_skips = take_reply_progress_skips();
-        if (new_skips.empty()) {
-            return;
+    auto consume_reply_skip = [](Process_message_reader::Delivery_progress& progress,
+                                 sequence_counter_type target_sequence,
+                                 sequence_counter_type observed_sequence) {
+        if (target_sequence == invalid_sequence) {
+            return false;
         }
 
-        for (const auto& skip : new_skips) {
-            auto existing = std::find_if(reply_progress_skips.begin(), reply_progress_skips.end(),
-                [&](const Reply_progress_skip& entry) {
-                    return entry.progress == skip.progress;
-                });
-
-            if (existing != reply_progress_skips.end()) {
-                *existing = skip;
+        auto skip_sequence = progress.reply_skip_sequence.load(std::memory_order_acquire);
+        while (skip_sequence != invalid_sequence) {
+            if (target_sequence < skip_sequence) {
+                // The skip applies to a future delivery target; leave it in place.
+                return false;
             }
-            else {
-                reply_progress_skips.emplace_back(skip);
+
+            if (target_sequence > skip_sequence) {
+                // The target has advanced beyond the recorded skip. If we've already
+                // observed or published past the skip, clear it to avoid keeping stale
+                // hints that can no longer be consumed.
+                const auto published = progress.reply_sequence.load(std::memory_order_acquire);
+                if (observed_sequence >= skip_sequence || published >= skip_sequence) {
+                    progress.reply_skip_sequence.compare_exchange_strong(
+                        skip_sequence, invalid_sequence, std::memory_order_acq_rel);
+                }
+                return false;
             }
-        }
-    };
 
-    auto take_reply_progress_skip = [&](const Process_message_reader::Delivery_progress* progress_ptr,
-                                         sequence_counter_type target_sequence,
-                                         sequence_counter_type observed_sequence)
-        -> std::optional<Reply_progress_skip> {
-        if (!progress_ptr) {
-            return std::nullopt;
-        }
+            // target_sequence == skip_sequence
+            if (observed_sequence != skip_sequence) {
+                // The delivery fence snapshot has not yet seen the skipped sequence.
+                return false;
+            }
 
-        auto it = std::find_if(reply_progress_skips.begin(), reply_progress_skips.end(),
-            [&](const Reply_progress_skip& skip) {
-                return skip.progress == progress_ptr;
-            });
+            const auto published = progress.reply_sequence.load(std::memory_order_acquire);
+            if (published < skip_sequence) {
+                // Reply reader still draining the handler; wait until it publishes.
+                return false;
+            }
 
-        if (it == reply_progress_skips.end()) {
-            return std::nullopt;
-        }
+            if (progress.reply_skip_sequence.compare_exchange_strong(
+                    skip_sequence, invalid_sequence, std::memory_order_acq_rel)) {
+                return true;
+            }
 
-        const Reply_progress_skip skip = *it;
-        const auto reply_sequence = progress_ptr->reply_sequence.load(std::memory_order_acquire);
-
-        auto log_decision = [&](const char* decision) {
-            console()
-                << "[delivery-fence] reply-skip decision=" << decision
-                << " progress=" << static_cast<const void*>(skip.progress)
-                << " skip_seq=" << skip.sequence
-                << " target=" << target_sequence
-                << " observed=" << observed_sequence
-                << " reply=" << reply_sequence
-                << '\n';
-        };
-
-        if (skip.sequence == invalid_sequence) {
-            log_decision("discard-invalid");
-            reply_progress_skips.erase(it);
-            return std::nullopt;
+            // Another thread updated the skip hint; reload and evaluate again.
+            skip_sequence = progress.reply_skip_sequence.load(std::memory_order_acquire);
         }
 
-        if (target_sequence > skip.sequence) {
-            log_decision("discard-target-advanced");
-            reply_progress_skips.erase(it);
-            return std::nullopt;
-        }
-
-        if (target_sequence != skip.sequence) {
-            log_decision("defer-target-mismatch");
-            return std::nullopt;
-        }
-
-        if (observed_sequence > skip.sequence) {
-            log_decision("discard-observed-advanced");
-            reply_progress_skips.erase(it);
-            return std::nullopt;
-        }
-
-        if (observed_sequence != skip.sequence) {
-            log_decision("defer-observed-mismatch");
-            return std::nullopt;
-        }
-
-        if (reply_sequence < skip.sequence) {
-            log_decision("defer-reply-behind");
-            return std::nullopt;
-        }
-
-        reply_progress_skips.erase(it);
-        log_decision("consume");
-        return skip;
+        return false;
     };
 
     while (true) {
-        refresh_reply_progress_skips();
-
         std::vector<Process_message_reader::Delivery_target> targets;
 
         {
@@ -1717,8 +1671,7 @@ void Managed_process::wait_for_delivery_fence()
                     rep_target);
                 if (rep_target_info.wait_needed) {
                     if (auto progress = rep_target_info.progress.lock()) {
-                        if (auto skip = take_reply_progress_skip(
-                                progress.get(), rep_target_info.target, rep_target_info.observed)) {
+                        if (consume_reply_skip(*progress, rep_target_info.target, rep_target_info.observed)) {
                             rep_target_info.wait_needed = false;
                         }
                     }
