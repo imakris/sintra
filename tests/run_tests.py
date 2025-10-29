@@ -48,7 +48,6 @@ if importlib.util.find_spec("psutil") is not None:
 
 PRESERVE_CORES_ENV = "SINTRA_PRESERVE_CORES"
 CORE_LIMIT_ENV = "SINTRA_CORE_LIMIT_MB"
-DEFAULT_DARWIN_CORE_LIMIT_MB = 512
 
 # macOS emits Mach-O core files that snapshot every virtual memory region of the
 # crashing process. Two platform effects make Sintra dumps look enormous even
@@ -70,9 +69,9 @@ DEFAULT_DARWIN_CORE_LIMIT_MB = 512
 # space (~4.24 GiB) as soon as a Mach-O core was written even though the rings
 # are sparse files on APFS. ``Ring_data::attach`` now applies ``MADV_DONTDUMP``
 # to both data spans (and the control block), which keeps the cores compact, but
-# ``SINTRA_CORE_LIMIT_MB`` remains available to enforce an upper bound (512 MiB
-# by default on macOS). Set the variable to ``0`` to restore ``ulimit -c
-# unlimited`` when a full core is required.
+# ``SINTRA_CORE_LIMIT_MB`` remains available for teams that want to cap crash
+# dumps explicitly. Remove the variable or set it to ``unlimited`` when a full
+# core is required.
 
 
 def _format_size(num_bytes: Optional[int]) -> str:
@@ -1314,12 +1313,8 @@ class TestRunner:
             return
 
         requested_value = os.environ.get(CORE_LIMIT_ENV)
-        configured_by_env = requested_value is not None
-
         if requested_value is None:
-            if sys.platform != "darwin":
-                return
-            requested_value = str(DEFAULT_DARWIN_CORE_LIMIT_MB)
+            return
 
         normalized = requested_value.strip().lower()
         if not normalized:
@@ -1359,18 +1354,17 @@ class TestRunner:
         try:
             resource.setrlimit(resource.RLIMIT_CORE, (limit_bytes, hard_limit))
         except (ValueError, OSError, resource.error) as exc:
-            origin = CORE_LIMIT_ENV if configured_by_env else "default macOS limit"
+            origin = CORE_LIMIT_ENV
             print(
-                f"{Color.YELLOW}Warning: Failed to apply {origin} of {_format_size(limit_bytes)}: {exc}.{Color.RESET}"
+                f"{Color.YELLOW}Warning: Failed to apply {origin}={requested_value!r} ({_format_size(limit_bytes)}): {exc}.{Color.RESET}"
             )
             return
 
         self._core_soft_limit_bytes = limit_bytes
 
-        origin = CORE_LIMIT_ENV if configured_by_env else f"default macOS {DEFAULT_DARWIN_CORE_LIMIT_MB} MB cap"
         description = "disabled" if limit_bytes == 0 else f"capped at {_format_size(limit_bytes)}"
         print(
-            f"{Color.BLUE}Info: Core dumps {description} via {origin}.{Color.RESET}"
+            f"{Color.BLUE}Info: Core dumps {description} via {CORE_LIMIT_ENV}.{Color.RESET}"
         )
 
     def _line_indicates_failure(self, line: str) -> bool:
