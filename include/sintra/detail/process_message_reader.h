@@ -12,6 +12,9 @@
 #include <mutex>
 #include <set>
 #include <thread>
+#include <vector>
+#include <algorithm>
+#include <utility>
 
 
 namespace sintra {
@@ -52,6 +55,30 @@ static inline thread_local instance_id_type s_tl_common_function_iid = invalid_i
 
 static inline thread_local Process_message_reader* s_tl_current_request_reader = nullptr;
 static inline thread_local Process_message_reader* s_tl_current_reply_reader = nullptr;
+
+struct Reply_progress_skip
+{
+    const void* progress = nullptr;
+    sequence_counter_type observed = invalid_sequence;
+};
+
+static inline thread_local std::vector<Reply_progress_skip> s_tl_reply_progress_to_skip;
+
+inline void register_reply_progress_skip(const void* progress_address, sequence_counter_type observed_sequence)
+{
+    if (!progress_address || observed_sequence == invalid_sequence) {
+        return;
+    }
+
+    s_tl_reply_progress_to_skip.push_back({progress_address, observed_sequence});
+}
+
+inline std::vector<Reply_progress_skip> take_reply_progress_skips()
+{
+    auto skips = std::move(s_tl_reply_progress_to_skip);
+    s_tl_reply_progress_to_skip.clear();
+    return skips;
+}
 
 static inline thread_local instance_id_type s_tl_additional_piids[max_process_index];
 static inline thread_local size_t s_tl_additional_piids_size = 0;
@@ -102,7 +129,6 @@ struct Process_message_reader
         std::atomic<sequence_counter_type> reply_sequence{invalid_sequence};
         std::atomic<bool> request_stopped{false};
         std::atomic<bool> reply_stopped{false};
-        std::atomic<sequence_counter_type> reply_skip_sequence{invalid_sequence};
     };
 
     using Delivery_progress_ptr = std::shared_ptr<Delivery_progress>;
