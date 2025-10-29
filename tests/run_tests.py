@@ -2137,7 +2137,6 @@ class TestRunner:
         return [
             *debugger_command,
             '--batch',
-            '--no-lldbinit',
             '-p', str(pid),
             '-o', 'thread backtrace all -c 256 -f',
             '-o', 'detach',
@@ -2174,7 +2173,6 @@ class TestRunner:
         return [
             *debugger_command,
             '--batch',
-            '--no-lldbinit',
             '-o', f'target create --core {quoted_core} {quoted_executable}',
             '-o', 'thread backtrace all -c 256 -f',
             '-o', 'quit',

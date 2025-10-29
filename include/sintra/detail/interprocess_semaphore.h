@@ -3,9 +3,10 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <limits>
+#include <random>
 #include <stdexcept>
 #include <system_error>
-#include <random>
 
 #if defined(_WIN32)
   #ifndef NOMINMAX
@@ -28,15 +29,15 @@
     #if __has_include(<os/os_sync_wait_on_address.h>) && __has_include(<os/clock.h>)
       #include <os/os_sync_wait_on_address.h>
       #include <os/clock.h>
+      #if __has_include(<mach/mach_time.h>)
+        #include <mach/mach_time.h>
+      #endif
       // macOS builds require os_sync_wait_on_address; no named-semaphore fallback is provided.
     #else
       #error "sintra requires <os/os_sync_wait_on_address.h> and <os/clock.h>. Install recent Xcode Command Line Tools (macOS 13+/Xcode 15+) to provide os_sync_wait_on_address."
     #endif
   #else
     #error "sintra requires compiler support for __has_include to verify os_sync_wait_on_address availability on macOS."
-  #endif
-  #ifdef OS_CLOCK_MACH_ABSOLUTE_TIME
-    #include <mach/mach_time.h>
   #endif
 #else
   #include <cerrno>
@@ -312,8 +313,19 @@ public:
             }
 
             auto remaining = std::chrono::ceil<std::chrono::nanoseconds>(abs_time - now);
+            if (remaining <= std::chrono::nanoseconds::zero()) {
+                cancel_wait_os_sync();
+                return false;
+            }
+
+            uint64_t deadline = make_os_sync_absolute_deadline(abs_time);
+            if (deadline == 0) {
+                cancel_wait_os_sync();
+                return false;
+            }
+
             int32_t observed = expected;
-            if (!wait_os_sync_with_timeout(expected, remaining, observed)) {
+            if (!wait_os_sync_with_timeout(expected, deadline, observed)) {
                 if (observed >= 0) {
                     return true;
                 }
@@ -404,10 +416,18 @@ private:
     static constexpr os_sync_wait_on_address_flags_t wait_flags = OS_SYNC_WAIT_ON_ADDRESS_SHARED;
     static constexpr os_sync_wake_by_address_flags_t wake_flags = OS_SYNC_WAKE_BY_ADDRESS_SHARED;
 
+    static uint64_t saturating_add(uint64_t base, uint64_t delta)
+    {
+        if (std::numeric_limits<uint64_t>::max() - base < delta) {
+            return std::numeric_limits<uint64_t>::max();
+        }
+        return base + delta;
+    }
+
 #ifdef OS_CLOCK_MACH_ABSOLUTE_TIME
     static constexpr os_clockid_t wait_clock = OS_CLOCK_MACH_ABSOLUTE_TIME;
 
-    static uint64_t nanoseconds_to_mach_absolute_ticks(uint64_t timeout_ns)
+    static uint64_t convert_timeout_delta(uint64_t timeout_ns)
     {
         if (timeout_ns == 0) {
             return 0;
@@ -419,30 +439,100 @@ private:
             return info;
         }();
 
-        unsigned __int128 absolute_delta = static_cast<unsigned __int128>(timeout_ns) *
-                                           static_cast<unsigned __int128>(timebase.denom);
-        absolute_delta += static_cast<unsigned __int128>(timebase.numer - 1);
-        absolute_delta /= static_cast<unsigned __int128>(timebase.numer);
+        __uint128_t numer = static_cast<__uint128_t>(timeout_ns) *
+                            static_cast<__uint128_t>(timebase.denom);
+        numer += static_cast<__uint128_t>(timebase.numer) - 1;
+        __uint128_t denom = static_cast<__uint128_t>(timebase.numer);
 
+        __uint128_t absolute_delta = numer / denom;
+        if (absolute_delta > std::numeric_limits<uint64_t>::max()) {
+            return std::numeric_limits<uint64_t>::max();
+        }
         return static_cast<uint64_t>(absolute_delta);
     }
-#elif defined(OS_CLOCK_MONOTONIC)
+#elif defined(OS_CLOCK_MONOTONIC) || defined(CLOCK_MONOTONIC)
+#   if defined(OS_CLOCK_MONOTONIC)
     static constexpr os_clockid_t wait_clock = OS_CLOCK_MONOTONIC;
-
-    static uint64_t nanoseconds_to_mach_absolute_ticks(uint64_t timeout_ns)
-    {
-        return timeout_ns;
-    }
-#elif defined(CLOCK_MONOTONIC)
+#   else
     static constexpr os_clockid_t wait_clock = static_cast<os_clockid_t>(CLOCK_MONOTONIC);
+#   endif
 
-    static uint64_t nanoseconds_to_mach_absolute_ticks(uint64_t timeout_ns)
+    static uint64_t convert_timeout_delta(uint64_t timeout_ns)
     {
         return timeout_ns;
     }
 #else
 #   error "No supported monotonic clock id available for os_sync_wait_on_address_with_timeout"
 #endif
+
+    static uint64_t os_sync_clock_now()
+    {
+#if defined(OS_CLOCK_MACH_ABSOLUTE_TIME)
+        if constexpr (wait_clock == OS_CLOCK_MACH_ABSOLUTE_TIME) {
+            return mach_absolute_time();
+        }
+#endif
+#if defined(OS_CLOCK_MONOTONIC)
+        if constexpr (wait_clock == OS_CLOCK_MONOTONIC) {
+            timespec ts{};
+            if (clock_gettime(static_cast<clockid_t>(wait_clock), &ts) != 0) {
+                throw std::system_error(errno, std::generic_category(), "clock_gettime");
+            }
+            return static_cast<uint64_t>(ts.tv_sec) * 1000000000ULL +
+                   static_cast<uint64_t>(ts.tv_nsec);
+        }
+#endif
+#if defined(CLOCK_MONOTONIC)
+        if constexpr (wait_clock == static_cast<os_clockid_t>(CLOCK_MONOTONIC)) {
+            timespec ts{};
+            if (clock_gettime(static_cast<clockid_t>(wait_clock), &ts) != 0) {
+                throw std::system_error(errno, std::generic_category(), "clock_gettime");
+            }
+            return static_cast<uint64_t>(ts.tv_sec) * 1000000000ULL +
+                   static_cast<uint64_t>(ts.tv_nsec);
+        }
+#endif
+
+        static_assert(
+#if defined(OS_CLOCK_MACH_ABSOLUTE_TIME)
+            wait_clock == OS_CLOCK_MACH_ABSOLUTE_TIME ||
+#endif
+#if defined(OS_CLOCK_MONOTONIC)
+            wait_clock == OS_CLOCK_MONOTONIC ||
+#endif
+#if defined(CLOCK_MONOTONIC)
+            wait_clock == static_cast<os_clockid_t>(CLOCK_MONOTONIC) ||
+#endif
+            false,
+            "Unsupported os_sync wait clock");
+
+        return 0;
+    }
+
+    template <typename Clock, typename Duration>
+    static uint64_t make_os_sync_absolute_deadline(const std::chrono::time_point<Clock, Duration>& abs_time)
+    {
+        using namespace std::chrono;
+
+        auto now = Clock::now();
+        if (abs_time <= now) {
+            return 0;
+        }
+
+        auto delta = abs_time - now;
+        auto ns_delta = duration_cast<nanoseconds>(delta);
+        auto count = ns_delta.count();
+        if (count <= 0) {
+            return 0;
+        }
+
+        if (count >= static_cast<int64_t>(std::numeric_limits<uint64_t>::max())) {
+            return std::numeric_limits<uint64_t>::max();
+        }
+
+        uint64_t delta_ns = static_cast<uint64_t>(count);
+        return saturating_add(os_sync_clock_now(), convert_timeout_delta(delta_ns));
+    }
 
     void initialise_os_sync(unsigned int initial_count)
     {
@@ -490,31 +580,22 @@ private:
         return false;
     }
 
-    bool wait_os_sync_with_timeout(int32_t expected, std::chrono::nanoseconds remaining, int32_t& observed)
+    bool wait_os_sync_with_timeout(int32_t expected, uint64_t absolute_deadline, int32_t& observed)
     {
-        if (remaining <= std::chrono::nanoseconds::zero()) {
+        if (absolute_deadline == 0) {
             observed = m_os_sync.count.load(std::memory_order_acquire);
             return false;
         }
-
-        auto count = remaining.count();
-        if (count <= 0) {
-            observed = m_os_sync.count.load(std::memory_order_acquire);
-            return false;
-        }
-
-        uint64_t timeout_ns = static_cast<uint64_t>(count);
 
         while (true) {
             uint64_t expected_value = static_cast<uint32_t>(expected);
-            const uint64_t timeout_value = nanoseconds_to_mach_absolute_ticks(timeout_ns);
             int rc = os_sync_wait_on_address_with_timeout(
                 reinterpret_cast<void*>(&m_os_sync.count),
                 expected_value,
                 sizeof(int32_t),
                 wait_flags,
                 wait_clock,
-                timeout_value);
+                absolute_deadline);
             if (rc >= 0) {
                 observed = m_os_sync.count.load(std::memory_order_acquire);
                 return true;
