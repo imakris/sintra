@@ -25,6 +25,7 @@
 #elif defined(__APPLE__)
   #include <cerrno>
   #include <ctime>
+  #include <time.h>
   #if defined(__has_include)
     #if __has_include(<os/os_sync_wait_on_address.h>) && __has_include(<os/clock.h>)
       #include <os/os_sync_wait_on_address.h>
@@ -318,14 +319,14 @@ public:
                 return false;
             }
 
-            uint64_t timeout_value = make_os_sync_timeout(remaining);
-            if (timeout_value == 0) {
+            uint64_t deadline_value = make_os_sync_deadline(remaining);
+            if (deadline_value == 0) {
                 cancel_wait_os_sync();
                 return false;
             }
 
             int32_t observed = expected;
-            if (!wait_os_sync_with_timeout(expected, timeout_value, observed)) {
+            if (!wait_os_sync_until(expected, deadline_value, observed)) {
                 if (observed >= 0) {
                     return true;
                 }
@@ -457,7 +458,44 @@ private:
 #   error "No supported monotonic clock id available for os_sync_wait_on_address_with_timeout"
 #endif
 
-    static uint64_t make_os_sync_timeout(std::chrono::nanoseconds remaining)
+    static uint64_t os_sync_now()
+    {
+#if defined(OS_CLOCK_MACH_ABSOLUTE_TIME)
+        return mach_absolute_time();
+#else
+        timespec ts{};
+        clockid_t clock_id =
+#   if defined(CLOCK_MONOTONIC)
+            CLOCK_MONOTONIC;
+#   else
+            static_cast<clockid_t>(wait_clock);
+#   endif
+
+        if (::clock_gettime(clock_id, &ts) != 0) {
+            throw std::system_error(errno, std::generic_category(), "clock_gettime");
+        }
+
+        __uint128_t now_ns = static_cast<__uint128_t>(ts.tv_sec) * 1000000000ULL;
+        now_ns += static_cast<__uint128_t>(ts.tv_nsec);
+        if (now_ns > std::numeric_limits<uint64_t>::max()) {
+            return std::numeric_limits<uint64_t>::max();
+        }
+        return static_cast<uint64_t>(now_ns);
+#endif
+    }
+
+    static uint64_t saturating_add(uint64_t lhs, uint64_t rhs)
+    {
+        if (rhs == 0) {
+            return lhs;
+        }
+        if (lhs >= std::numeric_limits<uint64_t>::max() - rhs) {
+            return std::numeric_limits<uint64_t>::max();
+        }
+        return lhs + rhs;
+    }
+
+    static uint64_t make_os_sync_deadline(std::chrono::nanoseconds remaining)
     {
         using namespace std::chrono;
 
@@ -477,7 +515,12 @@ private:
             converted = 1;
         }
 
-        return converted;
+        if (converted == std::numeric_limits<uint64_t>::max()) {
+            return converted;
+        }
+
+        uint64_t now = os_sync_now();
+        return saturating_add(now, converted);
     }
 
     void initialise_os_sync(unsigned int initial_count)
@@ -526,9 +569,9 @@ private:
         return false;
     }
 
-    bool wait_os_sync_with_timeout(int32_t expected, uint64_t timeout_value, int32_t& observed)
+    bool wait_os_sync_until(int32_t expected, uint64_t deadline_value, int32_t& observed)
     {
-        if (timeout_value == 0) {
+        if (deadline_value == 0) {
             observed = m_os_sync.count.load(std::memory_order_acquire);
             return false;
         }
@@ -541,7 +584,7 @@ private:
                 sizeof(int32_t),
                 wait_flags,
                 wait_clock,
-                timeout_value);
+                deadline_value);
             if (rc >= 0) {
                 observed = m_os_sync.count.load(std::memory_order_acquire);
                 return true;
