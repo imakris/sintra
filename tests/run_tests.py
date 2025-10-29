@@ -479,6 +479,7 @@ class TestRunner:
         timeout = _lookup_test_timeout(invocation.name, self.timeout)
         scratch_dir = self._allocate_scratch_directory(invocation)
         process = None
+        cleanup_scratch_dir = True
         try:
             popen_env = self._build_test_environment(scratch_dir)
             start_time = time.time()
@@ -738,6 +739,7 @@ class TestRunner:
                 if self.preserve_on_timeout:
                     print(f"\n{Color.RED}TIMEOUT: Process exceeded timeout of {timeout}s (PID {process.pid}). Preserving for debugging as requested.{Color.RESET}")
                     print(f"{Color.YELLOW}Attach a debugger to PID {process.pid} or terminate it manually when done.{Color.RESET}")
+                    cleanup_scratch_dir = False
                     sys.exit(2)
 
                 stack_traces = live_stack_traces
@@ -798,7 +800,8 @@ class TestRunner:
                 error=error_msg
             )
         finally:
-            self._cleanup_scratch_directory(scratch_dir)
+            if cleanup_scratch_dir:
+                self._cleanup_scratch_directory(scratch_dir)
 
     def _kill_process_tree(self, pid: int):
         """Kill a process and all its children"""
