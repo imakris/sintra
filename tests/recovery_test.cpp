@@ -23,9 +23,12 @@
 #include <sintra/sintra.h>
 #include <sintra/detail/managed_process.h>
 
+#include "test_environment.h"
+
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <cerrno>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
@@ -42,6 +45,9 @@
 #endif
 #else
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <sys/resource.h>
+#endif
 #endif
 
 namespace {
@@ -120,8 +126,7 @@ std::filesystem::path ensure_shared_directory()
         return dir;
     }
 
-    auto base = std::filesystem::temp_directory_path() / "sintra_tests";
-    std::filesystem::create_directories(base);
+    auto base = sintra::test::scratch_subdirectory("recovery_test");
 
     auto unique_suffix = std::chrono::duration_cast<std::chrono::nanoseconds>(
                              std::chrono::high_resolution_clock::now().time_since_epoch())
@@ -165,6 +170,30 @@ void append_line(const std::filesystem::path& file, const std::string& value)
     }
     out << value << '\n';
 }
+
+#if defined(__APPLE__)
+void disable_core_dumps_for_intentional_abort()
+{
+    struct rlimit current {};
+    if (getrlimit(RLIMIT_CORE, &current) != 0) {
+        std::fprintf(stderr, "[CRASHER] getrlimit(RLIMIT_CORE) failed: %d\n", errno);
+        return;
+    }
+
+    if (current.rlim_cur == 0) {
+        return;
+    }
+
+    struct rlimit updated = current;
+    updated.rlim_cur = 0;
+    if (setrlimit(RLIMIT_CORE, &updated) != 0) {
+        std::fprintf(stderr, "[CRASHER] setrlimit(RLIMIT_CORE) failed: %d\n", errno);
+        return;
+    }
+
+    std::fprintf(stderr, "[CRASHER] Disabled core dumps for intentional abort\n");
+}
+#endif
 
 int process_watchdog()
 {
@@ -223,7 +252,7 @@ int process_crasher()
     }
 
     {
-        std::ofstream diag(std::filesystem::temp_directory_path() / "sintra_crasher_diag.log", std::ios::app);
+        std::ofstream diag(sintra::test::scratch_subdirectory("recovery_test") / "sintra_crasher_diag.log", std::ios::app);
         diag << "process_crasher pid="
 #ifdef _WIN32
              << _getpid()
@@ -293,6 +322,9 @@ int process_crasher()
         log << "First run - about to abort!" << std::endl;
         log.close();
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
+#if defined(__APPLE__)
+        disable_core_dumps_for_intentional_abort();
+#endif
         std::abort();
     }
 

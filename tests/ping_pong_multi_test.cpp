@@ -19,6 +19,8 @@
 
 #include <sintra/sintra.h>
 
+#include "test_environment.h"
+
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -71,8 +73,7 @@ std::filesystem::path ensure_shared_directory()
         return dir;
     }
 
-    auto base = std::filesystem::temp_directory_path() / "sintra_tests";
-    std::filesystem::create_directories(base);
+    auto base = sintra::test::scratch_subdirectory("ping_pong_multi");
 
     auto unique_suffix = std::chrono::duration_cast<std::chrono::nanoseconds>(
                              std::chrono::high_resolution_clock::now().time_since_epoch())

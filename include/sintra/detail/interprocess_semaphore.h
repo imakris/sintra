@@ -35,6 +35,9 @@
   #else
     #error "sintra requires compiler support for __has_include to verify os_sync_wait_on_address availability on macOS."
   #endif
+  #ifdef OS_CLOCK_MACH_ABSOLUTE_TIME
+    #include <mach/mach_time.h>
+  #endif
 #else
   #include <cerrno>
   #include <semaphore.h>
@@ -401,15 +404,45 @@ private:
     static constexpr os_sync_wait_on_address_flags_t wait_flags = OS_SYNC_WAIT_ON_ADDRESS_SHARED;
     static constexpr os_sync_wake_by_address_flags_t wake_flags = OS_SYNC_WAKE_BY_ADDRESS_SHARED;
 
-#    ifdef OS_CLOCK_REALTIME
-    static constexpr os_clockid_t wait_clock = OS_CLOCK_REALTIME;
-#    elif defined(CLOCK_REALTIME)
-    static constexpr os_clockid_t wait_clock = static_cast<os_clockid_t>(CLOCK_REALTIME);
-#    elif defined(OS_CLOCK_MACH_ABSOLUTE_TIME)
+#ifdef OS_CLOCK_MACH_ABSOLUTE_TIME
     static constexpr os_clockid_t wait_clock = OS_CLOCK_MACH_ABSOLUTE_TIME;
-#    else
-#      error "No supported clock id available for os_sync_wait_on_address_with_timeout"
-#    endif
+
+    static uint64_t nanoseconds_to_mach_absolute_ticks(uint64_t timeout_ns)
+    {
+        if (timeout_ns == 0) {
+            return 0;
+        }
+
+        static const mach_timebase_info_data_t timebase = [] {
+            mach_timebase_info_data_t info{};
+            (void)mach_timebase_info(&info);
+            return info;
+        }();
+
+        unsigned __int128 absolute_delta = static_cast<unsigned __int128>(timeout_ns) *
+                                           static_cast<unsigned __int128>(timebase.denom);
+        absolute_delta += static_cast<unsigned __int128>(timebase.numer - 1);
+        absolute_delta /= static_cast<unsigned __int128>(timebase.numer);
+
+        return static_cast<uint64_t>(absolute_delta);
+    }
+#elif defined(OS_CLOCK_MONOTONIC)
+    static constexpr os_clockid_t wait_clock = OS_CLOCK_MONOTONIC;
+
+    static uint64_t nanoseconds_to_mach_absolute_ticks(uint64_t timeout_ns)
+    {
+        return timeout_ns;
+    }
+#elif defined(CLOCK_MONOTONIC)
+    static constexpr os_clockid_t wait_clock = static_cast<os_clockid_t>(CLOCK_MONOTONIC);
+
+    static uint64_t nanoseconds_to_mach_absolute_ticks(uint64_t timeout_ns)
+    {
+        return timeout_ns;
+    }
+#else
+#   error "No supported monotonic clock id available for os_sync_wait_on_address_with_timeout"
+#endif
 
     void initialise_os_sync(unsigned int initial_count)
     {
@@ -473,13 +506,15 @@ private:
         uint64_t timeout_ns = static_cast<uint64_t>(count);
 
         while (true) {
+            uint64_t expected_value = static_cast<uint32_t>(expected);
+            const uint64_t timeout_value = nanoseconds_to_mach_absolute_ticks(timeout_ns);
             int rc = os_sync_wait_on_address_with_timeout(
                 reinterpret_cast<void*>(&m_os_sync.count),
-                expected,
+                expected_value,
                 sizeof(int32_t),
                 wait_flags,
                 wait_clock,
-                timeout_ns);
+                timeout_value);
             if (rc >= 0) {
                 observed = m_os_sync.count.load(std::memory_order_acquire);
                 return true;
@@ -503,9 +538,10 @@ private:
     int32_t wait_on_address_blocking(int32_t expected)
     {
         while (true) {
+            uint64_t expected_value = static_cast<uint32_t>(expected);
             int rc = os_sync_wait_on_address(
                 reinterpret_cast<void*>(&m_os_sync.count),
-                expected,
+                expected_value,
                 sizeof(int32_t),
                 wait_flags);
             if (rc >= 0) {

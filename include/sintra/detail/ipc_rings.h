@@ -148,7 +148,11 @@
 // the writer will tolerate before triggering an eviction scan. Override with a
 // compile-time value tailored to your deployment if desired.
 #ifndef SINTRA_EVICTION_SPIN_BUDGET_US
-#define SINTRA_EVICTION_SPIN_BUDGET_US 500u
+// Give readers a wider scheduling window (5ms by default) before the writer
+// initiates an eviction pass. The previous 500µs budget was occasionally too
+// tight on heavily loaded macOS runners, where short deschedules allowed the
+// writer to evict still-progressing readers and triggered data overflows.
+#define SINTRA_EVICTION_SPIN_BUDGET_US 5000u
 #endif
 
 #ifndef SINTRA_EVICTION_LAG_RINGS
@@ -163,79 +167,24 @@ namespace fs  = std::filesystem;
 namespace ipc = boost::interprocess;
 
 using sequence_counter_type = uint64_t;
+
+struct Ring_diagnostics
+{
+    sequence_counter_type max_reader_lag             = 0;
+    sequence_counter_type worst_overflow_lag         = 0;
+    uint64_t              reader_lag_overflow_count  = 0;
+    uint64_t              reader_sequence_regressions = 0;
+    uint64_t              reader_eviction_count      = 0;
+    uint32_t              last_evicted_reader_index  = std::numeric_limits<uint32_t>::max();
+    sequence_counter_type last_evicted_reader_sequence = 0;
+    sequence_counter_type last_evicted_writer_sequence = 0;
+    uint32_t              last_evicted_reader_octile = std::numeric_limits<uint32_t>::max();
+    uint32_t              last_overflow_reader_index = std::numeric_limits<uint32_t>::max();
+    sequence_counter_type last_overflow_reader_sequence = 0;
+    sequence_counter_type last_overflow_leading_sequence = 0;
+    sequence_counter_type last_overflow_last_consumed = 0;
+};
 constexpr auto invalid_sequence = ~sequence_counter_type(0);
-
-#ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
-namespace ring_detail {
-
-inline uint64_t calibrate_spin_loops_per_microsecond()
-{
-    static std::atomic<uint64_t> cached{0};
-    uint64_t loops = cached.load(std::memory_order_acquire);
-    if (loops != 0) {
-        return loops;
-    }
-
-    constexpr uint64_t sample_iterations = 1u << 20;
-    volatile uint64_t sink = 0;
-
-    double start = get_wtime();
-    for (uint64_t i = 0; i < sample_iterations; ++i) {
-        sink += i;
-    }
-    double elapsed = get_wtime() - start;
-    (void)sink;
-
-    uint64_t computed = sample_iterations;
-    if (elapsed > 0.0) {
-        double loops_per_us = static_cast<double>(sample_iterations) / (elapsed * 1e6);
-        if (loops_per_us >= 1.0) {
-            computed = static_cast<uint64_t>(loops_per_us);
-        }
-        else {
-            computed = 1;
-        }
-    }
-
-    uint64_t expected = 0;
-    if (cached.compare_exchange_strong(expected, computed, std::memory_order_release, std::memory_order_relaxed)) {
-        return computed;
-    }
-
-    return cached.load(std::memory_order_acquire);
-}
-
-inline uint64_t get_eviction_spin_loop_budget()
-{
-#if defined(SINTRA_EVICTION_SPIN_THRESHOLD) && SINTRA_EVICTION_SPIN_THRESHOLD > 0
-    // Backwards compatibility: allow callers to supply a raw iteration budget.
-    return SINTRA_EVICTION_SPIN_THRESHOLD;
-#else
-    static std::atomic<uint64_t> cached{0};
-    uint64_t loops = cached.load(std::memory_order_acquire);
-    if (loops != 0) {
-        return loops;
-    }
-
-    const uint64_t loops_per_us = calibrate_spin_loops_per_microsecond();
-    uint64_t computed = loops_per_us * static_cast<uint64_t>(SINTRA_EVICTION_SPIN_BUDGET_US);
-    if (computed == 0) {
-        computed = loops_per_us != 0 ? loops_per_us : 1;
-    }
-
-    uint64_t expected = 0;
-    if (cached.compare_exchange_strong(expected, computed, std::memory_order_release, std::memory_order_relaxed)) {
-        return computed;
-    }
-
-    return cached.load(std::memory_order_acquire);
-#endif
-}
-
-} // namespace ring_detail
-#endif // SINTRA_ENABLE_SLOW_READER_EVICTION
-
-
 
 //==============================================================================
 // Suggested ring configurations helper
@@ -651,6 +600,15 @@ private:
                     m_data_region_0 = region0.release();
                     m_data_region_1 = region1.release();
                     m_data = (T*)m_data_region_0->get_address();
+
+#if defined(MADV_DONTDUMP)
+                    // Keep crash dumps compact (especially on macOS where Mach
+                    // cores include every reserved span) and avoid leaking
+                    // transient payloads. Failing to apply MADV_DONTDUMP is
+                    // harmless, so we deliberately ignore the return value.
+                    ::madvise(m_data_region_0->get_address(), m_data_region_size, MADV_DONTDUMP);
+                    ::madvise(m_data_region_1->get_address(), m_data_region_size, MADV_DONTDUMP);
+#endif
                     break;
                 }
 
@@ -808,6 +766,21 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         // NOTE: ONLY RELEVANT FOR TRACKING / DIAGNOSTICS
         // Should equal the sum of the eight bytes in read_access. Not used for correctness.
         std::atomic<uint32_t>                num_readers{0};
+
+        // Diagnostic counters (best-effort, relaxed atomics).
+        std::atomic<sequence_counter_type>   max_reader_lag{0};
+        std::atomic<sequence_counter_type>   worst_overflow_lag{0};
+        std::atomic<uint64_t>                reader_lag_overflow_count{0};
+        std::atomic<uint64_t>                reader_sequence_regressions{0};
+        std::atomic<uint64_t>                reader_eviction_count{0};
+        std::atomic<uint32_t>                last_evicted_reader_index{std::numeric_limits<uint32_t>::max()};
+        std::atomic<sequence_counter_type>   last_evicted_reader_sequence{0};
+        std::atomic<sequence_counter_type>   last_evicted_writer_sequence{0};
+        std::atomic<uint32_t>                last_evicted_reader_octile{std::numeric_limits<uint32_t>::max()};
+        std::atomic<uint32_t>                last_overflow_reader_index{std::numeric_limits<uint32_t>::max()};
+        std::atomic<sequence_counter_type>   last_overflow_reader_sequence{0};
+        std::atomic<sequence_counter_type>   last_overflow_leading_sequence{0};
+        std::atomic<sequence_counter_type>   last_overflow_last_consumed{0};
 
         // Per-reader currently visible (snapshot) sequence. Cache-line sized to minimize
         // false sharing between reader slots. A reader sets its slot to the snapshot head
@@ -1090,6 +1063,10 @@ private:
             m_control_region = new ipc::mapped_region(fm_control, ipc::read_write, 0, 0);
             m_control = (Control*)m_control_region->get_address();
 
+#if defined(MADV_DONTDUMP)
+            ::madvise(m_control_region->get_address(), m_control_region->get_size(), MADV_DONTDUMP);
+#endif
+
             return true;
         }
         catch (...) {
@@ -1102,6 +1079,30 @@ private:
     std::string          m_control_filename;
 protected:
     Control*             m_control        = nullptr;
+
+public:
+    Ring_diagnostics get_diagnostics() const noexcept
+    {
+        Ring_diagnostics diag;
+        if (!m_control) {
+            return diag;
+        }
+
+        diag.max_reader_lag = m_control->max_reader_lag.load(std::memory_order_acquire);
+        diag.worst_overflow_lag = m_control->worst_overflow_lag.load(std::memory_order_acquire);
+        diag.reader_lag_overflow_count = m_control->reader_lag_overflow_count.load(std::memory_order_acquire);
+        diag.reader_sequence_regressions = m_control->reader_sequence_regressions.load(std::memory_order_acquire);
+        diag.reader_eviction_count = m_control->reader_eviction_count.load(std::memory_order_acquire);
+        diag.last_evicted_reader_index = m_control->last_evicted_reader_index.load(std::memory_order_acquire);
+        diag.last_evicted_reader_sequence = m_control->last_evicted_reader_sequence.load(std::memory_order_acquire);
+        diag.last_evicted_writer_sequence = m_control->last_evicted_writer_sequence.load(std::memory_order_acquire);
+        diag.last_evicted_reader_octile = m_control->last_evicted_reader_octile.load(std::memory_order_acquire);
+        diag.last_overflow_reader_index = m_control->last_overflow_reader_index.load(std::memory_order_acquire);
+        diag.last_overflow_reader_sequence = m_control->last_overflow_reader_sequence.load(std::memory_order_acquire);
+        diag.last_overflow_leading_sequence = m_control->last_overflow_leading_sequence.load(std::memory_order_acquire);
+        diag.last_overflow_last_consumed = m_control->last_overflow_last_consumed.load(std::memory_order_acquire);
+        return diag;
+    }
 };
 
   //\       //\       //\       //\       //\       //\       //\       //
@@ -1283,6 +1284,7 @@ struct Ring_R : Ring<T, true>
 
                 m_trailing_octile = trailing_octile;
                 m_reading_sequence->store(confirmed_leading_sequence);
+                m_last_consumed_sequence = confirmed_leading_sequence;
                 break;
             }
 
@@ -1361,26 +1363,59 @@ struct Ring_R : Ring<T, true>
     const Range<T> wait_for_new_data()
     {
         auto produce_range = [&]() -> Range<T> {
-            if (c.reading_sequences[m_rs_index].data.has_guard.load(std::memory_order_acquire) == 0) {
-                reattach_after_eviction();
+            if (handle_eviction_if_needed()) {
+                return {};
             }
 
-            auto num_range_elements =
-                size_t(c.leading_sequence.load(std::memory_order_acquire) - m_reading_sequence->load());
+            auto start_sequence = m_reading_sequence->load(std::memory_order_acquire);
+            auto leading_sequence = c.leading_sequence.load(std::memory_order_acquire);
+            const auto last_consumed_before = m_last_consumed_sequence;
 
-            if (num_range_elements > this->m_num_elements) {
-                num_range_elements = this->m_num_elements;
-            }
+            auto update_max_relaxed = [](auto& target, sequence_counter_type value) {
+                auto current = target.load(std::memory_order_relaxed);
+                while (value > current &&
+                       !target.compare_exchange_weak(current, value, std::memory_order_relaxed)) {
+                }
+            };
 
             Range<T> ret;
+
+            sequence_counter_type full_lag = 0;
+            if (leading_sequence >= start_sequence) {
+                full_lag = leading_sequence - start_sequence;
+            }
+            else {
+                c.reader_sequence_regressions.fetch_add(1, std::memory_order_relaxed);
+            }
+
+            update_max_relaxed(c.max_reader_lag, full_lag);
+
+            sequence_counter_type clamped_lag = full_lag;
+            if (clamped_lag > sequence_counter_type(this->m_num_elements)) {
+                c.reader_lag_overflow_count.fetch_add(1, std::memory_order_relaxed);
+                update_max_relaxed(c.worst_overflow_lag, full_lag);
+                c.last_overflow_reader_index.store(static_cast<uint32_t>(m_rs_index), std::memory_order_relaxed);
+                c.last_overflow_reader_sequence.store(start_sequence, std::memory_order_relaxed);
+                c.last_overflow_leading_sequence.store(leading_sequence, std::memory_order_relaxed);
+                c.last_overflow_last_consumed.store(last_consumed_before, std::memory_order_relaxed);
+                clamped_lag = sequence_counter_type(this->m_num_elements);
+            }
+
+            if (start_sequence < m_last_consumed_sequence) {
+                c.reader_sequence_regressions.fetch_add(1, std::memory_order_relaxed);
+            }
+
+            size_t num_range_elements = static_cast<size_t>(clamped_lag);
+
             if (num_range_elements == 0) {
                 // Could happen if we were explicitly unblocked
                 return ret;
             }
 
-            ret.begin = this->m_data + mod_u64(m_reading_sequence->load(), this->m_num_elements);
+            ret.begin = this->m_data + mod_u64(start_sequence, this->m_num_elements);
             ret.end   = ret.begin + num_range_elements;
             m_reading_sequence->fetch_add(num_range_elements);  // +=
+            m_last_consumed_sequence = start_sequence + sequence_counter_type(num_range_elements);
             return ret;
         };
 
@@ -1515,9 +1550,7 @@ struct Ring_R : Ring<T, true>
 
         const size_t new_trailing_octile = (8 * t_idx) / this->m_num_elements;
 
-        if (c.reading_sequences[m_rs_index].data.has_guard.load(std::memory_order_acquire) == 0) {
-            reattach_after_eviction();
-        }
+        handle_eviction_if_needed();
 
         if (new_trailing_octile != m_trailing_octile) {
             const uint64_t new_mask = uint64_t(1) << (8 * new_trailing_octile);
@@ -1531,6 +1564,32 @@ struct Ring_R : Ring<T, true>
         }
     }
 
+    bool handle_eviction_if_needed()
+    {
+        auto& slot = c.reading_sequences[m_rs_index].data;
+        if (slot.has_guard.load(std::memory_order_acquire) != 0) {
+            return false;
+        }
+
+#ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
+        if (slot.status.load(std::memory_order_acquire) == Ring<T, false>::READER_STATE_EVICTED) {
+            // Reader was evicted by writer for being too slow.
+            // Skip all missed data and jump to writer's current position.
+            // This is the only safe recovery strategy since old data has been overwritten.
+            sequence_counter_type new_seq = c.leading_sequence.load(std::memory_order_acquire);
+            slot.v.store(new_seq, std::memory_order_release);
+            m_reading_sequence->store(new_seq, std::memory_order_release);
+            m_last_consumed_sequence = new_seq;
+            reattach_after_eviction();
+            m_evicted_since_last_wait.store(true, std::memory_order_release);
+            return true;
+        }
+#endif
+
+        reattach_after_eviction();
+        return false;
+    }
+
     void reattach_after_eviction()
     {
         const uint64_t mask = uint64_t(1) << (8 * m_trailing_octile);
@@ -1542,6 +1601,17 @@ struct Ring_R : Ring<T, true>
         c.reading_sequences[m_rs_index].data.status.store(
             Ring<T, false>::READER_STATE_ACTIVE, std::memory_order_release);
 #endif
+    }
+
+public:
+    bool consume_eviction_notification()
+    {
+        return m_evicted_since_last_wait.exchange(false, std::memory_order_acq_rel);
+    }
+
+    bool eviction_pending() const
+    {
+        return m_evicted_since_last_wait.load(std::memory_order_acquire);
     }
 
     /**
@@ -1569,6 +1639,8 @@ private:
     std::atomic<sequence_counter_type>* m_reading_sequence      = &s_zero_rs;
     size_t                              m_trailing_octile       = 0;
     uint64_t                            m_seen_unblock_sequence = 0;
+    sequence_counter_type               m_last_consumed_sequence = 0;
+    std::atomic<bool>                   m_evicted_since_last_wait{false};
 
 protected:
     std::atomic<bool>                   m_reading               = false;
@@ -1876,8 +1948,63 @@ private:
 #endif
             auto range_mask = (uint64_t(0xff) << (8 * new_octile));
 #ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
+            auto run_eviction_pass = [&]() {
+                sequence_counter_type eviction_threshold =
+                    (m_pending_new_sequence >
+                     sequence_counter_type(SINTRA_EVICTION_LAG_RINGS) * this->m_num_elements)
+                        ? (m_pending_new_sequence - sequence_counter_type(SINTRA_EVICTION_LAG_RINGS) *
+                                                       this->m_num_elements)
+                        : 0;
+
+                for (int i = 0; i < max_process_index; ++i) {
+                    // Check if this reader slot is active
+                    if (c.reading_sequences[i].data.status.load(std::memory_order_acquire)
+                        == Ring<T, false>::READER_STATE_ACTIVE)
+                    {
+                        sequence_counter_type reader_seq =
+                            c.reading_sequences[i].data.v.load(std::memory_order_acquire);
+                        uint8_t guard_flag =
+                            c.reading_sequences[i].data.has_guard.load(std::memory_order_acquire);
+                        uint8_t reader_octile =
+                            c.reading_sequences[i].data.trailing_octile.load(std::memory_order_acquire);
+
+                        bool blocking_current_octile =
+                            (guard_flag != 0) && (reader_octile == new_octile);
+
+                        if (reader_seq < eviction_threshold || blocking_current_octile) {
+                            // Evict only if the reader currently holds a guard
+                            uint8_t expected = 1;
+                            if (c.reading_sequences[i].data.has_guard.compare_exchange_strong(
+                                    expected, uint8_t{0}, std::memory_order_acq_rel))
+                            {
+                                c.reading_sequences[i].data.status.store(
+                                    Ring<T, false>::READER_STATE_EVICTED, std::memory_order_release);
+
+                                size_t evicted_reader_octile =
+                                    c.reading_sequences[i].data.trailing_octile.load(std::memory_order_acquire);
+                                c.read_access.fetch_sub(uint64_t(1) << (8 * evicted_reader_octile), std::memory_order_acq_rel);
+                                c.reader_eviction_count.fetch_add(1, std::memory_order_relaxed);
+                                c.last_evicted_reader_index.store(static_cast<uint32_t>(i), std::memory_order_relaxed);
+                                c.last_evicted_reader_sequence.store(reader_seq, std::memory_order_relaxed);
+                                c.last_evicted_writer_sequence.store(m_pending_new_sequence, std::memory_order_relaxed);
+                                c.last_evicted_reader_octile.store(static_cast<uint32_t>(evicted_reader_octile), std::memory_order_relaxed);
+                            }
+                        }
+                    }
+                }
+
+                c.scavenge_orphans();
+            };
+
+#if defined(SINTRA_EVICTION_SPIN_THRESHOLD) && SINTRA_EVICTION_SPIN_THRESHOLD > 0
             uint64_t spin_count = 0;
-            const uint64_t spin_loop_budget = ring_detail::get_eviction_spin_loop_budget();
+            constexpr uint64_t spin_loop_budget = SINTRA_EVICTION_SPIN_THRESHOLD;
+#else
+            using eviction_clock = std::chrono::steady_clock;
+            const auto eviction_budget = std::chrono::microseconds{SINTRA_EVICTION_SPIN_BUDGET_US};
+            auto eviction_deadline = eviction_clock::time_point{};
+            bool eviction_deadline_armed = false;
+#endif
 #endif
             while (c.read_access.load(std::memory_order_acquire) & range_mask) {
                 bool has_blocking_reader = false;
@@ -1899,59 +2026,39 @@ private:
                     // trailing octile has not yet been published. Keep spinning until the guard count drops
                     // (or an eviction occurs) so that the writer never writes into an octile that is still
                     // protected by a reader.
+#ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
+#if defined(SINTRA_EVICTION_SPIN_THRESHOLD) && SINTRA_EVICTION_SPIN_THRESHOLD > 0
+                    spin_count = 0;
+#else
+                    eviction_deadline_armed = false;
+#endif
+#endif
                     continue;
                 }
 
                 // Busy-wait until the target octile is unguarded
 #ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
+#if defined(SINTRA_EVICTION_SPIN_THRESHOLD) && SINTRA_EVICTION_SPIN_THRESHOLD > 0
                 if (++spin_count > spin_loop_budget) {
                     // Writer is stuck. Time to find and evict the slow reader(s).
                     // This is a slow path, taken only in exceptional circumstances.
-
-                    // The sequence number that marks a reader as "too far behind".
-                    // Any reader with a sequence older than this is a candidate for eviction.
-                    // A safe threshold is one full ring buffer behind the writer's current head.
-                    sequence_counter_type eviction_threshold =
-                        (m_pending_new_sequence >
-                         sequence_counter_type(SINTRA_EVICTION_LAG_RINGS) * this->m_num_elements)
-                            ? (m_pending_new_sequence - sequence_counter_type(SINTRA_EVICTION_LAG_RINGS) *
-                                                           this->m_num_elements)
-                            : 0;
-
-                    for (int i = 0; i < max_process_index; ++i) {
-                        // Check if this reader slot is active
-                        if (c.reading_sequences[i].data.status.load(std::memory_order_acquire)
-                            == Ring<T, false>::READER_STATE_ACTIVE)
-                        {
-                            sequence_counter_type reader_seq =
-                                c.reading_sequences[i].data.v.load(std::memory_order_acquire);
-                            uint8_t guard_flag =
-                                c.reading_sequences[i].data.has_guard.load(std::memory_order_acquire);
-                            uint8_t reader_octile =
-                                c.reading_sequences[i].data.trailing_octile.load(std::memory_order_acquire);
-
-                            bool blocking_current_octile =
-                                (guard_flag != 0) && (reader_octile == new_octile);
-
-                            if (reader_seq < eviction_threshold || blocking_current_octile) {
-                                // Evict only if the reader currently holds a guard
-                                uint8_t expected = 1;
-                                if (c.reading_sequences[i].data.has_guard.compare_exchange_strong(
-                                        expected, uint8_t{0}, std::memory_order_acq_rel))
-                                {
-                                    c.reading_sequences[i].data.status.store(
-                                        Ring<T, false>::READER_STATE_EVICTED, std::memory_order_release);
-
-                                    size_t evicted_reader_octile =
-                                        c.reading_sequences[i].data.trailing_octile.load(std::memory_order_acquire);
-                                    c.read_access.fetch_sub(uint64_t(1) << (8 * evicted_reader_octile), std::memory_order_acq_rel);
-                                }
-                            }
-                        }
-                    }
+                    run_eviction_pass();
                     spin_count = 0; // Reset spin count after an eviction pass
-                    c.scavenge_orphans();
                 }
+#else
+                auto now = eviction_clock::now();
+                if (eviction_budget.count() == 0) {
+                    run_eviction_pass();
+                }
+                else if (!eviction_deadline_armed) {
+                    eviction_deadline = now + eviction_budget;
+                    eviction_deadline_armed = true;
+                }
+                else if (now >= eviction_deadline) {
+                    run_eviction_pass();
+                    eviction_deadline = now + eviction_budget;
+                }
+#endif
 #endif
             }
             m_octile = new_octile;
