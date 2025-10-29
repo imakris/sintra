@@ -22,6 +22,8 @@ Options:
 
 import argparse
 import fnmatch
+import importlib
+import importlib.util
 import json
 import os
 import shlex
@@ -36,7 +38,163 @@ import urllib.request
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, IO, List, Optional, Set, Tuple
+from typing import Dict, IO, Iterable, List, Optional, Sequence, Set, Tuple
+
+
+_PSUTIL = None
+if importlib.util.find_spec("psutil") is not None:
+    _PSUTIL = importlib.import_module("psutil")
+
+
+PRESERVE_CORES_ENV = "SINTRA_PRESERVE_CORES"
+
+
+def _format_size(num_bytes: Optional[int]) -> str:
+    """Return a human-friendly representation of ``num_bytes``."""
+
+    if num_bytes is None:
+        return "unknown"
+
+    if num_bytes < 0:
+        return "unknown"
+
+    units = ["B", "KB", "MB", "GB", "TB", "PB"]
+    value = float(num_bytes)
+    for unit in units:
+        if value < 1024.0:
+            return f"{value:.2f} {unit}"
+        value /= 1024.0
+    return f"{value:.2f} EB"
+
+
+def _available_memory_bytes() -> Optional[int]:
+    """Best-effort determination of available physical memory."""
+
+    if _PSUTIL is not None:
+        try:
+            return int(_PSUTIL.virtual_memory().available)
+        except Exception:
+            pass
+
+    try:
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        avail_pages = os.sysconf("SC_AVPHYS_PAGES")
+    except (AttributeError, OSError, ValueError):
+        page_size = None
+        avail_pages = None
+
+    if isinstance(page_size, int) and isinstance(avail_pages, int):
+        return page_size * avail_pages
+
+    if sys.platform == "darwin":
+        try:
+            vm_stat = subprocess.run(
+                ["vm_stat"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except Exception:
+            return None
+
+        page_size_bytes = 4096
+        for line in vm_stat.stdout.splitlines():
+            if line.startswith("page size of"):
+                parts = line.split()
+                try:
+                    page_size_bytes = int(parts[3])
+                except (IndexError, ValueError):
+                    page_size_bytes = 4096
+                break
+
+        free_pages = 0
+        inactive_pages = 0
+        speculative_pages = 0
+
+        for line in vm_stat.stdout.splitlines():
+            if line.startswith("Pages free"):
+                free_pages = int(line.split(":")[1].strip().strip("."))
+            elif line.startswith("Pages inactive"):
+                inactive_pages = int(line.split(":")[1].strip().strip("."))
+            elif line.startswith("Pages speculative"):
+                speculative_pages = int(line.split(":")[1].strip().strip("."))
+
+        return page_size_bytes * (free_pages + inactive_pages + speculative_pages)
+
+    return None
+
+
+def _available_disk_bytes(path: Path) -> Optional[int]:
+    """Return free disk space for ``path``."""
+
+    try:
+        usage = shutil.disk_usage(path)
+    except Exception:
+        return None
+    return usage.free
+
+
+def _env_flag(name: str) -> bool:
+    """Return True if the specified environment variable is truthy."""
+
+    value = os.environ.get(name)
+    if value is None:
+        return False
+
+    normalized = value.strip().lower()
+    if not normalized:
+        return False
+
+    return normalized not in {"0", "false", "no", "off"}
+
+
+def _find_lingering_processes(prefixes: Sequence[str]) -> List[Tuple[int, str]]:
+    """Return processes whose names start with one of ``prefixes``."""
+
+    normalized_prefixes = tuple(prefixes)
+    matches: List[Tuple[int, str]] = []
+
+    if _PSUTIL is not None:
+        try:
+            for proc in _PSUTIL.process_iter(["name"]):
+                name = proc.info.get("name") or ""
+                if name.startswith(normalized_prefixes):
+                    matches.append((proc.pid, name))
+        except Exception:
+            pass
+        if matches:
+            return matches
+
+    try:
+        ps_output = subprocess.run(
+            ["ps", "-axo", "pid=,comm="],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        return matches
+
+    for line in ps_output.stdout.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2:
+            continue
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        name = parts[1]
+        if name.startswith(normalized_prefixes):
+            matches.append((pid, name))
+
+    return matches
+
+
+def _describe_processes(processes: Iterable[Tuple[int, str]]) -> str:
+    """Return a compact string description of ``processes``."""
+
+    formatted = [f"{name} (pid={pid})" for pid, name in processes]
+    return ", ".join(formatted) if formatted else ""
 
 class Color:
     """ANSI color codes for terminal output"""
@@ -213,6 +371,13 @@ class TestRunner:
         self._stack_capture_history_lock = threading.Lock()
         self._sudo_capability: Optional[bool] = None
         self._windows_crash_dump_dir: Optional[Path] = None
+        self._preserve_core_dumps = _env_flag(PRESERVE_CORES_ENV)
+        self._core_cleanup_lock = threading.Lock()
+        self._core_cleanup_messages: List[Tuple[str, str]] = []
+        self._core_cleanup_bytes_freed = 0
+        self._scratch_cleanup_lock = threading.Lock()
+        self._scratch_cleanup_dirs_removed = 0
+        self._scratch_cleanup_bytes_freed = 0
 
         # Determine test directory - check both with and without config subdirectory
         test_dir_with_config = build_dir / 'tests' / config
@@ -260,8 +425,40 @@ class TestRunner:
         env['SINTRA_TEST_ROOT'] = str(scratch_dir)
         return env
 
+    @staticmethod
+    def _estimate_directory_size(directory: Path) -> int:
+        """Return a best-effort estimate of ``directory`` size in bytes."""
+
+        total = 0
+        if not directory.exists():
+            return total
+
+        try:
+            for root, _, files in os.walk(directory):
+                root_path = Path(root)
+                for name in files:
+                    file_path = root_path / name
+                    try:
+                        total += file_path.stat().st_size
+                    except OSError:
+                        continue
+        except OSError:
+            return total
+
+        return total
+
+    def _record_scratch_cleanup(self, freed_bytes: int) -> None:
+        """Track scratch-directory cleanup statistics for later reporting."""
+
+        with self._scratch_cleanup_lock:
+            self._scratch_cleanup_dirs_removed += 1
+            if freed_bytes > 0:
+                self._scratch_cleanup_bytes_freed += freed_bytes
+
     def _cleanup_scratch_directory(self, directory: Path) -> None:
         """Best-effort removal of a scratch directory."""
+
+        size_estimate = self._estimate_directory_size(directory)
 
         try:
             shutil.rmtree(directory)
@@ -271,11 +468,212 @@ class TestRunner:
             print(
                 f"\n{Color.YELLOW}Warning: Failed to remove scratch directory {directory}: {exc}{Color.RESET}"
             )
+            return
+
+        self._record_scratch_cleanup(size_estimate)
+
+    def _core_dump_search_directories(self, invocation: TestInvocation) -> List[Path]:
+        """Return directories that may contain core dumps for ``invocation``."""
+
+        candidates: Set[Path] = {
+            invocation.path.parent.resolve(),
+            Path.cwd().resolve(),
+            self.build_dir.resolve(),
+            self._scratch_base,
+        }
+
+        if sys.platform == "darwin":
+            candidates.add(Path("/cores"))
+            candidates.add(Path.home() / "Library" / "Logs" / "DiagnosticReports")
+        elif sys.platform.startswith("linux"):
+            candidates.add(Path("/var/lib/systemd/coredump"))
+
+        return [path for path in candidates if path]
+
+    @staticmethod
+    def _is_core_dump_file(path: Path) -> bool:
+        """Return True if ``path`` appears to be a core dump file."""
+
+        name = path.name
+        return (
+            name == "core"
+            or name.startswith("core.")
+            or name.startswith("core-")
+            or name.endswith(".core")
+        )
+
+    @staticmethod
+    def _normalize_core_path(path: Path) -> Path:
+        """Return a canonical representation for core dump paths."""
+
+        try:
+            return path.resolve()
+        except OSError:
+            return path
+
+    def _snapshot_core_dumps(self, invocation: TestInvocation) -> Set[Path]:
+        """Capture the set of core dump files before launching a test."""
+
+        snapshot: Set[Path] = set()
+        for directory in self._core_dump_search_directories(invocation):
+            try:
+                entries = list(directory.iterdir())
+            except OSError:
+                continue
+
+            for entry in entries:
+                if not entry.is_file():
+                    continue
+                if not self._is_core_dump_file(entry):
+                    continue
+                snapshot.add(self._normalize_core_path(entry))
+
+        return snapshot
+
+    def _find_new_core_dumps(
+        self,
+        invocation: TestInvocation,
+        snapshot: Set[Path],
+        start_time: float,
+    ) -> List[Tuple[Path, float, int]]:
+        """Return newly created core dumps after a test run."""
+
+        new_dumps: List[Tuple[Path, float, int]] = []
+        for directory in self._core_dump_search_directories(invocation):
+            try:
+                entries = list(directory.iterdir())
+            except OSError:
+                continue
+
+            for entry in entries:
+                if not entry.is_file():
+                    continue
+                if not self._is_core_dump_file(entry):
+                    continue
+
+                normalized = self._normalize_core_path(entry)
+                if normalized in snapshot:
+                    continue
+
+                try:
+                    stat_info = entry.stat()
+                except OSError:
+                    continue
+
+                if stat_info.st_mtime + 0.001 < start_time:
+                    continue
+
+                new_dumps.append((normalized, stat_info.st_mtime, stat_info.st_size))
+
+        return new_dumps
+
+    def _record_core_cleanup(self, level: str, message: str, freed_bytes: int = 0) -> None:
+        """Record a core cleanup message to be emitted later."""
+
+        with self._core_cleanup_lock:
+            self._core_cleanup_messages.append((level, message))
+            if freed_bytes:
+                self._core_cleanup_bytes_freed += freed_bytes
+
+    def _cleanup_new_core_dumps(
+        self,
+        invocation: TestInvocation,
+        snapshot: Set[Path],
+        start_time: float,
+        result_success: Optional[bool],
+    ) -> None:
+        """Remove new core dumps to avoid exhausting disk space."""
+
+        new_dumps = self._find_new_core_dumps(invocation, snapshot, start_time)
+        if not new_dumps:
+            return
+
+        total_size = sum(size for _, _, size in new_dumps if size is not None)
+
+        message_prefix = f"Core dumps ({invocation.name})"
+        if result_success:
+            message_prefix = f"{message_prefix} - test reported success"
+
+        if self._preserve_core_dumps:
+            message = (
+                f"{message_prefix}: detected "
+                f"{len(new_dumps)} file(s) totalling {_format_size(total_size)} "
+                f"(preserved due to {PRESERVE_CORES_ENV})"
+            )
+            level = "warning" if result_success else "info"
+            self._record_core_cleanup(level, message)
+            return
+
+        removed: List[str] = []
+        freed_bytes = 0
+        errors: List[str] = []
+
+        for path, _, size in new_dumps:
+            try:
+                if size is None:
+                    size = 0
+                path.unlink()
+                removed.append(path.name)
+                freed_bytes += size
+            except OSError as exc:
+                errors.append(f"Core dumps: failed to remove {path}: {exc}")
+
+        if removed:
+            removed.sort()
+            message = (
+                f"{message_prefix}: removed "
+                f"{len(removed)} file(s) totalling {_format_size(freed_bytes)} "
+                f"({', '.join(removed)})"
+            )
+            level = "warning" if result_success else "info"
+            self._record_core_cleanup(level, message, freed_bytes=freed_bytes)
+        else:
+            # Nothing removed; still report total detected to aid diagnostics.
+            message = (
+                f"{message_prefix}: detected "
+                f"{len(new_dumps)} file(s) totalling {_format_size(total_size)}"
+            )
+            level = "warning" if result_success else "info"
+            self._record_core_cleanup(level, message)
+
+        for error in errors:
+            self._record_core_cleanup("warning", error)
 
     def cleanup(self) -> None:
         """Remove the root scratch directory for this runner."""
 
         self._cleanup_scratch_directory(self._scratch_base)
+
+    def consume_core_cleanup_reports(self) -> Tuple[int, List[Tuple[str, str]]]:
+        """Return accumulated core cleanup messages and reset the state."""
+
+        with self._core_cleanup_lock:
+            freed = self._core_cleanup_bytes_freed
+            messages = list(self._core_cleanup_messages)
+            self._core_cleanup_messages.clear()
+            self._core_cleanup_bytes_freed = 0
+
+        with self._scratch_cleanup_lock:
+            scratch_dirs = self._scratch_cleanup_dirs_removed
+            scratch_bytes = self._scratch_cleanup_bytes_freed
+            self._scratch_cleanup_dirs_removed = 0
+            self._scratch_cleanup_bytes_freed = 0
+
+        total_freed = freed + scratch_bytes
+
+        if scratch_dirs:
+            noun = "directory" if scratch_dirs == 1 else "directories"
+            messages.append(
+                (
+                    "info",
+                    (
+                        "Scratch: removed "
+                        f"{scratch_dirs} {noun} totalling {_format_size(scratch_bytes)}"
+                    ),
+                )
+            )
+
+        return total_freed, messages
 
     def find_test_suites(
         self,
@@ -480,6 +878,9 @@ class TestRunner:
         scratch_dir = self._allocate_scratch_directory(invocation)
         process = None
         cleanup_scratch_dir = True
+        core_snapshot = self._snapshot_core_dumps(invocation)
+        start_time = time.time()
+        result_success: Optional[bool] = None
         try:
             popen_env = self._build_test_environment(scratch_dir)
             start_time = time.time()
@@ -726,6 +1127,7 @@ class TestRunner:
                 elif postmortem_stack_error:
                     error_msg = f"{error_msg}\n\n[Post-mortem stack capture unavailable: {postmortem_stack_error}]"
 
+                result_success = success
                 return TestResult(
                     success=success,
                     duration=duration,
@@ -777,6 +1179,7 @@ class TestRunner:
                 elif stack_error:
                     stderr = f"{stderr}\n\n[Stack capture unavailable: {stack_error}]"
 
+                result_success = False
                 return TestResult(
                     success=False,
                     duration=duration,
@@ -793,6 +1196,7 @@ class TestRunner:
             error_msg = f"Exception: {str(e)}"
             if stderr:
                 error_msg = f"{error_msg}\n{stderr}"
+            result_success = False
             return TestResult(
                 success=False,
                 duration=0,
@@ -802,6 +1206,7 @@ class TestRunner:
         finally:
             if cleanup_scratch_dir:
                 self._cleanup_scratch_directory(scratch_dir)
+            self._cleanup_new_core_dumps(invocation, core_snapshot, start_time, result_success)
 
     def _kill_process_tree(self, pid: int):
         """Kill a process and all its children"""
@@ -2754,6 +3159,13 @@ class TestRunner:
 
         print()  # Final newline
 
+        _, cleanup_messages = self.consume_core_cleanup_reports()
+        for level, message in cleanup_messages:
+            if level == 'warning':
+                print(f"  {Color.YELLOW}{message}{Color.RESET}")
+            else:
+                print(f"  {message}")
+
         return passed, failed, results
 
     def print_summary(self, invocation: TestInvocation, passed: int, failed: int, results: List[TestResult]):
@@ -3001,6 +3413,13 @@ def main():
                 reps_in_this_round = min(batch_size, max_remaining)
                 print(f"\n{Color.BLUE}--- Round: {reps_in_this_round} repetition(s) ---{Color.RESET}")
 
+                lingering = _find_lingering_processes(("sintra_",))
+                if lingering:
+                    details = _describe_processes(lingering)
+                    print(
+                        f"  {Color.YELLOW}Warning: Detected lingering sintra processes before starting the round: {details}{Color.RESET}"
+                    )
+
                 for i in range(reps_in_this_round):
                     print(f"  Rep {i + 1}/{reps_in_this_round}: ", end="", flush=True)
                     for invocation in tests:
@@ -3047,6 +3466,20 @@ def main():
                 print(
                     f"    {Color.BLUE}Round complete - total elapsed: {format_duration(round_elapsed)}{Color.RESET}"
                 )
+
+                available_memory = _available_memory_bytes()
+                disk_space = _available_disk_bytes(runner.build_dir)
+                print(
+                    f"    Diagnostics: available memory={_format_size(available_memory)}, "
+                    f"free disk={_format_size(disk_space)}"
+                )
+
+                _, cleanup_messages = runner.consume_core_cleanup_reports()
+                for level, message in cleanup_messages:
+                    if level == 'warning':
+                        print(f"    {Color.YELLOW}{message}{Color.RESET}")
+                    else:
+                        print(f"    {message}")
 
                 if not suite_all_passed:
                     break
