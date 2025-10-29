@@ -227,8 +227,9 @@ public:
             desired_access = FILE_MAP_READ | FILE_MAP_WRITE;
             break;
         case copy_on_write:
+            // Request only FILE_MAP_COPY; adding FILE_MAP_READ prevents COW writes on Windows.
             protect = PAGE_WRITECOPY;
-            desired_access = FILE_MAP_READ | FILE_MAP_COPY;
+            desired_access = FILE_MAP_COPY;
             break;
         }
 
