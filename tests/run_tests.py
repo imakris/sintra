@@ -375,6 +375,9 @@ class TestRunner:
         self._core_cleanup_lock = threading.Lock()
         self._core_cleanup_messages: List[Tuple[str, str]] = []
         self._core_cleanup_bytes_freed = 0
+        self._scratch_cleanup_lock = threading.Lock()
+        self._scratch_cleanup_dirs_removed = 0
+        self._scratch_cleanup_bytes_freed = 0
 
         # Determine test directory - check both with and without config subdirectory
         test_dir_with_config = build_dir / 'tests' / config
@@ -422,8 +425,40 @@ class TestRunner:
         env['SINTRA_TEST_ROOT'] = str(scratch_dir)
         return env
 
+    @staticmethod
+    def _estimate_directory_size(directory: Path) -> int:
+        """Return a best-effort estimate of ``directory`` size in bytes."""
+
+        total = 0
+        if not directory.exists():
+            return total
+
+        try:
+            for root, _, files in os.walk(directory):
+                root_path = Path(root)
+                for name in files:
+                    file_path = root_path / name
+                    try:
+                        total += file_path.stat().st_size
+                    except OSError:
+                        continue
+        except OSError:
+            return total
+
+        return total
+
+    def _record_scratch_cleanup(self, freed_bytes: int) -> None:
+        """Track scratch-directory cleanup statistics for later reporting."""
+
+        with self._scratch_cleanup_lock:
+            self._scratch_cleanup_dirs_removed += 1
+            if freed_bytes > 0:
+                self._scratch_cleanup_bytes_freed += freed_bytes
+
     def _cleanup_scratch_directory(self, directory: Path) -> None:
         """Best-effort removal of a scratch directory."""
+
+        size_estimate = self._estimate_directory_size(directory)
 
         try:
             shutil.rmtree(directory)
@@ -433,6 +468,9 @@ class TestRunner:
             print(
                 f"\n{Color.YELLOW}Warning: Failed to remove scratch directory {directory}: {exc}{Color.RESET}"
             )
+            return
+
+        self._record_scratch_cleanup(size_estimate)
 
     def _core_dump_search_directories(self, invocation: TestInvocation) -> List[Path]:
         """Return directories that may contain core dumps for ``invocation``."""
@@ -542,6 +580,7 @@ class TestRunner:
         invocation: TestInvocation,
         snapshot: Set[Path],
         start_time: float,
+        result_success: Optional[bool],
     ) -> None:
         """Remove new core dumps to avoid exhausting disk space."""
 
@@ -551,13 +590,18 @@ class TestRunner:
 
         total_size = sum(size for _, _, size in new_dumps if size is not None)
 
+        message_prefix = f"Core dumps ({invocation.name})"
+        if result_success:
+            message_prefix = f"{message_prefix} - test reported success"
+
         if self._preserve_core_dumps:
             message = (
-                "Core dumps: detected "
+                f"{message_prefix}: detected "
                 f"{len(new_dumps)} file(s) totalling {_format_size(total_size)} "
                 f"(preserved due to {PRESERVE_CORES_ENV})"
             )
-            self._record_core_cleanup("info", message)
+            level = "warning" if result_success else "info"
+            self._record_core_cleanup(level, message)
             return
 
         removed: List[str] = []
@@ -577,18 +621,20 @@ class TestRunner:
         if removed:
             removed.sort()
             message = (
-                "Core dumps: removed "
+                f"{message_prefix}: removed "
                 f"{len(removed)} file(s) totalling {_format_size(freed_bytes)} "
                 f"({', '.join(removed)})"
             )
-            self._record_core_cleanup("info", message, freed_bytes=freed_bytes)
+            level = "warning" if result_success else "info"
+            self._record_core_cleanup(level, message, freed_bytes=freed_bytes)
         else:
             # Nothing removed; still report total detected to aid diagnostics.
             message = (
-                "Core dumps: detected "
+                f"{message_prefix}: detected "
                 f"{len(new_dumps)} file(s) totalling {_format_size(total_size)}"
             )
-            self._record_core_cleanup("info", message)
+            level = "warning" if result_success else "info"
+            self._record_core_cleanup(level, message)
 
         for error in errors:
             self._record_core_cleanup("warning", error)
@@ -606,7 +652,28 @@ class TestRunner:
             messages = list(self._core_cleanup_messages)
             self._core_cleanup_messages.clear()
             self._core_cleanup_bytes_freed = 0
-        return freed, messages
+
+        with self._scratch_cleanup_lock:
+            scratch_dirs = self._scratch_cleanup_dirs_removed
+            scratch_bytes = self._scratch_cleanup_bytes_freed
+            self._scratch_cleanup_dirs_removed = 0
+            self._scratch_cleanup_bytes_freed = 0
+
+        total_freed = freed + scratch_bytes
+
+        if scratch_dirs:
+            noun = "directory" if scratch_dirs == 1 else "directories"
+            messages.append(
+                (
+                    "info",
+                    (
+                        "Scratch: removed "
+                        f"{scratch_dirs} {noun} totalling {_format_size(scratch_bytes)}"
+                    ),
+                )
+            )
+
+        return total_freed, messages
 
     def find_test_suites(
         self,
@@ -813,6 +880,7 @@ class TestRunner:
         cleanup_scratch_dir = True
         core_snapshot = self._snapshot_core_dumps(invocation)
         start_time = time.time()
+        result_success: Optional[bool] = None
         try:
             popen_env = self._build_test_environment(scratch_dir)
             start_time = time.time()
@@ -1059,6 +1127,7 @@ class TestRunner:
                 elif postmortem_stack_error:
                     error_msg = f"{error_msg}\n\n[Post-mortem stack capture unavailable: {postmortem_stack_error}]"
 
+                result_success = success
                 return TestResult(
                     success=success,
                     duration=duration,
@@ -1110,6 +1179,7 @@ class TestRunner:
                 elif stack_error:
                     stderr = f"{stderr}\n\n[Stack capture unavailable: {stack_error}]"
 
+                result_success = False
                 return TestResult(
                     success=False,
                     duration=duration,
@@ -1126,6 +1196,7 @@ class TestRunner:
             error_msg = f"Exception: {str(e)}"
             if stderr:
                 error_msg = f"{error_msg}\n{stderr}"
+            result_success = False
             return TestResult(
                 success=False,
                 duration=0,
@@ -1135,7 +1206,7 @@ class TestRunner:
         finally:
             if cleanup_scratch_dir:
                 self._cleanup_scratch_directory(scratch_dir)
-            self._cleanup_new_core_dumps(invocation, core_snapshot, start_time)
+            self._cleanup_new_core_dumps(invocation, core_snapshot, start_time, result_success)
 
     def _kill_process_tree(self, pid: int):
         """Kill a process and all its children"""
