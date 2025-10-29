@@ -197,25 +197,57 @@ inline uint64_t calibrate_spin_loops_per_microsecond()
         return loops;
     }
 
-    constexpr uint64_t sample_iterations = 1u << 20;
+    constexpr uint64_t initial_iterations = 1u << 20;
+    constexpr uint64_t max_iterations     = 1u << 28;
+    constexpr double min_sample_seconds   = 50e-6; // 50 microseconds for stable timing
+
     volatile uint64_t sink = 0;
+    uint64_t iterations     = initial_iterations;
+    uint64_t computed       = 1;
+    double best_elapsed     = 0.0;
+    uint64_t best_iterations = 0;
 
-    double start = get_wtime();
-    for (uint64_t i = 0; i < sample_iterations; ++i) {
-        sink += i;
-    }
-    double elapsed = get_wtime() - start;
-    (void)sink;
+    while (true) {
+        sink = 0;
+        double start = get_wtime();
+        for (uint64_t i = 0; i < iterations; ++i) {
+            sink += i;
+        }
+        double elapsed = get_wtime() - start;
+        (void)sink;
 
-    uint64_t computed = sample_iterations;
-    if (elapsed > 0.0) {
-        double loops_per_us = static_cast<double>(sample_iterations) / (elapsed * 1e6);
-        if (loops_per_us >= 1.0) {
-            computed = static_cast<uint64_t>(loops_per_us);
+        if (elapsed > 0.0) {
+            if (elapsed >= min_sample_seconds) {
+                double loops_per_us = static_cast<double>(iterations) / (elapsed * 1e6);
+                computed = (loops_per_us >= 1.0) ? static_cast<uint64_t>(loops_per_us) : 1;
+                break;
+            }
+
+            // Timer resolution is too coarse for this iteration count; remember the
+            // best sample and try again with a larger workload in the hope of
+            // measuring a more reliable duration.
+            best_elapsed = elapsed;
+            best_iterations = iterations;
         }
-        else {
-            computed = 1;
+
+        if (iterations >= max_iterations) {
+            if (best_elapsed > 0.0 && best_iterations != 0) {
+                double loops_per_us = static_cast<double>(best_iterations) /
+                    (std::max(best_elapsed, min_sample_seconds) * 1e6);
+                computed = (loops_per_us >= 1.0) ? static_cast<uint64_t>(loops_per_us) : 1;
+            }
+            else if (elapsed > 0.0) {
+                double loops_per_us = static_cast<double>(iterations) /
+                    (std::max(elapsed, min_sample_seconds) * 1e6);
+                computed = (loops_per_us >= 1.0) ? static_cast<uint64_t>(loops_per_us) : 1;
+            }
+            else {
+                computed = 1;
+            }
+            break;
         }
+
+        iterations <<= 1;
     }
 
     uint64_t expected = 0;
