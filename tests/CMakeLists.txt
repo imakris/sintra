@@ -56,6 +56,7 @@ function(add_test_suite SUFFIX IS_DEBUG)
         choreography_extreme_test.cpp
         dummy_test.cpp
         extreme_choreography_test.cpp
+        interprocess_semaphore_test.cpp
         interprocess_file_mapping_test.cpp
         interprocess_mutex_test.cpp
         ipc_rings_tests.cpp
@@ -67,6 +68,7 @@ function(add_test_suite SUFFIX IS_DEBUG)
         processing_fence_test.cpp
         recovery_test.cpp
         rpc_append_test.cpp
+        ring_cleanup_stress_test.cpp
         spawn_detached_test.cpp
         variable_buffer_alignment_test.cpp
     )
