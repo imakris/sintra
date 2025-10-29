@@ -133,9 +133,9 @@
 // ─── Boost.Interprocess ──────────────────────────────────────────────────────
 #include <boost/interprocess/file_mapping.hpp>
 #include <boost/interprocess/mapped_region.hpp>
-#include <boost/interprocess/sync/interprocess_mutex.hpp>
 
 #include "interprocess_semaphore.h"
+#include "interprocess_mutex.h"
 
 #include "ipc_platform_utils.h"
 
@@ -864,7 +864,7 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         // Used to avoid accidentally having multiple writers on the same ring
         // across processes. Only one writer may hold this at a time.
         std::atomic<uint32_t>                writer_pid{0};
-        ipc::interprocess_mutex              ownership_mutex;
+        detail::interprocess_mutex           ownership_mutex;
 
         // The following synchronization structures may only be accessed between lock()/unlock().
 
@@ -1852,7 +1852,7 @@ private:
 
         auto finalize_recovery = [&]() {
             c.ownership_mutex.~interprocess_mutex();
-            new (&c.ownership_mutex) ipc::interprocess_mutex();
+            new (&c.ownership_mutex) detail::interprocess_mutex();
             c.writer_pid.store(0, std::memory_order_release);
         };
 
