@@ -7,13 +7,18 @@
 #include "message.h"
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <set>
 #include <thread>
 #include <algorithm>
 #include <utility>
+#include <vector>
 #include <cstdint>
 
 
@@ -55,6 +60,112 @@ static inline thread_local instance_id_type s_tl_common_function_iid = invalid_i
 
 static inline thread_local Process_message_reader* s_tl_current_request_reader = nullptr;
 static inline thread_local Process_message_reader* s_tl_current_reply_reader = nullptr;
+
+struct Reply_progress_skip
+{
+    const void* progress = nullptr;
+    std::uint64_t generation = 0;
+    sequence_counter_type sequence = invalid_sequence;
+};
+
+static inline thread_local std::vector<Reply_progress_skip> s_tl_reply_progress_to_skip;
+
+namespace detail
+{
+
+inline bool rpc_wait_logging_enabled()
+{
+    static const bool enabled = [] {
+        const char* value = std::getenv("SINTRA_DEBUG_RPC_WAIT_LOG");
+        if (!value) {
+            return false;
+        }
+
+        if (*value == '\0') {
+            return false;
+        }
+
+        if (std::strcmp(value, "0") == 0) {
+            return false;
+        }
+
+        return true;
+    }();
+    return enabled;
+}
+
+inline std::chrono::milliseconds rpc_wait_log_interval()
+{
+    static const std::chrono::milliseconds interval = [] {
+        long long ms = 2000;
+        if (const char* value = std::getenv("SINTRA_DEBUG_RPC_WAIT_LOG_INTERVAL_MS")) {
+            char* end = nullptr;
+            const long long parsed = std::strtoll(value, &end, 10);
+            if (end && end != value && parsed > 0) {
+                ms = parsed;
+            }
+        }
+        return std::chrono::milliseconds(ms);
+    }();
+    return interval;
+}
+
+inline void log_reply_progress_skip_event(const char* tag,
+    const Reply_progress_skip& skip,
+    std::uint64_t expected_generation,
+    sequence_counter_type target_sequence,
+    sequence_counter_type observed_sequence,
+    sequence_counter_type published_sequence = invalid_sequence)
+{
+    if (!rpc_wait_logging_enabled()) {
+        return;
+    }
+
+    std::fprintf(stderr,
+        "[sintra][reply_skip][%s] progress=%p skip_gen=%llu expected_gen=%llu skip_seq=%lld target_seq=%lld observed_seq=%lld published_seq=%lld vector_size=%zu\n",
+        tag,
+        skip.progress,
+        static_cast<unsigned long long>(skip.generation),
+        static_cast<unsigned long long>(expected_generation),
+        static_cast<long long>(skip.sequence),
+        static_cast<long long>(target_sequence),
+        static_cast<long long>(observed_sequence),
+        static_cast<long long>(published_sequence),
+        static_cast<std::size_t>(s_tl_reply_progress_to_skip.size()));
+}
+
+} // namespace detail
+
+inline void register_reply_progress_skip(const void* progress_address,
+    std::uint64_t generation,
+    sequence_counter_type target_sequence,
+    sequence_counter_type observed_sequence)
+{
+    if (!progress_address) {
+        return;
+    }
+
+    auto sequence = target_sequence;
+    if (sequence == invalid_sequence) {
+        sequence = observed_sequence;
+    }
+
+    if (sequence == invalid_sequence) {
+        return;
+    }
+
+    Reply_progress_skip skip{progress_address, generation, sequence};
+    s_tl_reply_progress_to_skip.push_back(skip);
+
+    detail::log_reply_progress_skip_event("register", skip, generation, target_sequence, observed_sequence);
+}
+
+inline std::vector<Reply_progress_skip> take_reply_progress_skips()
+{
+    auto skips = std::move(s_tl_reply_progress_to_skip);
+    s_tl_reply_progress_to_skip.clear();
+    return skips;
+}
 
 static inline thread_local instance_id_type s_tl_additional_piids[max_process_index];
 static inline thread_local size_t s_tl_additional_piids_size = 0;
@@ -135,6 +246,7 @@ struct Process_message_reader
         Delivery_stream stream = Delivery_stream::Request;
         sequence_counter_type target = invalid_sequence;
         sequence_counter_type observed = invalid_sequence;
+        std::uint64_t progress_generation = 0;
         bool wait_needed = false;
     };
 
@@ -236,6 +348,62 @@ private:
 };
 
 
+namespace detail {
+
+inline bool consume_reply_progress_skip(
+    std::vector<Reply_progress_skip>& skips,
+    const Process_message_reader::Delivery_progress* progress_ptr,
+    std::uint64_t expected_generation,
+    sequence_counter_type target_sequence,
+    sequence_counter_type observed_sequence)
+{
+    if (!progress_ptr) {
+        return false;
+    }
+
+    for (auto it = skips.begin(); it != skips.end();) {
+        if (it->progress != progress_ptr) {
+            ++it;
+            continue;
+        }
+
+        if (it->generation != expected_generation) {
+            detail::log_reply_progress_skip_event("generation-mismatch", *it, expected_generation, target_sequence, observed_sequence);
+            it = skips.erase(it);
+            continue;
+        }
+
+        const auto skip_sequence = it->sequence;
+        if (skip_sequence == invalid_sequence) {
+            detail::log_reply_progress_skip_event("invalid-sequence", *it, expected_generation, target_sequence, observed_sequence);
+            it = skips.erase(it);
+            continue;
+        }
+
+        if (target_sequence != invalid_sequence && skip_sequence == target_sequence) {
+            const auto published = progress_ptr->reply_sequence.load(std::memory_order_acquire);
+            if (published >= skip_sequence) {
+                detail::log_reply_progress_skip_event("consumed", *it, expected_generation, target_sequence, observed_sequence, published);
+                it = skips.erase(it);
+                return true;
+            }
+            detail::log_reply_progress_skip_event("pending", *it, expected_generation, target_sequence, observed_sequence, published);
+            return false;
+        }
+
+        if (observed_sequence != invalid_sequence && observed_sequence >= skip_sequence) {
+            detail::log_reply_progress_skip_event("pruned", *it, expected_generation, target_sequence, observed_sequence);
+            it = skips.erase(it);
+            continue;
+        }
+
+        ++it;
+    }
+
+    return false;
 }
 
+} // namespace detail
 
+
+} // namespace sintra

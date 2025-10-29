@@ -7,7 +7,10 @@
 #include "managed_process.h"
 #include "transceiver.h"
 
+#include <atomic>
 #include <cassert>
+#include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <iterator>
 #include <memory>
@@ -36,6 +39,38 @@ using std::string;
 using std::is_same_v;
 using std::is_base_of_v;
 using std::unique_lock;
+
+
+namespace detail
+{
+
+inline void log_rpc_wait_state(const Outstanding_rpc_control& control,
+    std::chrono::steady_clock::duration elapsed)
+{
+    if (!rpc_wait_logging_enabled()) {
+        return;
+    }
+
+    const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+    sequence_counter_type published = invalid_sequence;
+    if (const auto* progress = control.reply_delivery_progress) {
+        published = progress->reply_sequence.load(std::memory_order_acquire);
+    }
+
+    std::fprintf(stderr,
+        "[sintra][rpc_wait] remote=%llu elapsed_ms=%lld keep_waiting=%d cancelled=%d success=%d target_seq=%lld observed_seq=%lld published_seq=%lld generation=%llu\n",
+        static_cast<unsigned long long>(control.remote_instance),
+        static_cast<long long>(elapsed_ms),
+        static_cast<int>(control.keep_waiting),
+        static_cast<int>(control.cancelled),
+        static_cast<int>(control.success),
+        static_cast<long long>(control.reply_target_sequence),
+        static_cast<long long>(control.reply_observed_sequence),
+        static_cast<long long>(published),
+        static_cast<unsigned long long>(control.reply_progress_generation));
+}
+
+} // namespace detail
 
 
 
@@ -859,6 +894,18 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
         lock_guard<mutex> sl(orpcc.keep_waiting_mutex);
         rm_body = returned_message;
         orpcc.success = true;
+        if (auto* reader = s_tl_current_reply_reader) {
+            auto progress = reader->delivery_progress();
+            if (progress) {
+                orpcc.reply_delivery_progress = progress.get();
+                orpcc.reply_observed_sequence = progress->reply_sequence.load(std::memory_order_acquire);
+                orpcc.reply_target_sequence = reader->get_reply_leading_sequence();
+                if (orpcc.reply_target_sequence == invalid_sequence) {
+                    orpcc.reply_target_sequence = orpcc.reply_observed_sequence;
+                }
+                orpcc.reply_progress_generation = progress->generation;
+            }
+        }
         orpcc.keep_waiting = false;
         orpcc.keep_waiting_condition.notify_all();
     };
@@ -924,7 +971,19 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
     // With predicate waiting plus Managed_process::unblock_rpc() (invoked on
     // coordinator loss and during finalize()), this wait is bounded and cannot
     // deadlock via lost notifications.
-    orpcc.keep_waiting_condition.wait(sl, [&]{ return !orpcc.keep_waiting; });
+    if (!detail::rpc_wait_logging_enabled()) {
+        orpcc.keep_waiting_condition.wait(sl, [&]{ return !orpcc.keep_waiting; });
+    }
+    else {
+        const auto interval = detail::rpc_wait_log_interval();
+        const auto wait_start = std::chrono::steady_clock::now();
+        while (!orpcc.keep_waiting_condition.wait_for(sl, interval, [&]{ return !orpcc.keep_waiting; })) {
+            if (!orpcc.keep_waiting) {
+                break;
+            }
+            detail::log_rpc_wait_state(orpcc, std::chrono::steady_clock::now() - wait_start);
+        }
+    }
 
     // Release per-RPC mutex before touching the global outstanding set.
     // This maintains the lock ordering rule: always acquire s_outstanding_rpcs_mutex
@@ -938,6 +997,19 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
 
     // we can now disable the return message handler
     s_mproc->deactivate_return_handler(function_instance_id);
+
+    if (orpcc.success) {
+        register_reply_progress_skip(orpcc.reply_delivery_progress,
+            orpcc.reply_progress_generation,
+            orpcc.reply_target_sequence,
+            orpcc.reply_observed_sequence);
+    }
+    else {
+        orpcc.reply_delivery_progress = nullptr;
+        orpcc.reply_target_sequence = invalid_sequence;
+        orpcc.reply_observed_sequence = invalid_sequence;
+        orpcc.reply_progress_generation = 0;
+    }
 
     if (!orpcc.success) {
         if (ex_tid != not_defined_type_id) {
