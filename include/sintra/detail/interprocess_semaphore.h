@@ -318,14 +318,14 @@ public:
                 return false;
             }
 
-            uint64_t deadline = make_os_sync_absolute_deadline(abs_time);
-            if (deadline == 0) {
+            uint64_t timeout_value = make_os_sync_timeout(remaining);
+            if (timeout_value == 0) {
                 cancel_wait_os_sync();
                 return false;
             }
 
             int32_t observed = expected;
-            if (!wait_os_sync_with_timeout(expected, deadline, observed)) {
+            if (!wait_os_sync_with_timeout(expected, timeout_value, observed)) {
                 if (observed >= 0) {
                     return true;
                 }
@@ -416,14 +416,6 @@ private:
     static constexpr os_sync_wait_on_address_flags_t wait_flags = OS_SYNC_WAIT_ON_ADDRESS_SHARED;
     static constexpr os_sync_wake_by_address_flags_t wake_flags = OS_SYNC_WAKE_BY_ADDRESS_SHARED;
 
-    static uint64_t saturating_add(uint64_t base, uint64_t delta)
-    {
-        if (std::numeric_limits<uint64_t>::max() - base < delta) {
-            return std::numeric_limits<uint64_t>::max();
-        }
-        return base + delta;
-    }
-
 #ifdef OS_CLOCK_MACH_ABSOLUTE_TIME
     static constexpr os_clockid_t wait_clock = OS_CLOCK_MACH_ABSOLUTE_TIME;
 
@@ -465,73 +457,27 @@ private:
 #   error "No supported monotonic clock id available for os_sync_wait_on_address_with_timeout"
 #endif
 
-    static uint64_t os_sync_clock_now()
-    {
-#if defined(OS_CLOCK_MACH_ABSOLUTE_TIME)
-        if constexpr (wait_clock == OS_CLOCK_MACH_ABSOLUTE_TIME) {
-            return mach_absolute_time();
-        }
-#endif
-#if defined(OS_CLOCK_MONOTONIC)
-        if constexpr (wait_clock == OS_CLOCK_MONOTONIC) {
-            timespec ts{};
-            if (clock_gettime(static_cast<clockid_t>(wait_clock), &ts) != 0) {
-                throw std::system_error(errno, std::generic_category(), "clock_gettime");
-            }
-            return static_cast<uint64_t>(ts.tv_sec) * 1000000000ULL +
-                   static_cast<uint64_t>(ts.tv_nsec);
-        }
-#endif
-#if defined(CLOCK_MONOTONIC)
-        if constexpr (wait_clock == static_cast<os_clockid_t>(CLOCK_MONOTONIC)) {
-            timespec ts{};
-            if (clock_gettime(static_cast<clockid_t>(wait_clock), &ts) != 0) {
-                throw std::system_error(errno, std::generic_category(), "clock_gettime");
-            }
-            return static_cast<uint64_t>(ts.tv_sec) * 1000000000ULL +
-                   static_cast<uint64_t>(ts.tv_nsec);
-        }
-#endif
-
-        static_assert(
-#if defined(OS_CLOCK_MACH_ABSOLUTE_TIME)
-            wait_clock == OS_CLOCK_MACH_ABSOLUTE_TIME ||
-#endif
-#if defined(OS_CLOCK_MONOTONIC)
-            wait_clock == OS_CLOCK_MONOTONIC ||
-#endif
-#if defined(CLOCK_MONOTONIC)
-            wait_clock == static_cast<os_clockid_t>(CLOCK_MONOTONIC) ||
-#endif
-            false,
-            "Unsupported os_sync wait clock");
-
-        return 0;
-    }
-
-    template <typename Clock, typename Duration>
-    static uint64_t make_os_sync_absolute_deadline(const std::chrono::time_point<Clock, Duration>& abs_time)
+    static uint64_t make_os_sync_timeout(std::chrono::nanoseconds remaining)
     {
         using namespace std::chrono;
 
-        auto now = Clock::now();
-        if (abs_time <= now) {
+        if (remaining <= nanoseconds::zero()) {
             return 0;
         }
 
-        auto delta = abs_time - now;
-        auto ns_delta = duration_cast<nanoseconds>(delta);
-        auto count = ns_delta.count();
+        const auto count = remaining.count();
         if (count <= 0) {
             return 0;
         }
 
-        if (count >= static_cast<int64_t>(std::numeric_limits<uint64_t>::max())) {
-            return std::numeric_limits<uint64_t>::max();
+        uint64_t delta_ns = static_cast<uint64_t>(count);
+
+        uint64_t converted = convert_timeout_delta(delta_ns);
+        if (converted == 0) {
+            converted = 1;
         }
 
-        uint64_t delta_ns = static_cast<uint64_t>(count);
-        return saturating_add(os_sync_clock_now(), convert_timeout_delta(delta_ns));
+        return converted;
     }
 
     void initialise_os_sync(unsigned int initial_count)
@@ -580,9 +526,9 @@ private:
         return false;
     }
 
-    bool wait_os_sync_with_timeout(int32_t expected, uint64_t absolute_deadline, int32_t& observed)
+    bool wait_os_sync_with_timeout(int32_t expected, uint64_t timeout_value, int32_t& observed)
     {
-        if (absolute_deadline == 0) {
+        if (timeout_value == 0) {
             observed = m_os_sync.count.load(std::memory_order_acquire);
             return false;
         }
@@ -595,7 +541,7 @@ private:
                 sizeof(int32_t),
                 wait_flags,
                 wait_clock,
-                absolute_deadline);
+                timeout_value);
             if (rc >= 0) {
                 observed = m_os_sync.count.load(std::memory_order_acquire);
                 return true;
