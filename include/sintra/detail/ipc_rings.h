@@ -1505,6 +1505,11 @@ struct Ring_R : Ring<T, true>
             }
             c.unlock();
 
+#ifdef SINTRA_STRESS_TEST_DELAYS
+            // Artificial delay to increase likelihood of reader being stuck waiting
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+#endif
+
             int sleepy_index = m_sleepy_index.load(std::memory_order_acquire);
             if (sleepy_index >= 0) {
                 if (should_shutdown()) {

@@ -15,6 +15,10 @@ function(add_test_suite SUFFIX IS_DEBUG)
         target_link_libraries(${LIB_TARGET} INTERFACE winmm)
     endif()
 
+    # Enable stress test delays for deadlock reproduction
+    # Comment this out for normal builds
+    # target_compile_definitions(${LIB_TARGET} INTERFACE SINTRA_STRESS_TEST_DELAYS)
+
     # Set optimization flags
     if(IS_DEBUG)
         if(MSVC)
@@ -46,6 +50,7 @@ function(add_test_suite SUFFIX IS_DEBUG)
     # Create all test executables with this configuration
     set(TEST_FILES
         barrier_complex_choreography_test.cpp
+        barrier_deadlock_reproduction_test.cpp
         barrier_flush_test.cpp
         barrier_pathological_choreography_test.cpp
         barrier_rapid_reuse_test.cpp

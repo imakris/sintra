@@ -272,6 +272,16 @@ public:
     bool timed_wait(const std::chrono::time_point<Clock, Duration>& abs_time)
     {
 #if defined(_WIN32)
+#ifndef NDEBUG
+        static std::atomic<int> call_count{0};
+        int this_call = call_count.fetch_add(1, std::memory_order_relaxed);
+        bool should_log = (this_call >= 200 && this_call < 220);
+        if (should_log) {
+            std::fprintf(stderr, "[timed_wait #%d tid=%u] START\n",
+                         this_call, (unsigned)::GetCurrentThreadId());
+            std::fflush(stderr);
+        }
+#endif
         HANDLE handle = windows_handle();
         auto now = Clock::now();
         if (abs_time <= now) {
@@ -289,7 +299,24 @@ public:
             timeout = static_cast<DWORD>(remaining.count());
         }
 
+#ifndef NDEBUG
+        if (should_log) {
+            std::fprintf(stderr, "[timed_wait #%d tid=%u] About to wait: timeout=%u ms, handle=%p\n",
+                         this_call, (unsigned)::GetCurrentThreadId(), timeout, handle);
+            std::fflush(stderr);
+        }
+#endif
+
         DWORD result = ::WaitForSingleObject(handle, timeout);
+
+#ifndef NDEBUG
+        if (should_log) {
+            std::fprintf(stderr, "[timed_wait #%d tid=%u] DONE: result=%u (0=signaled, 258=timeout)\n",
+                         this_call, (unsigned)::GetCurrentThreadId(), result);
+            std::fflush(stderr);
+        }
+#endif
+
         if (result == WAIT_OBJECT_0) {
             return true;
         }

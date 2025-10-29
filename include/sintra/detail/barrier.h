@@ -77,7 +77,12 @@ inline bool barrier_dispatch(delivery_fence_t,
         return true;
     }
 
-    s_mproc->wait_for_delivery_fence();
+    // Skip both request and reply streams to avoid distributed deadlock:
+    // When all processes simultaneously call barriers and then wait_for_delivery_fence(),
+    // they would all wait for each other's readers to progress, but no progress is possible
+    // since nobody is sending new messages. Barriers only need to ensure the barrier RPC
+    // itself completes, not that all readers have caught up.
+    s_mproc->wait_for_delivery_fence(/*skip_reply_streams=*/true, /*skip_request_streams=*/true);
     return true;
 }
 
@@ -107,7 +112,8 @@ inline void wait_for_processing_quiescence()
     // Waiting directly on the delivery fence keeps request-thread state intact and
     // allows the Managed_process to service any queued post-handlers without
     // paying the cost of an additional helper thread.
-    s_mproc->wait_for_delivery_fence();
+    // Skip both request and reply streams to avoid deadlock (see comment in delivery_fence_t handler).
+    s_mproc->wait_for_delivery_fence(/*skip_reply_streams=*/true, /*skip_request_streams=*/true);
 }
 
 } // namespace detail

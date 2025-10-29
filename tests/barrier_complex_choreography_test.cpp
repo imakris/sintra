@@ -547,6 +547,12 @@ int stage_b2_process() { return stage_process(1, 2); }
 
 int main(int argc, char* argv[])
 {
+#ifdef _WIN32
+    // Disable Windows error reporting dialogs and CRT abort popups
+    ::SetErrorMode(SEM_NOGPFAULTERRORBOX | SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX);
+    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+#endif
+
     std::set_terminate(custom_terminate_handler);
 
     const bool is_spawned = has_branch_flag(argc, argv);
