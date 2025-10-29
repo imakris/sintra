@@ -48,6 +48,29 @@ if importlib.util.find_spec("psutil") is not None:
 
 PRESERVE_CORES_ENV = "SINTRA_PRESERVE_CORES"
 
+# macOS emits Mach-O core files that snapshot every virtual memory region of the
+# crashing process. Two platform effects make Sintra dumps look enormous even
+# when very little physical memory is dirtied:
+#
+#   • The dynamic loader reserves a 4 GiB ``__PAGEZERO`` segment on every
+#     process. That reservation is always recorded in the core image even though
+#     it contains no data.
+#   • Every request/reply ring that ``Managed_process`` touches is "double
+#     mapped" by ``Ring_data::attach``: we reserve a 2× span and map the 2 MiB
+#     data file twice so wrap-around reads stay linear. Each active channel
+#     therefore contributes roughly 4 MiB of virtual address space. During the
+#     recovery test the coordinator plus the watchdog/crasher pair keep dozens of
+#     these channels open concurrently (outgoing rings for the local process plus
+#     readers for every remote process slot), which adds roughly another 250 MiB
+#     of reservations.
+#
+# GitHub Actions used to report the logical size of that 4 GiB + ~250 MiB address
+# space (~4.24 GiB) as soon as a Mach-O core was written even though the rings
+# are sparse files on APFS. ``MADV_DONTDUMP`` handles this automatically on
+# Linux. macOS does not expose the flag, so ``recovery_test`` disables core
+# dumps immediately before its intentional ``std::abort()`` to keep runners from
+# filling their disks with Mach-O artifacts.
+
 
 def _format_size(num_bytes: Optional[int]) -> str:
     """Return a human-friendly representation of ``num_bytes``."""
@@ -597,8 +620,8 @@ class TestRunner:
         if self._preserve_core_dumps:
             message = (
                 f"{message_prefix}: detected "
-                f"{len(new_dumps)} file(s) totalling {_format_size(total_size)} "
-                f"(preserved due to {PRESERVE_CORES_ENV})"
+                f"{len(new_dumps)} file(s) totalling {_format_size(total_size)}"
+                f" (preserved due to {PRESERVE_CORES_ENV})"
             )
             level = "warning" if result_success else "info"
             self._record_core_cleanup(level, message)
@@ -622,8 +645,8 @@ class TestRunner:
             removed.sort()
             message = (
                 f"{message_prefix}: removed "
-                f"{len(removed)} file(s) totalling {_format_size(freed_bytes)} "
-                f"({', '.join(removed)})"
+                f"{len(removed)} file(s) totalling {_format_size(freed_bytes)}"
+                f" ({', '.join(removed)})"
             )
             level = "warning" if result_success else "info"
             self._record_core_cleanup(level, message, freed_bytes=freed_bytes)

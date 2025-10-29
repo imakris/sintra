@@ -28,6 +28,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <cerrno>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
@@ -44,6 +45,9 @@
 #endif
 #else
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <sys/resource.h>
+#endif
 #endif
 
 namespace {
@@ -166,6 +170,30 @@ void append_line(const std::filesystem::path& file, const std::string& value)
     }
     out << value << '\n';
 }
+
+#if defined(__APPLE__)
+void disable_core_dumps_for_intentional_abort()
+{
+    struct rlimit current {};
+    if (getrlimit(RLIMIT_CORE, &current) != 0) {
+        std::fprintf(stderr, "[CRASHER] getrlimit(RLIMIT_CORE) failed: %d\n", errno);
+        return;
+    }
+
+    if (current.rlim_cur == 0) {
+        return;
+    }
+
+    struct rlimit updated = current;
+    updated.rlim_cur = 0;
+    if (setrlimit(RLIMIT_CORE, &updated) != 0) {
+        std::fprintf(stderr, "[CRASHER] setrlimit(RLIMIT_CORE) failed: %d\n", errno);
+        return;
+    }
+
+    std::fprintf(stderr, "[CRASHER] Disabled core dumps for intentional abort\n");
+}
+#endif
 
 int process_watchdog()
 {
@@ -294,6 +322,9 @@ int process_crasher()
         log << "First run - about to abort!" << std::endl;
         log.close();
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
+#if defined(__APPLE__)
+        disable_core_dumps_for_intentional_abort();
+#endif
         std::abort();
     }
 
