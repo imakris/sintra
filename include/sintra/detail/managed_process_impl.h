@@ -1531,6 +1531,24 @@ function<void()> Managed_process::call_on_availability(Named_instance<T> transce
     return ret;
 }
 
+#ifdef SINTRA_ENABLE_TEST_HOOKS
+inline void Managed_process::test_disable_reader(instance_id_type process_instance_id)
+{
+    std::shared_ptr<Process_message_reader> reader;
+    {
+        std::shared_lock<std::shared_mutex> lock(m_readers_mutex);
+        auto it = m_readers.find(process_instance_id);
+        if (it != m_readers.end()) {
+            reader = it->second;
+        }
+    }
+
+    if (reader) {
+        reader->stop_nowait();
+    }
+}
+#endif
+
 inline
 void Managed_process::wait_until_all_external_readers_are_done(int extra_allowed_readers)
 {

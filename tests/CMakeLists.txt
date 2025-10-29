@@ -38,6 +38,8 @@ function(add_test_suite SUFFIX IS_DEBUG)
         endif()
     endif()
 
+    target_compile_definitions(${LIB_TARGET} INTERFACE SINTRA_ENABLE_TEST_HOOKS)
+
     # Link OpenMP if available (for timing)
     if(TARGET OpenMP::OpenMP_CXX)
         target_link_libraries(${LIB_TARGET} INTERFACE OpenMP::OpenMP_CXX)
@@ -50,6 +52,7 @@ function(add_test_suite SUFFIX IS_DEBUG)
         barrier_pathological_choreography_test.cpp
         barrier_rapid_reuse_test.cpp
         barrier_stress_test.cpp
+        barrier_self_reader_disabled_test.cpp
         basic_pub_sub.cpp
         complex_choreography_stress_test.cpp
         complex_choreography_test.cpp
