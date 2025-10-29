@@ -205,6 +205,7 @@ class TestRunner:
         self._stack_capture_history: Dict[str, Set[str]] = defaultdict(set)
         self._stack_capture_history_lock = threading.Lock()
         self._sudo_capability: Optional[bool] = None
+        self._windows_crash_dump_dir: Optional[Path] = None
 
         # Determine test directory - check both with and without config subdirectory
         test_dir_with_config = build_dir / 'tests' / config
@@ -220,6 +221,12 @@ class TestRunner:
 
         if sys.platform == 'win32':
             self._prepare_windows_debuggers()
+            dump_error = self._ensure_windows_local_dumps()
+            if dump_error:
+                print(
+                    f"{Color.YELLOW}Warning: {dump_error}. "
+                    f"Crash dumps may be unavailable.{Color.RESET}"
+                )
 
     def find_test_suites(
         self,
@@ -1988,6 +1995,107 @@ class TestRunner:
                 f"Stack capture may be unavailable.{Color.RESET}"
             )
 
+    def _ensure_windows_local_dumps(self) -> Optional[str]:
+        """Configure Windows Error Reporting to create crash dumps for tests."""
+
+        if sys.platform != 'win32':
+            return None
+
+        if self._windows_crash_dump_dir is not None:
+            return None
+
+        local_app_data = os.environ.get('LOCALAPPDATA')
+        if local_app_data:
+            base_dir = Path(local_app_data)
+        else:
+            base_dir = Path.home() / 'AppData' / 'Local'
+
+        dump_dir = base_dir / 'sintra' / 'CrashDumps'
+
+        try:
+            dump_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            return f"failed to create crash dump directory {dump_dir}: {exc}"
+
+        reg_key = (
+            r'HKCU\Software\Microsoft\Windows\Windows Error Reporting\LocalDumps'
+        )
+
+        operations = [
+            (
+                'DumpFolder',
+                [
+                    'reg',
+                    'add',
+                    reg_key,
+                    '/f',
+                    '/v',
+                    'DumpFolder',
+                    '/t',
+                    'REG_EXPAND_SZ',
+                    '/d',
+                    str(dump_dir),
+                ],
+            ),
+            (
+                'DumpType',
+                [
+                    'reg',
+                    'add',
+                    reg_key,
+                    '/f',
+                    '/v',
+                    'DumpType',
+                    '/t',
+                    'REG_DWORD',
+                    '/d',
+                    '2',
+                ],
+            ),
+            (
+                'DumpCount',
+                [
+                    'reg',
+                    'add',
+                    reg_key,
+                    '/f',
+                    '/v',
+                    'DumpCount',
+                    '/t',
+                    'REG_DWORD',
+                    '/d',
+                    '10',
+                ],
+            ),
+        ]
+
+        for value_name, command in operations:
+            try:
+                result = subprocess.run(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=15,
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                return (
+                    f"failed to configure {value_name} crash dump setting via reg: {exc}"
+                )
+
+            if result.returncode != 0:
+                detail = result.stderr.strip() or result.stdout.strip()
+                if detail:
+                    return (
+                        f"reg exited with code {result.returncode} while setting {value_name}: {detail}"
+                    )
+                return (
+                    f"reg exited with code {result.returncode} while setting {value_name}"
+                )
+
+        self._windows_crash_dump_dir = dump_dir
+        return None
+
     def _resolve_windows_debugger(self) -> Tuple[Optional[str], Optional[str], str]:
         """Return the first available Windows debugger and its path."""
 
@@ -2019,6 +2127,9 @@ class TestRunner:
             return "", debugger_error
 
         candidate_dirs = [invocation.path.parent, Path.cwd()]
+
+        if self._windows_crash_dump_dir:
+            candidate_dirs.insert(0, self._windows_crash_dump_dir)
 
         local_app_data = os.environ.get('LOCALAPPDATA')
         if local_app_data:
