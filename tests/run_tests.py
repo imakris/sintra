@@ -47,7 +47,6 @@ if importlib.util.find_spec("psutil") is not None:
 
 
 PRESERVE_CORES_ENV = "SINTRA_PRESERVE_CORES"
-CORE_LIMIT_ENV = "SINTRA_CORE_LIMIT_MB"
 
 # macOS emits Mach-O core files that snapshot every virtual memory region of the
 # crashing process. Two platform effects make Sintra dumps look enormous even
@@ -68,10 +67,7 @@ CORE_LIMIT_ENV = "SINTRA_CORE_LIMIT_MB"
 # GitHub Actions used to report the logical size of that 4 GiB + ~250 MiB address
 # space (~4.24 GiB) as soon as a Mach-O core was written even though the rings
 # are sparse files on APFS. ``Ring_data::attach`` now applies ``MADV_DONTDUMP``
-# to both data spans (and the control block), which keeps the cores compact, but
-# ``SINTRA_CORE_LIMIT_MB`` remains available for teams that want to cap crash
-# dumps explicitly. Remove the variable or set it to ``unlimited`` when a full
-# core is required.
+# to both data spans (and the control block), which keeps the cores compact.
 
 
 def _format_size(num_bytes: Optional[int]) -> str:
@@ -400,7 +396,6 @@ class TestRunner:
         self._core_cleanup_lock = threading.Lock()
         self._core_cleanup_messages: List[Tuple[str, str]] = []
         self._core_cleanup_bytes_freed = 0
-        self._core_soft_limit_bytes: Optional[int] = None
         self._scratch_cleanup_lock = threading.Lock()
         self._scratch_cleanup_dirs_removed = 0
         self._scratch_cleanup_bytes_freed = 0
@@ -416,7 +411,6 @@ class TestRunner:
 
         # Kill any existing sintra processes for a clean start
         self._kill_all_sintra_processes()
-        self._configure_core_dump_limit()
 
         if sys.platform == 'win32':
             self._prepare_windows_debuggers()
@@ -617,12 +611,6 @@ class TestRunner:
 
         total_size = sum(size for _, _, size in new_dumps if size is not None)
 
-        truncated_hint = ""
-        limit = self._core_soft_limit_bytes
-        if limit and limit > 0:
-            if any(size is not None and size >= limit for _, _, size in new_dumps):
-                truncated_hint = f" (reached {_format_size(limit)} core limit)"
-
         message_prefix = f"Core dumps ({invocation.name})"
         if result_success:
             message_prefix = f"{message_prefix} - test reported success"
@@ -631,7 +619,7 @@ class TestRunner:
             message = (
                 f"{message_prefix}: detected "
                 f"{len(new_dumps)} file(s) totalling {_format_size(total_size)}"
-                f"{truncated_hint} (preserved due to {PRESERVE_CORES_ENV})"
+                f" (preserved due to {PRESERVE_CORES_ENV})"
             )
             level = "warning" if result_success else "info"
             self._record_core_cleanup(level, message)
@@ -656,7 +644,7 @@ class TestRunner:
             message = (
                 f"{message_prefix}: removed "
                 f"{len(removed)} file(s) totalling {_format_size(freed_bytes)}"
-                f"{truncated_hint} ({', '.join(removed)})"
+                f" ({', '.join(removed)})"
             )
             level = "warning" if result_success else "info"
             self._record_core_cleanup(level, message, freed_bytes=freed_bytes)
@@ -664,7 +652,7 @@ class TestRunner:
             # Nothing removed; still report total detected to aid diagnostics.
             message = (
                 f"{message_prefix}: detected "
-                f"{len(new_dumps)} file(s) totalling {_format_size(total_size)}{truncated_hint}"
+                f"{len(new_dumps)} file(s) totalling {_format_size(total_size)}"
             )
             level = "warning" if result_success else "info"
             self._record_core_cleanup(level, message)
@@ -1300,72 +1288,6 @@ class TestRunner:
         except Exception:
             # Ignore errors - processes may not exist
             pass
-
-    def _configure_core_dump_limit(self) -> None:
-        """Apply platform-specific caps to prevent massive core dumps."""
-
-        if os.name != "posix":
-            return
-
-        try:
-            import resource
-        except ImportError:
-            return
-
-        requested_value = os.environ.get(CORE_LIMIT_ENV)
-        if requested_value is None:
-            return
-
-        normalized = requested_value.strip().lower()
-        if not normalized:
-            return
-
-        if normalized in {"unlimited", "none", "no", "off", "disable", "disabled", "-1"}:
-            return
-
-        try:
-            limit_mb = float(normalized)
-        except ValueError:
-            print(
-                f"{Color.YELLOW}Warning: Ignoring invalid {CORE_LIMIT_ENV} value '{requested_value}'.{Color.RESET}"
-            )
-            return
-
-        if limit_mb < 0:
-            print(
-                f"{Color.YELLOW}Warning: Ignoring negative {CORE_LIMIT_ENV} value '{requested_value}'.{Color.RESET}"
-            )
-            return
-
-        limit_bytes = int(limit_mb * 1024 * 1024)
-
-        try:
-            soft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_CORE)
-        except (ValueError, OSError, resource.error):
-            return
-
-        if hard_limit != resource.RLIM_INFINITY and limit_bytes > hard_limit:
-            limit_bytes = hard_limit
-
-        if soft_limit == limit_bytes:
-            self._core_soft_limit_bytes = limit_bytes
-            return
-
-        try:
-            resource.setrlimit(resource.RLIMIT_CORE, (limit_bytes, hard_limit))
-        except (ValueError, OSError, resource.error) as exc:
-            origin = CORE_LIMIT_ENV
-            print(
-                f"{Color.YELLOW}Warning: Failed to apply {origin}={requested_value!r} ({_format_size(limit_bytes)}): {exc}.{Color.RESET}"
-            )
-            return
-
-        self._core_soft_limit_bytes = limit_bytes
-
-        description = "disabled" if limit_bytes == 0 else f"capped at {_format_size(limit_bytes)}"
-        print(
-            f"{Color.BLUE}Info: Core dumps {description} via {CORE_LIMIT_ENV}.{Color.RESET}"
-        )
 
     def _line_indicates_failure(self, line: str) -> bool:
         """Heuristically determine whether a log line signals a test failure."""
