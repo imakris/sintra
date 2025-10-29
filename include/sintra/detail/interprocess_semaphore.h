@@ -3,9 +3,10 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <limits>
+#include <random>
 #include <stdexcept>
 #include <system_error>
-#include <random>
 
 #if defined(_WIN32)
   #ifndef NOMINMAX
@@ -404,10 +405,18 @@ private:
     static constexpr os_sync_wait_on_address_flags_t wait_flags = OS_SYNC_WAIT_ON_ADDRESS_SHARED;
     static constexpr os_sync_wake_by_address_flags_t wake_flags = OS_SYNC_WAKE_BY_ADDRESS_SHARED;
 
+    static uint64_t saturating_add(uint64_t base, uint64_t delta)
+    {
+        if (std::numeric_limits<uint64_t>::max() - base < delta) {
+            return std::numeric_limits<uint64_t>::max();
+        }
+        return base + delta;
+    }
+
 #ifdef OS_CLOCK_MACH_ABSOLUTE_TIME
     static constexpr os_clockid_t wait_clock = OS_CLOCK_MACH_ABSOLUTE_TIME;
 
-    static uint64_t nanoseconds_to_mach_absolute_ticks(uint64_t timeout_ns)
+    static uint64_t convert_timeout_delta(uint64_t timeout_ns)
     {
         if (timeout_ns == 0) {
             return 0;
@@ -426,23 +435,40 @@ private:
 
         return static_cast<uint64_t>(absolute_delta);
     }
-#elif defined(OS_CLOCK_MONOTONIC)
+    static uint64_t os_sync_clock_now()
+    {
+        return mach_absolute_time();
+    }
+#elif defined(OS_CLOCK_MONOTONIC) || defined(CLOCK_MONOTONIC)
+#   if defined(OS_CLOCK_MONOTONIC)
     static constexpr os_clockid_t wait_clock = OS_CLOCK_MONOTONIC;
+#   else
+    static constexpr os_clockid_t wait_clock = static_cast<os_clockid_t>(CLOCK_MONOTONIC);
+#   endif
 
-    static uint64_t nanoseconds_to_mach_absolute_ticks(uint64_t timeout_ns)
+    static uint64_t convert_timeout_delta(uint64_t timeout_ns)
     {
         return timeout_ns;
     }
-#elif defined(CLOCK_MONOTONIC)
-    static constexpr os_clockid_t wait_clock = static_cast<os_clockid_t>(CLOCK_MONOTONIC);
 
-    static uint64_t nanoseconds_to_mach_absolute_ticks(uint64_t timeout_ns)
+    static uint64_t os_sync_clock_now()
     {
-        return timeout_ns;
+        timespec ts{};
+        if (clock_gettime(static_cast<clockid_t>(wait_clock), &ts) != 0) {
+            throw std::system_error(errno, std::generic_category(), "clock_gettime");
+        }
+        return static_cast<uint64_t>(ts.tv_sec) * 1000000000ULL +
+               static_cast<uint64_t>(ts.tv_nsec);
     }
 #else
 #   error "No supported monotonic clock id available for os_sync_wait_on_address_with_timeout"
 #endif
+
+    static uint64_t make_timeout_deadline(std::chrono::nanoseconds remaining)
+    {
+        const uint64_t delta_ns = static_cast<uint64_t>(remaining.count());
+        return saturating_add(os_sync_clock_now(), convert_timeout_delta(delta_ns));
+    }
 
     void initialise_os_sync(unsigned int initial_count)
     {
@@ -503,11 +529,10 @@ private:
             return false;
         }
 
-        uint64_t timeout_ns = static_cast<uint64_t>(count);
+        const uint64_t timeout_value = make_timeout_deadline(remaining);
 
         while (true) {
             uint64_t expected_value = static_cast<uint32_t>(expected);
-            const uint64_t timeout_value = nanoseconds_to_mach_absolute_ticks(timeout_ns);
             int rc = os_sync_wait_on_address_with_timeout(
                 reinterpret_cast<void*>(&m_os_sync.count),
                 expected_value,
