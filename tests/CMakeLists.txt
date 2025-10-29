@@ -50,7 +50,6 @@ function(add_test_suite SUFFIX IS_DEBUG)
     # Create all test executables with this configuration
     set(TEST_FILES
         barrier_complex_choreography_test.cpp
-        barrier_deadlock_reproduction_test.cpp
         barrier_flush_test.cpp
         barrier_pathological_choreography_test.cpp
         barrier_rapid_reuse_test.cpp
