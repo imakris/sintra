@@ -50,6 +50,10 @@ namespace
 
 using sintra::detail::interprocess_semaphore;
 
+#if defined(_WIN32)
+constexpr std::size_t kWindowsNameChars = 64;
+#endif
+
 class Test_failure : public std::runtime_error
 {
 public:
@@ -257,8 +261,6 @@ void test_release_local_handle_idempotent()
     interprocess_semaphore sem(0);
 
 #if defined(_WIN32)
-    constexpr std::size_t kWindowsNameChars = 64;
-
     struct Windows_descriptor {
         std::uint64_t id;
         std::wstring name;
@@ -308,71 +310,22 @@ void test_multithreaded_contention()
     interprocess_semaphore sem(0);
     std::atomic<int> posted{0};
     std::atomic<int> acquired{0};
-    std::atomic<int> timeouts{0};
-    std::atomic<int> entered_loop_body{0};
-    std::atomic<int> past_counter_increment{0};
 
     std::random_device rd;
     std::vector<std::thread> threads;
     threads.reserve(kThreads);
 
-    std::fprintf(stderr, "[test] Starting multithreaded_contention with %d threads, %d iterations each\n",
-                 kThreads, kIterationsPerThread);
-
     for (int t = 0; t < kThreads; ++t) {
-        threads.emplace_back([&, tid = t, seed = rd()]() mutable {
-            std::fprintf(stderr, "[thread %d] Thread starting, about to init RNG\n", tid);
-            std::fflush(stderr);
+        threads.emplace_back([&, seed = rd()]() mutable {
             std::mt19937 rng(seed);
-            std::fprintf(stderr, "[thread %d] RNG initialized, entering loop\n", tid);
-            std::fflush(stderr);
-            int local_posts = 0;
-            int local_acquires = 0;
-            int local_timeouts = 0;
-
-            std::fprintf(stderr, "[thread %d] About to enter for loop\n", tid);
-            std::fflush(stderr);
-
             for (int i = 0; i < kIterationsPerThread; ++i) {
-                if (i == 0) {
-                    entered_loop_body.fetch_add(1, std::memory_order_relaxed);
-                    past_counter_increment.fetch_add(1, std::memory_order_relaxed);
-                }
-                if (i < 2) {
-                    std::fprintf(stderr, "[thread %d iter %d] Loop iteration started\n", tid, i);
-                    std::fflush(stderr);
-                }
                 if ((rng() & 3) == 0) {
-                    if (i < 3) {
-                        std::fprintf(stderr, "[thread %d iter %d] About to post\n", tid, i);
-                        std::fflush(stderr);
-                    }
                     sem.post();
-                    if (i < 3) {
-                        std::fprintf(stderr, "[thread %d iter %d] Post done\n", tid, i);
-                        std::fflush(stderr);
-                    }
                     posted.fetch_add(1, std::memory_order_relaxed);
-                    ++local_posts;
                 } else {
-                    if (i < 3) {
-                        std::fprintf(stderr, "[thread %d iter %d] About to timed_wait\n", tid, i);
-                        std::fflush(stderr);
-                    }
-                    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(20);
+                    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(3);
                     if (sem.timed_wait(deadline)) {
-                        if (i < 3) {
-                            std::fprintf(stderr, "[thread %d iter %d] timed_wait succeeded\n", tid, i);
-                            std::fflush(stderr);
-                        }
                         acquired.fetch_add(1, std::memory_order_relaxed);
-                        ++local_acquires;
-                    } else {
-                        if (i < 3) {
-                            std::fprintf(stderr, "[thread %d iter %d] timed_wait timed out\n", tid, i);
-                            std::fflush(stderr);
-                        }
-                        ++local_timeouts;
                     }
                 }
 
@@ -380,35 +333,16 @@ void test_multithreaded_contention()
                     std::this_thread::yield();
                 }
             }
-
-            timeouts.fetch_add(local_timeouts, std::memory_order_relaxed);
-            std::fprintf(stderr, "[thread %d] Finished: posts=%d, acquires=%d, timeouts=%d\n",
-                         tid, local_posts, local_acquires, local_timeouts);
         });
     }
-
-    std::fprintf(stderr, "[test] Waiting for threads to complete...\n");
-    std::fprintf(stderr, "[test] entered_loop_body=%d, past_counter_increment=%d\n",
-                 entered_loop_body.load(), past_counter_increment.load());
-    std::fflush(stderr);
 
     for (auto& th : threads) {
         th.join();
     }
 
-    std::fprintf(stderr, "[test] All threads joined. entered_loop_body=%d, past_counter_increment=%d\n",
-                 entered_loop_body.load(), past_counter_increment.load());
-    std::fflush(stderr);
-    std::fprintf(stderr, "[test] Draining remaining semaphore counts...\n");
-
-    int drained = 0;
     while (sem.try_wait()) {
         acquired.fetch_add(1, std::memory_order_relaxed);
-        ++drained;
     }
-
-    std::fprintf(stderr, "[test] Drained %d, posted=%d, acquired=%d, timeouts=%d\n",
-                 drained, posted.load(), acquired.load(), timeouts.load());
 
     REQUIRE_EQ(posted.load(std::memory_order_relaxed), acquired.load(std::memory_order_relaxed));
 }
@@ -658,7 +592,6 @@ void test_cross_process_coordination()
     constexpr int kChildren = 3;
     constexpr int kIterationsPerChild = 400;
     constexpr int kBurst = 3;
-    constexpr std::size_t kWindowsNameChars = 64;
 
     interprocess_semaphore work_sem(0);
     interprocess_semaphore ack_sem(0);
