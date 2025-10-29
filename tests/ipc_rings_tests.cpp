@@ -25,6 +25,8 @@
 #define private public
 #define protected public
 #include "sintra/detail/ipc_rings.h"
+
+#include "test_environment.h"
 #undef private
 #undef protected
 
@@ -134,8 +136,7 @@ struct Temp_ring_dir {
 
     explicit Temp_ring_dir(const std::string& hint)
     {
-        auto base = std::filesystem::temp_directory_path() / "sintra_ipc_ring_tests";
-        std::filesystem::create_directories(base);
+        auto base = sintra::test::scratch_subdirectory("ipc_rings");
 
         // Simple unique directory name
         auto id = test_counter().fetch_add(1, std::memory_order_relaxed);
