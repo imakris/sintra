@@ -429,48 +429,61 @@ TEST_CASE(test_reader_eviction_does_not_underflow_octile_counter)
         reader.start_reading(trailing_cap);
     });
 
-    uint8_t guarded_octile = 0;
-    auto guard_deadline = std::chrono::steady_clock::now() + 1s;
-    bool guard_observed = false;
-    while (std::chrono::steady_clock::now() < guard_deadline) {
-        if (slot.has_guard.load(std::memory_order_acquire)) {
-            guarded_octile = slot.trailing_octile.load(std::memory_order_relaxed);
-            guard_observed = true;
-            break;
+    auto join_if_joinable = [](std::thread& t) {
+        if (t.joinable()) {
+            t.join();
         }
-        std::this_thread::yield();
-    }
-    ASSERT_TRUE(guard_observed);
+    };
 
-    guard_ready.store(true, std::memory_order_release);
-
-    auto eviction_deadline = std::chrono::steady_clock::now() + 2s;
-    bool eviction_observed = false;
-    while (std::chrono::steady_clock::now() < eviction_deadline) {
-        auto status = slot.status.load(std::memory_order_acquire);
-        if (status == sintra::Ring<uint32_t, true>::READER_STATE_EVICTED) {
-            eviction_observed = true;
-            break;
+    try {
+        uint8_t guarded_octile = 0;
+        auto guard_deadline = std::chrono::steady_clock::now() + 1s;
+        bool guard_observed = false;
+        while (std::chrono::steady_clock::now() < guard_deadline) {
+            if (slot.has_guard.load(std::memory_order_acquire)) {
+                guarded_octile = slot.trailing_octile.load(std::memory_order_relaxed);
+                guard_observed = true;
+                break;
+            }
+            std::this_thread::yield();
         }
-        std::this_thread::yield();
+        ASSERT_TRUE(guard_observed);
+
+        guard_ready.store(true, std::memory_order_release);
+
+        auto eviction_deadline = std::chrono::steady_clock::now() + 2s;
+        bool eviction_observed = false;
+        while (std::chrono::steady_clock::now() < eviction_deadline) {
+            auto status = slot.status.load(std::memory_order_acquire);
+            if (status == sintra::Ring<uint32_t, true>::READER_STATE_EVICTED) {
+                eviction_observed = true;
+                break;
+            }
+            std::this_thread::yield();
+        }
+        ASSERT_TRUE(eviction_observed);
+
+        join_if_joinable(reader_thread);
+
+        uint64_t read_access = reader.c.read_access.load(std::memory_order_acquire);
+        const uint64_t guard_mask = uint64_t(1) << (guarded_octile * 8);
+        uint8_t guard_count = static_cast<uint8_t>((read_access >> (guarded_octile * 8)) & 0xffu);
+
+        reader.c.read_access.fetch_add(guard_mask, std::memory_order_release);
+        slot.has_guard.store(1, std::memory_order_release);
+        slot.status.store(sintra::Ring<uint32_t, true>::READER_STATE_ACTIVE, std::memory_order_release);
+
+        join_if_joinable(writer_thread);
+
+        reader.done_reading();
+
+        ASSERT_EQ(0u, guard_count);
     }
-    ASSERT_TRUE(eviction_observed);
-
-    reader_thread.join();
-
-    uint64_t read_access = reader.c.read_access.load(std::memory_order_acquire);
-    const uint64_t guard_mask = uint64_t(1) << (guarded_octile * 8);
-    uint8_t guard_count = static_cast<uint8_t>((read_access >> (guarded_octile * 8)) & 0xffu);
-
-    reader.c.read_access.fetch_add(guard_mask, std::memory_order_release);
-    slot.has_guard.store(1, std::memory_order_release);
-    slot.status.store(sintra::Ring<uint32_t, true>::READER_STATE_ACTIVE, std::memory_order_release);
-
-    writer_thread.join();
-
-    reader.done_reading();
-
-    ASSERT_EQ(0u, guard_count);
+    catch (...) {
+        join_if_joinable(reader_thread);
+        join_if_joinable(writer_thread);
+        throw;
+    }
 }
 
 TEST_CASE(test_slow_reader_eviction_restores_status)
