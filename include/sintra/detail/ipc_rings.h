@@ -600,6 +600,15 @@ private:
                     m_data_region_0 = region0.release();
                     m_data_region_1 = region1.release();
                     m_data = (T*)m_data_region_0->get_address();
+
+#if defined(MADV_DONTDUMP)
+                    // Keep crash dumps compact (especially on macOS where Mach
+                    // cores include every reserved span) and avoid leaking
+                    // transient payloads. Failing to apply MADV_DONTDUMP is
+                    // harmless, so we deliberately ignore the return value.
+                    ::madvise(m_data_region_0->get_address(), m_data_region_size, MADV_DONTDUMP);
+                    ::madvise(m_data_region_1->get_address(), m_data_region_size, MADV_DONTDUMP);
+#endif
                     break;
                 }
 
@@ -1053,6 +1062,10 @@ private:
             ipc::file_mapping fm_control(m_control_filename.c_str(), ipc::read_write);
             m_control_region = new ipc::mapped_region(fm_control, ipc::read_write, 0, 0);
             m_control = (Control*)m_control_region->get_address();
+
+#if defined(MADV_DONTDUMP)
+            ::madvise(m_control_region->get_address(), m_control_region->get_size(), MADV_DONTDUMP);
+#endif
 
             return true;
         }
