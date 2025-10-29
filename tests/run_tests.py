@@ -22,6 +22,7 @@ Options:
 
 import argparse
 import fnmatch
+import importlib
 import json
 import os
 import shlex
@@ -36,7 +37,146 @@ import urllib.request
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, IO, List, Optional, Set, Tuple
+from typing import Dict, IO, Iterable, List, Optional, Sequence, Set, Tuple
+
+
+_PSUTIL = None
+if importlib.util.find_spec("psutil") is not None:
+    _PSUTIL = importlib.import_module("psutil")
+
+
+def _format_size(num_bytes: Optional[int]) -> str:
+    """Return a human-friendly representation of ``num_bytes``."""
+
+    if num_bytes is None:
+        return "unknown"
+
+    if num_bytes < 0:
+        return "unknown"
+
+    units = ["B", "KB", "MB", "GB", "TB", "PB"]
+    value = float(num_bytes)
+    for unit in units:
+        if value < 1024.0:
+            return f"{value:.2f} {unit}"
+        value /= 1024.0
+    return f"{value:.2f} EB"
+
+
+def _available_memory_bytes() -> Optional[int]:
+    """Best-effort determination of available physical memory."""
+
+    if _PSUTIL is not None:
+        try:
+            return int(_PSUTIL.virtual_memory().available)
+        except Exception:
+            pass
+
+    try:
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        avail_pages = os.sysconf("SC_AVPHYS_PAGES")
+    except (AttributeError, OSError, ValueError):
+        page_size = None
+        avail_pages = None
+
+    if isinstance(page_size, int) and isinstance(avail_pages, int):
+        return page_size * avail_pages
+
+    if sys.platform == "darwin":
+        try:
+            vm_stat = subprocess.run(
+                ["vm_stat"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except Exception:
+            return None
+
+        page_size_bytes = 4096
+        for line in vm_stat.stdout.splitlines():
+            if line.startswith("page size of"):
+                parts = line.split()
+                try:
+                    page_size_bytes = int(parts[3])
+                except (IndexError, ValueError):
+                    page_size_bytes = 4096
+                break
+
+        free_pages = 0
+        inactive_pages = 0
+        speculative_pages = 0
+
+        for line in vm_stat.stdout.splitlines():
+            if line.startswith("Pages free"):
+                free_pages = int(line.split(":")[1].strip().strip("."))
+            elif line.startswith("Pages inactive"):
+                inactive_pages = int(line.split(":")[1].strip().strip("."))
+            elif line.startswith("Pages speculative"):
+                speculative_pages = int(line.split(":")[1].strip().strip("."))
+
+        return page_size_bytes * (free_pages + inactive_pages + speculative_pages)
+
+    return None
+
+
+def _available_disk_bytes(path: Path) -> Optional[int]:
+    """Return free disk space for ``path``."""
+
+    try:
+        usage = shutil.disk_usage(path)
+    except Exception:
+        return None
+    return usage.free
+
+
+def _find_lingering_processes(prefixes: Sequence[str]) -> List[Tuple[int, str]]:
+    """Return processes whose names start with one of ``prefixes``."""
+
+    normalized_prefixes = tuple(prefixes)
+    matches: List[Tuple[int, str]] = []
+
+    if _PSUTIL is not None:
+        try:
+            for proc in _PSUTIL.process_iter(["name"]):
+                name = proc.info.get("name") or ""
+                if name.startswith(normalized_prefixes):
+                    matches.append((proc.pid, name))
+        except Exception:
+            pass
+        if matches:
+            return matches
+
+    try:
+        ps_output = subprocess.run(
+            ["ps", "-axo", "pid=,comm="],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        return matches
+
+    for line in ps_output.stdout.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2:
+            continue
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        name = parts[1]
+        if name.startswith(normalized_prefixes):
+            matches.append((pid, name))
+
+    return matches
+
+
+def _describe_processes(processes: Iterable[Tuple[int, str]]) -> str:
+    """Return a compact string description of ``processes``."""
+
+    formatted = [f"{name} (pid={pid})" for pid, name in processes]
+    return ", ".join(formatted) if formatted else ""
 
 class Color:
     """ANSI color codes for terminal output"""
@@ -3001,6 +3141,13 @@ def main():
                 reps_in_this_round = min(batch_size, max_remaining)
                 print(f"\n{Color.BLUE}--- Round: {reps_in_this_round} repetition(s) ---{Color.RESET}")
 
+                lingering = _find_lingering_processes(("sintra_",))
+                if lingering:
+                    details = _describe_processes(lingering)
+                    print(
+                        f"  {Color.YELLOW}Warning: Detected lingering sintra processes before starting the round: {details}{Color.RESET}"
+                    )
+
                 for i in range(reps_in_this_round):
                     print(f"  Rep {i + 1}/{reps_in_this_round}: ", end="", flush=True)
                     for invocation in tests:
@@ -3046,6 +3193,13 @@ def main():
                 round_elapsed = time.time() - suite_start_time
                 print(
                     f"    {Color.BLUE}Round complete - total elapsed: {format_duration(round_elapsed)}{Color.RESET}"
+                )
+
+                available_memory = _available_memory_bytes()
+                disk_space = _available_disk_bytes(runner.build_dir)
+                print(
+                    f"    Diagnostics: available memory={_format_size(available_memory)}, "
+                    f"free disk={_format_size(disk_space)}"
                 )
 
                 if not suite_all_passed:
