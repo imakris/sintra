@@ -12,7 +12,6 @@
 #include <mutex>
 #include <set>
 #include <thread>
-#include <vector>
 #include <algorithm>
 #include <utility>
 #include <cstdint>
@@ -235,45 +234,6 @@ private:
     condition_variable                  m_stop_condition;
 
 };
-
-
-struct Reply_progress_skip
-{
-    const Process_message_reader::Delivery_progress* progress = nullptr;
-    std::uint64_t generation = 0;
-    sequence_counter_type sequence = invalid_sequence;
-};
-
-static inline thread_local std::vector<Reply_progress_skip> s_tl_reply_progress_to_skip;
-
-inline void register_reply_progress_skip(
-    const Process_message_reader::Delivery_progress* progress_address,
-    std::uint64_t generation,
-    sequence_counter_type target_sequence,
-    sequence_counter_type observed_sequence)
-{
-    if (!progress_address || generation == 0) {
-        return;
-    }
-
-    auto sequence = target_sequence;
-    if (sequence == invalid_sequence) {
-        sequence = observed_sequence;
-    }
-
-    if (sequence == invalid_sequence) {
-        return;
-    }
-
-    s_tl_reply_progress_to_skip.push_back({progress_address, generation, sequence});
-}
-
-inline std::vector<Reply_progress_skip> take_reply_progress_skips()
-{
-    auto skips = std::move(s_tl_reply_progress_to_skip);
-    s_tl_reply_progress_to_skip.clear();
-    return skips;
-}
 
 
 }

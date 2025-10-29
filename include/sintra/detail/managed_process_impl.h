@@ -1590,48 +1590,6 @@ inline void Managed_process::run_after_current_handler(function<void()> task)
 inline
 void Managed_process::wait_for_delivery_fence()
 {
-    auto reply_progress_skips = take_reply_progress_skips();
-
-    auto consume_reply_skip = [&](Process_message_reader::Delivery_progress& progress,
-                                 sequence_counter_type target_sequence,
-                                 sequence_counter_type observed_sequence) {
-        for (auto it = reply_progress_skips.begin(); it != reply_progress_skips.end();) {
-            if (it->progress != &progress) {
-                ++it;
-                continue;
-            }
-
-            if (it->generation != progress.generation) {
-                it = reply_progress_skips.erase(it);
-                continue;
-            }
-
-            const auto skip_sequence = it->sequence;
-            if (skip_sequence == invalid_sequence) {
-                it = reply_progress_skips.erase(it);
-                continue;
-            }
-
-            if (target_sequence != invalid_sequence && skip_sequence == target_sequence) {
-                const auto published = progress.reply_sequence.load(std::memory_order_acquire);
-                if (published >= skip_sequence) {
-                    reply_progress_skips.erase(it);
-                    return true;
-                }
-                return false;
-            }
-
-            if (observed_sequence != invalid_sequence && observed_sequence >= skip_sequence) {
-                it = reply_progress_skips.erase(it);
-                continue;
-            }
-
-            ++it;
-        }
-
-        return false;
-    };
-
     while (true) {
         std::vector<Process_message_reader::Delivery_target> targets;
 
@@ -1662,13 +1620,6 @@ void Managed_process::wait_for_delivery_fence()
                 auto rep_target_info = reader.prepare_delivery_target(
                     Process_message_reader::Delivery_stream::Reply,
                     rep_target);
-                if (rep_target_info.wait_needed) {
-                    if (auto progress = rep_target_info.progress.lock()) {
-                        if (consume_reply_skip(*progress, rep_target_info.target, rep_target_info.observed)) {
-                            rep_target_info.wait_needed = false;
-                        }
-                    }
-                }
                 if (rep_target_info.wait_needed) {
                     targets.emplace_back(std::move(rep_target_info));
                 }
