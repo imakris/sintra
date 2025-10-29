@@ -23,6 +23,8 @@
 #include <sintra/sintra.h>
 #include <sintra/detail/managed_process.h>
 
+#include "test_environment.h"
+
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -120,8 +122,7 @@ std::filesystem::path ensure_shared_directory()
         return dir;
     }
 
-    auto base = std::filesystem::temp_directory_path() / "sintra_tests";
-    std::filesystem::create_directories(base);
+    auto base = sintra::test::scratch_subdirectory("recovery_test");
 
     auto unique_suffix = std::chrono::duration_cast<std::chrono::nanoseconds>(
                              std::chrono::high_resolution_clock::now().time_since_epoch())
@@ -223,7 +224,7 @@ int process_crasher()
     }
 
     {
-        std::ofstream diag(std::filesystem::temp_directory_path() / "sintra_crasher_diag.log", std::ios::app);
+        std::ofstream diag(sintra::test::scratch_subdirectory("recovery_test") / "sintra_crasher_diag.log", std::ios::app);
         diag << "process_crasher pid="
 #ifdef _WIN32
              << _getpid()
