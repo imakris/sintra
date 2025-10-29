@@ -504,6 +504,9 @@ Managed_process::Managed_process():
     s_mproc = this;
 
     m_pid = detail::get_current_process_id();
+    if (auto start_stamp = current_process_start_stamp()) {
+        m_process_start_stamp = *start_stamp;
+    }
 
     install_signal_handler();
 
@@ -570,6 +573,8 @@ Managed_process::~Managed_process()
         // now it's safe to delete the Coordinator.
         delete s_coord;
         s_coord = 0;
+
+        mark_run_directory_for_cleanup(std::filesystem::path(m_directory));
 
         // removes the swarm directory
         remove_directory(m_directory);
@@ -965,6 +970,17 @@ Managed process options:
     const std::string current_abi = detail::abi_token();
 
     if (coordinator_is_local) {
+        run_marker_record run_marker{};
+        run_marker.pid = static_cast<uint32_t>(m_pid);
+        run_marker.start_stamp = m_process_start_stamp;
+        run_marker.created_monotonic_ns = monotonic_now_ns();
+        run_marker.recovery_occurrence = static_cast<uint32_t>(s_recovery_occurrence);
+
+        if (!write_run_marker(std::filesystem::path(m_directory), run_marker)) {
+            throw std::runtime_error(
+                "Sintra failed to persist the coordinator run marker at " + m_directory);
+        }
+
         std::ofstream marker(abi_path, std::ios::out | std::ios::trunc);
         if (!marker) {
             throw std::runtime_error(
@@ -1411,19 +1427,24 @@ void Managed_process::wait_for_stop()
 inline
 std::string Managed_process::obtain_swarm_directory()
 {
-    std::string sintra_directory = fs::temp_directory_path().string() + "/sintra/";
-    if (!check_or_create_directory(sintra_directory)) {
+    const std::filesystem::path sintra_directory = std::filesystem::temp_directory_path() / "sintra";
+    if (!check_or_create_directory(sintra_directory.string())) {
         throw std::runtime_error("access to a working directory failed");
     }
+
+    cleanup_stale_swarm_directories(
+        sintra_directory,
+        static_cast<uint32_t>(m_pid),
+        m_process_start_stamp);
 
     std::stringstream stream;
     stream << std::hex << m_swarm_id;
-    auto swarm_directory = sintra_directory + stream.str();
-    if (!check_or_create_directory(swarm_directory)) {
+    const std::filesystem::path swarm_directory = sintra_directory / stream.str();
+    if (!check_or_create_directory(swarm_directory.string())) {
         throw std::runtime_error("access to a working directory failed");
     }
 
-    return swarm_directory;
+    return swarm_directory.string();
 }
 
 // Calls f when the specified transceiver becomes available.

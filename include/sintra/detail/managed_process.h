@@ -216,6 +216,7 @@ struct Managed_process: Derived_transceiver<Managed_process>
     string                              m_binary_name;
 
     detail::process_id_type             m_pid;
+    uint64_t                            m_process_start_stamp = 0;
 
     atomic<bool>                        m_must_stop;
     condition_variable                  m_termination_condition;
