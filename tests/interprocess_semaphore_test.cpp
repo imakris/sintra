@@ -50,6 +50,10 @@ namespace
 
 using sintra::detail::interprocess_semaphore;
 
+#if defined(_WIN32)
+constexpr std::size_t kWindowsNameChars = 64;
+#endif
+
 class Test_failure : public std::runtime_error
 {
 public:
@@ -503,8 +507,6 @@ void test_cross_process_coordination()
 }
 
 #elif defined(_WIN32)
-
-constexpr std::size_t kWindowsNameChars = 64;
 
 std::string narrow_from_wide(const wchar_t* value)
 {
