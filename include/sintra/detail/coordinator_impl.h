@@ -158,29 +158,103 @@ detail::barrier_completion_payload Process_group::barrier(
         }
 
         if (needs_outbound || needs_processing) {
+            const auto now = std::chrono::steady_clock::now();
+            constexpr auto outbound_timeout = std::chrono::seconds(30);
+            constexpr auto processing_timeout = std::chrono::seconds(60);
+
+            if (needs_outbound) {
+                b.outbound_deadline = now + outbound_timeout;
+            }
+            if (needs_processing) {
+                b.processing_deadline = now + processing_timeout;
+            }
+
+            auto handle_rpc_failure = [&](detail::barrier_ack_type type,
+                                          instance_id_type offender,
+                                          detail::barrier_failure reason)
+            {
+                if (type == detail::barrier_ack_type::outbound && b.awaiting_outbound) {
+                    b.outbound_state = detail::barrier_state::failed;
+                    b.outbound_failure = reason;
+                    b.outbound_offender = offender;
+                    b.outbound_waiters.clear();
+                    b.awaiting_outbound = false;
+                }
+                if (type == detail::barrier_ack_type::processing && b.awaiting_processing) {
+                    b.processing_state = detail::barrier_state::failed;
+                    b.processing_failure = reason;
+                    b.processing_offender = offender;
+                    b.processing_waiters.clear();
+                    b.awaiting_processing = false;
+                }
+            };
+
             for (auto pid : b.processes_arrived) {
-                if (needs_outbound) {
+                if (needs_outbound && b.awaiting_outbound) {
                     detail::barrier_ack_request req {};
                     req.barrier_sequence = sequence;
                     req.common_function_iid = current_common_fiid;
                     req.ack_type = detail::barrier_ack_type::outbound;
                     req.target_sequence = sequence;
-                    Managed_process::rpc_barrier_ack_request(pid, req);
+                    try {
+                        Managed_process::rpc_barrier_ack_request(pid, req);
+                    }
+                    catch (...) {
+                        handle_rpc_failure(detail::barrier_ack_type::outbound, pid, detail::barrier_failure::peer_lost);
+                    }
                 }
-                if (needs_processing) {
+                if (needs_processing && b.awaiting_processing) {
                     detail::barrier_ack_request req {};
                     req.barrier_sequence = sequence;
                     req.common_function_iid = current_common_fiid;
                     req.ack_type = detail::barrier_ack_type::processing;
                     req.target_sequence = sequence;
-                    Managed_process::rpc_barrier_ack_request(pid, req);
+                    try {
+                        Managed_process::rpc_barrier_ack_request(pid, req);
+                    }
+                    catch (...) {
+                        handle_rpc_failure(detail::barrier_ack_type::processing, pid, detail::barrier_failure::peer_lost);
+                    }
                 }
             }
 
             while ((b.awaiting_outbound && !b.outbound_waiters.empty()) ||
                    (b.awaiting_processing && !b.processing_waiters.empty()))
             {
-                b.completion_cv.wait(barrier_lock);
+                const auto current = std::chrono::steady_clock::now();
+                if (b.awaiting_outbound && current >= b.outbound_deadline) {
+                    b.outbound_state = detail::barrier_state::failed;
+                    b.outbound_failure = detail::barrier_failure::timeout;
+                    b.outbound_offender = invalid_instance_id;
+                    b.outbound_waiters.clear();
+                    b.awaiting_outbound = false;
+                }
+                if (b.awaiting_processing && current >= b.processing_deadline) {
+                    b.processing_state = detail::barrier_state::failed;
+                    b.processing_failure = detail::barrier_failure::timeout;
+                    b.processing_offender = invalid_instance_id;
+                    b.processing_waiters.clear();
+                    b.awaiting_processing = false;
+                }
+
+                if (!b.awaiting_outbound && !b.awaiting_processing) {
+                    break;
+                }
+
+                auto next_deadline = std::chrono::steady_clock::time_point::max();
+                if (b.awaiting_outbound) {
+                    next_deadline = std::min(next_deadline, b.outbound_deadline);
+                }
+                if (b.awaiting_processing) {
+                    next_deadline = std::min(next_deadline, b.processing_deadline);
+                }
+
+                if (next_deadline == std::chrono::steady_clock::time_point::max()) {
+                    b.completion_cv.wait(barrier_lock);
+                }
+                else {
+                    b.completion_cv.wait_until(barrier_lock, next_deadline);
+                }
             }
         }
 
@@ -200,6 +274,7 @@ detail::barrier_completion_payload Process_group::barrier(
                 payload.outbound.state = detail::barrier_state::failed;
                 payload.outbound.failure_code = b.outbound_failure;
                 payload.outbound.offender = b.outbound_offender;
+                payload.outbound.sequence = invalid_sequence;
             }
             else {
                 payload.outbound.state = detail::barrier_state::satisfied;
@@ -220,6 +295,7 @@ detail::barrier_completion_payload Process_group::barrier(
                 payload.processing.state = detail::barrier_state::failed;
                 payload.processing.failure_code = b.processing_failure;
                 payload.processing.offender = b.processing_offender;
+                payload.processing.sequence = invalid_sequence;
             }
             else {
                 payload.processing.state = detail::barrier_state::satisfied;
