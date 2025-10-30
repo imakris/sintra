@@ -22,6 +22,7 @@
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <optional>
 #include <random>
 #include <sstream>
 #include <stdexcept>
@@ -43,6 +44,107 @@ constexpr std::size_t kStageAWorkers = 3;
 constexpr std::size_t kStageBWorkers = 3;
 constexpr std::size_t kIterations     = 64;
 constexpr std::array<std::size_t, 2> kExpectedPerStage = {kStageAWorkers, kStageBWorkers};
+constexpr char kTraceEnvVar[] = "SINTRA_COMPLEX_TRACE";
+constexpr char kDelayEnvVar[] = "SINTRA_COMPLEX_DELAY_US_MAX";
+
+std::filesystem::path ensure_shared_directory();
+
+class Trace_logger
+{
+public:
+    Trace_logger(const std::string& role, std::optional<unsigned> worker_index)
+    {
+        const char* enabled_env = std::getenv(kTraceEnvVar);
+        m_enabled = (enabled_env && *enabled_env);
+        if (!m_enabled) {
+            return;
+        }
+
+        try {
+            auto dir = ensure_shared_directory();
+            std::ostringstream name;
+            name << "complex_choreography_" << role;
+            if (worker_index) {
+                name << '_' << *worker_index;
+            }
+            name << ".log";
+
+            m_stream.open(dir / name.str(), std::ios::out | std::ios::app);
+            if (!m_stream) {
+                m_enabled = false;
+            }
+        }
+        catch (...) {
+            m_enabled = false;
+        }
+    }
+
+    template <typename... Args>
+    void log(std::string_view event, Args&&... args)
+    {
+        write_entry(std::nullopt, event, std::forward<Args>(args)...);
+    }
+
+    template <typename... Args>
+    void log_iteration(std::uint32_t iteration, std::string_view event, Args&&... args)
+    {
+        write_entry(iteration, event, std::forward<Args>(args)...);
+    }
+
+private:
+    template <typename... Args>
+    void write_entry(std::optional<std::uint32_t> iteration,
+                     std::string_view event,
+                     Args&&... args)
+    {
+        if (!m_enabled) {
+            return;
+        }
+
+        const auto now = std::chrono::steady_clock::now().time_since_epoch();
+        const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(now).count();
+
+        std::ostringstream line;
+        line << '[' << micros << "] tid=" << std::this_thread::get_id();
+        if (iteration) {
+            line << " iter=" << *iteration;
+        }
+        line << ' ' << event;
+        ((line << ' ' << std::forward<Args>(args)), ...);
+
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_stream << line.str() << '\n';
+        m_stream.flush();
+    }
+
+    bool m_enabled = false;
+    std::mutex m_mutex;
+    std::ofstream m_stream;
+};
+
+int read_env_int(const char* name, int default_value)
+{
+    const char* value = std::getenv(name);
+    if (!value || !*value) {
+        return default_value;
+    }
+    try {
+        const int parsed = std::stoi(value);
+        return parsed < 0 ? 0 : parsed;
+    }
+    catch (...) {
+        return default_value;
+    }
+}
+
+uint32_t current_process_id()
+{
+#ifdef _WIN32
+    return static_cast<uint32_t>(_getpid());
+#else
+    return static_cast<uint32_t>(getpid());
+#endif
+}
 constexpr std::uint32_t kMaxExtraRounds = 4;
 
 struct StageReport
@@ -241,6 +343,8 @@ int coordinator_process()
     using namespace sintra;
 
     Coordinator_state state;
+    Trace_logger trace("coordinator", std::nullopt);
+    trace.log("start", "pid=", current_process_id());
 
     const auto make_failure_message = [](std::uint32_t iteration, auto&& formatter) {
         std::ostringstream oss;
@@ -257,6 +361,11 @@ int coordinator_process()
                 state.failure_reason = make_failure_message(report.iteration, [&](std::ostringstream& oss) {
                     oss << "stage index out of bounds (stage=" << report.stage << ')';
                 });
+                trace.log_iteration(report.iteration,
+                                     "failure",
+                                     "reason=stage-index-out-of-bounds",
+                                     "stage=",
+                                     report.stage);
             }
             state.cv.notify_all();
             return;
@@ -269,6 +378,9 @@ int coordinator_process()
                     oss << "iteration index out of bounds (allowed range 0.." << (kIterations - 1)
                         << ')';
                 });
+                trace.log_iteration(report.iteration,
+                                     "failure",
+                                     "reason=iteration-index-out-of-bounds");
             }
             state.cv.notify_all();
             return;
@@ -287,6 +399,13 @@ int coordinator_process()
                 oss << "worker index out of bounds for stage " << stage << " (worker="
                     << report.worker << ", expected < " << kExpectedPerStage[stage] << ')';
             });
+            trace.log_iteration(report.iteration,
+                                 "failure",
+                                 "reason=worker-index-out-of-bounds",
+                                 "stage=",
+                                 stage,
+                                 "worker=",
+                                 report.worker);
             state.cv.notify_all();
             return;
         }
@@ -296,6 +415,13 @@ int coordinator_process()
             state.failure_reason = make_failure_message(report.iteration, [&](std::ostringstream& oss) {
                 oss << "duplicate report from stage " << stage << ", worker " << report.worker;
             });
+            trace.log_iteration(report.iteration,
+                                 "failure",
+                                 "reason=duplicate-report",
+                                 "stage=",
+                                 stage,
+                                 "worker=",
+                                 report.worker);
             state.cv.notify_all();
             return;
         }
@@ -307,6 +433,17 @@ int coordinator_process()
                 oss << "payload mismatch for stage " << stage << ", worker " << report.worker
                     << " (expected=" << expected << ", actual=" << report.payload << ')';
             });
+            trace.log_iteration(report.iteration,
+                                 "failure",
+                                 "reason=payload-mismatch",
+                                 "stage=",
+                                 stage,
+                                 "worker=",
+                                 report.worker,
+                                 "expected=",
+                                 expected,
+                                 "actual=",
+                                 report.payload);
             state.cv.notify_all();
             return;
         }
@@ -316,6 +453,11 @@ int coordinator_process()
             state.failure_reason = make_failure_message(report.iteration, [&](std::ostringstream& oss) {
                 oss << "stage B report received before release";
             });
+            trace.log_iteration(report.iteration,
+                                 "failure",
+                                 "reason=stage-b-early-report",
+                                 "worker=",
+                                 report.worker);
             state.cv.notify_all();
             return;
         }
@@ -328,6 +470,25 @@ int coordinator_process()
                 oss << "too many reports for stage " << stage << " (received=" << count
                     << ", expected=" << kExpectedPerStage[stage] << ')';
             });
+            trace.log_iteration(report.iteration,
+                                 "failure",
+                                 "reason=too-many-reports",
+                                 "stage=",
+                                 stage,
+                                 "received=",
+                                 count);
+        }
+        else {
+            trace.log_iteration(report.iteration,
+                                 "report",
+                                 "stage=",
+                                 stage,
+                                 "worker=",
+                                 report.worker,
+                                 "payload=",
+                                 report.payload,
+                                 "count=",
+                                 count);
         }
         state.cv.notify_all();
     });
@@ -336,7 +497,9 @@ int coordinator_process()
 
     for (std::uint32_t iteration = 0; iteration < kIterations; ++iteration) {
         const auto start_barrier = make_iteration_barrier_name("complex-start", iteration);
+        trace.log_iteration(iteration, "barrier-enter", "name=", start_barrier);
         barrier(start_barrier);
+        trace.log_iteration(iteration, "barrier-exit", "name=", start_barrier);
 
         {
             std::unique_lock<std::mutex> lock(state.mutex);
@@ -348,17 +511,32 @@ int coordinator_process()
         const std::uint32_t extra_rounds = extra_rounds_for_iteration(iteration);
         const auto stage0_token = directive_token(0, iteration);
         world() << StageDirective{0u, iteration, extra_rounds, stage0_token};
+        trace.log_iteration(iteration,
+                             "directive-stage0",
+                             "extra-rounds=",
+                             extra_rounds,
+                             "token=",
+                             stage0_token);
 
         const auto phase_a_barrier = make_iteration_barrier_name("complex-phase-a", iteration);
+        trace.log_iteration(iteration, "barrier-enter", "name=", phase_a_barrier);
         barrier(phase_a_barrier);
+        trace.log_iteration(iteration, "barrier-exit", "name=", phase_a_barrier);
 
         {
             std::lock_guard<std::mutex> lock(state.mutex);
             state.stage_b_release_sent[iteration] = true;
         }
+        trace.log_iteration(iteration, "stage-b-release", "sent=true");
 
         const auto stage1_token = directive_token(1, iteration);
         world() << StageDirective{1u, iteration, extra_rounds, stage1_token};
+        trace.log_iteration(iteration,
+                             "directive-stage1",
+                             "extra-rounds=",
+                             extra_rounds,
+                             "token=",
+                             stage1_token);
 
         {
             std::unique_lock<std::mutex> lock(state.mutex);
@@ -368,20 +546,37 @@ int coordinator_process()
         }
 
         const auto phase_b_barrier = make_iteration_barrier_name("complex-phase-b", iteration);
+        trace.log_iteration(iteration, "barrier-enter", "name=", phase_b_barrier);
         barrier(phase_b_barrier);
+        trace.log_iteration(iteration, "barrier-exit", "name=", phase_b_barrier);
 
         for (std::uint32_t extra = 0; extra < extra_rounds; ++extra) {
             const auto extra_barrier = make_extra_barrier_name(iteration, extra);
+            trace.log_iteration(iteration,
+                                 "barrier-enter",
+                                 "name=",
+                                 extra_barrier,
+                                 "extra-index=",
+                                 extra);
             barrier(extra_barrier);
+            trace.log_iteration(iteration,
+                                 "barrier-exit",
+                                 "name=",
+                                 extra_barrier,
+                                 "extra-index=",
+                                 extra);
         }
 
         const auto done_barrier = make_iteration_barrier_name("complex-done", iteration);
+        trace.log_iteration(iteration, "barrier-enter", "name=", done_barrier);
         barrier(done_barrier);
+        trace.log_iteration(iteration, "barrier-exit", "name=", done_barrier);
 
         ++iterations_completed;
     }
 
     barrier("complex-choreography-test-done", "_sintra_all_processes");
+    trace.log("all-processes-barrier", "name=complex-choreography-test-done");
     deactivate_all_slots();
 
     std::size_t stage_a_total = 0;
@@ -401,8 +596,21 @@ int coordinator_process()
     try {
         const auto shared_dir = get_shared_directory();
         write_result(shared_dir, success, iterations_completed, stage_a_total, stage_b_total, failure_reason);
+        trace.log("result-written",
+                  "success=",
+                  success,
+                  "iterations=",
+                  iterations_completed,
+                  "stage-a-total=",
+                  stage_a_total,
+                  "stage-b-total=",
+                  stage_b_total);
+        if (!success) {
+            trace.log("failure-summary", failure_reason);
+        }
     } catch (const std::exception& e) {
         std::fprintf(stderr, "Failed to write result: %s\n", e.what());
+        trace.log("result-write-error", e.what());
         return 1;
     }
 
@@ -420,28 +628,50 @@ int stage_process(std::uint32_t stage, std::uint32_t worker_index)
     std::vector<std::uint32_t> extra_rounds_cache(kIterations, 0);
     std::vector<std::uint32_t> release_tokens(kIterations, 0);
 
+    Trace_logger trace(stage == 0 ? "stage_a" : "stage_b", worker_index);
+    trace.log("start", "pid=", current_process_id(), "worker=", worker_index, "stage=", stage);
+
     activate_slot([&](const StageDirective& directive) {
         if (directive.stage != stage) {
             return;
         }
         if (directive.iteration >= kIterations) {
             failure.store(true, std::memory_order_relaxed);
+            trace.log_iteration(directive.iteration,
+                                 "failure",
+                                 "reason=directive-iteration-out-of-range");
             return;
         }
         if (directive.extra_rounds > kMaxExtraRounds) {
             failure.store(true, std::memory_order_relaxed);
+            trace.log_iteration(directive.iteration,
+                                 "warning",
+                                 "reason=directive-extra-rounds-clamped",
+                                 "value=",
+                                 directive.extra_rounds);
         }
 
         {
             std::lock_guard<std::mutex> lock(release_mutex);
             if (release_received[directive.iteration]) {
                 failure.store(true, std::memory_order_relaxed);
+                trace.log_iteration(directive.iteration,
+                                     "failure",
+                                     "reason=duplicate-directive",
+                                     "token=",
+                                     directive.token);
             } else {
                 release_received[directive.iteration] = true;
             }
             extra_rounds_cache[directive.iteration] = directive.extra_rounds;
             release_tokens[directive.iteration]     = directive.token;
         }
+        trace.log_iteration(directive.iteration,
+                             "directive-received",
+                             "extra-rounds=",
+                             directive.extra_rounds,
+                             "token=",
+                             directive.token);
         release_cv.notify_all();
     });
 
@@ -454,7 +684,8 @@ int stage_process(std::uint32_t stage, std::uint32_t worker_index)
 #endif
     std::seed_seq seed{now_seed, pid_seed, static_cast<unsigned>(stage), static_cast<unsigned>(worker_index)};
     std::mt19937 gen(seed);
-    std::uniform_int_distribution<int> delay_dist(0, 40);
+    const int configured_delay_max = read_env_int(kDelayEnvVar, 40);
+    std::uniform_int_distribution<int> delay_dist(0, configured_delay_max);
 
     auto wait_for_release = [&](std::uint32_t iteration) {
         std::unique_lock<std::mutex> lock(release_mutex);
@@ -464,7 +695,9 @@ int stage_process(std::uint32_t stage, std::uint32_t worker_index)
 
     for (std::uint32_t iteration = 0; iteration < kIterations; ++iteration) {
         const auto start_barrier = make_iteration_barrier_name("complex-start", iteration);
+        trace.log_iteration(iteration, "barrier-enter", "name=", start_barrier);
         barrier(start_barrier);
+        trace.log_iteration(iteration, "barrier-exit", "name=", start_barrier);
 
         const auto phase_a_barrier = make_iteration_barrier_name("complex-phase-a", iteration);
         const auto phase_b_barrier = make_iteration_barrier_name("complex-phase-b", iteration);
@@ -475,18 +708,42 @@ int stage_process(std::uint32_t stage, std::uint32_t worker_index)
             if (delay > 0) {
                 std::this_thread::sleep_for(std::chrono::microseconds(delay));
             }
+            trace.log_iteration(iteration,
+                                 "report-sending",
+                                 "payload=",
+                                 expected_payload(stage, iteration, worker_index),
+                                 "delay-us=",
+                                 delay);
             world() << StageReport{stage,
                                    worker_index,
                                    iteration,
                                    expected_payload(stage, iteration, worker_index)};
 
+            trace.log_iteration(iteration, "release-wait");
             auto [extra_rounds, token] = wait_for_release(iteration);
+            trace.log_iteration(iteration,
+                                 "release-received",
+                                 "extra-rounds=",
+                                 extra_rounds,
+                                 "token=",
+                                 token);
             if (token != directive_token(stage, iteration)) {
                 failure.store(true, std::memory_order_relaxed);
+                trace.log_iteration(iteration,
+                                     "failure",
+                                     "reason=token-mismatch",
+                                     "expected=",
+                                     directive_token(stage, iteration),
+                                     "actual=",
+                                     token);
             }
 
+            trace.log_iteration(iteration, "barrier-enter", "name=", phase_a_barrier);
             barrier(phase_a_barrier);
+            trace.log_iteration(iteration, "barrier-exit", "name=", phase_a_barrier);
+            trace.log_iteration(iteration, "barrier-enter", "name=", phase_b_barrier);
             barrier(phase_b_barrier);
+            trace.log_iteration(iteration, "barrier-exit", "name=", phase_b_barrier);
 
             if (extra_rounds > kMaxExtraRounds) {
                 failure.store(true, std::memory_order_relaxed);
@@ -494,28 +751,66 @@ int stage_process(std::uint32_t stage, std::uint32_t worker_index)
             }
             for (std::uint32_t extra = 0; extra < extra_rounds; ++extra) {
                 const auto extra_barrier = make_extra_barrier_name(iteration, extra);
+                trace.log_iteration(iteration,
+                                     "barrier-enter",
+                                     "name=",
+                                     extra_barrier,
+                                     "extra-index=",
+                                     extra);
                 barrier(extra_barrier);
+                trace.log_iteration(iteration,
+                                     "barrier-exit",
+                                     "name=",
+                                     extra_barrier,
+                                     "extra-index=",
+                                     extra);
             }
 
+            trace.log_iteration(iteration, "barrier-enter", "name=", done_barrier);
             barrier(done_barrier);
+            trace.log_iteration(iteration, "barrier-exit", "name=", done_barrier);
         } else {
+            trace.log_iteration(iteration, "barrier-enter", "name=", phase_a_barrier);
             barrier(phase_a_barrier);
+            trace.log_iteration(iteration, "barrier-exit", "name=", phase_a_barrier);
 
+            trace.log_iteration(iteration, "release-wait");
             auto [extra_rounds, token] = wait_for_release(iteration);
+            trace.log_iteration(iteration,
+                                 "release-received",
+                                 "extra-rounds=",
+                                 extra_rounds,
+                                 "token=",
+                                 token);
             if (token != directive_token(stage, iteration)) {
                 failure.store(true, std::memory_order_relaxed);
+                trace.log_iteration(iteration,
+                                     "failure",
+                                     "reason=token-mismatch",
+                                     "expected=",
+                                     directive_token(stage, iteration),
+                                     "actual=",
+                                     token);
             }
 
             const int delay = delay_dist(gen);
             if (delay > 0) {
                 std::this_thread::sleep_for(std::chrono::microseconds(delay));
             }
+            trace.log_iteration(iteration,
+                                 "report-sending",
+                                 "payload=",
+                                 expected_payload(stage, iteration, worker_index),
+                                 "delay-us=",
+                                 delay);
             world() << StageReport{stage,
                                    worker_index,
                                    iteration,
                                    expected_payload(stage, iteration, worker_index)};
 
+            trace.log_iteration(iteration, "barrier-enter", "name=", phase_b_barrier);
             barrier(phase_b_barrier);
+            trace.log_iteration(iteration, "barrier-exit", "name=", phase_b_barrier);
 
             if (extra_rounds > kMaxExtraRounds) {
                 failure.store(true, std::memory_order_relaxed);
@@ -523,17 +818,36 @@ int stage_process(std::uint32_t stage, std::uint32_t worker_index)
             }
             for (std::uint32_t extra = 0; extra < extra_rounds; ++extra) {
                 const auto extra_barrier = make_extra_barrier_name(iteration, extra);
+                trace.log_iteration(iteration,
+                                     "barrier-enter",
+                                     "name=",
+                                     extra_barrier,
+                                     "extra-index=",
+                                     extra);
                 barrier(extra_barrier);
+                trace.log_iteration(iteration,
+                                     "barrier-exit",
+                                     "name=",
+                                     extra_barrier,
+                                     "extra-index=",
+                                     extra);
             }
 
+            trace.log_iteration(iteration, "barrier-enter", "name=", done_barrier);
             barrier(done_barrier);
+            trace.log_iteration(iteration, "barrier-exit", "name=", done_barrier);
         }
     }
 
     deactivate_all_slots();
+    trace.log("deactivate-slots");
     barrier("complex-choreography-test-done", "_sintra_all_processes");
+    trace.log("all-processes-barrier", "name=complex-choreography-test-done");
 
-    return failure.load(std::memory_order_relaxed) ? 1 : 0;
+    const bool failed = failure.load(std::memory_order_relaxed);
+    trace.log("exit", "failure=", failed);
+
+    return failed ? 1 : 0;
 }
 
 int stage_a0_process() { return stage_process(0, 0); }
@@ -544,6 +858,12 @@ int stage_b1_process() { return stage_process(1, 1); }
 int stage_b2_process() { return stage_process(1, 2); }
 
 } // namespace
+
+bool trace_enabled()
+{
+    const char* value = std::getenv(kTraceEnvVar);
+    return value && *value;
+}
 
 int main(int argc, char* argv[])
 {
@@ -573,14 +893,18 @@ int main(int argc, char* argv[])
         const auto result_path = shared_dir / "complex_choreography_result.txt";
         if (!std::filesystem::exists(result_path)) {
             std::fprintf(stderr, "Error: result file not found at %s\n", result_path.string().c_str());
-            cleanup_directory_with_retries(shared_dir);
+            if (!trace_enabled()) {
+                cleanup_directory_with_retries(shared_dir);
+            }
             return 1;
         }
 
         std::ifstream in(result_path, std::ios::binary);
         if (!in) {
             std::fprintf(stderr, "Error: failed to open result file %s\n", result_path.string().c_str());
-            cleanup_directory_with_retries(shared_dir);
+            if (!trace_enabled()) {
+                cleanup_directory_with_retries(shared_dir);
+            }
             return 1;
         }
 
@@ -596,7 +920,9 @@ int main(int argc, char* argv[])
         in >> stage_b_total;
         std::getline(in >> std::ws, reason);
 
-        cleanup_directory_with_retries(shared_dir);
+        if (!trace_enabled()) {
+            cleanup_directory_with_retries(shared_dir);
+        }
 
         const std::size_t expected_stage_a = kStageAWorkers * kIterations;
         const std::size_t expected_stage_b = kStageBWorkers * kIterations;
