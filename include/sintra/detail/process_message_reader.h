@@ -12,11 +12,6 @@
 #include <mutex>
 #include <set>
 #include <thread>
-#include <algorithm>
-#include <utility>
-#include <cstdint>
-
-
 namespace sintra {
 
 
@@ -54,7 +49,6 @@ static inline thread_local Message_prefix* s_tl_current_message = nullptr;
 static inline thread_local instance_id_type s_tl_common_function_iid = invalid_instance_id;
 
 static inline thread_local Process_message_reader* s_tl_current_request_reader = nullptr;
-static inline thread_local Process_message_reader* s_tl_current_reply_reader = nullptr;
 
 static inline thread_local instance_id_type s_tl_additional_piids[max_process_index];
 static inline thread_local size_t s_tl_additional_piids_size = 0;
@@ -101,23 +95,10 @@ struct Process_message_reader
 
     struct Delivery_progress
     {
-        Delivery_progress()
-            : generation(next_generation())
-        {
-        }
-
         std::atomic<sequence_counter_type> request_sequence{invalid_sequence};
         std::atomic<sequence_counter_type> reply_sequence{invalid_sequence};
         std::atomic<bool> request_stopped{false};
         std::atomic<bool> reply_stopped{false};
-        const std::uint64_t generation;
-
-    private:
-        static std::uint64_t next_generation()
-        {
-            static std::atomic<std::uint64_t> counter{1};
-            return counter.fetch_add(1, std::memory_order_relaxed);
-        }
     };
 
     using Delivery_progress_ptr = std::shared_ptr<Delivery_progress>;
@@ -134,7 +115,6 @@ struct Process_message_reader
         Delivery_progress_weak_ptr progress;
         Delivery_stream stream = Delivery_stream::Request;
         sequence_counter_type target = invalid_sequence;
-        sequence_counter_type observed = invalid_sequence;
         bool wait_needed = false;
     };
 
