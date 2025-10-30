@@ -13,6 +13,7 @@ on:
       - 'tests/**'
       - 'example/**'
       - '.github/workflows/**'
+      - 'flip_to_trigger_ci'
   pull_request:
     branches: [ '*' ]
     paths:
@@ -25,10 +26,11 @@ on:
       - 'tests/**'
       - 'example/**'
       - '.github/workflows/**'
+      - 'flip_to_trigger_ci'
 
 jobs:
   build:
-    name: Build
+    name: Build (macOS)
     runs-on: macos-15
 
     steps:
@@ -97,7 +99,7 @@ jobs:
           retention-days: 1
 
   stress-tests:
-    name: Stress Test
+    name: Stress Test (macOS)
     needs: build
     if: ${{ needs.build.result == 'success' }}
     uses: ./.github/workflows/stress-test-macos.yml

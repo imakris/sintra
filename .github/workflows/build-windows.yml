@@ -13,6 +13,7 @@ on:
       - 'tests/**'
       - 'example/**'
       - '.github/workflows/**'
+      - 'flip_to_trigger_ci'
   pull_request:
     branches: [ '*' ]
     paths:
@@ -25,10 +26,11 @@ on:
       - 'tests/**'
       - 'example/**'
       - '.github/workflows/**'
+      - 'flip_to_trigger_ci'
 
 jobs:
   build:
-    name: Build
+    name: Build (Windows)
     runs-on: windows-latest
 
     steps:
@@ -164,7 +166,7 @@ jobs:
           retention-days: 1
 
   stress-tests:
-    name: Stress Test
+    name: Stress Test (Windows)
     needs: build
     if: ${{ needs.build.result == 'success' }}
     uses: ./.github/workflows/stress-test-windows.yml
