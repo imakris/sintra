@@ -3,9 +3,13 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <limits>
+#include <random>
 #include <stdexcept>
 #include <system_error>
-#include <random>
+#if defined(SINTRA_OS_SYNC_DIAGNOSTICS)
+#  include <cstdio>
+#endif
 
 #if defined(_WIN32)
   #ifndef NOMINMAX
@@ -407,7 +411,7 @@ private:
 #ifdef OS_CLOCK_MACH_ABSOLUTE_TIME
     static constexpr os_clockid_t wait_clock = OS_CLOCK_MACH_ABSOLUTE_TIME;
 
-    static uint64_t nanoseconds_to_mach_absolute_ticks(uint64_t timeout_ns)
+    static uint64_t nanoseconds_to_clock_ticks(uint64_t timeout_ns)
     {
         if (timeout_ns == 0) {
             return 0;
@@ -426,19 +430,36 @@ private:
 
         return static_cast<uint64_t>(absolute_delta);
     }
+
+    static uint64_t current_clock_ticks()
+    {
+        return mach_absolute_time();
+    }
 #elif defined(OS_CLOCK_MONOTONIC)
     static constexpr os_clockid_t wait_clock = OS_CLOCK_MONOTONIC;
 
-    static uint64_t nanoseconds_to_mach_absolute_ticks(uint64_t timeout_ns)
+    static uint64_t nanoseconds_to_clock_ticks(uint64_t timeout_ns)
     {
         return timeout_ns;
+    }
+
+    static uint64_t current_clock_ticks()
+    {
+        return clock_gettime_nsec_np(CLOCK_MONOTONIC);
     }
 #elif defined(CLOCK_MONOTONIC)
     static constexpr os_clockid_t wait_clock = static_cast<os_clockid_t>(CLOCK_MONOTONIC);
 
-    static uint64_t nanoseconds_to_mach_absolute_ticks(uint64_t timeout_ns)
+    static uint64_t nanoseconds_to_clock_ticks(uint64_t timeout_ns)
     {
         return timeout_ns;
+    }
+
+    static uint64_t current_clock_ticks()
+    {
+        timespec ts{};
+        ::clock_gettime(CLOCK_MONOTONIC, &ts);
+        return static_cast<uint64_t>(ts.tv_sec) * 1000000000ull + static_cast<uint64_t>(ts.tv_nsec);
     }
 #else
 #   error "No supported monotonic clock id available for os_sync_wait_on_address_with_timeout"
@@ -507,7 +528,12 @@ private:
 
         while (true) {
             uint64_t expected_value = static_cast<uint32_t>(expected);
-            const uint64_t timeout_value = nanoseconds_to_mach_absolute_ticks(timeout_ns);
+            const uint64_t delta_ticks = nanoseconds_to_clock_ticks(timeout_ns);
+            const uint64_t now_ticks = current_clock_ticks();
+            uint64_t timeout_value = now_ticks + delta_ticks;
+            if (timeout_value < now_ticks) {
+                timeout_value = std::numeric_limits<uint64_t>::max();
+            }
             int rc = os_sync_wait_on_address_with_timeout(
                 reinterpret_cast<void*>(&m_os_sync.count),
                 expected_value,
@@ -526,6 +552,21 @@ private:
             if (errno == EINTR || errno == EFAULT) {
                 continue;
             }
+#if defined(SINTRA_OS_SYNC_DIAGNOSTICS)
+            if (errno == EINVAL) {
+                std::fprintf(stderr,
+                             "[sintra] os_sync_wait_on_address_with_timeout EINVAL\n"
+                             "  expected=%d observed(pre)=%d remaining_ns=%lld\n"
+                             "  now_ticks=%llu delta_ticks=%llu timeout_ticks=%llu\n",
+                             static_cast<int>(expected),
+                             static_cast<int>(observed),
+                             static_cast<long long>(remaining.count()),
+                             static_cast<unsigned long long>(now_ticks),
+                             static_cast<unsigned long long>(delta_ticks),
+                             static_cast<unsigned long long>(timeout_value));
+                std::fflush(stderr);
+            }
+#endif
             throw std::system_error(errno, std::generic_category(), "os_sync_wait_on_address_with_timeout");
         }
     }
