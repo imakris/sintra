@@ -102,5 +102,54 @@ confirmed.
 * Update the regression tests to assert that the coordinator completes every
   iteration without seeing missing markers on Windows.
 
+## Additional observations (April 2025)
+
+During a follow-up investigation we attempted to prototype the two-phase
+handshake outlined above. The proof-of-concept extended the barrier RPC so the
+coordinator captured each caller's request-ring leading sequence and queued a
+background wait using `Managed_process::wait_for_delivery_targets()`. While the
+approach looked promising on paper, running
+`sintra_barrier_delivery_fence_repro_test_release` on Linux highlighted two
+practical issues:
+
+* Startup barriers execute before every `Process_message_reader` has fully
+  transitioned to `READER_NORMAL`. Capturing drain targets for readers still in
+  the `READER_SERVICE` state yielded absolute sequence values around `315`
+  (matching the ring's persistent leading sequence) while the corresponding
+  progress counters remained at `0`. Because the request threads have not begun
+  draining those rings yet, the background wait never completes and the barrier
+  replies never fire.
+* Even once the readers become active, scheduling the wait on a detached thread
+  introduces ordering hazards. Multiple threads attempt to publish barrier
+  completions onto the reply ring, violating the single-writer expectation and
+  risking deadlocks when the request thread still owns the ring's writer slot.
+
+The debugging logs below illustrate the stall. The coordinator recorded a drain
+target of `315` for each worker while the observed progress remained `0`:
+
+```
+[barrier] /include/sintra/detail/managed_process_impl.h:1328 waiting on 3 remote targets
+[delivery] checking 3 targets
+  target=315 observed=0 stream=req
+```
+
+Eventually, once the request threads advanced the progress counters, the drain
+would complete, but the lengthy stall made the test impractically slow and
+susceptible to timing out:
+
+```
+[delivery] checking 3 targets
+  target=315 observed=315 stream=req
+[barrier] remote drain satisfied
+[barrier] completions emitted
+```
+
+Future work should avoid relying on detached threads and instead piggyback on
+the request loop itself. One option is to queue a lightweight post-handler via
+`run_after_current_handler()` that re-checks the recorded delivery targets after
+each message and only emits completions once all targets are satisfied. This
+keeps the single-writer invariant intact and sidesteps the startup edge case by
+skipping readers that have not entered the normal processing state yet.
+
 Documenting this plan should make future attempts focus on the architectural
 gap instead of surface-level mitigations.
