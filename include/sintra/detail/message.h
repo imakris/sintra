@@ -687,7 +687,7 @@ struct Message_ring_R: Ring_R<char>
 
     // Returns a pointer to the buffer of the message
     // If there is no message to read, it blocks.
-    Message_prefix* fetch_message()
+    Message_prefix* fetch_message(bool urgent = false)
     {
         // if all the messages in the reading buffer have been read
         if (m_range.begin == m_range.end) {
@@ -702,7 +702,7 @@ struct Message_ring_R: Ring_R<char>
             }
 
             // start with a new reading buffer. this will block until there is something to read.
-            auto range = wait_for_new_data();
+            auto range = wait_for_new_data(urgent);
             if (!range.begin) {
                 return nullptr;
             }

@@ -1678,6 +1678,55 @@ void Managed_process::wait_for_delivery_fence()
             return;
         }
 
+        struct Fence_wait_scope
+        {
+            std::atomic<uint32_t>* counter = nullptr;
+            explicit Fence_wait_scope(std::atomic<uint32_t>* c = nullptr) : counter(c)
+            {
+                if (counter) {
+                    counter->fetch_add(1, std::memory_order_acq_rel);
+                }
+            }
+            Fence_wait_scope(const Fence_wait_scope&) = delete;
+            Fence_wait_scope& operator=(const Fence_wait_scope&) = delete;
+            Fence_wait_scope(Fence_wait_scope&& other) noexcept : counter(other.counter)
+            {
+                other.counter = nullptr;
+            }
+            Fence_wait_scope& operator=(Fence_wait_scope&& other) noexcept
+            {
+                if (this != &other) {
+                    release();
+                    counter = other.counter;
+                    other.counter = nullptr;
+                }
+                return *this;
+            }
+            ~Fence_wait_scope()
+            {
+                release();
+            }
+        private:
+            void release()
+            {
+                if (counter) {
+                    counter->fetch_sub(1, std::memory_order_acq_rel);
+                    counter = nullptr;
+                }
+            }
+        };
+
+        std::vector<Fence_wait_scope> fence_guards;
+        fence_guards.reserve(targets.size());
+        for (auto& target : targets) {
+            if (target.wait_needed && target.fence_waiters) {
+                fence_guards.emplace_back(target.fence_waiters);
+            }
+            else {
+                fence_guards.emplace_back();
+            }
+        }
+
         auto all_targets_satisfied = [&]() {
             if (m_communication_state != COMMUNICATION_RUNNING) {
                 return true;
