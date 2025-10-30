@@ -40,7 +40,7 @@ concurrency:
 jobs:
   stress-test:
     name: Stress Test
-    runs-on: macos-14
+    runs-on: macos-15
     env:
       GITHUB_TOKEN: ${{ secrets.repository-token }}
 
