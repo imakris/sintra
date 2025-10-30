@@ -28,7 +28,7 @@ on:
 
 jobs:
   build:
-    name: Build
+    name: Build (Linux)
     runs-on: ubuntu-latest
 
     steps:
@@ -141,7 +141,7 @@ jobs:
           retention-days: 1
 
   stress-tests:
-    name: Stress Test
+    name: Stress Test (Linux)
     needs: build
     if: ${{ needs.build.result == 'success' }}
     uses: ./.github/workflows/stress-test-linux.yml
