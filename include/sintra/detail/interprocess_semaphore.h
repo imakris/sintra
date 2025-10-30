@@ -502,10 +502,14 @@ private:
     static constexpr os_sync_wait_on_address_flags_t wait_flags = OS_SYNC_WAIT_ON_ADDRESS_SHARED;
     static constexpr os_sync_wake_by_address_flags_t wake_flags = OS_SYNC_WAKE_BY_ADDRESS_SHARED;
 
-#if defined(OS_CLOCK_MONOTONIC)
-    static constexpr os_clockid_t wait_clock = OS_CLOCK_MONOTONIC;
-#elif defined(OS_CLOCK_MACH_ABSOLUTE_TIME)
+#if defined(OS_CLOCK_MACH_ABSOLUTE_TIME)
+    // Prefer Mach absolute time because some macOS releases define
+    // OS_CLOCK_MONOTONIC yet return EINVAL when it is used with
+    // os_sync_wait_on_address_with_timeout. The timeout argument is converted
+    // from nanoseconds to ticks when this clock id is selected.
     static constexpr os_clockid_t wait_clock = OS_CLOCK_MACH_ABSOLUTE_TIME;
+#elif defined(OS_CLOCK_MONOTONIC)
+    static constexpr os_clockid_t wait_clock = OS_CLOCK_MONOTONIC;
 #elif defined(CLOCK_MONOTONIC)
     static constexpr os_clockid_t wait_clock = static_cast<os_clockid_t>(CLOCK_MONOTONIC);
 #else
