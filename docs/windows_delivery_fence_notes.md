@@ -102,5 +102,29 @@ confirmed.
 * Update the regression tests to assert that the coordinator completes every
   iteration without seeing missing markers on Windows.
 
+## Follow-up observations (March 2025)
+
+While attempting to prototype the "drain before release" scheme, two specific
+failure modes surfaced:
+
+* Calling `wait_for_delivery_fence()` directly from the last-arrival code path
+  blocks indefinitely. The helper snapshots both request **and reply** readers;
+  because the coordinator has not emitted the barrier completions yet, the
+  reply-side targets can never be satisfied and the wait does not complete.
+* Capturing per-process request-leading sequences after the last arrival and
+  waiting for the corresponding delivery-progress counters to advance still
+  hangs in practice. The coordinator's reader map includes entries for newly
+  spawned workers whose request threads have not yet published any progress.
+  Their delivery counters remain at zero while the leading-sequence snapshot is
+  already ahead of them, so the drain wait never finishes.
+
+The experiments confirm that a viable fix needs a way to identify only the
+actively participating request readers and to exclude reply-stream targets from
+the coordinator-side fence. Future work should focus on a filtered snapshot
+that captures request readers for the processes listed in the barrier
+completion and ignores reply readers entirely. Once that plumbing exists, the
+background thread can wait on those filtered targets without deadlocking the
+coordinator.
+
 Documenting this plan should make future attempts focus on the architectural
 gap instead of surface-level mitigations.
