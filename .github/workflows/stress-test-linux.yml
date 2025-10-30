@@ -1,10 +1,8 @@
 name: Stress Test - Linux
-run-name: >-
-  Stress Test - ${{ github.event.workflow_run.head_branch || github.event.workflow_run.head_sha }}${{
-    github.event.workflow_run.event == 'pull_request' &&
-    format(' (PR #{0})', github.event.workflow_run.pull_requests[0].number)
-    || ''
-  }}
+run-name: >
+  Stress · Linux ·
+  ${{ github.event.workflow_run.head_branch || github.ref_name }}
+  ${{ github.event.workflow_run.pull_requests && github.event.workflow_run.pull_requests[0] && format('· PR #{0}', github.event.workflow_run.pull_requests[0].number) || '' }}
 
 on:
   workflow_run:
@@ -13,8 +11,13 @@ on:
       - completed
 
 permissions:
-  actions: read
   contents: read
+  statuses: write
+  actions: read
+
+concurrency:
+  group: stress-${{ github.event.workflow_run.head_sha }}-linux
+  cancel-in-progress: false
 
 jobs:
   stress-test:
@@ -23,6 +26,31 @@ jobs:
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
 
     steps:
+      - name: Mark stress tests as pending on PR commit
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const sha = context.payload.workflow_run.head_sha;
+            await github.rest.repos.createCommitStatus({
+              owner, repo, sha,
+              state: 'pending',
+              context: `Stress tests / ${process.platform}`,
+              target_url: `${context.serverUrl}/${owner}/${repo}/actions/runs/${process.env.GITHUB_RUN_ID}`,
+              description: `Starting stress tests for ${context.payload.workflow_run.head_branch || sha.substring(0,7)}`
+            });
+
+      - name: Context
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "### Source";
+            echo "- Branch: [${{ github.event.workflow_run.head_branch }}](https://github.com/${{ github.repository }}/tree/${{ github.event.workflow_run.head_branch }})";
+            echo "- Commit: [${{ github.event.workflow_run.head_sha }}](https://github.com/${{ github.repository }}/commit/${{ github.event.workflow_run.head_sha }})";
+            echo "- PR: ${{ github.event.workflow_run.pull_requests && github.event.workflow_run.pull_requests[0] && format('[#{0}]({1})', github.event.workflow_run.pull_requests[0].number, github.event.workflow_run.pull_requests[0].html_url) || '—' }}";
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -160,3 +188,48 @@ jobs:
         run: |
           cd tests
           python run_tests.py --repetitions 10 --timeout 30 --build-dir ../build --config Release
+
+      - name: Mark status success
+        if: success()
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const sha = context.payload.workflow_run.head_sha;
+            await github.rest.repos.createCommitStatus({
+              owner, repo, sha,
+              state: 'success',
+              context: `Stress tests / ${process.platform}`,
+              target_url: `${context.serverUrl}/${owner}/${repo}/actions/runs/${process.env.GITHUB_RUN_ID}`,
+              description: 'Stress tests passed'
+            });
+
+      - name: Mark status failure
+        if: failure()
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const sha = context.payload.workflow_run.head_sha;
+            await github.rest.repos.createCommitStatus({
+              owner, repo, sha,
+              state: 'failure',
+              context: `Stress tests / ${process.platform}`,
+              target_url: `${context.serverUrl}/${owner}/${repo}/actions/runs/${process.env.GITHUB_RUN_ID}`,
+              description: 'Stress tests failed'
+            });
+
+      - name: Mark status cancelled
+        if: cancelled()
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const sha = context.payload.workflow_run.head_sha;
+            await github.rest.repos.createCommitStatus({
+              owner, repo, sha,
+              state: 'error',
+              context: `Stress tests / ${process.platform}`,
+              target_url: `${context.serverUrl}/${owner}/${repo}/actions/runs/${process.env.GITHUB_RUN_ID}`,
+              description: 'Stress tests cancelled'
+            });
