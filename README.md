@@ -11,22 +11,22 @@
   <tbody>
     <tr>
       <td>Linux</td>
-      <td style="text-align:center;"><a href="https://github.com/imakris/sintra/actions/workflows/build-linux.yml"><img alt="Linux Build" src="https://img.shields.io/github/actions/workflow/status/imakris/sintra/build-linux.yml?branch=master&amp;label=Linux%20Build&amp;logo=github" style="display:block;margin:0 auto;"></a></td>
-      <td style="text-align:center;"><a href="https://github.com/imakris/sintra/actions/workflows/stress-test-linux.yml"><img alt="Linux Tests" src="https://img.shields.io/github/actions/workflow/status/imakris/sintra/stress-test-linux.yml?branch=master&amp;label=Linux%20Tests&amp;logo=github" style="display:block;margin:0 auto;"></a></td>
+      <td align="center"><a href="https://github.com/imakris/sintra/actions/workflows/build-linux.yml"><img alt="Linux Build" src="https://img.shields.io/github/actions/workflow/status/imakris/sintra/build-linux.yml?branch=master&amp;label=Linux%20Build&amp;logo=github"></a></td>
+      <td align="center"><a href="https://github.com/imakris/sintra/actions/workflows/tests-linux.yml"><img alt="Linux Tests" src="https://img.shields.io/github/actions/workflow/status/imakris/sintra/tests-linux.yml?branch=master&amp;label=Linux%20Tests&amp;logo=github"></a></td>
     </tr>
     <tr>
       <td>macOS</td>
-      <td style="text-align:center;"><a href="https://github.com/imakris/sintra/actions/workflows/build-macos.yml"><img alt="macOS Build" src="https://img.shields.io/github/actions/workflow/status/imakris/sintra/build-macos.yml?branch=master&amp;label=macOS%20Build&amp;logo=github" style="display:block;margin:0 auto;"></a></td>
-      <td style="text-align:center;"><a href="https://github.com/imakris/sintra/actions/workflows/stress-test-macos.yml"><img alt="macOS Tests" src="https://img.shields.io/github/actions/workflow/status/imakris/sintra/stress-test-macos.yml?branch=master&amp;label=macOS%20Tests&amp;logo=github" style="display:block;margin:0 auto;"></a></td>
+      <td align="center"><a href="https://github.com/imakris/sintra/actions/workflows/build-macos.yml"><img alt="macOS Build" src="https://img.shields.io/github/actions/workflow/status/imakris/sintra/build-macos.yml?branch=master&amp;label=macOS%20Build&amp;logo=github"></a></td>
+      <td align="center"><a href="https://github.com/imakris/sintra/actions/workflows/tests-macos.yml"><img alt="macOS Tests" src="https://img.shields.io/github/actions/workflow/status/imakris/sintra/tests-macos.yml?branch=master&amp;label=macOS%20Tests&amp;logo=github"></a></td>
     </tr>
     <tr>
       <td>Windows</td>
-      <td style="text-align:center;"><a href="https://github.com/imakris/sintra/actions/workflows/build-windows.yml"><img alt="Windows Build" src="https://img.shields.io/github/actions/workflow/status/imakris/sintra/build-windows.yml?branch=master&amp;label=Windows%20Build&amp;logo=github" style="display:block;margin:0 auto;"></a></td>
-      <td style="text-align:center;"><a href="https://github.com/imakris/sintra/actions/workflows/stress-test-windows.yml"><img alt="Windows Tests" src="https://img.shields.io/github/actions/workflow/status/imakris/sintra/stress-test-windows.yml?branch=master&amp;label=Windows%20Tests&amp;logo=github" style="display:block;margin:0 auto;"></a></td>
+      <td align="center"><a href="https://github.com/imakris/sintra/actions/workflows/build-windows.yml"><img alt="Windows Build" src="https://img.shields.io/github/actions/workflow/status/imakris/sintra/build-windows.yml?branch=master&amp;label=Windows%20Build&amp;logo=github"></a></td>
+      <td align="center"><a href="https://github.com/imakris/sintra/actions/workflows/tests-windows.yml"><img alt="Windows Tests" src="https://img.shields.io/github/actions/workflow/status/imakris/sintra/tests-windows.yml?branch=master&amp;label=Windows%20Tests&amp;logo=github"></a></td>
     </tr>
     <tr>
       <td>FreeBSD</td>
-      <td colspan="2" style="text-align:center;"><a href="https://cirrus-ci.com/github/imakris/sintra"><img alt="FreeBSD Build &amp; Test" src="https://api.cirrus-ci.com/github/imakris/sintra.svg?task=FreeBSD%20Build%20%26%20Test&amp;branch=master&amp;label=FreeBSD%20Build%20%26%20Test&amp;logo=cirrus-ci" style="display:block;margin:0 auto;"></a></td>
+      <td align="center" colspan="2"><a href="https://cirrus-ci.com/github/imakris/sintra"><img alt="FreeBSD Build &amp; Test" src="https://api.cirrus-ci.com/github/imakris/sintra.svg?task=FreeBSD%20Build%20%26%20Test&amp;branch=master&amp;label=FreeBSD%20Build%20%26%20Test&amp;logo=cirrus-ci"></a></td>
     </tr>
   </tbody>
 </table>
