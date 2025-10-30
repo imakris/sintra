@@ -1,4 +1,4 @@
-name: Stress Test - macOS
+name: Stress Test - macOS (reusable)
 
 on:
   workflow_call:
