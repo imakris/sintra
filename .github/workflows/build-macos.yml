@@ -1,4 +1,4 @@
-name: Build - macOS
+name: Build & Test - macOS
 
 on:
   push:
@@ -29,7 +29,7 @@ on:
 jobs:
   build:
     name: Build
-    runs-on: macos-14
+    runs-on: macos-15
 
     steps:
       - name: Checkout repository
@@ -95,3 +95,17 @@ jobs:
           name: macos-build-${{ github.event.pull_request.head.sha || github.sha }}
           path: build/
           retention-days: 1
+
+  stress-tests:
+    name: Stress Test
+    needs: build
+    if: ${{ needs.build.result == 'success' }}
+    uses: ./.github/workflows/stress-test-macos.yml
+    secrets:
+      repository-token: ${{ secrets.GITHUB_TOKEN }}
+    with:
+      build_run_id: ${{ github.run_id }}
+      head_sha: ${{ github.event.pull_request.head.sha || github.sha }}
+      branch: ${{ github.head_ref || github.ref_name }}
+      pr_number: ${{ github.event.pull_request.number || '' }}
+      base_sha: ${{ github.event.pull_request.base.sha || '' }}
