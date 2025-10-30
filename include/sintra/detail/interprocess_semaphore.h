@@ -544,7 +544,8 @@ private:
             if (errno == EINTR || errno == EFAULT) {
                 continue;
             }
-            if (errno == EINVAL && downgrade_scope_if_shared()) {
+            if (errno == EINVAL) {
+                downgrade_scope_if_shared();
                 continue;
             }
             throw std::system_error(errno, std::generic_category(), "os_sync_wait_on_address_with_timeout");
@@ -571,7 +572,8 @@ private:
             if (errno == EINTR || errno == EFAULT) {
                 continue;
             }
-            if (errno == EINVAL && downgrade_scope_if_shared()) {
+            if (errno == EINVAL) {
+                downgrade_scope_if_shared();
                 continue;
             }
             throw std::system_error(errno, std::generic_category(), "os_sync_wait_on_address");
@@ -595,7 +597,8 @@ private:
                 if (errno == EINTR) {
                     continue;
                 }
-                if (errno == EINVAL && downgrade_scope_if_shared()) {
+                if (errno == EINVAL) {
+                    downgrade_scope_if_shared();
                     continue;
                 }
             }
