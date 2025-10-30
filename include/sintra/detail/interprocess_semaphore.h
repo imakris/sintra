@@ -591,6 +591,30 @@ private:
         return false;
     }
 
+    static uint64_t os_sync_timeout_argument_from_nanoseconds(uint64_t timeout_ns)
+    {
+#if defined(OS_CLOCK_MACH_ABSOLUTE_TIME)
+        if constexpr (wait_clock == OS_CLOCK_MACH_ABSOLUTE_TIME) {
+            mach_timebase_info_data_t timebase_info{};
+            (void)mach_timebase_info(&timebase_info);
+
+            if (timebase_info.numer == 0 || timebase_info.denom == 0) {
+                return timeout_ns;
+            }
+
+            const __uint128_t scaled = (static_cast<__uint128_t>(timeout_ns) *
+                                        static_cast<__uint128_t>(timebase_info.denom)) +
+                                       static_cast<__uint128_t>(timebase_info.numer - 1);
+            const __uint128_t ticks = scaled / static_cast<__uint128_t>(timebase_info.numer);
+            if (ticks > std::numeric_limits<uint64_t>::max()) {
+                return std::numeric_limits<uint64_t>::max();
+            }
+            return static_cast<uint64_t>(ticks);
+        }
+#endif
+        return timeout_ns;
+    }
+
     bool wait_os_sync_with_timeout(int32_t expected, std::chrono::nanoseconds remaining, int32_t& observed)
     {
         if (remaining <= std::chrono::nanoseconds::zero()) {
@@ -619,16 +643,17 @@ private:
         }
 
         uint64_t timeout_ns = static_cast<uint64_t>(count);
+        uint64_t timeout_argument = os_sync_timeout_argument_from_nanoseconds(timeout_ns);
 
         while (true) {
             uint64_t expected_value = static_cast<uint32_t>(expected);
 #if defined(__APPLE__)
             interprocess_semaphore_detail::os_sync_trace::log(
-                "wait_os_sync_with_timeout attempt expected=%d expected_value=%u remaining_ns=%llu timeout_arg_ns=%llu address=%p",
+                "wait_os_sync_with_timeout attempt expected=%d expected_value=%u remaining_ns=%llu timeout_arg=%llu address=%p",
                 static_cast<int>(expected),
                 static_cast<unsigned>(expected_value),
                 static_cast<unsigned long long>(timeout_ns),
-                static_cast<unsigned long long>(timeout_ns),
+                static_cast<unsigned long long>(timeout_argument),
                 reinterpret_cast<void*>(&m_os_sync.count));
 #endif
             int rc = os_sync_wait_on_address_with_timeout(
@@ -637,7 +662,7 @@ private:
                 sizeof(int32_t),
                 wait_flags,
                 wait_clock,
-                timeout_ns);
+                timeout_argument);
             int saved_errno = errno;
 #if defined(__APPLE__)
             interprocess_semaphore_detail::os_sync_trace::log(
