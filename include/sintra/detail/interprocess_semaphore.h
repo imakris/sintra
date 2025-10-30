@@ -503,15 +503,47 @@ private:
     static constexpr os_sync_wake_by_address_flags_t wake_flags = OS_SYNC_WAKE_BY_ADDRESS_SHARED;
 
 #if defined(OS_CLOCK_MACH_ABSOLUTE_TIME)
-    // Prefer Mach absolute time because some macOS releases define
-    // OS_CLOCK_MONOTONIC yet return EINVAL when it is used with
-    // os_sync_wait_on_address_with_timeout. The timeout argument is converted
-    // from nanoseconds to ticks when this clock id is selected.
     static constexpr os_clockid_t wait_clock = OS_CLOCK_MACH_ABSOLUTE_TIME;
+
+    static uint64_t os_sync_timeout_argument_from_nanoseconds(uint64_t timeout_ns)
+    {
+        if (timeout_ns == 0) {
+            return 0;
+        }
+
+        static const mach_timebase_info_data_t timebase = [] {
+            mach_timebase_info_data_t info{};
+            if (mach_timebase_info(&info) != 0 || info.numer == 0 || info.denom == 0) {
+                return mach_timebase_info_data_t{1, 1};
+            }
+            return info;
+        }();
+
+        unsigned __int128 absolute_delta = static_cast<unsigned __int128>(timeout_ns) *
+                                           static_cast<unsigned __int128>(timebase.denom);
+        absolute_delta += static_cast<unsigned __int128>(timebase.numer - 1);
+        absolute_delta /= static_cast<unsigned __int128>(timebase.numer);
+
+        if (absolute_delta > std::numeric_limits<uint64_t>::max()) {
+            return std::numeric_limits<uint64_t>::max();
+        }
+
+        return static_cast<uint64_t>(absolute_delta);
+    }
 #elif defined(OS_CLOCK_MONOTONIC)
     static constexpr os_clockid_t wait_clock = OS_CLOCK_MONOTONIC;
+
+    static uint64_t os_sync_timeout_argument_from_nanoseconds(uint64_t timeout_ns)
+    {
+        return timeout_ns;
+    }
 #elif defined(CLOCK_MONOTONIC)
     static constexpr os_clockid_t wait_clock = static_cast<os_clockid_t>(CLOCK_MONOTONIC);
+
+    static uint64_t os_sync_timeout_argument_from_nanoseconds(uint64_t timeout_ns)
+    {
+        return timeout_ns;
+    }
 #else
 #   error "No supported monotonic clock id available for os_sync_wait_on_address_with_timeout"
 #endif
@@ -593,29 +625,6 @@ private:
             }
         }
         return false;
-    }
-
-    static uint64_t os_sync_timeout_argument_from_nanoseconds(uint64_t timeout_ns)
-    {
-#if defined(OS_CLOCK_MACH_ABSOLUTE_TIME)
-        if constexpr (wait_clock == OS_CLOCK_MACH_ABSOLUTE_TIME) {
-            mach_timebase_info_data_t timebase_info{};
-            if (mach_timebase_info(&timebase_info) != 0 || timebase_info.numer == 0 ||
-                timebase_info.denom == 0) {
-                return timeout_ns;
-            }
-
-            const __uint128_t scaled = (static_cast<__uint128_t>(timeout_ns) *
-                                        static_cast<__uint128_t>(timebase_info.denom)) +
-                                       static_cast<__uint128_t>(timebase_info.numer - 1);
-            const __uint128_t ticks = scaled / static_cast<__uint128_t>(timebase_info.numer);
-            if (ticks > std::numeric_limits<uint64_t>::max()) {
-                return std::numeric_limits<uint64_t>::max();
-            }
-            return static_cast<uint64_t>(ticks);
-        }
-#endif
-        return timeout_ns;
     }
 
     bool wait_os_sync_with_timeout(int32_t expected, std::chrono::nanoseconds remaining, int32_t& observed)
