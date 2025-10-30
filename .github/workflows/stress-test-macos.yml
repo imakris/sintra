@@ -96,13 +96,21 @@ jobs:
           sudo sysctl kern.corefile=core.%P || true
 
       - name: Download build artifacts
+        id: download-artifacts
         uses: actions/download-artifact@v4
         with:
           name: macos-build-${{ github.event.workflow_run.head_sha }}
           path: build/
           github-token: ${{ github.token }}
           run-id: ${{ github.event.workflow_run.id }}
-          if-no-artifact-found: error
+
+      - name: Validate build artifacts
+        if: steps.download-artifacts.outcome == 'success'
+        run: |
+          if [ ! -d build ]; then
+            echo "::error::Expected macOS build artifact was not downloaded" >&2
+            exit 1
+          fi
 
       - name: Setup Python
         uses: actions/setup-python@v5
