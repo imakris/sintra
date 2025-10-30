@@ -1,13 +1,10 @@
 # Sintra
 
-[![Build - Linux](https://github.com/imakris/sintra/actions/workflows/build-linux.yml/badge.svg?branch=master)](https://github.com/imakris/sintra/actions/workflows/build-linux.yml)
-[![Stress Test - Linux](https://github.com/imakris/sintra/actions/workflows/stress-test-linux.yml/badge.svg?branch=master)](https://github.com/imakris/sintra/actions/workflows/stress-test-linux.yml)
-
-[![Build - macOS](https://github.com/imakris/sintra/actions/workflows/build-macos.yml/badge.svg?branch=master)](https://github.com/imakris/sintra/actions/workflows/build-macos.yml)
-[![Stress Test - macOS](https://github.com/imakris/sintra/actions/workflows/stress-test-macos.yml/badge.svg?branch=master)](https://github.com/imakris/sintra/actions/workflows/stress-test-macos.yml)
-
-[![Build - Windows](https://github.com/imakris/sintra/actions/workflows/build-windows.yml/badge.svg?branch=master)](https://github.com/imakris/sintra/actions/workflows/build-windows.yml)
-[![Stress Test - Windows](https://github.com/imakris/sintra/actions/workflows/stress-test-windows.yml/badge.svg?branch=master)](https://github.com/imakris/sintra/actions/workflows/stress-test-windows.yml)
+| Platform | Build | Tests |
+| --- | --- | --- |
+| Linux | [![Linux Build](https://img.shields.io/github/actions/workflow/status/imakris/sintra/build-linux.yml?branch=master&label=Linux%20Build&logo=github)](https://github.com/imakris/sintra/actions/workflows/build-linux.yml) | [![Linux Tests](https://img.shields.io/github/actions/workflow/status/imakris/sintra/stress-test-linux.yml?branch=master&label=Linux%20Tests&logo=github)](https://github.com/imakris/sintra/actions/workflows/stress-test-linux.yml) |
+| macOS | [![macOS Build](https://img.shields.io/github/actions/workflow/status/imakris/sintra/build-macos.yml?branch=master&label=macOS%20Build&logo=github)](https://github.com/imakris/sintra/actions/workflows/build-macos.yml) | [![macOS Tests](https://img.shields.io/github/actions/workflow/status/imakris/sintra/stress-test-macos.yml?branch=master&label=macOS%20Tests&logo=github)](https://github.com/imakris/sintra/actions/workflows/stress-test-macos.yml) |
+| Windows | [![Windows Build](https://img.shields.io/github/actions/workflow/status/imakris/sintra/build-windows.yml?branch=master&label=Windows%20Build&logo=github)](https://github.com/imakris/sintra/actions/workflows/build-windows.yml) | [![Windows Tests](https://img.shields.io/github/actions/workflow/status/imakris/sintra/stress-test-windows.yml?branch=master&label=Windows%20Tests&logo=github)](https://github.com/imakris/sintra/actions/workflows/stress-test-windows.yml) |
 
 [![FreeBSD Build & Test](https://api.cirrus-ci.com/github/imakris/sintra.svg?task=FreeBSD%20Build%20%26%20Test&branch=master)](https://cirrus-ci.com/github/imakris/sintra)
 
