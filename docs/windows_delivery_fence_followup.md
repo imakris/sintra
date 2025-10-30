@@ -83,3 +83,50 @@ The approach did **not** succeed:
 The attempted fix is not suitable for submission; all changes were discarded.
 This document records the approach and the failure mode so the next iteration
 can focus on the sequence-space mapping rather than repeating the same path.
+
+## Additional notes (June 2025)
+
+Another pass attempted to salvage the two-phase handshake by preserving both
+the worker-reported request watermark and the coordinator's local snapshot at
+barrier entry. The intent was to wait for the **maximum** of the two values so
+that stale remote targets could not release the barrier prematurely. While the
+idea looked promising, measurements from `barrier_delivery_fence_repro_test`
+showed that the sequence spaces still diverge:
+
+* Workers reported request leading sequences around `175` while the
+  coordinator's readers observed the same rings at `323`. Local delivery
+  counters also published `323`, which means the coordinator had already
+  drained the backlog even though the remote watermark remained in an older
+  epoch.
+* For later barriers the coordinator's backlog shrank to zero, yet the remote
+  handshakes never caught up. Waiting for `max(remote_target, local_snapshot)`
+  therefore blocked indefinitely—local readers never report `>= 323` again once
+  a fresh process epoch starts at a lower absolute sequence number.
+* The repro run slowed to a crawl on Linux (multi-minute wall clock) and never
+  reached completion on Windows because the "normalized" targets were outside
+  the reachable range for the current ring instance.
+
+### Takeaways
+
+* Using raw leading-sequence values is brittle; they persist across ring
+  lifetimes and lack any indication of epoch boundaries. Normalizing via a max
+  still assumes a globally monotonic counter, which is not true after process
+  restarts.
+* Future iterations should capture **deltas** instead of absolute values. One
+  option is to store `(local_leading - local_observed)` at barrier entry and
+  wait until the observed counter advances by that delta. That tracks backlog
+  size directly and avoids reasoning about sequence epochs.
+* Instrumentation that logs `{remote_target, local_leading, local_observed}`
+  per barrier arrival is essential. Make sure the next attempt keeps those logs
+  (perhaps behind a debug macro) so Windows runs can confirm whether the delta
+  approach converges.
+
+### Prompt for follow-up work
+
+> Implement a coordinator-side delivery fence that waits for **delta-based**
+> targets instead of raw sequence numbers. Capture `(local_leading,
+> local_observed)` at barrier entry for every participant, compute the backlog
+> size, and block the coordinator until each reader's observed counter advances
+> by that backlog. Retain the worker-reported watermark only for diagnostics.
+> Re-run `sintra_barrier_delivery_fence_repro_test` on Windows to validate that
+> the barrier completes and the coordinator sees every marker.
