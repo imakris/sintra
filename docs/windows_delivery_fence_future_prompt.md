@@ -15,3 +15,16 @@
 * `barrier_delivery_fence_repro_test` must fail on the current main branch but pass reliably after the change.
 * No new helper threads are introduced; all waits must remain on the request thread via post-handlers.
 * Add instrumentation or unit coverage that demonstrates the coordinator waited for the recorded drain targets.
+
+**Additional notes (August 2025):**
+
+* Instrumentation from the most recent attempt (`docs/windows_delivery_fence_aug2025_attempt.md`) showed that
+  `Delivery_progress::request_sequence` often lags far behind the ring reader. Startup barriers reported
+  `req_target == req_read == 315` while `request_sequence == 0`, and later iterations showed
+  `req_target == req_read == 1546` with `request_sequence == 1362`. Waiting for the raw watermark therefore
+  never completed even though the coordinator had already drained the ring.
+* When implementing the helper mentioned in step 3, compute per-reader backlog deltas using the ring snapshots
+  (e.g., `reader.get_request_leading_sequence()` minus `reader.get_request_reading_sequence()`) and wait for the
+  delivery progress to advance by that delta rather than comparing absolute sequence numbers.
+* Make sure the coordinator ignores readers whose delivery progress has never advanced (still zero) until they
+  publish their first update, otherwise the post-handler will block indefinitely on dormant readers.
