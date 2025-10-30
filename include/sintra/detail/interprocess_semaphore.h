@@ -4,8 +4,10 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdarg>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <mutex>
 #include <random>
@@ -65,9 +67,16 @@ namespace interprocess_semaphore_detail
         {
             static const bool value = [] {
                 if (const char* env = std::getenv("SINTRA_OS_SYNC_TRACE")) {
-                    return env[0] != '\0';
+                    if (env[0] == '\0') {
+                        return false;
+                    }
+                    if (matches_ignore_case(env, "0") || matches_ignore_case(env, "false") ||
+                        matches_ignore_case(env, "off") || matches_ignore_case(env, "no")) {
+                        return false;
+                    }
+                    return true;
                 }
-                return false;
+                return true;
             }();
             return value;
         }
@@ -103,6 +112,19 @@ namespace interprocess_semaphore_detail
         }
 
     private:
+        static bool matches_ignore_case(const char* value, const char* literal)
+        {
+            while (*value && *literal) {
+                if (std::tolower(static_cast<unsigned char>(*value)) !=
+                    std::tolower(static_cast<unsigned char>(*literal))) {
+                    return false;
+                }
+                ++value;
+                ++literal;
+            }
+            return *value == '\0' && *literal == '\0';
+        }
+
         static std::mutex& mutex()
         {
             static std::mutex instance;
@@ -474,6 +496,8 @@ private:
     {
         std::atomic<int32_t> count{0};
     };
+
+    using interprocess_semaphore_detail::os_sync_trace;
 
     os_sync_storage m_os_sync{};
 

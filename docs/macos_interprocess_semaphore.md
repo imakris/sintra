@@ -11,9 +11,9 @@ about where the `EINVAL` originates.
 ## Instrumentation overview
 
 The header `include/sintra/detail/interprocess_semaphore.h` now exposes a lightweight tracing
-utility that records each interaction with the `os_sync_*` primitives when the
-`SINTRA_OS_SYNC_TRACE` environment variable is set. The logger writes timestamped entries that
-include:
+utility that records each interaction with the `os_sync_*` primitives. Tracing is enabled by
+default so every macOS run captures the parameters and results of the failing calls. The logger
+writes timestamped entries that include:
 
 - the semaphore counter value before and after each increment/decrement
 - the arguments passed to `os_sync_wait_on_address[_with_timeout]`
@@ -26,15 +26,13 @@ the kernel's `EINVAL` response.【F:include/sintra/detail/interprocess_semaphore
 
 ## Enabling the trace
 
-1. Build and run the failing tests with the environment variable set:
+1. Build and run the failing tests as usual. By default, macOS builds now emit the trace to
+   standard error.
+2. To redirect the log or disable it temporarily:
    ```bash
-   export SINTRA_OS_SYNC_TRACE=1
    export SINTRA_OS_SYNC_TRACE_FILE="/tmp/sintra_os_sync_trace.log"  # optional; defaults to stderr
-   ninja sintra_interprocess_semaphore_test_debug
-   ./tests/sintra_interprocess_semaphore_test_debug
+   export SINTRA_OS_SYNC_TRACE=0   # optional; disables tracing entirely
    ```
-2. The trace is line-buffered. If `SINTRA_OS_SYNC_TRACE_FILE` is omitted, the log prints to
-   standard error; otherwise, it appends to the supplied file path.
 3. Share the resulting log so we can map the `EINVAL` to the exact wait attempt, expected
    counter value, and timeout supplied by the semaphore implementation.
 
