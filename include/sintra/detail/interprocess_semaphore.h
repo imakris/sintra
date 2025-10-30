@@ -394,15 +394,33 @@ private:
         interprocess_semaphore_detail::close_handle(m_windows.id);
     }
 #elif defined(__APPLE__)
+    enum class os_sync_address_scope : uint8_t
+    {
+        shared,
+        process_local
+    };
+
     struct os_sync_storage
     {
         std::atomic<int32_t> count{0};
+        std::atomic<os_sync_address_scope> scope{os_sync_address_scope::shared};
     };
 
     os_sync_storage m_os_sync{};
 
-    static constexpr os_sync_wait_on_address_flags_t wait_flags = OS_SYNC_WAIT_ON_ADDRESS_SHARED;
-    static constexpr os_sync_wake_by_address_flags_t wake_flags = OS_SYNC_WAKE_BY_ADDRESS_SHARED;
+    static constexpr os_sync_wait_on_address_flags_t shared_wait_flag = OS_SYNC_WAIT_ON_ADDRESS_SHARED;
+#ifdef OS_SYNC_WAIT_ON_ADDRESS_PRIVATE
+    static constexpr os_sync_wait_on_address_flags_t local_wait_flag = OS_SYNC_WAIT_ON_ADDRESS_PRIVATE;
+#else
+    static constexpr os_sync_wait_on_address_flags_t local_wait_flag = static_cast<os_sync_wait_on_address_flags_t>(0);
+#endif
+
+    static constexpr os_sync_wake_by_address_flags_t shared_wake_flag = OS_SYNC_WAKE_BY_ADDRESS_SHARED;
+#ifdef OS_SYNC_WAKE_BY_ADDRESS_PRIVATE
+    static constexpr os_sync_wake_by_address_flags_t local_wake_flag = OS_SYNC_WAKE_BY_ADDRESS_PRIVATE;
+#else
+    static constexpr os_sync_wake_by_address_flags_t local_wake_flag = static_cast<os_sync_wake_by_address_flags_t>(0);
+#endif
 
 #ifdef OS_CLOCK_MACH_ABSOLUTE_TIME
     static constexpr os_clockid_t wait_clock = OS_CLOCK_MACH_ABSOLUTE_TIME;
@@ -512,7 +530,7 @@ private:
                 reinterpret_cast<void*>(&m_os_sync.count),
                 expected_value,
                 sizeof(int32_t),
-                wait_flags,
+                wait_flags(),
                 wait_clock,
                 timeout_value);
             if (rc >= 0) {
@@ -524,6 +542,9 @@ private:
                 return false;
             }
             if (errno == EINTR || errno == EFAULT) {
+                continue;
+            }
+            if (errno == EINVAL && downgrade_scope_if_shared()) {
                 continue;
             }
             throw std::system_error(errno, std::generic_category(), "os_sync_wait_on_address_with_timeout");
@@ -543,11 +564,14 @@ private:
                 reinterpret_cast<void*>(&m_os_sync.count),
                 expected_value,
                 sizeof(int32_t),
-                wait_flags);
+                wait_flags());
             if (rc >= 0) {
                 return m_os_sync.count.load(std::memory_order_acquire);
             }
             if (errno == EINTR || errno == EFAULT) {
+                continue;
+            }
+            if (errno == EINVAL && downgrade_scope_if_shared()) {
                 continue;
             }
             throw std::system_error(errno, std::generic_category(), "os_sync_wait_on_address");
@@ -560,7 +584,7 @@ private:
             int rc = os_sync_wake_by_address_any(
                 reinterpret_cast<void*>(&m_os_sync.count),
                 sizeof(int32_t),
-                wake_flags);
+                wake_flags());
             if (rc == 0) {
                 return;
             }
@@ -571,9 +595,33 @@ private:
                 if (errno == EINTR) {
                     continue;
                 }
+                if (errno == EINVAL && downgrade_scope_if_shared()) {
+                    continue;
+                }
             }
             throw std::system_error(errno, std::generic_category(), "os_sync_wake_by_address_any");
         }
+    }
+
+    os_sync_wait_on_address_flags_t wait_flags() const
+    {
+        return m_os_sync.scope.load(std::memory_order_acquire) == os_sync_address_scope::shared ? shared_wait_flag
+                                                                                                : local_wait_flag;
+    }
+
+    os_sync_wake_by_address_flags_t wake_flags() const
+    {
+        return m_os_sync.scope.load(std::memory_order_acquire) == os_sync_address_scope::shared ? shared_wake_flag
+                                                                                                : local_wake_flag;
+    }
+
+    bool downgrade_scope_if_shared()
+    {
+        auto expected = os_sync_address_scope::shared;
+        return m_os_sync.scope.compare_exchange_strong(expected,
+                                                       os_sync_address_scope::process_local,
+                                                       std::memory_order_acq_rel,
+                                                       std::memory_order_acquire);
     }
 #else
     sem_t m_sem{};
