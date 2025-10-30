@@ -3,7 +3,10 @@ run-name: >-
   Stress Test - ${{ github.event.workflow_run.display_title }}${{
     github.event.workflow_run.head_branch && format(' • {0}', github.event.workflow_run.head_branch) || ''
   }}${{
-    github.event.workflow_run.pull_requests[0].number && format(' • PR #{0}', github.event.workflow_run.pull_requests[0].number) || ''
+    join(github.event.workflow_run.pull_requests.*.number, '') != '' && format(
+      ' • PR #{0}',
+      join(github.event.workflow_run.pull_requests.*.number, ', ')
+    ) || ''
   }}
 
 on:
@@ -34,7 +37,7 @@ jobs:
         shell: bash
         env:
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
-          PR_BASE_SHA: ${{ github.event.workflow_run.pull_requests[0].base.sha || '' }}
+          PR_BASE_SHA: ${{ join(github.event.workflow_run.pull_requests.*.base.sha, '') }}
         run: |
           set -euo pipefail
           if [ -n "$PR_BASE_SHA" ]; then
