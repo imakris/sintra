@@ -1,30 +1,45 @@
-# macOS `interprocess_semaphore` failure analysis
+# macOS `interprocess_semaphore` failure instrumentation
 
-## Symptom
+## Current status
 
-Running the debug suite on macOS crashed in `sintra_interprocess_semaphore_test_debug` with an uncaught
-`std::system_error` reporting `os_sync_wait_on_address_with_timeout: Invalid argument`. The failure was
-reproducible in stress-style tests that exercise the `timed_wait` API, such as the multithreaded contention
-scenario that waits with a 3 ms deadline on each iteration.【F:tests/interprocess_semaphore_test.cpp†L305-L347】
+The macOS implementation of `interprocess_semaphore` still fails the debug suite with
+`os_sync_wait_on_address_with_timeout: Invalid argument`. We have not yet isolated the exact
+root cause. Instead of speculating further, we added runtime instrumentation to capture the
+state of every macOS wait/wake operation so the next test run can provide concrete evidence
+about where the `EINVAL` originates.
 
-## Root cause
+## Instrumentation overview
 
-When the semaphore count dropped below zero, the macOS backend delegated timed waits to
-`os_sync_wait_on_address_with_timeout`. The old implementation forwarded only the requested wait duration in
-Mach ticks. However, the Darwin API expects an **absolute** deadline expressed in the time base of the
-selected clock. Because the value we supplied was a tiny relative delta (for example ~3 million ticks for a
-3 ms wait) instead of `mach_absolute_time() + delta`, the call was rejected with `EINVAL`. The runtime then
-threw a `std::system_error` at the throw site in `wait_os_sync_with_timeout`, aborting the test process.【F:include/sintra/detail/interprocess_semaphore.h†L512-L551】
+The header `include/sintra/detail/interprocess_semaphore.h` now exposes a lightweight tracing
+utility that records each interaction with the `os_sync_*` primitives when the
+`SINTRA_OS_SYNC_TRACE` environment variable is set. The logger writes timestamped entries that
+include:
 
-## Fix
+- the semaphore counter value before and after each increment/decrement
+- the arguments passed to `os_sync_wait_on_address[_with_timeout]`
+- the computed timeout/deadline values used for timed waits
+- the raw return codes and `errno` values reported by the operating system
+- the count snapshot observed immediately after each syscall returns
 
-We now convert the caller's deadline into an absolute timeout before invoking the kernel primitive. The
-helper `current_wait_clock_ticks()` returns the current tick count for the clock used by the wait (Mach
-absolute time on macOS), and `saturating_add()` guards against overflow when constructing the deadline. The
-patched call site adds this current tick count to the converted duration, so the kernel receives a proper
-absolute timestamp and the wait succeeds or times out as expected.【F:include/sintra/detail/interprocess_semaphore.h†L494-L551】
+This information should reveal which call site rejects our parameters and what values triggered
+the kernel's `EINVAL` response.【F:include/sintra/detail/interprocess_semaphore.h†L55-L176】【F:include/sintra/detail/interprocess_semaphore.h†L468-L582】
 
-## Outcome
+## Enabling the trace
 
-With the corrected deadline calculation the macOS timed-wait path no longer triggers `EINVAL`, allowing the
-semaphore tests to complete successfully.
+1. Build and run the failing tests with the environment variable set:
+   ```bash
+   export SINTRA_OS_SYNC_TRACE=1
+   export SINTRA_OS_SYNC_TRACE_FILE="/tmp/sintra_os_sync_trace.log"  # optional; defaults to stderr
+   ninja sintra_interprocess_semaphore_test_debug
+   ./tests/sintra_interprocess_semaphore_test_debug
+   ```
+2. The trace is line-buffered. If `SINTRA_OS_SYNC_TRACE_FILE` is omitted, the log prints to
+   standard error; otherwise, it appends to the supplied file path.
+3. Share the resulting log so we can map the `EINVAL` to the exact wait attempt, expected
+   counter value, and timeout supplied by the semaphore implementation.
+
+## Next steps
+
+Once we have a trace from a failing macOS run we can pinpoint the syscall that rejects our
+inputs, correlate it with the surrounding semaphore logic, and implement a targeted fix with
+confidence.
