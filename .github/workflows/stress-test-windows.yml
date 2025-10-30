@@ -1,5 +1,5 @@
 name: Stress Test - Windows
-run-name: Stress Test - ${{ github.event.workflow_run.display_title }}
+run-name: Stress Test - ${{ github.event.workflow_run.head_branch || github.event.workflow_run.display_title }}
 
 on:
   workflow_run:
