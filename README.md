@@ -11,18 +11,18 @@
   <tbody>
     <tr>
       <td>Linux</td>
-      <td style="text-align:center;"><a href="https://github.com/imakris/sintra/actions/workflows/build-linux.yml"><img alt="Linux Build" src="https://img.shields.io/github/checks-status/imakris/sintra/master?checkName=Build%20%28Linux%29&amp;label=Linux%20Build&amp;logo=github" style="display:block;margin:0 auto;"></a></td>
-      <td style="text-align:center;"><a href="https://github.com/imakris/sintra/actions/workflows/stress-test-linux.yml"><img alt="Linux Tests" src="https://img.shields.io/github/checks-status/imakris/sintra/master?checkName=Stress%20Test%20%28Linux%29&amp;label=Linux%20Tests&amp;logo=github" style="display:block;margin:0 auto;"></a></td>
+      <td style="text-align:center;"><a href="https://github.com/imakris/sintra/actions/workflows/build-linux.yml?query=branch%3Amaster"><img alt="Linux Build" src="https://badgen.net/github/checks/imakris/sintra/master/Build%20(Linux)?label=Linux%20Build&amp;icon=github" style="display:block;margin:0 auto;"></a></td>
+      <td style="text-align:center;"><a href="https://github.com/imakris/sintra/actions/workflows/build-linux.yml?query=branch%3Amaster"><img alt="Linux Tests" src="https://badgen.net/github/checks/imakris/sintra/master/Stress%20Test%20(Linux)%20/%20Stress%20Test?label=Linux%20Tests&amp;icon=github" style="display:block;margin:0 auto;"></a></td>
     </tr>
     <tr>
       <td>macOS</td>
-      <td style="text-align:center;"><a href="https://github.com/imakris/sintra/actions/workflows/build-macos.yml"><img alt="macOS Build" src="https://img.shields.io/github/checks-status/imakris/sintra/master?checkName=Build%20%28macOS%29&amp;label=macOS%20Build&amp;logo=github" style="display:block;margin:0 auto;"></a></td>
-      <td style="text-align:center;"><a href="https://github.com/imakris/sintra/actions/workflows/stress-test-macos.yml"><img alt="macOS Tests" src="https://img.shields.io/github/checks-status/imakris/sintra/master?checkName=Stress%20Test%20%28macOS%29&amp;label=macOS%20Tests&amp;logo=github" style="display:block;margin:0 auto;"></a></td>
+      <td style="text-align:center;"><a href="https://github.com/imakris/sintra/actions/workflows/build-macos.yml?query=branch%3Amaster"><img alt="macOS Build" src="https://badgen.net/github/checks/imakris/sintra/master/Build%20(macOS)?label=macOS%20Build&amp;icon=github" style="display:block;margin:0 auto;"></a></td>
+      <td style="text-align:center;"><a href="https://github.com/imakris/sintra/actions/workflows/build-macos.yml?query=branch%3Amaster"><img alt="macOS Tests" src="https://badgen.net/github/checks/imakris/sintra/master/Stress%20Test%20(macOS)%20/%20Stress%20Test?label=macOS%20Tests&amp;icon=github" style="display:block;margin:0 auto;"></a></td>
     </tr>
     <tr>
       <td>Windows</td>
-      <td style="text-align:center;"><a href="https://github.com/imakris/sintra/actions/workflows/build-windows.yml"><img alt="Windows Build" src="https://img.shields.io/github/checks-status/imakris/sintra/master?checkName=Build%20%28Windows%29&amp;label=Windows%20Build&amp;logo=github" style="display:block;margin:0 auto;"></a></td>
-      <td style="text-align:center;"><a href="https://github.com/imakris/sintra/actions/workflows/stress-test-windows.yml"><img alt="Windows Tests" src="https://img.shields.io/github/checks-status/imakris/sintra/master?checkName=Stress%20Test%20%28Windows%29&amp;label=Windows%20Tests&amp;logo=github" style="display:block;margin:0 auto;"></a></td>
+      <td style="text-align:center;"><a href="https://github.com/imakris/sintra/actions/workflows/build-windows.yml?query=branch%3Amaster"><img alt="Windows Build" src="https://badgen.net/github/checks/imakris/sintra/master/Build%20(Windows)?label=Windows%20Build&amp;icon=github" style="display:block;margin:0 auto;"></a></td>
+      <td style="text-align:center;"><a href="https://github.com/imakris/sintra/actions/workflows/build-windows.yml?query=branch%3Amaster"><img alt="Windows Tests" src="https://badgen.net/github/checks/imakris/sintra/master/Stress%20Test%20(Windows)%20/%20Stress%20Test?label=Windows%20Tests&amp;icon=github" style="display:block;margin:0 auto;"></a></td>
     </tr>
     <tr>
       <td>FreeBSD</td>
