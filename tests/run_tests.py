@@ -2171,7 +2171,7 @@ class TestRunner:
         lldb_args = [
             '--batch',
             '--no-lldbinit',
-            '--core', str(core_path),
+            '-c', str(core_path),
             str(invocation.path),
             '-o', 'thread backtrace all -c 256 -f',
             '-o', 'quit',
