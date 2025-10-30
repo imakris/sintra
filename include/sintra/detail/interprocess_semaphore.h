@@ -524,14 +524,13 @@ private:
         uint64_t timeout_ns = static_cast<uint64_t>(count);
 
         while (true) {
-            const auto scope = current_scope();
             uint64_t expected_value = static_cast<uint32_t>(expected);
             const uint64_t timeout_value = nanoseconds_to_mach_absolute_ticks(timeout_ns);
             int rc = os_sync_wait_on_address_with_timeout(
                 reinterpret_cast<void*>(&m_os_sync.count),
                 expected_value,
                 sizeof(int32_t),
-                wait_flags_for_scope(scope),
+                wait_flags(),
                 wait_clock,
                 timeout_value);
             if (rc >= 0) {
@@ -546,7 +545,7 @@ private:
                 continue;
             }
             if (errno == EINVAL) {
-                adjust_scope_after_einval(scope);
+                downgrade_scope_if_shared();
                 continue;
             }
             throw std::system_error(errno, std::generic_category(), "os_sync_wait_on_address_with_timeout");
@@ -561,13 +560,12 @@ private:
     int32_t wait_on_address_blocking(int32_t expected)
     {
         while (true) {
-            const auto scope = current_scope();
             uint64_t expected_value = static_cast<uint32_t>(expected);
             int rc = os_sync_wait_on_address(
                 reinterpret_cast<void*>(&m_os_sync.count),
                 expected_value,
                 sizeof(int32_t),
-                wait_flags_for_scope(scope));
+                wait_flags());
             if (rc >= 0) {
                 return m_os_sync.count.load(std::memory_order_acquire);
             }
@@ -575,7 +573,7 @@ private:
                 continue;
             }
             if (errno == EINVAL) {
-                adjust_scope_after_einval(scope);
+                downgrade_scope_if_shared();
                 continue;
             }
             throw std::system_error(errno, std::generic_category(), "os_sync_wait_on_address");
@@ -585,11 +583,10 @@ private:
     void wake_one_waiter()
     {
         while (true) {
-            const auto scope = current_scope();
             int rc = os_sync_wake_by_address_any(
                 reinterpret_cast<void*>(&m_os_sync.count),
                 sizeof(int32_t),
-                wake_flags_for_scope(scope));
+                wake_flags());
             if (rc == 0) {
                 return;
             }
@@ -601,7 +598,7 @@ private:
                     continue;
                 }
                 if (errno == EINVAL) {
-                    adjust_scope_after_einval(scope);
+                    downgrade_scope_if_shared();
                     continue;
                 }
             }
@@ -609,32 +606,25 @@ private:
         }
     }
 
-    static os_sync_wait_on_address_flags_t wait_flags_for_scope(os_sync_address_scope scope)
+    os_sync_wait_on_address_flags_t wait_flags() const
     {
-        return scope == os_sync_address_scope::shared ? shared_wait_flag : local_wait_flag;
+        return m_os_sync.scope.load(std::memory_order_acquire) == os_sync_address_scope::shared ? shared_wait_flag
+                                                                                                : local_wait_flag;
     }
 
-    static os_sync_wake_by_address_flags_t wake_flags_for_scope(os_sync_address_scope scope)
+    os_sync_wake_by_address_flags_t wake_flags() const
     {
-        return scope == os_sync_address_scope::shared ? shared_wake_flag : local_wake_flag;
+        return m_os_sync.scope.load(std::memory_order_acquire) == os_sync_address_scope::shared ? shared_wake_flag
+                                                                                                : local_wake_flag;
     }
 
-    os_sync_address_scope current_scope() const
+    bool downgrade_scope_if_shared()
     {
-        return m_os_sync.scope.load(std::memory_order_acquire);
-    }
-
-    void adjust_scope_after_einval(os_sync_address_scope observed_scope)
-    {
-        if (observed_scope != os_sync_address_scope::shared) {
-            return;
-        }
-
         auto expected = os_sync_address_scope::shared;
-        (void)m_os_sync.scope.compare_exchange_strong(expected,
-                                                      os_sync_address_scope::process_local,
-                                                      std::memory_order_acq_rel,
-                                                      std::memory_order_acquire);
+        return m_os_sync.scope.compare_exchange_strong(expected,
+                                                       os_sync_address_scope::process_local,
+                                                       std::memory_order_acq_rel,
+                                                       std::memory_order_acquire);
     }
 #else
     sem_t m_sem{};
