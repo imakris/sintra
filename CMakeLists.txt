@@ -2,6 +2,12 @@ cmake_minimum_required(VERSION 3.16)
 
 project(sintra LANGUAGES CXX)
 
+# Default to the newest macOS SDK available on GitHub runners when building on Apple
+# platforms, but allow callers to override the deployment target explicitly.
+if(APPLE AND (NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET OR CMAKE_OSX_DEPLOYMENT_TARGET STREQUAL ""))
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "15.0" CACHE STRING "Minimum supported macOS version" FORCE)
+endif()
+
 find_package(Threads REQUIRED)
 
 option(SINTRA_RELEASE_WITH_DEBUG_SYMBOLS "Emit debug symbols when building Release configuration" ON)
