@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <stdexcept>
 #include <system_error>
+#include <limits>
 #include <random>
 
 #if defined(_WIN32)
@@ -426,19 +427,49 @@ private:
 
         return static_cast<uint64_t>(absolute_delta);
     }
+
+    static uint64_t deadline_from_timeout(uint64_t timeout_ns)
+    {
+        const uint64_t now = mach_absolute_time();
+        const uint64_t delta = nanoseconds_to_mach_absolute_ticks(timeout_ns);
+        const uint64_t deadline = now + delta;
+        return deadline < now ? std::numeric_limits<uint64_t>::max() : deadline;
+    }
 #elif defined(OS_CLOCK_MONOTONIC)
     static constexpr os_clockid_t wait_clock = OS_CLOCK_MONOTONIC;
 
-    static uint64_t nanoseconds_to_mach_absolute_ticks(uint64_t timeout_ns)
+    static uint64_t deadline_from_timeout(uint64_t timeout_ns)
     {
-        return timeout_ns;
+        timespec ts{};
+        if (::clock_gettime(static_cast<clockid_t>(wait_clock), &ts) != 0) {
+            throw std::system_error(errno, std::generic_category(), "clock_gettime");
+        }
+
+        unsigned __int128 now = static_cast<unsigned __int128>(ts.tv_sec) * 1000000000ULL +
+                                static_cast<unsigned __int128>(ts.tv_nsec);
+        now += static_cast<unsigned __int128>(timeout_ns);
+        if (now > std::numeric_limits<uint64_t>::max()) {
+            return std::numeric_limits<uint64_t>::max();
+        }
+        return static_cast<uint64_t>(now);
     }
 #elif defined(CLOCK_MONOTONIC)
     static constexpr os_clockid_t wait_clock = static_cast<os_clockid_t>(CLOCK_MONOTONIC);
 
-    static uint64_t nanoseconds_to_mach_absolute_ticks(uint64_t timeout_ns)
+    static uint64_t deadline_from_timeout(uint64_t timeout_ns)
     {
-        return timeout_ns;
+        timespec ts{};
+        if (::clock_gettime(static_cast<clockid_t>(wait_clock), &ts) != 0) {
+            throw std::system_error(errno, std::generic_category(), "clock_gettime");
+        }
+
+        unsigned __int128 now = static_cast<unsigned __int128>(ts.tv_sec) * 1000000000ULL +
+                                static_cast<unsigned __int128>(ts.tv_nsec);
+        now += static_cast<unsigned __int128>(timeout_ns);
+        if (now > std::numeric_limits<uint64_t>::max()) {
+            return std::numeric_limits<uint64_t>::max();
+        }
+        return static_cast<uint64_t>(now);
     }
 #else
 #   error "No supported monotonic clock id available for os_sync_wait_on_address_with_timeout"
@@ -507,7 +538,7 @@ private:
 
         while (true) {
             uint64_t expected_value = static_cast<uint32_t>(expected);
-            const uint64_t timeout_value = nanoseconds_to_mach_absolute_ticks(timeout_ns);
+            const uint64_t timeout_value = deadline_from_timeout(timeout_ns);
             int rc = os_sync_wait_on_address_with_timeout(
                 reinterpret_cast<void*>(&m_os_sync.count),
                 expected_value,
