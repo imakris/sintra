@@ -1,29 +1,34 @@
 name: Stress Test - Linux
 run-name: >
   Stress · Linux ·
-  ${{ github.event.workflow_run.head_branch || github.ref_name }}
-  ${{ github.event.workflow_run.pull_requests && github.event.workflow_run.pull_requests[0] && format('· PR #{0}', github.event.workflow_run.pull_requests[0].number) || '' }}
+  ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.ref) || (github.event.workflow_run && github.event.workflow_run.head_branch) || github.ref_name }}
+  ${{ (github.event_name == 'pull_request' && format('· PR #{0}', github.event.pull_request.number)) || (github.event.workflow_run && github.event.workflow_run.pull_requests && github.event.workflow_run.pull_requests[0] && format('· PR #{0}', github.event.workflow_run.pull_requests[0].number)) || '' }}
 
 on:
   workflow_run:
     workflows: ["Build - Linux"]
     types:
       - completed
+  pull_request:
+    branches: ['*']
 
 permissions:
+  actions: read
   contents: read
   statuses: write
-  actions: read
 
 concurrency:
-  group: stress-${{ github.event.workflow_run.head_sha }}-linux
+  group: stress-${{ (github.event.workflow_run && github.event.workflow_run.head_sha) || (github.event.pull_request && github.event.pull_request.head.sha) || github.sha }}-linux
   cancel-in-progress: false
 
 jobs:
   stress-test:
     name: Stress Test - Linux
     runs-on: ubuntu-latest
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    if: ${{ (github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event != 'pull_request') ||
+      github.event_name == 'pull_request' }}
 
     steps:
       - name: Mark stress tests as pending on PR commit
@@ -31,14 +36,88 @@ jobs:
         with:
           script: |
             const {owner, repo} = context.repo;
-            const sha = context.payload.workflow_run.head_sha;
+            const eventName = context.eventName;
+            let sha;
+            let branch;
+            let prNumber;
+
+            if (eventName === 'pull_request') {
+              const pr = context.payload.pull_request;
+              sha = pr.head.sha;
+              branch = pr.head.ref;
+              prNumber = pr.number;
+            } else {
+              const run = context.payload.workflow_run;
+              sha = run.head_sha;
+              branch = run.head_branch;
+              const pr = run.pull_requests && run.pull_requests[0];
+              if (pr) {
+                prNumber = pr.number;
+              }
+            }
+
             await github.rest.repos.createCommitStatus({
               owner, repo, sha,
               state: 'pending',
               context: `Stress tests / ${process.platform}`,
               target_url: `${context.serverUrl}/${owner}/${repo}/actions/runs/${process.env.GITHUB_RUN_ID}`,
-              description: `Starting stress tests for ${context.payload.workflow_run.head_branch || sha.substring(0,7)}`
+              description: `Starting stress tests for ${branch || sha.substring(0,7)}${prNumber ? ` (PR #${prNumber})` : ''}`
             });
+
+      - name: Wait for build run to complete (PR only)
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const headSha = context.payload.pull_request.head.sha;
+
+            const wf = await github.rest.actions.getWorkflow({
+              owner, repo, workflow_id: 'build-linux.yml'
+            });
+
+            const deadline = Date.now() + 60 * 60 * 1000;
+            while (true) {
+              const runs = await github.rest.actions.listWorkflowRuns({
+                owner, repo, workflow_id: wf.data.id,
+                head_sha: headSha, per_page: 1
+              });
+              const run = runs.data.workflow_runs[0];
+              core.info(run ? `Build status: ${run.status}/${run.conclusion}` : 'No build run yet');
+
+              if (run && run.status === 'completed') {
+                if (run.conclusion !== 'success') {
+                  core.setFailed(`Build is ${run.conclusion}, aborting stress tests`);
+                }
+                core.exportVariable('SRC_BUILD_RUN_ID', run.id.toString());
+                break;
+              }
+              if (Date.now() > deadline) {
+                core.setFailed('Timed out waiting for build run to complete');
+                break;
+              }
+              await new Promise(r => setTimeout(r, 30000));
+            }
+
+      - name: Set artifact lookup vars
+        id: vars
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "RUN_ID=${SRC_BUILD_RUN_ID}" >> "$GITHUB_ENV"
+            echo "HEAD_SHA=${{ github.event.pull_request.head.sha }}" >> "$GITHUB_ENV"
+            echo "HEAD_BRANCH=${{ github.event.pull_request.head.ref }}" >> "$GITHUB_ENV"
+            echo "PR_NUMBER=${{ github.event.pull_request.number }}" >> "$GITHUB_ENV"
+            echo "PR_URL=${{ github.event.pull_request.html_url }}" >> "$GITHUB_ENV"
+            echo "PR_BASE_SHA=${{ github.event.pull_request.base.sha }}" >> "$GITHUB_ENV"
+          else
+            echo "RUN_ID=${{ github.event.workflow_run.id }}" >> "$GITHUB_ENV"
+            echo "HEAD_SHA=${{ github.event.workflow_run.head_sha }}" >> "$GITHUB_ENV"
+            echo "HEAD_BRANCH=${{ github.event.workflow_run.head_branch }}" >> "$GITHUB_ENV"
+            echo "PR_NUMBER=${{ github.event.workflow_run.pull_requests && github.event.workflow_run.pull_requests[0] && github.event.workflow_run.pull_requests[0].number || '' }}" >> "$GITHUB_ENV"
+            echo "PR_URL=${{ github.event.workflow_run.pull_requests && github.event.workflow_run.pull_requests[0] && github.event.workflow_run.pull_requests[0].html_url || '' }}" >> "$GITHUB_ENV"
+            echo "PR_BASE_SHA=${{ github.event.workflow_run.pull_requests && github.event.workflow_run.pull_requests[0] && github.event.workflow_run.pull_requests[0].base.sha || '' }}" >> "$GITHUB_ENV"
+          fi
 
       - name: Context
         if: always()
@@ -46,23 +125,31 @@ jobs:
         run: |
           {
             echo "### Source";
-            echo "- Branch: [${{ github.event.workflow_run.head_branch }}](https://github.com/${{ github.repository }}/tree/${{ github.event.workflow_run.head_branch }})";
-            echo "- Commit: [${{ github.event.workflow_run.head_sha }}](https://github.com/${{ github.repository }}/commit/${{ github.event.workflow_run.head_sha }})";
-            echo "- PR: ${{ github.event.workflow_run.pull_requests && github.event.workflow_run.pull_requests[0] && format('[#{0}]({1})', github.event.workflow_run.pull_requests[0].number, github.event.workflow_run.pull_requests[0].html_url) || '—' }}";
+            if [ -n "${PR_NUMBER}" ]; then
+              echo "- PR: [#${PR_NUMBER}](${PR_URL})";
+            else
+              echo "- PR: —";
+            fi
+            if [ -n "${HEAD_BRANCH}" ]; then
+              echo "- Branch: [${HEAD_BRANCH}](https://github.com/${{ github.repository }}/tree/${HEAD_BRANCH})";
+            else
+              echo "- Branch: —";
+            fi
+            echo "- Commit: [${HEAD_SHA}](https://github.com/${{ github.repository }}/commit/${HEAD_SHA})";
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ env.HEAD_SHA }}
           fetch-depth: 0
 
       - name: Determine diff base
         id: diff-base
         shell: bash
         env:
-          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
-          PR_BASE_SHA: ${{ github.event.workflow_run.pull_requests[0].base.sha || '' }}
+          HEAD_SHA: ${{ env.HEAD_SHA }}
+          PR_BASE_SHA: ${{ env.PR_BASE_SHA }}
         run: |
           set -euo pipefail
           if [ -n "$PR_BASE_SHA" ]; then
@@ -78,7 +165,7 @@ jobs:
         id: changed
         uses: dorny/paths-filter@v3
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ env.HEAD_SHA }}
           base: ${{ steps.diff-base.outputs.base }}
           filters: |
             core:
@@ -165,10 +252,11 @@ jobs:
       - name: Download build artifacts
         uses: actions/download-artifact@v4.1.7
         with:
-          name: linux-build-${{ github.event.workflow_run.head_sha }}
+          name: linux-build-${{ env.HEAD_SHA }}
           path: build/
           github-token: ${{ github.token }}
-          run-id: ${{ github.event.workflow_run.id }}
+          run-id: ${{ env.RUN_ID }}
+          if-no-artifact-found: error
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -195,13 +283,15 @@ jobs:
         with:
           script: |
             const {owner, repo} = context.repo;
-            const sha = context.payload.workflow_run.head_sha;
+            const sha = process.env.HEAD_SHA;
+            const branch = process.env.HEAD_BRANCH;
+            const prNumber = process.env.PR_NUMBER;
             await github.rest.repos.createCommitStatus({
               owner, repo, sha,
               state: 'success',
               context: `Stress tests / ${process.platform}`,
               target_url: `${context.serverUrl}/${owner}/${repo}/actions/runs/${process.env.GITHUB_RUN_ID}`,
-              description: 'Stress tests passed'
+              description: `Stress tests passed${branch ? ` on ${branch}` : ''}${prNumber ? ` (PR #${prNumber})` : ''}`
             });
 
       - name: Mark status failure
@@ -210,13 +300,15 @@ jobs:
         with:
           script: |
             const {owner, repo} = context.repo;
-            const sha = context.payload.workflow_run.head_sha;
+            const sha = process.env.HEAD_SHA;
+            const branch = process.env.HEAD_BRANCH;
+            const prNumber = process.env.PR_NUMBER;
             await github.rest.repos.createCommitStatus({
               owner, repo, sha,
               state: 'failure',
               context: `Stress tests / ${process.platform}`,
               target_url: `${context.serverUrl}/${owner}/${repo}/actions/runs/${process.env.GITHUB_RUN_ID}`,
-              description: 'Stress tests failed'
+              description: `Stress tests failed${branch ? ` on ${branch}` : ''}${prNumber ? ` (PR #${prNumber})` : ''}`
             });
 
       - name: Mark status cancelled
@@ -225,11 +317,13 @@ jobs:
         with:
           script: |
             const {owner, repo} = context.repo;
-            const sha = context.payload.workflow_run.head_sha;
+            const sha = process.env.HEAD_SHA;
+            const branch = process.env.HEAD_BRANCH;
+            const prNumber = process.env.PR_NUMBER;
             await github.rest.repos.createCommitStatus({
               owner, repo, sha,
               state: 'error',
               context: `Stress tests / ${process.platform}`,
               target_url: `${context.serverUrl}/${owner}/${repo}/actions/runs/${process.env.GITHUB_RUN_ID}`,
-              description: 'Stress tests cancelled'
+              description: `Stress tests cancelled${branch ? ` on ${branch}` : ''}${prNumber ? ` (PR #${prNumber})` : ''}`
             });
