@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <system_error>
 #include <random>
+#include <limits>
 
 #if defined(_WIN32)
   #ifndef NOMINMAX
@@ -490,6 +491,24 @@ private:
         return false;
     }
 
+    static uint64_t current_wait_clock_ticks()
+    {
+#ifdef OS_CLOCK_MACH_ABSOLUTE_TIME
+        return mach_absolute_time();
+#else
+        auto now = std::chrono::steady_clock::now().time_since_epoch();
+        return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
+#endif
+    }
+
+    static uint64_t saturating_add(uint64_t lhs, uint64_t rhs)
+    {
+        if (std::numeric_limits<uint64_t>::max() - lhs < rhs) {
+            return std::numeric_limits<uint64_t>::max();
+        }
+        return lhs + rhs;
+    }
+
     bool wait_os_sync_with_timeout(int32_t expected, std::chrono::nanoseconds remaining, int32_t& observed)
     {
         if (remaining <= std::chrono::nanoseconds::zero()) {
@@ -507,7 +526,9 @@ private:
 
         while (true) {
             uint64_t expected_value = static_cast<uint32_t>(expected);
-            const uint64_t timeout_value = nanoseconds_to_mach_absolute_ticks(timeout_ns);
+            const uint64_t timeout_value = saturating_add(
+                current_wait_clock_ticks(),
+                nanoseconds_to_mach_absolute_ticks(timeout_ns));
             int rc = os_sync_wait_on_address_with_timeout(
                 reinterpret_cast<void*>(&m_os_sync.count),
                 expected_value,
