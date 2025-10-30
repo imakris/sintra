@@ -2134,8 +2134,7 @@ class TestRunner:
             ]
 
         # Fallback to lldb
-        return [
-            *debugger_command,
+        lldb_args = [
             '--batch',
             '--no-lldbinit',
             '-p', str(pid),
@@ -2143,6 +2142,8 @@ class TestRunner:
             '-o', 'detach',
             '-o', 'quit',
         ]
+
+        return self._merge_debugger_args(debugger_command, lldb_args)
 
     def _build_unix_core_debugger_command(
         self,
@@ -2167,18 +2168,42 @@ class TestRunner:
                 str(core_path),
             ]
 
-        # Fallback to lldb
-        quoted_executable = shlex.quote(str(invocation.path))
-        quoted_core = shlex.quote(str(core_path))
-
-        return [
-            *debugger_command,
+        # Fallback to lldb. The ``-c``/``--core`` CLI flag on macOS rejects
+        # paths containing spaces as "ambiguous" even when quoted, so issue an
+        # explicit ``target create`` command instead.
+        core_arg = shlex.quote(str(core_path))
+        exe_arg = shlex.quote(str(invocation.path))
+        lldb_args = [
             '--batch',
             '--no-lldbinit',
-            '-o', f'target create --core {quoted_core} {quoted_executable}',
+            '-o', f'target create --core {core_arg} {exe_arg}',
             '-o', 'thread backtrace all -c 256 -f',
             '-o', 'quit',
         ]
+
+        return self._merge_debugger_args(debugger_command, lldb_args)
+
+    def _merge_debugger_args(
+        self, debugger_command: List[str], debugger_args: List[str]
+    ) -> List[str]:
+        """Combine a debugger command with additional arguments, handling wrappers."""
+
+        if not debugger_command:
+            return debugger_args
+
+        merged = list(debugger_command)
+
+        try:
+            wrapper_name = Path(debugger_command[0]).name
+        except Exception:
+            wrapper_name = ''
+
+        if wrapper_name == 'xcrun' and len(debugger_command) >= 2:
+            # Insert a separator so xcrun forwards subsequent flags to the tool.
+            merged.append('--')
+
+        merged.extend(debugger_args)
+        return merged
 
     def _locate_windows_debugger(self, executable: str) -> Tuple[Optional[str], str]:
         """Locate or install the requested Windows debugger executable."""
