@@ -11,6 +11,10 @@ on:
         description: "Commit SHA to test (head of PR or push)"
         required: true
         type: string
+      base_sha:
+        description: "Base commit SHA for diff detection (PR base or push commit)"
+        required: false
+        type: string
       branch:
         description: "Branch name (PR head ref or push ref)"
         required: false
@@ -43,6 +47,7 @@ jobs:
         run: |
           echo "RUN_ID=${{ inputs.build_run_id }}" >> "$GITHUB_ENV"
           echo "HEAD_SHA=${{ inputs.head_sha }}" >> "$GITHUB_ENV"
+          echo "BASE_SHA=${{ inputs.base_sha || '' }}" >> "$GITHUB_ENV"
           echo "HEAD_BRANCH=${{ inputs.branch || '' }}" >> "$GITHUB_ENV"
           echo "PR_NUMBER=${{ inputs.pr_number || '' }}" >> "$GITHUB_ENV"
 
@@ -76,8 +81,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # For PRs we’d normally pass base SHA; here we just use parent when available.
-          if git rev-parse "${HEAD_SHA}^" >/dev/null 2>&1; then
+          if [ -n "${BASE_SHA}" ]; then
+            base_commit="$BASE_SHA"
+          elif git rev-parse "${HEAD_SHA}^" >/dev/null 2>&1; then
             base_commit="$(git rev-parse "${HEAD_SHA}^")"
           else
             base_commit="$HEAD_SHA"
