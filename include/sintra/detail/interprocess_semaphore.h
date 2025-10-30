@@ -545,7 +545,7 @@ private:
                 continue;
             }
             if (errno == EINVAL) {
-                downgrade_scope_if_shared();
+                adjust_scope_after_einval();
                 continue;
             }
             throw std::system_error(errno, std::generic_category(), "os_sync_wait_on_address_with_timeout");
@@ -573,7 +573,7 @@ private:
                 continue;
             }
             if (errno == EINVAL) {
-                downgrade_scope_if_shared();
+                adjust_scope_after_einval();
                 continue;
             }
             throw std::system_error(errno, std::generic_category(), "os_sync_wait_on_address");
@@ -598,7 +598,7 @@ private:
                     continue;
                 }
                 if (errno == EINVAL) {
-                    downgrade_scope_if_shared();
+                    adjust_scope_after_einval();
                     continue;
                 }
             }
@@ -625,6 +625,22 @@ private:
                                                        os_sync_address_scope::process_local,
                                                        std::memory_order_acq_rel,
                                                        std::memory_order_acquire);
+    }
+
+    bool upgrade_scope_if_process_local()
+    {
+        auto expected = os_sync_address_scope::process_local;
+        return m_os_sync.scope.compare_exchange_strong(expected,
+                                                       os_sync_address_scope::shared,
+                                                       std::memory_order_acq_rel,
+                                                       std::memory_order_acquire);
+    }
+
+    void adjust_scope_after_einval()
+    {
+        if (!downgrade_scope_if_shared()) {
+            upgrade_scope_if_process_local();
+        }
     }
 #else
     sem_t m_sem{};
