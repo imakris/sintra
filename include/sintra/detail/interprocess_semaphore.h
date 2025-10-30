@@ -662,7 +662,7 @@ private:
                 sizeof(int32_t),
                 wait_flags,
                 wait_clock,
-                deadline.absolute);
+                deadline.converted_delta);
             if (rc >= 0) {
                 observed = m_os_sync.count.load(std::memory_order_acquire);
                 return true;
