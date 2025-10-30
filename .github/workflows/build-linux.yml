@@ -141,7 +141,7 @@ jobs:
           retention-days: 1
 
   stress-tests:
-    name: Stress tests - Linux
+    name: Stress Test
     needs: build
     if: ${{ needs.build.result == 'success' }}
     uses: ./.github/workflows/stress-test-linux.yml

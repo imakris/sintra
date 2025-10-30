@@ -130,3 +130,56 @@ showed that the sequence spaces still diverge:
 > by that backlog. Retain the worker-reported watermark only for diagnostics.
 > Re-run `sintra_barrier_delivery_fence_repro_test` on Windows to validate that
 > the barrier completes and the coordinator sees every marker.
+
+
+## Follow-up investigation [2] (June 2025)
+
+Another attempt revisited the deferred-completion idea but tried to tighten the
+snapshot logic:
+
+* Skip request readers that had not yet published any delivery progress (their
+  counters were still `0`) to avoid the "leading sequence 315 vs observed 0"
+  mismatch seen previously.【7ca296†L1-L10】
+* Reuse the existing delivery-progress counters by queuing waits through
+  `Managed_process::schedule_delivery_wait()` so completions run on the request
+  thread once every recorded target is satisfied.【2a840a†L5-L10】
+
+The coordinator still failed to release the barrier. Instrumentation showed that
+workers entering the fence after the first iteration recorded request targets
+around `1546` while the corresponding progress counters plateaued near
+`1362`.【ca4977†L5-L14】 With no new traffic in flight the difference never
+closed, so the background wait held the barrier indefinitely and the repro test
+eventually timed out.
+
+### Additional observations
+
+* Skipping readers with zero progress prevents the startup deadlock but does not
+  address the fundamental mismatch between the writers' leading sequences and
+  the coordinator's consumption counters. Even after the system processes a full
+  burst, the gap remains on the order of hundreds of sequences, suggesting that
+  the captured targets include historical traffic rather than just the backlog
+  present at barrier entry.
+* Because `schedule_delivery_wait()` runs inside the request handler, the single
+  writer invariant for the reply ring remains intact. The failure is entirely
+  due to the unsatisfied delivery targets, not to concurrency issues on the
+  reply channel.
+
+### Recommended next steps
+
+* Extend the barrier RPC payload so workers report both their request-ring
+  leading sequence and the coordinator's reading sequence observed at the same
+  instant. The difference between the two would provide an explicit backlog
+  size instead of relying on the coordinator to infer it.
+* Alternatively, expose a helper on the coordinator that returns the monotonic
+  offset between the ring's global sequence space and the per-reader counters.
+  Having a stable translation would allow the coordinator to convert worker
+  provided sequences into local targets without guessing.
+* Re-run the repro test under heavy instrumentation (ideally with timestamps) to
+  confirm whether the 180–200 sequence gap is constant or grows with each
+  iteration. If it grows, the handshake must also cover newly arriving traffic
+  while the barrier drains the backlog.
+
+All experimental code for this iteration was reverted after confirming the test
+still hangs. The notes above capture the observed failure so the next pass can
+focus on obtaining reliable per-process backlog measurements before deferring
+completions.
