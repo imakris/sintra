@@ -502,10 +502,10 @@ private:
     static constexpr os_sync_wait_on_address_flags_t wait_flags = OS_SYNC_WAIT_ON_ADDRESS_SHARED;
     static constexpr os_sync_wake_by_address_flags_t wake_flags = OS_SYNC_WAKE_BY_ADDRESS_SHARED;
 
-#ifdef OS_CLOCK_MACH_ABSOLUTE_TIME
-    static constexpr os_clockid_t wait_clock = OS_CLOCK_MACH_ABSOLUTE_TIME;
-#elif defined(OS_CLOCK_MONOTONIC)
+#if defined(OS_CLOCK_MONOTONIC)
     static constexpr os_clockid_t wait_clock = OS_CLOCK_MONOTONIC;
+#elif defined(OS_CLOCK_MACH_ABSOLUTE_TIME)
+    static constexpr os_clockid_t wait_clock = OS_CLOCK_MACH_ABSOLUTE_TIME;
 #elif defined(CLOCK_MONOTONIC)
     static constexpr os_clockid_t wait_clock = static_cast<os_clockid_t>(CLOCK_MONOTONIC);
 #else
@@ -596,9 +596,8 @@ private:
 #if defined(OS_CLOCK_MACH_ABSOLUTE_TIME)
         if constexpr (wait_clock == OS_CLOCK_MACH_ABSOLUTE_TIME) {
             mach_timebase_info_data_t timebase_info{};
-            (void)mach_timebase_info(&timebase_info);
-
-            if (timebase_info.numer == 0 || timebase_info.denom == 0) {
+            if (mach_timebase_info(&timebase_info) != 0 || timebase_info.numer == 0 ||
+                timebase_info.denom == 0) {
                 return timeout_ns;
             }
 
