@@ -1,5 +1,13 @@
 name: Stress Test - macOS
-run-name: Stress Test - ${{ github.event.workflow_run.display_title }}
+run-name: >-
+  ${{ github.event.workflow_run.pull_requests[0]
+      && format('Stress Test - PR #{0} ({1} -> {2})',
+        github.event.workflow_run.pull_requests[0].number,
+        github.event.workflow_run.pull_requests[0].head.ref,
+        github.event.workflow_run.pull_requests[0].base.ref)
+      || github.event.workflow_run.head_branch
+      && format('Stress Test - {0}', github.event.workflow_run.head_branch)
+      || format('Stress Test - {0}', github.event.workflow_run.display_title) }}
 
 on:
   workflow_run:
