@@ -289,6 +289,10 @@ struct Managed_process: Derived_transceiver<Managed_process>
     template <typename T>
     function<void()> call_on_availability(Named_instance<T> transceiver, function<void()> f);
 
+#ifdef SINTRA_ENABLE_TEST_HOOKS
+    void test_disable_reader(instance_id_type process_instance_id);
+#endif
+
     void unpublish_all_transceivers();
 
 
