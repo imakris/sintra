@@ -95,57 +95,13 @@ jobs:
           sudo launchctl limit core unlimited unlimited
           sudo sysctl kern.corefile=core.%P || true
 
-      - name: Locate build artifact
-        id: artifact-info
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          RUN_ID: ${{ github.event.workflow_run.id }}
-          ARTIFACT_NAME: macos-build-${{ github.event.workflow_run.head_sha }}
-        run: |
-          set -euo pipefail
-          python3 <<'PY'
-import json
-import os
-import subprocess
-
-repo = os.environ["REPO"]
-run_id = os.environ["RUN_ID"]
-name = os.environ["ARTIFACT_NAME"]
-
-result = subprocess.run(
-    ["gh", "api", f"/repos/{repo}/actions/runs/{run_id}/artifacts"],
-    check=True,
-    capture_output=True,
-    text=True,
-)
-
-data = json.loads(result.stdout or "{}"); artifacts = data.get("artifacts", [])
-artifact_id = next((str(item.get("id")) for item in artifacts if item.get("name") == name), None)
-
-with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
-    fh.write(f"artifact-name={name}\n")
-    if artifact_id:
-        fh.write("found=true\n")
-        fh.write(f"artifact-id={artifact_id}\n")
-    else:
-        fh.write("found=false\n")
-PY
-
       - name: Download build artifacts
-        if: steps.artifact-info.outputs.found == 'true'
         uses: actions/download-artifact@v4.1.7
         with:
-          artifact-ids: ${{ steps.artifact-info.outputs.artifact-id }}
+          name: macos-build-${{ github.event.workflow_run.head_sha }}
           path: build/
           github-token: ${{ github.token }}
-
-      - name: Fail when build artifact is missing
-        if: steps.artifact-info.outputs.found != 'true'
-        run: |
-          echo "::error::Build artifact '${{ steps.artifact-info.outputs.artifact-name }}' was not found for workflow run ${{ github.event.workflow_run.id }}."
-          exit 1
+          run-id: ${{ github.event.workflow_run.id }}
 
       - name: Setup Python
         uses: actions/setup-python@v5
