@@ -2,15 +2,24 @@
 
 ## Current status
 
-The macOS implementation of `interprocess_semaphore` still fails the debug suite with
-`os_sync_wait_on_address_with_timeout: Invalid argument`. We have not yet isolated the exact
-root cause. Instead of speculating further, we added runtime instrumentation to capture the
-state of every macOS wait/wake operation so the next test run can provide concrete evidence
-about where the `EINVAL` originates.
+The trace from the most recent macOS failure shows that `os_sync_wait_on_address_with_timeout`
+rejects the deadline that we submit immediately after a successful wake. The failing thread
+records:
+
+```
+[... pid=16386 ...] wait_os_sync_with_timeout attempt expected=-1 expected_value=4294967295 remaining_ns=79999584 timeout_value=1093079754750 address=0x16b371d9c
+[... pid=16386 ...] wait_os_sync_with_timeout result rc=-1 errno=22 count_snapshot=-1
+```
+
+`errno=22` (`EINVAL`) occurs even though the absolute deadline is well in the future. The wake
+path uses the same address and flags successfully, so the only remaining degree of freedom is
+the deadline encoding. This indicates that the version of macOS in CI interprets the final
+parameter to `os_sync_wait_on_address_with_timeout` as a *relative interval* rather than an
+absolute `mach_absolute_time` timestamp.
 
 ## Instrumentation overview
 
-The header `include/sintra/detail/interprocess_semaphore.h` now exposes a lightweight tracing
+The header `include/sintra/detail/interprocess_semaphore.h` exposes a lightweight tracing
 utility that records each interaction with the `os_sync_*` primitives. Tracing is enabled by
 default so every macOS run captures the parameters and results of the failing calls. The logger
 writes timestamped entries that include:
@@ -21,8 +30,8 @@ writes timestamped entries that include:
 - the raw return codes and `errno` values reported by the operating system
 - the count snapshot observed immediately after each syscall returns
 
-This information should reveal which call site rejects our parameters and what values triggered
-the kernel's `EINVAL` response.【F:include/sintra/detail/interprocess_semaphore.h†L55-L176】【F:include/sintra/detail/interprocess_semaphore.h†L468-L582】
+The new timeout strategy also logs when it switches between absolute deadlines and relative
+intervals so we can verify which representation a given operating system accepts.【F:include/sintra/detail/interprocess_semaphore.h†L55-L132】【F:include/sintra/detail/interprocess_semaphore.h†L745-L825】
 
 ## Enabling the trace
 
@@ -38,6 +47,8 @@ the kernel's `EINVAL` response.【F:include/sintra/detail/interprocess_semaphore
 
 ## Next steps
 
-Once we have a trace from a failing macOS run we can pinpoint the syscall that rejects our
-inputs, correlate it with the surrounding semaphore logic, and implement a targeted fix with
-confidence.
+When the runtime observes `EINVAL` from an absolute deadline it automatically retries with a
+relative interval and latches whichever mode succeeds. Subsequent waits reuse the verified
+format, so once the CI run confirms which encoding macOS expects the failure should disappear.
+If a new failure occurs the log will show both the rejected format and whether the dynamic
+switch executed, narrowing any future investigations.

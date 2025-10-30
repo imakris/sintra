@@ -147,6 +147,82 @@ namespace interprocess_semaphore_detail
             return instance;
         }
     };
+
+    enum class os_sync_timeout_mode : uint8_t
+    {
+        unknown = 0,
+        absolute_deadline = 1,
+        relative_interval = 2,
+    };
+
+    class os_sync_timeout_strategy
+    {
+    public:
+        static os_sync_timeout_mode choose_mode()
+        {
+            auto value = current();
+            if (value == os_sync_timeout_mode::relative_interval) {
+                return os_sync_timeout_mode::relative_interval;
+            }
+            return os_sync_timeout_mode::absolute_deadline;
+        }
+
+        static void note_success(os_sync_timeout_mode mode)
+        {
+            if (mode == os_sync_timeout_mode::unknown) {
+                return;
+            }
+
+            int expected = static_cast<int>(os_sync_timeout_mode::unknown);
+            storage().compare_exchange_strong(
+                expected,
+                static_cast<int>(mode),
+                std::memory_order_acq_rel,
+                std::memory_order_acquire);
+        }
+
+        static bool switch_to(os_sync_timeout_mode desired)
+        {
+            int target = static_cast<int>(desired);
+            auto& state = storage();
+            int current_value = state.load(std::memory_order_acquire);
+            while (current_value != target) {
+                if (state.compare_exchange_weak(current_value,
+                                                target,
+                                                std::memory_order_acq_rel,
+                                                std::memory_order_acquire)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        static os_sync_timeout_mode current()
+        {
+            return static_cast<os_sync_timeout_mode>(
+                storage().load(std::memory_order_acquire));
+        }
+
+    private:
+        static std::atomic<int>& storage()
+        {
+            static std::atomic<int> mode{static_cast<int>(os_sync_timeout_mode::unknown)};
+            return mode;
+        }
+    };
+
+    inline const char* describe(os_sync_timeout_mode mode)
+    {
+        switch (mode) {
+            case os_sync_timeout_mode::absolute_deadline:
+                return "absolute";
+            case os_sync_timeout_mode::relative_interval:
+                return "relative";
+            case os_sync_timeout_mode::unknown:
+            default:
+                return "unknown";
+        }
+    }
 #endif
 
     inline uint64_t generate_global_identifier()
@@ -667,20 +743,27 @@ private:
         }
 
         uint64_t timeout_ns = static_cast<uint64_t>(count);
+        const uint64_t interval_ticks = nanoseconds_to_mach_absolute_ticks(timeout_ns);
 
         while (true) {
             uint64_t expected_value = static_cast<uint32_t>(expected);
-            const uint64_t timeout_value = saturating_add(
-                current_wait_clock_ticks(),
-                nanoseconds_to_mach_absolute_ticks(timeout_ns));
 #if defined(__APPLE__)
+            auto mode = interprocess_semaphore_detail::os_sync_timeout_strategy::choose_mode();
+            uint64_t wait_value = interval_ticks;
+            if (mode != interprocess_semaphore_detail::os_sync_timeout_mode::relative_interval) {
+                wait_value = saturating_add(current_wait_clock_ticks(), interval_ticks);
+                mode = interprocess_semaphore_detail::os_sync_timeout_mode::absolute_deadline;
+            }
             interprocess_semaphore_detail::os_sync_trace::log(
-                "wait_os_sync_with_timeout attempt expected=%d expected_value=%u remaining_ns=%llu timeout_value=%llu address=%p",
+                "wait_os_sync_with_timeout attempt mode=%s expected=%d expected_value=%u remaining_ns=%llu wait_value=%llu address=%p",
+                interprocess_semaphore_detail::describe(mode),
                 static_cast<int>(expected),
                 static_cast<unsigned>(expected_value),
                 static_cast<unsigned long long>(timeout_ns),
-                static_cast<unsigned long long>(timeout_value),
+                static_cast<unsigned long long>(wait_value),
                 reinterpret_cast<void*>(&m_os_sync.count));
+#else
+            uint64_t wait_value = saturating_add(current_wait_clock_ticks(), interval_ticks);
 #endif
             int rc = os_sync_wait_on_address_with_timeout(
                 reinterpret_cast<void*>(&m_os_sync.count),
@@ -688,7 +771,7 @@ private:
                 sizeof(int32_t),
                 wait_flags,
                 wait_clock,
-                timeout_value);
+                wait_value);
             int saved_errno = errno;
 #if defined(__APPLE__)
             interprocess_semaphore_detail::os_sync_trace::log(
@@ -699,11 +782,15 @@ private:
 #endif
             if (rc >= 0) {
                 observed = m_os_sync.count.load(std::memory_order_acquire);
+#if defined(__APPLE__)
+                interprocess_semaphore_detail::os_sync_timeout_strategy::note_success(mode);
+#endif
                 return true;
             }
             if (saved_errno == ETIMEDOUT) {
                 observed = m_os_sync.count.load(std::memory_order_acquire);
 #if defined(__APPLE__)
+                interprocess_semaphore_detail::os_sync_timeout_strategy::note_success(mode);
                 interprocess_semaphore_detail::os_sync_trace::log(
                     "wait_os_sync_with_timeout timeout observed=%d",
                     static_cast<int>(observed));
@@ -719,6 +806,23 @@ private:
 #endif
                 continue;
             }
+#if defined(__APPLE__)
+            if (saved_errno == EINVAL) {
+                auto fallback = mode == interprocess_semaphore_detail::os_sync_timeout_mode::relative_interval
+                                     ? interprocess_semaphore_detail::os_sync_timeout_mode::absolute_deadline
+                                     : interprocess_semaphore_detail::os_sync_timeout_mode::relative_interval;
+                bool switched = interprocess_semaphore_detail::os_sync_timeout_strategy::switch_to(fallback);
+                interprocess_semaphore_detail::os_sync_trace::log(
+                    "wait_os_sync_with_timeout mode_switch from=%s to=%s result=%s",
+                    interprocess_semaphore_detail::describe(mode),
+                    interprocess_semaphore_detail::describe(fallback),
+                    switched ? "success" : "unchanged");
+                if (switched) {
+                    errno = saved_errno;
+                    continue;
+                }
+            }
+#endif
             errno = saved_errno;
 #if defined(__APPLE__)
             interprocess_semaphore_detail::os_sync_trace::log(
