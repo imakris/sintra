@@ -1650,15 +1650,46 @@ void Managed_process::barrier_ack_request(const detail::barrier_ack_request& req
         response.barrier_sequence = req.barrier_sequence;
         response.common_function_iid = req.common_function_iid;
         response.ack_type = req.ack_type;
-        response.observed_sequence = req.target_sequence;
         response.responder = s_mproc->m_instance_id;
         response.success = true;
+
+        auto mark_failure = [&response](detail::barrier_failure reason) {
+            response.success = false;
+            response.observed_sequence = invalid_sequence;
+            (void)reason; // reserved for future reporting
+        };
+
+        try {
+            switch (req.ack_type) {
+            case detail::barrier_ack_type::outbound: {
+                if (s_coord) {
+                    s_mproc->flush(process_of(s_coord_id), req.target_sequence);
+                    response.observed_sequence = req.target_sequence;
+                }
+                else {
+                    mark_failure(detail::barrier_failure::coordinator_stop);
+                }
+                break;
+            }
+            case detail::barrier_ack_type::processing: {
+                s_mproc->wait_for_delivery_fence();
+                response.observed_sequence = req.target_sequence;
+                break;
+            }
+            default:
+                response.observed_sequence = req.target_sequence;
+                break;
+            }
+        }
+        catch (...) {
+            mark_failure(detail::barrier_failure::peer_draining);
+        }
 
         try {
             Process_group::rpc_barrier_ack_response(s_coord_id, response);
         }
         catch (...) {
-            // Coordinator will escalate on timeout/failure.
+            // Coordinator will handle missing acknowledgements (e.g., during shutdown).
         }
     });
 }

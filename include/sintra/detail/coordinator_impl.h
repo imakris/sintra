@@ -184,6 +184,53 @@ detail::barrier_completion_payload Process_group::barrier(
             }
         }
 
+        for (auto& [pid, payload] : b.completion_payloads) {
+            (void)pid;
+            if (payload.barrier_sequence == invalid_sequence) {
+                payload.barrier_sequence = sequence;
+            }
+
+            if ((payload.request_flags & detail::barrier_flag_outbound) == 0) {
+                payload.outbound.state = detail::barrier_state::not_requested;
+                payload.outbound.failure_code = detail::barrier_failure::none;
+                payload.outbound.offender = invalid_instance_id;
+                payload.outbound.sequence = invalid_sequence;
+            }
+            else if (b.outbound_state == detail::barrier_state::failed) {
+                payload.outbound.state = detail::barrier_state::failed;
+                payload.outbound.failure_code = b.outbound_failure;
+                payload.outbound.offender = b.outbound_offender;
+            }
+            else {
+                payload.outbound.state = detail::barrier_state::satisfied;
+                payload.outbound.failure_code = detail::barrier_failure::none;
+                payload.outbound.offender = invalid_instance_id;
+                if (payload.outbound.sequence == invalid_sequence) {
+                    payload.outbound.sequence = sequence;
+                }
+            }
+
+            if ((payload.request_flags & detail::barrier_flag_processing) == 0) {
+                payload.processing.state = detail::barrier_state::not_requested;
+                payload.processing.failure_code = detail::barrier_failure::none;
+                payload.processing.offender = invalid_instance_id;
+                payload.processing.sequence = invalid_sequence;
+            }
+            else if (b.processing_state == detail::barrier_state::failed) {
+                payload.processing.state = detail::barrier_state::failed;
+                payload.processing.failure_code = b.processing_failure;
+                payload.processing.offender = b.processing_offender;
+            }
+            else {
+                payload.processing.state = detail::barrier_state::satisfied;
+                payload.processing.failure_code = detail::barrier_failure::none;
+                payload.processing.offender = invalid_instance_id;
+                if (payload.processing.sequence == invalid_sequence) {
+                    payload.processing.sequence = sequence;
+                }
+            }
+        }
+
         detail::barrier_completion_payload caller_payload {};
         auto caller_payload_it = b.completion_payloads.find(caller_piid);
         if (caller_payload_it != b.completion_payloads.end()) {
@@ -293,6 +340,9 @@ inline void Process_group::barrier_ack_response(
 
         if (b.outbound_waiters.empty()) {
             b.awaiting_outbound = false;
+            if (b.outbound_state != detail::barrier_state::failed) {
+                b.outbound_state = detail::barrier_state::satisfied;
+            }
         }
     }
     else if (response.ack_type == detail::barrier_ack_type::processing && b.awaiting_processing) {
@@ -318,6 +368,9 @@ inline void Process_group::barrier_ack_response(
 
         if (b.processing_waiters.empty()) {
             b.awaiting_processing = false;
+            if (b.processing_state != detail::barrier_state::failed) {
+                b.processing_state = detail::barrier_state::satisfied;
+            }
         }
     }
 
