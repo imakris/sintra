@@ -9,8 +9,6 @@ on:
     workflows: ["Build - macOS"]
     types:
       - completed
-  pull_request:
-    branches: ['*']
 
 permissions:
   actions: read
