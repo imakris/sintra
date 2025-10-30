@@ -1,5 +1,7 @@
 name: Stress Test - Windows
-run-name: Stress Test - ${{ github.event.workflow_run.display_title }}
+run-name: >-
+  Stress Test - ${{ github.event.workflow_run.pull_requests[0] && format('PR #{0}', github.event.workflow_run.pull_requests[0].number) || github.event.workflow_run.head_branch || github.event.workflow_run.display_title }}
+  ${{ github.event.workflow_run.pull_requests[0] && github.event.workflow_run.head_branch && format('({0})', github.event.workflow_run.head_branch) || '' }}
 
 on:
   workflow_run:
@@ -23,6 +25,30 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
+
+      - name: Record trigger metadata
+        if: always()
+        shell: bash
+        env:
+          SOURCE_RUN_URL: ${{ github.event.workflow_run.html_url }}
+          SOURCE_RUN_NAME: ${{ github.event.workflow_run.display_title }}
+          PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number || '' }}
+          PR_URL: ${{ github.event.workflow_run.pull_requests[0].html_url || '' }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch || '' }}
+        run: |
+          {
+            echo "### Trigger details"
+            echo ""
+            echo "- **Source workflow run:** [${SOURCE_RUN_NAME}](${SOURCE_RUN_URL})"
+            if [ -n "$PR_NUMBER" ] && [ -n "$PR_URL" ]; then
+              echo "- **Pull request:** [#${PR_NUMBER}](${PR_URL})"
+            elif [ -n "$PR_NUMBER" ]; then
+              echo "- **Pull request:** #${PR_NUMBER}"
+            fi
+            if [ -n "$HEAD_BRANCH" ]; then
+              echo "- **Head branch:** \`$HEAD_BRANCH\`"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Determine diff base
         id: diff-base
