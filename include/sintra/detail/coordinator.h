@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "barrier_protocol.h"
 #include "id_types.h"
 #include "resolvable_instance.h"
 #include "resolve_type.h"
@@ -11,8 +12,11 @@
 #include <array>
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
+#include <chrono>
 #include <memory>
 #include <mutex>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -48,7 +52,9 @@ struct Process_group: Derived_transceiver<Process_group>
     // processes waiting on the barrier. This message would contain
     // - the serial number, for identification purposes
     // - the sequence counter (i.e. at which ring sequence was the barrier completed)
-    sequence_counter_type barrier(const string& barrier_name);
+    detail::barrier_completion_payload barrier(const string& barrier_name,
+                                               std::uint32_t request_flags = 0);
+    void barrier_ack_response(const detail::barrier_ack_response& response);
 
 
     struct Barrier
@@ -60,12 +66,30 @@ struct Process_group: Derived_transceiver<Process_group>
         //sequence_counter_type                   flush_sequence = 0;
         bool                                    failed = false;
         instance_id_type                        common_function_iid = invalid_instance_id;
+        std::uint32_t                           group_requirement_mask = 0;
+        std::unordered_map<instance_id_type, std::uint32_t> per_process_flags;
+        unordered_set<instance_id_type>         outbound_waiters;
+        unordered_set<instance_id_type>         processing_waiters;
+        std::unordered_map<instance_id_type, detail::barrier_completion_payload> completion_payloads;
+        bool                                    rendezvous_complete = false;
+        detail::barrier_state                   outbound_state = detail::barrier_state::not_requested;
+        detail::barrier_state                   processing_state = detail::barrier_state::not_requested;
+        detail::barrier_failure                 outbound_failure = detail::barrier_failure::none;
+        detail::barrier_failure                 processing_failure = detail::barrier_failure::none;
+        instance_id_type                        outbound_offender = invalid_instance_id;
+        instance_id_type                        processing_offender = invalid_instance_id;
+        std::chrono::steady_clock::time_point   outbound_deadline {};
+        std::chrono::steady_clock::time_point   processing_deadline {};
+        bool                                    awaiting_outbound = false;
+        bool                                    awaiting_processing = false;
+        condition_variable                      completion_cv;
     };
 
     struct Barrier_completion
     {
         instance_id_type                        common_function_iid = invalid_instance_id;
         std::vector<instance_id_type>           recipients;
+        std::vector<detail::barrier_completion_payload> recipient_payloads;
     };
 
     unordered_map<string, shared_ptr<Barrier>>  m_barriers;
@@ -73,6 +97,7 @@ struct Process_group: Derived_transceiver<Process_group>
 
     mutex m_call_mutex;
     SINTRA_RPC_STRICT_EXPLICIT(barrier)
+    SINTRA_RPC_STRICT(barrier_ack_response)
 
 public:
     void drop_from_inflight_barriers(

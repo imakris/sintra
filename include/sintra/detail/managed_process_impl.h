@@ -6,6 +6,8 @@
 #include "utility.h"
 #include "type_utils.h"
 #include "ipc_platform_utils.h"
+#include "barrier_protocol.h"
+#include "coordinator.h"
 
 #include <array>
 #include <atomic>
@@ -1323,7 +1325,8 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
     // assign_name requires that all group processes are instantiated, in order
     // to receive the instance_published event
     if (s_recovery_occurrence == 0) {
-        bool all_started = Process_group::rpc_barrier(m_group_all, UIBS);
+        auto start_payload = Process_group::rpc_barrier(m_group_all, UIBS, 0);
+        const bool all_started = start_payload.rendezvous.state == detail::barrier_state::satisfied;
         if (!all_started) {
             return false;
         }
@@ -1633,6 +1636,31 @@ inline void Managed_process::run_after_current_handler(function<void()> task)
         }
         task();
     };
+}
+
+inline
+void Managed_process::barrier_ack_request(const detail::barrier_ack_request& request)
+{
+    run_after_current_handler([req = request]() mutable {
+        if (!s_mproc) {
+            return;
+        }
+
+        detail::barrier_ack_response response {};
+        response.barrier_sequence = req.barrier_sequence;
+        response.common_function_iid = req.common_function_iid;
+        response.ack_type = req.ack_type;
+        response.observed_sequence = req.target_sequence;
+        response.responder = s_mproc->m_instance_id;
+        response.success = true;
+
+        try {
+            Process_group::rpc_barrier_ack_response(s_coord_id, response);
+        }
+        catch (...) {
+            // Coordinator will escalate on timeout/failure.
+        }
+    });
 }
 
 inline

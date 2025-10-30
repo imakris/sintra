@@ -4,6 +4,7 @@
 #pragma once
 
 #include "config.h"
+#include "barrier_protocol.h"
 #include "globals.h"
 #include "ipc_rings.h"
 #include "message.h"
@@ -262,6 +263,8 @@ struct Managed_process: Derived_transceiver<Managed_process>
     void wait_for_delivery_fence();
     void notify_delivery_progress();
 
+    void barrier_ack_request(const detail::barrier_ack_request& request);
+
 
     size_t unblock_rpc(instance_id_type process_instance_id = invalid_instance_id);
 
@@ -271,6 +274,7 @@ struct Managed_process: Derived_transceiver<Managed_process>
     // instance_unpublished event, which will follow shortly after.
     SINTRA_SIGNAL_EXPLICIT(terminated_abnormally, int status);
     SINTRA_SIGNAL_EXPLICIT(unpublish_transceiver_notify, instance_id_type transceiver_instance_id);
+    SINTRA_RPC_STRICT(barrier_ack_request)
 
     spinlocked_umap<tn_type, list<function<void()>>>
                                         m_queued_availability_calls;

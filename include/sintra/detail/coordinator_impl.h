@@ -29,9 +29,13 @@ using std::unique_lock;
 
 // EXPORTED EXCLUSIVELY FOR RPC
 inline
-sequence_counter_type Process_group::barrier(
-    const string& barrier_name)
+detail::barrier_completion_payload Process_group::barrier(
+    const string& barrier_name,
+    std::uint32_t request_flags)
 {
+    detail::barrier_completion_payload result_payload {};
+    result_payload.request_flags = request_flags;
+
     std::unique_lock basic_lock(m_call_mutex);
     instance_id_type caller_piid = s_tl_current_message->sender_instance_id;
     if (m_process_ids.find(caller_piid) == m_process_ids.end()) {
@@ -45,7 +49,7 @@ sequence_counter_type Process_group::barrier(
 
     auto barrier = barrier_entry; // keep the barrier alive even if the map rehashes
     Barrier& b = *barrier;
-    b.m.lock(); // main barrier lock
+    std::unique_lock barrier_lock(b.m); // main barrier lock
 
     // Atomically snapshot membership and filter draining processes while holding m_call_mutex.
     // This ensures a consistent view: no process can be added/removed or change draining state
@@ -56,6 +60,10 @@ sequence_counter_type Process_group::barrier(
         b.processes_arrived.clear();
         b.failed = false;
         b.common_function_iid = make_instance_id();
+        b.group_requirement_mask = 0;
+        b.per_process_flags.clear();
+        b.outbound_waiters.clear();
+        b.processing_waiters.clear();
 
         // Filter out draining processes while still holding m_call_mutex for atomicity
         if (auto* coord = s_coord) {
@@ -78,25 +86,134 @@ sequence_counter_type Process_group::barrier(
 
     b.processes_arrived.insert(caller_piid);
     b.processes_pending.erase(caller_piid);
+    b.per_process_flags[caller_piid] = request_flags;
+    b.group_requirement_mask |= request_flags;
 
-    if (b.processes_pending.size() == 0) {
-        // Last arrival
-        auto additional_pids = b.processes_arrived;
-        additional_pids.erase(caller_piid);
+    if (b.processes_pending.empty()) {
+        const auto current_common_fiid = b.common_function_iid;
+        b.rendezvous_complete = true;
+        const auto sequence = s_mproc->m_out_rep_c->get_leading_sequence();
 
-        assert(s_tl_common_function_iid == invalid_instance_id);
-        assert(s_tl_additional_piids_size == 0);
-        assert(additional_pids.size() < max_process_index);
-        s_tl_additional_piids_size = 0;
-        for (auto& e : additional_pids) {
-            s_tl_additional_piids[s_tl_additional_piids_size++] = e;
+        auto populate_payload = [&](instance_id_type pid, std::uint32_t flags) {
+            auto& payload = b.completion_payloads[pid];
+            payload.common_function_iid = current_common_fiid;
+            payload.request_flags = flags;
+            payload.barrier_sequence = sequence;
+            payload.rendezvous.state = detail::barrier_state::satisfied;
+            payload.rendezvous.sequence = sequence;
+
+            if (flags & detail::barrier_flag_inbound) {
+                payload.inbound.state = detail::barrier_state::satisfied;
+                payload.inbound.sequence = sequence;
+            }
+            else {
+                payload.inbound.state = detail::barrier_state::not_requested;
+                payload.inbound.sequence = invalid_sequence;
+            }
+        };
+
+        for (auto pid : b.processes_arrived) {
+            auto flags_it = b.per_process_flags.find(pid);
+            std::uint32_t flags = (flags_it != b.per_process_flags.end()) ? flags_it->second : 0;
+            populate_payload(pid, flags);
         }
 
-        const auto current_common_fiid = b.common_function_iid;
-        s_tl_common_function_iid = current_common_fiid;
-        b.m.unlock();
+        const bool needs_outbound = (b.group_requirement_mask & detail::barrier_flag_outbound) != 0;
+        const bool needs_processing = (b.group_requirement_mask & detail::barrier_flag_processing) != 0;
 
-        // Re-lock m_call_mutex to safely erase from m_barriers
+        if (needs_outbound) {
+            b.awaiting_outbound = true;
+            b.outbound_waiters = b.processes_arrived;
+            b.outbound_state = detail::barrier_state::downgraded;
+            for (auto& [pid, payload] : b.completion_payloads) {
+                (void)pid;
+                payload.outbound.state = detail::barrier_state::downgraded;
+                payload.outbound.failure_code = detail::barrier_failure::none;
+                payload.outbound.offender = invalid_instance_id;
+                payload.outbound.sequence = sequence;
+            }
+        }
+        else {
+            b.awaiting_outbound = false;
+            b.outbound_waiters.clear();
+            b.outbound_state = detail::barrier_state::not_requested;
+        }
+
+        if (needs_processing) {
+            b.awaiting_processing = true;
+            b.processing_waiters = b.processes_arrived;
+            b.processing_state = detail::barrier_state::downgraded;
+            for (auto& [pid, payload] : b.completion_payloads) {
+                (void)pid;
+                payload.processing.state = detail::barrier_state::downgraded;
+                payload.processing.failure_code = detail::barrier_failure::none;
+                payload.processing.offender = invalid_instance_id;
+                payload.processing.sequence = sequence;
+            }
+        }
+        else {
+            b.awaiting_processing = false;
+            b.processing_waiters.clear();
+            b.processing_state = detail::barrier_state::not_requested;
+        }
+
+        if (needs_outbound || needs_processing) {
+            for (auto pid : b.processes_arrived) {
+                if (needs_outbound) {
+                    detail::barrier_ack_request req {};
+                    req.barrier_sequence = sequence;
+                    req.common_function_iid = current_common_fiid;
+                    req.ack_type = detail::barrier_ack_type::outbound;
+                    req.target_sequence = sequence;
+                    Managed_process::rpc_barrier_ack_request(pid, req);
+                }
+                if (needs_processing) {
+                    detail::barrier_ack_request req {};
+                    req.barrier_sequence = sequence;
+                    req.common_function_iid = current_common_fiid;
+                    req.ack_type = detail::barrier_ack_type::processing;
+                    req.target_sequence = sequence;
+                    Managed_process::rpc_barrier_ack_request(pid, req);
+                }
+            }
+
+            while ((b.awaiting_outbound && !b.outbound_waiters.empty()) ||
+                   (b.awaiting_processing && !b.processing_waiters.empty()))
+            {
+                b.completion_cv.wait(barrier_lock);
+            }
+        }
+
+        detail::barrier_completion_payload caller_payload {};
+        auto caller_payload_it = b.completion_payloads.find(caller_piid);
+        if (caller_payload_it != b.completion_payloads.end()) {
+            caller_payload = caller_payload_it->second;
+        }
+        else {
+            caller_payload.common_function_iid = current_common_fiid;
+            caller_payload.barrier_sequence = sequence;
+            caller_payload.rendezvous.state = detail::barrier_state::satisfied;
+            caller_payload.rendezvous.sequence = sequence;
+        }
+
+        Barrier_completion completion;
+        completion.common_function_iid = current_common_fiid;
+        for (auto& [pid, payload] : b.completion_payloads) {
+            if (pid == caller_piid) {
+                continue;
+            }
+            completion.recipients.push_back(pid);
+            completion.recipient_payloads.push_back(payload);
+        }
+
+        barrier_lock.unlock();
+
+        if (!completion.recipients.empty()) {
+            std::vector<Barrier_completion> completions;
+            completions.push_back(std::move(completion));
+            emit_barrier_completions(completions);
+        }
+
         basic_lock.lock();
         auto it = m_barriers.find(barrier_name);
         if (it != m_barriers.end() &&
@@ -106,10 +223,9 @@ sequence_counter_type Process_group::barrier(
         {
             m_barriers.erase(it);
         }
-        // basic_lock will unlock m_call_mutex on return
-        // Use reply ring watermark (m_out_rep_c) since barrier completion messages
-        // are sent on the reply channel. Get it at return time for the calling process.
-        return s_mproc->m_out_rep_c->get_leading_sequence();
+        basic_lock.unlock();
+
+        return caller_payload;
     }
     else {
         // Not last arrival - emit a deferral message now and return without a normal reply
@@ -125,9 +241,88 @@ sequence_counter_type Process_group::barrier(
             (type_id_type)detail::reserved_id::deferral);
 
         mark_rpc_reply_deferred();
-        b.m.unlock();
-        return 0;
+        barrier_lock.unlock();
+        return result_payload;
     }
+}
+
+inline void Process_group::barrier_ack_response(
+    const detail::barrier_ack_response& response)
+{
+    std::unique_lock basic_lock(m_call_mutex);
+
+    std::shared_ptr<Barrier> barrier_ptr;
+    for (auto& [name, entry] : m_barriers) {
+        if (entry && entry->common_function_iid == response.common_function_iid) {
+            barrier_ptr = entry;
+            break;
+        }
+    }
+
+    if (!barrier_ptr) {
+        return;
+    }
+
+    Barrier& b = *barrier_ptr;
+    std::unique_lock barrier_lock(b.m);
+
+    auto responder = response.responder;
+    auto& payload = b.completion_payloads[responder];
+    payload.common_function_iid = b.common_function_iid;
+
+    if (response.ack_type == detail::barrier_ack_type::outbound && b.awaiting_outbound) {
+        b.outbound_waiters.erase(responder);
+
+        if (response.success) {
+            payload.outbound.state = detail::barrier_state::satisfied;
+            payload.outbound.failure_code = detail::barrier_failure::none;
+            payload.outbound.offender = invalid_instance_id;
+            payload.outbound.sequence = response.observed_sequence;
+        }
+        else {
+            payload.outbound.state = detail::barrier_state::failed;
+            payload.outbound.failure_code = detail::barrier_failure::peer_draining;
+            payload.outbound.offender = responder;
+            payload.outbound.sequence = response.observed_sequence;
+
+            b.outbound_state = detail::barrier_state::failed;
+            b.outbound_failure = detail::barrier_failure::peer_draining;
+            b.outbound_offender = responder;
+            b.outbound_waiters.clear();
+        }
+
+        if (b.outbound_waiters.empty()) {
+            b.awaiting_outbound = false;
+        }
+    }
+    else if (response.ack_type == detail::barrier_ack_type::processing && b.awaiting_processing) {
+        b.processing_waiters.erase(responder);
+
+        if (response.success) {
+            payload.processing.state = detail::barrier_state::satisfied;
+            payload.processing.failure_code = detail::barrier_failure::none;
+            payload.processing.offender = invalid_instance_id;
+            payload.processing.sequence = response.observed_sequence;
+        }
+        else {
+            payload.processing.state = detail::barrier_state::failed;
+            payload.processing.failure_code = detail::barrier_failure::peer_draining;
+            payload.processing.offender = responder;
+            payload.processing.sequence = response.observed_sequence;
+
+            b.processing_state = detail::barrier_state::failed;
+            b.processing_failure = detail::barrier_failure::peer_draining;
+            b.processing_offender = responder;
+            b.processing_waiters.clear();
+        }
+
+        if (b.processing_waiters.empty()) {
+            b.awaiting_processing = false;
+        }
+    }
+
+    barrier_lock.unlock();
+    b.completion_cv.notify_all();
 }
 
 
@@ -169,6 +364,25 @@ inline void Process_group::drop_from_inflight_barriers(
             completion.recipients.push_back(process_iid);
         }
 
+        completion.recipient_payloads.reserve(completion.recipients.size());
+        for (auto recipient : completion.recipients) {
+            auto payload_it = barrier->completion_payloads.find(recipient);
+            if (payload_it != barrier->completion_payloads.end()) {
+                completion.recipient_payloads.push_back(payload_it->second);
+            }
+            else {
+                detail::barrier_completion_payload payload {};
+                payload.common_function_iid = barrier->common_function_iid;
+                payload.request_flags = barrier->group_requirement_mask;
+                payload.rendezvous.state = detail::barrier_state::satisfied;
+                payload.rendezvous.sequence = invalid_sequence;
+                payload.inbound.state = detail::barrier_state::not_requested;
+                payload.outbound.state = detail::barrier_state::not_requested;
+                payload.processing.state = detail::barrier_state::not_requested;
+                completion.recipient_payloads.push_back(payload);
+            }
+        }
+
         barrier->processes_arrived.clear();
         barrier->common_function_iid = invalid_instance_id;
 
@@ -182,25 +396,54 @@ inline void Process_group::drop_from_inflight_barriers(
 inline void Process_group::emit_barrier_completions(
     const std::vector<Barrier_completion>& completions)
 {
-    using return_message_type = Message<Enclosure<sequence_counter_type>, void, not_defined_type_id>;
+    using return_message_type =
+        Message<Enclosure<detail::barrier_completion_payload>, void, not_defined_type_id>;
 
     for (const auto& completion : completions) {
         if (completion.common_function_iid == invalid_instance_id) {
             continue;
         }
 
-        if (completion.recipients.empty()) {
+        const auto recipient_count = completion.recipients.size();
+        if (recipient_count == 0) {
             continue;
         }
 
-        // Get per-recipient flush token: compute it INSIDE the loop so each recipient
-        // gets a watermark that's valid for their specific message write time.
-        // This prevents hangs where a global token is ahead of some recipient's channel.
-        for (auto recipient : completion.recipients) {
+        for (std::size_t idx = 0; idx < recipient_count; ++idx) {
+            auto recipient = completion.recipients[idx];
+            detail::barrier_completion_payload payload {};
+            if (idx < completion.recipient_payloads.size()) {
+                payload = completion.recipient_payloads[idx];
+            }
+            if (payload.common_function_iid == invalid_instance_id) {
+                payload.common_function_iid = completion.common_function_iid;
+            }
+
             const auto flush_sequence = s_mproc->m_out_rep_c->get_leading_sequence();
+            if (payload.barrier_sequence == invalid_sequence) {
+                payload.barrier_sequence = flush_sequence;
+            }
+
+            if (payload.inbound.state == detail::barrier_state::satisfied &&
+                payload.inbound.sequence == invalid_sequence)
+            {
+                payload.inbound.sequence = payload.barrier_sequence;
+            }
+
+            if (payload.outbound.state == detail::barrier_state::satisfied &&
+                payload.outbound.sequence == invalid_sequence)
+            {
+                payload.outbound.sequence = payload.barrier_sequence;
+            }
+
+            if (payload.processing.state == detail::barrier_state::satisfied &&
+                payload.processing.sequence == invalid_sequence)
+            {
+                payload.processing.sequence = payload.barrier_sequence;
+            }
 
             auto* placed_msg = s_mproc->m_out_rep_c->write<return_message_type>(
-                vb_size<return_message_type>(flush_sequence), flush_sequence);
+                vb_size<return_message_type>(payload), payload);
 
             Transceiver::finalize_rpc_write(
                 placed_msg,
