@@ -153,3 +153,29 @@ skipping readers that have not entered the normal processing state yet.
 
 Documenting this plan should make future attempts focus on the architectural
 gap instead of surface-level mitigations.
+
+## October 2025 status update
+
+Two mitigation experiments were attempted but neither yielded a viable fix:
+
+1. **Post-handler driven drain.** The change captured per-process request-ring
+   leading sequences and queued a post-handler via
+   `Managed_process::run_after_current_handler()`. The idea was to re-check the
+   recorded targets after each request handler finished. In practice the
+   handler executed only once—immediately after the barrier RPC returned—because
+   the coordinator's request loop had no further messages to trigger additional
+   post-handler runs. As a result the recorded targets were never re-evaluated
+   and the barrier hung, leaving the repro test stuck.
+2. **Synchronous `wait_for_delivery_fence()` call.** Calling
+   `Managed_process::wait_for_delivery_fence()` directly inside
+   `Process_group::barrier()` (just before emitting completions) causes the
+   coordinator's request thread to block while holding the barrier. Remote
+   readers cannot make progress under that lock, so the wait never completes and
+   the barrier deadlocks.
+
+Both experiments reinforce the need for a proper two-phase completion that ties
+into the coordinator's request loop without blocking it. Any future attempt
+should supply a mechanism for re-evaluating pending drain targets when other
+request reader threads publish progress (for example by storing the targets in a
+shared structure that `notify_delivery_progress()` can service) rather than
+relying on the current request handler to poll.
