@@ -626,14 +626,15 @@ private:
 
     void adjust_scope_after_einval(os_sync_address_scope observed_scope)
     {
-        auto expected = observed_scope;
-        const auto desired = (observed_scope == os_sync_address_scope::shared)
-                                 ? os_sync_address_scope::process_local
-                                 : os_sync_address_scope::shared;
-        m_os_sync.scope.compare_exchange_strong(expected,
-                                                desired,
-                                                std::memory_order_acq_rel,
-                                                std::memory_order_acquire);
+        if (observed_scope != os_sync_address_scope::shared) {
+            return;
+        }
+
+        auto expected = os_sync_address_scope::shared;
+        (void)m_os_sync.scope.compare_exchange_strong(expected,
+                                                      os_sync_address_scope::process_local,
+                                                      std::memory_order_acq_rel,
+                                                      std::memory_order_acquire);
     }
 #else
     sem_t m_sem{};
