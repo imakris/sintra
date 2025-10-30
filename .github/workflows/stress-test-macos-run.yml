@@ -10,7 +10,8 @@ jobs:
   stress-tests:
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
     uses: ./.github/workflows/stress-test-macos.yml
-    secrets: inherit
+    secrets:
+      repository-token: ${{ secrets.GITHUB_TOKEN }}
     with:
       build_run_id: ${{ github.event.workflow_run.id }}
       head_sha: ${{ github.event.workflow_run.head_sha }}
