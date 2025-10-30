@@ -1,4 +1,4 @@
-name: Build - Linux
+name: Build & Test - Linux
 
 on:
   push:
@@ -140,3 +140,16 @@ jobs:
           path: build/
           retention-days: 1
 
+  stress-tests:
+    name: Stress Test
+    needs: build
+    if: ${{ needs.build.result == 'success' }}
+    uses: ./.github/workflows/stress-test-linux.yml
+    secrets:
+      repository-token: ${{ secrets.GITHUB_TOKEN }}
+    with:
+      build_run_id: ${{ github.run_id }}
+      head_sha: ${{ github.event.pull_request.head.sha || github.sha }}
+      branch: ${{ github.head_ref || github.ref_name }}
+      pr_number: ${{ github.event.pull_request.number || '' }}
+      base_sha: ${{ github.event.pull_request.base.sha || '' }}
