@@ -39,7 +39,7 @@ concurrency:
 
 jobs:
   stress-test:
-    name: Stress Test - Windows
+    name: Stress Test
     runs-on: windows-latest
     env:
       GITHUB_TOKEN: ${{ secrets.repository-token }}
@@ -198,7 +198,13 @@ jobs:
           path: build/
           github-token: ${{ secrets.repository-token }}
           run-id: ${{ env.RUN_ID }}
-          if-no-artifact-found: error
+      - name: Verify artifacts present
+        shell: bash
+        run: |
+          if [ ! -d build ]; then
+            echo "Expected build artifacts were not downloaded" >&2
+            exit 1
+          fi
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -221,12 +227,13 @@ jobs:
             const sha = process.env.HEAD_SHA;
             const branch = process.env.HEAD_BRANCH;
             const prNumber = process.env.PR_NUMBER;
+            const statusContext = 'Stress Test';
             await github.rest.repos.createCommitStatus({
               owner, repo, sha,
               state: 'success',
-              context: `Stress tests / ${process.platform}`,
+              context: statusContext,
               target_url: `${context.serverUrl}/${owner}/${repo}/actions/runs/${process.env.GITHUB_RUN_ID}`,
-              description: `Stress tests passed${branch ? ` on ${branch}` : ''}${prNumber ? ` (PR #${prNumber})` : ''}`
+              description: `Stress Test passed${branch ? ` on ${branch}` : ''}${prNumber ? ` (PR #${prNumber})` : ''}`
             });
 
       - name: Mark status failure
@@ -238,10 +245,11 @@ jobs:
             const sha = process.env.HEAD_SHA;
             const branch = process.env.HEAD_BRANCH;
             const prNumber = process.env.PR_NUMBER;
+            const statusContext = 'Stress Test';
             await github.rest.repos.createCommitStatus({
               owner, repo, sha,
               state: 'failure',
-              context: `Stress tests / ${process.platform}`,
+              context: statusContext,
               target_url: `${context.serverUrl}/${owner}/${repo}/actions/runs/${process.env.GITHUB_RUN_ID}`,
-              description: `Stress tests failed${branch ? ` on ${branch}` : ''}${prNumber ? ` (PR #${prNumber})` : ''}`
+              description: `Stress Test failed${branch ? ` on ${branch}` : ''}${prNumber ? ` (PR #${prNumber})` : ''}`
             });
