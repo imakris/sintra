@@ -110,6 +110,8 @@ struct Process_message_reader
         std::atomic<sequence_counter_type> reply_sequence{invalid_sequence};
         std::atomic<bool> request_stopped{false};
         std::atomic<bool> reply_stopped{false};
+        std::atomic<uint32_t> request_fence_waiters{0};
+        std::atomic<uint32_t> reply_fence_waiters{0};
         const std::uint64_t generation;
 
     private:
@@ -136,6 +138,7 @@ struct Process_message_reader
         sequence_counter_type target = invalid_sequence;
         sequence_counter_type observed = invalid_sequence;
         bool wait_needed = false;
+        std::atomic<uint32_t>* fence_waiters = nullptr;
     };
 
     inline

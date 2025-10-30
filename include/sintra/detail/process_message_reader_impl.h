@@ -276,7 +276,12 @@ void Process_message_reader::request_reader_function()
         // request reader. The reply reader thread is responsible for popping
         // tokens when the *reply* reading sequence reaches them.
 
-        Message_prefix* m = m_in_req_c->fetch_message();
+        bool urgent = false;
+        if (progress) {
+            urgent = progress->request_fence_waiters.load(std::memory_order_acquire) > 0;
+        }
+
+        Message_prefix* m = m_in_req_c->fetch_message(urgent);
         s_tl_current_message = m;
         if (m == nullptr) {
             break;
@@ -467,6 +472,13 @@ Process_message_reader::Delivery_target Process_message_reader::prepare_delivery
         return target;
     }
 
+    if (stream == Delivery_stream::Request) {
+        target.fence_waiters = &strong_progress->request_fence_waiters;
+    }
+    else {
+        target.fence_waiters = &strong_progress->reply_fence_waiters;
+    }
+
     target.wait_needed = true;
     return target;
 }
@@ -536,7 +548,12 @@ void Process_message_reader::reply_reader_function()
             }
         }
 
-        Message_prefix* m = m_in_rep_c->fetch_message();
+        bool urgent = false;
+        if (progress) {
+            urgent = progress->reply_fence_waiters.load(std::memory_order_acquire) > 0;
+        }
+
+        Message_prefix* m = m_in_rep_c->fetch_message(urgent);
         s_tl_current_message = m;
 
         if (m == nullptr) {

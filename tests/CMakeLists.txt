@@ -43,6 +43,9 @@ function(add_test_suite SUFFIX IS_DEBUG)
         target_link_libraries(${LIB_TARGET} INTERFACE OpenMP::OpenMP_CXX)
     endif()
 
+    # Enable lightweight test hooks for behaviour injection via environment variables
+    target_compile_definitions(${LIB_TARGET} INTERFACE SINTRA_ENABLE_TEST_HOOKS)
+
     # Create all test executables with this configuration
     set(TEST_FILES
         barrier_complex_choreography_test.cpp

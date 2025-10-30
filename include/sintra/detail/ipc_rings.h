@@ -111,6 +111,7 @@
 #include <cassert>
 #include <cerrno>
 #include <chrono>
+#include <cstdlib>
 #include <cstddef>       // std::byte
 #include <cstring>       // std::strlen
 #include <cstdint>
@@ -166,6 +167,42 @@ namespace fs  = std::filesystem;
 namespace ipc = boost::interprocess;
 
 using sequence_counter_type = uint64_t;
+
+namespace detail::test_hooks
+{
+#ifdef SINTRA_ENABLE_TEST_HOOKS
+inline int ring_wait_delay_ms()
+{
+    static const int delay_ms = [] {
+        const char* value = std::getenv("SINTRA_TEST_RING_DELAY_MS");
+        if (!value || !*value) {
+            return 0;
+        }
+
+        char* end_ptr = nullptr;
+        const long parsed = std::strtol(value, &end_ptr, 10);
+        if (end_ptr == value || parsed <= 0) {
+            return 0;
+        }
+
+        constexpr long kMaxDelayMs = 1000;
+        const long clamped = (parsed > kMaxDelayMs) ? kMaxDelayMs : parsed;
+        return static_cast<int>(clamped);
+    }();
+    return delay_ms;
+}
+
+inline void maybe_delay_ring_wait()
+{
+    const int delay = ring_wait_delay_ms();
+    if (delay > 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+    }
+}
+#else
+inline void maybe_delay_ring_wait() {}
+#endif
+} // namespace detail::test_hooks
 
 struct Ring_diagnostics
 {
@@ -1359,7 +1396,7 @@ struct Ring_R : Ring<T, true>
      * SHUTDOWN BEHAVIOR: If m_stopping is set, returns an empty range immediately
      * without blocking. This allows reader threads to exit gracefully during shutdown.
      */
-    const Range<T> wait_for_new_data()
+    const Range<T> wait_for_new_data(bool urgent = false)
     {
         auto produce_range = [&]() -> Range<T> {
             if (handle_eviction_if_needed()) {
@@ -1431,6 +1468,26 @@ struct Ring_R : Ring<T, true>
             return Range<T>{};
         }
 
+        if (urgent) {
+            const double fast_spin_extension = fast_spin_duration * 4;
+            while (true) {
+                const double fast_spin_end = get_wtime() + fast_spin_extension;
+                while (sequences_equal() && get_wtime() < fast_spin_end) {
+                    if (should_shutdown()) {
+                        return Range<T>{};
+                    }
+                }
+
+                if (!sequences_equal()) {
+                    break;
+                }
+
+                std::this_thread::yield();
+            }
+
+            return produce_range();
+        }
+
         // Phase 1 — fast spin: aggressively poll for a very short window to
         // deliver sub-100µs wakeups when the writer is still active.
         const double fast_spin_end = get_wtime() + fast_spin_duration;
@@ -1438,6 +1495,8 @@ struct Ring_R : Ring<T, true>
             if (should_shutdown()) {
                 return Range<T>{};
             }
+
+            detail::test_hooks::maybe_delay_ring_wait();
         }
 
         if (sequences_equal()) {
@@ -1449,6 +1508,7 @@ struct Ring_R : Ring<T, true>
                 if (should_shutdown()) {
                     return Range<T>{};
                 }
+                detail::test_hooks::maybe_delay_ring_wait();
                 const auto seq_now = c.global_unblock_sequence.load(std::memory_order_acquire);
                 if (seq_now != m_seen_unblock_sequence) {
                     m_seen_unblock_sequence = seq_now;
@@ -1504,6 +1564,8 @@ struct Ring_R : Ring<T, true>
                 return Range<T>{};
             }
             c.unlock();
+
+            detail::test_hooks::maybe_delay_ring_wait();
 
             int sleepy_index = m_sleepy_index.load(std::memory_order_acquire);
             if (sleepy_index >= 0) {
