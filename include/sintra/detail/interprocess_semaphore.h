@@ -497,8 +497,6 @@ private:
         std::atomic<int32_t> count{0};
     };
 
-    using interprocess_semaphore_detail::os_sync_trace;
-
     os_sync_storage m_os_sync{};
 
     static constexpr os_sync_wait_on_address_flags_t wait_flags = OS_SYNC_WAIT_ON_ADDRESS_SHARED;
@@ -548,7 +546,7 @@ private:
     {
         m_os_sync.count.store(static_cast<int32_t>(initial_count), std::memory_order_relaxed);
 #if defined(__APPLE__)
-        os_sync_trace::log(
+        interprocess_semaphore_detail::os_sync_trace::log(
             "initialise_os_sync initial_count=%u address=%p",
             initial_count,
             reinterpret_cast<void*>(&m_os_sync.count));
@@ -561,7 +559,7 @@ private:
     {
         int32_t previous = m_os_sync.count.fetch_add(1, std::memory_order_release);
 #if defined(__APPLE__)
-        os_sync_trace::log(
+        interprocess_semaphore_detail::os_sync_trace::log(
             "post_os_sync previous=%d new_value=%d address=%p",
             static_cast<int>(previous),
             static_cast<int>(previous + 1),
@@ -576,7 +574,7 @@ private:
     {
         int32_t previous = m_os_sync.count.fetch_sub(1, std::memory_order_acq_rel);
 #if defined(__APPLE__)
-        os_sync_trace::log(
+        interprocess_semaphore_detail::os_sync_trace::log(
             "wait_os_sync previous=%d new_value=%d address=%p",
             static_cast<int>(previous),
             static_cast<int>(previous - 1),
@@ -584,7 +582,7 @@ private:
 #endif
         if (previous > 0) {
 #if defined(__APPLE__)
-            os_sync_trace::log("wait_os_sync satisfied_without_wait previous=%d", static_cast<int>(previous));
+            interprocess_semaphore_detail::os_sync_trace::log("wait_os_sync satisfied_without_wait previous=%d", static_cast<int>(previous));
 #endif
             return;
         }
@@ -592,13 +590,13 @@ private:
         int32_t expected = previous - 1;
         while (true) {
 #if defined(__APPLE__)
-            os_sync_trace::log(
+            interprocess_semaphore_detail::os_sync_trace::log(
                 "wait_os_sync waiting expected=%d",
                 static_cast<int>(expected));
 #endif
             int32_t observed = wait_on_address_blocking(expected);
 #if defined(__APPLE__)
-            os_sync_trace::log(
+            interprocess_semaphore_detail::os_sync_trace::log(
                 "wait_os_sync wake observed=%d",
                 static_cast<int>(observed));
 #endif
@@ -646,7 +644,7 @@ private:
         if (remaining <= std::chrono::nanoseconds::zero()) {
             observed = m_os_sync.count.load(std::memory_order_acquire);
 #if defined(__APPLE__)
-            os_sync_trace::log(
+            interprocess_semaphore_detail::os_sync_trace::log(
                 "wait_os_sync_with_timeout immediate_timeout expected=%d observed=%d remaining_ns=%lld",
                 static_cast<int>(expected),
                 static_cast<int>(observed),
@@ -659,7 +657,7 @@ private:
         if (count <= 0) {
             observed = m_os_sync.count.load(std::memory_order_acquire);
 #if defined(__APPLE__)
-            os_sync_trace::log(
+            interprocess_semaphore_detail::os_sync_trace::log(
                 "wait_os_sync_with_timeout non_positive_duration expected=%d observed=%d duration_ns=%lld",
                 static_cast<int>(expected),
                 static_cast<int>(observed),
@@ -676,7 +674,7 @@ private:
                 current_wait_clock_ticks(),
                 nanoseconds_to_mach_absolute_ticks(timeout_ns));
 #if defined(__APPLE__)
-            os_sync_trace::log(
+            interprocess_semaphore_detail::os_sync_trace::log(
                 "wait_os_sync_with_timeout attempt expected=%d expected_value=%u remaining_ns=%llu timeout_value=%llu address=%p",
                 static_cast<int>(expected),
                 static_cast<unsigned>(expected_value),
@@ -693,7 +691,7 @@ private:
                 timeout_value);
             int saved_errno = errno;
 #if defined(__APPLE__)
-            os_sync_trace::log(
+            interprocess_semaphore_detail::os_sync_trace::log(
                 "wait_os_sync_with_timeout result rc=%d errno=%d count_snapshot=%d",
                 rc,
                 saved_errno,
@@ -706,7 +704,7 @@ private:
             if (saved_errno == ETIMEDOUT) {
                 observed = m_os_sync.count.load(std::memory_order_acquire);
 #if defined(__APPLE__)
-                os_sync_trace::log(
+                interprocess_semaphore_detail::os_sync_trace::log(
                     "wait_os_sync_with_timeout timeout observed=%d",
                     static_cast<int>(observed));
 #endif
@@ -715,7 +713,7 @@ private:
             if (saved_errno == EINTR || saved_errno == EFAULT) {
                 errno = saved_errno;
 #if defined(__APPLE__)
-                os_sync_trace::log(
+                interprocess_semaphore_detail::os_sync_trace::log(
                     "wait_os_sync_with_timeout retry errno=%d",
                     saved_errno);
 #endif
@@ -723,7 +721,7 @@ private:
             }
             errno = saved_errno;
 #if defined(__APPLE__)
-            os_sync_trace::log(
+            interprocess_semaphore_detail::os_sync_trace::log(
                 "wait_os_sync_with_timeout throwing errno=%d expected=%d",
                 saved_errno,
                 static_cast<int>(expected));
@@ -736,7 +734,7 @@ private:
     {
         m_os_sync.count.fetch_add(1, std::memory_order_acq_rel);
 #if defined(__APPLE__)
-        os_sync_trace::log(
+        interprocess_semaphore_detail::os_sync_trace::log(
             "cancel_wait_os_sync new_value=%d",
             static_cast<int>(m_os_sync.count.load(std::memory_order_acquire)));
 #endif
@@ -747,7 +745,7 @@ private:
         while (true) {
             uint64_t expected_value = static_cast<uint32_t>(expected);
 #if defined(__APPLE__)
-            os_sync_trace::log(
+            interprocess_semaphore_detail::os_sync_trace::log(
                 "wait_on_address_blocking attempt expected=%d expected_value=%u address=%p",
                 static_cast<int>(expected),
                 static_cast<unsigned>(expected_value),
@@ -760,7 +758,7 @@ private:
                 wait_flags);
             int saved_errno = errno;
 #if defined(__APPLE__)
-            os_sync_trace::log(
+            interprocess_semaphore_detail::os_sync_trace::log(
                 "wait_on_address_blocking result rc=%d errno=%d count_snapshot=%d",
                 rc,
                 saved_errno,
@@ -772,7 +770,7 @@ private:
             if (saved_errno == EINTR || saved_errno == EFAULT) {
                 errno = saved_errno;
 #if defined(__APPLE__)
-                os_sync_trace::log(
+                interprocess_semaphore_detail::os_sync_trace::log(
                     "wait_on_address_blocking retry errno=%d",
                     saved_errno);
 #endif
@@ -780,7 +778,7 @@ private:
             }
             errno = saved_errno;
 #if defined(__APPLE__)
-            os_sync_trace::log(
+            interprocess_semaphore_detail::os_sync_trace::log(
                 "wait_on_address_blocking throwing errno=%d expected=%d",
                 saved_errno,
                 static_cast<int>(expected));
@@ -798,7 +796,7 @@ private:
                 wake_flags);
             int saved_errno = errno;
 #if defined(__APPLE__)
-            os_sync_trace::log(
+            interprocess_semaphore_detail::os_sync_trace::log(
                 "wake_one_waiter result rc=%d errno=%d count_snapshot=%d",
                 rc,
                 saved_errno,
@@ -814,14 +812,14 @@ private:
                 if (saved_errno == EINTR) {
                     errno = saved_errno;
 #if defined(__APPLE__)
-                    os_sync_trace::log("wake_one_waiter retry errno=EINTR");
+                    interprocess_semaphore_detail::os_sync_trace::log("wake_one_waiter retry errno=EINTR");
 #endif
                     continue;
                 }
             }
             errno = saved_errno;
 #if defined(__APPLE__)
-            os_sync_trace::log(
+            interprocess_semaphore_detail::os_sync_trace::log(
                 "wake_one_waiter throwing errno=%d",
                 saved_errno);
 #endif
