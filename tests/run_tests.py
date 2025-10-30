@@ -26,6 +26,7 @@ import importlib
 import importlib.util
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -2167,12 +2168,18 @@ class TestRunner:
                 str(core_path),
             ]
 
-        # Fallback to lldb
+        # Fallback to lldb. ``lldb`` accepts ``--core``/``-c`` command-line options,
+        # but older toolchains ship wrappers that interpret those flags before
+        # forwarding arguments to the debugger, producing the "unknown or ambiguous
+        # option" failures observed on GitHub's macOS runners. Issue the equivalent
+        # ``target create --core`` command through ``-o`` instead so the debugger
+        # itself parses the paths.
+        core_arg = shlex.quote(str(core_path))
+        binary_arg = shlex.quote(str(invocation.path))
         lldb_args = [
             '--batch',
             '--no-lldbinit',
-            '-c', str(core_path),
-            str(invocation.path),
+            '-o', f'target create --core {core_arg} {binary_arg}',
             '-o', 'thread backtrace all -c 256 -f',
             '-o', 'quit',
         ]
