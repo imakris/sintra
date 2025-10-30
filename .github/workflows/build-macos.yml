@@ -97,7 +97,7 @@ jobs:
           retention-days: 1
 
   stress-tests:
-    name: Stress tests - macOS
+    name: Stress Test
     needs: build
     if: ${{ needs.build.result == 'success' }}
     uses: ./.github/workflows/stress-test-macos.yml
