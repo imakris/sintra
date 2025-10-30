@@ -1,5 +1,5 @@
 name: Stress Test - Linux
-run-name: Stress Test - ${{ github.event.workflow_run.head_branch || github.event.workflow_run.display_title }}
+run-name: Stress Test - Linux
 
 on:
   workflow_run:
@@ -23,6 +23,74 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
+
+      - name: Collect run metadata
+        id: run-metadata
+        shell: bash
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch || '' }}
+          PR_HEAD_REF: ${{ github.event.workflow_run.pull_requests[0].head.ref || '' }}
+          DISPLAY_TITLE: ${{ github.event.workflow_run.display_title || '' }}
+        run: |
+          set -euo pipefail
+          branch="$HEAD_BRANCH"
+          if [ -z "$branch" ] && [ -n "$PR_HEAD_REF" ]; then
+            branch="$PR_HEAD_REF"
+          fi
+          if [ -z "$branch" ] && [ -n "$DISPLAY_TITLE" ]; then
+            branch="$DISPLAY_TITLE"
+          fi
+          if [ -z "$branch" ]; then
+            branch="detached"
+          fi
+          short_sha="${HEAD_SHA:0:7}"
+          commit_subject="$(git log -1 --pretty=%s "$HEAD_SHA")"
+          {
+            echo "branch=$branch"
+            echo "short_sha=$short_sha"
+            echo "commit_subject=$commit_subject"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Update workflow run title
+        shell: bash
+        env:
+          RUN_LABEL: Stress Test - Linux
+          BRANCH: ${{ steps.run-metadata.outputs.branch }}
+          SHORT_SHA: ${{ steps.run-metadata.outputs.short_sha }}
+          COMMIT_SUBJECT: ${{ steps.run-metadata.outputs.commit_subject }}
+        run: |
+          set -euo pipefail
+          title="$RUN_LABEL"
+          if [ -n "$BRANCH" ]; then
+            title="$title • $BRANCH"
+          fi
+          if [ -n "$SHORT_SHA" ]; then
+            title="$title@$SHORT_SHA"
+          fi
+          {
+            echo 'GITHUB_RUN_NAME<<EOF'
+            echo "$title"
+            if [ -n "$COMMIT_SUBJECT" ]; then
+              echo "$COMMIT_SUBJECT"
+            fi
+            echo 'EOF'
+          } >> "$GITHUB_ENV"
+
+      - name: Publish run context summary
+        shell: bash
+        env:
+          BRANCH: ${{ steps.run-metadata.outputs.branch }}
+          SHORT_SHA: ${{ steps.run-metadata.outputs.short_sha }}
+          COMMIT_SUBJECT: ${{ steps.run-metadata.outputs.commit_subject }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Stress test context"
+            echo
+            echo "- **Branch:** `$BRANCH`"
+            echo "- **Commit:** `$SHORT_SHA` — $COMMIT_SUBJECT"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Determine diff base
         id: diff-base
