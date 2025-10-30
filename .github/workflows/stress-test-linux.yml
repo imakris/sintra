@@ -130,13 +130,12 @@ jobs:
         run: gdb --version
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v4.1.7
         with:
           name: linux-build-${{ github.event.workflow_run.head_sha }}
           path: build/
           github-token: ${{ github.token }}
           run-id: ${{ github.event.workflow_run.id }}
-          if-no-artifact-found: error
 
       - name: Setup Python
         uses: actions/setup-python@v5
