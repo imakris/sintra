@@ -24,8 +24,7 @@ jobs:
     name: Stress Test - Linux
     runs-on: ubuntu-latest
     if: ${{ (github.event_name == 'workflow_run' &&
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event != 'pull_request') ||
+      github.event.workflow_run.conclusion == 'success') ||
       github.event_name == 'pull_request' }}
 
     steps:
