@@ -30,7 +30,7 @@ on:
 
 jobs:
   build:
-    name: Build (macOS)
+    name: macOS Build
     runs-on: macos-15
 
     steps:
@@ -99,7 +99,7 @@ jobs:
           retention-days: 1
 
   stress-tests:
-    name: Stress Test (macOS)
+    name: macOS Tests
     needs: build
     if: ${{ needs.build.result == 'success' }}
     uses: ./.github/workflows/stress-test-macos.yml

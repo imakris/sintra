@@ -30,7 +30,7 @@ on:
 
 jobs:
   build:
-    name: Build (Windows)
+    name: Windows Build
     runs-on: windows-latest
 
     steps:
@@ -166,7 +166,7 @@ jobs:
           retention-days: 1
 
   stress-tests:
-    name: Stress Test (Windows)
+    name: Windows Tests
     needs: build
     if: ${{ needs.build.result == 'success' }}
     uses: ./.github/workflows/stress-test-windows.yml
