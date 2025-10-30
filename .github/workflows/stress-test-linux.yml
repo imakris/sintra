@@ -24,7 +24,8 @@ on:
         required: false
         type: string
     secrets:
-      GITHUB_TOKEN:
+      repository-token:
+        description: "GitHub token forwarded from the caller workflow"
         required: true
 
 permissions:
@@ -40,6 +41,8 @@ jobs:
   stress-test:
     name: Stress Test - Linux
     runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: ${{ secrets.repository-token }}
 
     steps:
       - name: Set context env
@@ -168,7 +171,7 @@ jobs:
         with:
           name: linux-build-${{ env.HEAD_SHA }}
           path: build/
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          github-token: ${{ secrets.repository-token }}
           run-id: ${{ env.RUN_ID }}
           if-no-artifact-found: error
 
