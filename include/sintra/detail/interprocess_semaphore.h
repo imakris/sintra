@@ -3,9 +3,16 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdarg>
+#include <cctype>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <limits>
+#include <mutex>
+#include <random>
 #include <stdexcept>
 #include <system_error>
-#include <random>
 
 #if defined(_WIN32)
   #ifndef NOMINMAX
@@ -24,6 +31,7 @@
 #elif defined(__APPLE__)
   #include <cerrno>
   #include <ctime>
+  #include <pthread.h>
   #if defined(__has_include)
     #if __has_include(<os/os_sync_wait_on_address.h>) && __has_include(<os/clock.h>)
       #include <os/os_sync_wait_on_address.h>
@@ -51,6 +59,96 @@ namespace sintra::detail
 {
 namespace interprocess_semaphore_detail
 {
+#if defined(__APPLE__)
+    class os_sync_trace
+    {
+    public:
+        static bool enabled()
+        {
+            static const bool value = [] {
+                if (const char* env = std::getenv("SINTRA_OS_SYNC_TRACE")) {
+                    if (env[0] == '\0') {
+                        return false;
+                    }
+                    if (matches_ignore_case(env, "0") || matches_ignore_case(env, "false") ||
+                        matches_ignore_case(env, "off") || matches_ignore_case(env, "no")) {
+                        return false;
+                    }
+                    return true;
+                }
+                return true;
+            }();
+            return value;
+        }
+
+        static void log(const char* fmt, ...)
+        {
+            if (!enabled()) {
+                return;
+            }
+
+            std::lock_guard<std::mutex> guard(mutex());
+            std::FILE* destination = stream();
+
+            auto now = std::chrono::system_clock::now().time_since_epoch();
+            auto seconds = std::chrono::duration_cast<std::chrono::seconds>(now);
+            auto nanos = std::chrono::duration_cast<std::chrono::nanoseconds>(now - seconds);
+
+            std::fprintf(
+                destination,
+                "[%lld.%09lld pid=%ld tid=%p] ",
+                static_cast<long long>(seconds.count()),
+                static_cast<long long>(nanos.count()),
+                static_cast<long>(::getpid()),
+                reinterpret_cast<void*>(pthread_self()));
+
+            va_list args;
+            va_start(args, fmt);
+            std::vfprintf(destination, fmt, args);
+            va_end(args);
+
+            std::fprintf(destination, "\n");
+            std::fflush(destination);
+        }
+
+    private:
+        static bool matches_ignore_case(const char* value, const char* literal)
+        {
+            while (*value && *literal) {
+                if (std::tolower(static_cast<unsigned char>(*value)) !=
+                    std::tolower(static_cast<unsigned char>(*literal))) {
+                    return false;
+                }
+                ++value;
+                ++literal;
+            }
+            return *value == '\0' && *literal == '\0';
+        }
+
+        static std::mutex& mutex()
+        {
+            static std::mutex instance;
+            return instance;
+        }
+
+        static std::FILE* stream()
+        {
+            static std::FILE* instance = [] {
+                if (const char* path = std::getenv("SINTRA_OS_SYNC_TRACE_FILE")) {
+                    if (path[0] != '\0') {
+                        if (std::FILE* file = std::fopen(path, "a")) {
+                            ::setvbuf(file, nullptr, _IOLBF, 0);
+                            return file;
+                        }
+                    }
+                }
+                return stderr;
+            }();
+            return instance;
+        }
+    };
+#endif
+
     inline uint64_t generate_global_identifier()
     {
         static const uint64_t process_entropy = [] {
@@ -406,40 +504,10 @@ private:
 
 #ifdef OS_CLOCK_MACH_ABSOLUTE_TIME
     static constexpr os_clockid_t wait_clock = OS_CLOCK_MACH_ABSOLUTE_TIME;
-
-    static uint64_t nanoseconds_to_mach_absolute_ticks(uint64_t timeout_ns)
-    {
-        if (timeout_ns == 0) {
-            return 0;
-        }
-
-        static const mach_timebase_info_data_t timebase = [] {
-            mach_timebase_info_data_t info{};
-            (void)mach_timebase_info(&info);
-            return info;
-        }();
-
-        unsigned __int128 absolute_delta = static_cast<unsigned __int128>(timeout_ns) *
-                                           static_cast<unsigned __int128>(timebase.denom);
-        absolute_delta += static_cast<unsigned __int128>(timebase.numer - 1);
-        absolute_delta /= static_cast<unsigned __int128>(timebase.numer);
-
-        return static_cast<uint64_t>(absolute_delta);
-    }
 #elif defined(OS_CLOCK_MONOTONIC)
     static constexpr os_clockid_t wait_clock = OS_CLOCK_MONOTONIC;
-
-    static uint64_t nanoseconds_to_mach_absolute_ticks(uint64_t timeout_ns)
-    {
-        return timeout_ns;
-    }
 #elif defined(CLOCK_MONOTONIC)
     static constexpr os_clockid_t wait_clock = static_cast<os_clockid_t>(CLOCK_MONOTONIC);
-
-    static uint64_t nanoseconds_to_mach_absolute_ticks(uint64_t timeout_ns)
-    {
-        return timeout_ns;
-    }
 #else
 #   error "No supported monotonic clock id available for os_sync_wait_on_address_with_timeout"
 #endif
@@ -447,6 +515,12 @@ private:
     void initialise_os_sync(unsigned int initial_count)
     {
         m_os_sync.count.store(static_cast<int32_t>(initial_count), std::memory_order_relaxed);
+#if defined(__APPLE__)
+        interprocess_semaphore_detail::os_sync_trace::log(
+            "initialise_os_sync initial_count=%u address=%p",
+            initial_count,
+            reinterpret_cast<void*>(&m_os_sync.count));
+#endif
     }
 
     void teardown_os_sync() noexcept {}
@@ -454,6 +528,13 @@ private:
     void post_os_sync()
     {
         int32_t previous = m_os_sync.count.fetch_add(1, std::memory_order_release);
+#if defined(__APPLE__)
+        interprocess_semaphore_detail::os_sync_trace::log(
+            "post_os_sync previous=%d new_value=%d address=%p",
+            static_cast<int>(previous),
+            static_cast<int>(previous + 1),
+            reinterpret_cast<void*>(&m_os_sync.count));
+#endif
         if (previous < 0) {
             wake_one_waiter();
         }
@@ -462,13 +543,33 @@ private:
     void wait_os_sync()
     {
         int32_t previous = m_os_sync.count.fetch_sub(1, std::memory_order_acq_rel);
+#if defined(__APPLE__)
+        interprocess_semaphore_detail::os_sync_trace::log(
+            "wait_os_sync previous=%d new_value=%d address=%p",
+            static_cast<int>(previous),
+            static_cast<int>(previous - 1),
+            reinterpret_cast<void*>(&m_os_sync.count));
+#endif
         if (previous > 0) {
+#if defined(__APPLE__)
+            interprocess_semaphore_detail::os_sync_trace::log("wait_os_sync satisfied_without_wait previous=%d", static_cast<int>(previous));
+#endif
             return;
         }
 
         int32_t expected = previous - 1;
         while (true) {
+#if defined(__APPLE__)
+            interprocess_semaphore_detail::os_sync_trace::log(
+                "wait_os_sync waiting expected=%d",
+                static_cast<int>(expected));
+#endif
             int32_t observed = wait_on_address_blocking(expected);
+#if defined(__APPLE__)
+            interprocess_semaphore_detail::os_sync_trace::log(
+                "wait_os_sync wake observed=%d",
+                static_cast<int>(observed));
+#endif
             if (observed >= 0) {
                 return;
             }
@@ -494,12 +595,26 @@ private:
     {
         if (remaining <= std::chrono::nanoseconds::zero()) {
             observed = m_os_sync.count.load(std::memory_order_acquire);
+#if defined(__APPLE__)
+            interprocess_semaphore_detail::os_sync_trace::log(
+                "wait_os_sync_with_timeout immediate_timeout expected=%d observed=%d remaining_ns=%lld",
+                static_cast<int>(expected),
+                static_cast<int>(observed),
+                static_cast<long long>(remaining.count()));
+#endif
             return false;
         }
 
         auto count = remaining.count();
         if (count <= 0) {
             observed = m_os_sync.count.load(std::memory_order_acquire);
+#if defined(__APPLE__)
+            interprocess_semaphore_detail::os_sync_trace::log(
+                "wait_os_sync_with_timeout non_positive_duration expected=%d observed=%d duration_ns=%lld",
+                static_cast<int>(expected),
+                static_cast<int>(observed),
+                static_cast<long long>(count));
+#endif
             return false;
         }
 
@@ -507,50 +622,117 @@ private:
 
         while (true) {
             uint64_t expected_value = static_cast<uint32_t>(expected);
-            const uint64_t timeout_value = nanoseconds_to_mach_absolute_ticks(timeout_ns);
+#if defined(__APPLE__)
+            interprocess_semaphore_detail::os_sync_trace::log(
+                "wait_os_sync_with_timeout attempt expected=%d expected_value=%u remaining_ns=%llu timeout_ns=%llu address=%p",
+                static_cast<int>(expected),
+                static_cast<unsigned>(expected_value),
+                static_cast<unsigned long long>(timeout_ns),
+                static_cast<unsigned long long>(timeout_ns),
+                reinterpret_cast<void*>(&m_os_sync.count));
+#endif
             int rc = os_sync_wait_on_address_with_timeout(
                 reinterpret_cast<void*>(&m_os_sync.count),
                 expected_value,
                 sizeof(int32_t),
                 wait_flags,
                 wait_clock,
-                timeout_value);
+                timeout_ns);
+            int saved_errno = errno;
+#if defined(__APPLE__)
+            interprocess_semaphore_detail::os_sync_trace::log(
+                "wait_os_sync_with_timeout result rc=%d errno=%d count_snapshot=%d",
+                rc,
+                saved_errno,
+                static_cast<int>(m_os_sync.count.load(std::memory_order_acquire)));
+#endif
             if (rc >= 0) {
                 observed = m_os_sync.count.load(std::memory_order_acquire);
                 return true;
             }
-            if (errno == ETIMEDOUT) {
+            if (saved_errno == ETIMEDOUT) {
                 observed = m_os_sync.count.load(std::memory_order_acquire);
+#if defined(__APPLE__)
+                interprocess_semaphore_detail::os_sync_trace::log(
+                    "wait_os_sync_with_timeout timeout observed=%d",
+                    static_cast<int>(observed));
+#endif
                 return false;
             }
-            if (errno == EINTR || errno == EFAULT) {
+            if (saved_errno == EINTR || saved_errno == EFAULT) {
+                errno = saved_errno;
+#if defined(__APPLE__)
+                interprocess_semaphore_detail::os_sync_trace::log(
+                    "wait_os_sync_with_timeout retry errno=%d",
+                    saved_errno);
+#endif
                 continue;
             }
-            throw std::system_error(errno, std::generic_category(), "os_sync_wait_on_address_with_timeout");
+            errno = saved_errno;
+#if defined(__APPLE__)
+            interprocess_semaphore_detail::os_sync_trace::log(
+                "wait_os_sync_with_timeout throwing errno=%d expected=%d",
+                saved_errno,
+                static_cast<int>(expected));
+#endif
+            throw std::system_error(saved_errno, std::generic_category(), "os_sync_wait_on_address_with_timeout");
         }
     }
 
     void cancel_wait_os_sync()
     {
         m_os_sync.count.fetch_add(1, std::memory_order_acq_rel);
+#if defined(__APPLE__)
+        interprocess_semaphore_detail::os_sync_trace::log(
+            "cancel_wait_os_sync new_value=%d",
+            static_cast<int>(m_os_sync.count.load(std::memory_order_acquire)));
+#endif
     }
 
     int32_t wait_on_address_blocking(int32_t expected)
     {
         while (true) {
             uint64_t expected_value = static_cast<uint32_t>(expected);
+#if defined(__APPLE__)
+            interprocess_semaphore_detail::os_sync_trace::log(
+                "wait_on_address_blocking attempt expected=%d expected_value=%u address=%p",
+                static_cast<int>(expected),
+                static_cast<unsigned>(expected_value),
+                reinterpret_cast<void*>(&m_os_sync.count));
+#endif
             int rc = os_sync_wait_on_address(
                 reinterpret_cast<void*>(&m_os_sync.count),
                 expected_value,
                 sizeof(int32_t),
                 wait_flags);
+            int saved_errno = errno;
+#if defined(__APPLE__)
+            interprocess_semaphore_detail::os_sync_trace::log(
+                "wait_on_address_blocking result rc=%d errno=%d count_snapshot=%d",
+                rc,
+                saved_errno,
+                static_cast<int>(m_os_sync.count.load(std::memory_order_acquire)));
+#endif
             if (rc >= 0) {
                 return m_os_sync.count.load(std::memory_order_acquire);
             }
-            if (errno == EINTR || errno == EFAULT) {
+            if (saved_errno == EINTR || saved_errno == EFAULT) {
+                errno = saved_errno;
+#if defined(__APPLE__)
+                interprocess_semaphore_detail::os_sync_trace::log(
+                    "wait_on_address_blocking retry errno=%d",
+                    saved_errno);
+#endif
                 continue;
             }
-            throw std::system_error(errno, std::generic_category(), "os_sync_wait_on_address");
+            errno = saved_errno;
+#if defined(__APPLE__)
+            interprocess_semaphore_detail::os_sync_trace::log(
+                "wait_on_address_blocking throwing errno=%d expected=%d",
+                saved_errno,
+                static_cast<int>(expected));
+#endif
+            throw std::system_error(saved_errno, std::generic_category(), "os_sync_wait_on_address");
         }
     }
 
@@ -561,18 +743,36 @@ private:
                 reinterpret_cast<void*>(&m_os_sync.count),
                 sizeof(int32_t),
                 wake_flags);
+            int saved_errno = errno;
+#if defined(__APPLE__)
+            interprocess_semaphore_detail::os_sync_trace::log(
+                "wake_one_waiter result rc=%d errno=%d count_snapshot=%d",
+                rc,
+                saved_errno,
+                static_cast<int>(m_os_sync.count.load(std::memory_order_acquire)));
+#endif
             if (rc == 0) {
                 return;
             }
             if (rc == -1) {
-                if (errno == ENOENT) {
+                if (saved_errno == ENOENT) {
                     return;
                 }
-                if (errno == EINTR) {
+                if (saved_errno == EINTR) {
+                    errno = saved_errno;
+#if defined(__APPLE__)
+                    interprocess_semaphore_detail::os_sync_trace::log("wake_one_waiter retry errno=EINTR");
+#endif
                     continue;
                 }
             }
-            throw std::system_error(errno, std::generic_category(), "os_sync_wake_by_address_any");
+            errno = saved_errno;
+#if defined(__APPLE__)
+            interprocess_semaphore_detail::os_sync_trace::log(
+                "wake_one_waiter throwing errno=%d",
+                saved_errno);
+#endif
+            throw std::system_error(saved_errno, std::generic_category(), "os_sync_wake_by_address_any");
         }
     }
 #else
