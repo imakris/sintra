@@ -1,11 +1,15 @@
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <random>
 #include <stdexcept>
+#include <string>
 #include <system_error>
 
 #if defined(_WIN32)
@@ -319,14 +323,14 @@ public:
                 return false;
             }
 
-            uint64_t deadline_value = make_os_sync_deadline(remaining);
-            if (deadline_value == 0) {
+            auto deadline = make_os_sync_deadline(remaining);
+            if (deadline.absolute == 0) {
                 cancel_wait_os_sync();
                 return false;
             }
 
             int32_t observed = expected;
-            if (!wait_os_sync_until(expected, deadline_value, observed)) {
+            if (!wait_os_sync_until(expected, deadline, observed)) {
                 if (observed >= 0) {
                     return true;
                 }
@@ -495,32 +499,100 @@ private:
         return lhs + rhs;
     }
 
-    static uint64_t make_os_sync_deadline(std::chrono::nanoseconds remaining)
+    struct os_sync_deadline_info
+    {
+        uint64_t absolute = 0;
+        uint64_t requested_ns = 0;
+        uint64_t converted_delta = 0;
+        uint64_t reference_now = 0;
+    };
+
+    static bool os_sync_debug_enabled()
+    {
+        static const bool enabled = [] {
+            const char* value = std::getenv("SINTRA_DEBUG_OS_SYNC");
+            return value != nullptr && value[0] != '\0';
+        }();
+        return enabled;
+    }
+
+    static void log_os_sync_wait_event(const char* event,
+                                       int32_t expected,
+                                       const os_sync_deadline_info& deadline,
+                                       uint64_t now_snapshot,
+                                       int error = 0)
+    {
+        if (!os_sync_debug_enabled()) {
+            return;
+        }
+
+        std::fprintf(stderr,
+                     "[sintra][os_sync] %s expected=%d deadline=%llu now=%llu requested_ns=%llu converted=%llu reference_now=%llu error=%d\n",
+                     event,
+                     static_cast<int>(expected),
+                     static_cast<unsigned long long>(deadline.absolute),
+                     static_cast<unsigned long long>(now_snapshot),
+                     static_cast<unsigned long long>(deadline.requested_ns),
+                     static_cast<unsigned long long>(deadline.converted_delta),
+                     static_cast<unsigned long long>(deadline.reference_now),
+                     error);
+        std::fflush(stderr);
+    }
+
+    static std::string make_os_sync_error_message(int32_t expected,
+                                                  const os_sync_deadline_info& deadline,
+                                                  int error,
+                                                  uint64_t now_snapshot)
+    {
+        std::array<char, 256> buffer{};
+        std::snprintf(buffer.data(),
+                      buffer.size(),
+                      "os_sync_wait_on_address_with_timeout(expected=%d, deadline=%llu, now=%llu, requested_ns=%llu, converted=%llu, reference_now=%llu, errno=%d)",
+                      static_cast<int>(expected),
+                      static_cast<unsigned long long>(deadline.absolute),
+                      static_cast<unsigned long long>(now_snapshot),
+                      static_cast<unsigned long long>(deadline.requested_ns),
+                      static_cast<unsigned long long>(deadline.converted_delta),
+                      static_cast<unsigned long long>(deadline.reference_now),
+                      error);
+        return std::string(buffer.data());
+    }
+
+    static os_sync_deadline_info make_os_sync_deadline(std::chrono::nanoseconds remaining)
     {
         using namespace std::chrono;
 
+        os_sync_deadline_info deadline;
+
         if (remaining <= nanoseconds::zero()) {
-            return 0;
+            return deadline;
         }
 
         const auto count = remaining.count();
         if (count <= 0) {
-            return 0;
+            return deadline;
         }
 
-        uint64_t delta_ns = static_cast<uint64_t>(count);
+        deadline.requested_ns = static_cast<uint64_t>(count);
 
-        uint64_t converted = convert_timeout_delta(delta_ns);
-        if (converted == 0) {
-            converted = 1;
+        deadline.converted_delta = convert_timeout_delta(deadline.requested_ns);
+        if (deadline.converted_delta == 0) {
+            deadline.converted_delta = 1;
         }
 
-        if (converted == std::numeric_limits<uint64_t>::max()) {
-            return converted;
+        deadline.reference_now = os_sync_now();
+
+        if (deadline.converted_delta == std::numeric_limits<uint64_t>::max()) {
+            deadline.absolute = std::numeric_limits<uint64_t>::max();
+            return deadline;
         }
 
-        uint64_t now = os_sync_now();
-        return saturating_add(now, converted);
+        deadline.absolute = saturating_add(deadline.reference_now, deadline.converted_delta);
+        if (deadline.absolute == std::numeric_limits<uint64_t>::max()) {
+            deadline.converted_delta = std::numeric_limits<uint64_t>::max();
+        }
+
+        return deadline;
     }
 
     void initialise_os_sync(unsigned int initial_count)
@@ -569,9 +641,15 @@ private:
         return false;
     }
 
-    bool wait_os_sync_until(int32_t expected, uint64_t deadline_value, int32_t& observed)
+    bool wait_os_sync_until(int32_t expected,
+                            const os_sync_deadline_info& deadline,
+                            int32_t& observed)
     {
-        if (deadline_value == 0) {
+        if (deadline.absolute == 0) {
+            if (os_sync_debug_enabled()) {
+                const uint64_t now_snapshot = os_sync_now();
+                log_os_sync_wait_event("deadline-expired", expected, deadline, now_snapshot);
+            }
             observed = m_os_sync.count.load(std::memory_order_acquire);
             return false;
         }
@@ -584,19 +662,33 @@ private:
                 sizeof(int32_t),
                 wait_flags,
                 wait_clock,
-                deadline_value);
+                deadline.absolute);
             if (rc >= 0) {
                 observed = m_os_sync.count.load(std::memory_order_acquire);
                 return true;
             }
-            if (errno == ETIMEDOUT) {
+            int error = errno;
+            if (error == ETIMEDOUT) {
+                if (os_sync_debug_enabled()) {
+                    const uint64_t now_snapshot = os_sync_now();
+                    log_os_sync_wait_event("timeout", expected, deadline, now_snapshot, error);
+                }
                 observed = m_os_sync.count.load(std::memory_order_acquire);
                 return false;
             }
-            if (errno == EINTR || errno == EFAULT) {
+            if (error == EINTR || error == EFAULT) {
+                if (os_sync_debug_enabled()) {
+                    const uint64_t now_snapshot = os_sync_now();
+                    log_os_sync_wait_event("retry", expected, deadline, now_snapshot, error);
+                }
                 continue;
             }
-            throw std::system_error(errno, std::generic_category(), "os_sync_wait_on_address_with_timeout");
+            const uint64_t now_snapshot = os_sync_now();
+            log_os_sync_wait_event("error", expected, deadline, now_snapshot, error);
+            throw std::system_error(
+                error,
+                std::generic_category(),
+                make_os_sync_error_message(expected, deadline, error, now_snapshot));
         }
     }
 
