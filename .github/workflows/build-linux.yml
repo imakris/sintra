@@ -145,7 +145,8 @@ jobs:
     needs: build
     if: ${{ needs.build.result == 'success' }}
     uses: ./.github/workflows/stress-test-linux.yml
-    secrets: inherit
+    secrets:
+      repository-token: ${{ secrets.GITHUB_TOKEN }}
     with:
       build_run_id: ${{ github.run_id }}
       head_sha: ${{ github.event.pull_request.head.sha || github.sha }}
