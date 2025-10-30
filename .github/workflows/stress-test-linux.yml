@@ -130,13 +130,21 @@ jobs:
         run: gdb --version
 
       - name: Download build artifacts
+        id: download-artifacts
         uses: actions/download-artifact@v4
         with:
           name: linux-build-${{ github.event.workflow_run.head_sha }}
           path: build/
           github-token: ${{ github.token }}
           run-id: ${{ github.event.workflow_run.id }}
-          if-no-artifact-found: error
+
+      - name: Verify build artifacts were downloaded
+        run: |
+          set -euo pipefail
+          if [ ! -d build ] || [ -z "$(ls -A build)" ]; then
+            echo "::error::Expected build artifacts were not downloaded from the build workflow." >&2
+            exit 1
+          fi
 
       - name: Setup Python
         uses: actions/setup-python@v5

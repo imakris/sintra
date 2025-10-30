@@ -155,13 +155,27 @@ jobs:
           }
 
       - name: Download build artifacts
+        id: download-artifacts
         uses: actions/download-artifact@v4
         with:
           name: windows-build-${{ github.event.workflow_run.head_sha }}
           path: build/
           github-token: ${{ github.token }}
           run-id: ${{ github.event.workflow_run.id }}
-          if-no-artifact-found: error
+
+      - name: Verify build artifacts were downloaded
+        shell: pwsh
+        run: |
+          if (-not (Test-Path 'build')) {
+            Write-Error 'Expected build artifact directory "build" is missing.'
+            exit 1
+          }
+
+          $entries = Get-ChildItem -Path 'build' -Force -ErrorAction Stop
+          if (-not $entries) {
+            Write-Error 'Downloaded build artifact directory "build" is empty.'
+            exit 1
+          }
 
       - name: Setup Python
         uses: actions/setup-python@v5
