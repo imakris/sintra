@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   stress-test:
-    name: Stress Test
+    name: Stress Test - macOS
     runs-on: macos-14
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
 
