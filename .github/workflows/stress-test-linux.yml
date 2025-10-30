@@ -94,6 +94,7 @@ jobs:
               }
               if (Date.now() > deadline) {
                 core.setFailed('Timed out waiting for build run to complete');
+                break;
               }
               await new Promise(r => setTimeout(r, 30000));
             }
