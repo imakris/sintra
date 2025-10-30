@@ -1,4 +1,4 @@
-name: Stress Test - Linux
+name: Stress Test - Linux (reusable)
 
 on:
   workflow_call:

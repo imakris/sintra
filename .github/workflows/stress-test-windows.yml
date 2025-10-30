@@ -1,4 +1,4 @@
-name: Stress Test - Windows
+name: Stress Test - Windows (reusable)
 
 on:
   workflow_call:
