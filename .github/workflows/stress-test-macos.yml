@@ -102,7 +102,6 @@ jobs:
           path: build/
           github-token: ${{ github.token }}
           run-id: ${{ github.event.workflow_run.id }}
-          if-no-artifact-found: error
 
       - name: Setup Python
         uses: actions/setup-python@v5
