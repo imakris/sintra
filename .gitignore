@@ -16,3 +16,4 @@ CMakeUserPresets.json
 # Third-party downloads (temporary)
 /third_party/boost_*/
 /third_party/*.tar.gz
+__pycache__/
