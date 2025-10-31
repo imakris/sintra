@@ -3450,6 +3450,10 @@ def main():
                         if remaining_repetitions[test_name] <= 0:
                             continue
 
+                        # Print placeholder progress marker immediately so long-running
+                        # tests still give visible feedback in CI logs.
+                        print(".", end="", flush=True)
+
                         result = runner.run_test_once(invocation)
 
                         accumulated_results[test_name]['durations'].append(result.duration)
@@ -3458,7 +3462,8 @@ def main():
 
                         if result.success:
                             result_bucket['passed'] += 1
-                            print(f"{Color.GREEN}.{Color.RESET}", end="", flush=True)
+                            # Recolor the placeholder dot we printed before the run.
+                            print(f"\b{Color.GREEN}.{Color.RESET}", end="", flush=True)
                         else:
                             result_bucket['failed'] += 1
                             suite_all_passed = False
@@ -3477,7 +3482,7 @@ def main():
                                 'message': error_message if error_message else first_line,
                             })
 
-                            print(f"{Color.RED}F{Color.RESET}", end="", flush=True)
+                            print(f"\b{Color.RED}F{Color.RESET}", end="", flush=True)
 
                         remaining_repetitions[test_name] -= 1
 
