@@ -13,6 +13,7 @@
 #include <random>
 #include <stdexcept>
 #include <system_error>
+#include <thread>
 
 #if defined(_WIN32)
   #ifndef NOMINMAX
@@ -47,6 +48,8 @@
   #ifdef OS_CLOCK_MACH_ABSOLUTE_TIME
     #include <mach/mach_time.h>
   #endif
+  #include <signal.h>
+  #include <sys/wait.h>
 #else
   #include <cerrno>
   #include <semaphore.h>
@@ -156,7 +159,7 @@ namespace interprocess_semaphore_detail
     // NOTE: Sintra intentionally hard-requires that macOS honours nanosecond
     //       timeouts for os_sync_wait_on_address_with_timeout. If the probe
     //       below ever reports EINVAL, do NOT add a fallback conversion or
-    //       compatibility modeâ€”raise an error and update the platform instead.
+    //       compatibility mode—raise an error and update the platform instead.
     inline void ensure_os_sync_timeout_support()
     {
         static std::once_flag probe_once;
@@ -167,14 +170,11 @@ namespace interprocess_semaphore_detail
                 throw std::system_error(errno, std::system_category(), "mmap failed while probing os_sync_wait_on_address_with_timeout");
             }
 
-            auto cleanup_mapping = [&]() {
-                ::munmap(mapping, probe_size);
-            };
-
             auto* probe_ptr = static_cast<std::atomic<int32_t>*>(mapping);
             new (probe_ptr) std::atomic<int32_t>(0);
 
             constexpr uint64_t probe_timeout_ns = 1'000'000; // 1 ms
+            const auto probe_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
 
 #if defined(OS_CLOCK_MACH_ABSOLUTE_TIME)
             constexpr os_clockid_t probe_clock = OS_CLOCK_MACH_ABSOLUTE_TIME;
@@ -186,30 +186,59 @@ namespace interprocess_semaphore_detail
 #   error "No supported monotonic clock id available for os_sync_wait_on_address_with_timeout"
 #endif
 
-            errno = 0;
-            uint64_t expected = static_cast<uint32_t>(probe_ptr->load(std::memory_order_relaxed));
-            int rc = os_sync_wait_on_address_with_timeout(
-                static_cast<void*>(probe_ptr),
-                expected,
-                sizeof(int32_t),
-                OS_SYNC_WAIT_ON_ADDRESS_SHARED,
-                probe_clock,
-                probe_timeout_ns);
-            int saved_errno = errno;
-
-            interprocess_semaphore_detail::os_sync_trace::log(
-                "os_sync_wait_on_address_with_timeout probe rc=%d errno=%d",
-                rc,
-                saved_errno);
-
-            if (rc == -1 && saved_errno == ETIMEDOUT) {
-                cleanup_mapping();
-                return;
+            pid_t child = ::fork();
+            if (child == -1) {
+                ::munmap(mapping, probe_size);
+                throw std::system_error(errno, std::system_category(), "fork failed while probing os_sync_wait_on_address_with_timeout");
             }
 
-            cleanup_mapping();
+            if (child == 0) {
+                errno = 0;
+                uint64_t expected = static_cast<uint32_t>(probe_ptr->load(std::memory_order_relaxed));
+                int rc = os_sync_wait_on_address_with_timeout(
+                    static_cast<void*>(probe_ptr),
+                    expected,
+                    sizeof(int32_t),
+                    OS_SYNC_WAIT_ON_ADDRESS_SHARED,
+                    probe_clock,
+                    probe_timeout_ns);
+                int saved_errno = errno;
+                ::_exit((rc == -1 && saved_errno == ETIMEDOUT) ? 0 : (rc == -1 && saved_errno == EINVAL ? 2 : 1));
+            }
 
-            if (rc == -1 && saved_errno == EINVAL) {
+            int status = 0;
+            while (true) {
+                pid_t result = ::waitpid(child, &status, WNOHANG);
+                if (result == child) {
+                    break;
+                }
+                if (result == -1) {
+                    int wait_error = errno;
+                    ::kill(child, SIGKILL);
+                    ::waitpid(child, nullptr, 0);
+                    ::munmap(mapping, probe_size);
+                    throw std::system_error(wait_error, std::system_category(), "waitpid failed while probing os_sync_wait_on_address_with_timeout");
+                }
+                if (std::chrono::steady_clock::now() >= probe_deadline) {
+                    ::kill(child, SIGKILL);
+                    ::waitpid(child, nullptr, 0);
+                    ::munmap(mapping, probe_size);
+                    throw std::runtime_error("os_sync_wait_on_address_with_timeout probe hung; nanosecond timeout support could not be verified.");
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+
+            ::munmap(mapping, probe_size);
+
+            if (!WIFEXITED(status)) {
+                throw std::runtime_error("os_sync_wait_on_address_with_timeout probe exited abnormally; nanosecond support could not be verified.");
+            }
+
+            int exit_code = WEXITSTATUS(status);
+            if (exit_code == 0) {
+                return;
+            }
+            if (exit_code == 2) {
                 throw std::runtime_error(
                     "macOS kernel rejected nanosecond timeouts for os_sync_wait_on_address_with_timeout; "
                     "nanosecond support is required. Please update macOS or install the latest Xcode Command Line Tools.");
@@ -874,4 +903,5 @@ private:
 }; 
 
 } // namespace sintra::detail
+
 
