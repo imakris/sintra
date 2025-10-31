@@ -3419,12 +3419,30 @@ def main():
             suite_all_passed = True
             batch_size = 1
 
-            # Print test plan for this suite
+            # Print test plan table for this suite
             print("\n  Test order:")
+
+            # Calculate column widths
+            id_col_width = 4
+            name_col_width = max([len(_canonical_test_name(inv.name)) for inv in tests] + [4]) + 2
+            reps_col_width = 12
+
+            # Create format strings
+            header_fmt = f"  {{:<{id_col_width}}} {{:<{name_col_width}}} {{:>{reps_col_width}}}"
+            row_fmt = header_fmt
+            table_width = id_col_width + name_col_width + reps_col_width + 4
+
+            # Print table
+            print("  " + "=" * table_width)
+            print(header_fmt.format('ID', 'Name', 'Repetitions'))
+            print("  " + "=" * table_width)
+
             for idx, invocation in enumerate(tests, start=1):
                 canonical_name = _canonical_test_name(invocation.name)
                 reps = target_repetitions[invocation.name]
-                print(f"    {idx:02d}. {canonical_name}: {reps} repetition(s)")
+                print(row_fmt.format(f"{idx:02d}", canonical_name, reps))
+
+            print("  " + "=" * table_width)
 
             # Create header for round display
             header = " ".join(f"{index + 1:02d}" for index, _ in enumerate(tests))
@@ -3616,6 +3634,11 @@ def main():
                             print(f"    ... and {remaining} more failure(s)")
                 print(f"\n{Color.RED}Stopping - suite {config_name} failed{Color.RESET}")
                 break
+
+            # Add spacing between suites if not the last one
+            if config_idx < total_configs:
+                print()
+                print()
 
         # Final summary
         total_duration = time.time() - overall_start_time
