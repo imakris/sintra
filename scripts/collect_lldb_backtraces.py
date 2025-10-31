@@ -36,6 +36,12 @@ def parse_args() -> argparse.Namespace:
         default='xcrun lldb --batch -o run -o "thread backtrace all" --',
         help="LLDB invocation used to rerun failing tests in batch mode.",
     )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=120.0,
+        help="Maximum seconds to wait for each LLDB rerun before terminating it.",
+    )
     return parser.parse_args()
 
 
@@ -90,6 +96,7 @@ def run_lldb_for_tests(
     *,
     lldb_cmd: Sequence[str],
     build_dir: Path,
+    timeout: float,
 ) -> None:
     reruns: List[Tuple[str, Sequence[str], str | None]] = []
     for name in failing_tests:
@@ -106,12 +113,21 @@ def run_lldb_for_tests(
         return
 
     for name, command, workdir in reruns:
+        print("i am starting")
+        sys.stdout.flush()
         print(f"::group::LLDB backtrace for {name}")
         sys.stdout.flush()
         cwd = Path(workdir) if workdir else build_dir
         try:
-            subprocess.run([*lldb_cmd, *command], cwd=cwd, check=False)
+            subprocess.run([*lldb_cmd, *command], cwd=cwd, check=False, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            print(
+                f"::error::LLDB rerun for {name} exceeded {timeout} seconds and was terminated.",
+                file=sys.stderr,
+            )
         finally:
+            print("i am finished")
+            sys.stdout.flush()
             print("::endgroup::")
             sys.stdout.flush()
 
@@ -135,7 +151,13 @@ def main() -> int:
         return 0
 
     lldb_cmd = shlex.split(args.lldb)
-    run_lldb_for_tests(failing_tests, metadata, lldb_cmd=lldb_cmd, build_dir=build_dir)
+    run_lldb_for_tests(
+        failing_tests,
+        metadata,
+        lldb_cmd=lldb_cmd,
+        build_dir=build_dir,
+        timeout=args.timeout,
+    )
     return 0
 
 
