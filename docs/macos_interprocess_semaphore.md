@@ -2,10 +2,7 @@
 
 ## Root cause summary
 
-The always-on trace paid off: the failing run captured the precise syscall arguments that
-triggered macOS to abort the semaphore test. The relevant excerpt (timestamps truncated for
-brevity) shows the timed wait supplying an enormous `timeout_value` (logged before the fix)
-immediately before the kernel returned `EINVAL`:
+The always-on trace paid off: the failing run captured the precise syscall arguments that triggered macOS to abort the semaphore test. The relevant excerpt (timestamps truncated for brevity) shows the timed wait supplying an enormous `timeout_value` (logged before the fix) immediately before the kernel returned `EINVAL`:
 
 ```
 wait_os_sync_with_timeout attempt expected=-1 expected_value=4294967295 remaining_ns=79999584 timeout_value=1093079754750 address=0x16b371d9c
@@ -13,21 +10,15 @@ wait_os_sync_with_timeout result rc=-1 errno=22 count_snapshot=-1
 wait_os_sync_with_timeout throwing errno=22 expected=-1
 ```
 
-According to Apple's public header, `os_sync_wait_on_address_with_timeout` expects the final
-argument to be a *relative* timeout expressed in nanoseconds for the chosen clock id, not an
-absolute deadline. We were passing `mach_absolute_time() + delta` because the API surface looks
-similar to `os_sync_wait_on_address_with_deadline`. The kernel rightfully rejected those
-out-of-range values with `EINVAL`.
+According to Apple''s public header, `os_sync_wait_on_address_with_timeout` expects the final argument to be a *relative* timeout expressed in nanoseconds for the chosen clock id, not an absolute deadline. We were passing `mach_absolute_time() + delta` because the API surface looks similar to `os_sync_wait_on_address_with_deadline`. The kernel rightfully rejected those out-of-range values with `EINVAL`.
 
 ## Fix
 
-The macOS backend now forwards the remaining timeout directly, in nanoseconds, instead of converting it into an absolute `mach_absolute_time` tick count. When a kernel build still expects Mach tick units, the runtime detects the first `EINVAL`, flips a process-wide flag, and retries using converted tick values. If the kernel *still* refuses the call, the semaphore falls back to a cooperative polling loop that watches the counter, sleeps in short slices, and honours the original deadline. This keeps the documented fast path, restores compatibility with older kernels, and still provides bounded waits when both interpretations are rejected. a??F:include/sintra/detail/interprocess_semaphore.h�?�L500-L521a?`a??F:include/sintra/detail/interprocess_semaphore.h�?�L642-L790a?`
+The macOS backend now forwards the remaining timeout directly, in nanoseconds, instead of converting it into an absolute `mach_absolute_time` tick count. During initialisation we execute a single probe call to `os_sync_wait_on_address_with_timeout`; if the kernel responds with `EINVAL` we abort immediately with a diagnostic because nanosecond support is mandatory for Sintra. There is intentionally no compatibility mode or fallback.
 
 ## Instrumentation overview
 
-The trace hooks remain enabled so future macOS regressions will still produce detailed logs. The
-logger records counter transitions, syscall parameters, and the OS responses for every wait and
-wake path.【F:include/sintra/detail/interprocess_semaphore.h†L55-L176】【F:include/sintra/detail/interprocess_semaphore.h†L468-L582】
+The trace hooks remain enabled so future macOS regressions will still produce detailed logs. The logger records counter transitions, syscall parameters, and the OS responses for every wait and wake path.
 
 ### Enabling or redirecting the trace
 
@@ -40,8 +31,4 @@ wake path.【F:include/sintra/detail/interprocess_semaphore.h†L55-L176】【F:
 
 ### When to disable it
 
-Disable tracing only when you need noiseless output (for example, benchmarking). Otherwise it is
-lightweight and invaluable for diagnostics.
-
-
-
+Disable tracing only when you need noiseless output (for example, benchmarking). Otherwise it is lightweight and invaluable for diagnostics.
