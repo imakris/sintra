@@ -373,7 +373,13 @@ class TestInvocation:
 
 
 def _print_test_plan(test_suites: Dict[str, List['TestInvocation']], base_repetitions: int) -> None:
-    """Print numbered test order and the weighted repetition plan once at startup."""
+    """Print numbered test order and the weighted repetition plan once at startup.
+    
+    Args:
+        test_suites: Dictionary mapping configuration names ('debug', 'release') to 
+                     lists of TestInvocation objects
+        base_repetitions: Number of repetitions requested via --repetitions flag
+    """
     # Flatten in deterministic order, preserving discovery order inside each suite.
     all_invocations: List['TestInvocation'] = []
     for cfg in ("debug", "release"):
