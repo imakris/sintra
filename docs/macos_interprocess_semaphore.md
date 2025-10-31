@@ -21,9 +21,7 @@ out-of-range values with `EINVAL`.
 
 ## Fix
 
-The macOS backend now forwards the remaining timeout directly, in nanoseconds, instead of
-converting it into an absolute `mach_absolute_time` tick count. This aligns the call with the
-documented contract and removes the redundant conversion helpers.【F:include/sintra/detail/interprocess_semaphore.h†L500-L521】【F:include/sintra/detail/interprocess_semaphore.h†L642-L705】
+The macOS backend now forwards the remaining timeout directly, in nanoseconds, instead of converting it into an absolute mach_absolute_time tick count. When the kernel still responds with EINVAL (observed on runners that appear to require Mach absolute ticks) the code performs a single retry using the converted tick value. This keeps the fast path aligned with the documented API while maintaining compatibility with older behaviour.
 
 ## Instrumentation overview
 
@@ -44,3 +42,5 @@ wake path.【F:include/sintra/detail/interprocess_semaphore.h†L55-L176】【F:
 
 Disable tracing only when you need noiseless output (for example, benchmarking). Otherwise it is
 lightweight and invaluable for diagnostics.
+
+

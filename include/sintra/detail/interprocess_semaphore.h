@@ -618,64 +618,86 @@ private:
             return false;
         }
 
-        uint64_t timeout_ns = static_cast<uint64_t>(count);
+        const uint64_t base_timeout_ns = static_cast<uint64_t>(count);
 
         while (true) {
-            uint64_t expected_value = static_cast<uint32_t>(expected);
-#if defined(__APPLE__)
-            interprocess_semaphore_detail::os_sync_trace::log(
-                "wait_os_sync_with_timeout attempt expected=%d expected_value=%u remaining_ns=%llu timeout_arg_ns=%llu address=%p",
-                static_cast<int>(expected),
-                static_cast<unsigned>(expected_value),
-                static_cast<unsigned long long>(timeout_ns),
-                static_cast<unsigned long long>(timeout_ns),
-                reinterpret_cast<void*>(&m_os_sync.count));
-#endif
-            int rc = os_sync_wait_on_address_with_timeout(
-                reinterpret_cast<void*>(&m_os_sync.count),
-                expected_value,
-                sizeof(int32_t),
-                wait_flags,
-                wait_clock,
-                timeout_ns);
-            int saved_errno = errno;
-#if defined(__APPLE__)
-            interprocess_semaphore_detail::os_sync_trace::log(
-                "wait_os_sync_with_timeout result rc=%d errno=%d count_snapshot=%d",
-                rc,
-                saved_errno,
-                static_cast<int>(m_os_sync.count.load(std::memory_order_acquire)));
-#endif
-            if (rc >= 0) {
-                observed = m_os_sync.count.load(std::memory_order_acquire);
-                return true;
-            }
-            if (saved_errno == ETIMEDOUT) {
-                observed = m_os_sync.count.load(std::memory_order_acquire);
+            uint64_t timeout_arg = base_timeout_ns;
+            bool attempted_mach_ticks = false;
+
+            while (true) {
+                uint64_t expected_value = static_cast<uint32_t>(expected);
 #if defined(__APPLE__)
                 interprocess_semaphore_detail::os_sync_trace::log(
-                    "wait_os_sync_with_timeout timeout observed=%d",
-                    static_cast<int>(observed));
+                    "wait_os_sync_with_timeout attempt expected=%d expected_value=%u remaining_ns=%llu timeout_arg=%llu address=%p",
+                    static_cast<int>(expected),
+                    static_cast<unsigned>(expected_value),
+                    static_cast<unsigned long long>(base_timeout_ns),
+                    static_cast<unsigned long long>(timeout_arg),
+                    reinterpret_cast<void*>(&m_os_sync.count));
 #endif
-                return false;
-            }
-            if (saved_errno == EINTR || saved_errno == EFAULT) {
+                int rc = os_sync_wait_on_address_with_timeout(
+                    reinterpret_cast<void*>(&m_os_sync.count),
+                    expected_value,
+                    sizeof(int32_t),
+                    wait_flags,
+                    wait_clock,
+                    timeout_arg);
+                int saved_errno = errno;
+#if defined(__APPLE__)
+                interprocess_semaphore_detail::os_sync_trace::log(
+                    "wait_os_sync_with_timeout result rc=%d errno=%d count_snapshot=%d",
+                    rc,
+                    saved_errno,
+                    static_cast<int>(m_os_sync.count.load(std::memory_order_acquire)));
+#endif
+                if (rc >= 0) {
+                    observed = m_os_sync.count.load(std::memory_order_acquire);
+                    return true;
+                }
+                if (saved_errno == ETIMEDOUT) {
+                    observed = m_os_sync.count.load(std::memory_order_acquire);
+#if defined(__APPLE__)
+                    interprocess_semaphore_detail::os_sync_trace::log(
+                        "wait_os_sync_with_timeout timeout observed=%d",
+                        static_cast<int>(observed));
+#endif
+                    return false;
+                }
+                if (saved_errno == EINTR || saved_errno == EFAULT) {
+                    errno = saved_errno;
+#if defined(__APPLE__)
+                    interprocess_semaphore_detail::os_sync_trace::log(
+                        "wait_os_sync_with_timeout retry errno=%d",
+                        saved_errno);
+#endif
+                    break;
+                }
+#if defined(__APPLE__)
+                if (!attempted_mach_ticks && saved_errno == EINVAL) {
+                    attempted_mach_ticks = true;
+                    uint64_t mach_timeout = nanoseconds_to_mach_absolute_ticks(base_timeout_ns);
+                    if (mach_timeout != timeout_arg) {
+                        interprocess_semaphore_detail::os_sync_trace::log(
+                            "wait_os_sync_with_timeout retry_mach_ticks expected=%d original_timeout_ns=%llu fallback_ticks=%llu",
+                            static_cast<int>(expected),
+                            static_cast<unsigned long long>(base_timeout_ns),
+                            static_cast<unsigned long long>(mach_timeout));
+                        timeout_arg = mach_timeout;
+                        continue;
+                    }
+                }
+#endif
                 errno = saved_errno;
 #if defined(__APPLE__)
                 interprocess_semaphore_detail::os_sync_trace::log(
-                    "wait_os_sync_with_timeout retry errno=%d",
-                    saved_errno);
+                    "wait_os_sync_with_timeout throwing errno=%d expected=%d",
+                    saved_errno,
+                    static_cast<int>(expected));
 #endif
-                continue;
+                throw std::system_error(saved_errno, std::generic_category(), "os_sync_wait_on_address_with_timeout");
             }
-            errno = saved_errno;
-#if defined(__APPLE__)
-            interprocess_semaphore_detail::os_sync_trace::log(
-                "wait_os_sync_with_timeout throwing errno=%d expected=%d",
-                saved_errno,
-                static_cast<int>(expected));
-#endif
-            throw std::system_error(saved_errno, std::generic_category(), "os_sync_wait_on_address_with_timeout");
+
+            continue;
         }
     }
 
