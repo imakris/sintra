@@ -11,6 +11,7 @@
 #include <array>
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <unordered_set>
@@ -60,6 +61,8 @@ struct Process_group: Derived_transceiver<Process_group>
         //sequence_counter_type                   flush_sequence = 0;
         bool                                    failed = false;
         instance_id_type                        common_function_iid = invalid_instance_id;
+        uint64_t                                generation = 0;
+        bool                                    tearing_down = false;
     };
 
     struct Barrier_completion

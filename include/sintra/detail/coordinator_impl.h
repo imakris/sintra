@@ -56,6 +56,8 @@ sequence_counter_type Process_group::barrier(
         b.processes_arrived.clear();
         b.failed = false;
         b.common_function_iid = make_instance_id();
+        ++b.generation;
+        b.tearing_down = false;
 
         // Filter out draining processes while still holding m_call_mutex for atomicity
         if (auto* coord = s_coord) {
@@ -93,6 +95,8 @@ sequence_counter_type Process_group::barrier(
         }
 
         const auto current_common_fiid = b.common_function_iid;
+        const auto current_generation = b.generation;
+        b.tearing_down = true;
         s_tl_common_function_iid = current_common_fiid;
         b.m.unlock();
 
@@ -102,7 +106,8 @@ sequence_counter_type Process_group::barrier(
         if (it != m_barriers.end() &&
             it->second &&
             it->second.get() == barrier.get() &&
-            it->second->common_function_iid == current_common_fiid)
+            it->second->common_function_iid == current_common_fiid &&
+            it->second->generation == current_generation)
         {
             m_barriers.erase(it);
         }
@@ -160,6 +165,8 @@ inline void Process_group::drop_from_inflight_barriers(
         }
 
         Barrier_completion completion;
+        const auto current_generation = barrier->generation;
+        barrier->tearing_down = true;
         completion.common_function_iid = barrier->common_function_iid;
         completion.recipients.assign(
             barrier->processes_arrived.begin(),
@@ -173,9 +180,21 @@ inline void Process_group::drop_from_inflight_barriers(
         barrier->common_function_iid = invalid_instance_id;
 
         barrier_lock.unlock();
+        bool erased = false;
+        if (barrier_it->second &&
+            barrier_it->second.get() == barrier.get() &&
+            barrier_it->second->generation == current_generation)
+        {
+            barrier_it = m_barriers.erase(barrier_it);
+            erased = true;
+        }
+        else {
+            ++barrier_it;
+        }
 
-        barrier_it = m_barriers.erase(barrier_it);
-        completions.push_back(std::move(completion));
+        if (erased) {
+            completions.push_back(std::move(completion));
+        }
     }
 }
 
