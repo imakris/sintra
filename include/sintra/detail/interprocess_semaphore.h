@@ -330,8 +330,6 @@ namespace interprocess_semaphore_detail
         }
     }
 #endif
-}
-
 } // namespace interprocess_semaphore_detail
 
 class interprocess_semaphore
