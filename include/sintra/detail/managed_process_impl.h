@@ -451,6 +451,15 @@ sintra::type_id_type get_type_id()
         return it->second;
     }
 
+    if (!s_coord || s_coord_id == invalid_instance_id) {
+        // Coordinator not yet published (e.g., during construction). Allocate a new
+        // type id locally so the registration proceeds; coordinator will observe the
+        // cached value once fully initialised.
+        auto tid = make_type_id();
+        s_mproc->m_type_id_of_type_name[type_name] = tid;
+        return tid;
+    }
+
     // Caution the Coordinator call will refer to the map that is being assigned,
     // if the Coordinator is local. Do not be tempted to simplify the temporary,
     // because depending on the order of evaluation, it may or it may not work.
@@ -1641,68 +1650,60 @@ inline void Managed_process::run_after_current_handler(function<void()> task)
 inline
 void Managed_process::barrier_ack_request(detail::barrier_ack_request request)
 {
-    // NOTE: keep this handler lean. Historical versions avoided touching
-    // shared maps during teardown; reintroducing that complexity brought
-    // back spinlock crashes when the process was already unwinding. The
-    // coordinator (or RPC failure path) will degrade the phase if the
-    // process group is gone, so we just attempt the wait and reply.
-    run_after_current_handler([req = std::move(request)]() mutable {
-        Managed_process* process = s_mproc;
-        if (!process) {
-            return;
-        }
+    Managed_process* process = s_mproc;
+    if (!process) {
+        return;
+    }
 
-        if (!process->m_out_req_c || !process->m_out_rep_c) {
-            return;
-        }
+    if (!process->m_out_req_c || !process->m_out_rep_c) {
+        return;
+    }
 
-        detail::barrier_ack_response response = detail::make_barrier_ack_response();
-        response.barrier_sequence = req.barrier_sequence;
-        response.common_function_iid = req.common_function_iid;
-        response.ack_type = req.ack_type;
-        response.responder = process->m_instance_id;
-        response.success = true;
-        response.observed_sequence = req.target_sequence;
+    detail::barrier_ack_response response = detail::make_barrier_ack_response();
+    response.barrier_sequence = request.barrier_sequence;
+    response.common_function_iid = request.common_function_iid;
+    response.ack_type = request.ack_type;
+    response.responder = process->m_instance_id;
+    response.success = true;
+    response.observed_sequence = request.target_sequence;
 
-        auto mark_failure = [&response](detail::barrier_failure reason) {
-            response.success = false;
-            response.observed_sequence = invalid_sequence;
-            (void)reason; // reserved for future reporting
-        };
+    auto mark_failure = [&response](detail::barrier_failure reason) {
+        response.success = false;
+        response.observed_sequence = invalid_sequence;
+        (void)reason; // reserved for future reporting
+    };
 
-        try {
-            switch (req.ack_type) {
-            case detail::barrier_ack_type::outbound: {
-                if (s_coord) {
-                    process->flush(process_of(s_coord_id), req.target_sequence);
-                }
-                else {
-                    mark_failure(detail::barrier_failure::coordinator_stop);
-                }
-                break;
+    try {
+        switch (request.ack_type) {
+        case detail::barrier_ack_type::outbound: {
+            if (s_coord) {
+                process->flush(process_of(s_coord_id), request.target_sequence);
             }
-            case detail::barrier_ack_type::processing: {
-                process->wait_for_delivery_fence();
-                break;
+            else {
+                mark_failure(detail::barrier_failure::coordinator_stop);
             }
-            default:
-                break;
-            }
+            break;
         }
-        catch (...) {
-            mark_failure(detail::barrier_failure::peer_draining);
+        case detail::barrier_ack_type::processing: {
+            process->wait_for_delivery_fence();
+            break;
         }
+        default:
+            break;
+        }
+    }
+    catch (...) {
+        mark_failure(detail::barrier_failure::peer_draining);
+    }
 
-        if (req.group_instance_id != invalid_instance_id && s_coord) {
-            try {
-                Process_group::rpc_barrier_ack_response(req.group_instance_id, response);
-            }
-            catch (...) {
-                // Coordinator will handle missing acknowledgements (e.g., during shutdown).
-            }
-        }
-    });
+    if (request.group_instance_id != invalid_instance_id) {
+        process->emit_remote<Managed_process::barrier_ack_notify>(
+            request.group_instance_id,
+            response);
+    }
 }
+
+
 
 inline
 void Managed_process::wait_for_delivery_fence()

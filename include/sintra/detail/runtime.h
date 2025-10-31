@@ -23,6 +23,11 @@
 #include <unistd.h>
 #endif
 
+#ifdef _MSC_VER
+#include <crtdbg.h>
+#include <windows.h>
+#endif
+
 namespace sintra {
 namespace detail {
 
@@ -143,6 +148,16 @@ inline void init(
     const char* const* argv,
     std::vector<Process_descriptor> branches = std::vector<Process_descriptor>())
 {
+#ifdef _MSC_VER
+    // Disable CRT assertion and abort dialogs in debug builds on Windows
+    // This must happen before any assertions to prevent dialog popups during automated testing
+    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+    _CrtSetReportMode(_CRT_ASSERT, 0);
+    _CrtSetReportMode(_CRT_ERROR, 0);
+    _CrtSetReportMode(_CRT_WARN, 0);
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+#endif
+
 #ifndef _WIN32
     struct sigaction noaction;
     std::memset(&noaction, 0, sizeof(noaction));
@@ -152,7 +167,12 @@ inline void init(
 #endif
 
     static bool once = false;
-    assert(!once); // init() may only be run once.
+    // Allow re-init after finalize: check if s_mproc is nullptr (finalize was called)
+    if (once && s_mproc != nullptr) {
+        // init() called while already initialized - this is an error
+        assert(false && "init() may only be called once before finalize()");
+        return;
+    }
     once = true;
 
     static detail::Cleanup_guard cleanup_guard([]() {

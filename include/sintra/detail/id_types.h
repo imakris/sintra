@@ -72,6 +72,7 @@ namespace detail {
         // EXPLICITLY DEFINED SIGNALS HANDLED BY COORDINATOR
         base_of_messages_handled_by_coordinator = 0x80000000,
         terminated_abnormally,
+        barrier_ack_notify,
 
         num_reserved_type_ids
     };

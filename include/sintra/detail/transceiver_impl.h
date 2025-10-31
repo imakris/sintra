@@ -17,6 +17,7 @@
 #include <string>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 #include "exception_conversions.h"
 #include "exception_conversions_impl.h"
@@ -36,6 +37,95 @@ using std::string;
 using std::is_same_v;
 using std::is_base_of_v;
 using std::unique_lock;
+
+namespace detail {
+
+struct Pending_export_queue
+{
+    std::mutex mutex;
+    std::vector<std::function<void()>> actions;
+};
+
+inline Pending_export_queue& pending_export_queue()
+{
+    static Pending_export_queue queue;
+    return queue;
+}
+
+inline void enqueue_pending_export(std::function<void()> action)
+{
+    auto& queue = pending_export_queue();
+    std::lock_guard<std::mutex> lock(queue.mutex);
+    queue.actions.push_back(std::move(action));
+}
+
+inline void run_pending_exports()
+{
+    auto& queue = pending_export_queue();
+    for (;;) {
+        std::vector<std::function<void()>> actions;
+        {
+            std::lock_guard<std::mutex> lock(queue.mutex);
+            if (queue.actions.empty()) {
+                break;
+            }
+            actions.swap(queue.actions);
+        }
+
+        for (auto& action : actions) {
+            action();
+        }
+    }
+}
+
+struct Export_registration_state
+{
+    std::mutex mutex;
+    bool registered = false;
+    bool cancelled = false;
+    std::function<void()> unregister;
+};
+
+inline std::function<void()> extract_unregister(Export_registration_state& state)
+{
+    std::function<void()> op;
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        if (!state.registered) {
+            state.cancelled = true;
+            return op;
+        }
+        op = std::move(state.unregister);
+        state.registered = false;
+        state.cancelled = true;
+    }
+    return op;
+}
+
+inline bool begin_registration(Export_registration_state& state)
+{
+    std::lock_guard<std::mutex> lock(state.mutex);
+    if (state.cancelled || state.registered) {
+        return false;
+    }
+    // Mark as pending registration to prevent duplicate scheduling.
+    state.registered = true;
+    return true;
+}
+
+inline bool complete_registration(Export_registration_state& state, std::function<void()> unregister)
+{
+    std::lock_guard<std::mutex> lock(state.mutex);
+    if (state.cancelled) {
+        state.registered = false;
+        state.unregister = nullptr;
+        return false;
+    }
+    state.unregister = std::move(unregister);
+    return true;
+}
+
+} // namespace detail
 
 
 
@@ -90,6 +180,8 @@ void Transceiver::construct(const string& name/* = ""*/, uint64_t instance_id/* 
         &Transceiver::instance_invalidated_handler,
         Typed_instance_id<void>(any_local_or_remote) );
     */
+
+    detail::run_pending_exports();
 }
 
 
@@ -1010,23 +1102,49 @@ Transceiver::export_rpc_impl()
     warn_about_reference_args<MT>();
 
     auto* self = static_cast<typename RPCTC::o_type*>(this);
-    const auto instance_id = m_instance_id;
+    auto state = std::make_shared<detail::Export_registration_state>();
 
-    get_instance_to_object_map<RPCTC>()[instance_id] = self;
+    auto register_action = [state, self = this]() {
+        {
+            if (!detail::begin_registration(*state)) {
+                return;
+            }
+        }
 
-    uint64_t test = MT::id();
+        auto instance_id = self->m_instance_id;
+        auto* object = static_cast<typename RPCTC::o_type*>(self);
 
-    // handler registration
-    using RPCTC_o_type = typename RPCTC::o_type;
-    static auto once = get_rpc_handler_map()[test] =
-        &RPCTC_o_type::template rpc_handler<RPCTC, MT>;
-    (void)(once); // suppress unused variable warning
+        get_instance_to_object_map<RPCTC>()[instance_id] = object;
 
-    return [instance_id]() {
-        // Note: do NOT call ensure_rpc_shutdown() here - the transceiver may already
-        // be destroyed by the time this cleanup lambda is invoked during finalize().
-        // RPC shutdown is handled by the transceiver's destructor (via destroy()).
-        get_instance_to_object_map<RPCTC>().erase(instance_id);
+        uint64_t test = MT::id();
+
+        using RPCTC_o_type = typename RPCTC::o_type;
+        static auto once = get_rpc_handler_map()[test] =
+            &RPCTC_o_type::template rpc_handler<RPCTC, MT>;
+        (void)(once);
+
+        auto unregister = [instance_id]() {
+            get_instance_to_object_map<RPCTC>().erase(instance_id);
+        };
+
+        if (!detail::complete_registration(*state, std::move(unregister))) {
+            unregister();
+        }
+    };
+
+    const auto runtime_ready = (s_mproc != nullptr) && (m_instance_id != invalid_instance_id);
+    if (runtime_ready) {
+        register_action();
+    }
+    else {
+        detail::enqueue_pending_export(register_action);
+    }
+
+    return [state]() {
+        auto unregister = detail::extract_unregister(*state);
+        if (unregister) {
+            unregister();
+        }
     };
 }
 

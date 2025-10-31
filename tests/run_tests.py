@@ -482,6 +482,9 @@ class TestRunner:
     def _cleanup_scratch_directory(self, directory: Path) -> None:
         """Best-effort removal of a scratch directory."""
 
+        if os.environ.get("SINTRA_TEST_KEEP_SCRATCH"):
+            return
+
         size_estimate = self._estimate_directory_size(directory)
 
         try:

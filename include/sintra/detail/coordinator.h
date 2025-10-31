@@ -36,10 +36,7 @@ using std::unordered_set;
 struct Process_group: Derived_transceiver<Process_group>
 {
 
-    Process_group():
-        Derived_transceiver<Process_group>("", make_service_instance_id())
-    {
-    }
+    Process_group();
 
 
     void set(const unordered_set<instance_id_type>& member_process_ids);

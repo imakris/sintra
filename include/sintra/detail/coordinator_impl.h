@@ -19,6 +19,19 @@
 namespace sintra {
 
 
+inline Process_group::Process_group()
+    : Derived_transceiver<Process_group>("", make_service_instance_id())
+{
+    activate<Managed_process>(
+        [this](const Managed_process::barrier_ack_notify& msg) {
+            if (msg.group_instance_id != this->instance_id()) {
+                return;
+            }
+            barrier_ack_response(msg.response);
+        },
+        any_remote);
+}
+
 using std::cout;
 using std::lock_guard;
 using std::mutex;
@@ -409,6 +422,19 @@ inline void Process_group::barrier_ack_response(
     std::unique_lock barrier_lock(b.m);
 
     auto responder = response.responder;
+
+    // Check if the barrier is still awaiting acks for this phase BEFORE touching containers
+    // Late-arriving responses must not modify completion_payloads after the phase completes
+    const bool is_outbound = (response.ack_type == detail::barrier_ack_type::outbound);
+    const bool is_processing = (response.ack_type == detail::barrier_ack_type::processing);
+
+    if (is_outbound && !b.awaiting_outbound) {
+        return; // Phase already completed, ignore late response
+    }
+    if (is_processing && !b.awaiting_processing) {
+        return; // Phase already completed, ignore late response
+    }
+
     auto& payload = b.completion_payloads[responder];
     payload.common_function_iid = b.common_function_iid;
 

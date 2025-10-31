@@ -274,6 +274,7 @@ struct Managed_process: Derived_transceiver<Managed_process>
     // instance_unpublished event, which will follow shortly after.
     SINTRA_SIGNAL_EXPLICIT(terminated_abnormally, int status);
     SINTRA_SIGNAL_EXPLICIT(unpublish_transceiver_notify, instance_id_type transceiver_instance_id);
+    SINTRA_SIGNAL_EXPLICIT(barrier_ack_notify, instance_id_type group_instance_id, detail::barrier_ack_response response);
     SINTRA_RPC_STRICT(barrier_ack_request)
 
     spinlocked_umap<tn_type, list<function<void()>>>
