@@ -346,29 +346,6 @@ def _calculate_target_repetitions(base_repetitions: int, weight: int) -> int:
     return max(base, weight)
 
 
-def _print_test_plan(test_suites: Dict[str, List["TestInvocation"]], base_repetitions: int) -> None:
-    """Print numbered test order and the weighted repetition plan once at startup."""
-    # Flatten in deterministic order, preserving discovery order inside each suite.
-    all_invocations: List["TestInvocation"] = []
-    for cfg in ("debug", "release"):
-        all_invocations.extend(test_suites.get(cfg, []))
-    if not all_invocations:
-        return
-
-    print("\n  Test order:")
-    for idx, inv in enumerate(all_invocations, 1):
-        print(f"    {idx:02d}. {inv.name}")
-
-    print("\n  Weighted tests:")
-    for idx, inv in enumerate(all_invocations, 1):
-        weight = _lookup_test_weight(inv.name)
-        reps = _calculate_target_repetitions(base_repetitions, weight)
-        if reps <= 0:
-            continue
-        print(f"    {idx:02d}. {inv.name}: x{weight} -> {reps} repetition(s)")
-    print()
-
-
 def format_duration(seconds: float) -> str:
     """Format duration in human-readable format"""
     if seconds < 1:
@@ -3415,9 +3392,6 @@ def main():
         total_configs = len(test_suites)
         print(f"Found {total_configs} configuration suite(s) to run")
 
-        # Show the complete, weighted plan once at the beginning.
-        _print_test_plan(test_suites, args.repetitions)
-
         overall_start_time = time.time()
         overall_all_passed = True
 
@@ -3445,8 +3419,15 @@ def main():
             suite_all_passed = True
             batch_size = 1
 
-            print()
-            print()
+            # Print test plan for this suite
+            print("\n  Test order:")
+            for idx, invocation in enumerate(tests, start=1):
+                canonical_name = _canonical_test_name(invocation.name)
+                reps = target_repetitions[invocation.name]
+                print(f"    {idx:02d}. {canonical_name}: {reps} repetition(s)")
+
+            # Create header for round display
+            header = " ".join(f"{index + 1:02d}" for index, _ in enumerate(tests))
 
             while True:
                 remaining_counts = [count for count in remaining_repetitions.values() if count > 0]
@@ -3456,6 +3437,7 @@ def main():
                 max_remaining = max(remaining_counts)
                 reps_in_this_round = min(batch_size, max_remaining)
                 print(f"\n{Color.BLUE}--- Round: {reps_in_this_round} repetition(s) ---{Color.RESET}")
+                print(header)
 
                 lingering = _find_lingering_processes(("sintra_",))
                 if lingering:
