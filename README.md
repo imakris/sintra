@@ -11,18 +11,18 @@
   <tbody>
     <tr>
       <td>Linux</td>
-      <td style="text-align:center;"><a href="https://github.com/imakris/sintra/actions/workflows/build-linux.yml"><img alt="Linux Build" src="https://github.com/imakris/sintra/actions/workflows/build-linux.yml/badge.svg?branch=master&event=push" style="display:block;margin:0 auto;"></a></td>
-      <td style="text-align:center;"><a href="https://github.com/imakris/sintra/actions/workflows/build-linux.yml"><img alt="Linux Tests" src="https://github.com/imakris/sintra/actions/workflows/build-linux.yml/badge.svg?branch=master&event=push" style="display:block;margin:0 auto;"></a></td>
+      <td style="text-align:center;"><a href="https://github.com/imakris/sintra/actions/workflows/build-linux.yml"><img alt="Linux Build" src="https://github.com/imakris/sintra/actions/workflows/build-linux.yml/badge.svg?branch=master" style="display:block;margin:0 auto;"></a></td>
+      <td style="text-align:center;"><a href="https://github.com/imakris/sintra/actions/workflows/build-linux.yml"><img alt="Linux Tests" src="https://github.com/imakris/sintra/actions/workflows/build-linux.yml/badge.svg?branch=master" style="display:block;margin:0 auto;"></a></td>
     </tr>
     <tr>
       <td>macOS</td>
-      <td style="text-align:center;"><a href="https://github.com/imakris/sintra/actions/workflows/build-macos.yml"><img alt="macOS Build" src="https://github.com/imakris/sintra/actions/workflows/build-macos.yml/badge.svg?branch=master&event=push" style="display:block;margin:0 auto;"></a></td>
-      <td style="text-align:center;"><a href="https://github.com/imakris/sintra/actions/workflows/build-macos.yml"><img alt="macOS Tests" src="https://github.com/imakris/sintra/actions/workflows/build-macos.yml/badge.svg?branch=master&event=push" style="display:block;margin:0 auto;"></a></td>
+      <td style="text-align:center;"><a href="https://github.com/imakris/sintra/actions/workflows/build-macos.yml"><img alt="macOS Build" src="https://github.com/imakris/sintra/actions/workflows/build-macos.yml/badge.svg?branch=master" style="display:block;margin:0 auto;"></a></td>
+      <td style="text-align:center;"><a href="https://github.com/imakris/sintra/actions/workflows/build-macos.yml"><img alt="macOS Tests" src="https://github.com/imakris/sintra/actions/workflows/build-macos.yml/badge.svg?branch=master" style="display:block;margin:0 auto;"></a></td>
     </tr>
     <tr>
       <td>Windows</td>
-      <td style="text-align:center;"><a href="https://github.com/imakris/sintra/actions/workflows/build-windows.yml"><img alt="Windows Build" src="https://github.com/imakris/sintra/actions/workflows/build-windows.yml/badge.svg?branch=master&event=push" style="display:block;margin:0 auto;"></a></td>
-      <td style="text-align:center;"><a href="https://github.com/imakris/sintra/actions/workflows/build-windows.yml"><img alt="Windows Tests" src="https://github.com/imakris/sintra/actions/workflows/build-windows.yml/badge.svg?branch=master&event=push" style="display:block;margin:0 auto;"></a></td>
+      <td style="text-align:center;"><a href="https://github.com/imakris/sintra/actions/workflows/build-windows.yml"><img alt="Windows Build" src="https://github.com/imakris/sintra/actions/workflows/build-windows.yml/badge.svg?branch=master" style="display:block;margin:0 auto;"></a></td>
+      <td style="text-align:center;"><a href="https://github.com/imakris/sintra/actions/workflows/build-windows.yml"><img alt="Windows Tests" src="https://github.com/imakris/sintra/actions/workflows/build-windows.yml/badge.svg?branch=master" style="display:block;margin:0 auto;"></a></td>
     </tr>
     <tr>
       <td>FreeBSD</td>
