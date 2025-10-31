@@ -986,15 +986,37 @@ class TestRunner:
                 join_step = 0.2
                 max_join_time = 5.0
 
+                if instrumentation_active:
+                    self._instrument_step(
+                        "[instrumentation] Shutdown of log reader threads initiated"
+                    )
+
                 for thread, stream in threads:
                     join_deadline = time.monotonic() + max_join_time
+                    if instrumentation_active:
+                        self._instrument_step(
+                            f"[instrumentation] Joining reader thread {thread.name} (alive={thread.is_alive()})"
+                        )
                     while thread.is_alive():
                         remaining = join_deadline - time.monotonic()
                         if remaining <= 0:
+                            if instrumentation_active:
+                                self._instrument_step(
+                                    f"[instrumentation] Reader thread {thread.name} join deadline reached"
+                                )
                             break
-                        thread.join(timeout=min(join_step, remaining))
+                        join_timeout = min(join_step, remaining)
+                        thread.join(timeout=join_timeout)
+                        if thread.is_alive() and instrumentation_active:
+                            self._instrument_step(
+                                f"[instrumentation] Reader thread {thread.name} still alive after join attempt"
+                            )
 
                     if thread.is_alive():
+                        if instrumentation_active:
+                            self._instrument_step(
+                                f"[instrumentation] Closing stream for reader thread {thread.name}"
+                            )
                         try:
                             stream.close()
                         except Exception:
@@ -1002,10 +1024,23 @@ class TestRunner:
                         thread.join(timeout=join_step)
 
                     if thread.is_alive():
+                        if instrumentation_active:
+                            self._instrument_step(
+                                f"[instrumentation] Reader thread {thread.name} failed to terminate after stream close"
+                            )
                         print(
                             f"\n{Color.YELLOW}Warning: Log reader thread did not terminate cleanly; "
                             "closing descriptors to avoid resource leak.{Color.RESET}"
                         )
+                    elif instrumentation_active:
+                        self._instrument_step(
+                            f"[instrumentation] Reader thread {thread.name} terminated"
+                        )
+
+                if instrumentation_active:
+                    self._instrument_step(
+                        "[instrumentation] Shutdown of log reader threads completed"
+                    )
 
             if instrumentation_active:
                 self._instrument_step(
