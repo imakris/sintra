@@ -1031,6 +1031,14 @@ class TestRunner:
                 if process is not None and process.pid is not None:
                     base_exclusions.add(process.pid)
 
+                descendant_candidates: Set[int] = set()
+                if process is not None and process.pid is not None:
+                    descendant_candidates = {
+                        pid
+                        for pid in self._collect_descendant_pids(process.pid)
+                        if pid not in base_exclusions
+                    }
+
                 survivors = set(
                     pid
                     for pid in self._collect_process_group_pids(pgid)
@@ -1038,13 +1046,71 @@ class TestRunner:
                 )
 
                 if not survivors:
+                    if descendant_candidates and instrumentation_active:
+                        extra_only = sorted(descendant_candidates)
+                        detail_map = self._describe_pids(extra_only)
+                        detail_entries = ", ".join(
+                            f"{pid}:{detail_map.get(pid, 'details unavailable')}"
+                            for pid in extra_only
+                        )
+                        instrument(
+                            f"[instrumentation] Descendant processes outside group ({reason}): "
+                            f"{extra_only} details=[{detail_entries}]"
+                        )
+                    if (
+                        sys.platform == 'darwin'
+                        and instrumentation_active
+                    ):
+                        crash_watchers = _find_lingering_processes(
+                            (
+                                'ReportCrash',
+                                'Diagnosticd',
+                                'spindump',
+                            )
+                        )
+                        if crash_watchers:
+                            instrument(
+                                f"[instrumentation] macOS crash monitor processes ({reason}): "
+                                f"{_describe_processes(crash_watchers)}"
+                            )
                     return False
 
                 survivor_list = sorted(survivors)
                 if instrumentation_active:
-                    instrument(
-                        f"[instrumentation] Residual process group members ({reason}): {survivor_list}"
+                    detail_map = self._describe_pids(survivor_list)
+                    detail_entries = ", ".join(
+                        f"{pid}:{detail_map.get(pid, 'details unavailable')}"
+                        for pid in survivor_list
                     )
+                    instrument(
+                        f"[instrumentation] Residual process group members ({reason}): {survivor_list} "
+                        f"details=[{detail_entries}]"
+                    )
+                    if descendant_candidates:
+                        descendant_only = sorted(descendant_candidates - survivors)
+                        if descendant_only:
+                            descendant_map = self._describe_pids(descendant_only)
+                            descendant_entries = ", ".join(
+                                f"{pid}:{descendant_map.get(pid, 'details unavailable')}"
+                                for pid in descendant_only
+                            )
+                            instrument(
+                                f"[instrumentation] Descendant processes outside group ({reason}): "
+                                f"{descendant_only} details=[{descendant_entries}]"
+                            )
+                    if sys.platform == 'darwin':
+                        crash_watchers = _find_lingering_processes(
+                            (
+                                'ReportCrash',
+                                'Diagnosticd',
+                                'spindump',
+                            )
+                        )
+                        if crash_watchers:
+                            instrument(
+                                f"[instrumentation] macOS crash monitor processes ({reason}): "
+                                f"{_describe_processes(crash_watchers)}"
+                            )
 
                 try:
                     import signal
@@ -3442,6 +3508,114 @@ class TestRunner:
             stack.extend(parent_to_children.get(current, []))
 
         return descendants
+
+    def _describe_pids(self, pids: Iterable[int]) -> Dict[int, str]:
+        """Return human-readable details for the provided process IDs."""
+
+        unique_pids = sorted({pid for pid in pids if isinstance(pid, int) and pid > 0})
+        if not unique_pids:
+            return {}
+
+        details: Dict[int, str] = {}
+
+        if _PSUTIL is not None:
+            psutil_module = _PSUTIL
+            now = time.time()
+            for pid in unique_pids:
+                if pid in details:
+                    continue
+                try:
+                    proc = psutil_module.Process(pid)
+                except Exception:
+                    continue
+
+                parts: List[str] = []
+                try:
+                    parts.append(f"ppid={proc.ppid()}")
+                except Exception:
+                    pass
+                try:
+                    parts.append(f"pgid={os.getpgid(pid)}")
+                except Exception:
+                    pass
+                try:
+                    parts.append(f"status={proc.status()}")
+                except Exception:
+                    pass
+                try:
+                    create_time = proc.create_time()
+                except Exception:
+                    create_time = None
+                if create_time:
+                    uptime = now - create_time
+                    if uptime >= 0:
+                        parts.append(f"uptime={uptime:.1f}s")
+                try:
+                    cmdline = proc.cmdline()
+                except Exception:
+                    cmdline = []
+                if not cmdline:
+                    try:
+                        name = proc.name()
+                    except Exception:
+                        name = ""
+                    if name:
+                        cmdline = [name]
+                if cmdline:
+                    parts.append(f"cmd={' '.join(cmdline)}")
+                if parts:
+                    details[pid] = " ".join(parts)
+
+        remaining = [pid for pid in unique_pids if pid not in details]
+        ps_executable = shutil.which('ps')
+        if remaining and ps_executable:
+            chunk_size = 16
+            for offset in range(0, len(remaining), chunk_size):
+                chunk = remaining[offset : offset + chunk_size]
+                command = [
+                    ps_executable,
+                    '-o',
+                    'pid=,ppid=,pgid=,stat=,etime=,command=',
+                    '-p',
+                    ','.join(str(pid) for pid in chunk),
+                ]
+                try:
+                    result = subprocess.run(
+                        command,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        check=True,
+                        timeout=5,
+                    )
+                except subprocess.SubprocessError:
+                    continue
+
+                for line in result.stdout.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    fields = line.split(None, 5)
+                    if len(fields) < 5:
+                        continue
+                    try:
+                        pid_value = int(fields[0])
+                    except ValueError:
+                        continue
+                    description_parts = [
+                        f"ppid={fields[1]}",
+                        f"pgid={fields[2]}",
+                        f"stat={fields[3]}",
+                        f"etime={fields[4]}",
+                    ]
+                    if len(fields) >= 6:
+                        description_parts.append(f"cmd={fields[5]}")
+                    details[pid_value] = " ".join(description_parts)
+
+        for pid in unique_pids:
+            details.setdefault(pid, 'details unavailable')
+
+        return details
 
     def _snapshot_process_table_via_ps(self) -> List[Tuple[int, int, int]]:
         """Return (pid, ppid, pgid) tuples using the portable ps command."""
