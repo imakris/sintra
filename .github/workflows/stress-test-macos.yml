@@ -27,6 +27,9 @@ on:
       repository-token:
         description: "GitHub token forwarded from the caller workflow"
         required: true
+      gist-secret:
+        description: "Gist token for badge updates"
+        required: false
 
 permissions:
   actions: read
@@ -206,7 +209,7 @@ jobs:
         if: always() && inputs.branch == 'master'
         uses: schneegans/dynamic-badges-action@v1.7.0
         with:
-          auth: ${{ secrets.repository-token }}
+          auth: ${{ secrets.gist-secret }}
           gistID: 38c12e638eddbbfad6962730f6b10d20
           filename: sintra-macos-tests.json
           label: Tests
