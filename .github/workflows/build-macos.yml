@@ -87,9 +87,93 @@ jobs:
       - name: Build
         run: cmake --build build --config Release
 
-      - name: Run tests
+      - name: Run tests (LLDB backtrace on failure)
         if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.core == 'true' || steps.changed.outputs.workflows == 'true'
-        run: ctest --test-dir build -C Release --output-on-failure --timeout 60
+        env:
+          CTEST_OUTPUT_ON_FAILURE: "1"
+        run: |
+          set -Eeuo pipefail
+          export PS4='+ $(date "+%H:%M:%S") ${BASH_SOURCE}:${LINENO}: '
+          set -x
+
+          if ctest --test-dir build -C Release --output-on-failure --timeout 60 -VV -j1; then
+            exit 0
+          fi
+
+          status=$?
+          echo "::warning::CTest failed with exit code ${status}. Attempting LLDB backtraces for failing tests."
+
+          failed_log="build/Testing/Temporary/LastTestsFailed.log"
+          if [ ! -f "${failed_log}" ]; then
+            echo "::warning::No LastTestsFailed.log found at ${failed_log}; unable to determine failing tests for LLDB rerun."
+            exit "${status}"
+          fi
+
+          python3 <<'PY'
+import json
+import pathlib
+import subprocess
+import sys
+
+build_dir = pathlib.Path("build")
+failed_log = build_dir / "Testing" / "Temporary" / "LastTestsFailed.log"
+
+failed_tests = []
+with failed_log.open() as fh:
+    for line in fh:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        failed_tests.append(line)
+
+if not failed_tests:
+    print("::warning::No failing tests were recorded in LastTestsFailed.log", file=sys.stderr)
+    sys.exit(0)
+
+ctest_info = subprocess.check_output([
+    "ctest", "--test-dir", str(build_dir), "-C", "Release", "--show-only=json-v1"
+], text=True)
+
+data = json.loads(ctest_info)
+lookup = {}
+for test in data.get("tests", []):
+    name = test.get("name")
+    command = [str(arg) for arg in test.get("command", []) if arg is not None]
+    props = {}
+    for prop in test.get("properties", []):
+        pname = prop.get("name")
+        pvalue = prop.get("value")
+        if pname is not None and pvalue is not None:
+            props[pname] = pvalue
+    workdir = props.get("WORKING_DIRECTORY")
+    if name and command:
+        lookup[name] = (command, workdir)
+
+reruns = []
+for name in failed_tests:
+    if name not in lookup:
+        print(f"::warning::No command metadata found for failing test '{name}'", file=sys.stderr)
+        continue
+    reruns.append((name, *lookup[name]))
+
+if not reruns:
+    print("::warning::Unable to construct LLDB reruns for the failing tests", file=sys.stderr)
+    sys.exit(0)
+
+lldb_base = ["xcrun", "lldb", "--batch", "-o", "run", "-o", "thread backtrace all", "--"]
+
+for name, command, workdir in reruns:
+    print(f"::group::LLDB backtrace for {name}")
+    sys.stdout.flush()
+    cwd = workdir or str(build_dir)
+    try:
+        subprocess.run(lldb_base + command, cwd=cwd, check=False)
+    finally:
+        print("::endgroup::")
+        sys.stdout.flush()
+PY
+
+          exit "${status}"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
