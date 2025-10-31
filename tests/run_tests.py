@@ -43,6 +43,14 @@ from typing import Dict, IO, Iterable, List, Optional, Sequence, Set, Tuple
 
 print = partial(__import__("builtins").print, file=sys.stderr, flush=True)
 
+
+def _instrumentation_print(message: str) -> None:
+    """Emit high-frequency instrumentation to stdout with explicit flushing."""
+
+    sys.stdout.write(f"{message}\n")
+    sys.stdout.flush()
+    time.sleep(0.001)
+
 _PSUTIL = None
 if importlib.util.find_spec("psutil") is not None:
     _PSUTIL = importlib.import_module("psutil")
@@ -403,6 +411,7 @@ class TestRunner:
         self._scratch_cleanup_lock = threading.Lock()
         self._scratch_cleanup_dirs_removed = 0
         self._scratch_cleanup_bytes_freed = 0
+        self._instrument_first_invocation = True
 
         # Determine test directory - check both with and without config subdirectory
         test_dir_with_config = build_dir / 'tests' / config
@@ -430,6 +439,15 @@ class TestRunner:
                     f"{Color.YELLOW}Warning: {jit_error}. "
                     f"JIT prompts may still block crash dumps.{Color.RESET}"
                 )
+
+    def instrumentation_active(self) -> bool:
+        """Return True while extra instrumentation for the first test is enabled."""
+
+        return self._instrument_first_invocation
+
+    def _instrument_step(self, message: str) -> None:
+        if self._instrument_first_invocation:
+            _instrumentation_print(message)
 
     def _allocate_scratch_directory(self, invocation: TestInvocation) -> Path:
         """Create a per-invocation scratch directory for test artifacts."""
@@ -761,8 +779,16 @@ class TestRunner:
         for config, tests in discovered_tests.items():
             if not tests:
                 continue
-
-            test_suites[config] = tests
+            ordered = sorted(
+                enumerate(tests),
+                key=lambda item: (
+                    0
+                    if _canonical_test_name(item[1].name).startswith("dummy_test")
+                    else 1,
+                    item[0],
+                ),
+            )
+            test_suites[config] = [invocation for _, invocation in ordered]
 
         if not test_suites:
             if any([test_name, include_patterns, exclude_patterns]):
@@ -906,8 +932,17 @@ class TestRunner:
         core_snapshot = self._snapshot_core_dumps(invocation)
         start_time = time.time()
         result_success: Optional[bool] = None
+        instrumentation_active = self._instrument_first_invocation
+        if instrumentation_active:
+            self._instrument_step(
+                f"[instrumentation] Entering run_test_once for {invocation.name} with timeout {timeout}s"
+            )
         try:
             popen_env = self._build_test_environment(scratch_dir)
+            if instrumentation_active:
+                self._instrument_step(
+                    f"[instrumentation] Environment prepared for {invocation.name}"
+                )
             start_time = time.time()
             start_monotonic = time.monotonic()
 
@@ -928,6 +963,10 @@ class TestRunner:
             else:
                 popen_kwargs['start_new_session'] = True
             popen_kwargs['env'] = popen_env
+            if instrumentation_active:
+                self._instrument_step(
+                    f"[instrumentation] Launch parameters ready for {invocation.name}"
+                )
 
             stdout_lines: List[str] = []
             stderr_lines: List[str] = []
@@ -968,13 +1007,25 @@ class TestRunner:
                             "closing descriptors to avoid resource leak.{Color.RESET}"
                         )
 
+            if instrumentation_active:
+                self._instrument_step(
+                    f"[instrumentation] Spawning process for {invocation.name}"
+                )
             process = subprocess.Popen(invocation.command(), **popen_kwargs)
+            if instrumentation_active:
+                self._instrument_step(
+                    f"[instrumentation] Process started for {invocation.name} with pid {process.pid}"
+                )
 
             if hasattr(os, 'getpgid'):
                 try:
                     process_group_id = os.getpgid(process.pid)
                 except (ProcessLookupError, PermissionError, OSError):
                     process_group_id = None
+            if instrumentation_active:
+                self._instrument_step(
+                    f"[instrumentation] Process group lookup complete for {invocation.name}"
+                )
 
             def attempt_live_capture(trigger_line: str) -> None:
                 nonlocal live_stack_traces, live_stack_error, capture_pause_total, capture_active_start
@@ -1054,6 +1105,10 @@ class TestRunner:
             # Wait with timeout, extending the deadline for live stack captures
             try:
                 while True:
+                    if instrumentation_active:
+                        self._instrument_step(
+                            f"[instrumentation] Monitoring {invocation.name} for completion"
+                        )
                     with capture_lock:
                         pause_total = capture_pause_total
                         active_start = capture_active_start
@@ -1081,9 +1136,17 @@ class TestRunner:
                         continue
 
                 process.wait()
+                if instrumentation_active:
+                    self._instrument_step(
+                        f"[instrumentation] Process wait complete for {invocation.name}"
+                    )
                 duration = time.time() - start_time
 
                 shutdown_reader_threads()
+                if instrumentation_active:
+                    self._instrument_step(
+                        f"[instrumentation] Reader threads finished for {invocation.name}"
+                    )
 
                 stdout = ''.join(stdout_lines)
                 stderr = ''.join(stderr_lines)
@@ -1232,6 +1295,11 @@ class TestRunner:
             if cleanup_scratch_dir:
                 self._cleanup_scratch_directory(scratch_dir)
             self._cleanup_new_core_dumps(invocation, core_snapshot, start_time, result_success)
+            if instrumentation_active:
+                self._instrument_step(
+                    f"[instrumentation] Exiting run_test_once for {invocation.name}"
+                )
+                self._instrument_first_invocation = False
 
     def _kill_process_tree(self, pid: int):
         """Kill a process and all its children"""
@@ -3447,6 +3515,16 @@ def main():
             # Create header for round display
             header = " ".join(f"{index + 1:02d}" for index, _ in enumerate(tests))
 
+            instrumentation_pending = runner.instrumentation_active()
+            if instrumentation_pending:
+                _instrumentation_print(
+                    "[instrumentation] Prepared suite header; entering execution loop"
+                )
+                if tests:
+                    _instrumentation_print(
+                        f"[instrumentation] First test scheduled: {tests[0].name}"
+                    )
+
             while True:
                 remaining_counts = [count for count in remaining_repetitions.values() if count > 0]
                 if not remaining_counts:
@@ -3454,6 +3532,10 @@ def main():
 
                 max_remaining = max(remaining_counts)
                 reps_in_this_round = min(batch_size, max_remaining)
+                if instrumentation_pending:
+                    _instrumentation_print(
+                        f"[instrumentation] Starting round with batch size {reps_in_this_round}"
+                    )
                 print(f"\n{Color.BLUE}--- Round: {reps_in_this_round} repetition(s) ---{Color.RESET}")
                 print(header)
 
@@ -3466,14 +3548,26 @@ def main():
 
                 for i in range(reps_in_this_round):
                     row_segments = ["  "] * len(tests)
+                    if instrumentation_pending:
+                        _instrumentation_print(
+                            f"[instrumentation] Round iteration {i + 1} preparing to evaluate tests"
+                        )
                     for index, invocation in enumerate(tests):
                         test_name = invocation.name
                         if remaining_repetitions[test_name] <= 0:
                             continue
 
                         row_start = "."
-
+                        if instrumentation_pending:
+                            _instrumentation_print(
+                                f"[instrumentation] Considering test {test_name} at index {index}"
+                            )
                         result = runner.run_test_once(invocation)
+                        if instrumentation_pending:
+                            _instrumentation_print(
+                                f"[instrumentation] Completed invocation for {test_name}"
+                            )
+                            instrumentation_pending = runner.instrumentation_active()
 
                         accumulated_results[test_name]['durations'].append(result.duration)
 
