@@ -411,7 +411,7 @@ class TestRunner:
         self._scratch_cleanup_lock = threading.Lock()
         self._scratch_cleanup_dirs_removed = 0
         self._scratch_cleanup_bytes_freed = 0
-        self._instrument_first_invocation = True
+        self._instrumentation_enabled = True
 
         # Determine test directory - check both with and without config subdirectory
         test_dir_with_config = build_dir / 'tests' / config
@@ -441,12 +441,12 @@ class TestRunner:
                 )
 
     def instrumentation_active(self) -> bool:
-        """Return True while extra instrumentation for the first test is enabled."""
+        """Return True when verbose instrumentation should be emitted."""
 
-        return self._instrument_first_invocation
+        return self._instrumentation_enabled
 
     def _instrument_step(self, message: str) -> None:
-        if self._instrument_first_invocation:
+        if self._instrumentation_enabled:
             _instrumentation_print(message)
 
     def _allocate_scratch_directory(self, invocation: TestInvocation) -> Path:
@@ -932,7 +932,7 @@ class TestRunner:
         core_snapshot = self._snapshot_core_dumps(invocation)
         start_time = time.time()
         result_success: Optional[bool] = None
-        instrumentation_active = self._instrument_first_invocation
+        instrumentation_active = self.instrumentation_active()
         if instrumentation_active:
             self._instrument_step(
                 f"[instrumentation] Entering run_test_once for {invocation.name} with timeout {timeout}s"
@@ -1299,7 +1299,6 @@ class TestRunner:
                 self._instrument_step(
                     f"[instrumentation] Exiting run_test_once for {invocation.name}"
                 )
-                self._instrument_first_invocation = False
 
     def _kill_process_tree(self, pid: int):
         """Kill a process and all its children"""
