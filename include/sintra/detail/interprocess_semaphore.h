@@ -43,6 +43,7 @@
   #else
     #error "sintra requires compiler support for __has_include to verify os_sync_wait_on_address availability on macOS."
   #endif
+  #include <sys/mman.h>
   #ifdef OS_CLOCK_MACH_ABSOLUTE_TIME
     #include <mach/mach_time.h>
   #endif
@@ -160,7 +161,19 @@ namespace interprocess_semaphore_detail
     {
         static std::once_flag probe_once;
         std::call_once(probe_once, [] {
-            alignas(4) std::atomic<int32_t> probe_value{0};
+            constexpr size_t probe_size = 4096;
+            void* mapping = ::mmap(nullptr, probe_size, PROT_READ | PROT_WRITE, MAP_ANON | MAP_SHARED, -1, 0);
+            if (mapping == MAP_FAILED) {
+                throw std::system_error(errno, std::system_category(), "mmap failed while probing os_sync_wait_on_address_with_timeout");
+            }
+
+            auto cleanup_mapping = [&]() {
+                ::munmap(mapping, probe_size);
+            };
+
+            auto* probe_ptr = static_cast<std::atomic<int32_t>*>(mapping);
+            new (probe_ptr) std::atomic<int32_t>(0);
+
             constexpr uint64_t probe_timeout_ns = 1'000'000; // 1 ms
 
 #if defined(OS_CLOCK_MACH_ABSOLUTE_TIME)
@@ -174,9 +187,9 @@ namespace interprocess_semaphore_detail
 #endif
 
             errno = 0;
-            uint64_t expected = static_cast<uint32_t>(probe_value.load(std::memory_order_relaxed));
+            uint64_t expected = static_cast<uint32_t>(probe_ptr->load(std::memory_order_relaxed));
             int rc = os_sync_wait_on_address_with_timeout(
-                reinterpret_cast<void*>(&probe_value),
+                static_cast<void*>(probe_ptr),
                 expected,
                 sizeof(int32_t),
                 OS_SYNC_WAIT_ON_ADDRESS_SHARED,
@@ -190,8 +203,11 @@ namespace interprocess_semaphore_detail
                 saved_errno);
 
             if (rc == -1 && saved_errno == ETIMEDOUT) {
+                cleanup_mapping();
                 return;
             }
+
+            cleanup_mapping();
 
             if (rc == -1 && saved_errno == EINVAL) {
                 throw std::runtime_error(
