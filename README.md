@@ -44,17 +44,17 @@ coordinate modular applications, daemons, and tools that need to communicate rel
 
 ## Key features
 
-* **Type-safe APIs across processes** â€“ interfaces are expressed as C++ types, so
+* **Type-safe APIs across processes** - interfaces are expressed as C++ types, so
   mismatched payloads are detected at compile time instead of surfacing as runtime
   protocol errors.
-* **Signal bus and RPC in one package** â€“ publish/subscribe message dispatch and
+* **Signal bus and RPC in one package** - publish/subscribe message dispatch and
   synchronous remote procedure calls share the same primitives, allowing you to mix
   patterns as your architecture requires.
-* **Header-only distribution** â€“ integrate the library by adding the headers to your
+* **Header-only distribution** - integrate the library by adding the headers to your
   project; no separate build step or binaries are necessary.
-* **Cross-platform design** â€“ built on top of Boost.Interprocess and related
+* **Cross-platform design** - built on top of Boost.Interprocess and related
   header-only Boost utilities, enabling shared-memory transport on Linux and Windows.
-* **Opt-in crash recovery** â€“ mark critical workers with `sintra::enable_recovery()` so
+* **Opt-in crash recovery** - mark critical workers with `sintra::enable_recovery()` so
   the coordinator automatically respawns them after an unexpected exit.
 
 Typical use cases include plugin hosts coordinating work with out-of-process plugins,
