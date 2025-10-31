@@ -1641,8 +1641,18 @@ inline void Managed_process::run_after_current_handler(function<void()> task)
 inline
 void Managed_process::barrier_ack_request(detail::barrier_ack_request request)
 {
+    // NOTE: keep this handler lean. Historical versions avoided touching
+    // shared maps during teardown; reintroducing that complexity brought
+    // back spinlock crashes when the process was already unwinding. The
+    // coordinator (or RPC failure path) will degrade the phase if the
+    // process group is gone, so we just attempt the wait and reply.
     run_after_current_handler([req = std::move(request)]() mutable {
-        if (!s_mproc) {
+        Managed_process* process = s_mproc;
+        if (!process) {
+            return;
+        }
+
+        if (!process->m_out_req_c || !process->m_out_rep_c) {
             return;
         }
 
@@ -1650,8 +1660,9 @@ void Managed_process::barrier_ack_request(detail::barrier_ack_request request)
         response.barrier_sequence = req.barrier_sequence;
         response.common_function_iid = req.common_function_iid;
         response.ack_type = req.ack_type;
-        response.responder = s_mproc->m_instance_id;
+        response.responder = process->m_instance_id;
         response.success = true;
+        response.observed_sequence = req.target_sequence;
 
         auto mark_failure = [&response](detail::barrier_failure reason) {
             response.success = false;
@@ -1663,8 +1674,7 @@ void Managed_process::barrier_ack_request(detail::barrier_ack_request request)
             switch (req.ack_type) {
             case detail::barrier_ack_type::outbound: {
                 if (s_coord) {
-                    s_mproc->flush(process_of(s_coord_id), req.target_sequence);
-                    response.observed_sequence = req.target_sequence;
+                    process->flush(process_of(s_coord_id), req.target_sequence);
                 }
                 else {
                     mark_failure(detail::barrier_failure::coordinator_stop);
@@ -1672,12 +1682,10 @@ void Managed_process::barrier_ack_request(detail::barrier_ack_request request)
                 break;
             }
             case detail::barrier_ack_type::processing: {
-                s_mproc->wait_for_delivery_fence();
-                response.observed_sequence = req.target_sequence;
+                process->wait_for_delivery_fence();
                 break;
             }
             default:
-                response.observed_sequence = req.target_sequence;
                 break;
             }
         }
@@ -1685,11 +1693,13 @@ void Managed_process::barrier_ack_request(detail::barrier_ack_request request)
             mark_failure(detail::barrier_failure::peer_draining);
         }
 
-        try {
-            Process_group::rpc_barrier_ack_response(s_coord_id, response);
-        }
-        catch (...) {
-            // Coordinator will handle missing acknowledgements (e.g., during shutdown).
+        if (req.group_instance_id != invalid_instance_id && s_coord) {
+            try {
+                Process_group::rpc_barrier_ack_response(req.group_instance_id, response);
+            }
+            catch (...) {
+                // Coordinator will handle missing acknowledgements (e.g., during shutdown).
+            }
         }
     });
 }

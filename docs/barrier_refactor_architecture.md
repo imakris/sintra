@@ -265,6 +265,12 @@ the request thread. We reuse that mechanism:
    once with `success = false`. The coordinator treats that as a downgrade or
    failure and releases the barrier with `failure_code = peer_draining`.
 
+> **Implementation note:** keep the acknowledgement handler lean. Historical
+> builds tried to “double check” membership by looking inside the thread-safe
+> maps that track published transceivers, which reopened long-dead spinlock
+> crashes during teardown. Let the coordinator’s existing RPC failure handling
+> drive any downgrades instead of doing extra bookkeeping in the participant.
+
 This keeps processing acknowledgements on the request thread, reusing the
 existing quiescence semantics without introducing extra worker threads.
 
