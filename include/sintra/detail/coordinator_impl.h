@@ -33,7 +33,7 @@ detail::barrier_completion_payload Process_group::barrier(
     const string& barrier_name,
     std::uint32_t request_flags)
 {
-    detail::barrier_completion_payload result_payload {};
+    detail::barrier_completion_payload result_payload = detail::make_barrier_completion_payload();
     result_payload.request_flags = request_flags;
 
     std::unique_lock basic_lock(m_call_mutex);
@@ -96,6 +96,7 @@ detail::barrier_completion_payload Process_group::barrier(
 
         auto populate_payload = [&](instance_id_type pid, std::uint32_t flags) {
             auto& payload = b.completion_payloads[pid];
+            payload = detail::make_barrier_completion_payload();
             payload.common_function_iid = current_common_fiid;
             payload.request_flags = flags;
             payload.barrier_sequence = sequence;
@@ -191,7 +192,7 @@ detail::barrier_completion_payload Process_group::barrier(
 
             for (auto pid : b.processes_arrived) {
                 if (needs_outbound && b.awaiting_outbound) {
-                    detail::barrier_ack_request req {};
+                    detail::barrier_ack_request req = detail::make_barrier_ack_request();
                     req.barrier_sequence = sequence;
                     req.common_function_iid = current_common_fiid;
                     req.ack_type = detail::barrier_ack_type::outbound;
@@ -204,7 +205,7 @@ detail::barrier_completion_payload Process_group::barrier(
                     }
                 }
                 if (needs_processing && b.awaiting_processing) {
-                    detail::barrier_ack_request req {};
+                    detail::barrier_ack_request req = detail::make_barrier_ack_request();
                     req.barrier_sequence = sequence;
                     req.common_function_iid = current_common_fiid;
                     req.ack_type = detail::barrier_ack_type::processing;
@@ -307,7 +308,7 @@ detail::barrier_completion_payload Process_group::barrier(
             }
         }
 
-        detail::barrier_completion_payload caller_payload {};
+        detail::barrier_completion_payload caller_payload = detail::make_barrier_completion_payload();
         auto caller_payload_it = b.completion_payloads.find(caller_piid);
         if (caller_payload_it != b.completion_payloads.end()) {
             caller_payload = caller_payload_it->second;
@@ -500,7 +501,7 @@ inline void Process_group::drop_from_inflight_barriers(
                 completion.recipient_payloads.push_back(payload_it->second);
             }
             else {
-                detail::barrier_completion_payload payload {};
+                detail::barrier_completion_payload payload = detail::make_barrier_completion_payload();
                 payload.common_function_iid = barrier->common_function_iid;
                 payload.request_flags = barrier->group_requirement_mask;
                 payload.rendezvous.state = detail::barrier_state::satisfied;

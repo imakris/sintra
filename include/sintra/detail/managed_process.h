@@ -263,7 +263,7 @@ struct Managed_process: Derived_transceiver<Managed_process>
     void wait_for_delivery_fence();
     void notify_delivery_progress();
 
-    void barrier_ack_request(const detail::barrier_ack_request& request);
+    void barrier_ack_request(detail::barrier_ack_request request);
 
 
     size_t unblock_rpc(instance_id_type process_instance_id = invalid_instance_id);

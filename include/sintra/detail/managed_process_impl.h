@@ -1639,14 +1639,14 @@ inline void Managed_process::run_after_current_handler(function<void()> task)
 }
 
 inline
-void Managed_process::barrier_ack_request(const detail::barrier_ack_request& request)
+void Managed_process::barrier_ack_request(detail::barrier_ack_request request)
 {
-    run_after_current_handler([req = request]() mutable {
+    run_after_current_handler([req = std::move(request)]() mutable {
         if (!s_mproc) {
             return;
         }
 
-        detail::barrier_ack_response response {};
+        detail::barrier_ack_response response = detail::make_barrier_ack_response();
         response.barrier_sequence = req.barrier_sequence;
         response.common_function_iid = req.common_function_iid;
         response.ack_type = req.ack_type;

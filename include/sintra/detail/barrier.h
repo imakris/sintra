@@ -23,13 +23,13 @@ inline bool should_treat_rpc_failure_as_satisfied()
 
 inline void wait_for_processing_quiescence();
 
-inline thread_local barrier_completion_payload s_tl_last_barrier_payload {};
+inline thread_local barrier_completion_payload s_tl_last_barrier_payload = make_barrier_completion_payload();
 
 inline bool rendezvous_barrier(const std::string& barrier_name,
                                const std::string& group_name,
                                std::uint32_t request_flags = 0)
 {
-    detail::barrier_completion_payload payload;
+    detail::barrier_completion_payload payload = detail::make_barrier_completion_payload();
     try {
         payload = Process_group::rpc_barrier(group_name, barrier_name, request_flags);
     }

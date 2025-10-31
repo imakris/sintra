@@ -5,6 +5,7 @@
 
 #include "globals.h"
 #include "id_types.h"
+#include "ipc_rings.h"
 
 #include <cstdint>
 
@@ -26,10 +27,10 @@ enum class barrier_failure : std::uint8_t {
 };
 
 struct barrier_phase_status {
-    barrier_state state = barrier_state::not_requested;
-    barrier_failure failure_code = barrier_failure::none;
-    instance_id_type offender = invalid_instance_id;
-    sequence_counter_type sequence = invalid_sequence;
+    barrier_state state;
+    barrier_failure failure_code;
+    instance_id_type offender;
+    sequence_counter_type sequence;
 };
 
 constexpr std::uint32_t barrier_flag_inbound = 1u << 0;
@@ -37,13 +38,13 @@ constexpr std::uint32_t barrier_flag_outbound = 1u << 1;
 constexpr std::uint32_t barrier_flag_processing = 1u << 2;
 
 struct barrier_completion_payload {
-    sequence_counter_type barrier_sequence = invalid_sequence;
-    std::uint32_t request_flags = 0;
-    instance_id_type common_function_iid = invalid_instance_id;
-    barrier_phase_status rendezvous {};
-    barrier_phase_status inbound {};
-    barrier_phase_status outbound {};
-    barrier_phase_status processing {};
+    sequence_counter_type barrier_sequence;
+    std::uint32_t request_flags;
+    instance_id_type common_function_iid;
+    barrier_phase_status rendezvous;
+    barrier_phase_status inbound;
+    barrier_phase_status outbound;
+    barrier_phase_status processing;
 };
 
 enum class barrier_ack_type : std::uint8_t {
@@ -52,19 +53,63 @@ enum class barrier_ack_type : std::uint8_t {
 };
 
 struct barrier_ack_request {
-    sequence_counter_type barrier_sequence = invalid_sequence;
-    instance_id_type common_function_iid = invalid_instance_id;
-    barrier_ack_type ack_type = barrier_ack_type::outbound;
-    sequence_counter_type target_sequence = invalid_sequence;
+    sequence_counter_type barrier_sequence;
+    instance_id_type common_function_iid;
+    barrier_ack_type ack_type;
+    sequence_counter_type target_sequence;
 };
 
 struct barrier_ack_response {
-    sequence_counter_type barrier_sequence = invalid_sequence;
-    instance_id_type common_function_iid = invalid_instance_id;
-    barrier_ack_type ack_type = barrier_ack_type::outbound;
-    sequence_counter_type observed_sequence = invalid_sequence;
-    instance_id_type responder = invalid_instance_id;
-    bool success = true;
+    sequence_counter_type barrier_sequence;
+    instance_id_type common_function_iid;
+    barrier_ack_type ack_type;
+    sequence_counter_type observed_sequence;
+    instance_id_type responder;
+    bool success;
 };
+
+inline constexpr barrier_phase_status make_barrier_phase_status(
+    barrier_state state = barrier_state::not_requested,
+    barrier_failure failure = barrier_failure::none,
+    instance_id_type offender = invalid_instance_id,
+    sequence_counter_type sequence = invalid_sequence)
+{
+    return barrier_phase_status{state, failure, offender, sequence};
+}
+
+inline constexpr barrier_completion_payload make_barrier_completion_payload()
+{
+    return barrier_completion_payload{
+        invalid_sequence,
+        0,
+        invalid_instance_id,
+        make_barrier_phase_status(),
+        make_barrier_phase_status(),
+        make_barrier_phase_status(),
+        make_barrier_phase_status(),
+    };
+}
+
+inline constexpr barrier_ack_request make_barrier_ack_request()
+{
+    return barrier_ack_request{
+        invalid_sequence,
+        invalid_instance_id,
+        barrier_ack_type::outbound,
+        invalid_sequence,
+    };
+}
+
+inline constexpr barrier_ack_response make_barrier_ack_response()
+{
+    return barrier_ack_response{
+        invalid_sequence,
+        invalid_instance_id,
+        barrier_ack_type::outbound,
+        invalid_sequence,
+        invalid_instance_id,
+        true,
+    };
+}
 
 } // namespace sintra::detail
