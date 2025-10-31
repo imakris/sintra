@@ -26,7 +26,6 @@ import importlib
 import importlib.util
 import json
 import os
-import shlex
 import shutil
 import subprocess
 import sys
@@ -2134,15 +2133,20 @@ class TestRunner:
             ]
 
         # Fallback to lldb
-        return [
-            *debugger_command,
-            '--batch',
-            '--no-lldbinit',
+        # ``lldb`` on macOS is picky about long option spellings when invoked
+        # through ``xcrun``.  Using the canonical short forms avoids
+        # ``error: unknown or ambiguous option`` failures when the debugger is
+        # executed non-interactively on CI machines.
+        lldb_args = [
+            '-b',
+            '-n',
             '-p', str(pid),
             '-o', 'thread backtrace all -c 256 -f',
             '-o', 'detach',
             '-o', 'quit',
         ]
+
+        return self._merge_debugger_args(debugger_command, lldb_args)
 
     def _build_unix_core_debugger_command(
         self,
@@ -2168,17 +2172,40 @@ class TestRunner:
             ]
 
         # Fallback to lldb
-        quoted_executable = shlex.quote(str(invocation.path))
-        quoted_core = shlex.quote(str(core_path))
-
-        return [
-            *debugger_command,
-            '--batch',
-            '--no-lldbinit',
-            '-o', f'target create --core {quoted_core} {quoted_executable}',
+        # See the note in ``_build_unix_live_debugger_command`` about short
+        # option spellings.
+        lldb_args = [
+            '-b',
+            '-n',
+            '-c', str(core_path),
+            str(invocation.path),
             '-o', 'thread backtrace all -c 256 -f',
             '-o', 'quit',
         ]
+
+        return self._merge_debugger_args(debugger_command, lldb_args)
+
+    def _merge_debugger_args(
+        self, debugger_command: List[str], debugger_args: List[str]
+    ) -> List[str]:
+        """Combine a debugger command with additional arguments, handling wrappers."""
+
+        if not debugger_command:
+            return debugger_args
+
+        merged = list(debugger_command)
+
+        try:
+            wrapper_name = Path(debugger_command[0]).name
+        except Exception:
+            wrapper_name = ''
+
+        if wrapper_name == 'xcrun' and len(debugger_command) >= 2:
+            # Insert a separator so xcrun forwards subsequent flags to the tool.
+            merged.append('--')
+
+        merged.extend(debugger_args)
+        return merged
 
     def _locate_windows_debugger(self, executable: str) -> Tuple[Optional[str], str]:
         """Locate or install the requested Windows debugger executable."""
