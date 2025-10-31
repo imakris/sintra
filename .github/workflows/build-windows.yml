@@ -183,6 +183,7 @@ jobs:
     uses: ./.github/workflows/stress-test-windows.yml
     secrets:
       repository-token: ${{ secrets.GITHUB_TOKEN }}
+      gist-secret: ${{ secrets.GIST_SECRET }}
     with:
       build_run_id: ${{ github.run_id }}
       head_sha: ${{ github.event.pull_request.head.sha || github.sha }}
