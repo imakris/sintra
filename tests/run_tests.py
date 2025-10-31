@@ -1013,6 +1013,126 @@ class TestRunner:
             reader_states: Dict[str, Dict[str, Any]] = {}
             process_group_id: Optional[int] = None
 
+            def terminate_process_group_members(reason: str) -> bool:
+                """Ensure helpers in the spawned process group terminate."""
+
+                if sys.platform == 'win32':
+                    return False
+
+                pgid = process_group_id
+                if pgid is None:
+                    return False
+
+                try:
+                    base_exclusions = {0, os.getpid()}
+                except Exception:
+                    base_exclusions = {0}
+
+                if process is not None and process.pid is not None:
+                    base_exclusions.add(process.pid)
+
+                survivors = set(
+                    pid
+                    for pid in self._collect_process_group_pids(pgid)
+                    if pid not in base_exclusions
+                )
+
+                if not survivors:
+                    return False
+
+                survivor_list = sorted(survivors)
+                if instrumentation_active:
+                    instrument(
+                        f"[instrumentation] Residual process group members ({reason}): {survivor_list}"
+                    )
+
+                try:
+                    import signal
+                except ImportError:
+                    return bool(survivors)
+
+                failures: List[Tuple[int, str]] = []
+                for target_pid in survivor_list:
+                    try:
+                        os.kill(target_pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        continue
+                    except PermissionError as exc:
+                        failures.append((target_pid, f"PermissionError: {exc}"))
+                    except OSError as exc:
+                        failures.append((target_pid, f"OSError: {exc}"))
+
+                if failures and instrumentation_active:
+                    for pid_value, detail in failures:
+                        instrument(
+                            f"[instrumentation] Failed to deliver SIGTERM to {pid_value}: {detail}"
+                        )
+
+                wait_deadline = time.monotonic() + 1.0
+                while time.monotonic() < wait_deadline:
+                    survivors = set(
+                        pid
+                        for pid in self._collect_process_group_pids(pgid)
+                        if pid not in base_exclusions
+                    )
+                    if not survivors:
+                        if instrumentation_active:
+                            instrument(
+                                f"[instrumentation] Residual process group empty after SIGTERM ({reason})"
+                            )
+                        return False
+                    time.sleep(0.05)
+
+                survivors = set(
+                    pid
+                    for pid in self._collect_process_group_pids(pgid)
+                    if pid not in base_exclusions
+                )
+
+                if not survivors:
+                    if instrumentation_active:
+                        instrument(
+                            f"[instrumentation] Residual process group empty after SIGTERM ({reason})"
+                        )
+                    return False
+
+                survivor_list = sorted(survivors)
+                if instrumentation_active:
+                    instrument(
+                        f"[instrumentation] Forcing SIGKILL for residual processes ({reason}): {survivor_list}"
+                    )
+
+                for target_pid in survivor_list:
+                    try:
+                        os.kill(target_pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        continue
+                    except PermissionError as exc:
+                        if instrumentation_active:
+                            instrument(
+                                f"[instrumentation] Failed to deliver SIGKILL to {target_pid}: {exc}"
+                            )
+                    except OSError as exc:
+                        if instrumentation_active:
+                            instrument(
+                                f"[instrumentation] Failed to deliver SIGKILL to {target_pid}: {exc}"
+                            )
+
+                time.sleep(0.05)
+
+                survivors = set(
+                    pid
+                    for pid in self._collect_process_group_pids(pgid)
+                    if pid not in base_exclusions
+                )
+
+                if survivors and instrumentation_active:
+                    instrument(
+                        f"[instrumentation] Residual processes still alive after SIGKILL ({reason}): {sorted(survivors)}"
+                    )
+
+                return bool(survivors)
+
             def shutdown_reader_threads() -> None:
                 """Ensure log reader threads terminate to avoid leaking resources."""
                 join_step = 0.2
@@ -1073,6 +1193,9 @@ class TestRunner:
                             )
 
                     if thread.is_alive():
+                        terminate_process_group_members(
+                            f"log reader stall ({descriptor}) for {invocation.name}"
+                        )
                         if instrumentation_active:
                             instrument(
                                 f"[instrumentation] Closing stream for reader thread {thread.name} ({descriptor})"
@@ -1310,6 +1433,7 @@ class TestRunner:
                     instrument(
                         f"[instrumentation] Process wait complete for {invocation.name}"
                     )
+                terminate_process_group_members(f"{invocation.name} exit")
                 duration = time.time() - start_time
 
                 shutdown_reader_threads()
