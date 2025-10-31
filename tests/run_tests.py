@@ -25,6 +25,7 @@ import fnmatch
 import importlib
 import importlib.util
 import json
+from functools import partial
 import os
 import shlex
 import shutil
@@ -40,6 +41,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, IO, Iterable, List, Optional, Sequence, Set, Tuple
 
+print = partial(__import__("builtins").print, file=sys.stderr, flush=True)
 
 _PSUTIL = None
 if importlib.util.find_spec("psutil") is not None:
@@ -52,15 +54,15 @@ PRESERVE_CORES_ENV = "SINTRA_PRESERVE_CORES"
 # crashing process. Two platform effects make Sintra dumps look enormous even
 # when very little physical memory is dirtied:
 #
-#   • The dynamic loader reserves a 4 GiB ``__PAGEZERO`` segment on every
+#   - The dynamic loader reserves a 4 GiB ``__PAGEZERO`` segment on every
 #     process. That reservation is always recorded in the core image even though
 #     it contains no data.
-#   • Every request/reply ring that ``Managed_process`` touches is "double
-#     mapped" by ``Ring_data::attach``: we reserve a 2× span and map the 2 MiB
-#     data file twice so wrap-around reads stay linear. Each active channel
-#     therefore contributes roughly 4 MiB of virtual address space. During the
-#     recovery test the coordinator plus the watchdog/crasher pair keep dozens of
-#     these channels open concurrently (outgoing rings for the local process plus
+#   - Every request/reply ring that ``Managed_process`` touches is "double"
+#     mapped by ``Ring_data::attach``: we reserve a fixed span and map the data
+#     file twice so wrap-around reads stay linear. Each active channel therefore
+#     contributes roughly 4 MiB of virtual address space. During the recovery
+#     test the coordinator plus the watchdog/crasher pair keep dozens of these
+#     channels open concurrently (outgoing rings for the local process plus
 #     readers for every remote process slot), which adds roughly another 250 MiB
 #     of reservations.
 #
@@ -70,7 +72,6 @@ PRESERVE_CORES_ENV = "SINTRA_PRESERVE_CORES"
 # Linux. macOS does not expose the flag, so ``recovery_test`` disables core
 # dumps immediately before its intentional ``std::abort()`` to keep runners from
 # filling their disks with Mach-O artifacts.
-
 
 def _format_size(num_bytes: Optional[int]) -> str:
     """Return a human-friendly representation of ``num_bytes``."""
@@ -3423,9 +3424,16 @@ def main():
                 if weight != 1
             ]
             if weighted_tests:
-                print(f"  Weighted tests:")
-                for display_name, weight, total in sorted(weighted_tests):
-                    print(f"    {display_name}: x{weight} -> {total} repetition(s)")
+                print("  Weighted tests:")
+                for idx, (display_name, weight, total) in enumerate(sorted(weighted_tests), start=1):
+                    print(f"    {idx:02d}. {display_name}: x{weight} -> {total} repetition(s)")
+
+            print("  Test order:")
+            for idx, invocation in enumerate(tests, start=1):
+                print(f"    {idx:02d}. {invocation.name}")
+
+            header = " ".join(f"{index + 1:02d}" for index, _ in enumerate(tests))
+            print(header)
 
             while True:
                 remaining_counts = [count for count in remaining_repetitions.values() if count > 0]
@@ -3435,6 +3443,7 @@ def main():
                 max_remaining = max(remaining_counts)
                 reps_in_this_round = min(batch_size, max_remaining)
                 print(f"\n{Color.BLUE}--- Round: {reps_in_this_round} repetition(s) ---{Color.RESET}")
+                print(header)
 
                 lingering = _find_lingering_processes(("sintra_",))
                 if lingering:
@@ -3444,15 +3453,13 @@ def main():
                     )
 
                 for i in range(reps_in_this_round):
-                    print(f"  Rep {i + 1}/{reps_in_this_round}: ", end="", flush=True)
-                    for invocation in tests:
+                    row_segments = ["  "] * len(tests)
+                    for index, invocation in enumerate(tests):
                         test_name = invocation.name
                         if remaining_repetitions[test_name] <= 0:
                             continue
 
-                        # Print placeholder progress marker immediately so long-running
-                        # tests still give visible feedback in CI logs.
-                        print(".", end="", flush=True)
+                        row_start = "."
 
                         result = runner.run_test_once(invocation)
 
@@ -3462,8 +3469,7 @@ def main():
 
                         if result.success:
                             result_bucket['passed'] += 1
-                            # Recolor the placeholder dot we printed before the run.
-                            print(f"\b{Color.GREEN}.{Color.RESET}", end="", flush=True)
+                            row_end = "."
                         else:
                             result_bucket['failed'] += 1
                             suite_all_passed = False
@@ -3482,11 +3488,13 @@ def main():
                                 'message': error_message if error_message else first_line,
                             })
 
-                            print(f"\b{Color.RED}F{Color.RESET}", end="", flush=True)
+                            row_end = "F"
 
                         remaining_repetitions[test_name] -= 1
 
-                    print()
+                        row_segments[index] = f"{row_start}{row_end}"
+
+                    print(" ".join(row_segments))
                     if not suite_all_passed:
                         break
 
