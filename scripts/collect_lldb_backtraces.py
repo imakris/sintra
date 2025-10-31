@@ -113,6 +113,8 @@ def run_lldb_for_tests(
         return
 
     for name, command, workdir in reruns:
+        print("i am starting")
+        sys.stdout.flush()
         print(f"::group::LLDB backtrace for {name}")
         sys.stdout.flush()
         cwd = Path(workdir) if workdir else build_dir
@@ -124,6 +126,8 @@ def run_lldb_for_tests(
                 file=sys.stderr,
             )
         finally:
+            print("i am finished")
+            sys.stdout.flush()
             print("::endgroup::")
             sys.stdout.flush()
 
