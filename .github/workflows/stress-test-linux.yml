@@ -234,3 +234,14 @@ jobs:
               target_url: `${context.serverUrl}/${owner}/${repo}/actions/runs/${process.env.GITHUB_RUN_ID}`,
               description: `Stress Test failed${branch ? ` on ${branch}` : ''}${prNumber ? ` (PR #${prNumber})` : ''}`
             });
+
+      - name: Update tests badge
+        if: always() && inputs.branch == 'master'
+        uses: schneegans/dynamic-badges-action@v1.7.0
+        with:
+          auth: ${{ secrets.repository-token }}
+          gistID: 38c12e638eddbbfad6962730f6b10d20
+          filename: sintra-linux-tests.json
+          label: Tests
+          message: ${{ job.status }}
+          color: ${{ job.status == 'success' && 'green' || 'red' }}

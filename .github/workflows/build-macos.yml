@@ -98,6 +98,17 @@ jobs:
           path: build/
           retention-days: 1
 
+      - name: Update build badge
+        if: github.ref == 'refs/heads/master'
+        uses: schneegans/dynamic-badges-action@v1.7.0
+        with:
+          auth: ${{ secrets.GIST_SECRET }}
+          gistID: 38c12e638eddbbfad6962730f6b10d20
+          filename: sintra-macos-build.json
+          label: Build
+          message: ${{ job.status }}
+          color: ${{ job.status == 'success' && 'green' || 'red' }}
+
   stress-tests:
     name: macOS Tests
     needs: build
