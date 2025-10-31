@@ -148,6 +148,10 @@ namespace interprocess_semaphore_detail
         }
     };
 
+    // NOTE: Sintra intentionally hard-requires that macOS honours nanosecond
+    //       timeouts for os_sync_wait_on_address_with_timeout. If the probe
+    //       below ever reports EINVAL, do NOT add a fallback conversion or
+    //       compatibility mode—raise an error and update the platform instead.
     inline void ensure_os_sync_timeout_support()
     {
         static std::once_flag probe_once;
