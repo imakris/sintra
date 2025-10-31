@@ -371,6 +371,28 @@ class TestInvocation:
     def command(self) -> List[str]:
         return [str(self.path), *self.args]
 
+def _print_test_plan(test_suites: Dict[str, List['TestInvocation']], base_repetitions: int) -> None:
+    """Print numbered test order and the weighted repetition plan once at startup."""
+    # Flatten in deterministic order, preserving discovery order inside each suite.
+    all_invocations: List['TestInvocation'] = []
+    for cfg in ("debug", "release"):
+        all_invocations.extend(test_suites.get(cfg, []))
+    if not all_invocations:
+        return
+
+    print("\n  Test order:")
+    for idx, inv in enumerate(all_invocations, 1):
+        print(f"    {idx:02d}. {inv.name}")
+
+    print("\n  Weighted tests:")
+    for idx, inv in enumerate(all_invocations, 1):
+        weight = _lookup_test_weight(inv.name)
+        reps = _calculate_target_repetitions(base_repetitions, weight)
+        if reps <= 0:
+            continue
+        print(f"    {idx:02d}. {inv.name}: x{weight} -> {reps} repetition(s)")
+    print()
+
 class TestRunner:
     """Manages test execution with timeout and repetition"""
 
@@ -3384,6 +3406,9 @@ def main():
             exclude_patterns=exclude_patterns,
         )
 
+        # Show the complete, weighted plan once at the beginning.
+        _print_test_plan(test_suites, args.repetitions)
+
         if not test_suites:
             print(f"{Color.RED}No test suites found to run{Color.RESET}")
             return 1
@@ -3524,68 +3549,11 @@ def main():
 
             # Print suite results
             suite_duration = time.time() - suite_start_time
-            def format_test_name(test_name):
-                """Format the raw test name for display in the summary table."""
-
-                formatted = test_name
-                if formatted.startswith("sintra_"):
-                    formatted = formatted[len("sintra_"):]
-
-                if formatted.startswith("ipc_rings_tests_"):
-                    formatted = formatted.replace("_release_adaptive", "_release", 1)
-                    formatted = formatted.replace("_debug_adaptive", "_debug", 1)
-                    if formatted.endswith("_release"):
-                        formatted = formatted[:-len("_release")] + " (release)"
-                    elif formatted.endswith("_debug"):
-                        formatted = formatted[:-len("_debug")] + " (debug)"
-
-                return formatted
-
-            def sort_key(test_name):
-                formatted = format_test_name(test_name)
-                if formatted.startswith("dummy_test"):
-                    group = 0
-                elif formatted.startswith("ipc_rings_tests"):
-                    group = 1
-                else:
-                    group = 2
-                return group, formatted
 
             print(f"\n{Color.BOLD}Results for {config_name}:{Color.RESET}")
 
-            ordered_test_names = sorted(accumulated_results.keys(), key=sort_key)
-            formatted_names = [format_test_name(name) for name in ordered_test_names]
-
-            test_col_width = max([len(name) for name in formatted_names] + [4]) + 2
-            passrate_col_width = 20
-            avg_runtime_col_width = 17
-
-            header_fmt = (
-                f"{{:<{test_col_width}}}"
-                f" {{:>{passrate_col_width}}}"
-                f" {{:>{avg_runtime_col_width}}}"
-            )
-            row_fmt = header_fmt
-            table_width = test_col_width + passrate_col_width + avg_runtime_col_width + 2
-
-            print("=" * table_width)
-            print(header_fmt.format('Test', 'Pass rate', 'Avg runtime (s)'))
-            print("=" * table_width)
-
-            for test_name, display_name in zip(ordered_test_names, formatted_names):
-                passed = accumulated_results[test_name]['passed']
-                failed = accumulated_results[test_name]['failed']
-                total = passed + failed
-                pass_rate = (passed / total * 100) if total > 0 else 0
-
-                durations = accumulated_results[test_name]['durations']
-                avg_duration = sum(durations) / len(durations) if durations else 0
-
-                pass_rate_str = f"{passed}/{total} ({pass_rate:6.2f}%)"
-                avg_duration_str = f"{avg_duration:.2f}"
-                print(row_fmt.format(display_name, pass_rate_str, avg_duration_str))
-
-            print("=" * table_width)
+            print()
+            print()
             print(f"Suite duration: {format_duration(suite_duration)}")
 
             if suite_all_passed:
