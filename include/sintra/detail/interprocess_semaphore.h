@@ -60,6 +60,10 @@ namespace sintra::detail
 namespace interprocess_semaphore_detail
 {
 #if defined(__APPLE__)
+// NOTE: Apple explicitly documents that os_sync_wait_on_address* must only be
+//       used to implement ownership-free primitives (semaphores, condition
+//       variables, etc.) and not for general locking. Sintra adheres to that
+//       guidance; do not repurpose these shims for mutex-style primitives.
     class os_sync_trace
     {
     public:
