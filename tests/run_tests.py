@@ -281,6 +281,7 @@ DEFAULT_LIVE_STACK_ATTACH_TIMEOUT = 30.0
 DEFAULT_LLDB_LIVE_STACK_ATTACH_TIMEOUT = 90.0
 
 WINDOWS_DEBUGGER_CACHE_ENV = 'SINTRA_WINDOWS_DEBUGGER_CACHE'
+WINDOWS_DEBUGGER_OVERRIDE_ENV = 'SINTRA_WINDOWS_DEBUGGER_EXE'
 WINSDK_INSTALLER_URL_ENV = 'SINTRA_WINSDK_INSTALLER_URL'
 WINSDK_FEATURE_ENV = 'SINTRA_WINSDK_FEATURE'
 WINSDK_DEBUGGER_MSI_ENV = 'SINTRA_WINSDK_DEBUGGER_MSI'
@@ -2189,6 +2190,20 @@ class TestRunner:
         cache_key = executable.lower()
         if cache_key in self._debugger_cache:
             return self._debugger_cache[cache_key]
+
+        override_path = os.environ.get(WINDOWS_DEBUGGER_OVERRIDE_ENV)
+        if override_path:
+            candidate = Path(override_path)
+            candidate_name = candidate.name.lower()
+            expected_names = {executable.lower()}
+            if not executable.lower().endswith('.exe'):
+                expected_names.add(f"{executable}.exe".lower())
+            if candidate.exists() and candidate.is_file() and candidate_name in expected_names:
+                result = (str(candidate), '')
+            else:
+                result = (None, f"override debugger path '{override_path}' invalid or does not match {executable}")
+            self._debugger_cache[cache_key] = result
+            return result
 
         debugger_root, prepare_error = self._ensure_downloaded_windows_debugger_root()
         if not debugger_root:
