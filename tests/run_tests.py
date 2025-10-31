@@ -39,7 +39,7 @@ import urllib.request
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, IO, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, IO, Iterable, List, Optional, Sequence, Set, Tuple
 
 print = partial(__import__("builtins").print, file=sys.stderr, flush=True)
 
@@ -412,6 +412,8 @@ class TestRunner:
         self._scratch_cleanup_dirs_removed = 0
         self._scratch_cleanup_bytes_freed = 0
         self._instrumentation_enabled = True
+        self._instrumentation_disk_root: Optional[Path] = self.build_dir
+        self._instrument_disk_cache: Dict[Path, Tuple[float, str]] = {}
 
         # Determine test directory - check both with and without config subdirectory
         test_dir_with_config = build_dir / 'tests' / config
@@ -445,9 +447,36 @@ class TestRunner:
 
         return self._instrumentation_enabled
 
-    def _instrument_step(self, message: str) -> None:
-        if self._instrumentation_enabled:
-            _instrumentation_print(message)
+    def _instrument_step(self, message: str, *, disk_path: Optional[Path] = None) -> None:
+        if not self._instrumentation_enabled:
+            return
+
+        sample_path: Optional[Path]
+        if disk_path is not None:
+            sample_path = disk_path
+        else:
+            sample_path = self._instrumentation_disk_root
+
+        suffix = ""
+        cache_key: Optional[Path] = None
+        if sample_path is not None:
+            try:
+                cache_key = sample_path.resolve()
+            except Exception:
+                cache_key = sample_path
+
+        if cache_key is not None:
+            now = time.monotonic()
+            cached = self._instrument_disk_cache.get(cache_key)
+            if cached and now - cached[0] < 0.5:
+                suffix = cached[1]
+            else:
+                free_bytes = _available_disk_bytes(cache_key)
+                formatted = _format_size(free_bytes)
+                suffix = f" [disk free: {formatted} at {cache_key}]"
+                self._instrument_disk_cache[cache_key] = (now, suffix)
+
+        _instrumentation_print(f"{message}{suffix}")
 
     def _allocate_scratch_directory(self, invocation: TestInvocation) -> Path:
         """Create a per-invocation scratch directory for test artifacts."""
@@ -933,14 +962,15 @@ class TestRunner:
         start_time = time.time()
         result_success: Optional[bool] = None
         instrumentation_active = self.instrumentation_active()
+        instrument = partial(self._instrument_step, disk_path=self.build_dir)
         if instrumentation_active:
-            self._instrument_step(
+            instrument(
                 f"[instrumentation] Entering run_test_once for {invocation.name} with timeout {timeout}s"
             )
         try:
             popen_env = self._build_test_environment(scratch_dir)
             if instrumentation_active:
-                self._instrument_step(
+                instrument(
                     f"[instrumentation] Environment prepared for {invocation.name}"
                 )
             start_time = time.time()
@@ -964,7 +994,7 @@ class TestRunner:
                 popen_kwargs['start_new_session'] = True
             popen_kwargs['env'] = popen_env
             if instrumentation_active:
-                self._instrument_step(
+                instrument(
                     f"[instrumentation] Launch parameters ready for {invocation.name}"
                 )
 
@@ -978,7 +1008,9 @@ class TestRunner:
             capture_lock = threading.Lock()
             capture_pause_total = 0.0
             capture_active_start: Optional[float] = None
-            threads: List[Tuple[threading.Thread, IO[str]]] = []
+            threads: List[Tuple[threading.Thread, IO[str], str]] = []
+            reader_state_lock = threading.Lock()
+            reader_states: Dict[str, Dict[str, Any]] = {}
             process_group_id: Optional[int] = None
 
             def shutdown_reader_threads() -> None:
@@ -986,15 +1018,65 @@ class TestRunner:
                 join_step = 0.2
                 max_join_time = 5.0
 
-                for thread, stream in threads:
+                if instrumentation_active:
+                    instrument(
+                        "[instrumentation] Shutdown of log reader threads initiated"
+                    )
+
+                def snapshot_reader_state(thread_name: str) -> str:
+                    with reader_state_lock:
+                        state = dict(reader_states.get(thread_name, {}))
+                    descriptor = state.get("descriptor", "unknown")
+                    lines = state.get("lines") or 0
+                    bytes_read = state.get("bytes") or 0
+                    last_update = state.get("last_update")
+                    start_time_state = state.get("start_time")
+                    lifetime_str = "unknown"
+                    if isinstance(start_time_state, float) and isinstance(last_update, float):
+                        lifetime = max(last_update - start_time_state, 0.0)
+                        lifetime_str = f"{lifetime:.3f}s"
+                    if isinstance(last_update, float):
+                        idle = max(time.monotonic() - last_update, 0.0)
+                        last_update_str = f"{idle:.3f}s ago"
+                    else:
+                        last_update_str = "unknown"
+                    active = state.get("active")
+                    last_line = state.get("last_line_excerpt")
+                    excerpt = repr(last_line) if last_line is not None else "None"
+                    return (
+                        f"descriptor={descriptor} lines={lines} bytes={bytes_read} runtime={lifetime_str} "
+                        f"last_activity={last_update_str} active={active} last_line={excerpt}"
+                    )
+
+                for thread, stream, descriptor in threads:
                     join_deadline = time.monotonic() + max_join_time
+                    if instrumentation_active:
+                        instrument(
+                            f"[instrumentation] Joining reader thread {thread.name} (alive={thread.is_alive()}) "
+                            f"state={snapshot_reader_state(thread.name)}"
+                        )
                     while thread.is_alive():
                         remaining = join_deadline - time.monotonic()
                         if remaining <= 0:
+                            if instrumentation_active:
+                                instrument(
+                                    f"[instrumentation] Reader thread {thread.name} join deadline reached "
+                                    f"state={snapshot_reader_state(thread.name)}"
+                                )
                             break
-                        thread.join(timeout=min(join_step, remaining))
+                        join_timeout = min(join_step, remaining)
+                        thread.join(timeout=join_timeout)
+                        if thread.is_alive() and instrumentation_active:
+                            instrument(
+                                f"[instrumentation] Reader thread {thread.name} still alive after join attempt "
+                                f"state={snapshot_reader_state(thread.name)}"
+                            )
 
                     if thread.is_alive():
+                        if instrumentation_active:
+                            instrument(
+                                f"[instrumentation] Closing stream for reader thread {thread.name} ({descriptor})"
+                            )
                         try:
                             stream.close()
                         except Exception:
@@ -1002,18 +1084,32 @@ class TestRunner:
                         thread.join(timeout=join_step)
 
                     if thread.is_alive():
+                        if instrumentation_active:
+                            instrument(
+                                f"[instrumentation] Reader thread {thread.name} failed to terminate after stream close "
+                                f"state={snapshot_reader_state(thread.name)}"
+                            )
                         print(
                             f"\n{Color.YELLOW}Warning: Log reader thread did not terminate cleanly; "
                             "closing descriptors to avoid resource leak.{Color.RESET}"
                         )
+                    elif instrumentation_active:
+                        instrument(
+                            f"[instrumentation] Reader thread {thread.name} terminated state={snapshot_reader_state(thread.name)}"
+                        )
+
+                if instrumentation_active:
+                    instrument(
+                        "[instrumentation] Shutdown of log reader threads completed"
+                    )
 
             if instrumentation_active:
-                self._instrument_step(
+                instrument(
                     f"[instrumentation] Spawning process for {invocation.name}"
                 )
             process = subprocess.Popen(invocation.command(), **popen_kwargs)
             if instrumentation_active:
-                self._instrument_step(
+                instrument(
                     f"[instrumentation] Process started for {invocation.name} with pid {process.pid}"
                 )
 
@@ -1023,7 +1119,7 @@ class TestRunner:
                 except (ProcessLookupError, PermissionError, OSError):
                     process_group_id = None
             if instrumentation_active:
-                self._instrument_step(
+                instrument(
                     f"[instrumentation] Process group lookup complete for {invocation.name}"
                 )
 
@@ -1067,10 +1163,56 @@ class TestRunner:
                     with capture_lock:
                         live_stack_error = error
 
-            def monitor_stream(stream, buffer: List[str]) -> None:
+            def monitor_stream(stream, buffer: List[str], descriptor: str) -> None:
+                thread_name = threading.current_thread().name
+                start_time = time.monotonic()
+                lines = 0
+                bytes_read = 0
+                if instrumentation_active:
+                    instrument(
+                        f"[instrumentation] Reader thread {thread_name} starting for {descriptor}"
+                    )
+                with reader_state_lock:
+                    reader_states[thread_name] = {
+                        "descriptor": descriptor,
+                        "lines": 0,
+                        "bytes": 0,
+                        "last_update": start_time,
+                        "active": True,
+                        "last_line_excerpt": None,
+                        "start_time": start_time,
+                    }
                 try:
                     for line in iter(stream.readline, ''):
                         buffer.append(line)
+                        lines += 1
+                        bytes_read += len(line.encode('utf-8', errors='ignore'))
+                        now_monotonic = time.monotonic()
+                        stripped = line.rstrip('\n')
+                        if len(stripped) > 200:
+                            stripped = f"{stripped[:197]}..."
+                        with reader_state_lock:
+                            entry = reader_states.setdefault(
+                                thread_name,
+                                {
+                                    "descriptor": descriptor,
+                                    "lines": 0,
+                                    "bytes": 0,
+                                    "last_update": start_time,
+                                    "active": True,
+                                    "last_line_excerpt": None,
+                                    "start_time": start_time,
+                                },
+                            )
+                            entry.update(
+                                {
+                                    "lines": lines,
+                                    "bytes": bytes_read,
+                                    "last_update": now_monotonic,
+                                    "active": True,
+                                    "last_line_excerpt": stripped,
+                                }
+                            )
                         attempt_live_capture(line)
                 except (OSError, ValueError):
                     # The stream may be closed from another thread during shutdown.
@@ -1083,30 +1225,58 @@ class TestRunner:
                         stream.close()
                     except Exception:
                         pass
+                    end_time = time.monotonic()
+                    with reader_state_lock:
+                        entry = reader_states.setdefault(
+                            thread_name,
+                            {
+                                "descriptor": descriptor,
+                                "lines": 0,
+                                "bytes": 0,
+                                "last_update": start_time,
+                                "active": False,
+                                "last_line_excerpt": None,
+                                "start_time": start_time,
+                            },
+                        )
+                        entry.update(
+                            {
+                                "lines": lines,
+                                "bytes": bytes_read,
+                                "last_update": end_time,
+                                "active": False,
+                            }
+                        )
+                    if instrumentation_active:
+                        duration = end_time - start_time
+                        instrument(
+                            f"[instrumentation] Reader thread {thread_name} exiting for {descriptor} "
+                            f"after {duration:.3f}s lines={lines} bytes={bytes_read}"
+                        )
 
             if process.stdout:
                 stdout_thread = threading.Thread(
                     target=monitor_stream,
-                    args=(process.stdout, stdout_lines),
+                    args=(process.stdout, stdout_lines, 'stdout'),
                     daemon=True,
                 )
                 stdout_thread.start()
-                threads.append((stdout_thread, process.stdout))
+                threads.append((stdout_thread, process.stdout, 'stdout'))
 
             if process.stderr:
                 stderr_thread = threading.Thread(
                     target=monitor_stream,
-                    args=(process.stderr, stderr_lines),
+                    args=(process.stderr, stderr_lines, 'stderr'),
                     daemon=True,
                 )
                 stderr_thread.start()
-                threads.append((stderr_thread, process.stderr))
+                threads.append((stderr_thread, process.stderr, 'stderr'))
 
             # Wait with timeout, extending the deadline for live stack captures
             try:
                 while True:
                     if instrumentation_active:
-                        self._instrument_step(
+                        instrument(
                             f"[instrumentation] Monitoring {invocation.name} for completion"
                         )
                     with capture_lock:
@@ -1137,14 +1307,14 @@ class TestRunner:
 
                 process.wait()
                 if instrumentation_active:
-                    self._instrument_step(
+                    instrument(
                         f"[instrumentation] Process wait complete for {invocation.name}"
                     )
                 duration = time.time() - start_time
 
                 shutdown_reader_threads()
                 if instrumentation_active:
-                    self._instrument_step(
+                    instrument(
                         f"[instrumentation] Reader threads finished for {invocation.name}"
                     )
 
@@ -1296,7 +1466,7 @@ class TestRunner:
                 self._cleanup_scratch_directory(scratch_dir)
             self._cleanup_new_core_dumps(invocation, core_snapshot, start_time, result_success)
             if instrumentation_active:
-                self._instrument_step(
+                instrument(
                     f"[instrumentation] Exiting run_test_once for {invocation.name}"
                 )
 
@@ -3515,12 +3685,16 @@ def main():
             header = " ".join(f"{index + 1:02d}" for index, _ in enumerate(tests))
 
             instrumentation_pending = runner.instrumentation_active()
+            instrumentation_emit = partial(
+                runner._instrument_step,
+                disk_path=runner.build_dir,
+            )
             if instrumentation_pending:
-                _instrumentation_print(
+                instrumentation_emit(
                     "[instrumentation] Prepared suite header; entering execution loop"
                 )
                 if tests:
-                    _instrumentation_print(
+                    instrumentation_emit(
                         f"[instrumentation] First test scheduled: {tests[0].name}"
                     )
 
@@ -3532,7 +3706,7 @@ def main():
                 max_remaining = max(remaining_counts)
                 reps_in_this_round = min(batch_size, max_remaining)
                 if instrumentation_pending:
-                    _instrumentation_print(
+                    instrumentation_emit(
                         f"[instrumentation] Starting round with batch size {reps_in_this_round}"
                     )
                 print(f"\n{Color.BLUE}--- Round: {reps_in_this_round} repetition(s) ---{Color.RESET}")
@@ -3548,7 +3722,7 @@ def main():
                 for i in range(reps_in_this_round):
                     row_segments = ["  "] * len(tests)
                     if instrumentation_pending:
-                        _instrumentation_print(
+                        instrumentation_emit(
                             f"[instrumentation] Round iteration {i + 1} preparing to evaluate tests"
                         )
                     for index, invocation in enumerate(tests):
@@ -3558,12 +3732,12 @@ def main():
 
                         row_start = "."
                         if instrumentation_pending:
-                            _instrumentation_print(
+                            instrumentation_emit(
                                 f"[instrumentation] Considering test {test_name} at index {index}"
                             )
                         result = runner.run_test_once(invocation)
                         if instrumentation_pending:
-                            _instrumentation_print(
+                            instrumentation_emit(
                                 f"[instrumentation] Completed invocation for {test_name}"
                             )
                             instrumentation_pending = runner.instrumentation_active()
