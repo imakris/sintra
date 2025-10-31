@@ -174,7 +174,6 @@ namespace interprocess_semaphore_detail
             new (probe_ptr) std::atomic<int32_t>(0);
 
             constexpr uint64_t probe_timeout_ns = 1'000'000; // 1 ms
-            const auto probe_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
 
 #if defined(OS_CLOCK_MACH_ABSOLUTE_TIME)
             constexpr os_clockid_t probe_clock = OS_CLOCK_MACH_ABSOLUTE_TIME;
@@ -186,59 +185,24 @@ namespace interprocess_semaphore_detail
 #   error "No supported monotonic clock id available for os_sync_wait_on_address_with_timeout"
 #endif
 
-            pid_t child = ::fork();
-            if (child == -1) {
-                ::munmap(mapping, probe_size);
-                throw std::system_error(errno, std::system_category(), "fork failed while probing os_sync_wait_on_address_with_timeout");
-            }
-
-            if (child == 0) {
-                errno = 0;
-                uint64_t expected = static_cast<uint32_t>(probe_ptr->load(std::memory_order_relaxed));
-                int rc = os_sync_wait_on_address_with_timeout(
-                    static_cast<void*>(probe_ptr),
-                    expected,
-                    sizeof(int32_t),
-                    OS_SYNC_WAIT_ON_ADDRESS_SHARED,
-                    probe_clock,
-                    probe_timeout_ns);
-                int saved_errno = errno;
-                ::_exit((rc == -1 && saved_errno == ETIMEDOUT) ? 0 : (rc == -1 && saved_errno == EINVAL ? 2 : 1));
-            }
-
-            int status = 0;
-            while (true) {
-                pid_t result = ::waitpid(child, &status, WNOHANG);
-                if (result == child) {
-                    break;
-                }
-                if (result == -1) {
-                    int wait_error = errno;
-                    ::kill(child, SIGKILL);
-                    ::waitpid(child, nullptr, 0);
-                    ::munmap(mapping, probe_size);
-                    throw std::system_error(wait_error, std::system_category(), "waitpid failed while probing os_sync_wait_on_address_with_timeout");
-                }
-                if (std::chrono::steady_clock::now() >= probe_deadline) {
-                    ::kill(child, SIGKILL);
-                    ::waitpid(child, nullptr, 0);
-                    ::munmap(mapping, probe_size);
-                    throw std::runtime_error("os_sync_wait_on_address_with_timeout probe hung; nanosecond timeout support could not be verified.");
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }
+            errno = 0;
+            uint64_t expected = static_cast<uint32_t>(probe_ptr->load(std::memory_order_relaxed));
+            int rc = os_sync_wait_on_address_with_timeout(
+                static_cast<void*>(probe_ptr),
+                expected,
+                sizeof(int32_t),
+                OS_SYNC_WAIT_ON_ADDRESS_SHARED,
+                probe_clock,
+                probe_timeout_ns);
+            int saved_errno = errno;
 
             ::munmap(mapping, probe_size);
 
-            if (!WIFEXITED(status)) {
-                throw std::runtime_error("os_sync_wait_on_address_with_timeout probe exited abnormally; nanosecond support could not be verified.");
-            }
-
-            int exit_code = WEXITSTATUS(status);
-            if (exit_code == 0) {
+            if (rc == -1 && saved_errno == ETIMEDOUT) {
                 return;
             }
-            if (exit_code == 2) {
+
+            if (rc == -1 && saved_errno == EINVAL) {
                 throw std::runtime_error(
                     "macOS kernel rejected nanosecond timeouts for os_sync_wait_on_address_with_timeout; "
                     "nanosecond support is required. Please update macOS or install the latest Xcode Command Line Tools.");
@@ -247,6 +211,63 @@ namespace interprocess_semaphore_detail
             throw std::runtime_error(
                 "os_sync_wait_on_address_with_timeout probe failed; nanosecond timeout support could not be verified.");
         });
+    }
+#endif
+
+
+
+            errno = 0;
+
+            uint64_t expected = static_cast<uint32_t>(probe_ptr->load(std::memory_order_relaxed));
+
+            int rc = os_sync_wait_on_address_with_timeout(
+
+                static_cast<void*>(probe_ptr),
+
+                expected,
+
+                sizeof(int32_t),
+
+                OS_SYNC_WAIT_ON_ADDRESS_SHARED,
+
+                probe_clock,
+
+                probe_timeout_ns);
+
+            int saved_errno = errno;
+
+
+
+            ::munmap(mapping, probe_size);
+
+
+
+            if (rc == -1 && saved_errno == ETIMEDOUT) {
+
+                return;
+
+            }
+
+
+
+            if (rc == -1 && saved_errno == EINVAL) {
+
+                throw std::runtime_error(
+
+                    "macOS kernel rejected nanosecond timeouts for os_sync_wait_on_address_with_timeout; "
+
+                    "nanosecond support is required. Please update macOS or install the latest Xcode Command Line Tools.");
+
+            }
+
+
+
+            throw std::runtime_error(
+
+                "os_sync_wait_on_address_with_timeout probe failed; nanosecond timeout support could not be verified.");
+
+        });
+
     }
 #endif
 
@@ -359,7 +380,9 @@ namespace interprocess_semaphore_detail
         }
     }
 #endif
-}
+
+} // namespace interprocess_semaphore_detail
+
 
 class interprocess_semaphore
 {
@@ -392,7 +415,7 @@ public:
     void release_local_handle() noexcept
     {
 #if defined(_WIN32)
-        interprocess_semaphore_detail::close_handle(m_windows.id);
+        sintra::detail::interprocess_semaphore_detail::close_handle(m_windows.id);
 #elif defined(__APPLE__)
         // Nothing to do for the os_sync based implementation.
 #else
@@ -569,7 +592,7 @@ private:
 
     void initialise_windows(unsigned int initial_count)
     {
-        m_windows.id = interprocess_semaphore_detail::generate_global_identifier();
+        m_windows.id = sintra::detail::interprocess_semaphore_detail::generate_global_identifier();
         std::swprintf(m_windows.name,
                       sizeof(m_windows.name) / sizeof(m_windows.name[0]),
                       L"SintraSemaphore_%016llX",
@@ -580,17 +603,17 @@ private:
             throw std::system_error(::GetLastError(), std::system_category(), "CreateSemaphoreW");
         }
 
-        interprocess_semaphore_detail::register_handle(m_windows.id, handle);
+        sintra::detail::interprocess_semaphore_detail::register_handle(m_windows.id, handle);
     }
 
     HANDLE windows_handle() const
     {
-        return interprocess_semaphore_detail::ensure_handle(m_windows.id, m_windows.name);
+        return sintra::detail::interprocess_semaphore_detail::ensure_handle(m_windows.id, m_windows.name);
     }
 
     void teardown_windows() noexcept
     {
-        interprocess_semaphore_detail::close_handle(m_windows.id);
+        sintra::detail::interprocess_semaphore_detail::close_handle(m_windows.id);
     }
 #elif defined(__APPLE__)
     struct os_sync_storage
@@ -615,10 +638,10 @@ private:
 
     void initialise_os_sync(unsigned int initial_count)
     {
-        interprocess_semaphore_detail::ensure_os_sync_timeout_support();
+        sintra::detail::interprocess_semaphore_detail::ensure_os_sync_timeout_support();
         m_os_sync.count.store(static_cast<int32_t>(initial_count), std::memory_order_relaxed);
 #if defined(__APPLE__)
-        interprocess_semaphore_detail::os_sync_trace::log(
+        sintra::detail::interprocess_semaphore_detail::os_sync_trace::log(
             "initialise_os_sync initial_count=%u address=%p",
             initial_count,
             reinterpret_cast<void*>(&m_os_sync.count));
@@ -631,7 +654,7 @@ private:
     {
         int32_t previous = m_os_sync.count.fetch_add(1, std::memory_order_release);
 #if defined(__APPLE__)
-        interprocess_semaphore_detail::os_sync_trace::log(
+        sintra::detail::interprocess_semaphore_detail::os_sync_trace::log(
             "post_os_sync previous=%d new_value=%d address=%p",
             static_cast<int>(previous),
             static_cast<int>(previous + 1),
@@ -646,7 +669,7 @@ private:
     {
         int32_t previous = m_os_sync.count.fetch_sub(1, std::memory_order_acq_rel);
 #if defined(__APPLE__)
-        interprocess_semaphore_detail::os_sync_trace::log(
+        sintra::detail::interprocess_semaphore_detail::os_sync_trace::log(
             "wait_os_sync previous=%d new_value=%d address=%p",
             static_cast<int>(previous),
             static_cast<int>(previous - 1),
@@ -654,7 +677,7 @@ private:
 #endif
         if (previous > 0) {
 #if defined(__APPLE__)
-            interprocess_semaphore_detail::os_sync_trace::log("wait_os_sync satisfied_without_wait previous=%d", static_cast<int>(previous));
+            sintra::detail::interprocess_semaphore_detail::os_sync_trace::log("wait_os_sync satisfied_without_wait previous=%d", static_cast<int>(previous));
 #endif
             return;
         }
@@ -662,13 +685,13 @@ private:
         int32_t expected = previous - 1;
         while (true) {
 #if defined(__APPLE__)
-            interprocess_semaphore_detail::os_sync_trace::log(
+            sintra::detail::interprocess_semaphore_detail::os_sync_trace::log(
                 "wait_os_sync waiting expected=%d",
                 static_cast<int>(expected));
 #endif
             int32_t observed = wait_on_address_blocking(expected);
 #if defined(__APPLE__)
-            interprocess_semaphore_detail::os_sync_trace::log(
+            sintra::detail::interprocess_semaphore_detail::os_sync_trace::log(
                 "wait_os_sync wake observed=%d",
                 static_cast<int>(observed));
 #endif
@@ -698,7 +721,7 @@ private:
         if (remaining <= std::chrono::nanoseconds::zero()) {
             observed = m_os_sync.count.load(std::memory_order_acquire);
 #if defined(__APPLE__)
-            interprocess_semaphore_detail::os_sync_trace::log(
+            sintra::detail::interprocess_semaphore_detail::os_sync_trace::log(
                 "wait_os_sync_with_timeout immediate_timeout expected=%d observed=%d remaining_ns=%lld",
                 static_cast<int>(expected),
                 static_cast<int>(observed),
@@ -711,7 +734,7 @@ private:
         if (count <= 0) {
             observed = m_os_sync.count.load(std::memory_order_acquire);
 #if defined(__APPLE__)
-            interprocess_semaphore_detail::os_sync_trace::log(
+            sintra::detail::interprocess_semaphore_detail::os_sync_trace::log(
                 "wait_os_sync_with_timeout non_positive_duration expected=%d observed=%d duration_ns=%lld",
                 static_cast<int>(expected),
                 static_cast<int>(observed),
@@ -725,7 +748,7 @@ private:
         while (true) {
             uint64_t expected_value = static_cast<uint32_t>(expected);
 #if defined(__APPLE__)
-            interprocess_semaphore_detail::os_sync_trace::log(
+            sintra::detail::interprocess_semaphore_detail::os_sync_trace::log(
                 "wait_os_sync_with_timeout attempt expected=%d expected_value=%u timeout_ns=%llu address=%p",
                 static_cast<int>(expected),
                 static_cast<unsigned>(expected_value),
@@ -741,7 +764,7 @@ private:
                 timeout_ns);
             int saved_errno = errno;
 #if defined(__APPLE__)
-            interprocess_semaphore_detail::os_sync_trace::log(
+            sintra::detail::interprocess_semaphore_detail::os_sync_trace::log(
                 "wait_os_sync_with_timeout result rc=%d errno=%d count_snapshot=%d",
                 rc,
                 saved_errno,
@@ -754,7 +777,7 @@ private:
             if (saved_errno == ETIMEDOUT) {
                 observed = m_os_sync.count.load(std::memory_order_acquire);
 #if defined(__APPLE__)
-                interprocess_semaphore_detail::os_sync_trace::log(
+                sintra::detail::interprocess_semaphore_detail::os_sync_trace::log(
                     "wait_os_sync_with_timeout timeout observed=%d",
                     static_cast<int>(observed));
 #endif
@@ -763,7 +786,7 @@ private:
             if (saved_errno == EINTR || saved_errno == EFAULT) {
                 errno = saved_errno;
 #if defined(__APPLE__)
-                interprocess_semaphore_detail::os_sync_trace::log(
+                sintra::detail::interprocess_semaphore_detail::os_sync_trace::log(
                     "wait_os_sync_with_timeout retry errno=%d",
                 saved_errno);
 #endif
@@ -772,7 +795,7 @@ private:
             errno = saved_errno;
 #if defined(__APPLE__)
             if (saved_errno == EINVAL) {
-                interprocess_semaphore_detail::os_sync_trace::log(
+                sintra::detail::interprocess_semaphore_detail::os_sync_trace::log(
                     "wait_os_sync_with_timeout fatal_einval expected=%d timeout_ns=%llu",
                     static_cast<int>(expected),
                     static_cast<unsigned long long>(timeout_ns));
@@ -780,7 +803,7 @@ private:
                     "os_sync_wait_on_address_with_timeout returned EINVAL despite nanosecond probe success; "
                     "this macOS kernel does not honour the documented timeout contract.");
             }
-            interprocess_semaphore_detail::os_sync_trace::log(
+            sintra::detail::interprocess_semaphore_detail::os_sync_trace::log(
                 "wait_os_sync_with_timeout throwing errno=%d expected=%d",
                 saved_errno,
                 static_cast<int>(expected));
@@ -793,7 +816,7 @@ private:
     {
         m_os_sync.count.fetch_add(1, std::memory_order_acq_rel);
 #if defined(__APPLE__)
-        interprocess_semaphore_detail::os_sync_trace::log(
+        sintra::detail::interprocess_semaphore_detail::os_sync_trace::log(
             "cancel_wait_os_sync new_value=%d",
             static_cast<int>(m_os_sync.count.load(std::memory_order_acquire)));
 #endif
@@ -804,7 +827,7 @@ private:
         while (true) {
             uint64_t expected_value = static_cast<uint32_t>(expected);
 #if defined(__APPLE__)
-            interprocess_semaphore_detail::os_sync_trace::log(
+            sintra::detail::interprocess_semaphore_detail::os_sync_trace::log(
                 "wait_on_address_blocking attempt expected=%d expected_value=%u address=%p",
                 static_cast<int>(expected),
                 static_cast<unsigned>(expected_value),
@@ -817,7 +840,7 @@ private:
                 wait_flags);
             int saved_errno = errno;
 #if defined(__APPLE__)
-            interprocess_semaphore_detail::os_sync_trace::log(
+            sintra::detail::interprocess_semaphore_detail::os_sync_trace::log(
                 "wait_on_address_blocking result rc=%d errno=%d count_snapshot=%d",
                 rc,
                 saved_errno,
@@ -829,7 +852,7 @@ private:
             if (saved_errno == EINTR || saved_errno == EFAULT) {
                 errno = saved_errno;
 #if defined(__APPLE__)
-                interprocess_semaphore_detail::os_sync_trace::log(
+                sintra::detail::interprocess_semaphore_detail::os_sync_trace::log(
                     "wait_on_address_blocking retry errno=%d",
                     saved_errno);
 #endif
@@ -837,7 +860,7 @@ private:
             }
             errno = saved_errno;
 #if defined(__APPLE__)
-            interprocess_semaphore_detail::os_sync_trace::log(
+            sintra::detail::interprocess_semaphore_detail::os_sync_trace::log(
                 "wait_on_address_blocking throwing errno=%d expected=%d",
                 saved_errno,
                 static_cast<int>(expected));
@@ -855,7 +878,7 @@ private:
                 wake_flags);
             int saved_errno = errno;
 #if defined(__APPLE__)
-            interprocess_semaphore_detail::os_sync_trace::log(
+            sintra::detail::interprocess_semaphore_detail::os_sync_trace::log(
                 "wake_one_waiter result rc=%d errno=%d count_snapshot=%d",
                 rc,
                 saved_errno,
@@ -871,14 +894,14 @@ private:
                 if (saved_errno == EINTR) {
                     errno = saved_errno;
 #if defined(__APPLE__)
-                    interprocess_semaphore_detail::os_sync_trace::log("wake_one_waiter retry errno=EINTR");
+                    sintra::detail::interprocess_semaphore_detail::os_sync_trace::log("wake_one_waiter retry errno=EINTR");
 #endif
                     continue;
                 }
             }
             errno = saved_errno;
 #if defined(__APPLE__)
-            interprocess_semaphore_detail::os_sync_trace::log(
+            sintra::detail::interprocess_semaphore_detail::os_sync_trace::log(
                 "wake_one_waiter throwing errno=%d",
                 saved_errno);
 #endif
