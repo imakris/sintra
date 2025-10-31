@@ -21,7 +21,7 @@ out-of-range values with `EINVAL`.
 
 ## Fix
 
-The macOS backend now forwards the remaining timeout directly, in nanoseconds, instead of converting it into an absolute mach_absolute_time tick count. When a kernel build still expects mach absolute tick values, the runtime detects the first EINVAL, switches a process-wide flag, and retries using the converted timeout for the rest of the run. This keeps the fast path aligned with the documented API while maintaining compatibility with older behaviour.
+The macOS backend now forwards the remaining timeout directly, in nanoseconds, instead of converting it into an absolute `mach_absolute_time` tick count. When a kernel build still expects Mach tick units, the runtime detects the first `EINVAL`, flips a process-wide flag, and retries using converted tick values. If the kernel *still* refuses the call, the semaphore falls back to a cooperative polling loop that watches the counter, sleeps in short slices, and honours the original deadline. This keeps the documented fast path, restores compatibility with older kernels, and still provides bounded waits when both interpretations are rejected. a??F:include/sintra/detail/interprocess_semaphore.h�?�L500-L521a?`a??F:include/sintra/detail/interprocess_semaphore.h�?�L642-L790a?`
 
 ## Instrumentation overview
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdarg>
@@ -13,6 +14,7 @@
 #include <random>
 #include <stdexcept>
 #include <system_error>
+#include <thread>
 
 #if defined(_WIN32)
   #ifndef NOMINMAX
@@ -43,9 +45,7 @@
   #else
     #error "sintra requires compiler support for __has_include to verify os_sync_wait_on_address availability on macOS."
   #endif
-  #ifdef OS_CLOCK_MACH_ABSOLUTE_TIME
-    #include <mach/mach_time.h>
-  #endif
+  #include <mach/mach_time.h>
 #else
   #include <cerrno>
   #include <semaphore.h>
@@ -153,6 +153,7 @@ namespace interprocess_semaphore_detail
         automatic = 0,
         nanoseconds,
         mach_ticks,
+        manual,
     };
 
     inline std::atomic<uint8_t>& os_sync_timeout_mode_selector()
@@ -170,8 +171,33 @@ namespace interprocess_semaphore_detail
             return "nanoseconds";
         case os_sync_timeout_mode::mach_ticks:
             return "mach_ticks";
+        case os_sync_timeout_mode::manual:
+            return "manual";
         }
         return "unknown";
+    }
+
+    inline uint64_t to_timeout_argument(uint64_t timeout_ns, bool use_mach_ticks)
+    {
+        if (!use_mach_ticks) {
+            return timeout_ns;
+        }
+        if (timeout_ns == 0) {
+            return 0;
+        }
+
+        static const mach_timebase_info_data_t timebase = [] {
+            mach_timebase_info_data_t info{};
+            (void)mach_timebase_info(&info);
+            return info;
+        }();
+
+        unsigned __int128 absolute_delta = static_cast<unsigned __int128>(timeout_ns) *
+                                           static_cast<unsigned __int128>(timebase.denom);
+        absolute_delta += static_cast<unsigned __int128>(timebase.numer - 1);
+        absolute_delta /= static_cast<unsigned __int128>(timebase.numer);
+
+        return static_cast<uint64_t>(absolute_delta);
     }
 #endif
 
@@ -530,37 +556,10 @@ private:
 
 #ifdef OS_CLOCK_MACH_ABSOLUTE_TIME
     static constexpr os_clockid_t wait_clock = OS_CLOCK_MACH_ABSOLUTE_TIME;
-    static uint64_t nanoseconds_to_mach_absolute_ticks(uint64_t timeout_ns)
-    {
-        if (timeout_ns == 0) {
-            return 0;
-        }
-
-        static const mach_timebase_info_data_t timebase = [] {
-            mach_timebase_info_data_t info{};
-            (void)mach_timebase_info(&info);
-            return info;
-        }();
-
-        unsigned __int128 absolute_delta = static_cast<unsigned __int128>(timeout_ns) *
-                                           static_cast<unsigned __int128>(timebase.denom);
-        absolute_delta += static_cast<unsigned __int128>(timebase.numer - 1);
-        absolute_delta /= static_cast<unsigned __int128>(timebase.numer);
-
-        return static_cast<uint64_t>(absolute_delta);
-    }
 #elif defined(OS_CLOCK_MONOTONIC)
     static constexpr os_clockid_t wait_clock = OS_CLOCK_MONOTONIC;
-    static uint64_t nanoseconds_to_mach_absolute_ticks(uint64_t timeout_ns)
-    {
-        return timeout_ns;
-    }
 #elif defined(CLOCK_MONOTONIC)
     static constexpr os_clockid_t wait_clock = static_cast<os_clockid_t>(CLOCK_MONOTONIC);
-    static uint64_t nanoseconds_to_mach_absolute_ticks(uint64_t timeout_ns)
-    {
-        return timeout_ns;
-    }
 #else
 #   error "No supported monotonic clock id available for os_sync_wait_on_address_with_timeout"
 #endif
@@ -681,10 +680,12 @@ private:
 #if defined(__APPLE__)
             auto mode_value = timeout_mode_atomic.load(std::memory_order_acquire);
             auto mode = static_cast<interprocess_semaphore_detail::os_sync_timeout_mode>(mode_value);
-            uint64_t timeout_arg = base_timeout_ns;
-            if (mode == interprocess_semaphore_detail::os_sync_timeout_mode::mach_ticks) {
-                timeout_arg = nanoseconds_to_mach_absolute_ticks(base_timeout_ns);
+            if (mode == interprocess_semaphore_detail::os_sync_timeout_mode::manual) {
+                return wait_os_sync_with_timeout_manual(expected, base_timeout_ns, observed);
             }
+            uint64_t timeout_arg = base_timeout_ns;
+            const bool use_mach_ticks = (mode == interprocess_semaphore_detail::os_sync_timeout_mode::mach_ticks);
+            timeout_arg = interprocess_semaphore_detail::to_timeout_argument(base_timeout_ns, use_mach_ticks);
             uint64_t expected_value = static_cast<uint32_t>(expected);
             interprocess_semaphore_detail::os_sync_trace::log(
                 "wait_os_sync_with_timeout attempt expected=%d expected_value=%u remaining_ns=%llu timeout_arg=%llu mode=%s address=%p",
@@ -754,19 +755,30 @@ private:
                 continue;
             }
 #if defined(__APPLE__)
-            if (saved_errno == EINVAL &&
-                mode != interprocess_semaphore_detail::os_sync_timeout_mode::mach_ticks) {
-                uint8_t previous_mode = mode_value;
+            if (saved_errno == EINVAL) {
+                if (mode != interprocess_semaphore_detail::os_sync_timeout_mode::mach_ticks) {
+                    timeout_mode_atomic.store(
+                        static_cast<uint8_t>(interprocess_semaphore_detail::os_sync_timeout_mode::mach_ticks),
+                        std::memory_order_release);
+                    interprocess_semaphore_detail::os_sync_trace::log(
+                        "wait_os_sync_with_timeout switching_mode expected=%d original_timeout_ns=%llu new_mode=%s previous_mode=%s",
+                        static_cast<int>(expected),
+                        static_cast<unsigned long long>(base_timeout_ns),
+                        interprocess_semaphore_detail::to_string(interprocess_semaphore_detail::os_sync_timeout_mode::mach_ticks),
+                        interprocess_semaphore_detail::to_string(static_cast<interprocess_semaphore_detail::os_sync_timeout_mode>(mode)));
+                    continue;
+                }
+
                 timeout_mode_atomic.store(
-                    static_cast<uint8_t>(interprocess_semaphore_detail::os_sync_timeout_mode::mach_ticks),
+                    static_cast<uint8_t>(interprocess_semaphore_detail::os_sync_timeout_mode::manual),
                     std::memory_order_release);
                 interprocess_semaphore_detail::os_sync_trace::log(
                     "wait_os_sync_with_timeout switching_mode expected=%d original_timeout_ns=%llu new_mode=%s previous_mode=%s",
                     static_cast<int>(expected),
                     static_cast<unsigned long long>(base_timeout_ns),
-                    interprocess_semaphore_detail::to_string(interprocess_semaphore_detail::os_sync_timeout_mode::mach_ticks),
-                    interprocess_semaphore_detail::to_string(static_cast<interprocess_semaphore_detail::os_sync_timeout_mode>(previous_mode)));
-                continue;
+                    interprocess_semaphore_detail::to_string(interprocess_semaphore_detail::os_sync_timeout_mode::manual),
+                    interprocess_semaphore_detail::to_string(interprocess_semaphore_detail::os_sync_timeout_mode::mach_ticks));
+                return wait_os_sync_with_timeout_manual(expected, base_timeout_ns, observed);
             }
 #endif
             errno = saved_errno;
@@ -779,6 +791,50 @@ private:
             throw std::system_error(saved_errno, std::generic_category(), "os_sync_wait_on_address_with_timeout");
         }
     }
+
+#if defined(__APPLE__)
+    bool wait_os_sync_with_timeout_manual(int32_t expected, uint64_t base_timeout_ns, int32_t& observed)
+    {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::nanoseconds(base_timeout_ns);
+        const std::chrono::nanoseconds sleep_quantum = std::chrono::microseconds(50);
+
+        interprocess_semaphore_detail::os_sync_trace::log(
+            "wait_os_sync_with_timeout manual_fallback_start expected=%d timeout_ns=%llu address=%p",
+            static_cast<int>(expected),
+            static_cast<unsigned long long>(base_timeout_ns),
+            reinterpret_cast<void*>(&m_os_sync.count));
+
+        while (true) {
+            observed = m_os_sync.count.load(std::memory_order_acquire);
+            if (observed >= 0) {
+                interprocess_semaphore_detail::os_sync_trace::log(
+                    "wait_os_sync_with_timeout manual_fallback_success expected=%d observed=%d",
+                    static_cast<int>(expected),
+                    static_cast<int>(observed));
+                return true;
+            }
+
+            auto now = std::chrono::steady_clock::now();
+            if (now >= deadline) {
+                cancel_wait_os_sync();
+                observed = m_os_sync.count.load(std::memory_order_acquire);
+                interprocess_semaphore_detail::os_sync_trace::log(
+                    "wait_os_sync_with_timeout manual_fallback_timeout expected=%d observed=%d",
+                    static_cast<int>(expected),
+                    static_cast<int>(observed));
+                return false;
+            }
+
+            auto remaining = std::chrono::duration_cast<std::chrono::nanoseconds>(deadline - now);
+            auto sleep_duration = std::min(remaining, sleep_quantum);
+            interprocess_semaphore_detail::os_sync_trace::log(
+                "wait_os_sync_with_timeout manual_fallback_sleep sleep_ns=%lld observed=%d",
+                static_cast<long long>(sleep_duration.count()),
+                static_cast<int>(observed));
+            std::this_thread::sleep_for(sleep_duration);
+        }
+    }
+#endif
 
     void cancel_wait_os_sync()
     {
