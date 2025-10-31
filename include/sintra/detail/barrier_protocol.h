@@ -53,6 +53,7 @@ enum class barrier_ack_type : std::uint8_t {
 };
 
 struct barrier_ack_request {
+    instance_id_type group_instance_id;
     sequence_counter_type barrier_sequence;
     instance_id_type common_function_iid;
     barrier_ack_type ack_type;
@@ -93,6 +94,7 @@ inline constexpr barrier_completion_payload make_barrier_completion_payload()
 inline constexpr barrier_ack_request make_barrier_ack_request()
 {
     return barrier_ack_request{
+        invalid_instance_id,
         invalid_sequence,
         invalid_instance_id,
         barrier_ack_type::outbound,

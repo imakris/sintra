@@ -2192,6 +2192,10 @@ class TestRunner:
             return self._debugger_cache[cache_key]
 
         override_path = os.environ.get(WINDOWS_DEBUGGER_OVERRIDE_ENV)
+        if not override_path:
+            default_override = Path(r"C:\Program Files\Windows Kits\10\Debuggers\x64\cdb.exe")
+            if default_override.exists():
+                override_path = str(default_override)
         if override_path:
             candidate = Path(override_path)
             candidate_name = candidate.name.lower()

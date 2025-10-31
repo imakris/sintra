@@ -174,15 +174,21 @@ detail::barrier_completion_payload Process_group::barrier(
                                           instance_id_type offender,
                                           detail::barrier_failure reason)
             {
+                auto state_for_reason = [&](detail::barrier_failure failure_reason) {
+                    return (failure_reason == detail::barrier_failure::peer_draining)
+                        ? detail::barrier_state::downgraded
+                        : detail::barrier_state::failed;
+                };
+
                 if (type == detail::barrier_ack_type::outbound && b.awaiting_outbound) {
-                    b.outbound_state = detail::barrier_state::failed;
+                    b.outbound_state = state_for_reason(reason);
                     b.outbound_failure = reason;
                     b.outbound_offender = offender;
                     b.outbound_waiters.clear();
                     b.awaiting_outbound = false;
                 }
                 if (type == detail::barrier_ack_type::processing && b.awaiting_processing) {
-                    b.processing_state = detail::barrier_state::failed;
+                    b.processing_state = state_for_reason(reason);
                     b.processing_failure = reason;
                     b.processing_offender = offender;
                     b.processing_waiters.clear();
@@ -193,6 +199,7 @@ detail::barrier_completion_payload Process_group::barrier(
             for (auto pid : b.processes_arrived) {
                 if (needs_outbound && b.awaiting_outbound) {
                     detail::barrier_ack_request req = detail::make_barrier_ack_request();
+                    req.group_instance_id = this->instance_id();
                     req.barrier_sequence = sequence;
                     req.common_function_iid = current_common_fiid;
                     req.ack_type = detail::barrier_ack_type::outbound;
@@ -206,6 +213,7 @@ detail::barrier_completion_payload Process_group::barrier(
                 }
                 if (needs_processing && b.awaiting_processing) {
                     detail::barrier_ack_request req = detail::make_barrier_ack_request();
+                    req.group_instance_id = this->instance_id();
                     req.barrier_sequence = sequence;
                     req.common_function_iid = current_common_fiid;
                     req.ack_type = detail::barrier_ack_type::processing;
@@ -226,14 +234,18 @@ detail::barrier_completion_payload Process_group::barrier(
                 if (b.awaiting_outbound && current >= b.outbound_deadline) {
                     b.outbound_state = detail::barrier_state::failed;
                     b.outbound_failure = detail::barrier_failure::timeout;
-                    b.outbound_offender = invalid_instance_id;
+                    b.outbound_offender = b.outbound_waiters.empty()
+                        ? invalid_instance_id
+                        : *b.outbound_waiters.begin();
                     b.outbound_waiters.clear();
                     b.awaiting_outbound = false;
                 }
                 if (b.awaiting_processing && current >= b.processing_deadline) {
                     b.processing_state = detail::barrier_state::failed;
                     b.processing_failure = detail::barrier_failure::timeout;
-                    b.processing_offender = invalid_instance_id;
+                    b.processing_offender = b.processing_waiters.empty()
+                        ? invalid_instance_id
+                        : *b.processing_waiters.begin();
                     b.processing_waiters.clear();
                     b.awaiting_processing = false;
                 }
@@ -270,19 +282,22 @@ detail::barrier_completion_payload Process_group::barrier(
                 payload.outbound.failure_code = detail::barrier_failure::none;
                 payload.outbound.offender = invalid_instance_id;
                 payload.outbound.sequence = invalid_sequence;
-            }
-            else if (b.outbound_state == detail::barrier_state::failed) {
-                payload.outbound.state = detail::barrier_state::failed;
-                payload.outbound.failure_code = b.outbound_failure;
-                payload.outbound.offender = b.outbound_offender;
-                payload.outbound.sequence = invalid_sequence;
-            }
-            else {
-                payload.outbound.state = detail::barrier_state::satisfied;
-                payload.outbound.failure_code = detail::barrier_failure::none;
-                payload.outbound.offender = invalid_instance_id;
-                if (payload.outbound.sequence == invalid_sequence) {
-                    payload.outbound.sequence = sequence;
+            } else {
+                if (b.outbound_state == detail::barrier_state::failed ||
+                    b.outbound_state == detail::barrier_state::downgraded)
+                {
+                    payload.outbound.state = b.outbound_state;
+                    payload.outbound.failure_code = b.outbound_failure;
+                    payload.outbound.offender = b.outbound_offender;
+                    payload.outbound.sequence = invalid_sequence;
+                }
+                else {
+                    payload.outbound.state = detail::barrier_state::satisfied;
+                    payload.outbound.failure_code = detail::barrier_failure::none;
+                    payload.outbound.offender = invalid_instance_id;
+                    if (payload.outbound.sequence == invalid_sequence) {
+                        payload.outbound.sequence = sequence;
+                    }
                 }
             }
 
@@ -291,19 +306,22 @@ detail::barrier_completion_payload Process_group::barrier(
                 payload.processing.failure_code = detail::barrier_failure::none;
                 payload.processing.offender = invalid_instance_id;
                 payload.processing.sequence = invalid_sequence;
-            }
-            else if (b.processing_state == detail::barrier_state::failed) {
-                payload.processing.state = detail::barrier_state::failed;
-                payload.processing.failure_code = b.processing_failure;
-                payload.processing.offender = b.processing_offender;
-                payload.processing.sequence = invalid_sequence;
-            }
-            else {
-                payload.processing.state = detail::barrier_state::satisfied;
-                payload.processing.failure_code = detail::barrier_failure::none;
-                payload.processing.offender = invalid_instance_id;
-                if (payload.processing.sequence == invalid_sequence) {
-                    payload.processing.sequence = sequence;
+            } else {
+                if (b.processing_state == detail::barrier_state::failed ||
+                    b.processing_state == detail::barrier_state::downgraded)
+                {
+                    payload.processing.state = b.processing_state;
+                    payload.processing.failure_code = b.processing_failure;
+                    payload.processing.offender = b.processing_offender;
+                    payload.processing.sequence = invalid_sequence;
+                }
+                else {
+                    payload.processing.state = detail::barrier_state::satisfied;
+                    payload.processing.failure_code = detail::barrier_failure::none;
+                    payload.processing.offender = invalid_instance_id;
+                    if (payload.processing.sequence == invalid_sequence) {
+                        payload.processing.sequence = sequence;
+                    }
                 }
             }
         }
@@ -394,30 +412,66 @@ inline void Process_group::barrier_ack_response(
     auto& payload = b.completion_payloads[responder];
     payload.common_function_iid = b.common_function_iid;
 
+    auto update_phase_state = [](bool success,
+                                 detail::barrier_phase_status& phase_payload,
+                                 detail::barrier_state& phase_state,
+                                 detail::barrier_failure& failure_code,
+                                 instance_id_type& offender,
+                                 instance_id_type responder_iid,
+                                 detail::barrier_failure failure_reason,
+                                 sequence_counter_type observed_sequence)
+    {
+        if (success) {
+            phase_payload.state = detail::barrier_state::satisfied;
+            phase_payload.failure_code = detail::barrier_failure::none;
+            phase_payload.offender = invalid_instance_id;
+            phase_payload.sequence = observed_sequence;
+            if (phase_state != detail::barrier_state::failed &&
+                phase_state != detail::barrier_state::downgraded)
+            {
+                phase_state = detail::barrier_state::downgraded; // temporary until waiters drain
+                failure_code = detail::barrier_failure::none;
+                offender = invalid_instance_id;
+            }
+            return;
+        }
+
+        const bool downgrade = (failure_reason == detail::barrier_failure::peer_draining);
+        phase_payload.state = downgrade ? detail::barrier_state::downgraded
+                                        : detail::barrier_state::failed;
+        phase_payload.failure_code = failure_reason;
+        phase_payload.offender = responder_iid;
+        phase_payload.sequence = invalid_sequence;
+
+        phase_state = downgrade ? detail::barrier_state::downgraded
+                                : detail::barrier_state::failed;
+        failure_code = failure_reason;
+        offender = responder_iid;
+    };
+
     if (response.ack_type == detail::barrier_ack_type::outbound && b.awaiting_outbound) {
         b.outbound_waiters.erase(responder);
 
-        if (response.success) {
-            payload.outbound.state = detail::barrier_state::satisfied;
-            payload.outbound.failure_code = detail::barrier_failure::none;
-            payload.outbound.offender = invalid_instance_id;
-            payload.outbound.sequence = response.observed_sequence;
-        }
-        else {
-            payload.outbound.state = detail::barrier_state::failed;
-            payload.outbound.failure_code = detail::barrier_failure::peer_draining;
-            payload.outbound.offender = responder;
-            payload.outbound.sequence = response.observed_sequence;
-
-            b.outbound_state = detail::barrier_state::failed;
-            b.outbound_failure = detail::barrier_failure::peer_draining;
-            b.outbound_offender = responder;
+        if (!response.success) {
+            // Treat participant refusal as peer_draining downgrade.
             b.outbound_waiters.clear();
         }
 
+        update_phase_state(
+            response.success,
+            payload.outbound,
+            b.outbound_state,
+            b.outbound_failure,
+            b.outbound_offender,
+            responder,
+            detail::barrier_failure::peer_draining,
+            response.observed_sequence);
+
         if (b.outbound_waiters.empty()) {
             b.awaiting_outbound = false;
-            if (b.outbound_state != detail::barrier_state::failed) {
+            if (b.outbound_state == detail::barrier_state::downgraded &&
+                b.outbound_failure == detail::barrier_failure::none)
+            {
                 b.outbound_state = detail::barrier_state::satisfied;
             }
         }
@@ -425,27 +479,25 @@ inline void Process_group::barrier_ack_response(
     else if (response.ack_type == detail::barrier_ack_type::processing && b.awaiting_processing) {
         b.processing_waiters.erase(responder);
 
-        if (response.success) {
-            payload.processing.state = detail::barrier_state::satisfied;
-            payload.processing.failure_code = detail::barrier_failure::none;
-            payload.processing.offender = invalid_instance_id;
-            payload.processing.sequence = response.observed_sequence;
-        }
-        else {
-            payload.processing.state = detail::barrier_state::failed;
-            payload.processing.failure_code = detail::barrier_failure::peer_draining;
-            payload.processing.offender = responder;
-            payload.processing.sequence = response.observed_sequence;
-
-            b.processing_state = detail::barrier_state::failed;
-            b.processing_failure = detail::barrier_failure::peer_draining;
-            b.processing_offender = responder;
+        if (!response.success) {
             b.processing_waiters.clear();
         }
 
+        update_phase_state(
+            response.success,
+            payload.processing,
+            b.processing_state,
+            b.processing_failure,
+            b.processing_offender,
+            responder,
+            detail::barrier_failure::peer_draining,
+            response.observed_sequence);
+
         if (b.processing_waiters.empty()) {
             b.awaiting_processing = false;
-            if (b.processing_state != detail::barrier_state::failed) {
+            if (b.processing_state == detail::barrier_state::downgraded &&
+                b.processing_failure == detail::barrier_failure::none)
+            {
                 b.processing_state = detail::barrier_state::satisfied;
             }
         }
@@ -461,6 +513,12 @@ inline void Process_group::drop_from_inflight_barriers(
     std::vector<Barrier_completion>& completions)
 {
     std::lock_guard basic_lock(m_call_mutex);
+
+    const bool coordinator_stopping = (process_iid == process_of(this->instance_id()));
+    const auto coordinator_offender = coordinator_stopping ? process_iid : invalid_instance_id;
+    const auto rendezvous_failure = coordinator_stopping
+        ? detail::barrier_failure::coordinator_stop
+        : detail::barrier_failure::peer_draining;
 
     for (auto barrier_it = m_barriers.begin(); barrier_it != m_barriers.end(); ) {
         auto barrier = barrier_it->second;
@@ -495,20 +553,63 @@ inline void Process_group::drop_from_inflight_barriers(
         }
 
         completion.recipient_payloads.reserve(completion.recipients.size());
+
+        auto adjust_payload = [&](detail::barrier_completion_payload& payload,
+                                  instance_id_type recipient)
+        {
+            auto flags_it = barrier->per_process_flags.find(recipient);
+            if (flags_it != barrier->per_process_flags.end()) {
+                payload.request_flags = flags_it->second;
+            }
+
+            payload.barrier_sequence = invalid_sequence;
+            payload.rendezvous.state = detail::barrier_state::failed;
+            payload.rendezvous.failure_code = rendezvous_failure;
+            payload.rendezvous.offender = coordinator_stopping ? coordinator_offender : process_iid;
+            payload.rendezvous.sequence = invalid_sequence;
+
+            auto apply_phase = [&](detail::barrier_phase_status& phase,
+                                   bool requested)
+            {
+                if (!requested) {
+                    phase.state = detail::barrier_state::not_requested;
+                    phase.failure_code = detail::barrier_failure::none;
+                    phase.offender = invalid_instance_id;
+                    phase.sequence = invalid_sequence;
+                    return;
+                }
+
+                if (coordinator_stopping) {
+                    phase.state = detail::barrier_state::failed;
+                    phase.failure_code = detail::barrier_failure::coordinator_stop;
+                    phase.offender = coordinator_offender;
+                }
+                else {
+                    phase.state = detail::barrier_state::downgraded;
+                    phase.failure_code = detail::barrier_failure::peer_draining;
+                    phase.offender = process_iid;
+                }
+                phase.sequence = invalid_sequence;
+            };
+
+            const auto flags = payload.request_flags;
+            apply_phase(payload.inbound,    (flags & detail::barrier_flag_inbound) != 0);
+            apply_phase(payload.outbound,   (flags & detail::barrier_flag_outbound) != 0);
+            apply_phase(payload.processing, (flags & detail::barrier_flag_processing) != 0);
+        };
+
         for (auto recipient : completion.recipients) {
             auto payload_it = barrier->completion_payloads.find(recipient);
             if (payload_it != barrier->completion_payloads.end()) {
-                completion.recipient_payloads.push_back(payload_it->second);
+                detail::barrier_completion_payload payload = payload_it->second;
+                adjust_payload(payload, recipient);
+                completion.recipient_payloads.push_back(std::move(payload));
             }
             else {
                 detail::barrier_completion_payload payload = detail::make_barrier_completion_payload();
                 payload.common_function_iid = barrier->common_function_iid;
                 payload.request_flags = barrier->group_requirement_mask;
-                payload.rendezvous.state = detail::barrier_state::satisfied;
-                payload.rendezvous.sequence = invalid_sequence;
-                payload.inbound.state = detail::barrier_state::not_requested;
-                payload.outbound.state = detail::barrier_state::not_requested;
-                payload.processing.state = detail::barrier_state::not_requested;
+                adjust_payload(payload, recipient);
                 completion.recipient_payloads.push_back(payload);
             }
         }
