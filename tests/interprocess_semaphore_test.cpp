@@ -258,45 +258,13 @@ void test_threaded_producer_consumer()
 
 void test_release_local_handle_idempotent()
 {
+    // release_local_handle() is documented as a no-op on current backends.
+    // This test verifies that calling it multiple times is safe and doesn't
+    // break semaphore functionality.
     interprocess_semaphore sem(0);
 
-#if defined(_WIN32)
-    struct Windows_descriptor {
-        std::uint64_t id;
-        std::wstring name;
-    };
-
-    auto capture_descriptor = [](const interprocess_semaphore& sem) {
-        Windows_descriptor desc{};
-        const auto* base = reinterpret_cast<const unsigned char*>(&sem);
-        std::memcpy(&desc.id, base, sizeof(desc.id));
-        wchar_t name_buffer[kWindowsNameChars];
-        std::memcpy(name_buffer, base + sizeof(desc.id), sizeof(name_buffer));
-        name_buffer[kWindowsNameChars - 1] = L'\0';
-        desc.name.assign(name_buffer);
-        return desc;
-    };
-
-    const Windows_descriptor descriptor = capture_descriptor(sem);
-#endif
-
     sem.release_local_handle();
     sem.release_local_handle();
-
-#if defined(_WIN32)
-    HANDLE recreated = ::CreateSemaphoreW(nullptr, 0, LONG_MAX, descriptor.name.c_str());
-    if (!recreated) {
-        throw std::system_error(::GetLastError(), std::system_category(), "CreateSemaphoreW");
-    }
-
-    unsigned char* base = reinterpret_cast<unsigned char*>(&sem);
-    std::memcpy(base, &descriptor.id, sizeof(descriptor.id));
-    wchar_t name_buffer[kWindowsNameChars]{};
-    std::wcsncpy(name_buffer, descriptor.name.c_str(), kWindowsNameChars - 1);
-    std::memcpy(base + sizeof(descriptor.id), name_buffer, sizeof(name_buffer));
-
-    sintra::detail::interprocess_semaphore_detail::register_handle(descriptor.id, recreated);
-#endif
 
     sem.post();
     REQUIRE_TRUE(sem.try_wait());
@@ -530,27 +498,19 @@ std::string current_executable_path()
     return std::string(buffer, length);
 }
 
-void attach_existing_semaphore(interprocess_semaphore& sem,
+void attach_existing_semaphore(sintra::detail::interprocess_semaphore& sem,
                                const std::string& name_ascii,
-                               std::uint64_t id)
+                               std::uint64_t /*id*/)
 {
-    std::wstring name_w(name_ascii.begin(), name_ascii.end());
-    HANDLE handle = ::OpenSemaphoreW(SYNCHRONIZE | SEMAPHORE_MODIFY_STATE, FALSE, name_w.c_str());
-    if (!handle) {
-        handle = ::CreateSemaphoreW(nullptr, 0, LONG_MAX, name_w.c_str());
-        if (!handle) {
-            throw std::system_error(::GetLastError(), std::system_category(), "CreateSemaphoreW");
-        }
-    }
-
-    sem.release_local_handle();
-    unsigned char* base = reinterpret_cast<unsigned char*>(&sem);
-    std::memcpy(base, &id, sizeof(id));
-    wchar_t name_buffer[kWindowsNameChars]{};
-    std::wcsncpy(name_buffer, name_w.c_str(), kWindowsNameChars - 1);
-    std::memcpy(base + sizeof(id), name_buffer, sizeof(name_buffer));
-
-    sintra::detail::interprocess_semaphore_detail::register_handle(id, handle);
+#if defined(_WIN32)
+    using sem_t = sintra::detail::interprocess_semaphore;
+    std::wstring wname(name_ascii.begin(), name_ascii.end());
+    // Reconstruct in-place using the named constructor to attach to the existing kernel semaphore.
+    sem.~interprocess_semaphore();
+    new (&sem) sem_t(0u, wname.c_str(), 0x7fffffff);
+#else
+    (void)sem; (void)name_ascii;
+#endif
 }
 
 int run_interprocess_child(const std::string& work_name,
