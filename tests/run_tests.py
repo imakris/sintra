@@ -27,6 +27,7 @@ import importlib.util
 import json
 from functools import partial
 import os
+import socket
 import shlex
 import shutil
 import subprocess
@@ -1057,6 +1058,12 @@ class TestRunner:
                             f"[instrumentation] Descendant processes outside group ({reason}): "
                             f"{extra_only} details=[{detail_entries}]"
                         )
+                        fd_map = self._snapshot_pid_fd_usage(extra_only)
+                        for pid_value in sorted(fd_map):
+                            instrument(
+                                f"[instrumentation] Descriptor usage for descendant {pid_value} "
+                                f"({reason}): {fd_map[pid_value]}"
+                            )
                     if (
                         sys.platform == 'darwin'
                         and instrumentation_active
@@ -1086,6 +1093,12 @@ class TestRunner:
                         f"[instrumentation] Residual process group members ({reason}): {survivor_list} "
                         f"details=[{detail_entries}]"
                     )
+                    fd_map = self._snapshot_pid_fd_usage(survivor_list)
+                    for pid_value in sorted(fd_map):
+                        instrument(
+                            f"[instrumentation] Descriptor usage for residual {pid_value} "
+                            f"({reason}): {fd_map[pid_value]}"
+                        )
                     if descendant_candidates:
                         descendant_only = sorted(descendant_candidates - survivors)
                         if descendant_only:
@@ -1098,6 +1111,12 @@ class TestRunner:
                                 f"[instrumentation] Descendant processes outside group ({reason}): "
                                 f"{descendant_only} details=[{descendant_entries}]"
                             )
+                            fd_map = self._snapshot_pid_fd_usage(descendant_only)
+                            for pid_value in sorted(fd_map):
+                                instrument(
+                                    f"[instrumentation] Descriptor usage for descendant {pid_value} "
+                                    f"({reason}): {fd_map[pid_value]}"
+                                )
                     if sys.platform == 'darwin':
                         crash_watchers = _find_lingering_processes(
                             (
@@ -1259,9 +1278,14 @@ class TestRunner:
                             )
 
                     if thread.is_alive():
-                        terminate_process_group_members(
+                        residual_during_shutdown = terminate_process_group_members(
                             f"log reader stall ({descriptor}) for {invocation.name}"
                         )
+                        if instrumentation_active and residual_during_shutdown:
+                            instrument(
+                                f"[instrumentation] Residual processes persisted after stall cleanup "
+                                f"for {descriptor}"
+                            )
                         forcible_close_applied = False
                         if stream_fd is not None:
                             try:
@@ -1460,10 +1484,22 @@ class TestRunner:
 
             if process.stdout:
                 stdout_fd: Optional[int] = None
+                stdout_fd_error: Optional[BaseException] = None
                 try:
                     stdout_fd = process.stdout.fileno()
-                except (OSError, ValueError, AttributeError):
+                except (OSError, ValueError, AttributeError) as exc:
+                    stdout_fd_error = exc
                     stdout_fd = None
+                if instrumentation_active:
+                    if stdout_fd is not None:
+                        instrument(
+                            f"[instrumentation] Captured stdout fd {stdout_fd} for {invocation.name}"
+                        )
+                    else:
+                        instrument(
+                            f"[instrumentation] Failed to capture stdout fd for {invocation.name}: "
+                            f"{stdout_fd_error!r}"
+                        )
                 stdout_thread = threading.Thread(
                     target=monitor_stream,
                     args=(process.stdout, stdout_lines, 'stdout'),
@@ -1474,10 +1510,22 @@ class TestRunner:
 
             if process.stderr:
                 stderr_fd: Optional[int] = None
+                stderr_fd_error: Optional[BaseException] = None
                 try:
                     stderr_fd = process.stderr.fileno()
-                except (OSError, ValueError, AttributeError):
+                except (OSError, ValueError, AttributeError) as exc:
+                    stderr_fd_error = exc
                     stderr_fd = None
+                if instrumentation_active:
+                    if stderr_fd is not None:
+                        instrument(
+                            f"[instrumentation] Captured stderr fd {stderr_fd} for {invocation.name}"
+                        )
+                    else:
+                        instrument(
+                            f"[instrumentation] Failed to capture stderr fd for {invocation.name}: "
+                            f"{stderr_fd_error!r}"
+                        )
                 stderr_thread = threading.Thread(
                     target=monitor_stream,
                     args=(process.stderr, stderr_lines, 'stderr'),
@@ -1524,7 +1572,13 @@ class TestRunner:
                     instrument(
                         f"[instrumentation] Process wait complete for {invocation.name}"
                     )
-                terminate_process_group_members(f"{invocation.name} exit")
+                residual_processes = terminate_process_group_members(
+                    f"{invocation.name} exit"
+                )
+                if instrumentation_active and residual_processes:
+                    instrument(
+                        f"[instrumentation] Residual processes persisted after {invocation.name} exit"
+                    )
                 duration = time.time() - start_time
 
                 shutdown_reader_threads()
@@ -3639,6 +3693,125 @@ class TestRunner:
 
         for pid in unique_pids:
             details.setdefault(pid, 'details unavailable')
+
+        return details
+
+    def _snapshot_pid_fd_usage(
+        self,
+        pids: Iterable[int],
+        *,
+        entry_limit: int = 6,
+    ) -> Dict[int, str]:
+        """Gather best-effort file descriptor information for the provided PIDs."""
+
+        unique_pids = [pid for pid in pids if isinstance(pid, int) and pid > 0]
+        if not unique_pids:
+            return {}
+
+        details: Dict[int, str] = {}
+
+        if _PSUTIL is not None:
+            psutil_module = _PSUTIL
+            for pid in unique_pids:
+                if pid in details:
+                    continue
+                try:
+                    proc = psutil_module.Process(pid)
+                except Exception:
+                    continue
+
+                parts: List[str] = []
+                try:
+                    num_fds = proc.num_fds()
+                except Exception:
+                    num_fds = None
+                if isinstance(num_fds, int):
+                    parts.append(f"num_fds={num_fds}")
+
+                connection_entries: List[str] = []
+                try:
+                    for connection in proc.connections(kind='all'):
+                        if getattr(connection, 'fd', None) is None:
+                            continue
+                        descriptor = f"fd={connection.fd}"
+                        conn_type = getattr(connection, 'type', None)
+                        if conn_type is not None:
+                            try:
+                                type_name = socket.SocketKind(conn_type).name
+                            except Exception:
+                                type_name = str(conn_type)
+                            descriptor = f"{descriptor}:{type_name}"
+                        status = getattr(connection, 'status', None)
+                        if status:
+                            descriptor = f"{descriptor}:{status}"
+                        laddr = getattr(connection, 'laddr', None)
+                        raddr = getattr(connection, 'raddr', None)
+                        if laddr:
+                            descriptor = f"{descriptor}:laddr={laddr}"
+                        if raddr:
+                            descriptor = f"{descriptor}:raddr={raddr}"
+                        connection_entries.append(descriptor)
+                        if len(connection_entries) >= entry_limit:
+                            break
+                except Exception:
+                    connection_entries = []
+
+                if connection_entries:
+                    parts.append(
+                        "connections=[" + "; ".join(connection_entries) + "]"
+                    )
+
+                file_entries: List[str] = []
+                try:
+                    for opened in proc.open_files():
+                        if getattr(opened, 'fd', None) is not None:
+                            file_entries.append(
+                                f"fd={opened.fd}:{getattr(opened, 'path', '<unknown>')}"
+                            )
+                        else:
+                            file_entries.append(getattr(opened, 'path', '<unknown>'))
+                        if len(file_entries) >= entry_limit:
+                            break
+                except Exception:
+                    file_entries = []
+
+                if file_entries:
+                    parts.append("open_files=[" + "; ".join(file_entries) + "]")
+
+                if parts:
+                    details[pid] = " ".join(parts)
+
+        remaining = [pid for pid in unique_pids if pid not in details]
+        lsof_executable = shutil.which('lsof')
+        if remaining and lsof_executable:
+            for pid in remaining:
+                try:
+                    result = subprocess.run(
+                        [
+                            lsof_executable,
+                            '-n',
+                            '-p',
+                            str(pid),
+                        ],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        timeout=5,
+                        check=True,
+                    )
+                except subprocess.SubprocessError:
+                    continue
+
+                parsed: List[str] = []
+                for raw_line in result.stdout.splitlines():
+                    line = raw_line.strip()
+                    if not line or line.startswith('COMMAND'):
+                        continue
+                    parsed.append(line)
+                    if len(parsed) >= entry_limit:
+                        break
+                if parsed:
+                    details[pid] = 'lsof=' + '; '.join(parsed)
 
         return details
 
