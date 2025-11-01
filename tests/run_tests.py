@@ -1779,6 +1779,13 @@ class TestRunner:
 
                 # Kill the process tree on timeout
                 self._kill_process_tree(process.pid)
+                residual_processes = terminate_process_group_members(
+                    f"{invocation.name} timeout cleanup"
+                )
+                if instrumentation_active and residual_processes:
+                    instrument(
+                        f"[instrumentation] Residual processes persisted after {invocation.name} timeout cleanup"
+                    )
 
                 try:
                     process.wait(timeout=1)
@@ -1804,8 +1811,20 @@ class TestRunner:
                 )
 
         except Exception as e:
+            residual_processes = False
             if process:
                 self._kill_process_tree(process.pid)
+                residual_processes = terminate_process_group_members(
+                    f"{invocation.name} exception cleanup"
+                )
+            else:
+                residual_processes = terminate_process_group_members(
+                    f"{invocation.name} exception cleanup"
+                )
+            if instrumentation_active and residual_processes:
+                instrument(
+                    f"[instrumentation] Residual processes persisted after {invocation.name} exception cleanup"
+                )
             shutdown_reader_threads()
             stdout = ''.join(stdout_lines) if stdout_lines else ""
             stderr = ''.join(stderr_lines) if stderr_lines else ""
