@@ -44,9 +44,6 @@
     #error "sintra requires compiler support for __has_include to verify os_sync_wait_on_address availability on macOS."
   #endif
   #include <sys/mman.h>
-  #ifdef OS_CLOCK_MACH_ABSOLUTE_TIME
-    #include <mach/mach_time.h>
-  #endif
 #else
   #include <cerrno>
   #include <semaphore.h>
@@ -156,7 +153,7 @@ namespace interprocess_semaphore_detail
     // NOTE: Sintra intentionally hard-requires that macOS honours nanosecond
     //       timeouts for os_sync_wait_on_address_with_timeout. If the probe
     //       below ever reports EINVAL, do NOT add a fallback conversion or
-    //       compatibility modeΓÇöraise an error and update the platform instead.
+    //       compatibility mode—raise an error and update the platform instead.
     inline void ensure_os_sync_timeout_support()
     {
         static std::once_flag probe_once;
@@ -176,9 +173,9 @@ namespace interprocess_semaphore_detail
 
             constexpr uint64_t probe_timeout_ns = 1'000'000; // 1 ms
 
-#if defined(OS_CLOCK_MACH_ABSOLUTE_TIME)
-            constexpr os_clockid_t probe_clock = OS_CLOCK_MACH_ABSOLUTE_TIME;
-#elif defined(OS_CLOCK_MONOTONIC)
+            // Use the same monotonic clock preference as the main wait path so
+            // the probe exercises the production configuration.
+#if defined(OS_CLOCK_MONOTONIC)
             constexpr os_clockid_t probe_clock = OS_CLOCK_MONOTONIC;
 #elif defined(CLOCK_MONOTONIC)
             constexpr os_clockid_t probe_clock = static_cast<os_clockid_t>(CLOCK_MONOTONIC);
@@ -198,9 +195,10 @@ namespace interprocess_semaphore_detail
             int saved_errno = errno;
 
             interprocess_semaphore_detail::os_sync_trace::log(
-                "os_sync_wait_on_address_with_timeout probe rc=%d errno=%d",
+                "os_sync_wait_on_address_with_timeout probe rc=%d errno=%d timeout_ns=%llu",
                 rc,
-                saved_errno);
+                saved_errno,
+                static_cast<unsigned long long>(probe_timeout_ns));
 
             if (rc == -1 && saved_errno == ETIMEDOUT) {
                 cleanup_mapping();
@@ -211,8 +209,8 @@ namespace interprocess_semaphore_detail
 
             if (rc == -1 && saved_errno == EINVAL) {
                 throw std::runtime_error(
-                    "macOS kernel rejected nanosecond timeouts for os_sync_wait_on_address_with_timeout; "
-                    "nanosecond support is required. Please update macOS or install the latest Xcode Command Line Tools.");
+                    "os_sync_wait_on_address_with_timeout rejected the supplied clock id or arguments (EINVAL); "
+                    "nanosecond timeout support is required. Please update macOS or install the latest Xcode Command Line Tools.");
             }
 
             throw std::runtime_error(
@@ -574,9 +572,10 @@ private:
     static constexpr os_sync_wait_on_address_flags_t wait_flags = OS_SYNC_WAIT_ON_ADDRESS_SHARED;
     static constexpr os_sync_wake_by_address_flags_t wake_flags = OS_SYNC_WAKE_BY_ADDRESS_SHARED;
 
-#ifdef OS_CLOCK_MACH_ABSOLUTE_TIME
-    static constexpr os_clockid_t wait_clock = OS_CLOCK_MACH_ABSOLUTE_TIME;
-#elif defined(OS_CLOCK_MONOTONIC)
+// os_sync_wait_on_address_with_timeout expects timeouts expressed in nanoseconds
+// relative to a monotonic clock. Prefer Apple's monotonic clock id when available
+// and fall back to the POSIX constant if necessary.
+#if defined(OS_CLOCK_MONOTONIC)
     static constexpr os_clockid_t wait_clock = OS_CLOCK_MONOTONIC;
 #elif defined(CLOCK_MONOTONIC)
     static constexpr os_clockid_t wait_clock = static_cast<os_clockid_t>(CLOCK_MONOTONIC);
@@ -692,7 +691,6 @@ private:
         }
 
         const uint64_t timeout_ns = static_cast<uint64_t>(count);
-
         while (true) {
             uint64_t expected_value = static_cast<uint32_t>(expected);
 #if defined(__APPLE__)
