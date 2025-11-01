@@ -963,16 +963,8 @@ class TestRunner:
         result_success: Optional[bool] = None
         instrumentation_active = self.instrumentation_active()
         instrument = partial(self._instrument_step, disk_path=self.build_dir)
-        if instrumentation_active:
-            instrument(
-                f"[instrumentation] Entering run_test_once for {invocation.name} with timeout {timeout}s"
-            )
         try:
             popen_env = self._build_test_environment(scratch_dir)
-            if instrumentation_active:
-                instrument(
-                    f"[instrumentation] Environment prepared for {invocation.name}"
-                )
             start_time = time.time()
             start_monotonic = time.monotonic()
 
@@ -993,10 +985,6 @@ class TestRunner:
             else:
                 popen_kwargs['start_new_session'] = True
             popen_kwargs['env'] = popen_env
-            if instrumentation_active:
-                instrument(
-                    f"[instrumentation] Launch parameters ready for {invocation.name}"
-                )
 
             stdout_lines: List[str] = []
             stderr_lines: List[str] = []
@@ -1046,93 +1034,24 @@ class TestRunner:
                 )
 
                 if not survivors:
-                    if descendant_candidates and instrumentation_active:
-                        extra_only = sorted(descendant_candidates)
-                        detail_map = self._describe_pids(extra_only)
-                        detail_entries = ", ".join(
-                            f"{pid}:{detail_map.get(pid, 'details unavailable')}"
-                            for pid in extra_only
-                        )
-                        instrument(
-                            f"[instrumentation] Descendant processes outside group ({reason}): "
-                            f"{extra_only} details=[{detail_entries}]"
-                        )
-                    if (
-                        sys.platform == 'darwin'
-                        and instrumentation_active
-                    ):
-                        crash_watchers = _find_lingering_processes(
-                            (
-                                'ReportCrash',
-                                'Diagnosticd',
-                                'spindump',
-                            )
-                        )
-                        if crash_watchers:
-                            instrument(
-                                f"[instrumentation] macOS crash monitor processes ({reason}): "
-                                f"{_describe_processes(crash_watchers)}"
-                            )
                     return False
 
                 survivor_list = sorted(survivors)
-                if instrumentation_active:
-                    detail_map = self._describe_pids(survivor_list)
-                    detail_entries = ", ".join(
-                        f"{pid}:{detail_map.get(pid, 'details unavailable')}"
-                        for pid in survivor_list
-                    )
-                    instrument(
-                        f"[instrumentation] Residual process group members ({reason}): {survivor_list} "
-                        f"details=[{detail_entries}]"
-                    )
-                    if descendant_candidates:
-                        descendant_only = sorted(descendant_candidates - survivors)
-                        if descendant_only:
-                            descendant_map = self._describe_pids(descendant_only)
-                            descendant_entries = ", ".join(
-                                f"{pid}:{descendant_map.get(pid, 'details unavailable')}"
-                                for pid in descendant_only
-                            )
-                            instrument(
-                                f"[instrumentation] Descendant processes outside group ({reason}): "
-                                f"{descendant_only} details=[{descendant_entries}]"
-                            )
-                    if sys.platform == 'darwin':
-                        crash_watchers = _find_lingering_processes(
-                            (
-                                'ReportCrash',
-                                'Diagnosticd',
-                                'spindump',
-                            )
-                        )
-                        if crash_watchers:
-                            instrument(
-                                f"[instrumentation] macOS crash monitor processes ({reason}): "
-                                f"{_describe_processes(crash_watchers)}"
-                            )
 
                 try:
                     import signal
                 except ImportError:
                     return bool(survivors)
 
-                failures: List[Tuple[int, str]] = []
                 for target_pid in survivor_list:
                     try:
                         os.kill(target_pid, signal.SIGTERM)
                     except ProcessLookupError:
                         continue
                     except PermissionError as exc:
-                        failures.append((target_pid, f"PermissionError: {exc}"))
+                        pass
                     except OSError as exc:
-                        failures.append((target_pid, f"OSError: {exc}"))
-
-                if failures and instrumentation_active:
-                    for pid_value, detail in failures:
-                        instrument(
-                            f"[instrumentation] Failed to deliver SIGTERM to {pid_value}: {detail}"
-                        )
+                        pass
 
                 wait_deadline = time.monotonic() + 1.0
                 while time.monotonic() < wait_deadline:
@@ -1142,10 +1061,6 @@ class TestRunner:
                         if pid not in base_exclusions
                     )
                     if not survivors:
-                        if instrumentation_active:
-                            instrument(
-                                f"[instrumentation] Residual process group empty after SIGTERM ({reason})"
-                            )
                         return False
                     time.sleep(0.05)
 
@@ -1156,17 +1071,9 @@ class TestRunner:
                 )
 
                 if not survivors:
-                    if instrumentation_active:
-                        instrument(
-                            f"[instrumentation] Residual process group empty after SIGTERM ({reason})"
-                        )
                     return False
 
                 survivor_list = sorted(survivors)
-                if instrumentation_active:
-                    instrument(
-                        f"[instrumentation] Forcing SIGKILL for residual processes ({reason}): {survivor_list}"
-                    )
 
                 for target_pid in survivor_list:
                     try:
@@ -1174,15 +1081,9 @@ class TestRunner:
                     except ProcessLookupError:
                         continue
                     except PermissionError as exc:
-                        if instrumentation_active:
-                            instrument(
-                                f"[instrumentation] Failed to deliver SIGKILL to {target_pid}: {exc}"
-                            )
+                        pass
                     except OSError as exc:
-                        if instrumentation_active:
-                            instrument(
-                                f"[instrumentation] Failed to deliver SIGKILL to {target_pid}: {exc}"
-                            )
+                        pass
 
                 time.sleep(0.05)
 
@@ -1192,10 +1093,6 @@ class TestRunner:
                     if pid not in base_exclusions
                 )
 
-                if survivors and instrumentation_active:
-                    instrument(
-                        f"[instrumentation] Residual processes still alive after SIGKILL ({reason}): {sorted(survivors)}"
-                    )
 
                 return bool(survivors)
 
@@ -1203,11 +1100,6 @@ class TestRunner:
                 """Ensure log reader threads terminate to avoid leaking resources."""
                 join_step = 0.2
                 max_join_time = 5.0
-
-                if instrumentation_active:
-                    instrument(
-                        "[instrumentation] Shutdown of log reader threads initiated"
-                    )
 
                 def snapshot_reader_state(thread_name: str) -> str:
                     with reader_state_lock:
@@ -1236,27 +1128,12 @@ class TestRunner:
 
                 for thread, stream, descriptor, stream_fd in threads:
                     join_deadline = time.monotonic() + max_join_time
-                    if instrumentation_active:
-                        instrument(
-                            f"[instrumentation] Joining reader thread {thread.name} (alive={thread.is_alive()}) "
-                            f"state={snapshot_reader_state(thread.name)}"
-                        )
                     while thread.is_alive():
                         remaining = join_deadline - time.monotonic()
                         if remaining <= 0:
-                            if instrumentation_active:
-                                instrument(
-                                    f"[instrumentation] Reader thread {thread.name} join deadline reached "
-                                    f"state={snapshot_reader_state(thread.name)}"
-                                )
                             break
                         join_timeout = min(join_step, remaining)
                         thread.join(timeout=join_timeout)
-                        if thread.is_alive() and instrumentation_active:
-                            instrument(
-                                f"[instrumentation] Reader thread {thread.name} still alive after join attempt "
-                                f"state={snapshot_reader_state(thread.name)}"
-                            )
 
                     if thread.is_alive():
                         terminate_process_group_members(
@@ -1267,20 +1144,9 @@ class TestRunner:
                             try:
                                 os.close(stream_fd)
                                 forcible_close_applied = True
-                                if instrumentation_active:
-                                    instrument(
-                                        f"[instrumentation] Forcibly closed fd {stream_fd} for reader thread {thread.name} ({descriptor})"
-                                    )
                             except OSError as exc:
-                                if instrumentation_active:
-                                    instrument(
-                                        f"[instrumentation] Failed to close fd {stream_fd} for reader thread {thread.name} ({descriptor}): {exc}"
-                                    )
+                                pass
                         if not forcible_close_applied:
-                            if instrumentation_active:
-                                instrument(
-                                    f"[instrumentation] Closing stream for reader thread {thread.name} ({descriptor})"
-                                )
                             try:
                                 stream.close()
                             except Exception:
@@ -1288,44 +1154,19 @@ class TestRunner:
                         thread.join(timeout=join_step)
 
                     if thread.is_alive():
-                        if instrumentation_active:
-                            instrument(
-                                f"[instrumentation] Reader thread {thread.name} failed to terminate after forcible close "
-                                f"state={snapshot_reader_state(thread.name)}"
-                            )
                         print(
                             f"\n{Color.YELLOW}Warning: Log reader thread did not terminate cleanly; "
                             "closing descriptors to avoid resource leak.{Color.RESET}"
                         )
-                    elif instrumentation_active:
-                        instrument(
-                            f"[instrumentation] Reader thread {thread.name} terminated state={snapshot_reader_state(thread.name)}"
-                        )
 
-                if instrumentation_active:
-                    instrument(
-                        "[instrumentation] Shutdown of log reader threads completed"
-                    )
 
-            if instrumentation_active:
-                instrument(
-                    f"[instrumentation] Spawning process for {invocation.name}"
-                )
             process = subprocess.Popen(invocation.command(), **popen_kwargs)
-            if instrumentation_active:
-                instrument(
-                    f"[instrumentation] Process started for {invocation.name} with pid {process.pid}"
-                )
 
             if hasattr(os, 'getpgid'):
                 try:
                     process_group_id = os.getpgid(process.pid)
                 except (ProcessLookupError, PermissionError, OSError):
                     process_group_id = None
-            if instrumentation_active:
-                instrument(
-                    f"[instrumentation] Process group lookup complete for {invocation.name}"
-                )
 
             def attempt_live_capture(trigger_line: str) -> None:
                 nonlocal live_stack_traces, live_stack_error, capture_pause_total, capture_active_start
@@ -1372,10 +1213,6 @@ class TestRunner:
                 start_time = time.monotonic()
                 lines = 0
                 bytes_read = 0
-                if instrumentation_active:
-                    instrument(
-                        f"[instrumentation] Reader thread {thread_name} starting for {descriptor}"
-                    )
                 with reader_state_lock:
                     reader_states[thread_name] = {
                         "descriptor": descriptor,
@@ -1451,12 +1288,6 @@ class TestRunner:
                                 "active": False,
                             }
                         )
-                    if instrumentation_active:
-                        duration = end_time - start_time
-                        instrument(
-                            f"[instrumentation] Reader thread {thread_name} exiting for {descriptor} "
-                            f"after {duration:.3f}s lines={lines} bytes={bytes_read}"
-                        )
 
             if process.stdout:
                 stdout_fd: Optional[int] = None
@@ -1489,10 +1320,6 @@ class TestRunner:
             # Wait with timeout, extending the deadline for live stack captures
             try:
                 while True:
-                    if instrumentation_active:
-                        instrument(
-                            f"[instrumentation] Monitoring {invocation.name} for completion"
-                        )
                     with capture_lock:
                         pause_total = capture_pause_total
                         active_start = capture_active_start
@@ -1520,18 +1347,10 @@ class TestRunner:
                         continue
 
                 process.wait()
-                if instrumentation_active:
-                    instrument(
-                        f"[instrumentation] Process wait complete for {invocation.name}"
-                    )
                 terminate_process_group_members(f"{invocation.name} exit")
                 duration = time.time() - start_time
 
                 shutdown_reader_threads()
-                if instrumentation_active:
-                    instrument(
-                        f"[instrumentation] Reader threads finished for {invocation.name}"
-                    )
 
                 stdout = ''.join(stdout_lines)
                 stderr = ''.join(stderr_lines)
@@ -1680,10 +1499,6 @@ class TestRunner:
             if cleanup_scratch_dir:
                 self._cleanup_scratch_directory(scratch_dir)
             self._cleanup_new_core_dumps(invocation, core_snapshot, start_time, result_success)
-            if instrumentation_active:
-                instrument(
-                    f"[instrumentation] Exiting run_test_once for {invocation.name}"
-                )
 
     def _kill_process_tree(self, pid: int):
         """Kill a process and all its children"""
@@ -4007,20 +3822,6 @@ def main():
             # Create header for round display
             header = " ".join(f"{index + 1:02d}" for index, _ in enumerate(tests))
 
-            instrumentation_pending = runner.instrumentation_active()
-            instrumentation_emit = partial(
-                runner._instrument_step,
-                disk_path=runner.build_dir,
-            )
-            if instrumentation_pending:
-                instrumentation_emit(
-                    "[instrumentation] Prepared suite header; entering execution loop"
-                )
-                if tests:
-                    instrumentation_emit(
-                        f"[instrumentation] First test scheduled: {tests[0].name}"
-                    )
-
             while True:
                 remaining_counts = [count for count in remaining_repetitions.values() if count > 0]
                 if not remaining_counts:
@@ -4028,10 +3829,6 @@ def main():
 
                 max_remaining = max(remaining_counts)
                 reps_in_this_round = min(batch_size, max_remaining)
-                if instrumentation_pending:
-                    instrumentation_emit(
-                        f"[instrumentation] Starting round with batch size {reps_in_this_round}"
-                    )
                 print(f"\n{Color.BLUE}--- Round: {reps_in_this_round} repetition(s) ---{Color.RESET}")
                 print(header)
 
@@ -4044,26 +3841,13 @@ def main():
 
                 for i in range(reps_in_this_round):
                     row_segments = ["  "] * len(tests)
-                    if instrumentation_pending:
-                        instrumentation_emit(
-                            f"[instrumentation] Round iteration {i + 1} preparing to evaluate tests"
-                        )
                     for index, invocation in enumerate(tests):
                         test_name = invocation.name
                         if remaining_repetitions[test_name] <= 0:
                             continue
 
                         row_start = "."
-                        if instrumentation_pending:
-                            instrumentation_emit(
-                                f"[instrumentation] Considering test {test_name} at index {index}"
-                            )
                         result = runner.run_test_once(invocation)
-                        if instrumentation_pending:
-                            instrumentation_emit(
-                                f"[instrumentation] Completed invocation for {test_name}"
-                            )
-                            instrumentation_pending = runner.instrumentation_active()
 
                         accumulated_results[test_name]['durations'].append(result.duration)
 
