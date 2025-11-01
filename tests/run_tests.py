@@ -27,6 +27,7 @@ import importlib.util
 import json
 from functools import partial
 import os
+import socket
 import shlex
 import shutil
 import subprocess
@@ -39,7 +40,7 @@ import urllib.request
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, IO, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, IO, Iterable, List, Optional, Sequence, Set, Tuple
 
 print = partial(__import__("builtins").print, file=sys.stderr, flush=True)
 
@@ -412,6 +413,8 @@ class TestRunner:
         self._scratch_cleanup_dirs_removed = 0
         self._scratch_cleanup_bytes_freed = 0
         self._instrumentation_enabled = True
+        self._instrumentation_disk_root: Optional[Path] = self.build_dir
+        self._instrument_disk_cache: Dict[Path, Tuple[float, str]] = {}
 
         # Determine test directory - check both with and without config subdirectory
         test_dir_with_config = build_dir / 'tests' / config
@@ -445,9 +448,36 @@ class TestRunner:
 
         return self._instrumentation_enabled
 
-    def _instrument_step(self, message: str) -> None:
-        if self._instrumentation_enabled:
-            _instrumentation_print(message)
+    def _instrument_step(self, message: str, *, disk_path: Optional[Path] = None) -> None:
+        if not self._instrumentation_enabled:
+            return
+
+        sample_path: Optional[Path]
+        if disk_path is not None:
+            sample_path = disk_path
+        else:
+            sample_path = self._instrumentation_disk_root
+
+        suffix = ""
+        cache_key: Optional[Path] = None
+        if sample_path is not None:
+            try:
+                cache_key = sample_path.resolve()
+            except Exception:
+                cache_key = sample_path
+
+        if cache_key is not None:
+            now = time.monotonic()
+            cached = self._instrument_disk_cache.get(cache_key)
+            if cached and now - cached[0] < 0.5:
+                suffix = cached[1]
+            else:
+                free_bytes = _available_disk_bytes(cache_key)
+                formatted = _format_size(free_bytes)
+                suffix = f" [disk free: {formatted} at {cache_key}]"
+                self._instrument_disk_cache[cache_key] = (now, suffix)
+
+        _instrumentation_print(f"{message}{suffix}")
 
     def _allocate_scratch_directory(self, invocation: TestInvocation) -> Path:
         """Create a per-invocation scratch directory for test artifacts."""
@@ -933,14 +963,15 @@ class TestRunner:
         start_time = time.time()
         result_success: Optional[bool] = None
         instrumentation_active = self.instrumentation_active()
+        instrument = partial(self._instrument_step, disk_path=self.build_dir)
         if instrumentation_active:
-            self._instrument_step(
+            instrument(
                 f"[instrumentation] Entering run_test_once for {invocation.name} with timeout {timeout}s"
             )
         try:
             popen_env = self._build_test_environment(scratch_dir)
             if instrumentation_active:
-                self._instrument_step(
+                instrument(
                     f"[instrumentation] Environment prepared for {invocation.name}"
                 )
             start_time = time.time()
@@ -964,7 +995,7 @@ class TestRunner:
                 popen_kwargs['start_new_session'] = True
             popen_kwargs['env'] = popen_env
             if instrumentation_active:
-                self._instrument_step(
+                instrument(
                     f"[instrumentation] Launch parameters ready for {invocation.name}"
                 )
 
@@ -978,42 +1009,408 @@ class TestRunner:
             capture_lock = threading.Lock()
             capture_pause_total = 0.0
             capture_active_start: Optional[float] = None
-            threads: List[Tuple[threading.Thread, IO[str]]] = []
+            threads: List[Tuple[threading.Thread, IO[str], str, Optional[int]]] = []
+            reader_state_lock = threading.Lock()
+            reader_states: Dict[str, Dict[str, Any]] = {}
             process_group_id: Optional[int] = None
+            descendant_monitor_thread: Optional[threading.Thread] = None
+            descendant_monitor_stop = threading.Event()
+            descendant_lock = threading.Lock()
+            observed_descendants: Set[int] = set()
 
+            def _record_descendants(snapshot: Iterable[int], source: str) -> None:
+                """Add ``snapshot`` PIDs to the observed descendant set."""
+
+                if sys.platform == 'win32':
+                    return
+
+                filtered = {
+                    pid for pid in snapshot if isinstance(pid, int) and pid > 0
+                }
+                if not filtered:
+                    return
+
+                with descendant_lock:
+                    new_entries = filtered - observed_descendants
+                    if new_entries:
+                        observed_descendants.update(filtered)
+                        if instrumentation_active:
+                            instrument(
+                                f"[instrumentation] Recorded descendant processes "
+                                f"({source}): {sorted(new_entries)}"
+                            )
+                    else:
+                        observed_descendants.update(filtered)
+
+            def _check_pid_alive(pid: int) -> bool:
+                """Return True if ``pid`` still refers to a running process."""
+
+                if pid <= 0:
+                    return False
+
+                if sys.platform == 'win32':
+                    return False
+
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    return False
+                except PermissionError:
+                    return True
+                except OSError:
+                    return True
+                return True
+
+            def _refresh_descendants(reason: str) -> Set[int]:
+                """Snapshot descendants of the test process and record them."""
+
+                if sys.platform == 'win32':
+                    return set()
+
+                pid_local = process.pid if process is not None else None
+                if pid_local is None or pid_local <= 0:
+                    return set()
+
+                snapshot: Set[int] = set()
+
+                if _PSUTIL is not None:
+                    try:
+                        proc = _PSUTIL.Process(pid_local)
+                        for child in proc.children(recursive=True):
+                            child_pid = getattr(child, 'pid', None)
+                            if isinstance(child_pid, int) and child_pid > 0:
+                                snapshot.add(child_pid)
+                    except Exception:
+                        pass
+
+                try:
+                    snapshot.update(self._collect_descendant_pids(pid_local))
+                except Exception:
+                    pass
+
+                if snapshot:
+                    _record_descendants(snapshot, reason)
+
+                return snapshot
+
+            def terminate_process_group_members(reason: str) -> bool:
+                """Ensure helpers in the spawned process group terminate."""
+
+                if sys.platform == 'win32':
+                    return False
+
+                pgid = process_group_id
+                if pgid is None:
+                    return False
+
+                try:
+                    base_exclusions = {0, os.getpid()}
+                except Exception:
+                    base_exclusions = {0}
+
+                if process is not None and process.pid is not None:
+                    base_exclusions.add(process.pid)
+
+                def collect_targets() -> Tuple[Set[int], Set[int]]:
+                    """Return process-group survivors and out-of-group descendants."""
+
+                    survivors_local = set(
+                        pid
+                        for pid in self._collect_process_group_pids(pgid)
+                        if pid not in base_exclusions
+                    )
+
+                    descendant_only_local: Set[int] = set()
+                    if sys.platform != 'win32':
+                        if process is not None and process.pid is not None:
+                            _refresh_descendants(f"{reason} target refresh")
+                        with descendant_lock:
+                            recorded = {
+                                pid
+                                for pid in observed_descendants
+                                if pid not in base_exclusions
+                            }
+                        for pid in recorded:
+                            if pid in survivors_local:
+                                continue
+                            if _check_pid_alive(pid):
+                                descendant_only_local.add(pid)
+                            else:
+                                with descendant_lock:
+                                    observed_descendants.discard(pid)
+                    return survivors_local, descendant_only_local
+
+                survivors, descendant_only = collect_targets()
+
+                if not survivors and not descendant_only:
+                    if (
+                        sys.platform == 'darwin'
+                        and instrumentation_active
+                    ):
+                        crash_watchers = _find_lingering_processes(
+                            (
+                                'ReportCrash',
+                                'Diagnosticd',
+                                'spindump',
+                            )
+                        )
+                        if crash_watchers:
+                            instrument(
+                                f"[instrumentation] macOS crash monitor processes ({reason}): "
+                                f"{_describe_processes(crash_watchers)}"
+                            )
+                    return False
+
+                if instrumentation_active:
+                    if survivors:
+                        survivor_list = sorted(survivors)
+                        detail_map = self._describe_pids(survivor_list)
+                        detail_entries = ", ".join(
+                            f"{pid}:{detail_map.get(pid, 'details unavailable')}"
+                            for pid in survivor_list
+                        )
+                        instrument(
+                            f"[instrumentation] Residual process group members ({reason}): {survivor_list} "
+                            f"details=[{detail_entries}]"
+                        )
+                        fd_map = self._snapshot_pid_fd_usage(survivor_list)
+                        for pid_value in sorted(fd_map):
+                            instrument(
+                                f"[instrumentation] Descriptor usage for residual {pid_value} "
+                                f"({reason}): {fd_map[pid_value]}"
+                            )
+                    if descendant_only:
+                        descendant_list = sorted(descendant_only)
+                        descendant_map = self._describe_pids(descendant_list)
+                        descendant_entries = ", ".join(
+                            f"{pid}:{descendant_map.get(pid, 'details unavailable')}"
+                            for pid in descendant_list
+                        )
+                        instrument(
+                            f"[instrumentation] Descendant processes outside group ({reason}): "
+                            f"{descendant_list} details=[{descendant_entries}]"
+                        )
+                        fd_map = self._snapshot_pid_fd_usage(descendant_list)
+                        for pid_value in sorted(fd_map):
+                            instrument(
+                                f"[instrumentation] Descriptor usage for descendant {pid_value} "
+                                f"({reason}): {fd_map[pid_value]}"
+                            )
+                    if sys.platform == 'darwin':
+                        crash_watchers = _find_lingering_processes(
+                            (
+                                'ReportCrash',
+                                'Diagnosticd',
+                                'spindump',
+                            )
+                        )
+                        if crash_watchers:
+                            instrument(
+                                f"[instrumentation] macOS crash monitor processes ({reason}): "
+                                f"{_describe_processes(crash_watchers)}"
+                            )
+
+                try:
+                    import signal
+                except ImportError:
+                    return bool(survivors or descendant_only)
+
+                failures: List[Tuple[int, str]] = []
+                targets = sorted(survivors | descendant_only)
+                for target_pid in targets:
+                    try:
+                        os.kill(target_pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        continue
+                    except PermissionError as exc:
+                        failures.append((target_pid, f"PermissionError: {exc}"))
+                    except OSError as exc:
+                        failures.append((target_pid, f"OSError: {exc}"))
+
+                if failures and instrumentation_active:
+                    for pid_value, detail in failures:
+                        instrument(
+                            f"[instrumentation] Failed to deliver SIGTERM to {pid_value}: {detail}"
+                        )
+
+                wait_deadline = time.monotonic() + 1.0
+                while time.monotonic() < wait_deadline:
+                    survivors, descendant_only = collect_targets()
+                    if not survivors and not descendant_only:
+                        if instrumentation_active:
+                            instrument(
+                                f"[instrumentation] Residual process group empty after SIGTERM ({reason})"
+                            )
+                        return False
+                    time.sleep(0.05)
+
+                survivors, descendant_only = collect_targets()
+
+                if not survivors and not descendant_only:
+                    if instrumentation_active:
+                        instrument(
+                            f"[instrumentation] Residual process group empty after SIGTERM ({reason})"
+                        )
+                    return False
+
+                targets = sorted(survivors | descendant_only)
+                if instrumentation_active and targets:
+                    instrument(
+                        f"[instrumentation] Forcing SIGKILL for residual processes ({reason}): {targets}"
+                    )
+
+                for target_pid in targets:
+                    try:
+                        os.kill(target_pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        continue
+                    except PermissionError as exc:
+                        if instrumentation_active:
+                            instrument(
+                                f"[instrumentation] Failed to deliver SIGKILL to {target_pid}: {exc}"
+                            )
+                    except OSError as exc:
+                        if instrumentation_active:
+                            instrument(
+                                f"[instrumentation] Failed to deliver SIGKILL to {target_pid}: {exc}"
+                            )
+
+                time.sleep(0.05)
+
+                survivors, descendant_only = collect_targets()
+
+                if instrumentation_active:
+                    if survivors:
+                        instrument(
+                            f"[instrumentation] Residual processes still alive after SIGKILL ({reason}): {sorted(survivors)}"
+                        )
+                    if descendant_only:
+                        instrument(
+                            f"[instrumentation] Descendants outside group still alive after SIGKILL ({reason}): "
+                            f"{sorted(descendant_only)}"
+                        )
+
+                return bool(survivors or descendant_only)
             def shutdown_reader_threads() -> None:
                 """Ensure log reader threads terminate to avoid leaking resources."""
                 join_step = 0.2
                 max_join_time = 5.0
 
-                for thread, stream in threads:
+                if instrumentation_active:
+                    instrument(
+                        "[instrumentation] Shutdown of log reader threads initiated"
+                    )
+
+                def snapshot_reader_state(thread_name: str) -> str:
+                    with reader_state_lock:
+                        state = dict(reader_states.get(thread_name, {}))
+                    descriptor = state.get("descriptor", "unknown")
+                    lines = state.get("lines") or 0
+                    bytes_read = state.get("bytes") or 0
+                    last_update = state.get("last_update")
+                    start_time_state = state.get("start_time")
+                    lifetime_str = "unknown"
+                    if isinstance(start_time_state, float) and isinstance(last_update, float):
+                        lifetime = max(last_update - start_time_state, 0.0)
+                        lifetime_str = f"{lifetime:.3f}s"
+                    if isinstance(last_update, float):
+                        idle = max(time.monotonic() - last_update, 0.0)
+                        last_update_str = f"{idle:.3f}s ago"
+                    else:
+                        last_update_str = "unknown"
+                    active = state.get("active")
+                    last_line = state.get("last_line_excerpt")
+                    excerpt = repr(last_line) if last_line is not None else "None"
+                    return (
+                        f"descriptor={descriptor} lines={lines} bytes={bytes_read} runtime={lifetime_str} "
+                        f"last_activity={last_update_str} active={active} last_line={excerpt}"
+                    )
+
+                for thread, stream, descriptor, stream_fd in threads:
                     join_deadline = time.monotonic() + max_join_time
+                    if instrumentation_active:
+                        instrument(
+                            f"[instrumentation] Joining reader thread {thread.name} (alive={thread.is_alive()}) "
+                            f"state={snapshot_reader_state(thread.name)}"
+                        )
                     while thread.is_alive():
                         remaining = join_deadline - time.monotonic()
                         if remaining <= 0:
+                            if instrumentation_active:
+                                instrument(
+                                    f"[instrumentation] Reader thread {thread.name} join deadline reached "
+                                    f"state={snapshot_reader_state(thread.name)}"
+                                )
                             break
-                        thread.join(timeout=min(join_step, remaining))
+                        join_timeout = min(join_step, remaining)
+                        thread.join(timeout=join_timeout)
+                        if thread.is_alive() and instrumentation_active:
+                            instrument(
+                                f"[instrumentation] Reader thread {thread.name} still alive after join attempt "
+                                f"state={snapshot_reader_state(thread.name)}"
+                            )
 
                     if thread.is_alive():
-                        try:
-                            stream.close()
-                        except Exception:
-                            pass
+                        residual_during_shutdown = terminate_process_group_members(
+                            f"log reader stall ({descriptor}) for {invocation.name}"
+                        )
+                        if instrumentation_active and residual_during_shutdown:
+                            instrument(
+                                f"[instrumentation] Residual processes persisted after stall cleanup "
+                                f"for {descriptor}"
+                            )
+                        forcible_close_applied = False
+                        if stream_fd is not None:
+                            try:
+                                os.close(stream_fd)
+                                forcible_close_applied = True
+                                if instrumentation_active:
+                                    instrument(
+                                        f"[instrumentation] Forcibly closed fd {stream_fd} for reader thread {thread.name} ({descriptor})"
+                                    )
+                            except OSError as exc:
+                                if instrumentation_active:
+                                    instrument(
+                                        f"[instrumentation] Failed to close fd {stream_fd} for reader thread {thread.name} ({descriptor}): {exc}"
+                                    )
+                        if not forcible_close_applied:
+                            if instrumentation_active:
+                                instrument(
+                                    f"[instrumentation] Closing stream for reader thread {thread.name} ({descriptor})"
+                                )
+                            try:
+                                stream.close()
+                            except Exception:
+                                pass
                         thread.join(timeout=join_step)
 
                     if thread.is_alive():
+                        if instrumentation_active:
+                            instrument(
+                                f"[instrumentation] Reader thread {thread.name} failed to terminate after forcible close "
+                                f"state={snapshot_reader_state(thread.name)}"
+                            )
                         print(
                             f"\n{Color.YELLOW}Warning: Log reader thread did not terminate cleanly; "
                             "closing descriptors to avoid resource leak.{Color.RESET}"
                         )
+                    elif instrumentation_active:
+                        instrument(
+                            f"[instrumentation] Reader thread {thread.name} terminated state={snapshot_reader_state(thread.name)}"
+                        )
+
+                if instrumentation_active:
+                    instrument(
+                        "[instrumentation] Shutdown of log reader threads completed"
+                    )
 
             if instrumentation_active:
-                self._instrument_step(
+                instrument(
                     f"[instrumentation] Spawning process for {invocation.name}"
                 )
             process = subprocess.Popen(invocation.command(), **popen_kwargs)
             if instrumentation_active:
-                self._instrument_step(
+                instrument(
                     f"[instrumentation] Process started for {invocation.name} with pid {process.pid}"
                 )
 
@@ -1023,9 +1420,25 @@ class TestRunner:
                 except (ProcessLookupError, PermissionError, OSError):
                     process_group_id = None
             if instrumentation_active:
-                self._instrument_step(
+                instrument(
                     f"[instrumentation] Process group lookup complete for {invocation.name}"
                 )
+
+            if sys.platform != 'win32' and descendant_monitor_thread is None:
+                def _descendant_monitor_loop() -> None:
+                    poll_interval = 0.3
+                    while not descendant_monitor_stop.is_set():
+                        _refresh_descendants(f"{invocation.name} live poll")
+                        if descendant_monitor_stop.wait(poll_interval):
+                            break
+
+                descendant_monitor_thread = threading.Thread(
+                    target=_descendant_monitor_loop,
+                    name=f"{invocation.name}-descendants",
+                    daemon=True,
+                )
+                descendant_monitor_thread.start()
+                _refresh_descendants(f"{invocation.name} initial poll")
 
             def attempt_live_capture(trigger_line: str) -> None:
                 nonlocal live_stack_traces, live_stack_error, capture_pause_total, capture_active_start
@@ -1067,10 +1480,56 @@ class TestRunner:
                     with capture_lock:
                         live_stack_error = error
 
-            def monitor_stream(stream, buffer: List[str]) -> None:
+            def monitor_stream(stream, buffer: List[str], descriptor: str) -> None:
+                thread_name = threading.current_thread().name
+                start_time = time.monotonic()
+                lines = 0
+                bytes_read = 0
+                if instrumentation_active:
+                    instrument(
+                        f"[instrumentation] Reader thread {thread_name} starting for {descriptor}"
+                    )
+                with reader_state_lock:
+                    reader_states[thread_name] = {
+                        "descriptor": descriptor,
+                        "lines": 0,
+                        "bytes": 0,
+                        "last_update": start_time,
+                        "active": True,
+                        "last_line_excerpt": None,
+                        "start_time": start_time,
+                    }
                 try:
                     for line in iter(stream.readline, ''):
                         buffer.append(line)
+                        lines += 1
+                        bytes_read += len(line.encode('utf-8', errors='ignore'))
+                        now_monotonic = time.monotonic()
+                        stripped = line.rstrip('\n')
+                        if len(stripped) > 200:
+                            stripped = f"{stripped[:197]}..."
+                        with reader_state_lock:
+                            entry = reader_states.setdefault(
+                                thread_name,
+                                {
+                                    "descriptor": descriptor,
+                                    "lines": 0,
+                                    "bytes": 0,
+                                    "last_update": start_time,
+                                    "active": True,
+                                    "last_line_excerpt": None,
+                                    "start_time": start_time,
+                                },
+                            )
+                            entry.update(
+                                {
+                                    "lines": lines,
+                                    "bytes": bytes_read,
+                                    "last_update": now_monotonic,
+                                    "active": True,
+                                    "last_line_excerpt": stripped,
+                                }
+                            )
                         attempt_live_capture(line)
                 except (OSError, ValueError):
                     # The stream may be closed from another thread during shutdown.
@@ -1083,30 +1542,92 @@ class TestRunner:
                         stream.close()
                     except Exception:
                         pass
+                    end_time = time.monotonic()
+                    with reader_state_lock:
+                        entry = reader_states.setdefault(
+                            thread_name,
+                            {
+                                "descriptor": descriptor,
+                                "lines": 0,
+                                "bytes": 0,
+                                "last_update": start_time,
+                                "active": False,
+                                "last_line_excerpt": None,
+                                "start_time": start_time,
+                            },
+                        )
+                        entry.update(
+                            {
+                                "lines": lines,
+                                "bytes": bytes_read,
+                                "last_update": end_time,
+                                "active": False,
+                            }
+                        )
+                    if instrumentation_active:
+                        duration = end_time - start_time
+                        instrument(
+                            f"[instrumentation] Reader thread {thread_name} exiting for {descriptor} "
+                            f"after {duration:.3f}s lines={lines} bytes={bytes_read}"
+                        )
 
             if process.stdout:
+                stdout_fd: Optional[int] = None
+                stdout_fd_error: Optional[BaseException] = None
+                try:
+                    stdout_fd = process.stdout.fileno()
+                except (OSError, ValueError, AttributeError) as exc:
+                    stdout_fd_error = exc
+                    stdout_fd = None
+                if instrumentation_active:
+                    if stdout_fd is not None:
+                        instrument(
+                            f"[instrumentation] Captured stdout fd {stdout_fd} for {invocation.name}"
+                        )
+                    else:
+                        instrument(
+                            f"[instrumentation] Failed to capture stdout fd for {invocation.name}: "
+                            f"{stdout_fd_error!r}"
+                        )
                 stdout_thread = threading.Thread(
                     target=monitor_stream,
-                    args=(process.stdout, stdout_lines),
+                    args=(process.stdout, stdout_lines, 'stdout'),
                     daemon=True,
                 )
                 stdout_thread.start()
-                threads.append((stdout_thread, process.stdout))
+                threads.append((stdout_thread, process.stdout, 'stdout', stdout_fd))
 
             if process.stderr:
+                stderr_fd: Optional[int] = None
+                stderr_fd_error: Optional[BaseException] = None
+                try:
+                    stderr_fd = process.stderr.fileno()
+                except (OSError, ValueError, AttributeError) as exc:
+                    stderr_fd_error = exc
+                    stderr_fd = None
+                if instrumentation_active:
+                    if stderr_fd is not None:
+                        instrument(
+                            f"[instrumentation] Captured stderr fd {stderr_fd} for {invocation.name}"
+                        )
+                    else:
+                        instrument(
+                            f"[instrumentation] Failed to capture stderr fd for {invocation.name}: "
+                            f"{stderr_fd_error!r}"
+                        )
                 stderr_thread = threading.Thread(
                     target=monitor_stream,
-                    args=(process.stderr, stderr_lines),
+                    args=(process.stderr, stderr_lines, 'stderr'),
                     daemon=True,
                 )
                 stderr_thread.start()
-                threads.append((stderr_thread, process.stderr))
+                threads.append((stderr_thread, process.stderr, 'stderr', stderr_fd))
 
             # Wait with timeout, extending the deadline for live stack captures
             try:
                 while True:
                     if instrumentation_active:
-                        self._instrument_step(
+                        instrument(
                             f"[instrumentation] Monitoring {invocation.name} for completion"
                         )
                     with capture_lock:
@@ -1137,14 +1658,21 @@ class TestRunner:
 
                 process.wait()
                 if instrumentation_active:
-                    self._instrument_step(
+                    instrument(
                         f"[instrumentation] Process wait complete for {invocation.name}"
+                    )
+                residual_processes = terminate_process_group_members(
+                    f"{invocation.name} exit"
+                )
+                if instrumentation_active and residual_processes:
+                    instrument(
+                        f"[instrumentation] Residual processes persisted after {invocation.name} exit"
                     )
                 duration = time.time() - start_time
 
                 shutdown_reader_threads()
                 if instrumentation_active:
-                    self._instrument_step(
+                    instrument(
                         f"[instrumentation] Reader threads finished for {invocation.name}"
                     )
 
@@ -1292,11 +1820,14 @@ class TestRunner:
                 error=error_msg
             )
         finally:
+            if descendant_monitor_thread is not None:
+                descendant_monitor_stop.set()
+                descendant_monitor_thread.join(timeout=1.0)
             if cleanup_scratch_dir:
                 self._cleanup_scratch_directory(scratch_dir)
             self._cleanup_new_core_dumps(invocation, core_snapshot, start_time, result_success)
             if instrumentation_active:
-                self._instrument_step(
+                instrument(
                     f"[instrumentation] Exiting run_test_once for {invocation.name}"
                 )
 
@@ -3149,6 +3680,233 @@ class TestRunner:
 
         return descendants
 
+    def _describe_pids(self, pids: Iterable[int]) -> Dict[int, str]:
+        """Return human-readable details for the provided process IDs."""
+
+        unique_pids = sorted({pid for pid in pids if isinstance(pid, int) and pid > 0})
+        if not unique_pids:
+            return {}
+
+        details: Dict[int, str] = {}
+
+        if _PSUTIL is not None:
+            psutil_module = _PSUTIL
+            now = time.time()
+            for pid in unique_pids:
+                if pid in details:
+                    continue
+                try:
+                    proc = psutil_module.Process(pid)
+                except Exception:
+                    continue
+
+                parts: List[str] = []
+                try:
+                    parts.append(f"ppid={proc.ppid()}")
+                except Exception:
+                    pass
+                try:
+                    parts.append(f"pgid={os.getpgid(pid)}")
+                except Exception:
+                    pass
+                try:
+                    parts.append(f"status={proc.status()}")
+                except Exception:
+                    pass
+                try:
+                    create_time = proc.create_time()
+                except Exception:
+                    create_time = None
+                if create_time:
+                    uptime = now - create_time
+                    if uptime >= 0:
+                        parts.append(f"uptime={uptime:.1f}s")
+                try:
+                    cmdline = proc.cmdline()
+                except Exception:
+                    cmdline = []
+                if not cmdline:
+                    try:
+                        name = proc.name()
+                    except Exception:
+                        name = ""
+                    if name:
+                        cmdline = [name]
+                if cmdline:
+                    parts.append(f"cmd={' '.join(cmdline)}")
+                if parts:
+                    details[pid] = " ".join(parts)
+
+        remaining = [pid for pid in unique_pids if pid not in details]
+        ps_executable = shutil.which('ps')
+        if remaining and ps_executable:
+            chunk_size = 16
+            for offset in range(0, len(remaining), chunk_size):
+                chunk = remaining[offset : offset + chunk_size]
+                command = [
+                    ps_executable,
+                    '-o',
+                    'pid=,ppid=,pgid=,stat=,etime=,command=',
+                    '-p',
+                    ','.join(str(pid) for pid in chunk),
+                ]
+                try:
+                    result = subprocess.run(
+                        command,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        check=True,
+                        timeout=5,
+                    )
+                except subprocess.SubprocessError:
+                    continue
+
+                for line in result.stdout.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    fields = line.split(None, 5)
+                    if len(fields) < 5:
+                        continue
+                    try:
+                        pid_value = int(fields[0])
+                    except ValueError:
+                        continue
+                    description_parts = [
+                        f"ppid={fields[1]}",
+                        f"pgid={fields[2]}",
+                        f"stat={fields[3]}",
+                        f"etime={fields[4]}",
+                    ]
+                    if len(fields) >= 6:
+                        description_parts.append(f"cmd={fields[5]}")
+                    details[pid_value] = " ".join(description_parts)
+
+        for pid in unique_pids:
+            details.setdefault(pid, 'details unavailable')
+
+        return details
+
+    def _snapshot_pid_fd_usage(
+        self,
+        pids: Iterable[int],
+        *,
+        entry_limit: int = 6,
+    ) -> Dict[int, str]:
+        """Gather best-effort file descriptor information for the provided PIDs."""
+
+        unique_pids = [pid for pid in pids if isinstance(pid, int) and pid > 0]
+        if not unique_pids:
+            return {}
+
+        details: Dict[int, str] = {}
+
+        if _PSUTIL is not None:
+            psutil_module = _PSUTIL
+            for pid in unique_pids:
+                if pid in details:
+                    continue
+                try:
+                    proc = psutil_module.Process(pid)
+                except Exception:
+                    continue
+
+                parts: List[str] = []
+                try:
+                    num_fds = proc.num_fds()
+                except Exception:
+                    num_fds = None
+                if isinstance(num_fds, int):
+                    parts.append(f"num_fds={num_fds}")
+
+                connection_entries: List[str] = []
+                try:
+                    for connection in proc.connections(kind='all'):
+                        if getattr(connection, 'fd', None) is None:
+                            continue
+                        descriptor = f"fd={connection.fd}"
+                        conn_type = getattr(connection, 'type', None)
+                        if conn_type is not None:
+                            try:
+                                type_name = socket.SocketKind(conn_type).name
+                            except Exception:
+                                type_name = str(conn_type)
+                            descriptor = f"{descriptor}:{type_name}"
+                        status = getattr(connection, 'status', None)
+                        if status:
+                            descriptor = f"{descriptor}:{status}"
+                        laddr = getattr(connection, 'laddr', None)
+                        raddr = getattr(connection, 'raddr', None)
+                        if laddr:
+                            descriptor = f"{descriptor}:laddr={laddr}"
+                        if raddr:
+                            descriptor = f"{descriptor}:raddr={raddr}"
+                        connection_entries.append(descriptor)
+                        if len(connection_entries) >= entry_limit:
+                            break
+                except Exception:
+                    connection_entries = []
+
+                if connection_entries:
+                    parts.append(
+                        "connections=[" + "; ".join(connection_entries) + "]"
+                    )
+
+                file_entries: List[str] = []
+                try:
+                    for opened in proc.open_files():
+                        if getattr(opened, 'fd', None) is not None:
+                            file_entries.append(
+                                f"fd={opened.fd}:{getattr(opened, 'path', '<unknown>')}"
+                            )
+                        else:
+                            file_entries.append(getattr(opened, 'path', '<unknown>'))
+                        if len(file_entries) >= entry_limit:
+                            break
+                except Exception:
+                    file_entries = []
+
+                if file_entries:
+                    parts.append("open_files=[" + "; ".join(file_entries) + "]")
+
+                if parts:
+                    details[pid] = " ".join(parts)
+
+        remaining = [pid for pid in unique_pids if pid not in details]
+        lsof_executable = shutil.which('lsof')
+        if remaining and lsof_executable:
+            for pid in remaining:
+                try:
+                    result = subprocess.run(
+                        [
+                            lsof_executable,
+                            '-n',
+                            '-p',
+                            str(pid),
+                        ],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        timeout=5,
+                        check=True,
+                    )
+                except subprocess.SubprocessError:
+                    continue
+
+                parsed: List[str] = []
+                for raw_line in result.stdout.splitlines():
+                    line = raw_line.strip()
+                    if not line or line.startswith('COMMAND'):
+                        continue
+                    parsed.append(line)
+                    if len(parsed) >= entry_limit:
+                        break
+                if parsed:
+                    details[pid] = 'lsof=' + '; '.join(parsed)
+
+        return details
+
     def _snapshot_process_table_via_ps(self) -> List[Tuple[int, int, int]]:
         """Return (pid, ppid, pgid) tuples using the portable ps command."""
 
@@ -3515,12 +4273,16 @@ def main():
             header = " ".join(f"{index + 1:02d}" for index, _ in enumerate(tests))
 
             instrumentation_pending = runner.instrumentation_active()
+            instrumentation_emit = partial(
+                runner._instrument_step,
+                disk_path=runner.build_dir,
+            )
             if instrumentation_pending:
-                _instrumentation_print(
+                instrumentation_emit(
                     "[instrumentation] Prepared suite header; entering execution loop"
                 )
                 if tests:
-                    _instrumentation_print(
+                    instrumentation_emit(
                         f"[instrumentation] First test scheduled: {tests[0].name}"
                     )
 
@@ -3532,7 +4294,7 @@ def main():
                 max_remaining = max(remaining_counts)
                 reps_in_this_round = min(batch_size, max_remaining)
                 if instrumentation_pending:
-                    _instrumentation_print(
+                    instrumentation_emit(
                         f"[instrumentation] Starting round with batch size {reps_in_this_round}"
                     )
                 print(f"\n{Color.BLUE}--- Round: {reps_in_this_round} repetition(s) ---{Color.RESET}")
@@ -3548,7 +4310,7 @@ def main():
                 for i in range(reps_in_this_round):
                     row_segments = ["  "] * len(tests)
                     if instrumentation_pending:
-                        _instrumentation_print(
+                        instrumentation_emit(
                             f"[instrumentation] Round iteration {i + 1} preparing to evaluate tests"
                         )
                     for index, invocation in enumerate(tests):
@@ -3558,12 +4320,12 @@ def main():
 
                         row_start = "."
                         if instrumentation_pending:
-                            _instrumentation_print(
+                            instrumentation_emit(
                                 f"[instrumentation] Considering test {test_name} at index {index}"
                             )
                         result = runner.run_test_once(invocation)
                         if instrumentation_pending:
-                            _instrumentation_print(
+                            instrumentation_emit(
                                 f"[instrumentation] Completed invocation for {test_name}"
                             )
                             instrumentation_pending = runner.instrumentation_active()
