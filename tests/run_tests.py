@@ -1013,6 +1013,85 @@ class TestRunner:
             reader_state_lock = threading.Lock()
             reader_states: Dict[str, Dict[str, Any]] = {}
             process_group_id: Optional[int] = None
+            descendant_monitor_thread: Optional[threading.Thread] = None
+            descendant_monitor_stop = threading.Event()
+            descendant_lock = threading.Lock()
+            observed_descendants: Set[int] = set()
+
+            def _record_descendants(snapshot: Iterable[int], source: str) -> None:
+                """Add ``snapshot`` PIDs to the observed descendant set."""
+
+                if sys.platform == 'win32':
+                    return
+
+                filtered = {
+                    pid for pid in snapshot if isinstance(pid, int) and pid > 0
+                }
+                if not filtered:
+                    return
+
+                with descendant_lock:
+                    new_entries = filtered - observed_descendants
+                    if new_entries:
+                        observed_descendants.update(filtered)
+                        if instrumentation_active:
+                            instrument(
+                                f"[instrumentation] Recorded descendant processes "
+                                f"({source}): {sorted(new_entries)}"
+                            )
+                    else:
+                        observed_descendants.update(filtered)
+
+            def _check_pid_alive(pid: int) -> bool:
+                """Return True if ``pid`` still refers to a running process."""
+
+                if pid <= 0:
+                    return False
+
+                if sys.platform == 'win32':
+                    return False
+
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    return False
+                except PermissionError:
+                    return True
+                except OSError:
+                    return True
+                return True
+
+            def _refresh_descendants(reason: str) -> Set[int]:
+                """Snapshot descendants of the test process and record them."""
+
+                if sys.platform == 'win32':
+                    return set()
+
+                pid_local = process.pid if process is not None else None
+                if pid_local is None or pid_local <= 0:
+                    return set()
+
+                snapshot: Set[int] = set()
+
+                if _PSUTIL is not None:
+                    try:
+                        proc = _PSUTIL.Process(pid_local)
+                        for child in proc.children(recursive=True):
+                            child_pid = getattr(child, 'pid', None)
+                            if isinstance(child_pid, int) and child_pid > 0:
+                                snapshot.add(child_pid)
+                    except Exception:
+                        pass
+
+                try:
+                    snapshot.update(self._collect_descendant_pids(pid_local))
+                except Exception:
+                    pass
+
+                if snapshot:
+                    _record_descendants(snapshot, reason)
+
+                return snapshot
 
             def terminate_process_group_members(reason: str) -> bool:
                 """Ensure helpers in the spawned process group terminate."""
@@ -1032,38 +1111,38 @@ class TestRunner:
                 if process is not None and process.pid is not None:
                     base_exclusions.add(process.pid)
 
-                descendant_candidates: Set[int] = set()
-                if process is not None and process.pid is not None:
-                    descendant_candidates = {
+                def collect_targets() -> Tuple[Set[int], Set[int]]:
+                    """Return process-group survivors and out-of-group descendants."""
+
+                    survivors_local = set(
                         pid
-                        for pid in self._collect_descendant_pids(process.pid)
+                        for pid in self._collect_process_group_pids(pgid)
                         if pid not in base_exclusions
-                    }
+                    )
 
-                survivors = set(
-                    pid
-                    for pid in self._collect_process_group_pids(pgid)
-                    if pid not in base_exclusions
-                )
+                    descendant_only_local: Set[int] = set()
+                    if sys.platform != 'win32':
+                        if process is not None and process.pid is not None:
+                            _refresh_descendants(f"{reason} target refresh")
+                        with descendant_lock:
+                            recorded = {
+                                pid
+                                for pid in observed_descendants
+                                if pid not in base_exclusions
+                            }
+                        for pid in recorded:
+                            if pid in survivors_local:
+                                continue
+                            if _check_pid_alive(pid):
+                                descendant_only_local.add(pid)
+                            else:
+                                with descendant_lock:
+                                    observed_descendants.discard(pid)
+                    return survivors_local, descendant_only_local
 
-                if not survivors:
-                    if descendant_candidates and instrumentation_active:
-                        extra_only = sorted(descendant_candidates)
-                        detail_map = self._describe_pids(extra_only)
-                        detail_entries = ", ".join(
-                            f"{pid}:{detail_map.get(pid, 'details unavailable')}"
-                            for pid in extra_only
-                        )
-                        instrument(
-                            f"[instrumentation] Descendant processes outside group ({reason}): "
-                            f"{extra_only} details=[{detail_entries}]"
-                        )
-                        fd_map = self._snapshot_pid_fd_usage(extra_only)
-                        for pid_value in sorted(fd_map):
-                            instrument(
-                                f"[instrumentation] Descriptor usage for descendant {pid_value} "
-                                f"({reason}): {fd_map[pid_value]}"
-                            )
+                survivors, descendant_only = collect_targets()
+
+                if not survivors and not descendant_only:
                     if (
                         sys.platform == 'darwin'
                         and instrumentation_active
@@ -1082,41 +1161,41 @@ class TestRunner:
                             )
                     return False
 
-                survivor_list = sorted(survivors)
                 if instrumentation_active:
-                    detail_map = self._describe_pids(survivor_list)
-                    detail_entries = ", ".join(
-                        f"{pid}:{detail_map.get(pid, 'details unavailable')}"
-                        for pid in survivor_list
-                    )
-                    instrument(
-                        f"[instrumentation] Residual process group members ({reason}): {survivor_list} "
-                        f"details=[{detail_entries}]"
-                    )
-                    fd_map = self._snapshot_pid_fd_usage(survivor_list)
-                    for pid_value in sorted(fd_map):
-                        instrument(
-                            f"[instrumentation] Descriptor usage for residual {pid_value} "
-                            f"({reason}): {fd_map[pid_value]}"
+                    if survivors:
+                        survivor_list = sorted(survivors)
+                        detail_map = self._describe_pids(survivor_list)
+                        detail_entries = ", ".join(
+                            f"{pid}:{detail_map.get(pid, 'details unavailable')}"
+                            for pid in survivor_list
                         )
-                    if descendant_candidates:
-                        descendant_only = sorted(descendant_candidates - survivors)
-                        if descendant_only:
-                            descendant_map = self._describe_pids(descendant_only)
-                            descendant_entries = ", ".join(
-                                f"{pid}:{descendant_map.get(pid, 'details unavailable')}"
-                                for pid in descendant_only
-                            )
+                        instrument(
+                            f"[instrumentation] Residual process group members ({reason}): {survivor_list} "
+                            f"details=[{detail_entries}]"
+                        )
+                        fd_map = self._snapshot_pid_fd_usage(survivor_list)
+                        for pid_value in sorted(fd_map):
                             instrument(
-                                f"[instrumentation] Descendant processes outside group ({reason}): "
-                                f"{descendant_only} details=[{descendant_entries}]"
+                                f"[instrumentation] Descriptor usage for residual {pid_value} "
+                                f"({reason}): {fd_map[pid_value]}"
                             )
-                            fd_map = self._snapshot_pid_fd_usage(descendant_only)
-                            for pid_value in sorted(fd_map):
-                                instrument(
-                                    f"[instrumentation] Descriptor usage for descendant {pid_value} "
-                                    f"({reason}): {fd_map[pid_value]}"
-                                )
+                    if descendant_only:
+                        descendant_list = sorted(descendant_only)
+                        descendant_map = self._describe_pids(descendant_list)
+                        descendant_entries = ", ".join(
+                            f"{pid}:{descendant_map.get(pid, 'details unavailable')}"
+                            for pid in descendant_list
+                        )
+                        instrument(
+                            f"[instrumentation] Descendant processes outside group ({reason}): "
+                            f"{descendant_list} details=[{descendant_entries}]"
+                        )
+                        fd_map = self._snapshot_pid_fd_usage(descendant_list)
+                        for pid_value in sorted(fd_map):
+                            instrument(
+                                f"[instrumentation] Descriptor usage for descendant {pid_value} "
+                                f"({reason}): {fd_map[pid_value]}"
+                            )
                     if sys.platform == 'darwin':
                         crash_watchers = _find_lingering_processes(
                             (
@@ -1134,10 +1213,11 @@ class TestRunner:
                 try:
                     import signal
                 except ImportError:
-                    return bool(survivors)
+                    return bool(survivors or descendant_only)
 
                 failures: List[Tuple[int, str]] = []
-                for target_pid in survivor_list:
+                targets = sorted(survivors | descendant_only)
+                for target_pid in targets:
                     try:
                         os.kill(target_pid, signal.SIGTERM)
                     except ProcessLookupError:
@@ -1155,12 +1235,8 @@ class TestRunner:
 
                 wait_deadline = time.monotonic() + 1.0
                 while time.monotonic() < wait_deadline:
-                    survivors = set(
-                        pid
-                        for pid in self._collect_process_group_pids(pgid)
-                        if pid not in base_exclusions
-                    )
-                    if not survivors:
+                    survivors, descendant_only = collect_targets()
+                    if not survivors and not descendant_only:
                         if instrumentation_active:
                             instrument(
                                 f"[instrumentation] Residual process group empty after SIGTERM ({reason})"
@@ -1168,26 +1244,22 @@ class TestRunner:
                         return False
                     time.sleep(0.05)
 
-                survivors = set(
-                    pid
-                    for pid in self._collect_process_group_pids(pgid)
-                    if pid not in base_exclusions
-                )
+                survivors, descendant_only = collect_targets()
 
-                if not survivors:
+                if not survivors and not descendant_only:
                     if instrumentation_active:
                         instrument(
                             f"[instrumentation] Residual process group empty after SIGTERM ({reason})"
                         )
                     return False
 
-                survivor_list = sorted(survivors)
-                if instrumentation_active:
+                targets = sorted(survivors | descendant_only)
+                if instrumentation_active and targets:
                     instrument(
-                        f"[instrumentation] Forcing SIGKILL for residual processes ({reason}): {survivor_list}"
+                        f"[instrumentation] Forcing SIGKILL for residual processes ({reason}): {targets}"
                     )
 
-                for target_pid in survivor_list:
+                for target_pid in targets:
                     try:
                         os.kill(target_pid, signal.SIGKILL)
                     except ProcessLookupError:
@@ -1205,19 +1277,20 @@ class TestRunner:
 
                 time.sleep(0.05)
 
-                survivors = set(
-                    pid
-                    for pid in self._collect_process_group_pids(pgid)
-                    if pid not in base_exclusions
-                )
+                survivors, descendant_only = collect_targets()
 
-                if survivors and instrumentation_active:
-                    instrument(
-                        f"[instrumentation] Residual processes still alive after SIGKILL ({reason}): {sorted(survivors)}"
-                    )
+                if instrumentation_active:
+                    if survivors:
+                        instrument(
+                            f"[instrumentation] Residual processes still alive after SIGKILL ({reason}): {sorted(survivors)}"
+                        )
+                    if descendant_only:
+                        instrument(
+                            f"[instrumentation] Descendants outside group still alive after SIGKILL ({reason}): "
+                            f"{sorted(descendant_only)}"
+                        )
 
-                return bool(survivors)
-
+                return bool(survivors or descendant_only)
             def shutdown_reader_threads() -> None:
                 """Ensure log reader threads terminate to avoid leaking resources."""
                 join_step = 0.2
@@ -1350,6 +1423,22 @@ class TestRunner:
                 instrument(
                     f"[instrumentation] Process group lookup complete for {invocation.name}"
                 )
+
+            if sys.platform != 'win32' and descendant_monitor_thread is None:
+                def _descendant_monitor_loop() -> None:
+                    poll_interval = 0.3
+                    while not descendant_monitor_stop.is_set():
+                        _refresh_descendants(f"{invocation.name} live poll")
+                        if descendant_monitor_stop.wait(poll_interval):
+                            break
+
+                descendant_monitor_thread = threading.Thread(
+                    target=_descendant_monitor_loop,
+                    name=f"{invocation.name}-descendants",
+                    daemon=True,
+                )
+                descendant_monitor_thread.start()
+                _refresh_descendants(f"{invocation.name} initial poll")
 
             def attempt_live_capture(trigger_line: str) -> None:
                 nonlocal live_stack_traces, live_stack_error, capture_pause_total, capture_active_start
@@ -1731,6 +1820,9 @@ class TestRunner:
                 error=error_msg
             )
         finally:
+            if descendant_monitor_thread is not None:
+                descendant_monitor_stop.set()
+                descendant_monitor_thread.join(timeout=1.0)
             if cleanup_scratch_dir:
                 self._cleanup_scratch_directory(scratch_dir)
             self._cleanup_new_core_dumps(invocation, core_snapshot, start_time, result_success)
