@@ -1008,7 +1008,7 @@ class TestRunner:
             capture_lock = threading.Lock()
             capture_pause_total = 0.0
             capture_active_start: Optional[float] = None
-            threads: List[Tuple[threading.Thread, IO[str], str]] = []
+            threads: List[Tuple[threading.Thread, IO[str], str, Optional[int]]] = []
             reader_state_lock = threading.Lock()
             reader_states: Dict[str, Dict[str, Any]] = {}
             process_group_id: Optional[int] = None
@@ -1234,7 +1234,7 @@ class TestRunner:
                         f"last_activity={last_update_str} active={active} last_line={excerpt}"
                     )
 
-                for thread, stream, descriptor in threads:
+                for thread, stream, descriptor, stream_fd in threads:
                     join_deadline = time.monotonic() + max_join_time
                     if instrumentation_active:
                         instrument(
@@ -1262,20 +1262,35 @@ class TestRunner:
                         terminate_process_group_members(
                             f"log reader stall ({descriptor}) for {invocation.name}"
                         )
-                        if instrumentation_active:
-                            instrument(
-                                f"[instrumentation] Closing stream for reader thread {thread.name} ({descriptor})"
-                            )
-                        try:
-                            stream.close()
-                        except Exception:
-                            pass
+                        forcible_close_applied = False
+                        if stream_fd is not None:
+                            try:
+                                os.close(stream_fd)
+                                forcible_close_applied = True
+                                if instrumentation_active:
+                                    instrument(
+                                        f"[instrumentation] Forcibly closed fd {stream_fd} for reader thread {thread.name} ({descriptor})"
+                                    )
+                            except OSError as exc:
+                                if instrumentation_active:
+                                    instrument(
+                                        f"[instrumentation] Failed to close fd {stream_fd} for reader thread {thread.name} ({descriptor}): {exc}"
+                                    )
+                        if not forcible_close_applied:
+                            if instrumentation_active:
+                                instrument(
+                                    f"[instrumentation] Closing stream for reader thread {thread.name} ({descriptor})"
+                                )
+                            try:
+                                stream.close()
+                            except Exception:
+                                pass
                         thread.join(timeout=join_step)
 
                     if thread.is_alive():
                         if instrumentation_active:
                             instrument(
-                                f"[instrumentation] Reader thread {thread.name} failed to terminate after stream close "
+                                f"[instrumentation] Reader thread {thread.name} failed to terminate after forcible close "
                                 f"state={snapshot_reader_state(thread.name)}"
                             )
                         print(
@@ -1444,22 +1459,32 @@ class TestRunner:
                         )
 
             if process.stdout:
+                stdout_fd: Optional[int] = None
+                try:
+                    stdout_fd = process.stdout.fileno()
+                except (OSError, ValueError, AttributeError):
+                    stdout_fd = None
                 stdout_thread = threading.Thread(
                     target=monitor_stream,
                     args=(process.stdout, stdout_lines, 'stdout'),
                     daemon=True,
                 )
                 stdout_thread.start()
-                threads.append((stdout_thread, process.stdout, 'stdout'))
+                threads.append((stdout_thread, process.stdout, 'stdout', stdout_fd))
 
             if process.stderr:
+                stderr_fd: Optional[int] = None
+                try:
+                    stderr_fd = process.stderr.fileno()
+                except (OSError, ValueError, AttributeError):
+                    stderr_fd = None
                 stderr_thread = threading.Thread(
                     target=monitor_stream,
                     args=(process.stderr, stderr_lines, 'stderr'),
                     daemon=True,
                 )
                 stderr_thread.start()
-                threads.append((stderr_thread, process.stderr, 'stderr'))
+                threads.append((stderr_thread, process.stderr, 'stderr', stderr_fd))
 
             # Wait with timeout, extending the deadline for live stack captures
             try:
