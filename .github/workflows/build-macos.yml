@@ -53,6 +53,7 @@ jobs:
               - 'third_party/**'
             tests:
               - 'tests/**'
+              - 'flip_to_trigger_ci'
             examples:
               - 'example/**'
             workflows:
