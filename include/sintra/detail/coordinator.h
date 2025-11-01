@@ -77,8 +77,12 @@ struct Process_group: Derived_transceiver<Process_group>
         instance_id_type                        processing_offender = invalid_instance_id;
         std::chrono::steady_clock::time_point   outbound_deadline {};
         std::chrono::steady_clock::time_point   processing_deadline {};
+        sequence_counter_type                   rendezvous_sequence = invalid_sequence;
         bool                                    awaiting_outbound = false;
         bool                                    awaiting_processing = false;
+        bool                                    timeout_monitor_active = false;
+        bool                                    async_completion_pending = false;
+        bool                                    completion_dispatched = false;
         condition_variable                      completion_cv;
     };
 
@@ -102,6 +106,13 @@ public:
         std::vector<Barrier_completion>& completions);
     void emit_barrier_completions(
         const std::vector<Barrier_completion>& completions);
+    void finalize_barrier_locked(
+        const std::string& barrier_name,
+        Barrier& barrier,
+        std::unique_lock<std::mutex>& barrier_lock,
+        std::unique_lock<std::mutex>& basic_lock);
+    void update_barrier_payload_states_locked(Barrier& barrier);
+    void monitor_barrier_timeouts(std::string barrier_name, std::weak_ptr<Barrier> barrier_wp);
 
 private:
     void add_process(instance_id_type process_iid);

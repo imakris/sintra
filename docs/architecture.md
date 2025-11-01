@@ -494,6 +494,29 @@ throw std::pair<deferral, function<void()>>{
 
 The RPC dispatcher catches these, stores the caller's continuation, and resumes when the barrier completes.
 
+For barriers this handshake is essential rather than an optimisation. The initial
+deferral replaces the caller's function-instance id with the barrier-wide
+`common_function_iid`, allowing the coordinator to fan a single completion out to
+every participant. The calling thread remains blocked on its
+`Outstanding_rpc_control` while the request-reader thread services the eventual
+`barrier_ack_request` and the reply-reader thread advances the rings. Skipping
+the deferral would leave the caller waiting on its original function id and it
+would never observe the completion payload that is emitted under the shared id.
+
+The acknowledgement responses introduced by the barrier refactor are handled on
+the request reader thread. They must be dispatched via a signal path that does
+not rely on the deferred RPC reply; otherwise the application deadlocks waiting
+for an acknowledgement that cannot be sent. When acknowledgement phases are
+requested the coordinator also spawns a lightweight timeout monitor thread that
+polls the recorded deadlines and marks them `timeout` if peers never respond,
+allowing the barrier to conclude without blocking the request loop.
+
+> **Diagnostics:** set `SINTRA_TRACE_BARRIER=1` to enable detailed tracing from
+> the coordinator, managed processes, and the processing-fence harness. The
+> instrumentation logs deferrals, acknowledgement requests/responses, timeout
+> actions, and the internal state of `wait_for_delivery_fence()` so you can
+> follow each barrier through to completion.
+
 ### Handler Registry
 
 ```cpp

@@ -8,6 +8,9 @@
 #include "ipc_rings.h"
 
 #include <cstdint>
+#include <cstdlib>
+#include <iostream>
+#include <sstream>
 
 namespace sintra::detail {
 
@@ -76,6 +79,24 @@ inline constexpr barrier_phase_status make_barrier_phase_status(
     sequence_counter_type sequence = invalid_sequence)
 {
     return barrier_phase_status{state, failure, offender, sequence};
+}
+
+inline bool barrier_trace_enabled()
+{
+    static const bool enabled = (std::getenv("SINTRA_TRACE_BARRIER") != nullptr);
+    return enabled;
+}
+
+template <typename... Args>
+inline void log_barrier_event(Args&&... args)
+{
+    if (!barrier_trace_enabled()) {
+        return;
+    }
+
+    std::ostringstream oss;
+    ((oss << std::forward<Args>(args)), ...);
+    std::cout << oss.str() << std::endl;
 }
 
 inline constexpr barrier_completion_payload make_barrier_completion_payload()

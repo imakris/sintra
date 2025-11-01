@@ -198,6 +198,39 @@ struct Process_group::Barrier {
    - The coordinator removes responders from `processing_waiters`, handling
      draining, loss, and timeouts the same way as the outbound phase.
 
+### Participant Responsibilities and Threading
+
+- **Deferral handshake.** Every caller receives a deferral reply when it is not the
+  final arriver. The calling thread parks inside `Transceiver::call()` waiting on
+  its `Outstanding_rpc_control`, while the coordinator remaps the return handler
+  to the barrier-wide `common_function_iid`. The actual completion payload later
+  arrives on the same reply ring sequence identified by the deferral.
+- **Ack handling happens on the request reader thread.** The coordinator's
+  `barrier_ack_request` RPC executes in `Managed_process::barrier_ack_request()`,
+  which runs on the process' request reader thread. That handler performs the
+  waits described above—`Managed_process::flush()` for outbound guarantees and
+  `wait_for_delivery_fence()` (which internally drains inbound readers and queued
+  post-handlers) for processing guarantees—before emitting an acknowledgement.
+- **Union of requirements applies to everyone.** Because the coordinator uses the
+  bitwise union of `request_flags` to populate `group_requirement_mask`, every
+  participant in the barrier may be asked to satisfy outbound or processing acks
+  even if it only requested a rendezvous guarantee. Peers that do not need the
+  additional phase still contribute the acknowledgement so the group-level
+  requirement can be met.
+- **Coordinator frees the request loop and monitors timeouts asynchronously.**
+  Once the last participant arrives and outbound/processing guarantees are required,
+  the coordinator defers that caller just like the earlier arrivals. This releases
+  the request reader so it can process subsequent `barrier_ack_notify` signals. A
+  lightweight background monitor thread evaluates phase deadlines and, if they
+  expire, marks the phase `timeout` and finalises the barrier without blocking the
+  request loop.
+- **Tracing the flow (`SINTRA_TRACE_BARRIER`).** Setting the environment variable
+  enables verbose logging from the coordinator and managed processes. Use this
+  while debugging to see deferral scheduling, acknowledgement requests/responses,
+  timeout-monitor decisions, and the state of `wait_for_delivery_fence()`. The
+  external processing-fence test also writes controller/worker logs when the flag
+  is enabled.
+
 7. **Completion**
    - When every required phase finishes (either satisfied or definitively failed
      or downgraded), the coordinator writes the prepared
