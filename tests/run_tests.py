@@ -25,7 +25,6 @@ import fnmatch
 import importlib
 import importlib.util
 import json
-from functools import partial
 import os
 import shlex
 import shutil
@@ -41,7 +40,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, IO, Iterable, List, Optional, Sequence, Set, Tuple
 
-print = partial(__import__("builtins").print, file=sys.stderr, flush=True)
 
 _PSUTIL = None
 if importlib.util.find_spec("psutil") is not None:
@@ -54,15 +52,15 @@ PRESERVE_CORES_ENV = "SINTRA_PRESERVE_CORES"
 # crashing process. Two platform effects make Sintra dumps look enormous even
 # when very little physical memory is dirtied:
 #
-#   - The dynamic loader reserves a 4 GiB ``__PAGEZERO`` segment on every
+#   • The dynamic loader reserves a 4 GiB ``__PAGEZERO`` segment on every
 #     process. That reservation is always recorded in the core image even though
 #     it contains no data.
-#   - Every request/reply ring that ``Managed_process`` touches is "double"
-#     mapped by ``Ring_data::attach``: we reserve a fixed span and map the data
-#     file twice so wrap-around reads stay linear. Each active channel therefore
-#     contributes roughly 4 MiB of virtual address space. During the recovery
-#     test the coordinator plus the watchdog/crasher pair keep dozens of these
-#     channels open concurrently (outgoing rings for the local process plus
+#   • Every request/reply ring that ``Managed_process`` touches is "double
+#     mapped" by ``Ring_data::attach``: we reserve a 2× span and map the 2 MiB
+#     data file twice so wrap-around reads stay linear. Each active channel
+#     therefore contributes roughly 4 MiB of virtual address space. During the
+#     recovery test the coordinator plus the watchdog/crasher pair keep dozens of
+#     these channels open concurrently (outgoing rings for the local process plus
 #     readers for every remote process slot), which adds roughly another 250 MiB
 #     of reservations.
 #
@@ -72,6 +70,7 @@ PRESERVE_CORES_ENV = "SINTRA_PRESERVE_CORES"
 # Linux. macOS does not expose the flag, so ``recovery_test`` disables core
 # dumps immediately before its intentional ``std::abort()`` to keep runners from
 # filling their disks with Mach-O artifacts.
+
 
 def _format_size(num_bytes: Optional[int]) -> str:
     """Return a human-friendly representation of ``num_bytes``."""
@@ -344,7 +343,6 @@ def _calculate_target_repetitions(base_repetitions: int, weight: int) -> int:
         return weight
 
     return max(base, weight)
-
 
 def format_duration(seconds: float) -> str:
     """Format duration in human-readable format"""
@@ -941,6 +939,173 @@ class TestRunner:
             capture_active_start: Optional[float] = None
             threads: List[Tuple[threading.Thread, IO[str]]] = []
             process_group_id: Optional[int] = None
+            descendant_monitor_thread: Optional[threading.Thread] = None
+            descendant_monitor_stop = threading.Event()
+            descendant_lock = threading.Lock()
+            observed_descendants: Set[int] = set()
+
+            def _record_descendants(snapshot: Iterable[int]) -> None:
+                if sys.platform == 'win32':
+                    return
+
+                filtered = {pid for pid in snapshot if isinstance(pid, int) and pid > 0}
+                if not filtered:
+                    return
+
+                with descendant_lock:
+                    observed_descendants.update(filtered)
+
+            def _check_pid_alive(pid: int) -> bool:
+                if pid <= 0:
+                    return False
+
+                if sys.platform == 'win32':
+                    return False
+
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    return False
+                except PermissionError:
+                    return True
+                except OSError:
+                    return True
+                return True
+
+            def _refresh_descendants(reason: str) -> Set[int]:
+                if sys.platform == 'win32':
+                    return set()
+
+                pid_local = process.pid if process is not None else None
+                if pid_local is None or pid_local <= 0:
+                    return set()
+
+                snapshot: Set[int] = set()
+
+                if _PSUTIL is not None:
+                    try:
+                        proc = _PSUTIL.Process(pid_local)
+                        for child in proc.children(recursive=True):
+                            child_pid = getattr(child, 'pid', None)
+                            if isinstance(child_pid, int) and child_pid > 0:
+                                snapshot.add(child_pid)
+                    except Exception:
+                        pass
+
+                try:
+                    snapshot.update(self._collect_descendant_pids(pid_local))
+                except Exception:
+                    pass
+
+                if snapshot:
+                    _record_descendants(snapshot)
+
+                return snapshot
+
+            def terminate_process_group_members(reason: str) -> bool:
+                if sys.platform == 'win32':
+                    return False
+
+                pgid = process_group_id
+                if pgid is None:
+                    return False
+
+                try:
+                    base_exclusions = {0, os.getpid()}
+                except Exception:
+                    base_exclusions = {0}
+
+                if process is not None and process.pid is not None:
+                    base_exclusions.add(process.pid)
+
+                def collect_targets() -> Tuple[Set[int], Set[int]]:
+                    survivors_local = {
+                        pid
+                        for pid in self._collect_process_group_pids(pgid)
+                        if pid not in base_exclusions
+                    }
+
+                    descendant_only_local: Set[int] = set()
+                    if sys.platform != 'win32':
+                        if process is not None and process.pid is not None:
+                            _refresh_descendants(f"{reason} target refresh")
+                        with descendant_lock:
+                            recorded = {
+                                pid
+                                for pid in observed_descendants
+                                if pid not in base_exclusions
+                            }
+                        for pid in recorded:
+                            if pid in survivors_local:
+                                continue
+                            if _check_pid_alive(pid):
+                                descendant_only_local.add(pid)
+                            else:
+                                with descendant_lock:
+                                    observed_descendants.discard(pid)
+                    return survivors_local, descendant_only_local
+
+                survivors, descendant_only = collect_targets()
+
+                if not survivors and not descendant_only:
+                    return False
+
+                try:
+                    import signal
+                except ImportError:
+                    return bool(survivors or descendant_only)
+
+                failures: List[Tuple[int, str]] = []
+                targets = sorted(survivors | descendant_only)
+                for target_pid in targets:
+                    try:
+                        os.kill(target_pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        continue
+                    except PermissionError as exc:
+                        failures.append((target_pid, f"PermissionError: {exc}"))
+                    except OSError as exc:
+                        failures.append((target_pid, f"OSError: {exc}"))
+
+                for pid_value, detail in failures:
+                    print(
+                        f"\n{Color.YELLOW}Warning: Failed to deliver SIGTERM to {pid_value}: {detail}{Color.RESET}"
+                    )
+
+                wait_deadline = time.monotonic() + 1.0
+                while time.monotonic() < wait_deadline:
+                    survivors, descendant_only = collect_targets()
+                    if not survivors and not descendant_only:
+                        return False
+                    time.sleep(0.05)
+
+                survivors, descendant_only = collect_targets()
+
+                if not survivors and not descendant_only:
+                    return False
+
+                targets = sorted(survivors | descendant_only)
+
+                for target_pid in targets:
+                    try:
+                        os.kill(target_pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        continue
+                    except Exception as exc:
+                        print(
+                            f"\n{Color.YELLOW}Warning: Failed to deliver SIGKILL to {target_pid}: {exc}{Color.RESET}"
+                        )
+
+                time.sleep(0.05)
+
+                survivors, descendant_only = collect_targets()
+
+                return bool(survivors or descendant_only)
+
+            def stop_descendant_monitor() -> None:
+                if descendant_monitor_thread is not None:
+                    descendant_monitor_stop.set()
+                    descendant_monitor_thread.join(timeout=1.0)
 
             def shutdown_reader_threads() -> None:
                 """Ensure log reader threads terminate to avoid leaking resources."""
@@ -963,6 +1128,12 @@ class TestRunner:
                         thread.join(timeout=join_step)
 
                     if thread.is_alive():
+                        terminate_process_group_members(
+                            f"log reader stall for {invocation.name}"
+                        )
+                        thread.join(timeout=join_step)
+
+                    if thread.is_alive():
                         print(
                             f"\n{Color.YELLOW}Warning: Log reader thread did not terminate cleanly; "
                             "closing descriptors to avoid resource leak.{Color.RESET}"
@@ -975,6 +1146,23 @@ class TestRunner:
                     process_group_id = os.getpgid(process.pid)
                 except (ProcessLookupError, PermissionError, OSError):
                     process_group_id = None
+
+            if sys.platform != 'win32':
+                def _descendant_monitor() -> None:
+                    while not descendant_monitor_stop.is_set():
+                        if process.poll() is not None:
+                            break
+                        _refresh_descendants("monitor loop")
+                        if descendant_monitor_stop.wait(0.2):
+                            break
+
+                descendant_monitor_thread = threading.Thread(
+                    target=_descendant_monitor,
+                    name=f"{invocation.name}-descendants",
+                    daemon=True,
+                )
+                descendant_monitor_thread.start()
+                _refresh_descendants("initial spawn")
 
             def attempt_live_capture(trigger_line: str) -> None:
                 nonlocal live_stack_traces, live_stack_error, capture_pause_total, capture_active_start
@@ -1083,7 +1271,14 @@ class TestRunner:
                 process.wait()
                 duration = time.time() - start_time
 
+                stop_descendant_monitor()
                 shutdown_reader_threads()
+
+                residual_processes = terminate_process_group_members("normal completion")
+                if residual_processes:
+                    print(
+                        f"\n{Color.YELLOW}Warning: Residual helper processes remained after {invocation.name}{Color.RESET}"
+                    )
 
                 stdout = ''.join(stdout_lines)
                 stderr = ''.join(stderr_lines)
@@ -1188,13 +1383,27 @@ class TestRunner:
 
                 # Kill the process tree on timeout
                 self._kill_process_tree(process.pid)
+                residual_processes = terminate_process_group_members(
+                    f"{invocation.name} timeout cleanup"
+                )
+                if instrumentation_active and residual_processes:
+                    instrument(
+                        f"[instrumentation] Residual processes persisted after {invocation.name} timeout cleanup"
+                    )
 
                 try:
                     process.wait(timeout=1)
                 except Exception:
                     pass
 
+                stop_descendant_monitor()
                 shutdown_reader_threads()
+
+                residual_processes = terminate_process_group_members("timeout cleanup")
+                if residual_processes:
+                    print(
+                        f"\n{Color.YELLOW}Warning: Residual helper processes persisted after timeout cleanup for {invocation.name}{Color.RESET}"
+                    )
 
                 stdout = ''.join(stdout_lines)
                 stderr = ''.join(stderr_lines)
@@ -1213,9 +1422,16 @@ class TestRunner:
                 )
 
         except Exception as e:
+            residual_processes = False
             if process:
                 self._kill_process_tree(process.pid)
+            stop_descendant_monitor()
             shutdown_reader_threads()
+            residual_processes = terminate_process_group_members("exception cleanup")
+            if residual_processes:
+                print(
+                    f"\n{Color.YELLOW}Warning: Residual helper processes persisted after exception cleanup for {invocation.name}{Color.RESET}"
+                )
             stdout = ''.join(stdout_lines) if stdout_lines else ""
             stderr = ''.join(stderr_lines) if stderr_lines else ""
             error_msg = f"Exception: {str(e)}"
@@ -1229,6 +1445,7 @@ class TestRunner:
                 error=error_msg
             )
         finally:
+            stop_descendant_monitor()
             if cleanup_scratch_dir:
                 self._cleanup_scratch_directory(scratch_dir)
             self._cleanup_new_core_dumps(invocation, core_snapshot, start_time, result_success)
@@ -3419,33 +3636,15 @@ def main():
             suite_all_passed = True
             batch_size = 1
 
-            # Print test plan table for this suite
-            print("\n  Test order:")
-
-            # Calculate column widths
-            id_col_width = 4
-            name_col_width = max([len(_canonical_test_name(inv.name)) for inv in tests] + [4]) + 2
-            reps_col_width = 12
-
-            # Create format strings
-            header_fmt = f"  {{:<{id_col_width}}} {{:<{name_col_width}}} {{:>{reps_col_width}}}"
-            row_fmt = header_fmt
-            table_width = id_col_width + name_col_width + reps_col_width + 4
-
-            # Print table
-            print("  " + "=" * table_width)
-            print(header_fmt.format('ID', 'Name', 'Repetitions'))
-            print("  " + "=" * table_width)
-
-            for idx, invocation in enumerate(tests, start=1):
-                canonical_name = _canonical_test_name(invocation.name)
-                reps = target_repetitions[invocation.name]
-                print(row_fmt.format(f"{idx:02d}", canonical_name, reps))
-
-            print("  " + "=" * table_width)
-
-            # Create header for round display
-            header = " ".join(f"{index + 1:02d}" for index, _ in enumerate(tests))
+            weighted_tests = [
+                (_canonical_test_name(name), weight, target_repetitions[name])
+                for name, weight in test_weights.items()
+                if weight != 1
+            ]
+            if weighted_tests:
+                print(f"  Weighted tests:")
+                for display_name, weight, total in sorted(weighted_tests):
+                    print(f"    {display_name}: x{weight} -> {total} repetition(s)")
 
             while True:
                 remaining_counts = [count for count in remaining_repetitions.values() if count > 0]
@@ -3455,7 +3654,6 @@ def main():
                 max_remaining = max(remaining_counts)
                 reps_in_this_round = min(batch_size, max_remaining)
                 print(f"\n{Color.BLUE}--- Round: {reps_in_this_round} repetition(s) ---{Color.RESET}")
-                print(header)
 
                 lingering = _find_lingering_processes(("sintra_",))
                 if lingering:
@@ -3465,13 +3663,11 @@ def main():
                     )
 
                 for i in range(reps_in_this_round):
-                    row_segments = ["  "] * len(tests)
-                    for index, invocation in enumerate(tests):
+                    print(f"  Rep {i + 1}/{reps_in_this_round}: ", end="", flush=True)
+                    for invocation in tests:
                         test_name = invocation.name
                         if remaining_repetitions[test_name] <= 0:
                             continue
-
-                        row_start = "."
 
                         result = runner.run_test_once(invocation)
 
@@ -3481,7 +3677,7 @@ def main():
 
                         if result.success:
                             result_bucket['passed'] += 1
-                            row_end = "."
+                            print(f"{Color.GREEN}.{Color.RESET}", end="", flush=True)
                         else:
                             result_bucket['failed'] += 1
                             suite_all_passed = False
@@ -3500,13 +3696,11 @@ def main():
                                 'message': error_message if error_message else first_line,
                             })
 
-                            row_end = "F"
+                            print(f"{Color.RED}F{Color.RESET}", end="", flush=True)
 
                         remaining_repetitions[test_name] -= 1
 
-                        row_segments[index] = f"{row_start}{row_end}"
-
-                    print(" ".join(row_segments))
+                    print()
                     if not suite_all_passed:
                         break
 
@@ -3634,11 +3828,6 @@ def main():
                             print(f"    ... and {remaining} more failure(s)")
                 print(f"\n{Color.RED}Stopping - suite {config_name} failed{Color.RESET}")
                 break
-
-            # Add spacing between suites if not the last one
-            if config_idx < total_configs:
-                print()
-                print()
 
         # Final summary
         total_duration = time.time() - overall_start_time
