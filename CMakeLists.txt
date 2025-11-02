@@ -23,49 +23,10 @@ if(CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_CONFIGURATION_TYPES "Debug;Release" CACHE STRING "" FORCE)
 endif()
 
-# Check if vendored Boost headers exist
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/boost/boost/version.hpp")
-    set(SINTRA_USE_VENDORED_BOOST_DEFAULT ON)
-else()
-    set(SINTRA_USE_VENDORED_BOOST_DEFAULT OFF)
-endif()
-
-option(SINTRA_USE_VENDORED_BOOST "Use vendored Boost headers from third_party/boost" ${SINTRA_USE_VENDORED_BOOST_DEFAULT})
-
-if(SINTRA_USE_VENDORED_BOOST)
-    message(STATUS "Using vendored Boost headers from third_party/boost")
-    set(BOOST_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/boost")
-else()
-    message(STATUS "Fetching Boost headers via FetchContent")
-    include(FetchContent)
-
-    set(FETCHCONTENT_BASE_DIR "${CMAKE_CURRENT_LIST_DIR}/../_deps")
-    file(MAKE_DIRECTORY "${FETCHCONTENT_BASE_DIR}")
-
-    FetchContent_Declare(
-        boost_headers
-        URL
-            https://archives.boost.io/release/1.89.0/source/boost_1_89_0.tar.gz
-            https://boostorg.jfrog.io/artifactory/main/release/1.89.0/source/boost_1_89_0.tar.gz
-        URL_HASH SHA256=b5a3c209b1c99ff8b5ea70430b6f2a4347ecca0df4f7bba28b3969cc4f895a46
-        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-    )
-    FetchContent_MakeAvailable(boost_headers)
-    FetchContent_GetProperties(boost_headers)
-    set(BOOST_INCLUDE_DIR "${boost_headers_SOURCE_DIR}")
-endif()
-
-if(NOT TARGET Boost::boost)
-    add_library(Boost::boost INTERFACE IMPORTED)
-    set_target_properties(Boost::boost PROPERTIES
-        INTERFACE_INCLUDE_DIRECTORIES "${BOOST_INCLUDE_DIR}"
-    )
-endif()
-
 add_library(sintra INTERFACE)
 target_include_directories(sintra INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(sintra INTERFACE cxx_std_17)
-target_link_libraries(sintra INTERFACE Boost::boost Threads::Threads)
+target_link_libraries(sintra INTERFACE Threads::Threads)
 # Ensure RTTI is enabled for every consumer
 if(MSVC)
     target_compile_options(sintra INTERFACE $<$<COMPILE_LANGUAGE:CXX>:/GR>)
