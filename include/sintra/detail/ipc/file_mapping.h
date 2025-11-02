@@ -95,10 +95,19 @@ public:
     // Flush underlying file contents to durable storage (best-effort).
     void flush_file()
     {
+        // Only flush if the file is opened for writing
+        if (m_mode != read_write) {
+            return;
+        }
+
 #if defined(_WIN32)
         if (m_file != INVALID_HANDLE_VALUE) {
             if (!::FlushFileBuffers(m_file)) {
-                throw std::system_error(::GetLastError(), std::system_category(), "FlushFileBuffers failed");
+                DWORD err = ::GetLastError();
+                // Treat ACCESS_DENIED as no-op (best-effort semantics)
+                if (err != ERROR_ACCESS_DENIED) {
+                    throw std::system_error(err, std::system_category(), "FlushFileBuffers failed");
+                }
             }
         }
 #else
@@ -218,6 +227,24 @@ private:
 #endif
 };
 
+#ifndef _WIN32
+namespace {
+// Cache the page size to avoid repeated sysconf() calls
+inline long get_page_size()
+{
+    static const long page_size = []() {
+        long sz = ::sysconf(_SC_PAGE_SIZE);
+        if (sz <= 0) {
+            throw std::system_error(std::make_error_code(std::errc::invalid_argument),
+                                    "could not determine page size");
+        }
+        return sz;
+    }();
+    return page_size;
+}
+} // anonymous namespace
+#endif
+
 class mapped_region
 {
 public:
@@ -306,7 +333,9 @@ public:
         const std::size_t view_size = mapping_size + delta;
 
         off.QuadPart = aligned_off;
-        (void)options; // Windows-specific flags are handled via desired_access/protect.
+        (void)options;
+        // NOTE: Windows-specific options (if any) are handled via desired_access/protect above.
+        //       The 'options' parameter is currently ignored on Windows.
         void* view = ::MapViewOfFileEx(mapping, desired_access,
             static_cast<DWORD>(off.HighPart), static_cast<DWORD>(off.LowPart), view_size, address);
         if (!view) {
@@ -357,12 +386,10 @@ public:
                                     "mapped_region: offset does not fit in off_t");
         }
 
-        long page = ::sysconf(_SC_PAGE_SIZE);
-        if (page <= 0) {
-            throw std::system_error(std::make_error_code(std::errc::invalid_argument),
-                                    "mapped_region: could not determine page size");
-        }
+        const long page = get_page_size();
         const std::uint64_t gran = static_cast<std::uint64_t>(page);
+        // NOTE: MAP_FIXED will replace any existing mappings at the specified address.
+        //       Consider using MAP_FIXED_NOREPLACE where available for safer behavior.
         if ((options & MAP_FIXED) && address &&
             (reinterpret_cast<std::uintptr_t>(address) % gran) != 0) {
             throw std::system_error(std::make_error_code(std::errc::invalid_argument),
@@ -416,15 +443,28 @@ public:
         }
 
 #if defined(_WIN32)
-        if (!::FlushViewOfFile(static_cast<char*>(m_address) + offset, len)) {
+        // Use the view base (m_base) to compute the flush region for correctness.
+        // We must flush from a page-aligned position within the view.
+        SYSTEM_INFO si{};
+        ::GetSystemInfo(&si);
+        const std::uintptr_t gran = si.dwAllocationGranularity;
+
+        std::uintptr_t start = reinterpret_cast<std::uintptr_t>(m_address) + offset;
+        std::uintptr_t base_addr = reinterpret_cast<std::uintptr_t>(m_base);
+        std::uintptr_t aligned_start = (start / gran) * gran;
+
+        // Ensure aligned_start is not before the base
+        if (aligned_start < base_addr) {
+            aligned_start = base_addr;
+        }
+
+        std::size_t flush_len = (start - aligned_start) + len;
+
+        if (!::FlushViewOfFile(reinterpret_cast<void*>(aligned_start), flush_len)) {
             throw std::system_error(::GetLastError(), std::system_category(), "FlushViewOfFile failed");
         }
 #else
-        long page = ::sysconf(_SC_PAGE_SIZE);
-        if (page <= 0) {
-            throw std::system_error(std::make_error_code(std::errc::invalid_argument),
-                                    "mapped_region::flush: could not determine page size");
-        }
+        const long page = get_page_size();
         std::uintptr_t base = reinterpret_cast<std::uintptr_t>(m_address);
         if (base > std::numeric_limits<std::uintptr_t>::max() - offset) {
             throw std::system_error(std::make_error_code(std::errc::value_too_large),
@@ -485,13 +525,10 @@ public:
         release();
     }
 
-    void*       get_address() const noexcept { return m_address; }
-
     // STL-style accessors
     void*       data()           noexcept { return m_address; }
     const void* data()     const noexcept { return m_address; }
     std::size_t size()     const noexcept { return m_size;    }
-    std::size_t get_size() const noexcept { return m_size;    }
 
 private:
     void release() noexcept
