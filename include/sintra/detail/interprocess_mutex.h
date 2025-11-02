@@ -1,8 +1,6 @@
 #pragma once
 
-
-// NOTE: This should compile on C++17
-
+// NOTE: This compiles on C++17
 
 #include <algorithm>
 #include <atomic>
@@ -12,7 +10,7 @@
 #include <system_error>
 #include <thread>
 
-#include "ipc_platform_utils.h"
+#include "ipc_platform_utils.h"  // expected to provide: get_current_pid(), get_current_tid(), is_process_alive(uint32_t)
 
 namespace sintra { namespace detail {
 
@@ -25,7 +23,9 @@ public:
     interprocess_mutex(const interprocess_mutex&) = delete;
     interprocess_mutex& operator=(const interprocess_mutex&) = delete;
 
-    void lock() {
+    // Blocks until the lock is acquired. Throws on recursive acquisition (same thread).
+    void lock()
+    {
         const owner_token self = make_owner_token();
         if (try_acquire(self)) {
             return;
@@ -40,13 +40,17 @@ public:
         }
     }
 
-    bool try_lock() {
+    // Non-blocking attempt. Returns false on contention or recursive attempt by the same thread.
+    bool try_lock()
+    {
         const owner_token self = make_owner_token();
         return try_acquire(self, /*throw_on_recursive=*/false);
     }
 
+    // Timed try with a relative timeout. Prefers steady_clock to avoid wall-clock jumps.
     template <class Rep, class Period>
-    bool try_lock_for(const std::chrono::duration<Rep, Period>& rel_timeout) noexcept {
+    bool try_lock_for(const std::chrono::duration<Rep, Period>& rel_timeout) noexcept
+    {
         const owner_token self = make_owner_token();
         if (try_acquire(self, /*throw_on_recursive=*/false)) {
             return true;
@@ -65,50 +69,99 @@ public:
         }
     }
 
+    // Timed try with an absolute time point; converts to a relative steady timeout to avoid wall clock jumps.
     template <class Clock, class Duration>
-    bool try_lock_until(const std::chrono::time_point<Clock, Duration>& abs_time) noexcept {
+    bool try_lock_until(const std::chrono::time_point<Clock, Duration>& abs_time) noexcept
+    {
         const owner_token self = make_owner_token();
         if (try_acquire(self, /*throw_on_recursive=*/false)) {
             return true;
         }
 
-        std::size_t iteration = 0;
-        for (;;) {
-            adaptive_wait(iteration++);
-            if (try_acquire(self, /*throw_on_recursive=*/false)) {
-                return true;
-            }
-            if (Clock::now() >= abs_time) {
-                return false;
-            }
+        const auto now_c = Clock::now();
+        if (now_c >= abs_time) {
+            return false;
         }
+        const auto rel = abs_time - now_c; // compute once; then use steady clock internally
+        return try_lock_for(rel);
     }
 
-    void unlock() {
+    // Unlock; throws if called by a non-owner thread.
+    void unlock()
+    {
         const owner_token self = make_owner_token();
-        owner_token       expected = self;
-        if (!m_owner.compare_exchange_strong(expected,
-            k_unowned, std::memory_order_release, std::memory_order_relaxed))
+        owner_token expected = self;
+        if (!m_owner.compare_exchange_strong(
+            expected, k_unowned, std::memory_order_release, std::memory_order_relaxed))
         {
             // Someone else (or no one) owns it -> error.
             throw std::system_error(std::make_error_code(std::errc::operation_not_permitted),
                                     "interprocess_mutex unlock by non-owner");
         }
+        // Clearing flag here is optional; leave as-is so that a subsequent query still
+        // reflects whether the *last* successful acquire was via recovery.
     }
 
-    void release_local_handle() noexcept {
-        // No-op for mutex; kept for API symmetry with other IPC handles.
-    }
+    // API symmetry hook for other IPC handles; no-op for mutex.
+    void release_local_handle() noexcept { }
 
-    bool recovered_last_acquire() const noexcept {
-        return s_last_lock_recovered;
+    // Was the last successful acquire of *this mutex instance* via recovery?
+    bool recovered_last_acquire() const noexcept
+    {
+        return m_last_recovered.load(std::memory_order_relaxed) != 0;
     }
-
 
 private:
-    inline static thread_local bool s_last_lock_recovered = false;
+    // === Types & constants ===
+    using owner_token = std::uint64_t; // upper 32 bits: pid, lower 32 bits: tid
+    static constexpr owner_token k_unowned = 0;
 
-    static void adaptive_wait(std::size_t iteration) {
+    // We require a lock-free 64-bit atomic for interprocess usage.
+    static_assert(std::atomic<owner_token>::is_always_lock_free,
+                  "interprocess_mutex requires lock-free 64-bit atomics");
+
+    // Recovery coordination token packs {recoverer_pid (hi32), ticks_ms (lo32)}
+    using recover_token = std::uint64_t;
+
+    // If a recoverer stalls while still "alive", let others preempt after this many ms.
+    static constexpr std::uint32_t k_recovery_stale_ms = 10000; // 10s; conservative
+
+    static owner_token make_owner_token()
+    {
+        const owner_token pid = static_cast<owner_token>(get_current_pid());
+        const owner_token tid = static_cast<owner_token>(get_current_tid());
+        return (pid << 32u) | (tid & 0xFFFFFFFFull);
+    }
+
+    static std::uint32_t owner_pid(owner_token token)
+    {
+        return static_cast<std::uint32_t>(token >> 32u);
+    }
+
+    static recover_token make_recover_token(std::uint32_t pid, std::uint32_t ticks)
+    {
+        return (static_cast<recover_token>(pid) << 32u) | static_cast<recover_token>(ticks);
+    }
+
+    static std::uint32_t recover_pid(recover_token tok)
+    {
+        return static_cast<std::uint32_t>(tok >> 32u);
+    }
+
+    static std::uint32_t recover_ticks(recover_token tok)
+    {
+        return static_cast<std::uint32_t>(tok & 0xFFFFFFFFull);
+    }
+
+    static std::uint32_t now_ticks32() noexcept
+    {
+        using namespace std::chrono;
+        const auto ms = duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+        return static_cast<std::uint32_t>(ms);
+    }
+
+    static void adaptive_wait(std::size_t iteration)
+    {
         // Short phase: yield a few times to let other threads run.
         if (iteration < 16) {
             std::this_thread::yield();
@@ -120,32 +173,18 @@ private:
         std::this_thread::sleep_for(sleep_us);
     }
 
-    using owner_token = std::uint64_t;
-    static constexpr owner_token k_unowned = 0;
-
-    // We require a lock-free 64-bit atomic for interprocess usage.
-    static_assert(std::atomic<owner_token>::is_always_lock_free,
-                  "interprocess_mutex requires lock-free 64-bit atomics");
-
-    static owner_token make_owner_token() {
-        const owner_token pid = static_cast<owner_token>(get_current_pid());
-        const owner_token tid = static_cast<owner_token>(get_current_tid());
-        return (pid << 32u) | (tid & 0xFFFFFFFFull);
-    }
-
-    static uint32_t owner_pid(owner_token token) {
-        return static_cast<uint32_t>(token >> 32u);
-    }
-
     // Original internal entry-point keeps throwing behavior for lock()
     // (i.e., recursive lock -> throw).
-    bool try_acquire(owner_token self) {
+    bool try_acquire(owner_token self)
+    {
         return try_acquire(self, /*throw_on_recursive=*/true);
     }
 
-    // New internal helper lets timed/try APIs avoid throwing on recursion.
-    bool try_acquire(owner_token self, bool throw_on_recursive) {
-        s_last_lock_recovered = false;
+    // Internal helper lets timed/try APIs avoid throwing on recursion.
+    bool try_acquire(owner_token self, bool throw_on_recursive)
+    {
+        m_last_recovered.store(0, std::memory_order_relaxed);
+
         owner_token expected = k_unowned;
         if (m_owner.compare_exchange_strong(
             expected, self, std::memory_order_acquire, std::memory_order_relaxed))
@@ -171,7 +210,7 @@ private:
             if (m_owner.compare_exchange_strong(
                 expected, self, std::memory_order_acquire, std::memory_order_relaxed))
             {
-                s_last_lock_recovered = true;
+                m_last_recovered.store(1, std::memory_order_relaxed);
                 return true;
             }
         }
@@ -179,28 +218,37 @@ private:
         return false;
     }
 
-    bool try_recover(owner_token observed_owner, owner_token self) {
+    // Attempt robust recovery if the observed owner appears to be dead.
+    bool try_recover(owner_token observed_owner, owner_token self)
+    {
         if (observed_owner == k_unowned) {
             return false;
         }
 
-        // If someone is recovering but that process is dead, clear it first.
-        uint32_t rec = m_recovering.load(std::memory_order_acquire);
-        if (rec != 0 && !is_process_alive(rec)) {
-            m_recovering.compare_exchange_strong(
-                rec, 0, std::memory_order_acq_rel, std::memory_order_relaxed);
+        // If someone is recovering but that process is dead or stalled, clear it first.
+        recover_token rec = m_recovering.load(std::memory_order_acquire);
+        if (rec != 0) {
+            const auto rp = recover_pid(rec);
+            const auto rt = recover_ticks(rec);
+            const auto nowt = now_ticks32();
+            const bool stalled = static_cast<std::uint32_t>(nowt - rt) > k_recovery_stale_ms;
+            if ((rp != 0 && !is_process_alive(rp)) || stalled) {
+                m_recovering.compare_exchange_strong(
+                    rec, static_cast<recover_token>(0), std::memory_order_acq_rel, std::memory_order_relaxed);
+            }
         }
 
-        // Try to become the single recovering process (store caller PID).
-        uint32_t expected = 0;
-        const uint32_t caller_pid = owner_pid(self);
+        // Try to become the recoverer for a short critical sequence.
+        const recover_token want = make_recover_token(get_current_pid(), now_ticks32());
+        recover_token zero = 0;
         if (!m_recovering.compare_exchange_strong(
-            expected, caller_pid, std::memory_order_acq_rel, std::memory_order_relaxed))
+            zero, want, std::memory_order_acq_rel, std::memory_order_relaxed))
         {
-            return false; // Someone else is handling recovery.
+            return false; // someone else is (still) recovering
         }
 
-        bool        recovered     = false;
+        // We are the recoverer now.
+        bool recovered = false;
         owner_token current_owner = m_owner.load(std::memory_order_acquire);
 
         // If unlocked meanwhile, consider it recovered.
@@ -215,12 +263,20 @@ private:
         }
 
         // Release the recovery lock.
-        m_recovering.store(0, std::memory_order_release);
+        m_recovering.store(static_cast<recover_token>(0), std::memory_order_release);
         return recovered;
     }
 
-    alignas(64) std::atomic<owner_token> m_owner{k_unowned};
-    alignas(64) std::atomic<uint32_t>    m_recovering{0};
+private:
+    // Owner token in shared memory: who currently owns the mutex.
+    alignas(64) std::atomic<owner_token> m_owner{ k_unowned };
+
+    // Recovery gate. Packs {recoverer_pid, ticks_ms}. Used to serialize robust recovery and
+    // to allow preemption if a recoverer stalls without dying.
+    alignas(64) std::atomic<recover_token> m_recovering{ 0 };
+
+    // Per-instance flag indicating if the last successful acquire recovered from a dead owner.
+    alignas(64) std::atomic<std::uint8_t> m_last_recovered{ 0 };
 };
 
 }} // namespace sintra::detail
