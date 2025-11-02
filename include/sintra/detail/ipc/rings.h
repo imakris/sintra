@@ -575,7 +575,7 @@ private:
                     region0.reset(new ipc::mapped_region(file, data_rights, 0,
                         m_data_region_size, ptr, map_extra_options));
                     region1.reset(new ipc::mapped_region(file, data_rights, 0, 0,
-                        ((char*)region0->get_address()) + m_data_region_size, map_extra_options));
+                        ((char*)region0->data()) + m_data_region_size, map_extra_options));
                 }
                 catch (const std::exception& ex) {
                     mapping_failed = true;
@@ -587,24 +587,24 @@ private:
                 // ── Validate layout ─────────────────────────────────────────────────
                 bool layout_ok = !mapping_failed &&
                     region0 && region1 &&
-                    region0->get_address() == ptr &&
-                    region1->get_address() == ptr + m_data_region_size &&
-                    region0->get_size() == m_data_region_size &&
-                    region1->get_size() == m_data_region_size;
+                    region0->data() == ptr &&
+                    region1->data() == ptr + m_data_region_size &&
+                    region0->size() == m_data_region_size &&
+                    region1->size() == m_data_region_size;
 
                 if (layout_ok) {
                     // Success! MAP_FIXED has replaced the PROT_NONE reservation.
                     m_data_region_0 = region0.release();
                     m_data_region_1 = region1.release();
-                    m_data = (T*)m_data_region_0->get_address();
+                    m_data = (T*)m_data_region_0->data();
 
 #if defined(MADV_DONTDUMP)
                     // Keep crash dumps compact (especially on macOS where Mach
                     // cores include every reserved span) and avoid leaking
                     // transient payloads. Failing to apply MADV_DONTDUMP is
                     // harmless, so we deliberately ignore the return value.
-                    ::madvise(m_data_region_0->get_address(), m_data_region_size, MADV_DONTDUMP);
-                    ::madvise(m_data_region_1->get_address(), m_data_region_size, MADV_DONTDUMP);
+                    ::madvise(m_data_region_0->data(), m_data_region_size, MADV_DONTDUMP);
+                    ::madvise(m_data_region_1->data(), m_data_region_size, MADV_DONTDUMP);
 #endif
                     break;
                 }
@@ -1058,10 +1058,10 @@ private:
 
             ipc::file_mapping fm_control(m_control_filename.c_str(), ipc::read_write);
             m_control_region = new ipc::mapped_region(fm_control, ipc::read_write, 0, 0);
-            m_control = (Control*)m_control_region->get_address();
+            m_control = (Control*)m_control_region->data();
 
 #if defined(MADV_DONTDUMP)
-            ::madvise(m_control_region->get_address(), m_control_region->get_size(), MADV_DONTDUMP);
+            ::madvise(m_control_region->data(), m_control_region->size(), MADV_DONTDUMP);
 #endif
 
             return true;
