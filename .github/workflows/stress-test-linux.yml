@@ -100,7 +100,6 @@ jobs:
         id: changed
         uses: dorny/paths-filter@v3
         with:
-          ref: ${{ env.HEAD_SHA }}
           base: ${{ steps.diff-base.outputs.base }}
           filters: |
             core:
