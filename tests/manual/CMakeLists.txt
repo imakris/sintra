@@ -7,7 +7,7 @@ function(add_manual_test_suite SUFFIX IS_DEBUG)
     set(LIB_TARGET sintra_for_${SUFFIX})
 
     set(MANUAL_TEST_FILES
-        barrier_deadlock_reproduction_test.cpp
+        # barrier_deadlock_reproduction_test.cpp  # Disabled - uses obsolete APIs
         hang_test.cpp
         coordinator_crash_children_hang_test.cpp
         children_crash_coordinator_deadlock_test.cpp
