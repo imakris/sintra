@@ -5,9 +5,10 @@
 
 namespace sintra { namespace detail {
 
-// Simple mutex implementation using a binary semaphore.
+// Backup mutex implementation using a binary semaphore.
+// Heavier than the regular interprocess_mutex (has full semaphore overhead).
 // Does not track ownership or support recursion detection.
-// Use interprocess_mutex for full mutex semantics with ownership tracking.
+// Use this only as a fallback if the regular interprocess_mutex has issues.
 class interprocess_mutex_semaphore_wrapper
 {
 public:
