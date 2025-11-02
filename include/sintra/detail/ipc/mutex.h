@@ -173,7 +173,7 @@ public:
         if (!m_owner.compare_exchange_strong(
             expected, k_unowned, std::memory_order_release, std::memory_order_relaxed))
         {
-            // Someone else (or no one) owns it -> error.
+            // Either unlocked by someone else (after recovery) or not owned by us.
             throw std::system_error(std::make_error_code(std::errc::operation_not_permitted),
                                     "interprocess_mutex unlock by non-owner");
         }
@@ -181,13 +181,10 @@ public:
         // reflects whether the *last* successful acquire was via recovery.
     }
 
-    // API symmetry hook for other IPC handles; no-op for mutex.
-    void release_local_handle() noexcept { }
-
-    // Was the last successful acquire of *this mutex instance* via recovery?
+    // Indicates whether the last successful acquire of *this mutex instance* was via recovery
     bool recovered_last_acquire() const noexcept
     {
-        return m_last_recovered.load(std::memory_order_relaxed) != 0;
+        return m_last_recovered.load(std::memory_order_relaxed) != 0u;
     }
 
 private:
@@ -198,6 +195,10 @@ private:
     // We require a lock-free 64-bit atomic for interprocess usage.
     static_assert(std::atomic<owner_token>::is_always_lock_free,
                   "interprocess_mutex requires lock-free 64-bit atomics");
+    static_assert(std::atomic<recover_token>::is_always_lock_free,
+                  "interprocess_mutex requires lock-free 64-bit atomics for recovery");
+    static_assert(std::atomic<std::uint32_t>::is_always_lock_free,
+                  "interprocess_mutex requires lock-free 32-bit atomics for flags");
 
     // Recovery coordination token packs {recoverer_pid (hi32), ticks_ms (lo32)}
     using recover_token = std::uint64_t;
@@ -266,7 +267,7 @@ private:
             expected, self, std::memory_order_acquire, std::memory_order_relaxed))
         {
             // Successful normal acquisition -> clear recovery flag
-            m_last_recovered.store(0, std::memory_order_relaxed);
+            m_last_recovered.store(0u, std::memory_order_relaxed);
             return true;
         }
 
@@ -275,11 +276,9 @@ private:
             if (throw_on_recursive) {
                 throw std::system_error(
                     std::make_error_code(std::errc::resource_deadlock_would_occur),
-                    "interprocess_mutex recursive locking detected");
+                    "interprocess_mutex: recursive lock detected");
             }
-            else {
-                return false;
-            }
+            return false;
         }
 
         // Recovery path: previous owner is gone (process crashed/exited).
@@ -358,7 +357,7 @@ private:
     alignas(64) std::atomic<recover_token> m_recovering{ 0 };
 
     // Per-instance flag indicating if the last successful acquire recovered from a dead owner.
-    alignas(64) std::atomic<std::uint8_t> m_last_recovered{ 0 };
+    alignas(64) std::atomic<std::uint32_t> m_last_recovered{ 0u };
 };
 
 }} // namespace sintra::detail
