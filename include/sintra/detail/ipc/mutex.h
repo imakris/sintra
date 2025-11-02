@@ -192,6 +192,9 @@ private:
     using owner_token = std::uint64_t; // upper 32 bits: pid, lower 32 bits: tid
     static constexpr owner_token k_unowned = 0;
 
+    // Recovery coordination token packs {recoverer_pid (hi32), ticks_ms (lo32)}
+    using recover_token = std::uint64_t;
+
     // We require a lock-free 64-bit atomic for interprocess usage.
     static_assert(std::atomic<owner_token>::is_always_lock_free,
                   "interprocess_mutex requires lock-free 64-bit atomics");
@@ -199,9 +202,6 @@ private:
                   "interprocess_mutex requires lock-free 64-bit atomics for recovery");
     static_assert(std::atomic<std::uint32_t>::is_always_lock_free,
                   "interprocess_mutex requires lock-free 32-bit atomics for flags");
-
-    // Recovery coordination token packs {recoverer_pid (hi32), ticks_ms (lo32)}
-    using recover_token = std::uint64_t;
 
     // If a recoverer stalls while still "alive", let others preempt after this many ms.
     static constexpr std::uint32_t k_recovery_stale_ms = 10000; // 10s; conservative
