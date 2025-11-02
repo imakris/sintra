@@ -212,6 +212,30 @@ public:
         }
 
 #if defined(_WIN32)
+        SYSTEM_INFO sys_info;
+        ::GetSystemInfo(&sys_info);
+        const std::size_t allocation_granularity = static_cast<std::size_t>(sys_info.dwAllocationGranularity);
+#else
+        const long page_size_long = ::sysconf(_SC_PAGESIZE);
+        if (page_size_long <= 0) {
+            throw std::system_error(errno ? errno : EINVAL, std::system_category(),
+                                    "mapped_region: sysconf(_SC_PAGESIZE) failed");
+        }
+        const std::size_t allocation_granularity = static_cast<std::size_t>(page_size_long);
+#endif
+
+        const std::uint64_t misalignment = offset % static_cast<std::uint64_t>(allocation_granularity);
+        const std::uint64_t aligned_offset = offset - misalignment;
+        const std::size_t   offset_delta = static_cast<std::size_t>(misalignment);
+
+        if (mapping_size > std::numeric_limits<std::size_t>::max() - offset_delta) {
+            throw std::system_error(std::make_error_code(std::errc::value_too_large),
+                                    "mapped_region: adjusted mapping size does not fit in size_t");
+        }
+
+        const std::size_t adjusted_size = mapping_size + offset_delta;
+
+#if defined(_WIN32)
         DWORD protect = PAGE_READONLY;
         DWORD desired_access = FILE_MAP_READ;
         switch (mode) {
@@ -238,12 +262,16 @@ public:
         }
 
         ULARGE_INTEGER off;
-        off.QuadPart = offset;
+        off.QuadPart = aligned_offset;
         (void)options; // Windows-specific flags are handled via desired_access/protect.
+        void* requested_base = nullptr;
+        if (address) {
+            requested_base = reinterpret_cast<void*>(reinterpret_cast<char*>(address) - offset_delta);
+        }
         void* view = ::MapViewOfFileEx(mapping, desired_access,
                                        static_cast<DWORD>(off.HighPart),
                                        static_cast<DWORD>(off.LowPart),
-                                       mapping_size, address);
+                                       adjusted_size, requested_base);
         if (!view) {
             DWORD err = ::GetLastError();
             ::CloseHandle(mapping);
@@ -252,7 +280,9 @@ public:
         }
 
         m_mapping_handle = mapping;
-        m_address = view;
+        m_base_address = view;
+        m_address = reinterpret_cast<void*>(reinterpret_cast<char*>(view) + offset_delta);
+        m_base_size = adjusted_size;
         m_size = mapping_size;
 #else
         int prot = PROT_READ;
@@ -273,18 +303,24 @@ public:
             flags |= options;
         }
 
-        if (offset > static_cast<std::uint64_t>(std::numeric_limits<off_t>::max())) {
+        if (aligned_offset > static_cast<std::uint64_t>(std::numeric_limits<off_t>::max())) {
             throw std::system_error(std::make_error_code(std::errc::invalid_argument),
                                     "mapped_region: offset does not fit in off_t");
         }
 
-        void* mapped = ::mmap(address, mapping_size, prot, flags,
-                              file.native_handle(), static_cast<off_t>(offset));
+        void* requested_base = nullptr;
+        if (address) {
+            requested_base = reinterpret_cast<void*>(reinterpret_cast<char*>(address) - offset_delta);
+        }
+        void* mapped = ::mmap(requested_base, adjusted_size, prot, flags,
+                              file.native_handle(), static_cast<off_t>(aligned_offset));
         if (mapped == MAP_FAILED) {
             throw std::system_error(errno, std::system_category(), "mmap failed");
         }
 
-        m_address = mapped;
+        m_base_address = mapped;
+        m_address = reinterpret_cast<void*>(reinterpret_cast<char*>(mapped) + offset_delta);
+        m_base_size = adjusted_size;
         m_size = mapping_size;
 #endif
     }
@@ -298,13 +334,17 @@ public:
     {
         if (this != &other) {
             release();
+            m_base_address = other.m_base_address;
             m_address = other.m_address;
             m_size = other.m_size;
 #if defined(_WIN32)
             m_mapping_handle = other.m_mapping_handle;
             other.m_mapping_handle = nullptr;
 #endif
+            m_base_size = other.m_base_size;
+            other.m_base_address = nullptr;
             other.m_address = nullptr;
+            other.m_base_size = 0;
             other.m_size = 0;
         }
         return *this;
@@ -325,27 +365,32 @@ private:
     void release() noexcept
     {
 #if defined(_WIN32)
-        if (m_address) {
-            ::UnmapViewOfFile(m_address);
+        if (m_base_address) {
+            ::UnmapViewOfFile(m_base_address);
         }
         m_address = nullptr;
+        m_base_address = nullptr;
         if (m_mapping_handle) {
             ::CloseHandle(static_cast<HANDLE>(m_mapping_handle));
             m_mapping_handle = nullptr;
         }
 #else
-        if (m_address) {
-            ::munmap(m_address, m_size);
+        if (m_base_address) {
+            ::munmap(m_base_address, m_base_size);
         }
         m_address = nullptr;
+        m_base_address = nullptr;
 #endif
+        m_base_size = 0;
         m_size = 0;
     }
 
 #if defined(_WIN32)
     HANDLE      m_mapping_handle = nullptr;
 #endif
+    void*       m_base_address = nullptr;
     void*       m_address = nullptr;
+    std::size_t m_base_size = 0;
     std::size_t m_size = 0;
 };
 
