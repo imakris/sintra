@@ -685,6 +685,11 @@ public:
         // No-op (Windows named semaphores handle this internally)
     }
 
+#ifdef _WIN32
+    // Friend for testing: allows test to extract Windows semaphore details without hardcoded offsets
+    friend void test_get_win_semaphore_info(const interprocess_semaphore&, std::uint64_t&, std::wstring&);
+#endif
+
 private:
     ips_backend m_impl;
 };
