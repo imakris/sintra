@@ -3,8 +3,8 @@
 
 #pragma once
 
-#include "globals.h"
-#include "message.h"
+#include "../globals.h"
+#include "../messaging/message.h"
 
 #include <atomic>
 #include <condition_variable>

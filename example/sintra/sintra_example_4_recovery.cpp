@@ -22,7 +22,7 @@
 //
 
 #include <sintra/sintra.h>
-#include <sintra/detail/managed_process.h>
+#include <sintra/detail/process/managed_process.h>
 #include <iostream>
 #include <chrono>
 #include <thread>

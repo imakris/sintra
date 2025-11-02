@@ -1,5 +1,5 @@
-#include <sintra/detail/message.h>
-#include <sintra/detail/message_impl.h>
+#include <sintra/detail/messaging/message.h>
+#include <sintra/detail/messaging/message_impl.h>
 
 #include <array>
 #include <cstdint>

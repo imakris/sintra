@@ -13,7 +13,7 @@
 // corruption.
 
 
-#include "spinlock.h"
+#include "../ipc/spinlock.h"
 
 #include <deque>
 #include <list>
