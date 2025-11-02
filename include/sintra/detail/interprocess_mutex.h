@@ -96,44 +96,71 @@ public:
         return try_acquire(self, /*throw_on_recursive=*/false);
     }
 
-    // Timed try with a relative timeout. Prefers steady_clock to avoid wall-clock jumps.
-    template <class Rep, class Period>
-    bool try_lock_for(const std::chrono::duration<Rep, Period>& rel_timeout) noexcept
+
+    // Tries to acquire within a steady_clock-relative duration.
+    // Uses adaptive spinning, then sleeps with exponential backoff capped and
+    // clamped to the remaining time budget.
+    bool try_lock_for(std::chrono::steady_clock::duration rel)
     {
         const owner_token self = make_owner_token();
+
+        // Fast attempt
         if (try_acquire(self, /*throw_on_recursive=*/false)) {
             return true;
         }
+        if (rel <= std::chrono::steady_clock::duration::zero()) {
+            return false;
+        }
 
-        const auto deadline = std::chrono::steady_clock::now() + rel_timeout;
-        std::size_t iteration = 0;
-        for (;;) {
-            adaptive_wait(iteration++);
+        const auto deadline = std::chrono::steady_clock::now() + rel;
+
+        // Backoff: brief yield phase, then sleep with exponential growth.
+        std::uint32_t spins = 0;
+        auto sleep_us = std::chrono::microseconds(1);
+        const auto sleep_cap = std::chrono::microseconds(16000); // ~16 ms upper bound
+
+        for (;;)
+        {
+            // Short spinning/yield phase helps light contention without oversleeping.
+            if (spins < 16) {
+                std::this_thread::yield();
+                ++spins;
+            }
+            else {
+                const auto now = std::chrono::steady_clock::now();
+                if (now >= deadline) {
+                    return false;
+                }
+
+                // Clamp the sleep to the remaining budget to reduce overshoot.
+                auto remaining = std::chrono::duration_cast<std::chrono::microseconds>(deadline - now);
+                auto to_sleep = (sleep_us < remaining) ? sleep_us : remaining;
+                std::this_thread::sleep_for(to_sleep);
+
+                // Exponential backoff with cap; next sleep remains clamped each loop.
+                if (sleep_us < sleep_cap) {
+                    sleep_us *= 2;
+                    if (sleep_us > sleep_cap) {
+                        sleep_us = sleep_cap;
+                    }
+                }
+            }
+
             if (try_acquire(self, /*throw_on_recursive=*/false)) {
                 return true;
             }
-            if (std::chrono::steady_clock::now() >= deadline) {
-                return false;
-            }
         }
     }
 
-    // Timed try with an absolute time point; converts to a relative steady timeout to avoid wall clock jumps.
-    template <class Clock, class Duration>
-    bool try_lock_until(const std::chrono::time_point<Clock, Duration>& abs_time) noexcept
+
+    // Steady-clock absolute deadline overload (preferred).
+    bool try_lock_until(const std::chrono::time_point<std::chrono::steady_clock>& abs_time) noexcept
     {
-        const owner_token self = make_owner_token();
-        if (try_acquire(self, /*throw_on_recursive=*/false)) {
-            return true;
-        }
-
-        const auto now_c = Clock::now();
-        if (now_c >= abs_time) {
-            return false;
-        }
-        const auto rel = abs_time - now_c; // compute once; then use steady clock internally
-        return try_lock_for(rel);
+        const auto now = std::chrono::steady_clock::now();
+        if (abs_time <= now) return try_lock_for(std::chrono::steady_clock::duration::zero());
+        return try_lock_for(abs_time - now);
     }
+
 
     // Unlock; throws if called by a non-owner thread.
     void unlock()
@@ -280,7 +307,10 @@ private:
             const auto rp = recover_pid(rec);
             const auto rt = recover_ticks(rec);
             const auto nowt = now_ticks32();
+            
+            // uint32_t subtraction is wrap-safe for tick comparisons
             const bool stalled = static_cast<std::uint32_t>(nowt - rt) > k_recovery_stale_ms;
+
             if ((rp != 0 && !is_process_alive(rp)) || stalled) {
                 m_recovering.compare_exchange_strong(
                     rec, static_cast<recover_token>(0), std::memory_order_acq_rel, std::memory_order_relaxed);
