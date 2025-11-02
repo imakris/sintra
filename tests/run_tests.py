@@ -368,7 +368,7 @@ class TestRunner:
     """Manages test execution with timeout and repetition"""
 
     def __init__(self, build_dir: Path, config: str, timeout: float, verbose: bool,
-                 preserve_on_timeout: bool = False):
+                 preserve_on_timeout: bool = False, test_subdir: str = None):
         self.build_dir = build_dir
         self.config = config
         self.timeout = timeout
@@ -411,6 +411,10 @@ class TestRunner:
             self.test_dir = test_dir_with_config
         else:
             self.test_dir = test_dir_simple
+
+        # If test_subdir is specified, append it to the test directory
+        if test_subdir:
+            self.test_dir = self.test_dir / test_subdir
 
         # Kill any existing sintra processes for a clean start
         self._kill_all_sintra_processes()
@@ -2080,6 +2084,8 @@ def main():
     parser.add_argument('--config', type=str, default='Debug',
                         choices=['Debug', 'Release'],
                         help='Build configuration (default: Debug)')
+    parser.add_argument('--test-dir', type=str, default=None,
+                        help='Subdirectory within build-dir/tests to search for tests (e.g., "manual" for manual tests)')
     parser.add_argument('--verbose', action='store_true',
                         help='Show detailed output for each test run')
     parser.add_argument('--preserve-stalled-processes', action='store_true',
@@ -2106,6 +2112,8 @@ def main():
     print(f"Configuration: {args.config}")
     print(f"Repetitions per test: {args.repetitions}")
     print(f"Timeout per test: {args.timeout}s")
+    if args.test_dir:
+        print(f"Test subdirectory: {args.test_dir}")
     if args.test:
         print(f"Substring filter (--test): {args.test}")
     include_patterns = _collect_patterns(args.include)
@@ -2120,7 +2128,7 @@ def main():
         print(f"{Color.YELLOW}Warning: --kill_stalled_processes is deprecated; stalled tests are killed by default.{Color.RESET}")
 
     preserve_on_timeout = args.preserve_stalled_processes
-    runner = TestRunner(build_dir, args.config, args.timeout, args.verbose, preserve_on_timeout)
+    runner = TestRunner(build_dir, args.config, args.timeout, args.verbose, preserve_on_timeout, test_subdir=args.test_dir)
     try:
         test_suites = runner.find_test_suites(
             test_name=args.test,
