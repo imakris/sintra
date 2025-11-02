@@ -52,6 +52,7 @@ BUILD REQUIREMENTS
 
 // Platform headers MUST be included BEFORE opening namespaces to avoid polluting them
 #if defined(_WIN32)
+  #define WIN32_LEAN_AND_MEAN  // Exclude rarely-used Windows APIs
   #define NOMINMAX  // Prevent Windows.h from defining min/max macros
   #include <windows.h>
   #include <synchapi.h>
