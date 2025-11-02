@@ -100,7 +100,14 @@ public:
         // No-op for mutex; kept for API symmetry with other IPC handles.
     }
 
+    bool recovered_last_acquire() const noexcept {
+        return s_last_lock_recovered;
+    }
+
+
 private:
+    inline static thread_local bool s_last_lock_recovered = false;
+
     static void adaptive_wait(std::size_t iteration) {
         // Short phase: yield a few times to let other threads run.
         if (iteration < 16) {
@@ -138,6 +145,7 @@ private:
 
     // New internal helper lets timed/try APIs avoid throwing on recursion.
     bool try_acquire(owner_token self, bool throw_on_recursive) {
+        s_last_lock_recovered = false;
         owner_token expected = k_unowned;
         if (m_owner.compare_exchange_strong(
             expected, self, std::memory_order_acquire, std::memory_order_relaxed))
@@ -163,6 +171,7 @@ private:
             if (m_owner.compare_exchange_strong(
                 expected, self, std::memory_order_acquire, std::memory_order_relaxed))
             {
+                s_last_lock_recovered = true;
                 return true;
             }
         }
@@ -173,6 +182,13 @@ private:
     bool try_recover(owner_token observed_owner, owner_token self) {
         if (observed_owner == k_unowned) {
             return false;
+        }
+
+        // If someone is recovering but that process is dead, clear it first.
+        uint32_t rec = m_recovering.load(std::memory_order_acquire);
+        if (rec != 0 && !is_process_alive(rec)) {
+            m_recovering.compare_exchange_strong(
+                rec, 0, std::memory_order_acq_rel, std::memory_order_relaxed);
         }
 
         // Try to become the single recovering process (store caller PID).

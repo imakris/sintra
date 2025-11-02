@@ -43,6 +43,7 @@ BUILD REQUIREMENTS
 */
 
 #include <atomic>
+#include <cassert>
 #include <cstdint>
 #include <chrono>
 #include <cerrno>
@@ -267,7 +268,7 @@ static void ips_win_ensure_ready(ips_backend& b) noexcept
                     ((unsigned long long)tid<<7) ^
                     ((unsigned long long)self);
                 wchar_t buf[64];
-                bounded_swprintf(buf, 64, L"Global\\SintraSem_%016llX", x);
+                bounded_swprintf(buf, 64, L"Local\\SintraSem_%016llX", x);
                 ips_win_copy_name(b, buf);
             }
             else {
@@ -479,9 +480,19 @@ static inline int posix_wait_equal_until(
         if (now >= deadline) {
             errno = ETIMEDOUT; return -1;
         }
-        struct timespec ts;
-        ns_to_timespec(deadline - now, ts);
-        int rc = futex_wait((int*)addr, (int)expected, &ts);
+        uint64_t rel = deadline - now;
+        int rc;
+        {
+            uint64_t tmax = (uint64_t)std::numeric_limits<time_t>::max();
+            if (rel / 1000000000ULL > tmax) {
+                rc = futex_wait((int*)addr, (int)expected, nullptr);
+            }
+            else {
+                struct timespec ts;
+                ns_to_timespec(rel, ts);
+                rc = futex_wait((int*)addr, (int)expected, &ts);
+            }
+        }
         if (rc == 0)                           return  0; // value changed or spuriously woke; caller rechecks
         if (errno == ETIMEDOUT)                return -1;
         if (errno == EINTR || errno == EAGAIN) continue;
@@ -663,10 +674,15 @@ public:
     interprocess_semaphore(interprocess_semaphore&&) = delete;
     interprocess_semaphore& operator=(interprocess_semaphore&&) = delete;
 
-    // API compatibility: void wait() (loops forever until acquired)
+    // API compatibility: void wait() (loops forever until acquired or unrecoverable backend error)
     void wait() noexcept
     {
-        while (!m_impl.wait()) { if (errno == EINVAL) break; }
+        while (!m_impl.wait()) {
+            if (errno == EINVAL) {
+                assert(!"errno == EINVAL in interprocess_semaphore::wait() [backend error]");
+                break;
+            }
+        }
     }
 
     // API compatibility: bool try_wait()
