@@ -31,10 +31,6 @@
 // below matches the behaviour of the original project while documenting the
 // reasoning behind each macro.
 
-#ifndef BOOST_ALL_NO_LIB
-#define BOOST_ALL_NO_LIB
-#define SINTRA_UNDEF_BOOST_ALL_NO_LIB
-#endif
 
 
 #ifdef _MSC_VER  // if compiling with Visual Studio
@@ -46,9 +42,6 @@
 #define NOMINMAX
 #endif
 
-#ifndef BOOST_USE_WINDOWS_H
-#define BOOST_USE_WINDOWS_H
-#endif
 
 #endif // _MSC_VER
 
@@ -80,18 +73,18 @@
 // here as well: it exposes the global singleton that binds together the active
 // coordinator and the local managed process instance.
 #include "detail/globals.h"
-#include "detail/coordinator.h"
-#include "detail/coordinator_impl.h"
-#include "detail/managed_process.h"
-#include "detail/managed_process_impl.h"
+#include "detail/process/coordinator.h"
+#include "detail/process/coordinator_impl.h"
+#include "detail/process/managed_process.h"
+#include "detail/process/managed_process_impl.h"
 
 // -- Messaging --------------------------------------------------------------
 // Messages are the communication primitive in Sintra.  They travel over
 // transceivers, and the process message reader consumes them on behalf of a
 // managed process.  These includes wire up the request/reply rings, message
 // envelopes, and the transceiver façade that user code interacts with.
-#include "detail/message_impl.h"
-#include "detail/process_message_reader_impl.h"
+#include "detail/messaging/message_impl.h"
+#include "detail/messaging/process_message_reader_impl.h"
 #include "detail/transceiver.h"
 #include "detail/transceiver_impl.h"
 
@@ -182,6 +175,3 @@ void enable_recovery();
 #endif
 
 
-#ifdef SINTRA_UNDEF_BOOST_ALL_NO_LIB
-#undef BOOST_ALL_NO_LIB
-#endif

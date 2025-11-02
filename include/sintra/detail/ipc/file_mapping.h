@@ -14,7 +14,7 @@
 #include <utility>
 
 #if defined(_WIN32)
-#    include "sintra_windows.h"
+#    include "../sintra_windows.h"
 #else
 #    include <fcntl.h>
 #    include <sys/mman.h>

@@ -8,8 +8,8 @@
 #include <system_error>
 #include <vector>
 
-#include "sintra/detail/interprocess_file_mapping.h"
-#include "sintra/detail/ipc_platform_utils.h"
+#include "sintra/detail/ipc/file_mapping.h"
+#include "sintra/detail/ipc/platform_utils.h"
 
 #include "test_environment.h"
 

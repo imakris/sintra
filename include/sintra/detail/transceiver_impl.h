@@ -3,8 +3,8 @@
 
 #pragma once
 
-#include "coordinator.h"
-#include "managed_process.h"
+#include "process/coordinator.h"
+#include "process/managed_process.h"
 #include "transceiver.h"
 
 #include <cassert>
@@ -20,7 +20,7 @@
 
 #include "exception_conversions.h"
 #include "exception_conversions_impl.h"
-#include "process_message_reader.h"
+#include "messaging/process_message_reader.h"
 
 
 namespace sintra {

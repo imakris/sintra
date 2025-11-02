@@ -4,8 +4,8 @@
 #pragma once
 
 #include "globals.h"
-#include "managed_process.h"
-#include "process_message_reader_impl.h"
+#include "process/managed_process.h"
+#include "messaging/process_message_reader_impl.h"
 
 #include <stdexcept>
 #include <string>

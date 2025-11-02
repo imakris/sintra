@@ -3,9 +3,9 @@
 
 #pragma once
 
-#include "utility.h"
-#include "type_utils.h"
-#include "ipc_platform_utils.h"
+#include "../utility.h"
+#include "../type_utils.h"
+#include "../ipc/platform_utils.h"
 
 #include <array>
 #include <atomic>
@@ -510,7 +510,7 @@ Managed_process::Managed_process():
 
     install_signal_handler();
 
-    // NOTE: Do not be tempted to use get_current_process_creation_time from boost::interprocess,
+    // NOTE: Do not use external library helpers for process creation time,
     // it is only implemented for Windows.
     m_time_instantiated = std::chrono::system_clock::now();
 }

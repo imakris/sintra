@@ -3,10 +3,10 @@
 
 #pragma once
 
-#include "id_types.h"
-#include "resolvable_instance.h"
-#include "resolve_type.h"
-#include "transceiver.h"
+#include "../id_types.h"
+#include "../resolvable_instance.h"
+#include "../resolve_type.h"
+#include "../transceiver.h"
 
 #include <array>
 #include <atomic>

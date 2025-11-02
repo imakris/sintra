@@ -78,7 +78,7 @@ CAVEATS
 
 // Platform headers MUST be included BEFORE opening namespaces to avoid polluting them
 #if defined(_WIN32)
-  #include "sintra_windows.h"
+  #include "../sintra_windows.h"
   #include <synchapi.h>
   #include <mutex>
   #include <unordered_map>
