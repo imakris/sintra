@@ -484,7 +484,7 @@ static inline void posix_wake_some(uint32_t* addr, int n) noexcept
 
 struct ips_backend_posix_state
 {
-    alignas(4) uint32_t count = 0;
+    std::atomic<uint32_t> count{0};
     uint32_t max = 0x7fffffff;
 };
 
@@ -528,7 +528,7 @@ inline void ips_backend::init_named(
 
 inline bool ips_backend::try_wait() noexcept
 {
-    std::atomic_ref<uint32_t> c(P(*this).count);
+    std::atomic<uint32_t>& c = P(*this).count;
     uint32_t v = c.load(std::memory_order_acquire);
     while (v != 0) {
         if (c.compare_exchange_weak(v, v-1, std::memory_order_acq_rel, std::memory_order_acquire)) {
@@ -547,7 +547,7 @@ inline bool ips_backend::wait() noexcept
 
 inline bool ips_backend::try_wait_for(std::chrono::nanoseconds d) noexcept
 {
-    std::atomic_ref<uint32_t> c(P(*this).count);
+    std::atomic<uint32_t>& c = P(*this).count;
     if (try_wait()) return true;
 
     const uint64_t add = d.count() <= 0 ? 0ULL : (uint64_t)d.count();
@@ -564,7 +564,7 @@ inline bool ips_backend::try_wait_for(std::chrono::nanoseconds d) noexcept
             errno = ETIMEDOUT;
             return false;
         }
-        if (posix_wait_equal_until(&P(*this).count, 0u, deadline) == -1) {
+        if (posix_wait_equal_until(reinterpret_cast<uint32_t*>(&P(*this).count), 0u, deadline) == -1) {
             if (errno == ETIMEDOUT) {
                 return false;
             }
@@ -580,7 +580,7 @@ inline void ips_backend::post(uint32_t n) noexcept
 {
     if (n == 0) return;
 
-    std::atomic_ref<uint32_t> c(P(*this).count);
+    std::atomic<uint32_t>& c = P(*this).count;
     uint32_t v = c.load(std::memory_order_relaxed);
     const uint32_t maxv = P(*this).max;
 
@@ -594,7 +594,7 @@ inline void ips_backend::post(uint32_t n) noexcept
         }
     }
 
-    posix_wake_some(&P(*this).count, (int)n);
+    posix_wake_some(reinterpret_cast<uint32_t*>(&P(*this).count), (int)n);
 }
 
 inline void ips_backend::destroy() noexcept
