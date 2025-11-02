@@ -3,10 +3,10 @@
 
 #pragma once
 
-#include "id_types.h"
-#include "ipc_rings.h"
-#include "utility.h"
-#include "message_args.h"
+#include "../id_types.h"
+#include "../ipc/rings.h"
+#include "../utility.h"
+#include "../messaging/message_args.h"
 
 #include <cassert>
 #include <cstdint>

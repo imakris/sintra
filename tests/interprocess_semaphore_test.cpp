@@ -10,7 +10,7 @@
 // guarantees, and multi-process usage without relying on additional
 // frameworks.
 
-#include <sintra/detail/interprocess_semaphore.h>
+#include <sintra/detail/ipc/semaphore.h>
 
 #include <atomic>
 #include <array>

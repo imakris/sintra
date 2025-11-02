@@ -24,7 +24,7 @@
 #define SINTRA_EVICTION_SPIN_THRESHOLD 0
 #define private public
 #define protected public
-#include "sintra/detail/ipc_rings.h"
+#include "sintra/detail/ipc/rings.h"
 
 #include "test_environment.h"
 #undef private

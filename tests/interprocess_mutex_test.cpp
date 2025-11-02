@@ -8,8 +8,8 @@
 
 using namespace std::chrono_literals;
 
-#include "sintra/detail/interprocess_mutex.h"
-#include "sintra/detail/ipc_platform_utils.h"
+#include "sintra/detail/ipc/mutex.h"
+#include "sintra/detail/ipc/platform_utils.h"
 
 namespace
 {
@@ -97,16 +97,9 @@ int main()
     // Fresh mutex should be acquirable via try_lock.
     expect(mtx.try_lock(), "try_lock should succeed on an unlocked mutex");
 
-    // Recursive try_lock must throw resource_deadlock_would_occur.
-    bool try_lock_detected_recursion = false;
-    try {
-        (void)mtx.try_lock();
-    } catch (const std::system_error& error) {
-        expect_error_code(error, std::errc::resource_deadlock_would_occur,
-                          "try_lock recursion");
-        try_lock_detected_recursion = true;
-    }
-    expect(try_lock_detected_recursion, "try_lock recursion should throw");
+    // Recursive try_lock must return false (same thread cannot reacquire).
+    bool recursive_try_lock_result = mtx.try_lock();
+    expect(!recursive_try_lock_result, "try_lock recursion should return false");
 
     // While locked, another thread attempting try_lock should fail without throwing.
     std::atomic<bool> other_thread_attempted{false};

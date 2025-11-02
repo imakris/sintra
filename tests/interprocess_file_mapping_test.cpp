@@ -8,8 +8,8 @@
 #include <system_error>
 #include <vector>
 
-#include "sintra/detail/interprocess_file_mapping.h"
-#include "sintra/detail/ipc_platform_utils.h"
+#include "sintra/detail/ipc/file_mapping.h"
+#include "sintra/detail/ipc/platform_utils.h"
 
 #include "test_environment.h"
 
@@ -134,9 +134,9 @@ int main()
     {
         ipc::file_mapping mapping(temp.path, ipc::read_only);
         ipc::mapped_region region(mapping, ipc::read_only, 0, 0);
-        expect(region.get_size() == original_data.size(),
+        expect(region.size() == original_data.size(),
                "read-only mapping should cover the full file when size is zero");
-        auto* bytes = static_cast<const std::uint8_t*>(region.get_address());
+        auto* bytes = static_cast<const std::uint8_t*>(region.data());
         expect(bytes != nullptr, "read-only mapping returned null address");
         for (std::size_t i = 0; i < original_data.size(); ++i) {
             if (bytes[i] != original_data[i]) {
@@ -151,9 +151,9 @@ int main()
         const std::size_t length = 128;
         ipc::file_mapping mapping(temp.path, ipc::read_only);
         ipc::mapped_region region(mapping, ipc::read_only, offset, length);
-        expect(region.get_size() == length,
+        expect(region.size() == length,
                "partial mapping reported unexpected size");
-        auto* bytes = static_cast<const std::uint8_t*>(region.get_address());
+        auto* bytes = static_cast<const std::uint8_t*>(region.data());
         expect(bytes != nullptr, "partial mapping returned null address");
         for (std::size_t i = 0; i < length; ++i) {
             if (bytes[i] != original_data[offset + i]) {
@@ -199,14 +199,14 @@ int main()
     {
         ipc::file_mapping mapping(temp.path, ipc::read_write);
         ipc::mapped_region region(mapping, ipc::copy_on_write, 0, 0);
-        expect(region.get_size() == original_data.size(),
+        expect(region.size() == original_data.size(),
                "copy-on-write mapping should cover the entire file");
-        auto* bytes = static_cast<std::uint8_t*>(region.get_address());
+        auto* bytes = static_cast<std::uint8_t*>(region.data());
         expect(bytes != nullptr, "copy-on-write mapping returned null address");
-        for (std::size_t i = 0; i < region.get_size(); ++i) {
+        for (std::size_t i = 0; i < region.size(); ++i) {
             bytes[i] = static_cast<std::uint8_t>(bytes[i] ^ 0xFFu);
         }
-        for (std::size_t i = 0; i < region.get_size(); ++i) {
+        for (std::size_t i = 0; i < region.size(); ++i) {
             if (bytes[i] == original_data[i]) {
                 fail("copy-on-write mapping did not observe written data");
             }
@@ -228,9 +228,9 @@ int main()
     {
         ipc::file_mapping mapping(temp.path, ipc::read_write);
         ipc::mapped_region region(mapping, ipc::read_write, 0, 0);
-        expect(region.get_size() == expected.size(),
+        expect(region.size() == expected.size(),
                "read-write mapping should cover the entire file");
-        auto* bytes = static_cast<std::uint8_t*>(region.get_address());
+        auto* bytes = static_cast<std::uint8_t*>(region.data());
         expect(bytes != nullptr, "read-write mapping returned null address");
         for (std::size_t i = 0; i < expected.size(); ++i) {
             bytes[i] = expected[i];
