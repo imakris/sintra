@@ -3,16 +3,16 @@
 
 #pragma once
 
-#include "config.h"
-#include "globals.h"
-#include "ipc_rings.h"
-#include "message.h"
-#include "process_id.h"
-#include "process_message_reader.h"
-#include "resolve_type.h"
-#include "spinlocked_containers.h"
-#include "transceiver.h"
-#include "call_function_with_message_args.h"
+#include "../config.h"
+#include "../globals.h"
+#include "../ipc/rings.h"
+#include "../messaging/message.h"
+#include "../process/process_id.h"
+#include "../messaging/process_message_reader.h"
+#include "../resolve_type.h"
+#include "../ipc/spinlocked_containers.h"
+#include "../transceiver.h"
+#include "../messaging/call_function_with_message_args.h"
 
 #include <algorithm>
 #include <atomic>

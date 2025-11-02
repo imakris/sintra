@@ -3,8 +3,8 @@
 
 #pragma once
 
-#include "coordinator.h"
-#include "managed_process.h"
+#include "../process/coordinator.h"
+#include "../process/managed_process.h"
 
 #include <cassert>
 #include <functional>

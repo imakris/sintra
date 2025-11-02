@@ -4,7 +4,7 @@
 #pragma once
 
 #include "globals.h"
-#include "managed_process.h"
+#include "process/managed_process.h"
 #include "utility.h"
 
 #include <atomic>
