@@ -24,7 +24,7 @@ Sintra is a header-only C++ library for type-safe inter-process communication (I
 
 ### Core Design Principles
 
-1. **Shared-memory communication**: Uses Boost.Interprocess for memory-mapped files
+1. **Shared-memory communication**: Memory-mapped files for cross-process data exchange
 2. **Single-producer/multi-consumer (SPMC) rings**: Lock-free data structures for low-latency messaging
 3. **Type-safe APIs**: Compile-time type checking prevents protocol errors
 4. **Header-only**: No separate compilation required
