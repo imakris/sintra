@@ -8,7 +8,7 @@ function(add_test_suite SUFFIX IS_DEBUG)
     add_library(${LIB_TARGET} INTERFACE)
     target_include_directories(${LIB_TARGET} INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
     target_compile_features(${LIB_TARGET} INTERFACE cxx_std_17)
-    target_link_libraries(${LIB_TARGET} INTERFACE Boost::boost Threads::Threads)
+    target_link_libraries(${LIB_TARGET} INTERFACE Threads::Threads)
 
     # Link winmm on Windows for timeBeginPeriod/timeEndPeriod
     if(WIN32)
