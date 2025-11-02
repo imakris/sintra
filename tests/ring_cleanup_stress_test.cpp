@@ -8,7 +8,7 @@
 //
 
 #include <sintra/sintra.h>
-#include <sintra/detail/ipc_platform_utils.h>
+#include <sintra/detail/ipc/platform_utils.h>
 
 #include "test_environment.h"
 

@@ -3,7 +3,7 @@
 
 #pragma once
 
-#include "message.h"
+#include "messaging/message.h"
 
 
 namespace sintra {

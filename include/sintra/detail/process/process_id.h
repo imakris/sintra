@@ -6,7 +6,7 @@
 #include <cstdint>
 
 #ifdef _WIN32
-#    include "sintra_windows.h"
+#    include "../sintra_windows.h"
 #else
 #    include <unistd.h>
 #endif

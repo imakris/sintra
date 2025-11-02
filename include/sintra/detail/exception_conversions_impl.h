@@ -4,7 +4,7 @@
 #pragma once
 
 #include "exception_conversions.h"
-#include "message.h"
+#include "messaging/message.h"
 #include "type_utils.h"
 
 #include <filesystem>

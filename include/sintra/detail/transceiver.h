@@ -5,8 +5,8 @@
 
 #include "globals.h"
 #include "id_types.h"
-#include "message.h"
-#include "spinlocked_containers.h"
+#include "messaging/message.h"
+#include "ipc/spinlocked_containers.h"
 
 #include <condition_variable>
 #include <functional>
@@ -322,7 +322,7 @@ public:
 
 
     // Short note: The message body is implemented with detail::message_args rather than std::tuple
-    // to retain the plain-struct layout that boost::fusion::vector previously provided. This keeps
+    // to retain a plain-struct layout for the message arguments. This keeps
     // RPC argument packs as compact as possible in the ring buffer.
 
 

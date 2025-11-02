@@ -21,7 +21,7 @@
 //
 
 #include <sintra/sintra.h>
-#include <sintra/detail/managed_process.h>
+#include <sintra/detail/process/managed_process.h>
 
 #include "test_environment.h"
 
