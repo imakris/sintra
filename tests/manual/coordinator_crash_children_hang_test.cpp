@@ -77,23 +77,16 @@ int main(int argc, char* argv[])
 {
     const bool is_spawned = has_branch_flag(argc, argv);
 
+    // Define child processes only (coordinator runs in parent)
     std::vector<sintra::Process_descriptor> processes;
-    processes.emplace_back(coordinator_process);
     processes.emplace_back(child_crash_after_delay);
     processes.emplace_back(child_hang_forever);
 
     sintra::init(argc, argv, processes);
 
-    // Parent process: wait for children to crash/hang
-    // This test should timeout - we're testing the harness's ability to detect failures
+    // Coordinator process (parent): crashes immediately
     if (!is_spawned) {
-        std::fprintf(stderr, "Parent: Waiting for children (this should timeout)...\n");
-        std::fflush(stderr);
-
-        // Wait indefinitely - the test harness should kill us via timeout
-        while (true) {
-            std::this_thread::sleep_for(std::chrono::seconds(1));
-        }
+        coordinator_process();
     }
 
     // Should never reach finalize due to crashes/hangs
