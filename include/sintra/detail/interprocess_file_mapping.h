@@ -21,7 +21,7 @@
 
 namespace sintra::detail::ipc {
 
-enum mode_t
+enum map_mode_t
 {
     read_only,
     read_write,
@@ -35,7 +35,7 @@ class file_mapping
 public:
     using size_type = std::uint64_t;
 
-    file_mapping(const char* filename, mode_t mode)
+    file_mapping(const char* filename, map_mode_t mode)
     {
         if (!filename) {
             throw std::system_error(std::make_error_code(std::errc::invalid_argument),
@@ -44,12 +44,12 @@ public:
         open_impl(std::filesystem::path(filename), mode);
     }
 
-    file_mapping(const std::string& filename, mode_t mode)
+    file_mapping(const std::string& filename, map_mode_t mode)
     {
         open_impl(std::filesystem::path(filename), mode);
     }
 
-    file_mapping(const std::filesystem::path& filename, mode_t mode)
+    file_mapping(const std::filesystem::path& filename, map_mode_t mode)
     {
         open_impl(filename, mode);
     }
@@ -87,7 +87,7 @@ public:
     }
 
     size_type size() const noexcept { return m_size; }
-    mode_t mode() const noexcept { return m_mode; }
+    map_mode_t mode() const noexcept { return m_mode; }
 
 #if defined(_WIN32)
     using native_handle_type = HANDLE;
@@ -98,7 +98,7 @@ public:
 #endif
 
 private:
-    void open_impl(const std::filesystem::path& filename, mode_t mode)
+    void open_impl(const std::filesystem::path& filename, map_mode_t mode)
     {
         close_impl();
 
@@ -130,9 +130,18 @@ private:
         m_file = file;
         m_size = static_cast<size_type>(size.QuadPart);
 #else
+#ifdef O_CLOEXEC
+        int flags = (mode == read_write) ? (O_RDWR | O_CLOEXEC) : (O_RDONLY | O_CLOEXEC);
+#else
         int flags = (mode == read_write) ? O_RDWR : O_RDONLY;
+#endif
         const auto* native = filename.c_str();
         int fd = ::open(native, flags);
+#ifndef O_CLOEXEC
+        if (fd != -1) {
+            (void)::fcntl(fd, F_SETFD, FD_CLOEXEC);
+        }
+#endif
         if (fd == -1) {
             throw std::system_error(errno, std::system_category(), "open failed");
         }
@@ -172,7 +181,7 @@ private:
     }
 
     size_type m_size = 0;
-    mode_t    m_mode = read_only;
+    map_mode_t    m_mode = read_only;
 
 #if defined(_WIN32)
     HANDLE m_file = INVALID_HANDLE_VALUE;
@@ -184,10 +193,21 @@ private:
 class mapped_region
 {
 public:
-    mapped_region(const file_mapping& file, mode_t mode,
+    mapped_region(const file_mapping& file, map_mode_t mode,
                   std::uint64_t offset, std::size_t size,
                   void* address = nullptr, map_options_t options = 0)
     {
+        // Validate view mode vs file open mode
+        if (mode == read_write && file.mode() != read_write) {
+            throw std::system_error(std::make_error_code(std::errc::operation_not_permitted),
+                                    "mapped_region: read_write view requires read_write file");
+        }
+#if !defined(_WIN32)
+        if (mode == copy_on_write && file.mode() != read_write) {
+            throw std::system_error(std::make_error_code(std::errc::operation_not_permitted),
+                                    "mapped_region: copy_on_write view requires read_write file on POSIX");
+        }
+#endif
         if (offset > file.size()) {
             throw std::system_error(std::make_error_code(std::errc::invalid_argument),
                                     "mapped_region: offset beyond end of file");
@@ -246,6 +266,11 @@ public:
         SYSTEM_INFO si{};
         ::GetSystemInfo(&si);
         const std::uint64_t gran = si.dwAllocationGranularity;
+        if (address && (reinterpret_cast<std::uintptr_t>(address) % gran) != 0) {
+            ::CloseHandle(mapping);
+            throw std::system_error(std::make_error_code(std::errc::invalid_argument),
+                                    "mapped_region: address not aligned to allocation granularity");
+        }
         const std::uint64_t aligned_off = (offset / gran) * gran;
         const std::size_t   delta = static_cast<std::size_t>(offset - aligned_off);
         if (mapping_size > std::numeric_limits<std::size_t>::max() - delta) {
@@ -298,7 +323,15 @@ public:
         }
 
         long page = ::sysconf(_SC_PAGE_SIZE);
+        if (page <= 0) {
+            throw std::system_error(std::make_error_code(std::errc::invalid_argument),
+                                    "mapped_region: could not determine page size");
+        }
         const std::uint64_t gran = static_cast<std::uint64_t>(page);
+        if (address && (reinterpret_cast<std::uintptr_t>(address) % gran) != 0) {
+            throw std::system_error(std::make_error_code(std::errc::invalid_argument),
+                                    "mapped_region: address not aligned to page size");
+        }
         const std::uint64_t aligned_off64 = (offset / gran) * gran;
         const std::size_t   delta = static_cast<std::size_t>(offset - aligned_off64);
         if (mapping_size > std::numeric_limits<std::size_t>::max() - delta) {
@@ -322,6 +355,35 @@ public:
         m_base_size = view_size;
         m_address = static_cast<char*>(mapped) + delta;
         m_size = mapping_size;
+#endif
+    }
+
+    // Flush changes to the underlying file (no-op for read_only). If len==0, flush to end.
+    void flush(std::size_t offset = 0, std::size_t len = 0)
+    {
+        if (offset > m_size) {
+            throw std::system_error(std::make_error_code(std::errc::invalid_argument),
+                                    "mapped_region::flush: offset beyond mapping size");
+        }
+        if (len == 0) {
+            len = m_size - offset;
+        }
+        if (len > m_size - offset) {
+            throw std::system_error(std::make_error_code(std::errc::invalid_argument),
+                                    "mapped_region::flush: length exceeds mapping size");
+        }
+#if defined(_WIN32)
+        if (m_address && len) {
+            if (!::FlushViewOfFile(static_cast<char*>(m_address) + offset, len)) {
+                throw std::system_error(::GetLastError(), std::system_category(), "FlushViewOfFile failed");
+            }
+        }
+#else
+        if (m_address && len) {
+            if (::msync(static_cast<char*>(m_address) + offset, len, MS_SYNC) != 0) {
+                throw std::system_error(errno, std::system_category(), "msync failed");
+            }
+        }
 #endif
     }
 
