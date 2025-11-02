@@ -1,6 +1,55 @@
 #pragma once
+/*
+interprocess_mutex.h
 
-// NOTE: This compiles on C++17
+PROCESS-ROBUST MUTEX WITH OWNER-DEATH RECOVERY
+Provides a compact mutual-exclusion primitive suitable for interprocess use.
+The mutex is implemented entirely with lock-free atomic operations and an
+adaptive spinning strategy. It can recover automatically when the owning
+process terminates unexpectedly.
+
+ROBUSTNESS MODEL
+This mutex is process-robust: it detects and recovers from owner-process death.
+If the owning thread exits while its process continues to run, the mutex
+remains locked until the process terminates. Recovery preemption is supported:
+if a recovery attempt stalls beyond a configurable timeout window, another
+thread may safely take over and complete the recovery.
+
+MEMORY & ORDERING
+Ownership transitions rely on 64-bit atomic compare-exchange operations using
+acquire and release semantics, ensuring full visibility of writes before and
+after lock transitions. Recovery clears the owner token using acq_rel ordering.
+All atomic members are required to be lock-free.
+
+USAGE CONTRACT
+The mutex object must reside in shared memory accessible by all participant
+processes. The platform utilities defined in `ipc_platform_utils.h` must
+provide:
+  - get_current_pid()
+  - get_current_tid()
+  - is_process_alive(uint32_t)
+No explicit initialization routine is required.
+
+COMPATIBILITY & PORTABILITY
+The implementation is portable to any platform that supports lock-free 64-bit
+atomics and basic thread yielding. It uses adaptive spinning with exponential
+backoff and occasional sleeps under contention. No operating system–specific
+kernel synchronization primitives are required.
+
+RECOVERY FLAG
+The method recovered_last_acquire() reports whether the most recent successful
+acquisition followed an owner-death recovery. The flag is set to true only when
+a lock is taken after recovery and reset to false on the next normal acquisition.
+Failed try_* attempts do not affect the flag.
+
+CAVEATS
+- Thread death within a still-running process is not detected.
+- Recovery preemption may result in short overlapping recovery attempts,
+  but only one can succeed in resetting ownership.
+- Timed waits (try_lock_for, try_lock_until) may exceed their timeout by
+  up to one backoff interval (~16 ms).
+- Recursive lock attempts throw resource_deadlock_would_occur.
+*/
 
 #include <algorithm>
 #include <atomic>
@@ -27,14 +76,14 @@ public:
     void lock()
     {
         const owner_token self = make_owner_token();
-        if (try_acquire(self)) {
+        if (try_acquire(self, /*throw_on_recursive=*/true)) {
             return;
         }
 
         std::size_t iteration = 0;
         for (;;) {
             adaptive_wait(iteration++);
-            if (try_acquire(self)) {
+            if (try_acquire(self, /*throw_on_recursive=*/true)) {
                 return;
             }
         }
@@ -173,8 +222,7 @@ private:
         std::this_thread::sleep_for(sleep_us);
     }
 
-    // Original internal entry-point keeps throwing behavior for lock()
-    // (i.e., recursive lock -> throw).
+    // Attempts to acquire the mutex for 'self' with recursion detection.
     bool try_acquire(owner_token self)
     {
         return try_acquire(self, /*throw_on_recursive=*/true);
@@ -183,12 +231,12 @@ private:
     // Internal helper lets timed/try APIs avoid throwing on recursion.
     bool try_acquire(owner_token self, bool throw_on_recursive)
     {
-        m_last_recovered.store(0, std::memory_order_relaxed);
-
         owner_token expected = k_unowned;
         if (m_owner.compare_exchange_strong(
             expected, self, std::memory_order_acquire, std::memory_order_relaxed))
         {
+            // Successful normal acquisition -> clear recovery flag
+            m_last_recovered.store(0, std::memory_order_relaxed);
             return true;
         }
 
@@ -210,6 +258,7 @@ private:
             if (m_owner.compare_exchange_strong(
                 expected, self, std::memory_order_acquire, std::memory_order_relaxed))
             {
+                // Successful post-recovery acquisition -> set recovery flag
                 m_last_recovered.store(1, std::memory_order_relaxed);
                 return true;
             }

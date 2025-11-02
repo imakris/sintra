@@ -41,6 +41,27 @@ ERROR SEMANTICS
 
 BUILD REQUIREMENTS
 - The wait word is a naturally aligned 32-bit word accessed atomically (lock-free required).
+
+ROBUSTNESS MODEL
+- Semaphores are ownerless counters. If a process crashes after wait(), the counter remains decremented; there is no “owner” to recover.
+- Windows (named semaphore): the kernel object persists independently of handle lifetimes; process termination does not roll back the count.
+- POSIX (shared memory): the counter lives in shared memory visible to other processes and continues to reflect the current value.
+
+MEMORY & ORDERING
+- The 32-bit counter is accessed with acquire/release semantics around successful decrement/increment.
+- Spurious wake-ups are possible on POSIX, callers must always recheck state after any wake.
+
+USAGE CONTRACT (shared memory requirements)
+- POSIX: The internal 32-bit wait word must reside in shared memory (e.g., MAP_SHARED). Placing the object in process-local memory yields intra-process behavior only.
+- Windows: HANDLEs are per-process. Use a common name across processes or place this object in shared memory to carry the generated name to other processes.
+
+COMPATIBILITY & PORTABILITY
+- This API mirrors the sibling `interprocess_mutex` style: steady-clock deadlines, bool-returning timed waits, and errno for error/timeout discrimination.
+- Intended for Linux (futex), macOS 14.4+ (wait-on-address), Windows 8+. No fallback shims for older platforms.
+
+CAVEATS
+- Overflow: post(n) where (current + n) > max sets errno=EOVERFLOW and does not wake.
+- Timed waits: return false on timeout and set errno=ETIMEDOUT; other errors also return false with errno set.
 */
 
 #include <atomic>
