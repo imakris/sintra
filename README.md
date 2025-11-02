@@ -52,8 +52,7 @@ coordinate modular applications, daemons, and tools that need to communicate rel
   patterns as your architecture requires.
 * **Header-only distribution** - integrate the library by adding the headers to your
   project; no separate build step or binaries are necessary.
-* **Cross-platform design** - built on top of Boost.Interprocess and related
-  header-only Boost utilities, enabling shared-memory transport on Linux and Windows.
+* **Cross-platform design** - shared-memory transport on Linux and Windows.
 * **Opt-in crash recovery** - mark critical workers with `sintra::enable_recovery()` so
   the coordinator automatically respawns them after an unexpected exit.
 
@@ -150,10 +149,7 @@ Processing fences are safe to call from any thread, including handlers themselve
 
 1. Add the `include/` directory to your project's include path.
 2. Ensure that a C++17 compliant compiler is used (GCC, Clang, or MSVC are supported).
-3. Sintra vendors the required Boost headers under `third_party/boost`,
-   including `interprocess`, `type_index`, and `fusion`, so no additional
-   dependency setup is needed when using the repository as-is.
-4. Explore the `example/` directory to see how to set up signal buses, channels, and
+3. Explore the `example/` directory to see how to set up signal buses, channels, and
    remote call endpoints.
 
 Because everything ships as headers, Sintra works well in monorepos or projects that
