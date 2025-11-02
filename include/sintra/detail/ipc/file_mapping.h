@@ -299,6 +299,28 @@ public:
                                     "mapped_region: zero-length mapping");
         }
 
+        // Calculate allocation granularity and alignment for the mapping.
+        // Both Windows and POSIX require the file offset to be aligned to a specific boundary.
+#if defined(_WIN32)
+        SYSTEM_INFO si{};
+        ::GetSystemInfo(&si);
+        const std::size_t allocation_granularity = static_cast<std::size_t>(si.dwAllocationGranularity);
+#else
+        const long page_size_long = get_page_size();
+        const std::size_t allocation_granularity = static_cast<std::size_t>(page_size_long);
+#endif
+
+        const std::uint64_t misalignment = offset % static_cast<std::uint64_t>(allocation_granularity);
+        const std::uint64_t aligned_offset = offset - misalignment;
+        const std::size_t   offset_delta = static_cast<std::size_t>(misalignment);
+
+        if (mapping_size > std::numeric_limits<std::size_t>::max() - offset_delta) {
+            throw std::system_error(std::make_error_code(std::errc::value_too_large),
+                                    "mapped_region: adjusted mapping size does not fit in size_t");
+        }
+
+        const std::size_t adjusted_size = mapping_size + offset_delta;
+
         m_mode = mode;
 
 #if defined(_WIN32)
@@ -326,30 +348,21 @@ public:
         }
 
         ULARGE_INTEGER off;
-        SYSTEM_INFO si{};
-        ::GetSystemInfo(&si);
-        const std::uint64_t gran = si.dwAllocationGranularity;
-        if (address && (reinterpret_cast<std::uintptr_t>(address) % gran) != 0) {
-            ::CloseHandle(mapping);
-            std::string msg = std::string(
-                "mapped_region: address not aligned to allocation granularity of ") + std::to_string(gran) + " bytes";
-            throw std::system_error(std::make_error_code(std::errc::invalid_argument), msg);
-        }
-        const std::uint64_t aligned_off = (offset / gran) * gran;
-        const std::size_t   delta = static_cast<std::size_t>(offset - aligned_off);
-        if (mapping_size > std::numeric_limits<std::size_t>::max() - delta) {
-            ::CloseHandle(mapping);
-            throw std::system_error(std::make_error_code(std::errc::value_too_large),
-                                    "mapped_region: mapping size + delta overflows size_t");
-        }
-        const std::size_t view_size = mapping_size + delta;
-
-        off.QuadPart = aligned_off;
+        off.QuadPart = aligned_offset;
         (void)options;
         // NOTE: Windows-specific options (if any) are handled via desired_access/protect above.
         //       The 'options' parameter is currently ignored on Windows.
+
+        // Calculate the base address for MapViewOfFileEx.
+        // If the user requested a specific address, we must account for the offset delta to ensure
+        // the final user-visible address aligns correctly.
+        void* requested_base = nullptr;
+        if (address) {
+            requested_base = reinterpret_cast<void*>(reinterpret_cast<char*>(address) - offset_delta);
+        }
+
         void* view = ::MapViewOfFileEx(mapping, desired_access,
-            static_cast<DWORD>(off.HighPart), static_cast<DWORD>(off.LowPart), view_size, address);
+            static_cast<DWORD>(off.HighPart), static_cast<DWORD>(off.LowPart), adjusted_size, requested_base);
         if (!view) {
             DWORD err = ::GetLastError();
             ::CloseHandle(mapping);
@@ -359,8 +372,8 @@ public:
 
         m_mapping_handle = mapping;
         m_base = view;
-        m_base_size = view_size;
-        m_address = static_cast<char*>(view) + delta;
+        m_base_size = adjusted_size;
+        m_address = static_cast<char*>(view) + offset_delta;
         m_size = mapping_size;
 #else
         int prot = PROT_READ;
@@ -393,43 +406,29 @@ public:
         }
 #endif
 
-        if (offset > static_cast<std::uint64_t>(std::numeric_limits<off_t>::max())) {
-            throw std::system_error(std::make_error_code(std::errc::invalid_argument),
-                                    "mapped_region: offset does not fit in off_t");
-        }
-
-        const long page = get_page_size();
-        const std::uint64_t gran = static_cast<std::uint64_t>(page);
-        // NOTE: MAP_FIXED will replace any existing mappings at the specified address.
-        //       Consider using MAP_FIXED_NOREPLACE where available for safer behavior.
-        if ((options & MAP_FIXED) && address &&
-            (reinterpret_cast<std::uintptr_t>(address) % gran) != 0) {
-            throw std::system_error(std::make_error_code(std::errc::invalid_argument),
-                                    "mapped_region: address not aligned to page size with MAP_FIXED");
-        }
-
-        const std::uint64_t aligned_off64 = (offset / gran) * gran;
-        const std::size_t   delta = static_cast<std::size_t>(offset - aligned_off64);
-        if (mapping_size > std::numeric_limits<std::size_t>::max() - delta) {
-            throw std::system_error(std::make_error_code(std::errc::value_too_large),
-                                    "mapped_region: mapping size + delta overflows size_t");
-        }
-        const std::size_t view_size = mapping_size + delta;
-        if (aligned_off64 > static_cast<std::uint64_t>(std::numeric_limits<off_t>::max())) {
+        // Verify that the aligned offset fits in off_t for mmap.
+        if (aligned_offset > static_cast<std::uint64_t>(std::numeric_limits<off_t>::max())) {
             throw std::system_error(std::make_error_code(std::errc::invalid_argument),
                                     "mapped_region: aligned offset does not fit in off_t");
         }
-        const off_t aligned_off = static_cast<off_t>(aligned_off64);
 
-        void* mapped = ::mmap(address, view_size, prot, flags,
-                              file.native_handle(), aligned_off);
+        // Calculate the base address for mmap.
+        // If the user requested a specific address, we must account for the offset delta to ensure
+        // the final user-visible address aligns correctly.
+        void* requested_base = nullptr;
+        if (address) {
+            requested_base = reinterpret_cast<void*>(reinterpret_cast<char*>(address) - offset_delta);
+        }
+
+        void* mapped = ::mmap(requested_base, adjusted_size, prot, flags,
+                              file.native_handle(), static_cast<off_t>(aligned_offset));
         if (mapped == MAP_FAILED) {
             throw std::system_error(errno, std::system_category(), "mmap failed");
         }
 
         m_base = mapped;
-        m_base_size = view_size;
-        m_address = static_cast<char*>(mapped) + delta;
+        m_base_size = adjusted_size;
+        m_address = static_cast<char*>(mapped) + offset_delta;
         m_size = mapping_size;
 #endif
     }
