@@ -14,5 +14,4 @@ CMakeUserPresets.json
 !CMakeLists.txt
 
 # Third-party downloads (temporary)
-/third_party/boost_*/
 /third_party/*.tar.gz
