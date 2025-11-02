@@ -9,6 +9,8 @@ function(add_manual_test_suite SUFFIX IS_DEBUG)
     set(MANUAL_TEST_FILES
         barrier_deadlock_reproduction_test.cpp
         hang_test.cpp
+        coordinator_crash_children_hang_test.cpp
+        children_crash_coordinator_deadlock_test.cpp
     )
 
     foreach(TEST_FILE IN LISTS MANUAL_TEST_FILES)
