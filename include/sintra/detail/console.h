@@ -3,7 +3,7 @@
 
 #pragma once
 
-#include "coordinator.h"
+#include "process/coordinator.h"
 #include "globals.h"
 
 #include <cstddef>

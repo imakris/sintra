@@ -62,7 +62,7 @@ CAVEATS
 #include <system_error>
 #include <thread>
 
-#include "ipc_platform_utils.h"  // expected to provide: get_current_pid(), get_current_tid(), is_process_alive(uint32_t)
+#include "../ipc/platform_utils.h"  // expected to provide: get_current_pid(), get_current_tid(), is_process_alive(uint32_t)
 
 namespace sintra { namespace detail {
 

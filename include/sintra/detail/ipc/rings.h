@@ -100,9 +100,9 @@
 #pragma once
 
 // ─── Project config & utilities (kept as in original codebase) ───────────────
-#include "config.h"      // configuration constants for adaptive waiting, cache sizes, etc.
-#include "get_wtime.h"   // high-res wall clock (used by adaptive reader policy)
-#include "id_types.h"    // ID and type aliases as used by the project
+#include "../config.h"      // configuration constants for adaptive waiting, cache sizes, etc.
+#include "../get_wtime.h"   // high-res wall clock (used by adaptive reader policy)
+#include "../id_types.h"    // ID and type aliases as used by the project
 
 // ─── STL / stdlib ────────────────────────────────────────────────────────────
 #include <algorithm>     // std::reverse
@@ -130,11 +130,11 @@
 #include <vector>
 
 // ─── Interprocess Primitives ─────────────────────────────────────────────────
-#include "interprocess_file_mapping.h"
-#include "interprocess_mutex.h"
-#include "interprocess_semaphore.h"
+#include "../ipc/file_mapping.h"
+#include "../ipc/mutex.h"
+#include "../ipc/semaphore.h"
 
-#include "ipc_platform_utils.h"
+#include "../ipc/platform_utils.h"
 
 // Enables the writer to forcefully evict readers that are too slow.
 #ifndef SINTRA_ENABLE_SLOW_READER_EVICTION
@@ -502,7 +502,7 @@ private:
      *   • Compute ptr by rounding (mem + granularity) down to granularity
      *     (historical layout parity).
      *   • Release the reservation, then map the file twice contiguously starting
-     *     at ptr (Boost maps at a provided address).
+     *     at ptr.
      *
      * LINUX / POSIX
      *   • Reserve a 2× span with mmap(PROT_NONE). POSIX guarantees page alignment.
@@ -520,7 +520,7 @@ private:
                 return false; // size mismatch => refuse to map
             }
 
-            // NOTE: On Windows, Boost's "page size" here is the allocation granularity.
+            // NOTE: On Windows, the "page size" for mapping purposes is the allocation granularity.
             size_t page_size = system_page_size();
 
             // Enforce the “multiple of page/granularity” constraint explicitly.
