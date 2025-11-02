@@ -102,3 +102,12 @@ endfunction()
 # Build test suites for both build types using the adaptive policy
 add_test_suite("release" FALSE)
 add_test_suite("debug" TRUE)
+
+# Manual tests - reproduction cases and intentionally failing tests
+# Enable with: cmake -DBUILD_MANUAL_TESTS=ON
+option(BUILD_MANUAL_TESTS "Build manual/reproduction tests that may fail" OFF)
+
+if(BUILD_MANUAL_TESTS)
+    message(STATUS "Building manual tests (may contain intentionally failing tests)")
+    add_subdirectory(manual)
+endif()
