@@ -563,11 +563,17 @@ inline bool ips_backend::try_wait_for(std::chrono::nanoseconds d) noexcept
             continue;
         }
         if (now_ns() >= deadline) {
+            if (try_wait()) {
+                return true;
+            }
             errno = ETIMEDOUT;
             return false;
         }
         if (posix_wait_equal_until(reinterpret_cast<uint32_t*>(&P(*this).count), 0u, deadline) == -1) {
             if (errno == ETIMEDOUT) {
+                if (try_wait()) {
+                    return true;
+                }
                 return false;
             }
             if (errno == ENOTSUP) {

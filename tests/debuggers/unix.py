@@ -5,6 +5,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -274,13 +275,13 @@ class UnixDebuggerStrategy(DebuggerStrategy):
         if not debugger_command:
             return "", debugger_error
 
-        candidate_dirs = [invocation.path.parent, Path.cwd()]
+        candidate_dirs = {invocation.path.parent, Path.cwd()}
 
         if sys.platform == "darwin":
             darwin_core_dirs = [Path("/cores"), Path.home() / "Library" / "Logs" / "DiagnosticReports"]
-            for directory in darwin_core_dirs:
-                if directory not in candidate_dirs:
-                    candidate_dirs.append(directory)
+            candidate_dirs.update(darwin_core_dirs)
+        elif sys.platform.startswith("linux"):
+            candidate_dirs.add(Path("/var/lib/systemd/coredump"))
 
         candidate_cores: List[Tuple[float, Path]] = []
 
@@ -319,42 +320,56 @@ class UnixDebuggerStrategy(DebuggerStrategy):
         stack_outputs: List[str] = []
         capture_errors: List[str] = []
 
-        for _, core_path in candidate_cores:
-            command = self._build_unix_core_debugger_command(
-                debugger_name,
-                debugger_command,
-                invocation,
-                core_path,
-            )
+        cleanup_paths: List[Path] = []
 
-            try:
-                result = subprocess.run(
-                    command,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    timeout=180,
+        try:
+            for _, core_path in candidate_cores:
+                prepared_path, cleanup_path, prep_error = self._prepare_core_dump(core_path)
+                if prep_error:
+                    capture_errors.append(f"{core_path}: {prep_error}")
+                    continue
+
+                if cleanup_path is not None:
+                    cleanup_paths.append(cleanup_path)
+
+                command = self._build_unix_core_debugger_command(
+                    debugger_name,
+                    debugger_command,
+                    invocation,
+                    prepared_path,
                 )
-            except subprocess.SubprocessError as exc:
-                capture_errors.append(f"{core_path}: debugger failed ({exc})")
-                continue
 
-            output = result.stdout.strip()
-            if not output and result.stderr:
-                output = result.stderr.strip()
+                try:
+                    result = subprocess.run(
+                        command,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        timeout=180,
+                    )
+                except subprocess.SubprocessError as exc:
+                    capture_errors.append(f"{prepared_path}: debugger failed ({exc})")
+                    continue
 
-            if result.returncode == 0 and output:
-                stack_outputs.append(f"{core_path}\n{output}")
-                break
+                output = result.stdout.strip()
+                if not output and result.stderr:
+                    output = result.stderr.strip()
 
-            if output:
-                capture_errors.append(
-                    f"{core_path}: debugger exited with code {result.returncode}: {output}"
-                )
-            else:
-                capture_errors.append(
-                    f"{core_path}: debugger exited with code {result.returncode} without output"
-                )
+                if result.returncode == 0 and output:
+                    stack_outputs.append(f"{core_path}\n{output}")
+                    break
+
+                if output:
+                    capture_errors.append(
+                        f"{prepared_path}: debugger exited with code {result.returncode}: {output}"
+                    )
+                else:
+                    capture_errors.append(
+                        f"{prepared_path}: debugger exited with code {result.returncode} without output"
+                    )
+        finally:
+            for path in cleanup_paths:
+                self._safe_unlink(path)
 
         if stack_outputs:
             return "\n\n".join(stack_outputs), ""
@@ -521,10 +536,6 @@ class UnixDebuggerStrategy(DebuggerStrategy):
         if self._sudo_capability is not None:
             return self._sudo_capability
 
-        if sys.platform != "darwin":
-            self._sudo_capability = False
-            return False
-
         if hasattr(os, "geteuid") and os.geteuid() == 0:
             self._sudo_capability = False
             return False
@@ -548,6 +559,83 @@ class UnixDebuggerStrategy(DebuggerStrategy):
 
         self._sudo_capability = result.returncode == 0
         return self._sudo_capability
+
+    def _prepare_core_dump(self, core_path: Path) -> Tuple[Path, Optional[Path], Optional[str]]:
+        if core_path.suffix != ".zst":
+            return core_path, None, None
+
+        decompressed, error = self._decompress_zst_core(core_path)
+        if error or decompressed is None:
+            return core_path, None, error or "failed to decompress core dump"
+
+        return decompressed, decompressed, None
+
+    def _decompress_zst_core(self, core_path: Path) -> Tuple[Optional[Path], Optional[str]]:
+        zstd_path = shutil.which("zstd") or shutil.which("unzstd")
+        if not zstd_path:
+            return None, "zstd utility not available to decompress core dump"
+
+        fd, temp_path_str = tempfile.mkstemp(prefix="sintra-core-", suffix=".core")
+        os.close(fd)
+        temp_path = Path(temp_path_str)
+
+        command = [zstd_path]
+        if Path(zstd_path).name != "unzstd":
+            command.append("-d")
+            command.append("--no-progress")
+        command.extend([
+            "-f",
+            str(core_path),
+            "-o",
+            str(temp_path),
+        ])
+
+        sudo_supported = self._supports_passwordless_sudo()
+        attempts = (False, True) if sudo_supported else (False,)
+
+        for use_sudo in attempts:
+            actual_command = (
+                self._wrap_command_with_sudo(command) if use_sudo else command
+            )
+
+            try:
+                result = subprocess.run(
+                    actual_command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=120,
+                )
+            except subprocess.SubprocessError as exc:
+                if use_sudo or not sudo_supported:
+                    self._safe_unlink(temp_path)
+                    return None, f"decompression failed ({exc})"
+                self._safe_unlink(temp_path)
+                continue
+
+            if result.returncode == 0:
+                return temp_path, None
+
+            detail = result.stderr.strip() or result.stdout.strip()
+            if use_sudo or not sudo_supported:
+                self._safe_unlink(temp_path)
+                if detail:
+                    return None, f"decompression failed: {detail}"
+                return None, "decompression failed"
+            self._safe_unlink(temp_path)
+            continue
+
+        self._safe_unlink(temp_path)
+        return None, "decompression failed"
+
+    @staticmethod
+    def _safe_unlink(path: Path) -> None:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
 
     def _wrap_command_with_sudo(self, command: List[str]) -> List[str]:
         if not self._supports_passwordless_sudo():
