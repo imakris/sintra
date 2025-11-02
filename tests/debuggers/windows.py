@@ -661,7 +661,18 @@ class WindowsDebuggerStrategy(DebuggerStrategy):
             return "", debugger_error
 
         target_pids = [pid]
-        target_pids.extend(self._collect_windows_process_tree_pids(pid))
+        # Use the collect_descendant_pids callback (which has psutil support) if available,
+        # otherwise fall back to the PowerShell-based method
+        if self._collect_descendant_pids:
+            child_pids = list(self._collect_descendant_pids(pid))
+            target_pids.extend(child_pids)
+            if self.verbose:
+                print(f"[DEBUG] Windows debugger: root PID {pid}, children from callback: {child_pids}, total PIDs: {target_pids}", file=sys.stderr)
+        else:
+            child_pids = self._collect_windows_process_tree_pids(pid)
+            target_pids.extend(child_pids)
+            if self.verbose:
+                print(f"[DEBUG] Windows debugger: root PID {pid}, children from PowerShell: {child_pids}, total PIDs: {target_pids}", file=sys.stderr)
 
         stack_outputs: List[str] = []
         capture_errors: List[str] = []
