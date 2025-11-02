@@ -233,6 +233,9 @@ int coordinator_process()
                     std::ostringstream oss;
                     oss << "Coordinator did not observe first marker for iteration " << iteration;
                     failure_reason = oss.str();
+                    // Print [FAIL] to trigger live stack capture
+                    std::fprintf(stderr, "[FAIL] %s\n", failure_reason.c_str());
+                    std::fflush(stderr);
                 }
                 success = false;
                 aborted = true;
@@ -242,6 +245,9 @@ int coordinator_process()
                     failure_reason = state.failure_detail.empty()
                         ? "Coordinator observed invalid marker sequence"
                         : state.failure_detail;
+                    // Print [FAIL] to trigger live stack capture
+                    std::fprintf(stderr, "[FAIL] %s\n", failure_reason.c_str());
+                    std::fflush(stderr);
                 }
                 success = false;
                 aborted = true;
@@ -278,6 +284,9 @@ int coordinator_process()
                             oss << (idx == 0 ? " " : " ") << missing_workers[idx];
                         }
                         failure_reason = oss.str();
+                        // Print [FAIL] to trigger live stack capture
+                        std::fprintf(stderr, "[FAIL] %s\n", failure_reason.c_str());
+                        std::fflush(stderr);
                     }
                     success = false;
                     aborted = true;

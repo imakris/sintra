@@ -1654,11 +1654,26 @@ class TestRunner:
         return pids
 
     def _collect_descendant_pids(self, root_pid: int) -> List[int]:
-        """Return all descendant process IDs for the provided root PID on Unix."""
+        """Return all descendant process IDs for the provided root PID."""
 
         descendants: List[int] = []
 
         if sys.platform == 'win32':
+            # Use psutil to get descendants on Windows
+            if _PSUTIL is not None:
+                try:
+                    root_proc = _PSUTIL.Process(root_pid)
+                    children = root_proc.children(recursive=True)
+                    descendants = [child.pid for child in children]
+                    if self.verbose:
+                        print(f"[DEBUG] _collect_descendant_pids({root_pid}) found {len(descendants)} descendants: {descendants}", file=sys.stderr)
+                except (_PSUTIL.NoSuchProcess, _PSUTIL.AccessDenied, Exception) as e:
+                    if self.verbose:
+                        print(f"[DEBUG] _collect_descendant_pids({root_pid}) failed: {e}", file=sys.stderr)
+                    pass
+            else:
+                if self.verbose:
+                    print(f"[DEBUG] _collect_descendant_pids({root_pid}): psutil not available", file=sys.stderr)
             return descendants
 
         proc_path = Path('/proc')
