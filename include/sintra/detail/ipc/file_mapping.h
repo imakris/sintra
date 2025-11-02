@@ -112,13 +112,25 @@ public:
         }
 #else
         if (m_fd != -1) {
-            #if defined(_POSIX_SYNCHRONIZED_IO) && (_POSIX_SYNCHRONIZED_IO > 0)
-            if (::fdatasync(m_fd) != 0) {
+#if defined(_POSIX_SYNCHRONIZED_IO) && (_POSIX_SYNCHRONIZED_IO > 0)
+            int rc;
+            do {
+                rc = ::fdatasync(m_fd);
+            }
+            while (rc != 0 && errno == EINTR);
+            if (rc != 0) {
+                throw std::system_error(errno, std::system_category(), "fdatasync failed");
+            }
 #else
-            if (::fsync(m_fd) != 0) {
-#endif
+            int rc;
+            do {
+                rc = ::fsync(m_fd);
+            } 
+            while (rc != 0 && errno == EINTR);
+            if (rc != 0) {
                 throw std::system_error(errno, std::system_category(), "fsync failed");
             }
+#endif
         }
 #endif
     }
@@ -443,24 +455,9 @@ public:
         }
 
 #if defined(_WIN32)
-        // Use the view base (m_base) to compute the flush region for correctness.
-        // We must flush from a page-aligned position within the view.
-        SYSTEM_INFO si{};
-        ::GetSystemInfo(&si);
-        const std::uintptr_t gran = si.dwAllocationGranularity;
-
-        std::uintptr_t start = reinterpret_cast<std::uintptr_t>(m_address) + offset;
-        std::uintptr_t base_addr = reinterpret_cast<std::uintptr_t>(m_base);
-        std::uintptr_t aligned_start = (start / gran) * gran;
-
-        // Ensure aligned_start is not before the base
-        if (aligned_start < base_addr) {
-            aligned_start = base_addr;
-        }
-
-        std::size_t flush_len = (start - aligned_start) + len;
-
-        if (!::FlushViewOfFile(reinterpret_cast<void*>(aligned_start), flush_len)) {
+        // Simplified flush: pass any address inside the view; Windows aligns internally to page boundaries.
+        std::uintptr_t start_addr = reinterpret_cast<std::uintptr_t>(m_address) + offset;
+        if (!::FlushViewOfFile(reinterpret_cast<void*>(start_addr), len)) {
             throw std::system_error(::GetLastError(), std::system_category(), "FlushViewOfFile failed");
         }
 #else
@@ -484,7 +481,12 @@ public:
         }
         std::size_t adj_len = static_cast<std::size_t>(end - aligned);
 
-        if (::msync(reinterpret_cast<void*>(aligned), adj_len, MS_SYNC) != 0) {
+        int rc;
+        do {
+            rc = ::msync(reinterpret_cast<void*>(aligned), adj_len, MS_SYNC);
+        }
+        while (rc != 0 && errno == EINTR);
+        if (rc != 0) {
             throw std::system_error(errno, std::system_category(), "msync failed");
         }
 #endif
