@@ -444,8 +444,10 @@ template <typename T>
 sintra::type_id_type get_type_id()
 {
     const std::string type_name = detail::type_name<T>();
-    auto it = s_mproc->m_type_id_of_type_name.find(type_name);
-    if (it != s_mproc->m_type_id_of_type_name.end()) {
+    // Hold spinlock while accessing the iterator to prevent use-after-invalidation
+    auto scoped_map = s_mproc->m_type_id_of_type_name.scoped();
+    auto it = scoped_map.get().find(type_name);
+    if (it != scoped_map.get().end()) {
         return it->second;
     }
 
@@ -469,8 +471,10 @@ sintra::type_id_type get_type_id(const T&) {return get_type_id<T>();}
 template <typename>
 sintra::instance_id_type get_instance_id(std::string&& assigned_name)
 {
-    auto it = s_mproc->m_instance_id_of_assigned_name.find(assigned_name);
-    if (it != s_mproc->m_instance_id_of_assigned_name.end()) {
+    // Hold spinlock while accessing the iterator to prevent use-after-invalidation
+    auto scoped_map = s_mproc->m_instance_id_of_assigned_name.scoped();
+    auto it = scoped_map.get().find(assigned_name);
+    if (it != scoped_map.get().end()) {
         return it->second;
     }
 
@@ -1543,16 +1547,22 @@ void Managed_process::wait_until_all_external_readers_are_done(int extra_allowed
 inline void Managed_process::unpublish_all_transceivers()
 {
     std::vector<Transceiver*> to_destroy;
-    to_destroy.reserve(m_local_pointer_of_instance_id.size());
 
-    for (auto& entry : m_local_pointer_of_instance_id) {
-        auto iid = entry.first;
-        auto* transceiver = entry.second;
-        if (!transceiver || iid == m_instance_id) {
-            continue;
+    // Hold the spinlock during iteration to prevent concurrent modification.
+    // Using scoped() ensures the map isn't modified while we build the list.
+    {
+        auto scoped_map = m_local_pointer_of_instance_id.scoped();
+        to_destroy.reserve(scoped_map.get().size());
+
+        for (auto& entry : scoped_map.get()) {
+            auto iid = entry.first;
+            auto* transceiver = entry.second;
+            if (!transceiver || iid == m_instance_id) {
+                continue;
+            }
+
+            to_destroy.push_back(transceiver);
         }
-
-        to_destroy.push_back(transceiver);
     }
 
     for (auto* transceiver : to_destroy) {
