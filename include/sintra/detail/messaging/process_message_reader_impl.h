@@ -563,11 +563,13 @@ void Process_message_reader::reply_reader_function()
                 // the pointer remains valid while we access it.
                 Transceiver::Return_handler handler_copy;
                 bool have_handler = false;
+                bool object_found = false;
                 {
                     auto scoped_map = s_mproc->m_local_pointer_of_instance_id.scoped();
                     auto it = scoped_map.get().find(m->receiver_instance_id);
 
                     if (it != scoped_map.get().end()) {
+                        object_found = true;
                         auto &return_handlers = it->second->m_active_return_handlers;
 
                         {
@@ -584,31 +586,32 @@ void Process_message_reader::reply_reader_function()
 
                 // Now invoke handlers with spinlock released to avoid holding it during
                 // potentially long-running user code.
-                if (have_handler) {
-                    if (m->exception_type_id == not_defined_type_id) {
-                        handler_copy.return_handler(*m);
-                    }
-                    else
-                    if (m->exception_type_id != (type_id_type)detail::reserved_id::deferral) {
-                        handler_copy.exception_handler(*m);
+                if (object_found) {
+                    if (have_handler) {
+                        if (m->exception_type_id == not_defined_type_id) {
+                            handler_copy.return_handler(*m);
+                        }
+                        else
+                        if (m->exception_type_id != (type_id_type)detail::reserved_id::deferral) {
+                            handler_copy.exception_handler(*m);
+                        }
+                        else {
+                            handler_copy.deferral_handler(*m);
+                        }
                     }
                     else {
-                        handler_copy.deferral_handler(*m);
+                        // No active return handler — can happen if the caller already cleaned up
+                        // (e.g., after cancellation/shutdown) and a late/duplicate message arrived.
+                        // Drop it quietly unless we're fully RUNNING; in RUNNING emit a diagnostic
+                        // but do not hard-assert to avoid modal dialogs on Windows Debug.
+                        if (s_mproc && s_mproc->m_communication_state == Managed_process::COMMUNICATION_RUNNING) {
+                            std::fprintf(stderr,
+                                "Warning: Reply reader received message for function_instance_id=%llu but no active handler found (receiver_instance_id=%llu)\n",
+                                static_cast<unsigned long long>(m->function_instance_id),
+                                static_cast<unsigned long long>(m->receiver_instance_id));
+                        }
                     }
                 }
-                else {
-                    // No active return handler — can happen if the caller already cleaned up
-                    // (e.g., after cancellation/shutdown) and a late/duplicate message arrived.
-                    // Drop it quietly unless we're fully RUNNING; in RUNNING emit a diagnostic
-                    // but do not hard-assert to avoid modal dialogs on Windows Debug.
-                    if (s_mproc && s_mproc->m_communication_state == Managed_process::COMMUNICATION_RUNNING) {
-                        std::fprintf(stderr,
-                            "Warning: Reply reader received message for function_instance_id=%llu but no active handler found (receiver_instance_id=%llu)\n",
-                            static_cast<unsigned long long>(m->function_instance_id),
-                            static_cast<unsigned long long>(m->receiver_instance_id));
-                    }
-                }
-            }
                 else {
                     // The target object no longer exists locally. During shutdown or after
                     // coordinator loss, late replies can legitimately arrive after objects
