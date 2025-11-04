@@ -445,10 +445,13 @@ sintra::type_id_type get_type_id()
 {
     const std::string type_name = detail::type_name<T>();
     // Hold spinlock while accessing the iterator to prevent use-after-invalidation
-    auto scoped_map = s_mproc->m_type_id_of_type_name.scoped();
-    auto it = scoped_map.get().find(type_name);
-    if (it != scoped_map.get().end()) {
-        return it->second;
+    {
+        auto scoped_map = s_mproc->m_type_id_of_type_name.scoped();
+        auto it = scoped_map.get().find(type_name);
+        if (it != scoped_map.get().end()) {
+            return it->second;
+        }
+        // Spinlock released here automatically when scoped_map goes out of scope
     }
 
     // Caution the Coordinator call will refer to the map that is being assigned,
@@ -472,10 +475,13 @@ template <typename>
 sintra::instance_id_type get_instance_id(std::string&& assigned_name)
 {
     // Hold spinlock while accessing the iterator to prevent use-after-invalidation
-    auto scoped_map = s_mproc->m_instance_id_of_assigned_name.scoped();
-    auto it = scoped_map.get().find(assigned_name);
-    if (it != scoped_map.get().end()) {
-        return it->second;
+    {
+        auto scoped_map = s_mproc->m_instance_id_of_assigned_name.scoped();
+        auto it = scoped_map.get().find(assigned_name);
+        if (it != scoped_map.get().end()) {
+            return it->second;
+        }
+        // Spinlock released here automatically when scoped_map goes out of scope
     }
 
     // Caution the Coordinator call will refer to the map that is being assigned,
