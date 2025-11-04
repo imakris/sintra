@@ -127,20 +127,64 @@ barrier_completion_payload Process_group::barrier(
 
     basic_lock.unlock();
 
+    auto pending_it = b.pending.find(caller_piid);
+    auto arrived_it = b.arrivals.find(caller_piid);
+
+    auto fail_rendezvous = [&](barrier_failure reason,
+                               instance_id_type failing_instance,
+                               instance_id_type failing_function) {
+        auto payload = make_fast_fail_payload(reason);
+        const auto requirement_mask_snapshot = b.requirement_mask;
+        auto waiters = b.waiter_function_ids;
+
+        b.waiter_function_ids.clear();
+        b.pending.clear();
+        b.arrivals.clear();
+        b.rendezvous_active = false;
+        b.rendezvous_complete = true;
+        b.rendezvous_sequence = invalid_sequence;
+        b.completion_template.barrier_sequence = invalid_sequence;
+        b.completion_template.rendezvous = payload.rendezvous;
+
+        barrier_lock.unlock();
+
+        if (payload.requirement_mask == 0 &&
+            requirement_mask_snapshot != std::numeric_limits<uint32_t>::max())
+        {
+            payload.requirement_mask = requirement_mask_snapshot;
+        }
+
+        auto dispatch = [&](instance_id_type recipient, instance_id_type function_iid) {
+            if (function_iid == invalid_instance_id) {
+                return;
+            }
+            send_payload(recipient, function_iid, payload);
+        };
+
+        dispatch(failing_instance, failing_function);
+
+        for (const auto& [recipient, function_iid] : waiters) {
+            if (recipient == failing_instance && function_iid == failing_function) {
+                continue;
+            }
+            dispatch(recipient, function_iid);
+        }
+
+        return make_barrier_completion_payload();
+    };
+
     if (b.requirement_mask == std::numeric_limits<uint32_t>::max()) {
         b.requirement_mask = request_flags;
         b.completion_template.requirement_mask = request_flags;
     }
     else if (b.requirement_mask != request_flags) {
-        auto payload = make_fast_fail_payload(barrier_failure::incompatible_request);
-        const auto function_iid = current_message->function_instance_id;
-        barrier_lock.unlock();
-        send_payload(caller_piid, function_iid, payload);
-        return make_barrier_completion_payload();
+        if (pending_it != b.pending.end()) {
+            b.pending.erase(pending_it);
+        }
+        return fail_rendezvous(barrier_failure::incompatible_request,
+                               caller_piid,
+                               current_message->function_instance_id);
     }
-
-    auto pending_it = b.pending.find(caller_piid);
-    auto arrived_it = b.arrivals.find(caller_piid);
 
     if (arrived_it != b.arrivals.end()) {
         auto payload = make_fast_fail_payload(barrier_failure::incompatible_request);
