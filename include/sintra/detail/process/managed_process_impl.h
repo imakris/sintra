@@ -43,6 +43,12 @@ namespace sintra {
 extern thread_local bool tl_is_req_thread;
 extern thread_local std::function<void()> tl_post_handler_function;
 
+// Protects access to s_mproc during signal dispatch to prevent use-after-free.
+// On POSIX: The signal dispatch thread takes a shared lock when accessing s_mproc.
+// On Windows: The CRT signal handler thread takes a shared lock when accessing s_mproc.
+// The Managed_process destructor takes an exclusive lock before clearing s_mproc.
+inline std::shared_mutex dispatch_shutdown_mutex_instance;
+
 inline std::once_flag& signal_handler_once_flag()
 {
     static std::once_flag flag;
@@ -129,6 +135,11 @@ namespace {
 
     inline void dispatch_signal_number(int sig_number)
     {
+        // Hold shared lock to prevent s_mproc from being destroyed while we access it.
+        // The Managed_process destructor will acquire an exclusive lock before clearing
+        // s_mproc and destroying the object, ensuring this function completes first.
+        std::shared_lock<std::shared_mutex> dispatch_lock(dispatch_shutdown_mutex_instance);
+
         auto* mproc = s_mproc;
 #ifndef _WIN32
         if (sig_number == SIGCHLD) {
@@ -254,6 +265,12 @@ namespace {
 inline
 static void s_signal_handler(int sig)
 {
+    // Hold shared lock to prevent s_mproc from being destroyed while we access it.
+    // Windows signal() handlers run on a CRT-managed thread (not true signal context),
+    // so we can safely use mutexes. The Managed_process destructor will acquire an
+    // exclusive lock before clearing s_mproc, ensuring this handler completes first.
+    std::shared_lock<std::shared_mutex> dispatch_lock(dispatch_shutdown_mutex_instance);
+
     if (s_mproc && s_mproc->m_out_req_c) {
         s_mproc->emit_remote<Managed_process::terminated_abnormally>(sig);
 
@@ -671,10 +688,29 @@ Managed_process::~Managed_process()
         ::close(pipefd[0]);
         pipefd[0] = -1;
     }
-#endif
 
-    s_mproc = nullptr;
-    s_mproc_id = 0;
+    // Wait for any in-flight signal dispatches to complete before clearing s_mproc.
+    // On POSIX: The dispatch thread may still be executing dispatch_signal_number()
+    //           after we closed the pipes above.
+    // On Windows: The CRT signal handler thread may be executing s_signal_handler().
+    // Taking an exclusive lock here ensures all shared locks are released before we
+    // clear s_mproc and destroy the object, preventing use-after-free.
+    {
+        std::unique_lock<std::shared_mutex> dispatch_lock(dispatch_shutdown_mutex_instance);
+        s_mproc = nullptr;
+        s_mproc_id = 0;
+    }
+#else
+    // Wait for any in-flight signal handler to complete before clearing s_mproc.
+    // The Windows CRT signal handler may be executing s_signal_handler() on a
+    // separate thread. Taking an exclusive lock ensures the handler completes
+    // before we clear s_mproc and destroy the object, preventing use-after-free.
+    {
+        std::unique_lock<std::shared_mutex> dispatch_lock(dispatch_shutdown_mutex_instance);
+        s_mproc = nullptr;
+        s_mproc_id = 0;
+    }
+#endif
 }
 
 #ifndef _WIN32
