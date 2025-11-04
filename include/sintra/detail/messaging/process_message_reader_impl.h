@@ -320,10 +320,20 @@ void Process_message_reader::request_reader_function()
                 // If addressed to a specified local receiver, this may only be an RPC call,
                 // thus the named receiver must exist.
 
-                // if the receiver  registered handler, call the handler
-                auto it = Transceiver::get_rpc_handler_map().find(m->message_type_id);
-                assert(it != Transceiver::get_rpc_handler_map().end()); // this would be a library error
-                (*it->second)(*m); // call the handler
+                // if the receiver registered handler, call the handler
+                // Hold spinlock while accessing the iterator to prevent use-after-invalidation
+                void (*handler_fn)(Message_prefix&);
+                {
+                    auto scoped_map = Transceiver::get_rpc_handler_map().scoped();
+                    auto it = scoped_map.get().find(m->message_type_id);
+                    assert(it != scoped_map.get().end()); // this would be a library error
+
+                    // Copy the function pointer while holding the lock
+                    handler_fn = it->second;
+                    // Spinlock released here automatically when scoped_map goes out of scope
+                }
+
+                (*handler_fn)(*m); // call the handler
             }
         }
         else
@@ -548,22 +558,35 @@ void Process_message_reader::reply_reader_function()
                 (m->receiver_instance_id == s_coord_id && s_coord) ||
                 (m->sender_instance_id   == s_coord_id) )
             {
-                auto it = s_mproc->m_local_pointer_of_instance_id.find(m->receiver_instance_id);
+                // Hold the spinlock for the entire critical section to prevent use-after-free.
+                // The Transceiver destructor erases from this map, so holding the lock ensures
+                // the pointer remains valid while we access it.
+                Transceiver::Return_handler handler_copy;
+                bool have_handler = false;
+                bool object_found = false;
+                {
+                    auto scoped_map = s_mproc->m_local_pointer_of_instance_id.scoped();
+                    auto it = scoped_map.get().find(m->receiver_instance_id);
 
-                if (it != s_mproc->m_local_pointer_of_instance_id.end()) {
-                    auto &return_handlers = it->second->m_active_return_handlers;
+                    if (it != scoped_map.get().end()) {
+                        object_found = true;
+                        auto &return_handlers = it->second->m_active_return_handlers;
 
-                    Transceiver::Return_handler handler_copy;
-                    bool have_handler = false;
-                    {
-                        std::lock_guard<std::mutex> guard(it->second->m_return_handlers_mutex);
-                        auto it2 = return_handlers.find(m->function_instance_id);
-                        if (it2 != return_handlers.end()) {
-                            handler_copy = it2->second;
-                            have_handler = true;
+                        {
+                            std::lock_guard<std::mutex> guard(it->second->m_return_handlers_mutex);
+                            auto it2 = return_handlers.find(m->function_instance_id);
+                            if (it2 != return_handlers.end()) {
+                                handler_copy = it2->second;
+                                have_handler = true;
+                            }
                         }
                     }
+                    // Spinlock released here automatically when scoped_map goes out of scope
+                }
 
+                // Now invoke handlers with spinlock released to avoid holding it during
+                // potentially long-running user code.
+                if (object_found) {
                     if (have_handler) {
                         if (m->exception_type_id == not_defined_type_id) {
                             handler_copy.return_handler(*m);
