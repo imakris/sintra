@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "../barrier_types.h"
 #include "../id_types.h"
 #include "../resolvable_instance.h"
 #include "../resolve_type.h"
@@ -11,6 +12,7 @@
 #include <array>
 #include <atomic>
 #include <condition_variable>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <unordered_set>
@@ -48,7 +50,9 @@ struct Process_group: Derived_transceiver<Process_group>
     // processes waiting on the barrier. This message would contain
     // - the serial number, for identification purposes
     // - the sequence counter (i.e. at which ring sequence was the barrier completed)
-    sequence_counter_type barrier(const string& barrier_name);
+    barrier_completion_payload barrier(const string& barrier_name,
+                                       uint32_t request_flags,
+                                       boot_id_type boot_id);
 
 
     struct Barrier
@@ -57,15 +61,20 @@ struct Process_group: Derived_transceiver<Process_group>
         condition_variable                      cv;
         unordered_set<instance_id_type>         processes_pending;
         unordered_set<instance_id_type>         processes_arrived;
-        //sequence_counter_type                   flush_sequence = 0;
         bool                                    failed = false;
         instance_id_type                        common_function_iid = invalid_instance_id;
+        uint32_t                                requirement_mask = std::numeric_limits<uint32_t>::max();
+        uint64_t                                barrier_epoch = 0;
+        sequence_counter_type                   rendezvous_sequence = invalid_sequence;
+        bool                                    rendezvous_complete = false;
+        barrier_completion_payload              completion_template = make_barrier_completion_payload();
     };
 
     struct Barrier_completion
     {
         instance_id_type                        common_function_iid = invalid_instance_id;
         std::vector<instance_id_type>           recipients;
+        barrier_completion_payload              payload = make_barrier_completion_payload();
     };
 
     unordered_map<string, shared_ptr<Barrier>>  m_barriers;

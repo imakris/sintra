@@ -29,8 +29,10 @@ using std::unique_lock;
 
 // EXPORTED EXCLUSIVELY FOR RPC
 inline
-sequence_counter_type Process_group::barrier(
-    const string& barrier_name)
+barrier_completion_payload Process_group::barrier(
+    const string& barrier_name,
+    uint32_t request_flags,
+    boot_id_type /*boot_id*/)
 {
     std::unique_lock basic_lock(m_call_mutex);
     instance_id_type caller_piid = s_tl_current_message->sender_instance_id;
@@ -47,6 +49,19 @@ sequence_counter_type Process_group::barrier(
     Barrier& b = *barrier;
     b.m.lock(); // main barrier lock
 
+    auto make_fast_fail_payload = [&](barrier_failure reason) {
+        auto payload = make_barrier_completion_payload();
+        payload.barrier_epoch = b.barrier_epoch;
+        const auto frozen_mask = b.requirement_mask;
+        payload.requirement_mask = (frozen_mask == std::numeric_limits<uint32_t>::max())
+                                       ? request_flags
+                                       : frozen_mask;
+        payload.rendezvous.state = barrier_state::failed;
+        payload.rendezvous.failure_code = reason;
+        payload.rendezvous.sequence = invalid_sequence;
+        return payload;
+    };
+
     // Atomically snapshot membership and filter draining processes while holding m_call_mutex.
     // This ensures a consistent view: no process can be added/removed or change draining state
     // between the membership snapshot and the draining filter.
@@ -56,6 +71,12 @@ sequence_counter_type Process_group::barrier(
         b.processes_arrived.clear();
         b.failed = false;
         b.common_function_iid = make_instance_id();
+        b.requirement_mask = std::numeric_limits<uint32_t>::max();
+        b.rendezvous_complete = false;
+        b.rendezvous_sequence = invalid_sequence;
+        ++b.barrier_epoch;
+        b.completion_template = make_barrier_completion_payload();
+        b.completion_template.barrier_epoch = b.barrier_epoch;
 
         // Filter out draining processes while still holding m_call_mutex for atomicity
         if (auto* coord = s_coord) {
@@ -76,10 +97,28 @@ sequence_counter_type Process_group::barrier(
     // need to be able to arrive at the barrier concurrently
     basic_lock.unlock();
 
+    if (b.requirement_mask == std::numeric_limits<uint32_t>::max()) {
+        b.requirement_mask = request_flags;
+        b.completion_template.requirement_mask = request_flags;
+    }
+    else if (b.requirement_mask != request_flags) {
+        auto payload = make_fast_fail_payload(barrier_failure::incompatible_request);
+        b.m.unlock();
+        return payload;
+    }
+
+    if (b.processes_pending.find(caller_piid) == b.processes_pending.end() &&
+        b.processes_arrived.find(caller_piid) == b.processes_arrived.end())
+    {
+        auto payload = make_fast_fail_payload(barrier_failure::incompatible_request);
+        b.m.unlock();
+        return payload;
+    }
+
     b.processes_arrived.insert(caller_piid);
     b.processes_pending.erase(caller_piid);
 
-    if (b.processes_pending.size() == 0) {
+    if (b.processes_pending.empty()) {
         // Last arrival
         auto additional_pids = b.processes_arrived;
         additional_pids.erase(caller_piid);
@@ -94,6 +133,17 @@ sequence_counter_type Process_group::barrier(
 
         const auto current_common_fiid = b.common_function_iid;
         s_tl_common_function_iid = current_common_fiid;
+
+        const auto flush_sequence = s_mproc->m_out_rep_c->get_leading_sequence();
+        b.rendezvous_sequence = flush_sequence;
+        b.rendezvous_complete = true;
+        b.completion_template.barrier_sequence = flush_sequence;
+        b.completion_template.requirement_mask = b.requirement_mask;
+        b.completion_template.rendezvous.state = barrier_state::satisfied;
+        b.completion_template.rendezvous.failure_code = barrier_failure::none;
+        b.completion_template.rendezvous.sequence = flush_sequence;
+
+        barrier_completion_payload result = b.completion_template;
         b.m.unlock();
 
         // Re-lock m_call_mutex to safely erase from m_barriers
@@ -107,9 +157,7 @@ sequence_counter_type Process_group::barrier(
             m_barriers.erase(it);
         }
         // basic_lock will unlock m_call_mutex on return
-        // Use reply ring watermark (m_out_rep_c) since barrier completion messages
-        // are sent on the reply channel. Get it at return time for the calling process.
-        return s_mproc->m_out_rep_c->get_leading_sequence();
+        return result;
     }
     else {
         // Not last arrival - emit a deferral message now and return without a normal reply
@@ -126,8 +174,8 @@ sequence_counter_type Process_group::barrier(
 
         mark_rpc_reply_deferred();
         b.m.unlock();
-        return 0;
-    }
+        return make_barrier_completion_payload();
+}
 }
 
 
@@ -172,6 +220,22 @@ inline void Process_group::drop_from_inflight_barriers(
         barrier->processes_arrived.clear();
         barrier->common_function_iid = invalid_instance_id;
 
+        auto payload = barrier->completion_template;
+        if (payload.requirement_mask == 0 &&
+            barrier->requirement_mask != std::numeric_limits<uint32_t>::max())
+        {
+            payload.requirement_mask = barrier->requirement_mask;
+        }
+
+        if (!barrier->rendezvous_complete) {
+            payload.barrier_sequence = invalid_sequence;
+            payload.rendezvous.state = barrier_state::failed;
+            payload.rendezvous.failure_code = barrier_failure::peer_lost;
+            payload.rendezvous.sequence = invalid_sequence;
+        }
+
+        completion.payload = payload;
+
         barrier_lock.unlock();
 
         barrier_it = m_barriers.erase(barrier_it);
@@ -182,7 +246,7 @@ inline void Process_group::drop_from_inflight_barriers(
 inline void Process_group::emit_barrier_completions(
     const std::vector<Barrier_completion>& completions)
 {
-    using return_message_type = Message<Enclosure<sequence_counter_type>, void, not_defined_type_id>;
+    using return_message_type = Message<Enclosure<barrier_completion_payload>, void, not_defined_type_id>;
 
     for (const auto& completion : completions) {
         if (completion.common_function_iid == invalid_instance_id) {
@@ -197,10 +261,13 @@ inline void Process_group::emit_barrier_completions(
         // gets a watermark that's valid for their specific message write time.
         // This prevents hangs where a global token is ahead of some recipient's channel.
         for (auto recipient : completion.recipients) {
-            const auto flush_sequence = s_mproc->m_out_rep_c->get_leading_sequence();
+            auto payload = completion.payload;
+            if (payload.barrier_sequence == invalid_sequence) {
+                payload.barrier_sequence = completion.payload.barrier_sequence;
+            }
 
             auto* placed_msg = s_mproc->m_out_rep_c->write<return_message_type>(
-                vb_size<return_message_type>(flush_sequence), flush_sequence);
+                vb_size<return_message_type>(payload), payload);
 
             Transceiver::finalize_rpc_write(
                 placed_msg,

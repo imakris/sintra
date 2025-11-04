@@ -41,8 +41,9 @@ int worker_process(std::uint32_t worker_index)
 
             // All processes use the SAME barrier name repeatedly
             // This causes rapid create/destroy/recreate cycles
-            auto seq1 = barrier("reuse");
-            if (seq1 == 0 || seq1 <= last_reuse_seq) {
+            auto reuse_head = barrier("reuse");
+            const auto seq1 = reuse_head.sequence();
+            if (!reuse_head.succeeded() || seq1 == 0 || seq1 <= last_reuse_seq) {
                 std::fprintf(stderr,
                              "Worker %u iter %u: unexpected reuse seq %llu after %llu\n",
                              worker_index,
@@ -55,8 +56,9 @@ int worker_process(std::uint32_t worker_index)
 
             // Immediately call another barrier with a different name
             // to test interleaving
-            auto seq2 = barrier("other");
-            if (seq2 == 0 || seq2 <= last_other_seq) {
+            auto other_head = barrier("other");
+            const auto seq2 = other_head.sequence();
+            if (!other_head.succeeded() || seq2 == 0 || seq2 <= last_other_seq) {
                 std::fprintf(stderr,
                              "Worker %u iter %u: unexpected other seq %llu after %llu\n",
                              worker_index,
@@ -68,8 +70,9 @@ int worker_process(std::uint32_t worker_index)
             last_other_seq = seq2;
 
             // Call the first barrier again immediately
-            auto seq3 = barrier("reuse");
-            if (seq3 == 0 || seq3 <= last_reuse_seq) {
+            auto reuse_tail = barrier("reuse");
+            const auto seq3 = reuse_tail.sequence();
+            if (!reuse_tail.succeeded() || seq3 == 0 || seq3 <= last_reuse_seq) {
                 std::fprintf(stderr,
                              "Worker %u iter %u: reuse tail seq %llu after %llu\n",
                              worker_index,
@@ -81,8 +84,9 @@ int worker_process(std::uint32_t worker_index)
             last_reuse_seq = seq3;
 
             if ((iter & 0xF) == 0) {
-                auto seq4 = barrier("reuse");
-                if (seq4 == 0 || seq4 <= last_reuse_seq) {
+                auto reuse_bonus = barrier("reuse");
+                const auto seq4 = reuse_bonus.sequence();
+                if (!reuse_bonus.succeeded() || seq4 == 0 || seq4 <= last_reuse_seq) {
                     std::fprintf(stderr,
                                  "Worker %u iter %u: reuse bonus seq %llu after %llu\n",
                                  worker_index,
@@ -95,8 +99,9 @@ int worker_process(std::uint32_t worker_index)
             }
 
             if ((iter & 0x1F) == 0) {
-                auto seq5 = barrier("other");
-                if (seq5 == 0 || seq5 <= last_other_seq) {
+                auto other_bonus = barrier("other");
+                const auto seq5 = other_bonus.sequence();
+                if (!other_bonus.succeeded() || seq5 == 0 || seq5 <= last_other_seq) {
                     std::fprintf(stderr,
                                  "Worker %u iter %u: other bonus seq %llu after %llu\n",
                                  worker_index,

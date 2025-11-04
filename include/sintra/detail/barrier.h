@@ -4,6 +4,7 @@
 #pragma once
 
 #include "globals.h"
+#include "barrier_types.h"
 #include "process/managed_process.h"
 #include "messaging/process_message_reader_impl.h"
 
@@ -22,15 +23,20 @@ inline bool should_treat_rpc_failure_as_satisfied()
 
 inline void wait_for_processing_quiescence();
 
-inline bool rendezvous_barrier(const std::string& barrier_name, const std::string& group_name)
+inline barrier_completion_payload rendezvous_barrier_payload(const std::string& barrier_name,
+                                                             const std::string& group_name,
+                                                             uint32_t request_flags,
+                                                             boot_id_type boot_id)
 {
-    sequence_counter_type flush_seq = invalid_sequence;
+    auto payload = make_barrier_completion_payload();
     try {
-        flush_seq = Process_group::rpc_barrier(group_name, barrier_name);
+        payload = Process_group::rpc_barrier(group_name, barrier_name, request_flags, boot_id);
     }
     catch (const rpc_cancelled&) {
         if (should_treat_rpc_failure_as_satisfied()) {
-            return true;
+            payload.rendezvous.state = barrier_state::satisfied;
+            payload.rendezvous.failure_code = barrier_failure::none;
+            return payload;
         }
         throw;
     }
@@ -41,59 +47,81 @@ inline bool rendezvous_barrier(const std::string& barrier_name, const std::strin
             (message.find("no longer available") != std::string::npos) ||
             (message.find("shutting down") != std::string::npos);
         if (rpc_unavailable && should_treat_rpc_failure_as_satisfied()) {
-            return true;
+            payload.rendezvous.state = barrier_state::satisfied;
+            payload.rendezvous.failure_code = barrier_failure::none;
+            return payload;
         }
         throw;
     }
 
-    if (flush_seq == invalid_sequence) {
-        return false;
+    if (payload.barrier_sequence != invalid_sequence && !s_coord) {
+        s_mproc->flush(process_of(s_coord_id), payload.barrier_sequence);
     }
 
-    if (!s_coord) {
-        s_mproc->flush(process_of(s_coord_id), flush_seq);
-    }
-
-    return true;
+    return payload;
 }
 
-inline bool barrier_dispatch(rendezvous_t,
-                             const std::string& barrier_name,
-                             const std::string& group_name)
+inline barrier_result barrier_dispatch(rendezvous_t,
+                                       const std::string& barrier_name,
+                                       const std::string& group_name)
 {
-    return rendezvous_barrier(barrier_name, group_name);
+    auto payload = rendezvous_barrier_payload(barrier_name,
+                                             group_name,
+                                             barrier_flag_none,
+                                             0);
+    return barrier_result{std::move(payload)};
 }
 
-inline bool barrier_dispatch(delivery_fence_t,
-                             const std::string& barrier_name,
-                             const std::string& group_name)
+inline barrier_result barrier_dispatch(delivery_fence_t,
+                                       const std::string& barrier_name,
+                                       const std::string& group_name)
 {
-    const bool rendezvous_completed = barrier_dispatch(rendezvous_t{}, barrier_name, group_name);
-    if (!rendezvous_completed) {
-        return false;
+    auto payload = rendezvous_barrier_payload(barrier_name,
+                                             group_name,
+                                             barrier_flag_inbound,
+                                             0);
+    barrier_result result{std::move(payload)};
+    if (result.payload.rendezvous.state != barrier_state::satisfied) {
+        return result;
     }
 
     if (!s_mproc) {
-        return true;
+        result.payload.outbound = make_phase_status(barrier_state::satisfied,
+                                                    barrier_failure::none,
+                                                    invalid_sequence);
+        return result;
     }
 
     s_mproc->wait_for_delivery_fence();
-    return true;
+    result.payload.outbound = make_phase_status(barrier_state::satisfied,
+                                                barrier_failure::none,
+                                                invalid_sequence);
+    return result;
 }
 
-inline bool barrier_dispatch(processing_fence_t,
-                             const std::string& barrier_name,
-                             const std::string& group_name)
+inline barrier_result barrier_dispatch(processing_fence_t,
+                                       const std::string& barrier_name,
+                                       const std::string& group_name)
 {
-    const bool rendezvous_completed = barrier_dispatch(rendezvous_t{}, barrier_name, group_name);
-    if (!rendezvous_completed) {
-        return false;
+    auto payload = rendezvous_barrier_payload(barrier_name,
+                                             group_name,
+                                             barrier_flag_inbound | barrier_flag_processing,
+                                             0);
+    barrier_result result{std::move(payload)};
+    if (result.payload.rendezvous.state != barrier_state::satisfied) {
+        return result;
     }
 
     wait_for_processing_quiescence();
 
     const std::string processing_phase_name = barrier_name + "/processing";
-    return barrier_dispatch(rendezvous_t{}, processing_phase_name, group_name);
+    auto processing_result = barrier_dispatch(rendezvous_t{}, processing_phase_name, group_name);
+    result.local_processing_satisfied = static_cast<bool>(processing_result);
+    result.payload.processing = processing_result.payload.rendezvous;
+    result.payload.outbound = make_phase_status(barrier_state::satisfied,
+                                                barrier_failure::none,
+                                                invalid_sequence);
+    return result;
 }
 
 inline void wait_for_processing_quiescence()
@@ -113,25 +141,25 @@ inline void wait_for_processing_quiescence()
 } // namespace detail
 
 template <>
-inline bool barrier<rendezvous_t>(const std::string& barrier_name, const std::string& group_name)
+inline barrier_result barrier<rendezvous_t>(const std::string& barrier_name, const std::string& group_name)
 {
     return detail::barrier_dispatch(rendezvous_t{}, barrier_name, group_name);
 }
 
 template <>
-inline bool barrier<delivery_fence_t>(const std::string& barrier_name, const std::string& group_name)
+inline barrier_result barrier<delivery_fence_t>(const std::string& barrier_name, const std::string& group_name)
 {
     return detail::barrier_dispatch(delivery_fence_t{}, barrier_name, group_name);
 }
 
 template <>
-inline bool barrier<processing_fence_t>(const std::string& barrier_name, const std::string& group_name)
+inline barrier_result barrier<processing_fence_t>(const std::string& barrier_name, const std::string& group_name)
 {
     return detail::barrier_dispatch(processing_fence_t{}, barrier_name, group_name);
 }
 
 template <typename BarrierMode>
-inline bool barrier(const std::string& barrier_name, const std::string& group_name)
+inline barrier_result barrier(const std::string& barrier_name, const std::string& group_name)
 {
     return detail::barrier_dispatch(BarrierMode{}, barrier_name, group_name);
 }

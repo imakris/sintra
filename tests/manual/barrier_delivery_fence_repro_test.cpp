@@ -255,9 +255,9 @@ int coordinator_process()
             lock.unlock();
 
             if (!aborted) {
-                const bool barrier_ok = sintra::barrier("delivery-fence-repro-iteration");
+                const auto barrier_result = sintra::barrier("delivery-fence-repro-iteration");
                 barrier_called = true;
-                if (!barrier_ok) {
+                if (!barrier_result.succeeded()) {
                     if (success) {
                         failure_reason = "Coordinator barrier rendezvous failed";
                     }

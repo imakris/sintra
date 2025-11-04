@@ -104,6 +104,8 @@ namespace sintra {
 
 
 
+struct barrier_result;
+
 // ---------------------------------------------------------------------------
 // Barrier mode tags
 // ---------------------------------------------------------------------------
@@ -129,7 +131,7 @@ struct processing_fence_t {};
 /// combine it with traditional threading primitives if you also need
 /// thread-level coordination within a process.
 template<typename BarrierMode = delivery_fence_t>
-bool barrier(const std::string& barrier_name, const std::string& group_name = "_sintra_external_processes");
+barrier_result barrier(const std::string& barrier_name, const std::string& group_name = "_sintra_external_processes");
 
 
 template <typename FT, typename SENDER_T = void>

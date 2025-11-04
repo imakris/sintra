@@ -165,7 +165,7 @@ int controller_process()
     world() << Work_message{};
 
     const auto start = std::chrono::steady_clock::now();
-    const bool barrier_result = barrier<processing_fence_t>(
+    const auto barrier_result = barrier<processing_fence_t>(
         "processing-fence", group);
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - start);
@@ -181,7 +181,8 @@ int controller_process()
         std::future_status::ready;
 
     std::ofstream out(result_path, std::ios::binary | std::ios::trunc);
-    out << (barrier_result && handler_done ? "ok" : "fail") << '\n';
+    const bool rendezvous_ok = barrier_result.succeeded();
+    out << ((rendezvous_ok && handler_done) ? "ok" : "fail") << '\n';
     out << elapsed.count() << '\n';
     out << (handler_done ? "done" : "pending") << '\n';
 
@@ -189,7 +190,7 @@ int controller_process()
 
     handler_done_deactivator();
 
-    return (barrier_result && handler_done) ? 0 : 1;
+    return (rendezvous_ok && handler_done) ? 0 : 1;
 }
 
 int worker_process()

@@ -80,6 +80,11 @@ function(add_test_suite SUFFIX IS_DEBUG)
         add_executable(sintra_${TEST_NAME}_${SUFFIX} ${TEST_FILE})
         target_link_libraries(sintra_${TEST_NAME}_${SUFFIX} PRIVATE ${LIB_TARGET})
 
+        add_test(
+            NAME sintra_${TEST_NAME}_${SUFFIX}
+            COMMAND $<TARGET_FILE:sintra_${TEST_NAME}_${SUFFIX}>
+        )
+
         if(APPLE AND SINTRA_RELEASE_WITH_DEBUG_SYMBOLS AND NOT IS_DEBUG)
             if(NOT DEFINED SINTRA_DSYMUTIL_EXECUTABLE)
                 find_program(SINTRA_DSYMUTIL_EXECUTABLE dsymutil)

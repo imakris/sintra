@@ -65,10 +65,11 @@ int worker_process(std::uint32_t worker_index)
                 std::this_thread::sleep_for(std::chrono::microseconds(5));
             }
 
-            auto seq = barrier("stress-barrier");
+            auto rendezvous = barrier("stress-barrier");
+            const auto seq = rendezvous.sequence();
 
             // Verify sequence is valid (non-zero)
-            if (seq == 0 || seq <= last_seq) {
+            if (!rendezvous.succeeded() || seq == 0 || seq <= last_seq) {
                 std::fprintf(stderr, "Worker %u iter %u: bad stress seq %llu after %llu!\n",
                             worker_index, iter,
                             static_cast<unsigned long long>(seq),
@@ -78,8 +79,9 @@ int worker_process(std::uint32_t worker_index)
             last_seq = seq;
 
             if ((iter & 0x7) == 0) {
-                auto seq2 = barrier("stress-barrier");
-                if (seq2 == 0 || seq2 <= last_seq) {
+                auto rendezvous2 = barrier("stress-barrier");
+                const auto seq2 = rendezvous2.sequence();
+                if (!rendezvous2.succeeded() || seq2 == 0 || seq2 <= last_seq) {
                     std::fprintf(stderr,
                                  "Worker %u iter %u: repeated stress seq %llu after %llu!\n",
                                  worker_index,
@@ -92,8 +94,9 @@ int worker_process(std::uint32_t worker_index)
             }
 
             if ((iter & 0xF) == 0) {
-                auto alt_seq = barrier("stress-barrier-alt");
-                if (alt_seq == 0 || alt_seq <= last_alt_seq) {
+                auto alt = barrier("stress-barrier-alt");
+                const auto alt_seq = alt.sequence();
+                if (!alt.succeeded() || alt_seq == 0 || alt_seq <= last_alt_seq) {
                     std::fprintf(stderr,
                                  "Worker %u iter %u: bad alt seq %llu after %llu!\n",
                                  worker_index,

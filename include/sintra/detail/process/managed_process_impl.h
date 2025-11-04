@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "../barrier_types.h"
 #include "../utility.h"
 #include "../type_utils.h"
 #include "../ipc/platform_utils.h"
@@ -1323,8 +1324,11 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
     // assign_name requires that all group processes are instantiated, in order
     // to receive the instance_published event
     if (s_recovery_occurrence == 0) {
-        bool all_started = Process_group::rpc_barrier(m_group_all, UIBS);
-        if (!all_started) {
+        auto all_started = Process_group::rpc_barrier(m_group_all,
+                                                      UIBS,
+                                                      barrier_flag_none,
+                                                      0);
+        if (all_started.rendezvous.state != barrier_state::satisfied) {
             return false;
         }
     }
