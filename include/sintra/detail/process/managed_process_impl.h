@@ -43,6 +43,13 @@ namespace sintra {
 extern thread_local bool tl_is_req_thread;
 extern thread_local std::function<void()> tl_post_handler_function;
 
+// Protects access to s_mproc during signal dispatch to prevent use-after-free.
+// The signal dispatch thread (POSIX only) takes a shared lock when accessing s_mproc,
+// while the Managed_process destructor takes an exclusive lock before clearing it.
+#ifndef _WIN32
+inline std::shared_mutex dispatch_shutdown_mutex_instance;
+#endif
+
 inline std::once_flag& signal_handler_once_flag()
 {
     static std::once_flag flag;
@@ -116,12 +123,6 @@ namespace {
         return flag;
     }
 
-    inline std::shared_mutex& dispatch_shutdown_mutex()
-    {
-        static std::shared_mutex mtx;
-        return mtx;
-    }
-
     inline std::size_t signal_index(int sig)
     {
         auto& slots = signal_slots();
@@ -138,7 +139,7 @@ namespace {
         // Hold shared lock to prevent s_mproc from being destroyed while we access it.
         // The Managed_process destructor will acquire an exclusive lock before clearing
         // s_mproc and destroying the object, ensuring this function completes first.
-        std::shared_lock<std::shared_mutex> dispatch_lock(dispatch_shutdown_mutex());
+        std::shared_lock<std::shared_mutex> dispatch_lock(dispatch_shutdown_mutex_instance);
 
         auto* mproc = s_mproc;
 #ifndef _WIN32
@@ -689,7 +690,7 @@ Managed_process::~Managed_process()
     // in dispatch_signal_number() are released before we clear s_mproc and destroy
     // the object, preventing use-after-free.
     {
-        std::unique_lock<std::shared_mutex> dispatch_lock(dispatch_shutdown_mutex());
+        std::unique_lock<std::shared_mutex> dispatch_lock(dispatch_shutdown_mutex_instance);
         s_mproc = nullptr;
         s_mproc_id = 0;
     }
