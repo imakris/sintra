@@ -322,14 +322,16 @@ void Process_message_reader::request_reader_function()
 
                 // if the receiver registered handler, call the handler
                 // Hold spinlock while accessing the iterator to prevent use-after-invalidation
-                auto scoped_map = Transceiver::get_rpc_handler_map().scoped();
-                auto it = scoped_map.get().find(m->message_type_id);
-                assert(it != scoped_map.get().end()); // this would be a library error
+                void (*handler_fn)(Message_prefix&);
+                {
+                    auto scoped_map = Transceiver::get_rpc_handler_map().scoped();
+                    auto it = scoped_map.get().find(m->message_type_id);
+                    assert(it != scoped_map.get().end()); // this would be a library error
 
-                // Copy the function pointer while holding the lock
-                auto handler_fn = it->second;
-                // Release spinlock before calling user code
-                scoped_map.~scoped_access();
+                    // Copy the function pointer while holding the lock
+                    handler_fn = it->second;
+                    // Spinlock released here automatically when scoped_map goes out of scope
+                }
 
                 (*handler_fn)(*m); // call the handler
             }
@@ -559,52 +561,54 @@ void Process_message_reader::reply_reader_function()
                 // Hold the spinlock for the entire critical section to prevent use-after-free.
                 // The Transceiver destructor erases from this map, so holding the lock ensures
                 // the pointer remains valid while we access it.
-                auto scoped_map = s_mproc->m_local_pointer_of_instance_id.scoped();
-                auto it = scoped_map.get().find(m->receiver_instance_id);
+                Transceiver::Return_handler handler_copy;
+                bool have_handler = false;
+                {
+                    auto scoped_map = s_mproc->m_local_pointer_of_instance_id.scoped();
+                    auto it = scoped_map.get().find(m->receiver_instance_id);
 
-                if (it != scoped_map.get().end()) {
-                    auto &return_handlers = it->second->m_active_return_handlers;
+                    if (it != scoped_map.get().end()) {
+                        auto &return_handlers = it->second->m_active_return_handlers;
 
-                    Transceiver::Return_handler handler_copy;
-                    bool have_handler = false;
-                    {
-                        std::lock_guard<std::mutex> guard(it->second->m_return_handlers_mutex);
-                        auto it2 = return_handlers.find(m->function_instance_id);
-                        if (it2 != return_handlers.end()) {
-                            handler_copy = it2->second;
-                            have_handler = true;
+                        {
+                            std::lock_guard<std::mutex> guard(it->second->m_return_handlers_mutex);
+                            auto it2 = return_handlers.find(m->function_instance_id);
+                            if (it2 != return_handlers.end()) {
+                                handler_copy = it2->second;
+                                have_handler = true;
+                            }
                         }
                     }
+                    // Spinlock released here automatically when scoped_map goes out of scope
+                }
 
-                    // Release spinlock before invoking handlers to avoid holding it during
-                    // potentially long-running user code.
-                    scoped_map.~scoped_access();
-
-                    if (have_handler) {
-                        if (m->exception_type_id == not_defined_type_id) {
-                            handler_copy.return_handler(*m);
-                        }
-                        else
-                        if (m->exception_type_id != (type_id_type)detail::reserved_id::deferral) {
-                            handler_copy.exception_handler(*m);
-                        }
-                        else {
-                            handler_copy.deferral_handler(*m);
-                        }
+                // Now invoke handlers with spinlock released to avoid holding it during
+                // potentially long-running user code.
+                if (have_handler) {
+                    if (m->exception_type_id == not_defined_type_id) {
+                        handler_copy.return_handler(*m);
+                    }
+                    else
+                    if (m->exception_type_id != (type_id_type)detail::reserved_id::deferral) {
+                        handler_copy.exception_handler(*m);
                     }
                     else {
-                        // No active return handler — can happen if the caller already cleaned up
-                        // (e.g., after cancellation/shutdown) and a late/duplicate message arrived.
-                        // Drop it quietly unless we're fully RUNNING; in RUNNING emit a diagnostic
-                        // but do not hard-assert to avoid modal dialogs on Windows Debug.
-                        if (s_mproc && s_mproc->m_communication_state == Managed_process::COMMUNICATION_RUNNING) {
-                            std::fprintf(stderr,
-                                "Warning: Reply reader received message for function_instance_id=%llu but no active handler found (receiver_instance_id=%llu)\n",
-                                static_cast<unsigned long long>(m->function_instance_id),
-                                static_cast<unsigned long long>(m->receiver_instance_id));
-                        }
+                        handler_copy.deferral_handler(*m);
                     }
                 }
+                else {
+                    // No active return handler — can happen if the caller already cleaned up
+                    // (e.g., after cancellation/shutdown) and a late/duplicate message arrived.
+                    // Drop it quietly unless we're fully RUNNING; in RUNNING emit a diagnostic
+                    // but do not hard-assert to avoid modal dialogs on Windows Debug.
+                    if (s_mproc && s_mproc->m_communication_state == Managed_process::COMMUNICATION_RUNNING) {
+                        std::fprintf(stderr,
+                            "Warning: Reply reader received message for function_instance_id=%llu but no active handler found (receiver_instance_id=%llu)\n",
+                            static_cast<unsigned long long>(m->function_instance_id),
+                            static_cast<unsigned long long>(m->receiver_instance_id));
+                    }
+                }
+            }
                 else {
                     // The target object no longer exists locally. During shutdown or after
                     // coordinator loss, late replies can legitimately arrive after objects

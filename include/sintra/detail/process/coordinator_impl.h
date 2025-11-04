@@ -242,13 +242,14 @@ type_id_type Coordinator::resolve_type(const string& pretty_name)
 {
     lock_guard<mutex> lock(m_type_resolution_mutex);
     // Hold spinlock while accessing the iterator to prevent use-after-invalidation
-    auto scoped_map = s_mproc->m_type_id_of_type_name.scoped();
-    auto it = scoped_map.get().find(pretty_name);
-    if (it != scoped_map.get().end()) {
-        return it->second;
+    {
+        auto scoped_map = s_mproc->m_type_id_of_type_name.scoped();
+        auto it = scoped_map.get().find(pretty_name);
+        if (it != scoped_map.get().end()) {
+            return it->second;
+        }
+        // Spinlock released here automatically when scoped_map goes out of scope
     }
-    // Must release scoped_map before operator[] which also acquires the spinlock
-    scoped_map.~scoped_access();
 
     // a type is always assumed to exist
     return s_mproc->m_type_id_of_type_name[pretty_name] = make_type_id();
