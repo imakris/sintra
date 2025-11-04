@@ -91,6 +91,7 @@ barrier_completion_payload Process_group::barrier(
         b.pending.clear();
         b.arrivals.clear();
         b.waiter_function_ids.clear();
+        b.membership_snapshot.clear();
         b.rendezvous_active = true;
         b.requirement_mask = std::numeric_limits<uint32_t>::max();
         b.rendezvous_complete = false;
@@ -110,12 +111,14 @@ barrier_completion_payload Process_group::barrier(
             if (boot_it != m_process_boot_ids.end()) {
                 member_boot = boot_it->second;
             }
-            b.pending.emplace(iid, Participant_id{iid, member_boot});
+            Participant_id participant{iid, member_boot};
+            b.pending.insert(participant);
+            b.membership_snapshot.emplace(iid, participant);
         }
 
         if (auto* coord = s_coord) {
             for (auto it = b.pending.begin(); it != b.pending.end(); ) {
-                if (coord->is_process_draining(it->first)) {
+                if (coord->is_process_draining(it->iid)) {
                     it = b.pending.erase(it);
                 }
                 else {
@@ -127,11 +130,16 @@ barrier_completion_payload Process_group::barrier(
 
     basic_lock.unlock();
 
-    auto pending_it = b.pending.find(caller_piid);
-    auto arrived_it = b.arrivals.find(caller_piid);
+    Participant_id arrival_key{caller_piid, boot_id};
+    Participant_id expected_key{};
+    if (auto snapshot_it = b.membership_snapshot.find(caller_piid);
+        snapshot_it != b.membership_snapshot.end())
+    {
+        expected_key = snapshot_it->second;
+    }
 
     auto fail_rendezvous = [&](barrier_failure reason,
-                               instance_id_type failing_instance,
+                               const Participant_id& failing_participant,
                                instance_id_type failing_function) {
         auto payload = make_fast_fail_payload(reason);
         const auto requirement_mask_snapshot = b.requirement_mask;
@@ -140,6 +148,7 @@ barrier_completion_payload Process_group::barrier(
         b.waiter_function_ids.clear();
         b.pending.clear();
         b.arrivals.clear();
+        b.membership_snapshot.clear();
         b.rendezvous_active = false;
         b.rendezvous_complete = true;
         b.rendezvous_sequence = invalid_sequence;
@@ -154,20 +163,21 @@ barrier_completion_payload Process_group::barrier(
             payload.requirement_mask = requirement_mask_snapshot;
         }
 
-        auto dispatch = [&](instance_id_type recipient, instance_id_type function_iid) {
+        auto dispatch = [&](const Participant_id& participant, instance_id_type function_iid) {
             if (function_iid == invalid_instance_id) {
                 return;
             }
-            send_payload(recipient, function_iid, payload);
+            send_payload(participant.iid, function_iid, payload);
         };
 
-        dispatch(failing_instance, failing_function);
+        dispatch(failing_participant, failing_function);
 
-        for (const auto& [recipient, function_iid] : waiters) {
-            if (recipient == failing_instance && function_iid == failing_function) {
+        for (const auto& [participant, function_iid] : waiters) {
+            if (participant.iid == failing_participant.iid &&
+                function_iid == failing_function) {
                 continue;
             }
-            dispatch(recipient, function_iid);
+            dispatch(participant, function_iid);
         }
 
         return make_barrier_completion_payload();
@@ -178,15 +188,12 @@ barrier_completion_payload Process_group::barrier(
         b.completion_template.requirement_mask = request_flags;
     }
     else if (b.requirement_mask != request_flags) {
-        if (pending_it != b.pending.end()) {
-            b.pending.erase(pending_it);
-        }
         return fail_rendezvous(barrier_failure::incompatible_request,
-                               caller_piid,
+                               arrival_key,
                                current_message->function_instance_id);
     }
 
-    if (arrived_it != b.arrivals.end()) {
+    if (expected_key.iid == 0 && expected_key.boot_id == 0) {
         auto payload = make_fast_fail_payload(barrier_failure::incompatible_request);
         const auto function_iid = current_message->function_instance_id;
         barrier_lock.unlock();
@@ -194,6 +201,17 @@ barrier_completion_payload Process_group::barrier(
         return make_barrier_completion_payload();
     }
 
+    if (b.arrivals.find(arrival_key) != b.arrivals.end() ||
+        b.arrivals.find(expected_key) != b.arrivals.end())
+    {
+        auto payload = make_fast_fail_payload(barrier_failure::incompatible_request);
+        const auto function_iid = current_message->function_instance_id;
+        barrier_lock.unlock();
+        send_payload(caller_piid, function_iid, payload);
+        return make_barrier_completion_payload();
+    }
+
+    auto pending_it = b.pending.find(expected_key);
     if (pending_it == b.pending.end()) {
         auto payload = make_fast_fail_payload(barrier_failure::incompatible_request);
         const auto function_iid = current_message->function_instance_id;
@@ -202,9 +220,13 @@ barrier_completion_payload Process_group::barrier(
         return make_barrier_completion_payload();
     }
 
-    auto& tracked = pending_it->second;
-    if (tracked.boot_id != boot_id) {
+    const bool boot_mismatch = expected_key.boot_id != boot_id;
+    if (boot_mismatch) {
         if (b.completion_template.rendezvous.state == barrier_state::not_requested) {
+            b.completion_template.rendezvous.state = barrier_state::downgraded;
+            b.completion_template.rendezvous.failure_code = barrier_failure::peer_lost;
+        }
+        else if (b.completion_template.rendezvous.state == barrier_state::satisfied) {
             b.completion_template.rendezvous.state = barrier_state::downgraded;
             b.completion_template.rendezvous.failure_code = barrier_failure::peer_lost;
         }
@@ -213,12 +235,15 @@ barrier_completion_payload Process_group::barrier(
         {
             b.completion_template.rendezvous.failure_code = barrier_failure::peer_lost;
         }
-        tracked.boot_id = boot_id;
+
+        b.membership_snapshot[caller_piid] = arrival_key;
+        b.arrivals.erase(expected_key);
+        b.waiter_function_ids.erase(expected_key);
     }
 
-    b.arrivals.emplace(caller_piid, Participant_id{caller_piid, boot_id});
     b.pending.erase(pending_it);
-    b.waiter_function_ids[caller_piid] = current_message->function_instance_id;
+    b.arrivals.insert(arrival_key);
+    b.waiter_function_ids[arrival_key] = current_message->function_instance_id;
 
     if (!b.pending.empty()) {
         barrier_lock.unlock();
@@ -242,6 +267,7 @@ barrier_completion_payload Process_group::barrier(
     const auto requirement_mask = b.requirement_mask;
     b.waiter_function_ids.clear();
     b.arrivals.clear();
+    b.membership_snapshot.clear();
     barrier_lock.unlock();
 
     if (payload.requirement_mask == 0 &&
@@ -250,8 +276,8 @@ barrier_completion_payload Process_group::barrier(
         payload.requirement_mask = requirement_mask;
     }
 
-    for (const auto& [recipient, function_iid] : waiters) {
-        send_payload(recipient, function_iid, payload);
+    for (const auto& [participant, function_iid] : waiters) {
+        send_payload(participant.iid, function_iid, payload);
     }
 
     return make_barrier_completion_payload();
@@ -273,20 +299,44 @@ inline void Process_group::drop_from_inflight_barriers(instance_id_type process_
 
         std::unique_lock barrier_lock(barrier->m);
 
-        const bool touched_pending = barrier->pending.erase(process_iid) > 0;
-        const bool touched_arrived = barrier->arrivals.erase(process_iid) > 0;
-        const auto waiter_it = barrier->waiter_function_ids.find(process_iid);
-        const bool touched_waiter = waiter_it != barrier->waiter_function_ids.end();
+        auto erase_from_set = [&](auto& container) {
+            bool erased = false;
+            for (auto it = container.begin(); it != container.end(); ) {
+                if (it->iid == process_iid) {
+                    it = container.erase(it);
+                    erased = true;
+                }
+                else {
+                    ++it;
+                }
+            }
+            return erased;
+        };
+
+        auto erase_from_waiters = [&](auto& container) {
+            bool erased = false;
+            for (auto it = container.begin(); it != container.end(); ) {
+                if (it->first.iid == process_iid) {
+                    it = container.erase(it);
+                    erased = true;
+                }
+                else {
+                    ++it;
+                }
+            }
+            return erased;
+        };
+
+        const bool touched_pending = erase_from_set(barrier->pending);
+        const bool touched_arrived = erase_from_set(barrier->arrivals);
+        const bool touched_waiter = erase_from_waiters(barrier->waiter_function_ids);
 
         if (!touched_pending && !touched_arrived && !touched_waiter) {
             ++barrier_it;
             continue;
         }
 
-        if (touched_waiter) {
-            barrier->waiter_function_ids.erase(waiter_it);
-        }
-
+        barrier->membership_snapshot.erase(process_iid);
         barrier->pending.clear();
         barrier->arrivals.clear();
         barrier->rendezvous_active = false;
@@ -309,13 +359,13 @@ inline void Process_group::drop_from_inflight_barriers(instance_id_type process_
             payload.requirement_mask = requirement_mask;
         }
 
-        for (const auto& [recipient, function_iid] : waiters) {
+        for (const auto& [participant, function_iid] : waiters) {
             auto copy = payload;
             auto* placed_msg = s_mproc->m_out_rep_c->write<return_message_type>(
                 vb_size<return_message_type>(copy), copy);
             Transceiver::finalize_rpc_write(
                 placed_msg,
-                recipient,
+                participant.iid,
                 function_iid,
                 this,
                 not_defined_type_id);

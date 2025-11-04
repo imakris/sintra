@@ -11,6 +11,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <limits>
 #include <memory>
@@ -60,14 +61,53 @@ struct Process_group: Derived_transceiver<Process_group>
     {
         mutex                                   m;
         condition_variable                      cv;
-        std::unordered_map<instance_id_type, Participant_id> pending;
-        std::unordered_map<instance_id_type, Participant_id> arrivals;
-        std::unordered_map<instance_id_type, instance_id_type> waiter_function_ids;
+        std::unordered_set<Participant_id, Participant_id_hash> pending;
+        std::unordered_set<Participant_id, Participant_id_hash> arrivals;
+        std::unordered_map<Participant_id,
+                           instance_id_type,
+                           Participant_id_hash> waiter_function_ids;
+        std::unordered_map<instance_id_type, Participant_id> membership_snapshot;
         bool                                    rendezvous_active = false;
         uint32_t                                requirement_mask = std::numeric_limits<uint32_t>::max();
         uint64_t                                barrier_epoch = 0;
         sequence_counter_type                   rendezvous_sequence = invalid_sequence;
         bool                                    rendezvous_complete = false;
+
+        struct Outbound_phase {
+            struct Delivery_target {
+                instance_id_type      reader{};
+                sequence_counter_type cutoff_leading = invalid_sequence;
+                sequence_counter_type baseline_reading = invalid_sequence;
+                sequence_counter_type delta_target = invalid_sequence;
+                sequence_counter_type delta_remaining = invalid_sequence;
+                bool                  armed = false;
+            };
+
+            std::unordered_map<Participant_id,
+                               std::vector<Delivery_target>,
+                               Participant_id_hash> targets;
+            std::unordered_set<Participant_id, Participant_id_hash> waiters;
+            barrier_phase_status status = make_phase_status();
+        } outbound;
+
+        struct Processing_phase {
+            std::unordered_set<Participant_id, Participant_id_hash> waiters;
+            barrier_phase_status status = make_phase_status();
+        } processing;
+
+        struct Phase_timer {
+            bool armed = false;
+            std::chrono::steady_clock::time_point deadline{};
+            uint64_t armed_epoch = 0;
+            sequence_counter_type armed_sequence = invalid_sequence;
+            uint64_t armed_generation = 0;
+        };
+
+        Phase_timer rendezvous_timer;
+        Phase_timer outbound_service_timer;
+        Phase_timer outbound_timer;
+        Phase_timer processing_timer;
+
         barrier_completion_payload              completion_template = make_barrier_completion_payload();
     };
 
