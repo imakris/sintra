@@ -681,13 +681,15 @@ void Transceiver::rpc_handler(Message_prefix& untyped_msg)
     using r_type = typename unvoid<typename RPCTC::r_type>::type;
 
     MESSAGE_T& msg = (MESSAGE_T&)untyped_msg;
-    auto& instance_map = get_instance_to_object_map<RPCTC>();
     typename RPCTC::o_type* obj = nullptr;
 
-    if (auto it = instance_map.find(untyped_msg.receiver_instance_id);
-        it != instance_map.end())
+    // Hold spinlock while accessing the iterator to prevent use-after-invalidation
     {
-        obj = it->second;
+        auto scoped_map = get_instance_to_object_map<RPCTC>().scoped();
+        auto it = scoped_map.get().find(untyped_msg.receiver_instance_id);
+        if (it != scoped_map.get().end()) {
+            obj = it->second;
+        }
     }
 
     auto send_unavailable_response = [&](const std::string& reason)
@@ -829,11 +831,16 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
     if (RPCTC::may_be_called_directly && is_local_instance(instance_id)) {
         // if the instance is local, then it has already been registered in the instance_map
         // of this particular type. this will only find the object and call it.
-        auto it = get_instance_to_object_map<RPCTC>().find(instance_id);
-        if (it == get_instance_to_object_map<RPCTC>().end()) {
-            throw std::runtime_error("Local RPC target no longer available - it may have been shut down.");
+        // Hold spinlock while accessing the iterator to prevent use-after-invalidation
+        typename RPCTC::o_type* object = nullptr;
+        {
+            auto scoped_map = get_instance_to_object_map<RPCTC>().scoped();
+            auto it = scoped_map.get().find(instance_id);
+            if (it == scoped_map.get().end()) {
+                throw std::runtime_error("Local RPC target no longer available - it may have been shut down.");
+            }
+            object = it->second;
         }
-        auto* object = it->second;
         auto guard = object->try_acquire_rpc_execution();
         if (!guard) {
             throw std::runtime_error("Attempted to call an RPC on a target that is shutting down.");

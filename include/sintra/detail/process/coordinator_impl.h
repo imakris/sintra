@@ -241,9 +241,14 @@ inline
 type_id_type Coordinator::resolve_type(const string& pretty_name)
 {
     lock_guard<mutex> lock(m_type_resolution_mutex);
-    auto it = s_mproc->m_type_id_of_type_name.find(pretty_name);
-    if (it != s_mproc->m_type_id_of_type_name.end()) {
-        return it->second;
+    // Hold spinlock while accessing the iterator to prevent use-after-invalidation
+    {
+        auto scoped_map = s_mproc->m_type_id_of_type_name.scoped();
+        auto it = scoped_map.get().find(pretty_name);
+        if (it != scoped_map.get().end()) {
+            return it->second;
+        }
+        // Spinlock released here automatically when scoped_map goes out of scope
     }
 
     // a type is always assumed to exist
@@ -256,8 +261,10 @@ type_id_type Coordinator::resolve_type(const string& pretty_name)
 inline
 instance_id_type Coordinator::resolve_instance(const string& assigned_name)
 {
-    auto it = s_mproc->m_instance_id_of_assigned_name.find(assigned_name);
-    if (it != s_mproc->m_instance_id_of_assigned_name.end()) {
+    // Hold spinlock while accessing the iterator to prevent use-after-invalidation
+    auto scoped_map = s_mproc->m_instance_id_of_assigned_name.scoped();
+    auto it = scoped_map.get().find(assigned_name);
+    if (it != scoped_map.get().end()) {
         return it->second;
     }
 
