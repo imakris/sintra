@@ -32,13 +32,19 @@ inline
 barrier_completion_payload Process_group::barrier(
     const string& barrier_name,
     uint32_t request_flags,
-    boot_id_type /*boot_id*/)
+    boot_id_type boot_id)
 {
     std::unique_lock basic_lock(m_call_mutex);
     instance_id_type caller_piid = s_tl_current_message->sender_instance_id;
     if (m_process_ids.find(caller_piid) == m_process_ids.end()) {
         throw std::logic_error("The caller is not a member of the process group.");
     }
+
+    // Update the coordinator's best-effort boot id snapshot for the caller. The
+    // architecture expects rendezvous membership to key on `(iid, boot_id)`; in
+    // the absence of a dedicated registry feed we learn the boot id from the
+    // caller itself.
+    m_process_boot_ids[caller_piid] = boot_id;
 
     auto& barrier_entry = m_barriers[barrier_name];
     if (!barrier_entry) {
@@ -65,11 +71,11 @@ barrier_completion_payload Process_group::barrier(
     // Atomically snapshot membership and filter draining processes while holding m_call_mutex.
     // This ensures a consistent view: no process can be added/removed or change draining state
     // between the membership snapshot and the draining filter.
-    if (b.processes_pending.empty()) {
+    if (!b.rendezvous_active) {
         // new or reused barrier (may have failed previously)
-        b.processes_pending = m_process_ids;
-        b.processes_arrived.clear();
-        b.failed = false;
+        b.pending.clear();
+        b.arrivals.clear();
+        b.rendezvous_active = true;
         b.common_function_iid = make_instance_id();
         b.requirement_mask = std::numeric_limits<uint32_t>::max();
         b.rendezvous_complete = false;
@@ -77,14 +83,28 @@ barrier_completion_payload Process_group::barrier(
         ++b.barrier_epoch;
         b.completion_template = make_barrier_completion_payload();
         b.completion_template.barrier_epoch = b.barrier_epoch;
+        b.completion_template.requirement_mask = 0;
+        b.completion_template.rendezvous = make_phase_status(
+            barrier_state::not_requested,
+            barrier_failure::none,
+            invalid_sequence);
+
+        for (auto iid : m_process_ids) {
+            boot_id_type member_boot = 0;
+            auto boot_it = m_process_boot_ids.find(iid);
+            if (boot_it != m_process_boot_ids.end()) {
+                member_boot = boot_it->second;
+            }
+            b.pending.emplace(iid, Participant_id{iid, member_boot});
+        }
 
         // Filter out draining processes while still holding m_call_mutex for atomicity
         if (auto* coord = s_coord) {
-            for (auto it = b.processes_pending.begin();
-                 it != b.processes_pending.end(); )
+            for (auto it = b.pending.begin();
+                 it != b.pending.end(); )
             {
-                if (coord->is_process_draining(*it)) {
-                    it = b.processes_pending.erase(it);
+                if (coord->is_process_draining(it->first)) {
+                    it = b.pending.erase(it);
                 }
                 else {
                     ++it;
@@ -107,21 +127,48 @@ barrier_completion_payload Process_group::barrier(
         return payload;
     }
 
-    if (b.processes_pending.find(caller_piid) == b.processes_pending.end() &&
-        b.processes_arrived.find(caller_piid) == b.processes_arrived.end())
-    {
+    auto pending_it = b.pending.find(caller_piid);
+    auto arrived_it = b.arrivals.find(caller_piid);
+
+    if (arrived_it != b.arrivals.end()) {
         auto payload = make_fast_fail_payload(barrier_failure::incompatible_request);
         b.m.unlock();
         return payload;
     }
 
-    b.processes_arrived.insert(caller_piid);
-    b.processes_pending.erase(caller_piid);
+    if (pending_it == b.pending.end()) {
+        auto payload = make_fast_fail_payload(barrier_failure::incompatible_request);
+        b.m.unlock();
+        return payload;
+    }
 
-    if (b.processes_pending.empty()) {
+    auto& tracked = pending_it->second;
+    if (tracked.boot_id != boot_id) {
+        if (b.completion_template.rendezvous.state == barrier_state::not_requested) {
+            b.completion_template.rendezvous.state = barrier_state::downgraded;
+            b.completion_template.rendezvous.failure_code = barrier_failure::peer_lost;
+        }
+        else if (b.completion_template.rendezvous.state == barrier_state::downgraded &&
+                 b.completion_template.rendezvous.failure_code == barrier_failure::none)
+        {
+            b.completion_template.rendezvous.failure_code = barrier_failure::peer_lost;
+        }
+        tracked.boot_id = boot_id;
+    }
+
+    b.arrivals.emplace(caller_piid, Participant_id{caller_piid, boot_id});
+    b.pending.erase(pending_it);
+
+    if (b.pending.empty()) {
         // Last arrival
-        auto additional_pids = b.processes_arrived;
-        additional_pids.erase(caller_piid);
+        std::vector<instance_id_type> additional_pids;
+        additional_pids.reserve(b.arrivals.size() > 0 ? b.arrivals.size() - 1 : 0);
+        for (const auto& [iid, participant] : b.arrivals) {
+            (void)participant;
+            if (iid != caller_piid) {
+                additional_pids.push_back(iid);
+            }
+        }
 
         assert(s_tl_common_function_iid == invalid_instance_id);
         assert(s_tl_additional_piids_size == 0);
@@ -137,10 +184,13 @@ barrier_completion_payload Process_group::barrier(
         const auto flush_sequence = s_mproc->m_out_rep_c->get_leading_sequence();
         b.rendezvous_sequence = flush_sequence;
         b.rendezvous_complete = true;
+        b.rendezvous_active = false;
         b.completion_template.barrier_sequence = flush_sequence;
         b.completion_template.requirement_mask = b.requirement_mask;
-        b.completion_template.rendezvous.state = barrier_state::satisfied;
-        b.completion_template.rendezvous.failure_code = barrier_failure::none;
+        if (b.completion_template.rendezvous.state == barrier_state::not_requested) {
+            b.completion_template.rendezvous.state = barrier_state::satisfied;
+            b.completion_template.rendezvous.failure_code = barrier_failure::none;
+        }
         b.completion_template.rendezvous.sequence = flush_sequence;
 
         barrier_completion_payload result = b.completion_template;
@@ -194,30 +244,34 @@ inline void Process_group::drop_from_inflight_barriers(
 
         std::unique_lock barrier_lock(barrier->m);
 
-        const bool touched_pending = barrier->processes_pending.erase(process_iid) > 0;
-        const bool touched_arrived = barrier->processes_arrived.erase(process_iid) > 0;
+        const bool touched_pending = barrier->pending.erase(process_iid) > 0;
+        const bool touched_arrived = barrier->arrivals.erase(process_iid) > 0;
 
         if (!touched_pending && !touched_arrived) {
             ++barrier_it;
             continue;
         }
 
-        if (!barrier->processes_pending.empty()) {
+        if (!barrier->pending.empty()) {
             ++barrier_it;
             continue;
         }
 
         Barrier_completion completion;
         completion.common_function_iid = barrier->common_function_iid;
-        completion.recipients.assign(
-            barrier->processes_arrived.begin(),
-            barrier->processes_arrived.end());
+        completion.recipients.reserve(barrier->arrivals.size() + (touched_arrived ? 1 : 0));
+        for (const auto& [iid, participant] : barrier->arrivals) {
+            (void)participant;
+            completion.recipients.push_back(iid);
+        }
 
         if (touched_arrived) {
             completion.recipients.push_back(process_iid);
         }
 
-        barrier->processes_arrived.clear();
+        barrier->arrivals.clear();
+        barrier->pending.clear();
+        barrier->rendezvous_active = false;
         barrier->common_function_iid = invalid_instance_id;
 
         auto payload = barrier->completion_template;

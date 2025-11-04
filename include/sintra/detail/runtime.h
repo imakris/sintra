@@ -68,6 +68,12 @@ void collect_branches(
     collect_branches(branches, std::forward<Args>(rest)...);
 }
 
+inline bool& init_once_flag()
+{
+    static bool once = false;
+    return once;
+}
+
 class Cleanup_guard {
 public:
     explicit Cleanup_guard(std::function<void()> callback)
@@ -325,7 +331,7 @@ inline void init(
     // Install debug pause handlers if enabled via SINTRA_DEBUG_PAUSE_ON_EXIT
     detail::install_debug_pause_handlers();
 
-    static bool once = false;
+    bool& once = detail::init_once_flag();
     assert(!once); // init() may only be run once.
     once = true;
 
@@ -404,6 +410,8 @@ inline bool finalize()
 
     delete s_mproc;
     s_mproc = nullptr;
+
+    detail::init_once_flag() = false;
 
     return true;
 }

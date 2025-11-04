@@ -15,6 +15,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -59,9 +60,9 @@ struct Process_group: Derived_transceiver<Process_group>
     {
         mutex                                   m;
         condition_variable                      cv;
-        unordered_set<instance_id_type>         processes_pending;
-        unordered_set<instance_id_type>         processes_arrived;
-        bool                                    failed = false;
+        std::unordered_map<instance_id_type, Participant_id> pending;
+        std::unordered_map<instance_id_type, Participant_id> arrivals;
+        bool                                    rendezvous_active = false;
         instance_id_type                        common_function_iid = invalid_instance_id;
         uint32_t                                requirement_mask = std::numeric_limits<uint32_t>::max();
         uint64_t                                barrier_epoch = 0;
@@ -79,6 +80,7 @@ struct Process_group: Derived_transceiver<Process_group>
 
     unordered_map<string, shared_ptr<Barrier>>  m_barriers;
     unordered_set<instance_id_type>             m_process_ids;
+    std::unordered_map<instance_id_type, boot_id_type> m_process_boot_ids;
 
     mutex m_call_mutex;
     SINTRA_RPC_STRICT_EXPLICIT(barrier)
@@ -105,6 +107,16 @@ void Process_group::set(const unordered_set<instance_id_type>& member_process_id
     m_process_ids = unordered_set<instance_id_type>(
         member_process_ids.begin(), member_process_ids.end()
     );
+
+    std::unordered_map<instance_id_type, boot_id_type> next_boot_ids;
+    next_boot_ids.reserve(member_process_ids.size());
+
+    for (auto iid : member_process_ids) {
+        auto it = m_process_boot_ids.find(iid);
+        next_boot_ids.emplace(iid, it != m_process_boot_ids.end() ? it->second : 0);
+    }
+
+    m_process_boot_ids.swap(next_boot_ids);
 }
 
 
@@ -113,6 +125,7 @@ void Process_group::add_process(instance_id_type process_iid)
 {
     std::lock_guard lock(m_call_mutex);
     m_process_ids.insert(process_iid);
+    m_process_boot_ids.emplace(process_iid, 0);
 }
 
 
@@ -121,6 +134,7 @@ void Process_group::remove_process(instance_id_type process_iid)
 {
     std::lock_guard lock(m_call_mutex);
     m_process_ids.erase(process_iid);
+    m_process_boot_ids.erase(process_iid);
 }
 
 
