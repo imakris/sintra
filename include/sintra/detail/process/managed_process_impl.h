@@ -116,6 +116,12 @@ namespace {
         return flag;
     }
 
+    inline std::shared_mutex& dispatch_shutdown_mutex()
+    {
+        static std::shared_mutex mtx;
+        return mtx;
+    }
+
     inline std::size_t signal_index(int sig)
     {
         auto& slots = signal_slots();
@@ -129,6 +135,11 @@ namespace {
 
     inline void dispatch_signal_number(int sig_number)
     {
+        // Hold shared lock to prevent s_mproc from being destroyed while we access it.
+        // The Managed_process destructor will acquire an exclusive lock before clearing
+        // s_mproc and destroying the object, ensuring this function completes first.
+        std::shared_lock<std::shared_mutex> dispatch_lock(dispatch_shutdown_mutex());
+
         auto* mproc = s_mproc;
 #ifndef _WIN32
         if (sig_number == SIGCHLD) {
@@ -671,10 +682,21 @@ Managed_process::~Managed_process()
         ::close(pipefd[0]);
         pipefd[0] = -1;
     }
-#endif
 
+    // Wait for any in-flight signal dispatches to complete before clearing s_mproc.
+    // The dispatch thread may still be executing dispatch_signal_number() after we
+    // closed the pipes above. Taking an exclusive lock here ensures all shared locks
+    // in dispatch_signal_number() are released before we clear s_mproc and destroy
+    // the object, preventing use-after-free.
+    {
+        std::unique_lock<std::shared_mutex> dispatch_lock(dispatch_shutdown_mutex());
+        s_mproc = nullptr;
+        s_mproc_id = 0;
+    }
+#else
     s_mproc = nullptr;
     s_mproc_id = 0;
+#endif
 }
 
 #ifndef _WIN32
