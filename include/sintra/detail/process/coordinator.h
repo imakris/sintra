@@ -62,20 +62,13 @@ struct Process_group: Derived_transceiver<Process_group>
         condition_variable                      cv;
         std::unordered_map<instance_id_type, Participant_id> pending;
         std::unordered_map<instance_id_type, Participant_id> arrivals;
+        std::unordered_map<instance_id_type, instance_id_type> waiter_function_ids;
         bool                                    rendezvous_active = false;
-        instance_id_type                        common_function_iid = invalid_instance_id;
         uint32_t                                requirement_mask = std::numeric_limits<uint32_t>::max();
         uint64_t                                barrier_epoch = 0;
         sequence_counter_type                   rendezvous_sequence = invalid_sequence;
         bool                                    rendezvous_complete = false;
         barrier_completion_payload              completion_template = make_barrier_completion_payload();
-    };
-
-    struct Barrier_completion
-    {
-        instance_id_type                        common_function_iid = invalid_instance_id;
-        std::vector<instance_id_type>           recipients;
-        barrier_completion_payload              payload = make_barrier_completion_payload();
     };
 
     unordered_map<string, shared_ptr<Barrier>>  m_barriers;
@@ -86,11 +79,7 @@ struct Process_group: Derived_transceiver<Process_group>
     SINTRA_RPC_STRICT_EXPLICIT(barrier)
 
 public:
-    void drop_from_inflight_barriers(
-        instance_id_type process_iid,
-        std::vector<Barrier_completion>& completions);
-    void emit_barrier_completions(
-        const std::vector<Barrier_completion>& completions);
+    void drop_from_inflight_barriers(instance_id_type process_iid);
 
 private:
     void add_process(instance_id_type process_iid);
