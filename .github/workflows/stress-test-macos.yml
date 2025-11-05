@@ -167,7 +167,7 @@ jobs:
           ulimit -c unlimited
           cd tests
           # TEMPORARY: Only run ipc_rings_tests during synchronization debugging
-          python run_tests.py --repetitions 10 --timeout 30 --build-dir ../build --config Release --include "ipc_rings*"
+          python run_tests.py --repetitions 10 --timeout 30 --build-dir ../build --config Release --test ipc_rings
 
       - name: Mark status success
         if: success()
