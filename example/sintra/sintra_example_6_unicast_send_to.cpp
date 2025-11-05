@@ -1,14 +1,16 @@
 //
 // Sintra library, example 6
 //
-// This example demonstrates the new send_to() functionality for unicast messaging.
+// This example demonstrates the SINTRA_EXPORT_MESSAGE functionality for fire-and-forget
+// unicast messaging.
 //
 // In this example, there are 3 user processes:
-// - Process 1 sends a unicast message directly to Process 2 using send_to
-// - Process 2 responds with a unicast message back to Process 1
+// - Process 1 sends fire-and-forget messages directly to Process 2 using exported message handlers
+// - Process 2 receives and counts the messages
 // - Process 3 observes and verifies it doesn't receive unicast messages
 //
-// This demonstrates "fire-and-forget" unicast (no acknowledgement, unlike RPC)
+// This demonstrates fire-and-forget unicast (no acknowledgement, unlike RPC) using the
+// RPC infrastructure but without reply overhead.
 //
 
 #include <sintra/sintra.h>
@@ -25,7 +27,6 @@ using namespace sintra;
 struct UnicastMessage
 {
     uint64_t counter;
-    instance_id_type target_id;  // Target for response
 };
 
 struct IdExchange
@@ -41,21 +42,37 @@ instance_id_type g_process_1_id = 0;
 instance_id_type g_process_2_id = 0;
 
 
+// Transceiver type that can receive unicast messages
+struct MessageReceiver : Derived_transceiver<MessageReceiver>
+{
+    atomic<uint64_t>* received_count_ptr;
+    string instance_name_str;
+
+    MessageReceiver(atomic<uint64_t>* counter_ptr)
+        : received_count_ptr(counter_ptr) {}
+
+    void handle_unicast(const UnicastMessage& msg)
+    {
+        (*received_count_ptr)++;
+        console() << instance_name() << ": Received unicast message #" << msg.counter << "\n";
+    }
+
+    const char* instance_name() { return instance_name_str.c_str(); }
+
+    // Export the handler as a fire-and-forget message (no reply sent)
+    SINTRA_EXPORT_MESSAGE(handle_unicast)
+};
+
+
 int process_1()
 {
     // Process 1: Sender
     console() << "Process 1: Starting sender\n";
 
-    Transceiver t1;
-    g_process_1_id = t1.instance_id();
-
     std::atomic<uint64_t> received_count{0};
-
-    // Receive unicast responses from Process 2
-    t1.activate([&](UnicastMessage msg) {
-        received_count++;
-        console() << "Process 1: Received unicast response #" << msg.counter << "\n";
-    }, Typed_instance_id<void>(any_local_or_remote));
+    MessageReceiver receiver1(&received_count);
+    receiver1.instance_name_str = "Process 1";
+    g_process_1_id = receiver1.instance_id();
 
     // Receive ID exchange messages
     activate_slot([](IdExchange msg) {
@@ -75,19 +92,17 @@ int process_1()
     console() << "Process 1: Sending unicast messages to Process 2 (ID: "
               << g_process_2_id << ")\n";
 
-    // Send 5 unicast messages to Process 2
+    // Send 5 fire-and-forget unicast messages to Process 2
     for (uint64_t i = 0; i < 5; i++) {
-        using MT = Message<Enclosure<UnicastMessage>>;
-        t1.send_to<MT, Transceiver>(g_process_2_id, UnicastMessage{i, g_process_1_id});
+        MessageReceiver::rpc_handle_unicast(g_process_2_id, UnicastMessage{i});
         console() << "Process 1: Sent unicast message #" << i << " to Process 2\n";
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
-    // Wait a bit for responses
-    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    // Wait a bit to ensure messages are delivered
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
-    console() << "Process 1: Received " << received_count.load()
-              << " unicast responses (expected 5)\n";
+    console() << "Process 1: Sent all messages\n";
 
     // Wait for stop signal
     std::condition_variable cv;
@@ -110,23 +125,13 @@ int process_1()
 
 int process_2()
 {
-    // Process 2: Receiver and responder
+    // Process 2: Receiver
     console() << "Process 2: Starting receiver\n";
 
-    Transceiver t2;
-    g_process_2_id = t2.instance_id();
-
     std::atomic<uint64_t> received_count{0};
-
-    // Receive unicast messages from Process 1
-    t2.activate([&](UnicastMessage msg) {
-        received_count++;
-        console() << "Process 2: Received unicast message #" << msg.counter << "\n";
-
-        // Send unicast response back using the target_id from the message
-        using MT = Message<Enclosure<UnicastMessage>>;
-        t2.send_to<MT, Transceiver>(msg.target_id, UnicastMessage{msg.counter, g_process_2_id});
-    }, Typed_instance_id<void>(any_local_or_remote));
+    MessageReceiver receiver2(&received_count);
+    receiver2.instance_name_str = "Process 2";
+    g_process_2_id = receiver2.instance_id();
 
     // Receive ID exchange messages
     activate_slot([](IdExchange msg) {
@@ -171,12 +176,8 @@ int process_3()
     console() << "Process 3: Starting observer\n";
 
     std::atomic<uint64_t> unicast_received{0};
-
-    activate_slot([&](UnicastMessage msg) {
-        unicast_received++;
-        console() << "Process 3: ERROR - Received unicast message #" << msg.counter
-                  << " (should not happen!)\n";
-    });
+    MessageReceiver receiver3(&unicast_received);
+    receiver3.instance_name_str = "Process 3";
 
     activate_slot([](IdExchange msg) {
         console() << "Process 3: Observed ID exchange from process " << msg.process_index << "\n";
@@ -217,7 +218,7 @@ int main(int argc, char* argv[])
 
     if (process_index() == 0) {
         using namespace std::chrono_literals;
-        std::this_thread::sleep_for(3s);
+        std::this_thread::sleep_for(2s);
         console() << "Main: Sending stop signal\n";
         world() << Stop();
     }

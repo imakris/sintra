@@ -303,68 +303,37 @@ void Process_message_reader::request_reader_function()
                 continue;
             }
 
-            // Check if this is an RPC call (has RPC handler) or a unicast event (has event handler)
-            bool is_rpc_call = false;
+            // If addressed to a specified local receiver, this may only be an RPC call,
+            // thus the receiver must exist.
+            assert(
+                reader_state == READER_NORMAL ?
+                    s_mproc->m_local_pointer_of_instance_id.find(m->receiver_instance_id) !=
+                    s_mproc->m_local_pointer_of_instance_id.end()
+                :
+                    true
+            );
+
+            if ((reader_state == READER_NORMAL) ||
+                (is_service_instance(m->receiver_instance_id) && s_coord) ||
+                (m->sender_instance_id == s_coord_id) )
             {
-                auto scoped_map = Transceiver::get_rpc_handler_map().scoped();
-                is_rpc_call = scoped_map.get().find(m->message_type_id) != scoped_map.get().end();
-            }
+                // If addressed to a specified local receiver, this may only be an RPC call,
+                // thus the named receiver must exist.
 
-            if (is_rpc_call) {
-                // Traditional RPC path - receiver must exist
-                assert(
-                    reader_state == READER_NORMAL ?
-                        s_mproc->m_local_pointer_of_instance_id.find(m->receiver_instance_id) !=
-                        s_mproc->m_local_pointer_of_instance_id.end()
-                    :
-                        true
-                );
-
-                if ((reader_state == READER_NORMAL) ||
-                    (is_service_instance(m->receiver_instance_id) && s_coord) ||
-                    (m->sender_instance_id == s_coord_id) )
+                // if the receiver registered handler, call the handler
+                // Hold spinlock while accessing the iterator to prevent use-after-invalidation
+                void (*handler_fn)(Message_prefix&);
                 {
-                    // if the receiver registered handler, call the handler
-                    // Hold spinlock while accessing the iterator to prevent use-after-invalidation
-                    void (*handler_fn)(Message_prefix&);
-                    {
-                        auto scoped_map = Transceiver::get_rpc_handler_map().scoped();
-                        auto it = scoped_map.get().find(m->message_type_id);
-                        assert(it != scoped_map.get().end()); // this would be a library error
+                    auto scoped_map = Transceiver::get_rpc_handler_map().scoped();
+                    auto it = scoped_map.get().find(m->message_type_id);
+                    assert(it != scoped_map.get().end()); // this would be a library error
 
-                        // Copy the function pointer while holding the lock
-                        handler_fn = it->second;
-                        // Spinlock released here automatically when scoped_map goes out of scope
-                    }
-
-                    (*handler_fn)(*m); // call the handler
+                    // Copy the function pointer while holding the lock
+                    handler_fn = it->second;
+                    // Spinlock released here automatically when scoped_map goes out of scope
                 }
-            } else {
-                // Unicast event message (send_to) - dispatch to event handlers of matching transceiver
-                if (reader_state == READER_NORMAL) {
-                    lock_guard<recursive_mutex> sl(s_mproc->m_handlers_mutex);
 
-                    // Find handlers for this message type
-                    auto& active_handlers = s_mproc->m_active_handlers;
-                    auto it_mt = active_handlers.find(m->message_type_id);
-
-                    if (it_mt != active_handlers.end()) {
-                        // Check handlers that match the receiver instance ID
-                        instance_id_type receiver_ids[] = {
-                            m->receiver_instance_id,  // Exact match
-                            any_local_or_remote       // Wildcard handlers
-                        };
-
-                        for (auto rid : receiver_ids) {
-                            auto rhl = it_mt->second.find(rid);
-                            if (rhl != it_mt->second.end()) {
-                                for (auto& e : rhl->second) {
-                                    e(*m);
-                                }
-                            }
-                        }
-                    }
-                }
+                (*handler_fn)(*m); // call the handler
             }
         }
         else
