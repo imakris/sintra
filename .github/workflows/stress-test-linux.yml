@@ -194,12 +194,23 @@ jobs:
             find build/tests -type f -exec chmod +x {} +
           fi
 
-      - name: Run stress tests with run_tests.py
+      - name: Run stress_multi_reader_throughput 100k times
         if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.core == 'true' || steps.changed.outputs.workflows == 'true'
         shell: bash
         run: |
-          cd tests
-          python run_tests.py --repetitions 100000 --timeout 30 --build-dir ../build --config Release --test stress_multi_reader_throughput
+          test_exe="build/tests/sintra_ipc_rings_tests_release"
+
+          echo "Running stress_multi_reader_throughput 100,000 times..."
+          for i in $(seq 1 100000); do
+            if ! timeout 30 "$test_exe" --run stress:stress_multi_reader_throughput; then
+              echo "FAILURE on iteration $i"
+              exit 1
+            fi
+            if [ $((i % 1000)) -eq 0 ]; then
+              echo "Completed $i iterations..."
+            fi
+          done
+          echo "All 100,000 iterations passed!"
 
       - name: Mark status success
         if: success()
