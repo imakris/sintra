@@ -286,6 +286,12 @@ public:
         typename... Args>
     void send(Args&&... args);
 
+    template <
+        typename MESSAGE_T,
+        typename SENDER_T,
+        typename... Args>
+    void send_to(instance_id_type target, Args&&... args);
+
 
 
  //////////////////////////////////////////////////////////////////////////

@@ -562,6 +562,32 @@ void Transceiver::send(Args&&... args)
 }
 
 
+template <
+    typename MESSAGE_T,
+    typename SENDER_T,
+    typename... Args>
+void Transceiver::send_to(instance_id_type target, Args&&... args)
+{
+    static_assert(
+        std::is_base_of_v<Message_prefix, MESSAGE_T>,
+        "Attempting to send something that is not a message.");
+
+    constexpr bool sender_capability =
+        is_same_v    < typename MESSAGE_T::exporter, void     > ||
+        is_base_of_v < typename MESSAGE_T::exporter, SENDER_T >;
+
+    static_assert(sender_capability, "This type of sender cannot send messages of this type.");
+
+    static auto once = MESSAGE_T::id();
+    (void)(once); // suppress unused variable warning
+
+    MESSAGE_T* msg = s_mproc->m_out_req_c->write<MESSAGE_T>(vb_size<MESSAGE_T>(args...), args...);
+    msg->sender_instance_id = m_instance_id;
+    msg->receiver_instance_id = target;  // Runtime target addressing
+    s_mproc->m_out_req_c->done_writing();
+}
+
+
  //////////////////////////////////////////////////////////////////////////
 ///// BEGIN RPC ////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////
