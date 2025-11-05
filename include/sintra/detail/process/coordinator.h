@@ -206,9 +206,9 @@ public:
 
     bool is_process_draining(instance_id_type process_iid) const;
 
-    SINTRA_SIGNAL_EXPLICIT(instance_published,
+    SINTRA_MESSAGE_RESERVED(instance_published,
         type_id_type type_id, instance_id_type instance_id, message_string assigned_name)
-    SINTRA_SIGNAL_EXPLICIT(instance_unpublished,
+    SINTRA_MESSAGE_RESERVED(instance_unpublished,
         type_id_type type_id, instance_id_type instance_id, message_string assigned_name)
 
     friend struct Managed_process;
