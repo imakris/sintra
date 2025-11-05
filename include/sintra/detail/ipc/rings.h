@@ -1449,6 +1449,13 @@ struct Ring_R : Ring<T, true>
             ret.end   = ret.begin + num_range_elements;
             m_reading_sequence->fetch_add(num_range_elements);  // +=
             m_last_consumed_sequence = start_sequence + sequence_counter_type(num_range_elements);
+
+#ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
+            if (slot.status.load(std::memory_order_acquire) == Ring<T, false>::READER_STATE_EVICTED) {
+                handle_eviction_if_needed();
+                return {};
+            }
+#endif
             return ret;
         };
 
@@ -1612,7 +1619,12 @@ struct Ring_R : Ring<T, true>
             // Reader was evicted by writer for being too slow.
             // Skip all missed data and jump to writer's current position.
             // This is the only safe recovery strategy since old data has been overwritten.
-            sequence_counter_type new_seq = c.leading_sequence.load(std::memory_order_acquire);
+            const sequence_counter_type published_leading =
+                c.leading_sequence.load(std::memory_order_acquire);
+            const sequence_counter_type current_sequence =
+                m_reading_sequence->load(std::memory_order_acquire);
+            const sequence_counter_type new_seq =
+                std::max(current_sequence, published_leading);
             slot.v.store(new_seq, std::memory_order_release);
             m_reading_sequence->store(new_seq, std::memory_order_release);
             m_last_consumed_sequence = new_seq;
@@ -1643,6 +1655,14 @@ struct Ring_R : Ring<T, true>
 public:
     bool consume_eviction_notification()
     {
+#ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
+        if (!m_evicted_since_last_wait.load(std::memory_order_acquire)) {
+            auto& slot = c.reading_sequences[m_rs_index].data;
+            if (slot.status.load(std::memory_order_acquire) == Ring<T, false>::READER_STATE_EVICTED) {
+                handle_eviction_if_needed();
+            }
+        }
+#endif
         return m_evicted_since_last_wait.exchange(false, std::memory_order_acq_rel);
     }
 
