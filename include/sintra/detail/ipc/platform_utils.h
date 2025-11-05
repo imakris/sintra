@@ -20,6 +20,8 @@
 #include <system_error>
 #include <thread>
 
+#include <sintra/time_utils.h>
+
 #ifdef _WIN32
   #ifndef NOMINMAX
   #define NOMINMAX
@@ -408,12 +410,6 @@ inline bool is_process_alive(uint32_t pid)
 #endif
 }
 
-inline uint64_t monotonic_now_ns()
-{
-    const auto now = std::chrono::steady_clock::now().time_since_epoch();
-    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
-}
-
 inline std::optional<uint64_t> query_process_start_stamp(uint32_t pid)
 {
 #ifdef _WIN32
@@ -668,7 +664,7 @@ inline void cleanup_stale_swarm_directories(const std::filesystem::path& base_di
         return;
     }
 
-    const auto now_monotonic = monotonic_now_ns();
+    const auto now_monotonic = sintra::monotonic_now_ns();
 
     for (std::filesystem::directory_iterator it(base_dir, ec); !ec && it != std::filesystem::directory_iterator(); ++it) {
         std::error_code status_ec;
