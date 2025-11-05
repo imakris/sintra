@@ -1447,6 +1447,15 @@ struct Ring_R : Ring<T, true>
                     const uint64_t now_us = sintra::monotonic_now_us();
 
                     if (observed & Ring<T, false>::READER_GUARD_BUSY) {
+                        const uint8_t current = slot.has_guard.load(std::memory_order_acquire);
+                        if ((current & Ring<T, false>::READER_GUARD_HELD) == 0) {
+                            return false;
+                        }
+                        if ((current & Ring<T, false>::READER_GUARD_BUSY) == 0) {
+                            observed = current;
+                            continue;
+                        }
+
                         slot.guard_busy_since.store(now_us, std::memory_order_release);
                         return true;
                     }
