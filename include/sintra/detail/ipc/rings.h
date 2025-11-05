@@ -2057,6 +2057,52 @@ private:
                             (guard_flag & Ring<T, false>::READER_GUARD_BUSY) != 0;
 
                         if (guard_held && reader_busy) {
+                            // CRITICAL SYNCHRONIZATION FENCE FOR CROSS-VARIABLE ATOMICS
+                            //
+                            // This acquire fence pairs with the release fence in the reader's mark_guard_busy()
+                            // (rings.h ~line 1455) to establish happens-before ordering between two separate
+                            // atomic variables: has_guard and guard_busy_since.
+                            //
+                            // WHY THIS IS NECESSARY:
+                            // The reader executes:
+                            //   1. guard_busy_since.store(now_us, memory_order_release)    [Variable A]
+                            //   2. atomic_thread_fence(memory_order_release)               [Release fence]
+                            //   3. has_guard.compare_exchange_weak(..., acq_rel, acquire)  [Variable B]
+                            //
+                            // The writer (this code) executes:
+                            //   1. has_guard.load(memory_order_acquire)                    [Variable B]
+                            //   2. atomic_thread_fence(memory_order_acquire)               [Acquire fence - THIS FENCE]
+                            //   3. guard_busy_since.load(memory_order_acquire)             [Variable A]
+                            //
+                            // Without this fence, the acquire load of has_guard does NOT synchronize with the
+                            // release store to guard_busy_since because they are DIFFERENT atomic variables.
+                            // The C++ memory model only guarantees synchronization between operations on the
+                            // SAME atomic variable.
+                            //
+                            // CONSEQUENCE WITHOUT THE FENCE (especially on ARM/weakly-ordered CPUs):
+                            // The writer could observe:
+                            //   - has_guard = READER_GUARD_HELD | READER_GUARD_BUSY (new value)
+                            //   - guard_busy_since = 0 or stale value (old value, not yet visible)
+                            //
+                            // This causes the timeout logic to malfunction:
+                            //   - If guard_busy_since appears as 0, the timeout check is skipped
+                            //   - Active readers may be incorrectly evicted
+                            //   - Stalled readers may not be detected and evicted
+                            //
+                            // WHY ARM/macOS IS MOST AFFECTED:
+                            // x86/x64 uses TSO (Total Store Order), which provides stronger ordering guarantees.
+                            // Stores are visible to other cores in near-program order, hiding this bug.
+                            // ARM (Apple M1/M2) uses a weakly-ordered memory model where stores can be
+                            // significantly reordered and delayed without explicit synchronization barriers.
+                            //
+                            // THE FIX:
+                            // Paired release/acquire fences on different threads create a synchronization point
+                            // that ensures ALL stores that happened-before the release fence are visible after
+                            // the acquire fence, regardless of which atomic variables were involved.
+                            //
+                            // See C++17 [atomics.fences] §32.4/2-4 for the formal specification.
+                            std::atomic_thread_fence(std::memory_order_acquire);
+
                             auto clear_busy_flag = [&]() {
                                 uint8_t busy_expected = static_cast<uint8_t>(
                                     Ring<T, false>::READER_GUARD_HELD | Ring<T, false>::READER_GUARD_BUSY);
