@@ -577,11 +577,16 @@ TEST_CASE(test_streaming_reader_status_restored_after_eviction)
 STRESS_TEST(stress_multi_reader_throughput)
 {
     Temp_ring_dir tmp("stress_multi");
-    size_t ring_elements = pick_ring_elements<uint64_t>(512);
+    // Tightened parameters to stress-test guard eviction and cross-variable atomic synchronization:
+    // - Reduced ring size from 512 to 256 elements (2x more eviction pressure)
+    // - Increased iteration multiplier from 64 to 256 (4x more iterations)
+    // - Increased reader count from 3 to 5 (more concurrent contention)
+    // This makes the test ~8x more likely to trigger race conditions in the busy guard logic.
+    size_t ring_elements = pick_ring_elements<uint64_t>(256);
     const size_t max_trailing = (ring_elements * 3) / 4;
-    const size_t reader_count = 3;
+    const size_t reader_count = 5;
     const size_t chunk = std::max<size_t>(1, ring_elements / 16);
-    const size_t total_messages = chunk * 64;
+    const size_t total_messages = chunk * 256;
 
     sintra::Ring_W<uint64_t> writer(tmp.str(), "ring_data", ring_elements);
 
