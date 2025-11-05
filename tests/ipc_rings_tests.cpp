@@ -713,16 +713,38 @@ STRESS_TEST(stress_multi_reader_throughput)
         any_reader_evicted = any_reader_evicted || flag.load(std::memory_order_acquire);
     }
 
-    for (auto& results : reader_results) {
+    const bool diagnostics_recorded_eviction = diagnostics.reader_eviction_count > 0u;
+
+    // DIAGNOSTIC: Check for eviction detection mismatch
+    if (diagnostics_recorded_eviction && !any_reader_evicted) {
+        std::cerr << "[TEST DIAGNOSTIC] Eviction mismatch detected:\n"
+                  << "  - Writer recorded " << diagnostics.reader_eviction_count << " evictions\n"
+                  << "  - But NO reader set its eviction flag\n"
+                  << "  - This indicates eviction notification mechanism failure\n";
+        for (size_t rid = 0; rid < reader_count; ++rid) {
+            std::cerr << "  - Reader " << rid << ": collected " << reader_results[rid].size()
+                      << " values, evicted_flag=" << reader_evicted[rid].load(std::memory_order_acquire) << "\n";
+        }
+    }
+
+    for (size_t rid = 0; rid < reader_results.size(); ++rid) {
+        auto& results = reader_results[rid];
         for (size_t i = 0; i < results.size(); ++i) {
-            ASSERT_LT(results[i], total_messages);
-            if (i > 0) {
+            if (results[i] >= total_messages) {
+                std::cerr << "[TEST DIAGNOSTIC] Reader " << rid << " at index " << i
+                          << " has invalid value " << results[i] << " (>= " << total_messages << ")\n";
+                ASSERT_LT(results[i], total_messages);
+            }
+            if (i > 0 && results[i] <= results[i - 1]) {
+                std::cerr << "[TEST DIAGNOSTIC] Reader " << rid << " has ordering violation at index " << i << ":\n"
+                          << "  - results[" << (i-1) << "] = " << results[i-1] << "\n"
+                          << "  - results[" << i << "] = " << results[i] << "\n"
+                          << "  - Reader collected " << results.size() << " total values\n"
+                          << "  - Reader eviction flag: " << reader_evicted[rid].load(std::memory_order_acquire) << "\n";
                 ASSERT_GT(results[i], results[i - 1]);
             }
         }
     }
-
-    const bool diagnostics_recorded_eviction = diagnostics.reader_eviction_count > 0u;
 
     if (any_reader_evicted) {
         // A slow reader that gets evicted is expected to miss at least one publication. In
