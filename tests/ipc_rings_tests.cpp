@@ -913,6 +913,16 @@ int main(int argc, char** argv)
     bool list_tests = false;
     std::vector<std::string> selectors;
 
+    // DEVELOPMENT MODE: Check environment variable to run only stress_multi_reader_throughput
+    // Usage: export FOCUS_MULTI_READER_TEST=1 && ./ipc_rings_tests_release
+    const char* focus_test = std::getenv("FOCUS_MULTI_READER_TEST");
+    if (focus_test && std::string_view(focus_test) == "1") {
+        include_unit = false;
+        include_stress = true;
+        selectors.emplace_back("stress_multi_reader_throughput");
+        std::cerr << "[FOCUS MODE] Running only stress_multi_reader_throughput test\n";
+    }
+
     for (int i = 1; i < argc; ++i) {
         std::string_view arg(argv[i]);
         if (arg == "--stress-only") {
@@ -939,6 +949,14 @@ int main(int argc, char** argv)
         else if (arg == "--run") {
             std::cerr << "--run requires an argument" << std::endl;
             return 2;
+        }
+        else
+        if (arg == "--focus-multi-reader") {
+            include_unit = false;
+            include_stress = true;
+            selectors.clear();
+            selectors.emplace_back("stress_multi_reader_throughput");
+            std::cerr << "[FOCUS MODE] Running only stress_multi_reader_throughput test\n";
         }
     }
 
