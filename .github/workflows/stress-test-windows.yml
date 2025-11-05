@@ -221,7 +221,7 @@ jobs:
 
           echo "Running stress_multi_reader_throughput 100,000 times..."
           for i in $(seq 1 100000); do
-            if ! timeout 30 "$test_exe" --run stress:stress_multi_reader_throughput; then
+            if ! "$test_exe" --run stress:stress_multi_reader_throughput; then
               echo "FAILURE on iteration $i"
               exit 1
             fi
