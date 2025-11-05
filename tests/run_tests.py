@@ -249,7 +249,7 @@ class Color:
 TEST_WEIGHT_OVERRIDES = {
     # ipc_rings release stress tests
     "ipc_rings_tests_release:stress:stress_attach_detach_readers": 200,
-    "ipc_rings_tests_release:stress:stress_multi_reader_throughput": 100,
+    "ipc_rings_tests_release:stress:stress_multi_reader_throughput": 100000,
 
     # ipc_rings release unit tests
     "ipc_rings_tests_release:unit:test_directory_helpers": 500,

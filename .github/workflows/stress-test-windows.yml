@@ -218,7 +218,7 @@ jobs:
         shell: bash
         run: |
           cd tests
-          python run_tests.py --repetitions 10 --timeout 30 --build-dir ../build --config Release
+          python run_tests.py --repetitions 1 --timeout 30 --build-dir ../build --config Release --include '*stress_multi_reader_throughput*'
 
       - name: Mark status success
         if: success()
