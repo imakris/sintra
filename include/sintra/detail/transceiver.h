@@ -307,6 +307,7 @@ public:
         MF m,
         type_id_type ID,
         bool MAY_BE_CALLED_DIRECTLY,
+        bool IS_FIRE_AND_FORGET,
         typename RT = decltype(resolve_rt(m)),
         typename OBJECT_T = decltype(resolve_object_type(m))
     >
@@ -318,6 +319,7 @@ public:
         const static MF mf() { return m; };
         static constexpr type_id_type id = ID;
         static constexpr bool may_be_called_directly = MAY_BE_CALLED_DIRECTLY;
+        static constexpr bool is_fire_and_forget = IS_FIRE_AND_FORGET;
     };
 
 
@@ -486,7 +488,7 @@ public:
 
 
 
-#define SINTRA_RPC_IMPL(m, mfp, id, mbcd)                                                       \
+#define SINTRA_RPC_IMPL(m, mfp, id, mbcd, fire_and_forget)                                      \
     void rpc_assertion_##m() {                                                                  \
         static_assert(std::is_same_v<                                                           \
             std::remove_pointer_t<decltype(this)>,                                              \
@@ -494,7 +496,9 @@ public:
             "This Transceiver is not derived correctly."                                        \
         );                                                                                      \
     }                                                                                           \
-    using m ## _mftc = RPCTC_d<decltype(mfp), mfp, id, mbcd>;                                   \
+    using m ## _mftc = RPCTC_d<decltype(mfp), mfp, id, mbcd, fire_and_forget>;                  \
+    static_assert(!fire_and_forget || std::is_void_v<typename m ## _mftc::r_type>,              \
+        "Fire-and-forget functions (SINTRA_EXPORT_MESSAGE) must return void");                  \
     sintra::Instantiator m ## _itt = export_rpc<m ## _mftc>(mfp);                               \
                                                                                                 \
     template<typename... Args>                                                                  \
@@ -506,12 +510,12 @@ public:
     
     // Exports a member function for RPC.
     #define SINTRA_RPC(m)                                                                       \
-        SINTRA_RPC_IMPL(m, &Transceiver_type :: m, sintra::invalid_type_id, true)
+        SINTRA_RPC_IMPL(m, &Transceiver_type :: m, sintra::invalid_type_id, true, false)
 
     // Exports a member function for RPC, provided that an ID is already reserved for a function
     // with that name. This is only meant to be used internally.
     #define SINTRA_RPC_EXPLICIT(m)                                                              \
-        SINTRA_RPC_IMPL(m, &Transceiver_type :: m, (type_id_type)sintra::detail::reserved_id::m, true)
+        SINTRA_RPC_IMPL(m, &Transceiver_type :: m, (type_id_type)sintra::detail::reserved_id::m, true, false)
 
     // Exports a member function exclusively for RPC use. This implies that the function is
     // written in a way that makes no sense to call it directly. For example, this could be the
@@ -521,12 +525,19 @@ public:
     // shortcut when called within the same process, but will instead use the RPC mechanism
     // in all cases.
     #define SINTRA_RPC_STRICT(m)                                                                  \
-        SINTRA_RPC_IMPL(m, &Transceiver_type :: m, sintra::invalid_type_id, false)
+        SINTRA_RPC_IMPL(m, &Transceiver_type :: m, sintra::invalid_type_id, false, false)
 
     // Exports a member function exclusively for RPC, provided that an ID is already reserved for
     // a function with that name. This is only meant to be used internally.
     #define SINTRA_RPC_STRICT_EXPLICIT(m)                                                         \
-        SINTRA_RPC_IMPL(m, &Transceiver_type :: m, (type_id_type)sintra::detail::reserved_id::m, false)
+        SINTRA_RPC_IMPL(m, &Transceiver_type :: m, (type_id_type)sintra::detail::reserved_id::m, false, false)
+
+    // Exports a void member function for fire-and-forget unicast messaging.
+    // Similar to SINTRA_RPC, but does not send a reply message. Only works with void functions.
+    // This provides efficient one-way messaging to specific transceiver instances without
+    // the overhead of reply handling.
+    #define SINTRA_EXPORT_MESSAGE(m)                                                              \
+        SINTRA_RPC_IMPL(m, &Transceiver_type :: m, sintra::invalid_type_id, true, true)
 
   //\       //\       //\       //\       //\       //\       //\       //
  ////\     ////\     ////\     ////\     ////\     ////\     ////\     ////
