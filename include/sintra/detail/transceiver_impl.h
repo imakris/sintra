@@ -562,32 +562,6 @@ void Transceiver::send(Args&&... args)
 }
 
 
-template <
-    typename MESSAGE_T,
-    typename SENDER_T,
-    typename... Args>
-void Transceiver::send_to(instance_id_type target, Args&&... args)
-{
-    static_assert(
-        std::is_base_of_v<Message_prefix, MESSAGE_T>,
-        "Attempting to send something that is not a message.");
-
-    constexpr bool sender_capability =
-        is_same_v    < typename MESSAGE_T::exporter, void     > ||
-        is_base_of_v < typename MESSAGE_T::exporter, SENDER_T >;
-
-    static_assert(sender_capability, "This type of sender cannot send messages of this type.");
-
-    static auto once = MESSAGE_T::id();
-    (void)(once); // suppress unused variable warning
-
-    MESSAGE_T* msg = s_mproc->m_out_req_c->write<MESSAGE_T>(vb_size<MESSAGE_T>(args...), args...);
-    msg->sender_instance_id = m_instance_id;
-    msg->receiver_instance_id = target;  // Runtime target addressing
-    s_mproc->m_out_req_c->done_writing();
-}
-
-
  //////////////////////////////////////////////////////////////////////////
 ///// BEGIN RPC ////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////
@@ -780,10 +754,9 @@ void Transceiver::rpc_handler(Message_prefix& untyped_msg)
             return;
         }
 
-        // Check if this is a fire-and-forget message (void return type, no reply needed)
-        constexpr bool is_fire_and_forget = std::is_same_v<typename RPCTC::r_type, void>;
-        if constexpr (is_fire_and_forget) {
-            return; // Skip reply for fire-and-forget void functions
+        // Check if this is a fire-and-forget message (no reply needed)
+        if constexpr (RPCTC::is_fire_and_forget) {
+            return; // Skip reply for fire-and-forget functions
         }
 
         // additional return recipients, assumed to be waiting
@@ -959,11 +932,9 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
     //   (_)'  '\\.
     //            '\\.
 
-    // Check if this is a fire-and-forget message (void return type)
-    constexpr bool is_fire_and_forget = std::is_same_v<typename RPCTC::r_type, void>;
-
-    if constexpr (is_fire_and_forget) {
-        // For void functions, don't wait for a reply - this is fire-and-forget
+    // Check if this is a fire-and-forget message (no reply expected)
+    if constexpr (RPCTC::is_fire_and_forget) {
+        // For fire-and-forget functions, don't wait for a reply
         sl.unlock();
         {
             unique_lock<mutex> orpclock(s_outstanding_rpcs_mutex());
