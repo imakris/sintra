@@ -1360,6 +1360,8 @@ struct Ring_R : Ring<T, true>
     const Range<T> wait_for_new_data()
     {
         auto produce_range = [&]() -> Range<T> {
+            auto& slot = c.reading_sequences[m_rs_index].data;
+
             if (handle_eviction_if_needed()) {
                 return {};
             }
@@ -1413,6 +1415,13 @@ struct Ring_R : Ring<T, true>
             ret.end   = ret.begin + num_range_elements;
             m_reading_sequence->fetch_add(num_range_elements);  // +=
             m_last_consumed_sequence = start_sequence + sequence_counter_type(num_range_elements);
+
+#ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
+            if (slot.status.load(std::memory_order_acquire) == Ring<T, false>::READER_STATE_EVICTED) {
+                handle_eviction_if_needed();
+                return {};
+            }
+#endif
             return ret;
         };
 
@@ -1608,6 +1617,14 @@ struct Ring_R : Ring<T, true>
 public:
     bool consume_eviction_notification()
     {
+#ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
+        if (!m_evicted_since_last_wait.load(std::memory_order_acquire)) {
+            auto& slot = c.reading_sequences[m_rs_index].data;
+            if (slot.status.load(std::memory_order_acquire) == Ring<T, false>::READER_STATE_EVICTED) {
+                handle_eviction_if_needed();
+            }
+        }
+#endif
         return m_evicted_since_last_wait.exchange(false, std::memory_order_acq_rel);
     }
 
