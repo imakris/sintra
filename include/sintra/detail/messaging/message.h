@@ -487,7 +487,7 @@ struct Message: public Message_prefix, public T
 
 
  //////////////////////////////////////////////////////////////////////////
-///// BEGIN SIGNAL MACROS //////////////////////////////////////////////////
+///// BEGIN MESSAGE MACROS /////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////
 //////   \//////   \//////   \//////   \//////   \//////   \//////   \//////
  ////     \////     \////     \////     \////     \////     \////     \////
@@ -540,7 +540,7 @@ struct Message: public Message_prefix, public T
 
 
 
-#define SINTRA_SIGNAL_BASE(name, idv, ...)                                              \
+#define SINTRA_MESSAGE_BASE(name, idv, ...)                                              \
     void inheritance_assertion_##name() {                                               \
         static_assert(std::is_same_v<                                                   \
             std::remove_pointer_t<decltype(this)>,                                      \
@@ -552,11 +552,11 @@ struct Message: public Message_prefix, public T
     using name = sintra::Message<sm_body_type_##name, void, idv, Transceiver_type>;     \
 
 
-#define SINTRA_SIGNAL(name, ...)                                                        \
-    SINTRA_SIGNAL_BASE(name, sintra::invalid_type_id, __VA_ARGS__)
+#define SINTRA_MESSAGE(name, ...)                                                        \
+    SINTRA_MESSAGE_BASE(name, sintra::invalid_type_id, __VA_ARGS__)
 
-#define SINTRA_SIGNAL_EXPLICIT(name, ...)                                               \
-    SINTRA_SIGNAL_BASE(name, (type_id_type)sintra::detail::reserved_id::name, __VA_ARGS__)
+#define SINTRA_MESSAGE_RESERVED(name, ...)                                               \
+    SINTRA_MESSAGE_BASE(name, (type_id_type)sintra::detail::reserved_id::name, __VA_ARGS__)
 
 
 
@@ -564,7 +564,7 @@ struct Message: public Message_prefix, public T
  ////\     ////\     ////\     ////\     ////\     ////\     ////\     ////
 //////\   //////\   //////\   //////\   //////\   //////\   //////\   //////
 ////////////////////////////////////////////////////////////////////////////
-///// END SIGNAL MACROS/////////////////////////////////////////////////////
+///// END MESSAGE MACROS ///////////////////////////////////////////////////
  //////////////////////////////////////////////////////////////////////////
 
 

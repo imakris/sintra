@@ -15,3 +15,8 @@ CMakeUserPresets.json
 
 # Third-party downloads (temporary)
 /third_party/*.tar.gz
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
