@@ -189,6 +189,15 @@ struct Ring_diagnostics
     sequence_counter_type last_overflow_reader_sequence = 0;
     sequence_counter_type last_overflow_leading_sequence = 0;
     sequence_counter_type last_overflow_last_consumed = 0;
+    uint64_t              mark_guard_busy_entry_count = 0;
+    uint64_t              mark_guard_busy_observed_busy = 0;
+    uint64_t              mark_guard_busy_guard_not_held = 0;
+    uint64_t              mark_guard_busy_guard_cleared_after_busy = 0;
+    uint64_t              mark_guard_busy_busy_flag_raced = 0;
+    uint64_t              mark_guard_busy_cas_attempts = 0;
+    uint64_t              mark_guard_busy_cas_success = 0;
+    uint64_t              mark_guard_busy_cas_retries = 0;
+    uint64_t              mark_guard_busy_fast_path_refresh = 0;
 };
 constexpr auto invalid_sequence = ~sequence_counter_type(0);
 
@@ -739,6 +748,26 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
                       "The payload of cache_line_sized_t exceeds the assumed cache line size.");
     };
 
+    struct Guard_debug_record
+    {
+        std::atomic<uint32_t>            last_observed{0};
+        std::atomic<uint32_t>            last_current{0};
+        std::atomic<uint32_t>            last_result{0};
+        std::atomic<uint64_t>            last_timestamp_us{0};
+        std::atomic<sequence_counter_type> last_start_sequence{0};
+        std::atomic<sequence_counter_type> last_leading_sequence{0};
+    };
+
+    enum class Guard_mark_busy_outcome : uint32_t
+    {
+        none = 0,
+        guard_not_held,
+        busy_guard_refreshed,
+        busy_guard_cleared,
+        busy_flag_raced,
+        cas_installed_busy,
+    };
+
     /**
      * Shared control block. All fields that are concurrently modified are atomic.
      * NOTE: Atomics are chosen such that they are address-free and (ideally) lock-free.
@@ -791,6 +820,17 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         std::atomic<sequence_counter_type>   last_overflow_reader_sequence{0};
         std::atomic<sequence_counter_type>   last_overflow_leading_sequence{0};
         std::atomic<sequence_counter_type>   last_overflow_last_consumed{0};
+
+        Guard_debug_record                   guard_debug[max_process_index];
+        std::atomic<uint64_t>                mark_guard_busy_entry_count{0};
+        std::atomic<uint64_t>                mark_guard_busy_observed_busy{0};
+        std::atomic<uint64_t>                mark_guard_busy_guard_not_held{0};
+        std::atomic<uint64_t>                mark_guard_busy_guard_cleared_after_busy{0};
+        std::atomic<uint64_t>                mark_guard_busy_busy_flag_raced{0};
+        std::atomic<uint64_t>                mark_guard_busy_cas_attempts{0};
+        std::atomic<uint64_t>                mark_guard_busy_cas_success{0};
+        std::atomic<uint64_t>                mark_guard_busy_cas_retries{0};
+        std::atomic<uint64_t>                mark_guard_busy_fast_path_refresh{0};
 
         // Per-reader currently visible (snapshot) sequence. Cache-line sized to minimize
         // false sharing between reader slots. A reader sets its slot to the snapshot head
@@ -1117,7 +1157,43 @@ public:
         diag.last_overflow_reader_sequence = m_control->last_overflow_reader_sequence.load(std::memory_order_acquire);
         diag.last_overflow_leading_sequence = m_control->last_overflow_leading_sequence.load(std::memory_order_acquire);
         diag.last_overflow_last_consumed = m_control->last_overflow_last_consumed.load(std::memory_order_acquire);
+        diag.mark_guard_busy_entry_count = m_control->mark_guard_busy_entry_count.load(std::memory_order_acquire);
+        diag.mark_guard_busy_observed_busy = m_control->mark_guard_busy_observed_busy.load(std::memory_order_acquire);
+        diag.mark_guard_busy_guard_not_held = m_control->mark_guard_busy_guard_not_held.load(std::memory_order_acquire);
+        diag.mark_guard_busy_guard_cleared_after_busy = m_control->mark_guard_busy_guard_cleared_after_busy.load(std::memory_order_acquire);
+        diag.mark_guard_busy_busy_flag_raced = m_control->mark_guard_busy_busy_flag_raced.load(std::memory_order_acquire);
+        diag.mark_guard_busy_cas_attempts = m_control->mark_guard_busy_cas_attempts.load(std::memory_order_acquire);
+        diag.mark_guard_busy_cas_success = m_control->mark_guard_busy_cas_success.load(std::memory_order_acquire);
+        diag.mark_guard_busy_cas_retries = m_control->mark_guard_busy_cas_retries.load(std::memory_order_acquire);
+        diag.mark_guard_busy_fast_path_refresh = m_control->mark_guard_busy_fast_path_refresh.load(std::memory_order_acquire);
         return diag;
+    }
+
+    struct Guard_debug_snapshot
+    {
+        uint32_t             last_observed          = 0;
+        uint32_t             last_current           = 0;
+        uint32_t             last_result            = 0;
+        uint64_t             last_timestamp_us      = 0;
+        sequence_counter_type last_start_sequence    = 0;
+        sequence_counter_type last_leading_sequence  = 0;
+    };
+
+    Guard_debug_snapshot get_guard_debug_snapshot(int reader_index) const noexcept
+    {
+        Guard_debug_snapshot snapshot;
+        if (!m_control || reader_index < 0 || reader_index >= max_process_index) {
+            return snapshot;
+        }
+
+        const auto& record = m_control->guard_debug[reader_index];
+        snapshot.last_observed = record.last_observed.load(std::memory_order_acquire);
+        snapshot.last_current = record.last_current.load(std::memory_order_acquire);
+        snapshot.last_result = record.last_result.load(std::memory_order_acquire);
+        snapshot.last_timestamp_us = record.last_timestamp_us.load(std::memory_order_acquire);
+        snapshot.last_start_sequence = record.last_start_sequence.load(std::memory_order_acquire);
+        snapshot.last_leading_sequence = record.last_leading_sequence.load(std::memory_order_acquire);
+        return snapshot;
     }
 };
 
@@ -1437,28 +1513,70 @@ struct Ring_R : Ring<T, true>
                 return ret;
             }
 
+            auto* control = this->m_control;
+            auto& guard_debug = control->guard_debug[this->m_rs_index];
+            using Guard_mark_busy_outcome = typename Ring<T, false>::Guard_mark_busy_outcome;
+
+            auto record_guard_debug = [&](Guard_mark_busy_outcome outcome,
+                                          uint8_t                  observed_value,
+                                          uint8_t                  current_value,
+                                          uint64_t                 timestamp_us) {
+                guard_debug.last_observed.store(observed_value, std::memory_order_relaxed);
+                guard_debug.last_current.store(current_value, std::memory_order_relaxed);
+                guard_debug.last_result.store(static_cast<uint32_t>(outcome), std::memory_order_relaxed);
+                guard_debug.last_timestamp_us.store(timestamp_us, std::memory_order_relaxed);
+                guard_debug.last_start_sequence.store(start_sequence, std::memory_order_relaxed);
+                guard_debug.last_leading_sequence.store(leading_sequence, std::memory_order_relaxed);
+            };
+
             auto mark_guard_busy = [&]() -> bool {
+                control->mark_guard_busy_entry_count.fetch_add(1, std::memory_order_relaxed);
+
                 uint8_t observed = slot.has_guard.load(std::memory_order_acquire);
                 while (true) {
                     if ((observed & Ring<T, false>::READER_GUARD_HELD) == 0) {
+                        control->mark_guard_busy_guard_not_held.fetch_add(1, std::memory_order_relaxed);
+                        const uint64_t timestamp = sintra::monotonic_now_us();
+                        record_guard_debug(Guard_mark_busy_outcome::guard_not_held, observed, observed, timestamp);
                         return false;
                     }
 
                     const uint64_t now_us = sintra::monotonic_now_us();
 
                     if (observed & Ring<T, false>::READER_GUARD_BUSY) {
+                        control->mark_guard_busy_observed_busy.fetch_add(1, std::memory_order_relaxed);
+                        const uint8_t current = slot.has_guard.load(std::memory_order_acquire);
+                        if ((current & Ring<T, false>::READER_GUARD_HELD) == 0) {
+                            control->mark_guard_busy_guard_cleared_after_busy.fetch_add(
+                                1, std::memory_order_relaxed);
+                            record_guard_debug(Guard_mark_busy_outcome::busy_guard_cleared, observed, current, now_us);
+                            return false;
+                        }
+                        if ((current & Ring<T, false>::READER_GUARD_BUSY) == 0) {
+                            control->mark_guard_busy_busy_flag_raced.fetch_add(1, std::memory_order_relaxed);
+                            record_guard_debug(Guard_mark_busy_outcome::busy_flag_raced, observed, current, now_us);
+                            observed = current;
+                            continue;
+                        }
+
                         slot.guard_busy_since.store(now_us, std::memory_order_release);
+                        control->mark_guard_busy_fast_path_refresh.fetch_add(1, std::memory_order_relaxed);
+                        record_guard_debug(Guard_mark_busy_outcome::busy_guard_refreshed, observed, current, now_us);
                         return true;
                     }
 
                     slot.guard_busy_since.store(now_us, std::memory_order_release);
                     std::atomic_thread_fence(std::memory_order_release);
                     uint8_t desired = static_cast<uint8_t>(observed | Ring<T, false>::READER_GUARD_BUSY);
+                    control->mark_guard_busy_cas_attempts.fetch_add(1, std::memory_order_relaxed);
                     if (slot.has_guard.compare_exchange_weak(
                             observed, desired, std::memory_order_acq_rel, std::memory_order_acquire))
                     {
+                        control->mark_guard_busy_cas_success.fetch_add(1, std::memory_order_relaxed);
+                        record_guard_debug(Guard_mark_busy_outcome::cas_installed_busy, observed, desired, now_us);
                         return true;
                     }
+                    control->mark_guard_busy_cas_retries.fetch_add(1, std::memory_order_relaxed);
                 }
             };
 

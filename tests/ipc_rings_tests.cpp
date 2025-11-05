@@ -1,6 +1,8 @@
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
+#include <cerrno>
 #include <cmath>
 #include <cstdint>
 #include <exception>
@@ -10,6 +12,8 @@
 #include <future>
 #include <iostream>
 #include <limits>
+#include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <numeric>
 #include <optional>
@@ -33,6 +37,44 @@
 using namespace std::chrono_literals;
 
 namespace {
+
+std::atomic<std::atomic<uint8_t>*> g_guard_to_clear{nullptr};
+std::atomic<bool> g_guard_hook_fired{false};
+
+uint64_t guard_clearing_monotonic_hook()
+{
+    if (auto* guard = g_guard_to_clear.exchange(nullptr, std::memory_order_acq_rel)) {
+        guard->store(0, std::memory_order_release);
+        g_guard_hook_fired.store(true, std::memory_order_release);
+    }
+    return sintra::monotonic_now_ns() / 1000u;
+}
+
+class Scoped_monotonic_now_hook {
+public:
+    explicit Scoped_monotonic_now_hook(uint64_t (*fn)())
+    {
+        sintra::detail::set_monotonic_now_us_hook(fn);
+    }
+
+    ~Scoped_monotonic_now_hook()
+    {
+        sintra::detail::set_monotonic_now_us_hook(nullptr);
+    }
+};
+
+class Guard_pointer_scope {
+public:
+    explicit Guard_pointer_scope(std::atomic<uint8_t>* guard)
+    {
+        g_guard_to_clear.store(guard, std::memory_order_release);
+    }
+
+    ~Guard_pointer_scope()
+    {
+        g_guard_to_clear.store(nullptr, std::memory_order_release);
+    }
+};
 
 class Assertion_error : public std::runtime_error {
 public:
@@ -129,6 +171,45 @@ std::atomic<uint64_t>& test_counter()
 {
     static std::atomic<uint64_t> counter{0};
     return counter;
+}
+
+size_t parse_env_multiplier(const char* name, size_t fallback)
+{
+    const char* raw = std::getenv(name);
+    if (!raw || !*raw) {
+        return fallback;
+    }
+
+    char* end = nullptr;
+    errno = 0;
+    unsigned long long parsed = std::strtoull(raw, &end, 10);
+    if (errno != 0 || end == raw || (end && *end)) {
+        std::cerr << "Ignoring invalid value for " << name << ": '" << raw << "'\n";
+        return fallback;
+    }
+    if (parsed == 0) {
+        return fallback;
+    }
+
+    if (parsed > static_cast<unsigned long long>(std::numeric_limits<size_t>::max())) {
+        return std::numeric_limits<size_t>::max();
+    }
+
+    return static_cast<size_t>(parsed);
+}
+
+bool env_flag_enabled(const char* name)
+{
+    const char* raw = std::getenv(name);
+    if (!raw || !*raw) {
+        return false;
+    }
+
+    if (std::strcmp(raw, "0") == 0 || std::strcmp(raw, "false") == 0 || std::strcmp(raw, "FALSE") == 0) {
+        return false;
+    }
+
+    return true;
 }
 
 struct Temp_ring_dir {
@@ -387,6 +468,58 @@ TEST_CASE(test_wait_for_new_data)
     }
 }
 
+TEST_CASE(test_wait_for_new_data_detects_guard_clear_race)
+{
+    Temp_ring_dir tmp("wait_for_new_data_guard_clear");
+    const size_t ring_elements = pick_ring_elements<uint64_t>(128);
+    sintra::Ring_W<uint64_t> writer(tmp.str(), "ring_data", ring_elements);
+    sintra::Ring_R<uint64_t> reader(
+        tmp.str(), "ring_data", ring_elements, (ring_elements * 3) / 4);
+
+    auto initial = reader.start_reading();
+    ASSERT_TRUE(initial.begin == initial.end);
+
+    std::array<uint64_t, 4> payload{1, 2, 3, 4};
+    writer.write(payload.data(), payload.size());
+    writer.done_writing();
+
+    auto& slot = reader.c.reading_sequences[reader.m_rs_index].data;
+    slot.has_guard.store(
+        static_cast<uint8_t>(sintra::Ring<uint64_t, false>::READER_GUARD_HELD |
+                             sintra::Ring<uint64_t, false>::READER_GUARD_BUSY),
+        std::memory_order_release);
+
+    g_guard_hook_fired.store(false, std::memory_order_release);
+    Guard_pointer_scope guard_scope(&slot.has_guard);
+    Scoped_monotonic_now_hook hook(&guard_clearing_monotonic_hook);
+
+    auto range = reader.wait_for_new_data();
+
+    ASSERT_TRUE(g_guard_hook_fired.load(std::memory_order_acquire));
+    ASSERT_TRUE(range.begin == nullptr && range.end == nullptr);
+
+    auto snapshot = reader.get_guard_debug_snapshot(reader.m_rs_index);
+    ASSERT_EQ(
+        snapshot.last_result,
+        static_cast<uint32_t>(sintra::Ring<uint64_t, false>::Guard_mark_busy_outcome::busy_guard_cleared));
+    ASSERT_EQ(snapshot.last_observed,
+              static_cast<uint32_t>(sintra::Ring<uint64_t, false>::READER_GUARD_HELD |
+                                   sintra::Ring<uint64_t, false>::READER_GUARD_BUSY));
+
+    auto diag = reader.get_diagnostics();
+    ASSERT_EQ(diag.mark_guard_busy_entry_count, 1u);
+    ASSERT_EQ(diag.mark_guard_busy_observed_busy, 1u);
+    ASSERT_EQ(diag.mark_guard_busy_guard_cleared_after_busy, 1u);
+    ASSERT_EQ(diag.mark_guard_busy_guard_not_held, 0u);
+
+    const uint8_t guard_state = slot.has_guard.load(std::memory_order_acquire);
+    ASSERT_TRUE((guard_state & sintra::Ring<uint64_t, false>::READER_GUARD_HELD) != 0);
+    const uint8_t busy_mask = guard_state & sintra::Ring<uint64_t, false>::READER_GUARD_BUSY;
+    ASSERT_EQ(busy_mask, uint8_t{0});
+
+    reader.done_reading();
+}
+
 TEST_CASE(test_reader_eviction_does_not_underflow_octile_counter)
 {
     Temp_ring_dir tmp("guard_underflow");
@@ -576,166 +709,192 @@ TEST_CASE(test_streaming_reader_status_restored_after_eviction)
 
 STRESS_TEST(stress_multi_reader_throughput)
 {
-    Temp_ring_dir tmp("stress_multi");
-    size_t ring_elements = pick_ring_elements<uint64_t>(512);
-    const size_t max_trailing = (ring_elements * 3) / 4;
-    const size_t reader_count = 3;
-    const size_t chunk = std::max<size_t>(1, ring_elements / 16);
-    const size_t total_messages = chunk * 64;
+    const size_t message_multiplier = parse_env_multiplier("SINTRA_STRESS_MULTI_MESSAGE_SCALE", 1);
+    const size_t iteration_limit = parse_env_multiplier("SINTRA_STRESS_MULTI_REPEATS", 1);
+    const bool repeat_forever = env_flag_enabled("SINTRA_STRESS_MULTI_FOREVER");
 
-    sintra::Ring_W<uint64_t> writer(tmp.str(), "ring_data", ring_elements);
+    size_t iteration = 0;
 
-    std::atomic<bool> writer_done{false};
-    std::vector<std::vector<uint64_t>> reader_results(reader_count);
-    std::vector<std::exception_ptr> reader_errors(reader_count);
-    std::vector<std::atomic<bool>> reader_ready(reader_count);
-    std::vector<std::atomic<bool>> reader_evicted(reader_count);
-    for (auto& flag : reader_ready) { flag.store(false, std::memory_order_relaxed); }
-    for (auto& flag : reader_evicted) { flag.store(false, std::memory_order_relaxed); }
+    do {
+        Temp_ring_dir tmp("stress_multi");
+        size_t ring_elements = pick_ring_elements<uint64_t>(512);
+        const size_t max_trailing = (ring_elements * 3) / 4;
+        const size_t reader_count = 3;
+        const size_t chunk = std::max<size_t>(1, ring_elements / 16);
+        const size_t base_messages = chunk * 64;
+        const size_t total_messages =
+            message_multiplier > 0 && base_messages > 0
+                ? (message_multiplier > (std::numeric_limits<size_t>::max() / base_messages)
+                       ? std::numeric_limits<size_t>::max()
+                       : base_messages * message_multiplier)
+                : base_messages;
 
-    std::vector<std::thread> reader_threads;
-    reader_threads.reserve(reader_count);
-    for (size_t rid = 0; rid < reader_count; ++rid) {
-        reader_threads.emplace_back([&, rid]() {
-            try {
-                sintra::Ring_R<uint64_t> reader(tmp.str(), "ring_data", ring_elements, max_trailing);
-                auto initial = reader.start_reading();
-                ASSERT_EQ(static_cast<size_t>(initial.end - initial.begin), size_t(0));
-                reader_ready[rid].store(true, std::memory_order_release);
+        sintra::Ring_W<uint64_t> writer(tmp.str(), "ring_data", ring_elements);
 
-                while (!writer_done.load(std::memory_order_acquire) || reader_results[rid].size() < total_messages) {
-                    auto range = reader.wait_for_new_data();
+        std::atomic<bool> writer_done{false};
+        std::vector<std::vector<uint64_t>> reader_results(reader_count);
+        if (total_messages < std::numeric_limits<size_t>::max()) {
+            for (auto& results : reader_results) {
+                results.reserve(total_messages);
+            }
+        }
+        std::vector<std::exception_ptr> reader_errors(reader_count);
+        std::vector<std::atomic<bool>> reader_ready(reader_count);
+        std::vector<std::atomic<bool>> reader_evicted(reader_count);
+        for (auto& flag : reader_ready) { flag.store(false, std::memory_order_relaxed); }
+        for (auto& flag : reader_evicted) { flag.store(false, std::memory_order_relaxed); }
+
+        std::vector<std::thread> reader_threads;
+        reader_threads.reserve(reader_count);
+        for (size_t rid = 0; rid < reader_count; ++rid) {
+            reader_threads.emplace_back([&, rid]() {
+                try {
+                    sintra::Ring_R<uint64_t> reader(tmp.str(), "ring_data", ring_elements, max_trailing);
+                    auto initial = reader.start_reading();
+                    ASSERT_EQ(static_cast<size_t>(initial.end - initial.begin), size_t(0));
+                    reader_ready[rid].store(true, std::memory_order_release);
+
+                    while (!writer_done.load(std::memory_order_acquire) || reader_results[rid].size() < total_messages) {
+                        auto range = reader.wait_for_new_data();
+                        if (reader.consume_eviction_notification()) {
+                            reader_evicted[rid].store(true, std::memory_order_release);
+                            continue;
+                        }
+                        if (!range.begin || range.begin == range.end) {
+                            if (writer_done.load(std::memory_order_acquire)) {
+                                break;
+                            }
+                            continue;
+                        }
+                        size_t len = static_cast<size_t>(range.end - range.begin);
+                        reader_results[rid].insert(reader_results[rid].end(), range.begin, range.begin + len);
+                        reader.done_reading_new_data();
+                    }
+                    reader.done_reading();
                     if (reader.consume_eviction_notification()) {
                         reader_evicted[rid].store(true, std::memory_order_release);
-                        continue;
                     }
-                    if (!range.begin || range.begin == range.end) {
-                        if (writer_done.load(std::memory_order_acquire)) {
-                            break;
-                        }
-                        continue;
-                    }
-                    size_t len = static_cast<size_t>(range.end - range.begin);
-                    reader_results[rid].insert(reader_results[rid].end(), range.begin, range.begin + len);
-                    reader.done_reading_new_data();
                 }
-                reader.done_reading();
-                if (reader.consume_eviction_notification()) {
-                    reader_evicted[rid].store(true, std::memory_order_release);
+                catch (...) {
+                    reader_errors[rid] = std::current_exception();
+                    reader_ready[rid].store(true, std::memory_order_release);
+                }
+            });
+        }
+
+        for (size_t rid = 0; rid < reader_count; ++rid) {
+            while (!reader_ready[rid].load(std::memory_order_acquire)) {
+                std::this_thread::sleep_for(1ms);
+            }
+        }
+
+        std::exception_ptr writer_error;
+        std::thread writer_thread([&]() {
+            try {
+                std::vector<uint64_t> buffer(chunk);
+                uint64_t seq = 0;
+                while (seq < total_messages) {
+                    size_t count = std::min(chunk, static_cast<size_t>(total_messages - seq));
+                    for (size_t i = 0; i < count; ++i) {
+                        buffer[i] = seq + i;
+                    }
+                    writer.write(buffer.data(), count);
+                    writer.done_writing();
+                    seq += count;
                 }
             }
             catch (...) {
-                reader_errors[rid] = std::current_exception();
-                reader_ready[rid].store(true, std::memory_order_release);
+                writer_error = std::current_exception();
             }
+            writer_done.store(true, std::memory_order_release);
+            writer.unblock_global();
         });
-    }
 
-    for (size_t rid = 0; rid < reader_count; ++rid) {
-        while (!reader_ready[rid].load(std::memory_order_acquire)) {
-            std::this_thread::sleep_for(1ms);
+        writer_thread.join();
+        for (size_t rid = 0; rid < reader_count; ++rid) {
+            reader_threads[rid].join();
         }
-    }
 
-    std::exception_ptr writer_error;
-    std::thread writer_thread([&]() {
-        try {
-            std::vector<uint64_t> buffer(chunk);
-            uint64_t seq = 0;
-            while (seq < total_messages) {
-                size_t count = std::min(chunk, static_cast<size_t>(total_messages - seq));
-                for (size_t i = 0; i < count; ++i) {
-                    buffer[i] = seq + i;
+        auto diagnostics = writer.get_diagnostics();
+        const bool has_overflow = diagnostics.reader_lag_overflow_count > 0;
+        const bool has_regressions = diagnostics.reader_sequence_regressions > 0;
+        const bool has_evictions = diagnostics.reader_eviction_count > 0;
+        if (has_overflow || has_regressions || has_evictions) {
+            std::cerr << "[sintra::ring] diagnostics: max_reader_lag="
+                      << diagnostics.max_reader_lag
+                      << ", overflow_count=" << diagnostics.reader_lag_overflow_count
+                      << ", worst_overflow_lag=" << diagnostics.worst_overflow_lag
+                      << ", sequence_regressions=" << diagnostics.reader_sequence_regressions
+                      << ", eviction_count=" << diagnostics.reader_eviction_count
+                      << std::endl;
+
+            if (diagnostics.last_evicted_reader_index != std::numeric_limits<uint32_t>::max()) {
+                std::cerr << "    last_evicted_reader_index=" << diagnostics.last_evicted_reader_index
+                          << ", reader_sequence=" << diagnostics.last_evicted_reader_sequence
+                          << ", writer_sequence=" << diagnostics.last_evicted_writer_sequence
+                          << ", reader_octile=" << diagnostics.last_evicted_reader_octile
+                          << std::endl;
+            }
+
+            if (diagnostics.last_overflow_reader_index != std::numeric_limits<uint32_t>::max()) {
+                std::cerr << "    last_overflow_reader_index=" << diagnostics.last_overflow_reader_index
+                          << ", reader_sequence=" << diagnostics.last_overflow_reader_sequence
+                          << ", leading_sequence=" << diagnostics.last_overflow_leading_sequence
+                          << ", last_consumed=" << diagnostics.last_overflow_last_consumed
+                          << std::endl;
+            }
+        }
+
+        if (writer_error) {
+            std::rethrow_exception(writer_error);
+        }
+        for (auto& err : reader_errors) {
+            if (err) {
+                std::rethrow_exception(err);
+            }
+        }
+
+        bool any_reader_evicted = false;
+        for (auto& flag : reader_evicted) {
+            any_reader_evicted = any_reader_evicted || flag.load(std::memory_order_acquire);
+        }
+
+        for (auto& results : reader_results) {
+            for (size_t i = 0; i < results.size(); ++i) {
+                ASSERT_LT(results[i], total_messages);
+                if (i > 0) {
+                    ASSERT_GT(results[i], results[i - 1]);
                 }
-                writer.write(buffer.data(), count);
-                writer.done_writing();
-                seq += count;
             }
         }
-        catch (...) {
-            writer_error = std::current_exception();
+
+        const bool diagnostics_recorded_eviction = diagnostics.reader_eviction_count > 0u;
+
+        if (any_reader_evicted) {
+            // A slow reader that gets evicted is expected to miss at least one publication. In
+            // that scenario the ring guarantees ordering, but not completeness, so we only
+            // assert that diagnostics captured the eviction and skip the strict per-value
+            // comparison that assumes zero loss.
+            ASSERT_TRUE(diagnostics_recorded_eviction);
         }
-        writer_done.store(true, std::memory_order_release);
-        writer.unblock_global();
-    });
+        else {
+            ASSERT_FALSE(diagnostics_recorded_eviction);
 
-    writer_thread.join();
-    for (size_t rid = 0; rid < reader_count; ++rid) {
-        reader_threads[rid].join();
-    }
-
-    auto diagnostics = writer.get_diagnostics();
-    const bool has_overflow = diagnostics.reader_lag_overflow_count > 0;
-    const bool has_regressions = diagnostics.reader_sequence_regressions > 0;
-    const bool has_evictions = diagnostics.reader_eviction_count > 0;
-    if (has_overflow || has_regressions || has_evictions) {
-        std::cerr << "[sintra::ring] diagnostics: max_reader_lag="
-                  << diagnostics.max_reader_lag
-                  << ", overflow_count=" << diagnostics.reader_lag_overflow_count
-                  << ", worst_overflow_lag=" << diagnostics.worst_overflow_lag
-                  << ", sequence_regressions=" << diagnostics.reader_sequence_regressions
-                  << ", eviction_count=" << diagnostics.reader_eviction_count
-                  << std::endl;
-
-        if (diagnostics.last_evicted_reader_index != std::numeric_limits<uint32_t>::max()) {
-            std::cerr << "    last_evicted_reader_index=" << diagnostics.last_evicted_reader_index
-                      << ", reader_sequence=" << diagnostics.last_evicted_reader_sequence
-                      << ", writer_sequence=" << diagnostics.last_evicted_writer_sequence
-                      << ", reader_octile=" << diagnostics.last_evicted_reader_octile
-                      << std::endl;
-        }
-
-        if (diagnostics.last_overflow_reader_index != std::numeric_limits<uint32_t>::max()) {
-            std::cerr << "    last_overflow_reader_index=" << diagnostics.last_overflow_reader_index
-                      << ", reader_sequence=" << diagnostics.last_overflow_reader_sequence
-                      << ", leading_sequence=" << diagnostics.last_overflow_leading_sequence
-                      << ", last_consumed=" << diagnostics.last_overflow_last_consumed
-                      << std::endl;
-        }
-    }
-
-    if (writer_error) {
-        std::rethrow_exception(writer_error);
-    }
-    for (auto& err : reader_errors) {
-        if (err) {
-            std::rethrow_exception(err);
-        }
-    }
-
-    bool any_reader_evicted = false;
-    for (auto& flag : reader_evicted) {
-        any_reader_evicted = any_reader_evicted || flag.load(std::memory_order_acquire);
-    }
-
-    for (auto& results : reader_results) {
-        for (size_t i = 0; i < results.size(); ++i) {
-            ASSERT_LT(results[i], total_messages);
-            if (i > 0) {
-                ASSERT_GT(results[i], results[i - 1]);
+            for (auto& results : reader_results) {
+                ASSERT_EQ(results.size(), total_messages);
+                for (size_t i = 0; i < total_messages; ++i) {
+                    ASSERT_EQ(results[i], static_cast<uint64_t>(i));
+                }
             }
         }
-    }
 
-    const bool diagnostics_recorded_eviction = diagnostics.reader_eviction_count > 0u;
-
-    if (any_reader_evicted) {
-        // A slow reader that gets evicted is expected to miss at least one publication. In
-        // that scenario the ring guarantees ordering, but not completeness, so we only
-        // assert that diagnostics captured the eviction and skip the strict per-value
-        // comparison that assumes zero loss.
-        ASSERT_TRUE(diagnostics_recorded_eviction);
-        return;
-    }
-
-    ASSERT_FALSE(diagnostics_recorded_eviction);
-
-    for (auto& results : reader_results) {
-        ASSERT_EQ(results.size(), total_messages);
-        for (size_t i = 0; i < total_messages; ++i) {
-            ASSERT_EQ(results[i], static_cast<uint64_t>(i));
+        if (repeat_forever || iteration_limit > 1) {
+            std::cout << "[stress_multi_reader_throughput] iteration " << (iteration + 1)
+                      << " complete (messages=" << total_messages << ")" << std::endl;
         }
-    }
+
+        ++iteration;
+    } while (repeat_forever || iteration < iteration_limit);
 }
 
 STRESS_TEST(stress_attach_detach_readers)

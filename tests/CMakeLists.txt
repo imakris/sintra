@@ -2,6 +2,12 @@
 # Parameters:
 #   SUFFIX: e.g., "release", "debug"
 #   IS_DEBUG: TRUE or FALSE
+set(SINTRA_TEST_FILTER "" CACHE STRING "Semicolon-separated list of test source basenames to build")
+
+if(SINTRA_TEST_FILTER)
+    string(REPLACE "," ";" SINTRA_TEST_FILTER "${SINTRA_TEST_FILTER}")
+endif()
+
 function(add_test_suite SUFFIX IS_DEBUG)
     # Create library target for this configuration
     set(LIB_TARGET sintra_for_${SUFFIX})
@@ -74,6 +80,29 @@ function(add_test_suite SUFFIX IS_DEBUG)
         spawn_detached_test.cpp
         variable_buffer_alignment_test.cpp
     )
+
+    if(SINTRA_TEST_FILTER)
+        set(REQUESTED_TESTS ${SINTRA_TEST_FILTER})
+        set(FILTERED_TEST_FILES)
+        foreach(TEST_FILE IN LISTS TEST_FILES)
+            get_filename_component(TEST_NAME "${TEST_FILE}" NAME_WE)
+            list(FIND REQUESTED_TESTS "${TEST_NAME}" MATCH_INDEX)
+            if(MATCH_INDEX GREATER -1)
+                list(APPEND FILTERED_TEST_FILES "${TEST_FILE}")
+                list(REMOVE_AT REQUESTED_TESTS ${MATCH_INDEX})
+            endif()
+        endforeach()
+
+        foreach(UNMATCHED IN LISTS REQUESTED_TESTS)
+            message(WARNING "SINTRA_TEST_FILTER requested '${UNMATCHED}' but no matching test source was found")
+        endforeach()
+
+        if(FILTERED_TEST_FILES)
+            set(TEST_FILES ${FILTERED_TEST_FILES})
+        else()
+            message(FATAL_ERROR "SINTRA_TEST_FILTER did not match any test sources")
+        endif()
+    endif()
 
     foreach(TEST_FILE IN LISTS TEST_FILES)
         get_filename_component(TEST_NAME "${TEST_FILE}" NAME_WE)
