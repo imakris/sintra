@@ -1473,7 +1473,26 @@ struct Ring_R : Ring<T, true>
             m_last_consumed_sequence = start_sequence + sequence_counter_type(num_range_elements);
 
 #ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
+            // POST-BUSY EVICTION CHECK:
+            // This check detects evictions that occurred AFTER mark_guard_busy() succeeded.
+            // With proper cross-variable atomic synchronization (fence fix f86fa9c), the writer
+            // should see reader_busy=true and NOT evict at this point.
+            //
+            // This check was added in commit 61a8397 to catch evictions during the race window
+            // when broken synchronization allowed the writer to see stale reader_busy=false.
+            // If the fence fix is correct, this check should NEVER trigger.
+            //
+            // INSTRUMENTATION: Track how often this fires to determine if it's dead code.
             if (slot.status.load(std::memory_order_acquire) == Ring<T, false>::READER_STATE_EVICTED) {
+                static std::atomic<uint64_t> post_busy_eviction_count{0};
+                auto count = post_busy_eviction_count.fetch_add(1, std::memory_order_relaxed);
+                std::cerr << "[sintra::ring POST-BUSY EVICTION #" << (count + 1) << "] "
+                          << "Reader evicted AFTER marking guard busy. "
+                          << "This should NOT happen after fence fix (f86fa9c). "
+                          << "reader_index=" << m_rs_index
+                          << ", reading_sequence=" << m_reading_sequence->load(std::memory_order_relaxed)
+                          << ", leading_sequence=" << c.leading_sequence.load(std::memory_order_relaxed)
+                          << std::endl;
                 handle_eviction_if_needed();
                 return {};
             }
@@ -1647,8 +1666,27 @@ struct Ring_R : Ring<T, true>
                 c.leading_sequence.load(std::memory_order_acquire);
             const sequence_counter_type current_sequence =
                 m_reading_sequence->load(std::memory_order_acquire);
-            const sequence_counter_type new_seq =
-                std::max(current_sequence, published_leading);
+
+            // INVARIANT: Reader sequence should NEVER exceed writer's published position.
+            // If this occurs, it indicates a serious synchronization bug (e.g., reader did
+            // fetch_add based on stale leading_sequence due to broken memory ordering).
+            // The previous std::max(current, published) masked this invalid state.
+            // After the fence fix (f86fa9c), this condition should never occur.
+            if (current_sequence > published_leading) {
+                static std::atomic<uint64_t> invariant_violation_count{0};
+                auto count = invariant_violation_count.fetch_add(1, std::memory_order_relaxed);
+                std::cerr << "[sintra::ring INVARIANT VIOLATION #" << (count + 1) << "] "
+                          << "Reader sequence ahead of writer: "
+                          << "reader=" << current_sequence
+                          << ", writer=" << published_leading
+                          << ", delta=" << (current_sequence - published_leading)
+                          << ", reader_index=" << m_rs_index
+                          << std::endl;
+                // Continue with recovery using writer's position, but this indicates a bug.
+            }
+
+            // Always jump to writer's current position when evicted (never go backwards).
+            const sequence_counter_type new_seq = published_leading;
             slot.v.store(new_seq, std::memory_order_release);
             m_reading_sequence->store(new_seq, std::memory_order_release);
             m_last_consumed_sequence = new_seq;
@@ -1682,9 +1720,20 @@ public:
     bool consume_eviction_notification()
     {
 #ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
+        // SPECULATIVE EVICTION CHECK:
+        // This preemptively checks if the reader was evicted even when m_evicted_since_last_wait
+        // is false. Added in commit 61a8397, likely to catch evictions that happened during
+        // broken synchronization windows. With the fence fix, this should be redundant with
+        // the normal eviction detection flow. Instrumented to detect if it ever triggers.
         if (!m_evicted_since_last_wait.load(std::memory_order_acquire)) {
             auto& slot = c.reading_sequences[m_rs_index].data;
             if (slot.status.load(std::memory_order_acquire) == Ring<T, false>::READER_STATE_EVICTED) {
+                static std::atomic<uint64_t> speculative_eviction_check_count{0};
+                auto count = speculative_eviction_check_count.fetch_add(1, std::memory_order_relaxed);
+                std::cerr << "[sintra::ring SPECULATIVE EVICTION CHECK #" << (count + 1) << "] "
+                          << "Eviction detected in consume_eviction_notification when flag was false. "
+                          << "reader_index=" << m_rs_index
+                          << std::endl;
                 handle_eviction_if_needed();
             }
         }
