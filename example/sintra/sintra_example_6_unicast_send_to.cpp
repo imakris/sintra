@@ -1,7 +1,7 @@
 //
 // Sintra library, example 6
 //
-// This example demonstrates the SINTRA_EXPORT_MESSAGE functionality for fire-and-forget
+// This example demonstrates the SINTRA_UNICAST functionality for fire-and-forget
 // unicast messaging.
 //
 // In this example, there are 3 user processes:
@@ -62,7 +62,7 @@ struct MessageReceiver : Derived_transceiver<MessageReceiver>
     const char* instance_name() { return instance_name_str.c_str(); }
 
     // Export the handler as a fire-and-forget message (no reply sent)
-    SINTRA_EXPORT_MESSAGE(handle_unicast)
+    SINTRA_UNICAST(handle_unicast)
 };
 
 
