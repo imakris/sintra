@@ -182,12 +182,12 @@ protected:
 
 public:
 
-    SINTRA_SIGNAL_EXPLICIT(
+    SINTRA_MESSAGE_RESERVED(
         exception,
         message_string what
     )
 
-    SINTRA_SIGNAL_EXPLICIT(
+    SINTRA_MESSAGE_RESERVED(
         deferral,
         instance_id_type new_fiid
     )
