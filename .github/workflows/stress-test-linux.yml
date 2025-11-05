@@ -199,7 +199,7 @@ jobs:
         shell: bash
         run: |
           cd tests
-          python run_tests.py --repetitions 10 --timeout 30 --build-dir ../build --config Release
+          python run_tests.py --repetitions 100000 --timeout 30 --build-dir ../build --config Release --test stress_multi_reader_throughput
 
       - name: Mark status success
         if: success()

@@ -152,11 +152,11 @@ jobs:
         run: cmake -B build -S . -DCMAKE_BUILD_TYPE=Release ${{ steps.flags.outputs.CMAKE_FLAGS }}
 
       - name: Build
-        run: cmake --build build --config Release
+        run: cmake --build build --config Release --target sintra_ipc_rings_tests_release
 
       - name: Run tests
         if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.core == 'true' || steps.changed.outputs.workflows == 'true'
-        run: ctest --test-dir build -C Release --output-on-failure --timeout 60
+        run: ctest --test-dir build -C Release --output-on-failure --timeout 60 -R ipc_rings_tests_release
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4

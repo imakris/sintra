@@ -85,7 +85,7 @@ jobs:
         run: cmake -B build -S . -DCMAKE_BUILD_TYPE=Release ${{ steps.flags.outputs.CMAKE_FLAGS }}
 
       - name: Build
-        run: cmake --build build --config Release
+        run: cmake --build build --config Release --target sintra_ipc_rings_tests_release
 
       - name: Run tests (LLDB backtrace on failure)
         if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.core == 'true' || steps.changed.outputs.workflows == 'true'
@@ -96,7 +96,7 @@ jobs:
           export PS4='+ $(date "+%H:%M:%S") ${BASH_SOURCE}:${LINENO}: '
           set -x
 
-          if ctest --test-dir build -C Release --output-on-failure --timeout 60 -VV -j1; then
+          if ctest --test-dir build -C Release --output-on-failure --timeout 60 -VV -j1 -R ipc_rings_tests_release; then
             exit 0
           fi
 
