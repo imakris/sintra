@@ -15,6 +15,7 @@ Options:
     --include PATTERN               Include only tests matching glob-style pattern (can be repeated)
     --exclude PATTERN               Exclude tests matching glob-style pattern (can be repeated)
     --build-dir PATH                Path to build directory (default: ../build-ninja2)
+    --build-targets                 Build the required CMake targets before running tests
     --config CONFIG                 Build configuration Debug/Release (default: Debug)
     --verbose                       Show detailed output for each test run
     --preserve-stalled-processes    Keep stalled processes running for debugging (default: terminate)
@@ -360,9 +361,22 @@ class TestInvocation:
     path: Path
     name: str
     args: Tuple[str, ...] = ()
+    target: Optional[str] = None
 
     def command(self) -> List[str]:
         return [str(self.path), *self.args]
+
+    def cmake_target(self) -> Optional[str]:
+        """Return the CMake target backing this invocation, if known."""
+
+        if self.target:
+            return self.target
+
+        stem = self.path.stem
+        if stem:
+            return stem
+
+        return None
 
 class TestRunner:
     """Manages test execution with timeout and repetition"""
@@ -374,6 +388,10 @@ class TestRunner:
         self.timeout = timeout
         self.verbose = verbose
         self.preserve_on_timeout = preserve_on_timeout
+        self._configurations: List[Tuple[str, str]] = [
+            ('debug', 'Debug'),
+            ('release', 'Release'),
+        ]
         sanitized_config = ''.join(c.lower() if c.isalnum() else '_' for c in config)
         timestamp_ms = int(time.time() * 1000)
         scratch_dir_name = f".sintra-test-scratch-{sanitized_config}-{timestamp_ms}-{os.getpid()}"
@@ -751,15 +769,11 @@ class TestRunner:
             print(f"{Color.RED}Test directory not found: {self.test_dir}{Color.RESET}")
             return {}
 
-        # 2 configurations: adaptive policy in release and debug builds
-        configurations = [
-            'debug',
-            'release'
-        ]
+        configurations = self._configurations
 
         # Discover available tests dynamically so the runner adapts to new or removed binaries
         discovered_tests: Dict[str, List[TestInvocation]] = {
-            config: [] for config in configurations
+            config_key: [] for config_key, _ in configurations
         }
 
         try:
@@ -776,29 +790,42 @@ class TestRunner:
             if sys.platform == 'win32' and normalized_name.lower().endswith('.exe'):
                 normalized_name = normalized_name[:-4]
 
-            for config in configurations:
-                suffix = f"_{config}"
+            for config_key, _ in configurations:
+                suffix = f"_{config_key}"
                 if not normalized_name.endswith(suffix):
                     continue
 
                 base_name = normalized_name[:-len(suffix)]
 
-                if not self._matches_filters(
+                if not self._binary_matches_filters(
                     base_name,
                     normalized_name,
-                    test_name,
                     include_patterns,
                     exclude_patterns,
                 ):
                     break
 
                 invocations = self._expand_test_invocations(entry, base_name, normalized_name)
-                if invocations:
-                    discovered_tests[config].extend(invocations)
+                if not invocations:
+                    break
+
+                filtered_invocations = [
+                    inv
+                    for inv in invocations
+                    if self._invocation_matches_filters(
+                        inv,
+                        test_name,
+                        include_patterns,
+                        exclude_patterns,
+                    )
+                ]
+
+                if filtered_invocations:
+                    discovered_tests[config_key].extend(filtered_invocations)
                 break
 
         test_suites = {}
-        for config, tests in discovered_tests.items():
+        for config_key, tests in discovered_tests.items():
             if not tests:
                 continue
             ordered = sorted(
@@ -810,7 +837,7 @@ class TestRunner:
                     item[0],
                 ),
             )
-            test_suites[config] = [invocation for _, invocation in ordered]
+            test_suites[config_key] = [invocation for _, invocation in ordered]
 
         if not test_suites:
             if any([test_name, include_patterns, exclude_patterns]):
@@ -832,16 +859,49 @@ class TestRunner:
         return test_suites
 
     @staticmethod
-    def _matches_filters(
+    def _binary_matches_filters(
         base_name: str,
         normalized_name: str,
+        include_patterns: Optional[List[str]],
+        exclude_patterns: Optional[List[str]],
+    ) -> bool:
+        """Determine if a test binary should be considered based on filters."""
+
+        candidate_names = [base_name, normalized_name]
+
+        if include_patterns:
+            include_match = any(
+                fnmatch.fnmatch(name, pattern)
+                for pattern in include_patterns
+                for name in candidate_names
+            )
+            if not include_match:
+                return False
+
+        if exclude_patterns:
+            if any(
+                fnmatch.fnmatch(name, pattern)
+                for pattern in exclude_patterns
+                for name in candidate_names
+            ):
+                return False
+
+        return True
+
+    @staticmethod
+    def _invocation_matches_filters(
+        invocation: TestInvocation,
         test_name: Optional[str],
         include_patterns: Optional[List[str]],
         exclude_patterns: Optional[List[str]],
     ) -> bool:
-        """Determine if a test name should be included based on provided filters."""
+        """Determine if a specific invocation should be run based on filters."""
 
-        candidate_names = [base_name, normalized_name]
+        candidate_names = [invocation.name]
+
+        for arg in invocation.args:
+            if arg:
+                candidate_names.append(arg)
 
         if test_name and all(test_name not in name for name in candidate_names):
             return False
@@ -865,32 +925,91 @@ class TestRunner:
 
         return True
 
+    def _cmake_configuration_name(self, config_key: str) -> str:
+        for key, display in self._configurations:
+            if key == config_key:
+                return display
+        return config_key
+
+    def build_required_targets(
+        self,
+        config_key: str,
+        invocations: Sequence[TestInvocation],
+    ) -> bool:
+        """Ensure the CMake targets for ``invocations`` are built."""
+
+        unique_targets = sorted(
+            {
+                target
+                for invocation in invocations
+                for target in [invocation.cmake_target()]
+                if target
+            }
+        )
+
+        if not unique_targets:
+            return True
+
+        config_name = self._cmake_configuration_name(config_key)
+        command = [
+            'cmake',
+            '--build',
+            str(self.build_dir),
+            '--config',
+            config_name,
+            '--target',
+            *unique_targets,
+        ]
+
+        print(
+            f"{Color.BLUE}Building targets for {config_name}: {', '.join(unique_targets)}{Color.RESET}"
+        )
+
+        try:
+            result = subprocess.run(command, check=False)
+        except OSError as exc:
+            print(
+                f"{Color.RED}Failed to invoke cmake to build targets: {exc}{Color.RESET}"
+            )
+            return False
+
+        if result.returncode != 0:
+            print(
+                f"{Color.RED}CMake build failed for {config_name} (exit {result.returncode}).{Color.RESET}"
+            )
+            return False
+
+        return True
+
     def _expand_test_invocations(
         self,
         entry: Path,
         base_name: str,
         normalized_name: str,
     ) -> List[TestInvocation]:
-        if base_name == 'sintra_ipc_rings_tests':
-            return self._expand_ipc_rings_invocations(entry, normalized_name)
+        target = normalized_name
 
-        return [TestInvocation(path=entry, name=normalized_name)]
+        if base_name == 'sintra_ipc_rings_tests':
+            return self._expand_ipc_rings_invocations(entry, normalized_name, target)
+
+        return [TestInvocation(path=entry, name=normalized_name, target=target)]
 
     def _expand_ipc_rings_invocations(
         self,
         entry: Path,
         normalized_name: str,
+        target: str,
     ) -> List[TestInvocation]:
         selectors = self._list_ipc_rings_tests(entry)
         if not selectors:
             # Fallback to running the executable as a whole if discovery fails
-            return [TestInvocation(path=entry, name=normalized_name)]
+            return [TestInvocation(path=entry, name=normalized_name, target=target)]
 
         invocations: List[TestInvocation] = []
         for category, test_name in selectors:
             display_name = f"{normalized_name}:{category}:{test_name}"
             args = ('--run', f"{category}:{test_name}")
-            invocations.append(TestInvocation(entry, display_name, args))
+            invocations.append(TestInvocation(entry, display_name, args, target))
         return invocations
 
     def _list_ipc_rings_tests(self, entry: Path) -> List[Tuple[str, str]]:
@@ -2101,6 +2220,8 @@ def main():
                         help='Build configuration (default: Debug)')
     parser.add_argument('--test-dir', type=str, default=None,
                         help='Subdirectory within build-dir/tests to search for tests (e.g., "manual" for manual tests)')
+    parser.add_argument('--build-targets', action='store_true',
+                        help='Build required CMake targets before running tests')
     parser.add_argument('--verbose', action='store_true',
                         help='Show detailed output for each test run')
     parser.add_argument('--preserve-stalled-processes', action='store_true',
@@ -2170,6 +2291,10 @@ def main():
             print(f"{'=' * 80}")
 
             suite_start_time = time.time()
+
+            if args.build_targets:
+                if not runner.build_required_targets(config_name, tests):
+                    return 1
 
             # Adaptive soak test for this suite
             accumulated_results = {

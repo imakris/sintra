@@ -2,6 +2,32 @@
 # Parameters:
 #   SUFFIX: e.g., "release", "debug"
 #   IS_DEBUG: TRUE or FALSE
+set(SINTRA_TEST_FILTER "" CACHE STRING "Semicolon-separated list of test source basenames to build")
+
+set(SINTRA_REQUESTED_CANONICAL "")
+set(SINTRA_REQUESTED_ORIGINALS "")
+
+if(SINTRA_TEST_FILTER)
+    string(REPLACE "," ";" SINTRA_TEST_FILTER "${SINTRA_TEST_FILTER}")
+
+    foreach(_SINTRA_FILTER_ENTRY IN LISTS SINTRA_TEST_FILTER)
+        string(STRIP "${_SINTRA_FILTER_ENTRY}" _SINTRA_FILTER_ENTRY_STRIPPED)
+        if(_SINTRA_FILTER_ENTRY_STRIPPED STREQUAL "")
+            continue()
+        endif()
+
+        set(_SINTRA_CANONICAL "${_SINTRA_FILTER_ENTRY_STRIPPED}")
+        string(REGEX REPLACE "\\.cpp$" "" _SINTRA_CANONICAL "${_SINTRA_CANONICAL}")
+        string(REGEX REPLACE "^sintra_" "" _SINTRA_CANONICAL "${_SINTRA_CANONICAL}")
+        string(REGEX REPLACE "_(debug|release)$" "" _SINTRA_CANONICAL "${_SINTRA_CANONICAL}")
+
+        list(APPEND SINTRA_REQUESTED_CANONICAL "${_SINTRA_CANONICAL}")
+        list(APPEND SINTRA_REQUESTED_ORIGINALS "${_SINTRA_FILTER_ENTRY_STRIPPED}")
+    endforeach()
+
+    set(SINTRA_TEST_FILTER "${SINTRA_REQUESTED_CANONICAL}")
+endif()
+
 function(add_test_suite SUFFIX IS_DEBUG)
     # Create library target for this configuration
     set(LIB_TARGET sintra_for_${SUFFIX})
@@ -74,6 +100,36 @@ function(add_test_suite SUFFIX IS_DEBUG)
         spawn_detached_test.cpp
         variable_buffer_alignment_test.cpp
     )
+
+    if(SINTRA_TEST_FILTER)
+        set(_SINTRA_PENDING_CANONICAL ${SINTRA_TEST_FILTER})
+        set(_SINTRA_PENDING_ORIGINALS ${SINTRA_REQUESTED_ORIGINALS})
+        set(FILTERED_TEST_FILES)
+        foreach(TEST_FILE IN LISTS TEST_FILES)
+            get_filename_component(TEST_NAME "${TEST_FILE}" NAME_WE)
+            set(_SINTRA_TEST_CANON "${TEST_NAME}")
+            string(REGEX REPLACE "^sintra_" "" _SINTRA_TEST_CANON "${_SINTRA_TEST_CANON}")
+            string(REGEX REPLACE "_(debug|release)$" "" _SINTRA_TEST_CANON "${_SINTRA_TEST_CANON}")
+
+            list(FIND _SINTRA_PENDING_CANONICAL "${_SINTRA_TEST_CANON}" MATCH_INDEX)
+            if(MATCH_INDEX GREATER -1)
+                list(APPEND FILTERED_TEST_FILES "${TEST_FILE}")
+                list(REMOVE_AT _SINTRA_PENDING_CANONICAL ${MATCH_INDEX})
+                list(REMOVE_AT _SINTRA_PENDING_ORIGINALS ${MATCH_INDEX})
+            endif()
+        endforeach()
+
+        foreach(UNMATCHED IN LISTS _SINTRA_PENDING_ORIGINALS)
+            message(WARNING "SINTRA_TEST_FILTER requested '${UNMATCHED}' but no matching test source was found")
+        endforeach()
+
+        if(FILTERED_TEST_FILES)
+            set(TEST_FILES ${FILTERED_TEST_FILES})
+        else()
+            string(JOIN ", " _SINTRA_REQUEST_SUMMARY ${SINTRA_REQUESTED_ORIGINALS})
+            message(FATAL_ERROR "SINTRA_TEST_FILTER did not match any test sources: ${_SINTRA_REQUEST_SUMMARY}")
+        endif()
+    endif()
 
     foreach(TEST_FILE IN LISTS TEST_FILES)
         get_filename_component(TEST_NAME "${TEST_FILE}" NAME_WE)
