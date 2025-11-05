@@ -498,7 +498,7 @@ public:
     }                                                                                           \
     using m ## _mftc = RPCTC_d<decltype(mfp), mfp, id, mbcd, fire_and_forget>;                  \
     static_assert(!fire_and_forget || std::is_void_v<typename m ## _mftc::r_type>,              \
-        "Fire-and-forget functions (SINTRA_EXPORT_MESSAGE) must return void");                  \
+        "Fire-and-forget functions (SINTRA_UNICAST) must return void");\
     sintra::Instantiator m ## _itt = export_rpc<m ## _mftc>(mfp);                               \
                                                                                                 \
     template<typename... Args>                                                                  \
@@ -536,7 +536,7 @@ public:
     // Similar to SINTRA_RPC, but does not send a reply message. Only works with void functions.
     // This provides efficient one-way messaging to specific transceiver instances without
     // the overhead of reply handling.
-    #define SINTRA_EXPORT_MESSAGE(m)                                                              \
+    #define SINTRA_UNICAST(m)                                                              \
         SINTRA_RPC_IMPL(m, &Transceiver_type :: m, sintra::invalid_type_id, true, true)
 
   //\       //\       //\       //\       //\       //\       //\       //
