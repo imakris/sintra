@@ -76,6 +76,8 @@ CAVEATS
 #include <cwchar>
 #include <limits>
 
+#include <sintra/time_utils.h>
+
 // Platform headers MUST be included BEFORE opening namespaces to avoid polluting them
 #if defined(_WIN32)
   #include "../sintra_windows.h"
@@ -440,17 +442,6 @@ inline void ips_backend::destroy() noexcept
 
 
 
-static inline uint64_t now_ns() noexcept
-{
-#if SINTRA_BACKEND_DARWIN
-    return clock_gettime_nsec_np(CLOCK_MONOTONIC);
-#else
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
-#endif
-}
-
 #if SINTRA_BACKEND_LINUX
 static inline void ns_to_timespec(uint64_t ns, struct timespec& ts)
 {
@@ -488,7 +479,7 @@ static inline int posix_wait_equal_until(
     }
 #elif SINTRA_BACKEND_LINUX
     for (;;) {
-        const uint64_t now = now_ns();
+        const uint64_t now = sintra::monotonic_now_ns();
         if (now >= deadline) {
             errno = ETIMEDOUT; return -1;
         }
@@ -601,7 +592,7 @@ inline bool ips_backend::try_wait_for(std::chrono::nanoseconds d) noexcept
     if (try_wait()) return true;
 
     const uint64_t add = d.count() <= 0 ? 0ULL : (uint64_t)d.count();
-    const uint64_t deadline = now_ns() + add;
+    const uint64_t deadline = sintra::monotonic_now_ns() + add;
 
     for (;;) {
         uint32_t cur = c.load(std::memory_order_acquire);
@@ -610,7 +601,7 @@ inline bool ips_backend::try_wait_for(std::chrono::nanoseconds d) noexcept
                 return true;
             continue;
         }
-        if (now_ns() >= deadline) {
+        if (sintra::monotonic_now_ns() >= deadline) {
             if (try_wait()) {
                 return true;
             }
