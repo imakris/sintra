@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -33,6 +34,44 @@
 using namespace std::chrono_literals;
 
 namespace {
+
+std::atomic<std::atomic<uint8_t>*> g_guard_to_clear{nullptr};
+std::atomic<bool> g_guard_hook_fired{false};
+
+uint64_t guard_clearing_monotonic_hook()
+{
+    if (auto* guard = g_guard_to_clear.exchange(nullptr, std::memory_order_acq_rel)) {
+        guard->store(0, std::memory_order_release);
+        g_guard_hook_fired.store(true, std::memory_order_release);
+    }
+    return sintra::monotonic_now_ns() / 1000u;
+}
+
+class Scoped_monotonic_now_hook {
+public:
+    explicit Scoped_monotonic_now_hook(uint64_t (*fn)())
+    {
+        sintra::detail::set_monotonic_now_us_hook(fn);
+    }
+
+    ~Scoped_monotonic_now_hook()
+    {
+        sintra::detail::set_monotonic_now_us_hook(nullptr);
+    }
+};
+
+class Guard_pointer_scope {
+public:
+    explicit Guard_pointer_scope(std::atomic<uint8_t>* guard)
+    {
+        g_guard_to_clear.store(guard, std::memory_order_release);
+    }
+
+    ~Guard_pointer_scope()
+    {
+        g_guard_to_clear.store(nullptr, std::memory_order_release);
+    }
+};
 
 class Assertion_error : public std::runtime_error {
 public:
@@ -385,6 +424,58 @@ TEST_CASE(test_wait_for_new_data)
     for (size_t i = 0; i < expected.size(); ++i) {
         ASSERT_EQ(observed[i], expected[i]);
     }
+}
+
+TEST_CASE(test_wait_for_new_data_detects_guard_clear_race)
+{
+    Temp_ring_dir tmp("wait_for_new_data_guard_clear");
+    const size_t ring_elements = pick_ring_elements<uint64_t>(128);
+    sintra::Ring_W<uint64_t> writer(tmp.str(), "ring_data", ring_elements);
+    sintra::Ring_R<uint64_t> reader(
+        tmp.str(), "ring_data", ring_elements, (ring_elements * 3) / 4);
+
+    auto initial = reader.start_reading();
+    ASSERT_TRUE(initial.begin == initial.end);
+
+    std::array<uint64_t, 4> payload{1, 2, 3, 4};
+    writer.write(payload.data(), payload.size());
+    writer.done_writing();
+
+    auto& slot = reader.c.reading_sequences[reader.m_rs_index].data;
+    slot.has_guard.store(
+        static_cast<uint8_t>(sintra::Ring<uint64_t, false>::READER_GUARD_HELD |
+                             sintra::Ring<uint64_t, false>::READER_GUARD_BUSY),
+        std::memory_order_release);
+
+    g_guard_hook_fired.store(false, std::memory_order_release);
+    Guard_pointer_scope guard_scope(&slot.has_guard);
+    Scoped_monotonic_now_hook hook(&guard_clearing_monotonic_hook);
+
+    auto range = reader.wait_for_new_data();
+
+    ASSERT_TRUE(g_guard_hook_fired.load(std::memory_order_acquire));
+    ASSERT_TRUE(range.begin == nullptr && range.end == nullptr);
+
+    auto snapshot = reader.get_guard_debug_snapshot(reader.m_rs_index);
+    ASSERT_EQ(
+        snapshot.last_result,
+        static_cast<uint32_t>(sintra::Ring<uint64_t, false>::Guard_mark_busy_outcome::busy_guard_cleared));
+    ASSERT_EQ(snapshot.last_observed,
+              static_cast<uint32_t>(sintra::Ring<uint64_t, false>::READER_GUARD_HELD |
+                                   sintra::Ring<uint64_t, false>::READER_GUARD_BUSY));
+
+    auto diag = reader.get_diagnostics();
+    ASSERT_EQ(diag.mark_guard_busy_entry_count, 1u);
+    ASSERT_EQ(diag.mark_guard_busy_observed_busy, 1u);
+    ASSERT_EQ(diag.mark_guard_busy_guard_cleared_after_busy, 1u);
+    ASSERT_EQ(diag.mark_guard_busy_guard_not_held, 0u);
+
+    const uint8_t guard_state = slot.has_guard.load(std::memory_order_acquire);
+    ASSERT_TRUE((guard_state & sintra::Ring<uint64_t, false>::READER_GUARD_HELD) != 0);
+    const uint8_t busy_mask = guard_state & sintra::Ring<uint64_t, false>::READER_GUARD_BUSY;
+    ASSERT_EQ(busy_mask, uint8_t{0});
+
+    reader.done_reading();
 }
 
 TEST_CASE(test_reader_eviction_does_not_underflow_octile_counter)
