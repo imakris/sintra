@@ -497,8 +497,8 @@ public:
         );                                                                                      \
     }                                                                                           \
     using m ## _mftc = RPCTC_d<decltype(mfp), mfp, id, mbcd, fire_and_forget>;                  \
-    static_assert(!fire_and_forget || std::is_void_v<typename m ## _mftc::r_type>,             \
-        "Fire-and-forget functions (SINTRA_EXPORT_MESSAGE) must return void");                 \
+    static_assert(!fire_and_forget || std::is_void_v<typename m ## _mftc::r_type>,              \
+        "Fire-and-forget functions (SINTRA_EXPORT_MESSAGE) must return void");                  \
     sintra::Instantiator m ## _itt = export_rpc<m ## _mftc>(mfp);                               \
                                                                                                 \
     template<typename... Args>                                                                  \
