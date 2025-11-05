@@ -534,6 +534,13 @@ public:
     #define SINTRA_RPC_STRICT_EXPLICIT(m)                                                         \
         SINTRA_RPC_IMPL(m, &Transceiver_type :: m, (type_id_type)sintra::detail::reserved_id::m, false)
 
+    // Exports a void member function for fire-and-forget unicast messaging.
+    // Similar to SINTRA_RPC, but does not send a reply message. Only works with void functions.
+    // This provides efficient one-way messaging to specific transceiver instances without
+    // the overhead of reply handling.
+    #define SINTRA_EXPORT_MESSAGE(m)                                                              \
+        SINTRA_RPC_IMPL(m, &Transceiver_type :: m, sintra::invalid_type_id, true)
+
   //\       //\       //\       //\       //\       //\       //\       //
  ////\     ////\     ////\     ////\     ////\     ////\     ////\     ////
 //////\   //////\   //////\   //////\   //////\   //////\   //////\   //////

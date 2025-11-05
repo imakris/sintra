@@ -780,6 +780,12 @@ void Transceiver::rpc_handler(Message_prefix& untyped_msg)
             return;
         }
 
+        // Check if this is a fire-and-forget message (void return type, no reply needed)
+        constexpr bool is_fire_and_forget = std::is_same_v<typename RPCTC::r_type, void>;
+        if constexpr (is_fire_and_forget) {
+            return; // Skip reply for fire-and-forget void functions
+        }
+
         // additional return recipients, assumed to be waiting
         if (s_tl_common_function_iid != invalid_instance_id) {
 
@@ -952,6 +958,21 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
     // -- _  O|| --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --
     //   (_)'  '\\.
     //            '\\.
+
+    // Check if this is a fire-and-forget message (void return type)
+    constexpr bool is_fire_and_forget = std::is_same_v<typename RPCTC::r_type, void>;
+
+    if constexpr (is_fire_and_forget) {
+        // For void functions, don't wait for a reply - this is fire-and-forget
+        sl.unlock();
+        {
+            unique_lock<mutex> orpclock(s_outstanding_rpcs_mutex());
+            s_outstanding_rpcs().erase(&orpcc);
+        }
+        s_mproc->deactivate_return_handler(function_instance_id);
+        // Return void (void_placeholder_t will be handled by the caller)
+        return rm_body.get_value();
+    }
 
     // Wait until either a normal reply arrives or the RPC gets unblocked.
     // With predicate waiting plus Managed_process::unblock_rpc() (invoked on
