@@ -1573,7 +1573,12 @@ struct Ring_R : Ring<T, true>
             // Reader was evicted by writer for being too slow.
             // Skip all missed data and jump to writer's current position.
             // This is the only safe recovery strategy since old data has been overwritten.
-            sequence_counter_type new_seq = c.leading_sequence.load(std::memory_order_acquire);
+            const sequence_counter_type published_leading =
+                c.leading_sequence.load(std::memory_order_acquire);
+            const sequence_counter_type current_sequence =
+                m_reading_sequence->load(std::memory_order_acquire);
+            const sequence_counter_type new_seq =
+                std::max(current_sequence, published_leading);
             slot.v.store(new_seq, std::memory_order_release);
             m_reading_sequence->store(new_seq, std::memory_order_release);
             m_last_consumed_sequence = new_seq;
