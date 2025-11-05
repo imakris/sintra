@@ -269,8 +269,8 @@ struct Managed_process: Derived_transceiver<Managed_process>
     // This signal will be sent BEFORE the coordinator sends instance_unpublished
     // for this process. It is meant to notify crash guards about the reason of the
     // instance_unpublished event, which will follow shortly after.
-    SINTRA_SIGNAL_EXPLICIT(terminated_abnormally, int status);
-    SINTRA_SIGNAL_EXPLICIT(unpublish_transceiver_notify, instance_id_type transceiver_instance_id);
+    SINTRA_MESSAGE_RESERVED(terminated_abnormally, int status);
+    SINTRA_MESSAGE_RESERVED(unpublish_transceiver_notify, instance_id_type transceiver_instance_id);
 
     spinlocked_umap<tn_type, list<function<void()>>>
                                         m_queued_availability_calls;
