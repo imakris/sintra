@@ -134,30 +134,33 @@ jobs:
           sudo launchctl limit core unlimited unlimited
           sudo sysctl kern.corefile=core.%P || true
 
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4.1.7
-        with:
-          name: macos-build-${{ env.HEAD_SHA }}
-          path: build/
-          github-token: ${{ secrets.repository-token }}
-          run-id: ${{ env.RUN_ID }}
-      - name: Verify artifacts present
+      - name: Configure targeted stress build
+        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.core == 'true' || steps.changed.outputs.workflows == 'true'
         run: |
-          if [ ! -d build ]; then
-            echo "Expected build artifacts were not downloaded" >&2
-            exit 1
-          fi
+          cmake -S . -B stress-build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSINTRA_BUILD_TESTS=ON \
+            -DSINTRA_TEST_MATRIX=quick \
+            -DSINTRA_TEST_FILTER=ipc_rings_tests \
+            -DSINTRA_BUILD_EXAMPLES=OFF \
+            -DSINTRA_RELEASE_WITH_DEBUG_SYMBOLS=ON
+
+      - name: Build ipc_rings stress test
+        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.core == 'true' || steps.changed.outputs.workflows == 'true'
+        run: cmake --build stress-build --config Release --target sintra_ipc_rings_tests_release
 
       - name: Setup Python
+        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.core == 'true' || steps.changed.outputs.workflows == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.x'
 
       - name: Make test executables executable
+        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.core == 'true' || steps.changed.outputs.workflows == 'true'
         shell: bash
         run: |
-          if [ -d build/tests ]; then
-            find build/tests -type f -exec chmod +x {} +
+          if [ -d stress-build/tests ]; then
+            find stress-build/tests -type f -exec chmod +x {} +
           fi
 
       - name: Run stress tests with run_tests.py
@@ -166,7 +169,7 @@ jobs:
         run: |
           ulimit -c unlimited
           cd tests
-          python run_tests.py --repetitions 10 --timeout 30 --build-dir ../build --config Release
+          python run_tests.py --repetitions 1000 --timeout 30 --build-dir ../stress-build --config Release --test stress_multi_reader_throughput --build-targets
 
       - name: Mark status success
         if: success()

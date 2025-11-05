@@ -8,6 +8,7 @@
 // the helpers embedded in the semaphore backend so that every component that
 // needs a monotonic timestamp can rely on the same cross-process epoch.
 
+#include <atomic>
 #include <cstdint>
 #include <chrono>
 
@@ -26,6 +27,28 @@
 #endif
 
 namespace sintra {
+
+namespace detail {
+
+using monotonic_now_us_hook_t = uint64_t (*)();
+
+inline std::atomic<monotonic_now_us_hook_t>& monotonic_now_us_hook_storage()
+{
+    static std::atomic<monotonic_now_us_hook_t> hook{nullptr};
+    return hook;
+}
+
+inline void set_monotonic_now_us_hook(monotonic_now_us_hook_t hook) noexcept
+{
+    monotonic_now_us_hook_storage().store(hook, std::memory_order_release);
+}
+
+inline monotonic_now_us_hook_t get_monotonic_now_us_hook() noexcept
+{
+    return monotonic_now_us_hook_storage().load(std::memory_order_acquire);
+}
+
+} // namespace detail
 
 inline uint64_t monotonic_now_ns() noexcept
 {
@@ -76,6 +99,9 @@ inline uint64_t monotonic_now_ns() noexcept
 
 inline uint64_t monotonic_now_us() noexcept
 {
+    if (auto hook = detail::get_monotonic_now_us_hook()) {
+        return hook();
+    }
     return monotonic_now_ns() / 1000u;
 }
 
