@@ -1086,46 +1086,83 @@ int run_tests(bool include_unit, bool include_stress, const std::vector<std::str
 
 int main(int argc, char** argv)
 {
-    bool include_unit = true;
-    bool include_stress = true;
-    bool list_tests = false;
-    std::vector<std::string> selectors;
+    // Special mode: Run only stress_multi_reader_throughput 100,000 times
+    // This is hardcoded to help reproduce the macOS race condition
+    const int total_iterations = 100000;
 
-    for (int i = 1; i < argc; ++i) {
-        std::string_view arg(argv[i]);
-        if (arg == "--stress-only") {
-            include_unit = false;
-            include_stress = true;
-        }
-        else
-        if (arg == "--skip-stress") {
-            include_stress = false;
-        }
-        else
-        if (arg == "--unit-only") {
-            include_unit = true;
-            include_stress = false;
-        }
-        else
-        if (arg == "--list-tests") {
-            list_tests = true;
-        }
-        else
-        if (arg == "--run" && i + 1 < argc) {
-            selectors.emplace_back(argv[++i]);
-        }
-        else if (arg == "--run") {
-            std::cerr << "--run requires an argument" << std::endl;
-            return 2;
+    std::cout << "Running stress_multi_reader_throughput " << total_iterations << " times..." << std::endl;
+
+    // Find the test
+    const Test_case* target_test = nullptr;
+    for (const auto& test : registry()) {
+        if (test.name == "stress_multi_reader_throughput" && test.is_stress) {
+            target_test = &test;
+            break;
         }
     }
 
-    if (list_tests) {
-        for (const auto& test : registry()) {
-            std::cout << (test.is_stress ? "stress:" : "unit:") << test.name << '\n';
+    if (!target_test) {
+        std::cerr << "ERROR: Could not find stress_multi_reader_throughput test!" << std::endl;
+        return 2;
+    }
+
+    int failures = 0;
+    int successes = 0;
+
+    for (int i = 1; i <= total_iterations; ++i) {
+        try {
+            target_test->fn();
+            ++successes;
+
+            // Print progress every 1000 iterations
+            if (i % 1000 == 0) {
+                std::cout << "Progress: " << i << "/" << total_iterations
+                          << " (Passed: " << successes << ", Failed: " << failures << ")" << std::endl;
+            }
         }
+        catch (const Assertion_error& ex) {
+            ++failures;
+            std::cerr << "\n[FAIL] Iteration " << i << "/" << total_iterations
+                      << " - " << ex.what() << '\n' << std::endl;
+
+            // Stop on first failure to preserve diagnostic information
+            std::cerr << "Stopping on first failure. Total iterations completed: " << i << std::endl;
+            break;
+        }
+        catch (const std::exception& ex) {
+            ++failures;
+            std::cerr << "\n[FAIL] Iteration " << i << "/" << total_iterations
+                      << " - unexpected exception: " << ex.what() << '\n' << std::endl;
+
+            // Stop on first failure
+            std::cerr << "Stopping on first failure. Total iterations completed: " << i << std::endl;
+            break;
+        }
+        catch (...) {
+            ++failures;
+            std::cerr << "\n[FAIL] Iteration " << i << "/" << total_iterations
+                      << " - unknown exception" << '\n' << std::endl;
+
+            // Stop on first failure
+            std::cerr << "Stopping on first failure. Total iterations completed: " << i << std::endl;
+            break;
+        }
+    }
+
+    std::cout << "\n==== Final Summary ====" << std::endl;
+    std::cout << "Test: stress_multi_reader_throughput" << std::endl;
+    std::cout << "Total iterations: " << (successes + failures) << " / " << total_iterations << std::endl;
+    std::cout << "Passed: " << successes << std::endl;
+    std::cout << "Failed: " << failures << std::endl;
+
+    if (failures > 0) {
+        std::cout << "Result: FAILED" << std::endl;
+        return 1;
+    } else if (successes == total_iterations) {
+        std::cout << "Result: ALL PASSED" << std::endl;
         return 0;
+    } else {
+        std::cout << "Result: INCOMPLETE" << std::endl;
+        return 1;
     }
-
-    return run_tests(include_unit, include_stress, selectors);
 }
