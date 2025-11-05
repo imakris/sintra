@@ -738,6 +738,211 @@ STRESS_TEST(stress_multi_reader_throughput)
     }
 }
 
+STRESS_TEST(stress_multi_reader_throughput_aggressive)
+{
+    // This test is designed to expose a race condition in the busy guard logic
+    // that manifests on weakly-ordered CPUs (like ARM/macOS). The key is to:
+    // 1. Use a very small ring to increase wrapping frequency
+    // 2. Use many readers to increase contention
+    // 3. Write aggressively to trigger frequent evictions
+    // 4. Add small delays in readers to widen the race window
+
+    Temp_ring_dir tmp("stress_aggressive");
+
+    // Very small ring to maximize contention and wrapping
+    size_t ring_elements = pick_ring_elements<uint64_t>(64);  // Minimum viable ring
+    const size_t max_trailing = (ring_elements * 3) / 4;
+    const size_t reader_count = 8;  // More readers = more contention
+    const size_t chunk = std::max<size_t>(1, ring_elements / 8);  // Larger chunks relative to ring
+    const size_t total_messages = chunk * 128;  // More total work
+
+    sintra::Ring_W<uint64_t> writer(tmp.str(), "ring_data", ring_elements);
+
+    std::atomic<bool> writer_done{false};
+    std::vector<std::vector<uint64_t>> reader_results(reader_count);
+    std::vector<std::exception_ptr> reader_errors(reader_count);
+    std::vector<std::atomic<bool>> reader_ready(reader_count);
+    std::vector<std::atomic<bool>> reader_evicted(reader_count);
+    for (auto& flag : reader_ready) { flag.store(false, std::memory_order_relaxed); }
+    for (auto& flag : reader_evicted) { flag.store(false, std::memory_order_relaxed); }
+
+    std::vector<std::thread> reader_threads;
+    reader_threads.reserve(reader_count);
+    for (size_t rid = 0; rid < reader_count; ++rid) {
+        reader_threads.emplace_back([&, rid]() {
+            try {
+                sintra::Ring_R<uint64_t> reader(tmp.str(), "ring_data", ring_elements, max_trailing);
+                auto initial = reader.start_reading();
+                ASSERT_EQ(static_cast<size_t>(initial.end - initial.begin), size_t(0));
+                reader_ready[rid].store(true, std::memory_order_release);
+
+                while (!writer_done.load(std::memory_order_acquire) || reader_results[rid].size() < total_messages) {
+                    auto range = reader.wait_for_new_data();
+                    if (reader.consume_eviction_notification()) {
+                        reader_evicted[rid].store(true, std::memory_order_release);
+                        continue;
+                    }
+                    if (!range.begin || range.begin == range.end) {
+                        if (writer_done.load(std::memory_order_acquire)) {
+                            break;
+                        }
+                        continue;
+                    }
+
+                    // Add a small delay to widen the race window between getting the range
+                    // and actually copying the data. This simulates slow readers and increases
+                    // the chance of eviction during data copy.
+                    std::this_thread::sleep_for(std::chrono::microseconds(50));
+
+                    size_t len = static_cast<size_t>(range.end - range.begin);
+
+                    // Copy values one by one with barriers to expose memory ordering issues
+                    for (size_t i = 0; i < len; ++i) {
+                        uint64_t value = range.begin[i];
+                        std::atomic_thread_fence(std::memory_order_seq_cst);  // Force visibility
+                        reader_results[rid].push_back(value);
+                    }
+
+                    reader.done_reading_new_data();
+                }
+                reader.done_reading();
+                if (reader.consume_eviction_notification()) {
+                    reader_evicted[rid].store(true, std::memory_order_release);
+                }
+            }
+            catch (...) {
+                reader_errors[rid] = std::current_exception();
+                reader_ready[rid].store(true, std::memory_order_release);
+            }
+        });
+    }
+
+    for (size_t rid = 0; rid < reader_count; ++rid) {
+        while (!reader_ready[rid].load(std::memory_order_acquire)) {
+            std::this_thread::sleep_for(1ms);
+        }
+    }
+
+    std::exception_ptr writer_error;
+    std::thread writer_thread([&]() {
+        try {
+            std::vector<uint64_t> buffer(chunk);
+            uint64_t seq = 0;
+            while (seq < total_messages) {
+                size_t count = std::min(chunk, static_cast<size_t>(total_messages - seq));
+                for (size_t i = 0; i < count; ++i) {
+                    buffer[i] = seq + i;
+                }
+                writer.write(buffer.data(), count);
+                writer.done_writing();
+                seq += count;
+
+                // Write as fast as possible to overwhelm slow readers
+                // No delays here - we want to trigger evictions
+            }
+        }
+        catch (...) {
+            writer_error = std::current_exception();
+        }
+        writer_done.store(true, std::memory_order_release);
+        writer.unblock_global();
+    });
+
+    writer_thread.join();
+    for (size_t rid = 0; rid < reader_count; ++rid) {
+        reader_threads[rid].join();
+    }
+
+    auto diagnostics = writer.get_diagnostics();
+    const bool has_overflow = diagnostics.reader_lag_overflow_count > 0;
+    const bool has_regressions = diagnostics.reader_sequence_regressions > 0;
+    const bool has_evictions = diagnostics.reader_eviction_count > 0;
+    if (has_overflow || has_regressions || has_evictions) {
+        std::cerr << "[sintra::ring] aggressive test diagnostics: max_reader_lag="
+                  << diagnostics.max_reader_lag
+                  << ", overflow_count=" << diagnostics.reader_lag_overflow_count
+                  << ", worst_overflow_lag=" << diagnostics.worst_overflow_lag
+                  << ", sequence_regressions=" << diagnostics.reader_sequence_regressions
+                  << ", eviction_count=" << diagnostics.reader_eviction_count
+                  << std::endl;
+
+        if (diagnostics.last_evicted_reader_index != std::numeric_limits<uint32_t>::max()) {
+            std::cerr << "    last_evicted_reader_index=" << diagnostics.last_evicted_reader_index
+                      << ", reader_sequence=" << diagnostics.last_evicted_reader_sequence
+                      << ", writer_sequence=" << diagnostics.last_evicted_writer_sequence
+                      << ", reader_octile=" << diagnostics.last_evicted_reader_octile
+                      << std::endl;
+        }
+
+        if (diagnostics.last_overflow_reader_index != std::numeric_limits<uint32_t>::max()) {
+            std::cerr << "    last_overflow_reader_index=" << diagnostics.last_overflow_reader_index
+                      << ", reader_sequence=" << diagnostics.last_overflow_reader_sequence
+                      << ", leading_sequence=" << diagnostics.last_overflow_leading_sequence
+                      << ", last_consumed=" << diagnostics.last_overflow_last_consumed
+                      << std::endl;
+        }
+    }
+
+    if (writer_error) {
+        std::rethrow_exception(writer_error);
+    }
+    for (auto& err : reader_errors) {
+        if (err) {
+            std::rethrow_exception(err);
+        }
+    }
+
+    bool any_reader_evicted = false;
+    for (auto& flag : reader_evicted) {
+        any_reader_evicted = any_reader_evicted || flag.load(std::memory_order_acquire);
+    }
+
+    // Check for monotonicity - this is where the test should fail if the race exists
+    for (size_t rid = 0; rid < reader_count; ++rid) {
+        auto& results = reader_results[rid];
+        for (size_t i = 0; i < results.size(); ++i) {
+            ASSERT_LT(results[i], total_messages);
+            if (i > 0) {
+                // This assertion should fail if the race condition exists
+                // We might see duplicate values or backwards sequences
+                if (results[i] <= results[i - 1]) {
+                    std::cerr << "[RACE DETECTED] Reader " << rid
+                              << " saw non-monotonic sequence at index " << i
+                              << ": results[" << i-1 << "]=" << results[i-1]
+                              << ", results[" << i << "]=" << results[i]
+                              << std::endl;
+                    std::cerr << "Context (last 10 values): ";
+                    for (size_t j = (i >= 10 ? i - 10 : 0); j <= i && j < results.size(); ++j) {
+                        std::cerr << results[j] << " ";
+                    }
+                    std::cerr << std::endl;
+                }
+                ASSERT_GT(results[i], results[i - 1]);
+            }
+        }
+    }
+
+    const bool diagnostics_recorded_eviction = diagnostics.reader_eviction_count > 0u;
+
+    if (any_reader_evicted) {
+        // A slow reader that gets evicted is expected to miss at least one publication. In
+        // that scenario the ring guarantees ordering, but not completeness, so we only
+        // assert that diagnostics captured the eviction and skip the strict per-value
+        // comparison that assumes zero loss.
+        ASSERT_TRUE(diagnostics_recorded_eviction);
+        return;
+    }
+
+    ASSERT_FALSE(diagnostics_recorded_eviction);
+
+    for (auto& results : reader_results) {
+        ASSERT_EQ(results.size(), total_messages);
+        for (size_t i = 0; i < total_messages; ++i) {
+            ASSERT_EQ(results[i], static_cast<uint64_t>(i));
+        }
+    }
+}
+
 STRESS_TEST(stress_attach_detach_readers)
 {
     Temp_ring_dir tmp("stress_attach_detach");
