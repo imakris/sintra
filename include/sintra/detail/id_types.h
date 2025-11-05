@@ -187,25 +187,6 @@ uint64_t get_process_index(instance_id_type instance_id)
 }
 
 
-inline
-uint64_t get_transceiver_index(instance_id_type instance_id)
-{
-    return decompose_instance(instance_id).transceiver;
-}
-
-
-inline
-uint64_t get_process_complement(instance_id_type instance_id)
-{
-    return decompose_instance(instance_id).process_complement;
-}
-
-
-inline
-uint64_t get_transceiver_complement(instance_id_type instance_id)
-{
-    return decompose_instance(instance_id).transceiver_complement;
-}
 
 
 constexpr instance_id_type any_local_or_remote   =

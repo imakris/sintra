@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "config.h"
+
 #include <array>
 #include <chrono>
 #include <cstdlib>
@@ -45,36 +47,38 @@ using std::lock_guard;
 struct Adaptive_function
 {
     Adaptive_function(function<void()> f) :
-        ppf(new shared_ptr<function<void()>>(new function<void()>(f))),
+        func(new function<void()>(f)),
         m(new mutex)
     {}
 
     Adaptive_function(const Adaptive_function& rhs)
     {
         lock_guard<mutex> lock(*rhs.m);
-        ppf = rhs.ppf;
+        func = rhs.func;
         m = rhs.m;
     }
 
     void operator()()
     {
         lock_guard<mutex> lock(*m);
-        (**ppf)();
+        if (*func) {
+            (*func)();
+        }
     }
 
     void set(function<void()> f)
     {
         lock_guard<mutex> lock(*m);
-        **ppf = f;
+        *func = f;
     }
 
-    shared_ptr<shared_ptr<function<void()>>> ppf;
+    shared_ptr<function<void()>> func;
     shared_ptr<mutex> m;
 };
 
 
 
-inline 
+inline
 size_t get_cache_line_size()
 {
 #ifdef _WIN32
@@ -101,8 +105,9 @@ size_t get_cache_line_size()
 
 #else
 
-    // TODO: implement
-    return 0x40;
+    // Return the assumed value. Portable runtime detection of cache line size
+    // is complex and not worth the effort for a debug-only validation check.
+    return assumed_cache_line_size;
 
 #endif
 }
