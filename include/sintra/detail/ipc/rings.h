@@ -1679,8 +1679,33 @@ struct Ring_R : Ring<T, true>
                 // Continue with recovery using writer's position, but this indicates a bug.
             }
 
-            // Always jump to writer's current position when evicted (never go backwards).
-            const sequence_counter_type new_seq = published_leading;
+            // EVICTION RECOVERY: Jump to writer's current position.
+            // CRITICAL: We must not jump backwards relative to m_last_consumed_sequence,
+            // which tracks values already returned to the application. Jumping backwards
+            // would cause the reader to re-read and return values it already consumed,
+            // creating ordering violations in the application's result stream.
+            //
+            // BUG FOUND: The previous code used published_leading directly, which could be
+            // behind m_last_consumed_sequence if:
+            //   1. Reader consumed values up to position N (m_last_consumed_sequence = N)
+            //   2. Writer wrapped around the ring and is now at position M < N
+            //   3. Eviction recovery would jump from N to M (backwards!)
+            //
+            // This manifested as: results[i-1]=11391, results[i]=9344 in stress test.
+            const sequence_counter_type new_seq = std::max(published_leading, m_last_consumed_sequence);
+
+            // Diagnostic: Log when we prevent a backward jump
+            if (published_leading < m_last_consumed_sequence) {
+                static std::atomic<uint64_t> backward_jump_prevented_count{0};
+                auto count = backward_jump_prevented_count.fetch_add(1, std::memory_order_relaxed);
+                std::cerr << "[sintra::ring BACKWARD JUMP PREVENTED #" << (count + 1) << "] "
+                          << "Eviction recovery: writer=" << published_leading
+                          << ", last_consumed=" << m_last_consumed_sequence
+                          << ", delta=" << (m_last_consumed_sequence - published_leading)
+                          << ", jumping_to=" << new_seq
+                          << ", reader_index=" << m_rs_index
+                          << std::endl;
+            }
             slot.v.store(new_seq, std::memory_order_release);
             m_reading_sequence->store(new_seq, std::memory_order_release);
             m_last_consumed_sequence = new_seq;
