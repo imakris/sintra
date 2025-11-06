@@ -1552,8 +1552,9 @@ struct Ring_R : Ring<T, true>
         if (new_trailing_octile != m_trailing_octile) {
             const uint64_t new_mask = uint64_t(1) << (8 * new_trailing_octile);
             const uint64_t old_mask = uint64_t(1) << (8 * m_trailing_octile);
-            c.read_access.fetch_add(new_mask, std::memory_order_seq_cst);
-            c.read_access.fetch_sub(old_mask, std::memory_order_seq_cst);
+            // Atomically update both guards in a single operation to avoid transient double-guard state
+            const int64_t delta = static_cast<int64_t>(new_mask) - static_cast<int64_t>(old_mask);
+            c.read_access.fetch_add(delta, std::memory_order_seq_cst);
             c.reading_sequences[m_rs_index].data.trailing_octile.store(
                 static_cast<uint8_t>(new_trailing_octile), std::memory_order_seq_cst);
 
