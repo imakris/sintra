@@ -423,6 +423,8 @@ class UnixDebuggerStrategy(DebuggerStrategy):
                 "quit",
             ]
 
+        # lldb: Use -v for verbose output (shows function arguments/parameters)
+        # Note: lldb doesn't have an equivalent to gdb's "bt full" for all locals
         return [
             *debugger_command,
             "--batch",
@@ -430,7 +432,7 @@ class UnixDebuggerStrategy(DebuggerStrategy):
             "-p",
             str(pid),
             "-o",
-            "thread backtrace all -c 256 -f",
+            "thread backtrace all -c 256 -v",
             "-o",
             "detach",
             "-o",
@@ -465,6 +467,7 @@ class UnixDebuggerStrategy(DebuggerStrategy):
         quoted_executable = shlex.quote(str(invocation.path))
         quoted_core = shlex.quote(str(core_path))
 
+        # lldb: Use -v for verbose output (shows function arguments/parameters)
         return [
             *debugger_command,
             "--batch",
@@ -472,7 +475,7 @@ class UnixDebuggerStrategy(DebuggerStrategy):
             "-o",
             f"target create --core {quoted_core} {quoted_executable}",
             "-o",
-            "thread backtrace all -c 256 -f",
+            "thread backtrace all -c 256 -v",
             "-o",
             "quit",
         ]
