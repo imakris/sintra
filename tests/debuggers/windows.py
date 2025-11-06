@@ -580,7 +580,8 @@ class WindowsDebuggerStrategy(DebuggerStrategy):
                 command = [debugger_path]
                 if debugger_name == "windbg":
                     command.append("-Q")
-                command.extend(["-z", str(dump_path), "-c", ".symfix; .reload; ~* k; qd"])
+                # Use kP to show stack with parameters (function arguments)
+                command.extend(["-z", str(dump_path), "-c", ".symfix; .reload; ~* kP; qd"])
 
                 result = subprocess.run(
                     command,
@@ -683,7 +684,9 @@ class WindowsDebuggerStrategy(DebuggerStrategy):
                 command = [debugger_path]
                 if debugger_name == "windbg":
                     command.append("-Q")
-                command.extend(["-pv", "-p", str(target_pid), "-c", ".symfix; .reload; ~* k; qd"])
+                # Use kP to show stack with parameters (function arguments)
+                # Note: Full local variable display would require iterating frames with dv
+                command.extend(["-pv", "-p", str(target_pid), "-c", ".symfix; .reload; ~* kP; qd"])
 
                 result = subprocess.run(
                     command,
