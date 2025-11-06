@@ -827,15 +827,15 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
                 bool dead = owner_unknown || !is_process_alive(pid);
 
                 if (dead) {
-                    // Load trailing_octile BEFORE clearing has_guard to prevent race where
-                    // a concurrent reader updates trailing_octile between CAS and load,
-                    // causing us to decrement the wrong octile counter.
-                    uint8_t oct = slot.trailing_octile.load(std::memory_order_seq_cst);
-
                     uint8_t expected = 1;
                     if (slot.has_guard.compare_exchange_strong(
                             expected, uint8_t{0}, std::memory_order_seq_cst))
                     {
+                        // Read trailing_octile AFTER clearing has_guard. Once has_guard is zero,
+                        // the reader (even if it weren't dead) can no longer transition octiles,
+                        // giving us the final stable value. Reading before the CAS risks using a
+                        // stale octile if the reader transitioned between our read and the CAS.
+                        uint8_t oct = slot.trailing_octile.load(std::memory_order_seq_cst);
                         read_access.fetch_sub(uint64_t(1) << (8 * oct), std::memory_order_seq_cst);
                     }
 
@@ -1985,10 +1985,13 @@ private:
                             if (c.reading_sequences[i].data.has_guard.compare_exchange_strong(
                                     expected, uint8_t{0}, std::memory_order_seq_cst))
                             {
-                                // reader_octile was sampled before we dropped the guard, so it
-                                // still reflects the octile that must be unblocked even if the
-                                // reader races to publish a new trailing_octile while reattaching.
-                                const size_t evicted_reader_octile = reader_octile;
+                                // Read trailing_octile AFTER clearing has_guard. Once has_guard is zero,
+                                // the reader can no longer transition octiles, so this gives us the final
+                                // stable octile value. Reading before the CAS creates a race where the
+                                // reader transitions octiles between our read and the CAS, causing us to
+                                // decrement the wrong (already-decremented) octile and leak the new octile.
+                                const size_t evicted_reader_octile =
+                                    c.reading_sequences[i].data.trailing_octile.load(std::memory_order_seq_cst);
 
                                 c.reading_sequences[i].data.status.store(
                                     Ring<T, false>::READER_STATE_EVICTED, std::memory_order_seq_cst);
