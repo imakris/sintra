@@ -296,6 +296,8 @@ class Color:
 TEST_TIMEOUT_OVERRIDES = {
     "recovery_test_debug": 120.0,
     "recovery_test_release": 120.0,
+    "semaphore_high_contention_stress_debug": 120.0,
+    "semaphore_high_contention_stress_release": 120.0,
 }
 
 # Configure the maximum amount of wall time the runner spends attaching live

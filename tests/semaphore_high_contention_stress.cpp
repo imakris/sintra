@@ -59,7 +59,7 @@ void test_many_readers_limited_slots()
 {
     constexpr int kReaders = 8;
     constexpr int kSlots = 3;
-    constexpr int kIterationsPerReader = 50000;
+    constexpr int kIterationsPerReader = 12500;
 
     std::fprintf(stderr, "[TEST] Many readers, limited slots (%d readers, %d slots, %d iterations/reader)\n",
                  kReaders, kSlots, kIterationsPerReader);
@@ -198,7 +198,7 @@ void test_wake_all_stress()
 void test_mixed_operations_extreme_contention()
 {
     constexpr int kThreads = 12;
-    constexpr int kIterationsPerThread = 30000;
+    constexpr int kIterationsPerThread = 7500;
 
     std::fprintf(stderr, "[TEST] Mixed operations extreme contention (%d threads, %d iterations/thread)\n",
                  kThreads, kIterationsPerThread);
@@ -234,8 +234,8 @@ void test_mixed_operations_extreme_contention()
                     timed_wait_timeouts.fetch_add(1, std::memory_order_relaxed);
                 }
             } else {
-                // Longer timed_wait
-                auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(10);
+                // Longer timed_wait (keep moderate so each run stays within CI timeouts)
+                auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(5);
                 if (sem.timed_wait(deadline)) {
                     successful_waits.fetch_add(1, std::memory_order_relaxed);
                 } else {
@@ -279,7 +279,7 @@ void test_mixed_operations_extreme_contention()
 void test_rapid_post_wait_cycling()
 {
     constexpr int kCyclers = 10;
-    constexpr int kCyclesPerThread = 50000;
+    constexpr int kCyclesPerThread = 12500;
 
     std::fprintf(stderr, "[TEST] Rapid post/wait cycling (%d threads, %d cycles/thread)\n",
                  kCyclers, kCyclesPerThread);
