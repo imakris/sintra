@@ -24,6 +24,44 @@ class UnixDebuggerStrategy(DebuggerStrategy):
         super().__init__(verbose, **kwargs)
         self._sudo_capability: Optional[bool] = None
 
+    def ensure_crash_dumps(self) -> Optional[str]:
+        """Enable core dump generation for Unix systems."""
+        try:
+            import resource
+        except ImportError as exc:
+            return f"resource module unavailable: {exc}"
+
+        try:
+            # Get current limits
+            current_soft, current_hard = resource.getrlimit(resource.RLIMIT_CORE)
+
+            # If core dumps are already unlimited, nothing to do
+            if current_soft == resource.RLIM_INFINITY:
+                return None
+
+            # Try to set to unlimited (use hard limit as maximum if not root)
+            try:
+                resource.setrlimit(resource.RLIMIT_CORE, (resource.RLIM_INFINITY, resource.RLIM_INFINITY))
+            except (ValueError, OSError):
+                # If unlimited fails, try setting to the hard limit
+                if current_hard > 0:
+                    try:
+                        resource.setrlimit(resource.RLIMIT_CORE, (current_hard, current_hard))
+                    except (ValueError, OSError) as exc:
+                        return f"failed to enable core dumps (soft={current_soft}, hard={current_hard}): {exc}"
+                else:
+                    return "core dumps disabled by hard limit (requires system configuration)"
+
+            # Verify the change took effect
+            new_soft, _ = resource.getrlimit(resource.RLIMIT_CORE)
+            if new_soft == 0:
+                return "core dumps remain disabled after configuration attempt"
+
+        except Exception as exc:
+            return f"failed to configure core dumps: {exc}"
+
+        return None
+
     def capture_process_stacks(
         self,
         pid: int,
