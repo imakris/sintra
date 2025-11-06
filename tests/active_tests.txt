@@ -15,33 +15,32 @@
 # The test runner will run each test for the specified number of iterations.
 
 # Main test suite
-# TEMPORARY: Only running 2 tests to verify the new active_tests.txt system in CI
-# barrier_complex_choreography_test 1
-# barrier_flush_test 20
-# barrier_pathological_choreography_test 1
-# barrier_rapid_reuse_test 1
-# barrier_stress_test 10
-# basic_pub_sub 30
-# complex_choreography_stress_test 1
-# complex_choreography_test 1
-# choreography_extreme_test 1
+barrier_complex_choreography_test 1
+barrier_flush_test 20
+barrier_pathological_choreography_test 1
+barrier_rapid_reuse_test 1
+barrier_stress_test 10
+basic_pub_sub 30
+complex_choreography_stress_test 1
+complex_choreography_test 1
+choreography_extreme_test 1
 dummy_test 1
-# extreme_choreography_test 1
-# interprocess_semaphore_test 1
-# interprocess_file_mapping_test 1
-# interprocess_mutex_test 1
-# ipc_rings_tests 1
-# macos_named_semaphore_benchmark 1
-# macos_os_sync_semaphore_benchmark 1
-# message_args_traits_test 1
-# ping_pong_multi_test 10
-ping_pong_test 5
-# processing_fence_test 20
-# recovery_test 10
-# rpc_append_test 100
-# ring_cleanup_stress_test 1
-# spawn_detached_test 30
-# variable_buffer_alignment_test 1
+extreme_choreography_test 1
+interprocess_semaphore_test 1
+interprocess_file_mapping_test 1
+interprocess_mutex_test 1
+ipc_rings_tests 1
+macos_named_semaphore_benchmark 1
+macos_os_sync_semaphore_benchmark 1
+message_args_traits_test 1
+ping_pong_multi_test 10
+ping_pong_test 200
+processing_fence_test 20
+recovery_test 10
+rpc_append_test 100
+ring_cleanup_stress_test 1
+spawn_detached_test 30
+variable_buffer_alignment_test 1
 
 # Manual/reproduction tests (commented out by default)
 # Uncomment to enable these tests (they may fail by design)
