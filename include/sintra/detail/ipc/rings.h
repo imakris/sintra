@@ -1267,6 +1267,7 @@ struct Ring_R : Ring<T, true>
             c.reading_sequences[m_rs_index].data.guard_token.store(
                 static_cast<uint8_t>(Ring<T, true>::guard_token_present_mask | trailing_octile),
                 std::memory_order_seq_cst);
+            m_guard_attached = true;
 
             auto confirmed_leading_sequence = c.leading_sequence.load(std::memory_order_seq_cst);
             auto confirmed_range_first_sequence = std::max<int64_t>(
@@ -1296,6 +1297,7 @@ struct Ring_R : Ring<T, true>
                     previous_guard & Ring<T, true>::guard_token_octile_mask;
                 c.read_access.fetch_sub(
                     uint64_t(1) << (8 * guarded_octile), std::memory_order_seq_cst);
+                m_guard_attached = false;  // Guard voluntarily dropped for retry
             }
         }
 
@@ -1625,6 +1627,7 @@ struct Ring_R : Ring<T, true>
                 this->m_num_elements);
             m_trailing_octile = (8 * trailing_idx) / this->m_num_elements;
 
+            m_guard_attached = false;  // Guard was evicted, reset tracking
             reattach_after_eviction();
             m_evicted_since_last_wait.store(true, std::memory_order_seq_cst);
             return true;
@@ -1636,55 +1639,65 @@ struct Ring_R : Ring<T, true>
         //   1) The reader has never installed its guard (streaming readers start here).
         //   2) An eviction is in flight: the writer cleared the guard bit but has not yet stored
         //      READER_STATE_EVICTED or subtracted the guard from read_access.
-        // We use the guard count to distinguish these cases.
-        const uint64_t octile_shift = 8 * m_trailing_octile;
-        const uint64_t octile_mask = uint64_t(0xff) << octile_shift;
-        const uint8_t  guard_count = static_cast<uint8_t>(
-            (c.read_access.load(std::memory_order_seq_cst) & octile_mask) >> octile_shift);
+        // We use m_guard_attached to distinguish these cases.
 
-        if (guard_count > 0) {
-            // Case (2): Eviction in-flight. The writer has cleared our guard_token but hasn't
-            // yet published READER_STATE_EVICTED or decremented the guard count.
-            // Spin-wait for the writer to complete the eviction. This should take only
-            // microseconds (a few sequential atomic stores: status, then read_access decrement).
-            // We MUST NOT proceed without a guard, and we MUST NOT reattach before the writer
-            // decrements, or we'll leak a guard count.
-            constexpr int max_spins = 10000;
-            for (int spin = 0; spin < max_spins; ++spin) {
-                if (slot.status.load(std::memory_order_seq_cst) == Ring<T, false>::READER_STATE_EVICTED) {
-                    // Eviction completed, do the recovery
-                    sequence_counter_type new_seq = c.leading_sequence.load(std::memory_order_seq_cst);
-                    slot.v.store(new_seq, std::memory_order_seq_cst);
-                    m_reading_sequence->store(new_seq, std::memory_order_seq_cst);
-                    m_last_consumed_sequence = new_seq;
-
-                    // Recalculate trailing octile to match the new jumped-forward position
-                    const size_t trailing_idx = mod_pos_i64(
-                        int64_t(new_seq) - int64_t(m_max_trailing_elements),
-                        this->m_num_elements);
-                    m_trailing_octile = (8 * trailing_idx) / this->m_num_elements;
-
-                    reattach_after_eviction();
-                    m_evicted_since_last_wait.store(true, std::memory_order_seq_cst);
-                    return true;
-                }
-            }
-
-            // Eviction didn't complete within expected time. This is unexpected but could
-            // happen if the writer is preempted. Re-check guard count - if it became 0,
-            // the eviction completed and we can safely reattach.
-            const uint8_t guard_count_after = static_cast<uint8_t>(
-                (c.read_access.load(std::memory_order_seq_cst) & octile_mask) >> octile_shift);
-            if (guard_count_after == 0) {
-                reattach_after_eviction();
-            }
-            // Either reattached or eviction still pending - caller will retry
+        if (!m_guard_attached) {
+            // Case (1): This reader has never attached a guard. Safe to attach now.
+            reattach_after_eviction();
             return false;
         }
 
-        // Case (1): guard_count == 0, meaning never attached OR eviction fully completed.
-        // Safe to reattach.
-        reattach_after_eviction();
+        // Case (2): This reader had a guard (m_guard_attached == true), but guard_token is now 0.
+        // An eviction is in flight. The writer has cleared our guard_token but hasn't yet
+        // published READER_STATE_EVICTED or decremented read_access.
+        // Spin-wait for the writer to complete the eviction. This should take only microseconds
+        // (a few sequential atomic stores: status, then read_access decrement).
+        // We MUST NOT proceed without a guard, and we MUST NOT reattach before the writer
+        // decrements, or we'll leak a guard count.
+        constexpr int max_spins = 10000;
+        for (int spin = 0; spin < max_spins; ++spin) {
+            if (slot.status.load(std::memory_order_seq_cst) == Ring<T, false>::READER_STATE_EVICTED) {
+                // Eviction completed, do the recovery
+                sequence_counter_type new_seq = c.leading_sequence.load(std::memory_order_seq_cst);
+                slot.v.store(new_seq, std::memory_order_seq_cst);
+                m_reading_sequence->store(new_seq, std::memory_order_seq_cst);
+                m_last_consumed_sequence = new_seq;
+
+                // Recalculate trailing octile to match the new jumped-forward position
+                const size_t trailing_idx = mod_pos_i64(
+                    int64_t(new_seq) - int64_t(m_max_trailing_elements),
+                    this->m_num_elements);
+                m_trailing_octile = (8 * trailing_idx) / this->m_num_elements;
+
+                m_guard_attached = false;  // Guard was evicted, reset tracking
+                reattach_after_eviction();
+                m_evicted_since_last_wait.store(true, std::memory_order_seq_cst);
+                return true;
+            }
+        }
+
+        // Eviction didn't complete within expected time. This could happen if the writer thread
+        // is preempted mid-eviction. Re-check status in case it completed during the spin timeout.
+        if (slot.status.load(std::memory_order_seq_cst) == Ring<T, false>::READER_STATE_EVICTED) {
+            // Eviction completed while checking - recover now
+            sequence_counter_type new_seq = c.leading_sequence.load(std::memory_order_seq_cst);
+            slot.v.store(new_seq, std::memory_order_seq_cst);
+            m_reading_sequence->store(new_seq, std::memory_order_seq_cst);
+            m_last_consumed_sequence = new_seq;
+
+            const size_t trailing_idx = mod_pos_i64(
+                int64_t(new_seq) - int64_t(m_max_trailing_elements),
+                this->m_num_elements);
+            m_trailing_octile = (8 * trailing_idx) / this->m_num_elements;
+
+            m_guard_attached = false;
+            reattach_after_eviction();
+            m_evicted_since_last_wait.store(true, std::memory_order_seq_cst);
+            return true;
+        }
+
+        // Eviction still hasn't completed - this is very unexpected but possible if writer is
+        // severely delayed. Return false to signal caller to retry.
         return false;
 #else
         reattach_after_eviction();
@@ -1711,6 +1724,7 @@ struct Ring_R : Ring<T, true>
             static_cast<uint8_t>(Ring<T, true>::guard_token_present_mask |
                                  static_cast<uint8_t>(m_trailing_octile)),
             std::memory_order_seq_cst);
+        m_guard_attached = true;
     }
 
 public:
@@ -1751,6 +1765,7 @@ private:
     uint64_t                            m_seen_unblock_sequence = 0;
     sequence_counter_type               m_last_consumed_sequence = 0;
     std::atomic<bool>                   m_evicted_since_last_wait{false};
+    bool                                m_guard_attached        = false;
 
 protected:
     std::atomic<bool>                   m_reading               = false;
