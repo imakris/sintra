@@ -406,6 +406,8 @@ class UnixDebuggerStrategy(DebuggerStrategy):
         if debugger_name == "gdb":
             return [
                 *debugger_command,
+                "-p",
+                str(pid),
                 "--batch",
                 "--quiet",
                 "--nx",
@@ -419,7 +421,6 @@ class UnixDebuggerStrategy(DebuggerStrategy):
                 "detach",
                 "-ex",
                 "quit",
-                str(pid),
             ]
 
         return [
