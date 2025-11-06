@@ -21,6 +21,7 @@ Options:
 """
 
 import argparse
+import contextlib
 import fnmatch
 import importlib
 import importlib.util
@@ -39,7 +40,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR.parent) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR.parent))
 
-from typing import Any, Dict, IO, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, IO, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
 
 from tests.debuggers import DebuggerStrategy, get_debugger_strategy
 
@@ -391,6 +392,7 @@ class TestRunner:
         self._scratch_cleanup_lock = threading.Lock()
         self._scratch_cleanup_dirs_removed = 0
         self._scratch_cleanup_bytes_freed = 0
+        self._manual_stack_notice_printed = False
         self._instrumentation_enabled = True
         self._instrumentation_disk_root: Optional[Path] = self.build_dir
         self._instrument_disk_cache: Dict[Path, Tuple[float, str]] = {}
@@ -993,6 +995,36 @@ class TestRunner:
             reader_state_lock = threading.Lock()
             reader_states: Dict[str, Dict[str, Any]] = {}
             process_group_id: Optional[int] = None
+            manual_capture_event = threading.Event()
+            manual_capture_stop = threading.Event()
+            manual_capture_thread: Optional[threading.Thread] = None
+            manual_signal_handlers: Dict[int, object] = {}
+            manual_signal_module: Optional[object] = None
+
+            @contextlib.contextmanager
+            def stack_capture_context(mark_failure: bool) -> Iterator[bool]:
+                nonlocal capture_pause_total, capture_active_start
+
+                capture_started = time.monotonic()
+                with capture_lock:
+                    if capture_active_start is not None:
+                        yield False
+                        return
+                    if mark_failure:
+                        if failure_event.is_set():
+                            yield False
+                            return
+                        failure_event.set()
+                    capture_active_start = capture_started
+
+                try:
+                    yield True
+                finally:
+                    capture_finished = time.monotonic()
+                    with capture_lock:
+                        if capture_active_start is not None:
+                            capture_pause_total += capture_finished - capture_active_start
+                            capture_active_start = None
 
             def terminate_process_group_members(reason: str) -> bool:
                 """Ensure helpers in the spawned process group terminate."""
@@ -1162,33 +1194,23 @@ class TestRunner:
                     process_group_id = None
 
             def attempt_live_capture(trigger_line: str) -> None:
-                nonlocal live_stack_traces, live_stack_error, capture_pause_total, capture_active_start
+                nonlocal live_stack_traces, live_stack_error
                 if not trigger_line:
                     return
                 if not self._line_indicates_failure(trigger_line):
                     return
                 if not self._should_attempt_stack_capture(invocation, 'live_failure'):
                     return
-                capture_started = time.monotonic()
-                with capture_lock:
-                    if failure_event.is_set():
-                        return
-                    failure_event.set()
-                    capture_active_start = capture_started
 
                 traces = ""
                 error = ""
-                try:
+                with stack_capture_context(mark_failure=True) as allowed:
+                    if not allowed:
+                        return
                     traces, error = self._capture_process_stacks(
                         process.pid,
                         process_group_id,
                     )
-                finally:
-                    capture_finished = time.monotonic()
-                    with capture_lock:
-                        if capture_active_start is not None:
-                            capture_pause_total += capture_finished - capture_active_start
-                        capture_active_start = None
 
                 if traces:
                     with capture_lock:
@@ -1200,6 +1222,113 @@ class TestRunner:
                 elif error and not live_stack_traces:
                     with capture_lock:
                         live_stack_error = error
+
+            manual_signal_registered = False
+
+            if sys.platform != 'win32':
+                try:
+                    import signal as _manual_signal
+                except ImportError:
+                    _manual_signal = None
+
+                if _manual_signal is not None and hasattr(_manual_signal, 'SIGUSR1'):
+                    manual_signal_module = _manual_signal
+                    manual_signal = _manual_signal.SIGUSR1
+
+                    def _manual_signal_handler(signum, frame):  # type: ignore[override]
+                        manual_capture_event.set()
+
+                    previous = _manual_signal.getsignal(manual_signal)
+                    manual_signal_handlers[manual_signal] = previous
+                    _manual_signal.signal(manual_signal, _manual_signal_handler)
+                    manual_signal_registered = True
+
+                    if not self._manual_stack_notice_printed:
+                        print(
+                            f"{Color.BLUE}Manual stack capture enabled: send SIGUSR1 to PID {os.getpid()} "
+                            f"({invocation.name}) to snapshot live stacks.{Color.RESET}",
+                            flush=True,
+                        )
+                        self._manual_stack_notice_printed = True
+
+                    def _manual_capture_worker() -> None:
+                        nonlocal live_stack_traces, live_stack_error, capture_active_start
+
+                        while not manual_capture_stop.is_set():
+                            triggered = manual_capture_event.wait(timeout=0.2)
+                            if not triggered:
+                                continue
+                            manual_capture_event.clear()
+                            if manual_capture_stop.is_set():
+                                break
+                            if process.poll() is not None:
+                                print(
+                                    f"{Color.YELLOW}Manual stack capture requested but the test process has already "
+                                    f"exited.{Color.RESET}",
+                                    flush=True,
+                                )
+                                continue
+
+                            with capture_lock:
+                                active = capture_active_start is not None
+
+                            if active:
+                                print(
+                                    f"{Color.YELLOW}Manual stack capture skipped: another capture is already in progress.{Color.RESET}",
+                                    flush=True,
+                                )
+                                continue
+
+                            timestamp = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
+                            print(
+                                f"{Color.BLUE}Manual stack capture started at {timestamp} (PID {process.pid}).{Color.RESET}",
+                                flush=True,
+                            )
+
+                            traces = ""
+                            error = ""
+                            with stack_capture_context(mark_failure=False) as allowed:
+                                if not allowed:
+                                    print(
+                                        f"{Color.YELLOW}Manual stack capture skipped: capture context unavailable.{Color.RESET}",
+                                        flush=True,
+                                    )
+                                    continue
+                                traces, error = self._capture_process_stacks(
+                                    process.pid,
+                                    process_group_id,
+                                )
+
+                            with capture_lock:
+                                if traces:
+                                    header = f"Manual stack capture at {timestamp}"
+                                    if live_stack_traces:
+                                        live_stack_traces = f"{live_stack_traces}\n\n{header}\n{traces}"
+                                    else:
+                                        live_stack_traces = f"{header}\n{traces}"
+                                    live_stack_error = ""
+                                elif error and not live_stack_traces:
+                                    live_stack_error = error
+
+                            if traces:
+                                print(
+                                    f"{Color.BLUE}Manual stack capture completed (PID {process.pid}).{Color.RESET}",
+                                    flush=True,
+                                )
+                            elif error:
+                                print(
+                                    f"{Color.YELLOW}Manual stack capture failed: {error}{Color.RESET}",
+                                    flush=True,
+                                )
+
+                        manual_capture_event.clear()
+
+                    manual_capture_thread = threading.Thread(
+                        target=_manual_capture_worker,
+                        name=f"manual_stack_capture_{process.pid}",
+                        daemon=True,
+                    )
+                    manual_capture_thread.start()
 
             def monitor_stream(stream, buffer: List[str], descriptor: str) -> None:
                 thread_name = threading.current_thread().name
@@ -1482,6 +1611,16 @@ class TestRunner:
                 error=error_msg
             )
         finally:
+            manual_capture_stop.set()
+            manual_capture_event.set()
+            if manual_capture_thread is not None:
+                manual_capture_thread.join(timeout=1.0)
+            if manual_signal_registered and manual_signal_module is not None:
+                for sig, prev_handler in manual_signal_handlers.items():
+                    try:
+                        manual_signal_module.signal(sig, prev_handler)  # type: ignore
+                    except Exception:
+                        pass
             if cleanup_scratch_dir:
                 self._cleanup_scratch_directory(scratch_dir)
             self._cleanup_new_core_dumps(invocation, core_snapshot, start_time, result_success)
