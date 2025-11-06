@@ -27,11 +27,11 @@
 # choreography_extreme_test 10
 # dummy_test 10
 # extreme_choreography_test 10
-interprocess_semaphore_test 10000
-semaphore_high_contention_stress 1000
+# interprocess_semaphore_test 10000
+# semaphore_high_contention_stress 1000
 # interprocess_file_mapping_test 10
 # interprocess_mutex_test 10
-# ipc_rings_tests 100000
+ipc_rings_tests 100000
 # macos_named_semaphore_benchmark 10
 # macos_os_sync_semaphore_benchmark 10
 # message_args_traits_test 10
