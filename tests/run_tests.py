@@ -1,19 +1,17 @@
 #!/usr/bin/env python3
 """
-Sintra Test Runner with Timeout and Repetition Support
+Sintra Test Runner with Timeout Support
 
-This script runs Sintra tests multiple times with proper timeout handling
-to detect non-deterministic failures caused by OS scheduling issues.
+This script runs Sintra tests with proper timeout handling to detect
+non-deterministic failures caused by OS scheduling issues.
+
+Test selection and iteration counts are controlled by tests/active_tests.txt.
 
 Usage:
     python run_tests.py [options]
 
 Options:
-    --repetitions N                 Number of times to run each test (default: 1)
     --timeout SECONDS               Timeout per test run in seconds (default: 5)
-    --test NAME                     Run only specific test (e.g., sintra_ping_pong_test)
-    --include PATTERN               Include only tests matching glob-style pattern (can be repeated)
-    --exclude PATTERN               Exclude tests matching glob-style pattern (can be repeated)
     --build-dir PATH                Path to build directory (default: ../build-ninja2)
     --config CONFIG                 Build configuration Debug/Release (default: Debug)
     --verbose                       Show detailed output for each test run
@@ -21,7 +19,6 @@ Options:
 """
 
 import argparse
-import fnmatch
 import importlib
 import importlib.util
 import json
@@ -59,6 +56,55 @@ if importlib.util.find_spec("psutil") is not None:
 
 
 PRESERVE_CORES_ENV = "SINTRA_PRESERVE_CORES"
+
+
+def parse_active_tests(tests_dir: Path) -> Dict[str, int]:
+    """Parse active_tests.txt and return dict of {test_path: iterations}.
+
+    Returns:
+        Dictionary mapping test paths (relative to tests/) to iteration counts.
+        Empty dict if file doesn't exist or has no valid entries.
+    """
+    active_tests_file = tests_dir / "active_tests.txt"
+
+    if not active_tests_file.exists():
+        return {}
+
+    active_tests = {}
+
+    try:
+        with open(active_tests_file, 'r') as f:
+            for line_num, line in enumerate(f, 1):
+                # Strip whitespace
+                line = line.strip()
+
+                # Skip empty lines and comments
+                if not line or line.startswith('#'):
+                    continue
+
+                # Parse: <test_path> <iterations>
+                parts = line.split()
+                if len(parts) < 2:
+                    print(f"{Color.YELLOW}Warning: active_tests.txt:{line_num}: Invalid format (expected: test_path iterations): {line}{Color.RESET}")
+                    continue
+
+                test_path = parts[0]
+                try:
+                    iterations = int(parts[1])
+                    if iterations < 1:
+                        print(f"{Color.YELLOW}Warning: active_tests.txt:{line_num}: Iterations must be >= 1, got {iterations}{Color.RESET}")
+                        continue
+                except ValueError:
+                    print(f"{Color.YELLOW}Warning: active_tests.txt:{line_num}: Invalid iteration count: {parts[1]}{Color.RESET}")
+                    continue
+
+                active_tests[test_path] = iterations
+
+    except IOError as e:
+        print(f"{Color.YELLOW}Warning: Failed to read active_tests.txt: {e}{Color.RESET}")
+        return {}
+
+    return active_tests
 
 # macOS emits Mach-O core files that snapshot every virtual memory region of the
 # crashing process. Two platform effects make Sintra dumps look enormous even
@@ -240,40 +286,8 @@ class Color:
     BOLD = '\033[1m'
 
 
-# Tests that should receive additional repetition weight. Each value represents
-# the minimum number of times that the corresponding test should run when the
-# global ``--repetitions`` argument is set to 1. Larger ``--repetitions`` values
-# can still increase the total runs for a test, but the override no longer
-# multiplies the global value directly (which previously caused runaway runtimes
-# when soak runs used high repetition counts).
-TEST_WEIGHT_OVERRIDES = {
-    # ipc_rings release stress tests
-    "ipc_rings_tests_release:stress:stress_attach_detach_readers": 200,
-    "ipc_rings_tests_release:stress:stress_multi_reader_throughput": 100,
-
-    # ipc_rings release unit tests
-    "ipc_rings_tests_release:unit:test_directory_helpers": 500,
-    "ipc_rings_tests_release:unit:test_get_ring_configurations_properties": 500,
-    "ipc_rings_tests_release:unit:test_mod_helpers": 500,
-    "ipc_rings_tests_release:unit:test_multiple_readers_see_same_data": 500,
-    "ipc_rings_tests_release:unit:test_reader_eviction_does_not_underflow_octile_counter": 30,
-    "ipc_rings_tests_release:unit:test_ring_write_read_single_reader": 500,
-    "ipc_rings_tests_release:unit:test_slow_reader_eviction_restores_status": 500,
-    "ipc_rings_tests_release:unit:test_snapshot_raii": 500,
-    "ipc_rings_tests_release:unit:test_streaming_reader_status_restored_after_eviction": 500,
-    "ipc_rings_tests_release:unit:test_wait_for_new_data": 500,
-
-    # Other release tests
-    "barrier_flush_test_release": 20,
-    "barrier_stress_test_release": 10,
-    "basic_pubsub_test_release": 30,
-    "ping_pong_multi_test_release": 10,
-    "ping_pong_test_release": 200,
-    "processing_fence_test_release": 20,
-    "recovery_test_release": 10,
-    "rpc_append_test_release": 100,
-    "spawn_detached_test_release": 30,
-}
+# NOTE: Test iteration counts are now managed via active_tests.txt
+# This provides a single source of truth for both building and running tests.
 
 # Tests that need extended timeouts beyond the global ``--timeout`` argument.
 # Values represent the minimum timeout (in seconds) that should be enforced for
@@ -299,11 +313,28 @@ def _canonical_test_name(name: str) -> str:
     return canonical
 
 
-def _lookup_test_weight(name: str) -> int:
-    """Return the repetition weight for the provided test invocation."""
+def _lookup_test_weight(name: str, active_tests: Dict[str, int]) -> int:
+    """Return the repetition weight for the provided test invocation from active_tests.txt."""
 
     canonical = _canonical_test_name(name)
-    return TEST_WEIGHT_OVERRIDES.get(canonical, 1)
+
+    # For ipc_rings_tests expanded invocations, look up the base test name
+    # e.g., "ipc_rings_tests_release:unit:test_foo" -> "ipc_rings_tests"
+    if ':' in canonical:
+        # Extract base test name before first colon
+        base_test = canonical.split(':')[0]
+        # Remove _release or _debug suffix
+        if base_test.endswith('_release') or base_test.endswith('_debug'):
+            base_test = base_test.rsplit('_', 1)[0]
+        return active_tests.get(base_test, 1)
+
+    # For regular tests, try with and without config suffix
+    # e.g., "ping_pong_test_release" -> "ping_pong_test"
+    if canonical.endswith('_release') or canonical.endswith('_debug'):
+        base_test = canonical.rsplit('_', 1)[0]
+        return active_tests.get(base_test, 1)
+
+    return active_tests.get(canonical, 1)
 
 
 def _lookup_test_timeout(name: str, default: float) -> float:
@@ -314,28 +345,6 @@ def _lookup_test_timeout(name: str, default: float) -> float:
     if override is None:
         return default
     return max(default, override)
-
-
-def _calculate_target_repetitions(base_repetitions: int, weight: int) -> int:
-    """Return the total repetitions to run for a test.
-
-    ``weight`` expresses the desired run count when ``base_repetitions`` is 1.
-    Increasing ``base_repetitions`` beyond 1 no longer multiplies the weight,
-    preventing exponential growth in soak runs with large weight overrides.
-    ``base_repetitions`` can still override the weight when set higher.
-    """
-
-    base = max(base_repetitions, 0)
-    if base == 0:
-        return 0
-
-    if weight <= 1:
-        return base
-
-    if base == 1:
-        return weight
-
-    return max(base, weight)
 
 
 def format_duration(seconds: float) -> str:
@@ -368,7 +377,7 @@ class TestRunner:
     """Manages test execution with timeout and repetition"""
 
     def __init__(self, build_dir: Path, config: str, timeout: float, verbose: bool,
-                 preserve_on_timeout: bool = False, test_subdir: str = None):
+                 preserve_on_timeout: bool = False):
         self.build_dir = build_dir
         self.config = config
         self.timeout = timeout
@@ -411,10 +420,6 @@ class TestRunner:
             self.test_dir = test_dir_with_config
         else:
             self.test_dir = test_dir_simple
-
-        # If test_subdir is specified, append it to the test directory
-        if test_subdir:
-            self.test_dir = self.test_dir / test_subdir
 
         # Kill any existing sintra processes for a clean start
         self._kill_all_sintra_processes()
@@ -740,34 +745,37 @@ class TestRunner:
 
         return total_freed, messages
 
-    def find_test_suites(
-        self,
-        test_name: Optional[str] = None,
-        include_patterns: Optional[List[str]] = None,
-        exclude_patterns: Optional[List[str]] = None,
-    ) -> dict:
-        """Find all test executables organized by configuration suite"""
+    def find_test_suites(self, active_tests: Dict[str, int]) -> Tuple[Dict[str, List[TestInvocation]], Dict[str, int]]:
+        """Find test executables specified in active_tests.txt.
+
+        Returns:
+            Tuple of (test_suites, active_tests) where:
+            - test_suites: Dict mapping config name to list of TestInvocations
+            - active_tests: Dict mapping test paths to iteration counts
+        """
         if not self.test_dir.exists():
             print(f"{Color.RED}Test directory not found: {self.test_dir}{Color.RESET}")
-            return {}
+            return {}, active_tests
 
-        # 2 configurations: adaptive policy in release and debug builds
-        configurations = [
-            'debug',
-            'release'
-        ]
+        if not active_tests:
+            print(f"{Color.YELLOW}No tests specified in active_tests.txt{Color.RESET}")
+            return {}, active_tests
 
-        # Discover available tests dynamically so the runner adapts to new or removed binaries
-        discovered_tests: Dict[str, List[TestInvocation]] = {
-            config: [] for config in configurations
-        }
+        # 2 configurations: debug and release
+        configurations = ['debug', 'release']
+
+        # Map to store discovered test executables by base name
+        # Key: base test name (e.g., "ping_pong_test")
+        # Value: dict of {config: Path}
+        available_tests: Dict[str, Dict[str, Path]] = {}
 
         try:
             directory_entries = sorted(self.test_dir.iterdir())
         except OSError as exc:
             print(f"{Color.RED}Failed to inspect test directory {self.test_dir}: {exc}{Color.RESET}")
-            return {}
+            return {}, active_tests
 
+        # Scan for available test binaries
         for entry in directory_entries:
             if not (entry.is_file() or entry.is_symlink()):
                 continue
@@ -776,27 +784,44 @@ class TestRunner:
             if sys.platform == 'win32' and normalized_name.lower().endswith('.exe'):
                 normalized_name = normalized_name[:-4]
 
+            # Check if this matches a test with config suffix
             for config in configurations:
                 suffix = f"_{config}"
-                if not normalized_name.endswith(suffix):
-                    continue
+                if normalized_name.endswith(suffix):
+                    base_name = normalized_name[:-len(suffix)]
+                    # Remove "sintra_" prefix if present
+                    if base_name.startswith("sintra_"):
+                        base_name = base_name[len("sintra_"):]
 
-                base_name = normalized_name[:-len(suffix)]
-
-                if not self._matches_filters(
-                    base_name,
-                    normalized_name,
-                    test_name,
-                    include_patterns,
-                    exclude_patterns,
-                ):
+                    if base_name not in available_tests:
+                        available_tests[base_name] = {}
+                    available_tests[base_name][config] = entry
                     break
 
-                invocations = self._expand_test_invocations(entry, base_name, normalized_name)
+        # Now match active_tests entries with available binaries
+        discovered_tests: Dict[str, List[TestInvocation]] = {
+            config: [] for config in configurations
+        }
+
+        for test_path in active_tests.keys():
+            # Extract test name from path (e.g., "manual/some_test" -> "some_test")
+            test_name = test_path.split('/')[-1]
+
+            if test_name not in available_tests:
+                print(f"{Color.YELLOW}Warning: Test '{test_path}' from active_tests.txt not found in build directory{Color.RESET}")
+                continue
+
+            # Add test invocations for each available configuration
+            for config, test_binary in available_tests[test_name].items():
+                normalized_name = test_binary.name
+                if sys.platform == 'win32' and normalized_name.lower().endswith('.exe'):
+                    normalized_name = normalized_name[:-4]
+
+                invocations = self._expand_test_invocations(test_binary, f"sintra_{test_name}", normalized_name)
                 if invocations:
                     discovered_tests[config].extend(invocations)
-                break
 
+        # Build final test suites with ordering (dummy_test first)
         test_suites = {}
         for config, tests in discovered_tests.items():
             if not tests:
@@ -804,66 +829,18 @@ class TestRunner:
             ordered = sorted(
                 enumerate(tests),
                 key=lambda item: (
-                    0
-                    if _canonical_test_name(item[1].name).startswith("dummy_test")
-                    else 1,
+                    0 if _canonical_test_name(item[1].name).startswith("dummy_test") else 1,
                     item[0],
                 ),
             )
             test_suites[config] = [invocation for _, invocation in ordered]
 
         if not test_suites:
-            if any([test_name, include_patterns, exclude_patterns]):
-                filters = []
-                if test_name:
-                    filters.append(f"--test '{test_name}'")
-                if include_patterns:
-                    includes = ', '.join(include_patterns)
-                    filters.append(f"--include {includes}")
-                if exclude_patterns:
-                    excludes = ', '.join(exclude_patterns)
-                    filters.append(f"--exclude {excludes}")
-                filter_text = '; '.join(filters)
-                print(f"{Color.YELLOW}No tests found after applying filters: {filter_text}.{Color.RESET}")
-            else:
-                print(f"{Color.RED}No test binaries found in {self.test_dir}.{Color.RESET}")
-            return {}
+            print(f"{Color.RED}No test binaries found matching active_tests.txt{Color.RESET}")
+            return {}, active_tests
 
-        return test_suites
+        return test_suites, active_tests
 
-    @staticmethod
-    def _matches_filters(
-        base_name: str,
-        normalized_name: str,
-        test_name: Optional[str],
-        include_patterns: Optional[List[str]],
-        exclude_patterns: Optional[List[str]],
-    ) -> bool:
-        """Determine if a test name should be included based on provided filters."""
-
-        candidate_names = [base_name, normalized_name]
-
-        if test_name and all(test_name not in name for name in candidate_names):
-            return False
-
-        if include_patterns:
-            include_match = any(
-                fnmatch.fnmatch(name, pattern)
-                for pattern in include_patterns
-                for name in candidate_names
-            )
-            if not include_match:
-                return False
-
-        if exclude_patterns:
-            if any(
-                fnmatch.fnmatch(name, pattern)
-                for pattern in exclude_patterns
-                for name in candidate_names
-            ):
-                return False
-
-        return True
 
     def _expand_test_invocations(
         self,
@@ -2023,24 +2000,6 @@ class TestRunner:
                         break
 
 
-def _collect_patterns(raw_patterns: Optional[List[str]]) -> List[str]:
-    """Normalize include/exclude arguments into a flat list of glob patterns."""
-
-    if not raw_patterns:
-        return []
-
-    patterns: List[str] = []
-    for raw in raw_patterns:
-        if not raw:
-            continue
-        for item in raw.split(','):
-            item = item.strip()
-            if item:
-                patterns.append(item)
-
-    return patterns
-
-
 def _resolve_git_metadata(start_dir: Path) -> Tuple[str, str]:
     """Return the current git branch name and revision hash.
 
@@ -2079,28 +2038,17 @@ def _resolve_git_metadata(start_dir: Path) -> Tuple[str, str]:
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Run Sintra tests with timeout and repetition support',
-        formatter_class=argparse.RawDescriptionHelpFormatter
+        description='Run Sintra tests with timeout support',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='Test selection and iteration counts are controlled by tests/active_tests.txt'
     )
-    parser.add_argument('--repetitions', type=int, default=1,
-                        help='Number of times to run each test (default: 1)')
     parser.add_argument('--timeout', type=float, default=5.0,
                         help='Timeout per test run in seconds (default: 5)')
-    parser.add_argument('--test', type=str, default=None,
-                        help='Run only tests whose names include the provided substring (e.g., ping_pong)')
-    parser.add_argument('--include', action='append', default=None, metavar='PATTERN',
-                        help='Include only tests whose names match the given glob-style pattern. '
-                             'Can be repeated or include comma-separated patterns.')
-    parser.add_argument('--exclude', action='append', default=None, metavar='PATTERN',
-                        help='Exclude tests whose names match the given glob-style pattern. '
-                             'Can be repeated or include comma-separated patterns.')
     parser.add_argument('--build-dir', type=str, default='../build-ninja2',
                         help='Path to build directory (default: ../build-ninja2)')
     parser.add_argument('--config', type=str, default='Debug',
                         choices=['Debug', 'Release'],
                         help='Build configuration (default: Debug)')
-    parser.add_argument('--test-dir', type=str, default=None,
-                        help='Subdirectory within build-dir/tests to search for tests (e.g., "manual" for manual tests)')
     parser.add_argument('--verbose', action='store_true',
                         help='Show detailed output for each test run')
     parser.add_argument('--preserve-stalled-processes', action='store_true',
@@ -2123,33 +2071,26 @@ def main():
         print(f"Please build the project first or specify correct --build-dir")
         return 1
 
+    # Parse active_tests.txt
+    active_tests = parse_active_tests(script_dir)
+    if not active_tests:
+        print(f"{Color.RED}Error: No tests found in active_tests.txt{Color.RESET}")
+        print(f"Please ensure tests/active_tests.txt exists and contains test entries")
+        return 1
+
     print(f"Build directory: {build_dir}")
     print(f"Configuration: {args.config}")
-    print(f"Repetitions per test: {args.repetitions}")
     print(f"Timeout per test: {args.timeout}s")
-    if args.test_dir:
-        print(f"Test subdirectory: {args.test_dir}")
-    if args.test:
-        print(f"Substring filter (--test): {args.test}")
-    include_patterns = _collect_patterns(args.include)
-    exclude_patterns = _collect_patterns(args.exclude)
-    if include_patterns:
-        print(f"Include patterns: {', '.join(include_patterns)}")
-    if exclude_patterns:
-        print(f"Exclude patterns: {', '.join(exclude_patterns)}")
+    print(f"Active tests: {len(active_tests)} tests from active_tests.txt")
     print("=" * 70)
 
     if args.kill_stalled_processes:
         print(f"{Color.YELLOW}Warning: --kill_stalled_processes is deprecated; stalled tests are killed by default.{Color.RESET}")
 
     preserve_on_timeout = args.preserve_stalled_processes
-    runner = TestRunner(build_dir, args.config, args.timeout, args.verbose, preserve_on_timeout, test_subdir=args.test_dir)
+    runner = TestRunner(build_dir, args.config, args.timeout, args.verbose, preserve_on_timeout)
     try:
-        test_suites = runner.find_test_suites(
-            test_name=args.test,
-            include_patterns=include_patterns,
-            exclude_patterns=exclude_patterns,
-        )
+        test_suites, active_tests = runner.find_test_suites(active_tests)
 
         if not test_suites:
             print(f"{Color.RED}No test suites found to run{Color.RESET}")
@@ -2166,7 +2107,6 @@ def main():
             print(f"\n{'=' * 80}")
             print(f"{Color.BOLD}{Color.BLUE}Configuration {config_idx}/{total_configs}: {config_name}{Color.RESET}")
             print(f"  Tests in suite: {len(tests)}")
-            print(f"  Repetitions: {args.repetitions}")
             print(f"{'=' * 80}")
 
             suite_start_time = time.time()
@@ -2176,11 +2116,7 @@ def main():
                 invocation.name: {'passed': 0, 'failed': 0, 'durations': [], 'failures': []}
                 for invocation in tests
             }
-            test_weights = {invocation.name: _lookup_test_weight(invocation.name) for invocation in tests}
-            target_repetitions = {
-                name: _calculate_target_repetitions(args.repetitions, weight)
-                for name, weight in test_weights.items()
-            }
+            target_repetitions = {invocation.name: _lookup_test_weight(invocation.name, active_tests) for invocation in tests}
             remaining_repetitions = target_repetitions.copy()
             suite_all_passed = True
             batch_size = 1

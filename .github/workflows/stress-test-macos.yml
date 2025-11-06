@@ -166,7 +166,7 @@ jobs:
         run: |
           ulimit -c unlimited
           cd tests
-          python run_tests.py --repetitions 10 --timeout 30 --build-dir ../build --config Release
+          python run_tests.py --timeout 30 --build-dir ../build --config Release
 
       - name: Mark status success
         if: success()

@@ -161,38 +161,18 @@ prefer vendoring dependencies as git submodules or fetching them during configur
 
 ## Tests and continuous integration
 
-The library ships with a small suite of integration tests that exercise the
-publish/subscribe bus, ping-pong channels (single and multi-producer), remote
-procedure calls, and the managed-process recovery path. They are defined in the
-`tests/` directory and can be executed locally by configuring the project with
-`cmake` and running `ctest` from the build tree. For longer stress runs that
-mirror the CI configuration, invoke
+The library includes a comprehensive test suite covering publish/subscribe, RPC,
+barriers, and crash recovery. Tests are controlled by `tests/active_tests.txt`.
 
-```
-python tests/run_tests.py --repetitions 10 --timeout 30 --build-dir build --config Release
+```bash
+cmake -B build -DSINTRA_BUILD_TESTS=ON
+cmake --build build
+cd tests && python3 run_tests.py --build-dir ../build --config Release
 ```
 
-after building; the script repeatedly launches the compiled test binaries and
-handles timeouts or stalled processes. Add `--preserve-stalled-processes` if you
-need to keep wedged helpers alive for debugging instead of terminating them.
+See [TESTING.md](TESTING.md) for detailed documentation.
 
-### Operational guidance for `spawn_detached`
-
-The `sintra::spawn_detached` helper launches helper processes by way of a
-double-fork sequence and an anonymous pipe handshake. When the helper cannot
-create the pipe (for example because all file descriptors are exhausted) or is
-unable to report readiness through the pipe, the function now returns `false`.
-Callers should treat a `false` return value as a hard failure, log the error, and
-optionally retry after freeing resources. The handshake guarantees that a
-successful return means the grandchild has executed `execv` and relinquished the
-pipe, so spurious successes caused by early crashes are prevented.
-
-Continuous integration runs on both Linux and Windows through GitHub Actions.
-Each build workflow compiles the project in Release mode and publishes the
-artifacts. A follow-up stress-test workflow triggers when the build completes,
-downloads the artifacts, makes the bundled test executables runnable, and then
-executes `tests/run_tests.py --repetitions 10 --timeout 30 --kill_stalled_processes`
-to shake out intermittent issues.
+CI runs on Linux, macOS, Windows (GitHub Actions), and FreeBSD (Cirrus CI).
 
 ## License
 
