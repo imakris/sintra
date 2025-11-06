@@ -830,7 +830,7 @@ class TestRunner:
                 enumerate(tests),
                 key=lambda item: (
                     0 if _canonical_test_name(item[1].name).startswith("dummy_test") else 1,
-                    item[0],
+                    _canonical_test_name(item[1].name),
                 ),
             )
             test_suites[config] = [invocation for _, invocation in ordered]
@@ -2122,7 +2122,7 @@ def main():
             batch_size = 1
 
             # Print test plan table for this suite
-            print("\n  Test order:")
+            print("\n  Test overview")
 
             # Calculate column widths
             id_col_width = 4
