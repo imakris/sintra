@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git reset:*)",
+      "Bash(git checkout:*)",
+      "Bash(git pull:*)",
+      "Bash(git revert:*)",
+      "Bash(cmake:*)",
+      "Bash(python run_tests.py:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$(cat <<''EOF''\nConfigure CI to stress test only stress_multi_reader_throughput 100k times\n\nThis commit modifies the CI workflows to focus exclusively on detecting\nfailures in the stress_multi_reader_throughput test case:\n\n- Build workflows now only build sintra_ipc_rings_tests_release target\n- Stress test workflows run stress_multi_reader_throughput 100,000 times\n  (increased from 10 repetitions)\n- Applied to all platforms: macOS, Linux, and Windows\n\nThis focused testing strategy will help identify non-deterministic failures\nin the multi-reader throughput test after reverting the eviction-related\ncommits.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n)\")",
+      "Bash(git push:*)",
+      "Bash(build/tests/Release/sintra_ipc_rings_tests_release.exe:*)",
+      "Bash(git commit:*)",
+      "Bash(gh pr create:*)",
+      "Bash(for i in {1..5})",
+      "Bash(do echo \"=== Run $i ===\")",
+      "Bash(break)",
+      "Bash(done)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
