@@ -152,6 +152,12 @@
 #define SINTRA_EVICTION_SPIN_BUDGET_US 5000u
 #endif
 
+#ifdef SINTRA_TEST_HOOK_AFTER_GUARD_CLEAR
+namespace sintra::test {
+    void on_writer_guard_cleared(uint32_t reader_index, uint8_t guard_token);
+}
+#endif
+
 #ifndef SINTRA_EVICTION_LAG_RINGS
 #define SINTRA_EVICTION_LAG_RINGS 1u  // reader is "slow" if > N rings behind
 #endif
@@ -712,6 +718,12 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
     static constexpr uint8_t guard_token_present_mask = 0x80;
     static constexpr uint8_t guard_token_octile_mask  = 0x7f;
 
+    enum Guard_release_owner : uint8_t {
+        guard_release_none   = 0,
+        guard_release_reader = 1,
+        guard_release_writer = 2,
+    };
+
     // Helper: pad to a cache line to reduce false sharing in Control arrays.
     struct cache_line_sized_t {
         struct Payload {
@@ -719,6 +731,8 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
             std::atomic<uint8_t> status{READER_STATE_INACTIVE};
             std::atomic<uint8_t> trailing_octile{0};
             std::atomic<uint8_t> guard_token{0};
+            std::atomic<uint8_t> guard_release_owner{0};
+            std::atomic<uint8_t> pending_evicted_guard{0};
             std::atomic<uint32_t> owner_pid{0};
         };
 
@@ -1335,14 +1349,49 @@ struct Ring_R : Ring<T, true>
         }
 
         if (m_reading.load(std::memory_order_seq_cst)) {
-            uint8_t released_guard =
-                c.reading_sequences[m_rs_index].data.guard_token.exchange(
-                    0, std::memory_order_seq_cst);
+            auto& slot = c.reading_sequences[m_rs_index].data;
+            uint8_t released_guard = slot.guard_token.exchange(0, std::memory_order_seq_cst);
             if ((released_guard & Ring<T, true>::guard_token_present_mask) != 0) {
                 uint8_t released_octile =
                     released_guard & Ring<T, true>::guard_token_octile_mask;
                 c.read_access.fetch_sub(
                     uint64_t(1) << (8 * released_octile), std::memory_order_seq_cst);
+                slot.pending_evicted_guard.store(0, std::memory_order_seq_cst);
+                slot.guard_release_owner.store(
+                    Ring<T, true>::guard_release_none, std::memory_order_seq_cst);
+            }
+            else {
+                bool handled = false;
+                uint8_t expected_owner = Ring<T, true>::guard_release_writer;
+                if (slot.guard_release_owner.compare_exchange_strong(
+                        expected_owner,
+                        Ring<T, true>::guard_release_reader,
+                        std::memory_order_seq_cst,
+                        std::memory_order_seq_cst))
+                {
+                    uint8_t evicted_guard = slot.pending_evicted_guard.load(std::memory_order_seq_cst);
+                    uint8_t released_octile;
+                    if ((evicted_guard & Ring<T, true>::guard_token_present_mask) != 0) {
+                        released_octile =
+                            evicted_guard & Ring<T, true>::guard_token_octile_mask;
+                    }
+                    else {
+                        released_octile = slot.trailing_octile.load(std::memory_order_seq_cst);
+                    }
+                    c.read_access.fetch_sub(
+                        uint64_t(1) << (8 * released_octile), std::memory_order_seq_cst);
+                    slot.pending_evicted_guard.store(0, std::memory_order_seq_cst);
+                    slot.guard_release_owner.store(
+                        Ring<T, true>::guard_release_none, std::memory_order_seq_cst);
+                    handled = true;
+                }
+                if (!handled) {
+                    while (slot.guard_release_owner.load(std::memory_order_seq_cst) ==
+                           Ring<T, true>::guard_release_writer)
+                    {
+                        std::this_thread::yield();
+                    }
+                }
             }
             m_reading.store(false, std::memory_order_seq_cst);
         }
@@ -1603,35 +1652,68 @@ struct Ring_R : Ring<T, true>
     bool handle_eviction_if_needed()
     {
         auto& slot = c.reading_sequences[m_rs_index].data;
-        if ((slot.guard_token.load(std::memory_order_seq_cst) &
-             Ring<T, true>::guard_token_present_mask) != 0) {
-            return false;
-        }
+
+        for (;;) {
+            // Always recheck guard token at loop start - writer might be racing with us
+            if ((slot.guard_token.load(std::memory_order_seq_cst) &
+                 Ring<T, true>::guard_token_present_mask) != 0) {
+                return false;
+            }
 
 #ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
-        if (slot.status.load(std::memory_order_seq_cst) == Ring<T, false>::READER_STATE_EVICTED) {
-            // Reader was evicted by writer for being too slow.
-            // Skip all missed data and jump to writer's current position.
-            // This is the only safe recovery strategy since old data has been overwritten.
-            sequence_counter_type new_seq = c.leading_sequence.load(std::memory_order_seq_cst);
-            slot.v.store(new_seq, std::memory_order_seq_cst);
-            m_reading_sequence->store(new_seq, std::memory_order_seq_cst);
-            m_last_consumed_sequence = new_seq;
+            const auto status = slot.status.load(std::memory_order_seq_cst);
+            if (status == Ring<T, false>::READER_STATE_EVICTED) {
+                // Reader was evicted by writer for being too slow.
+                // Skip all missed data and jump to writer's current position.
+                // This is the only safe recovery strategy since old data has been overwritten.
+                sequence_counter_type new_seq = c.leading_sequence.load(std::memory_order_seq_cst);
+                slot.v.store(new_seq, std::memory_order_seq_cst);
+                m_reading_sequence->store(new_seq, std::memory_order_seq_cst);
+                m_last_consumed_sequence = new_seq;
 
-            // Recalculate trailing octile to match the new jumped-forward position
-            const size_t trailing_idx = mod_pos_i64(
-                int64_t(new_seq) - int64_t(m_max_trailing_elements),
-                this->m_num_elements);
-            m_trailing_octile = (8 * trailing_idx) / this->m_num_elements;
+                // Recalculate trailing octile to match the new jumped-forward position
+                const size_t trailing_idx = mod_pos_i64(
+                    int64_t(new_seq) - int64_t(m_max_trailing_elements),
+                    this->m_num_elements);
+                m_trailing_octile = (8 * trailing_idx) / this->m_num_elements;
 
-            reattach_after_eviction();
-            m_evicted_since_last_wait.store(true, std::memory_order_seq_cst);
-            return true;
-        }
+                reattach_after_eviction();
+                m_evicted_since_last_wait.store(true, std::memory_order_seq_cst);
+                return true;
+            }
 #endif
 
-        reattach_after_eviction();
-        return false;
+#ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
+            // The guard token is clear but the slot still reports ACTIVE.  That means either:
+            //   1) This reader has not yet installed its first guard (streaming attachment path), or
+            //   2) An eviction is mid-flight and the writer still owns the guard bookkeeping.
+            // The guard_release_owner flag tells us which case we are in.  Spin-waiting while the
+            // writer owns the release prevents us from reattaching a second guard before the writer
+            // has finished subtracting the first one from read_access.
+            const uint8_t release_owner = slot.guard_release_owner.load(std::memory_order_seq_cst);
+            if (release_owner == Ring<T, true>::guard_release_writer) {
+                // Eviction in progress - spin until writer completes its atomic updates.
+                // The writer must release ownership before setting status=EVICTED, so this
+                // spin is bounded by a few atomic stores (microseconds).
+                while (slot.guard_release_owner.load(std::memory_order_seq_cst) ==
+                       Ring<T, true>::guard_release_writer)
+                {
+                    std::this_thread::yield();
+                }
+                // Writer has released ownership. Loop back to recheck status, which should
+                // now be EVICTED (if writer won the cleanup race) or ready for reattachment.
+                continue;
+            }
+
+            // Guard cleared, status is ACTIVE, release owner is not writer.
+            // This is either first-time attachment or voluntary cleanup completed.
+            reattach_after_eviction();
+            return false;
+#else
+            reattach_after_eviction();
+            return false;
+#endif
+        }
     }
 
     void reattach_after_eviction()
@@ -1649,6 +1731,10 @@ struct Ring_R : Ring<T, true>
         c.reading_sequences[m_rs_index].data.status.store(
             Ring<T, false>::READER_STATE_ACTIVE, std::memory_order_seq_cst);
 #endif
+        c.reading_sequences[m_rs_index].data.pending_evicted_guard.store(
+            0, std::memory_order_seq_cst);
+        c.reading_sequences[m_rs_index].data.guard_release_owner.store(
+            Ring<T, true>::guard_release_none, std::memory_order_seq_cst);
         c.reading_sequences[m_rs_index].data.guard_token.store(
             static_cast<uint8_t>(Ring<T, true>::guard_token_present_mask |
                                  static_cast<uint8_t>(m_trailing_octile)),
@@ -2026,24 +2112,51 @@ private:
                             reader_has_guard && (reader_octile == new_octile);
 
                         if (reader_seq < eviction_threshold || blocking_current_octile) {
+                            auto& slot_data = c.reading_sequences[i].data;
                             // Evict only if the reader currently holds a guard
                             uint8_t evicted_guard =
-                                c.reading_sequences[i].data.guard_token.exchange(
-                                    0, std::memory_order_seq_cst);
+                                slot_data.guard_token.exchange(0, std::memory_order_seq_cst);
+                            slot_data.pending_evicted_guard.store(evicted_guard, std::memory_order_seq_cst);
+
                             if ((evicted_guard & Ring<T, false>::guard_token_present_mask) != 0) {
-                                const size_t evicted_reader_octile =
-                                    evicted_guard & Ring<T, false>::guard_token_octile_mask;
+                                slot_data.guard_release_owner.store(
+                                    Ring<T, false>::guard_release_writer, std::memory_order_seq_cst);
+#ifdef SINTRA_TEST_HOOK_AFTER_GUARD_CLEAR
+                                sintra::test::on_writer_guard_cleared(
+                                    static_cast<uint32_t>(i), evicted_guard);
+#endif
+                                uint8_t expected_owner = Ring<T, false>::guard_release_writer;
+                                if (slot_data.guard_release_owner.compare_exchange_strong(
+                                        expected_owner,
+                                        Ring<T, false>::guard_release_none,
+                                        std::memory_order_seq_cst,
+                                        std::memory_order_seq_cst))
+                                {
+                                    const size_t evicted_reader_octile =
+                                        evicted_guard & Ring<T, false>::guard_token_octile_mask;
 
-                                c.reading_sequences[i].data.status.store(
-                                    Ring<T, false>::READER_STATE_EVICTED, std::memory_order_seq_cst);
+                                    slot_data.status.store(
+                                        Ring<T, false>::READER_STATE_EVICTED, std::memory_order_seq_cst);
 
-                                c.read_access.fetch_sub(
-                                    uint64_t(1) << (8 * evicted_reader_octile), std::memory_order_seq_cst);
-                                c.reader_eviction_count.fetch_add(1, std::memory_order_seq_cst);
-                                c.last_evicted_reader_index.store(static_cast<uint32_t>(i), std::memory_order_seq_cst);
-                                c.last_evicted_reader_sequence.store(reader_seq, std::memory_order_seq_cst);
-                                c.last_evicted_writer_sequence.store(m_pending_new_sequence, std::memory_order_seq_cst);
-                                c.last_evicted_reader_octile.store(static_cast<uint32_t>(evicted_reader_octile), std::memory_order_seq_cst);
+                                    c.read_access.fetch_sub(
+                                        uint64_t(1) << (8 * evicted_reader_octile), std::memory_order_seq_cst);
+                                    slot_data.pending_evicted_guard.store(0, std::memory_order_seq_cst);
+                                    c.reader_eviction_count.fetch_add(1, std::memory_order_seq_cst);
+                                    c.last_evicted_reader_index.store(static_cast<uint32_t>(i), std::memory_order_seq_cst);
+                                    c.last_evicted_reader_sequence.store(reader_seq, std::memory_order_seq_cst);
+                                    c.last_evicted_writer_sequence.store(m_pending_new_sequence, std::memory_order_seq_cst);
+                                    c.last_evicted_reader_octile.store(
+                                        static_cast<uint32_t>(evicted_reader_octile), std::memory_order_seq_cst);
+                                }
+                                else {
+                                    // Reader claimed the release; keep diagnostics but skip the counter update here.
+                                    slot_data.pending_evicted_guard.store(0, std::memory_order_seq_cst);
+                                }
+                            }
+                            else {
+                                slot_data.guard_release_owner.store(
+                                    Ring<T, false>::guard_release_none, std::memory_order_seq_cst);
+                                slot_data.pending_evicted_guard.store(0, std::memory_order_seq_cst);
                             }
                         }
                     }
