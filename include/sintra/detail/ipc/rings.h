@@ -1570,7 +1570,12 @@ struct Ring_R : Ring<T, true>
 
             while (true) {
                 if ((observed_token & Ring<T, true>::guard_token_present_mask) == 0) {
-                    break;
+                    // Eviction (or scavenge) cleared our guard during octile transition.
+                    // Reset guard tracking and return without updating m_trailing_octile.
+                    // Next operation will call handle_eviction_if_needed() which will
+                    // detect the missing guard and reattach (or perform eviction recovery).
+                    m_guard_attached = false;
+                    return;
                 }
 
                 const uint8_t desired_token = static_cast<uint8_t>(
@@ -1670,16 +1675,22 @@ struct Ring_R : Ring<T, true>
             }
         }
 
-        // Eviction didn't complete within expected time. This could happen if the writer thread
-        // is preempted mid-eviction. Re-check status once more.
-        if (slot.status.load(std::memory_order_seq_cst) == Ring<T, false>::READER_STATE_EVICTED) {
+        // Spin timeout. Check one more time if eviction completed.
+        const auto final_status = slot.status.load(std::memory_order_seq_cst);
+        if (final_status == Ring<T, false>::READER_STATE_EVICTED) {
             // Eviction completed - perform recovery and return
             perform_eviction_recovery();
             return true;
         }
 
-        // Eviction still hasn't completed - this is very unexpected but possible if writer is
-        // severely delayed. Return false to signal caller to retry.
+        // Guard was cleared but status is not EVICTED. This can happen if:
+        // 1. Guard was cleared by scavenge_orphans (sets status=INACTIVE, not EVICTED)
+        // 2. Writer was severely preempted mid-eviction (very unlikely)
+        // 3. Octile transition was interrupted by eviction (handled in done_reading_new_data)
+        //
+        // In all cases, we have no guard and should reattach. Reset tracking and reattach.
+        m_guard_attached = false;
+        reattach_after_eviction();
         return false;
 #else
         reattach_after_eviction();
