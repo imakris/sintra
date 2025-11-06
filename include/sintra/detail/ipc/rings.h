@@ -2045,13 +2045,9 @@ private:
             bool eviction_deadline_armed = false;
 #endif
 #endif
-            size_t timeout_check_counter = 0;
             while (c.read_access.load(std::memory_order_seq_cst) & range_mask) {
                 bool has_blocking_reader = false;
-
-                // Only check for timeouts every 1000 iterations to avoid expensive syscalls
-                const bool should_check_timeout = (++timeout_check_counter % 1000) == 0;
-                const uint64_t now_us = should_check_timeout ? (monotonic_now_ns() / 1000) : 0;
+                const uint64_t now_us = monotonic_now_ns() / 1000;
 
                 for (int i = 0; i < max_process_index; ++i) {
                     uint8_t guard = c.reading_sequences[i].data.has_guard.load(std::memory_order_seq_cst);
@@ -2059,27 +2055,19 @@ private:
                         uint8_t oct = c.reading_sequences[i].data.trailing_octile.load(std::memory_order_seq_cst);
 
                         // Check if this guard has been held too long (crash recovery)
-                        // Only check periodically to avoid expensive monotonic_now_ns() calls
-                        if (should_check_timeout) {
-                            uint64_t acquired_at = c.reading_sequences[i].data.guard_acquired_at.load(std::memory_order_seq_cst);
-                            // If acquired_at is 0, treat as "acquired now" and set timestamp
-                            if (acquired_at == 0) {
-                                c.reading_sequences[i].data.guard_acquired_at.compare_exchange_strong(
-                                    acquired_at, now_us, std::memory_order_seq_cst);
-                            }
-                            else if (now_us >= acquired_at &&
-                                (now_us - acquired_at) >= SINTRA_READER_GUARD_TIMEOUT_US)
+                        uint64_t acquired_at = c.reading_sequences[i].data.guard_acquired_at.load(std::memory_order_seq_cst);
+                        if (acquired_at != 0 && now_us >= acquired_at &&
+                            (now_us - acquired_at) >= SINTRA_READER_GUARD_TIMEOUT_US)
+                        {
+                            // Force-clear stale guard
+                            uint8_t expected = 1;
+                            if (c.reading_sequences[i].data.has_guard.compare_exchange_strong(
+                                    expected, uint8_t{0}, std::memory_order_seq_cst))
                             {
-                                // Force-clear stale guard
-                                uint8_t expected = 1;
-                                if (c.reading_sequences[i].data.has_guard.compare_exchange_strong(
-                                        expected, uint8_t{0}, std::memory_order_seq_cst))
-                                {
-                                    c.read_access.fetch_sub(uint64_t(1) << (8 * oct), std::memory_order_seq_cst);
-                                    c.reading_sequences[i].data.guard_acquired_at.store(0, std::memory_order_seq_cst);
-                                }
-                                continue;
+                                c.read_access.fetch_sub(uint64_t(1) << (8 * oct), std::memory_order_seq_cst);
+                                c.reading_sequences[i].data.guard_acquired_at.store(0, std::memory_order_seq_cst);
                             }
+                            continue;
                         }
 
                         if (oct == new_octile) {

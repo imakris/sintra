@@ -472,6 +472,7 @@ TEST_CASE(test_reader_eviction_does_not_underflow_octile_counter)
 
         reader.c.read_access.fetch_add(guard_mask, std::memory_order_release);
         slot.has_guard.store(1, std::memory_order_release);
+        slot.guard_acquired_at.store(sintra::detail::ipc::monotonic_now_ns() / 1000, std::memory_order_release);
         slot.status.store(sintra::Ring<uint32_t, true>::READER_STATE_ACTIVE, std::memory_order_release);
 
         join_if_joinable(writer_thread);
