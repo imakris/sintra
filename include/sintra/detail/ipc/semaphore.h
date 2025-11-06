@@ -89,7 +89,7 @@ CAVEATS
 #else
   #include <time.h>
   // Single selection ladder for sub-platform specifics
-  #if defined(__APPLE__) && defined(__MACH__) && defined(__has_include) && __has_include(<os/sync_wait_on_address.h>)  
+  #if defined(__APPLE__) && defined(__MACH__) && defined(__has_include) && __has_include(<os/sync_wait_on_address.h>)
     #define SINTRA_BACKEND_DARWIN 1
     #include <os/clock.h>
     #include <os/sync_wait_on_address.h>
@@ -465,13 +465,22 @@ static inline int futex_wake(int* addr, int n)
 
 // Unified POSIX helpers (no further #ifs elsewhere)
 static inline int posix_wait_equal_until(
-    uint32_t* addr, uint32_t expected, uint64_t deadline) noexcept
+    uint32_t* addr, uint32_t expected, uint64_t deadline_ns) noexcept
 {
 #if SINTRA_BACKEND_DARWIN
     const uint32_t flags = OS_SYNC_WAIT_ON_ADDRESS_SHARED;
+    // Use with_timeout (relative) instead of with_deadline (absolute)
+    // to avoid clock unit confusion - timeout is clearly documented as nanoseconds
     for (;;) {
-        int rc = os_sync_wait_on_address_with_deadline(
-		    (void*)addr, (uint64_t)expected, 4, flags, OS_CLOCK_MONOTONIC, deadline);
+        const uint64_t now = monotonic_now_ns();
+        if (now >= deadline_ns) {
+            errno = ETIMEDOUT;
+            return -1;
+        }
+        uint64_t rel = deadline_ns - now;
+
+        int rc = os_sync_wait_on_address_with_timeout(
+            (void*)addr, (uint64_t)expected, 4, flags, OS_CLOCK_MONOTONIC, rel);
         if (rc >= 0)                           return  0;
         if (errno == ETIMEDOUT)                return -1;
         if (errno == EINTR || errno == EAGAIN) continue;
@@ -480,10 +489,10 @@ static inline int posix_wait_equal_until(
 #elif SINTRA_BACKEND_LINUX
     for (;;) {
         const uint64_t now = monotonic_now_ns();
-        if (now >= deadline) {
+        if (now >= deadline_ns) {
             errno = ETIMEDOUT; return -1;
         }
-        uint64_t rel = deadline - now;
+        uint64_t rel = deadline_ns - now;
         int rc;
         {
             uint64_t tmax = (uint64_t)std::numeric_limits<time_t>::max();
@@ -502,7 +511,7 @@ static inline int posix_wait_equal_until(
         return -1;
     }
 #else
-    (void)addr; (void)expected; (void)deadline;
+    (void)addr; (void)expected; (void)deadline_ns;
     errno = ENOTSUP;
     return -1;
 #endif
