@@ -827,11 +827,15 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
                 bool dead = owner_unknown || !is_process_alive(pid);
 
                 if (dead) {
+                    // Load trailing_octile BEFORE clearing has_guard to prevent race where
+                    // a concurrent reader updates trailing_octile between CAS and load,
+                    // causing us to decrement the wrong octile counter.
+                    uint8_t oct = slot.trailing_octile.load(std::memory_order_seq_cst);
+
                     uint8_t expected = 1;
                     if (slot.has_guard.compare_exchange_strong(
                             expected, uint8_t{0}, std::memory_order_seq_cst))
                     {
-                        uint8_t oct = slot.trailing_octile.load(std::memory_order_seq_cst);
                         read_access.fetch_sub(uint64_t(1) << (8 * oct), std::memory_order_seq_cst);
                     }
 
@@ -1981,12 +1985,16 @@ private:
                             if (c.reading_sequences[i].data.has_guard.compare_exchange_strong(
                                     expected, uint8_t{0}, std::memory_order_seq_cst))
                             {
+                                // reader_octile was sampled before we dropped the guard, so it
+                                // still reflects the octile that must be unblocked even if the
+                                // reader races to publish a new trailing_octile while reattaching.
+                                const size_t evicted_reader_octile = reader_octile;
+
                                 c.reading_sequences[i].data.status.store(
                                     Ring<T, false>::READER_STATE_EVICTED, std::memory_order_seq_cst);
 
-                                size_t evicted_reader_octile =
-                                    c.reading_sequences[i].data.trailing_octile.load(std::memory_order_seq_cst);
-                                c.read_access.fetch_sub(uint64_t(1) << (8 * evicted_reader_octile), std::memory_order_seq_cst);
+                                c.read_access.fetch_sub(
+                                    uint64_t(1) << (8 * evicted_reader_octile), std::memory_order_seq_cst);
                                 c.reader_eviction_count.fetch_add(1, std::memory_order_seq_cst);
                                 c.last_evicted_reader_index.store(static_cast<uint32_t>(i), std::memory_order_seq_cst);
                                 c.last_evicted_reader_sequence.store(reader_seq, std::memory_order_seq_cst);
