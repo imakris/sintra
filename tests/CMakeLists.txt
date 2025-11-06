@@ -57,6 +57,9 @@ function(add_test_suite SUFFIX IS_DEBUG)
         complex_choreography_test.cpp
         choreography_extreme_test.cpp
         dummy_test.cpp
+        # TEMPORARY - Remove after CI testing stack capture on all platforms
+        temporary_crash_test.cpp
+        temporary_hang_test.cpp
         extreme_choreography_test.cpp
         interprocess_semaphore_test.cpp
         interprocess_file_mapping_test.cpp
