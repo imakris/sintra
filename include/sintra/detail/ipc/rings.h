@@ -1629,10 +1629,17 @@ struct Ring_R : Ring<T, true>
             m_evicted_since_last_wait.store(true, std::memory_order_seq_cst);
             return true;
         }
-#endif
 
+        // guard_token=0 + status=ACTIVE means eviction raced with our reattachment:
+        // We called reattach_after_eviction(), which set guard and status=ACTIVE,
+        // then eviction cleared guard and set status=EVICTED, then we overwrote
+        // with status=ACTIVE. Don't reattach again - would double-increment counter.
+        return false;
+#else
+        // Without eviction tracking, always reattach when guard is cleared
         reattach_after_eviction();
         return false;
+#endif
     }
 
     void reattach_after_eviction()
