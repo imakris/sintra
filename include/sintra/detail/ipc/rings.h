@@ -1258,12 +1258,13 @@ struct Ring_R : Ring<T, true>
             uint8_t trailing_octile = static_cast<uint8_t>((8 * trailing_idx) / this->m_num_elements);
             uint64_t guard_mask     = uint64_t(1) << (8 * trailing_octile);
 
-            c.read_access.fetch_add(guard_mask, std::memory_order_seq_cst);
-
-            // Publish the octile index to our shared slot for the writer to see.
+            // Publish the octile index and guard flag BEFORE updating the bitmap, so the writer
+            // never sees a transient state where the bitmap is set but has_guard is still 0.
             c.reading_sequences[m_rs_index].data.trailing_octile.store(
                 trailing_octile, std::memory_order_seq_cst);
             c.reading_sequences[m_rs_index].data.has_guard.store(1, std::memory_order_seq_cst);
+
+            c.read_access.fetch_add(guard_mask, std::memory_order_seq_cst);
 
             auto confirmed_leading_sequence = c.leading_sequence.load(std::memory_order_seq_cst);
             auto confirmed_range_first_sequence = std::max<int64_t>(
@@ -1591,7 +1592,7 @@ struct Ring_R : Ring<T, true>
     void reattach_after_eviction()
     {
         const uint64_t mask = uint64_t(1) << (8 * m_trailing_octile);
-        c.read_access.fetch_add(mask, std::memory_order_seq_cst);
+        // Publish reader state BEFORE updating bitmap to avoid transient inconsistency
         c.reading_sequences[m_rs_index].data.trailing_octile.store(
             static_cast<uint8_t>(m_trailing_octile), std::memory_order_seq_cst);
         c.reading_sequences[m_rs_index].data.has_guard.store(1, std::memory_order_seq_cst);
@@ -1599,6 +1600,7 @@ struct Ring_R : Ring<T, true>
         c.reading_sequences[m_rs_index].data.status.store(
             Ring<T, false>::READER_STATE_ACTIVE, std::memory_order_seq_cst);
 #endif
+        c.read_access.fetch_add(mask, std::memory_order_seq_cst);
     }
 
 public:
