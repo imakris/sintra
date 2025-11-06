@@ -325,6 +325,7 @@ int process_crasher()
 #if defined(__APPLE__)
         disable_core_dumps_for_intentional_abort();
 #endif
+        sintra::disable_debug_pause_for_current_process();
         std::abort();
     }
 
