@@ -1579,6 +1579,13 @@ struct Ring_R : Ring<T, true>
             slot.v.store(new_seq, std::memory_order_seq_cst);
             m_reading_sequence->store(new_seq, std::memory_order_seq_cst);
             m_last_consumed_sequence = new_seq;
+
+            // Recalculate trailing octile based on new sequence position
+            const size_t t_idx = mod_pos_i64(
+                int64_t(new_seq) - int64_t(m_max_trailing_elements),
+                this->m_num_elements);
+            m_trailing_octile = (8 * t_idx) / this->m_num_elements;
+
             reattach_after_eviction();
             m_evicted_since_last_wait.store(true, std::memory_order_seq_cst);
             return true;
