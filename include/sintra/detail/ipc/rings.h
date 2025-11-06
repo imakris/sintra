@@ -1602,6 +1602,29 @@ struct Ring_R : Ring<T, true>
         }
     }
 
+    void perform_eviction_recovery()
+    {
+        auto& slot = c.reading_sequences[m_rs_index].data;
+
+        // Reader was evicted by writer for being too slow.
+        // Skip all missed data and jump to writer's current position.
+        // This is the only safe recovery strategy since old data has been overwritten.
+        sequence_counter_type new_seq = c.leading_sequence.load(std::memory_order_seq_cst);
+        slot.v.store(new_seq, std::memory_order_seq_cst);
+        m_reading_sequence->store(new_seq, std::memory_order_seq_cst);
+        m_last_consumed_sequence = new_seq;
+
+        // Recalculate trailing octile to match the new jumped-forward position
+        const size_t trailing_idx = mod_pos_i64(
+            int64_t(new_seq) - int64_t(m_max_trailing_elements),
+            this->m_num_elements);
+        m_trailing_octile = (8 * trailing_idx) / this->m_num_elements;
+
+        m_guard_attached = false;  // Guard was evicted, reset tracking
+        reattach_after_eviction();
+        m_evicted_since_last_wait.store(true, std::memory_order_seq_cst);
+    }
+
     bool handle_eviction_if_needed()
     {
         auto& slot = c.reading_sequences[m_rs_index].data;
@@ -1613,23 +1636,7 @@ struct Ring_R : Ring<T, true>
 #ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
         const auto status = slot.status.load(std::memory_order_seq_cst);
         if (status == Ring<T, false>::READER_STATE_EVICTED) {
-            // Reader was evicted by writer for being too slow.
-            // Skip all missed data and jump to writer's current position.
-            // This is the only safe recovery strategy since old data has been overwritten.
-            sequence_counter_type new_seq = c.leading_sequence.load(std::memory_order_seq_cst);
-            slot.v.store(new_seq, std::memory_order_seq_cst);
-            m_reading_sequence->store(new_seq, std::memory_order_seq_cst);
-            m_last_consumed_sequence = new_seq;
-
-            // Recalculate trailing octile to match the new jumped-forward position
-            const size_t trailing_idx = mod_pos_i64(
-                int64_t(new_seq) - int64_t(m_max_trailing_elements),
-                this->m_num_elements);
-            m_trailing_octile = (8 * trailing_idx) / this->m_num_elements;
-
-            m_guard_attached = false;  // Guard was evicted, reset tracking
-            reattach_after_eviction();
-            m_evicted_since_last_wait.store(true, std::memory_order_seq_cst);
+            perform_eviction_recovery();
             return true;
         }
 #endif
@@ -1657,42 +1664,17 @@ struct Ring_R : Ring<T, true>
         constexpr int max_spins = 10000;
         for (int spin = 0; spin < max_spins; ++spin) {
             if (slot.status.load(std::memory_order_seq_cst) == Ring<T, false>::READER_STATE_EVICTED) {
-                // Eviction completed, do the recovery
-                sequence_counter_type new_seq = c.leading_sequence.load(std::memory_order_seq_cst);
-                slot.v.store(new_seq, std::memory_order_seq_cst);
-                m_reading_sequence->store(new_seq, std::memory_order_seq_cst);
-                m_last_consumed_sequence = new_seq;
-
-                // Recalculate trailing octile to match the new jumped-forward position
-                const size_t trailing_idx = mod_pos_i64(
-                    int64_t(new_seq) - int64_t(m_max_trailing_elements),
-                    this->m_num_elements);
-                m_trailing_octile = (8 * trailing_idx) / this->m_num_elements;
-
-                m_guard_attached = false;  // Guard was evicted, reset tracking
-                reattach_after_eviction();
-                m_evicted_since_last_wait.store(true, std::memory_order_seq_cst);
+                // Eviction completed - perform recovery and return
+                perform_eviction_recovery();
                 return true;
             }
         }
 
         // Eviction didn't complete within expected time. This could happen if the writer thread
-        // is preempted mid-eviction. Re-check status in case it completed during the spin timeout.
+        // is preempted mid-eviction. Re-check status once more.
         if (slot.status.load(std::memory_order_seq_cst) == Ring<T, false>::READER_STATE_EVICTED) {
-            // Eviction completed while checking - recover now
-            sequence_counter_type new_seq = c.leading_sequence.load(std::memory_order_seq_cst);
-            slot.v.store(new_seq, std::memory_order_seq_cst);
-            m_reading_sequence->store(new_seq, std::memory_order_seq_cst);
-            m_last_consumed_sequence = new_seq;
-
-            const size_t trailing_idx = mod_pos_i64(
-                int64_t(new_seq) - int64_t(m_max_trailing_elements),
-                this->m_num_elements);
-            m_trailing_octile = (8 * trailing_idx) / this->m_num_elements;
-
-            m_guard_attached = false;
-            reattach_after_eviction();
-            m_evicted_since_last_wait.store(true, std::memory_order_seq_cst);
+            // Eviction completed - perform recovery and return
+            perform_eviction_recovery();
             return true;
         }
 
