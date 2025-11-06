@@ -664,7 +664,7 @@ inline void cleanup_stale_swarm_directories(const std::filesystem::path& base_di
         return;
     }
 
-    const auto now_monotonic = sintra::monotonic_now_ns();
+    const auto now_monotonic = monotonic_now_ns();
 
     for (std::filesystem::directory_iterator it(base_dir, ec); !ec && it != std::filesystem::directory_iterator(); ++it) {
         std::error_code status_ec;

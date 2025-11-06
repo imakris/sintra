@@ -479,7 +479,7 @@ static inline int posix_wait_equal_until(
     }
 #elif SINTRA_BACKEND_LINUX
     for (;;) {
-        const uint64_t now = sintra::monotonic_now_ns();
+        const uint64_t now = monotonic_now_ns();
         if (now >= deadline) {
             errno = ETIMEDOUT; return -1;
         }
@@ -592,7 +592,7 @@ inline bool ips_backend::try_wait_for(std::chrono::nanoseconds d) noexcept
     if (try_wait()) return true;
 
     const uint64_t add = d.count() <= 0 ? 0ULL : (uint64_t)d.count();
-    const uint64_t deadline = sintra::monotonic_now_ns() + add;
+    const uint64_t deadline = monotonic_now_ns() + add;
 
     for (;;) {
         uint32_t cur = c.load(std::memory_order_acquire);
@@ -601,7 +601,7 @@ inline bool ips_backend::try_wait_for(std::chrono::nanoseconds d) noexcept
                 return true;
             continue;
         }
-        if (sintra::monotonic_now_ns() >= deadline) {
+        if (monotonic_now_ns() >= deadline) {
             if (try_wait()) {
                 return true;
             }
