@@ -19,6 +19,7 @@ Options:
 """
 
 import argparse
+import contextlib
 import importlib
 import importlib.util
 import json
