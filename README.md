@@ -161,69 +161,18 @@ prefer vendoring dependencies as git submodules or fetching them during configur
 
 ## Tests and continuous integration
 
-The library ships with a comprehensive suite of integration tests that exercise the
-publish/subscribe bus, ping-pong channels (single and multi-producer), remote
-procedure calls, barrier synchronization, and the managed-process recovery path.
-
-### Quick Start
+The library includes a comprehensive test suite covering publish/subscribe, RPC,
+barriers, and crash recovery. Tests are controlled by `tests/active_tests.txt`.
 
 ```bash
-# Build tests
 cmake -B build -DSINTRA_BUILD_TESTS=ON
 cmake --build build
-
-# Run tests
-cd tests
-python3 run_tests.py --build-dir ../build --config Release
+cd tests && python3 run_tests.py --build-dir ../build --config Release
 ```
 
-### Test Selection
+See [TESTING.md](TESTING.md) for detailed documentation.
 
-Tests are controlled by a single configuration file: **`tests/active_tests.txt`**
-
-This file specifies which tests to build and how many iterations to run for each.
-To focus on specific tests, simply comment out the others in `active_tests.txt`
-and rebuild. For example:
-
-```
-# Comment out all tests except the one you're debugging
-# barrier_stress_test 10
-ping_pong_test 200
-# recovery_test 10
-```
-
-For detailed information about test configuration, iteration counts, manual tests,
-and debugging workflows, see **[TESTING.md](TESTING.md)**.
-
-### Stress Testing
-
-For longer stress runs that mirror the CI configuration:
-
-```bash
-python tests/run_tests.py --repetitions 10 --timeout 30 --build-dir build --config Release
-```
-
-The `--repetitions` flag multiplies the iteration counts specified in `active_tests.txt`.
-Add `--preserve-stalled-processes` to keep wedged helpers alive for debugging instead
-of terminating them.
-
-### Operational guidance for `spawn_detached`
-
-The `sintra::spawn_detached` helper launches helper processes by way of a
-double-fork sequence and an anonymous pipe handshake. When the helper cannot
-create the pipe (for example because all file descriptors are exhausted) or is
-unable to report readiness through the pipe, the function now returns `false`.
-Callers should treat a `false` return value as a hard failure, log the error, and
-optionally retry after freeing resources. The handshake guarantees that a
-successful return means the grandchild has executed `execv` and relinquished the
-pipe, so spurious successes caused by early crashes are prevented.
-
-### Continuous Integration
-
-CI runs on Linux, macOS, Windows (via GitHub Actions), and FreeBSD (via Cirrus CI).
-Each platform builds in Release mode and runs the full test suite with
-`--repetitions 10 --timeout 30` to catch non-deterministic failures. Test selection
-and iteration counts are unified across all platforms via `tests/active_tests.txt`.
+CI runs on Linux, macOS, Windows (GitHub Actions), and FreeBSD (Cirrus CI).
 
 ## License
 
