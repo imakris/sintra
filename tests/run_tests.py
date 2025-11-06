@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Sintra Test Runner with Timeout and Repetition Support
+Sintra Test Runner with Timeout Support
 
-This script runs Sintra tests multiple times with proper timeout handling
-to detect non-deterministic failures caused by OS scheduling issues.
+This script runs Sintra tests with proper timeout handling to detect
+non-deterministic failures caused by OS scheduling issues.
 
 Test selection and iteration counts are controlled by tests/active_tests.txt.
 
@@ -11,7 +11,6 @@ Usage:
     python run_tests.py [options]
 
 Options:
-    --repetitions N                 Multiplier for test iterations from active_tests.txt (default: 1)
     --timeout SECONDS               Timeout per test run in seconds (default: 5)
     --build-dir PATH                Path to build directory (default: ../build-ninja2)
     --config CONFIG                 Build configuration Debug/Release (default: Debug)
@@ -346,28 +345,6 @@ def _lookup_test_timeout(name: str, default: float) -> float:
     if override is None:
         return default
     return max(default, override)
-
-
-def _calculate_target_repetitions(base_repetitions: int, weight: int) -> int:
-    """Return the total repetitions to run for a test.
-
-    ``weight`` expresses the desired run count when ``base_repetitions`` is 1.
-    Increasing ``base_repetitions`` beyond 1 no longer multiplies the weight,
-    preventing exponential growth in soak runs with large weight overrides.
-    ``base_repetitions`` can still override the weight when set higher.
-    """
-
-    base = max(base_repetitions, 0)
-    if base == 0:
-        return 0
-
-    if weight <= 1:
-        return base
-
-    if base == 1:
-        return weight
-
-    return max(base, weight)
 
 
 def format_duration(seconds: float) -> str:
@@ -2061,12 +2038,10 @@ def _resolve_git_metadata(start_dir: Path) -> Tuple[str, str]:
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Run Sintra tests with timeout and repetition support',
+        description='Run Sintra tests with timeout support',
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog='Test selection is controlled by tests/active_tests.txt'
+        epilog='Test selection and iteration counts are controlled by tests/active_tests.txt'
     )
-    parser.add_argument('--repetitions', type=int, default=1,
-                        help='Multiplier for test iterations specified in active_tests.txt (default: 1)')
     parser.add_argument('--timeout', type=float, default=5.0,
                         help='Timeout per test run in seconds (default: 5)')
     parser.add_argument('--build-dir', type=str, default='../build-ninja2',
@@ -2105,7 +2080,6 @@ def main():
 
     print(f"Build directory: {build_dir}")
     print(f"Configuration: {args.config}")
-    print(f"Base repetitions: {args.repetitions}")
     print(f"Timeout per test: {args.timeout}s")
     print(f"Active tests: {len(active_tests)} tests from active_tests.txt")
     print("=" * 70)
@@ -2133,7 +2107,6 @@ def main():
             print(f"\n{'=' * 80}")
             print(f"{Color.BOLD}{Color.BLUE}Configuration {config_idx}/{total_configs}: {config_name}{Color.RESET}")
             print(f"  Tests in suite: {len(tests)}")
-            print(f"  Repetitions: {args.repetitions}")
             print(f"{'=' * 80}")
 
             suite_start_time = time.time()
@@ -2143,11 +2116,7 @@ def main():
                 invocation.name: {'passed': 0, 'failed': 0, 'durations': [], 'failures': []}
                 for invocation in tests
             }
-            test_weights = {invocation.name: _lookup_test_weight(invocation.name, active_tests) for invocation in tests}
-            target_repetitions = {
-                name: _calculate_target_repetitions(args.repetitions, weight)
-                for name, weight in test_weights.items()
-            }
+            target_repetitions = {invocation.name: _lookup_test_weight(invocation.name, active_tests) for invocation in tests}
             remaining_repetitions = target_repetitions.copy()
             suite_all_passed = True
             batch_size = 1

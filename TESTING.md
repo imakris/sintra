@@ -73,7 +73,6 @@ The same file controls both build-time and run-time behavior:
 - Reads `active_tests.txt` at startup
 - Discovers built test binaries matching the active tests
 - Runs each test for the specified number of iterations
-- Applies the `--repetitions` multiplier to iteration counts
 
 This unified approach means:
 - ✅ One file controls everything - no multiple mechanisms
@@ -138,14 +137,16 @@ python3 run_tests.py --build-dir ../build --config Release
 python3 run_tests.py --build-dir ../build --config Debug
 ```
 
-### Increase Iterations
+### Change Iteration Counts
 
-The `--repetitions` flag multiplies the iteration counts from `active_tests.txt`:
+Edit the iteration counts directly in `active_tests.txt`:
 
 ```bash
-# If ping_pong_test has 200 iterations in active_tests.txt,
-# this will run it 2000 times (200 * 10)
-python3 run_tests.py --repetitions 10 --build-dir ../build --config Release
+# To run ping_pong_test more times, edit tests/active_tests.txt:
+ping_pong_test 5000   # Increase from default
+
+# Then run tests
+python3 run_tests.py --build-dir ../build --config Release
 ```
 
 ### Extended Timeout
@@ -205,12 +206,6 @@ python3 run_tests.py --verbose --build-dir ../build --config Release
    python3 run_tests.py --config Release --build-dir ../build
    ```
 
-Or use `--repetitions` without editing the file:
-
-```bash
-python3 run_tests.py --repetitions 100 --config Release --build-dir ../build
-```
-
 ### Quick Sanity Check
 
 Just run `dummy_test` to verify the infrastructure works:
@@ -228,11 +223,7 @@ Just run `dummy_test` to verify the infrastructure works:
 
 ## Understanding Test Iterations
 
-The number of iterations for each test is determined by:
-
-```
-final_iterations = iterations_in_active_tests.txt × --repetitions
-```
+The number of iterations for each test is specified directly in `active_tests.txt`.
 
 ### Iteration Strategy
 
@@ -314,7 +305,6 @@ Manual tests are built alongside regular tests (no special CMake option needed).
 python3 run_tests.py [OPTIONS]
 
 Options:
-  --repetitions N       Multiplier for iterations from active_tests.txt (default: 1)
   --timeout SECONDS     Timeout per test run in seconds (default: 5.0)
   --build-dir PATH      Path to build directory (default: ../build-ninja2)
   --config CONFIG       Build configuration: Debug or Release (default: Debug)
@@ -345,7 +335,6 @@ Git branch: main
 Git revision: 2a9011e
 Build directory: /home/user/sintra/build
 Configuration: Release
-Base repetitions: 1
 Timeout per test: 5.0s
 Active tests: 26 tests from active_tests.txt
 ======================================================================
@@ -355,7 +344,6 @@ Found 2 configuration suite(s) to run
 ================================================================================
 Configuration 1/2: debug
   Tests in suite: 26
-  Repetitions: 1
 ================================================================================
 
   Test order:
@@ -378,7 +366,7 @@ The test infrastructure is used by CI workflows on multiple platforms.
 - name: Run Tests
   run: |
     cd tests
-    python run_tests.py --repetitions 10 --timeout 30 --build-dir ../build --config Release
+    python run_tests.py --timeout 30 --build-dir ../build --config Release
 ```
 
 ### Cirrus CI (FreeBSD)
@@ -386,7 +374,7 @@ The test infrastructure is used by CI workflows on multiple platforms.
 ```yaml
 test_script:
   - cd tests
-  - python3 run_tests.py --repetitions 10 --timeout 30 --build-dir ../build --config Release
+  - python3 run_tests.py --timeout 30 --build-dir ../build --config Release
 ```
 
 ### Test Matrix Control
@@ -428,10 +416,10 @@ cmake --build build
 
 ### Tests Pass Locally but Fail in CI
 
-- CI runs with `--repetitions 10` (more iterations)
+- CI runs with higher iteration counts (specified in `active_tests.txt`)
 - CI has different timing/scheduling behavior
 - Check for race conditions or non-deterministic failures
-- Increase local repetitions: `--repetitions 100`
+- Increase local iteration counts in `active_tests.txt` to reproduce
 
 ### Build is Slow
 
