@@ -1,3 +1,34 @@
+# Function to parse active_tests.txt and return list of test paths
+function(read_active_tests OUT_VAR)
+    set(ACTIVE_TESTS_FILE "${CMAKE_CURRENT_SOURCE_DIR}/active_tests.txt")
+
+    if(NOT EXISTS "${ACTIVE_TESTS_FILE}")
+        message(FATAL_ERROR "active_tests.txt not found at ${ACTIVE_TESTS_FILE}")
+    endif()
+
+    file(STRINGS "${ACTIVE_TESTS_FILE}" LINES)
+    set(TEST_PATHS "")
+
+    foreach(LINE IN LISTS LINES)
+        # Strip leading/trailing whitespace
+        string(STRIP "${LINE}" LINE)
+
+        # Skip empty lines and comments
+        if(LINE STREQUAL "" OR LINE MATCHES "^#")
+            continue()
+        endif()
+
+        # Parse line: <test_path> <iterations>
+        # We only care about test_path for building
+        string(REGEX MATCH "^([^ \t]+)" TEST_PATH "${LINE}")
+        if(TEST_PATH)
+            list(APPEND TEST_PATHS "${TEST_PATH}")
+        endif()
+    endforeach()
+
+    set(${OUT_VAR} ${TEST_PATHS} PARENT_SCOPE)
+endfunction()
+
 # Helper function to create all test executables for a specific configuration
 # Parameters:
 #   SUFFIX: e.g., "release", "debug"
@@ -43,42 +74,53 @@ function(add_test_suite SUFFIX IS_DEBUG)
         target_link_libraries(${LIB_TARGET} INTERFACE OpenMP::OpenMP_CXX)
     endif()
 
-    # Create all test executables with this configuration
-    set(TEST_FILES
-        barrier_complex_choreography_test.cpp
-        # Temporarily disable barrier_delivery_fence_repro_test; fails on all targets (will re-enable later)
-        # barrier_delivery_fence_repro_test.cpp
-        barrier_flush_test.cpp
-        barrier_pathological_choreography_test.cpp
-        barrier_rapid_reuse_test.cpp
-        barrier_stress_test.cpp
-        basic_pub_sub.cpp
-        complex_choreography_stress_test.cpp
-        complex_choreography_test.cpp
-        choreography_extreme_test.cpp
-        dummy_test.cpp
-        extreme_choreography_test.cpp
-        interprocess_semaphore_test.cpp
-        interprocess_file_mapping_test.cpp
-        interprocess_mutex_test.cpp
-        ipc_rings_tests.cpp
-        macos_named_semaphore_benchmark.cpp
-        macos_os_sync_semaphore_benchmark.cpp
-        message_args_traits_test.cpp
-        ping_pong_multi_test.cpp
-        ping_pong_test.cpp
-        processing_fence_test.cpp
-        recovery_test.cpp
-        rpc_append_test.cpp
-        ring_cleanup_stress_test.cpp
-        spawn_detached_test.cpp
-        variable_buffer_alignment_test.cpp
-    )
+    # Read test list from active_tests.txt
+    read_active_tests(TEST_PATHS)
 
-    foreach(TEST_FILE IN LISTS TEST_FILES)
-        get_filename_component(TEST_NAME "${TEST_FILE}" NAME_WE)
+    if(NOT TEST_PATHS)
+        message(WARNING "No active tests found in active_tests.txt")
+        return()
+    endif()
+
+    message(STATUS "Building ${SUFFIX} configuration for ${CMAKE_CURRENT_LIST_LENGTH} active tests")
+
+    # Create test executables based on active_tests.txt
+    foreach(TEST_PATH IN LISTS TEST_PATHS)
+        # Handle paths like "manual/some_test" or just "some_test"
+        # Convert path to file location and extract test name
+        string(REPLACE "/" ";" PATH_PARTS "${TEST_PATH}")
+        list(LENGTH PATH_PARTS PARTS_COUNT)
+
+        if(PARTS_COUNT EQUAL 1)
+            # Simple test in main directory: "some_test" -> "some_test.cpp"
+            set(TEST_FILE "${TEST_PATH}.cpp")
+            set(TEST_NAME "${TEST_PATH}")
+            set(SUBDIR "")
+        elseif(PARTS_COUNT EQUAL 2)
+            # Subdirectory test: "manual/some_test" -> "manual/some_test.cpp"
+            list(GET PATH_PARTS 0 SUBDIR)
+            list(GET PATH_PARTS 1 TEST_NAME)
+            set(TEST_FILE "${SUBDIR}/${TEST_NAME}.cpp")
+        else()
+            message(WARNING "Unsupported test path format: ${TEST_PATH}")
+            continue()
+        endif()
+
+        # Check if file exists
+        set(FULL_TEST_PATH "${CMAKE_CURRENT_SOURCE_DIR}/${TEST_FILE}")
+        if(NOT EXISTS "${FULL_TEST_PATH}")
+            message(WARNING "Test file not found: ${FULL_TEST_PATH} (from active_tests.txt entry: ${TEST_PATH})")
+            continue()
+        endif()
+
+        # Create executable
         add_executable(sintra_${TEST_NAME}_${SUFFIX} ${TEST_FILE})
         target_link_libraries(sintra_${TEST_NAME}_${SUFFIX} PRIVATE ${LIB_TARGET})
+
+        # Include parent directory for manual tests that need test utilities
+        if(SUBDIR)
+            target_include_directories(sintra_${TEST_NAME}_${SUFFIX} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+        endif()
 
         if(APPLE AND SINTRA_RELEASE_WITH_DEBUG_SYMBOLS AND NOT IS_DEBUG)
             if(NOT DEFINED SINTRA_DSYMUTIL_EXECUTABLE)
@@ -99,15 +141,6 @@ function(add_test_suite SUFFIX IS_DEBUG)
 
 endfunction()
 
-# Build test suites for both build types using the adaptive policy
+# Build test suites for both build types
 add_test_suite("release" FALSE)
 add_test_suite("debug" TRUE)
-
-# Manual tests - reproduction cases and intentionally failing tests
-# Enable with: cmake -DBUILD_MANUAL_TESTS=ON
-option(BUILD_MANUAL_TESTS "Build manual/reproduction tests that may fail" OFF)
-
-if(BUILD_MANUAL_TESTS)
-    message(STATUS "Building manual tests (may contain intentionally failing tests)")
-    add_subdirectory(manual)
-endif()

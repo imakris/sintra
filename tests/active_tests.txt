@@ -1,0 +1,51 @@
+# Active Tests Configuration
+#
+# This file controls which tests are built and run by the test infrastructure.
+# Format: <test_path> <iterations>
+#   - test_path: relative path to test from tests/ directory (without .cpp extension or sintra_ prefix)
+#   - iterations: number of times to run the test (minimum: 1)
+#   - Lines starting with # are ignored (comments)
+#   - Empty lines are ignored
+#
+# Examples:
+#   ping_pong_test 200
+#   manual/some_problematic_test 10
+#
+# The build system will only build tests listed here (not commented).
+# The test runner will run each test for the specified number of iterations.
+
+# Main test suite
+barrier_complex_choreography_test 1
+barrier_flush_test 20
+barrier_pathological_choreography_test 1
+barrier_rapid_reuse_test 1
+barrier_stress_test 10
+basic_pub_sub 30
+complex_choreography_stress_test 1
+complex_choreography_test 1
+choreography_extreme_test 1
+dummy_test 1
+extreme_choreography_test 1
+interprocess_semaphore_test 1
+interprocess_file_mapping_test 1
+interprocess_mutex_test 1
+ipc_rings_tests 1
+macos_named_semaphore_benchmark 1
+macos_os_sync_semaphore_benchmark 1
+message_args_traits_test 1
+ping_pong_multi_test 10
+ping_pong_test 200
+processing_fence_test 20
+recovery_test 10
+rpc_append_test 100
+ring_cleanup_stress_test 1
+spawn_detached_test 30
+variable_buffer_alignment_test 1
+
+# Manual/reproduction tests (commented out by default)
+# Uncomment to enable these tests (they may fail by design)
+# manual/barrier_delivery_fence_repro_test 1
+# manual/hang_test 1
+# manual/coordinator_crash_children_hang_test 1
+# manual/children_crash_coordinator_deadlock_test 1
+# manual/temp_ring 1
