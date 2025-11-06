@@ -22,6 +22,8 @@
 
 // Tune eviction behaviour for faster unit tests before including the ring header.
 #define SINTRA_EVICTION_SPIN_THRESHOLD 0
+#define SINTRA_EVICTION_SPIN_BUDGET_US 0
+#define SINTRA_TEST_HOOK_AFTER_GUARD_CLEAR
 #define private public
 #define protected public
 #include "sintra/detail/ipc/rings.h"
@@ -33,6 +35,39 @@
 using namespace std::chrono_literals;
 
 namespace {
+
+#ifdef SINTRA_TEST_HOOK_AFTER_GUARD_CLEAR
+struct Guard_clear_hook_context {
+    std::atomic<bool>* guard_cleared = nullptr;
+    std::atomic<bool>* allow_continue = nullptr;
+    uint32_t           target_index  = std::numeric_limits<uint32_t>::max();
+    std::atomic<uint8_t>* captured_guard = nullptr;
+};
+
+std::atomic<Guard_clear_hook_context*> guard_clear_context{nullptr};
+
+} // namespace
+
+namespace sintra::test {
+
+void on_writer_guard_cleared(uint32_t reader_index, uint8_t guard_token)
+{
+    auto* ctx = guard_clear_context.load(std::memory_order_acquire);
+    if (!ctx || reader_index != ctx->target_index) {
+        return;
+    }
+
+    ctx->captured_guard->store(guard_token, std::memory_order_release);
+    ctx->guard_cleared->store(true, std::memory_order_release);
+    while (!ctx->allow_continue->load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+    }
+}
+
+} // namespace sintra::test
+
+namespace {
+#endif
 
 class Assertion_error : public std::runtime_error {
 public:
@@ -440,9 +475,15 @@ TEST_CASE(test_reader_eviction_does_not_underflow_octile_counter)
         uint8_t guarded_octile = 0;
         auto guard_deadline = std::chrono::steady_clock::now() + 1s;
         bool guard_observed = false;
+        constexpr uint8_t guard_present_mask =
+            sintra::Ring<uint32_t, true>::guard_token_present_mask;
+        constexpr uint8_t guard_octile_mask =
+            sintra::Ring<uint32_t, true>::guard_token_octile_mask;
+
         while (std::chrono::steady_clock::now() < guard_deadline) {
-            if (slot.has_guard.load(std::memory_order_acquire)) {
-                guarded_octile = slot.trailing_octile.load(std::memory_order_acquire);
+            uint8_t guard_token = slot.guard_token.load(std::memory_order_acquire);
+            if ((guard_token & guard_present_mask) != 0) {
+                guarded_octile = guard_token & guard_octile_mask;
                 guard_observed = true;
                 break;
             }
@@ -470,7 +511,9 @@ TEST_CASE(test_reader_eviction_does_not_underflow_octile_counter)
         const uint64_t guard_mask = uint64_t(1) << (guarded_octile * 8);
 
         reader.c.read_access.fetch_add(guard_mask, std::memory_order_release);
-        slot.has_guard.store(1, std::memory_order_release);
+        slot.guard_token.store(
+            static_cast<uint8_t>(guard_present_mask | guarded_octile),
+            std::memory_order_release);
         slot.status.store(sintra::Ring<uint32_t, true>::READER_STATE_ACTIVE, std::memory_order_release);
 
         reader.done_reading();
@@ -483,6 +526,97 @@ TEST_CASE(test_reader_eviction_does_not_underflow_octile_counter)
     catch (...) {
         join_if_joinable(reader_thread);
         join_if_joinable(writer_thread);
+        throw;
+    }
+}
+
+TEST_CASE(test_reader_cleanup_during_inflight_eviction_leaks_guard)
+{
+    Temp_ring_dir tmp("cleanup_eviction_race");
+    const size_t ring_elements = pick_ring_elements<uint32_t>(64);
+    const size_t trailing_cap  = (ring_elements * 3) / 4;
+    const size_t block_elements = ring_elements / 8;
+
+    sintra::Ring_W<uint32_t> writer(tmp.str(), "ring_data", ring_elements);
+    sintra::Ring_R<uint32_t> reader(tmp.str(), "ring_data", ring_elements, trailing_cap);
+
+    auto& control = reader.c;
+    auto& slot    = control.reading_sequences[reader.m_rs_index].data;
+
+    std::atomic<bool> guard_cleared{false};
+    std::atomic<bool> allow_continue{false};
+    std::atomic<uint8_t> captured_guard{0};
+
+    Guard_clear_hook_context ctx{};
+    ctx.guard_cleared = &guard_cleared;
+    ctx.allow_continue = &allow_continue;
+    ctx.target_index = static_cast<uint32_t>(reader.m_rs_index);
+    ctx.captured_guard = &captured_guard;
+    guard_clear_context.store(&ctx, std::memory_order_release);
+
+    reader.start_reading(trailing_cap);
+
+    std::exception_ptr writer_error;
+    std::thread        writer_thread([&]() {
+        try {
+            std::vector<uint32_t> block(block_elements, 0);
+            while (!guard_cleared.load(std::memory_order_acquire)) {
+                writer.write(block.data(), block_elements);
+                writer.done_writing();
+            }
+        }
+        catch (...) {
+            writer_error = std::current_exception();
+        }
+    });
+
+    auto wait_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (!guard_cleared.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < wait_deadline)
+    {
+        std::this_thread::yield();
+    }
+
+    ASSERT_TRUE(guard_cleared.load(std::memory_order_acquire));
+
+    const uint8_t guard_present_mask = sintra::Ring<uint32_t, true>::guard_token_present_mask;
+    ASSERT_EQ(0u, slot.guard_token.load(std::memory_order_seq_cst) & guard_present_mask);
+
+    uint64_t read_access_before = control.read_access.load(std::memory_order_seq_cst);
+    ASSERT_NE(0ull, read_access_before);
+
+    auto join_writer = [&]() {
+        allow_continue.store(true, std::memory_order_release);
+        writer.unblock_global();
+        if (writer_thread.joinable()) {
+            writer_thread.join();
+        }
+    };
+
+    try {
+        reader.done_reading();
+
+        uint64_t read_access_after = control.read_access.load(std::memory_order_seq_cst);
+
+        join_writer();
+        guard_clear_context.store(nullptr, std::memory_order_release);
+
+        if (writer_error) {
+            std::rethrow_exception(writer_error);
+        }
+
+        ASSERT_EQ(0ull, read_access_after);
+
+        uint64_t read_access_final = control.read_access.load(std::memory_order_seq_cst);
+        ASSERT_EQ(0ull, read_access_final);
+    }
+    catch (...) {
+        guard_cleared.store(true, std::memory_order_release);
+        join_writer();
+        guard_clear_context.store(nullptr, std::memory_order_release);
+        if (writer_error) {
+            std::rethrow_exception(writer_error);
+        }
         throw;
     }
 }
@@ -509,10 +643,14 @@ TEST_CASE(test_slow_reader_eviction_restores_status)
 
     const uint64_t guard_mask = uint64_t(1) << (8 * trailing_octile);
     control.read_access.store(guard_mask, std::memory_order_release);
-    slot.has_guard.store(1, std::memory_order_release);
+    constexpr uint8_t guard_present_mask_u64 =
+        sintra::Ring<uint64_t, true>::guard_token_present_mask;
+    slot.guard_token.store(
+        static_cast<uint8_t>(guard_present_mask_u64 | static_cast<uint8_t>(trailing_octile)),
+        std::memory_order_release);
     slot.status.store(sintra::Ring<uint64_t, true>::READER_STATE_ACTIVE, std::memory_order_release);
 
-    slot.has_guard.store(0, std::memory_order_release);
+    slot.guard_token.store(0, std::memory_order_release);
     slot.status.store(sintra::Ring<uint64_t, true>::READER_STATE_EVICTED, std::memory_order_release);
     control.read_access.fetch_sub(guard_mask, std::memory_order_release);
 
@@ -541,7 +679,7 @@ TEST_CASE(test_streaming_reader_status_restored_after_eviction)
     reader.m_reading_sequence->store(initial_reading, std::memory_order_release);
     slot.v.store(initial_reading, std::memory_order_release);
     control.read_access.store(0, std::memory_order_release);
-    slot.has_guard.store(0, std::memory_order_release);
+    slot.guard_token.store(0, std::memory_order_release);
     slot.status.store(sintra::Ring<uint32_t, true>::READER_STATE_ACTIVE, std::memory_order_release);
 
     auto first_range = reader.wait_for_new_data();
@@ -551,9 +689,13 @@ TEST_CASE(test_streaming_reader_status_restored_after_eviction)
     const uint8_t guarded_octile = slot.trailing_octile.load(std::memory_order_acquire);
     const uint64_t guard_mask     = uint64_t(1) << (8 * guarded_octile);
 
-    uint8_t expected = 1;
-    ASSERT_TRUE(slot.has_guard.compare_exchange_strong(
-        expected, uint8_t{0}, std::memory_order_acq_rel));
+    constexpr uint8_t guard_present_mask_u32 =
+        sintra::Ring<uint32_t, true>::guard_token_present_mask;
+    constexpr uint8_t guard_octile_mask_u32 =
+        sintra::Ring<uint32_t, true>::guard_token_octile_mask;
+    uint8_t guard_snapshot = slot.guard_token.exchange(0, std::memory_order_acq_rel);
+    ASSERT_TRUE((guard_snapshot & guard_present_mask_u32) != 0);
+    ASSERT_EQ(guarded_octile, guard_snapshot & guard_octile_mask_u32);
     control.read_access.fetch_sub(guard_mask, std::memory_order_acq_rel);
     slot.status.store(sintra::Ring<uint32_t, true>::READER_STATE_EVICTED, std::memory_order_release);
 
@@ -757,6 +899,124 @@ STRESS_TEST(stress_attach_detach_readers)
             ASSERT_EQ(*ptr, 42);
         }
     }
+}
+
+STRESS_TEST(stress_guard_token_consistency_under_eviction)
+{
+    Temp_ring_dir tmp("guard_token_consistency");
+    const size_t ring_elements = pick_ring_elements<uint32_t>(32);
+    const size_t trailing_cap  = (ring_elements * 3) / 4;
+    const size_t block_elements = 1;
+
+    sintra::Ring_W<uint32_t> writer(tmp.str(), "ring_data", ring_elements);
+    sintra::Ring_R<uint32_t> reader(tmp.str(), "ring_data", ring_elements, trailing_cap);
+
+    auto& control = reader.c;
+    auto& slot    = control.reading_sequences[reader.m_rs_index].data;
+
+    std::vector<uint32_t> block(block_elements);
+    std::atomic<bool>     stop{false};
+    std::atomic<bool>     leak_detected{false};
+
+    std::exception_ptr writer_error;
+    std::thread        writer_thread([&]() {
+        try {
+            uint32_t value = 0;
+            while (!stop.load(std::memory_order_acquire)) {
+                for (size_t i = 0; i < block_elements; ++i) {
+                    block[i] = value++;
+                }
+                writer.write(block.data(), block_elements);
+                writer.done_writing();
+            }
+        }
+        catch (...) {
+            writer_error = std::current_exception();
+            stop.store(true, std::memory_order_release);
+        }
+        writer.unblock_global();
+    });
+
+    std::exception_ptr reader_error;
+    std::thread        reader_thread([&]() {
+        try {
+            reader.start_reading(trailing_cap);
+
+            const auto test_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            size_t     consecutive_guardless_iterations = 0;
+            while (!stop.load(std::memory_order_acquire)) {
+                auto range = reader.wait_for_new_data();
+                if (reader.consume_eviction_notification()) {
+                    continue;
+                }
+
+                if (!range.begin || range.begin == range.end) {
+                    if (std::chrono::steady_clock::now() >= test_deadline) {
+                        break;
+                    }
+                    continue;
+                }
+
+                // Simulate a slow reader to encourage evictions.
+                std::this_thread::sleep_for(std::chrono::microseconds(200));
+
+                reader.done_reading_new_data();
+
+                uint8_t guard_token = slot.guard_token.load(std::memory_order_seq_cst);
+                if ((guard_token & sintra::Ring<uint32_t, true>::guard_token_present_mask) == 0) {
+                    uint64_t read_access = control.read_access.load(std::memory_order_seq_cst);
+                    if (read_access != 0) {
+                        leak_detected.store(true, std::memory_order_release);
+                        stop.store(true, std::memory_order_release);
+                        writer.unblock_global();
+                        break;
+                    }
+                    ++consecutive_guardless_iterations;
+                }
+                else {
+                    consecutive_guardless_iterations = 0;
+                }
+
+                if (consecutive_guardless_iterations > 64) {
+                    // Guard remained cleared for an extended period. This is a strong
+                    // indicator that the reader is in a vulnerable window. Keep
+                    // spinning to give the writer ample opportunity to expose the
+                    // leak quickly instead of relying on the deadline alone.
+                    std::this_thread::sleep_for(std::chrono::microseconds(100));
+                }
+
+                if (std::chrono::steady_clock::now() >= test_deadline) {
+                    break;
+                }
+            }
+
+            stop.store(true, std::memory_order_release);
+            writer.unblock_global();
+        }
+        catch (...) {
+            reader_error = std::current_exception();
+            stop.store(true, std::memory_order_release);
+            writer.unblock_global();
+        }
+    });
+
+    reader_thread.join();
+    stop.store(true, std::memory_order_release);
+    writer.unblock_global();
+    writer_thread.join();
+
+    if (reader_error) {
+        std::rethrow_exception(reader_error);
+    }
+    if (writer_error) {
+        std::rethrow_exception(writer_error);
+    }
+
+    reader.done_reading();
+
+    ASSERT_FALSE(leak_detected.load(std::memory_order_acquire));
+    uint64_t read_access = control.read_access.load(std::memory_order_seq_cst);
+    ASSERT_EQ(0ull, read_access);
 }
 
 std::vector<const Test_case*> select_tests(
