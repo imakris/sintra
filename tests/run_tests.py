@@ -490,6 +490,8 @@ class TestRunner:
 
         env = os.environ.copy()
         env['SINTRA_TEST_ROOT'] = str(scratch_dir)
+        # Enable debug pause handlers for crash detection and debugger attachment
+        env['SINTRA_DEBUG_PAUSE_ON_EXIT'] = '1'
         return env
 
     @staticmethod
@@ -1197,6 +1199,43 @@ class TestRunner:
                 nonlocal live_stack_traces, live_stack_error
                 if not trigger_line:
                     return
+
+                # Check for SINTRA_DEBUG_PAUSE marker (process has paused for debugger attachment)
+                if '[SINTRA_DEBUG_PAUSE]' in trigger_line and 'paused:' in trigger_line:
+                    # Process has hit a crash and is paused - capture immediately
+                    if not self._should_attempt_stack_capture(invocation, 'debug_pause'):
+                        return
+
+                    traces = ""
+                    error = ""
+                    with stack_capture_context(mark_failure=True) as allowed:
+                        if not allowed:
+                            return
+                        traces, error = self._capture_process_stacks(
+                            process.pid,
+                            process_group_id,
+                        )
+
+                    if traces:
+                        with capture_lock:
+                            if live_stack_traces:
+                                live_stack_traces = f"{live_stack_traces}\n\n{traces}"
+                            else:
+                                live_stack_traces = traces
+                            live_stack_error = ""
+                    elif error and not live_stack_traces:
+                        with capture_lock:
+                            live_stack_error = error
+
+                    # Kill the paused process tree so test runner doesn't hang
+                    try:
+                        self._kill_process_tree(process.pid)
+                    except Exception:
+                        pass
+
+                    return
+
+                # Regular failure marker detection
                 if not self._line_indicates_failure(trigger_line):
                     return
                 if not self._should_attempt_stack_capture(invocation, 'live_failure'):
