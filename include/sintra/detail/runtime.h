@@ -87,10 +87,26 @@ private:
 };
 
 // Debug pause functionality - only enabled when SINTRA_DEBUG_PAUSE_ON_EXIT is set
-inline bool is_debug_pause_enabled()
+inline bool is_debug_pause_requested()
 {
     const char* env = std::getenv("SINTRA_DEBUG_PAUSE_ON_EXIT");
     return env && *env && (*env != '0');
+}
+
+inline std::atomic<bool>& debug_pause_state()
+{
+    static std::atomic<bool> active{false};
+    return active;
+}
+
+inline void set_debug_pause_active(bool active)
+{
+    debug_pause_state().store(active, std::memory_order_release);
+}
+
+inline bool is_debug_pause_active()
+{
+    return debug_pause_state().load(std::memory_order_acquire);
 }
 
 inline void debug_pause_forever(const char* reason)
@@ -114,6 +130,10 @@ inline void debug_pause_forever(const char* reason)
 #ifdef _WIN32
 inline LONG WINAPI debug_vectored_exception_handler(EXCEPTION_POINTERS* exception_info)
 {
+    if (!is_debug_pause_active()) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
     if (!exception_info || !exception_info->ExceptionRecord) {
         return EXCEPTION_CONTINUE_SEARCH;
     }
@@ -160,6 +180,12 @@ inline LONG WINAPI debug_vectored_exception_handler(EXCEPTION_POINTERS* exceptio
 #else
 inline void debug_signal_handler(int signum)
 {
+    if (!is_debug_pause_active()) {
+        std::signal(signum, SIG_DFL);
+        std::raise(signum);
+        return;
+    }
+
     const char* signal_name = "Unknown signal";
     switch (signum) {
         case SIGABRT:
@@ -177,9 +203,6 @@ inline void debug_signal_handler(int signum)
         case SIGBUS:
             signal_name = "SIGBUS (bus error)";
             break;
-        case SIGTERM:
-            signal_name = "SIGTERM (termination)";
-            break;
         default:
             break;
     }
@@ -190,6 +213,12 @@ inline void debug_signal_handler(int signum)
 
 inline void debug_signal_handler_win(int signum)
 {
+    if (!is_debug_pause_active()) {
+        std::signal(signum, SIG_DFL);
+        std::raise(signum);
+        return;
+    }
+
     const char* signal_name = "Unknown signal";
     switch (signum) {
         case SIGABRT:
@@ -204,9 +233,6 @@ inline void debug_signal_handler_win(int signum)
         case SIGSEGV:
             signal_name = "SIGSEGV (segmentation fault)";
             break;
-        case SIGTERM:
-            signal_name = "SIGTERM (termination)";
-            break;
         default:
             break;
     }
@@ -216,7 +242,10 @@ inline void debug_signal_handler_win(int signum)
 
 inline void install_debug_pause_handlers()
 {
-    if (!is_debug_pause_enabled()) {
+    const bool requested = is_debug_pause_requested();
+    set_debug_pause_active(requested);
+
+    if (!requested) {
         return;
     }
 
@@ -233,7 +262,6 @@ inline void install_debug_pause_handlers()
     std::signal(SIGFPE, debug_signal_handler_win);
     std::signal(SIGILL, debug_signal_handler_win);
     std::signal(SIGSEGV, debug_signal_handler_win);
-    std::signal(SIGTERM, debug_signal_handler_win);
 
     std::fprintf(stderr, "[SINTRA_DEBUG_PAUSE] Windows handlers configured (VEH)\n");
     std::fflush(stderr);
@@ -249,11 +277,15 @@ inline void install_debug_pause_handlers()
     sigaction(SIGFPE, &sa, nullptr);
     sigaction(SIGILL, &sa, nullptr);
     sigaction(SIGBUS, &sa, nullptr);
-    sigaction(SIGTERM, &sa, nullptr);
 #endif
 }
 
 } // namespace detail
+
+inline void disable_debug_pause_for_current_process()
+{
+    detail::set_debug_pause_active(false);
+}
 
 inline std::vector<Process_descriptor> make_branches()
 {
