@@ -1859,11 +1859,17 @@ struct Ring_R : Ring<T, true>
             if (!guard_updated) {
                 c.read_access.fetch_sub(new_mask, std::memory_order_seq_cst);
 
-                // Check why CAS failed to determine retry strategy
+                // Check why CAS failed to determine retry strategy. The guard accessor returns an
+                // encoded byte, so inspect the decoded fields directly instead of interpreting it
+                // as a Reader_state_union (which would zero the guard-present bit).
+                const bool guard_present = Ring<T, true>::encoded_guard_present(previous_state);
+#ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
                 const bool was_evicted =
-                    Ring<T, true>::reader_state_status(previous_state) ==
+                    c.reading_sequences[m_rs_index].data.status().load(std::memory_order_seq_cst) ==
                     Ring<T, true>::READER_STATE_EVICTED;
-                const bool guard_present = Ring<T, true>::reader_state_guard_present(previous_state);
+#else
+                const bool was_evicted = false;
+#endif
 
                 if (was_evicted || !guard_present) {
                     handle_eviction_if_needed();
@@ -1918,6 +1924,12 @@ struct Ring_R : Ring<T, true>
             return true;
         }
 #endif
+
+        const size_t trailing_idx = mod_pos_i64(
+            int64_t(m_reading_sequence->load(std::memory_order_seq_cst)) -
+                int64_t(m_max_trailing_elements),
+            this->m_num_elements);
+        m_trailing_octile = (8 * trailing_idx) / this->m_num_elements;
 
         reattach_after_eviction();
         return false;
