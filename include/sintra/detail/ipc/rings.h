@@ -1621,8 +1621,6 @@ struct Ring_R : Ring<T, true>
         const size_t new_trailing_octile = (8 * t_idx) / this->m_num_elements;
 
         if (new_trailing_octile != m_trailing_octile) {
-            auto& guard_token = c.reading_sequences[m_rs_index].data.guard_token;
-
             const uint64_t new_mask = uint64_t(1) << (8 * new_trailing_octile);
             const uint64_t old_mask = uint64_t(1) << (8 * m_trailing_octile);
             c.read_access.fetch_add(new_mask, std::memory_order_acq_rel);
@@ -1633,12 +1631,6 @@ struct Ring_R : Ring<T, true>
             typename Ring<T, true>::Reader_slot_state new_state = current_state.with_octile(static_cast<uint8_t>(new_trailing_octile));
             c.reading_sequences[m_rs_index].data.slot_state.store(new_state.packed, std::memory_order_release);
 
-                c.read_access.fetch_sub(new_mask, std::memory_order_seq_cst);
-                observed_token = expected_token;
-            }
-
-            c.reading_sequences[m_rs_index].data.trailing_octile.store(
-                static_cast<uint8_t>(new_trailing_octile), std::memory_order_seq_cst);
             m_trailing_octile = new_trailing_octile;
         }
     }

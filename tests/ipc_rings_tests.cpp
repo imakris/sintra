@@ -440,10 +440,6 @@ TEST_CASE(test_reader_eviction_does_not_underflow_octile_counter)
         uint8_t guarded_octile = 0;
         auto guard_deadline = std::chrono::steady_clock::now() + 1s;
         bool guard_observed = false;
-        constexpr uint8_t guard_present_mask =
-            sintra::Ring<uint32_t, true>::guard_token_present_mask;
-        constexpr uint8_t guard_octile_mask =
-            sintra::Ring<uint32_t, true>::guard_token_octile_mask;
 
         while (std::chrono::steady_clock::now() < guard_deadline) {
             sintra::Ring<uint32_t, true>::Reader_slot_state state{slot.slot_state.load(std::memory_order_acquire)};
