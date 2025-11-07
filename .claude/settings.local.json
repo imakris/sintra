@@ -3,7 +3,12 @@
     "allow": [
       "Bash(git merge:*)",
       "Bash(git branch:*)",
-      "Bash(cmake --build:*)"
+      "Bash(cmake --build:*)",
+      "Bash(gh pr create:*)",
+      "Bash(gh pr view:*)",
+      "Bash(git merge-base:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$(cat <<''EOF''\nFix done_reading_new_data() octile update race\n\nWhen updating the trailing octile in done_reading_new_data(), the code\nused an unconditional store that could overwrite EVICTED status and even\nrestore a guard that the writer had just cleared.\n\nThe race (lines 1682-1684):\n1. Reader loads: {octile=2, guard=1, status=ACTIVE}\n2. Reader creates new_state: {octile=3, guard=1, status=ACTIVE}\n3. Writer evicts: CAS to {octile=2, guard=0, status=EVICTED}\n4. Reader stores new_state: OVERWRITES EVICTED + RESTORES GUARD!\n\nThis is worse than the other races because it not only loses the EVICTED\nstatus but also resurrects the guard that was forcibly cleared.\n\nFix: Use CAS loop with checks:\n- Stop if guard was cleared (no longer holding guard to update)\n- Stop if status is EVICTED (writer evicted us)\n- Only update octile if we still have an active guard\n\nThis ensures the reader never overwrites EVICTED or restores a cleared guard.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n)\")"
     ],
     "deny": [],
     "ask": []

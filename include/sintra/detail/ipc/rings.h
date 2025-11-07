@@ -1679,9 +1679,30 @@ struct Ring_R : Ring<T, true>
             c.read_access.fetch_sub(old_mask, std::memory_order_acq_rel);
 
             // Update octile atomically in packed state
-            typename Ring<T, false>::Reader_state_pack old_state(c.reading_sequences[m_rs_index].data.reader_state.load(std::memory_order_relaxed));
-            typename Ring<T, false>::Reader_state_pack new_state = old_state.with_octile(static_cast<uint8_t>(new_trailing_octile));
-            c.reading_sequences[m_rs_index].data.reader_state.store(new_state.value, std::memory_order_release);
+            // Use CAS to avoid overwriting EVICTED status or restoring cleared guard
+            typename Ring<T, false>::Reader_state_pack current_state(
+                c.reading_sequences[m_rs_index].data.reader_state.load(std::memory_order_acquire));
+
+            while (true) {
+                // If guard was cleared or we're evicted, stop trying to update octile
+                if (!current_state.has_guard() ||
+                    current_state.status() == Ring<T, false>::READER_STATE_EVICTED) {
+                    break;
+                }
+
+                typename Ring<T, false>::Reader_state_pack new_state =
+                    current_state.with_octile(static_cast<uint8_t>(new_trailing_octile));
+                uint16_t expected = current_state.value;
+
+                if (c.reading_sequences[m_rs_index].data.reader_state.compare_exchange_weak(
+                        expected, new_state.value,
+                        std::memory_order_release, std::memory_order_acquire)) {
+                    break;  // Success
+                }
+
+                // CAS failed - reload and retry
+                current_state = typename Ring<T, false>::Reader_state_pack(expected);
+            }
 
             m_trailing_octile = new_trailing_octile;
         }
