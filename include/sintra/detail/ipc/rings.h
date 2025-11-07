@@ -710,56 +710,53 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         READER_STATE_EVICTED  = 2
     };
 
-    static constexpr uint8_t reader_status_shift      = 4;
-    static constexpr uint8_t reader_status_mask       =
-        static_cast<uint8_t>(0x03u << reader_status_shift);
-    static constexpr uint8_t guard_token_octile_mask  = 0x07;
-    static constexpr uint8_t guard_token_present_mask = 0x08;
+    // Union-based reader state: eliminates bit shifts/masks, uses direct field access
+    union Reader_state_union {
+        struct Fields {
+            uint8_t octile;          // Octile number (0-7)
+            uint8_t guard_present;   // 0 = no guard, 1 = guard present
+            uint8_t status;          // Reader_status enum value
+            uint8_t padding;         // Unused, maintains 4-byte alignment
+        } fields;
+        uint32_t word;
 
-    static constexpr uint8_t make_reader_state(
+        constexpr Reader_state_union() : word(0) {}
+        constexpr Reader_state_union(uint32_t w) : word(w) {}
+        constexpr Reader_state_union(Reader_status s, uint8_t o, bool g)
+            : fields{o, g ? uint8_t(1) : uint8_t(0), static_cast<uint8_t>(s), 0} {}
+    };
+
+    static constexpr Reader_state_union make_reader_state(
         Reader_status status, uint8_t octile, bool guard_present)
     {
-        return static_cast<uint8_t>((static_cast<uint8_t>(status) << reader_status_shift) |
-                                    (octile & guard_token_octile_mask) |
-                                    (guard_present ? guard_token_present_mask : 0));
+        return Reader_state_union(status, octile, guard_present);
     }
 
-    static constexpr uint8_t reader_state_status(uint8_t state)
+    static constexpr uint8_t reader_state_status(Reader_state_union state)
     {
-        return static_cast<uint8_t>((state & reader_status_mask) >> reader_status_shift);
+        return state.fields.status;
     }
 
-    static constexpr uint8_t reader_state_with_status(uint8_t state, uint8_t status)
+    static constexpr Reader_state_union reader_state_with_status(Reader_state_union state, uint8_t status)
     {
-        return static_cast<uint8_t>((state & static_cast<uint8_t>(~reader_status_mask)) |
-                                    ((status << reader_status_shift) & reader_status_mask));
+        state.fields.status = status;
+        return state;
     }
 
-    static constexpr uint8_t reader_state_with_trailing(uint8_t state, uint8_t octile)
+    static constexpr bool reader_state_guard_present(Reader_state_union state)
     {
-        return static_cast<uint8_t>((state & static_cast<uint8_t>(~guard_token_octile_mask)) |
-                                    (octile & guard_token_octile_mask));
+        return state.fields.guard_present != 0;
     }
 
-    static constexpr bool reader_state_guard_present(uint8_t state)
+    static constexpr uint8_t reader_state_guard_octile(Reader_state_union state)
     {
-        return (state & guard_token_present_mask) != 0;
+        return state.fields.octile;
     }
 
-    static constexpr uint8_t reader_state_guard_octile(uint8_t state)
+    static constexpr Reader_state_union reader_state_apply_guard(Reader_state_union state, uint8_t octile, bool present)
     {
-        return static_cast<uint8_t>(state & guard_token_octile_mask);
-    }
-
-    static constexpr uint8_t reader_state_apply_guard(uint8_t state, uint8_t guard_value)
-    {
-        if ((guard_value & guard_token_present_mask) != 0) {
-            state = reader_state_with_trailing(state, guard_value & guard_token_octile_mask);
-            state |= guard_token_present_mask;
-        }
-        else {
-            state &= static_cast<uint8_t>(~guard_token_present_mask);
-        }
+        state.fields.octile = octile;
+        state.fields.guard_present = present ? 1 : 0;
         return state;
     }
 
@@ -781,14 +778,14 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
     }
 
     template <typename F>
-    static uint8_t reader_state_fetch_update(
-        std::atomic<uint8_t>& state, std::memory_order order, F&& transform)
+    static Reader_state_union reader_state_fetch_update(
+        std::atomic<uint32_t>& state, std::memory_order order, F&& transform)
     {
-        uint8_t current = state.load(reader_state_load_order(order));
+        Reader_state_union current(state.load(reader_state_load_order(order)));
         while (true) {
-            uint8_t desired = transform(current);
+            Reader_state_union desired = transform(current);
             if (state.compare_exchange_weak(
-                    current, desired, order, std::memory_order_relaxed)) {
+                    current.word, desired.word, order, std::memory_order_relaxed)) {
                 return current;
             }
         }
@@ -796,27 +793,27 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
 
     template <typename F>
     static void reader_state_update(
-        std::atomic<uint8_t>& state, std::memory_order order, F&& transform)
+        std::atomic<uint32_t>& state, std::memory_order order, F&& transform)
     {
         reader_state_fetch_update(state, order, std::forward<F>(transform));
     }
 
     template <typename F>
-    static uint8_t reader_state_fetch_update_if(std::atomic<uint8_t>& state,
-                                                std::memory_order            order,
-                                                F&&                          transform,
-                                                bool&                        updated)
+    static Reader_state_union reader_state_fetch_update_if(std::atomic<uint32_t>& state,
+                                                           std::memory_order            order,
+                                                           F&&                          transform,
+                                                           bool&                        updated)
     {
-        uint8_t current = state.load(reader_state_load_order(order));
+        Reader_state_union current(state.load(reader_state_load_order(order)));
         while (true) {
-            std::optional<uint8_t> desired = transform(current);
+            std::optional<Reader_state_union> desired = transform(current);
             if (!desired.has_value()) {
                 updated = false;
                 return current;
             }
 
             if (state.compare_exchange_weak(
-                    current, *desired, order, std::memory_order_relaxed)) {
+                    current.word, desired->word, order, std::memory_order_relaxed)) {
                 updated = true;
                 return current;
             }
@@ -829,131 +826,93 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
             std::atomic<sequence_counter_type> v;
 
             struct Packed_reader_state {
-                std::atomic<uint8_t> bits{make_reader_state(READER_STATE_INACTIVE, 0, false)};
+                std::atomic<uint32_t> word{make_reader_state(READER_STATE_INACTIVE, 0, false).word};
 
                 struct Status_accessor {
-                    std::atomic<uint8_t>* bits;
+                    std::atomic<uint32_t>* word;
 
-                    uint8_t load(std::memory_order order = std::memory_order_seq_cst) const
+                    uint8_t load(std::memory_order order = std::memory_order_acquire) const
                     {
-                        return Ring::reader_state_status(bits->load(order));
+                        return Reader_state_union(word->load(order)).fields.status;
                     }
 
-                    void store(uint8_t value, std::memory_order order = std::memory_order_seq_cst) const
+                    void store(uint8_t value, std::memory_order order = std::memory_order_acq_rel) const
                     {
-                        Ring::reader_state_update(*bits, order, [value](uint8_t current) {
+                        Ring::reader_state_update(*word, order, [value](Reader_state_union current) {
                             return Ring::reader_state_with_status(current, value);
                         });
                     }
                 };
 
                 struct Trailing_accessor {
-                    std::atomic<uint8_t>* bits;
+                    std::atomic<uint32_t>* word;
 
-                    uint8_t load(std::memory_order order = std::memory_order_seq_cst) const
+                    uint8_t load(std::memory_order order = std::memory_order_acquire) const
                     {
-                        return static_cast<uint8_t>(bits->load(order) & Ring::guard_token_octile_mask);
+                        return Reader_state_union(word->load(order)).fields.octile;
                     }
 
-                    void store(uint8_t value, std::memory_order order = std::memory_order_seq_cst) const
+                    void store(uint8_t value, std::memory_order order = std::memory_order_acq_rel) const
                     {
-                        Ring::reader_state_update(*bits, order, [value](uint8_t current) {
-                            return Ring::reader_state_with_trailing(current, value);
+                        Ring::reader_state_update(*word, order, [value](Reader_state_union current) {
+                            current.fields.octile = value;
+                            return current;
                         });
                     }
                 };
 
                 struct Guard_accessor {
-                    std::atomic<uint8_t>* bits;
+                    std::atomic<uint32_t>* word;
 
-                    uint8_t load(std::memory_order order = std::memory_order_seq_cst) const
+                    uint8_t load(std::memory_order order = std::memory_order_acquire) const
                     {
-                        return static_cast<uint8_t>(bits->load(order) &
-                                                    (Ring::guard_token_present_mask |
-                                                     Ring::guard_token_octile_mask));
+                        Reader_state_union state(word->load(order));
+                        return state.fields.guard_present ? (0x08 | state.fields.octile) : 0;
                     }
 
-                    void store(uint8_t value, std::memory_order order = std::memory_order_seq_cst) const
+                    void store(uint8_t value, std::memory_order order = std::memory_order_acq_rel) const
                     {
-                        Ring::reader_state_update(*bits, order, [value](uint8_t current) {
-                            return Ring::reader_state_apply_guard(current, value);
+                        Ring::reader_state_update(*word, order, [value](Reader_state_union current) {
+                            return Ring::reader_state_apply_guard(current, value & 0x07, (value & 0x08) != 0);
                         });
                     }
 
-                    uint8_t exchange(uint8_t value, std::memory_order order = std::memory_order_seq_cst) const
+                    uint8_t exchange(uint8_t value, std::memory_order order = std::memory_order_acq_rel) const
                     {
-                        uint8_t previous = Ring::reader_state_fetch_update(
-                            *bits, order, [value](uint8_t current) {
-                                return Ring::reader_state_apply_guard(current, value);
+                        Reader_state_union previous = Ring::reader_state_fetch_update(
+                            *word, order, [value](Reader_state_union current) {
+                                return Ring::reader_state_apply_guard(current, value & 0x07, (value & 0x08) != 0);
                             });
-                        return static_cast<uint8_t>(previous &
-                                                    (Ring::guard_token_present_mask |
-                                                     Ring::guard_token_octile_mask));
-                    }
-
-                    bool compare_exchange_strong(uint8_t& expected,
-                                                 uint8_t desired,
-                                                 std::memory_order success,
-                                                 std::memory_order failure) const
-                    {
-                        uint8_t state_snapshot = bits->load(Ring::reader_state_load_order(failure));
-                        const uint8_t expected_bits = static_cast<uint8_t>(
-                            expected & (Ring::guard_token_present_mask | Ring::guard_token_octile_mask));
-
-                        while (true) {
-                            const uint8_t snapshot_bits = static_cast<uint8_t>(
-                                state_snapshot &
-                                (Ring::guard_token_present_mask | Ring::guard_token_octile_mask));
-
-                            if (snapshot_bits != expected_bits) {
-                                expected = snapshot_bits;
-                                return false;
-                            }
-
-                            const uint8_t desired_state = Ring::reader_state_apply_guard(state_snapshot, desired);
-
-                            if (bits->compare_exchange_strong(
-                                    state_snapshot, desired_state, success, failure)) {
-                                return true;
-                            }
-
-                            const uint8_t updated_bits = static_cast<uint8_t>(
-                                state_snapshot &
-                                (Ring::guard_token_present_mask | Ring::guard_token_octile_mask));
-
-                            if (updated_bits != expected_bits) {
-                                expected = updated_bits;
-                                return false;
-                            }
-                        }
+                        return previous.fields.guard_present ? (0x08 | previous.fields.octile) : 0;
                     }
 
                     template <typename F>
                     uint8_t fetch_update_if(F&& transform,
                                             bool& updated,
-                                            std::memory_order order = std::memory_order_seq_cst) const
+                                            std::memory_order order = std::memory_order_acq_rel) const
                     {
-                        return Ring::reader_state_fetch_update_if(
-                            *bits, order, std::forward<F>(transform), updated);
+                        Reader_state_union previous = Ring::reader_state_fetch_update_if(
+                            *word, order, std::forward<F>(transform), updated);
+                        return previous.fields.guard_present ? (0x08 | previous.fields.octile) : 0;
                     }
                 };
 
-                Status_accessor status() { return Status_accessor{&bits}; }
+                Status_accessor status() { return Status_accessor{&word}; }
                 Status_accessor status() const
                 {
-                    return Status_accessor{const_cast<std::atomic<uint8_t>*>(&bits)};
+                    return Status_accessor{const_cast<std::atomic<uint32_t>*>(&word)};
                 }
 
-                Trailing_accessor trailing_octile() { return Trailing_accessor{&bits}; }
+                Trailing_accessor trailing_octile() { return Trailing_accessor{&word}; }
                 Trailing_accessor trailing_octile() const
                 {
-                    return Trailing_accessor{const_cast<std::atomic<uint8_t>*>(&bits)};
+                    return Trailing_accessor{const_cast<std::atomic<uint32_t>*>(&word)};
                 }
 
-                Guard_accessor guard_token() { return Guard_accessor{&bits}; }
+                Guard_accessor guard_token() { return Guard_accessor{&word}; }
                 Guard_accessor guard_token() const
                 {
-                    return Guard_accessor{const_cast<std::atomic<uint8_t>*>(&bits)};
+                    return Guard_accessor{const_cast<std::atomic<uint32_t>*>(&word)};
                 }
             } reader_state{};
 
@@ -1078,8 +1037,8 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
 
                 if (dead) {
                     uint8_t guard_snapshot = slot.guard_token().exchange(0, std::memory_order_seq_cst);
-                    if ((guard_snapshot & guard_token_present_mask) != 0) {
-                        uint8_t oct = guard_snapshot & guard_token_octile_mask;
+                    if ((guard_snapshot & 0x08) != 0) {
+                        uint8_t oct = guard_snapshot & 0x07;
                         read_access.fetch_sub(uint64_t(1) << (8 * oct), std::memory_order_seq_cst);
                     }
 
@@ -1511,15 +1470,13 @@ struct Ring_R : Ring<T, true>
             auto guard_token_accessor = c.reading_sequences[m_rs_index].data.guard_token();
             bool guard_attached = false;
             guard_token_accessor.fetch_update_if(
-                [&](uint8_t current) -> std::optional<uint8_t> {
+                [&](typename Ring<T, true>::Reader_state_union current) -> std::optional<typename Ring<T, true>::Reader_state_union> {
                     if (Ring<T, true>::reader_state_status(current) ==
                         Ring<T, true>::READER_STATE_EVICTED) {
                         return std::nullopt;
                     }
 
-                    return Ring<T, true>::reader_state_apply_guard(
-                        current,
-                        static_cast<uint8_t>(Ring<T, true>::guard_token_present_mask | trailing_octile));
+                    return Ring<T, true>::reader_state_apply_guard(current, trailing_octile, true);
                 },
                 guard_attached,
                 std::memory_order_seq_cst);
@@ -1562,12 +1519,12 @@ struct Ring_R : Ring<T, true>
             // Trailing guard requirement changed between reads; drop and retry.
             bool guard_cleared = false;
             const uint8_t guard_snapshot = guard_token_accessor.fetch_update_if(
-                [&](uint8_t current) -> std::optional<uint8_t> {
+                [&](typename Ring<T, true>::Reader_state_union current) -> std::optional<typename Ring<T, true>::Reader_state_union> {
                     if (Ring<T, true>::reader_state_status(current) ==
                         Ring<T, true>::READER_STATE_EVICTED) {
                         return std::nullopt;
                     }
-                    return Ring<T, true>::reader_state_apply_guard(current, 0);
+                    return Ring<T, true>::reader_state_apply_guard(current, current.fields.octile, false);
                 },
                 guard_cleared,
                 std::memory_order_seq_cst);
@@ -1624,12 +1581,12 @@ struct Ring_R : Ring<T, true>
             auto guard_token_accessor = c.reading_sequences[m_rs_index].data.guard_token();
             bool   guard_cleared       = false;
             const uint8_t previous_state = guard_token_accessor.fetch_update_if(
-                [&](uint8_t current) -> std::optional<uint8_t> {
+                [&](typename Ring<T, true>::Reader_state_union current) -> std::optional<typename Ring<T, true>::Reader_state_union> {
                     if (Ring<T, true>::reader_state_status(current) ==
                         Ring<T, true>::READER_STATE_EVICTED) {
                         return std::nullopt;
                     }
-                    return Ring<T, true>::reader_state_apply_guard(current, 0);
+                    return Ring<T, true>::reader_state_apply_guard(current, current.fields.octile, false);
                 },
                 guard_cleared,
                 std::memory_order_seq_cst);
@@ -1861,15 +1818,13 @@ struct Ring_R : Ring<T, true>
         if (new_trailing_octile != m_trailing_octile) {
             auto guard_token_accessor = c.reading_sequences[m_rs_index].data.guard_token();
             const uint64_t new_mask     = uint64_t(1) << (8 * new_trailing_octile);
-            const uint8_t  desired_guard = static_cast<uint8_t>(
-                Ring<T, true>::guard_token_present_mask | static_cast<uint8_t>(new_trailing_octile));
 
             while (true) {
                 c.read_access.fetch_add(new_mask, std::memory_order_seq_cst);
 
                 bool guard_updated = false;
                 const uint8_t previous_state = guard_token_accessor.fetch_update_if(
-                    [&](uint8_t current) -> std::optional<uint8_t> {
+                    [&](typename Ring<T, true>::Reader_state_union current) -> std::optional<typename Ring<T, true>::Reader_state_union> {
                         if (Ring<T, true>::reader_state_status(current) ==
                             Ring<T, true>::READER_STATE_EVICTED) {
                             return std::nullopt;
@@ -1878,7 +1833,7 @@ struct Ring_R : Ring<T, true>
                             return std::nullopt;
                         }
 
-                        return Ring<T, true>::reader_state_apply_guard(current, desired_guard);
+                        return Ring<T, true>::reader_state_apply_guard(current, static_cast<uint8_t>(new_trailing_octile), true);
                     },
                     guard_updated,
                     std::memory_order_seq_cst);
@@ -1908,8 +1863,7 @@ struct Ring_R : Ring<T, true>
     bool handle_eviction_if_needed()
     {
         auto& slot = c.reading_sequences[m_rs_index].data;
-        if ((slot.guard_token().load(std::memory_order_seq_cst) &
-             Ring<T, true>::guard_token_present_mask) != 0) {
+        if ((slot.guard_token().load(std::memory_order_seq_cst) & 0x08) != 0) {
             return false;
         }
 
@@ -1949,7 +1903,7 @@ struct Ring_R : Ring<T, true>
 
             bool guard_updated = false;
             const uint8_t previous_state = guard_accessor.fetch_update_if(
-                [&](uint8_t current) -> std::optional<uint8_t> {
+                [&](typename Ring<T, true>::Reader_state_union current) -> std::optional<typename Ring<T, true>::Reader_state_union> {
                     if (Ring<T, true>::reader_state_guard_present(current)) {
                         return std::nullopt;
                     }
@@ -2343,10 +2297,8 @@ private:
                             c.reading_sequences[i].data.v.load(std::memory_order_seq_cst);
                         uint8_t guard_snapshot =
                             c.reading_sequences[i].data.guard_token().load(std::memory_order_seq_cst);
-                        bool reader_has_guard =
-                            (guard_snapshot & Ring<T, false>::guard_token_present_mask) != 0;
-                        uint8_t reader_octile =
-                            guard_snapshot & Ring<T, false>::guard_token_octile_mask;
+                        bool reader_has_guard = (guard_snapshot & 0x08) != 0;
+                        uint8_t reader_octile = guard_snapshot & 0x07;
 
                         bool blocking_current_octile =
                             reader_has_guard && (reader_octile == new_octile);
@@ -2356,13 +2308,13 @@ private:
                             const uint8_t previous_state = c.reading_sequences[i]
                                                                .data.guard_token()
                                                                .fetch_update_if(
-                                                                   [&](uint8_t current)
-                                                                       -> std::optional<uint8_t> {
+                                                                   [&](typename Ring<T, false>::Reader_state_union current)
+                                                                       -> std::optional<typename Ring<T, false>::Reader_state_union> {
                                                                        if (!Ring<T, false>::reader_state_guard_present(current)) {
                                                                            return std::nullopt;
                                                                        }
 
-                                                                       uint8_t cleared = Ring<T, false>::reader_state_apply_guard(current, 0);
+                                                                       typename Ring<T, false>::Reader_state_union cleared = Ring<T, false>::reader_state_apply_guard(current, current.fields.octile, false);
                                                                        return Ring<T, false>::reader_state_with_status(
                                                                            cleared,
                                                                            Ring<T, false>::READER_STATE_EVICTED);
@@ -2404,8 +2356,7 @@ private:
                 for (int i = 0; i < max_process_index; ++i) {
                     uint8_t guard_snapshot =
                         c.reading_sequences[i].data.guard_token().load(std::memory_order_seq_cst);
-                    if ((guard_snapshot & Ring<T, false>::guard_token_present_mask) != 0 &&
-                        (guard_snapshot & Ring<T, false>::guard_token_octile_mask) == new_octile)
+                    if ((guard_snapshot & 0x08) != 0 && (guard_snapshot & 0x07) == new_octile)
                     {
                         has_blocking_reader = true;
                         break;
