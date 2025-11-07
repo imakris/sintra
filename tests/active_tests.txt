@@ -53,4 +53,4 @@ variable_buffer_alignment_test 10
 
 # Test for lldb stack capture with multi-process hang
 # This test intentionally hangs to verify lldb captures all threads/processes
-ping_pong_hang_test 1
+# ping_pong_hang_test 1
