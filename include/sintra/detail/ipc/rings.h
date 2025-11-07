@@ -773,18 +773,8 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
 
     static constexpr std::memory_order reader_state_load_order(std::memory_order order)
     {
-        switch (order) {
-        case std::memory_order_relaxed:
-        case std::memory_order_consume:
-        case std::memory_order_acquire:
-            return order;
-        case std::memory_order_release:
-            return std::memory_order_relaxed;
-        case std::memory_order_acq_rel:
-            return std::memory_order_acquire;
-        case std::memory_order_seq_cst:
-            return std::memory_order_seq_cst;
-        }
+        // Hardened to seq_cst for all orderings
+        (void)order;
         return std::memory_order_seq_cst;
     }
 
@@ -796,7 +786,7 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         while (true) {
             Reader_state_union desired = transform(current);
             if (state.compare_exchange_strong(
-                    current.word, desired.word, order, std::memory_order_relaxed)) {
+                    current.word, desired.word, order, std::memory_order_seq_cst)) {
                 return current;
             }
         }
@@ -824,7 +814,7 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
             }
 
             if (state.compare_exchange_strong(
-                    current.word, desired->word, order, std::memory_order_relaxed)) {
+                    current.word, desired->word, order, std::memory_order_seq_cst)) {
                 updated = true;
                 return current;
             }
@@ -842,12 +832,12 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
                 struct Status_accessor {
                     std::atomic<uint32_t>* word;
 
-                    uint8_t load(std::memory_order order = std::memory_order_acquire) const
+                    uint8_t load(std::memory_order order = std::memory_order_seq_cst) const
                     {
                         return Reader_state_union(word->load(order)).fields.status;
                     }
 
-                    void store(uint8_t value, std::memory_order order = std::memory_order_acq_rel) const
+                    void store(uint8_t value, std::memory_order order = std::memory_order_seq_cst) const
                     {
                         Ring::reader_state_update(*word, order, [value](Reader_state_union current) {
                             return Ring::reader_state_with_status(current, value);
@@ -858,12 +848,12 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
                 struct Trailing_accessor {
                     std::atomic<uint32_t>* word;
 
-                    uint8_t load(std::memory_order order = std::memory_order_acquire) const
+                    uint8_t load(std::memory_order order = std::memory_order_seq_cst) const
                     {
                         return Reader_state_union(word->load(order)).fields.octile;
                     }
 
-                    void store(uint8_t value, std::memory_order order = std::memory_order_acq_rel) const
+                    void store(uint8_t value, std::memory_order order = std::memory_order_seq_cst) const
                     {
                         Ring::reader_state_update(*word, order, [value](Reader_state_union current) {
                             current.fields.octile = value;
@@ -875,20 +865,20 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
                 struct Guard_accessor {
                     std::atomic<uint32_t>* word;
 
-                    uint8_t load(std::memory_order order = std::memory_order_acquire) const
+                    uint8_t load(std::memory_order order = std::memory_order_seq_cst) const
                     {
                         Reader_state_union state(word->load(order));
                         return state.fields.guard_present ? (0x08 | state.fields.octile) : 0;
                     }
 
-                    void store(uint8_t value, std::memory_order order = std::memory_order_acq_rel) const
+                    void store(uint8_t value, std::memory_order order = std::memory_order_seq_cst) const
                     {
                         Ring::reader_state_update(*word, order, [value](Reader_state_union current) {
                             return Ring::reader_state_apply_guard(current, value & 0x07, (value & 0x08) != 0);
                         });
                     }
 
-                    uint8_t exchange(uint8_t value, std::memory_order order = std::memory_order_acq_rel) const
+                    uint8_t exchange(uint8_t value, std::memory_order order = std::memory_order_seq_cst) const
                     {
                         Reader_state_union previous = Ring::reader_state_fetch_update(
                             *word, order, [value](Reader_state_union current) {
@@ -900,7 +890,7 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
                     template <typename F>
                     uint8_t fetch_update_if(F&& transform,
                                             bool& updated,
-                                            std::memory_order order = std::memory_order_acq_rel) const
+                                            std::memory_order order = std::memory_order_seq_cst) const
                     {
                         Reader_state_union previous = Ring::reader_state_fetch_update_if(
                             *word, order, std::forward<F>(transform), updated);
