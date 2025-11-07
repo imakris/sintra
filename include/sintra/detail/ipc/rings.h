@@ -134,6 +134,7 @@
 #include "../ipc/file_mapping.h"
 #include "../ipc/mutex.h"
 #include "../ipc/semaphore.h"
+#include "../ipc/spinlock.h"
 
 #include "../ipc/platform_utils.h"
 
@@ -962,9 +963,7 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
 
         // --- Reader Sequence Stack Management ------------------------------------
         // Protects free_rs_stack and num_free_rs during slot acquisition/release.
-        std::atomic_flag                     rs_stack_spinlock = ATOMIC_FLAG_INIT;
-        void rs_stack_lock()   { while (rs_stack_spinlock.test_and_set()) {} }
-        void rs_stack_unlock() { rs_stack_spinlock.clear(); }
+        spinlock                             rs_stack_spinlock;
 
         // Freelist of reader-slot indices into reading_sequences[].
         int                                  free_rs_stack[max_process_index]{};
@@ -975,7 +974,7 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         {
             bool freed = false;
 
-            rs_stack_lock();
+            spinlock::locker lock(rs_stack_spinlock);
             auto in_freelist = [&](int idx) -> bool {
                 int nf = num_free_rs;
                 for (int i = 0; i < nf; ++i) {
@@ -1017,7 +1016,6 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
                 }
             }
 
-            rs_stack_unlock();
             return freed;
         }
 
@@ -1057,10 +1055,7 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         int                                  num_unordered = 0;
 
         // Spinlock guarding the ready/sleeping/unordered stacks.
-        std::atomic_flag                     spinlock_flag = ATOMIC_FLAG_INIT;
-
-        void lock()   { while (spinlock_flag.test_and_set()) {} }
-        void unlock() { spinlock_flag.clear(); }
+        spinlock                             m_spinlock;
 
         Control()
         {
@@ -1309,21 +1304,21 @@ struct Ring_R : Ring<T, true>
         // Acquire a reader slot from the freelist. This happens ONCE per Ring_R object.
         bool scavenged = false;
         while (true) {
-            c.rs_stack_lock();
-            if (c.num_free_rs > 0) {
-                int current_num_free = c.num_free_rs.fetch_sub(1) - 1;
-                m_rs_index = c.free_rs_stack[current_num_free];
+            {
+                spinlock::locker lock(c.rs_stack_spinlock);
+                if (c.num_free_rs > 0) {
+                    int current_num_free = c.num_free_rs.fetch_sub(1) - 1;
+                    m_rs_index = c.free_rs_stack[current_num_free];
 
-                // Mark our slot as ACTIVE while rs_stack_lock is still held so the
-                // scavenger cannot reclaim it before we publish the ownership.
-                auto& slot = c.reading_sequences[m_rs_index].data;
-                slot.owner_pid = get_current_pid();
-                slot.set_status(Ring<T, true>::READER_STATE_ACTIVE);
+                    // Mark our slot as ACTIVE while the spinlock is still held so the
+                    // scavenger cannot reclaim it before we publish the ownership.
+                    auto& slot = c.reading_sequences[m_rs_index].data;
+                    slot.owner_pid = get_current_pid();
+                    slot.set_status(Ring<T, true>::READER_STATE_ACTIVE);
 
-                c.rs_stack_unlock();
-                break;
+                    break;
+                }
             }
-            c.rs_stack_unlock();
 
             if (scavenged || !c.scavenge_orphans()) {
                 throw ring_acquisition_failure_exception(); // No slots available.
@@ -1347,7 +1342,7 @@ struct Ring_R : Ring<T, true>
         // Return the reader slot to the freelist and mark as inactive.
         if (m_rs_index != -1) {
             // Take the freelist lock FIRST to serialize with scavenger and other releasers.
-            c.rs_stack_lock();
+            spinlock::locker lock(c.rs_stack_spinlock);
 
             // Mark slot as inactive and clear ownership while the freelist is locked,
             // so scavenger cannot race a half-updated slot.
@@ -1365,8 +1360,6 @@ struct Ring_R : Ring<T, true>
                 c.free_rs_stack[nf] = m_rs_index;
                 c.num_free_rs++;
             }
-
-            c.rs_stack_unlock();
         }
     }
 
@@ -1678,11 +1671,11 @@ struct Ring_R : Ring<T, true>
                 return Range<T>{};
             }
 
-            c.lock();
+            c.m_spinlock.lock();
             m_sleepy_index = -1;
             if (sequences_equal()) {
                 if (m_stopping) {
-                    c.unlock();
+                    c.m_spinlock.unlock();
                     return Range<T>{};
                 }
                 int sleepy = c.ready_stack[--c.num_ready];
@@ -1700,33 +1693,30 @@ struct Ring_R : Ring<T, true>
                     c.ready_stack[c.num_ready++] = sleepy;
                     m_sleepy_index = -1;
                 }
-                c.unlock();
+                c.m_spinlock.unlock();
                 if (!sequences_equal()) {
                     return produce_range();
                 }
                 return Range<T>{};
             }
-            c.unlock();
+            c.m_spinlock.unlock();
 
             int sleepy_index = m_sleepy_index;
             if (sleepy_index >= 0) {
                 if (m_stopping) {
-                    c.lock();
+                    spinlock::locker lock(c.m_spinlock);
                     if (m_sleepy_index >= 0) {
                         c.dirty_semaphores[sleepy_index].post_unordered();
                     }
-                    c.unlock();
                 }
 
                 if (c.dirty_semaphores[sleepy_index].wait()) { // unordered wake
-                    c.lock();
+                    spinlock::locker lock(c.m_spinlock);
                     c.unordered_stack[c.num_unordered++] = sleepy_index;
-                    c.unlock();
                 }
                 else {
-                    c.lock();
+                    spinlock::locker lock(c.m_spinlock);
                     c.ready_stack[c.num_ready++] = sleepy_index;
-                    c.unlock();
                 }
                 m_sleepy_index = -1;
 
@@ -1918,12 +1908,11 @@ public:
      */
     void unblock_local()
     {
-        c.lock();
+        spinlock::locker lock(c.m_spinlock);
         int sleepy = m_sleepy_index;
         if (sleepy >= 0) {
             c.dirty_semaphores[sleepy].post_unordered();
         }
-        c.unlock();
     }
 
     void request_stop()
@@ -2066,18 +2055,19 @@ struct Ring_W : Ring<T, false>
      */
     sequence_counter_type done_writing()
     {
-        c.lock();
-        assert(m_writing_thread_index == thread_index());
-        c.leading_sequence = m_pending_new_sequence;
-        // Wake sleeping readers in a deterministic order
-        for (int i = 0; i < c.num_sleeping; i++) {
-            c.dirty_semaphores[c.sleeping_stack[i]].post_ordered();
+        {
+            spinlock::locker lock(c.m_spinlock);
+            assert(m_writing_thread_index == thread_index());
+            c.leading_sequence = m_pending_new_sequence;
+            // Wake sleeping readers in a deterministic order
+            for (int i = 0; i < c.num_sleeping; i++) {
+                c.dirty_semaphores[c.sleeping_stack[i]].post_ordered();
+            }
+            c.num_sleeping = 0;
+            while (c.num_unordered) {
+                c.ready_stack[c.num_ready++] = c.unordered_stack[--c.num_unordered];
+            }
         }
-        c.num_sleeping = 0;
-        while (c.num_unordered) {
-            c.ready_stack[c.num_ready++] = c.unordered_stack[--c.num_unordered];
-        }
-        c.unlock();
         m_writing_thread_index = 0;
         return m_pending_new_sequence;
     }
@@ -2090,7 +2080,7 @@ struct Ring_W : Ring<T, false>
     {
         c.global_unblock_sequence++;
 
-        c.lock();
+        spinlock::locker lock(c.m_spinlock);
         for (int i = 0; i < c.num_sleeping; i++) {
             c.dirty_semaphores[c.sleeping_stack[i]].post_ordered();
         }
@@ -2098,7 +2088,6 @@ struct Ring_W : Ring<T, false>
         while (c.num_unordered) {
             c.ready_stack[c.num_ready++] = c.unordered_stack[--c.num_unordered];
         }
-        c.unlock();
     }
 
     /**

@@ -170,7 +170,7 @@ namespace {
         ts.tv_sec = 0;
         ts.tv_nsec = 1'000'000; // 1 millisecond
         for (int spin = 0; spin < 200; ++spin) {
-            if (dispatched_signal_counter().load()) >= target) {
+            if (dispatched_signal_counter().load() >= target) {
                 return;
             }
             ::nanosleep(&ts, nullptr);
@@ -299,7 +299,7 @@ static void s_signal_handler(int sig, siginfo_t* info, void* ctx)
     const bool should_wait_for_dispatch = mproc && mproc->m_out_req_c && sig != SIGCHLD;
     uint32_t dispatched_before = 0;
     if (should_wait_for_dispatch) {
-        dispatched_before = dispatched_signal_counter().load());
+        dispatched_before = dispatched_signal_counter().load();
     }
 
     auto& pipefd = signal_pipe();
@@ -1743,16 +1743,16 @@ void Managed_process::wait_for_delivery_fence()
             }
 
             const auto observed = (target.stream == Process_message_reader::Delivery_stream::Request)
-                ? progress->request_sequence.load())
-                : progress->reply_sequence.load());
+                ? progress->request_sequence.load()
+                : progress->reply_sequence.load();
 
             if (observed >= target.target) {
                 continue;
             }
 
             const auto stopped = (target.stream == Process_message_reader::Delivery_stream::Request)
-                ? progress->request_stopped.load())
-                : progress->reply_stopped.load());
+                ? progress->request_stopped.load()
+                : progress->reply_stopped.load();
 
             if (stopped) {
                 continue;

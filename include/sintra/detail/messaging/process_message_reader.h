@@ -190,7 +190,7 @@ struct Process_message_reader
 
     Delivery_progress_ptr delivery_progress() const { return m_delivery_progress; }
 
-    State state() const { return m_reader_state.load()); }
+    State state() const { return m_reader_state.load(); }
 
 private:
 

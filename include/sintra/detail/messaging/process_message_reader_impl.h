@@ -93,9 +93,9 @@ void Process_message_reader::wait_until_ready()
 {
     std::unique_lock<std::mutex> lk(m_ready_mutex);
     m_ready_condition.wait(lk, [&]() {
-        const bool req_started = m_req_running.load());
-        const bool rep_started = m_rep_running.load());
-        const bool stopping = m_reader_state.load()) == READER_STOPPING;
+        const bool req_started = m_req_running.load();
+        const bool rep_started = m_rep_running.load();
+        const bool stopping = m_reader_state.load() == READER_STOPPING;
         return (req_started && rep_started) || stopping;
     });
 }
@@ -166,8 +166,8 @@ bool Process_message_reader::stop_and_wait(double waiting_period)
     stop_nowait();
 
     auto no_readers = [&]() {
-        const bool req_running = m_req_running.load());
-        const bool rep_running = m_rep_running.load());
+        const bool req_running = m_req_running.load();
+        const bool rep_running = m_rep_running.load();
         return !(req_running || rep_running);
     };
 
@@ -193,8 +193,8 @@ bool Process_message_reader::stop_and_wait(double waiting_period)
             std::fprintf(stderr,
                 "Process_message_reader::stop_and_wait timeout: pid=%llu req_running=%d rep_running=%d\n",
                 static_cast<unsigned long long>(m_process_instance_id),
-                m_req_running.load()),
-                m_rep_running.load()));
+                m_req_running.load(),
+                m_rep_running.load());
         }
     }
     return no_readers();
@@ -265,7 +265,7 @@ void Process_message_reader::request_reader_function()
     publish_request_progress(m_in_req_c->get_message_reading_sequence());
 
     while (true) {
-        const State reader_state = m_reader_state.load());
+        const State reader_state = m_reader_state.load();
         if (reader_state == READER_STOPPING) {
             break;
         }
@@ -464,8 +464,8 @@ Process_message_reader::Delivery_target Process_message_reader::prepare_delivery
     }
 
     const auto observed = (stream == Delivery_stream::Request)
-        ? strong_progress->request_sequence.load())
-        : strong_progress->reply_sequence.load());
+        ? strong_progress->request_sequence.load()
+        : strong_progress->reply_sequence.load();
 
     if (observed >= target_sequence) {
         return target;
@@ -512,7 +512,7 @@ void Process_message_reader::reply_reader_function()
     publish_reply_progress(m_in_rep_c->get_message_reading_sequence());
 
     while (true) {
-        const State reader_state = m_reader_state.load());
+        const State reader_state = m_reader_state.load();
         if (reader_state == READER_STOPPING) {
             break;
         }

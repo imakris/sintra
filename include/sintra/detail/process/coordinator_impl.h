@@ -601,7 +601,7 @@ inline bool Coordinator::is_process_draining(instance_id_type process_iid) const
     }
 
     const auto slot = static_cast<size_t>(draining_index);
-    return m_draining_process_states[slot].load()) != 0;
+    return m_draining_process_states[slot].load() != 0;
 }
 
 

@@ -124,11 +124,11 @@ function(add_test_suite SUFFIX IS_DEBUG)
             target_include_directories(sintra_${TEST_NAME}_${SUFFIX} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
         endif()
 
-        if(APPLE AND SINTRA_RELEASE_WITH_DEBUG_SYMBOLS AND NOT IS_DEBUG)
+        if(APPLE)
             if(NOT DEFINED SINTRA_DSYMUTIL_EXECUTABLE)
                 find_program(SINTRA_DSYMUTIL_EXECUTABLE dsymutil)
                 if(NOT SINTRA_DSYMUTIL_EXECUTABLE)
-                    message(FATAL_ERROR "dsymutil is required to generate debug symbols for Release builds on macOS")
+                    message(FATAL_ERROR "dsymutil is required to generate debug symbols on macOS")
                 endif()
             endif()
 
