@@ -1308,9 +1308,33 @@ struct Ring_R : Ring<T, true>
             c.read_access.fetch_add(guard_mask, std::memory_order_acq_rel);
 
             // Publish the octile index and guard to our shared slot atomically.
-            typename Ring<T, true>::Reader_state_pack old_state(c.reading_sequences[m_rs_index].data.reader_state.load(std::memory_order_relaxed));
-            typename Ring<T, true>::Reader_state_pack new_state = old_state.with_octile(trailing_octile).with_guard(1);
-            c.reading_sequences[m_rs_index].data.reader_state.store(new_state.value, std::memory_order_release);
+            // Use CAS to avoid overwriting EVICTED status set by writer.
+            typename Ring<T, true>::Reader_state_pack current_state(
+                c.reading_sequences[m_rs_index].data.reader_state.load(std::memory_order_acquire));
+
+            while (true) {
+#ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
+                if (current_state.status() == Ring<T, true>::READER_STATE_EVICTED) {
+                    // Evicted before we could acquire guard - abort and throw
+                    c.read_access.fetch_sub(guard_mask, std::memory_order_acq_rel);
+                    m_reading_lock = false;
+                    throw ring_reader_evicted_exception();
+                }
+#endif
+
+                typename Ring<T, true>::Reader_state_pack new_state =
+                    current_state.with_octile(trailing_octile).with_guard(1);
+                uint16_t expected = current_state.value;
+
+                if (c.reading_sequences[m_rs_index].data.reader_state.compare_exchange_weak(
+                        expected, new_state.value,
+                        std::memory_order_release, std::memory_order_acquire)) {
+                    break;  // Success
+                }
+
+                // CAS failed - reload current_state (expected was updated by CAS)
+                current_state = typename Ring<T, true>::Reader_state_pack(expected);
+            }
 
             auto confirmed_leading_sequence = c.leading_sequence.load(std::memory_order_acquire);
             auto confirmed_range_first_sequence = std::max<int64_t>(
@@ -1333,11 +1357,34 @@ struct Ring_R : Ring<T, true>
             }
 
             // Trailing guard requirement changed between reads; drop and retry.
-            typename Ring<T, true>::Reader_state_pack retry_old(c.reading_sequences[m_rs_index].data.reader_state.load(std::memory_order_acquire));
-            typename Ring<T, true>::Reader_state_pack retry_new = retry_old.with_guard(0);
-            c.reading_sequences[m_rs_index].data.reader_state.store(retry_new.value, std::memory_order_release);
-            if (retry_old.has_guard() != 0) {
-                c.read_access.fetch_sub(guard_mask, std::memory_order_acq_rel);
+            // Use CAS to avoid overwriting EVICTED status set by writer.
+            typename Ring<T, true>::Reader_state_pack retry_state(
+                c.reading_sequences[m_rs_index].data.reader_state.load(std::memory_order_acquire));
+
+            while (true) {
+#ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
+                if (retry_state.status() == Ring<T, true>::READER_STATE_EVICTED) {
+                    // Evicted during retry - abort take_snapshot()
+                    m_reading_lock = false;
+                    throw ring_reader_evicted_exception();
+                }
+#endif
+
+                typename Ring<T, true>::Reader_state_pack new_state = retry_state.with_guard(0);
+                uint16_t expected = retry_state.value;
+
+                if (c.reading_sequences[m_rs_index].data.reader_state.compare_exchange_weak(
+                        expected, new_state.value,
+                        std::memory_order_acq_rel, std::memory_order_acquire)) {
+                    // CAS succeeded - decrement read_access if we had a guard
+                    if (retry_state.has_guard() != 0) {
+                        c.read_access.fetch_sub(guard_mask, std::memory_order_acq_rel);
+                    }
+                    break;
+                }
+
+                // CAS failed - reload retry_state
+                retry_state = typename Ring<T, true>::Reader_state_pack(expected);
             }
         }
 
@@ -1378,6 +1425,18 @@ struct Ring_R : Ring<T, true>
 
         if (m_reading.load(std::memory_order_acquire)) {
             typename Ring<T, true>::Reader_state_pack old_state(c.reading_sequences[m_rs_index].data.reader_state.load(std::memory_order_acquire));
+
+#ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
+            // Check for eviction before clearing guard
+            if (old_state.status() == Ring<T, true>::READER_STATE_EVICTED) {
+                // Evicted - don't touch packed state or read_access
+                // Let handle_eviction_if_needed() handle cleanup on next call
+                m_reading.store(false, std::memory_order_release);
+                m_reading_lock.store(false, std::memory_order_release);
+                return;
+            }
+#endif
+
             if (old_state.has_guard()) {
                 typename Ring<T, true>::Reader_state_pack new_state = old_state.with_guard(0);
                 uint16_t expected = old_state.value;
@@ -1387,6 +1446,18 @@ struct Ring_R : Ring<T, true>
                     c.read_access.fetch_sub(
                         uint64_t(1) << (8 * m_trailing_octile), std::memory_order_acq_rel);
                 }
+#ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
+                else {
+                    // CAS failed - check if we were evicted
+                    typename Ring<T, true>::Reader_state_pack failed_state(expected);
+                    if (failed_state.status() == Ring<T, true>::READER_STATE_EVICTED) {
+                        // Evicted during CAS - don't touch read_access
+                        m_reading.store(false, std::memory_order_release);
+                        m_reading_lock.store(false, std::memory_order_release);
+                        return;
+                    }
+                }
+#endif
             }
             m_reading.store(false, std::memory_order_release);
         }
@@ -1649,14 +1720,30 @@ struct Ring_R : Ring<T, true>
         c.read_access.fetch_add(mask, std::memory_order_acq_rel);
 
         // Atomically update octile, guard, and status in packed state
-        typename Ring<T, false>::Reader_state_pack old_state(c.reading_sequences[m_rs_index].data.reader_state.load(std::memory_order_relaxed));
-        typename Ring<T, false>::Reader_state_pack new_state = old_state
-            .with_octile(static_cast<uint8_t>(m_trailing_octile))
-            .with_guard(1);
+        // Use CAS to avoid overwriting EVICTED status if writer evicts during reattach
+        typename Ring<T, false>::Reader_state_pack current_state(
+            c.reading_sequences[m_rs_index].data.reader_state.load(std::memory_order_acquire));
+
+        while (true) {
+            typename Ring<T, false>::Reader_state_pack new_state = current_state
+                .with_octile(static_cast<uint8_t>(m_trailing_octile))
+                .with_guard(1);
 #ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
-        new_state = new_state.with_status(Ring<T, false>::READER_STATE_ACTIVE);
+            new_state = new_state.with_status(Ring<T, false>::READER_STATE_ACTIVE);
 #endif
-        c.reading_sequences[m_rs_index].data.reader_state.store(new_state.value, std::memory_order_release);
+            uint16_t expected = current_state.value;
+
+            if (c.reading_sequences[m_rs_index].data.reader_state.compare_exchange_weak(
+                    expected, new_state.value,
+                    std::memory_order_release, std::memory_order_acquire)) {
+                break;  // Success
+            }
+
+            // CAS failed - reload current_state
+            // Note: Writer typically only evicts readers WITH guards, so this race is unlikely
+            // but we handle it for completeness
+            current_state = typename Ring<T, false>::Reader_state_pack(expected);
+        }
     }
 
 public:
