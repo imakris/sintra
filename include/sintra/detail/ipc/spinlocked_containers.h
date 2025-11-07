@@ -31,8 +31,6 @@ namespace sintra {
 using std::deque;
 using std::list;
 using std::map;
-using std::memory_order_seq_cst;
-using std::memory_order_seq_cst;
 using std::set;
 using std::unordered_map;
 using std::unordered_set;

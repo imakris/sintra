@@ -129,9 +129,9 @@ Sintra uses **dedicated reader threads** to process incoming messages from share
 
 `sintra::barrier()` coordinates progress across processes and comes in three flavors that trade off strength for cost. The template defaults to `delivery_fence_t`, so a plain `barrier("name")` is already stronger than a bare rendezvous. Pick the lightest-weight barrier whose guarantees match what your code must observe:
 
-* **Rendezvous barriers** (`barrier<sintra::rendezvous_t>(name)`) simply ensure that every participant has reached the synchronization point. Messages published before the barrier might still be in flight or waiting to be handled, so use this mode when you only need aligned phase progression—for example, coordinating the simultaneous start of a workload whose logic does not depend on the effects of earlier messages.
+* **Rendezvous barriers** (`barrier<sintra::rendezvous_t>(name)`) simply ensure that every participant has reached the synchronization point. Messages published before the barrier might still be in flight or waiting to be handled, so use this mode when you only need aligned phase progression-for example, coordinating the simultaneous start of a workload whose logic does not depend on the effects of earlier messages.
 * **Delivery-fence barriers** (`barrier(name)` or `barrier<sintra::delivery_fence_t>(name)`) guarantee that all pre-barrier messages have been pulled off the shared-memory rings by each process’s reader thread and are queued locally for handling, though the handlers may still be running. Reach for the default delivery fence when the next step requires the complete set of incoming work to be staged, such as inspecting an inbox before taking action.
-* **Processing-fence barriers** (`barrier(sintra::processing_fence_t{}, name)`) wait until every handler (and any continuations) for messages published before the barrier has finished executing. Choose this mode when subsequent logic must observe the completed side effects—for instance, reading shared state that earlier handlers updated or applying a configuration change only after all peers processed preparatory updates.
+* **Processing-fence barriers** (`barrier(sintra::processing_fence_t{}, name)`) wait until every handler (and any continuations) for messages published before the barrier has finished executing. Choose this mode when subsequent logic must observe the completed side effects-for instance, reading shared state that earlier handlers updated or applying a configuration change only after all peers processed preparatory updates.
 
 Delivery fences cost the same as rendezvous plus a short wait for readers to catch up. Processing fences add a single control message per process and an extra rendezvous so you can observe handler side effects deterministically.
 
@@ -157,7 +157,7 @@ prefer vendoring dependencies as git submodules or fetching them during configur
 
 ## Platform requirements
 
-* **macOS** – Sintra always uses `os_sync_wait_on_address` for its interprocess semaphore implementation. The build fails if `<os/os_sync_wait_on_address.h>` or `<os/clock.h>` is missing, so ensure the runner has macOS 13 or newer with the Xcode 15 (or newer) Command Line Tools installed. No legacy semaphore fallback is provided or supported.
+* **macOS** - Sintra always uses `os_sync_wait_on_address` for its interprocess semaphore implementation. The build fails if `<os/os_sync_wait_on_address.h>` or `<os/clock.h>` is missing, so ensure the runner has macOS 13 or newer with the Xcode 15 (or newer) Command Line Tools installed. No legacy semaphore fallback is provided or supported.
 
 ## Tests and continuous integration
 

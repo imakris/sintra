@@ -767,7 +767,7 @@ static inline size_t sintra_detect_cache_line_size_linux()
     return 64;
 }
 
-static inline void sintra_warn_if_cacheline_mismatch_linux(size_t assumed_cache_line_size)
+static inline void sintra_warn_if_cacheline_mismatch(size_t assumed_cache_line_size)
 {
     size_t detected = sintra_detect_cache_line_size_linux();
     if (detected && detected != assumed_cache_line_size) {
@@ -799,7 +799,7 @@ static inline size_t sintra_detect_cache_line_size_macos()
     return 64;
 }
 
-static inline void sintra_warn_if_cacheline_mismatch_macos(size_t assumed_cache_line_size)
+static inline void sintra_warn_if_cacheline_mismatch(size_t assumed_cache_line_size)
 {
     size_t detected = sintra_detect_cache_line_size_macos();
     if (detected && detected != assumed_cache_line_size) {

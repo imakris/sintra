@@ -433,13 +433,13 @@ int worker_process_impl(int worker_index)
         }
         if (!advance.success)
         {
-            stop_requested.store(true, std::memory_order_release);
+            stop_requested = true, std::memory_order_release;
         }
         completion_cv.notify_all();
     };
 
     auto stop_slot = [&](const Stop&) {
-        stop_requested.store(true, std::memory_order_release);
+        stop_requested = true, std::memory_order_release;
         {
             std::lock_guard<std::mutex> lk(state_mutex);
             kickoff_seen = true;
@@ -455,9 +455,9 @@ int worker_process_impl(int worker_index)
 
     const std::string group(kBarrierGroup);
 
-    for (int round = 0; round < kRounds && !stop_requested.load(); ++round)
+    for (int round = 0; round < kRounds && !stop_requested; ++round)
     {
-        active_round.store(round, std::memory_order_release);
+        active_round = round, std::memory_order_release;
         {
             std::lock_guard<std::mutex> lk(state_mutex);
             kickoff_seen = false;
@@ -535,7 +535,7 @@ int aggregator_process()
         if (task.round != state.round || task.worker_id < 0 ||
             task.worker_id >= static_cast<int>(kWorkerCount))
         {
-            failure.store(true, std::memory_order_release);
+            failure = true, std::memory_order_release;
             return;
         }
         auto& worker = state.workers[static_cast<std::size_t>(task.worker_id)];
@@ -549,7 +549,7 @@ int aggregator_process()
         if (done.round != state.round || done.worker_id < 0 ||
             done.worker_id >= static_cast<int>(kWorkerCount))
         {
-            failure.store(true, std::memory_order_release);
+            failure = true, std::memory_order_release;
             return;
         }
         auto& worker = state.workers[static_cast<std::size_t>(done.worker_id)];
@@ -565,8 +565,8 @@ int aggregator_process()
     };
 
     auto stop_slot = [&](const Stop& stop) {
-        stop_requested.store(true, std::memory_order_release);
-        failure.store(failure.load(std::memory_order_acquire) || stop.due_to_failure,
+        stop_requested = true, std::memory_order_release;
+        failure = failure.load(std::memory_order_acquire || stop.due_to_failure,
                       std::memory_order_release);
         state_cv.notify_all();
     };
@@ -578,7 +578,7 @@ int aggregator_process()
 
     const std::string group(kBarrierGroup);
 
-    for (int round = 0; round < kRounds && !stop_requested.load(); ++round)
+    for (int round = 0; round < kRounds && !stop_requested; ++round)
     {
         {
             std::lock_guard<std::mutex> lk(state_mutex);
@@ -600,7 +600,7 @@ int aggregator_process()
         {
             std::unique_lock<std::mutex> lk(state_mutex);
             const bool ready = state_cv.wait_for(lk, kWaitTimeout, [&] {
-                return state.ready_to_validate || stop_requested.load();
+                return state.ready_to_validate || stop_requested;
             });
             if (!ready)
             {
@@ -633,7 +633,7 @@ int aggregator_process()
             }
         }
 
-        failure.store(failure.load(std::memory_order_acquire) || local_failure,
+        failure = failure.load(std::memory_order_acquire || local_failure,
                       std::memory_order_release);
 
         for (std::size_t idx = 0; idx < kWorkerCount; ++idx)
@@ -647,7 +647,7 @@ int aggregator_process()
     }
 
     sintra::barrier(std::string(kFinalBarrier), "_sintra_all_processes");
-    return failure.load() ? 1 : 0;
+    return failure ? 1 : 0;
 }
 // ---------------------------------------------------------------------------
 // Verifier process
@@ -682,7 +682,7 @@ int verifier_process()
         if (validation.round != current_round || validation.worker_id < 0 ||
             validation.worker_id >= static_cast<int>(kWorkerCount))
         {
-            failure.store(true, std::memory_order_release);
+            failure = true, std::memory_order_release;
             return;
         }
         auto& worker = worker_state[static_cast<std::size_t>(validation.worker_id)];
@@ -699,8 +699,8 @@ int verifier_process()
     };
 
     auto stop_slot = [&](const Stop& stop) {
-        stop_requested.store(true, std::memory_order_release);
-        failure.store(failure.load(std::memory_order_acquire) || stop.due_to_failure,
+        stop_requested = true, std::memory_order_release;
+        failure = failure.load(std::memory_order_acquire || stop.due_to_failure,
                       std::memory_order_release);
         state_cv.notify_all();
     };
@@ -711,7 +711,7 @@ int verifier_process()
 
     const std::string group(kBarrierGroup);
 
-    for (int round = 0; round < kRounds && !stop_requested.load(); ++round)
+    for (int round = 0; round < kRounds && !stop_requested; ++round)
     {
         {
             std::lock_guard<std::mutex> lk(state_mutex);
@@ -730,11 +730,11 @@ int verifier_process()
         {
             std::unique_lock<std::mutex> lk(state_mutex);
             const bool seed_ok = state_cv.wait_for(lk, kWaitTimeout, [&] {
-                return seed_ready[static_cast<std::size_t>(round)] || stop_requested.load();
+                return seed_ready[static_cast<std::size_t>(round)] || stop_requested;
             });
             if (!seed_ok)
             {
-                failure.store(true, std::memory_order_release);
+                failure = true, std::memory_order_release;
             }
             if (seed_ready[static_cast<std::size_t>(round)])
             {
@@ -748,7 +748,7 @@ int verifier_process()
         {
             std::unique_lock<std::mutex> lk(state_mutex);
             const bool ready = state_cv.wait_for(lk, kWaitTimeout, [&] {
-                return ready_to_advance || stop_requested.load();
+                return ready_to_advance || stop_requested;
             });
             if (!ready)
             {
@@ -776,14 +776,14 @@ int verifier_process()
         sintra::world() << RoundAdvance{round, success, checksums};
         if (!success)
         {
-            stop_requested.store(true, std::memory_order_release);
+            stop_requested = true, std::memory_order_release;
         }
 
         sintra::barrier<sintra::processing_fence_t>(barrier_round_complete_name(round), group);
     }
 
     sintra::barrier(std::string(kFinalBarrier), "_sintra_all_processes");
-    return failure.load() ? 1 : 0;
+    return failure ? 1 : 0;
 }
 
 // ---------------------------------------------------------------------------

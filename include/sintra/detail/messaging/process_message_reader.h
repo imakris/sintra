@@ -127,7 +127,7 @@ struct Process_message_reader
     ~Process_message_reader();
 
 
-    void pause() { m_reader_state.store(READER_SERVICE, std::memory_order_release); }
+    void pause() { m_reader_state = READER_SERVICE, std::memory_order_release; }
 
 
     inline

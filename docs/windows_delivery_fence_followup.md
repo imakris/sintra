@@ -76,7 +76,7 @@ The approach did **not** succeed:
   reading sequence). This would allow the coordinator to compute an absolute
   "drain-to" target without guessing the mapping.
 * Alternatively, explore draining by counting messages rather than comparing raw
-  sequence numbers—e.g., capture the difference between leading and reading
+  sequence numbers-e.g., capture the difference between leading and reading
   sequences on the coordinator at barrier entry and wait until that backlog size
   reaches zero.
 
@@ -100,7 +100,7 @@ showed that the sequence spaces still diverge:
   epoch.
 * For later barriers the coordinator's backlog shrank to zero, yet the remote
   handshakes never caught up. Waiting for `max(remote_target, local_snapshot)`
-  therefore blocked indefinitely—local readers never report `>= 323` again once
+  therefore blocked indefinitely-local readers never report `>= 323` again once
   a fresh process epoch starts at a lower absolute sequence number.
 * The repro run slowed to a crawl on Linux (multi-minute wall clock) and never
   reached completion on Windows because the "normalized" targets were outside
@@ -175,7 +175,7 @@ eventually timed out.
   Having a stable translation would allow the coordinator to convert worker
   provided sequences into local targets without guessing.
 * Re-run the repro test under heavy instrumentation (ideally with timestamps) to
-  confirm whether the 180–200 sequence gap is constant or grows with each
+  confirm whether the 180-200 sequence gap is constant or grows with each
   iteration. If it grows, the handshake must also cover newly arriving traffic
   while the barrier drains the backlog.
 

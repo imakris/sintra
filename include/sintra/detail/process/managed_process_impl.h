@@ -386,7 +386,7 @@ void Managed_process::enable_recovery()
      *  • Each reader/writer ring is implemented via Ring_data::attach(), which
      *    reserves a 2× span and double maps the 2 MiB data file so wrap-around is
      *    linear for zero-copy reads. Those double-mapped spans are what appear as
-     *    "guard"/reserved regions inside Mach-O cores—the mapping design is
+     *    "guard"/reserved regions inside Mach-O cores-the mapping design is
      *    required for the ring abstraction rather than recovery itself, but the
      *    recovery harness crashes the process often enough that the platform
      *    keeps dumping them.

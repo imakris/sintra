@@ -105,17 +105,17 @@ void Process_message_reader::wait_until_ready()
 inline
 void Process_message_reader::stop_nowait()
 {
-    m_reader_state.store(READER_STOPPING, std::memory_order_release);
+    m_reader_state = READER_STOPPING, std::memory_order_release;
     m_ready_condition.notify_all();
 
     if (auto progress = m_delivery_progress) {
         const auto req_seq = m_in_req_c ? m_in_req_c->get_message_reading_sequence() : invalid_sequence;
-        progress->request_sequence.store(req_seq, std::memory_order_release);
-        progress->request_stopped.store(true, std::memory_order_release);
+        progress->request_sequence = req_seq, std::memory_order_release;
+        progress->request_stopped = true, std::memory_order_release;
 
         const auto rep_seq = m_in_rep_c ? m_in_rep_c->get_message_reading_sequence() : invalid_sequence;
-        progress->reply_sequence.store(rep_seq, std::memory_order_release);
-        progress->reply_stopped.store(true, std::memory_order_release);
+        progress->reply_sequence = rep_seq, std::memory_order_release;
+        progress->reply_stopped = true, std::memory_order_release;
 
         if (s_mproc) {
             s_mproc->notify_delivery_progress();
@@ -237,7 +237,7 @@ void Process_message_reader::request_reader_function()
 
     auto progress = m_delivery_progress;
     if (progress) {
-        progress->request_stopped.store(false, std::memory_order_release);
+        progress->request_stopped = false, std::memory_order_release;
     }
 
     auto publish_request_progress = [progress](sequence_counter_type seq) {
@@ -258,7 +258,7 @@ void Process_message_reader::request_reader_function()
     m_in_req_c->start_reading();
     {
         std::lock_guard<std::mutex> ready_guard(m_ready_mutex);
-        m_req_running.store(true, std::memory_order_release);
+        m_req_running = true, std::memory_order_release;
     }
     m_ready_condition.notify_all();
 
@@ -410,14 +410,14 @@ void Process_message_reader::request_reader_function()
     s_mproc->m_num_active_readers_condition.notify_all();
 
     std::lock_guard<std::mutex> lk(m_stop_mutex);
-    m_req_running.store(false, std::memory_order_release);
+    m_req_running = false, std::memory_order_release;
     m_ready_condition.notify_all();
     m_stop_condition.notify_one();
 
     if (progress) {
         const auto seq = m_in_req_c->get_message_reading_sequence();
-        progress->request_sequence.store(seq, std::memory_order_release);
-        progress->request_stopped.store(true, std::memory_order_release);
+        progress->request_sequence = seq, std::memory_order_release;
+        progress->request_stopped = true, std::memory_order_release;
     }
     if (s_mproc) {
         s_mproc->notify_delivery_progress();
@@ -488,7 +488,7 @@ void Process_message_reader::reply_reader_function()
 
     auto progress = m_delivery_progress;
     if (progress) {
-        progress->reply_stopped.store(false, std::memory_order_release);
+        progress->reply_stopped = false, std::memory_order_release;
     }
 
     auto publish_reply_progress = [progress](sequence_counter_type seq) {
@@ -505,7 +505,7 @@ void Process_message_reader::reply_reader_function()
     m_in_rep_c->start_reading();
     {
         std::lock_guard<std::mutex> ready_guard(m_ready_mutex);
-        m_rep_running.store(true, std::memory_order_release);
+        m_rep_running = true, std::memory_order_release;
     }
     m_ready_condition.notify_all();
 
@@ -600,7 +600,7 @@ void Process_message_reader::reply_reader_function()
                         }
                     }
                     else {
-                        // No active return handler — can happen if the caller already cleaned up
+                        // No active return handler - can happen if the caller already cleaned up
                         // (e.g., after cancellation/shutdown) and a late/duplicate message arrived.
                         // Drop it quietly unless we're fully RUNNING; in RUNNING emit a diagnostic
                         // but do not hard-assert to avoid modal dialogs on Windows Debug.
@@ -648,14 +648,14 @@ void Process_message_reader::reply_reader_function()
     s_mproc->m_num_active_readers_condition.notify_all();
 
     std::lock_guard<std::mutex> lk(m_stop_mutex);
-    m_rep_running.store(false, std::memory_order_release);
+    m_rep_running = false, std::memory_order_release;
     m_ready_condition.notify_all();
     m_stop_condition.notify_one();
 
     publish_reply_progress(m_in_rep_c->get_message_reading_sequence());
 
     if (progress) {
-        progress->reply_stopped.store(true, std::memory_order_release);
+        progress->reply_stopped = true, std::memory_order_release;
     }
     if (s_mproc) {
         s_mproc->notify_delivery_progress();

@@ -346,7 +346,7 @@ struct Shared_state
     Shared_state()
     {
         for (auto& owner : resource_owner) {
-            owner.store(-1, std::memory_order_relaxed);
+            owner = -1, std::memory_order_relaxed;
         }
         new (&sem_storage) interprocess_semaphore(kResources);
     }
@@ -450,7 +450,7 @@ void test_cross_process_coordination()
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
 
-        shared->start.store(1, std::memory_order_release);
+        shared->start = 1, std::memory_order_release;
 
         const int expected = kChildren * kIterationsPerChild;
         const auto finish_deadline = std::chrono::steady_clock::now() + kOverallTimeout;

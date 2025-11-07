@@ -3,23 +3,23 @@
 //
 // This test deliberately crafts an overly intricate multi-process
 // coordination scenario.  It chains together multiple synchronization
-// patterns – readiness handshakes, staged production checkpoints,
-// chaos probes that demand acknowledgements, and final audit barriers –
+// patterns - readiness handshakes, staged production checkpoints,
+// chaos probes that demand acknowledgements, and final audit barriers -
 // in order to exercise Sintra's message routing and barrier logic in a
 // dense, failure-prone arrangement.  While the scenario is contrived, it
 // is logically consistent and each step can complete successfully if the
 // synchronization primitives behave correctly.
 //
 // Process layout:
-//   * Conductor – orchestrates the phase plan, verifies checkpoints and
+//   * Conductor - orchestrates the phase plan, verifies checkpoints and
 //                  audit responses, and emits the global terminate signal.
-//   * Aggregator – validates producer payloads, enforces per-round
+//   * Aggregator - validates producer payloads, enforces per-round
 //                  checkpoints, waits for chaos completion, and emits an
 //                  audit outcome for every phase.
-//   * Producers (3) – emit deterministic data for each round, wait for
+//   * Producers (3) - emit deterministic data for each round, wait for
 //                     aggregator checkpoints before progressing, and
 //                     respond to chaos probes.
-//   * Chaos agent – injects probe messages for every phase and waits for
+//   * Chaos agent - injects probe messages for every phase and waits for
 //                   acknowledgements from every producer before allowing
 //                   the aggregator to finish.
 //

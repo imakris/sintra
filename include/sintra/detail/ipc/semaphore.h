@@ -570,9 +570,9 @@ inline void ips_backend::init_named(
 inline bool ips_backend::try_wait() noexcept
 {
     std::atomic<uint32_t>& c = P(*this).count;
-    uint32_t v = c.load(std::memory_order_seq_cst);
+    uint32_t v = c;
     while (v != 0) {
-        if (c.compare_exchange_weak(v, v-1, std::memory_order_seq_cst, std::memory_order_seq_cst)) {
+        if (c.compare_exchange_weak(v, v-1)) {
             return true;
         }
     }
@@ -595,9 +595,9 @@ inline bool ips_backend::try_wait_for(std::chrono::nanoseconds d) noexcept
     const uint64_t deadline = monotonic_now_ns() + add;
 
     for (;;) {
-        uint32_t cur = c.load(std::memory_order_seq_cst);
+        uint32_t cur = c;
         if (cur != 0) {
-            if (c.compare_exchange_weak(cur, cur-1, std::memory_order_seq_cst, std::memory_order_seq_cst))
+            if (c.compare_exchange_weak(cur, cur-1))
                 return true;
             continue;
         }
@@ -628,7 +628,7 @@ inline void ips_backend::post(uint32_t n) noexcept
     if (n == 0) return;
 
     std::atomic<uint32_t>& c = P(*this).count;
-    uint32_t v = c.load(std::memory_order_seq_cst);
+    uint32_t v = c;
     const uint32_t maxv = P(*this).max;
 
     for (;;) {
@@ -636,7 +636,7 @@ inline void ips_backend::post(uint32_t n) noexcept
             errno = EOVERFLOW;
             return;
         }
-        if (c.compare_exchange_weak(v, v + n, std::memory_order_seq_cst, std::memory_order_seq_cst)) {
+        if (c.compare_exchange_weak(v, v + n)) {
             break;
         }
     }

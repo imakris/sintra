@@ -36,7 +36,7 @@ No explicit initialization routine is required.
 COMPATIBILITY & PORTABILITY
 The implementation is portable to any platform that supports lock-free 64-bit
 atomics and basic thread yielding. It uses adaptive spinning with exponential
-backoff and occasional sleeps under contention. No operating system–specific
+backoff and occasional sleeps under contention. No operating system-specific
 kernel synchronization primitives are required.
 
 RECOVERY FLAG
@@ -171,7 +171,7 @@ public:
         const owner_token self = make_owner_token();
         owner_token expected = self;
         if (!m_owner.compare_exchange_strong(
-            expected, k_unowned, std::memory_order_seq_cst, std::memory_order_seq_cst))
+            expected, k_unowned))
         {
             // Either unlocked by someone else (after recovery) or not owned by us.
             throw std::system_error(std::make_error_code(std::errc::operation_not_permitted),
@@ -184,7 +184,7 @@ public:
     // Indicates whether the last successful acquire of *this mutex instance* was via recovery
     bool recovered_last_acquire() const noexcept
     {
-        return m_last_recovered.load(std::memory_order_seq_cst) != 0u;
+        return m_last_recovered != 0u;
     }
 
 private:
@@ -264,10 +264,10 @@ private:
     {
         owner_token expected = k_unowned;
         if (m_owner.compare_exchange_strong(
-            expected, self, std::memory_order_seq_cst, std::memory_order_seq_cst))
+            expected, self))
         {
             // Successful normal acquisition -> clear recovery flag
-            m_last_recovered.store(0u, std::memory_order_seq_cst);
+            m_last_recovered = 0u;
             return true;
         }
 
@@ -285,10 +285,10 @@ private:
         if (expected != k_unowned && try_recover(expected, self)) {
             expected = k_unowned;
             if (m_owner.compare_exchange_strong(
-                expected, self, std::memory_order_seq_cst, std::memory_order_seq_cst))
+                expected, self))
             {
                 // Successful post-recovery acquisition -> set recovery flag
-                m_last_recovered.store(1, std::memory_order_seq_cst);
+                m_last_recovered = 1;
                 return true;
             }
         }
@@ -304,7 +304,7 @@ private:
         }
 
         // If someone is recovering but that process is dead or stalled, clear it first.
-        recover_token rec = m_recovering.load(std::memory_order_seq_cst);
+        recover_token rec = m_recovering;
         if (rec != 0) {
             const auto rp = recover_pid(rec);
             const auto rt = recover_ticks(rec);
@@ -315,7 +315,7 @@ private:
 
             if ((rp != 0 && !is_process_alive(rp)) || stalled) {
                 m_recovering.compare_exchange_strong(
-                    rec, static_cast<recover_token>(0), std::memory_order_seq_cst, std::memory_order_seq_cst);
+                    rec, static_cast<recover_token>(0));
             }
         }
 
@@ -323,14 +323,14 @@ private:
         const recover_token want = make_recover_token(get_current_pid(), now_ticks32());
         recover_token zero = 0;
         if (!m_recovering.compare_exchange_strong(
-            zero, want, std::memory_order_seq_cst, std::memory_order_seq_cst))
+            zero, want))
         {
             return false; // someone else is (still) recovering
         }
 
         // We are the recoverer now.
         bool recovered = false;
-        owner_token current_owner = m_owner.load(std::memory_order_seq_cst);
+        owner_token current_owner = m_owner;
 
         // If unlocked meanwhile, consider it recovered.
         if (current_owner == k_unowned) {
@@ -340,11 +340,11 @@ private:
         if (current_owner == observed_owner && !is_process_alive(owner_pid(observed_owner))) {
             // Owner process is dead -> forcibly clear ownership.
             recovered = m_owner.compare_exchange_strong(
-                current_owner, k_unowned, std::memory_order_seq_cst, std::memory_order_seq_cst);
+                current_owner, k_unowned);
         }
 
         // Release the recovery lock.
-        m_recovering.store(static_cast<recover_token>(0), std::memory_order_seq_cst);
+        m_recovering = static_cast<recover_token>(0);
         return recovered;
     }
 

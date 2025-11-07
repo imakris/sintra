@@ -21,7 +21,7 @@
 class os_sync_semaphore {
 public:
     explicit os_sync_semaphore(unsigned int initial_count = 0) {
-        m_count.store(static_cast<int32_t>(initial_count), std::memory_order_relaxed);
+        m_count = static_cast<int32_t>(initial_count, std::memory_order_relaxed);
     }
 
     void post() {

@@ -3,11 +3,11 @@
 Sintra distinguishes three lifecycle states for processes that participate in
 coordinated execution:
 
-- **ACTIVE** – the process contributes to barriers and other group-wide RPCs.
-- **DRAINING** – the process is shutting down. It is excluded from future
+- **ACTIVE** - the process contributes to barriers and other group-wide RPCs.
+- **DRAINING** - the process is shutting down. It is excluded from future
   barriers and automatically released from any barrier that is already in
   progress.
-- **TERMINATED** – the process has exited and its resources have been scavenged.
+- **TERMINATED** - the process has exited and its resources have been scavenged.
 
 ## `sintra::finalize()`
 
@@ -44,8 +44,8 @@ Calling `sintra::finalize()` now performs the following steps:
   participants remain. *(Coordinator::drop_from_inflight_barriers in coordinator_impl.h)*
 - **Barrier completion with per-recipient flush tokens:** Processes that already
   reached the barrier continue to wait for their return value. When the barrier
-  resolves—either because the last active participant arrives or because every
-  remaining pending member began draining—the coordinator sends the result to each
+  resolves-either because the last active participant arrives or because every
+  remaining pending member began draining-the coordinator sends the result to each
   waiting caller. **Critically, each recipient receives a flush token computed at
   the moment their message is written** (not a global token), preventing hangs
   where a global watermark might be ahead of a recipient's channel.

@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$(cat <<''EOF''\nMerge remote branch updates into claude/use-union-instead-of-bitpacking\n\nResolved conflicts by keeping enhanced features from bugfix-macos-2:\n- SINTRA_PREFER_LLDB environment variable for debugger selection\n- lldb_capture_all.py script integration for comprehensive stack traces\n- ping_pong_hang_test documentation for lldb testing\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n)\")",
+      "Bash(gh run view:*)",
+      "Bash(gh api:*)",
+      "Bash(git ls-tree:*)",
+      "Bash(git checkout:*)",
+      "Bash(git push:*)",
+      "Bash(git commit:*)",
+      "Bash(git reset:*)",
+      "Bash(git merge:*)",
+      "Bash(gh run list:*)",
+      "WebFetch(domain:github.com)",
+      "Bash(gh pr view:*)",
+      "Bash(git rm -rf . --quiet)",
+      "Bash(git for-each-ref:*)",
+      "Bash(cmake --build:*)",
+      "Bash(for:*)",
+      "Bash(do sed -i 's/—/-/g; s/–/-/g; s/−/-/g' \"$file\")",
+      "Bash(done)",
+      "Bash(find:*)",
+      "Bash(perl -i -0pe:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

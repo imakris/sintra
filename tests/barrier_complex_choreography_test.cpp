@@ -425,17 +425,17 @@ int stage_process(std::uint32_t stage, std::uint32_t worker_index)
             return;
         }
         if (directive.iteration >= kIterations) {
-            failure.store(true, std::memory_order_relaxed);
+            failure = true, std::memory_order_relaxed;
             return;
         }
         if (directive.extra_rounds > kMaxExtraRounds) {
-            failure.store(true, std::memory_order_relaxed);
+            failure = true, std::memory_order_relaxed;
         }
 
         {
             std::lock_guard<std::mutex> lock(release_mutex);
             if (release_received[directive.iteration]) {
-                failure.store(true, std::memory_order_relaxed);
+                failure = true, std::memory_order_relaxed;
             } else {
                 release_received[directive.iteration] = true;
             }
@@ -482,14 +482,14 @@ int stage_process(std::uint32_t stage, std::uint32_t worker_index)
 
             auto [extra_rounds, token] = wait_for_release(iteration);
             if (token != directive_token(stage, iteration)) {
-                failure.store(true, std::memory_order_relaxed);
+                failure = true, std::memory_order_relaxed;
             }
 
             barrier(phase_a_barrier);
             barrier(phase_b_barrier);
 
             if (extra_rounds > kMaxExtraRounds) {
-                failure.store(true, std::memory_order_relaxed);
+                failure = true, std::memory_order_relaxed;
                 extra_rounds = kMaxExtraRounds;
             }
             for (std::uint32_t extra = 0; extra < extra_rounds; ++extra) {
@@ -503,7 +503,7 @@ int stage_process(std::uint32_t stage, std::uint32_t worker_index)
 
             auto [extra_rounds, token] = wait_for_release(iteration);
             if (token != directive_token(stage, iteration)) {
-                failure.store(true, std::memory_order_relaxed);
+                failure = true, std::memory_order_relaxed;
             }
 
             const int delay = delay_dist(gen);
@@ -518,7 +518,7 @@ int stage_process(std::uint32_t stage, std::uint32_t worker_index)
             barrier(phase_b_barrier);
 
             if (extra_rounds > kMaxExtraRounds) {
-                failure.store(true, std::memory_order_relaxed);
+                failure = true, std::memory_order_relaxed;
                 extra_rounds = kMaxExtraRounds;
             }
             for (std::uint32_t extra = 0; extra < extra_rounds; ++extra) {

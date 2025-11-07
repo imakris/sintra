@@ -38,7 +38,7 @@ advanced to the recorded targets. The coordinator would schedule a
   branch; the new helper was effectively idle. The repro test still stalled the
   coordinator after the initial "ready" barrier, which matches the original
   failure mode.
-* Forcing the handshake during startup barriers is not correct—the map of
+* Forcing the handshake during startup barriers is not correct-the map of
   request readers is incomplete during early initialization and the wait spins
   forever (reproducing the "315 vs 0" stall recorded in the May 2025 notes).
 * Injecting tracing directly into `delivery_fence_t` confirmed that the helper

@@ -219,7 +219,7 @@ struct Process_group : Derived_transceiver<Process_group> {
 
 **Return vs. Per-Recipient Tokens:** The barrier RPC returns a **single**
 watermark from the coordinator's **reply ring** for the **caller**. Per-recipient
-tokens are computed **inside** the coordinator's emit loop—one token **per
+tokens are computed **inside** the coordinator's emit loop-one token **per
 completion message**, at write time. Don't confuse the RPC's return value
 (the single marker the caller must flush) with the per-recipient tokens
 (embedded in each completion message).
@@ -451,7 +451,7 @@ required beyond the double-mapped rings themselves, and the respawned process in
 
 **How many rings stay mapped during `recovery_test`?** The watchdog, coordinator, and crasher each hold two outgoing rings
 (`Message_ring_W`) plus request/reply readers for every other live process. At the point where the crasher aborts that
-amounts to a few dozen 4 MiB spans in total—on the order of 250 MiB of virtual address space. Those ranges used to inflate
+amounts to a few dozen 4 MiB spans in total-on the order of 250 MiB of virtual address space. Those ranges used to inflate
 macOS cores to ~4.24 GiB (4 GiB `__PAGEZERO` + ~0.25 GiB of double-mapped rings + stacks/segments). Linux skips the ring
 spans thanks to `MADV_DONTDUMP`; macOS still records them, which is why the recovery test suppresses its intentional core
 file entirely.
@@ -464,8 +464,8 @@ file entirely.
 
 **Special IDs**:
 - `invalid_instance_id = 0`
-- `make_service_instance_id()` – allocates service IDs from the reserved range attached to the local process slot
-- `make_process_instance_id()` – produces the per-process sentinel (`transceiver == 1`) used for membership tracking
+- `make_service_instance_id()` - allocates service IDs from the reserved range attached to the local process slot
+- `make_process_instance_id()` - produces the per-process sentinel (`transceiver == 1`) used for membership tracking
 
 ### Type IDs
 

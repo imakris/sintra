@@ -139,7 +139,7 @@ int main(int argc, char* argv[])
     sintra::finalize();
 
     std::printf("Barrier rapid reuse test completed\n");
-    std::printf("Failures: %d\n", failures.load());
+    std::printf("Failures: %d\n", failures);
 
     return (failures > 0) ? 1 : 0;
 }

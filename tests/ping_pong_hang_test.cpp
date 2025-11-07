@@ -112,7 +112,7 @@ int process_ping_responder()
     std::thread worker_thread([&]() {
         int worker_iteration = 0;
         std::string worker_name = "ping_worker_thread";
-        while (keep_running.load()) {
+        while (keep_running) {
             worker_iteration++;
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
@@ -158,7 +158,7 @@ int process_pong_responder()
             int thread_id = i;
             std::string thread_name = "pong_worker_" + std::to_string(i);
             int work_count = 0;
-            while (keep_running.load()) {
+            while (keep_running) {
                 work_count++;
                 std::this_thread::sleep_for(std::chrono::milliseconds(30 + i * 10));
             }
@@ -166,7 +166,7 @@ int process_pong_responder()
     }
 
     sintra::activate_slot([&](Pong) {
-        int current_count = pong_count.fetch_add(1);
+        int current_count = pong_count++;
         response_times.push_back(current_count * 10);
 
         if (current_count >= max_responses) {
@@ -221,9 +221,9 @@ int process_monitor()
     std::thread monitor_thread([&]() {
         std::string monitor_thread_name = "monitor_thread";
         int monitor_iteration = 0;
-        while (keep_monitoring.load()) {
+        while (keep_monitoring) {
             monitor_iteration++;
-            int current_count = ping_counter.load();
+            int current_count = ping_counter;
             if (current_count > max_pings_seen) {
                 max_pings_seen = current_count;
             }
@@ -232,7 +232,7 @@ int process_monitor()
     });
 
     auto monitor_slot = [&](Ping) {
-        int count = ping_counter.fetch_add(1) + 1;
+        int count = ping_counter++ + 1;
         ping_timestamps.push_back(std::chrono::steady_clock::now());
 
         if (ping_timestamps.size() >= 2) {

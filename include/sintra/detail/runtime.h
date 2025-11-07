@@ -101,7 +101,7 @@ inline std::atomic<bool>& debug_pause_state()
 
 inline void set_debug_pause_active(bool active)
 {
-    debug_pause_state().store(active, std::memory_order_release);
+    debug_pause_state() = active, std::memory_order_release;
 }
 
 inline bool is_debug_pause_active()
@@ -421,7 +421,7 @@ inline bool finalize()
             flush_seq = invalid_sequence;
         }
 
-        done.store(true, std::memory_order_release);
+        done = true, std::memory_order_release;
         watchdog.join();
     }
 
