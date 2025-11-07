@@ -567,11 +567,13 @@ TEST_CASE(test_streaming_reader_status_restored_after_eviction)
         sintra::Ring<uint32_t, true>::guard_token_present_mask;
     constexpr uint8_t guard_octile_mask_u32 =
         sintra::Ring<uint32_t, true>::guard_token_octile_mask;
-    uint8_t guard_snapshot = slot.guard_token.exchange(0, std::memory_order_acq_rel);
-    ASSERT_TRUE((guard_snapshot & guard_present_mask_u32) != 0);
-    ASSERT_EQ(guarded_octile, guard_snapshot & guard_octile_mask_u32);
+    // Atomically clear guard and set EVICTED status using packed_state
+    uint32_t old_state = slot.packed_state.exchange(
+        sintra::Ring<uint32_t, true>::make_packed_state(0, false, sintra::Ring<uint32_t, true>::READER_STATE_EVICTED),
+        std::memory_order_acq_rel);
+    ASSERT_TRUE(sintra::Ring<uint32_t, true>::extract_guard_present(old_state));
+    ASSERT_EQ(guarded_octile, sintra::Ring<uint32_t, true>::extract_octile(old_state));
     control.read_access.fetch_sub(guard_mask, std::memory_order_acq_rel);
-    slot.status.store(sintra::Ring<uint32_t, true>::READER_STATE_EVICTED, std::memory_order_release);
 
     control.leading_sequence.fetch_add(ring_elements / 4, std::memory_order_release);
     reader.m_reading_sequence->fetch_sub(ring_elements / 4, std::memory_order_release);
@@ -582,7 +584,8 @@ TEST_CASE(test_streaming_reader_status_restored_after_eviction)
     reader.done_reading_new_data();
 
     const auto active_state = sintra::Ring<uint32_t, true>::READER_STATE_ACTIVE;
-    ASSERT_EQ(active_state, slot.status.load(std::memory_order_acquire));
+    uint32_t final_state = slot.packed_state.load(std::memory_order_acquire);
+    ASSERT_EQ(active_state, sintra::Ring<uint32_t, true>::extract_status(final_state));
 
     ASSERT_NO_THROW({
         reader.start_reading();
