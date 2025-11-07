@@ -795,7 +795,7 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         Reader_state_union current(state.load(reader_state_load_order(order)));
         while (true) {
             Reader_state_union desired = transform(current);
-            if (state.compare_exchange_weak(
+            if (state.compare_exchange_strong(
                     current.word, desired.word, order, std::memory_order_relaxed)) {
                 return current;
             }
@@ -823,7 +823,7 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
                 return current;
             }
 
-            if (state.compare_exchange_weak(
+            if (state.compare_exchange_strong(
                     current.word, desired->word, order, std::memory_order_relaxed)) {
                 updated = true;
                 return current;
@@ -1608,7 +1608,11 @@ struct Ring_R : Ring<T, true>
                     uint64_t(1) << (8 * released_octile), std::memory_order_seq_cst);
             }
             else if (!guard_cleared) {
-                m_evicted_since_last_wait.store(true, std::memory_order_seq_cst);
+                // Only set eviction flag if we were ACTUALLY evicted, not just CAS failure
+                Reader_state_union current_state(c.reading_sequences[m_rs_index].data.reader_state.word.load(std::memory_order_seq_cst));
+                if (Ring<T, true>::reader_state_status(current_state) == Ring<T, true>::READER_STATE_EVICTED) {
+                    m_evicted_since_last_wait.store(true, std::memory_order_seq_cst);
+                }
             }
             m_reading.store(false, std::memory_order_seq_cst);
         }
