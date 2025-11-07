@@ -221,7 +221,7 @@ Coordinator::Coordinator():
     // barrier paths are safe without additional locking. The array is fixed-size and
     // never grows, eliminating data races from container mutation.
     for (auto& draining_state : m_draining_process_states) {
-        draining_state = 0, std::memory_order_relaxed;
+        draining_state = 0;
     }
 }
 
@@ -405,7 +405,7 @@ instance_id_type Coordinator::publish_transceiver(type_id_type tid, instance_id_
         const auto draining_index = get_process_index(process_iid);
         if (draining_index > 0 && draining_index <= static_cast<uint64_t>(max_process_index)) {
             const auto slot = static_cast<size_t>(draining_index);
-            m_draining_process_states[slot] = 0, std::memory_order_release;
+            m_draining_process_states[slot] = 0;
         }
 
         return true_sequence();
@@ -472,7 +472,7 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
         const auto draining_index = get_process_index(process_iid);
         if (draining_index > 0 && draining_index <= static_cast<uint64_t>(max_process_index)) {
             const auto slot = static_cast<size_t>(draining_index);
-            m_draining_process_states[slot] = 1, std::memory_order_release;
+            m_draining_process_states[slot] = 1;
         }
 
         struct Pending_completion
@@ -548,7 +548,7 @@ inline sequence_counter_type Coordinator::begin_process_draining(instance_id_typ
     const auto draining_index = get_process_index(process_iid);
     if (draining_index > 0 && draining_index <= static_cast<uint64_t>(max_process_index)) {
         const auto slot = static_cast<size_t>(draining_index);
-        m_draining_process_states[slot] = 1, std::memory_order_release;
+        m_draining_process_states[slot] = 1;
     }
 
     struct Pending_completion
@@ -601,7 +601,7 @@ inline bool Coordinator::is_process_draining(instance_id_type process_iid) const
     }
 
     const auto slot = static_cast<size_t>(draining_index);
-    return m_draining_process_states[slot].load(std::memory_order_acquire) != 0;
+    return m_draining_process_states[slot].load()) != 0;
 }
 
 

@@ -419,7 +419,9 @@ inline bool ips_backend::try_wait_for(std::chrono::nanoseconds d) noexcept
 
 inline void ips_backend::post(uint32_t n) noexcept
 {
-    if (n == 0) return;
+    if (n == 0) {
+        return;
+    }
     HANDLE h = ips_win_ensure_handle(*this);
     if (!h) {
         errno = EINVAL; return;
@@ -447,7 +449,9 @@ static inline void ns_to_timespec(uint64_t ns, struct timespec& ts)
 {
     uint64_t sec = ns / 1000000000ULL;
     uint64_t tmax = (uint64_t)std::numeric_limits<time_t>::max();
-    if (sec > tmax) sec = tmax;
+    if (sec > tmax) {
+        sec = tmax;
+    }
     ts.tv_sec  = (time_t)sec;
     ts.tv_nsec = (long)(ns % 1000000000ULL);
 }
@@ -581,7 +585,9 @@ inline bool ips_backend::try_wait() noexcept
 
 inline bool ips_backend::wait() noexcept
 {
-    if (try_wait()) return true;
+    if (try_wait()) {
+        return true;
+    }
     // Use very large timeout for "infinite" wait
     return try_wait_for(std::chrono::nanoseconds(1ULL<<60));
 }
@@ -589,7 +595,9 @@ inline bool ips_backend::wait() noexcept
 inline bool ips_backend::try_wait_for(std::chrono::nanoseconds d) noexcept
 {
     std::atomic<uint32_t>& c = P(*this).count;
-    if (try_wait()) return true;
+    if (try_wait()) {
+        return true;
+    }
 
     const uint64_t add = d.count() <= 0 ? 0ULL : (uint64_t)d.count();
     const uint64_t deadline = monotonic_now_ns() + add;
@@ -625,7 +633,9 @@ inline bool ips_backend::try_wait_for(std::chrono::nanoseconds d) noexcept
 
 inline void ips_backend::post(uint32_t n) noexcept
 {
-    if (n == 0) return;
+    if (n == 0) {
+        return;
+    }
 
     std::atomic<uint32_t>& c = P(*this).count;
     uint32_t v = c;

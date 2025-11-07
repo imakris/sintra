@@ -170,9 +170,7 @@ public:
     {
         const owner_token self = make_owner_token();
         owner_token expected = self;
-        if (!m_owner.compare_exchange_strong(
-            expected, k_unowned))
-        {
+        if (!m_owner.compare_exchange_strong(expected, k_unowned)) {
             // Either unlocked by someone else (after recovery) or not owned by us.
             throw std::system_error(std::make_error_code(std::errc::operation_not_permitted),
                                     "interprocess_mutex unlock by non-owner");
@@ -263,9 +261,7 @@ private:
     bool try_acquire(owner_token self, bool throw_on_recursive)
     {
         owner_token expected = k_unowned;
-        if (m_owner.compare_exchange_strong(
-            expected, self))
-        {
+        if (m_owner.compare_exchange_strong(expected, self)) {
             // Successful normal acquisition -> clear recovery flag
             m_last_recovered = 0u;
             return true;
@@ -284,9 +280,7 @@ private:
         // Recovery path: previous owner is gone (process crashed/exited).
         if (expected != k_unowned && try_recover(expected, self)) {
             expected = k_unowned;
-            if (m_owner.compare_exchange_strong(
-                expected, self))
-            {
+            if (m_owner.compare_exchange_strong(expected, self)) {
                 // Successful post-recovery acquisition -> set recovery flag
                 m_last_recovered = 1;
                 return true;
@@ -314,17 +308,14 @@ private:
             const bool stalled = static_cast<std::uint32_t>(nowt - rt) > k_recovery_stale_ms;
 
             if ((rp != 0 && !is_process_alive(rp)) || stalled) {
-                m_recovering.compare_exchange_strong(
-                    rec, static_cast<recover_token>(0));
+                m_recovering.compare_exchange_strong(rec, static_cast<recover_token>(0));
             }
         }
 
         // Try to become the recoverer for a short critical sequence.
         const recover_token want = make_recover_token(get_current_pid(), now_ticks32());
         recover_token zero = 0;
-        if (!m_recovering.compare_exchange_strong(
-            zero, want))
-        {
+        if (!m_recovering.compare_exchange_strong(zero, want)) {
             return false; // someone else is (still) recovering
         }
 
@@ -339,8 +330,7 @@ private:
         else
         if (current_owner == observed_owner && !is_process_alive(owner_pid(observed_owner))) {
             // Owner process is dead -> forcibly clear ownership.
-            recovered = m_owner.compare_exchange_strong(
-                current_owner, k_unowned);
+            recovered = m_owner.compare_exchange_strong(current_owner, k_unowned);
         }
 
         // Release the recovery lock.

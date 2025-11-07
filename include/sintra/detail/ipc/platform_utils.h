@@ -706,16 +706,19 @@ inline void cleanup_stale_swarm_directories(const std::filesystem::path& base_di
                 if (!alive) {
                     stale = true;
                 }
-                else if (record.start_stamp != 0) {
+                else
+                if (record.start_stamp != 0) {
                     auto running_start = query_process_start_stamp(record.pid);
                     if (running_start && *running_start != record.start_stamp) {
                         stale = true;
                     }
-                    else if (!running_start && record.created_monotonic_ns > now_monotonic) {
+                    else
+                    if (!running_start && record.created_monotonic_ns > now_monotonic) {
                         stale = true;
                     }
                 }
-                else if (record.created_monotonic_ns > now_monotonic) {
+                else
+                if (record.created_monotonic_ns > now_monotonic) {
                     stale = true;
                 }
             }

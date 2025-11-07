@@ -101,12 +101,12 @@ inline std::atomic<bool>& debug_pause_state()
 
 inline void set_debug_pause_active(bool active)
 {
-    debug_pause_state() = active, std::memory_order_release;
+    debug_pause_state() = active;
 }
 
 inline bool is_debug_pause_active()
 {
-    return debug_pause_state().load(std::memory_order_acquire);
+    return debug_pause_state().load();
 }
 
 inline void debug_pause_forever(const char* reason)
@@ -405,11 +405,11 @@ inline bool finalize()
         std::atomic<bool> done{false};
         std::thread watchdog([&] {
             const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-            while (!done.load(std::memory_order_acquire) &&
+            while (!done.load() &&
                    std::chrono::steady_clock::now() < deadline) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
-            if (!done.load(std::memory_order_acquire)) {
+            if (!done.load()) {
                 s_mproc->unblock_rpc(process_of(s_coord_id));
             }
         });
@@ -421,7 +421,7 @@ inline bool finalize()
             flush_seq = invalid_sequence;
         }
 
-        done = true, std::memory_order_release;
+        done = true;
         watchdog.join();
     }
 
