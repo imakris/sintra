@@ -1344,11 +1344,16 @@ struct Ring_R : Ring<T, true>
             }
 
             // Trailing guard requirement changed between reads; drop and retry.
-            typename Ring<T, true>::Reader_slot_state old_state{c.reading_sequences[m_rs_index].data.slot_state.load(std::memory_order_acquire)};
-            if (old_state.has_guard()) {
-                typename Ring<T, true>::Reader_slot_state cleared_state = old_state.with_guard(false);
-                c.reading_sequences[m_rs_index].data.slot_state.store(cleared_state.packed, std::memory_order_release);
-                c.read_access.fetch_sub(guard_mask, std::memory_order_acq_rel);
+            // Use CAS to avoid race where writer evicts between our load and store,
+            // which would cause us to overwrite EVICTED status and double-decrement read_access.
+            typename Ring<T, true>::Reader_slot_state expected_state{c.reading_sequences[m_rs_index].data.slot_state.load(std::memory_order_acquire)};
+            if (expected_state.has_guard()) {
+                typename Ring<T, true>::Reader_slot_state new_state = expected_state.with_guard(false);
+                if (c.reading_sequences[m_rs_index].data.slot_state.compare_exchange_strong(
+                        expected_state.packed, new_state.packed, std::memory_order_acq_rel))
+                {
+                    c.read_access.fetch_sub(guard_mask, std::memory_order_acq_rel);
+                }
             }
         }
 
