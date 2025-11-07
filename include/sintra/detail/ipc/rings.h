@@ -1814,59 +1814,79 @@ struct Ring_R : Ring<T, true>
      */
     void done_reading_new_data()
     {
-        // The eviction handler can advance m_reading_sequence and reattach the guard
-        // to a new octile. Recompute the trailing position afterwards so we migrate
-        // toward the post-eviction state rather than the stale pre-eviction value.
-        handle_eviction_if_needed();
+        // CRITICAL: We must not return until guard is successfully updated OR we confirm
+        // eviction was handled. Returning with stale guard can cause permanent deadlock.
+        while (true) {
+            // The eviction handler can advance m_reading_sequence and reattach the guard
+            // to a new octile. Recompute the trailing position afterwards so we migrate
+            // toward the post-eviction state rather than the stale pre-eviction value.
+            if (handle_eviction_if_needed()) {
+                continue;  // Eviction handled, retry from top
+            }
 
-        const size_t t_idx = mod_pos_i64(
-            int64_t(m_reading_sequence->load(std::memory_order_seq_cst)) -
-            int64_t(m_max_trailing_elements),
-            this->m_num_elements);
+            const size_t t_idx = mod_pos_i64(
+                int64_t(m_reading_sequence->load(std::memory_order_seq_cst)) -
+                int64_t(m_max_trailing_elements),
+                this->m_num_elements);
 
-        const size_t new_trailing_octile = (8 * t_idx) / this->m_num_elements;
+            const size_t new_trailing_octile = (8 * t_idx) / this->m_num_elements;
 
-        if (new_trailing_octile != m_trailing_octile) {
+            if (new_trailing_octile == m_trailing_octile) {
+                return;  // Nothing to do
+            }
+
             auto guard_token_accessor = c.reading_sequences[m_rs_index].data.guard_token();
             const uint64_t new_mask     = uint64_t(1) << (8 * new_trailing_octile);
 
-            while (true) {
-                c.read_access.fetch_add(new_mask, std::memory_order_seq_cst);
+            c.read_access.fetch_add(new_mask, std::memory_order_seq_cst);
 
-                bool guard_updated = false;
-                const uint8_t previous_state = guard_token_accessor.fetch_update_if(
-                    [&](typename Ring<T, true>::Reader_state_union current) -> std::optional<typename Ring<T, true>::Reader_state_union> {
-                        if (Ring<T, true>::reader_state_status(current) ==
-                            Ring<T, true>::READER_STATE_EVICTED) {
-                            return std::nullopt;
-                        }
-                        if (!Ring<T, true>::reader_state_guard_present(current)) {
-                            return std::nullopt;
-                        }
+            bool guard_updated = false;
+            const uint8_t previous_state = guard_token_accessor.fetch_update_if(
+                [&](typename Ring<T, true>::Reader_state_union current) -> std::optional<typename Ring<T, true>::Reader_state_union> {
+                    if (Ring<T, true>::reader_state_status(current) ==
+                        Ring<T, true>::READER_STATE_EVICTED) {
+                        return std::nullopt;
+                    }
+                    if (!Ring<T, true>::reader_state_guard_present(current)) {
+                        return std::nullopt;
+                    }
 
-                        return Ring<T, true>::reader_state_apply_guard(current, static_cast<uint8_t>(new_trailing_octile), true);
-                    },
-                    guard_updated,
-                    std::memory_order_seq_cst);
+                    return Ring<T, true>::reader_state_apply_guard(current, static_cast<uint8_t>(new_trailing_octile), true);
+                },
+                guard_updated,
+                std::memory_order_seq_cst);
 
-                if (!guard_updated) {
-                    c.read_access.fetch_sub(new_mask, std::memory_order_seq_cst);
+            if (!guard_updated) {
+                c.read_access.fetch_sub(new_mask, std::memory_order_seq_cst);
+
+                // Check why CAS failed to determine retry strategy
+                const bool was_evicted =
+                    Ring<T, true>::reader_state_status(previous_state) ==
+                    Ring<T, true>::READER_STATE_EVICTED;
+                const bool guard_present = Ring<T, true>::reader_state_guard_present(previous_state);
+
+                if (was_evicted || !guard_present) {
                     handle_eviction_if_needed();
-                    return;
+                    continue;  // Retry after handling eviction
                 }
 
-                const uint8_t previous_octile = Ring<T, true>::encoded_guard_octile(previous_state);
-                if (previous_octile != new_trailing_octile) {
-                    c.read_access.fetch_sub(
-                        uint64_t(1) << (8 * previous_octile), std::memory_order_seq_cst);
-                }
-                else {
-                    c.read_access.fetch_sub(new_mask, std::memory_order_seq_cst);
-                }
-
-                m_trailing_octile = static_cast<uint8_t>(new_trailing_octile);
-                break;
+                // Spurious CAS failure or concurrent modification - yield and retry
+                std::this_thread::yield();
+                continue;
             }
+
+            // Success - clean up old guard octile
+            const uint8_t previous_octile = Ring<T, true>::encoded_guard_octile(previous_state);
+            if (previous_octile != new_trailing_octile) {
+                c.read_access.fetch_sub(
+                    uint64_t(1) << (8 * previous_octile), std::memory_order_seq_cst);
+            }
+            else {
+                c.read_access.fetch_sub(new_mask, std::memory_order_seq_cst);
+            }
+
+            m_trailing_octile = static_cast<uint8_t>(new_trailing_octile);
+            return;
         }
     }
 
