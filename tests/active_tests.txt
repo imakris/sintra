@@ -50,3 +50,4 @@ variable_buffer_alignment_test 10
 # manual/coordinator_crash_children_hang_test 1
 # manual/children_crash_coordinator_deadlock_test 1
 # manual/temp_ring 1
+manual/lldb_process_group_hang_test 1

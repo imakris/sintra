@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -187,69 +188,75 @@ class UnixDebuggerStrategy(DebuggerStrategy):
             debugger_success = False
 
             max_attempts = 3 if debugger_is_macos_lldb else 1
-            base_command = self._build_unix_live_debugger_command(
-                debugger_name,
-                debugger_command,
-                target_pid,
-            )
-            attempt = 0
-            use_sudo = False
-            while attempt < max_attempts:
-                command = (
-                    self._wrap_command_with_sudo(base_command)
-                    if use_sudo
-                    else base_command
+            base_command: List[str] = []
+            script_cleanup: Optional[Path] = None
+            try:
+                base_command, script_cleanup = self._build_unix_live_debugger_command(
+                    debugger_name,
+                    debugger_command,
+                    target_pid,
                 )
-                try:
-                    result = subprocess.run(
-                        command,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        text=True,
-                        timeout=debugger_timeout,
+                attempt = 0
+                use_sudo = False
+                while attempt < max_attempts:
+                    command = (
+                        self._wrap_command_with_sudo(base_command)
+                        if use_sudo
+                        else base_command
                     )
-                except subprocess.TimeoutExpired:
+                    try:
+                        result = subprocess.run(
+                            command,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            text=True,
+                            timeout=debugger_timeout,
+                        )
+                    except subprocess.TimeoutExpired:
+                        debugger_error = (
+                            f"{debugger_name} timed out after {debugger_timeout:.1f}s while attaching"
+                        )
+                        attach_timeout_hint_needed = True
+                        break
+                    except subprocess.SubprocessError as exc:
+                        debugger_error = f"{debugger_name} failed ({exc})"
+                        break
+
+                    debugger_output = result.stdout.strip()
+                    if not debugger_output and result.stderr:
+                        debugger_output = result.stderr.strip()
+
+                    if result.returncode == 0:
+                        debugger_success = True
+                        break
+
                     debugger_error = (
-                        f"{debugger_name} timed out after {debugger_timeout:.1f}s while attaching"
+                        f"{debugger_name} exited with code {result.returncode}: {result.stderr.strip()}"
                     )
-                    attach_timeout_hint_needed = True
-                    break
-                except subprocess.SubprocessError as exc:
-                    debugger_error = f"{debugger_name} failed ({exc})"
-                    break
 
-                debugger_output = result.stdout.strip()
-                if not debugger_output and result.stderr:
-                    debugger_output = result.stderr.strip()
+                    if (
+                        not use_sudo
+                        and self._should_retry_with_sudo(result.stderr, result.stdout)
+                    ):
+                        use_sudo = True
+                        continue
 
-                if result.returncode == 0:
-                    debugger_success = True
-                    break
+                    if not debugger_is_macos_lldb:
+                        break
 
-                debugger_error = (
-                    f"{debugger_name} exited with code {result.returncode}: {result.stderr.strip()}"
-                )
+                    if not self._process_exists(target_pid):
+                        break
 
-                if (
-                    not use_sudo
-                    and self._should_retry_with_sudo(result.stderr, result.stdout)
-                ):
-                    use_sudo = True
-                    continue
+                    lowered_error = result.stderr.strip().lower()
+                    if "no such process" not in lowered_error and "does not exist" not in lowered_error:
+                        break
 
-                if not debugger_is_macos_lldb:
-                    break
+                    time.sleep(0.5)
 
-                if not self._process_exists(target_pid):
-                    break
-
-                lowered_error = result.stderr.strip().lower()
-                if "no such process" not in lowered_error and "does not exist" not in lowered_error:
-                    break
-
-                time.sleep(0.5)
-
-                attempt += 1
+                    attempt += 1
+            finally:
+                if script_cleanup is not None:
+                    self._safe_unlink(script_cleanup)
 
             if debugger_success:
                 if debugger_output:
@@ -370,12 +377,15 @@ class UnixDebuggerStrategy(DebuggerStrategy):
                 if cleanup_path is not None:
                     cleanup_paths.append(cleanup_path)
 
-                command = self._build_unix_core_debugger_command(
+                command, script_cleanup = self._build_unix_core_debugger_command(
                     debugger_name,
                     debugger_command,
                     invocation,
                     prepared_path,
                 )
+
+                if script_cleanup is not None:
+                    cleanup_paths.append(script_cleanup)
 
                 try:
                     result = subprocess.run(
@@ -421,10 +431,6 @@ class UnixDebuggerStrategy(DebuggerStrategy):
         if sys.platform == "win32":
             return None, None, "debugger not available on this platform"
 
-        gdb_path = shutil.which("gdb")
-        if gdb_path:
-            return "gdb", [gdb_path], ""
-
         lldb_path = shutil.which("lldb")
         if lldb_path:
             return "lldb", [lldb_path], ""
@@ -433,6 +439,10 @@ class UnixDebuggerStrategy(DebuggerStrategy):
         if xcrun_path:
             return "lldb", [xcrun_path, "lldb"], ""
 
+        gdb_path = shutil.which("gdb")
+        if gdb_path:
+            return "gdb", [gdb_path], ""
+
         return None, None, "gdb or lldb not available (install gdb or the Xcode Command Line Tools)"
 
     def _build_unix_live_debugger_command(
@@ -440,42 +450,51 @@ class UnixDebuggerStrategy(DebuggerStrategy):
         debugger_name: str,
         debugger_command: List[str],
         pid: int,
-    ) -> List[str]:
+    ) -> Tuple[List[str], Optional[Path]]:
         if debugger_name == "gdb":
-            return [
-                *debugger_command,
-                "-p",
-                str(pid),
-                "--batch",
-                "--quiet",
-                "--nx",
-                "-ex",
-                "set confirm off",
-                "-ex",
-                "set pagination off",
-                "-ex",
-                "thread apply all bt full",
-                "-ex",
-                "detach",
-                "-ex",
-                "quit",
-            ]
+            return (
+                [
+                    *debugger_command,
+                    "-p",
+                    str(pid),
+                    "--batch",
+                    "--quiet",
+                    "--nx",
+                    "-ex",
+                    "set confirm off",
+                    "-ex",
+                    "set pagination off",
+                    "-ex",
+                    "thread apply all bt full",
+                    "-ex",
+                    "detach",
+                    "-ex",
+                    "quit",
+                ],
+                None,
+            )
 
-        # lldb: Use -v for verbose output (shows function arguments/parameters)
-        # Note: lldb doesn't have an equivalent to gdb's "bt full" for all locals
-        return [
+        script_path = self._create_lldb_stack_script()
+        command: List[str] = [
             *debugger_command,
             "--batch",
             "--no-lldbinit",
             "-p",
             str(pid),
             "-o",
-            "thread backtrace all -c 256 -v",
+            "thread list",
             "-o",
-            "detach",
-            "-o",
-            "quit",
+            "thread backtrace all -c 256 -e true",
         ]
+
+        if script_path is not None:
+            command.extend(
+                ["-o", f"command script import {shlex.quote(str(script_path))}"]
+            )
+
+        command.extend(["-o", "detach", "-o", "quit"])
+
+        return command, script_path
 
     def _build_unix_core_debugger_command(
         self,
@@ -483,40 +502,52 @@ class UnixDebuggerStrategy(DebuggerStrategy):
         debugger_command: List[str],
         invocation: "TestInvocation",
         core_path: Path,
-    ) -> List[str]:
+    ) -> Tuple[List[str], Optional[Path]]:
         if debugger_name == "gdb":
-            return [
-                *debugger_command,
-                "--batch",
-                "--quiet",
-                "--nx",
-                "-ex",
-                "set confirm off",
-                "-ex",
-                "set pagination off",
-                "-ex",
-                "thread apply all bt full",
-                "-ex",
-                "quit",
-                str(invocation.path),
-                str(core_path),
-            ]
+            return (
+                [
+                    *debugger_command,
+                    "--batch",
+                    "--quiet",
+                    "--nx",
+                    "-ex",
+                    "set confirm off",
+                    "-ex",
+                    "set pagination off",
+                    "-ex",
+                    "thread apply all bt full",
+                    "-ex",
+                    "quit",
+                    str(invocation.path),
+                    str(core_path),
+                ],
+                None,
+            )
 
         quoted_executable = shlex.quote(str(invocation.path))
         quoted_core = shlex.quote(str(core_path))
 
-        # lldb: Use -v for verbose output (shows function arguments/parameters)
-        return [
+        script_path = self._create_lldb_stack_script()
+        command: List[str] = [
             *debugger_command,
             "--batch",
             "--no-lldbinit",
             "-o",
             f"target create --core {quoted_core} {quoted_executable}",
             "-o",
-            "thread backtrace all -c 256 -v",
+            "thread list",
             "-o",
-            "quit",
+            "thread backtrace all -c 256 -e true",
         ]
+
+        if script_path is not None:
+            command.extend(
+                ["-o", f"command script import {shlex.quote(str(script_path))}"]
+            )
+
+        command.extend(["-o", "quit"])
+
+        return command, script_path
 
     def _capture_macos_sample_stack(
         self,
@@ -678,6 +709,76 @@ class UnixDebuggerStrategy(DebuggerStrategy):
             pass
         except OSError:
             pass
+
+    def _create_lldb_stack_script(self) -> Optional[Path]:
+        script_source = textwrap.dedent(
+            """
+            import lldb
+            import sys
+
+            def _format_value(variable):
+                summary = variable.GetSummary()
+                if summary:
+                    return summary
+
+                value = variable.GetValue()
+                if value:
+                    return value
+
+                data = variable.GetData()
+                if data and data.GetByteSize() > 0:
+                    error = lldb.SBError()
+                    try:
+                        unsigned = data.GetUnsignedInt64(error, 0)
+                    except Exception:
+                        unsigned = None
+                    if error.Success() and unsigned is not None:
+                        return hex(unsigned)
+
+                return "<unavailable>"
+
+            def __lldb_init_module(debugger, _internal_dict):
+                target = debugger.GetSelectedTarget()
+                process = target.GetProcess()
+                for thread in process:
+                    name = thread.GetName()
+                    ident = thread.GetIndexID()
+                    tid = thread.GetThreadID()
+                    header = f"[LLDB] Thread {ident} (tid={tid}"
+                    if name:
+                        header += f", name={name}"
+                    header += ")"
+                    print(header)
+                    frame = thread.GetFrameAtIndex(0)
+                    if not frame:
+                        print("    <no frame information>")
+                        continue
+                    variables = frame.GetVariables(True, True, False, True)
+                    if variables.GetSize() == 0:
+                        print("    <no locals or arguments>")
+                        continue
+                    for variable in variables:
+                        var_name = variable.GetName() or "<anonymous>"
+                        display = _format_value(variable)
+                        print(f"    {var_name} = {display}")
+                sys.stdout.flush()
+            """
+        )
+
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w", delete=False, suffix=".py", prefix="sintra_lldb_stack_"
+            ) as script_file:
+                script_file.write(script_source)
+                script_path = Path(script_file.name)
+        except OSError as exc:
+            if self.verbose:
+                self._log(
+                    f"{self._color.YELLOW}Warning: failed to create LLDB helper script: {exc}{self._color.RESET}"
+                )
+            return None
+
+        return script_path
 
     def _wrap_command_with_sudo(self, command: List[str]) -> List[str]:
         if not self._supports_passwordless_sudo():
