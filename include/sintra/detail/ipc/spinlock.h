@@ -22,10 +22,10 @@ struct spinlock
 
     void lock()
     {
-        while (m_locked.test_and_set(std::memory_order_acquire)) {
+        while (m_locked.test_and_set(std::memory_order_seq_cst)) {
         }
     }
-    void unlock() { m_locked.clear(std::memory_order_release);                  }
+    void unlock() { m_locked.clear(std::memory_order_seq_cst);                  }
 
 private:
     std::atomic_flag m_locked = ATOMIC_FLAG_INIT;

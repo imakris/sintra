@@ -305,18 +305,18 @@ private:
 
         void post_ordered()
         {
-            if (unordered.load(std::memory_order_acquire)) {
-                unordered.store(false, std::memory_order_release);
+            if (unordered.load(std::memory_order_seq_cst)) {
+                unordered.store(false, std::memory_order_seq_cst);
             }
-            else if (!posted.test_and_set(std::memory_order_acquire)) {
+            else if (!posted.test_and_set(std::memory_order_seq_cst)) {
                 this->post();
             }
         }
 
         void post_unordered()
         {
-            if (!posted.test_and_set(std::memory_order_acquire)) {
-                unordered.store(true, std::memory_order_release);
+            if (!posted.test_and_set(std::memory_order_seq_cst)) {
+                unordered.store(true, std::memory_order_seq_cst);
                 this->post();
             }
         }
@@ -324,8 +324,8 @@ private:
         bool wait()
         {
             detail::interprocess_semaphore::wait();
-            posted.clear(std::memory_order_release);
-            return unordered.exchange(false, std::memory_order_acq_rel);
+            posted.clear(std::memory_order_seq_cst);
+            return unordered.exchange(false, std::memory_order_seq_cst);
         }
 
         std::atomic_flag posted = ATOMIC_FLAG_INIT;
@@ -338,7 +338,7 @@ private:
 
     bool is_initialized() const noexcept
     {
-        return m_state.load(std::memory_order_acquire) == state_initialized;
+        return m_state.load(std::memory_order_seq_cst) == state_initialized;
     }
 
     impl& access() noexcept
@@ -354,7 +354,7 @@ private:
     impl& ensure_initialized()
     {
         while (true) {
-            uint8_t current = m_state.load(std::memory_order_acquire);
+            uint8_t current = m_state.load(std::memory_order_seq_cst);
             if (current == state_initialized) {
                 return access();
             }
@@ -362,16 +362,16 @@ private:
                 if (m_state.compare_exchange_strong(
                         current,
                         state_initializing,
-                        std::memory_order_acq_rel,
-                        std::memory_order_acquire))
+                        std::memory_order_seq_cst,
+                        std::memory_order_seq_cst))
                 {
                     try {
                         new (&m_storage) impl();
-                        m_state.store(state_initialized, std::memory_order_release);
+                        m_state.store(state_initialized, std::memory_order_seq_cst);
                         return access();
                     }
                     catch (...) {
-                        m_state.store(state_uninitialized, std::memory_order_release);
+                        m_state.store(state_uninitialized, std::memory_order_seq_cst);
                         throw;
                     }
                 }
@@ -384,7 +384,7 @@ private:
     {
         if (is_initialized()) {
             access().~impl();
-            m_state.store(state_uninitialized, std::memory_order_release);
+            m_state.store(state_uninitialized, std::memory_order_seq_cst);
         }
     }
 
@@ -836,10 +836,10 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         std::atomic_flag                     rs_stack_spinlock = ATOMIC_FLAG_INIT;
         void rs_stack_lock()
         {
-            while (rs_stack_spinlock.test_and_set(std::memory_order_acquire)) {
+            while (rs_stack_spinlock.test_and_set(std::memory_order_seq_cst)) {
             }
         }
-        void rs_stack_unlock() { rs_stack_spinlock.clear(std::memory_order_release); }
+        void rs_stack_unlock() { rs_stack_spinlock.clear(std::memory_order_seq_cst); }
 
         // Freelist of reader-slot indices into reading_sequences[].
         int                                  free_rs_stack[max_process_index]{};
@@ -852,7 +852,7 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
 
             rs_stack_lock();
             auto in_freelist = [&](int idx) -> bool {
-                int nf = num_free_rs.load(std::memory_order_relaxed);
+                int nf = num_free_rs.load(std::memory_order_seq_cst);
                 for (int i = 0; i < nf; ++i) {
                     if (free_rs_stack[i] == idx) {
                         return true;
@@ -869,7 +869,7 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
                     continue;
                 }
 
-                uint32_t pid = slot.owner_pid.load(std::memory_order_relaxed);
+                uint32_t pid = slot.owner_pid.load(std::memory_order_seq_cst);
 
                 bool owner_unknown = (pid == 0);
                 bool dead = owner_unknown || !is_process_alive(pid);
@@ -892,9 +892,9 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
                     slot.owner_pid.store(0, std::memory_order_relaxed);
 
                     if (!in_freelist(i)) {
-                        int idx = num_free_rs.load(std::memory_order_relaxed);
+                        int idx = num_free_rs.load(std::memory_order_seq_cst);
                         free_rs_stack[idx] = i;
-                        num_free_rs.fetch_add(1, std::memory_order_release);
+                        num_free_rs.fetch_add(1, std::memory_order_seq_cst);
                     }
                     freed = true;
                 }
@@ -943,10 +943,10 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         std::atomic_flag                     spinlock_flag = ATOMIC_FLAG_INIT;
         void lock()
         {
-            while (spinlock_flag.test_and_set(std::memory_order_acquire)) {
+            while (spinlock_flag.test_and_set(std::memory_order_seq_cst)) {
             }
         }
-        void unlock() { spinlock_flag.clear(std::memory_order_release); }
+        void unlock() { spinlock_flag.clear(std::memory_order_seq_cst); }
 
         Control()
         {
@@ -957,7 +957,7 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
             for (int i = 0; i < max_process_index; i++) { reading_sequences[i].data.v = invalid_sequence; }
             for (int i = 0; i < max_process_index; i++) { free_rs_stack[i] = i; }
 
-            writer_pid.store(0, std::memory_order_relaxed);
+            writer_pid.store(0, std::memory_order_seq_cst);
 
             // See the 'Note' in N4713 32.5 [Lock-free property], Par. 4.
             // The program is only valid if the conditions below are true.
@@ -977,7 +977,7 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
             assert(num_attached.is_lock_free());
             assert(leading_sequence.is_lock_free());
 
-            num_free_rs.store(max_process_index, std::memory_order_relaxed);
+            num_free_rs.store(max_process_index, std::memory_order_seq_cst);
         }
 
         static_assert(max_process_index <= 255,
@@ -1014,7 +1014,7 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         // a fetch_add here; a plain ++ loses updates under contention and the final
         // detacher would see an incorrect count and tear down the shared state while
         // other processes still use it.
-        m_control->num_attached.fetch_add(1, std::memory_order_acq_rel);
+        m_control->num_attached.fetch_add(1, std::memory_order_seq_cst);
     }
 
     ~Ring()
@@ -1024,7 +1024,7 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
             // The *last* detaching process deletes both control and data files. On
             // platforms where Control wraps kernel semaphore handles (Windows/macOS)
             // we must explicitly run the destructor once the final reference drops.
-            if (m_control->num_attached.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+            if (m_control->num_attached.fetch_sub(1, std::memory_order_seq_cst) == 1) {
 #if defined(_WIN32) || defined(__APPLE__)
                 m_control->~Control();
 #endif
@@ -1042,7 +1042,7 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
     }
 
     sequence_counter_type get_leading_sequence() const {
-        return m_control->leading_sequence.load(std::memory_order_acquire);
+        return m_control->leading_sequence.load(std::memory_order_seq_cst);
     }
 
     /**
@@ -1051,7 +1051,7 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
      */
     T* get_element_from_sequence(sequence_counter_type seq) const
     {
-        const auto leading = m_control->leading_sequence.load(std::memory_order_acquire);
+        const auto leading = m_control->leading_sequence.load(std::memory_order_seq_cst);
         if (leading == 0) return nullptr; // nothing published yet
 
         const auto last_published = leading - 1;
@@ -1138,19 +1138,19 @@ public:
             return diag;
         }
 
-        diag.max_reader_lag = m_control->max_reader_lag.load(std::memory_order_acquire);
-        diag.worst_overflow_lag = m_control->worst_overflow_lag.load(std::memory_order_acquire);
-        diag.reader_lag_overflow_count = m_control->reader_lag_overflow_count.load(std::memory_order_acquire);
-        diag.reader_sequence_regressions = m_control->reader_sequence_regressions.load(std::memory_order_acquire);
-        diag.reader_eviction_count = m_control->reader_eviction_count.load(std::memory_order_acquire);
-        diag.last_evicted_reader_index = m_control->last_evicted_reader_index.load(std::memory_order_acquire);
-        diag.last_evicted_reader_sequence = m_control->last_evicted_reader_sequence.load(std::memory_order_acquire);
-        diag.last_evicted_writer_sequence = m_control->last_evicted_writer_sequence.load(std::memory_order_acquire);
-        diag.last_evicted_reader_octile = m_control->last_evicted_reader_octile.load(std::memory_order_acquire);
-        diag.last_overflow_reader_index = m_control->last_overflow_reader_index.load(std::memory_order_acquire);
-        diag.last_overflow_reader_sequence = m_control->last_overflow_reader_sequence.load(std::memory_order_acquire);
-        diag.last_overflow_leading_sequence = m_control->last_overflow_leading_sequence.load(std::memory_order_acquire);
-        diag.last_overflow_last_consumed = m_control->last_overflow_last_consumed.load(std::memory_order_acquire);
+        diag.max_reader_lag = m_control->max_reader_lag.load(std::memory_order_seq_cst);
+        diag.worst_overflow_lag = m_control->worst_overflow_lag.load(std::memory_order_seq_cst);
+        diag.reader_lag_overflow_count = m_control->reader_lag_overflow_count.load(std::memory_order_seq_cst);
+        diag.reader_sequence_regressions = m_control->reader_sequence_regressions.load(std::memory_order_seq_cst);
+        diag.reader_eviction_count = m_control->reader_eviction_count.load(std::memory_order_seq_cst);
+        diag.last_evicted_reader_index = m_control->last_evicted_reader_index.load(std::memory_order_seq_cst);
+        diag.last_evicted_reader_sequence = m_control->last_evicted_reader_sequence.load(std::memory_order_seq_cst);
+        diag.last_evicted_writer_sequence = m_control->last_evicted_writer_sequence.load(std::memory_order_seq_cst);
+        diag.last_evicted_reader_octile = m_control->last_evicted_reader_octile.load(std::memory_order_seq_cst);
+        diag.last_overflow_reader_index = m_control->last_overflow_reader_index.load(std::memory_order_seq_cst);
+        diag.last_overflow_reader_sequence = m_control->last_overflow_reader_sequence.load(std::memory_order_seq_cst);
+        diag.last_overflow_leading_sequence = m_control->last_overflow_leading_sequence.load(std::memory_order_seq_cst);
+        diag.last_overflow_last_consumed = m_control->last_overflow_last_consumed.load(std::memory_order_seq_cst);
         return diag;
     }
 };
@@ -1195,9 +1195,9 @@ struct Ring_R : Ring<T, true>
         bool scavenged = false;
         while (true) {
             c.rs_stack_lock();
-            if (c.num_free_rs.load(std::memory_order_acquire) > 0) {
+            if (c.num_free_rs.load(std::memory_order_seq_cst) > 0) {
                 int current_num_free =
-                    c.num_free_rs.fetch_sub(1, std::memory_order_relaxed) - 1;
+                    c.num_free_rs.fetch_sub(1, std::memory_order_seq_cst) - 1;
                 m_rs_index = c.free_rs_stack[current_num_free];
 
                 // Mark our slot as ACTIVE while rs_stack_lock is still held so the
@@ -1228,7 +1228,7 @@ struct Ring_R : Ring<T, true>
     ~Ring_R()
     {
         // Ensure any active read guard is released.
-        if (m_reading.load(std::memory_order_acquire)) {
+        if (m_reading.load(std::memory_order_seq_cst)) {
             done_reading();
         }
 
@@ -1246,14 +1246,14 @@ struct Ring_R : Ring<T, true>
                 std::memory_order_release);
 
             // Push only if not already in the freelist (defensive: avoid duplicates).
-            int nf = c.num_free_rs.load(std::memory_order_relaxed);
+            int nf = c.num_free_rs.load(std::memory_order_seq_cst);
             bool already = false;
             for (int i = 0; i < nf; ++i) {
                 if (c.free_rs_stack[i] == m_rs_index) { already = true; break; }
             }
             if (!already) {
                 c.free_rs_stack[nf] = m_rs_index;
-                c.num_free_rs.fetch_add(1, std::memory_order_release);
+                c.num_free_rs.fetch_add(1, std::memory_order_seq_cst);
             }
 
             c.rs_stack_unlock();
@@ -1277,7 +1277,7 @@ struct Ring_R : Ring<T, true>
             f = false;
         }
 
-        if (m_reading.load(std::memory_order_acquire)) {
+        if (m_reading.load(std::memory_order_seq_cst)) {
             m_reading_lock = false;
             throw std::logic_error(
                 "Sintra Ring: Cannot call start_reading() again before calling done_reading().");
@@ -1292,7 +1292,7 @@ struct Ring_R : Ring<T, true>
             }
         }
 #endif
-        m_reading.store(true, std::memory_order_release);
+        m_reading.store(true, std::memory_order_seq_cst);
 
         // NOTE: Readers may only snapshot up to m_max_trailing_elements (typically 3/4 of the ring).
         // If this fires, you probably called start_reading()/try_snapshot_e(reader, N) with N larger than
@@ -1305,7 +1305,7 @@ struct Ring_R : Ring<T, true>
         Range<T> ret;
 
         while (true) {
-            auto leading_sequence = c.leading_sequence.load(std::memory_order_acquire);
+            auto leading_sequence = c.leading_sequence.load(std::memory_order_seq_cst);
 
             auto range_first_sequence =
                 std::max<int64_t>(0, int64_t(leading_sequence) - int64_t(num_trailing_elements));
@@ -1316,14 +1316,14 @@ struct Ring_R : Ring<T, true>
             uint8_t trailing_octile = static_cast<uint8_t>((8 * trailing_idx) / this->m_num_elements);
             uint64_t guard_mask     = uint64_t(1) << (8 * trailing_octile);
 
-            c.read_access.fetch_add(guard_mask, std::memory_order_acq_rel);
+            c.read_access.fetch_add(guard_mask, std::memory_order_seq_cst);
 
             // Atomically publish the octile index and guard flag to our shared slot for the writer to see.
             typename Ring<T, true>::Reader_slot_state current_state{c.reading_sequences[m_rs_index].data.slot_state.load(std::memory_order_acquire)};
             typename Ring<T, true>::Reader_slot_state new_state{trailing_octile, true, current_state.status()};
             c.reading_sequences[m_rs_index].data.slot_state.store(new_state.packed, std::memory_order_release);
 
-            auto confirmed_leading_sequence = c.leading_sequence.load(std::memory_order_acquire);
+            auto confirmed_leading_sequence = c.leading_sequence.load(std::memory_order_seq_cst);
             auto confirmed_range_first_sequence = std::max<int64_t>(
                 0, int64_t(confirmed_leading_sequence) - int64_t(num_trailing_elements));
 
@@ -1372,7 +1372,7 @@ struct Ring_R : Ring<T, true>
         // wait_for_new_data().  In that case we simply propagate the stop signal
         // without touching the local lock, avoiding spurious atomic operations
         // against partially torn down objects during crash recovery.
-        if (!m_reading.load(std::memory_order_acquire)) {
+        if (!m_reading.load(std::memory_order_seq_cst)) {
             request_stop();
             return;
         }
@@ -1381,8 +1381,8 @@ struct Ring_R : Ring<T, true>
         while (!m_reading_lock.compare_exchange_strong(
                     expected,
                     true,
-                    std::memory_order_acquire,
-                    std::memory_order_relaxed))
+                    std::memory_order_seq_cst,
+                    std::memory_order_seq_cst))
         {
             expected = false;
         }
@@ -1399,14 +1399,14 @@ struct Ring_R : Ring<T, true>
                         uint64_t(1) << (8 * m_trailing_octile), std::memory_order_acq_rel);
                 }
             }
-            m_reading.store(false, std::memory_order_release);
+            m_reading.store(false, std::memory_order_seq_cst);
         }
         else {
             // done_reading() called without active snapshot => shutdown signal
             request_stop();
         }
 
-        m_reading_lock.store(false, std::memory_order_release);
+        m_reading_lock.store(false, std::memory_order_seq_cst);
     }
 
     sequence_counter_type reading_sequence()     const { return m_reading_sequence->load(); }
@@ -1427,14 +1427,14 @@ struct Ring_R : Ring<T, true>
                 return {};
             }
 
-            auto start_sequence = m_reading_sequence->load(std::memory_order_acquire);
-            auto leading_sequence = c.leading_sequence.load(std::memory_order_acquire);
+            auto start_sequence = m_reading_sequence->load(std::memory_order_seq_cst);
+            auto leading_sequence = c.leading_sequence.load(std::memory_order_seq_cst);
             const auto last_consumed_before = m_last_consumed_sequence;
 
             auto update_max_relaxed = [](auto& target, sequence_counter_type value) {
-                auto current = target.load(std::memory_order_relaxed);
+                auto current = target.load(std::memory_order_seq_cst);
                 while (value > current &&
-                       !target.compare_exchange_weak(current, value, std::memory_order_relaxed)) {
+                       !target.compare_exchange_weak(current, value, std::memory_order_seq_cst)) {
                 }
             };
 
@@ -1445,24 +1445,24 @@ struct Ring_R : Ring<T, true>
                 full_lag = leading_sequence - start_sequence;
             }
             else {
-                c.reader_sequence_regressions.fetch_add(1, std::memory_order_relaxed);
+                c.reader_sequence_regressions.fetch_add(1, std::memory_order_seq_cst);
             }
 
             update_max_relaxed(c.max_reader_lag, full_lag);
 
             sequence_counter_type clamped_lag = full_lag;
             if (clamped_lag > sequence_counter_type(this->m_num_elements)) {
-                c.reader_lag_overflow_count.fetch_add(1, std::memory_order_relaxed);
+                c.reader_lag_overflow_count.fetch_add(1, std::memory_order_seq_cst);
                 update_max_relaxed(c.worst_overflow_lag, full_lag);
-                c.last_overflow_reader_index.store(static_cast<uint32_t>(m_rs_index), std::memory_order_relaxed);
-                c.last_overflow_reader_sequence.store(start_sequence, std::memory_order_relaxed);
-                c.last_overflow_leading_sequence.store(leading_sequence, std::memory_order_relaxed);
-                c.last_overflow_last_consumed.store(last_consumed_before, std::memory_order_relaxed);
+                c.last_overflow_reader_index.store(static_cast<uint32_t>(m_rs_index), std::memory_order_seq_cst);
+                c.last_overflow_reader_sequence.store(start_sequence, std::memory_order_seq_cst);
+                c.last_overflow_leading_sequence.store(leading_sequence, std::memory_order_seq_cst);
+                c.last_overflow_last_consumed.store(last_consumed_before, std::memory_order_seq_cst);
                 clamped_lag = sequence_counter_type(this->m_num_elements);
             }
 
             if (start_sequence < m_last_consumed_sequence) {
-                c.reader_sequence_regressions.fetch_add(1, std::memory_order_relaxed);
+                c.reader_sequence_regressions.fetch_add(1, std::memory_order_seq_cst);
             }
 
             size_t num_range_elements = static_cast<size_t>(clamped_lag);
@@ -1480,12 +1480,12 @@ struct Ring_R : Ring<T, true>
         };
 
         auto sequences_equal = [&]() {
-            return m_reading_sequence->load(std::memory_order_acquire) ==
-                   c.leading_sequence.load(std::memory_order_acquire);
+            return m_reading_sequence->load(std::memory_order_seq_cst) ==
+                   c.leading_sequence.load(std::memory_order_seq_cst);
         };
 
         auto should_shutdown = [&]() {
-            return m_stopping.load(std::memory_order_acquire);
+            return m_stopping.load(std::memory_order_seq_cst);
         };
 
         if (should_shutdown()) {
@@ -1510,7 +1510,7 @@ struct Ring_R : Ring<T, true>
                 if (should_shutdown()) {
                     return Range<T>{};
                 }
-                const auto seq_now = c.global_unblock_sequence.load(std::memory_order_acquire);
+                const auto seq_now = c.global_unblock_sequence.load(std::memory_order_seq_cst);
                 if (seq_now != m_seen_unblock_sequence) {
                     m_seen_unblock_sequence = seq_now;
                     if (!sequences_equal()) {
@@ -1526,7 +1526,7 @@ struct Ring_R : Ring<T, true>
             // Phase 3 — blocking wait: fully park on the semaphore to avoid
             // burning CPU when the writer is stalled for long periods.
             const auto unblock_sequence_now =
-                c.global_unblock_sequence.load(std::memory_order_acquire);
+                c.global_unblock_sequence.load(std::memory_order_seq_cst);
             if (unblock_sequence_now != m_seen_unblock_sequence) {
                 m_seen_unblock_sequence = unblock_sequence_now;
                 if (!sequences_equal()) {
@@ -1536,27 +1536,27 @@ struct Ring_R : Ring<T, true>
             }
 
             c.lock();
-            m_sleepy_index.store(-1, std::memory_order_relaxed);
+            m_sleepy_index.store(-1, std::memory_order_seq_cst);
             if (sequences_equal()) {
                 if (should_shutdown()) {
                     c.unlock();
                     return Range<T>{};
                 }
                 int sleepy = c.ready_stack[--c.num_ready];
-                m_sleepy_index.store(sleepy, std::memory_order_release);
+                m_sleepy_index.store(sleepy, std::memory_order_seq_cst);
                 c.sleeping_stack[c.num_sleeping++] = sleepy;
             }
             const auto unblock_sequence_after =
-                c.global_unblock_sequence.load(std::memory_order_acquire);
+                c.global_unblock_sequence.load(std::memory_order_seq_cst);
             if (unblock_sequence_after != m_seen_unblock_sequence) {
                 m_seen_unblock_sequence = unblock_sequence_after;
-                const int sleepy = m_sleepy_index.load(std::memory_order_relaxed);
+                const int sleepy = m_sleepy_index.load(std::memory_order_seq_cst);
                 if (sleepy >= 0) {
                     if (c.num_sleeping > 0 && c.sleeping_stack[c.num_sleeping - 1] == sleepy) {
                         c.sleeping_stack[--c.num_sleeping] = -1;
                     }
                     c.ready_stack[c.num_ready++] = sleepy;
-                    m_sleepy_index.store(-1, std::memory_order_release);
+                    m_sleepy_index.store(-1, std::memory_order_seq_cst);
                 }
                 c.unlock();
                 if (!sequences_equal()) {
@@ -1566,11 +1566,11 @@ struct Ring_R : Ring<T, true>
             }
             c.unlock();
 
-            int sleepy_index = m_sleepy_index.load(std::memory_order_acquire);
+            int sleepy_index = m_sleepy_index.load(std::memory_order_seq_cst);
             if (sleepy_index >= 0) {
                 if (should_shutdown()) {
                     c.lock();
-                    if (m_sleepy_index.load(std::memory_order_acquire) >= 0) {
+                    if (m_sleepy_index.load(std::memory_order_seq_cst) >= 0) {
                         c.dirty_semaphores[sleepy_index].post_unordered();
                     }
                     c.unlock();
@@ -1586,7 +1586,7 @@ struct Ring_R : Ring<T, true>
                     c.ready_stack[c.num_ready++] = sleepy_index;
                     c.unlock();
                 }
-                m_sleepy_index.store(-1, std::memory_order_release);
+                m_sleepy_index.store(-1, std::memory_order_seq_cst);
 
                 if (should_shutdown()) {
                     return Range<T>{};
@@ -1603,16 +1603,21 @@ struct Ring_R : Ring<T, true>
      */
     void done_reading_new_data()
     {
+        // The eviction handler can advance m_reading_sequence and reattach the guard
+        // to a new octile. Recompute the trailing position afterwards so we migrate
+        // toward the post-eviction state rather than the stale pre-eviction value.
+        handle_eviction_if_needed();
+
         const size_t t_idx = mod_pos_i64(
-            int64_t(m_reading_sequence->load(std::memory_order_acquire)) -
+            int64_t(m_reading_sequence->load(std::memory_order_seq_cst)) -
             int64_t(m_max_trailing_elements),
             this->m_num_elements);
 
         const size_t new_trailing_octile = (8 * t_idx) / this->m_num_elements;
 
-        handle_eviction_if_needed();
-
         if (new_trailing_octile != m_trailing_octile) {
+            auto& guard_token = c.reading_sequences[m_rs_index].data.guard_token;
+
             const uint64_t new_mask = uint64_t(1) << (8 * new_trailing_octile);
             const uint64_t old_mask = uint64_t(1) << (8 * m_trailing_octile);
             c.read_access.fetch_add(new_mask, std::memory_order_acq_rel);
@@ -1623,6 +1628,12 @@ struct Ring_R : Ring<T, true>
             typename Ring<T, true>::Reader_slot_state new_state = current_state.with_octile(static_cast<uint8_t>(new_trailing_octile));
             c.reading_sequences[m_rs_index].data.slot_state.store(new_state.packed, std::memory_order_release);
 
+                c.read_access.fetch_sub(new_mask, std::memory_order_seq_cst);
+                observed_token = expected_token;
+            }
+
+            c.reading_sequences[m_rs_index].data.trailing_octile.store(
+                static_cast<uint8_t>(new_trailing_octile), std::memory_order_seq_cst);
             m_trailing_octile = new_trailing_octile;
         }
     }
@@ -1640,12 +1651,19 @@ struct Ring_R : Ring<T, true>
             // Reader was evicted by writer for being too slow.
             // Skip all missed data and jump to writer's current position.
             // This is the only safe recovery strategy since old data has been overwritten.
-            sequence_counter_type new_seq = c.leading_sequence.load(std::memory_order_acquire);
-            slot.v.store(new_seq, std::memory_order_release);
-            m_reading_sequence->store(new_seq, std::memory_order_release);
+            sequence_counter_type new_seq = c.leading_sequence.load(std::memory_order_seq_cst);
+            slot.v.store(new_seq, std::memory_order_seq_cst);
+            m_reading_sequence->store(new_seq, std::memory_order_seq_cst);
             m_last_consumed_sequence = new_seq;
+
+            // Recalculate trailing octile to match the new jumped-forward position
+            const size_t trailing_idx = mod_pos_i64(
+                int64_t(new_seq) - int64_t(m_max_trailing_elements),
+                this->m_num_elements);
+            m_trailing_octile = (8 * trailing_idx) / this->m_num_elements;
+
             reattach_after_eviction();
-            m_evicted_since_last_wait.store(true, std::memory_order_release);
+            m_evicted_since_last_wait.store(true, std::memory_order_seq_cst);
             return true;
         }
 #endif
@@ -1675,12 +1693,12 @@ struct Ring_R : Ring<T, true>
 public:
     bool consume_eviction_notification()
     {
-        return m_evicted_since_last_wait.exchange(false, std::memory_order_acq_rel);
+        return m_evicted_since_last_wait.exchange(false, std::memory_order_seq_cst);
     }
 
     bool eviction_pending() const
     {
-        return m_evicted_since_last_wait.load(std::memory_order_acquire);
+        return m_evicted_since_last_wait.load(std::memory_order_seq_cst);
     }
 
     /**
@@ -1690,7 +1708,7 @@ public:
     void unblock_local()
     {
         c.lock();
-        int sleepy = m_sleepy_index.load(std::memory_order_acquire);
+        int sleepy = m_sleepy_index.load(std::memory_order_seq_cst);
         if (sleepy >= 0) {
             c.dirty_semaphores[sleepy].post_unordered();
         }
@@ -1699,7 +1717,7 @@ public:
 
     void request_stop()
     {
-        m_stopping.store(true, std::memory_order_release);
+        m_stopping.store(true, std::memory_order_seq_cst);
         unblock_local();
     }
 
@@ -1748,7 +1766,7 @@ private:
 inline uint32_t thread_index()
 {
     static std::atomic<uint32_t> next{1};
-    thread_local uint32_t mine = next.fetch_add(1, std::memory_order_relaxed);
+    thread_local uint32_t mine = next.fetch_add(1, std::memory_order_seq_cst);
     return mine;
 }
 
@@ -1768,7 +1786,7 @@ struct Ring_W : Ring<T, false>
             throw ring_acquisition_failure_exception();
         }
 
-        c.writer_pid.store(get_current_pid(), std::memory_order_release);
+        c.writer_pid.store(get_current_pid(), std::memory_order_seq_cst);
     }
 
     ~Ring_W()
@@ -1776,7 +1794,7 @@ struct Ring_W : Ring<T, false>
         // Wake any sleeping readers to avoid deadlocks during teardown
         unblock_global();
         c.ownership_mutex.unlock();
-        c.writer_pid.store(0, std::memory_order_release);
+        c.writer_pid.store(0, std::memory_order_seq_cst);
     }
 
     /**
@@ -1799,7 +1817,7 @@ struct Ring_W : Ring<T, false>
             m_pending_new_sequence -= num_src_elements;
             const size_t head = mod_u64(m_pending_new_sequence, this->m_num_elements);
             m_octile = (8 * head) / this->m_num_elements;
-            m_writing_thread_index.store(0, std::memory_order_release);
+            m_writing_thread_index.store(0, std::memory_order_seq_cst);
             throw;
         }
     }
@@ -1822,7 +1840,7 @@ struct Ring_W : Ring<T, false>
             m_pending_new_sequence -= num_elements;
             const size_t head = mod_u64(m_pending_new_sequence, this->m_num_elements);
             m_octile = (8 * head) / this->m_num_elements;
-            m_writing_thread_index.store(0, std::memory_order_release);
+            m_writing_thread_index.store(0, std::memory_order_seq_cst);
             throw;
         }
     }
@@ -1838,7 +1856,7 @@ struct Ring_W : Ring<T, false>
     sequence_counter_type done_writing()
     {
         c.lock();
-        assert(m_writing_thread_index.load(std::memory_order_relaxed) == thread_index());
+        assert(m_writing_thread_index.load(std::memory_order_seq_cst) == thread_index());
         c.leading_sequence.store(m_pending_new_sequence);
         // Wake sleeping readers in a deterministic order
         for (int i = 0; i < c.num_sleeping; i++) {
@@ -1849,7 +1867,7 @@ struct Ring_W : Ring<T, false>
             c.ready_stack[c.num_ready++] = c.unordered_stack[--c.num_unordered];
         }
         c.unlock();
-        m_writing_thread_index.store(0, std::memory_order_release);
+        m_writing_thread_index.store(0, std::memory_order_seq_cst);
         return m_pending_new_sequence;
     }
 
@@ -1859,7 +1877,7 @@ struct Ring_W : Ring<T, false>
      */
     void unblock_global()
     {
-        c.global_unblock_sequence.fetch_add(1, std::memory_order_acq_rel);
+        c.global_unblock_sequence.fetch_add(1, std::memory_order_seq_cst);
 
         c.lock();
         for (int i = 0; i < c.num_sleeping; i++) {
@@ -1878,7 +1896,7 @@ struct Ring_W : Ring<T, false>
      */
     Range<T> get_readable_range()
     {
-        const auto leading = c.leading_sequence.load(std::memory_order_acquire);
+        const auto leading = c.leading_sequence.load(std::memory_order_seq_cst);
         const auto ring = this->m_num_elements;
         const auto range_first = (leading > (3*ring/4)) ? (leading - (3*ring/4)) : 0;
 
@@ -1922,11 +1940,11 @@ private:
         auto finalize_recovery = [&]() {
             c.ownership_mutex.~interprocess_mutex();
             new (&c.ownership_mutex) detail::interprocess_mutex();
-            c.writer_pid.store(0, std::memory_order_release);
+            c.writer_pid.store(0, std::memory_order_seq_cst);
         };
 
         for (;;) {
-            uint32_t observed = c.writer_pid.load(std::memory_order_acquire);
+            uint32_t observed = c.writer_pid.load(std::memory_order_seq_cst);
             if (observed == 0) {
                 return;
             }
@@ -1949,8 +1967,8 @@ private:
                 if (!c.writer_pid.compare_exchange_strong(
                         expected,
                         encode_recovery_value(self_pid),
-                        std::memory_order_acq_rel,
-                        std::memory_order_acquire))
+                        std::memory_order_seq_cst,
+                        std::memory_order_seq_cst))
                 {
                     continue;
                 }
@@ -1963,8 +1981,8 @@ private:
             if (c.writer_pid.compare_exchange_strong(
                     expected_writer,
                     encode_recovery_value(self_pid),
-                    std::memory_order_acq_rel,
-                    std::memory_order_acquire))
+                    std::memory_order_seq_cst,
+                    std::memory_order_seq_cst))
             {
                 finalize_recovery();
                 return;
@@ -1990,13 +2008,13 @@ private:
         // Enforce exclusive writer (cheap fast-path loop)
         // Use thread-local index (trivial type) for reliable atomic operations across all platforms
         const uint32_t my_thread_idx = thread_index();
-        while (m_writing_thread_index.load(std::memory_order_relaxed) != my_thread_idx) {
+        while (m_writing_thread_index.load(std::memory_order_seq_cst) != my_thread_idx) {
             uint32_t expected = 0;
             m_writing_thread_index.compare_exchange_strong(
                 expected,
                 my_thread_idx,
-                std::memory_order_acq_rel,
-                std::memory_order_acquire);
+                std::memory_order_seq_cst,
+                std::memory_order_seq_cst);
         }
 
         const size_t index = mod_u64(m_pending_new_sequence, this->m_num_elements);
@@ -2009,7 +2027,7 @@ private:
         if (m_octile != new_octile) {
 #ifndef NDEBUG
             {
-                uint64_t ra = c.read_access.load(std::memory_order_acquire);
+                uint64_t ra = c.read_access.load(std::memory_order_seq_cst);
                 for (int b = 0; b < 8; ++b) {
                     assert(((ra >> (8*b)) & 0xffu) != 0xffu && "read_access octile underflowed to 255");
                 }
@@ -2071,7 +2089,7 @@ private:
             bool eviction_deadline_armed = false;
 #endif
 #endif
-            while (c.read_access.load(std::memory_order_acquire) & range_mask) {
+            while (c.read_access.load(std::memory_order_seq_cst) & range_mask) {
                 bool has_blocking_reader = false;
                 for (int i = 0; i < max_process_index; ++i) {
                     typename Ring<T, false>::Reader_slot_state state{c.reading_sequences[i].data.slot_state.load(std::memory_order_acquire)};
@@ -2083,7 +2101,7 @@ private:
                 }
 
                 if (!has_blocking_reader) {
-                    if (!(c.read_access.load(std::memory_order_acquire) & range_mask)) {
+                    if (!(c.read_access.load(std::memory_order_seq_cst) & range_mask)) {
                         break;
                     }
 
