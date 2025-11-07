@@ -1609,7 +1609,7 @@ struct Ring_R : Ring<T, true>
             }
             else if (!guard_cleared) {
                 // Only set eviction flag if we were ACTUALLY evicted, not just CAS failure
-                Reader_state_union current_state(c.reading_sequences[m_rs_index].data.reader_state.word.load(std::memory_order_seq_cst));
+                typename Ring<T, true>::Reader_state_union current_state(c.reading_sequences[m_rs_index].data.reader_state.word.load(std::memory_order_seq_cst));
                 if (Ring<T, true>::reader_state_status(current_state) == Ring<T, true>::READER_STATE_EVICTED) {
                     m_evicted_since_last_wait.store(true, std::memory_order_seq_cst);
                 }
