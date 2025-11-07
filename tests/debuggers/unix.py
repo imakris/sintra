@@ -421,10 +421,8 @@ class UnixDebuggerStrategy(DebuggerStrategy):
         if sys.platform == "win32":
             return None, None, "debugger not available on this platform"
 
-        gdb_path = shutil.which("gdb")
-        if gdb_path:
-            return "gdb", [gdb_path], ""
-
+        # TEMPORARY: Prefer lldb over gdb for multi-process/multi-thread stack trace testing
+        # This allows us to test the enhanced lldb stack capture on Linux
         lldb_path = shutil.which("lldb")
         if lldb_path:
             return "lldb", [lldb_path], ""
@@ -432,6 +430,10 @@ class UnixDebuggerStrategy(DebuggerStrategy):
         xcrun_path = shutil.which("xcrun")
         if xcrun_path:
             return "lldb", [xcrun_path, "lldb"], ""
+
+        gdb_path = shutil.which("gdb")
+        if gdb_path:
+            return "gdb", [gdb_path], ""
 
         return None, None, "gdb or lldb not available (install gdb or the Xcode Command Line Tools)"
 
@@ -461,21 +463,98 @@ class UnixDebuggerStrategy(DebuggerStrategy):
                 "quit",
             ]
 
-        # lldb: Use -v for verbose output (shows function arguments/parameters)
-        # Note: lldb doesn't have an equivalent to gdb's "bt full" for all locals
-        return [
-            *debugger_command,
-            "--batch",
-            "--no-lldbinit",
-            "-p",
-            str(pid),
-            "-o",
-            "thread backtrace all -c 256 -v",
-            "-o",
-            "detach",
-            "-o",
-            "quit",
-        ]
+        # lldb: Enhanced capture of all threads with local variables
+        # Create a temporary Python script for lldb to execute
+        # This captures all threads with full stack traces and local variables (equivalent to gdb's "bt full")
+
+        script_content = """import lldb
+
+debugger = lldb.debugger
+target = debugger.GetSelectedTarget()
+process = target.GetProcess()
+
+print('\\n' + '='*80)
+print('Process {}: {} threads'.format(process.GetProcessID(), process.GetNumThreads()))
+print('='*80)
+
+for thread_idx in range(process.GetNumThreads()):
+    thread = process.GetThreadAtIndex(thread_idx)
+    thread_name = thread.GetName() if thread.GetName() else '<unnamed>'
+
+    print('\\n' + '='*80)
+    print('Thread #{}: tid={} name={}'.format(thread.GetIndexID(), thread.GetThreadID(), thread_name))
+    print('='*80)
+
+    for frame_idx in range(min(thread.GetNumFrames(), 256)):
+        frame = thread.GetFrameAtIndex(frame_idx)
+        func_name = frame.GetDisplayFunctionName() if frame.GetDisplayFunctionName() else '<unknown>'
+        line_entry = frame.GetLineEntry()
+        file_name = line_entry.GetFileSpec().GetFilename() if line_entry.GetFileSpec().GetFilename() else '<unknown>'
+        line_num = line_entry.GetLine()
+
+        print('\\n  Frame #{}: {}'.format(frame_idx, func_name))
+        if line_num > 0:
+            print('    at {}:{}'.format(file_name, line_num))
+
+        # Get all variables (args=True, locals=True, statics=True, in_scope_only=True)
+        variables = frame.GetVariables(True, True, True, True)
+        if variables.GetSize() > 0:
+            print('    Local variables:')
+            for var_idx in range(variables.GetSize()):
+                var = variables.GetValueAtIndex(var_idx)
+                var_name = var.GetName()
+                var_value = var.GetValue()
+                var_type = var.GetTypeName()
+
+                if var_value:
+                    print('      {} ({}) = {}'.format(var_name, var_type, var_value))
+                else:
+                    var_summary = var.GetSummary()
+                    if var_summary:
+                        print('      {} ({}) = {}'.format(var_name, var_type, var_summary))
+                    else:
+                        print('      {} ({}) = <unavailable>'.format(var_name, var_type))
+"""
+
+        # Create a temporary script file
+        try:
+            script_fd, script_path = tempfile.mkstemp(suffix='.py', prefix='lldb_capture_', text=True)
+            try:
+                with os.fdopen(script_fd, 'w') as f:
+                    f.write(script_content)
+
+                return [
+                    *debugger_command,
+                    "--batch",
+                    "--no-lldbinit",
+                    "-p",
+                    str(pid),
+                    "-o",
+                    f"command script import {script_path}",
+                    "-o",
+                    "detach",
+                    "-o",
+                    "quit",
+                ]
+            finally:
+                # Note: We can't delete the script immediately as lldb needs to read it
+                # It will be cleaned up by the OS when the temp directory is cleared
+                pass
+        except Exception:
+            # Fallback to simple backtrace if script creation fails
+            return [
+                *debugger_command,
+                "--batch",
+                "--no-lldbinit",
+                "-p",
+                str(pid),
+                "-o",
+                "thread backtrace all -c 256 -v",
+                "-o",
+                "detach",
+                "-o",
+                "quit",
+            ]
 
     def _build_unix_core_debugger_command(
         self,
@@ -505,18 +584,94 @@ class UnixDebuggerStrategy(DebuggerStrategy):
         quoted_executable = shlex.quote(str(invocation.path))
         quoted_core = shlex.quote(str(core_path))
 
-        # lldb: Use -v for verbose output (shows function arguments/parameters)
-        return [
-            *debugger_command,
-            "--batch",
-            "--no-lldbinit",
-            "-o",
-            f"target create --core {quoted_core} {quoted_executable}",
-            "-o",
-            "thread backtrace all -c 256 -v",
-            "-o",
-            "quit",
-        ]
+        # lldb: Enhanced capture of all threads with local variables (same as live capture)
+        # Create a temporary Python script for lldb to execute
+        # This captures all threads with full stack traces and local variables (equivalent to gdb's "bt full")
+
+        script_content = """import lldb
+
+debugger = lldb.debugger
+target = debugger.GetSelectedTarget()
+process = target.GetProcess()
+
+print('\\n' + '='*80)
+print('Process {}: {} threads'.format(process.GetProcessID(), process.GetNumThreads()))
+print('='*80)
+
+for thread_idx in range(process.GetNumThreads()):
+    thread = process.GetThreadAtIndex(thread_idx)
+    thread_name = thread.GetName() if thread.GetName() else '<unnamed>'
+
+    print('\\n' + '='*80)
+    print('Thread #{}: tid={} name={}'.format(thread.GetIndexID(), thread.GetThreadID(), thread_name))
+    print('='*80)
+
+    for frame_idx in range(min(thread.GetNumFrames(), 256)):
+        frame = thread.GetFrameAtIndex(frame_idx)
+        func_name = frame.GetDisplayFunctionName() if frame.GetDisplayFunctionName() else '<unknown>'
+        line_entry = frame.GetLineEntry()
+        file_name = line_entry.GetFileSpec().GetFilename() if line_entry.GetFileSpec().GetFilename() else '<unknown>'
+        line_num = line_entry.GetLine()
+
+        print('\\n  Frame #{}: {}'.format(frame_idx, func_name))
+        if line_num > 0:
+            print('    at {}:{}'.format(file_name, line_num))
+
+        # Get all variables (args=True, locals=True, statics=True, in_scope_only=True)
+        variables = frame.GetVariables(True, True, True, True)
+        if variables.GetSize() > 0:
+            print('    Local variables:')
+            for var_idx in range(variables.GetSize()):
+                var = variables.GetValueAtIndex(var_idx)
+                var_name = var.GetName()
+                var_value = var.GetValue()
+                var_type = var.GetTypeName()
+
+                if var_value:
+                    print('      {} ({}) = {}'.format(var_name, var_type, var_value))
+                else:
+                    var_summary = var.GetSummary()
+                    if var_summary:
+                        print('      {} ({}) = {}'.format(var_name, var_type, var_summary))
+                    else:
+                        print('      {} ({}) = <unavailable>'.format(var_name, var_type))
+"""
+
+        # Create a temporary script file
+        try:
+            script_fd, script_path = tempfile.mkstemp(suffix='.py', prefix='lldb_capture_', text=True)
+            try:
+                with os.fdopen(script_fd, 'w') as f:
+                    f.write(script_content)
+
+                return [
+                    *debugger_command,
+                    "--batch",
+                    "--no-lldbinit",
+                    "-o",
+                    f"target create --core {quoted_core} {quoted_executable}",
+                    "-o",
+                    f"command script import {script_path}",
+                    "-o",
+                    "quit",
+                ]
+            finally:
+                # Note: We can't delete the script immediately as lldb needs to read it
+                # It will be cleaned up by the OS when the temp directory is cleared
+                pass
+        except Exception:
+            # Fallback to simple backtrace if script creation fails
+            return [
+                *debugger_command,
+                "--batch",
+                "--no-lldbinit",
+                "-o",
+                f"target create --core {quoted_core} {quoted_executable}",
+                "-o",
+                "thread backtrace all -c 256 -v",
+                "-o",
+                "quit",
+            ]
 
     def _capture_macos_sample_stack(
         self,
