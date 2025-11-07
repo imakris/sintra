@@ -50,3 +50,7 @@ variable_buffer_alignment_test 10
 # manual/coordinator_crash_children_hang_test 1
 # manual/children_crash_coordinator_deadlock_test 1
 # manual/temp_ring 1
+
+# Test for lldb stack capture with multi-process hang
+# This test intentionally hangs to verify lldb captures all threads/processes
+ping_pong_hang_test 1
