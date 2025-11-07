@@ -421,17 +421,36 @@ class UnixDebuggerStrategy(DebuggerStrategy):
         if sys.platform == "win32":
             return None, None, "debugger not available on this platform"
 
-        gdb_path = shutil.which("gdb")
-        if gdb_path:
-            return "gdb", [gdb_path], ""
+        # Check if we should prefer lldb (for testing or when explicitly requested)
+        prefer_lldb = os.environ.get("SINTRA_PREFER_LLDB", "").lower() in ("1", "true", "yes")
 
-        lldb_path = shutil.which("lldb")
-        if lldb_path:
-            return "lldb", [lldb_path], ""
+        if prefer_lldb:
+            # Try lldb first
+            lldb_path = shutil.which("lldb")
+            if lldb_path:
+                return "lldb", [lldb_path], ""
 
-        xcrun_path = shutil.which("xcrun")
-        if xcrun_path:
-            return "lldb", [xcrun_path, "lldb"], ""
+            xcrun_path = shutil.which("xcrun")
+            if xcrun_path:
+                return "lldb", [xcrun_path, "lldb"], ""
+
+            # Fall back to gdb if lldb not found
+            gdb_path = shutil.which("gdb")
+            if gdb_path:
+                return "gdb", [gdb_path], ""
+        else:
+            # Default behavior: prefer gdb on non-macOS, lldb on macOS
+            gdb_path = shutil.which("gdb")
+            if gdb_path:
+                return "gdb", [gdb_path], ""
+
+            lldb_path = shutil.which("lldb")
+            if lldb_path:
+                return "lldb", [lldb_path], ""
+
+            xcrun_path = shutil.which("xcrun")
+            if xcrun_path:
+                return "lldb", [xcrun_path, "lldb"], ""
 
         return None, None, "gdb or lldb not available (install gdb or the Xcode Command Line Tools)"
 
@@ -461,21 +480,40 @@ class UnixDebuggerStrategy(DebuggerStrategy):
                 "quit",
             ]
 
-        # lldb: Use -v for verbose output (shows function arguments/parameters)
-        # Note: lldb doesn't have an equivalent to gdb's "bt full" for all locals
-        return [
-            *debugger_command,
-            "--batch",
-            "--no-lldbinit",
-            "-p",
-            str(pid),
-            "-o",
-            "thread backtrace all -c 256 -v",
-            "-o",
-            "detach",
-            "-o",
-            "quit",
-        ]
+        # lldb: Try to use comprehensive capture script if available
+        script_path = Path(__file__).parent / "lldb_capture_all.py"
+        if script_path.exists():
+            return [
+                *debugger_command,
+                "--batch",
+                "--no-lldbinit",
+                "-p",
+                str(pid),
+                "-o",
+                f"command script import {shlex.quote(str(script_path))}",
+                "-o",
+                "capture_all_stacks",
+                "-o",
+                "detach",
+                "-o",
+                "quit",
+            ]
+        else:
+            # Fallback: Use basic backtrace with verbose output
+            # Note: This doesn't show local variables, only function arguments
+            return [
+                *debugger_command,
+                "--batch",
+                "--no-lldbinit",
+                "-p",
+                str(pid),
+                "-o",
+                "thread backtrace all -c 256 -v",
+                "-o",
+                "detach",
+                "-o",
+                "quit",
+            ]
 
     def _build_unix_core_debugger_command(
         self,
@@ -505,18 +543,35 @@ class UnixDebuggerStrategy(DebuggerStrategy):
         quoted_executable = shlex.quote(str(invocation.path))
         quoted_core = shlex.quote(str(core_path))
 
-        # lldb: Use -v for verbose output (shows function arguments/parameters)
-        return [
-            *debugger_command,
-            "--batch",
-            "--no-lldbinit",
-            "-o",
-            f"target create --core {quoted_core} {quoted_executable}",
-            "-o",
-            "thread backtrace all -c 256 -v",
-            "-o",
-            "quit",
-        ]
+        # lldb: Try to use comprehensive capture script if available
+        script_path = Path(__file__).parent / "lldb_capture_all.py"
+        if script_path.exists():
+            return [
+                *debugger_command,
+                "--batch",
+                "--no-lldbinit",
+                "-o",
+                f"target create --core {quoted_core} {quoted_executable}",
+                "-o",
+                f"command script import {shlex.quote(str(script_path))}",
+                "-o",
+                "capture_all_stacks",
+                "-o",
+                "quit",
+            ]
+        else:
+            # Fallback: Use basic backtrace with verbose output
+            return [
+                *debugger_command,
+                "--batch",
+                "--no-lldbinit",
+                "-o",
+                f"target create --core {quoted_core} {quoted_executable}",
+                "-o",
+                "thread backtrace all -c 256 -v",
+                "-o",
+                "quit",
+            ]
 
     def _capture_macos_sample_stack(
         self,
