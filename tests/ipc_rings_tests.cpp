@@ -441,9 +441,9 @@ TEST_CASE(test_reader_eviction_does_not_underflow_octile_counter)
         auto guard_deadline = std::chrono::steady_clock::now() + 1s;
         bool guard_observed = false;
         constexpr uint8_t guard_present_mask =
-            sintra::Ring<uint32_t, true>::guard_token_present_mask;
+            0x08;
         constexpr uint8_t guard_octile_mask =
-            sintra::Ring<uint32_t, true>::guard_token_octile_mask;
+            0x07;
 
         while (std::chrono::steady_clock::now() < guard_deadline) {
             uint8_t guard_token = slot.guard_token().load(std::memory_order_acquire);
@@ -518,7 +518,7 @@ TEST_CASE(test_slow_reader_eviction_restores_status)
     const uint64_t guard_mask = uint64_t(1) << (8 * trailing_octile);
     control.read_access.store(guard_mask, std::memory_order_release);
     constexpr uint8_t guard_present_mask_u64 =
-        sintra::Ring<uint64_t, true>::guard_token_present_mask;
+        0x08;
     slot.guard_token().store(
         static_cast<uint8_t>(guard_present_mask_u64 | static_cast<uint8_t>(trailing_octile)),
         std::memory_order_release);
@@ -563,10 +563,8 @@ TEST_CASE(test_streaming_reader_status_restored_after_eviction)
     const uint8_t guarded_octile = slot.trailing_octile().load(std::memory_order_acquire);
     const uint64_t guard_mask     = uint64_t(1) << (8 * guarded_octile);
 
-    constexpr uint8_t guard_present_mask_u32 =
-        sintra::Ring<uint32_t, true>::guard_token_present_mask;
-    constexpr uint8_t guard_octile_mask_u32 =
-        sintra::Ring<uint32_t, true>::guard_token_octile_mask;
+    constexpr uint8_t guard_present_mask_u32 = 0x08;
+    constexpr uint8_t guard_octile_mask_u32 = 0x07;
     uint8_t guard_snapshot = slot.guard_token().exchange(0, std::memory_order_acq_rel);
     ASSERT_TRUE((guard_snapshot & guard_present_mask_u32) != 0);
     ASSERT_EQ(guarded_octile, guard_snapshot & guard_octile_mask_u32);
