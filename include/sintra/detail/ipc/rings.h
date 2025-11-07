@@ -714,12 +714,168 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
 
     // Helper: pad to a cache line to reduce false sharing in Control arrays.
     struct cache_line_sized_t {
-        struct Payload {
+        struct Payload
+        {
+            struct Reader_state_fields
+            {
+                struct Snapshot
+                {
+                    uint8_t status;
+                    uint8_t trailing_octile;
+                    uint8_t guard_token;
+                };
+
+                class Guard
+                {
+                public:
+                    explicit Guard(Reader_state_fields& fields)
+                        : m_parent(&fields)
+                    {
+                        while (m_parent->m_lock.test_and_set(std::memory_order_acquire)) {
+                        }
+                    }
+
+                    ~Guard()
+                    {
+                        if (m_parent != nullptr) {
+                            m_parent->m_lock.clear(std::memory_order_release);
+                        }
+                    }
+
+                    Guard(Guard&& other) noexcept
+                        : m_parent(other.m_parent)
+                    {
+                        other.m_parent = nullptr;
+                    }
+
+                    Guard& operator=(Guard&& other) noexcept
+                    {
+                        if (this != &other) {
+                            if (m_parent != nullptr) {
+                                m_parent->m_lock.clear(std::memory_order_release);
+                            }
+                            m_parent = other.m_parent;
+                            other.m_parent = nullptr;
+                        }
+                        return *this;
+                    }
+
+                    Guard(const Guard&)            = delete;
+                    Guard& operator=(const Guard&) = delete;
+
+                    Snapshot snapshot() const
+                    {
+                        return {m_parent->m_status, m_parent->m_trailing_octile, m_parent->m_guard_token};
+                    }
+
+                    uint8_t status() const { return m_parent->m_status; }
+                    uint8_t trailing_octile() const { return m_parent->m_trailing_octile; }
+                    uint8_t guard_token() const { return m_parent->m_guard_token; }
+
+                    void set_status(uint8_t value) { m_parent->m_status = value; }
+                    void set_trailing_octile(uint8_t value) { m_parent->m_trailing_octile = value; }
+                    void set_guard_token(uint8_t value) { m_parent->m_guard_token = value; }
+
+                    uint8_t exchange_guard_token(uint8_t value)
+                    {
+                        uint8_t previous = m_parent->m_guard_token;
+                        m_parent->m_guard_token = value;
+                        return previous;
+                    }
+
+                    void set_trailing_and_guard(uint8_t trailing, uint8_t guard)
+                    {
+                        m_parent->m_trailing_octile = trailing;
+                        m_parent->m_guard_token     = guard;
+                    }
+
+                    void set_status_trailing_and_guard(uint8_t status_value,
+                                                        uint8_t trailing,
+                                                        uint8_t guard)
+                    {
+                        m_parent->m_status          = status_value;
+                        m_parent->m_trailing_octile = trailing;
+                        m_parent->m_guard_token     = guard;
+                    }
+
+                private:
+                    Reader_state_fields* m_parent = nullptr;
+                };
+
+                Guard lock() { return Guard(*this); }
+
+                Snapshot load_snapshot()
+                {
+                    auto guard = lock();
+                    return guard.snapshot();
+                }
+
+                uint8_t load_status()
+                {
+                    auto guard = lock();
+                    return guard.status();
+                }
+
+                void store_status(uint8_t desired)
+                {
+                    auto guard = lock();
+                    guard.set_status(desired);
+                }
+
+                uint8_t load_trailing_octile()
+                {
+                    auto guard = lock();
+                    return guard.trailing_octile();
+                }
+
+                void store_trailing_octile(uint8_t desired)
+                {
+                    auto guard = lock();
+                    guard.set_trailing_octile(desired);
+                }
+
+                uint8_t load_guard_token()
+                {
+                    auto guard = lock();
+                    return guard.guard_token();
+                }
+
+                void store_guard_token(uint8_t desired)
+                {
+                    auto guard = lock();
+                    guard.set_guard_token(desired);
+                }
+
+                uint8_t exchange_guard_token(uint8_t desired)
+                {
+                    auto guard = lock();
+                    return guard.exchange_guard_token(desired);
+                }
+
+                void store_trailing_and_guard(uint8_t trailing, uint8_t guard)
+                {
+                    auto guard_handle = lock();
+                    guard_handle.set_trailing_and_guard(trailing, guard);
+                }
+
+                void store_status_trailing_and_guard(uint8_t status_value,
+                                                      uint8_t trailing,
+                                                      uint8_t guard)
+                {
+                    auto guard_handle = lock();
+                    guard_handle.set_status_trailing_and_guard(status_value, trailing, guard);
+                }
+
+            private:
+                std::atomic_flag m_lock = ATOMIC_FLAG_INIT;
+                uint8_t          m_status{READER_STATE_INACTIVE};
+                uint8_t          m_trailing_octile{0};
+                uint8_t          m_guard_token{0};
+            };
+
             std::atomic<sequence_counter_type> v;
-            std::atomic<uint8_t> status{READER_STATE_INACTIVE};
-            std::atomic<uint8_t> trailing_octile{0};
-            std::atomic<uint8_t> guard_token{0};
-            std::atomic<uint32_t> owner_pid{0};
+            Reader_state_fields                state;
+            std::atomic<uint32_t>              owner_pid{0};
         };
 
         Payload data;
@@ -820,24 +976,34 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
             for (int i = 0; i < max_process_index; ++i) {
                 auto& slot = reading_sequences[i].data;
 
-                if (slot.status.load(std::memory_order_seq_cst) == READER_STATE_INACTIVE) {
-                    continue;
+                uint8_t guard_snapshot = 0;
+                bool    dead          = false;
+
+                {
+                    auto state_lock = slot.state.lock();
+
+                    if (state_lock.status() == READER_STATE_INACTIVE) {
+                        continue;
+                    }
+
+                    uint32_t pid = slot.owner_pid.load(std::memory_order_seq_cst);
+
+                    bool owner_unknown = (pid == 0);
+                    dead = owner_unknown || !is_process_alive(pid);
+
+                    if (dead) {
+                        guard_snapshot = state_lock.exchange_guard_token(0);
+                        state_lock.set_status(READER_STATE_INACTIVE);
+                        state_lock.set_trailing_octile(0);
+                        slot.owner_pid.store(0, std::memory_order_seq_cst);
+                    }
                 }
 
-                uint32_t pid = slot.owner_pid.load(std::memory_order_seq_cst);
-
-                bool owner_unknown = (pid == 0);
-                bool dead = owner_unknown || !is_process_alive(pid);
-
                 if (dead) {
-                    uint8_t guard_snapshot = slot.guard_token.exchange(0, std::memory_order_seq_cst);
                     if ((guard_snapshot & guard_token_present_mask) != 0) {
                         uint8_t oct = guard_snapshot & guard_token_octile_mask;
                         read_access.fetch_sub(uint64_t(1) << (8 * oct), std::memory_order_seq_cst);
                     }
-
-                    slot.status.store(READER_STATE_INACTIVE, std::memory_order_seq_cst);
-                    slot.owner_pid.store(0, std::memory_order_seq_cst);
 
                     if (!in_freelist(i)) {
                         int idx = num_free_rs.load(std::memory_order_seq_cst);
@@ -1152,8 +1318,10 @@ struct Ring_R : Ring<T, true>
                 // scavenger cannot reclaim it before we publish the ownership.
                 auto& slot = c.reading_sequences[m_rs_index].data;
                 slot.owner_pid.store(get_current_pid(), std::memory_order_seq_cst);
-                slot.status.store(
-                    Ring<T, true>::READER_STATE_ACTIVE, std::memory_order_seq_cst);
+                {
+                    auto state_lock = slot.state.lock();
+                    state_lock.set_status(Ring<T, true>::READER_STATE_ACTIVE);
+                }
 
                 c.rs_stack_unlock();
                 break;
@@ -1188,8 +1356,12 @@ struct Ring_R : Ring<T, true>
             // so scavenger cannot race a half-updated slot.
             auto& slot = c.reading_sequences[m_rs_index].data;
             slot.owner_pid.store(0, std::memory_order_seq_cst);
-            slot.status.store(
-                Ring<T, true>::READER_STATE_INACTIVE, std::memory_order_seq_cst);
+            {
+                auto state_lock = slot.state.lock();
+                state_lock.set_status(Ring<T, true>::READER_STATE_INACTIVE);
+                state_lock.set_guard_token(0);
+                state_lock.set_trailing_octile(0);
+            }
 
             // Push only if not already in the freelist (defensive: avoid duplicates).
             int nf = c.num_free_rs.load(std::memory_order_seq_cst);
@@ -1230,9 +1402,12 @@ struct Ring_R : Ring<T, true>
         }
 
 #ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
-        if (c.reading_sequences[m_rs_index].data.status.load() == Ring<T, true>::READER_STATE_EVICTED) {
-            m_reading_lock = false;
-            throw ring_reader_evicted_exception();
+        {
+            auto state_lock = c.reading_sequences[m_rs_index].data.state.lock();
+            if (state_lock.status() == Ring<T, true>::READER_STATE_EVICTED) {
+                m_reading_lock = false;
+                throw ring_reader_evicted_exception();
+            }
         }
 #endif
         m_reading.store(true, std::memory_order_seq_cst);
@@ -1262,11 +1437,9 @@ struct Ring_R : Ring<T, true>
             c.read_access.fetch_add(guard_mask, std::memory_order_seq_cst);
 
             // Publish the octile index to our shared slot for the writer to see.
-            c.reading_sequences[m_rs_index].data.trailing_octile.store(
-                trailing_octile, std::memory_order_seq_cst);
-            c.reading_sequences[m_rs_index].data.guard_token.store(
-                static_cast<uint8_t>(Ring<T, true>::guard_token_present_mask | trailing_octile),
-                std::memory_order_seq_cst);
+            c.reading_sequences[m_rs_index].data.state.store_trailing_and_guard(
+                trailing_octile,
+                static_cast<uint8_t>(Ring<T, true>::guard_token_present_mask | trailing_octile));
 
             auto confirmed_leading_sequence = c.leading_sequence.load(std::memory_order_seq_cst);
             auto confirmed_range_first_sequence = std::max<int64_t>(
@@ -1289,8 +1462,8 @@ struct Ring_R : Ring<T, true>
             }
 
             // Trailing guard requirement changed between reads; drop and retry.
-            uint8_t previous_guard = c.reading_sequences[m_rs_index].data.guard_token.exchange(
-                0, std::memory_order_seq_cst);
+            uint8_t previous_guard =
+                c.reading_sequences[m_rs_index].data.state.exchange_guard_token(0);
             if ((previous_guard & Ring<T, true>::guard_token_present_mask) != 0) {
                 uint8_t guarded_octile =
                     previous_guard & Ring<T, true>::guard_token_octile_mask;
@@ -1336,8 +1509,7 @@ struct Ring_R : Ring<T, true>
 
         if (m_reading.load(std::memory_order_seq_cst)) {
             uint8_t released_guard =
-                c.reading_sequences[m_rs_index].data.guard_token.exchange(
-                    0, std::memory_order_seq_cst);
+                c.reading_sequences[m_rs_index].data.state.exchange_guard_token(0);
             if ((released_guard & Ring<T, true>::guard_token_present_mask) != 0) {
                 uint8_t released_octile =
                     released_guard & Ring<T, true>::guard_token_octile_mask;
@@ -1561,41 +1733,32 @@ struct Ring_R : Ring<T, true>
         const size_t new_trailing_octile = (8 * t_idx) / this->m_num_elements;
 
         if (new_trailing_octile != m_trailing_octile) {
-            auto& guard_token = c.reading_sequences[m_rs_index].data.guard_token;
+            auto& state = c.reading_sequences[m_rs_index].data.state;
 
             const uint64_t new_mask = uint64_t(1) << (8 * new_trailing_octile);
-            uint8_t        observed_token = guard_token.load(std::memory_order_seq_cst);
 
-            while (true) {
-                if ((observed_token & Ring<T, true>::guard_token_present_mask) == 0) {
-                    break;
+            bool     guard_was_present = false;
+            uint8_t  previous_octile   = 0;
+
+            {
+                auto state_lock = state.lock();
+                const uint8_t current_guard = state_lock.guard_token();
+                if ((current_guard & Ring<T, true>::guard_token_present_mask) != 0) {
+                    guard_was_present = true;
+                    previous_octile = current_guard & Ring<T, true>::guard_token_octile_mask;
+                    state_lock.set_guard_token(static_cast<uint8_t>(
+                        Ring<T, true>::guard_token_present_mask |
+                        static_cast<uint8_t>(new_trailing_octile)));
                 }
-
-                const uint8_t desired_token = static_cast<uint8_t>(
-                    Ring<T, true>::guard_token_present_mask |
-                    static_cast<uint8_t>(new_trailing_octile));
-                const uint8_t previous_token = observed_token;
-
-                c.read_access.fetch_add(new_mask, std::memory_order_seq_cst);
-
-                uint8_t expected_token = observed_token;
-                if (guard_token.compare_exchange_strong(expected_token,
-                                                        desired_token,
-                                                        std::memory_order_seq_cst,
-                                                        std::memory_order_seq_cst)) {
-                    const uint8_t old_guarded_octile =
-                        previous_token & Ring<T, true>::guard_token_octile_mask;
-                    c.read_access.fetch_sub(
-                        uint64_t(1) << (8 * old_guarded_octile), std::memory_order_seq_cst);
-                    break;
-                }
-
-                c.read_access.fetch_sub(new_mask, std::memory_order_seq_cst);
-                observed_token = expected_token;
+                state_lock.set_trailing_octile(static_cast<uint8_t>(new_trailing_octile));
             }
 
-            c.reading_sequences[m_rs_index].data.trailing_octile.store(
-                static_cast<uint8_t>(new_trailing_octile), std::memory_order_seq_cst);
+            if (guard_was_present) {
+                const uint64_t old_mask = uint64_t(1) << (8 * previous_octile);
+                c.read_access.fetch_add(new_mask, std::memory_order_seq_cst);
+                c.read_access.fetch_sub(old_mask, std::memory_order_seq_cst);
+            }
+
             m_trailing_octile = new_trailing_octile;
         }
     }
@@ -1603,13 +1766,26 @@ struct Ring_R : Ring<T, true>
     bool handle_eviction_if_needed()
     {
         auto& slot = c.reading_sequences[m_rs_index].data;
-        if ((slot.guard_token.load(std::memory_order_seq_cst) &
-             Ring<T, true>::guard_token_present_mask) != 0) {
+
+        uint8_t guard_snapshot = 0;
+#ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
+        uint8_t status_snapshot = Ring<T, false>::READER_STATE_INACTIVE;
+#endif
+
+        {
+            auto state_lock = slot.state.lock();
+            guard_snapshot = state_lock.guard_token();
+#ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
+            status_snapshot = state_lock.status();
+#endif
+        }
+
+        if ((guard_snapshot & Ring<T, true>::guard_token_present_mask) != 0) {
             return false;
         }
 
 #ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
-        if (slot.status.load(std::memory_order_seq_cst) == Ring<T, false>::READER_STATE_EVICTED) {
+        if (status_snapshot == Ring<T, false>::READER_STATE_EVICTED) {
             // Reader was evicted by writer for being too slow.
             // Skip all missed data and jump to writer's current position.
             // This is the only safe recovery strategy since old data has been overwritten.
@@ -1638,21 +1814,20 @@ struct Ring_R : Ring<T, true>
     {
         const uint64_t mask = uint64_t(1) << (8 * m_trailing_octile);
         c.read_access.fetch_add(mask, std::memory_order_seq_cst);
-        c.reading_sequences[m_rs_index].data.trailing_octile.store(
-            static_cast<uint8_t>(m_trailing_octile), std::memory_order_seq_cst);
 #ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
-        // Publish the ACTIVE state before advertising the guard token.  This way if the writer
-        // manages to evict us between the guard_token store below and our status update, their
-        // READER_STATE_EVICTED write will win and we will observe it on the next
-        // handle_eviction_if_needed() iteration instead of resurrecting the slot to ACTIVE while the
-        // guard has already been cleared.
-        c.reading_sequences[m_rs_index].data.status.store(
-            Ring<T, false>::READER_STATE_ACTIVE, std::memory_order_seq_cst);
-#endif
-        c.reading_sequences[m_rs_index].data.guard_token.store(
+        // Publish the ACTIVE state at the same time as the guard token and trailing octile so writers
+        // never observe a partially updated combination.
+        c.reading_sequences[m_rs_index].data.state.store_status_trailing_and_guard(
+            Ring<T, false>::READER_STATE_ACTIVE,
+            static_cast<uint8_t>(m_trailing_octile),
             static_cast<uint8_t>(Ring<T, true>::guard_token_present_mask |
-                                 static_cast<uint8_t>(m_trailing_octile)),
-            std::memory_order_seq_cst);
+                                 static_cast<uint8_t>(m_trailing_octile)));
+#else
+        c.reading_sequences[m_rs_index].data.state.store_trailing_and_guard(
+            static_cast<uint8_t>(m_trailing_octile),
+            static_cast<uint8_t>(Ring<T, true>::guard_token_present_mask |
+                                 static_cast<uint8_t>(m_trailing_octile)));
+#endif
     }
 
 public:
@@ -2009,43 +2184,47 @@ private:
                         : 0;
 
                 for (int i = 0; i < max_process_index; ++i) {
-                    // Check if this reader slot is active
-                    if (c.reading_sequences[i].data.status.load(std::memory_order_seq_cst)
-                        == Ring<T, false>::READER_STATE_ACTIVE)
+                    auto& reader_slot = c.reading_sequences[i].data;
+
+                    sequence_counter_type reader_seq =
+                        reader_slot.v.load(std::memory_order_seq_cst);
+
+                    bool    evicted            = false;
+                    size_t  evicted_reader_octile = 0;
+
                     {
-                        sequence_counter_type reader_seq =
-                            c.reading_sequences[i].data.v.load(std::memory_order_seq_cst);
-                        uint8_t guard_snapshot =
-                            c.reading_sequences[i].data.guard_token.load(std::memory_order_seq_cst);
-                        bool reader_has_guard =
+                        auto state_lock = reader_slot.state.lock();
+                        if (state_lock.status() != Ring<T, false>::READER_STATE_ACTIVE) {
+                            continue;
+                        }
+
+                        const uint8_t guard_snapshot = state_lock.guard_token();
+                        const bool reader_has_guard =
                             (guard_snapshot & Ring<T, false>::guard_token_present_mask) != 0;
-                        uint8_t reader_octile =
+                        const uint8_t reader_octile =
                             guard_snapshot & Ring<T, false>::guard_token_octile_mask;
 
-                        bool blocking_current_octile =
+                        const bool blocking_current_octile =
                             reader_has_guard && (reader_octile == new_octile);
 
-                        if (reader_seq < eviction_threshold || blocking_current_octile) {
-                            // Evict only if the reader currently holds a guard
-                            uint8_t evicted_guard =
-                                c.reading_sequences[i].data.guard_token.exchange(
-                                    0, std::memory_order_seq_cst);
-                            if ((evicted_guard & Ring<T, false>::guard_token_present_mask) != 0) {
-                                const size_t evicted_reader_octile =
-                                    evicted_guard & Ring<T, false>::guard_token_octile_mask;
+                        if ((reader_seq < eviction_threshold || blocking_current_octile) && reader_has_guard) {
+                            evicted = true;
+                            evicted_reader_octile =
+                                guard_snapshot & Ring<T, false>::guard_token_octile_mask;
 
-                                c.reading_sequences[i].data.status.store(
-                                    Ring<T, false>::READER_STATE_EVICTED, std::memory_order_seq_cst);
-
-                                c.read_access.fetch_sub(
-                                    uint64_t(1) << (8 * evicted_reader_octile), std::memory_order_seq_cst);
-                                c.reader_eviction_count.fetch_add(1, std::memory_order_seq_cst);
-                                c.last_evicted_reader_index.store(static_cast<uint32_t>(i), std::memory_order_seq_cst);
-                                c.last_evicted_reader_sequence.store(reader_seq, std::memory_order_seq_cst);
-                                c.last_evicted_writer_sequence.store(m_pending_new_sequence, std::memory_order_seq_cst);
-                                c.last_evicted_reader_octile.store(static_cast<uint32_t>(evicted_reader_octile), std::memory_order_seq_cst);
-                            }
+                            state_lock.set_guard_token(0);
+                            state_lock.set_status(Ring<T, false>::READER_STATE_EVICTED);
                         }
+                    }
+
+                    if (evicted) {
+                        c.read_access.fetch_sub(
+                            uint64_t(1) << (8 * evicted_reader_octile), std::memory_order_seq_cst);
+                        c.reader_eviction_count.fetch_add(1, std::memory_order_seq_cst);
+                        c.last_evicted_reader_index.store(static_cast<uint32_t>(i), std::memory_order_seq_cst);
+                        c.last_evicted_reader_sequence.store(reader_seq, std::memory_order_seq_cst);
+                        c.last_evicted_writer_sequence.store(m_pending_new_sequence, std::memory_order_seq_cst);
+                        c.last_evicted_reader_octile.store(static_cast<uint32_t>(evicted_reader_octile), std::memory_order_seq_cst);
                     }
                 }
 
@@ -2066,7 +2245,7 @@ private:
                 bool has_blocking_reader = false;
                 for (int i = 0; i < max_process_index; ++i) {
                     uint8_t guard_snapshot =
-                        c.reading_sequences[i].data.guard_token.load(std::memory_order_seq_cst);
+                        c.reading_sequences[i].data.state.load_guard_token();
                     if ((guard_snapshot & Ring<T, false>::guard_token_present_mask) != 0 &&
                         (guard_snapshot & Ring<T, false>::guard_token_octile_mask) == new_octile)
                     {
