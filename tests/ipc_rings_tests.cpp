@@ -440,15 +440,10 @@ TEST_CASE(test_reader_eviction_does_not_underflow_octile_counter)
         uint8_t guarded_octile = 0;
         auto guard_deadline = std::chrono::steady_clock::now() + 1s;
         bool guard_observed = false;
-        constexpr uint8_t guard_present_mask =
-            sintra::Ring<uint32_t, true>::guard_token_present_mask;
-        constexpr uint8_t guard_octile_mask =
-            sintra::Ring<uint32_t, true>::guard_token_octile_mask;
-
         while (std::chrono::steady_clock::now() < guard_deadline) {
-            uint8_t guard_token = slot.guard_token.load(std::memory_order_acquire);
-            if ((guard_token & guard_present_mask) != 0) {
-                guarded_octile = guard_token & guard_octile_mask;
+            uint32_t state = slot.packed_state.load(std::memory_order_acquire);
+            if (sintra::Ring<uint32_t, true>::extract_guard_present(state)) {
+                guarded_octile = sintra::Ring<uint32_t, true>::extract_octile(state);
                 guard_observed = true;
                 break;
             }
@@ -461,7 +456,8 @@ TEST_CASE(test_reader_eviction_does_not_underflow_octile_counter)
         auto eviction_deadline = std::chrono::steady_clock::now() + 2s;
         bool eviction_observed = false;
         while (std::chrono::steady_clock::now() < eviction_deadline) {
-            auto status = slot.status.load(std::memory_order_acquire);
+            uint32_t state = slot.packed_state.load(std::memory_order_acquire);
+            auto status = sintra::Ring<uint32_t, true>::extract_status(state);
             if (status == sintra::Ring<uint32_t, true>::READER_STATE_EVICTED) {
                 eviction_observed = true;
                 break;
@@ -476,10 +472,10 @@ TEST_CASE(test_reader_eviction_does_not_underflow_octile_counter)
         const uint64_t guard_mask = uint64_t(1) << (guarded_octile * 8);
 
         reader.c.read_access.fetch_add(guard_mask, std::memory_order_release);
-        slot.guard_token.store(
-            static_cast<uint8_t>(guard_present_mask | guarded_octile),
+        slot.packed_state.store(
+            sintra::Ring<uint32_t, true>::make_packed_state(
+                guarded_octile, true, sintra::Ring<uint32_t, true>::READER_STATE_ACTIVE),
             std::memory_order_release);
-        slot.status.store(sintra::Ring<uint32_t, true>::READER_STATE_ACTIVE, std::memory_order_release);
 
         reader.done_reading();
 
@@ -512,25 +508,26 @@ TEST_CASE(test_slow_reader_eviction_restores_status)
         reader.m_num_elements);
     const auto trailing_octile = (8 * trailing_idx) / reader.m_num_elements;
 
-    reader.m_trailing_octile = static_cast<uint8_t>(trailing_octile);
-    slot.trailing_octile.store(static_cast<uint8_t>(trailing_octile), std::memory_order_release);
-
     const uint64_t guard_mask = uint64_t(1) << (8 * trailing_octile);
     control.read_access.store(guard_mask, std::memory_order_release);
-    constexpr uint8_t guard_present_mask_u64 =
-        sintra::Ring<uint64_t, true>::guard_token_present_mask;
-    slot.guard_token.store(
-        static_cast<uint8_t>(guard_present_mask_u64 | static_cast<uint8_t>(trailing_octile)),
-        std::memory_order_release);
-    slot.status.store(sintra::Ring<uint64_t, true>::READER_STATE_ACTIVE, std::memory_order_release);
 
-    slot.guard_token.store(0, std::memory_order_release);
-    slot.status.store(sintra::Ring<uint64_t, true>::READER_STATE_EVICTED, std::memory_order_release);
+    // Set initial ACTIVE state with guard
+    slot.packed_state.store(
+        sintra::Ring<uint64_t, true>::make_packed_state(
+            static_cast<uint8_t>(trailing_octile), true, sintra::Ring<uint64_t, true>::READER_STATE_ACTIVE),
+        std::memory_order_release);
+
+    // Simulate eviction: atomically clear guard and set EVICTED
+    slot.packed_state.store(
+        sintra::Ring<uint64_t, true>::make_packed_state(
+            0, false, sintra::Ring<uint64_t, true>::READER_STATE_EVICTED),
+        std::memory_order_release);
     control.read_access.fetch_sub(guard_mask, std::memory_order_release);
 
     reader.done_reading_new_data();
 
-    auto restored_status = slot.status.load(std::memory_order_acquire);
+    uint32_t final_state = slot.packed_state.load(std::memory_order_acquire);
+    auto restored_status = sintra::Ring<uint64_t, true>::extract_status(final_state);
     const auto expected_status = sintra::Ring<uint64_t, true>::READER_STATE_ACTIVE;
     ASSERT_EQ(expected_status, restored_status);
 }
@@ -553,26 +550,28 @@ TEST_CASE(test_streaming_reader_status_restored_after_eviction)
     reader.m_reading_sequence->store(initial_reading, std::memory_order_release);
     slot.v.store(initial_reading, std::memory_order_release);
     control.read_access.store(0, std::memory_order_release);
-    slot.guard_token.store(0, std::memory_order_release);
-    slot.status.store(sintra::Ring<uint32_t, true>::READER_STATE_ACTIVE, std::memory_order_release);
+    // Initialize with no guard, ACTIVE status
+    slot.packed_state.store(
+        sintra::Ring<uint32_t, true>::make_packed_state(0, false, sintra::Ring<uint32_t, true>::READER_STATE_ACTIVE),
+        std::memory_order_release);
 
     auto first_range = reader.wait_for_new_data();
     ASSERT_TRUE(first_range.end >= first_range.begin);
     reader.done_reading_new_data();
 
-    const uint8_t guarded_octile = slot.trailing_octile.load(std::memory_order_acquire);
+    // Extract guarded octile from packed_state after done_reading_new_data()
+    uint32_t state_after_read = slot.packed_state.load(std::memory_order_acquire);
+    const uint8_t guarded_octile = sintra::Ring<uint32_t, true>::extract_octile(state_after_read);
     const uint64_t guard_mask     = uint64_t(1) << (8 * guarded_octile);
 
-    constexpr uint8_t guard_present_mask_u32 =
-        sintra::Ring<uint32_t, true>::guard_token_present_mask;
-    constexpr uint8_t guard_octile_mask_u32 =
-        sintra::Ring<uint32_t, true>::guard_token_octile_mask;
     // Atomically clear guard and set EVICTED status using packed_state
     uint32_t old_state = slot.packed_state.exchange(
         sintra::Ring<uint32_t, true>::make_packed_state(0, false, sintra::Ring<uint32_t, true>::READER_STATE_EVICTED),
         std::memory_order_acq_rel);
-    ASSERT_TRUE(sintra::Ring<uint32_t, true>::extract_guard_present(old_state));
-    ASSERT_EQ(guarded_octile, sintra::Ring<uint32_t, true>::extract_octile(old_state));
+    bool had_guard = sintra::Ring<uint32_t, true>::extract_guard_present(old_state);
+    uint8_t old_octile = sintra::Ring<uint32_t, true>::extract_octile(old_state);
+    ASSERT_TRUE(had_guard);
+    ASSERT_EQ(guarded_octile, old_octile);
     control.read_access.fetch_sub(guard_mask, std::memory_order_acq_rel);
 
     control.leading_sequence.fetch_add(ring_elements / 4, std::memory_order_release);
@@ -585,7 +584,8 @@ TEST_CASE(test_streaming_reader_status_restored_after_eviction)
 
     const auto active_state = sintra::Ring<uint32_t, true>::READER_STATE_ACTIVE;
     uint32_t final_state = slot.packed_state.load(std::memory_order_acquire);
-    ASSERT_EQ(active_state, sintra::Ring<uint32_t, true>::extract_status(final_state));
+    uint8_t final_status = sintra::Ring<uint32_t, true>::extract_status(final_state);
+    ASSERT_EQ(active_state, final_status);
 
     ASSERT_NO_THROW({
         reader.start_reading();
