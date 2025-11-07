@@ -1322,12 +1322,39 @@ struct Ring_R : Ring<T, true>
             }
 
             // Trailing guard requirement changed between reads; drop and retry.
-            // Atomically clear guard while preserving ACTIVE status
-            uint32_t previous_state = c.reading_sequences[m_rs_index].data.packed_state.exchange(
-                make_packed_state(0, false, Ring<T, true>::READER_STATE_ACTIVE),
+            // Load current state and check for eviction BEFORE modifying
+            uint32_t current_state = c.reading_sequences[m_rs_index].data.packed_state.load(
                 std::memory_order_seq_cst);
-            if (extract_guard_present(previous_state)) {
-                uint8_t guarded_octile = extract_octile(previous_state);
+
+#ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
+            if (extract_status(current_state) == Ring<T, true>::READER_STATE_EVICTED) {
+                // Evicted during retry - abort take_snapshot()
+                m_reading_lock = false;
+                throw ring_reader_evicted_exception();
+            }
+#endif
+
+            // Not evicted - safe to clear guard and retry
+            uint32_t new_state = make_packed_state(0, false, Ring<T, true>::READER_STATE_ACTIVE);
+
+            // Use CAS in case writer evicts during our update
+            while (!c.reading_sequences[m_rs_index].data.packed_state.compare_exchange_weak(
+                current_state, new_state,
+                std::memory_order_seq_cst, std::memory_order_seq_cst)) {
+
+#ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
+                // CAS failed - check if we're now evicted
+                if (extract_status(current_state) == Ring<T, true>::READER_STATE_EVICTED) {
+                    m_reading_lock = false;
+                    throw ring_reader_evicted_exception();
+                }
+#endif
+                // Not evicted, retry CAS
+            }
+
+            // current_state now contains the previous value before our CAS
+            if (extract_guard_present(current_state)) {
+                uint8_t guarded_octile = extract_octile(current_state);
                 c.read_access.fetch_sub(
                     uint64_t(1) << (8 * guarded_octile), std::memory_order_seq_cst);
             }
@@ -1369,21 +1396,38 @@ struct Ring_R : Ring<T, true>
         }
 
         if (m_reading.load(std::memory_order_seq_cst)) {
-            // Atomically clear guard while preserving EVICTED status if present
-            // Use compare-exchange loop to handle race with writer eviction
+            // Load current state and check for eviction BEFORE modifying
             uint32_t current_state = c.reading_sequences[m_rs_index].data.packed_state.load(
                 std::memory_order_seq_cst);
-            uint32_t new_state;
-            do {
-                uint8_t status = extract_status(current_state);
-                // Preserve EVICTED status if set by writer, otherwise ACTIVE
-                uint8_t new_status = (status == Ring<T, true>::READER_STATE_EVICTED)
-                    ? Ring<T, true>::READER_STATE_EVICTED
-                    : Ring<T, true>::READER_STATE_ACTIVE;
-                new_state = make_packed_state(0, false, new_status);
-            } while (!c.reading_sequences[m_rs_index].data.packed_state.compare_exchange_weak(
+
+#ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
+            if (extract_status(current_state) == Ring<T, true>::READER_STATE_EVICTED) {
+                // Evicted - don't touch packed_state, let handle_eviction_if_needed() handle it
+                m_reading.store(false, std::memory_order_seq_cst);
+                m_reading_lock.store(false, std::memory_order_seq_cst);
+                return;
+            }
+#endif
+
+            // Not evicted - safe to clear guard
+            uint32_t new_state = make_packed_state(0, false, Ring<T, true>::READER_STATE_ACTIVE);
+
+            // Use CAS in case writer evicts during our update
+            while (!c.reading_sequences[m_rs_index].data.packed_state.compare_exchange_weak(
                 current_state, new_state,
-                std::memory_order_seq_cst, std::memory_order_seq_cst));
+                std::memory_order_seq_cst, std::memory_order_seq_cst)) {
+
+#ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
+                // CAS failed - check if we're now evicted
+                if (extract_status(current_state) == Ring<T, true>::READER_STATE_EVICTED) {
+                    // Evicted - don't touch packed_state
+                    m_reading.store(false, std::memory_order_seq_cst);
+                    m_reading_lock.store(false, std::memory_order_seq_cst);
+                    return;
+                }
+#endif
+                // Not evicted, retry CAS
+            }
 
             // current_state now contains the previous value before our CAS
             if (extract_guard_present(current_state)) {
