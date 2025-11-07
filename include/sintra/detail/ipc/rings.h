@@ -760,6 +760,17 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         return state;
     }
 
+    // Helper functions for encoded uint8_t guard tokens (used by accessor return values)
+    static constexpr bool encoded_guard_present(uint8_t encoded)
+    {
+        return (encoded & 0x08) != 0;
+    }
+
+    static constexpr uint8_t encoded_guard_octile(uint8_t encoded)
+    {
+        return encoded & 0x07;
+    }
+
     static constexpr std::memory_order reader_state_load_order(std::memory_order order)
     {
         switch (order) {
@@ -1535,8 +1546,8 @@ struct Ring_R : Ring<T, true>
                 throw ring_reader_evicted_exception();
             }
 
-            if (Ring<T, true>::reader_state_guard_present(guard_snapshot)) {
-                const uint8_t guarded_octile = Ring<T, true>::reader_state_guard_octile(guard_snapshot);
+            if (Ring<T, true>::encoded_guard_present(guard_snapshot)) {
+                const uint8_t guarded_octile = Ring<T, true>::encoded_guard_octile(guard_snapshot);
                 c.read_access.fetch_sub(
                     uint64_t(1) << (8 * guarded_octile), std::memory_order_seq_cst);
             }
@@ -1591,8 +1602,8 @@ struct Ring_R : Ring<T, true>
                 guard_cleared,
                 std::memory_order_seq_cst);
 
-            if (guard_cleared && Ring<T, true>::reader_state_guard_present(previous_state)) {
-                const uint8_t released_octile = Ring<T, true>::reader_state_guard_octile(previous_state);
+            if (guard_cleared && Ring<T, true>::encoded_guard_present(previous_state)) {
+                const uint8_t released_octile = Ring<T, true>::encoded_guard_octile(previous_state);
                 c.read_access.fetch_sub(
                     uint64_t(1) << (8 * released_octile), std::memory_order_seq_cst);
             }
@@ -1844,8 +1855,7 @@ struct Ring_R : Ring<T, true>
                     return;
                 }
 
-                const uint8_t previous_octile =
-                    Ring<T, true>::reader_state_guard_octile(previous_state);
+                const uint8_t previous_octile = Ring<T, true>::encoded_guard_octile(previous_state);
                 if (previous_octile != new_trailing_octile) {
                     c.read_access.fetch_sub(
                         uint64_t(1) << (8 * previous_octile), std::memory_order_seq_cst);
@@ -1922,12 +1932,12 @@ struct Ring_R : Ring<T, true>
 
             c.read_access.fetch_sub(mask, std::memory_order_seq_cst);
 
-            if (Ring<T, true>::reader_state_guard_present(previous_state) &&
-                Ring<T, true>::reader_state_status(previous_state) ==
-                    Ring<T, true>::READER_STATE_ACTIVE &&
-                Ring<T, true>::reader_state_guard_octile(previous_state) ==
+            // Check if someone else already attached the correct guard
+            if (Ring<T, true>::encoded_guard_present(previous_state) &&
+                Ring<T, true>::encoded_guard_octile(previous_state) ==
                     static_cast<uint8_t>(m_trailing_octile))
             {
+                // Guard is present with correct octile - work already done
                 return;
             }
 
@@ -2323,8 +2333,7 @@ private:
                                                                    std::memory_order_seq_cst);
 
                             if (guard_evicted) {
-                                const size_t evicted_reader_octile =
-                                    Ring<T, false>::reader_state_guard_octile(previous_state);
+                                const size_t evicted_reader_octile = Ring<T, false>::encoded_guard_octile(previous_state);
 
                                 c.read_access.fetch_sub(
                                     uint64_t(1) << (8 * evicted_reader_octile), std::memory_order_seq_cst);
