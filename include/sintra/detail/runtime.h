@@ -360,8 +360,7 @@ inline bool finalize()
         std::atomic<bool> done{false};
         std::thread watchdog([&] {
             const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-            while (!done.load() &&
-                   std::chrono::steady_clock::now() < deadline) {
+            while (!done.load() && std::chrono::steady_clock::now() < deadline) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
             if (!done.load()) {
