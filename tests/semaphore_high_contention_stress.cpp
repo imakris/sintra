@@ -37,8 +37,8 @@ std::atomic<int> g_failure_line{0};
 #define CHECK(expr) \
     do { \
         if (!(expr)) { \
-            g_test_failed.store(true, std::memory_order_relaxed); \
-            g_failure_line.store(__LINE__, std::memory_order_relaxed); \
+            g_test_failed = true, std::memory_order_relaxed; \
+            g_failure_line = __LINE__, std::memory_order_relaxed; \
             std::fprintf(stderr, "[FAIL] %s:%d - " #expr "\n", __FILE__, __LINE__); \
             return; \
         } \
@@ -117,11 +117,11 @@ void test_many_readers_limited_slots()
         t.join();
     }
 
-    CHECK(slots_held.load(std::memory_order_seq_cst) == 0);
-    CHECK(total_acquisitions.load(std::memory_order_seq_cst) == kReaders * kIterationsPerReader);
+    CHECK(slots_held == 0);
+    CHECK(total_acquisitions == kReaders * kIterationsPerReader);
 
     std::fprintf(stderr, "[PASS] Many readers test completed. Total acquisitions: %lld, Max concurrent: %d\n",
-                 total_acquisitions.load(), max_slots_held.load());
+                 total_acquisitions, max_slots_held);
 }
 
 // Test 2: Wake-all stress test
@@ -176,21 +176,20 @@ void test_wake_all_stress()
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     while (acquisitions.load(std::memory_order_relaxed) < kTotalPosts) {
         if (std::chrono::steady_clock::now() > deadline) {
-            std::fprintf(stderr, "[FAIL] Timeout waiting for acquisitions: %d/%d\n",
-                        acquisitions.load(), kTotalPosts);
+            std::fprintf(stderr, "[FAIL] Timeout waiting for acquisitions: %d/%d\n", acquisitions, kTotalPosts);
             CHECK(false);
             break;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
-    stop.store(true, std::memory_order_release);
+    stop = true, std::memory_order_release;
 
     for (auto& t : waiters) {
         t.join();
     }
 
-    CHECK(acquisitions.load(std::memory_order_seq_cst) == kTotalPosts);
+    CHECK(acquisitions == kTotalPosts);
     std::fprintf(stderr, "[PASS] Wake-all stress test completed\n");
 }
 
@@ -264,14 +263,14 @@ void test_mixed_operations_extreme_contention()
         ++drained;
     }
 
-    long long total_posts = posts.load(std::memory_order_seq_cst);
-    long long total_waits = successful_waits.load(std::memory_order_seq_cst) + drained;
+    long long total_posts = posts;
+    long long total_waits = successful_waits + drained;
 
     CHECK(total_posts == total_waits);
 
-    std::fprintf(stderr, "[PASS] Mixed operations test completed. Posts: %lld, Waits: %lld (try: %lld, timeouts: %lld, drained: %lld)\n",
-                 total_posts, successful_waits.load(), try_wait_successes.load(),
-                 timed_wait_timeouts.load(), drained);
+    std::fprintf(stderr, "[PASS] Mixed operations test completed. Posts: %lld, "
+	    "Waits: %lld (try: %lld, timeouts: %lld, drained: %lld)\n",
+        total_posts, successful_waits, try_wait_successes, timed_wait_timeouts, drained);
 }
 
 // Test 4: Rapid post/wait cycling
@@ -282,7 +281,7 @@ void test_rapid_post_wait_cycling()
     constexpr int kCyclesPerThread = 50000;
 
     std::fprintf(stderr, "[TEST] Rapid post/wait cycling (%d threads, %d cycles/thread)\n",
-                 kCyclers, kCyclesPerThread);
+        kCyclers, kCyclesPerThread);
 
     interprocess_semaphore sem(0);
     std::atomic<long long> cycle_count{0};
@@ -311,11 +310,10 @@ void test_rapid_post_wait_cycling()
         t.join();
     }
 
-    CHECK(cycle_count.load(std::memory_order_seq_cst) == kCyclers * kCyclesPerThread);
+    CHECK(cycle_count == kCyclers * kCyclesPerThread);
     CHECK(!sem.try_wait());  // Should be empty
 
-    std::fprintf(stderr, "[PASS] Rapid cycling test completed. Cycles: %lld\n",
-                 cycle_count.load());
+    std::fprintf(stderr, "[PASS] Rapid cycling test completed. Cycles: %lld\n", cycle_count);
 }
 
 } // namespace
@@ -327,33 +325,34 @@ int main()
 
     try {
         test_many_readers_limited_slots();
-        if (g_test_failed.load(std::memory_order_seq_cst)) {
-            std::fprintf(stderr, "[FAILED] Test failed at line %d\n", g_failure_line.load());
+        if (g_test_failed) {
+            std::fprintf(stderr, "[FAILED] Test failed at line %d\n", g_failure_line);
             return 1;
         }
 
         test_wake_all_stress();
-        if (g_test_failed.load(std::memory_order_seq_cst)) {
-            std::fprintf(stderr, "[FAILED] Test failed at line %d\n", g_failure_line.load());
+        if (g_test_failed) {
+            std::fprintf(stderr, "[FAILED] Test failed at line %d\n", g_failure_line);
             return 1;
         }
 
         test_mixed_operations_extreme_contention();
-        if (g_test_failed.load(std::memory_order_seq_cst)) {
-            std::fprintf(stderr, "[FAILED] Test failed at line %d\n", g_failure_line.load());
+        if (g_test_failed) {
+            std::fprintf(stderr, "[FAILED] Test failed at line %d\n", g_failure_line);
             return 1;
         }
 
         test_rapid_post_wait_cycling();
-        if (g_test_failed.load(std::memory_order_seq_cst)) {
-            std::fprintf(stderr, "[FAILED] Test failed at line %d\n", g_failure_line.load());
+        if (g_test_failed) {
+            std::fprintf(stderr, "[FAILED] Test failed at line %d\n", g_failure_line);
             return 1;
         }
 
         std::fprintf(stderr, "\n[SUCCESS] All semaphore stress tests passed\n");
         return 0;
 
-    } catch (const std::exception& e) {
+    }
+	catch (const std::exception& e) {
         std::fprintf(stderr, "[EXCEPTION] %s\n", e.what());
         return 1;
     }

@@ -202,7 +202,7 @@ inline
 instance_id_type make_instance_id()
 {
     static atomic<uint64_t> instance_index_counter(2 + num_reserved_service_instances);
-    assert(instance_index_counter.load(std::memory_order_relaxed) < max_instance_index);
+    assert(instance_index_counter.load() < max_instance_index);
     auto d = decompose_instance(s_mproc_id);
     const auto index = static_cast<uint64_t>(instance_index_counter++);
     return compose_instance(d.process, index);
@@ -215,7 +215,7 @@ instance_id_type make_service_instance_id()
     // 1 is always the transceiver index of the local Managed_process,
     // thus other transceivers start from 2
     static atomic<uint64_t> instance_index_counter(2);
-    assert(instance_index_counter.load(std::memory_order_relaxed) <
+    assert(instance_index_counter.load() <
            2 + num_reserved_service_instances);
     auto d = decompose_instance(s_mproc_id);
     const auto index = static_cast<uint64_t>(instance_index_counter++);
@@ -237,7 +237,7 @@ instance_id_type make_process_instance_id()
     // 1 is the wildcard for the local process
     // thus process indices start from 2
     static atomic<uint64_t> process_index_counter(2);
-    assert(process_index_counter.load(std::memory_order_relaxed) <= max_process_index);
+    assert(process_index_counter.load() <= max_process_index);
     const auto index = static_cast<uint32_t>(process_index_counter++);
     return compose_instance(index, 1ull);
 }

@@ -218,7 +218,7 @@ inline std::atomic<spawn_detached_debug_fn>& spawn_detached_debug_override()
 
 inline void emit_spawn_detached_debug(const spawn_detached_debug_info& info)
 {
-    if (auto fn = spawn_detached_debug_override().load(std::memory_order_acquire)) {
+    if (auto fn = spawn_detached_debug_override().load()) {
         fn(info);
     }
 }
@@ -299,7 +299,7 @@ inline int system_pipe2(int pipefd[2], int flags)
 
 inline int call_pipe2(int pipefd[2], int flags)
 {
-    if (auto override = pipe2_override().load(std::memory_order_acquire)) {
+    if (auto override = pipe2_override().load()) {
         return override(pipefd, flags);
     }
     return system_pipe2(pipefd, flags);
@@ -307,7 +307,7 @@ inline int call_pipe2(int pipefd[2], int flags)
 
 inline ssize_t call_write(int fd, const void* buf, size_t count)
 {
-    if (auto override = write_override().load(std::memory_order_acquire)) {
+    if (auto override = write_override().load()) {
         return override(fd, buf, count);
     }
     return ::write(fd, buf, count);
@@ -315,7 +315,7 @@ inline ssize_t call_write(int fd, const void* buf, size_t count)
 
 inline ssize_t call_read(int fd, void* buf, size_t count)
 {
-    if (auto override = read_override().load(std::memory_order_acquire)) {
+    if (auto override = read_override().load()) {
         return override(fd, buf, count);
     }
     return ::read(fd, buf, count);
@@ -323,7 +323,7 @@ inline ssize_t call_read(int fd, void* buf, size_t count)
 
 inline pid_t call_waitpid(pid_t pid, int* status, int options)
 {
-    if (auto override = waitpid_override().load(std::memory_order_acquire)) {
+    if (auto override = waitpid_override().load()) {
         return override(pid, status, options);
     }
     return ::waitpid(pid, status, options);
@@ -379,27 +379,27 @@ namespace testing {
 
 inline detail::pipe2_fn set_pipe2_override(detail::pipe2_fn fn)
 {
-    return detail::pipe2_override().exchange(fn, std::memory_order_acq_rel);
+    return detail::pipe2_override().exchange(fn);
 }
 
 inline detail::write_fn set_write_override(detail::write_fn fn)
 {
-    return detail::write_override().exchange(fn, std::memory_order_acq_rel);
+    return detail::write_override().exchange(fn);
 }
 
 inline detail::read_fn set_read_override(detail::read_fn fn)
 {
-    return detail::read_override().exchange(fn, std::memory_order_acq_rel);
+    return detail::read_override().exchange(fn);
 }
 
 inline detail::waitpid_fn set_waitpid_override(detail::waitpid_fn fn)
 {
-    return detail::waitpid_override().exchange(fn, std::memory_order_acq_rel);
+    return detail::waitpid_override().exchange(fn);
 }
 
 inline detail::spawn_detached_debug_fn set_spawn_detached_debug(detail::spawn_detached_debug_fn fn)
 {
-    return detail::spawn_detached_debug_override().exchange(fn, std::memory_order_acq_rel);
+    return detail::spawn_detached_debug_override().exchange(fn);
 }
 
 } // namespace testing

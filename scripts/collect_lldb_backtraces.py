@@ -137,6 +137,16 @@ def main() -> int:
     build_dir = args.build_dir
     failed_log = args.failed_log or build_dir / "Testing" / "Temporary" / "LastTestsFailed.log"
 
+    # Compute absolute path to LLDB script file
+    script_dir = Path(__file__).parent
+    lldb_script = script_dir / "lldb_capture_all.txt"
+    if not lldb_script.exists():
+        print(f"::warning::LLDB script not found at {lldb_script}, using basic backtrace", file=sys.stderr)
+        lldb_cmd_str = args.lldb
+    else:
+        # Use the comprehensive script to capture all thread variables
+        lldb_cmd_str = f'xcrun lldb --batch -s {lldb_script} --'
+
     failing_tests = read_failed_tests(failed_log)
     if not failing_tests:
         return 0
@@ -150,7 +160,7 @@ def main() -> int:
         )
         return 0
 
-    lldb_cmd = shlex.split(args.lldb)
+    lldb_cmd = shlex.split(lldb_cmd_str)
     run_lldb_for_tests(
         failing_tests,
         metadata,

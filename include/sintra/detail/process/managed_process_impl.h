@@ -159,7 +159,7 @@ namespace {
                 }
             }
 
-            dispatched_signal_counter().fetch_add(1, std::memory_order_release);
+            dispatched_signal_counter().fetch_add(1);
         }
     }
 
@@ -170,7 +170,7 @@ namespace {
         ts.tv_sec = 0;
         ts.tv_nsec = 1'000'000; // 1 millisecond
         for (int spin = 0; spin < 200; ++spin) {
-            if (dispatched_signal_counter().load(std::memory_order_acquire) >= target) {
+            if (dispatched_signal_counter().load() >= target) {
                 return;
             }
             ::nanosleep(&ts, nullptr);
@@ -179,7 +179,7 @@ namespace {
 
     inline void drain_pending_signals()
     {
-        auto mask = pending_signal_mask().exchange(0U, std::memory_order_acq_rel);
+        auto mask = pending_signal_mask().exchange(0U);
         if (mask == 0U) {
             return;
         }
@@ -299,7 +299,7 @@ static void s_signal_handler(int sig, siginfo_t* info, void* ctx)
     const bool should_wait_for_dispatch = mproc && mproc->m_out_req_c && sig != SIGCHLD;
     uint32_t dispatched_before = 0;
     if (should_wait_for_dispatch) {
-        dispatched_before = dispatched_signal_counter().load(std::memory_order_relaxed);
+        dispatched_before = dispatched_signal_counter().load();
     }
 
     auto& pipefd = signal_pipe();
@@ -328,7 +328,7 @@ static void s_signal_handler(int sig, siginfo_t* info, void* ctx)
         if (!delivered && (last_errno == EAGAIN || last_errno == EINTR)) {
             auto index = signal_index(sig);
             if (index < slots.size()) {
-                pending_signal_mask().fetch_or(1U << index, std::memory_order_release);
+                pending_signal_mask().fetch_or(1U << index);
             }
         }
     }
@@ -386,7 +386,7 @@ void Managed_process::enable_recovery()
      *  • Each reader/writer ring is implemented via Ring_data::attach(), which
      *    reserves a 2× span and double maps the 2 MiB data file so wrap-around is
      *    linear for zero-copy reads. Those double-mapped spans are what appear as
-     *    "guard"/reserved regions inside Mach-O cores—the mapping design is
+     *    "guard"/reserved regions inside Mach-O cores-the mapping design is
      *    required for the ring abstraction rather than recovery itself, but the
      *    recovery harness crashes the process often enough that the platform
      *    keeps dumping them.
@@ -1743,16 +1743,16 @@ void Managed_process::wait_for_delivery_fence()
             }
 
             const auto observed = (target.stream == Process_message_reader::Delivery_stream::Request)
-                ? progress->request_sequence.load(std::memory_order_acquire)
-                : progress->reply_sequence.load(std::memory_order_acquire);
+                ? progress->request_sequence.load()
+                : progress->reply_sequence.load();
 
             if (observed >= target.target) {
                 continue;
             }
 
             const auto stopped = (target.stream == Process_message_reader::Delivery_stream::Request)
-                ? progress->request_stopped.load(std::memory_order_acquire)
-                : progress->reply_stopped.load(std::memory_order_acquire);
+                ? progress->request_stopped.load()
+                : progress->reply_stopped.load();
 
             if (stopped) {
                 continue;
