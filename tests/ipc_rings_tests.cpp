@@ -27,6 +27,7 @@
 #include "sintra/detail/ipc/rings.h"
 
 #include "test_environment.h"
+#include "sintra/detail/runtime.h"
 #undef private
 #undef protected
 
@@ -51,12 +52,25 @@ private:
     }
 };
 
-#define ASSERT_TRUE(expr) do { if (!(expr)) throw Assertion_error(#expr, __FILE__, __LINE__); } while (false)
+#define ASSERT_TRUE(expr) do { \
+    if (!(expr)) { \
+        if (sintra::detail::is_debug_pause_active()) { \
+            std::cerr << __FILE__ << ':' << __LINE__ << " - assertion failed: " << #expr << std::endl; \
+            std::abort(); \
+        } \
+        throw Assertion_error(#expr, __FILE__, __LINE__); \
+    } \
+} while (false)
 #define ASSERT_FALSE(expr) ASSERT_TRUE(!(expr))
 #define ASSERT_EQ(expected, actual) do { \
     auto _exp = (expected); \
     auto _act = (actual); \
     if (!(_exp == _act)) { \
+        if (sintra::detail::is_debug_pause_active()) { \
+            std::cerr << __FILE__ << ':' << __LINE__ << " - assertion failed: " << #expected " == " #actual \
+                      << " (expected " << _exp << ", got " << _act << ")" << std::endl; \
+            std::abort(); \
+        } \
         std::ostringstream _oss; \
         _oss << "expected " << _exp << ", got " << _act; \
         throw Assertion_error(#expected " == " #actual, __FILE__, __LINE__, _oss.str()); \
@@ -66,6 +80,11 @@ private:
     auto _v1 = (val1); \
     auto _v2 = (val2); \
     if (_v1 == _v2) { \
+        if (sintra::detail::is_debug_pause_active()) { \
+            std::cerr << __FILE__ << ':' << __LINE__ << " - assertion failed: " << #val1 " != " #val2 \
+                      << " (values both equal to " << _v1 << ")" << std::endl; \
+            std::abort(); \
+        } \
         std::ostringstream _oss; \
         _oss << "values both equal to " << _v1; \
         throw Assertion_error(#val1 " != " #val2, __FILE__, __LINE__, _oss.str()); \
@@ -85,13 +104,23 @@ private:
     } \
     catch (...) { \
     } \
-    if (!_thrown) { throw Assertion_error("Expected exception " #exception_type, __FILE__, __LINE__); } \
+    if (!_thrown) { \
+        if (sintra::detail::is_debug_pause_active()) { \
+            std::cerr << __FILE__ << ':' << __LINE__ << " - assertion failed: Expected exception " #exception_type << std::endl; \
+            std::abort(); \
+        } \
+        throw Assertion_error("Expected exception " #exception_type, __FILE__, __LINE__); \
+    } \
 } while (false)
 #define ASSERT_NO_THROW(statement) do { \
     try { \
         statement; \
     } \
     catch (...) { \
+        if (sintra::detail::is_debug_pause_active()) { \
+            std::cerr << __FILE__ << ':' << __LINE__ << " - assertion failed: Unexpected exception" << std::endl; \
+            std::abort(); \
+        } \
         throw Assertion_error("Unexpected exception", __FILE__, __LINE__); \
     } \
 } while (false)
@@ -889,6 +918,9 @@ int run_tests(bool include_unit, bool include_stress, const std::vector<std::str
 
 int main(int argc, char** argv)
 {
+    // Install debug pause handlers for CI debugging
+    sintra::detail::install_debug_pause_handlers();
+
     bool include_unit = true;
     bool include_stress = true;
     bool list_tests = false;
