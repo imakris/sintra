@@ -1917,8 +1917,8 @@ struct Ring_R : Ring<T, true>
                         return std::nullopt;
                     }
 
-                    return typename Ring<T, true>::Reader_state_union::make(
-                        Ring<T, true>::READER_STATE_ACTIVE, static_cast<uint8_t>(m_trailing_octile), true);
+                    return current.with_status(Ring<T, true>::READER_STATE_ACTIVE)
+                                  .with_guard(static_cast<uint8_t>(m_trailing_octile), true);
                 },
                 guard_updated);
 

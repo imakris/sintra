@@ -121,7 +121,7 @@ void test_many_readers_limited_slots()
     CHECK(total_acquisitions == kReaders * kIterationsPerReader);
 
     std::fprintf(stderr, "[PASS] Many readers test completed. Total acquisitions: %lld, Max concurrent: %d\n",
-                 total_acquisitions, max_slots_held);
+                 total_acquisitions.load(), max_slots_held.load());
 }
 
 // Test 2: Wake-all stress test
@@ -176,7 +176,7 @@ void test_wake_all_stress()
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     while (acquisitions.load(std::memory_order_relaxed) < kTotalPosts) {
         if (std::chrono::steady_clock::now() > deadline) {
-            std::fprintf(stderr, "[FAIL] Timeout waiting for acquisitions: %d/%d\n", acquisitions, kTotalPosts);
+            std::fprintf(stderr, "[FAIL] Timeout waiting for acquisitions: %d/%d\n", acquisitions.load(), kTotalPosts);
             CHECK(false);
             break;
         }
@@ -270,7 +270,7 @@ void test_mixed_operations_extreme_contention()
 
     std::fprintf(stderr, "[PASS] Mixed operations test completed. Posts: %lld, "
         "Waits: %lld (try: %lld, timeouts: %lld, drained: %lld)\n",
-        total_posts, successful_waits, try_wait_successes, timed_wait_timeouts, drained);
+        total_posts, total_waits, try_wait_successes.load(), timed_wait_timeouts.load(), drained);
 }
 
 // Test 4: Rapid post/wait cycling
@@ -313,7 +313,7 @@ void test_rapid_post_wait_cycling()
     CHECK(cycle_count == kCyclers * kCyclesPerThread);
     CHECK(!sem.try_wait());  // Should be empty
 
-    std::fprintf(stderr, "[PASS] Rapid cycling test completed. Cycles: %lld\n", cycle_count);
+    std::fprintf(stderr, "[PASS] Rapid cycling test completed. Cycles: %lld\n", cycle_count.load());
 }
 
 } // namespace
@@ -326,25 +326,25 @@ int main()
     try {
         test_many_readers_limited_slots();
         if (g_test_failed) {
-            std::fprintf(stderr, "[FAILED] Test failed at line %d\n", g_failure_line);
+            std::fprintf(stderr, "[FAILED] Test failed at line %d\n", g_failure_line.load());
             return 1;
         }
 
         test_wake_all_stress();
         if (g_test_failed) {
-            std::fprintf(stderr, "[FAILED] Test failed at line %d\n", g_failure_line);
+            std::fprintf(stderr, "[FAILED] Test failed at line %d\n", g_failure_line.load());
             return 1;
         }
 
         test_mixed_operations_extreme_contention();
         if (g_test_failed) {
-            std::fprintf(stderr, "[FAILED] Test failed at line %d\n", g_failure_line);
+            std::fprintf(stderr, "[FAILED] Test failed at line %d\n", g_failure_line.load());
             return 1;
         }
 
         test_rapid_post_wait_cycling();
         if (g_test_failed) {
-            std::fprintf(stderr, "[FAILED] Test failed at line %d\n", g_failure_line);
+            std::fprintf(stderr, "[FAILED] Test failed at line %d\n", g_failure_line.load());
             return 1;
         }
 
