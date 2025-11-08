@@ -254,13 +254,11 @@ struct Range {
 // Small helper types
 //==============================================================================
 
-class ring_acquisition_failure_exception : public std::runtime_error {
-public:
+struct ring_acquisition_failure_exception : public std::runtime_error {
     ring_acquisition_failure_exception() : std::runtime_error("Failed to acquire ring buffer.") {}
 };
 
-class ring_reader_evicted_exception : public std::runtime_error {
-public:
+struct ring_reader_evicted_exception : public std::runtime_error {
     ring_reader_evicted_exception() : std::runtime_error(
               "Ring reader was evicted by the writer due to being too slow.") {}
 };
@@ -407,7 +405,7 @@ private:
         }
     }
 
-    typename std::aligned_storage<sizeof(impl), alignof(impl)>::type m_storage;
+    std::aligned_storage_t<sizeof(impl), alignof(impl)> m_storage;
     std::atomic<uint8_t> m_state{state_uninitialized};
 };
 
@@ -459,11 +457,7 @@ struct Ring_data
 
     ~Ring_data()
     {
-        delete m_data_region_0;
-        delete m_data_region_1;
-        m_data_region_0 = nullptr;
-        m_data_region_1 = nullptr;
-        m_data          = nullptr;
+        m_data = nullptr;
 
         if (m_remove_files_on_destruction) {
             std::error_code ec;
@@ -471,8 +465,8 @@ struct Ring_data
         }
     }
 
-    size_t        get_num_elements() const { return m_num_elements; }
-    const T*      get_base_address() const { return m_data; }
+    size_t   get_num_elements() const { return m_num_elements; }
+    const T* get_base_address() const { return m_data; }
 
 private:
 
@@ -533,7 +527,7 @@ private:
      */
     bool attach()
     {
-        assert(m_data_region_0 == nullptr && m_data_region_1 == nullptr && m_data == nullptr);
+        assert(!m_data_region_0 && !m_data_region_1 && m_data == nullptr);
 
         try {
             if (fs::file_size(m_data_filename) != m_data_region_size) {
@@ -616,8 +610,8 @@ private:
 
                 if (layout_ok) {
                     // Success! MAP_FIXED has replaced the PROT_NONE reservation.
-                    m_data_region_0 = region0.release();
-                    m_data_region_1 = region1.release();
+                    m_data_region_0 = std::move(region0);
+                    m_data_region_1 = std::move(region1);
                     m_data = (T*)m_data_region_0->data();
 
 #if defined(MADV_DONTDUMP)
@@ -670,8 +664,8 @@ private:
         }
     }
 
-    ipc::mapped_region*                 m_data_region_0                 = nullptr;
-    ipc::mapped_region*                 m_data_region_1                 = nullptr;
+    std::unique_ptr<ipc::mapped_region> m_data_region_0;
+    std::unique_ptr<ipc::mapped_region> m_data_region_1;
     std::string                         m_directory;
 
 protected:
@@ -900,14 +894,12 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
             } reader_state{};
 
             // Forward reader_state methods to Payload for convenience
-            auto status() const { return reader_state.status(); }
-            void set_status(uint8_t value) { reader_state.set_status(value); }
-
-            auto trailing_octile() const { return reader_state.trailing_octile(); }
-            void set_trailing_octile(uint8_t value) { reader_state.set_trailing_octile(value); }
-
-            auto guard_token() const { return reader_state.guard_token(); }
-            void set_guard_token(uint8_t value) { reader_state.set_guard_token(value); }
+            auto status() const                      { return reader_state.status(); }
+            void set_status(uint8_t value)           { reader_state.set_status(value); }
+            auto trailing_octile() const             { return reader_state.trailing_octile(); }
+            void set_trailing_octile(uint8_t value)  { reader_state.set_trailing_octile(value); }
+            auto guard_token() const                 { return reader_state.guard_token(); }
+            void set_guard_token(uint8_t value)      { reader_state.set_guard_token(value); }
             auto exchange_guard_token(uint8_t value) { return reader_state.exchange_guard_token(value); }
             template <typename F>
             auto fetch_update_guard_token_if(F&& transform, bool& updated) {
@@ -1490,8 +1482,7 @@ struct Ring_R : Ring<T, true>
                 [&](typename Ring<T, true>::Reader_state_union current)
                     -> std::optional<typename Ring<T, true>::Reader_state_union>
                 {
-                    if (Ring<T, true>::reader_state_status(current) ==
-                        Ring<T, true>::READER_STATE_EVICTED) {
+                    if (Ring<T, true>::reader_state_status(current) == Ring<T, true>::READER_STATE_EVICTED) {
                         return std::nullopt;
                     }
                     return Ring<T, true>::reader_state_apply_guard(current, current.fields.octile, false);
@@ -1546,8 +1537,7 @@ struct Ring_R : Ring<T, true>
                 [&](typename Ring<T, true>::Reader_state_union current)
                     -> std::optional<typename Ring<T, true>::Reader_state_union>
                 {
-                    if (Ring<T, true>::reader_state_status(current) ==
-                        Ring<T, true>::READER_STATE_EVICTED) {
+                    if (Ring<T, true>::reader_state_status(current) == Ring<T, true>::READER_STATE_EVICTED) {
                         return std::nullopt;
                     }
                     return Ring<T, true>::reader_state_apply_guard(current, current.fields.octile, false);
@@ -1873,8 +1863,7 @@ struct Ring_R : Ring<T, true>
 
             // Recalculate trailing octile to match the new jumped-forward position
             const size_t trailing_idx = mod_pos_i64(
-                int64_t(new_seq) - int64_t(m_max_trailing_elements),
-                this->m_num_elements);
+                int64_t(new_seq) - int64_t(m_max_trailing_elements), this->m_num_elements);
             m_trailing_octile = (8 * trailing_idx) / this->m_num_elements;
 
             reattach_after_eviction();
@@ -1884,8 +1873,7 @@ struct Ring_R : Ring<T, true>
 #endif
 
         const size_t trailing_idx = mod_pos_i64(
-            int64_t(m_reading_sequence->load()) -
-                int64_t(m_max_trailing_elements),
+            int64_t(m_reading_sequence->load()) - int64_t(m_max_trailing_elements),
             this->m_num_elements);
         m_trailing_octile = (8 * trailing_idx) / this->m_num_elements;
 
@@ -2017,8 +2005,8 @@ struct Ring_W : Ring<T, false>
     Ring_W(const std::string& directory,
            const std::string& data_filename,
            size_t             num_elements)
-    : Ring<T, false>::Ring(directory, data_filename, num_elements),
-      c(*this->m_control)
+    :   Ring<T, false>::Ring(directory, data_filename, num_elements),
+        c(*this->m_control)
     {
         ensure_writer_mutex_consistency();
 
@@ -2264,36 +2252,34 @@ private:
 #ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
             auto run_eviction_pass = [&]() {
                 sequence_counter_type eviction_threshold =
-                    (m_pending_new_sequence >
-                     sequence_counter_type(SINTRA_EVICTION_LAG_RINGS) * this->m_num_elements)
+                    (m_pending_new_sequence > sequence_counter_type(SINTRA_EVICTION_LAG_RINGS) * this->m_num_elements)
                         ? (m_pending_new_sequence - sequence_counter_type(SINTRA_EVICTION_LAG_RINGS) * this->m_num_elements)
                         : 0;
 
                 for (int i = 0; i < max_process_index; ++i) {
                     // Check if this reader slot is active
                     if (c.reading_sequences[i].data.status() == Ring<T, false>::READER_STATE_ACTIVE) {
-                        sequence_counter_type reader_seq =
-                            c.reading_sequences[i].data.v;
-                        uint8_t guard_snapshot       = c.reading_sequences[i].data.guard_token();
-                        bool    reader_has_guard     = (guard_snapshot & 0x08) != 0;
-                        uint8_t reader_octile        = guard_snapshot & 0x07;
-                        bool blocking_current_octile = reader_has_guard && (reader_octile == new_octile);
+                        sequence_counter_type reader_seq = c.reading_sequences[i].data.v;
+                        uint8_t guard_snapshot           = c.reading_sequences[i].data.guard_token();
+                        bool    reader_has_guard         = (guard_snapshot & 0x08) != 0;
+                        uint8_t reader_octile            = guard_snapshot & 0x07;
+                        bool blocking_current_octile     = reader_has_guard && (reader_octile == new_octile);
 
                         if (reader_seq < eviction_threshold || blocking_current_octile) {
                             bool guard_evicted = false;
                             const uint8_t previous_state = c.reading_sequences[i].data.fetch_update_guard_token_if(
-                                   [&](typename Ring<T, false>::Reader_state_union current)
-                                       -> std::optional<typename Ring<T, false>::Reader_state_union>
-                                   {
-                                       if (!Ring<T, false>::reader_state_guard_present(current)) {
-                                           return std::nullopt;
-                                       }
+                                [&](typename Ring<T, false>::Reader_state_union current)
+                                    -> std::optional<typename Ring<T, false>::Reader_state_union>
+                                {
+                                    if (!Ring<T, false>::reader_state_guard_present(current)) {
+                                        return std::nullopt;
+                                    }
 
-                                       typename Ring<T, false>::Reader_state_union cleared =
-                                           Ring<T, false>::reader_state_apply_guard(current, current.fields.octile, false);
-                                       return Ring<T, false>::reader_state_with_status(cleared, Ring<T, false>::READER_STATE_EVICTED);
-                                   },
-                                   guard_evicted);
+                                    typename Ring<T, false>::Reader_state_union cleared =
+                                        Ring<T, false>::reader_state_apply_guard(current, current.fields.octile, false);
+                                    return Ring<T, false>::reader_state_with_status(cleared, Ring<T, false>::READER_STATE_EVICTED);
+                                },
+                                guard_evicted);
 
                             if (guard_evicted) {
                                 const size_t evicted_reader_octile = Ring<T, false>::encoded_guard_octile(previous_state);
@@ -2325,8 +2311,7 @@ private:
             while (c.read_access & range_mask) {
                 bool has_blocking_reader = false;
                 for (int i = 0; i < max_process_index; ++i) {
-                    uint8_t guard_snapshot =
-                        c.reading_sequences[i].data.guard_token();
+                    uint8_t guard_snapshot = c.reading_sequences[i].data.guard_token();
                     if ((guard_snapshot & 0x08) != 0 && (guard_snapshot & 0x07) == new_octile) {
                         has_blocking_reader = true;
                         break;
