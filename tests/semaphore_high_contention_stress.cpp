@@ -197,7 +197,7 @@ void test_wake_all_stress()
 void test_mixed_operations_extreme_contention()
 {
     constexpr int kThreads = 12;
-    constexpr int kIterationsPerThread = 8000;
+    constexpr int kIterationsPerThread = 30000;
 
     std::fprintf(stderr, "[TEST] Mixed operations extreme contention (%d threads, %d iterations/thread)\n",
                  kThreads, kIterationsPerThread);
