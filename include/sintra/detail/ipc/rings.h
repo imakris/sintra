@@ -910,12 +910,14 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         bool empty() const { return count == 0; }
         int size() const { return count; }
 
-        void push(int value) {
+        void push(int value)
+        {
             assert(count < N);
             arr[count++] = value;
         }
 
-        int pop_or(int fallback) {
+        int pop_or(int fallback)
+        {
             if (count == 0) {
                 return fallback;
             }
@@ -924,7 +926,8 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
             return value;
         }
 
-        bool contains(int value) const {
+        bool contains(int value) const
+        {
             for (int i = 0; i < count; ++i) {
                 if (arr[i] == value) {
                     return true;
@@ -933,12 +936,24 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
             return false;
         }
 
-        bool remove_if_eq_tail(int value) {
+        bool remove_if_eq_tail(int value)
+        {
             if (count > 0 && arr[count - 1] == value) {
                 arr[--count] = -1;
                 return true;
             }
             return false;
+        }
+
+        template <typename F>
+        void drain(F&& fn)
+        {
+            while (!empty()) {
+                const int value = pop_or(-1);
+                if (value >= 0) {
+                    fn(value);
+                }
+            }
         }
 
         int& operator[](int index) { return arr[index]; }
@@ -1083,19 +1098,8 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
 
         void flush_wakeups()
         {
-            for (int i = 0; i < sleeping_stack.size(); ++i) {
-                const int idx = sleeping_stack[i];
-                if (idx >= 0) {
-                    dirty_semaphores[idx].post_ordered();
-                }
-            }
-            sleeping_stack.clear();
-            while (!unordered_stack.empty()) {
-                const int idx = unordered_stack.pop_or(-1);
-                if (idx >= 0) {
-                    ready_stack.push(idx);
-                }
-            }
+            sleeping_stack.drain([&]( int idx) { dirty_semaphores[idx].post_ordered(); });
+            unordered_stack.drain([&](int idx) { ready_stack.push(idx); });
         }
 
         // Spinlock guarding the ready/sleeping/unordered stacks.
@@ -2132,6 +2136,139 @@ struct Ring_W : Ring<T, false>
         return ret;
     }
 
+
+    void advance_writer_octile_if_needed(size_t head_index)
+    {
+        const uint8_t new_octile = octile_of_index(head_index, this->m_num_elements);
+        if (m_octile == new_octile) {
+            return;
+        }
+
+#ifndef NDEBUG
+        {
+            const uint64_t ra = c.read_access;
+            for (int b = 0; b < 8; ++b) {
+                assert(((ra >> (8 * b)) & 0xffu) != 0xffu && "read_access octile underflowed to 255");
+            }
+        }
+#endif
+
+        auto range_mask = (uint64_t(0xff) << (8 * new_octile));
+#ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
+        auto run_eviction_pass = [&]() {
+            sequence_counter_type eviction_threshold =
+                (m_pending_new_sequence > sequence_counter_type(SINTRA_EVICTION_LAG_RINGS) * this->m_num_elements)
+                    ? (m_pending_new_sequence - sequence_counter_type(SINTRA_EVICTION_LAG_RINGS) * this->m_num_elements)
+                    : 0;
+
+            for (int i = 0; i < max_process_index; ++i) {
+                if (c.reading_sequences[i].data.status() != Ring<T, false>::READER_STATE_ACTIVE) {
+                    continue;
+                }
+
+                sequence_counter_type reader_seq = c.reading_sequences[i].data.v;
+                uint8_t guard_snapshot           = c.reading_sequences[i].data.guard_token();
+                bool    reader_has_guard         = (guard_snapshot & 0x08) != 0;
+                uint8_t reader_octile            = guard_snapshot & 0x07;
+                bool blocking_current_octile     = reader_has_guard && (reader_octile == new_octile);
+
+                if (reader_seq >= eviction_threshold && !blocking_current_octile) {
+                    continue;
+                }
+
+                bool guard_evicted = false;
+                const uint8_t previous_state = c.reading_sequences[i].data.fetch_update_guard_token_if(
+                    [&](typename Ring<T, false>::Reader_state_union current)
+                        -> std::optional<typename Ring<T, false>::Reader_state_union>
+                    {
+                        if (!current.guard_present()) {
+                            return std::nullopt;
+                        }
+                        auto cleared = current.with_guard(current.guard_octile(), false);
+                        return cleared.with_status(Ring<T, false>::READER_STATE_EVICTED);
+                    },
+                    guard_evicted);
+
+                if (!guard_evicted) {
+                    continue;
+                }
+
+                const size_t evicted_reader_octile = Ring<T, false>::encoded_guard_octile(previous_state);
+
+                c.read_access.fetch_sub(octile_mask(static_cast<uint8_t>(evicted_reader_octile)));
+                c.reader_eviction_count++;
+                c.last_evicted_reader_index    = static_cast<uint32_t>(i);
+                c.last_evicted_reader_sequence = reader_seq;
+                c.last_evicted_writer_sequence = m_pending_new_sequence;
+                c.last_evicted_reader_octile   = static_cast<uint32_t>(evicted_reader_octile);
+            }
+
+            c.scavenge_orphans();
+        };
+
+#if defined(SINTRA_EVICTION_SPIN_THRESHOLD) && SINTRA_EVICTION_SPIN_THRESHOLD > 0
+        uint64_t spin_count = 0;
+        constexpr uint64_t spin_loop_budget = SINTRA_EVICTION_SPIN_THRESHOLD;
+#else
+        using eviction_clock = std::chrono::steady_clock;
+        const auto eviction_budget = std::chrono::microseconds{SINTRA_EVICTION_SPIN_BUDGET_US};
+        auto eviction_deadline = eviction_clock::time_point{};
+        bool eviction_deadline_armed = false;
+#endif
+#endif
+
+        while (c.read_access & range_mask) {
+            bool has_blocking_reader = false;
+            for (int i = 0; i < max_process_index; ++i) {
+                uint8_t guard_snapshot = c.reading_sequences[i].data.guard_token();
+                if ((guard_snapshot & 0x08) != 0 && (guard_snapshot & 0x07) == new_octile) {
+                    has_blocking_reader = true;
+                    break;
+                }
+            }
+
+            if (!has_blocking_reader) {
+                if (!(c.read_access & range_mask)) {
+                    break;
+                }
+#ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
+#if defined(SINTRA_EVICTION_SPIN_THRESHOLD) && SINTRA_EVICTION_SPIN_THRESHOLD > 0
+                spin_count = 0;
+#else
+                eviction_deadline_armed = false;
+#endif
+#endif
+                continue;
+            }
+
+#ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
+#if defined(SINTRA_EVICTION_SPIN_THRESHOLD) && SINTRA_EVICTION_SPIN_THRESHOLD > 0
+            if (++spin_count > spin_loop_budget) {
+                run_eviction_pass();
+                spin_count = 0;
+            }
+#else
+            auto now = eviction_clock::now();
+            if (eviction_budget.count() == 0) {
+                run_eviction_pass();
+            }
+            else
+            if (!eviction_deadline_armed) {
+                eviction_deadline = now + eviction_budget;
+                eviction_deadline_armed = true;
+            }
+            else
+            if (now >= eviction_deadline) {
+                run_eviction_pass();
+                eviction_deadline = now + eviction_budget;
+            }
+#endif
+#endif
+        }
+
+        m_octile = new_octile;
+    }
+
 private:
     void ensure_writer_mutex_consistency()
     {
@@ -2233,135 +2370,7 @@ private:
         m_pending_new_sequence += num_elements_to_write;
 
         const size_t head = mod_u64(m_pending_new_sequence, this->m_num_elements);
-        uint8_t new_octile = octile_of_index(head, this->m_num_elements);
-
-        // Only check when crossing to a new octile (fast path otherwise)
-        if (m_octile != new_octile) {
-#ifndef NDEBUG
-            {
-                uint64_t ra = c.read_access;
-                for (int b = 0; b < 8; ++b) {
-                    assert(((ra >> (8 * b)) & 0xffu) != 0xffu && "read_access octile underflowed to 255");
-                }
-            }
-#endif
-            auto range_mask = (uint64_t(0xff) << (8 * new_octile));
-#ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
-            auto run_eviction_pass = [&]() {
-                sequence_counter_type eviction_threshold =
-                    (m_pending_new_sequence > sequence_counter_type(SINTRA_EVICTION_LAG_RINGS) * this->m_num_elements)
-                        ? (m_pending_new_sequence - sequence_counter_type(SINTRA_EVICTION_LAG_RINGS) * this->m_num_elements)
-                        : 0;
-
-                for (int i = 0; i < max_process_index; ++i) {
-                    // Check if this reader slot is active
-                    if (c.reading_sequences[i].data.status() == Ring<T, false>::READER_STATE_ACTIVE) {
-                        sequence_counter_type reader_seq = c.reading_sequences[i].data.v;
-                        uint8_t guard_snapshot           = c.reading_sequences[i].data.guard_token();
-                        bool    reader_has_guard         = (guard_snapshot & 0x08) != 0;
-                        uint8_t reader_octile            = guard_snapshot & 0x07;
-                        bool blocking_current_octile     = reader_has_guard && (reader_octile == new_octile);
-
-                        if (reader_seq < eviction_threshold || blocking_current_octile) {
-                            bool guard_evicted = false;
-                            const uint8_t previous_state = c.reading_sequences[i].data.fetch_update_guard_token_if(
-                                [&](typename Ring<T, false>::Reader_state_union current)
-                                    -> std::optional<typename Ring<T, false>::Reader_state_union>
-                                {
-                                    if (!current.guard_present()) {
-                                        return std::nullopt;
-                                    }
-
-                                    auto cleared = current.with_guard(current.guard_octile(), false);
-                                    return cleared.with_status(Ring<T, false>::READER_STATE_EVICTED);
-                                },
-                                guard_evicted);
-
-                            if (guard_evicted) {
-                                const size_t evicted_reader_octile = Ring<T, false>::encoded_guard_octile(previous_state);
-
-                                c.read_access.fetch_sub(octile_mask(static_cast<uint8_t>(evicted_reader_octile)));
-                                c.reader_eviction_count++;
-                                c.last_evicted_reader_index    = static_cast<uint32_t>(i);
-                                c.last_evicted_reader_sequence = reader_seq;
-                                c.last_evicted_writer_sequence = m_pending_new_sequence;
-                                c.last_evicted_reader_octile   = static_cast<uint32_t>(evicted_reader_octile);
-                            }
-                        }
-                    }
-                }
-
-                c.scavenge_orphans();
-            };
-
-#if defined(SINTRA_EVICTION_SPIN_THRESHOLD) && SINTRA_EVICTION_SPIN_THRESHOLD > 0
-            uint64_t spin_count = 0;
-            constexpr uint64_t spin_loop_budget = SINTRA_EVICTION_SPIN_THRESHOLD;
-#else
-            using eviction_clock = std::chrono::steady_clock;
-            const auto eviction_budget = std::chrono::microseconds{SINTRA_EVICTION_SPIN_BUDGET_US};
-            auto eviction_deadline = eviction_clock::time_point{};
-            bool eviction_deadline_armed = false;
-#endif
-#endif
-            while (c.read_access & range_mask) {
-                bool has_blocking_reader = false;
-                for (int i = 0; i < max_process_index; ++i) {
-                    uint8_t guard_snapshot = c.reading_sequences[i].data.guard_token();
-                    if ((guard_snapshot & 0x08) != 0 && (guard_snapshot & 0x07) == new_octile) {
-                        has_blocking_reader = true;
-                        break;
-                    }
-                }
-
-                if (!has_blocking_reader) {
-                    if (!(c.read_access & range_mask)) {
-                        break;
-                    }
-
-                    // A reader is in the process of moving its guard: the guard flag was observed but the
-                    // trailing octile has not yet been published. Keep spinning until the guard count drops
-                    // (or an eviction occurs) so that the writer never writes into an octile that is still
-                    // protected by a reader.
-#ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
-#if defined(SINTRA_EVICTION_SPIN_THRESHOLD) && SINTRA_EVICTION_SPIN_THRESHOLD > 0
-                    spin_count = 0;
-#else
-                    eviction_deadline_armed = false;
-#endif
-#endif
-                    continue;
-                }
-
-                // Busy-wait until the target octile is unguarded
-#ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
-#if defined(SINTRA_EVICTION_SPIN_THRESHOLD) && SINTRA_EVICTION_SPIN_THRESHOLD > 0
-                if (++spin_count > spin_loop_budget) {
-                    // Writer is stuck. Time to find and evict the slow reader(s).
-                    // This is a slow path, taken only in exceptional circumstances.
-                    run_eviction_pass();
-                    spin_count = 0; // Reset spin count after an eviction pass
-                }
-#else
-                auto now = eviction_clock::now();
-                if (eviction_budget.count() == 0) {
-                    run_eviction_pass();
-                }
-                else
-                if (!eviction_deadline_armed) {
-                    eviction_deadline = now + eviction_budget;
-                    eviction_deadline_armed = true;
-                }
-                else
-                if (now >= eviction_deadline) {
-                    run_eviction_pass();
-                    eviction_deadline = now + eviction_budget;
-                }
-#endif
-#endif
-            }
-            m_octile = new_octile;
-        }
+        advance_writer_octile_if_needed(head);
         return this->m_data + index;
     }
 
