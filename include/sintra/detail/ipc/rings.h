@@ -828,84 +828,70 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
 
     // Helper: pad to a cache line to reduce false sharing in Control arrays.
     struct cache_line_sized_t {
-        struct Payload {
-            std::atomic<sequence_counter_type> v;
+        struct Packed_reader_state {
+            std::atomic<uint32_t> word{make_reader_state(READER_STATE_INACTIVE, 0, false).word};
 
-            struct Packed_reader_state {
-                std::atomic<uint32_t> word{make_reader_state(READER_STATE_INACTIVE, 0, false).word};
-
-                // Status field access
-                uint8_t status() const
-                {
-                    return Reader_state_union(word).fields.status;
-                }
-
-                void set_status(uint8_t value)
-                {
-                    Ring::reader_state_update(word, [value](Reader_state_union current) {
-                        return Ring::reader_state_with_status(current, value);
-                    });
-                }
-
-                // Trailing octile field access
-                uint8_t trailing_octile() const
-                {
-                    return Reader_state_union(word).fields.octile;
-                }
-
-                void set_trailing_octile(uint8_t value)
-                {
-                    Ring::reader_state_update(word, [value](Reader_state_union current) {
-                        current.fields.octile = value;
-                        return current;
-                    });
-                }
-
-                // Guard token field access (encoded: bit 0x08 = present, bits 0x07 = octile)
-                uint8_t guard_token() const
-                {
-                    Reader_state_union state(word);
-                    return state.fields.guard_present ? (0x08 | state.fields.octile) : 0;
-                }
-
-                void set_guard_token(uint8_t value)
-                {
-                    Ring::reader_state_update(word, [value](Reader_state_union current) {
-                        return Ring::reader_state_apply_guard(current, value & 0x07, (value & 0x08) != 0);
-                    });
-                }
-
-                uint8_t exchange_guard_token(uint8_t value)
-                {
-                    Reader_state_union previous = Ring::reader_state_fetch_update(
-                        word, [value](Reader_state_union current) {
-                            return Ring::reader_state_apply_guard(current, value & 0x07, (value & 0x08) != 0);
-                        });
-                    return previous.fields.guard_present ? (0x08 | previous.fields.octile) : 0;
-                }
-
-                template <typename F>
-                uint8_t fetch_update_guard_token_if(F&& transform, bool& updated)
-                {
-                    Reader_state_union previous = Ring::reader_state_fetch_update_if(
-                        word, std::forward<F>(transform), updated);
-                    return previous.fields.guard_present ? (0x08 | previous.fields.octile) : 0;
-                }
-            } reader_state{};
-
-            // Forward reader_state methods to Payload for convenience
-            auto status() const                      { return reader_state.status(); }
-            void set_status(uint8_t value)           { reader_state.set_status(value); }
-            auto trailing_octile() const             { return reader_state.trailing_octile(); }
-            void set_trailing_octile(uint8_t value)  { reader_state.set_trailing_octile(value); }
-            auto guard_token() const                 { return reader_state.guard_token(); }
-            void set_guard_token(uint8_t value)      { reader_state.set_guard_token(value); }
-            auto exchange_guard_token(uint8_t value) { return reader_state.exchange_guard_token(value); }
-            template <typename F>
-            auto fetch_update_guard_token_if(F&& transform, bool& updated) {
-                return reader_state.fetch_update_guard_token_if(std::forward<F>(transform), updated);
+            // Status field access
+            uint8_t status() const
+            {
+                return Reader_state_union(word).fields.status;
             }
 
+            void set_status(uint8_t value)
+            {
+                Ring::reader_state_update(word, [value](Reader_state_union current) {
+                    return Ring::reader_state_with_status(current, value);
+                });
+            }
+
+            // Trailing octile field access
+            uint8_t trailing_octile() const
+            {
+                return Reader_state_union(word).fields.octile;
+            }
+
+            void set_trailing_octile(uint8_t value)
+            {
+                Ring::reader_state_update(word, [value](Reader_state_union current) {
+                    current.fields.octile = value;
+                    return current;
+                });
+            }
+
+            // Guard token field access (encoded: bit 0x08 = present, bits 0x07 = octile)
+            uint8_t guard_token() const
+            {
+                Reader_state_union state(word);
+                return state.fields.guard_present ? (0x08 | state.fields.octile) : 0;
+            }
+
+            void set_guard_token(uint8_t value)
+            {
+                Ring::reader_state_update(word, [value](Reader_state_union current) {
+                    return Ring::reader_state_apply_guard(current, value & 0x07, (value & 0x08) != 0);
+                });
+            }
+
+            uint8_t exchange_guard_token(uint8_t value)
+            {
+                Reader_state_union previous = Ring::reader_state_fetch_update(
+                    word, [value](Reader_state_union current) {
+                        return Ring::reader_state_apply_guard(current, value & 0x07, (value & 0x08) != 0);
+                    });
+                return previous.fields.guard_present ? (0x08 | previous.fields.octile) : 0;
+            }
+
+            template <typename F>
+            uint8_t fetch_update_guard_token_if(F&& transform, bool& updated)
+            {
+                Reader_state_union previous = Ring::reader_state_fetch_update_if(
+                    word, std::forward<F>(transform), updated);
+                return previous.fields.guard_present ? (0x08 | previous.fields.octile) : 0;
+            }
+        };
+
+        struct Payload : Packed_reader_state {
+            std::atomic<sequence_counter_type> v;
             std::atomic<uint32_t> owner_pid{0};
         };
 
@@ -2036,19 +2022,13 @@ struct Ring_W : Ring<T, false>
     T* write(const T* src_buffer, size_t num_src_elements)
     {
         T* write_location = prepare_write(num_src_elements);
-        try {
-            for (size_t i = 0; i < num_src_elements; ++i) {
-                write_location[i] = src_buffer[i];
-            }
-            return write_location;
+        if constexpr (std::is_trivially_copyable_v<T>) {
+            std::memcpy(write_location, src_buffer, num_src_elements * sizeof(T));
         }
-        catch (...) {
-            m_pending_new_sequence -= num_src_elements;
-            const size_t head = mod_u64(m_pending_new_sequence, this->m_num_elements);
-            m_octile = (8 * head) / this->m_num_elements;
-            m_writing_thread_index = 0;
-            throw;
+        else {
+            std::copy_n(src_buffer, num_src_elements, write_location);
         }
+        return write_location;
     }
 
     /**
