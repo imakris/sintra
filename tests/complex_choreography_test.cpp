@@ -565,9 +565,8 @@ int aggregator_process()
     };
 
     auto stop_slot = [&](const Stop& stop) {
-        stop_requested = true, std::memory_order_release;
-        failure = failure.load(std::memory_order_acquire || stop.due_to_failure,
-                      std::memory_order_release);
+        stop_requested.store(true);
+        failure.store(failure.load() || stop.due_to_failure);
         state_cv.notify_all();
     };
 
@@ -633,8 +632,7 @@ int aggregator_process()
             }
         }
 
-        failure = failure.load(std::memory_order_acquire || local_failure,
-                      std::memory_order_release);
+        failure.store(failure.load() || local_failure);
 
         for (std::size_t idx = 0; idx < kWorkerCount; ++idx)
         {
@@ -699,9 +697,8 @@ int verifier_process()
     };
 
     auto stop_slot = [&](const Stop& stop) {
-        stop_requested = true, std::memory_order_release;
-        failure = failure.load(std::memory_order_acquire || stop.due_to_failure,
-                      std::memory_order_release);
+        stop_requested.store(true);
+        failure.store(failure.load() || stop.due_to_failure);
         state_cv.notify_all();
     };
 
