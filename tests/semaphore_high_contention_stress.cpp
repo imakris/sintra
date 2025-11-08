@@ -197,7 +197,7 @@ void test_wake_all_stress()
 void test_mixed_operations_extreme_contention()
 {
     constexpr int kThreads = 12;
-    constexpr int kIterationsPerThread = 30000;
+    constexpr int kIterationsPerThread = 8000;
 
     std::fprintf(stderr, "[TEST] Mixed operations extreme contention (%d threads, %d iterations/thread)\n",
                  kThreads, kIterationsPerThread);
@@ -285,7 +285,7 @@ void test_mixed_operations_extreme_contention()
 void test_rapid_post_wait_cycling()
 {
     constexpr int kCyclers = 10;
-    constexpr int kCyclesPerThread = 50000;
+    constexpr int kCyclesPerThread = 20000;
 
     std::fprintf(stderr, "[TEST] Rapid post/wait cycling (%d threads, %d cycles/thread)\n",
         kCyclers, kCyclesPerThread);

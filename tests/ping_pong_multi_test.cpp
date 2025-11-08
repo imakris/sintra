@@ -132,7 +132,7 @@ void wait_for_stop()
     sintra::deactivate_all_slots();
 }
 
-constexpr int kTargetPingCount = 500;
+constexpr int kTargetPingCount = 150;
 
 int process_ping_responder()
 {

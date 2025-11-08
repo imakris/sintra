@@ -41,7 +41,7 @@ int worker_process(std::uint32_t worker_index)
 
             // All processes use the SAME barrier name repeatedly
             // This causes rapid create/destroy/recreate cycles
-            auto seq1 = barrier("reuse");
+            const std::uint64_t seq1 = barrier("reuse");
             if (seq1 == 0 || seq1 <= last_reuse_seq) {
                 std::fprintf(stderr,
                              "Worker %u iter %u: unexpected reuse seq %llu after %llu\n",
@@ -55,7 +55,7 @@ int worker_process(std::uint32_t worker_index)
 
             // Immediately call another barrier with a different name
             // to test interleaving
-            auto seq2 = barrier("other");
+            const std::uint64_t seq2 = barrier("other");
             if (seq2 == 0 || seq2 <= last_other_seq) {
                 std::fprintf(stderr,
                              "Worker %u iter %u: unexpected other seq %llu after %llu\n",
@@ -68,7 +68,7 @@ int worker_process(std::uint32_t worker_index)
             last_other_seq = seq2;
 
             // Call the first barrier again immediately
-            auto seq3 = barrier("reuse");
+            const std::uint64_t seq3 = barrier("reuse");
             if (seq3 == 0 || seq3 <= last_reuse_seq) {
                 std::fprintf(stderr,
                              "Worker %u iter %u: reuse tail seq %llu after %llu\n",
@@ -81,7 +81,7 @@ int worker_process(std::uint32_t worker_index)
             last_reuse_seq = seq3;
 
             if ((iter & 0xF) == 0) {
-                auto seq4 = barrier("reuse");
+                const std::uint64_t seq4 = barrier("reuse");
                 if (seq4 == 0 || seq4 <= last_reuse_seq) {
                     std::fprintf(stderr,
                                  "Worker %u iter %u: reuse bonus seq %llu after %llu\n",
@@ -95,7 +95,7 @@ int worker_process(std::uint32_t worker_index)
             }
 
             if ((iter & 0x1F) == 0) {
-                auto seq5 = barrier("other");
+                const std::uint64_t seq5 = barrier("other");
                 if (seq5 == 0 || seq5 <= last_other_seq) {
                     std::fprintf(stderr,
                                  "Worker %u iter %u: other bonus seq %llu after %llu\n",
