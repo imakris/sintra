@@ -169,7 +169,7 @@ int process_monitor()
         if (stop_sent.load(std::memory_order_acquire)) {
             return;
         }
-        int count = counter.fetch_add(1, std::memory_order_relaxed) + 1;
+        int count = counter.fetch_add(1) + 1;
         if (count >= kTargetPingCount) {
             bool expected = false;
             if (stop_sent.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
@@ -184,7 +184,7 @@ int process_monitor()
     wait_for_stop();
 
     const auto shared_dir = get_shared_directory();
-    write_count(shared_dir / "ping_count.txt", counter.load(std::memory_order_relaxed));
+    write_count(shared_dir / "ping_count.txt", counter.load());
     sintra::barrier("ping-pong-finished", "_sintra_all_processes");
     return 0;
 }

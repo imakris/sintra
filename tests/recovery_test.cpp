@@ -270,7 +270,8 @@ int process_crasher()
         if (!g_shared_dir.empty()) {
             log_dir = g_shared_dir;
         }
-        else if (const char* shared_dir_env = std::getenv("SINTRA_TEST_SHARED_DIR")) {
+        else
+        if (const char* shared_dir_env = std::getenv("SINTRA_TEST_SHARED_DIR")) {
             log_dir = shared_dir_env;
         }
 

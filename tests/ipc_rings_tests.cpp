@@ -27,6 +27,7 @@
 #include "sintra/detail/ipc/rings.h"
 
 #include "test_environment.h"
+#include "sintra/detail/debug_pause.h"
 #undef private
 #undef protected
 
@@ -51,12 +52,25 @@ private:
     }
 };
 
-#define ASSERT_TRUE(expr) do { if (!(expr)) throw Assertion_error(#expr, __FILE__, __LINE__); } while (false)
+#define ASSERT_TRUE(expr) do { \
+    if (!(expr)) { \
+        if (sintra::detail::is_debug_pause_active()) { \
+            std::cerr << __FILE__ << ':' << __LINE__ << " - assertion failed: " << #expr << std::endl; \
+            std::abort(); \
+        } \
+        throw Assertion_error(#expr, __FILE__, __LINE__); \
+    } \
+} while (false)
 #define ASSERT_FALSE(expr) ASSERT_TRUE(!(expr))
 #define ASSERT_EQ(expected, actual) do { \
     auto _exp = (expected); \
     auto _act = (actual); \
     if (!(_exp == _act)) { \
+        if (sintra::detail::is_debug_pause_active()) { \
+            std::cerr << __FILE__ << ':' << __LINE__ << " - assertion failed: " << #expected " == " #actual \
+                      << " (expected " << _exp << ", got " << _act << ")" << std::endl; \
+            std::abort(); \
+        } \
         std::ostringstream _oss; \
         _oss << "expected " << _exp << ", got " << _act; \
         throw Assertion_error(#expected " == " #actual, __FILE__, __LINE__, _oss.str()); \
@@ -66,6 +80,11 @@ private:
     auto _v1 = (val1); \
     auto _v2 = (val2); \
     if (_v1 == _v2) { \
+        if (sintra::detail::is_debug_pause_active()) { \
+            std::cerr << __FILE__ << ':' << __LINE__ << " - assertion failed: " << #val1 " != " #val2 \
+                      << " (values both equal to " << _v1 << ")" << std::endl; \
+            std::abort(); \
+        } \
         std::ostringstream _oss; \
         _oss << "values both equal to " << _v1; \
         throw Assertion_error(#val1 " != " #val2, __FILE__, __LINE__, _oss.str()); \
@@ -85,13 +104,23 @@ private:
     } \
     catch (...) { \
     } \
-    if (!_thrown) { throw Assertion_error("Expected exception " #exception_type, __FILE__, __LINE__); } \
+    if (!_thrown) { \
+        if (sintra::detail::is_debug_pause_active()) { \
+            std::cerr << __FILE__ << ':' << __LINE__ << " - assertion failed: Expected exception " #exception_type << std::endl; \
+            std::abort(); \
+        } \
+        throw Assertion_error("Expected exception " #exception_type, __FILE__, __LINE__); \
+    } \
 } while (false)
 #define ASSERT_NO_THROW(statement) do { \
     try { \
         statement; \
     } \
     catch (...) { \
+        if (sintra::detail::is_debug_pause_active()) { \
+            std::cerr << __FILE__ << ':' << __LINE__ << " - assertion failed: Unexpected exception" << std::endl; \
+            std::abort(); \
+        } \
         throw Assertion_error("Unexpected exception", __FILE__, __LINE__); \
     } \
 } while (false)
@@ -139,7 +168,7 @@ struct Temp_ring_dir {
         auto base = sintra::test::scratch_subdirectory("ipc_rings");
 
         // Simple unique directory name
-        auto id = test_counter().fetch_add(1, std::memory_order_relaxed);
+        auto id = test_counter()++;
         path = base / (hint + '_' + std::to_string(id));
         std::filesystem::create_directories(path);
     }
@@ -332,12 +361,12 @@ TEST_CASE(test_wait_for_new_data)
         try {
             auto initial = reader->start_reading();
             ASSERT_EQ(static_cast<size_t>(initial.end - initial.begin), size_t(0));
-            ready.store(true, std::memory_order_release);
+            ready = true;
 
-            while (observed.size() < total_expected || !writer_done.load(std::memory_order_acquire)) {
+            while (observed.size() < total_expected || !writer_done) {
                 auto range = reader->wait_for_new_data();
                 if (!range.begin || range.begin == range.end) {
-                    if (writer_done.load(std::memory_order_acquire) && observed.size() >= total_expected) {
+                    if (writer_done && observed.size() >= total_expected) {
                         break;
                     }
                     continue;
@@ -358,7 +387,7 @@ TEST_CASE(test_wait_for_new_data)
         }
     });
 
-    while (!ready.load(std::memory_order_acquire)) {
+    while (!ready) {
         std::this_thread::sleep_for(1ms);
     }
 
@@ -373,7 +402,7 @@ TEST_CASE(test_wait_for_new_data)
         writer.unblock_global();
     }
 
-    writer_done.store(true, std::memory_order_release);
+    writer_done = true;
     writer.unblock_global();
 
     reader_thread.join();
@@ -418,7 +447,7 @@ TEST_CASE(test_reader_eviction_does_not_underflow_octile_counter)
     std::atomic<bool> guard_ready{false};
 
     std::thread writer_thread([&]{
-        while (!guard_ready.load(std::memory_order_acquire)) {
+        while (!guard_ready) {
             std::this_thread::yield();
         }
         for (int iter = 0; iter < static_cast<int>(ring_elements * 4); ++iter) {
@@ -440,9 +469,13 @@ TEST_CASE(test_reader_eviction_does_not_underflow_octile_counter)
         uint8_t guarded_octile = 0;
         auto guard_deadline = std::chrono::steady_clock::now() + 1s;
         bool guard_observed = false;
+        constexpr uint8_t guard_present_mask = 0x08;
+        constexpr uint8_t guard_octile_mask  = 0x07;
+
         while (std::chrono::steady_clock::now() < guard_deadline) {
-            if (slot.has_guard.load(std::memory_order_acquire)) {
-                guarded_octile = slot.trailing_octile.load(std::memory_order_relaxed);
+            uint8_t guard_token = slot.guard_token();
+            if ((guard_token & guard_present_mask) != 0) {
+                guarded_octile = guard_token & guard_octile_mask;
                 guard_observed = true;
                 break;
             }
@@ -450,12 +483,12 @@ TEST_CASE(test_reader_eviction_does_not_underflow_octile_counter)
         }
         ASSERT_TRUE(guard_observed);
 
-        guard_ready.store(true, std::memory_order_release);
+        guard_ready = true;
 
         auto eviction_deadline = std::chrono::steady_clock::now() + 2s;
         bool eviction_observed = false;
         while (std::chrono::steady_clock::now() < eviction_deadline) {
-            auto status = slot.status.load(std::memory_order_acquire);
+            auto status = slot.status();
             if (status == sintra::Ring<uint32_t, true>::READER_STATE_EVICTED) {
                 eviction_observed = true;
                 break;
@@ -465,20 +498,20 @@ TEST_CASE(test_reader_eviction_does_not_underflow_octile_counter)
         ASSERT_TRUE(eviction_observed);
 
         join_if_joinable(reader_thread);
-
-        uint64_t read_access = reader.c.read_access.load(std::memory_order_acquire);
-        const uint64_t guard_mask = uint64_t(1) << (guarded_octile * 8);
-        uint8_t guard_count = static_cast<uint8_t>((read_access >> (guarded_octile * 8)) & 0xffu);
-
-        reader.c.read_access.fetch_add(guard_mask, std::memory_order_release);
-        slot.has_guard.store(1, std::memory_order_release);
-        slot.status.store(sintra::Ring<uint32_t, true>::READER_STATE_ACTIVE, std::memory_order_release);
-
         join_if_joinable(writer_thread);
+
+        const uint64_t guard_mask = uint64_t(1) << (guarded_octile * 8);
+
+        reader.c.read_access.fetch_add(guard_mask);
+        slot.set_guard_token(static_cast<uint8_t>(guard_present_mask | guarded_octile));
+        slot.set_status(sintra::Ring<uint32_t, true>::READER_STATE_ACTIVE);
 
         reader.done_reading();
 
-        ASSERT_EQ(0u, guard_count);
+        uint64_t read_access = reader.c.read_access;
+        uint8_t guard_count = static_cast<uint8_t>((read_access >> (guarded_octile * 8)) & 0xffu);
+
+        ASSERT_EQ(0u, static_cast<unsigned>(guard_count));
     }
     catch (...) {
         join_if_joinable(reader_thread);
@@ -499,26 +532,28 @@ TEST_CASE(test_slow_reader_eviction_restores_status)
     auto& slot    = control.reading_sequences[reader.m_rs_index].data;
 
     const auto trailing_idx = sintra::mod_pos_i64(
-        static_cast<int64_t>(reader.m_reading_sequence->load(std::memory_order_relaxed)) -
+        static_cast<int64_t>(reader.m_reading_sequence->load()) -
         static_cast<int64_t>(reader.m_max_trailing_elements),
         reader.m_num_elements);
     const auto trailing_octile = (8 * trailing_idx) / reader.m_num_elements;
 
     reader.m_trailing_octile = static_cast<uint8_t>(trailing_octile);
-    slot.trailing_octile.store(static_cast<uint8_t>(trailing_octile), std::memory_order_relaxed);
+    slot.set_trailing_octile(static_cast<uint8_t>(trailing_octile));
 
     const uint64_t guard_mask = uint64_t(1) << (8 * trailing_octile);
-    control.read_access.store(guard_mask, std::memory_order_relaxed);
-    slot.has_guard.store(1, std::memory_order_relaxed);
-    slot.status.store(sintra::Ring<uint64_t, true>::READER_STATE_ACTIVE, std::memory_order_relaxed);
+    control.read_access = guard_mask;
+    constexpr uint8_t guard_present_mask_u64 = 0x08;
+    slot.set_guard_token(
+        static_cast<uint8_t>(guard_present_mask_u64 | static_cast<uint8_t>(trailing_octile)));
+    slot.set_status(sintra::Ring<uint64_t, true>::READER_STATE_ACTIVE);
 
-    slot.has_guard.store(0, std::memory_order_relaxed);
-    slot.status.store(sintra::Ring<uint64_t, true>::READER_STATE_EVICTED, std::memory_order_relaxed);
-    control.read_access.fetch_sub(guard_mask, std::memory_order_relaxed);
+    slot.set_guard_token(0);
+    slot.set_status(sintra::Ring<uint64_t, true>::READER_STATE_EVICTED);
+    control.read_access.fetch_sub(guard_mask);
 
     reader.done_reading_new_data();
 
-    auto restored_status = slot.status.load(std::memory_order_acquire);
+    auto restored_status = slot.status();
     const auto expected_status = sintra::Ring<uint64_t, true>::READER_STATE_ACTIVE;
     ASSERT_EQ(expected_status, restored_status);
 }
@@ -537,36 +572,38 @@ TEST_CASE(test_streaming_reader_status_restored_after_eviction)
         static_cast<sintra::sequence_counter_type>(trailing_cap + ring_elements / 8);
     const auto initial_reading = initial_leading - static_cast<sintra::sequence_counter_type>(ring_elements / 8);
 
-    control.leading_sequence.store(initial_leading, std::memory_order_release);
-    reader.m_reading_sequence->store(initial_reading, std::memory_order_release);
-    slot.v.store(initial_reading, std::memory_order_release);
-    control.read_access.store(0, std::memory_order_relaxed);
-    slot.has_guard.store(0, std::memory_order_relaxed);
-    slot.status.store(sintra::Ring<uint32_t, true>::READER_STATE_ACTIVE, std::memory_order_relaxed);
+    control.leading_sequence = initial_leading;
+    reader.m_reading_sequence->store(initial_reading);
+    slot.v = initial_reading;
+    control.read_access = 0;
+    slot.set_guard_token(0);
+    slot.set_status(sintra::Ring<uint32_t, true>::READER_STATE_ACTIVE);
 
     auto first_range = reader.wait_for_new_data();
     ASSERT_TRUE(first_range.end >= first_range.begin);
     reader.done_reading_new_data();
 
-    const uint8_t guarded_octile = slot.trailing_octile.load(std::memory_order_acquire);
+    const uint8_t  guarded_octile = slot.trailing_octile();
     const uint64_t guard_mask     = uint64_t(1) << (8 * guarded_octile);
 
-    uint8_t expected = 1;
-    ASSERT_TRUE(slot.has_guard.compare_exchange_strong(
-        expected, uint8_t{0}, std::memory_order_acq_rel));
-    control.read_access.fetch_sub(guard_mask, std::memory_order_acq_rel);
-    slot.status.store(sintra::Ring<uint32_t, true>::READER_STATE_EVICTED, std::memory_order_release);
+    constexpr uint8_t guard_present_mask_u32 = 0x08;
+    constexpr uint8_t guard_octile_mask_u32  = 0x07;
+    uint8_t guard_snapshot = slot.exchange_guard_token(0);
+    ASSERT_TRUE((guard_snapshot & guard_present_mask_u32) != 0);
+    ASSERT_EQ(guarded_octile, guard_snapshot & guard_octile_mask_u32);
+    control.read_access.fetch_sub(guard_mask);
+    slot.set_status(sintra::Ring<uint32_t, true>::READER_STATE_EVICTED);
 
-    control.leading_sequence.fetch_add(ring_elements / 4, std::memory_order_release);
-    reader.m_reading_sequence->fetch_sub(ring_elements / 4, std::memory_order_release);
-    slot.v.fetch_sub(ring_elements / 4, std::memory_order_release);
+    control.leading_sequence.fetch_add(ring_elements / 4);
+    reader.m_reading_sequence->fetch_sub(ring_elements / 4);
+    slot.v.fetch_sub(ring_elements / 4);
 
     auto second_range = reader.wait_for_new_data();
     ASSERT_TRUE(second_range.end >= second_range.begin);
     reader.done_reading_new_data();
 
     const auto active_state = sintra::Ring<uint32_t, true>::READER_STATE_ACTIVE;
-    ASSERT_EQ(active_state, slot.status.load(std::memory_order_acquire));
+    ASSERT_EQ(active_state, slot.status());
 
     ASSERT_NO_THROW({
         reader.start_reading();
@@ -590,8 +627,8 @@ STRESS_TEST(stress_multi_reader_throughput)
     std::vector<std::exception_ptr> reader_errors(reader_count);
     std::vector<std::atomic<bool>> reader_ready(reader_count);
     std::vector<std::atomic<bool>> reader_evicted(reader_count);
-    for (auto& flag : reader_ready) { flag.store(false, std::memory_order_relaxed); }
-    for (auto& flag : reader_evicted) { flag.store(false, std::memory_order_relaxed); }
+    for (auto& flag : reader_ready)   { flag = false; }
+    for (auto& flag : reader_evicted) { flag = false; }
 
     std::vector<std::thread> reader_threads;
     reader_threads.reserve(reader_count);
@@ -601,16 +638,16 @@ STRESS_TEST(stress_multi_reader_throughput)
                 sintra::Ring_R<uint64_t> reader(tmp.str(), "ring_data", ring_elements, max_trailing);
                 auto initial = reader.start_reading();
                 ASSERT_EQ(static_cast<size_t>(initial.end - initial.begin), size_t(0));
-                reader_ready[rid].store(true, std::memory_order_release);
+                reader_ready[rid] = true;
 
-                while (!writer_done.load(std::memory_order_acquire) || reader_results[rid].size() < total_messages) {
+                while (!writer_done || reader_results[rid].size() < total_messages) {
                     auto range = reader.wait_for_new_data();
                     if (reader.consume_eviction_notification()) {
-                        reader_evicted[rid].store(true, std::memory_order_release);
+                        reader_evicted[rid] = true;
                         continue;
                     }
                     if (!range.begin || range.begin == range.end) {
-                        if (writer_done.load(std::memory_order_acquire)) {
+                        if (writer_done) {
                             break;
                         }
                         continue;
@@ -621,18 +658,18 @@ STRESS_TEST(stress_multi_reader_throughput)
                 }
                 reader.done_reading();
                 if (reader.consume_eviction_notification()) {
-                    reader_evicted[rid].store(true, std::memory_order_release);
+                    reader_evicted[rid] = true;
                 }
             }
             catch (...) {
                 reader_errors[rid] = std::current_exception();
-                reader_ready[rid].store(true, std::memory_order_release);
+                reader_ready[rid] = true;
             }
         });
     }
 
     for (size_t rid = 0; rid < reader_count; ++rid) {
-        while (!reader_ready[rid].load(std::memory_order_acquire)) {
+        while (!reader_ready[rid]) {
             std::this_thread::sleep_for(1ms);
         }
     }
@@ -655,7 +692,7 @@ STRESS_TEST(stress_multi_reader_throughput)
         catch (...) {
             writer_error = std::current_exception();
         }
-        writer_done.store(true, std::memory_order_release);
+        writer_done = true;
         writer.unblock_global();
     });
 
@@ -705,16 +742,7 @@ STRESS_TEST(stress_multi_reader_throughput)
 
     bool any_reader_evicted = false;
     for (auto& flag : reader_evicted) {
-        any_reader_evicted = any_reader_evicted || flag.load(std::memory_order_acquire);
-    }
-
-    for (auto& results : reader_results) {
-        for (size_t i = 0; i < results.size(); ++i) {
-            ASSERT_LT(results[i], total_messages);
-            if (i > 0) {
-                ASSERT_GT(results[i], results[i - 1]);
-            }
-        }
+        any_reader_evicted = any_reader_evicted || flag;
     }
 
     const bool diagnostics_recorded_eviction = diagnostics.reader_eviction_count > 0u;
@@ -726,6 +754,15 @@ STRESS_TEST(stress_multi_reader_throughput)
         // comparison that assumes zero loss.
         ASSERT_TRUE(diagnostics_recorded_eviction);
         return;
+    }
+
+    for (auto& results : reader_results) {
+        for (size_t i = 0; i < results.size(); ++i) {
+            ASSERT_LT(results[i], total_messages);
+            if (i > 0) {
+                ASSERT_GT(results[i], results[i - 1]);
+            }
+        }
     }
 
     ASSERT_FALSE(diagnostics_recorded_eviction);
@@ -802,7 +839,8 @@ std::vector<const Test_case*> select_tests(
                 return {};
             }
         }
-        else if (category == "stress") {
+        else
+        if (category == "stress") {
             want_stress = true;
             if (!include_stress) {
                 std::cerr << "Requested stress test '" << name
@@ -881,6 +919,9 @@ int run_tests(bool include_unit, bool include_stress, const std::vector<std::str
 
 int main(int argc, char** argv)
 {
+    // Install debug pause handlers for CI debugging
+    sintra::detail::install_debug_pause_handlers();
+
     bool include_unit = true;
     bool include_stress = true;
     bool list_tests = false;
@@ -909,7 +950,8 @@ int main(int argc, char** argv)
         if (arg == "--run" && i + 1 < argc) {
             selectors.emplace_back(argv[++i]);
         }
-        else if (arg == "--run") {
+        else
+        if (arg == "--run") {
             std::cerr << "--run requires an argument" << std::endl;
             return 2;
         }

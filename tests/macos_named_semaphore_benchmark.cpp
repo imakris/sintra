@@ -20,7 +20,7 @@ public:
     explicit named_semaphore(unsigned int initial_count = 0) {
         // Generate unique name
         static std::atomic<uint64_t> counter{0};
-        uint64_t id = (static_cast<uint64_t>(getpid()) << 32) | counter.fetch_add(1);
+        uint64_t id = (static_cast<uint64_t>(getpid()) << 32) | counter++;
 
         std::snprintf(m_name, sizeof(m_name), "/sintra_bench_%016llx",
                      static_cast<unsigned long long>(id));
@@ -73,7 +73,7 @@ double benchmark_producer_consumer(int num_producers, int num_consumers, int ite
         producers.emplace_back([&]() {
             for (int i = 0; i < items_per_producer; ++i) {
                 empty_sem.wait();
-                items_produced.fetch_add(1, std::memory_order_relaxed);
+                items_produced.fetch_add(1);
                 full_sem.post();
             }
         });
@@ -90,7 +90,7 @@ double benchmark_producer_consumer(int num_producers, int num_consumers, int ite
         consumers.emplace_back([&, my_items]() {
             for (int i = 0; i < my_items; ++i) {
                 full_sem.wait();
-                items_consumed.fetch_add(1, std::memory_order_relaxed);
+                items_consumed.fetch_add(1);
                 empty_sem.post();
             }
         });

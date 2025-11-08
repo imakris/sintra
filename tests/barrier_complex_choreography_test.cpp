@@ -102,7 +102,7 @@ std::filesystem::path ensure_shared_directory()
 #endif
 
     static std::atomic<long long> counter{0};
-    unique_suffix ^= counter.fetch_add(1, std::memory_order_relaxed);
+    unique_suffix ^= counter.fetch_add(1);
 
     std::ostringstream oss;
     oss << "barrier_complex_choreography_" << unique_suffix;
@@ -203,10 +203,12 @@ void cleanup_directory_with_retries(const std::filesystem::path& dir)
         try {
             std::filesystem::remove_all(dir);
             cleanup_succeeded = true;
-        } catch (const std::exception& e) {
+        }
+        catch (const std::exception& e) {
             if (retry < 2) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            } else {
+            }
+            else {
                 std::fprintf(stderr,
                              "Warning: failed to remove temp directory %s after 3 attempts: %s\n",
                              dir.string().c_str(), e.what());
@@ -224,12 +226,15 @@ void custom_terminate_handler()
         auto eptr = std::current_exception();
         if (eptr) {
             std::rethrow_exception(eptr);
-        } else {
+        }
+        else {
             std::fprintf(stderr, "terminate called without an active exception\n");
         }
-    } catch (const std::exception& e) {
+    }
+    catch (const std::exception& e) {
         std::fprintf(stderr, "Uncaught exception: %s\n", e.what());
-    } catch (...) {
+    }
+    catch (...) {
         std::fprintf(stderr, "Uncaught exception of unknown type\n");
     }
 
@@ -401,7 +406,8 @@ int coordinator_process()
     try {
         const auto shared_dir = get_shared_directory();
         write_result(shared_dir, success, iterations_completed, stage_a_total, stage_b_total, failure_reason);
-    } catch (const std::exception& e) {
+    }
+    catch (const std::exception& e) {
         std::fprintf(stderr, "Failed to write result: %s\n", e.what());
         return 1;
     }
@@ -425,18 +431,19 @@ int stage_process(std::uint32_t stage, std::uint32_t worker_index)
             return;
         }
         if (directive.iteration >= kIterations) {
-            failure.store(true, std::memory_order_relaxed);
+            failure.store(true);
             return;
         }
         if (directive.extra_rounds > kMaxExtraRounds) {
-            failure.store(true, std::memory_order_relaxed);
+            failure.store(true);
         }
 
         {
             std::lock_guard<std::mutex> lock(release_mutex);
             if (release_received[directive.iteration]) {
-                failure.store(true, std::memory_order_relaxed);
-            } else {
+                failure.store(true);
+            }
+            else {
                 release_received[directive.iteration] = true;
             }
             extra_rounds_cache[directive.iteration] = directive.extra_rounds;
@@ -482,14 +489,14 @@ int stage_process(std::uint32_t stage, std::uint32_t worker_index)
 
             auto [extra_rounds, token] = wait_for_release(iteration);
             if (token != directive_token(stage, iteration)) {
-                failure.store(true, std::memory_order_relaxed);
+                failure.store(true);
             }
 
             barrier(phase_a_barrier);
             barrier(phase_b_barrier);
 
             if (extra_rounds > kMaxExtraRounds) {
-                failure.store(true, std::memory_order_relaxed);
+                failure.store(true);
                 extra_rounds = kMaxExtraRounds;
             }
             for (std::uint32_t extra = 0; extra < extra_rounds; ++extra) {
@@ -498,12 +505,13 @@ int stage_process(std::uint32_t stage, std::uint32_t worker_index)
             }
 
             barrier(done_barrier);
-        } else {
+        }
+        else {
             barrier(phase_a_barrier);
 
             auto [extra_rounds, token] = wait_for_release(iteration);
             if (token != directive_token(stage, iteration)) {
-                failure.store(true, std::memory_order_relaxed);
+                failure.store(true);
             }
 
             const int delay = delay_dist(gen);
@@ -518,7 +526,7 @@ int stage_process(std::uint32_t stage, std::uint32_t worker_index)
             barrier(phase_b_barrier);
 
             if (extra_rounds > kMaxExtraRounds) {
-                failure.store(true, std::memory_order_relaxed);
+                failure.store(true);
                 extra_rounds = kMaxExtraRounds;
             }
             for (std::uint32_t extra = 0; extra < extra_rounds; ++extra) {
@@ -533,7 +541,7 @@ int stage_process(std::uint32_t stage, std::uint32_t worker_index)
     deactivate_all_slots();
     barrier("complex-choreography-test-done", "_sintra_all_processes");
 
-    return failure.load(std::memory_order_relaxed) ? 1 : 0;
+    return failure.load() ? 1 : 0;
 }
 
 int stage_a0_process() { return stage_process(0, 0); }

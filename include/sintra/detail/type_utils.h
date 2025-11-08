@@ -67,7 +67,9 @@ constexpr std::string_view ctti_name()
         const auto ch = pretty[end];
         if (ch == '<') {
             ++depth;
-        } else if (ch == '>') {
+        }
+        else
+        if (ch == '>') {
             if (depth == 0) {
                 break;
             }

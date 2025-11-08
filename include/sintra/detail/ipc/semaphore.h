@@ -46,7 +46,7 @@ BUILD REQUIREMENTS
 - The wait word is a naturally aligned 32-bit word accessed atomically (lock-free required).
 
 ROBUSTNESS MODEL
-- Semaphores are ownerless counters. If a process crashes after wait(), the counter remains decremented; there is no “owner” to recover.
+- Semaphores are ownerless counters. If a process crashes after wait(), the counter remains decremented; there is no "owner" to recover.
 - Windows (named semaphore): the kernel object persists independently of handle lifetimes; process termination does not roll back the count.
 - POSIX (shared memory): the counter lives in shared memory visible to other processes and continues to reflect the current value.
 
@@ -76,7 +76,7 @@ CAVEATS
 #include <cwchar>
 #include <limits>
 
-#include <sintra/time_utils.h>
+#include "../time_utils.h"
 
 // Platform headers MUST be included BEFORE opening namespaces to avoid polluting them
 #if defined(_WIN32)
@@ -245,8 +245,8 @@ static HANDLE ips_win_local_handle(ips_backend& b) noexcept
         if (!h) {
             DWORD last = GetLastError();
 
-			// Last resort: try opening if creation failed for other reasons (e.g., permissions).
-			h = OpenSemaphoreW(SYNCHRONIZE | SEMAPHORE_MODIFY_STATE, FALSE, st.name);
+            // Last resort: try opening if creation failed for other reasons (e.g., permissions).
+            h = OpenSemaphoreW(SYNCHRONIZE | SEMAPHORE_MODIFY_STATE, FALSE, st.name);
         }
 
         if (!h) {
@@ -361,14 +361,14 @@ inline bool ips_backend::try_wait() noexcept
         errno = EINVAL;
         return false;
     }
-	
-	DWORD rc = WaitForSingleObject(h, 0);
-	if (rc == WAIT_OBJECT_0) return true;
-	if (rc == WAIT_FAILED) {
-		errno = EINVAL; // keeps “no errno on empty” invariant for normal false
-		return false;
-	}
-	return false;
+    
+    DWORD rc = WaitForSingleObject(h, 0);
+    if (rc == WAIT_OBJECT_0) return true;
+    if (rc == WAIT_FAILED) {
+        errno = EINVAL; // keeps "no errno on empty" invariant for normal false
+        return false;
+    }
+    return false;
 }
 
 
@@ -419,7 +419,9 @@ inline bool ips_backend::try_wait_for(std::chrono::nanoseconds d) noexcept
 
 inline void ips_backend::post(uint32_t n) noexcept
 {
-    if (n == 0) return;
+    if (n == 0) {
+        return;
+    }
     HANDLE h = ips_win_ensure_handle(*this);
     if (!h) {
         errno = EINVAL; return;
@@ -447,7 +449,9 @@ static inline void ns_to_timespec(uint64_t ns, struct timespec& ts)
 {
     uint64_t sec = ns / 1000000000ULL;
     uint64_t tmax = (uint64_t)std::numeric_limits<time_t>::max();
-    if (sec > tmax) sec = tmax;
+    if (sec > tmax) {
+        sec = tmax;
+    }
     ts.tv_sec  = (time_t)sec;
     ts.tv_nsec = (long)(ns % 1000000000ULL);
 }
@@ -471,7 +475,7 @@ static inline int posix_wait_equal_until(
     const uint32_t flags = OS_SYNC_WAIT_ON_ADDRESS_SHARED;
     for (;;) {
         int rc = os_sync_wait_on_address_with_deadline(
-		    (void*)addr, (uint64_t)expected, 4, flags, OS_CLOCK_MONOTONIC, deadline);
+            (void*)addr, (uint64_t)expected, 4, flags, OS_CLOCK_MONOTONIC, deadline);
         if (rc >= 0)                           return  0;
         if (errno == ETIMEDOUT)                return -1;
         if (errno == EINTR || errno == EAGAIN) continue;
@@ -570,9 +574,9 @@ inline void ips_backend::init_named(
 inline bool ips_backend::try_wait() noexcept
 {
     std::atomic<uint32_t>& c = P(*this).count;
-    uint32_t v = c.load(std::memory_order_acquire);
+    uint32_t v = c;
     while (v != 0) {
-        if (c.compare_exchange_weak(v, v-1, std::memory_order_acq_rel, std::memory_order_acquire)) {
+        if (c.compare_exchange_weak(v, v-1)) {
             return true;
         }
     }
@@ -581,7 +585,9 @@ inline bool ips_backend::try_wait() noexcept
 
 inline bool ips_backend::wait() noexcept
 {
-    if (try_wait()) return true;
+    if (try_wait()) {
+        return true;
+    }
     // Use very large timeout for "infinite" wait
     return try_wait_for(std::chrono::nanoseconds(1ULL<<60));
 }
@@ -589,15 +595,17 @@ inline bool ips_backend::wait() noexcept
 inline bool ips_backend::try_wait_for(std::chrono::nanoseconds d) noexcept
 {
     std::atomic<uint32_t>& c = P(*this).count;
-    if (try_wait()) return true;
+    if (try_wait()) {
+        return true;
+    }
 
     const uint64_t add = d.count() <= 0 ? 0ULL : (uint64_t)d.count();
     const uint64_t deadline = monotonic_now_ns() + add;
 
     for (;;) {
-        uint32_t cur = c.load(std::memory_order_acquire);
+        uint32_t cur = c;
         if (cur != 0) {
-            if (c.compare_exchange_weak(cur, cur-1, std::memory_order_acq_rel, std::memory_order_relaxed))
+            if (c.compare_exchange_weak(cur, cur-1))
                 return true;
             continue;
         }
@@ -625,10 +633,12 @@ inline bool ips_backend::try_wait_for(std::chrono::nanoseconds d) noexcept
 
 inline void ips_backend::post(uint32_t n) noexcept
 {
-    if (n == 0) return;
+    if (n == 0) {
+        return;
+    }
 
     std::atomic<uint32_t>& c = P(*this).count;
-    uint32_t v = c.load(std::memory_order_relaxed);
+    uint32_t v = c;
     const uint32_t maxv = P(*this).max;
 
     for (;;) {
@@ -636,7 +646,7 @@ inline void ips_backend::post(uint32_t n) noexcept
             errno = EOVERFLOW;
             return;
         }
-        if (c.compare_exchange_weak(v, v + n, std::memory_order_release, std::memory_order_relaxed)) {
+        if (c.compare_exchange_weak(v, v + n)) {
             break;
         }
     }

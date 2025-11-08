@@ -111,7 +111,7 @@ namespace sintra {
 //   - rendezvous_t: wait until every participant has reached the barrier.
 //   - delivery_fence_t (default): additionally ensure all pre-barrier messages
 //     have been fetched by local request readers.
-//   - processing_fence_t: the strongest guarantee – all pre-barrier message
+//   - processing_fence_t: the strongest guarantee - all pre-barrier message
 //     handlers have run to completion everywhere.
 struct rendezvous_t {};
 struct delivery_fence_t {};
@@ -125,7 +125,7 @@ struct processing_fence_t {};
 ///
 /// When multiple threads in a single process enter the same barrier they will
 /// match with the corresponding threads of the other participants in an
-/// unspecified order.  Barrier is an inter-process synchronisation mechanism –
+/// unspecified order.  Barrier is an inter-process synchronisation mechanism -
 /// combine it with traditional threading primitives if you also need
 /// thread-level coordination within a process.
 template<typename BarrierMode = delivery_fence_t>

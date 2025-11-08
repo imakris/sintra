@@ -73,14 +73,14 @@ int main(int argc, char* argv[])
     if (!is_spawned) {
         auto keep_running = std::make_shared<std::atomic<bool>>(true);
         std::thread background_thread([keep_running] {
-            while (keep_running->load(std::memory_order_relaxed)) {
+            while (keep_running->load(std::memory_order_acquire)) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
         });
         background_thread.detach();
 
         sintra::activate_slot([keep_running](Pong) {
-            keep_running->store(false, std::memory_order_relaxed);
+            keep_running->store(false, std::memory_order_release);
             std::fprintf(stderr, "[FAIL] Coordinator crashing after receiving Pong\n");
             std::fflush(stderr);
             std::this_thread::sleep_for(std::chrono::milliseconds(200));

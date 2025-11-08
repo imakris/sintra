@@ -34,8 +34,8 @@ failure modes:
    advanced.
 2. **Stale progress counters mid-run.** After skipping dormant readers the repro test still
    stalled with entries such as `req_target == req_read == 1546` while the delivery progress
-   plateaued at `1362`. No new backlog was present—the coordinator ring reader had already
-   caught up—but the captured progress counters never reflected the updated read position, so
+   plateaued at `1362`. No new backlog was present-the coordinator ring reader had already
+   caught up-but the captured progress counters never reflected the updated read position, so
    the wait loop blocked indefinitely and barrier completions were never emitted.
 
 The repro test continued to fail with `Coordinator did not observe first marker for iteration 1`

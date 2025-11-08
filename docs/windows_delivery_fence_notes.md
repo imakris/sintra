@@ -49,8 +49,8 @@ coordinator releases the barrier:
 
 The repro test highlights this race: the slow coordinator thread trusts the
 barrier to cover the bursts emitted immediately before entering the fence. Once
-one burst slips through—because the coordinator had not yet drained the request
-ring when the last worker released the barrier—the coordinator detects the
+one burst slips through-because the coordinator had not yet drained the request
+ring when the last worker released the barrier-the coordinator detects the
 missing sequence and aborts.【F:tests/barrier_delivery_fence_repro_test.cpp†L136-L209】
 
 ## Architectural direction
@@ -61,7 +61,7 @@ symptom. The issue stems from the fact that delivery-fence barriers rely on the
 per-process `wait_for_delivery_fence()` helper, which only inspects local
 reader progress. To make the fence robust we need an explicit handshake that
 prevents the coordinator from releasing the barrier until it knows that every
-participant's outbound traffic—up to the point of entering the fence—has been
+participant's outbound traffic-up to the point of entering the fence-has been
 observed.
 
 One viable direction is a two-phase completion:
@@ -162,7 +162,7 @@ Two mitigation experiments were attempted but neither yielded a viable fix:
    leading sequences and queued a post-handler via
    `Managed_process::run_after_current_handler()`. The idea was to re-check the
    recorded targets after each request handler finished. In practice the
-   handler executed only once—immediately after the barrier RPC returned—because
+   handler executed only once-immediately after the barrier RPC returned-because
    the coordinator's request loop had no further messages to trigger additional
    post-handler runs. As a result the recorded targets were never re-evaluated
    and the barrier hung, leaving the repro test stuck.

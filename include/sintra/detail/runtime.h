@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "debug_pause.h"
 #include "globals.h"
 #include "process/managed_process.h"
 #include "utility.h"
@@ -85,200 +86,6 @@ public:
 private:
     std::function<void()> m_callback;
 };
-
-// Debug pause functionality - only enabled when SINTRA_DEBUG_PAUSE_ON_EXIT is set
-inline bool is_debug_pause_requested()
-{
-    const char* env = std::getenv("SINTRA_DEBUG_PAUSE_ON_EXIT");
-    return env && *env && (*env != '0');
-}
-
-inline std::atomic<bool>& debug_pause_state()
-{
-    static std::atomic<bool> active{false};
-    return active;
-}
-
-inline void set_debug_pause_active(bool active)
-{
-    debug_pause_state().store(active, std::memory_order_release);
-}
-
-inline bool is_debug_pause_active()
-{
-    return debug_pause_state().load(std::memory_order_acquire);
-}
-
-inline void debug_pause_forever(const char* reason)
-{
-#ifdef _WIN32
-    const auto pid = _getpid();
-#else
-    const auto pid = getpid();
-#endif
-
-    std::fprintf(stderr, "\n[SINTRA_DEBUG_PAUSE] Process %d paused: %s\n", pid, reason);
-    std::fprintf(stderr, "[SINTRA_DEBUG_PAUSE] Attach debugger to PID %d to capture stacks\n", pid);
-    std::fflush(stderr);
-
-    // Infinite loop to keep process alive for debugger attachment
-    while (true) {
-        std::this_thread::sleep_for(std::chrono::hours(1));
-    }
-}
-
-#ifdef _WIN32
-inline LONG WINAPI debug_vectored_exception_handler(EXCEPTION_POINTERS* exception_info)
-{
-    if (!is_debug_pause_active()) {
-        return EXCEPTION_CONTINUE_SEARCH;
-    }
-
-    if (!exception_info || !exception_info->ExceptionRecord) {
-        return EXCEPTION_CONTINUE_SEARCH;
-    }
-
-    // Only handle actual crashes, not debugging events
-    DWORD code = exception_info->ExceptionRecord->ExceptionCode;
-    if (code == EXCEPTION_BREAKPOINT || code == EXCEPTION_SINGLE_STEP) {
-        return EXCEPTION_CONTINUE_SEARCH;
-    }
-
-    const char* exception_name = "Unknown exception";
-    switch (code) {
-        case EXCEPTION_ACCESS_VIOLATION:
-            exception_name = "Access violation";
-            break;
-        case EXCEPTION_ARRAY_BOUNDS_EXCEEDED:
-            exception_name = "Array bounds exceeded";
-            break;
-        case EXCEPTION_DATATYPE_MISALIGNMENT:
-            exception_name = "Datatype misalignment";
-            break;
-        case EXCEPTION_FLT_DIVIDE_BY_ZERO:
-            exception_name = "Float divide by zero";
-            break;
-        case EXCEPTION_FLT_INVALID_OPERATION:
-            exception_name = "Float invalid operation";
-            break;
-        case EXCEPTION_ILLEGAL_INSTRUCTION:
-            exception_name = "Illegal instruction";
-            break;
-        case EXCEPTION_INT_DIVIDE_BY_ZERO:
-            exception_name = "Integer divide by zero";
-            break;
-        case EXCEPTION_STACK_OVERFLOW:
-            exception_name = "Stack overflow";
-            break;
-        default:
-            return EXCEPTION_CONTINUE_SEARCH;
-    }
-
-    debug_pause_forever(exception_name);
-    return EXCEPTION_CONTINUE_SEARCH; // Never reached due to infinite loop
-}
-#else
-inline void debug_signal_handler(int signum)
-{
-    if (!is_debug_pause_active()) {
-        std::signal(signum, SIG_DFL);
-        std::raise(signum);
-        return;
-    }
-
-    const char* signal_name = "Unknown signal";
-    switch (signum) {
-        case SIGABRT:
-            signal_name = "SIGABRT (abort)";
-            break;
-        case SIGSEGV:
-            signal_name = "SIGSEGV (segmentation fault)";
-            break;
-        case SIGFPE:
-            signal_name = "SIGFPE (floating point exception)";
-            break;
-        case SIGILL:
-            signal_name = "SIGILL (illegal instruction)";
-            break;
-        case SIGBUS:
-            signal_name = "SIGBUS (bus error)";
-            break;
-        default:
-            break;
-    }
-
-    debug_pause_forever(signal_name);
-}
-#endif
-
-inline void debug_signal_handler_win(int signum)
-{
-    if (!is_debug_pause_active()) {
-        std::signal(signum, SIG_DFL);
-        std::raise(signum);
-        return;
-    }
-
-    const char* signal_name = "Unknown signal";
-    switch (signum) {
-        case SIGABRT:
-            signal_name = "SIGABRT (abort)";
-            break;
-        case SIGFPE:
-            signal_name = "SIGFPE (floating point exception)";
-            break;
-        case SIGILL:
-            signal_name = "SIGILL (illegal instruction)";
-            break;
-        case SIGSEGV:
-            signal_name = "SIGSEGV (segmentation fault)";
-            break;
-        default:
-            break;
-    }
-
-    debug_pause_forever(signal_name);
-}
-
-inline void install_debug_pause_handlers()
-{
-    const bool requested = is_debug_pause_requested();
-    set_debug_pause_active(requested);
-
-    if (!requested) {
-        return;
-    }
-
-    std::fprintf(stderr, "[SINTRA_DEBUG_PAUSE] Handlers installed\n");
-    std::fflush(stderr);
-
-#ifdef _WIN32
-    // AddVectoredExceptionHandler for exceptions (more reliable than SetUnhandledExceptionFilter)
-    // First parameter: 1 = add as first handler in chain
-    AddVectoredExceptionHandler(1, debug_vectored_exception_handler);
-
-    // signal() for abort(), etc.
-    std::signal(SIGABRT, debug_signal_handler_win);
-    std::signal(SIGFPE, debug_signal_handler_win);
-    std::signal(SIGILL, debug_signal_handler_win);
-    std::signal(SIGSEGV, debug_signal_handler_win);
-
-    std::fprintf(stderr, "[SINTRA_DEBUG_PAUSE] Windows handlers configured (VEH)\n");
-    std::fflush(stderr);
-#else
-    struct sigaction sa;
-    std::memset(&sa, 0, sizeof(sa));
-    sa.sa_handler = debug_signal_handler;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
-
-    sigaction(SIGABRT, &sa, nullptr);
-    sigaction(SIGSEGV, &sa, nullptr);
-    sigaction(SIGFPE, &sa, nullptr);
-    sigaction(SIGILL, &sa, nullptr);
-    sigaction(SIGBUS, &sa, nullptr);
-#endif
-}
 
 } // namespace detail
 
@@ -405,11 +212,10 @@ inline bool finalize()
         std::atomic<bool> done{false};
         std::thread watchdog([&] {
             const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-            while (!done.load(std::memory_order_acquire) &&
-                   std::chrono::steady_clock::now() < deadline) {
+            while (!done.load() && std::chrono::steady_clock::now() < deadline) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
-            if (!done.load(std::memory_order_acquire)) {
+            if (!done.load()) {
                 s_mproc->unblock_rpc(process_of(s_coord_id));
             }
         });
@@ -421,7 +227,7 @@ inline bool finalize()
             flush_seq = invalid_sequence;
         }
 
-        done.store(true, std::memory_order_release);
+        done = true;
         watchdog.join();
     }
 

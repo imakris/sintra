@@ -20,7 +20,7 @@
 #include <system_error>
 #include <thread>
 
-#include <sintra/time_utils.h>
+#include "../time_utils.h"
 
 #ifdef _WIN32
   #ifndef NOMINMAX
@@ -591,13 +591,16 @@ inline std::optional<run_marker_record> read_run_marker(const std::filesystem::p
             if (key == "pid") {
                 record.pid = static_cast<uint32_t>(std::stoul(value));
             }
-            else if (key == "start_ns") {
+            else
+            if (key == "start_ns") {
                 record.start_stamp = std::stoull(value);
             }
-            else if (key == "created_ns") {
+            else
+            if (key == "created_ns") {
                 record.created_monotonic_ns = std::stoull(value);
             }
-            else if (key == "occurrence") {
+            else
+            if (key == "occurrence") {
                 record.recovery_occurrence = static_cast<uint32_t>(std::stoul(value));
             }
         }
@@ -706,16 +709,19 @@ inline void cleanup_stale_swarm_directories(const std::filesystem::path& base_di
                 if (!alive) {
                     stale = true;
                 }
-                else if (record.start_stamp != 0) {
+                else
+                if (record.start_stamp != 0) {
                     auto running_start = query_process_start_stamp(record.pid);
                     if (running_start && *running_start != record.start_stamp) {
                         stale = true;
                     }
-                    else if (!running_start && record.created_monotonic_ns > now_monotonic) {
+                    else
+                    if (!running_start && record.created_monotonic_ns > now_monotonic) {
                         stale = true;
                     }
                 }
-                else if (record.created_monotonic_ns > now_monotonic) {
+                else
+                if (record.created_monotonic_ns > now_monotonic) {
                     stale = true;
                 }
             }
@@ -767,7 +773,7 @@ static inline size_t sintra_detect_cache_line_size_linux()
     return 64;
 }
 
-static inline void sintra_warn_if_cacheline_mismatch_linux(size_t assumed_cache_line_size)
+static inline void sintra_warn_if_cacheline_mismatch(size_t assumed_cache_line_size)
 {
     size_t detected = sintra_detect_cache_line_size_linux();
     if (detected && detected != assumed_cache_line_size) {
@@ -799,7 +805,7 @@ static inline size_t sintra_detect_cache_line_size_macos()
     return 64;
 }
 
-static inline void sintra_warn_if_cacheline_mismatch_macos(size_t assumed_cache_line_size)
+static inline void sintra_warn_if_cacheline_mismatch(size_t assumed_cache_line_size)
 {
     size_t detected = sintra_detect_cache_line_size_macos();
     if (detected && detected != assumed_cache_line_size) {

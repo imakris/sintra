@@ -218,7 +218,7 @@ inline std::atomic<spawn_detached_debug_fn>& spawn_detached_debug_override()
 
 inline void emit_spawn_detached_debug(const spawn_detached_debug_info& info)
 {
-    if (auto fn = spawn_detached_debug_override().load(std::memory_order_acquire)) {
+    if (auto fn = spawn_detached_debug_override().load()) {
         fn(info);
     }
 }
@@ -228,7 +228,8 @@ inline int fcntl_retry(int fd, int cmd)
     int rv = -1;
     do {
         rv = ::fcntl(fd, cmd);
-    } while (rv == -1 && errno == EINTR);
+    }
+    while (rv == -1 && errno == EINTR);
     return rv;
 }
 
@@ -237,7 +238,8 @@ inline int fcntl_retry(int fd, int cmd, int arg)
     int rv = -1;
     do {
         rv = ::fcntl(fd, cmd, arg);
-    } while (rv == -1 && errno == EINTR);
+    }
+    while (rv == -1 && errno == EINTR);
     return rv;
 }
 
@@ -247,7 +249,8 @@ inline int system_pipe2(int pipefd[2], int flags)
     int rv = -1;
     do {
         rv = ::pipe2(pipefd, flags);
-    } while (rv == -1 && errno == EINTR);
+    }
+    while (rv == -1 && errno == EINTR);
     return rv;
 #else
     if (flags & ~(O_CLOEXEC | O_NONBLOCK)) {
@@ -258,7 +261,8 @@ inline int system_pipe2(int pipefd[2], int flags)
     int pipe_result = -1;
     do {
         pipe_result = ::pipe(pipefd);
-    } while (pipe_result == -1 && errno == EINTR);
+    }
+    while (pipe_result == -1 && errno == EINTR);
     if (pipe_result == -1) {
         return -1;
     }
@@ -299,7 +303,7 @@ inline int system_pipe2(int pipefd[2], int flags)
 
 inline int call_pipe2(int pipefd[2], int flags)
 {
-    if (auto override = pipe2_override().load(std::memory_order_acquire)) {
+    if (auto override = pipe2_override().load()) {
         return override(pipefd, flags);
     }
     return system_pipe2(pipefd, flags);
@@ -307,7 +311,7 @@ inline int call_pipe2(int pipefd[2], int flags)
 
 inline ssize_t call_write(int fd, const void* buf, size_t count)
 {
-    if (auto override = write_override().load(std::memory_order_acquire)) {
+    if (auto override = write_override().load()) {
         return override(fd, buf, count);
     }
     return ::write(fd, buf, count);
@@ -315,7 +319,7 @@ inline ssize_t call_write(int fd, const void* buf, size_t count)
 
 inline ssize_t call_read(int fd, void* buf, size_t count)
 {
-    if (auto override = read_override().load(std::memory_order_acquire)) {
+    if (auto override = read_override().load()) {
         return override(fd, buf, count);
     }
     return ::read(fd, buf, count);
@@ -323,7 +327,7 @@ inline ssize_t call_read(int fd, void* buf, size_t count)
 
 inline pid_t call_waitpid(pid_t pid, int* status, int options)
 {
-    if (auto override = waitpid_override().load(std::memory_order_acquire)) {
+    if (auto override = waitpid_override().load()) {
         return override(pid, status, options);
     }
     return ::waitpid(pid, status, options);
@@ -379,27 +383,27 @@ namespace testing {
 
 inline detail::pipe2_fn set_pipe2_override(detail::pipe2_fn fn)
 {
-    return detail::pipe2_override().exchange(fn, std::memory_order_acq_rel);
+    return detail::pipe2_override().exchange(fn);
 }
 
 inline detail::write_fn set_write_override(detail::write_fn fn)
 {
-    return detail::write_override().exchange(fn, std::memory_order_acq_rel);
+    return detail::write_override().exchange(fn);
 }
 
 inline detail::read_fn set_read_override(detail::read_fn fn)
 {
-    return detail::read_override().exchange(fn, std::memory_order_acq_rel);
+    return detail::read_override().exchange(fn);
 }
 
 inline detail::waitpid_fn set_waitpid_override(detail::waitpid_fn fn)
 {
-    return detail::waitpid_override().exchange(fn, std::memory_order_acq_rel);
+    return detail::waitpid_override().exchange(fn);
 }
 
 inline detail::spawn_detached_debug_fn set_spawn_detached_debug(detail::spawn_detached_debug_fn fn)
 {
-    return detail::spawn_detached_debug_override().exchange(fn, std::memory_order_acq_rel);
+    return detail::spawn_detached_debug_override().exchange(fn);
 }
 
 } // namespace testing
@@ -531,7 +535,8 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
     pid_t child_pid = -1;
     do {
         child_pid = ::fork();
-    } while (child_pid == -1 && errno == EINTR);
+    }
+    while (child_pid == -1 && errno == EINTR);
     if (child_pid == -1) {
         if (ready_pipe[0] >= 0) {
             close(ready_pipe[0]);
@@ -713,7 +718,8 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
     pid_t wait_result = 0;
     do {
         wait_result = detail::call_waitpid(child_pid, &wait_status, WNOHANG);
-    } while (wait_result == -1 && errno == EINTR);
+    }
+    while (wait_result == -1 && errno == EINTR);
 
     if (wait_result == child_pid) {
         if (!(WIFEXITED(wait_status) && WEXITSTATUS(wait_status) == 0)) {

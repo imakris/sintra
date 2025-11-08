@@ -105,7 +105,8 @@ int worker_process(std::uint32_t worker_index)
                 last_alt_seq = alt_seq;
             }
         }
-    } catch (const std::exception& e) {
+    }
+    catch (const std::exception& e) {
         std::fprintf(stderr, "Worker %u exception: %s\n", worker_index, e.what());
         return 1;
     }

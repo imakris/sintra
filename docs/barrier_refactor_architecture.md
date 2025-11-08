@@ -64,14 +64,14 @@ struct barrier_phase_status {
     barrier_state         state;
     barrier_failure       failure_code;
     sequence_counter_type sequence;           // rendezvous: captured watermark;
-	                                          // outbound/processing: invalid_sequence
+                                              // outbound/processing: invalid_sequence
 };
 
 struct barrier_completion_payload {
     uint64_t              barrier_epoch;      // increments per rendezvous instance
     sequence_counter_type barrier_sequence;   // rendezvous token
     uint32_t              requirement_mask;   // rendezvous mask for the epoch; fast-fail arrivals
-	                                          // before freeze echo the caller's request_flags
+                                              // before freeze echo the caller's request_flags
 
     barrier_phase_status  rendezvous;         // coordinator authored
     barrier_phase_status  outbound;           // success/failure for the group

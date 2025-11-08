@@ -21,7 +21,7 @@
 class os_sync_semaphore {
 public:
     explicit os_sync_semaphore(unsigned int initial_count = 0) {
-        m_count.store(static_cast<int32_t>(initial_count), std::memory_order_relaxed);
+        m_count = static_cast<int32_t>(initial_count);
     }
 
     void post() {
@@ -97,7 +97,7 @@ double benchmark_producer_consumer(int num_producers, int num_consumers, int ite
         producers.emplace_back([&]() {
             for (int i = 0; i < items_per_producer; ++i) {
                 empty_sem.wait();
-                items_produced.fetch_add(1, std::memory_order_relaxed);
+                items_produced.fetch_add(1);
                 full_sem.post();
             }
         });
@@ -114,7 +114,7 @@ double benchmark_producer_consumer(int num_producers, int num_consumers, int ite
         consumers.emplace_back([&, my_items]() {
             for (int i = 0; i < my_items; ++i) {
                 full_sem.wait();
-                items_consumed.fetch_add(1, std::memory_order_relaxed);
+                items_consumed.fetch_add(1);
                 empty_sem.post();
             }
         });

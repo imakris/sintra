@@ -99,7 +99,7 @@ std::filesystem::path ensure_shared_directory()
 #endif
 
     static std::atomic<long long> counter{0};
-    unique_suffix ^= counter.fetch_add(1, std::memory_order_relaxed);
+    unique_suffix ^= counter.fetch_add(1);
 
     std::ostringstream oss;
     oss << "pathological_" << unique_suffix;
@@ -253,18 +253,22 @@ void write_summary(const Controller_state& state, const std::filesystem::path& d
         if (report.stage == 0) {
             pre_counts[iter][static_cast<std::size_t>(report.moment)] += 1;
         }
-        else if (report.stage == 1) {
+        else
+        if (report.stage == 1) {
             const auto step = static_cast<std::size_t>(report.step);
             stage_counts[iter][step][static_cast<std::size_t>(report.moment)] += 1;
         }
-        else if (report.stage == 2) {
+        else
+        if (report.stage == 2) {
             process_counts[iter][static_cast<std::size_t>(report.moment)] += 1;
         }
-        else if (report.stage == 3) {
+        else
+        if (report.stage == 3) {
             const auto step = static_cast<std::size_t>(report.step);
             final_counts[iter][step][static_cast<std::size_t>(report.moment)] += 1;
         }
-        else if (report.stage == 4) {
+        else
+        if (report.stage == 4) {
             final_process_counts[iter][static_cast<std::size_t>(report.moment)] += 1;
         }
     }
