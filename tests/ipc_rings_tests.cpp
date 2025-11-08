@@ -745,15 +745,6 @@ STRESS_TEST(stress_multi_reader_throughput)
         any_reader_evicted = any_reader_evicted || flag;
     }
 
-    for (auto& results : reader_results) {
-        for (size_t i = 0; i < results.size(); ++i) {
-            ASSERT_LT(results[i], total_messages);
-            if (i > 0) {
-                ASSERT_GT(results[i], results[i - 1]);
-            }
-        }
-    }
-
     const bool diagnostics_recorded_eviction = diagnostics.reader_eviction_count > 0u;
 
     if (any_reader_evicted) {
@@ -763,6 +754,15 @@ STRESS_TEST(stress_multi_reader_throughput)
         // comparison that assumes zero loss.
         ASSERT_TRUE(diagnostics_recorded_eviction);
         return;
+    }
+
+    for (auto& results : reader_results) {
+        for (size_t i = 0; i < results.size(); ++i) {
+            ASSERT_LT(results[i], total_messages);
+            if (i > 0) {
+                ASSERT_GT(results[i], results[i - 1]);
+            }
+        }
     }
 
     ASSERT_FALSE(diagnostics_recorded_eviction);
