@@ -46,7 +46,7 @@ BUILD REQUIREMENTS
 - The wait word is a naturally aligned 32-bit word accessed atomically (lock-free required).
 
 ROBUSTNESS MODEL
-- Semaphores are ownerless counters. If a process crashes after wait(), the counter remains decremented; there is no “owner” to recover.
+- Semaphores are ownerless counters. If a process crashes after wait(), the counter remains decremented; there is no "owner" to recover.
 - Windows (named semaphore): the kernel object persists independently of handle lifetimes; process termination does not roll back the count.
 - POSIX (shared memory): the counter lives in shared memory visible to other processes and continues to reflect the current value.
 
@@ -365,7 +365,7 @@ inline bool ips_backend::try_wait() noexcept
     DWORD rc = WaitForSingleObject(h, 0);
     if (rc == WAIT_OBJECT_0) return true;
     if (rc == WAIT_FAILED) {
-        errno = EINVAL; // keeps “no errno on empty” invariant for normal false
+        errno = EINVAL; // keeps "no errno on empty" invariant for normal false
         return false;
     }
     return false;

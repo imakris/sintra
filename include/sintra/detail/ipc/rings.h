@@ -7,7 +7,7 @@
  * WHAT THIS IS
  * ------------
  * A single-producer / multiple-consumer (SPMC) inter-process circular ring
- * buffer that uses the “magic ring” trick (double virtual mapping of the same
+ * buffer that uses the "magic ring" trick (double virtual mapping of the same
  * file back-to-back) so wrap-around reads and writes are linear in memory.
  *
  * WHEN TO USE
@@ -19,11 +19,11 @@
  * CONSTRAINTS & RECOMMENDATIONS
  * -----------------------------
  *  * Elements & octiles:
- *      - The ring is conceptually split into 8 equal “octiles”.
+ *      - The ring is conceptually split into 8 equal "octiles".
  *      - REQUIRED: num_elements % 8 == 0 (we guard per-octile).
  *  * Page / granularity alignment:
  *      - REQUIRED: data region size (num_elements * sizeof(T)) must be a
- *        multiple of the system’s mapping granularity:
+ *        multiple of the system's mapping granularity:
  *          * Windows: allocation granularity (dwAllocationGranularity)
  *          * POSIX: page size
  *        We assert this at attach() time.
@@ -41,14 +41,14 @@
  * WRITE BOUNDS
  * ------------
  *  * Each write must fit within a single octile (<= ring_size/8 elements).
- *    This ensures the writer only needs to check & spin on at most one octile’s
+ *    This ensures the writer only needs to check & spin on at most one octile's
  *    read guard (fast path with minimal contention).
  *
  * READER SNAPSHOTS & VALIDITY
  * ---------------------------
  *  * start_reading() returns a snapshot range into the shared memory mapping.
  *  * The snapshot remains valid until overwritten; i.e., until the writer
- *    advances far enough that the reader’s trailing guard octile would be
+ *    advances far enough that the reader's trailing guard octile would be
  *    surpassed and reclaimed by the writer.
  *  * start_reading() must be paired with done_reading().
  *    Calling start_reading() again, while a snapshot is active, throws.
@@ -192,7 +192,7 @@ constexpr auto invalid_sequence = ~sequence_counter_type(0);
 /**
  * Compute candidate ring sizes (in element counts) between min_elements and the
  * maximum byte size constraint, with up to max_subdivisions sizes. The algorithm
- * prefers power-of-two-like sizes aligned to the system’s page size so that
+ * prefers power-of-two-like sizes aligned to the system's page size so that
  * double-mapping constraints are naturally satisfied.
  *
  * Constraints embodied here:
@@ -218,7 +218,7 @@ std::vector<size_t> get_ring_configurations(
     // Round up to a page-size multiple that is also a multiple of sizeof(T)
     size_t base_size = lcm(sizeof(T), page_size);
 
-    // Respect caller’s minimum element constraint
+    // Respect caller's minimum element constraint
     size_t min_size = std::max(min_elements * sizeof(T), base_size);
     size_t tmp_size = base_size;
 
@@ -417,7 +417,7 @@ private:
   //       \//       \//       \//       \//       \//       \//       \//
 
 //==============================================================================
-// Ring_data: file-backed data region with “magic” double mapping
+// Ring_data: file-backed data region with "magic" double mapping
 //==============================================================================
 
 /**
@@ -509,7 +509,7 @@ private:
     }
 
     /**
-     * Attach the data file with a “double mapping”.
+     * Attach the data file with a "double mapping".
      *
      * WINDOWS
      *   * Reserve address space: 2× region + one granularity page.
@@ -537,7 +537,7 @@ private:
             // NOTE: On Windows, the "page size" for mapping purposes is the allocation granularity.
             size_t page_size = system_page_size();
 
-            // Enforce the “multiple of page/granularity” constraint explicitly.
+            // Enforce the "multiple of page/granularity" constraint explicitly.
             assert((m_data_region_size % page_size) == 0 &&
                    "Ring size (bytes) must be multiple of mapping granularity");
 
@@ -708,7 +708,7 @@ bool has_same_mapping(const RingT1& r1, const RingT2& r2)
 //==============================================================================
 
 /**
- * Extends Ring_data by adding the shared “control” region which holds all
+ * Extends Ring_data by adding the shared "control" region which holds all
  * cross-process state: publisher sequence, reader sequences, semaphores, and
  * small stacks used by the hybrid sleeping policy.
  */
@@ -958,7 +958,7 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
     {
         // This struct is always instantiated in a memory region which is shared among processes.
         // The atomics below are used for *cross-process* communication, including in a
-        // double-mapped (“magic ring”) region. See the detailed note & lock-free checks
+        // double-mapped ("magic ring") region. See the detailed note & lock-free checks
         // in Control() about address-free atomics (N4713 [atomics.lockfree]).
         std::atomic<size_t>                  num_attached{0};
 
@@ -1069,7 +1069,7 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         // The following synchronization structures may only be accessed between lock()/unlock().
 
         // An array (pool) of semaphores to synchronize reader wakeups. The writer posts these
-        // on publish; readers may also be unblocked locally in an “unordered” fashion.
+        // on publish; readers may also be unblocked locally in an "unordered" fashion.
         sintra_ring_semaphore                dirty_semaphores[max_process_index];
 
         // A stack of indices into dirty_semaphores[] that are free/ready for use.
@@ -1080,7 +1080,7 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         // or were blocking and not yet redistributed.
         Index_stack<max_process_index>       sleeping_stack;
 
-        // A stack of indices that were posted “out of order” (e.g., after a local unblock).
+        // A stack of indices that were posted "out of order" (e.g., after a local unblock).
         // To avoid O(n) removals from sleeping_stack, unordered posts leave the index in
         // sleeping_stack but flag the semaphore to avoid re-posting; the next ordered post
         // (e.g., on publish) drains unordered items back to ready_stack.
