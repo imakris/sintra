@@ -244,8 +244,7 @@ void Process_message_reader::request_reader_function()
         if (!progress) {
             return;
         }
-        const auto previous = progress->request_sequence.exchange(
-            seq);
+        const auto previous = progress->request_sequence.exchange(seq);
         if (previous != seq && s_mproc) {
             s_mproc->notify_delivery_progress();
         }
@@ -495,8 +494,7 @@ void Process_message_reader::reply_reader_function()
         if (!progress) {
             return;
         }
-        const auto previous = progress->reply_sequence.exchange(
-            seq);
+        const auto previous = progress->reply_sequence.exchange(seq);
         if (previous != seq && s_mproc) {
             s_mproc->notify_delivery_progress();
         }

@@ -20,11 +20,7 @@ struct spinlock
         spinlock& m_sl;
     };
 
-    void lock()
-    {
-        while (m_locked.test_and_set()) {
-        }
-    }
+    void lock()   { while (m_locked.test_and_set()) {} }
     void unlock() { m_locked.clear();                  }
 
 private:
