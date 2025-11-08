@@ -51,6 +51,7 @@ jobs:
               - 'CMakeLists.txt'
               - 'CMakePresets.json'
               - 'third_party/**'
+              - 'flip_to_trigger_ci'
             tests:
               - 'tests/**'
             examples:
