@@ -733,7 +733,8 @@ inline void Managed_process::reap_finished_children()
         pid_t result = 0;
         do {
             result = ::waitpid(pid, &status, WNOHANG);
-        } while (result == -1 && errno == EINTR);
+        }
+        while (result == -1 && errno == EINTR);
 
         if (result == 0) {
             remaining.push_back(pid);

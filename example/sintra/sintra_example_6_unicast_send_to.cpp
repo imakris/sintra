@@ -204,7 +204,8 @@ int process_3()
 
     if (unicast_received.load() == 0) {
         console() << "Process 3: SUCCESS - Did not receive any unicast messages (as expected)\n";
-    } else {
+    }
+    else {
         console() << "Process 3: FAILURE - Received " << unicast_received.load()
                   << " unicast messages (should be 0)\n";
     }

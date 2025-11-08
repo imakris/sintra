@@ -57,14 +57,15 @@ int main(int argc, char* argv[])
         if (done.load(std::memory_order_acquire)) {
             return;
         }
-        int count = ping_count.fetch_add(1, std::memory_order_relaxed) + 1;
+        int count = ping_count.fetch_add(1) + 1;
         if (count >= kTargetPingCount) {
             bool expected = false;
             if (done.compare_exchange_strong(expected, true)) {
                 done_promise.set_value();
             }
         }
-        else if ((count % 256) == 0) {
+        else
+        if ((count % 256) == 0) {
             std::this_thread::yield();
         }
     };
@@ -83,5 +84,5 @@ int main(int argc, char* argv[])
 
     sintra::finalize();
 
-    return ping_count.load(std::memory_order_relaxed) == kTargetPingCount ? 0 : 1;
+    return ping_count.load() == kTargetPingCount ? 0 : 1;
 }

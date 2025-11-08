@@ -90,7 +90,7 @@ std::filesystem::path ensure_shared_directory()
 #endif
 
     static std::atomic<long long> counter{0};
-    unique_suffix ^= counter.fetch_add(1, std::memory_order_relaxed);
+    unique_suffix ^= counter.fetch_add(1);
 
     std::ostringstream oss;
     oss << "delivery_fence_repro_" << unique_suffix;
@@ -237,7 +237,8 @@ int coordinator_process()
                 success = false;
                 aborted = true;
             }
-            else if (state.iteration_failed) {
+            else
+            if (state.iteration_failed) {
                 if (success) {
                     failure_reason = state.failure_detail.empty()
                         ? "Coordinator observed invalid marker sequence"
@@ -370,12 +371,15 @@ void custom_terminate_handler()
         auto eptr = std::current_exception();
         if (eptr) {
             std::rethrow_exception(eptr);
-        } else {
+        }
+        else {
             std::fprintf(stderr, "terminate called without an active exception\n");
         }
-    } catch (const std::exception& e) {
+    }
+    catch (const std::exception& e) {
         std::fprintf(stderr, "Uncaught exception: %s\n", e.what());
-    } catch (...) {
+    }
+    catch (...) {
         std::fprintf(stderr, "Uncaught exception of unknown type\n");
     }
 
@@ -389,10 +393,12 @@ void cleanup_directory_with_retries(const std::filesystem::path& dir)
         try {
             std::filesystem::remove_all(dir);
             cleanup_succeeded = true;
-        } catch (const std::exception& e) {
+        }
+        catch (const std::exception& e) {
             if (retry < 2) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            } else {
+            }
+            else {
                 std::fprintf(stderr,
                              "Warning: failed to remove temp directory %s after 3 attempts: %s\n",
                              dir.string().c_str(), e.what());

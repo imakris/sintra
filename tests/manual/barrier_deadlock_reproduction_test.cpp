@@ -141,7 +141,8 @@ int main(int argc, char* argv[])
         try {
             std::filesystem::remove_all(shared_dir);
             std::filesystem::create_directories(shared_dir);
-        } catch (...) {
+        }
+        catch (...) {
             // Ignore cleanup failures
         }
 

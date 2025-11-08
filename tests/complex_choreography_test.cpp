@@ -161,7 +161,7 @@ std::filesystem::path ensure_shared_directory()
 #endif
 
     static std::atomic<long long> counter{0};
-    const auto unique = counter.fetch_add(1, std::memory_order_relaxed);
+    const auto unique = counter.fetch_add(1);
 
     std::ostringstream oss;
     oss << "complex_" << now << '_' << pid << '_' << unique;
@@ -257,7 +257,7 @@ struct VerifierWorkerState
 std::uint64_t make_round_seed(int round)
 {
     static std::atomic<std::uint64_t> counter{0};
-    const std::uint64_t extra = counter.fetch_add(0x9E3779B97F4A7C15ULL, std::memory_order_relaxed);
+    const std::uint64_t extra = counter.fetch_add(0x9E3779B97F4A7C15ULL);
     const auto now = static_cast<std::uint64_t>(
         std::chrono::high_resolution_clock::now().time_since_epoch().count());
 #ifdef _WIN32

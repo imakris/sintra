@@ -37,12 +37,13 @@ std::atomic<int> g_failure_line{0};
 #define CHECK(expr) \
     do { \
         if (!(expr)) { \
-            g_test_failed = true, std::memory_order_relaxed; \
-            g_failure_line = __LINE__, std::memory_order_relaxed; \
+            g_test_failed.store(true); \
+            g_failure_line.store(__LINE__); \
             std::fprintf(stderr, "[FAIL] %s:%d - " #expr "\n", __FILE__, __LINE__); \
             return; \
         } \
-    } while (false)
+    } \
+    while (false)
 
 int get_pid()
 {
@@ -82,15 +83,14 @@ void test_many_readers_limited_slots()
             CHECK(held <= kSlots);
 
             // Update max
-            int current_max = max_slots_held.load(std::memory_order_relaxed);
+            int current_max = max_slots_held.load();
             while (held > current_max) {
-                if (max_slots_held.compare_exchange_weak(current_max, held,
-                    std::memory_order_relaxed, std::memory_order_relaxed)) {
+                if (max_slots_held.compare_exchange_weak(current_max, held)) {
                     break;
                 }
             }
 
-            total_acquisitions.fetch_add(1, std::memory_order_relaxed);
+            total_acquisitions.fetch_add(1);
 
             // Hold slot briefly to create contention
             if ((rng() & 0xFF) < 10) {
@@ -142,13 +142,13 @@ void test_wake_all_stress()
         while (!stop.load(std::memory_order_acquire)) {
             auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
             if (sem.timed_wait(deadline)) {
-                acquisitions.fetch_add(1, std::memory_order_relaxed);
+                acquisitions.fetch_add(1);
             }
         }
 
         // Drain remaining
         while (sem.try_wait()) {
-            acquisitions.fetch_add(1, std::memory_order_relaxed);
+            acquisitions.fetch_add(1);
         }
     };
 
@@ -174,7 +174,7 @@ void test_wake_all_stress()
 
     // Wait for all posts to be consumed
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-    while (acquisitions.load(std::memory_order_relaxed) < kTotalPosts) {
+    while (acquisitions.load() < kTotalPosts) {
         if (std::chrono::steady_clock::now() > deadline) {
             std::fprintf(stderr, "[FAIL] Timeout waiting for acquisitions: %d/%d\n", acquisitions.load(), kTotalPosts);
             CHECK(false);
@@ -183,7 +183,7 @@ void test_wake_all_stress()
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
-    stop = true, std::memory_order_release;
+    stop.store(true);
 
     for (auto& t : waiters) {
         t.join();
@@ -217,28 +217,35 @@ void test_mixed_operations_extreme_contention()
             if (op < 3) {
                 // Post
                 sem.post();
-                posts.fetch_add(1, std::memory_order_relaxed);
-            } else if (op < 5) {
+                posts.fetch_add(1);
+            }
+            else
+            if (op < 5) {
                 // try_wait
                 if (sem.try_wait()) {
-                    try_wait_successes.fetch_add(1, std::memory_order_relaxed);
-                    successful_waits.fetch_add(1, std::memory_order_relaxed);
+                    try_wait_successes.fetch_add(1);
+                    successful_waits.fetch_add(1);
                 }
-            } else if (op < 8) {
+            }
+            else
+            if (op < 8) {
                 // Short timed_wait
                 auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(100);
                 if (sem.timed_wait(deadline)) {
-                    successful_waits.fetch_add(1, std::memory_order_relaxed);
-                } else {
-                    timed_wait_timeouts.fetch_add(1, std::memory_order_relaxed);
+                    successful_waits.fetch_add(1);
                 }
-            } else {
+                else {
+                    timed_wait_timeouts.fetch_add(1);
+                }
+            }
+            else {
                 // Longer timed_wait
                 auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(10);
                 if (sem.timed_wait(deadline)) {
-                    successful_waits.fetch_add(1, std::memory_order_relaxed);
-                } else {
-                    timed_wait_timeouts.fetch_add(1, std::memory_order_relaxed);
+                    successful_waits.fetch_add(1);
+                }
+                else {
+                    timed_wait_timeouts.fetch_add(1);
                 }
             }
 
@@ -293,7 +300,7 @@ void test_rapid_post_wait_cycling()
             auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
             CHECK(sem.timed_wait(deadline));
 
-            cycle_count.fetch_add(1, std::memory_order_relaxed);
+            cycle_count.fetch_add(1);
 
             if ((i & 0xFFF) == 0) {
                 std::this_thread::yield();

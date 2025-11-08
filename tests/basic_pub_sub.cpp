@@ -103,7 +103,7 @@ std::filesystem::path ensure_shared_directory()
 #endif
 
     static std::atomic<long long> counter{0};
-    unique_suffix ^= counter.fetch_add(1, std::memory_order_relaxed);
+    unique_suffix ^= counter.fetch_add(1);
 
     std::ostringstream oss;
     oss << "basic_pubsub_" << unique_suffix;
@@ -356,7 +356,8 @@ int main(int argc, char* argv[])
             std::fprintf(stderr, "Error: failed to open result file at %s\n",
                           result_path.string().c_str());
             exit_code = 1;
-        } else {
+        }
+        else {
             in >> status;
             status_loaded = true;
         }
@@ -370,7 +371,8 @@ int main(int argc, char* argv[])
             catch (const std::exception& e) {
                 if (retry < 2) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                } else {
+                }
+                else {
                     std::fprintf(stderr,
                                   "Warning: failed to remove temp directory %s after 3 attempts: %s\n",
                                   shared_dir.string().c_str(), e.what());

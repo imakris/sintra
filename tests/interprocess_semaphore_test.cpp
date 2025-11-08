@@ -94,7 +94,8 @@ private:
         if (!(expr)) {                                                                               \
             throw Test_failure(#expr, __FILE__, __LINE__);                                           \
         }                                                                                            \
-    } while (false)
+    }                                                                                                \
+    while (false)
 
 #define REQUIRE_FALSE(expr) REQUIRE_TRUE(!(expr))
 
@@ -103,25 +104,28 @@ private:
         auto _exp = (expected);                                                                      \
         auto _act = (actual);                                                                        \
         if (!(_exp == _act)) {                                                                       \
-            throw Test_failure(#expected " == " #actual, __FILE__, __LINE__,                        \
-                               "expected " + std::to_string(_exp) + ", got " +                    \
+            throw Test_failure(#expected " == " #actual, __FILE__, __LINE__,                         \
+                               "expected " + std::to_string(_exp) + ", got " +                       \
                                    std::to_string(_act));                                            \
         }                                                                                            \
-    } while (false)
+    }                                                                                                \
+    while (false)
 
 #define REQUIRE_LT(val, ref)                                                                         \
     do {                                                                                             \
         if (!((val) < (ref))) {                                                                      \
-            throw Test_failure(#val " < " #ref, __FILE__, __LINE__);                               \
+            throw Test_failure(#val " < " #ref, __FILE__, __LINE__);                                 \
         }                                                                                            \
-    } while (false)
+    }                                                                                                \
+    while (false)
 
 #define REQUIRE_GE(val, ref)                                                                         \
     do {                                                                                             \
         if (!((val) >= (ref))) {                                                                     \
-            throw Test_failure(#val " >= " #ref, __FILE__, __LINE__);                              \
+            throw Test_failure(#val " >= " #ref, __FILE__, __LINE__);                                \
         }                                                                                            \
-    } while (false)
+    }                                                                                                \
+    while (false)
 
 struct Test_case
 {
@@ -304,11 +308,12 @@ void test_multithreaded_contention()
             for (int i = 0; i < kIterationsPerThread; ++i) {
                 if ((rng() & 3) == 0) {
                     sem.post();
-                    posted.fetch_add(1, std::memory_order_relaxed);
-                } else {
+                    posted.fetch_add(1);
+                }
+                else {
                     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(3);
                     if (sem.timed_wait(deadline)) {
-                        acquired.fetch_add(1, std::memory_order_relaxed);
+                        acquired.fetch_add(1);
                     }
                 }
 
@@ -324,10 +329,10 @@ void test_multithreaded_contention()
     }
 
     while (sem.try_wait()) {
-        acquired.fetch_add(1, std::memory_order_relaxed);
+        acquired.fetch_add(1);
     }
 
-    REQUIRE_EQ(posted.load(std::memory_order_relaxed), acquired.load(std::memory_order_relaxed));
+    REQUIRE_EQ(posted.load(), acquired.load());
 }
 
 #if defined(__unix__) || defined(__APPLE__)
@@ -346,7 +351,7 @@ struct Shared_state
     Shared_state()
     {
         for (auto& owner : resource_owner) {
-            owner = -1, std::memory_order_relaxed;
+            owner = -1;
         }
         new (&sem_storage) interprocess_semaphore(kResources);
     }
@@ -556,7 +561,8 @@ int run_interprocess_child(const std::string& work_name,
             ack_sem.post();
         }
         return 0;
-    } catch (const std::exception& e) {
+    }
+    catch (const std::exception& e) {
         std::fprintf(stderr, "[cross-process child] exception: %s\n", e.what());
         return 3;
     }

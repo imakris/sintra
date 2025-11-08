@@ -78,7 +78,7 @@ std::filesystem::path ensure_shared_directory()
 #endif
 
     static std::atomic<long long> counter{0};
-    const auto unique = counter.fetch_add(1, std::memory_order_relaxed);
+    const auto unique = counter.fetch_add(1);
 
     std::ostringstream oss;
     oss << "run_" << now << '_' << pid << '_' << unique;

@@ -839,7 +839,8 @@ std::vector<const Test_case*> select_tests(
                 return {};
             }
         }
-        else if (category == "stress") {
+        else
+        if (category == "stress") {
             want_stress = true;
             if (!include_stress) {
                 std::cerr << "Requested stress test '" << name
@@ -949,7 +950,8 @@ int main(int argc, char** argv)
         if (arg == "--run" && i + 1 < argc) {
             selectors.emplace_back(argv[++i]);
         }
-        else if (arg == "--run") {
+        else
+        if (arg == "--run") {
             std::cerr << "--run requires an argument" << std::endl;
             return 2;
         }

@@ -41,7 +41,8 @@ struct message_arg_storage {
     {
         if constexpr (std::is_reference<T>::value) {
             return v.get();
-        } else {
+        }
+        else {
             return std::forward<U>(v);
         }
     }

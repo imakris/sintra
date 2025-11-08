@@ -217,7 +217,7 @@ std::filesystem::path ensure_shared_directory()
 #endif
 
     static std::atomic<long long> counter{0};
-    const auto unique = counter.fetch_add(1, std::memory_order_relaxed);
+    const auto unique = counter.fetch_add(1);
 
     std::ostringstream oss;
     oss << "run_" << now << '_' << pid << '_' << unique;
@@ -329,7 +329,8 @@ int coordinator_process()
         if (fence.phase >= 0 && static_cast<std::size_t>(fence.phase) < kPhaseCount) {
             const auto& name = fence_names()[fence.phase];
             sintra::barrier<processing_fence_t>(name);
-        } else {
+        }
+        else {
             send_failure_notice(Actor::Coordinator, fence.phase, FailureCode::FenceResent,
                                 "received fence outside configured phases");
         }
@@ -516,9 +517,12 @@ int consumer_process()
             auto& seen = tracker[payload.phase][payload.producer];
             if (payload.sequence < 0 || payload.sequence >= static_cast<int>(seen.size())) {
                 range_error = true;
-            } else if (seen[payload.sequence]) {
+            }
+            else
+            if (seen[payload.sequence]) {
                 duplicate = true;
-            } else {
+            }
+            else {
                 seen[payload.sequence] = true;
                 processed[payload.phase]++;
             }
@@ -627,7 +631,8 @@ int monitor_process()
             send_failure_notice(Actor::Monitor, heartbeat.phase, FailureCode::HeartbeatOutOfOrder,
                                 oss.str());
             counter = heartbeat.tick + 1; // resynchronise to avoid cascading failures
-        } else {
+        }
+        else {
             ++counter;
         }
     };
@@ -723,7 +728,8 @@ int aggregator_process()
         if (phase_started[start.phase]) {
             record_failure_locked(Actor::Aggregator, start.phase, FailureCode::UnexpectedPhaseStart,
                                   "duplicate phase start");
-        } else {
+        }
+        else {
             phase_started[start.phase] = true;
             ack_counts[start.phase] = 0;
             auto& phase_tracker = tracker[start.phase];
@@ -783,7 +789,9 @@ int aggregator_process()
                 trigger_completion = true;
                 completion_phase = ack.phase;
                 completion_count = ack_counts[ack.phase];
-            } else if (ack_counts[ack.phase] > expected) {
+            }
+            else
+            if (ack_counts[ack.phase] > expected) {
                 record_failure_locked(Actor::Aggregator, ack.phase, FailureCode::AckOverflow,
                                       "ack count exceeded expected total");
             }

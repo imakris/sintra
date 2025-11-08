@@ -181,7 +181,8 @@ int process_pong_responder()
             while (stuck) {
                 std::this_thread::sleep_for(std::chrono::seconds(1));
             }
-        } else {
+        }
+        else {
             sintra::world() << Ping();
         }
     });
@@ -258,7 +259,7 @@ int process_monitor()
     monitor_thread.join();
 
     const auto shared_dir = get_shared_directory();
-    write_count(shared_dir / "ping_count.txt", ping_counter.load(std::memory_order_relaxed));
+    write_count(shared_dir / "ping_count.txt", ping_counter.load());
 
     return 0;
 }

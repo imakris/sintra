@@ -114,7 +114,8 @@ int main()
             if (acquired) {
                 mtx.unlock();
             }
-        } catch (...) {
+        }
+        catch (...) {
             other_thread_threw = true, std::memory_order_release;
         }
     });
@@ -154,11 +155,13 @@ int main()
     std::thread non_owner([&] {
         try {
             mtx.unlock();
-        } catch (const std::system_error& error) {
+        }
+        catch (const std::system_error& error) {
             expect_error_code(error, std::errc::operation_not_permitted,
                               "unlock from non-owner");
             non_owner_detected = true, std::memory_order_release;
-        } catch (...) {
+        }
+        catch (...) {
         }
     });
     non_owner.join();
@@ -171,7 +174,8 @@ int main()
     mtx.lock();
     try {
         mtx.lock();
-    } catch (const std::system_error& error) {
+    }
+    catch (const std::system_error& error) {
         expect_error_code(error, std::errc::resource_deadlock_would_occur,
                           "lock recursion");
         lock_detected_recursion = true;

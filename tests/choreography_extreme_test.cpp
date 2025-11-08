@@ -175,7 +175,7 @@ std::filesystem::path ensure_shared_directory()
 #endif
 
     static std::atomic<long long> counter{0};
-    unique_suffix ^= counter.fetch_add(1, std::memory_order_relaxed);
+    unique_suffix ^= counter.fetch_add(1);
 
     std::ostringstream oss;
     oss << "extreme_choreography_" << unique_suffix;
@@ -295,7 +295,9 @@ int process_conductor()
             if (msg.round != static_cast<int>(summary.rounds.size())) {
                 summary.sequential_rounds_ok = false;
             }
-        } else if (msg.round != 0) {
+        }
+        else
+        if (msg.round != 0) {
             summary.sequential_rounds_ok = false;
         }
         summary.rounds.push_back(msg.round);

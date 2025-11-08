@@ -171,7 +171,8 @@ int main()
                                       static_cast<std::uint64_t>(original_data.size()) + 1,
                                       0);
             (void)region;
-        } catch (const std::system_error& error) {
+        }
+        catch (const std::system_error& error) {
             threw = true;
             expect_error_code(error, std::errc::invalid_argument,
                               "offset beyond end of file");
@@ -187,7 +188,8 @@ int main()
             ipc::mapped_region region(mapping, ipc::read_only,
                                       static_cast<std::uint64_t>(original_data.size()), 0);
             (void)region;
-        } catch (const std::system_error& error) {
+        }
+        catch (const std::system_error& error) {
             threw = true;
             expect_error_code(error, std::errc::invalid_argument, "zero-length mapping");
         }

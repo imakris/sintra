@@ -228,7 +228,8 @@ inline int fcntl_retry(int fd, int cmd)
     int rv = -1;
     do {
         rv = ::fcntl(fd, cmd);
-    } while (rv == -1 && errno == EINTR);
+    }
+    while (rv == -1 && errno == EINTR);
     return rv;
 }
 
@@ -237,7 +238,8 @@ inline int fcntl_retry(int fd, int cmd, int arg)
     int rv = -1;
     do {
         rv = ::fcntl(fd, cmd, arg);
-    } while (rv == -1 && errno == EINTR);
+    }
+    while (rv == -1 && errno == EINTR);
     return rv;
 }
 
@@ -247,7 +249,8 @@ inline int system_pipe2(int pipefd[2], int flags)
     int rv = -1;
     do {
         rv = ::pipe2(pipefd, flags);
-    } while (rv == -1 && errno == EINTR);
+    }
+    while (rv == -1 && errno == EINTR);
     return rv;
 #else
     if (flags & ~(O_CLOEXEC | O_NONBLOCK)) {
@@ -258,7 +261,8 @@ inline int system_pipe2(int pipefd[2], int flags)
     int pipe_result = -1;
     do {
         pipe_result = ::pipe(pipefd);
-    } while (pipe_result == -1 && errno == EINTR);
+    }
+    while (pipe_result == -1 && errno == EINTR);
     if (pipe_result == -1) {
         return -1;
     }
@@ -531,7 +535,8 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
     pid_t child_pid = -1;
     do {
         child_pid = ::fork();
-    } while (child_pid == -1 && errno == EINTR);
+    }
+    while (child_pid == -1 && errno == EINTR);
     if (child_pid == -1) {
         if (ready_pipe[0] >= 0) {
             close(ready_pipe[0]);
@@ -713,7 +718,8 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
     pid_t wait_result = 0;
     do {
         wait_result = detail::call_waitpid(child_pid, &wait_status, WNOHANG);
-    } while (wait_result == -1 && errno == EINTR);
+    }
+    while (wait_result == -1 && errno == EINTR);
 
     if (wait_result == child_pid) {
         if (!(WIFEXITED(wait_status) && WEXITSTATUS(wait_status) == 0)) {

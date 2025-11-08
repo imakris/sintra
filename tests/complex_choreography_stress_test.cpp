@@ -188,7 +188,7 @@ std::filesystem::path ensure_shared_directory()
     const auto pid = static_cast<long long>(getpid());
 #endif
     static std::atomic<long long> counter{0};
-    const auto unique = counter.fetch_add(1, std::memory_order_relaxed);
+    const auto unique = counter.fetch_add(1);
 
     std::ostringstream oss;
     oss << "complex_run_" << now << '_' << pid << '_' << unique;
@@ -305,7 +305,8 @@ void aggregator_worker_status_slot(const Worker_status& status)
 
         if (state.worker_seen[status.worker_id]) {
             ++state.errors;
-        } else {
+        }
+        else {
             state.worker_seen[status.worker_id] = true;
             ++state.current_count;
             state.checksum_accumulator += status.checksum;
@@ -703,7 +704,8 @@ void conductor_summary_slot(const Phase_summary& summary)
 
     if (!state.awaiting_summary || summary.token != state.expected_token) {
         ++state.errors;
-    } else {
+    }
+    else {
         if (summary.worker_count != kWorkerCount) {
             ++state.errors;
         }
@@ -977,7 +979,8 @@ int main(int argc, char* argv[])
         bool success = false;
         try {
             success = validate_reports(shared_dir);
-        } catch (const std::exception& e) {
+        }
+        catch (const std::exception& e) {
             std::fprintf(stderr, "validation failed: %s\n", e.what());
             success = false;
         }
