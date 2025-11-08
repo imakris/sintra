@@ -46,7 +46,6 @@ if(MSVC)
         $<$<CONFIG:Debug>:/RTC1>        # Runtime checks
         $<$<CONFIG:Debug>:/MDd>         # Debug runtime library
         $<$<AND:$<CONFIG:Release>,$<BOOL:${SINTRA_RELEASE_WITH_DEBUG_SYMBOLS}>>:/Zi>
-        $<$<AND:$<CONFIG:Release>,$<BOOL:${SINTRA_RELEASE_WITH_DEBUG_SYMBOLS}>>:/Od>  # Disable optimizations for better debugging
     )
     target_link_options(sintra INTERFACE
         $<$<CONFIG:Debug>:/DEBUG:FULL>
@@ -57,7 +56,6 @@ else()
         $<$<CONFIG:Debug>:-g>
         $<$<CONFIG:Debug>:-O0>
         $<$<AND:$<CONFIG:Release>,$<BOOL:${SINTRA_RELEASE_WITH_DEBUG_SYMBOLS}>>:-g>
-        $<$<AND:$<CONFIG:Release>,$<BOOL:${SINTRA_RELEASE_WITH_DEBUG_SYMBOLS}>>:-O0>  # No optimization for full debugging
     )
 endif()
 
