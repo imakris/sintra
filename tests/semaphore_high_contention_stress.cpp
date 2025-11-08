@@ -269,7 +269,7 @@ void test_mixed_operations_extreme_contention()
     CHECK(total_posts == total_waits);
 
     std::fprintf(stderr, "[PASS] Mixed operations test completed. Posts: %lld, "
-	    "Waits: %lld (try: %lld, timeouts: %lld, drained: %lld)\n",
+        "Waits: %lld (try: %lld, timeouts: %lld, drained: %lld)\n",
         total_posts, successful_waits, try_wait_successes, timed_wait_timeouts, drained);
 }
 
@@ -352,7 +352,7 @@ int main()
         return 0;
 
     }
-	catch (const std::exception& e) {
+    catch (const std::exception& e) {
         std::fprintf(stderr, "[EXCEPTION] %s\n", e.what());
         return 1;
     }

@@ -533,14 +533,14 @@ struct Message: public Message_prefix, public T
 #define VA_DEFINE_STRUCT_13(v,a,b,c,d,e,f,g,h,i,j,k,l)          struct v { a;b;c;d;e;f;g;h;i;j;k;l; };
 #define VA_DEFINE_STRUCT_14(v,a,b,c,d,e,f,g,h,i,j,k,l,m)        struct v { a;b;c;d;e;f;g;h;i;j;k;l;m; };
 #define VA_DEFINE_STRUCT_15(v,a,b,c,d,e,f,g,h,i,j,k,l,m,n)      struct v { a;b;c;d;e;f;g;h;i;j;k;l;m;n; };
-#define VA_DEFINE_STRUCT_16(v,a,b,c,d,e,f,g,h,i,j,k,l,m,n,o)	struct v { a;b;c;d;e;f;g;h;i;j;k;l;m;n;o; };
+#define VA_DEFINE_STRUCT_16(v,a,b,c,d,e,f,g,h,i,j,k,l,m,n,o)    struct v { a;b;c;d;e;f;g;h;i;j;k;l;m;n;o; };
 
 /* reusable macro */
 #define DEFINE_STRUCT_(...) VA_NARGS_CALL_OVERLOAD(VA_DEFINE_STRUCT_, __VA_ARGS__)
 
 
 
-#define SINTRA_MESSAGE_BASE(name, idv, ...)                                              \
+#define SINTRA_MESSAGE_BASE(name, idv, ...)                                             \
     void inheritance_assertion_##name() {                                               \
         static_assert(std::is_same_v<                                                   \
             std::remove_pointer_t<decltype(this)>,                                      \
@@ -552,10 +552,10 @@ struct Message: public Message_prefix, public T
     using name = sintra::Message<sm_body_type_##name, void, idv, Transceiver_type>;     \
 
 
-#define SINTRA_MESSAGE(name, ...)                                                        \
+#define SINTRA_MESSAGE(name, ...)                                                       \
     SINTRA_MESSAGE_BASE(name, sintra::invalid_type_id, __VA_ARGS__)
 
-#define SINTRA_MESSAGE_RESERVED(name, ...)                                               \
+#define SINTRA_MESSAGE_RESERVED(name, ...)                                              \
     SINTRA_MESSAGE_BASE(name, (type_id_type)sintra::detail::reserved_id::name, __VA_ARGS__)
 
 

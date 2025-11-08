@@ -148,7 +148,7 @@ inline LONG WINAPI debug_vectored_exception_handler(EXCEPTION_POINTERS* exceptio
         case EXCEPTION_INT_DIVIDE_BY_ZERO:    exception_name = "Integer divide by zero";  break;
         case EXCEPTION_STACK_OVERFLOW:        exception_name = "Stack overflow";          break;
         default:
-		    return EXCEPTION_CONTINUE_SEARCH;
+            return EXCEPTION_CONTINUE_SEARCH;
     }
 
     debug_pause_forever(exception_name);

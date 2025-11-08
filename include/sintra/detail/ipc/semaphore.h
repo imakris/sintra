@@ -245,8 +245,8 @@ static HANDLE ips_win_local_handle(ips_backend& b) noexcept
         if (!h) {
             DWORD last = GetLastError();
 
-			// Last resort: try opening if creation failed for other reasons (e.g., permissions).
-			h = OpenSemaphoreW(SYNCHRONIZE | SEMAPHORE_MODIFY_STATE, FALSE, st.name);
+            // Last resort: try opening if creation failed for other reasons (e.g., permissions).
+            h = OpenSemaphoreW(SYNCHRONIZE | SEMAPHORE_MODIFY_STATE, FALSE, st.name);
         }
 
         if (!h) {
@@ -361,14 +361,14 @@ inline bool ips_backend::try_wait() noexcept
         errno = EINVAL;
         return false;
     }
-	
-	DWORD rc = WaitForSingleObject(h, 0);
-	if (rc == WAIT_OBJECT_0) return true;
-	if (rc == WAIT_FAILED) {
-		errno = EINVAL; // keeps “no errno on empty” invariant for normal false
-		return false;
-	}
-	return false;
+    
+    DWORD rc = WaitForSingleObject(h, 0);
+    if (rc == WAIT_OBJECT_0) return true;
+    if (rc == WAIT_FAILED) {
+        errno = EINVAL; // keeps “no errno on empty” invariant for normal false
+        return false;
+    }
+    return false;
 }
 
 
@@ -475,7 +475,7 @@ static inline int posix_wait_equal_until(
     const uint32_t flags = OS_SYNC_WAIT_ON_ADDRESS_SHARED;
     for (;;) {
         int rc = os_sync_wait_on_address_with_deadline(
-		    (void*)addr, (uint64_t)expected, 4, flags, OS_CLOCK_MONOTONIC, deadline);
+            (void*)addr, (uint64_t)expected, 4, flags, OS_CLOCK_MONOTONIC, deadline);
         if (rc >= 0)                           return  0;
         if (errno == ETIMEDOUT)                return -1;
         if (errno == EINTR || errno == EAGAIN) continue;

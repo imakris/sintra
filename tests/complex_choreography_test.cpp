@@ -327,7 +327,7 @@ int conductor_process()
             local_failure = true;
         }
         else
-	    if (last_completed_round >= round) {
+        if (last_completed_round >= round) {
             for (std::size_t worker = 0; worker < kWorkerCount; ++worker) {
                 const auto expected = expected_worker_xor(round, static_cast<int>(worker), seed);
                 if (last_checksums[worker] != expected) {

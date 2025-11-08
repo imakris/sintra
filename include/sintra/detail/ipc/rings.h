@@ -1895,7 +1895,7 @@ struct Ring_R : Ring<T, true>
             bool guard_updated = false;
             const uint8_t previous_state = c.reading_sequences[m_rs_index].data.fetch_update_guard_token_if(
                 [&](typename Ring<T, true>::Reader_state_union current)
-					-> std::optional<typename Ring<T, true>::Reader_state_union>
+                    -> std::optional<typename Ring<T, true>::Reader_state_union>
                 {
                     if (Ring<T, true>::reader_state_guard_present(current)) {
                         return std::nullopt;
