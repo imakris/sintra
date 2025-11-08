@@ -269,6 +269,13 @@ public:
 class sintra_ring_semaphore
 {
 public:
+    enum class wait_result
+    {
+        ordered,
+        unordered,
+        timeout
+    };
+
     sintra_ring_semaphore() = default;
     sintra_ring_semaphore(const sintra_ring_semaphore&) = delete;
     sintra_ring_semaphore& operator=(const sintra_ring_semaphore&) = delete;
@@ -291,6 +298,11 @@ public:
     bool wait()
     {
         return ensure_initialized().wait();
+    }
+
+    wait_result wait_for(std::chrono::nanoseconds timeout)
+    {
+        return ensure_initialized().wait_for(timeout);
     }
 
     void release_local_handle() noexcept
@@ -329,6 +341,15 @@ private:
             detail::interprocess_semaphore::wait();
             posted.clear();
             return unordered.exchange(false);
+        }
+
+        wait_result wait_for(std::chrono::nanoseconds timeout)
+        {
+            if (!detail::interprocess_semaphore::try_wait_for(timeout)) {
+                return wait_result::timeout;
+            }
+            posted.clear();
+            return unordered.exchange(false) ? wait_result::unordered : wait_result::ordered;
         }
 
         std::atomic_flag posted = ATOMIC_FLAG_INIT;
@@ -1565,6 +1586,8 @@ struct Ring_R : Ring<T, true>
      */
     const Range<T> wait_for_new_data()
     {
+        constexpr auto blocking_wait_watchdog = std::chrono::milliseconds(50);
+
         auto produce_range = [&]() -> Range<T> {
             if (handle_eviction_if_needed()) {
                 return {};
@@ -1703,25 +1726,43 @@ struct Ring_R : Ring<T, true>
 
             int sleepy_index = m_sleepy_index;
             if (sleepy_index >= 0) {
-                if (m_stopping) {
-                    spinlock::locker lock(c.m_spinlock);
-                    if (m_sleepy_index >= 0) {
-                        c.dirty_semaphores[sleepy_index].post_unordered();
+                while (true) {
+                    if (m_stopping) {
+                        spinlock::locker lock(c.m_spinlock);
+                        if (m_sleepy_index >= 0) {
+                            c.dirty_semaphores[sleepy_index].post_unordered();
+                        }
+                        return Range<T>{};
                     }
-                }
 
-                if (c.dirty_semaphores[sleepy_index].wait()) { // unordered wake
-                    spinlock::locker lock(c.m_spinlock);
-                    c.unordered_stack[c.num_unordered++] = sleepy_index;
-                }
-                else {
-                    spinlock::locker lock(c.m_spinlock);
-                    c.ready_stack[c.num_ready++] = sleepy_index;
-                }
-                m_sleepy_index = -1;
+                    auto wait_status = c.dirty_semaphores[sleepy_index].wait_for(blocking_wait_watchdog);
+                    if (wait_status == sintra_ring_semaphore::wait_result::timeout) {
+                        spinlock::locker lock(c.m_spinlock);
+                        const int current = m_sleepy_index;
+                        if (current >= 0) {
+                            if (c.num_sleeping > 0 && c.sleeping_stack[c.num_sleeping - 1] == current) {
+                                c.sleeping_stack[--c.num_sleeping] = -1;
+                            }
+                            c.ready_stack[c.num_ready++] = current;
+                            m_sleepy_index = -1;
+                        }
+                        return Range<T>{};
+                    }
 
-                if (m_stopping) {
-                    return Range<T>{};
+                    if (wait_status == sintra_ring_semaphore::wait_result::unordered) {
+                        spinlock::locker lock(c.m_spinlock);
+                        c.unordered_stack[c.num_unordered++] = sleepy_index;
+                    }
+                    else {
+                        spinlock::locker lock(c.m_spinlock);
+                        c.ready_stack[c.num_ready++] = sleepy_index;
+                    }
+                    m_sleepy_index = -1;
+
+                    if (m_stopping) {
+                        return Range<T>{};
+                    }
+                    break;
                 }
             }
         }
@@ -2491,4 +2532,3 @@ try_snapshot_e(Reader& reader, Args&&... args) noexcept
  //////////////////////////////////////////////////////////////////////////
 
 } // namespace sintra
-
