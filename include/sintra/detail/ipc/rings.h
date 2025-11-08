@@ -250,6 +250,21 @@ struct Range {
     T* end   = nullptr;
 };
 
+inline uint64_t octile_mask(uint8_t octile) noexcept
+{
+    return uint64_t(1) << (8u * octile);
+}
+
+inline uint8_t octile_of_index(size_t idx, size_t ring) noexcept
+{
+    return static_cast<uint8_t>((8u * idx) / ring);
+}
+
+inline uint8_t octile_of_sequence(sequence_counter_type seq, size_t ring) noexcept
+{
+    return octile_of_index(mod_u64(seq, ring), ring);
+}
+
 //==============================================================================
 // Small helper types
 //==============================================================================
@@ -1038,7 +1053,7 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
                     uint8_t guard_snapshot = slot.exchange_guard_token(0);
                     if ((guard_snapshot & 0x08) != 0) {
                         uint8_t oct = guard_snapshot & 0x07;
-                        read_access.fetch_sub(uint64_t(1) << (8 * oct));
+                        read_access.fetch_sub(octile_mask(oct));
                     }
 
                     slot.set_status(READER_STATE_INACTIVE);
@@ -1056,8 +1071,8 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
 
         void release_local_semaphores()
         {
-            for (int i = 0; i < max_process_index; ++i) {
-                dirty_semaphores[i].release_local_handle();
+            for (auto& sem : dirty_semaphores) {
+                sem.release_local_handle();
             }
         }
 
@@ -1085,6 +1100,23 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         // sleeping_stack but flag the semaphore to avoid re-posting; the next ordered post
         // (e.g., on publish) drains unordered items back to ready_stack.
         Index_stack<max_process_index>       unordered_stack;
+
+        void flush_wakeups()
+        {
+            for (int i = 0; i < sleeping_stack.size(); ++i) {
+                const int idx = sleeping_stack[i];
+                if (idx >= 0) {
+                    dirty_semaphores[idx].post_ordered();
+                }
+            }
+            sleeping_stack.clear();
+            while (!unordered_stack.empty()) {
+                const int idx = unordered_stack.pop_or(-1);
+                if (idx >= 0) {
+                    ready_stack.push(idx);
+                }
+            }
+        }
 
         // Spinlock guarding the ready/sleeping/unordered stacks.
         spinlock                             m_spinlock;
@@ -1435,8 +1467,8 @@ struct Ring_R : Ring<T, true>
             size_t trailing_idx = mod_pos_i64(
                 int64_t(range_first_sequence) - int64_t(m_max_trailing_elements), this->m_num_elements);
 
-            uint8_t trailing_octile = static_cast<uint8_t>((8 * trailing_idx) / this->m_num_elements);
-            uint64_t guard_mask     = uint64_t(1) << (8 * trailing_octile);
+            uint8_t trailing_octile = octile_of_index(trailing_idx, this->m_num_elements);
+            uint64_t guard_mask     = octile_mask(trailing_octile);
 
             c.read_access.fetch_add(guard_mask);
 
@@ -1467,7 +1499,7 @@ struct Ring_R : Ring<T, true>
             size_t confirmed_trailing_idx = mod_pos_i64(
                 int64_t(confirmed_range_first_sequence) - int64_t(m_max_trailing_elements), this->m_num_elements);
             uint8_t confirmed_trailing_octile =
-                static_cast<uint8_t>((8 * confirmed_trailing_idx) / this->m_num_elements);
+                octile_of_index(confirmed_trailing_idx, this->m_num_elements);
 
             if (confirmed_trailing_octile == trailing_octile) {
                 if (c.reading_sequences[m_rs_index].data.status() == Ring<T, true>::READER_STATE_EVICTED) {
@@ -1506,7 +1538,7 @@ struct Ring_R : Ring<T, true>
 
             if (Ring<T, true>::encoded_guard_present(guard_snapshot)) {
                 const uint8_t guarded_octile = Ring<T, true>::encoded_guard_octile(guard_snapshot);
-                c.read_access.fetch_sub(uint64_t(1) << (8 * guarded_octile));
+                c.read_access.fetch_sub(octile_mask(guarded_octile));
             }
         }
 
@@ -1555,7 +1587,7 @@ struct Ring_R : Ring<T, true>
 
             if (guard_cleared && Ring<T, true>::encoded_guard_present(previous_state)) {
                 const uint8_t released_octile = Ring<T, true>::encoded_guard_octile(previous_state);
-                c.read_access.fetch_sub(uint64_t(1) << (8 * released_octile));
+                c.read_access.fetch_sub(octile_mask(released_octile));
             }
             else
             if (!guard_cleared) {
@@ -1784,13 +1816,13 @@ struct Ring_R : Ring<T, true>
                 int64_t(m_reading_sequence->load()) - int64_t(m_max_trailing_elements),
                 this->m_num_elements);
 
-            const size_t new_trailing_octile = (8 * t_idx) / this->m_num_elements;
+            const uint8_t new_trailing_octile = octile_of_index(t_idx, this->m_num_elements);
 
             if (new_trailing_octile == m_trailing_octile) {
                 return;  // Nothing to do
             }
 
-            const uint64_t new_mask     = uint64_t(1) << (8 * new_trailing_octile);
+            const uint64_t new_mask     = octile_mask(new_trailing_octile);
 
             c.read_access.fetch_add(new_mask);
 
@@ -1837,7 +1869,7 @@ struct Ring_R : Ring<T, true>
             // Success - clean up old guard octile
             const uint8_t previous_octile = Ring<T, true>::encoded_guard_octile(previous_state);
             if (previous_octile != new_trailing_octile) {
-                c.read_access.fetch_sub(uint64_t(1) << (8 * previous_octile));
+                c.read_access.fetch_sub(octile_mask(previous_octile));
             }
             else {
                 c.read_access.fetch_sub(new_mask);
@@ -1868,7 +1900,7 @@ struct Ring_R : Ring<T, true>
             // Recalculate trailing octile to match the new jumped-forward position
             const size_t trailing_idx = mod_pos_i64(
                 int64_t(new_seq) - int64_t(m_max_trailing_elements), this->m_num_elements);
-            m_trailing_octile = (8 * trailing_idx) / this->m_num_elements;
+            m_trailing_octile = octile_of_index(trailing_idx, this->m_num_elements);
 
             reattach_after_eviction();
             m_evicted_since_last_wait = true;
@@ -1879,7 +1911,7 @@ struct Ring_R : Ring<T, true>
         const size_t trailing_idx = mod_pos_i64(
             int64_t(m_reading_sequence->load()) - int64_t(m_max_trailing_elements),
             this->m_num_elements);
-        m_trailing_octile = (8 * trailing_idx) / this->m_num_elements;
+        m_trailing_octile = octile_of_index(trailing_idx, this->m_num_elements);
 
         reattach_after_eviction();
         return false;
@@ -1887,7 +1919,7 @@ struct Ring_R : Ring<T, true>
 
     void reattach_after_eviction()
     {
-        const uint64_t mask = uint64_t(1) << (8 * m_trailing_octile);
+        const uint64_t mask = octile_mask(static_cast<uint8_t>(m_trailing_octile));
 
         while (true) {
             c.read_access.fetch_add(mask);
@@ -2066,7 +2098,7 @@ struct Ring_W : Ring<T, false>
         catch (...) {
             m_pending_new_sequence -= num_elements;
             const size_t head = mod_u64(m_pending_new_sequence, this->m_num_elements);
-            m_octile = (8 * head) / this->m_num_elements;
+            m_octile = octile_of_index(head, this->m_num_elements);
             m_writing_thread_index = 0;
             throw;
         }
@@ -2086,14 +2118,7 @@ struct Ring_W : Ring<T, false>
             spinlock::locker lock(c.m_spinlock);
             assert(m_writing_thread_index == thread_index());
             c.leading_sequence = m_pending_new_sequence;
-            // Wake sleeping readers in a deterministic order
-            for (int i = 0; i < c.sleeping_stack.size(); i++) {
-                c.dirty_semaphores[c.sleeping_stack[i]].post_ordered();
-            }
-            c.sleeping_stack.clear();
-            while (!c.unordered_stack.empty()) {
-                c.ready_stack.push(c.unordered_stack.pop_or(-1));
-            }
+            c.flush_wakeups();
         }
         m_writing_thread_index = 0;
         return m_pending_new_sequence;
@@ -2108,13 +2133,7 @@ struct Ring_W : Ring<T, false>
         c.global_unblock_sequence++;
 
         spinlock::locker lock(c.m_spinlock);
-        for (int i = 0; i < c.sleeping_stack.size(); i++) {
-            c.dirty_semaphores[c.sleeping_stack[i]].post_ordered();
-        }
-        c.sleeping_stack.clear();
-        while (!c.unordered_stack.empty()) {
-            c.ready_stack.push(c.unordered_stack.pop_or(-1));
-        }
+        c.flush_wakeups();
     }
 
     /**
@@ -2234,7 +2253,7 @@ private:
         m_pending_new_sequence += num_elements_to_write;
 
         const size_t head = mod_u64(m_pending_new_sequence, this->m_num_elements);
-        size_t new_octile = (8 * head) / this->m_num_elements;
+        uint8_t new_octile = octile_of_index(head, this->m_num_elements);
 
         // Only check when crossing to a new octile (fast path otherwise)
         if (m_octile != new_octile) {
@@ -2242,7 +2261,7 @@ private:
             {
                 uint64_t ra = c.read_access;
                 for (int b = 0; b < 8; ++b) {
-                    assert(((ra >> (8*b)) & 0xffu) != 0xffu && "read_access octile underflowed to 255");
+                    assert(((ra >> (8 * b)) & 0xffu) != 0xffu && "read_access octile underflowed to 255");
                 }
             }
 #endif
@@ -2282,7 +2301,7 @@ private:
                             if (guard_evicted) {
                                 const size_t evicted_reader_octile = Ring<T, false>::encoded_guard_octile(previous_state);
 
-                                c.read_access.fetch_sub(uint64_t(1) << (8 * evicted_reader_octile));
+                                c.read_access.fetch_sub(octile_mask(static_cast<uint8_t>(evicted_reader_octile)));
                                 c.reader_eviction_count++;
                                 c.last_evicted_reader_index    = static_cast<uint32_t>(i);
                                 c.last_evicted_reader_sequence = reader_seq;
