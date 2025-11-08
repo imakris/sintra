@@ -27,7 +27,7 @@
 #include "sintra/detail/ipc/rings.h"
 
 #include "test_environment.h"
-#include "sintra/detail/runtime.h"
+#include "sintra/detail/debug_pause.h"
 #undef private
 #undef protected
 
