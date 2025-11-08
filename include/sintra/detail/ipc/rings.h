@@ -727,6 +727,43 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
     };
 
     /**
+     * Simple fixed-capacity stack for managing indices.
+     * Used to manage semaphore indices and reader slot indices.
+     */
+    template<int N>
+    struct index_stack {
+        int a[N]{};
+        int n = 0;
+
+        void clear() { n = 0; }
+        void push(int v) { a[n++] = v; }
+        int pop_or(int v) { return n ? a[--n] : v; }
+
+        bool contains(int v) const {
+            for (int i = 0; i < n; ++i) {
+                if (a[i] == v) return true;
+            }
+            return false;
+        }
+
+        bool remove_if_eq_tail(int v) {
+            if (n && a[n - 1] == v) {
+                a[--n] = -1;
+                return true;
+            }
+            return false;
+        }
+
+        // Direct access for backward compatibility
+        int& operator[](int i) { return a[i]; }
+        const int& operator[](int i) const { return a[i]; }
+
+        // Size accessor
+        int size() const { return n; }
+        int& size_ref() { return n; }
+    };
+
+    /**
      * Shared control block. All fields that are concurrently modified are atomic.
      * NOTE: Atomics are chosen such that they are address-free and (ideally) lock-free.
      */
@@ -795,7 +832,7 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         void rs_stack_unlock() { rs_stack_spinlock.clear(std::memory_order_release); }
 
         // Freelist of reader-slot indices into reading_sequences[].
-        int                                  free_rs_stack[max_process_index]{};
+        index_stack<max_process_index>      free_rs_stack;
         std::atomic<int>                     num_free_rs{0};
         // --- End Reader Sequence Stack Management --------------------------------
 
@@ -805,13 +842,7 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
 
             rs_stack_lock();
             auto in_freelist = [&](int idx) -> bool {
-                int nf = num_free_rs.load(std::memory_order_relaxed);
-                for (int i = 0; i < nf; ++i) {
-                    if (free_rs_stack[i] == idx) {
-                        return true;
-                    }
-                }
-                return false;
+                return free_rs_stack.contains(idx);
             };
 
             for (int i = 0; i < max_process_index; ++i) {
@@ -839,8 +870,7 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
                     slot.owner_pid.store(0, std::memory_order_relaxed);
 
                     if (!in_freelist(i)) {
-                        int idx = num_free_rs.load(std::memory_order_relaxed);
-                        free_rs_stack[idx] = i;
+                        free_rs_stack.push(i);
                         num_free_rs.fetch_add(1, std::memory_order_release);
                     }
                     freed = true;
@@ -869,22 +899,13 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         // on publish; readers may also be unblocked locally in an “unordered” fashion.
         sintra_ring_semaphore                dirty_semaphores[max_process_index];
 
-        // A stack of indices into dirty_semaphores[] that are free/ready for use.
-        // Initially all semaphores are ready.
-        int                                  ready_stack[max_process_index]{};
-        int                                  num_ready = max_process_index;
-
-        // A stack of indices allocated to readers that are blocking / about to block /
-        // or were blocking and not yet redistributed.
-        int                                  sleeping_stack[max_process_index]{};
-        int                                  num_sleeping = 0;
-
-        // A stack of indices that were posted “out of order” (e.g., after a local unblock).
-        // To avoid O(n) removals from sleeping_stack, unordered posts leave the index in
-        // sleeping_stack but flag the semaphore to avoid re-posting; the next ordered post
-        // (e.g., on publish) drains unordered items back to ready_stack.
-        int                                  unordered_stack[max_process_index]{};
-        int                                  num_unordered = 0;
+        // Stacks for managing semaphore indices.
+        // ready_stack: indices into dirty_semaphores[] that are free/ready for use.
+        // sleeping_stack: indices allocated to readers that are blocking or were blocking.
+        // unordered_stack: indices posted out-of-order (after local unblock).
+        index_stack<max_process_index>      ready_stack;
+        index_stack<max_process_index>      sleeping_stack;
+        index_stack<max_process_index>      unordered_stack;
 
         // Spinlock guarding the ready/sleeping/unordered stacks.
         std::atomic_flag                     spinlock_flag = ATOMIC_FLAG_INIT;
@@ -897,12 +918,16 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
 
         Control()
         {
-            for (int i = 0; i < max_process_index; i++) { ready_stack   [i]  =  i; }
-            for (int i = 0; i < max_process_index; i++) { sleeping_stack[i]  = -1; }
-            for (int i = 0; i < max_process_index; i++) { unordered_stack[i] = -1; }
+            // Initialize ready_stack with all indices (all semaphores start ready)
+            for (int i = 0; i < max_process_index; i++) { ready_stack.push(i); }
+
+            // sleeping_stack and unordered_stack start empty
+            // (their arrays are zero-initialized, no need to set -1)
 
             for (int i = 0; i < max_process_index; i++) { reading_sequences[i].data.v = invalid_sequence; }
-            for (int i = 0; i < max_process_index; i++) { free_rs_stack[i] = i; }
+
+            // Initialize free_rs_stack with all indices (all reader slots start free)
+            for (int i = 0; i < max_process_index; i++) { free_rs_stack.push(i); }
 
             writer_pid.store(0, std::memory_order_relaxed);
 
@@ -1143,9 +1168,8 @@ struct Ring_R : Ring<T, true>
         while (true) {
             c.rs_stack_lock();
             if (c.num_free_rs.load(std::memory_order_acquire) > 0) {
-                int current_num_free =
-                    c.num_free_rs.fetch_sub(1, std::memory_order_relaxed) - 1;
-                m_rs_index = c.free_rs_stack[current_num_free];
+                m_rs_index = c.free_rs_stack.pop_or(-1);
+                c.num_free_rs.fetch_sub(1, std::memory_order_relaxed);
 
                 // Mark our slot as ACTIVE while rs_stack_lock is still held so the
                 // scavenger cannot reclaim it before we publish the ownership.
@@ -1479,9 +1503,9 @@ struct Ring_R : Ring<T, true>
                     c.unlock();
                     return Range<T>{};
                 }
-                int sleepy = c.ready_stack[--c.num_ready];
+                int sleepy = c.ready_stack.pop_or(-1);
                 m_sleepy_index.store(sleepy, std::memory_order_release);
-                c.sleeping_stack[c.num_sleeping++] = sleepy;
+                c.sleeping_stack.push(sleepy);
             }
             const auto unblock_sequence_after =
                 c.global_unblock_sequence.load(std::memory_order_acquire);
@@ -1489,10 +1513,8 @@ struct Ring_R : Ring<T, true>
                 m_seen_unblock_sequence = unblock_sequence_after;
                 const int sleepy = m_sleepy_index.load(std::memory_order_relaxed);
                 if (sleepy >= 0) {
-                    if (c.num_sleeping > 0 && c.sleeping_stack[c.num_sleeping - 1] == sleepy) {
-                        c.sleeping_stack[--c.num_sleeping] = -1;
-                    }
-                    c.ready_stack[c.num_ready++] = sleepy;
+                    c.sleeping_stack.remove_if_eq_tail(sleepy);
+                    c.ready_stack.push(sleepy);
                     m_sleepy_index.store(-1, std::memory_order_release);
                 }
                 c.unlock();
@@ -1515,12 +1537,12 @@ struct Ring_R : Ring<T, true>
 
                 if (c.dirty_semaphores[sleepy_index].wait()) { // unordered wake
                     c.lock();
-                    c.unordered_stack[c.num_unordered++] = sleepy_index;
+                    c.unordered_stack.push(sleepy_index);
                     c.unlock();
                 }
                 else {
                     c.lock();
-                    c.ready_stack[c.num_ready++] = sleepy_index;
+                    c.ready_stack.push(sleepy_index);
                     c.unlock();
                 }
                 m_sleepy_index.store(-1, std::memory_order_release);
@@ -1769,12 +1791,12 @@ struct Ring_W : Ring<T, false>
         assert(m_writing_thread_index.load(std::memory_order_relaxed) == thread_index());
         c.leading_sequence.store(m_pending_new_sequence);
         // Wake sleeping readers in a deterministic order
-        for (int i = 0; i < c.num_sleeping; i++) {
+        for (int i = 0; i < c.sleeping_stack.size(); i++) {
             c.dirty_semaphores[c.sleeping_stack[i]].post_ordered();
         }
-        c.num_sleeping = 0;
-        while (c.num_unordered) {
-            c.ready_stack[c.num_ready++] = c.unordered_stack[--c.num_unordered];
+        c.sleeping_stack.clear();
+        while (c.unordered_stack.size() > 0) {
+            c.ready_stack.push(c.unordered_stack.pop_or(-1));
         }
         c.unlock();
         m_writing_thread_index.store(0, std::memory_order_release);
@@ -1790,12 +1812,12 @@ struct Ring_W : Ring<T, false>
         c.global_unblock_sequence.fetch_add(1, std::memory_order_acq_rel);
 
         c.lock();
-        for (int i = 0; i < c.num_sleeping; i++) {
+        for (int i = 0; i < c.sleeping_stack.size(); i++) {
             c.dirty_semaphores[c.sleeping_stack[i]].post_ordered();
         }
-        c.num_sleeping = 0;
-        while (c.num_unordered) {
-            c.ready_stack[c.num_ready++] = c.unordered_stack[--c.num_unordered];
+        c.sleeping_stack.clear();
+        while (c.unordered_stack.size() > 0) {
+            c.ready_stack.push(c.unordered_stack.pop_or(-1));
         }
         c.unlock();
     }
