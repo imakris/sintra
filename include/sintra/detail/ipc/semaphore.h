@@ -76,7 +76,7 @@ CAVEATS
 #include <cwchar>
 #include <limits>
 
-#include <sintra/time_utils.h>
+#include "../time_utils.h"
 
 // Platform headers MUST be included BEFORE opening namespaces to avoid polluting them
 #if defined(_WIN32)

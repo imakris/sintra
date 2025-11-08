@@ -20,7 +20,7 @@
 #include <system_error>
 #include <thread>
 
-#include <sintra/time_utils.h>
+#include "../time_utils.h"
 
 #ifdef _WIN32
   #ifndef NOMINMAX
