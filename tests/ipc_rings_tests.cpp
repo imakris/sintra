@@ -440,10 +440,8 @@ TEST_CASE(test_reader_eviction_does_not_underflow_octile_counter)
         uint8_t guarded_octile = 0;
         auto guard_deadline = std::chrono::steady_clock::now() + 1s;
         bool guard_observed = false;
-        constexpr uint8_t guard_present_mask =
-            0x08;
-        constexpr uint8_t guard_octile_mask =
-            0x07;
+        constexpr uint8_t guard_present_mask = 0x08;
+        constexpr uint8_t guard_octile_mask  = 0x07;
 
         while (std::chrono::steady_clock::now() < guard_deadline) {
             uint8_t guard_token = slot.guard_token();
@@ -476,8 +474,7 @@ TEST_CASE(test_reader_eviction_does_not_underflow_octile_counter)
         const uint64_t guard_mask = uint64_t(1) << (guarded_octile * 8);
 
         reader.c.read_access.fetch_add(guard_mask);
-        slot.set_guard_token(
-            static_cast<uint8_t>(guard_present_mask | guarded_octile));
+        slot.set_guard_token(static_cast<uint8_t>(guard_present_mask | guarded_octile));
         slot.set_status(sintra::Ring<uint32_t, true>::READER_STATE_ACTIVE);
 
         reader.done_reading();
@@ -516,8 +513,7 @@ TEST_CASE(test_slow_reader_eviction_restores_status)
 
     const uint64_t guard_mask = uint64_t(1) << (8 * trailing_octile);
     control.read_access = guard_mask;
-    constexpr uint8_t guard_present_mask_u64 =
-        0x08;
+    constexpr uint8_t guard_present_mask_u64 = 0x08;
     slot.set_guard_token(
         static_cast<uint8_t>(guard_present_mask_u64 | static_cast<uint8_t>(trailing_octile)));
     slot.set_status(sintra::Ring<uint64_t, true>::READER_STATE_ACTIVE);
@@ -558,11 +554,11 @@ TEST_CASE(test_streaming_reader_status_restored_after_eviction)
     ASSERT_TRUE(first_range.end >= first_range.begin);
     reader.done_reading_new_data();
 
-    const uint8_t guarded_octile = slot.trailing_octile();
+    const uint8_t  guarded_octile = slot.trailing_octile();
     const uint64_t guard_mask     = uint64_t(1) << (8 * guarded_octile);
 
     constexpr uint8_t guard_present_mask_u32 = 0x08;
-    constexpr uint8_t guard_octile_mask_u32 = 0x07;
+    constexpr uint8_t guard_octile_mask_u32  = 0x07;
     uint8_t guard_snapshot = slot.exchange_guard_token(0);
     ASSERT_TRUE((guard_snapshot & guard_present_mask_u32) != 0);
     ASSERT_EQ(guarded_octile, guard_snapshot & guard_octile_mask_u32);
@@ -602,7 +598,7 @@ STRESS_TEST(stress_multi_reader_throughput)
     std::vector<std::exception_ptr> reader_errors(reader_count);
     std::vector<std::atomic<bool>> reader_ready(reader_count);
     std::vector<std::atomic<bool>> reader_evicted(reader_count);
-    for (auto& flag : reader_ready) { flag = false; }
+    for (auto& flag : reader_ready)   { flag = false; }
     for (auto& flag : reader_evicted) { flag = false; }
 
     std::vector<std::thread> reader_threads;

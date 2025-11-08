@@ -176,8 +176,7 @@ void test_wake_all_stress()
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     while (acquisitions.load(std::memory_order_relaxed) < kTotalPosts) {
         if (std::chrono::steady_clock::now() > deadline) {
-            std::fprintf(stderr, "[FAIL] Timeout waiting for acquisitions: %d/%d\n",
-                        acquisitions, kTotalPosts);
+            std::fprintf(stderr, "[FAIL] Timeout waiting for acquisitions: %d/%d\n", acquisitions, kTotalPosts);
             CHECK(false);
             break;
         }
@@ -269,9 +268,9 @@ void test_mixed_operations_extreme_contention()
 
     CHECK(total_posts == total_waits);
 
-    std::fprintf(stderr, "[PASS] Mixed operations test completed. Posts: %lld, Waits: %lld (try: %lld, timeouts: %lld, drained: %lld)\n",
-                 total_posts, successful_waits, try_wait_successes,
-                 timed_wait_timeouts, drained);
+    std::fprintf(stderr, "[PASS] Mixed operations test completed. Posts: %lld, "
+	    "Waits: %lld (try: %lld, timeouts: %lld, drained: %lld)\n",
+        total_posts, successful_waits, try_wait_successes, timed_wait_timeouts, drained);
 }
 
 // Test 4: Rapid post/wait cycling
@@ -282,7 +281,7 @@ void test_rapid_post_wait_cycling()
     constexpr int kCyclesPerThread = 50000;
 
     std::fprintf(stderr, "[TEST] Rapid post/wait cycling (%d threads, %d cycles/thread)\n",
-                 kCyclers, kCyclesPerThread);
+        kCyclers, kCyclesPerThread);
 
     interprocess_semaphore sem(0);
     std::atomic<long long> cycle_count{0};
@@ -314,8 +313,7 @@ void test_rapid_post_wait_cycling()
     CHECK(cycle_count == kCyclers * kCyclesPerThread);
     CHECK(!sem.try_wait());  // Should be empty
 
-    std::fprintf(stderr, "[PASS] Rapid cycling test completed. Cycles: %lld\n",
-                 cycle_count);
+    std::fprintf(stderr, "[PASS] Rapid cycling test completed. Cycles: %lld\n", cycle_count);
 }
 
 } // namespace
@@ -353,7 +351,8 @@ int main()
         std::fprintf(stderr, "\n[SUCCESS] All semaphore stress tests passed\n");
         return 0;
 
-    } catch (const std::exception& e) {
+    }
+	catch (const std::exception& e) {
         std::fprintf(stderr, "[EXCEPTION] %s\n", e.what());
         return 1;
     }
