@@ -903,6 +903,54 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
     };
 
     /**
+     * A simple fixed-capacity stack of indices. Eliminates duplicate
+     * push/pop/contains logic for ready_stack, sleeping_stack, unordered_stack, etc.
+     */
+    template <int N>
+    struct Index_stack {
+        int arr[N]{};
+        int count = 0;
+
+        void clear() { count = 0; }
+        bool empty() const { return count == 0; }
+        int size() const { return count; }
+
+        void push(int value) {
+            assert(count < N);
+            arr[count++] = value;
+        }
+
+        int pop_or(int fallback) {
+            if (count == 0) {
+                return fallback;
+            }
+            int value = arr[--count];
+            arr[count] = -1;
+            return value;
+        }
+
+        bool contains(int value) const {
+            for (int i = 0; i < count; ++i) {
+                if (arr[i] == value) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        bool remove_if_eq_tail(int value) {
+            if (count > 0 && arr[count - 1] == value) {
+                arr[--count] = -1;
+                return true;
+            }
+            return false;
+        }
+
+        int& operator[](int index) { return arr[index]; }
+        const int& operator[](int index) const { return arr[index]; }
+    };
+
+    /**
      * Shared control block. All fields that are concurrently modified are atomic.
      * NOTE: Atomics are chosen such that they are address-free and (ideally) lock-free.
      */
@@ -961,12 +1009,11 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         cache_line_sized_t                   reading_sequences[max_process_index];
 
         // --- Reader Sequence Stack Management ------------------------------------
-        // Protects free_rs_stack and num_free_rs during slot acquisition/release.
+        // Protects free_rs_stack during slot acquisition/release.
         spinlock                             rs_stack_spinlock;
 
         // Freelist of reader-slot indices into reading_sequences[].
-        int                                  free_rs_stack[max_process_index]{};
-        std::atomic<int>                     num_free_rs{0};
+        Index_stack<max_process_index>       free_rs_stack;
         // --- End Reader Sequence Stack Management --------------------------------
 
         bool scavenge_orphans()
@@ -974,15 +1021,6 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
             bool freed = false;
 
             spinlock::locker lock(rs_stack_spinlock);
-            auto in_freelist = [&](int idx) -> bool {
-                int nf = num_free_rs;
-                for (int i = 0; i < nf; ++i) {
-                    if (free_rs_stack[i] == idx) {
-                        return true;
-                    }
-                }
-                return false;
-            };
 
             for (int i = 0; i < max_process_index; ++i) {
                 auto& slot = reading_sequences[i].data;
@@ -1006,10 +1044,8 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
                     slot.set_status(READER_STATE_INACTIVE);
                     slot.owner_pid = 0;
 
-                    if (!in_freelist(i)) {
-                        int idx = num_free_rs;
-                        free_rs_stack[idx] = i;
-                        num_free_rs++;
+                    if (!free_rs_stack.contains(i)) {
+                        free_rs_stack.push(i);
                     }
                     freed = true;
                 }
@@ -1038,32 +1074,28 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
 
         // A stack of indices into dirty_semaphores[] that are free/ready for use.
         // Initially all semaphores are ready.
-        int                                  ready_stack[max_process_index]{};
-        int                                  num_ready = max_process_index;
+        Index_stack<max_process_index>       ready_stack;
 
         // A stack of indices allocated to readers that are blocking / about to block /
         // or were blocking and not yet redistributed.
-        int                                  sleeping_stack[max_process_index]{};
-        int                                  num_sleeping = 0;
+        Index_stack<max_process_index>       sleeping_stack;
 
         // A stack of indices that were posted “out of order” (e.g., after a local unblock).
         // To avoid O(n) removals from sleeping_stack, unordered posts leave the index in
         // sleeping_stack but flag the semaphore to avoid re-posting; the next ordered post
         // (e.g., on publish) drains unordered items back to ready_stack.
-        int                                  unordered_stack[max_process_index]{};
-        int                                  num_unordered = 0;
+        Index_stack<max_process_index>       unordered_stack;
 
         // Spinlock guarding the ready/sleeping/unordered stacks.
         spinlock                             m_spinlock;
 
         Control()
         {
-            for (int i = 0; i < max_process_index; i++) { ready_stack   [i]  =  i; }
-            for (int i = 0; i < max_process_index; i++) { sleeping_stack[i]  = -1; }
-            for (int i = 0; i < max_process_index; i++) { unordered_stack[i] = -1; }
+            // Initialize ready_stack with all indices (full), others empty
+            for (int i = 0; i < max_process_index; i++) { ready_stack.push(i); }
 
             for (int i = 0; i < max_process_index; i++) { reading_sequences[i].data.v = invalid_sequence; }
-            for (int i = 0; i < max_process_index; i++) { free_rs_stack[i] = i; }
+            for (int i = 0; i < max_process_index; i++) { free_rs_stack.push(i); }
 
             writer_pid = 0;
 
@@ -1084,8 +1116,6 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
             // Sanity (C++ note: lock-free guarantee is implementation-specific)
             assert(num_attached.is_lock_free());
             assert(leading_sequence.is_lock_free());
-
-            num_free_rs = max_process_index;
         }
 
         static_assert(max_process_index <= 255,
@@ -1305,9 +1335,8 @@ struct Ring_R : Ring<T, true>
         while (true) {
             {
                 spinlock::locker lock(c.rs_stack_spinlock);
-                if (c.num_free_rs > 0) {
-                    int current_num_free = c.num_free_rs.fetch_sub(1) - 1;
-                    m_rs_index = c.free_rs_stack[current_num_free];
+                if (!c.free_rs_stack.empty()) {
+                    m_rs_index = c.free_rs_stack.pop_or(-1);
 
                     // Mark our slot as ACTIVE while the spinlock is still held so the
                     // scavenger cannot reclaim it before we publish the ownership.
@@ -1350,14 +1379,8 @@ struct Ring_R : Ring<T, true>
             slot.set_status(Ring<T, true>::READER_STATE_INACTIVE);
 
             // Push only if not already in the freelist (defensive: avoid duplicates).
-            int nf = c.num_free_rs;
-            bool already = false;
-            for (int i = 0; i < nf; ++i) {
-                if (c.free_rs_stack[i] == m_rs_index) { already = true; break; }
-            }
-            if (!already) {
-                c.free_rs_stack[nf] = m_rs_index;
-                c.num_free_rs++;
+            if (!c.free_rs_stack.contains(m_rs_index)) {
+                c.free_rs_stack.push(m_rs_index);
             }
         }
     }
@@ -1550,7 +1573,6 @@ struct Ring_R : Ring<T, true>
     }
 
     sequence_counter_type reading_sequence()     const { return m_reading_sequence->load(); }
-    sequence_counter_type get_reading_sequence() const { return m_reading_sequence->load(); }
 
     /**
      * Block until new data is available (or until unblocked) and return the new
@@ -1677,19 +1699,17 @@ struct Ring_R : Ring<T, true>
                     c.m_spinlock.unlock();
                     return Range<T>{};
                 }
-                int sleepy = c.ready_stack[--c.num_ready];
+                int sleepy = c.ready_stack.pop_or(-1);
                 m_sleepy_index = sleepy;
-                c.sleeping_stack[c.num_sleeping++] = sleepy;
+                c.sleeping_stack.push(sleepy);
             }
             const auto unblock_sequence_after = c.global_unblock_sequence.load();
             if (unblock_sequence_after != m_seen_unblock_sequence) {
                 m_seen_unblock_sequence = unblock_sequence_after;
                 const int sleepy = m_sleepy_index;
                 if (sleepy >= 0) {
-                    if (c.num_sleeping > 0 && c.sleeping_stack[c.num_sleeping - 1] == sleepy) {
-                        c.sleeping_stack[--c.num_sleeping] = -1;
-                    }
-                    c.ready_stack[c.num_ready++] = sleepy;
+                    c.sleeping_stack.remove_if_eq_tail(sleepy);
+                    c.ready_stack.push(sleepy);
                     m_sleepy_index = -1;
                 }
                 c.m_spinlock.unlock();
@@ -1716,10 +1736,8 @@ struct Ring_R : Ring<T, true>
                         spinlock::locker lock(c.m_spinlock);
                         const int current = m_sleepy_index;
                         if (current >= 0) {
-                            if (c.num_sleeping > 0 && c.sleeping_stack[c.num_sleeping - 1] == current) {
-                                c.sleeping_stack[--c.num_sleeping] = -1;
-                            }
-                            c.ready_stack[c.num_ready++] = current;
+                            c.sleeping_stack.remove_if_eq_tail(current);
+                            c.ready_stack.push(current);
                             m_sleepy_index = -1;
                         }
                         return Range<T>{};
@@ -1727,11 +1745,11 @@ struct Ring_R : Ring<T, true>
 
                     if (wait_status == sintra_ring_semaphore::wait_result::unordered) {
                         spinlock::locker lock(c.m_spinlock);
-                        c.unordered_stack[c.num_unordered++] = sleepy_index;
+                        c.unordered_stack.push(sleepy_index);
                     }
                     else {
                         spinlock::locker lock(c.m_spinlock);
-                        c.ready_stack[c.num_ready++] = sleepy_index;
+                        c.ready_stack.push(sleepy_index);
                     }
                     m_sleepy_index = -1;
 
@@ -2069,12 +2087,12 @@ struct Ring_W : Ring<T, false>
             assert(m_writing_thread_index == thread_index());
             c.leading_sequence = m_pending_new_sequence;
             // Wake sleeping readers in a deterministic order
-            for (int i = 0; i < c.num_sleeping; i++) {
+            for (int i = 0; i < c.sleeping_stack.size(); i++) {
                 c.dirty_semaphores[c.sleeping_stack[i]].post_ordered();
             }
-            c.num_sleeping = 0;
-            while (c.num_unordered) {
-                c.ready_stack[c.num_ready++] = c.unordered_stack[--c.num_unordered];
+            c.sleeping_stack.clear();
+            while (!c.unordered_stack.empty()) {
+                c.ready_stack.push(c.unordered_stack.pop_or(-1));
             }
         }
         m_writing_thread_index = 0;
@@ -2090,12 +2108,12 @@ struct Ring_W : Ring<T, false>
         c.global_unblock_sequence++;
 
         spinlock::locker lock(c.m_spinlock);
-        for (int i = 0; i < c.num_sleeping; i++) {
+        for (int i = 0; i < c.sleeping_stack.size(); i++) {
             c.dirty_semaphores[c.sleeping_stack[i]].post_ordered();
         }
-        c.num_sleeping = 0;
-        while (c.num_unordered) {
-            c.ready_stack[c.num_ready++] = c.unordered_stack[--c.num_unordered];
+        c.sleeping_stack.clear();
+        while (!c.unordered_stack.empty()) {
+            c.ready_stack.push(c.unordered_stack.pop_or(-1));
         }
     }
 
