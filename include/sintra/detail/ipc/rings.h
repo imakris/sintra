@@ -1514,6 +1514,9 @@ struct Ring_R : Ring<T, true>
                 },
                 guard_cleared);
 
+            // Always release our own guard contribution before deciding next steps.
+            c.read_access.fetch_sub(guard_mask);
+
             if (!guard_cleared) {
                 m_reading      = false;
                 m_reading_lock = false;
@@ -1522,7 +1525,9 @@ struct Ring_R : Ring<T, true>
 
             if (Ring<T, true>::encoded_guard_present(guard_snapshot)) {
                 const uint8_t guarded_octile = Ring<T, true>::encoded_guard_octile(guard_snapshot);
-                c.read_access.fetch_sub(octile_mask(guarded_octile));
+                if (guarded_octile != trailing_octile) {
+                    c.read_access.fetch_sub(octile_mask(guarded_octile));
+                }
             }
         }
 
