@@ -100,7 +100,7 @@ jobs:
         id: changed
         uses: dorny/paths-filter@v3
         with:
-          base: ${{ steps.diff-base.outputs.base }}
+          base: ${{ inputs.pr_number == '' && steps.diff-base.outputs.base || '' }}
           filters: |
             core:
               - 'src/**'
