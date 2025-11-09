@@ -1668,6 +1668,7 @@ struct Ring_R : Ring<T, true>
         };
 
         while (true) {
+            bool heartbeat_timeout = false;
             if (m_stopping) {
                 return Range<T>{};
             }
@@ -1762,7 +1763,7 @@ struct Ring_R : Ring<T, true>
                                 c.ready_stack.push(current);
                                 m_sleepy_index = -1;
                             }
-                            // Heartbeat timeout: restart the wait phases.
+                            heartbeat_timeout = true;
                             break;
                         }
 
@@ -1787,6 +1788,10 @@ struct Ring_R : Ring<T, true>
             if (!sequences_equal()) {
                 return produce_range();
             }
+            if (heartbeat_timeout) {
+                continue;
+            }
+            return Range<T>{};
         }
     }
 
