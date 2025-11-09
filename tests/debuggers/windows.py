@@ -419,6 +419,7 @@ class WindowsDebuggerStrategy(DebuggerStrategy):
         return None
 
     def _configure_windows_jit_debugging(self) -> Optional[str]:
+        """Disable intrusive JIT prompts so crash dumps complete automatically."""
         if sys.platform != "win32":
             return None
 
@@ -428,18 +429,6 @@ class WindowsDebuggerStrategy(DebuggerStrategy):
             return f"winreg unavailable: {exc}"
 
         errors: List[str] = []
-
-        def set_string(root: int, subkey: str, name: str, value: str, access: int) -> None:
-            try:
-                handle = winreg.CreateKeyEx(root, subkey, 0, access)
-            except OSError as exc:
-                errors.append(f"{subkey}: failed to open key: {exc}")
-                return
-            with handle:
-                try:
-                    winreg.SetValueEx(handle, name, 0, winreg.REG_SZ, value)
-                except OSError as exc:
-                    errors.append(f"{subkey}: failed to set {name}: {exc}")
 
         def set_dword(root: int, subkey: str, name: str, value: int, access: int) -> None:
             try:
@@ -453,22 +442,26 @@ class WindowsDebuggerStrategy(DebuggerStrategy):
                 except OSError as exc:
                     errors.append(f"{subkey}: failed to set {name}: {exc}")
 
-        debugger_command = '""C:\\Program Files (x86)\\Windows Kits\\10\\Debuggers\\x64\\cdb.exe" -p %ld -e %ld -g'
-        jit_keys = [
-            (winreg.HKEY_LOCAL_MACHINE, r"Software\Microsoft\Windows NT\CurrentVersion\AeDebug"),
-            (winreg.HKEY_LOCAL_MACHINE, r"Software\Wow6432Node\Microsoft\Windows NT\CurrentVersion\AeDebug"),
-            (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows NT\CurrentVersion\AeDebug"),
-        ]
+        # Set Auto=1 for AeDebug to automatically perform default action (create crash dump)
+        # instead of showing a prompt that would block in headless CI environments
+        set_dword(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"Software\Microsoft\Windows NT\CurrentVersion\AeDebug",
+            "Auto",
+            1,
+            winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY,
+        )
 
-        for root, subkey in jit_keys:
-            access = winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY
-            if root == winreg.HKEY_CURRENT_USER:
-                access = winreg.KEY_SET_VALUE
-            elif "Wow6432Node" in subkey:
-                access = winreg.KEY_SET_VALUE | winreg.KEY_WOW64_32KEY
-            set_string(root, subkey, "Debugger", debugger_command, access)
-            set_dword(root, subkey, "Auto", 0, access)
+        # Disable Windows Error Reporting UI dialogs
+        set_dword(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"Software\Microsoft\Windows\Windows Error Reporting",
+            "DontShowUI",
+            1,
+            winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY,
+        )
 
+        # Configure .NET JIT debugging to not launch debugger on unhandled exceptions
         jit_subkeys = [
             (winreg.HKEY_LOCAL_MACHINE, r"Software\Microsoft\.NETFramework"),
             (winreg.HKEY_LOCAL_MACHINE, r"Software\Wow6432Node\Microsoft\.NETFramework"),
