@@ -248,11 +248,18 @@ inline void precision_sleep_for(std::chrono::duration<double> duration)
         return;
     }
 
-    const uint64_t target = mach_absolute_time() + static_cast<uint64_t>(absolute_delta);
+    const uint64_t deadline = mach_absolute_time() + static_cast<uint64_t>(absolute_delta);
 
-    auto status = mach_wait_until(target);
-    while (status == KERN_ABORTED) {
-        status = mach_wait_until(target);
+    while (true) {
+        const uint64_t now = mach_absolute_time();
+        if (now >= deadline) {
+            return;
+        }
+        auto status = mach_wait_until(deadline);
+        if (status != KERN_ABORTED) {
+            return;
+        }
+        // Signal interrupted - check if we've passed deadline before retrying
     }
 }
 #else
