@@ -8,7 +8,7 @@ import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from .base import DebuggerStrategy
 
@@ -679,7 +679,12 @@ class WindowsDebuggerStrategy(DebuggerStrategy):
         capture_errors: List[str] = []
         fallback_outputs: List[Tuple[str, str, int, str]] = []
 
+        analyzed_pids: set[int] = set()
+
         for target_pid in sorted(set(target_pids)):
+            if target_pid in analyzed_pids:
+                continue
+            analyzed_pids.add(target_pid)
             try:
                 command = [debugger_path]
                 if debugger_name == "windbg":
@@ -738,14 +743,25 @@ class WindowsDebuggerStrategy(DebuggerStrategy):
                         )
                     )
             else:
-                capture_errors.append(
-                    self._format_windows_debugger_failure(
-                        debugger_name,
-                        f"PID {target_pid}",
-                        normalized_code,
-                        stderr,
-                    )
+                dump_output, dump_error = self._capture_stack_via_minidump(
+                    debugger_name,
+                    debugger_path,
+                    target_pid,
                 )
+                if dump_output:
+                    fallback_outputs.append(
+                        (f"PID {target_pid} (minidump)", dump_output, 0, "dump analysis")
+                    )
+                else:
+                    capture_errors.append(
+                        dump_error
+                        or self._format_windows_debugger_failure(
+                            debugger_name,
+                            f"PID {target_pid}",
+                            normalized_code,
+                            stderr,
+                        )
+                    )
 
         if stack_outputs:
             return "\n\n".join(stack_outputs), ""
@@ -763,6 +779,97 @@ class WindowsDebuggerStrategy(DebuggerStrategy):
             return "", "; ".join(capture_errors)
 
         return "", "no stack data captured"
+
+    def _capture_stack_via_minidump(
+        self,
+        debugger_name: str,
+        debugger_path: str,
+        pid: int,
+    ) -> Tuple[str, Optional[str]]:
+        """Create a minidump via comsvcs.dll and analyze it with the debugger."""
+
+        dump_path = None
+        try:
+            dump_path, dump_error = self._create_minidump(pid)
+            if dump_error:
+                return "", dump_error
+            if not dump_path:
+                return "", "failed to create minidump"
+
+            command = [debugger_path]
+            if debugger_name == "windbg":
+                command.append("-Q")
+            command.extend(["-z", str(dump_path), "-c", ".symfix; .reload; ~* kP; qd"])
+
+            result = subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=120,
+            )
+        except (subprocess.SubprocessError, OSError) as exc:
+            return "", f"minidump analysis failed: {exc}"
+        finally:
+            if dump_path:
+                try:
+                    os.remove(dump_path)
+                except OSError:
+                    pass
+
+        stdout = result.stdout.strip()
+        stderr = result.stderr.strip()
+        output = stdout or stderr
+        if not output:
+            return "", "minidump analysis produced no output"
+        return output, None
+
+    def _create_minidump(self, pid: int) -> Tuple[Optional[str], Optional[str]]:
+        """Generate a minidump for the given PID using comsvcs.dll."""
+
+        system_root = os.environ.get("SystemRoot", r"C:\Windows")
+        rundll32 = Path(system_root) / "System32" / "rundll32.exe"
+        if not rundll32.exists():
+            return None, "rundll32.exe not found for minidump creation"
+
+        try:
+            tmp_fd, tmp_path = tempfile.mkstemp(prefix=f"sintra_{pid}_", suffix=".dmp")
+            os.close(tmp_fd)
+        except OSError as exc:
+            return None, f"failed to allocate dump file: {exc}"
+
+        command = [
+            str(rundll32),
+            "comsvcs.dll, MiniDump",
+            str(pid),
+            tmp_path,
+            "full",
+        ]
+
+        try:
+            result = subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=60,
+            )
+        except subprocess.SubprocessError as exc:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+            return None, f"minidump command failed: {exc}"
+
+        if result.returncode != 0:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+            detail = result.stderr.strip() or result.stdout.strip()
+            return None, f"minidump command exited with {result.returncode}: {detail}"
+
+        return tmp_path, None
 
     @staticmethod
     def _normalize_windows_returncode(returncode: int) -> int:
