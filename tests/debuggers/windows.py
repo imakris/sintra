@@ -442,15 +442,43 @@ class WindowsDebuggerStrategy(DebuggerStrategy):
                 except OSError as exc:
                     errors.append(f"{subkey}: failed to set {name}: {exc}")
 
-        # Set Auto=1 for AeDebug to automatically perform default action (create crash dump)
-        # instead of showing a prompt that would block in headless CI environments
-        set_dword(
-            winreg.HKEY_LOCAL_MACHINE,
-            r"Software\Microsoft\Windows NT\CurrentVersion\AeDebug",
-            "Auto",
-            1,
-            winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY,
-        )
+        def delete_value(root: int, subkey: str, name: str, access: int) -> None:
+            try:
+                handle = winreg.CreateKeyEx(root, subkey, 0, access)
+            except OSError as exc:
+                errors.append(f"{subkey}: failed to open key: {exc}")
+                return
+            with handle:
+                try:
+                    winreg.DeleteValue(handle, name)
+                except FileNotFoundError:
+                    # Value doesn't exist, that's fine
+                    pass
+                except OSError as exc:
+                    errors.append(f"{subkey}: failed to delete {name}: {exc}")
+
+        # Configure AeDebug for all registry hives (HKLM, HKLM Wow6432Node, HKCU)
+        # HKCU takes precedence, so we must clean up all of them
+        aedebug_keys = [
+            (winreg.HKEY_LOCAL_MACHINE, r"Software\Microsoft\Windows NT\CurrentVersion\AeDebug"),
+            (winreg.HKEY_LOCAL_MACHINE, r"Software\Wow6432Node\Microsoft\Windows NT\CurrentVersion\AeDebug"),
+            (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows NT\CurrentVersion\AeDebug"),
+        ]
+
+        for root, subkey in aedebug_keys:
+            access = winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY
+            if root == winreg.HKEY_CURRENT_USER:
+                access = winreg.KEY_SET_VALUE
+            elif "Wow6432Node" in subkey:
+                access = winreg.KEY_SET_VALUE | winreg.KEY_WOW64_32KEY
+
+            # Set Auto=1 to automatically perform default action (create crash dump)
+            # instead of showing a prompt that would block in headless CI
+            set_dword(root, subkey, "Auto", 1, access)
+
+            # Remove any custom Debugger command that was previously set by the broken code
+            # to let Windows use the default WER behavior
+            delete_value(root, subkey, "Debugger", access)
 
         # Disable Windows Error Reporting UI dialogs
         set_dword(
