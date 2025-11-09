@@ -589,7 +589,7 @@ class TestRunner:
         self.preserve_on_timeout = preserve_on_timeout
         sanitized_config = ''.join(c.lower() if c.isalnum() else '_' for c in config)
         timestamp_ms = int(time.time() * 1000)
-        scratch_dir_name = f".sintra-test-scratch-{sanitized_config}-{timestamp_ms}-{os.getpid()}"
+        scratch_dir_name = f"sintra-test-scratch-{sanitized_config}-{timestamp_ms}-{os.getpid()}"
         self._scratch_base = (self.build_dir / scratch_dir_name).resolve()
         self._scratch_base.mkdir(parents=True, exist_ok=True)
         self._scratch_lock = threading.Lock()
