@@ -228,6 +228,30 @@ std::filesystem::path ensure_shared_directory()
     return dir;
 }
 
+std::string log_timestamp()
+{
+    using clock = std::chrono::system_clock;
+    const auto now = clock::now().time_since_epoch();
+    const auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
+    return std::to_string(millis);
+}
+
+void log_extreme_event(std::string_view actor, const std::string& message)
+{
+    try {
+        const auto dir = get_shared_directory();
+        const auto path = dir / "extreme_choreography.log";
+        std::ofstream out(path, std::ios::app);
+        if (!out) {
+            return;
+        }
+        out << log_timestamp() << " [" << actor << "] " << message << '\n';
+    }
+    catch (...) {
+        // best-effort logging
+    }
+}
+
 void cleanup_directory(const std::filesystem::path& dir)
 {
     std::error_code ec;
@@ -298,6 +322,7 @@ std::string describe_failure(Actor actor, int phase, FailureCode code, const cha
 int coordinator_process()
 {
     using namespace sintra;
+    log_extreme_event("Coordinator", "process started");
 
     std::mutex mutex;
     std::condition_variable cv;
@@ -348,6 +373,7 @@ int coordinator_process()
 
     const std::string group = "_sintra_external_processes";
     barrier("extreme-choreography-ready", group);
+    log_extreme_event("Coordinator", "passed ready barrier");
 
     for (std::size_t phase = 0; phase < kPhaseCount; ++phase) {
         world() << PhaseStart{static_cast<int>(phase)};
@@ -359,10 +385,12 @@ int coordinator_process()
             failure_observed = true;
             send_failure_notice(Actor::Coordinator, static_cast<int>(phase),
                                 FailureCode::CoordinatorTimeout, "phase completion timed out");
+            log_extreme_event("Coordinator", "phase " + std::to_string(phase) + " completion timed out");
         }
     }
 
     world() << Stop{};
+    log_extreme_event("Coordinator", "Stop broadcast issued");
 
     {
         std::unique_lock<std::mutex> lk(mutex);
@@ -370,7 +398,9 @@ int coordinator_process()
     }
 
     deactivate_all_slots();
+    log_extreme_event("Coordinator", "entering final barrier");
     barrier("extreme-choreography-finished", "_sintra_all_processes");
+    log_extreme_event("Coordinator", "exited final barrier");
 
     return failure_observed ? 1 : 0;
 }
@@ -383,6 +413,8 @@ template<int ProducerId>
 int producer_process()
 {
     using namespace sintra;
+    constexpr const char* actor_label = (ProducerId == 0) ? "Producer0" : "Producer1";
+    log_extreme_event(actor_label, "process started");
 
     std::mutex mutex;
     std::condition_variable cv;
@@ -459,7 +491,9 @@ int producer_process()
     cv.wait(lk, [&] { return stop_requested; });
 
     deactivate_all_slots();
+    log_extreme_event(actor_label, "entering final barrier");
     barrier("extreme-choreography-finished", "_sintra_all_processes");
+    log_extreme_event(actor_label, "exited final barrier");
 
     return 0;
 }
@@ -472,6 +506,8 @@ template<int ConsumerId>
 int consumer_process()
 {
     using namespace sintra;
+    constexpr const char* actor_label = (ConsumerId == 0) ? "Consumer0" : "Consumer1";
+    log_extreme_event(actor_label, "process started");
 
     SequenceTracker tracker = make_sequence_tracker();
     std::array<int, kPhaseCount> processed{};
@@ -592,7 +628,9 @@ int consumer_process()
     cv.wait(lk, [&] { return stop_requested; });
 
     deactivate_all_slots();
+    log_extreme_event(actor_label, "entering final barrier");
     barrier("extreme-choreography-finished", "_sintra_all_processes");
+    log_extreme_event(actor_label, "exited final barrier");
 
     return 0;
 }
@@ -604,6 +642,7 @@ int consumer_process()
 int monitor_process()
 {
     using namespace sintra;
+    log_extreme_event("Monitor", "process started");
 
     std::array<std::array<int, kPhaseCount>, kProducerCount> heartbeat_counts{};
 
@@ -684,7 +723,9 @@ int monitor_process()
     cv.wait(lk, [&] { return stop_requested; });
 
     deactivate_all_slots();
+    log_extreme_event("Monitor", "entering final barrier");
     barrier("extreme-choreography-finished", "_sintra_all_processes");
+    log_extreme_event("Monitor", "exited final barrier");
 
     return 0;
 }
@@ -696,6 +737,7 @@ int monitor_process()
 int aggregator_process()
 {
     using namespace sintra;
+    log_extreme_event("Aggregator", "process started");
 
     const auto shared_dir = get_shared_directory();
     const auto summary_path = shared_dir / "extreme_summary.txt";
@@ -842,7 +884,9 @@ int aggregator_process()
     }
 
     deactivate_all_slots();
+    log_extreme_event("Aggregator", "entering final barrier");
     barrier("extreme-choreography-finished", "_sintra_all_processes");
+    log_extreme_event("Aggregator", "exited final barrier");
 
     std::ofstream out(summary_path, std::ios::binary | std::ios::trunc);
     if (out) {

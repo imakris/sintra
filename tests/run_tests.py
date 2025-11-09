@@ -691,6 +691,7 @@ class TestRunner:
 
         directory = self._scratch_base / f"{safe_name}_{index}"
         directory.mkdir(parents=True, exist_ok=True)
+        print(f"[SCRATCH] {invocation.name}: {directory}")
         return directory
 
     def _build_test_environment(self, scratch_dir: Path) -> Dict[str, str]:
@@ -1137,6 +1138,7 @@ class TestRunner:
         scratch_dir = self._allocate_scratch_directory(invocation)
         process = None
         cleanup_scratch_dir = True
+        preserved_scratch_dir: Optional[Path] = None
         core_snapshot = self._snapshot_core_dumps(invocation)
         start_time = time.time()
         result_success: Optional[bool] = None
@@ -1787,6 +1789,9 @@ class TestRunner:
                     error_msg = f"{error_msg}\n\n[Post-mortem stack capture unavailable: {postmortem_stack_error}]"
 
                 result_success = success
+                if not success:
+                    cleanup_scratch_dir = False
+                    preserved_scratch_dir = scratch_dir
                 return TestResult(
                     success=success,
                     duration=duration,
@@ -1801,13 +1806,14 @@ class TestRunner:
                     print(f"\n{Color.RED}TIMEOUT: Process exceeded timeout of {timeout}s (PID {process.pid}). Preserving for debugging as requested.{Color.RESET}")
                     print(f"{Color.YELLOW}Attach a debugger to PID {process.pid} or terminate it manually when done.{Color.RESET}")
                     cleanup_scratch_dir = False
+                    preserved_scratch_dir = scratch_dir
                     sys.exit(2)
 
-                stack_traces = live_stack_traces
-                stack_error = live_stack_error
-                if process:
-                    if self._should_attempt_stack_capture(invocation, 'timeout'):
-                        extra_traces, extra_error = self._capture_process_stacks(
+            stack_traces = live_stack_traces
+            stack_error = live_stack_error
+            if process:
+                if self._should_attempt_stack_capture(invocation, 'timeout'):
+                    extra_traces, extra_error = self._capture_process_stacks(
                             process.pid,
                             process_group_id,
                         )
@@ -1839,6 +1845,8 @@ class TestRunner:
                     stderr = f"{stderr}\n\n[Stack capture unavailable: {stack_error}]"
 
                 result_success = False
+                cleanup_scratch_dir = False
+                preserved_scratch_dir = scratch_dir
                 return TestResult(
                     success=False,
                     duration=duration,
@@ -1856,6 +1864,8 @@ class TestRunner:
             if stderr:
                 error_msg = f"{error_msg}\n{stderr}"
             result_success = False
+            cleanup_scratch_dir = False
+            preserved_scratch_dir = scratch_dir
             return TestResult(
                 success=False,
                 duration=0,
@@ -1875,6 +1885,11 @@ class TestRunner:
                         pass
             if cleanup_scratch_dir:
                 self._cleanup_scratch_directory(scratch_dir)
+            else:
+                if preserved_scratch_dir:
+                    print(f"{Color.YELLOW}[SCRATCH] Preserved artifacts for {invocation.name} at {preserved_scratch_dir}{Color.RESET}")
+                else:
+                    print(f"{Color.YELLOW}[SCRATCH] Preserved scratch directory for {invocation.name} due to failure.{Color.RESET}")
             self._cleanup_new_core_dumps(invocation, core_snapshot, start_time, result_success)
 
     def _kill_process_tree(self, pid: int):

@@ -466,20 +466,32 @@ int main(int argc, char* argv[])
     if (!is_spawned) {
         const auto result_path = shared_dir / "result.txt";
         if (!std::filesystem::exists(result_path)) {
+            std::fprintf(stderr, "[MAIN] Result file missing; preserving logs at %s\n",
+                         shared_dir.string().c_str());
             return 1;
         }
 
         std::ifstream in(result_path, std::ios::binary);
+        if (!in) {
+            std::fprintf(stderr, "[MAIN] Failed to open result file %s; preserving logs\n",
+                         result_path.string().c_str());
+            return 1;
+        }
         std::string status;
         in >> status;
 
-        // Best effort cleanup - ignore failures (files may still be in use)
-        std::error_code ec;
-        std::filesystem::remove_all(shared_dir, ec);
-        if (ec) {
-            std::fprintf(stderr, "[MAIN] Cleanup warning: %s\n", ec.message().c_str());
+        if (status == "ok") {
+            std::error_code ec;
+            std::filesystem::remove_all(shared_dir, ec);
+            if (ec) {
+                std::fprintf(stderr, "[MAIN] Cleanup warning: %s\n", ec.message().c_str());
+            }
+            return 0;
         }
-        return (status == "ok") ? 0 : 1;
+
+        std::fprintf(stderr, "[MAIN] Status=%s; preserving logs at %s\n",
+                     status.c_str(), shared_dir.string().c_str());
+        return 1;
     }
 
     return 0;
