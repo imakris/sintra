@@ -1821,17 +1821,17 @@ class TestRunner:
             if process:
                 if self._should_attempt_stack_capture(invocation, 'timeout'):
                     extra_traces, extra_error = self._capture_process_stacks(
-                            process.pid,
-                            process_group_id,
-                        )
-                        if extra_traces:
-                            if stack_traces:
-                                stack_traces = f"{stack_traces}\n\n{extra_traces}"
-                            else:
-                                stack_traces = extra_traces
-                            stack_error = ""
-                        elif extra_error and not stack_traces:
-                            stack_error = extra_error
+                        process.pid,
+                        process_group_id,
+                    )
+                    if extra_traces:
+                        if stack_traces:
+                            stack_traces = f"{stack_traces}\n\n{extra_traces}"
+                        else:
+                            stack_traces = extra_traces
+                        stack_error = ""
+                    elif extra_error and not stack_traces:
+                        stack_error = extra_error
 
                 # Kill the process tree on timeout
                 self._kill_process_tree(process.pid)
