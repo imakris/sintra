@@ -1139,6 +1139,8 @@ class TestRunner:
         process = None
         cleanup_scratch_dir = True
         preserved_scratch_dir: Optional[Path] = None
+        stack_log_written = False
+        stack_log_path = scratch_dir / "stack_traces.log"
         core_snapshot = self._snapshot_core_dumps(invocation)
         start_time = time.time()
         result_success: Optional[bool] = None
@@ -1779,14 +1781,19 @@ class TestRunner:
                             ) = self._capture_core_dump_stack(invocation, start_time, process.pid)
 
                 if live_stack_traces:
-                    error_msg = f"{error_msg}\n\n=== Captured stack traces ===\n{live_stack_traces}"
+                    self._append_stack_trace_log(stack_log_path, "Live capture", live_stack_traces)
+                    stack_log_written = True
                 elif live_stack_error:
                     error_msg = f"{error_msg}\n\n[Stack capture unavailable: {live_stack_error}]"
 
                 if postmortem_stack_traces:
-                    error_msg = f"{error_msg}\n\n=== Post-mortem stack trace ===\n{postmortem_stack_traces}"
+                    self._append_stack_trace_log(stack_log_path, "Post-mortem", postmortem_stack_traces)
+                    stack_log_written = True
                 elif postmortem_stack_error:
                     error_msg = f"{error_msg}\n\n[Post-mortem stack capture unavailable: {postmortem_stack_error}]"
+
+                if stack_log_written:
+                    error_msg = f"{error_msg}\n\n[Stack traces saved to {stack_log_path}]"
 
                 result_success = success
                 if not success:
@@ -1840,9 +1847,13 @@ class TestRunner:
                 stderr = ''.join(stderr_lines)
 
                 if stack_traces:
-                    stderr = f"{stderr}\n\n=== Captured stack traces ===\n{stack_traces}"
+                    self._append_stack_trace_log(stack_log_path, "Timeout capture", stack_traces)
+                    stack_log_written = True
                 elif stack_error:
                     stderr = f"{stderr}\n\n[Stack capture unavailable: {stack_error}]"
+
+                if stack_log_written:
+                    stderr = f"{stderr}\n\n[Stack traces saved to {stack_log_path}]"
 
                 result_success = False
                 cleanup_scratch_dir = False
@@ -2284,6 +2295,20 @@ class TestRunner:
             details.setdefault(pid, 'details unavailable')
 
         return details
+
+    @staticmethod
+    def _append_stack_trace_log(log_path: Path, title: str, content: str) -> None:
+        if not content or not content.strip():
+            return
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(log_path, "a", encoding="utf-8", errors="ignore") as handle:
+                handle.write(f"\n===== {title} =====\n")
+                handle.write(content)
+                if not content.endswith("\n"):
+                    handle.write("\n")
+        except OSError:
+            pass
 
     def _snapshot_process_table_via_ps(self) -> List[Tuple[int, int, int]]:
         """Return (pid, ppid, pgid) tuples using the portable ps command."""
