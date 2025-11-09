@@ -32,7 +32,7 @@ on:
         required: false
 
 permissions:
-  actions: read
+  actions: write
   contents: read
   statuses: write
 
@@ -219,6 +219,15 @@ jobs:
         run: |
           cd tests
           python run_tests.py --timeout 30 --build-dir ../build --config Release
+
+      - name: Upload test artifacts (logs and stack traces)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-test-artifacts-${{ env.HEAD_SHA }}
+          path: build/sintra-test-scratch-*/
+          retention-days: 7
+          if-no-files-found: warn
 
       - name: Mark status success
         if: success()

@@ -2840,12 +2840,14 @@ def main():
 
         if overall_all_passed:
             print(f"Overall result: {Color.GREEN}ALL SUITES PASSED{Color.RESET}")
+            runner.cleanup()
             return 0
         else:
             print(f"Overall result: {Color.RED}FAILED{Color.RESET}")
+            print(f"\n{Color.YELLOW}Preserving scratch directory for debugging: {runner._scratch_base}{Color.RESET}")
             return 1
     finally:
-        runner.cleanup()
+        pass
 
 if __name__ == '__main__':
     sys.exit(main())
