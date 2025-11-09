@@ -313,6 +313,7 @@ int conductor_process()
 
     const std::string group(kBarrierGroup);
     bool local_failure = false;
+    bool stop_broadcasted = false;
 
     for (int round = 0; round < kRounds && !stop_requested; ++round) {
         const std::uint64_t seed = make_round_seed(round);
@@ -337,6 +338,15 @@ int conductor_process()
         }
         lk.unlock();
 
+        // Broadcast Stop immediately when failure is detected, BEFORE entering
+        // the processing fence barrier. This ensures all processes see the stop
+        // signal while still in the current round and won't proceed to the next
+        // round's start barrier, which would cause a deadlock.
+        if (!stop_broadcasted && (local_failure || failure_observed)) {
+            sintra::world() << Stop{true};
+            stop_broadcasted = true;
+        }
+
         sintra::barrier<sintra::processing_fence_t>(barrier_round_complete_name(round), group);
 
         if (local_failure) {
@@ -345,7 +355,11 @@ int conductor_process()
     }
 
     const bool due_to_failure = local_failure || failure_observed;
-    sintra::world() << Stop{due_to_failure};
+    // Broadcast Stop again if not already sent (for the success case) or to ensure
+    // all processes have received it
+    if (!stop_broadcasted) {
+        sintra::world() << Stop{due_to_failure};
+    }
 
     write_result(result_path, due_to_failure ? "fail" : "ok",
                  std::max(last_completed_round, -1), due_to_failure);
