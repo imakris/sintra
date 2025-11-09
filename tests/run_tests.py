@@ -142,10 +142,100 @@ def _read_cmake_cache(cache_path: Path) -> Dict[str, str]:
     return entries
 
 
+def _locate_cmake_cache(build_dir: Path) -> Optional[Path]:
+    """Find a CMakeCache.txt within the given build directory."""
+
+    candidate = build_dir / "CMakeCache.txt"
+    if candidate.exists():
+        return candidate
+
+    try:
+        for path in build_dir.glob("**/CMakeCache.txt"):
+            return path
+    except OSError:
+        return None
+
+    return None
+
+
+def _parse_cmake_set_file(file_path: Path) -> Dict[str, str]:
+    """Parse simple set(VAR value) lines from a CMake-generated file."""
+
+    entries: Dict[str, str] = {}
+    try:
+        import shlex
+    except ImportError:
+        shlex = None
+
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as handle:
+            for raw_line in handle:
+                line = raw_line.strip()
+                if not line.startswith("set(") or not line.endswith(")"):
+                    continue
+                inner = line[4:-1].strip()
+                if not inner:
+                    continue
+                if shlex is not None:
+                    try:
+                        parts = shlex.split(inner, posix=True)
+                    except ValueError:
+                        parts = inner.split(None, 1)
+                else:
+                    parts = inner.split(None, 1)
+                if not parts:
+                    continue
+                key = parts[0]
+                value = ""
+                if len(parts) > 1:
+                    value = parts[1]
+                if value.startswith('"') and value.endswith('"'):
+                    value = value[1:-1]
+                if value.startswith("'") and value.endswith("'"):
+                    value = value[1:-1]
+                entries[key] = value
+    except OSError:
+        return {}
+
+    return entries
+
+
+def _parse_compiler_metadata_from_cmake_files(build_dir: Path) -> Dict[str, str]:
+    """Extract compiler details from CMake-generated compiler config files."""
+
+    entries: Dict[str, str] = {}
+    patterns = [
+        "CMakeFiles/**/CMakeCXXCompiler.cmake",
+        "CMakeFiles/**/CMakeCCompiler.cmake",
+    ]
+    for pattern in patterns:
+        try:
+            file_path = next(build_dir.glob(pattern), None)
+        except OSError:
+            file_path = None
+        if not file_path:
+            continue
+        parsed = _parse_cmake_set_file(file_path)
+        for key, value in parsed.items():
+            entries.setdefault(key, value)
+    return entries
+
+
 def _collect_compiler_metadata(build_dir: Path) -> Optional[Dict[str, Any]]:
     """Extract compiler + flag details from the build tree's CMake cache."""
 
-    cache_entries = _read_cmake_cache(build_dir / "CMakeCache.txt")
+    cache_entries: Dict[str, str] = {}
+    cache_path = _locate_cmake_cache(build_dir)
+    if cache_path:
+        cache_entries = _read_cmake_cache(cache_path)
+
+    compiler_file_entries = _parse_compiler_metadata_from_cmake_files(build_dir)
+    if compiler_file_entries:
+        combined_entries = dict(cache_entries)
+        for key, value in compiler_file_entries.items():
+            combined_entries.setdefault(key, value)
+        cache_entries = combined_entries
+
     if not cache_entries:
         return None
 
@@ -182,6 +272,7 @@ def _collect_compiler_metadata(build_dir: Path) -> Optional[Dict[str, Any]]:
         "generator": generator,
         "base_flags": base_flags,
         "config_flags": per_config_flags,
+        "cache_path": str(cache_path) if cache_path else None,
     }
 
 
