@@ -1667,122 +1667,127 @@ struct Ring_R : Ring<T, true>
             return m_reading_sequence->load() == c.leading_sequence;
         };
 
-        if (m_stopping) {
-            return Range<T>{};
-        }
-
-        // Phase 1 - fast spin: aggressively poll for a very short window to
-        // deliver sub-100µs wakeups when the writer is still active.
-        const double fast_spin_end = get_wtime() + fast_spin_duration;
-        while (sequences_equal() && get_wtime() < fast_spin_end) {
+        while (true) {
             if (m_stopping) {
                 return Range<T>{};
             }
-        }
 
-        if (sequences_equal()) {
-            // Phase 2 - precision sleeps: yield the CPU in 1ms slices while
-            // still polling at a high enough cadence to catch bursts quickly.
-            Scoped_timer_resolution timer_resolution_guard(1);
-            const double precision_sleep_end = get_wtime() + precision_sleep_duration;
-            while (sequences_equal() && get_wtime() < precision_sleep_end) {
+            // Phase 1 - fast spin: aggressively poll for a very short window to
+            // deliver sub-100µs wakeups when the writer is still active.
+            const double fast_spin_end = get_wtime() + fast_spin_duration;
+            while (sequences_equal() && get_wtime() < fast_spin_end) {
                 if (m_stopping) {
                     return Range<T>{};
                 }
-                const auto seq_now = c.global_unblock_sequence.load();
-                if (seq_now != m_seen_unblock_sequence) {
-                    m_seen_unblock_sequence = seq_now;
+            }
+
+            if (sequences_equal()) {
+                // Phase 2 - precision sleeps: yield the CPU in 1ms slices while
+                // still polling at a high enough cadence to catch bursts quickly.
+                Scoped_timer_resolution timer_resolution_guard(1);
+                const double precision_sleep_end = get_wtime() + precision_sleep_duration;
+                while (sequences_equal() && get_wtime() < precision_sleep_end) {
+                    if (m_stopping) {
+                        return Range<T>{};
+                    }
+                    const auto seq_now = c.global_unblock_sequence.load();
+                    if (seq_now != m_seen_unblock_sequence) {
+                        m_seen_unblock_sequence = seq_now;
+                        if (!sequences_equal()) {
+                            return produce_range();
+                        }
+                        return Range<T>{};
+                    }
+                    precision_sleep_for(std::chrono::duration<double>(precision_sleep_cycle));
+                }
+            }
+
+            if (sequences_equal()) {
+                // Phase 3 - blocking wait: fully park on the semaphore to avoid
+                // burning CPU when the writer is stalled for long periods.
+                const auto unblock_sequence_now = c.global_unblock_sequence.load();
+                if (unblock_sequence_now != m_seen_unblock_sequence) {
+                    m_seen_unblock_sequence = unblock_sequence_now;
                     if (!sequences_equal()) {
                         return produce_range();
                     }
                     return Range<T>{};
                 }
-                precision_sleep_for(std::chrono::duration<double>(precision_sleep_cycle));
-            }
-        }
 
-        if (sequences_equal()) {
-            // Phase 3 - blocking wait: fully park on the semaphore to avoid
-            // burning CPU when the writer is stalled for long periods.
-            const auto unblock_sequence_now = c.global_unblock_sequence.load();
-            if (unblock_sequence_now != m_seen_unblock_sequence) {
-                m_seen_unblock_sequence = unblock_sequence_now;
-                if (!sequences_equal()) {
-                    return produce_range();
+                c.m_spinlock.lock();
+                m_sleepy_index = -1;
+                if (sequences_equal()) {
+                    if (m_stopping) {
+                        c.m_spinlock.unlock();
+                        return Range<T>{};
+                    }
+                    int sleepy = c.ready_stack.pop_or(-1);
+                    m_sleepy_index = sleepy;
+                    c.sleeping_stack.push(sleepy);
                 }
-                return Range<T>{};
-            }
-
-            c.m_spinlock.lock();
-            m_sleepy_index = -1;
-            if (sequences_equal()) {
-                if (m_stopping) {
+                const auto unblock_sequence_after = c.global_unblock_sequence.load();
+                if (unblock_sequence_after != m_seen_unblock_sequence) {
+                    m_seen_unblock_sequence = unblock_sequence_after;
+                    const int sleepy = m_sleepy_index;
+                    if (sleepy >= 0) {
+                        c.sleeping_stack.remove_if_eq_tail(sleepy);
+                        c.ready_stack.push(sleepy);
+                        m_sleepy_index = -1;
+                    }
                     c.m_spinlock.unlock();
+                    if (!sequences_equal()) {
+                        return produce_range();
+                    }
                     return Range<T>{};
                 }
-                int sleepy = c.ready_stack.pop_or(-1);
-                m_sleepy_index = sleepy;
-                c.sleeping_stack.push(sleepy);
-            }
-            const auto unblock_sequence_after = c.global_unblock_sequence.load();
-            if (unblock_sequence_after != m_seen_unblock_sequence) {
-                m_seen_unblock_sequence = unblock_sequence_after;
-                const int sleepy = m_sleepy_index;
-                if (sleepy >= 0) {
-                    c.sleeping_stack.remove_if_eq_tail(sleepy);
-                    c.ready_stack.push(sleepy);
-                    m_sleepy_index = -1;
-                }
                 c.m_spinlock.unlock();
-                if (!sequences_equal()) {
-                    return produce_range();
+
+                int sleepy_index = m_sleepy_index;
+                if (sleepy_index >= 0) {
+                    while (true) {
+                        if (m_stopping) {
+                            spinlock::locker lock(c.m_spinlock);
+                            if (m_sleepy_index >= 0) {
+                                c.dirty_semaphores[sleepy_index].post_unordered();
+                            }
+                            return Range<T>{};
+                        }
+
+                        auto wait_status = c.dirty_semaphores[sleepy_index].wait_for(blocking_wait_watchdog);
+                        if (wait_status == sintra_ring_semaphore::wait_result::timeout) {
+                            spinlock::locker lock(c.m_spinlock);
+                            const int current = m_sleepy_index;
+                            if (current >= 0) {
+                                c.sleeping_stack.remove_if_eq_tail(current);
+                                c.ready_stack.push(current);
+                                m_sleepy_index = -1;
+                            }
+                            // Heartbeat timeout: restart the wait phases.
+                            break;
+                        }
+
+                        if (wait_status == sintra_ring_semaphore::wait_result::unordered) {
+                            spinlock::locker lock(c.m_spinlock);
+                            c.unordered_stack.push(sleepy_index);
+                        }
+                        else {
+                            spinlock::locker lock(c.m_spinlock);
+                            c.ready_stack.push(sleepy_index);
+                        }
+                        m_sleepy_index = -1;
+
+                        if (m_stopping) {
+                            return Range<T>{};
+                        }
+                        break;
+                    }
                 }
-                return Range<T>{};
             }
-            c.m_spinlock.unlock();
 
-            int sleepy_index = m_sleepy_index;
-            if (sleepy_index >= 0) {
-                while (true) {
-                    if (m_stopping) {
-                        spinlock::locker lock(c.m_spinlock);
-                        if (m_sleepy_index >= 0) {
-                            c.dirty_semaphores[sleepy_index].post_unordered();
-                        }
-                        return Range<T>{};
-                    }
-
-                    auto wait_status = c.dirty_semaphores[sleepy_index].wait_for(blocking_wait_watchdog);
-                    if (wait_status == sintra_ring_semaphore::wait_result::timeout) {
-                        spinlock::locker lock(c.m_spinlock);
-                        const int current = m_sleepy_index;
-                        if (current >= 0) {
-                            c.sleeping_stack.remove_if_eq_tail(current);
-                            c.ready_stack.push(current);
-                            m_sleepy_index = -1;
-                        }
-                        return Range<T>{};
-                    }
-
-                    if (wait_status == sintra_ring_semaphore::wait_result::unordered) {
-                        spinlock::locker lock(c.m_spinlock);
-                        c.unordered_stack.push(sleepy_index);
-                    }
-                    else {
-                        spinlock::locker lock(c.m_spinlock);
-                        c.ready_stack.push(sleepy_index);
-                    }
-                    m_sleepy_index = -1;
-
-                    if (m_stopping) {
-                        return Range<T>{};
-                    }
-                    break;
-                }
+            if (!sequences_equal()) {
+                return produce_range();
             }
         }
-
-        return produce_range();
     }
 
     /**
