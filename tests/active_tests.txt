@@ -26,7 +26,7 @@
 # choreography_extreme_test                 80
 # complex_choreography_stress_test          60
 # complex_choreography_test                 30
-dummy_test                                 2
+# dummy_test                                 2
 # extreme_choreography_test                 80
 # interprocess_file_mapping_test           100
 # interprocess_mutex_test                  100
@@ -49,7 +49,7 @@ dummy_test                                 2
 # Uncomment to enable these tests (they may fail by design)
 # manual/barrier_delivery_fence_repro_test 1
 # manual/hang_test 1
-# manual/coordinator_crash_children_hang_test 1
+manual/coordinator_crash_children_hang_test 1
 # manual/children_crash_coordinator_deadlock_test 1
 # manual/temp_ring 1
 
