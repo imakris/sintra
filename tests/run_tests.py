@@ -55,6 +55,18 @@ _PSUTIL = None
 if importlib.util.find_spec("psutil") is not None:
     _PSUTIL = importlib.import_module("psutil")
 
+try:
+    import signal as _signal_module
+except ImportError:
+    _signal_module = None
+
+_POSIX_STOP_SIGNALS: Set[int] = set()
+if _signal_module is not None:
+    for _sig_name in ("SIGSTOP", "SIGTSTP", "SIGTTIN", "SIGTTOU"):
+        _sig_value = getattr(_signal_module, _sig_name, None)
+        if isinstance(_sig_value, int):
+            _POSIX_STOP_SIGNALS.add(_sig_value)
+
 
 PRESERVE_CORES_ENV = "SINTRA_PRESERVE_CORES"
 
@@ -106,6 +118,106 @@ def parse_active_tests(tests_dir: Path) -> Dict[str, int]:
         return {}
 
     return active_tests
+
+
+def _read_cmake_cache(cache_path: Path) -> Dict[str, str]:
+    """Return a mapping of keys from CMakeCache.txt, if available."""
+
+    entries: Dict[str, str] = {}
+    try:
+        with open(cache_path, "r", encoding="utf-8", errors="ignore") as handle:
+            for raw_line in handle:
+                line = raw_line.strip()
+                if not line or line.startswith(("//", "#")):
+                    continue
+                if "=" not in line or ":" not in line:
+                    continue
+                key_part, value = line.split("=", 1)
+                key = key_part.split(":", 1)[0].strip()
+                if not key:
+                    continue
+                entries[key] = value.strip()
+    except OSError:
+        return {}
+    return entries
+
+
+def _collect_compiler_metadata(build_dir: Path) -> Optional[Dict[str, Any]]:
+    """Extract compiler + flag details from the build tree's CMake cache."""
+
+    cache_entries = _read_cmake_cache(build_dir / "CMakeCache.txt")
+    if not cache_entries:
+        return None
+
+    compiler = (
+        cache_entries.get("CMAKE_CXX_COMPILER")
+        or cache_entries.get("CMAKE_C_COMPILER")
+        or ""
+    )
+    compiler_id = (
+        cache_entries.get("CMAKE_CXX_COMPILER_ID")
+        or cache_entries.get("CMAKE_C_COMPILER_ID")
+        or ""
+    )
+    compiler_version = (
+        cache_entries.get("CMAKE_CXX_COMPILER_VERSION")
+        or cache_entries.get("CMAKE_C_COMPILER_VERSION")
+        or ""
+    )
+    generator = cache_entries.get("CMAKE_GENERATOR", "")
+    base_flags = cache_entries.get("CMAKE_CXX_FLAGS", "").strip()
+
+    per_config_flags: Dict[str, str] = {}
+    prefix = "CMAKE_CXX_FLAGS_"
+
+    for key, value in cache_entries.items():
+        if key.startswith(prefix):
+            config_key = key[len(prefix) :].lower()
+            per_config_flags[config_key] = value.strip()
+
+    return {
+        "compiler": compiler,
+        "compiler_id": compiler_id,
+        "compiler_version": compiler_version,
+        "generator": generator,
+        "base_flags": base_flags,
+        "config_flags": per_config_flags,
+    }
+
+
+def _print_configuration_build_details(metadata: Optional[Dict[str, Any]], config_name: str) -> None:
+    """Emit compiler + flag information for a configuration run."""
+
+    if not metadata:
+        print("  Compiler: <unknown> (CMakeCache.txt not found)")
+        print("  Compiler flags: <unknown>")
+        return
+
+    compiler_desc = metadata.get("compiler") or ""
+    extras = []
+    compiler_id = metadata.get("compiler_id")
+    if compiler_id:
+        extras.append(compiler_id)
+    compiler_version = metadata.get("compiler_version")
+    if compiler_version:
+        extras.append(compiler_version)
+
+    if extras and compiler_desc:
+        compiler_desc = f"{compiler_desc} ({' '.join(extras)})"
+    elif extras:
+        compiler_desc = " ".join(extras)
+    elif not compiler_desc:
+        compiler_desc = "<unknown>"
+
+    print(f"  Compiler: {compiler_desc}")
+
+    base_flags = metadata.get("base_flags", "")
+    config_flags = metadata.get("config_flags", {}).get(config_name.lower(), "")
+    combined_flags = " ".join(part for part in (base_flags, config_flags) if part).strip()
+    if not combined_flags:
+        combined_flags = "<none>"
+    print(f"  Compiler flags: {combined_flags}")
+
 
 # macOS emits Mach-O core files that snapshot every virtual memory region of the
 # crashing process. Two platform effects make Sintra dumps look enormous even
@@ -896,9 +1008,11 @@ class TestRunner:
             return []
 
         if result.returncode != 0:
+            stderr_output = (result.stderr or "").strip()
+            stdout_output = (result.stdout or "").strip()
             print(
                 f"{Color.YELLOW}Warning: Failed to list tests for {entry.name} (exit {result.returncode}). "
-                f"stderr: {result.stderr.strip()}{Color.RESET}"
+                f"stderr: {stderr_output or stdout_output}{Color.RESET}"
             )
             self._ipc_rings_cache[entry] = []
             return []
@@ -979,6 +1093,8 @@ class TestRunner:
             manual_capture_thread: Optional[threading.Thread] = None
             manual_signal_handlers: Dict[int, object] = {}
             manual_signal_module: Optional[object] = None
+            stop_signal_desc: Optional[str] = None
+            posix_signal: Optional[int] = None
 
             @contextlib.contextmanager
             def stack_capture_context(mark_failure: bool) -> Iterator[bool]:
@@ -1485,6 +1601,30 @@ class TestRunner:
                         continue
 
                 process.wait()
+
+                if sys.platform != 'win32':
+                    posix_signal = self._decode_posix_signal(process.returncode)
+                    if self._is_stop_signal(posix_signal):
+                        stop_signal_desc = self._format_signal_name(posix_signal or 0)
+                        reason = f"stop_signal:{posix_signal}"
+                        if self._should_attempt_stack_capture(invocation, reason):
+                            traces = ""
+                            error = ""
+                            with stack_capture_context(mark_failure=True) as allowed:
+                                if allowed:
+                                    traces, error = self._capture_process_stacks(
+                                        process.pid,
+                                        process_group_id,
+                                    )
+                            if traces:
+                                if live_stack_traces:
+                                    live_stack_traces = f"{live_stack_traces}\n\n{traces}"
+                                else:
+                                    live_stack_traces = traces
+                                live_stack_error = ""
+                            elif error and not live_stack_traces:
+                                live_stack_error = error
+
                 terminate_process_group_members(f"{invocation.name} exit")
                 duration = time.time() - start_time
 
@@ -1498,7 +1638,12 @@ class TestRunner:
 
                 if not success:
                     # Categorize failure type for better diagnostics
-                    if process.returncode < 0 or process.returncode > 128:
+                    if stop_signal_desc:
+                        error_msg = (
+                            f"STOPPED: Received {stop_signal_desc} "
+                            f"(exit code {process.returncode})\n{stderr}"
+                        )
+                    elif process.returncode < 0 or process.returncode > 128:
                         # Unix signal (negative) or Windows crash code (large positive like 0xC0000005)
                         error_msg = f"CRASH: Process terminated abnormally (exit code {process.returncode})\n{stderr}"
                     elif duration < 0.1:
@@ -1748,9 +1893,38 @@ class TestRunner:
             # Windows crash codes are typically large unsigned values such as 0xC0000005.
             return returncode < 0 or returncode >= 0xC0000000
 
+        signal_num = self._decode_posix_signal(returncode)
+        if signal_num is not None and signal_num in _POSIX_STOP_SIGNALS:
+            return False
+
         # POSIX: negative return codes indicate termination by signal.
         # Codes > 128 are also commonly used to report signal-based exits.
         return returncode < 0 or returncode > 128
+
+    @staticmethod
+    def _decode_posix_signal(returncode: int) -> Optional[int]:
+        """Return the POSIX signal number encoded in a return code."""
+
+        if returncode == 0 or sys.platform == 'win32':
+            return None
+
+        if returncode < 0:
+            return -returncode
+
+        if returncode > 128:
+            signal_num = returncode - 128
+            if signal_num > 0:
+                return signal_num
+        return None
+
+    @staticmethod
+    def _format_signal_name(signal_num: int) -> str:
+        if _signal_module is not None:
+            try:
+                return _signal_module.Signals(signal_num).name
+            except Exception:
+                pass
+        return f"signal {signal_num}"
 
     def _capture_process_stacks(
         self,
@@ -1758,6 +1932,12 @@ class TestRunner:
         process_group: Optional[int] = None,
     ) -> Tuple[str, str]:
         return self._debugger.capture_process_stacks(pid, process_group)
+
+    @staticmethod
+    def _is_stop_signal(signal_num: Optional[int]) -> bool:
+        if signal_num is None:
+            return False
+        return signal_num in _POSIX_STOP_SIGNALS
 
     def _capture_core_dump_stack(
         self,
@@ -2256,8 +2436,12 @@ def main():
         print(f"Please ensure tests/active_tests.txt exists and contains test entries")
         return 1
 
+    compiler_metadata = _collect_compiler_metadata(build_dir)
+
     print(f"Build directory: {build_dir}")
-    print(f"Configuration: {args.config}")
+    print(f"Requested configuration root: {args.config}")
+    if compiler_metadata and compiler_metadata.get("generator"):
+        print(f"CMake generator: {compiler_metadata['generator']}")
     print(f"Timeout per test: {args.timeout}s")
     print(f"Active tests: {len(active_tests)} tests from active_tests.txt")
     print("=" * 70)
@@ -2285,6 +2469,7 @@ def main():
             print(f"\n{'=' * 80}")
             print(f"{Color.BOLD}{Color.BLUE}Configuration {config_idx}/{total_configs}: {config_name}{Color.RESET}")
             print(f"  Tests in suite: {len(tests)}")
+            _print_configuration_build_details(compiler_metadata, config_name)
             print(f"{'=' * 80}")
 
             suite_start_time = time.time()
