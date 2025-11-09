@@ -679,7 +679,7 @@ class WindowsDebuggerStrategy(DebuggerStrategy):
         capture_errors: List[str] = []
         fallback_outputs: List[Tuple[str, str, int, str]] = []
 
-        analyzed_pids: set[int] = set()
+        analyzed_pids: Set[int] = set()
 
         for target_pid in sorted(set(target_pids)):
             if target_pid in analyzed_pids:
@@ -730,19 +730,15 @@ class WindowsDebuggerStrategy(DebuggerStrategy):
                     stack_outputs.append(f"PID {target_pid}\n{output}{note}")
                 continue
 
-            if output:
-                if not output_from_stderr:
-                    fallback_outputs.append((f"PID {target_pid}", output, normalized_code, stderr))
-                else:
-                    capture_errors.append(
-                        self._format_windows_debugger_failure(
-                            debugger_name,
-                            f"PID {target_pid}",
-                            normalized_code,
-                            stderr,
-                        )
-                    )
-            else:
+            fallback_needed = False
+            if not exit_ok:
+                fallback_needed = self._should_use_minidump_fallback(
+                    output,
+                    stderr,
+                    normalized_code,
+                )
+
+            if fallback_needed:
                 dump_output, dump_error = self._capture_stack_via_minidump(
                     debugger_name,
                     debugger_path,
@@ -756,6 +752,28 @@ class WindowsDebuggerStrategy(DebuggerStrategy):
                     capture_errors.append(
                         dump_error
                         or self._format_windows_debugger_failure(
+                            debugger_name,
+                            f"PID {target_pid}",
+                            normalized_code,
+                            stderr,
+                        )
+                    )
+            else:
+                if output:
+                    if not output_from_stderr:
+                        fallback_outputs.append((f"PID {target_pid}", output, normalized_code, stderr))
+                    else:
+                        capture_errors.append(
+                            self._format_windows_debugger_failure(
+                                debugger_name,
+                                f"PID {target_pid}",
+                                normalized_code,
+                                stderr,
+                            )
+                        )
+                else:
+                    capture_errors.append(
+                        self._format_windows_debugger_failure(
                             debugger_name,
                             f"PID {target_pid}",
                             normalized_code,
@@ -870,6 +888,26 @@ class WindowsDebuggerStrategy(DebuggerStrategy):
             return None, f"minidump command exited with {result.returncode}: {detail}"
 
         return tmp_path, None
+
+    @staticmethod
+    def _should_use_minidump_fallback(
+        output: str,
+        stderr: str,
+        returncode: int,
+    ) -> bool:
+        if not output:
+            return True
+        lowered = output.lower()
+        if "unable to examine process" in lowered:
+            return True
+        if "hresult 0x80004002" in lowered:
+            return True
+        if "not attached as a debuggee" in lowered:
+            return True
+        lowered_err = stderr.lower()
+        if "unable to examine process" in lowered_err or "hresult 0x80004002" in lowered_err:
+            return True
+        return False
 
     @staticmethod
     def _normalize_windows_returncode(returncode: int) -> int:
