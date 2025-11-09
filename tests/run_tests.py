@@ -691,7 +691,6 @@ class TestRunner:
 
         directory = self._scratch_base / f"{safe_name}_{index}"
         directory.mkdir(parents=True, exist_ok=True)
-        print(f"[SCRATCH] {invocation.name}: {directory}")
         return directory
 
     def _build_test_environment(self, scratch_dir: Path) -> Dict[str, str]:
@@ -1897,10 +1896,8 @@ class TestRunner:
             if cleanup_scratch_dir:
                 self._cleanup_scratch_directory(scratch_dir)
             else:
-                if preserved_scratch_dir:
-                    print(f"{Color.YELLOW}[SCRATCH] Preserved artifacts for {invocation.name} at {preserved_scratch_dir}{Color.RESET}")
-                else:
-                    print(f"{Color.YELLOW}[SCRATCH] Preserved scratch directory for {invocation.name} due to failure.{Color.RESET}")
+                target = preserved_scratch_dir or scratch_dir
+                print(f"{Color.YELLOW}[SCRATCH] {invocation.name} artifacts at {target}{Color.RESET}")
             self._cleanup_new_core_dumps(invocation, core_snapshot, start_time, result_success)
 
     def _kill_process_tree(self, pid: int):
