@@ -20,9 +20,6 @@ Options:
 
 import argparse
 import contextlib
-import importlib
-import importlib.util
-import json
 from functools import partial
 import os
 import shutil
@@ -33,6 +30,7 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR.parent) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR.parent))
@@ -40,6 +38,21 @@ if str(SCRIPT_DIR.parent) not in sys.path:
 from typing import Any, Dict, IO, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
 
 from tests.debuggers import DebuggerStrategy, get_debugger_strategy
+from tests.runner.configuration import (
+    TEST_TIMEOUT_OVERRIDES,
+    collect_compiler_metadata,
+    parse_active_tests,
+    print_configuration_build_details,
+)
+from tests.runner.platform import ManualSignalSupport, PlatformSupport, get_platform_support
+from tests.runner.utils import (
+    Color,
+    available_disk_bytes,
+    env_flag,
+    find_lingering_processes,
+    format_duration,
+    format_size,
+)
 
 print = partial(__import__("builtins").print, file=sys.stderr, flush=True)
 
@@ -50,10 +63,6 @@ def _instrumentation_print(message: str) -> None:
     sys.stdout.write(f"{message}\n")
     sys.stdout.flush()
     time.sleep(0.001)
-
-_PSUTIL = None
-if importlib.util.find_spec("psutil") is not None:
-    _PSUTIL = importlib.import_module("psutil")
 
 try:
     import signal as _signal_module
@@ -71,243 +80,6 @@ if _signal_module is not None:
 PRESERVE_CORES_ENV = "SINTRA_PRESERVE_CORES"
 
 
-def parse_active_tests(tests_dir: Path) -> Dict[str, int]:
-    """Parse active_tests.txt and return dict of {test_path: iterations}.
-
-    Returns:
-        Dictionary mapping test paths (relative to tests/) to iteration counts.
-        Empty dict if file doesn't exist or has no valid entries.
-    """
-    active_tests_file = tests_dir / "active_tests.txt"
-
-    if not active_tests_file.exists():
-        return {}
-
-    active_tests = {}
-
-    try:
-        with open(active_tests_file, 'r') as f:
-            for line_num, line in enumerate(f, 1):
-                # Strip whitespace
-                line = line.strip()
-
-                # Skip empty lines and comments
-                if not line or line.startswith('#'):
-                    continue
-
-                # Parse: <test_path> <iterations>
-                parts = line.split()
-                if len(parts) < 2:
-                    print(f"{Color.YELLOW}Warning: active_tests.txt:{line_num}: Invalid format (expected: test_path iterations): {line}{Color.RESET}")
-                    continue
-
-                test_path = parts[0]
-                try:
-                    iterations = int(parts[1])
-                    if iterations < 1:
-                        print(f"{Color.YELLOW}Warning: active_tests.txt:{line_num}: Iterations must be >= 1, got {iterations}{Color.RESET}")
-                        continue
-                except ValueError:
-                    print(f"{Color.YELLOW}Warning: active_tests.txt:{line_num}: Invalid iteration count: {parts[1]}{Color.RESET}")
-                    continue
-
-                active_tests[test_path] = iterations
-
-    except IOError as e:
-        print(f"{Color.YELLOW}Warning: Failed to read active_tests.txt: {e}{Color.RESET}")
-        return {}
-
-    return active_tests
-
-
-def _read_cmake_cache(cache_path: Path) -> Dict[str, str]:
-    """Return a mapping of keys from CMakeCache.txt, if available."""
-
-    entries: Dict[str, str] = {}
-    try:
-        with open(cache_path, "r", encoding="utf-8", errors="ignore") as handle:
-            for raw_line in handle:
-                line = raw_line.strip()
-                if not line or line.startswith(("//", "#")):
-                    continue
-                if "=" not in line or ":" not in line:
-                    continue
-                key_part, value = line.split("=", 1)
-                key = key_part.split(":", 1)[0].strip()
-                if not key:
-                    continue
-                entries[key] = value.strip()
-    except OSError:
-        return {}
-    return entries
-
-
-def _locate_cmake_cache(build_dir: Path) -> Optional[Path]:
-    """Find a CMakeCache.txt within the given build directory."""
-
-    candidate = build_dir / "CMakeCache.txt"
-    if candidate.exists():
-        return candidate
-
-    try:
-        for path in build_dir.glob("**/CMakeCache.txt"):
-            return path
-    except OSError:
-        return None
-
-    return None
-
-
-def _parse_cmake_set_file(file_path: Path) -> Dict[str, str]:
-    """Parse simple set(VAR value) lines from a CMake-generated file."""
-
-    entries: Dict[str, str] = {}
-    try:
-        import shlex
-    except ImportError:
-        shlex = None
-
-    try:
-        with open(file_path, "r", encoding="utf-8", errors="ignore") as handle:
-            for raw_line in handle:
-                line = raw_line.strip()
-                if not line.startswith("set(") or not line.endswith(")"):
-                    continue
-                inner = line[4:-1].strip()
-                if not inner:
-                    continue
-                if shlex is not None:
-                    try:
-                        parts = shlex.split(inner, posix=True)
-                    except ValueError:
-                        parts = inner.split(None, 1)
-                else:
-                    parts = inner.split(None, 1)
-                if not parts:
-                    continue
-                key = parts[0]
-                value = ""
-                if len(parts) > 1:
-                    value = parts[1]
-                if value.startswith('"') and value.endswith('"'):
-                    value = value[1:-1]
-                if value.startswith("'") and value.endswith("'"):
-                    value = value[1:-1]
-                entries[key] = value
-    except OSError:
-        return {}
-
-    return entries
-
-
-def _parse_compiler_metadata_from_cmake_files(build_dir: Path) -> Dict[str, str]:
-    """Extract compiler details from CMake-generated compiler config files."""
-
-    entries: Dict[str, str] = {}
-    patterns = [
-        "CMakeFiles/**/CMakeCXXCompiler.cmake",
-        "CMakeFiles/**/CMakeCCompiler.cmake",
-    ]
-    for pattern in patterns:
-        try:
-            file_path = next(build_dir.glob(pattern), None)
-        except OSError:
-            file_path = None
-        if not file_path:
-            continue
-        parsed = _parse_cmake_set_file(file_path)
-        for key, value in parsed.items():
-            entries.setdefault(key, value)
-    return entries
-
-
-def _collect_compiler_metadata(build_dir: Path) -> Optional[Dict[str, Any]]:
-    """Extract compiler + flag details from the build tree's CMake cache."""
-
-    cache_entries: Dict[str, str] = {}
-    cache_path = _locate_cmake_cache(build_dir)
-    if cache_path:
-        cache_entries = _read_cmake_cache(cache_path)
-
-    compiler_file_entries = _parse_compiler_metadata_from_cmake_files(build_dir)
-    if compiler_file_entries:
-        combined_entries = dict(cache_entries)
-        for key, value in compiler_file_entries.items():
-            combined_entries.setdefault(key, value)
-        cache_entries = combined_entries
-
-    if not cache_entries:
-        return None
-
-    compiler = (
-        cache_entries.get("CMAKE_CXX_COMPILER")
-        or cache_entries.get("CMAKE_C_COMPILER")
-        or ""
-    )
-    compiler_id = (
-        cache_entries.get("CMAKE_CXX_COMPILER_ID")
-        or cache_entries.get("CMAKE_C_COMPILER_ID")
-        or ""
-    )
-    compiler_version = (
-        cache_entries.get("CMAKE_CXX_COMPILER_VERSION")
-        or cache_entries.get("CMAKE_C_COMPILER_VERSION")
-        or ""
-    )
-    generator = cache_entries.get("CMAKE_GENERATOR", "")
-    base_flags = cache_entries.get("CMAKE_CXX_FLAGS", "").strip()
-
-    per_config_flags: Dict[str, str] = {}
-    prefix = "CMAKE_CXX_FLAGS_"
-
-    for key, value in cache_entries.items():
-        if key.startswith(prefix):
-            config_key = key[len(prefix) :].lower()
-            per_config_flags[config_key] = value.strip()
-
-    return {
-        "compiler": compiler,
-        "compiler_id": compiler_id,
-        "compiler_version": compiler_version,
-        "generator": generator,
-        "base_flags": base_flags,
-        "config_flags": per_config_flags,
-        "cache_path": str(cache_path) if cache_path else None,
-    }
-
-
-def _print_configuration_build_details(metadata: Optional[Dict[str, Any]], config_name: str) -> None:
-    """Emit compiler + flag information for a configuration run."""
-
-    if not metadata:
-        print("  Compiler: <unknown> (CMakeCache.txt not found)")
-        print("  Compiler flags: <unknown>")
-        return
-
-    compiler_desc = metadata.get("compiler") or ""
-    extras = []
-    compiler_id = metadata.get("compiler_id")
-    if compiler_id:
-        extras.append(compiler_id)
-    compiler_version = metadata.get("compiler_version")
-    if compiler_version:
-        extras.append(compiler_version)
-
-    if extras and compiler_desc:
-        compiler_desc = f"{compiler_desc} ({' '.join(extras)})"
-    elif extras:
-        compiler_desc = " ".join(extras)
-    elif not compiler_desc:
-        compiler_desc = "<unknown>"
-
-    print(f"  Compiler: {compiler_desc}")
-
-    base_flags = metadata.get("base_flags", "")
-    config_flags = metadata.get("config_flags", {}).get(config_name.lower(), "")
-    combined_flags = " ".join(part for part in (base_flags, config_flags) if part).strip()
-    if not combined_flags:
-        combined_flags = "<none>"
-    print(f"  Compiler flags: {combined_flags}")
 
 
 # macOS emits Mach-O core files that snapshot every virtual memory region of the
@@ -333,165 +105,14 @@ def _print_configuration_build_details(metadata: Optional[Dict[str, Any]], confi
 # dumps immediately before its intentional ``std::abort()`` to keep runners from
 # filling their disks with Mach-O artifacts.
 
-def _format_size(num_bytes: Optional[int]) -> str:
-    """Return a human-friendly representation of ``num_bytes``."""
-
-    if num_bytes is None:
-        return "unknown"
-
-    if num_bytes < 0:
-        return "unknown"
-
-    units = ["B", "KB", "MB", "GB", "TB", "PB"]
-    value = float(num_bytes)
-    for unit in units:
-        if value < 1024.0:
-            return f"{value:.2f} {unit}"
-        value /= 1024.0
-    return f"{value:.2f} EB"
-
-
-def _available_memory_bytes() -> Optional[int]:
-    """Best-effort determination of available physical memory."""
-
-    if _PSUTIL is not None:
-        try:
-            return int(_PSUTIL.virtual_memory().available)
-        except Exception:
-            pass
-
-    try:
-        page_size = os.sysconf("SC_PAGE_SIZE")
-        avail_pages = os.sysconf("SC_AVPHYS_PAGES")
-    except (AttributeError, OSError, ValueError):
-        page_size = None
-        avail_pages = None
-
-    if isinstance(page_size, int) and isinstance(avail_pages, int):
-        return page_size * avail_pages
-
-    if sys.platform == "darwin":
-        try:
-            vm_stat = subprocess.run(
-                ["vm_stat"],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-        except Exception:
-            return None
-
-        page_size_bytes = 4096
-        for line in vm_stat.stdout.splitlines():
-            if line.startswith("page size of"):
-                parts = line.split()
-                try:
-                    page_size_bytes = int(parts[3])
-                except (IndexError, ValueError):
-                    page_size_bytes = 4096
-                break
-
-        free_pages = 0
-        inactive_pages = 0
-        speculative_pages = 0
-
-        for line in vm_stat.stdout.splitlines():
-            if line.startswith("Pages free"):
-                free_pages = int(line.split(":")[1].strip().strip("."))
-            elif line.startswith("Pages inactive"):
-                inactive_pages = int(line.split(":")[1].strip().strip("."))
-            elif line.startswith("Pages speculative"):
-                speculative_pages = int(line.split(":")[1].strip().strip("."))
-
-        return page_size_bytes * (free_pages + inactive_pages + speculative_pages)
-
-    return None
-
-
-def _available_disk_bytes(path: Path) -> Optional[int]:
-    """Return free disk space for ``path``."""
-
-    try:
-        usage = shutil.disk_usage(path)
-    except Exception:
-        return None
-    return usage.free
-
-
-def _env_flag(name: str) -> bool:
-    """Return True if the specified environment variable is truthy."""
-
-    value = os.environ.get(name)
-    if value is None:
-        return False
-
-    normalized = value.strip().lower()
-    if not normalized:
-        return False
-
-    return normalized not in {"0", "false", "no", "off"}
-
-
-def _find_lingering_processes(prefixes: Sequence[str]) -> List[Tuple[int, str]]:
-    """Return processes whose names start with one of ``prefixes``."""
-
-    normalized_prefixes = tuple(prefixes)
-    matches: List[Tuple[int, str]] = []
-
-    if _PSUTIL is not None:
-        try:
-            for proc in _PSUTIL.process_iter(["name"]):
-                name = proc.info.get("name") or ""
-                if name.startswith(normalized_prefixes):
-                    matches.append((proc.pid, name))
-        except Exception:
-            pass
-        if matches:
-            return matches
-
-    try:
-        ps_output = subprocess.run(
-            ["ps", "-axo", "pid=,comm="],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except Exception:
-        return matches
-
-    for line in ps_output.stdout.splitlines():
-        parts = line.strip().split(None, 1)
-        if len(parts) != 2:
-            continue
-        try:
-            pid = int(parts[0])
-        except ValueError:
-            continue
-        name = parts[1]
-        if name.startswith(normalized_prefixes):
-            matches.append((pid, name))
-
-    return matches
-
-
 def _describe_processes(processes: Iterable[Tuple[int, str]]) -> str:
     """Return a compact string description of ``processes``."""
 
     formatted = [f"{name} (pid={pid})" for pid, name in processes]
     return ", ".join(formatted) if formatted else ""
 
-class Color:
-    """ANSI color codes for terminal output"""
-    GREEN = '\033[92m'
-    RED = '\033[91m'
-    YELLOW = '\033[93m'
-    BLUE = '\033[94m'
-    RESET = '\033[0m'
-    BOLD = '\033[1m'
-
 
 # NOTE: Test iteration counts are now managed via active_tests.txt
-# This provides a single source of truth for both building and running tests.
 
 # Tests that need extended timeouts beyond the global ``--timeout`` argument.
 # Values represent the minimum timeout (in seconds) that should be enforced for
@@ -551,12 +172,6 @@ def _lookup_test_timeout(name: str, default: float) -> float:
     return max(default, override)
 
 
-def format_duration(seconds: float) -> str:
-    """Format duration in human-readable format"""
-    if seconds < 1:
-        return f"{seconds*1000:.0f}ms"
-    return f"{seconds:.2f}s"
-
 class TestResult:
     """Result of a single test run"""
     def __init__(self, success: bool, duration: float, output: str = "", error: str = ""):
@@ -587,6 +202,7 @@ class TestRunner:
         self.timeout = timeout
         self.verbose = verbose
         self.preserve_on_timeout = preserve_on_timeout
+        self.platform: PlatformSupport = get_platform_support(verbose=verbose)
         sanitized_config = ''.join(c.lower() if c.isalnum() else '_' for c in config)
         timestamp_ms = int(time.time() * 1000)
         scratch_dir_name = f".sintra-test-scratch-{sanitized_config}-{timestamp_ms}-{os.getpid()}"
@@ -597,7 +213,7 @@ class TestRunner:
         self._ipc_rings_cache: Dict[Path, List[Tuple[str, str]]] = {}
         self._stack_capture_history: Dict[str, Set[str]] = defaultdict(set)
         self._stack_capture_history_lock = threading.Lock()
-        self._preserve_core_dumps = _env_flag(PRESERVE_CORES_ENV)
+        self._preserve_core_dumps = env_flag(PRESERVE_CORES_ENV)
         self._core_cleanup_lock = threading.Lock()
         self._core_cleanup_messages: List[Tuple[str, str]] = []
         self._core_cleanup_bytes_freed = 0
@@ -674,8 +290,8 @@ class TestRunner:
             if cached and now - cached[0] < 0.5:
                 suffix = cached[1]
             else:
-                free_bytes = _available_disk_bytes(cache_key)
-                formatted = _format_size(free_bytes)
+                free_bytes = available_disk_bytes(cache_key)
+                formatted = format_size(free_bytes)
                 suffix = f" [disk free: {formatted} at {cache_key}]"
                 self._instrument_disk_cache[cache_key] = (now, suffix)
 
@@ -759,13 +375,8 @@ class TestRunner:
             self._scratch_base,
         }
 
-        if sys.platform == "darwin":
-            candidates.add(Path("/cores"))
-            candidates.add(Path.home() / "Library" / "Logs" / "DiagnosticReports")
-        elif sys.platform.startswith("linux"):
-            candidates.add(Path("/var/lib/systemd/coredump"))
-
-        return [path for path in candidates if path]
+        enriched = self.platform.core_dump_directories(candidates)
+        return [path for path in enriched if path]
 
     @staticmethod
     def _is_core_dump_file(path: Path) -> bool:
@@ -874,7 +485,7 @@ class TestRunner:
         if self._preserve_core_dumps:
             message = (
                 f"{message_prefix}: detected "
-                f"{len(new_dumps)} file(s) totalling {_format_size(total_size)}"
+                f"{len(new_dumps)} file(s) totalling {format_size(total_size)}"
                 f" (preserved due to {PRESERVE_CORES_ENV})"
             )
             level = "warning" if result_success else "info"
@@ -899,7 +510,7 @@ class TestRunner:
             removed.sort()
             message = (
                 f"{message_prefix}: removed "
-                f"{len(removed)} file(s) totalling {_format_size(freed_bytes)}"
+                f"{len(removed)} file(s) totalling {format_size(freed_bytes)}"
                 f" ({', '.join(removed)})"
             )
             level = "warning" if result_success else "info"
@@ -908,7 +519,7 @@ class TestRunner:
             # Nothing removed; still report total detected to aid diagnostics.
             message = (
                 f"{message_prefix}: detected "
-                f"{len(new_dumps)} file(s) totalling {_format_size(total_size)}"
+                f"{len(new_dumps)} file(s) totalling {format_size(total_size)}"
             )
             level = "warning" if result_success else "info"
             self._record_core_cleanup(level, message)
@@ -945,7 +556,7 @@ class TestRunner:
                     "info",
                     (
                         "Scratch: removed "
-                        f"{scratch_dirs} {noun} totalling {_format_size(scratch_bytes)}"
+                        f"{scratch_dirs} {noun} totalling {format_size(scratch_bytes)}"
                     ),
                 )
             )
@@ -987,9 +598,7 @@ class TestRunner:
             if not (entry.is_file() or entry.is_symlink()):
                 continue
 
-            normalized_name = entry.name
-            if sys.platform == 'win32' and normalized_name.lower().endswith('.exe'):
-                normalized_name = normalized_name[:-4]
+            normalized_name = self.platform.adjust_executable_name(entry.name)
 
             # Check if this matches a test with config suffix
             for config in configurations:
@@ -1020,9 +629,7 @@ class TestRunner:
 
             # Add test invocations for each available configuration
             for config, test_binary in available_tests[test_name].items():
-                normalized_name = test_binary.name
-                if sys.platform == 'win32' and normalized_name.lower().endswith('.exe'):
-                    normalized_name = normalized_name[:-4]
+                normalized_name = self.platform.adjust_executable_name(test_binary.name)
 
                 invocations = self._expand_test_invocations(test_binary, f"sintra_{test_name}", normalized_name)
                 if invocations:
@@ -1156,13 +763,7 @@ class TestRunner:
                 'cwd': invocation.path.parent,
             }
 
-            if sys.platform == 'win32':
-                creationflags = 0
-                if hasattr(subprocess, 'CREATE_NEW_PROCESS_GROUP'):
-                    creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
-                popen_kwargs['creationflags'] = creationflags
-            else:
-                popen_kwargs['start_new_session'] = True
+            self.platform.configure_popen(popen_kwargs)
             popen_kwargs['env'] = popen_env
 
             stdout_lines: List[str] = []
@@ -1214,9 +815,6 @@ class TestRunner:
 
             def terminate_process_group_members(reason: str) -> bool:
                 """Ensure helpers in the spawned process group terminate."""
-
-                if sys.platform == 'win32':
-                    return False
 
                 pgid = process_group_id
                 if pgid is None:
@@ -1448,31 +1046,31 @@ class TestRunner:
 
             manual_signal_registered = False
 
-            if sys.platform != 'win32':
+            manual_signal_info: Optional[ManualSignalSupport] = self.platform.manual_signal_support()
+            if manual_signal_info is not None:
+                manual_signal_module = manual_signal_info.module
+                manual_signal = manual_signal_info.signal_number
+
                 try:
-                    import signal as _manual_signal
-                except ImportError:
-                    _manual_signal = None
+                    signal_label = manual_signal_module.Signals(manual_signal).name  # type: ignore[attr-defined]
+                except Exception:
+                    signal_label = f"signal {manual_signal}"
 
-                if _manual_signal is not None and hasattr(_manual_signal, 'SIGUSR1'):
-                    manual_signal_module = _manual_signal
-                    manual_signal = _manual_signal.SIGUSR1
+                def _manual_signal_handler(signum, frame):  # type: ignore[override]
+                    manual_capture_event.set()
 
-                    def _manual_signal_handler(signum, frame):  # type: ignore[override]
-                        manual_capture_event.set()
+                previous = manual_signal_module.getsignal(manual_signal)
+                manual_signal_handlers[manual_signal] = previous
+                manual_signal_module.signal(manual_signal, _manual_signal_handler)
+                manual_signal_registered = True
 
-                    previous = _manual_signal.getsignal(manual_signal)
-                    manual_signal_handlers[manual_signal] = previous
-                    _manual_signal.signal(manual_signal, _manual_signal_handler)
-                    manual_signal_registered = True
-
-                    if not self._manual_stack_notice_printed:
-                        print(
-                            f"{Color.BLUE}Manual stack capture enabled: send SIGUSR1 to PID {os.getpid()} "
-                            f"({invocation.name}) to snapshot live stacks.{Color.RESET}",
-                            flush=True,
-                        )
-                        self._manual_stack_notice_printed = True
+                if not self._manual_stack_notice_printed:
+                    print(
+                        f"{Color.BLUE}Manual stack capture enabled: send {signal_label} to PID {os.getpid()} "
+                        f"({invocation.name}) to snapshot live stacks.{Color.RESET}",
+                        flush=True,
+                    )
+                    self._manual_stack_notice_printed = True
 
                     def _manual_capture_worker() -> None:
                         nonlocal live_stack_traces, live_stack_error, capture_active_start
@@ -1693,28 +1291,27 @@ class TestRunner:
 
                 process.wait()
 
-                if sys.platform != 'win32':
-                    posix_signal = self._decode_posix_signal(process.returncode)
-                    if self._is_stop_signal(posix_signal):
-                        stop_signal_desc = self._format_signal_name(posix_signal or 0)
-                        reason = f"stop_signal:{posix_signal}"
-                        if self._should_attempt_stack_capture(invocation, reason):
-                            traces = ""
-                            error = ""
-                            with stack_capture_context(mark_failure=True) as allowed:
-                                if allowed:
-                                    traces, error = self._capture_process_stacks(
-                                        process.pid,
-                                        process_group_id,
-                                    )
-                            if traces:
-                                if live_stack_traces:
-                                    live_stack_traces = f"{live_stack_traces}\n\n{traces}"
-                                else:
-                                    live_stack_traces = traces
-                                live_stack_error = ""
-                            elif error and not live_stack_traces:
-                                live_stack_error = error
+                posix_signal = self._decode_posix_signal(process.returncode)
+                if self._is_stop_signal(posix_signal):
+                    stop_signal_desc = self._format_signal_name(posix_signal or 0)
+                    reason = f"stop_signal:{posix_signal}"
+                    if self._should_attempt_stack_capture(invocation, reason):
+                        traces = ""
+                        error = ""
+                        with stack_capture_context(mark_failure=True) as allowed:
+                            if allowed:
+                                traces, error = self._capture_process_stacks(
+                                    process.pid,
+                                    process_group_id,
+                                )
+                        if traces:
+                            if live_stack_traces:
+                                live_stack_traces = f"{live_stack_traces}\n\n{traces}"
+                            else:
+                                live_stack_traces = traces
+                            live_stack_error = ""
+                        elif error and not live_stack_traces:
+                            live_stack_error = error
 
                 terminate_process_group_members(f"{invocation.name} exit")
                 duration = time.time() - start_time
@@ -1880,27 +1477,7 @@ class TestRunner:
     def _kill_process_tree(self, pid: int):
         """Kill a process and all its children"""
         try:
-            if sys.platform == 'win32':
-                # On Windows, use taskkill to kill process tree.
-                # Redirect output to DEVNULL to avoid hanging.
-                subprocess.run(
-                    ['taskkill', '/F', '/T', '/PID', str(pid)],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=5
-                )
-            else:
-                # On Unix, kill process group
-                import signal
-                try:
-                    pgid = os.getpgid(pid)
-                except ProcessLookupError:
-                    pgid = None
-
-                if pgid is not None:
-                    os.killpg(pgid, signal.SIGKILL)
-                else:
-                    os.kill(pid, signal.SIGKILL)
+            self.platform.kill_process_tree(pid)
         except Exception as e:
             # Log but don't fail if cleanup fails
             print(f"\n{Color.YELLOW}Warning: Failed to kill process {pid}: {e}{Color.RESET}")
@@ -1909,30 +1486,7 @@ class TestRunner:
     def _kill_all_sintra_processes(self):
         """Kill all existing sintra processes to ensure clean start"""
         try:
-            if sys.platform == 'win32':
-                # Kill all sintra test processes
-                test_names = [
-                    'sintra_basic_pubsub_test.exe',
-                    'sintra_ping_pong_test.exe',
-                    'sintra_ping_pong_multi_test.exe',
-                    'sintra_rpc_append_test.exe',
-                    'sintra_recovery_test.exe',
-                ]
-                for name in test_names:
-                    subprocess.run(
-                        ['taskkill', '/F', '/IM', name],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        timeout=5
-                    )
-            else:
-                # On Unix, use pkill. Redirect output to DEVNULL to avoid hanging.
-                subprocess.run(
-                    ['pkill', '-9', 'sintra'],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=5
-                )
+            self.platform.kill_all_sintra_processes()
         except Exception:
             # Ignore errors - processes may not exist
             pass
@@ -1980,7 +1534,7 @@ class TestRunner:
         if returncode == 0:
             return False
 
-        if sys.platform == 'win32':
+        if self.platform.is_windows:
             # Windows crash codes are typically large unsigned values such as 0xC0000005.
             return returncode < 0 or returncode >= 0xC0000000
 
@@ -1992,11 +1546,10 @@ class TestRunner:
         # Codes > 128 are also commonly used to report signal-based exits.
         return returncode < 0 or returncode > 128
 
-    @staticmethod
-    def _decode_posix_signal(returncode: int) -> Optional[int]:
+    def _decode_posix_signal(self, returncode: int) -> Optional[int]:
         """Return the POSIX signal number encoded in a return code."""
 
-        if returncode == 0 or sys.platform == 'win32':
+        if returncode == 0 or self.platform.is_windows:
             return None
 
         if returncode < 0:
@@ -2041,396 +1594,23 @@ class TestRunner:
     def _collect_process_group_pids(self, pgid: int) -> List[int]:
         """Return all process IDs belonging to the provided process group."""
 
-        pids: List[int] = []
-
-        if sys.platform == 'win32':
-            return pids
-
-        proc_path = Path('/proc')
-        entries: Optional[List[Path]] = None
-        if proc_path.exists():
-            try:
-                entries = list(proc_path.iterdir())
-            except Exception:
-                entries = None
-
-        if entries is None:
-            return self._collect_process_group_pids_via_ps(pgid)
-
-        for entry in entries:
-            if not entry.is_dir():
-                continue
-            name = entry.name
-            if not name.isdigit():
-                continue
-
-            try:
-                candidate_pid = int(name)
-            except ValueError:
-                continue
-
-            try:
-                candidate_pgid = os.getpgid(candidate_pid)
-            except (ProcessLookupError, PermissionError):
-                continue
-
-            if candidate_pgid == pgid:
-                pids.append(candidate_pid)
-
-        return pids
+        return self.platform.collect_process_group_pids(pgid)
 
     def _collect_descendant_pids(self, root_pid: int) -> List[int]:
         """Return all descendant process IDs for the provided root PID."""
 
-        descendants: List[int] = []
-
-        if sys.platform == 'win32':
-            # Use psutil to get descendants on Windows
-            psutil_worked = False
-            if _PSUTIL is not None:
-                try:
-                    root_proc = _PSUTIL.Process(root_pid)
-                    children = root_proc.children(recursive=True)
-                    descendants = [child.pid for child in children]
-                    psutil_worked = True
-                    if self.verbose:
-                        print(f"[DEBUG] _collect_descendant_pids({root_pid}) found {len(descendants)} descendants via psutil: {descendants}", file=sys.stderr)
-                except (_PSUTIL.NoSuchProcess, _PSUTIL.AccessDenied) as e:
-                    # Expected errors when parent process has exited
-                    if self.verbose:
-                        print(f"[DEBUG] _collect_descendant_pids({root_pid}) psutil failed: {e}, trying Win32_Process fallback", file=sys.stderr)
-                    pass
-                except Exception as e:
-                    # Unexpected error - log with more detail
-                    if self.verbose:
-                        print(f"[DEBUG] _collect_descendant_pids({root_pid}) psutil unexpected error ({type(e).__name__}): {e}, trying Win32_Process fallback", file=sys.stderr)
-                    pass
-
-            # Fallback: Query Win32_Process directly (works even if parent is dead)
-            if not psutil_worked:
-                descendants = self._collect_descendant_pids_windows_fallback(root_pid)
-                if self.verbose and descendants:
-                    print(f"[DEBUG] _collect_descendant_pids({root_pid}) found {len(descendants)} descendants via Win32_Process: {descendants}", file=sys.stderr)
-
-            return descendants
-
-        proc_path = Path('/proc')
-        entries: Optional[List[Path]] = None
-        if proc_path.exists():
-            try:
-                entries = list(proc_path.iterdir())
-            except Exception:
-                entries = None
-
-        if entries is None:
-            return self._collect_descendant_pids_via_ps(root_pid)
-
-        parent_to_children: Dict[int, List[int]] = {}
-
-        for entry in entries:
-            if not entry.is_dir():
-                continue
-
-            name = entry.name
-            if not name.isdigit():
-                continue
-
-            try:
-                pid = int(name)
-            except ValueError:
-                continue
-
-            stat_path = entry / 'stat'
-            try:
-                stat_content = stat_path.read_text()
-            except (OSError, UnicodeDecodeError):
-                continue
-
-            close_paren = stat_content.find(')')
-            if close_paren == -1 or close_paren + 2 >= len(stat_content):
-                continue
-
-            remainder = stat_content[close_paren + 2 :].split()
-            if len(remainder) < 2:
-                continue
-
-            try:
-                parent_pid = int(remainder[1])
-            except ValueError:
-                continue
-
-            parent_to_children.setdefault(parent_pid, []).append(pid)
-
-        visited: Set[int] = set()
-        stack: List[int] = parent_to_children.get(root_pid, [])[:]
-
-        while stack:
-            current = stack.pop()
-            if current in visited or current == root_pid:
-                continue
-            visited.add(current)
-            descendants.append(current)
-            stack.extend(parent_to_children.get(current, []))
-
-        return descendants
-
-    def _collect_descendant_pids_windows_fallback(self, root_pid: int) -> List[int]:
-        """
-        Fallback method for Windows that queries Win32_Process directly.
-        Works even if the parent process has already exited, unlike psutil.children().
-        """
-        import shutil
-
-        # Validate root_pid to prevent command injection (Python doesn't enforce type hints at runtime)
-        if not isinstance(root_pid, int):
-            if self.verbose:
-                print(f"[DEBUG] _collect_descendant_pids_windows_fallback: invalid root_pid type: {type(root_pid)}", file=sys.stderr)
-            return []
-
-        if root_pid <= 0 or root_pid > 0xFFFFFFFF:  # Windows PIDs are 32-bit
-            if self.verbose:
-                print(f"[DEBUG] _collect_descendant_pids_windows_fallback: root_pid out of range: {root_pid}", file=sys.stderr)
-            return []
-
-        powershell_path = shutil.which("powershell")
-        if not powershell_path:
-            if self.verbose:
-                print(f"[DEBUG] _collect_descendant_pids_windows_fallback: powershell not found", file=sys.stderr)
-            return []
-
-        # PowerShell script to recursively find all descendants by querying Win32_Process.ParentProcessId
-        # This works even if the parent process has exited
-        # Note: Use $ParentPid instead of $Pid since $Pid is a built-in PowerShell variable
-        # root_pid is validated as integer above, safe from injection
-        script = (
-            "function Get-ChildPids($ParentPid){"
-            "  $children = Get-CimInstance Win32_Process -Filter \"ParentProcessId=$ParentPid\" -ErrorAction SilentlyContinue;"
-            "  foreach($child in $children){"
-            "    $child.ProcessId;"
-            "    Get-ChildPids $child.ProcessId"
-            "  }"
-            "}"
-            f"; Get-ChildPids {root_pid}"
-        )
-
-        try:
-            result = subprocess.run(
-                [
-                    powershell_path,
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-Command",
-                    script,
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=5,  # 5 seconds sufficient for Get-CimInstance query even with many processes
-            )
-
-            if result.returncode != 0:
-                if self.verbose:
-                    print(f"[DEBUG] _collect_descendant_pids_windows_fallback: PowerShell failed with code {result.returncode}", file=sys.stderr)
-                return []
-
-            pids: List[int] = []
-            for line in result.stdout.strip().split('\n'):
-                line = line.strip()
-                if line and line.isdigit():
-                    try:
-                        pid = int(line)
-                        if pid > 0:
-                            pids.append(pid)
-                    except ValueError:
-                        continue
-
-            return pids
-
-        except (subprocess.SubprocessError, OSError) as e:
-            if self.verbose:
-                print(f"[DEBUG] _collect_descendant_pids_windows_fallback: exception: {e}", file=sys.stderr)
-            return []
+        return self.platform.collect_descendant_pids(root_pid)
 
     def _describe_pids(self, pids: Iterable[int]) -> Dict[int, str]:
         """Return human-readable details for the provided process IDs."""
 
-        unique_pids = sorted({pid for pid in pids if isinstance(pid, int) and pid > 0})
-        if not unique_pids:
-            return {}
-
-        details: Dict[int, str] = {}
-
-        if _PSUTIL is not None:
-            psutil_module = _PSUTIL
-            now = time.time()
-            for pid in unique_pids:
-                if pid in details:
-                    continue
-                try:
-                    proc = psutil_module.Process(pid)
-                except Exception:
-                    continue
-
-                parts: List[str] = []
-                try:
-                    parts.append(f"ppid={proc.ppid()}")
-                except Exception:
-                    pass
-                try:
-                    parts.append(f"pgid={os.getpgid(pid)}")
-                except Exception:
-                    pass
-                try:
-                    parts.append(f"status={proc.status()}")
-                except Exception:
-                    pass
-                try:
-                    create_time = proc.create_time()
-                except Exception:
-                    create_time = None
-                if create_time:
-                    uptime = now - create_time
-                    if uptime >= 0:
-                        parts.append(f"uptime={uptime:.1f}s")
-                try:
-                    cmdline = proc.cmdline()
-                except Exception:
-                    cmdline = []
-                if not cmdline:
-                    try:
-                        name = proc.name()
-                    except Exception:
-                        name = ""
-                    if name:
-                        cmdline = [name]
-                if cmdline:
-                    parts.append(f"cmd={' '.join(cmdline)}")
-                if parts:
-                    details[pid] = " ".join(parts)
-
-        remaining = [pid for pid in unique_pids if pid not in details]
-        ps_executable = shutil.which('ps')
-        if remaining and ps_executable:
-            chunk_size = 16
-            for offset in range(0, len(remaining), chunk_size):
-                chunk = remaining[offset : offset + chunk_size]
-                command = [
-                    ps_executable,
-                    '-o',
-                    'pid=,ppid=,pgid=,stat=,etime=,command=',
-                    '-p',
-                    ','.join(str(pid) for pid in chunk),
-                ]
-                try:
-                    result = subprocess.run(
-                        command,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        text=True,
-                        check=True,
-                        timeout=5,
-                    )
-                except subprocess.SubprocessError:
-                    continue
-
-                for line in result.stdout.splitlines():
-                    line = line.strip()
-                    if not line:
-                        continue
-                    fields = line.split(None, 5)
-                    if len(fields) < 5:
-                        continue
-                    try:
-                        pid_value = int(fields[0])
-                    except ValueError:
-                        continue
-                    description_parts = [
-                        f"ppid={fields[1]}",
-                        f"pgid={fields[2]}",
-                        f"stat={fields[3]}",
-                        f"etime={fields[4]}",
-                    ]
-                    if len(fields) >= 6:
-                        description_parts.append(f"cmd={fields[5]}")
-                    details[pid_value] = " ".join(description_parts)
-
-        for pid in unique_pids:
-            details.setdefault(pid, 'details unavailable')
-
-        return details
+        return self.platform.describe_processes(pids)
 
     def _snapshot_process_table_via_ps(self) -> List[Tuple[int, int, int]]:
         """Return (pid, ppid, pgid) tuples using the portable ps command."""
 
-        if sys.platform == 'win32':
-            return []
+        return self.platform.snapshot_process_table()
 
-        ps_executable = shutil.which('ps')
-        if not ps_executable:
-            return []
-
-        try:
-            result = subprocess.run(
-                [ps_executable, '-eo', 'pid=,ppid=,pgid='],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=5,
-                check=True,
-            )
-        except subprocess.SubprocessError:
-            return []
-
-        snapshot: List[Tuple[int, int, int]] = []
-        for line in result.stdout.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            parts = line.split()
-            if len(parts) != 3:
-                continue
-            try:
-                pid_value = int(parts[0])
-                ppid_value = int(parts[1])
-                pgid_value = int(parts[2])
-            except ValueError:
-                continue
-            snapshot.append((pid_value, ppid_value, pgid_value))
-
-        return snapshot
-
-    def _collect_process_group_pids_via_ps(self, pgid: int) -> List[int]:
-        """Collect process IDs that belong to the provided PGID using ps."""
-
-        snapshot = self._snapshot_process_table_via_ps()
-        if not snapshot:
-            return []
-
-        return [pid for pid, _, process_group in snapshot if process_group == pgid]
-
-    def _collect_descendant_pids_via_ps(self, root_pid: int) -> List[int]:
-        """Collect descendant process IDs for the provided root PID using ps."""
-
-        snapshot = self._snapshot_process_table_via_ps()
-        if not snapshot:
-            return []
-
-        parent_to_children: Dict[int, List[int]] = defaultdict(list)
-        for pid, ppid, _ in snapshot:
-            parent_to_children[ppid].append(pid)
-
-        descendants: List[int] = []
-        stack: List[int] = parent_to_children.get(root_pid, [])[:]
-        while stack:
-            current = stack.pop()
-            if current in descendants or current == root_pid:
-                continue
-            descendants.append(current)
-            stack.extend(parent_to_children.get(current, []))
-
-        return descendants
 
     def run_test_multiple(self, invocation: TestInvocation, repetitions: int) -> Tuple[int, int, List[TestResult]]:
         """Run a test multiple times and collect results"""
@@ -2618,7 +1798,7 @@ def main():
         print(f"Please ensure tests/active_tests.txt exists and contains test entries")
         return 1
 
-    compiler_metadata = _collect_compiler_metadata(build_dir)
+    compiler_metadata = collect_compiler_metadata(build_dir)
 
     print(f"Build directory: {build_dir}")
     print(f"Requested configuration root: {args.config}")
@@ -2651,7 +1831,7 @@ def main():
             print(f"\n{'=' * 80}")
             print(f"{Color.BOLD}{Color.BLUE}Configuration {config_idx}/{total_configs}: {config_name}{Color.RESET}")
             print(f"  Tests in suite: {len(tests)}")
-            _print_configuration_build_details(compiler_metadata, config_name)
+            print_configuration_build_details(compiler_metadata, config_name)
             print(f"{'=' * 80}")
 
             suite_start_time = time.time()
@@ -2704,7 +1884,7 @@ def main():
                 print(f"\n{Color.BLUE}--- Round: {reps_in_this_round} repetition(s) ---{Color.RESET}")
                 print(header)
 
-                lingering = _find_lingering_processes(("sintra_",))
+                lingering = find_lingering_processes(("sintra_",))
                 if lingering:
                     details = _describe_processes(lingering)
                     print(
@@ -2761,11 +1941,11 @@ def main():
                     f"    {Color.BLUE}Round complete - total elapsed: {format_duration(round_elapsed)}{Color.RESET}"
                 )
 
-                available_memory = _available_memory_bytes()
-                disk_space = _available_disk_bytes(runner.build_dir)
+                available_memory = runner.platform.available_memory_bytes()
+                disk_space = available_disk_bytes(runner.build_dir)
                 print(
-                    f"    Diagnostics: available memory={_format_size(available_memory)}, "
-                    f"free disk={_format_size(disk_space)}"
+                    f"    Diagnostics: available memory={format_size(available_memory)}, "
+                    f"free disk={format_size(disk_space)}"
                 )
 
                 _, cleanup_messages = runner.consume_core_cleanup_reports()
