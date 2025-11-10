@@ -14,6 +14,7 @@
 // - Exit on its own (via timeout)
 
 #include <sintra/sintra.h>
+#include <test_environment.h>
 
 #include <chrono>
 #include <cstdio>
@@ -27,8 +28,8 @@ int coordinator_process()
     std::fprintf(stderr, "Coordinator: Starting (will crash immediately)\n");
     std::fflush(stderr);
 
-    // Crash immediately - illegal instruction via __builtin_trap()
-    __builtin_trap();
+    // Crash immediately - illegal instruction
+    sintra::test::trigger_illegal_instruction_crash();
 
     return 0; // unreachable
 }
@@ -44,7 +45,7 @@ int child_crash_after_delay()
     std::fflush(stderr);
 
     // Crash via illegal instruction
-    __builtin_trap();
+    sintra::test::trigger_illegal_instruction_crash();
 
     return 0; // unreachable
 }
