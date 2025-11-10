@@ -586,6 +586,13 @@ void Process_message_reader::reply_reader_function()
                 // potentially long-running user code.
                 if (object_found) {
                     if (have_handler) {
+                        #ifdef SINTRA_BARRIER_DEBUG
+                        std::fprintf(stderr, "[BARRIER_DEBUG] Reply reader: invoking handler for receiver=%llu function=%llu exception_type=%llu\n",
+                            (unsigned long long)m->receiver_instance_id,
+                            (unsigned long long)m->function_instance_id,
+                            (unsigned long long)m->exception_type_id);
+                        std::fflush(stderr);
+                        #endif
                         if (m->exception_type_id == not_defined_type_id) {
                             handler_copy.return_handler(*m);
                         }

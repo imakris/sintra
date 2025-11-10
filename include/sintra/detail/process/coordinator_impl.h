@@ -3,6 +3,9 @@
 
 #pragma once
 
+// TEMPORARY: Enable barrier debugging
+#define SINTRA_BARRIER_DEBUG 1
+
 #include "../process/coordinator.h"
 #include "../process/managed_process.h"
 
@@ -95,6 +98,17 @@ sequence_counter_type Process_group::barrier(
         const auto current_common_fiid = b.common_function_iid;
         s_tl_common_function_iid = current_common_fiid;
         b.m.unlock();
+
+        // DIAGNOSTIC: Log barrier completion
+        #ifdef SINTRA_BARRIER_DEBUG
+        std::fprintf(stderr, "[BARRIER_DEBUG] Last arrival for '%s': caller=%llu, sending completions to %zu processes\n",
+            barrier_name.c_str(), (unsigned long long)caller_piid, (size_t)s_tl_additional_piids_size);
+        for (size_t i = 0; i < s_tl_additional_piids_size; i++) {
+            std::fprintf(stderr, "[BARRIER_DEBUG]   -> completion to process %llu\n",
+                (unsigned long long)s_tl_additional_piids[i]);
+        }
+        std::fflush(stderr);
+        #endif
 
         // Re-lock m_call_mutex to safely erase from m_barriers
         basic_lock.lock();
