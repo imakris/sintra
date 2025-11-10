@@ -419,23 +419,16 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
         return false;
     }
 
+    // Note: Unlike Unix spawn_detached, Windows _spawnv expects argv[0] to be the program name.
+    // The caller already includes the binary name in argv[0], so we use argv as-is.
+    // We only need to resolve the full path for the program to execute.
+
     char full_path[_MAX_PATH];
     if (_fullpath(full_path, prog, _MAX_PATH) == nullptr) {
         if (child_pid_out) {
             *child_pid_out = -1;
         }
         return false;
-    }
-
-    size_t argv_size = 0;
-    for (size_t i = 0; argv[i] != nullptr; ++i) {
-        ++argv_size;
-    }
-
-    std::vector<const char*> argv_with_prog(argv_size + 2, nullptr);
-    argv_with_prog[0] = full_path;
-    for (size_t i = 0; i != argv_size; ++i) {
-        argv_with_prog[i + 1] = argv[i];
     }
 
     // Convert UTF-8 string to wide string
@@ -461,9 +454,9 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
 
             std::wstring ws = to_wide(*arg);
             // Quote argument if it contains space or is empty
-            bool has_space = ws.find(L' ') != std::wstring::npos || ws.empty();
+            bool needs_quoting = ws.find(L' ') != std::wstring::npos || ws.empty();
 
-            if (has_space) cmdline += L'"';
+            if (needs_quoting) cmdline += L'"';
 
             // Escape internal quotes and backslashes before quotes
             for (size_t i = 0; i < ws.length(); ++i) {
@@ -471,10 +464,12 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
                 if (c == L'"') {
                     cmdline += L"\\\"";
                 } else if (c == L'\\') {
-                    // Check if backslash is before quote or end
+                    // Check if backslash is before quote
                     if (i + 1 < ws.length() && ws[i + 1] == L'"') {
                         cmdline += L"\\\\";
-                    } else if (i + 1 == ws.length()) {
+                    }
+                    // Check if trailing backslash in quoted argument
+                    else if (i + 1 == ws.length() && needs_quoting) {
                         cmdline += L"\\\\";
                     } else {
                         cmdline += L'\\';
@@ -484,13 +479,13 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
                 }
             }
 
-            if (has_space) cmdline += L'"';
+            if (needs_quoting) cmdline += L'"';
         }
         return cmdline;
     };
 
-    // Build command line - argv_with_prog includes program name at [0]
-    std::wstring cmdline_str = build_command_line(argv_with_prog.data());
+    // Build command line - argv already includes program name at [0] (Windows convention)
+    std::wstring cmdline_str = build_command_line(argv);
     std::vector<wchar_t> cmdline_buf(cmdline_str.begin(), cmdline_str.end());
     cmdline_buf.push_back(L'\0'); // Null-terminate
 
@@ -504,13 +499,17 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
         STARTUPINFOW si;
         ZeroMemory(&si, sizeof(si));
         si.cb = sizeof(si);
+        si.dwFlags = STARTF_USESTDHANDLES;
+        si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+        si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+        si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
 
         PROCESS_INFORMATION pi;
         ZeroMemory(&pi, sizeof(pi));
 
         // CREATE_NEW_PROCESS_GROUP: Like Unix setsid() - new process group for Ctrl-C isolation
-        // CREATE_BREAKAWAY_FROM_JOB: Escape parent's Job Object so children survive parent crash
-        DWORD creation_flags = CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB;
+        // Note: CREATE_BREAKAWAY_FROM_JOB removed - it requires special permissions and may fail
+        DWORD creation_flags = CREATE_NEW_PROCESS_GROUP;
 
         BOOL success = CreateProcessW(
             nullptr,                    // Application name (use command line instead)
