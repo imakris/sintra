@@ -2086,20 +2086,26 @@ class TestRunner:
 
         if sys.platform == 'win32':
             # Use psutil to get descendants on Windows
+            psutil_worked = False
             if _PSUTIL is not None:
                 try:
                     root_proc = _PSUTIL.Process(root_pid)
                     children = root_proc.children(recursive=True)
                     descendants = [child.pid for child in children]
+                    psutil_worked = True
                     if self.verbose:
-                        print(f"[DEBUG] _collect_descendant_pids({root_pid}) found {len(descendants)} descendants: {descendants}", file=sys.stderr)
+                        print(f"[DEBUG] _collect_descendant_pids({root_pid}) found {len(descendants)} descendants via psutil: {descendants}", file=sys.stderr)
                 except (_PSUTIL.NoSuchProcess, _PSUTIL.AccessDenied, Exception) as e:
                     if self.verbose:
-                        print(f"[DEBUG] _collect_descendant_pids({root_pid}) failed: {e}", file=sys.stderr)
+                        print(f"[DEBUG] _collect_descendant_pids({root_pid}) psutil failed: {e}, trying Win32_Process fallback", file=sys.stderr)
                     pass
-            else:
-                if self.verbose:
-                    print(f"[DEBUG] _collect_descendant_pids({root_pid}): psutil not available", file=sys.stderr)
+
+            # Fallback: Query Win32_Process directly (works even if parent is dead)
+            if not psutil_worked:
+                descendants = self._collect_descendant_pids_windows_fallback(root_pid)
+                if self.verbose and descendants:
+                    print(f"[DEBUG] _collect_descendant_pids({root_pid}) found {len(descendants)} descendants via Win32_Process: {descendants}", file=sys.stderr)
+
             return descendants
 
         proc_path = Path('/proc')
@@ -2161,6 +2167,73 @@ class TestRunner:
             stack.extend(parent_to_children.get(current, []))
 
         return descendants
+
+    def _collect_descendant_pids_windows_fallback(self, root_pid: int) -> List[int]:
+        """
+        Fallback method for Windows that queries Win32_Process directly.
+        Works even if the parent process has already exited, unlike psutil.children().
+        """
+        import shutil
+
+        powershell_path = shutil.which("powershell")
+        if not powershell_path:
+            if self.verbose:
+                print(f"[DEBUG] _collect_descendant_pids_windows_fallback: powershell not found", file=sys.stderr)
+            return []
+
+        # PowerShell script to recursively find all descendants by querying Win32_Process.ParentProcessId
+        # This works even if the parent process has exited
+        # Note: Use $ParentPid instead of $Pid since $Pid is a built-in PowerShell variable
+        script = (
+            "function Get-ChildPids($ParentPid){"
+            "  $children = Get-CimInstance Win32_Process -Filter \"ParentProcessId=$ParentPid\" -ErrorAction SilentlyContinue;"
+            "  foreach($child in $children){"
+            "    $child.ProcessId;"
+            "    Get-ChildPids $child.ProcessId"
+            "  }"
+            "}"
+            f"; Get-ChildPids {root_pid}"
+        )
+
+        try:
+            result = subprocess.run(
+                [
+                    powershell_path,
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    script,
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=5,
+            )
+
+            if result.returncode != 0:
+                if self.verbose:
+                    print(f"[DEBUG] _collect_descendant_pids_windows_fallback: PowerShell failed with code {result.returncode}", file=sys.stderr)
+                return []
+
+            pids: List[int] = []
+            for line in result.stdout.strip().split('\n'):
+                line = line.strip()
+                if line and line.isdigit():
+                    try:
+                        pid = int(line)
+                        if pid > 0:
+                            pids.append(pid)
+                    except ValueError:
+                        continue
+
+            return pids
+
+        except (subprocess.SubprocessError, OSError) as e:
+            if self.verbose:
+                print(f"[DEBUG] _collect_descendant_pids_windows_fallback: exception: {e}", file=sys.stderr)
+            return []
 
     def _describe_pids(self, pids: Iterable[int]) -> Dict[int, str]:
         """Return human-readable details for the provided process IDs."""
