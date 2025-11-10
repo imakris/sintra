@@ -27,8 +27,8 @@ int coordinator_process()
     std::fprintf(stderr, "Coordinator: Starting (will crash immediately)\n");
     std::fflush(stderr);
 
-    // Crash immediately - use debug_aware_abort to allow test harness to capture stacks
-    sintra::detail::debug_aware_abort();
+    // Crash immediately - null pointer dereference
+    *static_cast<volatile int*>(nullptr) = 0;
 
     return 0; // unreachable
 }
@@ -43,8 +43,8 @@ int child_crash_after_delay()
     std::fprintf(stderr, "Child 1: Crashing now\n");
     std::fflush(stderr);
 
-    // Use debug_aware_abort to allow test harness to capture stacks
-    sintra::detail::debug_aware_abort();
+    // Crash via null pointer dereference
+    *static_cast<volatile int*>(nullptr) = 0;
 
     return 0; // unreachable
 }
