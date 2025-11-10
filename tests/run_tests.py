@@ -1546,8 +1546,7 @@ class TestRunner:
         # Codes > 128 are also commonly used to report signal-based exits.
         return returncode < 0 or returncode > 128
 
-    @staticmethod
-    def _decode_posix_signal(returncode: int) -> Optional[int]:
+    def _decode_posix_signal(self, returncode: int) -> Optional[int]:
         """Return the POSIX signal number encoded in a return code."""
 
         if returncode == 0 or self.platform.is_windows:
