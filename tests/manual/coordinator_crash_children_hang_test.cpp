@@ -24,18 +24,10 @@ namespace {
 
 int coordinator_process()
 {
-    std::fprintf(stderr, "Coordinator: Waiting for children to be ready\n");
+    std::fprintf(stderr, "Coordinator: Starting (will crash immediately)\n");
     std::fflush(stderr);
 
-    // Wait for all child processes to reach ready state. This ensures the
-    // process tree is fully established before coordinator crashes, allowing
-    // test harness to enumerate and capture stacks from all processes.
-    sintra::barrier("crash-test-ready", "_sintra_all_processes");
-
-    std::fprintf(stderr, "Coordinator: All processes ready, crashing now\n");
-    std::fflush(stderr);
-
-    // Use debug_aware_abort to allow test harness to capture stacks
+    // Crash immediately - use debug_aware_abort to allow test harness to capture stacks
     sintra::detail::debug_aware_abort();
 
     return 0; // unreachable
@@ -45,9 +37,6 @@ int child_crash_after_delay()
 {
     std::fprintf(stderr, "Child 1: Starting (will crash after 5 seconds)\n");
     std::fflush(stderr);
-
-    // Signal ready to coordinator
-    sintra::barrier("crash-test-ready", "_sintra_all_processes");
 
     std::this_thread::sleep_for(std::chrono::seconds(5));
 
@@ -64,9 +53,6 @@ int child_hang_forever()
 {
     std::fprintf(stderr, "Child 2: Starting (will hang indefinitely)\n");
     std::fflush(stderr);
-
-    // Signal ready to coordinator
-    sintra::barrier("crash-test-ready", "_sintra_all_processes");
 
     // Infinite loop - process hangs here
     while (true) {
