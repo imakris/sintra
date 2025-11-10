@@ -53,9 +53,15 @@ def main():
     # Write new value
     flip_file.write_text(new_value)
 
+    # Also touch a workflows file to trigger the changed filter
+    # This ensures CI actually runs tests instead of skipping them
+    workflows_trigger = Path(__file__).parent / ".github" / "workflows" / ".ci_trigger"
+    workflows_trigger.parent.mkdir(parents=True, exist_ok=True)
+    workflows_trigger.write_text(new_value)
+
     # Git operations
-    print("Adding file to git...")
-    run_command("git add flip_to_trigger_ci")
+    print("Adding files to git...")
+    run_command("git add flip_to_trigger_ci .github/workflows/.ci_trigger")
 
     print("Creating commit...")
     commit_message = f"""Trigger CI (flip: {current_value} -> {new_value})
@@ -64,9 +70,11 @@ def main():
 
 Co-Authored-By: Claude <noreply@anthropic.com>"""
 
-    # Use a more portable way to create the commit
-    result = run_command(
-        f'git commit -m "{commit_message.splitlines()[0]}" -m "{chr(10).join(commit_message.splitlines()[1:])}"',
+    # Use subprocess.run with list arguments for proper handling
+    result = subprocess.run(
+        ["git", "commit", "-m", commit_message],
+        capture_output=True,
+        text=True,
         check=False
     )
 
