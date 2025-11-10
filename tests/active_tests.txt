@@ -17,40 +17,40 @@
 # Main test suite
 # Iteration counts are tuned for CI (detect flakiness and race conditions)
 
-# barrier_complex_choreography_test         20
-# barrier_flush_test                        50
-# barrier_pathological_choreography_test    60
-# barrier_rapid_reuse_test                  40
-# barrier_stress_test                       40
-# basic_pub_sub                             60
-# choreography_extreme_test                 80
-# complex_choreography_stress_test          60
-# complex_choreography_test                 30
-# dummy_test                                 2
-# extreme_choreography_test                 80
-# interprocess_file_mapping_test           100
-# interprocess_mutex_test                  100
-# interprocess_semaphore_test               10
-# ipc_rings_tests                           10
-# macos_named_semaphore_benchmark          100
-# macos_os_sync_semaphore_benchmark        100
-# message_args_traits_test                 100
-# ping_pong_multi_test                     100
-# ping_pong_test                           100
-# processing_fence_test                    100
-# recovery_test                             40
-# ring_cleanup_stress_test                 100
-# rpc_append_test                          100
-# semaphore_high_contention_stress          10
-# spawn_detached_test                      100
-# variable_buffer_alignment_test           100
+barrier_complex_choreography_test         20
+barrier_flush_test                        50
+barrier_pathological_choreography_test    60
+barrier_rapid_reuse_test                  40
+barrier_stress_test                       40
+basic_pub_sub                             60
+choreography_extreme_test                 80
+complex_choreography_stress_test          60
+complex_choreography_test                 30
+dummy_test                                 2
+extreme_choreography_test                 80
+interprocess_file_mapping_test           100
+interprocess_mutex_test                  100
+interprocess_semaphore_test               10
+ipc_rings_tests                           10
+macos_named_semaphore_benchmark          100
+macos_os_sync_semaphore_benchmark        100
+message_args_traits_test                 100
+ping_pong_multi_test                     100
+ping_pong_test                           100
+processing_fence_test                    100
+recovery_test                             40
+ring_cleanup_stress_test                 100
+rpc_append_test                          100
+semaphore_high_contention_stress          10
+spawn_detached_test                      100
+variable_buffer_alignment_test           100
 
 # Manual/reproduction tests (commented out by default)
 # Uncomment to enable these tests (they may fail by design)
 
 # manual/barrier_delivery_fence_repro_test 1
 # manual/hang_test 1
-manual/coordinator_crash_children_hang_test 1
+# manual/coordinator_crash_children_hang_test 1
 # manual/children_crash_coordinator_deadlock_test 1
 # manual/temp_ring 1
 
