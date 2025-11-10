@@ -1371,15 +1371,6 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
             }
         }
 
-        // Brief delay to ensure child processes are registered in OS process tree
-        // before returning control to user code. This is critical for crash debugging:
-        // if user code crashes immediately after init(), test harness needs to be able
-        // to enumerate the full process tree to capture stacks from all processes.
-        // Without this, fast coordinator crashes can happen before children are discoverable.
-        if (!successfully_spawned.empty()) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        }
-
         auto all_processes = successfully_spawned;
         all_processes.insert(m_instance_id);
 
