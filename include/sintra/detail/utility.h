@@ -438,53 +438,61 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
         argv_with_prog[i + 1] = argv[i];
     }
 
+    // Convert UTF-8 string to wide string
+    auto to_wide = [](const char* str) -> std::wstring {
+        if (!str || !*str) return std::wstring();
+        int len = MultiByteToWideChar(CP_UTF8, 0, str, -1, nullptr, 0);
+        if (len <= 0) return std::wstring();
+        std::wstring result(len - 1, 0); // -1 to exclude null terminator from size
+        MultiByteToWideChar(CP_UTF8, 0, str, -1, &result[0], len);
+        return result;
+    };
+
     // Build command line from argv with proper escaping
     // Windows requires command line as single string with proper quoting
-    auto build_command_line = [](const char* prog, const char* const* argv) -> std::string {
-        std::string cmdline;
+    // argv should already include program name at [0]
+    auto build_command_line = [&to_wide](const char* const* argv) -> std::wstring {
+        std::wstring cmdline;
+        bool first = true;
 
-        // Add executable path with quotes if it contains spaces
-        bool needs_quotes = std::strchr(prog, ' ') != nullptr;
-        if (needs_quotes) cmdline += '"';
-        cmdline += prog;
-        if (needs_quotes) cmdline += '"';
-
-        // Add arguments
         for (const char* const* arg = argv; *arg != nullptr; ++arg) {
-            cmdline += ' ';
+            if (!first) cmdline += L' ';
+            first = false;
 
+            std::wstring ws = to_wide(*arg);
             // Quote argument if it contains space or is empty
-            const char* s = *arg;
-            bool has_space = std::strchr(s, ' ') != nullptr || *s == '\0';
+            bool has_space = ws.find(L' ') != std::wstring::npos || ws.empty();
 
-            if (has_space) cmdline += '"';
+            if (has_space) cmdline += L'"';
 
             // Escape internal quotes and backslashes before quotes
-            while (*s) {
-                if (*s == '"') {
-                    cmdline += "\\\"";
-                } else if (*s == '\\') {
+            for (size_t i = 0; i < ws.length(); ++i) {
+                wchar_t c = ws[i];
+                if (c == L'"') {
+                    cmdline += L"\\\"";
+                } else if (c == L'\\') {
                     // Check if backslash is before quote or end
-                    const char* next = s + 1;
-                    if (*next == '"' || *next == '\0') {
-                        cmdline += "\\\\";
+                    if (i + 1 < ws.length() && ws[i + 1] == L'"') {
+                        cmdline += L"\\\\";
+                    } else if (i + 1 == ws.length()) {
+                        cmdline += L"\\\\";
                     } else {
-                        cmdline += '\\';
+                        cmdline += L'\\';
                     }
                 } else {
-                    cmdline += *s;
+                    cmdline += c;
                 }
-                ++s;
             }
 
-            if (has_space) cmdline += '"';
+            if (has_space) cmdline += L'"';
         }
         return cmdline;
     };
 
-    std::string cmdline_str = build_command_line(full_path, argv_with_prog.data() + 1);
-    std::vector<char> cmdline_buf(cmdline_str.begin(), cmdline_str.end());
-    cmdline_buf.push_back('\0'); // Null-terminate
+    // Build command line - argv_with_prog includes program name at [0]
+    std::wstring cmdline_str = build_command_line(argv_with_prog.data());
+    std::vector<wchar_t> cmdline_buf(cmdline_str.begin(), cmdline_str.end());
+    cmdline_buf.push_back(L'\0'); // Null-terminate
 
     constexpr unsigned kMaxAttempts = 5;
     const auto retry_delay = std::chrono::milliseconds(50);
@@ -493,7 +501,7 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
     unsigned long last_doserrno = 0;
 
     for (unsigned attempt = 0; attempt < kMaxAttempts; ++attempt) {
-        STARTUPINFOA si;
+        STARTUPINFOW si;
         ZeroMemory(&si, sizeof(si));
         si.cb = sizeof(si);
 
@@ -504,9 +512,9 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
         // CREATE_BREAKAWAY_FROM_JOB: Escape parent's Job Object so children survive parent crash
         DWORD creation_flags = CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB;
 
-        BOOL success = CreateProcessA(
-            full_path,                  // Application name (full path)
-            cmdline_buf.data(),         // Command line (mutable)
+        BOOL success = CreateProcessW(
+            nullptr,                    // Application name (use command line instead)
+            cmdline_buf.data(),         // Command line (mutable, includes full path at [0])
             nullptr,                    // Process security attributes
             nullptr,                    // Thread security attributes
             TRUE,                       // Inherit handles (for stdout/stderr)
