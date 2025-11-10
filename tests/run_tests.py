@@ -2181,16 +2181,12 @@ class TestRunner:
         """
         import shutil
 
-        # Validate root_pid to prevent command injection (Python doesn't enforce type hints at runtime)
+        # Validate root_pid (Python doesn't enforce type hints at runtime)
         if not isinstance(root_pid, int):
-            if self.verbose:
-                print(f"[DEBUG] _collect_descendant_pids_windows_fallback: invalid root_pid type: {type(root_pid)}", file=sys.stderr)
-            return []
+            raise ValueError(f"root_pid must be an integer, got {type(root_pid).__name__}")
 
         if root_pid <= 0 or root_pid > 0xFFFFFFFF:  # Windows PIDs are 32-bit
-            if self.verbose:
-                print(f"[DEBUG] _collect_descendant_pids_windows_fallback: root_pid out of range: {root_pid}", file=sys.stderr)
-            return []
+            raise ValueError(f"root_pid out of valid range: {root_pid}")
 
         powershell_path = shutil.which("powershell")
         if not powershell_path:
@@ -2200,9 +2196,9 @@ class TestRunner:
 
         # PowerShell script to recursively find all descendants by querying Win32_Process.ParentProcessId
         # This works even if the parent process has exited
-        # Note: Use $ParentPid instead of $Pid since $Pid is a built-in PowerShell variable
-        # root_pid is validated as integer above, safe from injection
+        # Uses param($RootPid) to safely accept the PID as a parameter (no string interpolation)
         script = (
+            "param($RootPid); "
             "function Get-ChildPids($ParentPid){"
             "  $children = Get-CimInstance Win32_Process -Filter \"ParentProcessId=$ParentPid\" -ErrorAction SilentlyContinue;"
             "  foreach($child in $children){"
@@ -2210,7 +2206,7 @@ class TestRunner:
             "    Get-ChildPids $child.ProcessId"
             "  }"
             "}"
-            f"; Get-ChildPids {root_pid}"
+            "; Get-ChildPids $RootPid"
         )
 
         try:
@@ -2223,6 +2219,7 @@ class TestRunner:
                     "Bypass",
                     "-Command",
                     script,
+                    str(root_pid),  # Passed as separate argument to param($RootPid)
                 ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
