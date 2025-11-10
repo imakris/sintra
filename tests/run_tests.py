@@ -2095,9 +2095,15 @@ class TestRunner:
                     psutil_worked = True
                     if self.verbose:
                         print(f"[DEBUG] _collect_descendant_pids({root_pid}) found {len(descendants)} descendants via psutil: {descendants}", file=sys.stderr)
-                except (_PSUTIL.NoSuchProcess, _PSUTIL.AccessDenied, Exception) as e:
+                except (_PSUTIL.NoSuchProcess, _PSUTIL.AccessDenied) as e:
+                    # Expected errors when parent process has exited
                     if self.verbose:
                         print(f"[DEBUG] _collect_descendant_pids({root_pid}) psutil failed: {e}, trying Win32_Process fallback", file=sys.stderr)
+                    pass
+                except Exception as e:
+                    # Unexpected error - log with more detail
+                    if self.verbose:
+                        print(f"[DEBUG] _collect_descendant_pids({root_pid}) psutil unexpected error ({type(e).__name__}): {e}, trying Win32_Process fallback", file=sys.stderr)
                     pass
 
             # Fallback: Query Win32_Process directly (works even if parent is dead)
@@ -2175,6 +2181,17 @@ class TestRunner:
         """
         import shutil
 
+        # Validate root_pid to prevent command injection (Python doesn't enforce type hints at runtime)
+        if not isinstance(root_pid, int):
+            if self.verbose:
+                print(f"[DEBUG] _collect_descendant_pids_windows_fallback: invalid root_pid type: {type(root_pid)}", file=sys.stderr)
+            return []
+
+        if root_pid <= 0 or root_pid > 0xFFFFFFFF:  # Windows PIDs are 32-bit
+            if self.verbose:
+                print(f"[DEBUG] _collect_descendant_pids_windows_fallback: root_pid out of range: {root_pid}", file=sys.stderr)
+            return []
+
         powershell_path = shutil.which("powershell")
         if not powershell_path:
             if self.verbose:
@@ -2184,6 +2201,7 @@ class TestRunner:
         # PowerShell script to recursively find all descendants by querying Win32_Process.ParentProcessId
         # This works even if the parent process has exited
         # Note: Use $ParentPid instead of $Pid since $Pid is a built-in PowerShell variable
+        # root_pid is validated as integer above, safe from injection
         script = (
             "function Get-ChildPids($ParentPid){"
             "  $children = Get-CimInstance Win32_Process -Filter \"ParentProcessId=$ParentPid\" -ErrorAction SilentlyContinue;"
@@ -2209,7 +2227,7 @@ class TestRunner:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                timeout=5,
+                timeout=5,  # 5 seconds sufficient for Get-CimInstance query even with many processes
             )
 
             if result.returncode != 0:
