@@ -27,8 +27,8 @@ int coordinator_process()
     std::fprintf(stderr, "Coordinator: Starting (will crash immediately)\n");
     std::fflush(stderr);
 
-    // Crash immediately - null pointer dereference
-    *static_cast<volatile int*>(nullptr) = 0;
+    // Crash immediately - illegal instruction via __builtin_trap()
+    __builtin_trap();
 
     return 0; // unreachable
 }
@@ -43,8 +43,8 @@ int child_crash_after_delay()
     std::fprintf(stderr, "Child 1: Crashing now\n");
     std::fflush(stderr);
 
-    // Crash via null pointer dereference
-    *static_cast<volatile int*>(nullptr) = 0;
+    // Crash via illegal instruction
+    __builtin_trap();
 
     return 0; // unreachable
 }
