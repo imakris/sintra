@@ -16,6 +16,7 @@
 #include <sintra/sintra.h>
 
 #include <chrono>
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <thread>
@@ -27,8 +28,9 @@ int coordinator_process()
     std::fprintf(stderr, "Coordinator: Starting (will crash immediately)\n");
     std::fflush(stderr);
 
-    // Crash immediately - null pointer dereference
-    *static_cast<volatile int*>(nullptr) = 0;
+    // Crash immediately by raising SIGSEGV (same signal as null pointer crash)
+    // Using raise() is well-defined, unlike null pointer dereference which is UB
+    std::raise(SIGSEGV);
 
     return 0; // unreachable
 }
@@ -43,8 +45,9 @@ int child_crash_after_delay()
     std::fprintf(stderr, "Child 1: Crashing now\n");
     std::fflush(stderr);
 
-    // Crash via null pointer dereference
-    *static_cast<volatile int*>(nullptr) = 0;
+    // Crash by raising SIGSEGV (same signal as null pointer crash)
+    // Using raise() is well-defined, unlike null pointer dereference which is UB
+    std::raise(SIGSEGV);
 
     return 0; // unreachable
 }
