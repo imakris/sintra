@@ -484,8 +484,22 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
         return cmdline;
     };
 
+    // Convert full path to wide string for lpApplicationName
+    std::wstring full_path_w = to_wide(full_path);
+
     // Build command line - argv already includes program name at [0] (Windows convention)
     std::wstring cmdline_str = build_command_line(argv);
+
+    // Validate command line length (Windows limit is 32,767 characters)
+    constexpr size_t kMaxCommandLineLength = 32767;
+    if (cmdline_str.length() >= kMaxCommandLineLength) {
+        if (child_pid_out) {
+            *child_pid_out = -1;
+        }
+        errno = E2BIG;  // Argument list too long
+        return false;
+    }
+
     std::vector<wchar_t> cmdline_buf(cmdline_str.begin(), cmdline_str.end());
     cmdline_buf.push_back(L'\0'); // Null-terminate
 
@@ -512,8 +526,8 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
         DWORD creation_flags = CREATE_NEW_PROCESS_GROUP;
 
         BOOL success = CreateProcessW(
-            nullptr,                    // Application name (use command line instead)
-            cmdline_buf.data(),         // Command line (mutable, includes full path at [0])
+            full_path_w.c_str(),        // Application name - explicit resolved path (more secure)
+            cmdline_buf.data(),         // Command line (mutable, includes program name at [0])
             nullptr,                    // Process security attributes
             nullptr,                    // Thread security attributes
             TRUE,                       // Inherit handles (for stdout/stderr)
