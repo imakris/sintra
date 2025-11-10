@@ -438,6 +438,54 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
         argv_with_prog[i + 1] = argv[i];
     }
 
+    // Build command line from argv with proper escaping
+    // Windows requires command line as single string with proper quoting
+    auto build_command_line = [](const char* prog, const char* const* argv) -> std::string {
+        std::string cmdline;
+
+        // Add executable path with quotes if it contains spaces
+        bool needs_quotes = std::strchr(prog, ' ') != nullptr;
+        if (needs_quotes) cmdline += '"';
+        cmdline += prog;
+        if (needs_quotes) cmdline += '"';
+
+        // Add arguments
+        for (const char* const* arg = argv; *arg != nullptr; ++arg) {
+            cmdline += ' ';
+
+            // Quote argument if it contains space or is empty
+            const char* s = *arg;
+            bool has_space = std::strchr(s, ' ') != nullptr || *s == '\0';
+
+            if (has_space) cmdline += '"';
+
+            // Escape internal quotes and backslashes before quotes
+            while (*s) {
+                if (*s == '"') {
+                    cmdline += "\\\"";
+                } else if (*s == '\\') {
+                    // Check if backslash is before quote or end
+                    const char* next = s + 1;
+                    if (*next == '"' || *next == '\0') {
+                        cmdline += "\\\\";
+                    } else {
+                        cmdline += '\\';
+                    }
+                } else {
+                    cmdline += *s;
+                }
+                ++s;
+            }
+
+            if (has_space) cmdline += '"';
+        }
+        return cmdline;
+    };
+
+    std::string cmdline_str = build_command_line(full_path, argv_with_prog.data() + 1);
+    std::vector<char> cmdline_buf(cmdline_str.begin(), cmdline_str.end());
+    cmdline_buf.push_back('\0'); // Null-terminate
+
     constexpr unsigned kMaxAttempts = 5;
     const auto retry_delay = std::chrono::milliseconds(50);
 
@@ -445,16 +493,53 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
     unsigned long last_doserrno = 0;
 
     for (unsigned attempt = 0; attempt < kMaxAttempts; ++attempt) {
-        auto spawned = _spawnv(P_DETACH, full_path, argv_with_prog.data());
-        if (spawned != -1) {
+        STARTUPINFOA si;
+        ZeroMemory(&si, sizeof(si));
+        si.cb = sizeof(si);
+
+        PROCESS_INFORMATION pi;
+        ZeroMemory(&pi, sizeof(pi));
+
+        // CREATE_NEW_PROCESS_GROUP: Like Unix setsid() - new process group for Ctrl-C isolation
+        // CREATE_BREAKAWAY_FROM_JOB: Escape parent's Job Object so children survive parent crash
+        DWORD creation_flags = CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB;
+
+        BOOL success = CreateProcessA(
+            full_path,                  // Application name (full path)
+            cmdline_buf.data(),         // Command line (mutable)
+            nullptr,                    // Process security attributes
+            nullptr,                    // Thread security attributes
+            TRUE,                       // Inherit handles (for stdout/stderr)
+            creation_flags,             // Creation flags
+            nullptr,                    // Environment (inherit)
+            nullptr,                    // Current directory (inherit)
+            &si,                        // Startup info
+            &pi                         // Process information
+        );
+
+        if (success) {
             if (child_pid_out) {
-                *child_pid_out = static_cast<int>(spawned);
+                *child_pid_out = static_cast<int>(pi.dwProcessId);
             }
+
+            // Close handles - we don't need to hold them
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+
             return true;
         }
 
-        _get_errno(&last_errno);
-        _get_doserrno(&last_doserrno);
+        // Handle failure
+        last_doserrno = GetLastError();
+
+        // Map Windows error to errno
+        if (last_doserrno == ERROR_ACCESS_DENIED) {
+            last_errno = EACCES;
+        } else if (last_doserrno == ERROR_FILE_NOT_FOUND || last_doserrno == ERROR_PATH_NOT_FOUND) {
+            last_errno = ENOENT;
+        } else {
+            last_errno = EAGAIN; // Generic transient error
+        }
 
         const bool access_denied = (last_errno == EACCES) &&
             (last_doserrno == ERROR_ACCESS_DENIED ||
