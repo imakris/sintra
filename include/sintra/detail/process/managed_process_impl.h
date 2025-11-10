@@ -5,6 +5,7 @@
 
 #include "../utility.h"
 #include "../type_utils.h"
+#include "../exception.h"
 #include "../ipc/platform_utils.h"
 
 #include <array>
@@ -1220,11 +1221,15 @@ Managed process options:
 }
 
 inline
-bool Managed_process::spawn_swarm_process(
+Managed_process::Spawn_result Managed_process::spawn_swarm_process(
     const Spawn_swarm_process_args& s )
 {
     assert(s_coord);
-    std::vector<instance_id_type> failed_spawns, successful_spawns;
+    Spawn_result result;
+    result.binary_name = s.binary_name;
+    result.instance_id = s.piid;
+    result.errno_value = 0;
+
     auto args = s.args;
     args.insert(args.end(), {"--recovery_occurrence", std::to_string(s.occurrence)} );
 
@@ -1254,9 +1259,9 @@ bool Managed_process::spawn_swarm_process(
     }
 
     int spawned_pid = -1;
-    bool success = spawn_detached(s.binary_name.c_str(), cargs.v(), &spawned_pid);
+    result.success = spawn_detached(s.binary_name.c_str(), cargs.v(), &spawned_pid);
 
-    if (success) {
+    if (result.success) {
 #ifndef _WIN32
         if (spawned_pid > 0) {
             std::lock_guard<std::mutex> guard(m_spawned_child_pids_mutex);
@@ -1285,7 +1290,17 @@ bool Managed_process::spawn_swarm_process(
 #else
         saved_errno = errno;
 #endif
+        result.errno_value = saved_errno;
 
+        std::ostringstream error_msg;
+        error_msg << "Failed to spawn process";
+        if (saved_errno != 0) {
+            std::error_code ec(saved_errno, std::system_category());
+            error_msg << " (errno " << saved_errno << ": " << ec.message() << ')';
+        }
+        result.error_message = error_msg.str();
+
+        // Still log to stderr for backwards compatibility
         std::cerr << "failed to launch " << s.binary_name;
         if (saved_errno != 0) {
             std::error_code ec(saved_errno, std::system_category());
@@ -1298,7 +1313,7 @@ bool Managed_process::spawn_swarm_process(
         m_readers.erase(s.piid);
     }
 
-    return success;
+    return result;
 }
 
 inline
@@ -1309,6 +1324,10 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
 
     using namespace sintra;
     using std::to_string;
+
+    // Variables for error tracking (used by coordinator)
+    std::unordered_set<instance_id_type> successfully_spawned;
+    std::vector<init_error::failed_process> spawn_failures;
 
     if (s_coord) {
 
@@ -1329,7 +1348,6 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
         }
 
         // 2. spawn
-        std::unordered_set<instance_id_type> successfully_spawned;
         it = branch_vector.begin();
         //auto readers_it = m_readers.begin();
         for (int i = 0; it != branch_vector.end(); it++, i++) {
@@ -1338,8 +1356,18 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
             all_args.insert(all_args.end(), it->sintra_options.begin(), it->sintra_options.end());
             all_args.insert(all_args.end(), it->user_options.begin(), it->user_options.end());
 
-            if (spawn_swarm_process({it->entry.m_binary_name, all_args, it->assigned_instance_id})) {
+            auto result = spawn_swarm_process({it->entry.m_binary_name, all_args, it->assigned_instance_id});
+            if (result.success) {
                 successfully_spawned.insert(it->assigned_instance_id);
+            }
+            else {
+                spawn_failures.emplace_back(
+                    result.binary_name,
+                    result.instance_id,
+                    init_error::cause::spawn_failed,
+                    result.errno_value,
+                    result.error_message
+                );
             }
         }
 
@@ -1380,6 +1408,33 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
     // to receive the instance_published event
     if (s_recovery_occurrence == 0) {
         bool all_started = Process_group::rpc_barrier(m_group_all, UIBS);
+
+        // If we're the coordinator and have failures to report, throw init_error
+        if (s_coord && (!spawn_failures.empty() || !all_started)) {
+            // If barrier failed, some successfully spawned processes didn't reach it
+            if (!all_started && spawn_failures.empty()) {
+                // All processes that we attempted to spawn but didn't reach the barrier
+                for (const auto& iid : successfully_spawned) {
+                    spawn_failures.emplace_back(
+                        "", // We don't have binary name readily available here
+                        iid,
+                        init_error::cause::barrier_timeout,
+                        0,
+                        "Process spawned successfully but did not reach initialization barrier (may have crashed during startup)"
+                    );
+                }
+            }
+
+            // Collect successfully spawned instance IDs to include in exception
+            std::vector<instance_id_type> successful_list(
+                successfully_spawned.begin(),
+                successfully_spawned.end()
+            );
+            successful_list.push_back(m_instance_id); // Include coordinator
+
+            throw init_error(std::move(spawn_failures), std::move(successful_list));
+        }
+
         if (!all_started) {
             return false;
         }

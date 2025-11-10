@@ -318,6 +318,15 @@ struct Managed_process: Derived_transceiver<Managed_process>
         uint32_t                        occurrence = 0;
     };
 
+    struct Spawn_result
+    {
+        bool                            success;
+        std::string                     binary_name;
+        instance_id_type                instance_id;
+        int                             errno_value;
+        std::string                     error_message;
+    };
+
 #ifndef _WIN32
     std::vector<pid_t>                  m_spawned_child_pids;
     mutable std::mutex                  m_spawned_child_pids_mutex;
@@ -325,7 +334,7 @@ struct Managed_process: Derived_transceiver<Managed_process>
 #endif
 
 
-    bool spawn_swarm_process( const Spawn_swarm_process_args& ssp_args );
+    Spawn_result spawn_swarm_process( const Spawn_swarm_process_args& ssp_args );
 
     map<instance_id_type, Spawn_swarm_process_args> m_cached_spawns;
 };

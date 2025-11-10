@@ -266,7 +266,8 @@ inline size_t spawn_swarm_process(
 
     for (size_t i = 0; i < multiplicity; ++i) {
         spawn_args.piid = piid;
-        if (s_mproc->spawn_swarm_process(spawn_args)) {
+        auto result = s_mproc->spawn_swarm_process(spawn_args);
+        if (result.success) {
             ++spawned;
         }
     }
