@@ -84,7 +84,7 @@ int main(int argc, char* argv[])
             std::fprintf(stderr, "[FAIL] Coordinator crashing after receiving Pong\n");
             std::fflush(stderr);
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
-            std::abort();
+            sintra::detail::debug_aware_abort();
         });
 
         sintra::barrier("coordinator-crash-ready", "_sintra_all_processes");

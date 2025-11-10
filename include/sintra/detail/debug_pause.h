@@ -54,6 +54,23 @@ inline void debug_pause_forever(const char* reason)
     }
 }
 
+// Debug-aware abort that respects SINTRA_DEBUG_PAUSE_ON_EXIT.
+// Use this instead of std::abort() in tests to ensure the test harness
+// can attach debuggers and capture stack traces before process termination.
+//
+// Background: On Windows with MinGW, the managed_process signal handler
+// intercepts SIGABRT and calls TerminateProcess() immediately, which prevents
+// both the debug_pause signal handler and the test harness from capturing
+// crash information. By calling debug_pause_forever() BEFORE abort(), we
+// ensure the process pauses for debugging when SINTRA_DEBUG_PAUSE_ON_EXIT=1.
+[[noreturn]] inline void debug_aware_abort()
+{
+    if (is_debug_pause_active()) {
+        debug_pause_forever("abort");
+    }
+    std::abort();
+}
+
 #ifdef _WIN32
 inline LONG WINAPI debug_vectored_exception_handler(EXCEPTION_POINTERS* exception_info)
 {

@@ -56,7 +56,7 @@ private:
     if (!(expr)) { \
         if (sintra::detail::is_debug_pause_active()) { \
             std::cerr << __FILE__ << ':' << __LINE__ << " - assertion failed: " << #expr << std::endl; \
-            std::abort(); \
+            sintra::detail::debug_aware_abort(); \
         } \
         throw Assertion_error(#expr, __FILE__, __LINE__); \
     } \
@@ -69,7 +69,7 @@ private:
         if (sintra::detail::is_debug_pause_active()) { \
             std::cerr << __FILE__ << ':' << __LINE__ << " - assertion failed: " << #expected " == " #actual \
                       << " (expected " << _exp << ", got " << _act << ")" << std::endl; \
-            std::abort(); \
+            sintra::detail::debug_aware_abort(); \
         } \
         std::ostringstream _oss; \
         _oss << "expected " << _exp << ", got " << _act; \
@@ -83,7 +83,7 @@ private:
         if (sintra::detail::is_debug_pause_active()) { \
             std::cerr << __FILE__ << ':' << __LINE__ << " - assertion failed: " << #val1 " != " #val2 \
                       << " (values both equal to " << _v1 << ")" << std::endl; \
-            std::abort(); \
+            sintra::detail::debug_aware_abort(); \
         } \
         std::ostringstream _oss; \
         _oss << "values both equal to " << _v1; \
@@ -107,7 +107,7 @@ private:
     if (!_thrown) { \
         if (sintra::detail::is_debug_pause_active()) { \
             std::cerr << __FILE__ << ':' << __LINE__ << " - assertion failed: Expected exception " #exception_type << std::endl; \
-            std::abort(); \
+            sintra::detail::debug_aware_abort(); \
         } \
         throw Assertion_error("Expected exception " #exception_type, __FILE__, __LINE__); \
     } \
@@ -119,7 +119,7 @@ private:
     catch (...) { \
         if (sintra::detail::is_debug_pause_active()) { \
             std::cerr << __FILE__ << ':' << __LINE__ << " - assertion failed: Unexpected exception" << std::endl; \
-            std::abort(); \
+            sintra::detail::debug_aware_abort(); \
         } \
         throw Assertion_error("Unexpected exception", __FILE__, __LINE__); \
     } \

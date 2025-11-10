@@ -57,7 +57,7 @@ int child_crash_immediately()
     std::fprintf(stderr, "Child 1: Starting (will crash immediately)\n");
     std::fflush(stderr);
 
-    std::abort();
+    sintra::detail::debug_aware_abort();
 
     return 0; // unreachable
 }
@@ -72,7 +72,7 @@ int child_crash_after_short_delay()
     std::fprintf(stderr, "Child 2: Crashing now\n");
     std::fflush(stderr);
 
-    std::abort();
+    sintra::detail::debug_aware_abort();
 
     return 0; // unreachable
 }
