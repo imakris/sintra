@@ -6,6 +6,7 @@
 #include "../process/coordinator.h"
 #include "../process/managed_process.h"
 
+#include <algorithm>
 #include <cassert>
 #include <functional>
 #include <iostream>
@@ -468,6 +469,16 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
     if (iid == process_iid) {
 
         ready_notifications = finalize_initialization_tracking(process_iid);
+        if (!ready_notifications.empty()) {
+            ready_notifications.erase(
+                std::remove_if(
+                    ready_notifications.begin(),
+                    ready_notifications.end(),
+                    [&](const Pending_instance_publication& publication) {
+                        return process_of(publication.instance_id) == process_iid;
+                    }),
+                ready_notifications.end());
+        }
 
         // remove all name lookup entries resolving to the unpublished process
         auto name_map = s_mproc->m_instance_id_of_assigned_name.scoped();
