@@ -61,6 +61,16 @@ struct spinlock
 
                 const auto owner = m_owner_pid.load(std::memory_order_acquire);
                 if (owner != 0 && owner != self_pid && is_process_alive(owner)) {
+                    if (detail::is_debug_pause_active()) {
+                        std::fprintf(
+                            stderr,
+                            "[sintra][spinlock] Owner PID %u is paused under debug control; "
+                            "forcibly releasing spinlock to allow shutdown to proceed.\n",
+                            owner);
+                        force_unlock();
+                        live_owner_deadline = std::chrono::steady_clock::now() + k_live_owner_timeout;
+                        continue;
+                    }
                     report_live_owner_stall(owner);
                 }
 
