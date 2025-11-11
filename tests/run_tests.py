@@ -120,6 +120,9 @@ def _describe_processes(processes: Iterable[Tuple[int, str]]) -> str:
 TEST_TIMEOUT_OVERRIDES = {
     "recovery_test_debug": 120.0,
     "recovery_test_release": 120.0,
+    "barrier_complex_choreography_test": 120.0,
+    "barrier_pathological_choreography_test": 120.0,
+    "barrier_stress_test": 120.0,
 }
 
 # Configure the maximum amount of wall time the runner spends attaching live
