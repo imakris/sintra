@@ -49,21 +49,9 @@
 
 #ifdef _WIN32
 #include <process.h>
-#define GETPID() _getpid()
 #else
 #include <unistd.h>
-#define GETPID() getpid()
 #endif
-
-// Diagnostic logging macros for failure investigation
-#define LOG(role, ...) do { \
-    auto now = std::chrono::steady_clock::now().time_since_epoch(); \
-    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now).count(); \
-    std::fprintf(stderr, "[%s PID:%d T:%lld] ", role, GETPID(), (long long)ms); \
-    std::fprintf(stderr, __VA_ARGS__); \
-    std::fprintf(stderr, "\n"); \
-    std::fflush(stderr); \
-} while(0)
 
 namespace {
 
@@ -286,8 +274,6 @@ std::uint64_t make_round_seed(int round)
 
 int conductor_process()
 {
-    LOG("CONDUCTOR", "===== STARTING =====");
-
     const auto shared_dir = get_shared_directory();
     const auto result_path = shared_dir / "result.txt";
 
@@ -300,20 +286,16 @@ int conductor_process()
 
     auto advance_slot = [&](const RoundAdvance& advance) {
         if (advance.round < 0 || advance.round >= kRounds) {
-            LOG("CONDUCTOR", "RoundAdvance received with invalid round=%d", advance.round);
             return;
         }
         {
             std::lock_guard<std::mutex> lk(advance_mutex);
-            LOG("CONDUCTOR", "RoundAdvance received: round=%d success=%d (last_completed=%d)",
-                advance.round, advance.success, last_completed_round);
             if (advance.round > last_completed_round) {
                 last_completed_round = advance.round;
                 last_checksums = advance.checksums;
             }
             if (!advance.success) {
                 failure_observed = true;
-                LOG("CONDUCTOR", "FAILURE observed in RoundAdvance for round=%d", advance.round);
             }
         }
         advance_cv.notify_all();
@@ -321,7 +303,6 @@ int conductor_process()
 
     auto stop_slot = [&](const Stop& stop) {
         std::lock_guard<std::mutex> lk(advance_mutex);
-        LOG("CONDUCTOR", "Stop received: due_to_failure=%d", stop.due_to_failure);
         stop_requested = true;
         failure_observed = failure_observed || stop.due_to_failure;
         advance_cv.notify_all();
@@ -336,34 +317,21 @@ int conductor_process()
 
     for (int round = 0; round < kRounds && !stop_requested; ++round) {
         const std::uint64_t seed = make_round_seed(round);
-        LOG("CONDUCTOR", "==== ROUND %d START ==== seed=%llu", round, (unsigned long long)seed);
-
-        LOG("CONDUCTOR", "Entering start barrier for round %d", round);
         sintra::barrier(barrier_round_start_name(round), group);
-        LOG("CONDUCTOR", "Exited start barrier for round %d", round);
 
-        LOG("CONDUCTOR", "Broadcasting Kickoff for round %d", round);
         sintra::world() << Kickoff{round, seed};
 
-        LOG("CONDUCTOR", "Waiting for RoundAdvance (timeout=%ds)...", (int)kWaitTimeout.count());
         std::unique_lock<std::mutex> lk(advance_mutex);
         const bool completed = advance_cv.wait_for(
             lk, kWaitTimeout, [&] { return stop_requested || last_completed_round >= round; });
         if (!completed) {
-            LOG("CONDUCTOR", "TIMEOUT waiting for RoundAdvance! round=%d last_completed=%d stop_requested=%d failure_observed=%d",
-                round, last_completed_round, stop_requested, failure_observed);
             local_failure = true;
-        }
-        else {
-            LOG("CONDUCTOR", "RoundAdvance received successfully for round %d", round);
         }
 
         if (last_completed_round >= round) {
             for (std::size_t worker = 0; worker < kWorkerCount; ++worker) {
                 const auto expected = expected_worker_xor(round, static_cast<int>(worker), seed);
                 if (last_checksums[worker] != expected) {
-                    LOG("CONDUCTOR", "CHECKSUM MISMATCH: round=%d worker=%zu expected=%llx got=%llx",
-                        round, worker, (unsigned long long)expected, (unsigned long long)last_checksums[worker]);
                     local_failure = true;
                 }
             }
@@ -375,37 +343,28 @@ int conductor_process()
         // signal while still in the current round and won't proceed to the next
         // round's start barrier, which would cause a deadlock.
         if (!stop_broadcasted && (local_failure || failure_observed)) {
-            LOG("CONDUCTOR", "Broadcasting Stop (due to failure) before fence barrier, round=%d", round);
             sintra::world() << Stop{true};
             stop_broadcasted = true;
         }
 
-        LOG("CONDUCTOR", "Entering complete barrier (processing fence) for round %d", round);
         sintra::barrier<sintra::processing_fence_t>(barrier_round_complete_name(round), group);
-        LOG("CONDUCTOR", "Exited complete barrier for round %d", round);
 
         if (local_failure) {
-            LOG("CONDUCTOR", "Breaking out of round loop due to local_failure, round=%d", round);
             break;
         }
     }
 
     const bool due_to_failure = local_failure || failure_observed;
-    LOG("CONDUCTOR", "Round loop complete. due_to_failure=%d last_completed_round=%d", due_to_failure, last_completed_round);
-
     // Broadcast Stop again if not already sent (for the success case) or to ensure
     // all processes have received it
     if (!stop_broadcasted) {
-        LOG("CONDUCTOR", "Broadcasting final Stop, due_to_failure=%d", due_to_failure);
         sintra::world() << Stop{due_to_failure};
     }
 
     write_result(result_path, due_to_failure ? "fail" : "ok",
                  std::max(last_completed_round, -1), due_to_failure);
 
-    LOG("CONDUCTOR", "Entering final barrier");
     sintra::barrier(std::string(kFinalBarrier), "_sintra_all_processes");
-    LOG("CONDUCTOR", "Exiting with code %d", due_to_failure ? 1 : 0);
     return due_to_failure ? 1 : 0;
 }
 // ---------------------------------------------------------------------------
@@ -414,10 +373,6 @@ int conductor_process()
 
 int worker_process_impl(int worker_index)
 {
-    char role_name[32];
-    std::snprintf(role_name, sizeof(role_name), "WORKER%d", worker_index);
-    LOG(role_name, "===== STARTING =====");
-
     std::atomic<bool> stop_requested{false};
     std::atomic<int> active_round{-1};
 
@@ -431,17 +386,15 @@ int worker_process_impl(int worker_index)
         make_round_seed(worker_index) ^ static_cast<std::uint64_t>(worker_index * 0x12345)));
     std::uniform_int_distribution<int> delay_dist(kMinWorkerDelay.count(), kMaxWorkerDelay.count());
 
-    auto kickoff_slot = [&, role_name](const Kickoff& kickoff) {
+    auto kickoff_slot = [&](const Kickoff& kickoff) {
         if (stop_requested.load(std::memory_order_acquire)) {
             return;
         }
         const int expected = active_round.load(std::memory_order_acquire);
         if (kickoff.round != expected) {
-            LOG(role_name, "Kickoff received but round mismatch: got %d expected %d", kickoff.round, expected);
             return;
         }
 
-        LOG(role_name, "Kickoff received for round %d, sending %d MicroTasks", kickoff.round, (int)kTasksPerWorker);
         std::array<std::uint64_t, kTasksPerWorker> payloads{};
         for (int step = 0; step < static_cast<int>(kTasksPerWorker); ++step) {
             const auto payload = compute_payload(kickoff.round, worker_index, step, kickoff.seed);
@@ -456,7 +409,6 @@ int worker_process_impl(int worker_index)
         }
 
         sintra::world() << WorkerDone{kickoff.round, worker_index, static_cast<int>(kTasksPerWorker)};
-        LOG(role_name, "Sent WorkerDone for round %d", kickoff.round);
 
         {
             std::lock_guard<std::mutex> lk(state_mutex);
@@ -465,11 +417,10 @@ int worker_process_impl(int worker_index)
         kickoff_cv.notify_all();
     };
 
-    auto advance_slot = [&, role_name](const RoundAdvance& advance) {
+    auto advance_slot = [&](const RoundAdvance& advance) {
         if (advance.round != active_round.load(std::memory_order_acquire)) {
             return;
         }
-        LOG(role_name, "RoundAdvance received for round %d, success=%d", advance.round, advance.success);
         {
             std::lock_guard<std::mutex> lk(state_mutex);
             round_completed = true;
@@ -480,8 +431,7 @@ int worker_process_impl(int worker_index)
         completion_cv.notify_all();
     };
 
-    auto stop_slot = [&, role_name](const Stop& stop) {
-        LOG(role_name, "Stop received, due_to_failure=%d", stop.due_to_failure);
+    auto stop_slot = [&](const Stop&) {
         stop_requested = true, std::memory_order_release;
         {
             std::lock_guard<std::mutex> lk(state_mutex);
@@ -506,22 +456,15 @@ int worker_process_impl(int worker_index)
             round_completed = false;
         }
 
-        LOG(role_name, "==== ROUND %d START ==== Entering start barrier", round);
         sintra::barrier(barrier_round_start_name(round), group);
-        LOG(role_name, "Exited start barrier for round %d, waiting for Kickoff...", round);
 
         {
             std::unique_lock<std::mutex> lk(state_mutex);
-            bool got_kickoff = kickoff_cv.wait_for(lk, kWaitTimeout, [&] {
+            kickoff_cv.wait_for(lk, kWaitTimeout, [&] {
                 return kickoff_seen || stop_requested.load(std::memory_order_acquire);
             });
-            if (!got_kickoff) {
-                LOG(role_name, "TIMEOUT waiting for Kickoff! round=%d kickoff_seen=%d stop_requested=%d",
-                    round, kickoff_seen, stop_requested.load(std::memory_order_acquire));
-            }
         }
         if (stop_requested.load(std::memory_order_acquire)) {
-            LOG(role_name, "Stop requested, entering fence barrier for round %d before breaking", round);
             // The stop signal means the conductor is winding down, but the worker has not
             // entered the library's draining path. Other participants may already be parked on
             // the processing fence for this round, so the worker still has to rendezvous before
@@ -531,19 +474,13 @@ int worker_process_impl(int worker_index)
             break;
         }
 
-        LOG(role_name, "Waiting for RoundAdvance...");
         {
             std::unique_lock<std::mutex> lk(state_mutex);
-            bool got_advance = completion_cv.wait_for(lk, kWaitTimeout, [&] {
+            completion_cv.wait_for(lk, kWaitTimeout, [&] {
                 return round_completed || stop_requested.load(std::memory_order_acquire);
             });
-            if (!got_advance) {
-                LOG(role_name, "TIMEOUT waiting for RoundAdvance! round=%d round_completed=%d stop_requested=%d",
-                    round, round_completed, stop_requested.load(std::memory_order_acquire));
-            }
         }
         if (stop_requested.load(std::memory_order_acquire)) {
-            LOG(role_name, "Stop requested after RoundAdvance wait, entering fence barrier for round %d", round);
             // See comment above: we must still participate in the in-flight processing fence
             // before breaking out once a stop is observed.
             sintra::barrier<sintra::processing_fence_t>(barrier_round_complete_name(round),
@@ -551,14 +488,10 @@ int worker_process_impl(int worker_index)
             break;
         }
 
-        LOG(role_name, "Entering complete barrier (processing fence) for round %d", round);
         sintra::barrier<sintra::processing_fence_t>(barrier_round_complete_name(round), group);
-        LOG(role_name, "Exited complete barrier for round %d", round);
     }
 
-    LOG(role_name, "Entering final barrier");
     sintra::barrier(std::string(kFinalBarrier), "_sintra_all_processes");
-    LOG(role_name, "Exiting with code 0");
     return 0;
 }
 
@@ -572,8 +505,6 @@ int worker_process2() { return worker_process_impl(2); }
 
 int aggregator_process()
 {
-    LOG("AGGREGATOR", "===== STARTING =====");
-
     AggregatorState state;
     std::mutex state_mutex;
     std::condition_variable state_cv;
@@ -645,9 +576,7 @@ int aggregator_process()
             }
         }
 
-        LOG("AGGREGATOR", "==== ROUND %d START ==== Entering start barrier", round);
         sintra::barrier(barrier_round_start_name(round), group);
-        LOG("AGGREGATOR", "Exited start barrier, waiting for all workers to be done...");
 
         std::array<AggregatorWorkerState, kWorkerCount> snapshot{};
         bool local_failure = false;
@@ -659,18 +588,11 @@ int aggregator_process()
                 return state.ready_to_validate || stop_requested;
             });
             if (!ready) {
-                int done_count = 0;
-                for (size_t i = 0; i < kWorkerCount; ++i) {
-                    if (state.workers[i].done) done_count++;
-                }
-                LOG("AGGREGATOR", "TIMEOUT waiting for workers! round=%d done_count=%d/%d seed_ready=%d",
-                    round, done_count, (int)kWorkerCount, state.seed_ready);
                 local_failure = true;
             }
             seed = state.seed;
             snapshot = state.workers;
             if (!state.seed_ready) {
-                LOG("AGGREGATOR", "Seed not ready for round %d", round);
                 local_failure = true;
             }
         }
@@ -698,14 +620,10 @@ int aggregator_process()
                                           worker.xor_checksum, worker.sum_checksum};
         }
 
-        LOG("AGGREGATOR", "Entering complete barrier (processing fence) for round %d", round);
         sintra::barrier<sintra::processing_fence_t>(barrier_round_complete_name(round), group);
-        LOG("AGGREGATOR", "Exited complete barrier for round %d", round);
     }
 
-    LOG("AGGREGATOR", "Entering final barrier, failure=%d", failure.load());
     sintra::barrier(std::string(kFinalBarrier), "_sintra_all_processes");
-    LOG("AGGREGATOR", "Exiting with code %d", failure ? 1 : 0);
     return failure ? 1 : 0;
 }
 // ---------------------------------------------------------------------------
@@ -714,8 +632,6 @@ int aggregator_process()
 
 int verifier_process()
 {
-    LOG("VERIFIER", "===== STARTING =====");
-
     std::mutex state_mutex;
     std::condition_variable state_cv;
     std::atomic<bool> stop_requested{false};
@@ -780,9 +696,7 @@ int verifier_process()
             }
         }
 
-        LOG("VERIFIER", "==== ROUND %d START ==== Entering start barrier", round);
         sintra::barrier(barrier_round_start_name(round), group);
-        LOG("VERIFIER", "Exited start barrier, waiting for seed...");
 
         std::uint64_t seed = 0;
         {
@@ -791,8 +705,6 @@ int verifier_process()
                 return seed_ready[static_cast<std::size_t>(round)] || stop_requested;
             });
             if (!seed_ok) {
-                LOG("VERIFIER", "TIMEOUT waiting for seed! round=%d seed_ready=%d",
-                    round, seed_ready[static_cast<std::size_t>(round)]);
                 failure = true, std::memory_order_release;
             }
             if (seed_ready[static_cast<std::size_t>(round)]) {
@@ -800,7 +712,6 @@ int verifier_process()
             }
         }
 
-        LOG("VERIFIER", "Waiting for validations from all workers...");
         std::array<std::uint64_t, kWorkerCount> checksums{};
         bool success = true;
 
@@ -810,8 +721,6 @@ int verifier_process()
                 return ready_to_advance || stop_requested;
             });
             if (!ready) {
-                LOG("VERIFIER", "TIMEOUT waiting for validations! round=%d received=%d/%d",
-                    round, validations_received, (int)kWorkerCount);
                 success = false;
             }
             for (std::size_t idx = 0; idx < kWorkerCount; ++idx) {
@@ -830,21 +739,15 @@ int verifier_process()
 
         success = success && !failure.load(std::memory_order_acquire);
 
-        LOG("VERIFIER", "Broadcasting RoundAdvance: round=%d success=%d", round, success);
         sintra::world() << RoundAdvance{round, success, checksums};
         if (!success) {
-            LOG("VERIFIER", "Failure detected, setting stop_requested");
             stop_requested = true, std::memory_order_release;
         }
 
-        LOG("VERIFIER", "Entering complete barrier (processing fence) for round %d", round);
         sintra::barrier<sintra::processing_fence_t>(barrier_round_complete_name(round), group);
-        LOG("VERIFIER", "Exited complete barrier for round %d", round);
     }
 
-    LOG("VERIFIER", "Entering final barrier, failure=%d", failure.load());
     sintra::barrier(std::string(kFinalBarrier), "_sintra_all_processes");
-    LOG("VERIFIER", "Exiting with code %d", failure ? 1 : 0);
     return failure ? 1 : 0;
 }
 
