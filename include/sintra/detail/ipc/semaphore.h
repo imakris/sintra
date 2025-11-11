@@ -13,7 +13,6 @@ OVERVIEW
 - Cross-platform semaphore with a 32-bit counter.
 - POSIX uses a wait-on-address shim; Windows uses a named kernel semaphore.
 - Single monotonic deadline timeline (ns). No fairness guarantee.
-- Define SINTRA_USE_SEMAPHORE_POLLING to force polling backend on all platforms.
 
 SUPPORTED OS (intentional; no fallbacks)
 - Linux (futex), macOS 14.4+ (<os/sync_wait_on_address.h>), Windows 8+ (named kernel semaphore).
@@ -22,7 +21,7 @@ SUPPORTED OS (intentional; no fallbacks)
   * macOS: wake-all is used; may over-wake. If Apple adds wake-one/wake-N, prefer bounded waking.
   * POSIX wait(): implemented via a very large relative wait on a monotonic clock; effectively "infinite".
   * Windows try_wait(): returns false when no token is available and does not set errno; timed waits set errno=ETIMEDOUT.
-  * Polling backend: Uses atomic counter in shared memory with nanosleep fallback; simpler than Windows named semaphores.
+  * Polling backend: Uses atomic counter in shared memory with nanosleep fallback.
 
 INTERPROCESS SEMANTICS
 - POSIX: the 32-bit wait word must be in shared memory (e.g., mmap MAP_SHARED).
@@ -78,6 +77,7 @@ CAVEATS
 #include <climits>
 #include <cwchar>
 #include <limits>
+#include <thread>
 
 #include "../time_utils.h"
 
@@ -632,12 +632,7 @@ inline bool ips_backend::try_wait_for(std::chrono::nanoseconds d) noexcept
                 return false;
             }
             if (errno == ENOTSUP) {
-#if defined(_WIN32)
-                Sleep(1);  // Windows Sleep takes milliseconds
-#else
-                struct timespec ts{0, 1'000'000};
-                nanosleep(&ts, nullptr);
-#endif
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
             // other errors treated as spurious; loop and recheck
         }
