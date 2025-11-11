@@ -6,6 +6,7 @@
 #include "../process/coordinator.h"
 #include "../process/managed_process.h"
 
+#include <algorithm>
 #include <cassert>
 #include <functional>
 #include <iostream>
@@ -337,8 +338,22 @@ instance_id_type Coordinator::publish_transceiver(type_id_type tid, instance_id_
     auto pr_it = m_transceiver_registry.find(process_iid);
     auto entry = tn_type{ tid, assigned_name };
 
-    auto true_sequence = [&]() {
-        emit_global<instance_published>(tid, iid, assigned_name);
+    auto true_sequence = [&](bool allow_notification_delay) {
+        bool queued_notification = false;
+        if (allow_notification_delay) {
+            std::lock_guard<mutex> init_lock(m_init_tracking_mutex);
+            if (!m_processes_in_initialization.empty()) {
+                // Delay instance_published while startup is still in progress to prevent
+                // circular RPC activation between not-yet-ready processes.
+                m_delayed_instance_publications.push_back(
+                    Pending_instance_publication{tid, iid, assigned_name});
+                queued_notification = true;
+            }
+        }
+
+        if (!queued_notification) {
+            emit_global<instance_published>(tid, iid, assigned_name);
+        }
         assert(s_tl_additional_piids_size == 0);
         assert(s_tl_common_function_iid == invalid_instance_id);
 
@@ -387,7 +402,7 @@ instance_id_type Coordinator::publish_transceiver(type_id_type tid, instance_id_
         // Do NOT reset draining state here - only reset when publishing a NEW PROCESS (Managed_process),
         // not when publishing a regular transceiver. Resetting here could interfere with shutdown.
 
-        return true_sequence();
+        return true_sequence(false);
     }
     else
     if (iid == process_iid) { // the transceiver is a Managed_process
@@ -408,7 +423,7 @@ instance_id_type Coordinator::publish_transceiver(type_id_type tid, instance_id_
             m_draining_process_states[slot] = 0;
         }
 
-        return true_sequence();
+        return true_sequence(true);
     }
     else {
         return invalid_instance_id;
@@ -448,8 +463,22 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
     // keep a copy of the assigned name before deleting it
     auto tn = it->second;
 
+    std::vector<Pending_instance_publication> ready_notifications;
+
     // if it is a Managed_process is being unpublished, more cleanup is required
     if (iid == process_iid) {
+
+        ready_notifications = finalize_initialization_tracking(process_iid);
+        if (!ready_notifications.empty()) {
+            ready_notifications.erase(
+                std::remove_if(
+                    ready_notifications.begin(),
+                    ready_notifications.end(),
+                    [&](const Pending_instance_publication& publication) {
+                        return process_of(publication.instance_id) == process_iid;
+                    }),
+                ready_notifications.end());
+        }
 
         // remove all name lookup entries resolving to the unpublished process
         auto name_map = s_mproc->m_instance_id_of_assigned_name.scoped();
@@ -538,6 +567,15 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
     }
 
     emit_global<instance_unpublished>(tn.type_id, iid, tn.name);
+
+    if (!ready_notifications.empty()) {
+        for (auto& publication : ready_notifications) {
+            emit_global<instance_published>(
+                publication.type_id,
+                publication.instance_id,
+                publication.assigned_name);
+        }
+    }
 
     return true;
 }
@@ -668,6 +706,39 @@ void Coordinator::recover_if_required(instance_id_type piid)
     else {
         // remove traces
         // ... [implement]
+    }
+}
+
+inline
+std::vector<Coordinator::Pending_instance_publication>
+Coordinator::finalize_initialization_tracking(instance_id_type process_iid)
+{
+    std::vector<Pending_instance_publication> ready_notifications;
+    {
+        std::lock_guard<mutex> lock(m_init_tracking_mutex);
+        if (process_iid != invalid_instance_id) {
+            m_processes_in_initialization.erase(process_iid);
+        }
+        if (m_processes_in_initialization.empty() && !m_delayed_instance_publications.empty()) {
+            ready_notifications.swap(m_delayed_instance_publications);
+        }
+    }
+    return ready_notifications;
+}
+
+inline
+void Coordinator::mark_initialization_complete(instance_id_type process_iid)
+{
+    auto ready_notifications = finalize_initialization_tracking(process_iid);
+    if (ready_notifications.empty()) {
+        return;
+    }
+
+    for (auto& publication : ready_notifications) {
+        emit_global<instance_published>(
+            publication.type_id,
+            publication.instance_id,
+            publication.assigned_name);
     }
 }
 
