@@ -764,17 +764,7 @@ void Transceiver::rpc_handler(Message_prefix& untyped_msg)
 
             // NOTE: For the recipients in this loop, this will be the second time the function returns,
             // assuming they have already received a deferral.
-            #ifdef SINTRA_BARRIER_DEBUG
-            std::fprintf(stderr, "[BARRIER_DEBUG] RPC return: sending %zu additional completions (common_fiid=%llu)\n",
-                (size_t)s_tl_additional_piids_size, (unsigned long long)s_tl_common_function_iid);
-            std::fflush(stderr);
-            #endif
             for (size_t i = 0; i < s_tl_additional_piids_size; i++) {
-                #ifdef SINTRA_BARRIER_DEBUG
-                std::fprintf(stderr, "[BARRIER_DEBUG]   -> writing completion to %llu via m_out_rep_c=%p\n",
-                    (unsigned long long)s_tl_additional_piids[i], (void*)s_mproc->m_out_rep_c);
-                std::fflush(stderr);
-                #endif
                 return_message_type* placed_msg = s_mproc->m_out_rep_c->write<return_message_type>(vb_size<return_message_type>(vf.result), vf.result);
                 finalize_rpc_write(placed_msg, s_tl_additional_piids[i], s_tl_common_function_iid, obj, not_defined_type_id);
             }

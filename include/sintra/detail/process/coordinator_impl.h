@@ -3,9 +3,6 @@
 
 #pragma once
 
-// TEMPORARY: Enable barrier debugging
-#define SINTRA_BARRIER_DEBUG 1
-
 #include "../process/coordinator.h"
 #include "../process/managed_process.h"
 
@@ -38,26 +35,12 @@ sequence_counter_type Process_group::barrier(
     std::unique_lock basic_lock(m_call_mutex);
     instance_id_type caller_piid = s_tl_current_message->sender_instance_id;
 
-    #ifdef SINTRA_BARRIER_DEBUG
-    auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
-    std::fprintf(stderr, "[BARRIER_DEBUG T:%lld] RPC ARRIVAL: barrier='%s' caller=%llu\n",
-        (long long)now_ms, barrier_name.c_str(), (unsigned long long)caller_piid);
-    std::fflush(stderr);
-    #endif
-
     if (m_process_ids.find(caller_piid) == m_process_ids.end()) {
         throw std::logic_error("The caller is not a member of the process group.");
     }
 
     auto& barrier_entry = m_barriers[barrier_name];
     bool barrier_exists = (barrier_entry != nullptr);
-
-    #ifdef SINTRA_BARRIER_DEBUG
-    std::fprintf(stderr, "[BARRIER_DEBUG T:%lld] Barrier state: exists=%d, caller=%llu\n",
-        (long long)now_ms, barrier_exists, (unsigned long long)caller_piid);
-    std::fflush(stderr);
-    #endif
 
     if (!barrier_entry) {
         barrier_entry = std::make_shared<Barrier>();
@@ -77,23 +60,12 @@ sequence_counter_type Process_group::barrier(
         b.failed = false;
         b.common_function_iid = make_instance_id();
 
-        #ifdef SINTRA_BARRIER_DEBUG
-        std::fprintf(stderr, "[BARRIER_DEBUG] FIRST ARRIVAL for '%s': caller=%llu, initializing with %zu members\n",
-            barrier_name.c_str(), (unsigned long long)caller_piid, m_process_ids.size());
-        std::fflush(stderr);
-        #endif
-
         // Filter out draining processes while still holding m_call_mutex for atomicity
         if (auto* coord = s_coord) {
             for (auto it = b.processes_pending.begin();
                  it != b.processes_pending.end(); )
             {
                 if (coord->is_process_draining(*it)) {
-                    #ifdef SINTRA_BARRIER_DEBUG
-                    std::fprintf(stderr, "[BARRIER_DEBUG] Filtered out draining process %llu from barrier '%s'\n",
-                        (unsigned long long)*it, barrier_name.c_str());
-                    std::fflush(stderr);
-                    #endif
                     it = b.processes_pending.erase(it);
                 }
                 else {
@@ -103,26 +75,12 @@ sequence_counter_type Process_group::barrier(
         }
     }
 
-    #ifdef SINTRA_BARRIER_DEBUG
-    std::fprintf(stderr, "[BARRIER_DEBUG] Before arrival processing for '%s': pending=%zu, arrived=%zu, caller=%llu\n",
-        barrier_name.c_str(), b.processes_pending.size(), b.processes_arrived.size(),
-        (unsigned long long)caller_piid);
-    std::fflush(stderr);
-    #endif
-
     // Now safe to release m_call_mutex - barrier state is consistent and other threads
     // need to be able to arrive at the barrier concurrently
     basic_lock.unlock();
 
     b.processes_arrived.insert(caller_piid);
     b.processes_pending.erase(caller_piid);
-
-    #ifdef SINTRA_BARRIER_DEBUG
-    std::fprintf(stderr, "[BARRIER_DEBUG] After arrival for '%s': pending=%zu, arrived=%zu, caller=%llu\n",
-        barrier_name.c_str(), b.processes_pending.size(), b.processes_arrived.size(),
-        (unsigned long long)caller_piid);
-    std::fflush(stderr);
-    #endif
 
     if (b.processes_pending.size() == 0) {
         // Last arrival
@@ -141,17 +99,6 @@ sequence_counter_type Process_group::barrier(
         s_tl_common_function_iid = current_common_fiid;
         b.m.unlock();
 
-        // DIAGNOSTIC: Log barrier completion
-        #ifdef SINTRA_BARRIER_DEBUG
-        std::fprintf(stderr, "[BARRIER_DEBUG] Last arrival for '%s': caller=%llu, sending completions to %zu processes\n",
-            barrier_name.c_str(), (unsigned long long)caller_piid, (size_t)s_tl_additional_piids_size);
-        for (size_t i = 0; i < s_tl_additional_piids_size; i++) {
-            std::fprintf(stderr, "[BARRIER_DEBUG]   -> completion to process %llu\n",
-                (unsigned long long)s_tl_additional_piids[i]);
-        }
-        std::fflush(stderr);
-        #endif
-
         // Re-lock m_call_mutex to safely erase from m_barriers
         basic_lock.lock();
         auto it = m_barriers.find(barrier_name);
@@ -165,23 +112,12 @@ sequence_counter_type Process_group::barrier(
         // basic_lock will unlock m_call_mutex on return
         // Use reply ring watermark (m_out_rep_c) since barrier completion messages
         // are sent on the reply channel. Get it at return time for the calling process.
-        #ifdef SINTRA_BARRIER_DEBUG
-        std::fprintf(stderr, "[BARRIER_DEBUG] LAST ARRIVAL returns immediately: barrier='%s' caller=%llu\n",
-            barrier_name.c_str(), (unsigned long long)caller_piid);
-        std::fflush(stderr);
-        #endif
         return s_mproc->m_out_rep_c->get_leading_sequence();
     }
     else {
         // Not last arrival - emit a deferral message now and return without a normal reply
         auto* current_message = s_tl_current_message;
         assert(current_message);
-
-        #ifdef SINTRA_BARRIER_DEBUG
-        std::fprintf(stderr, "[BARRIER_DEBUG] NOT LAST: barrier='%s' caller=%llu, sending deferral (pending=%zu remaining)\n",
-            barrier_name.c_str(), (unsigned long long)caller_piid, b.processes_pending.size());
-        std::fflush(stderr);
-        #endif
 
         deferral* placed_msg = s_mproc->m_out_rep_c->write<deferral>(0, b.common_function_iid);
         Transceiver::finalize_rpc_write(

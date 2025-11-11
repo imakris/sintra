@@ -73,7 +73,7 @@ constexpr int kRounds = 7;
 constexpr std::chrono::seconds kWaitTimeout{20};
 constexpr std::chrono::milliseconds kMinWorkerDelay{1};
 constexpr std::chrono::milliseconds kMaxWorkerDelay{6};
-constexpr std::string_view kBarrierGroup = "_sintra_external_processes";
+constexpr std::string_view kBarrierGroup = "_sintra_all_processes";
 constexpr std::string_view kFinalBarrier = "complex-choreography-finish";
 constexpr std::string_view kEnvSharedDir = "SINTRA_COMPLEX_TEST_DIR";
 
