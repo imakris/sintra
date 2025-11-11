@@ -1859,6 +1859,12 @@ void Managed_process::wait_for_delivery_fence()
 
 inline void Managed_process::notify_delivery_progress()
 {
+    // Acquire the mutex before notifying to prevent lost notifications.
+    // Even though the shared state (progress sequences) is atomic, we must
+    // hold the mutex when notifying to ensure the notification doesn't arrive
+    // before a waiter transitions from predicate-check to wait-state.
+    // See: wait_for_delivery_fence() which waits on this condition variable.
+    std::lock_guard<std::mutex> lk(m_delivery_mutex);
     m_delivery_condition.notify_all();
 }
 
