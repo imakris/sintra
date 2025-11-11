@@ -84,7 +84,6 @@ CAVEATS
 // Platform headers MUST be included BEFORE opening namespaces to avoid polluting them
 #if defined(SINTRA_USE_SEMAPHORE_POLLING)
   // User explicitly requested polling backend on all platforms
-  #include <time.h>
   #define SINTRA_BACKEND_POLLING 1
 #elif defined(_WIN32)
   #include "../sintra_windows.h"
