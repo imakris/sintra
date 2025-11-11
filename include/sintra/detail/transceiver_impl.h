@@ -150,17 +150,16 @@ inline
 void
 Transceiver::release_rpc_execution()
 {
-    bool should_notify;
-    {
-        unique_lock<mutex> lock(m_rpc_lifecycle_mutex);
-        assert(m_active_rpc_calls);
+    unique_lock<mutex> lock(m_rpc_lifecycle_mutex);
+    assert(m_active_rpc_calls);
 
-        --m_active_rpc_calls;
-        should_notify = m_rpc_shutdown_requested && m_active_rpc_calls == 0;
-        // Lock automatically released by scope exit
-    }
+    --m_active_rpc_calls;
+    const bool should_notify = m_rpc_shutdown_requested && m_active_rpc_calls == 0;
 
     if (should_notify) {
+        // Notify while holding the lock to prevent lost notifications.
+        // This ensures the notification doesn't arrive before a waiter
+        // transitions from predicate-check to wait-state.
         m_rpc_lifecycle_condition.notify_all();
     }
 }
