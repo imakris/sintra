@@ -42,7 +42,7 @@ public:
 
     void set_raw_owner(owner_token token)
     {
-        owner_atomic() = token, std::memory_order_release;
+        owner_atomic().store(token);
     }
 
     owner_token raw_owner() const
@@ -52,7 +52,7 @@ public:
 
     void set_recovering(uint32_t pid)
     {
-        recovering_atomic() = pid, std::memory_order_release;
+        recovering_atomic().store(pid);
     }
 
     static owner_token make_current_owner_token()
@@ -107,16 +107,16 @@ int main()
     std::atomic<bool> other_thread_threw{false};
 
     std::thread contender([&] {
-        other_thread_attempted = true, std::memory_order_release;
+        other_thread_attempted.store(true);
         try {
             bool acquired = mtx.try_lock();
-            other_thread_acquired = acquired, std::memory_order_release;
+            other_thread_acquired.store(acquired);
             if (acquired) {
                 mtx.unlock();
             }
         }
         catch (...) {
-            other_thread_threw = true, std::memory_order_release;
+            other_thread_threw.store(true);
         }
     });
 
@@ -137,7 +137,7 @@ int main()
     std::atomic<bool> second_thread_locked{false};
     std::thread locker([&] {
         mtx.lock();
-        second_thread_locked = true, std::memory_order_release;
+        second_thread_locked.store(true);
         std::this_thread::sleep_for(1ms);
         mtx.unlock();
     });
@@ -159,7 +159,7 @@ int main()
         catch (const std::system_error& error) {
             expect_error_code(error, std::errc::operation_not_permitted,
                               "unlock from non-owner");
-            non_owner_detected = true, std::memory_order_release;
+            non_owner_detected.store(true);
         }
         catch (...) {
         }

@@ -455,7 +455,7 @@ void test_cross_process_coordination()
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
 
-        shared->start = 1, std::memory_order_release;
+        shared->start.store(1);
 
         const int expected = kChildren * kIterationsPerChild;
         const auto finish_deadline = std::chrono::steady_clock::now() + kOverallTimeout;

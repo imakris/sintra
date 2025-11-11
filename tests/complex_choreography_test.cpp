@@ -426,13 +426,13 @@ int worker_process_impl(int worker_index)
             round_completed = true;
         }
         if (!advance.success) {
-            stop_requested = true, std::memory_order_release;
+            stop_requested.store(true);
         }
         completion_cv.notify_all();
     };
 
     auto stop_slot = [&](const Stop&) {
-        stop_requested = true, std::memory_order_release;
+        stop_requested.store(true);
         {
             std::lock_guard<std::mutex> lk(state_mutex);
             kickoff_seen = true;
@@ -449,7 +449,7 @@ int worker_process_impl(int worker_index)
     const std::string group(kBarrierGroup);
 
     for (int round = 0; round < kRounds && !stop_requested; ++round) {
-        active_round = round, std::memory_order_release;
+        active_round.store(round);
         {
             std::lock_guard<std::mutex> lk(state_mutex);
             kickoff_seen = false;
@@ -524,7 +524,7 @@ int aggregator_process()
         if (task.round != state.round || task.worker_id < 0 ||
             task.worker_id >= static_cast<int>(kWorkerCount))
         {
-            failure = true, std::memory_order_release;
+            failure.store(true);
             return;
         }
         auto& worker = state.workers[static_cast<std::size_t>(task.worker_id)];
@@ -538,7 +538,7 @@ int aggregator_process()
         if (done.round != state.round || done.worker_id < 0 ||
             done.worker_id >= static_cast<int>(kWorkerCount))
         {
-            failure = true, std::memory_order_release;
+            failure.store(true);
             return;
         }
         auto& worker = state.workers[static_cast<std::size_t>(done.worker_id)];
@@ -658,7 +658,7 @@ int verifier_process()
         if (validation.round != current_round || validation.worker_id < 0 ||
             validation.worker_id >= static_cast<int>(kWorkerCount))
         {
-            failure = true, std::memory_order_release;
+            failure.store(true);
             return;
         }
         auto& worker = worker_state[static_cast<std::size_t>(validation.worker_id)];
@@ -705,7 +705,7 @@ int verifier_process()
                 return seed_ready[static_cast<std::size_t>(round)] || stop_requested;
             });
             if (!seed_ok) {
-                failure = true, std::memory_order_release;
+                failure.store(true);
             }
             if (seed_ready[static_cast<std::size_t>(round)]) {
                 seed = seeds[static_cast<std::size_t>(round)];
@@ -741,7 +741,7 @@ int verifier_process()
 
         sintra::world() << RoundAdvance{round, success, checksums};
         if (!success) {
-            stop_requested = true, std::memory_order_release;
+            stop_requested.store(true);
         }
 
         sintra::barrier<sintra::processing_fence_t>(barrier_round_complete_name(round), group);
