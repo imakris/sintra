@@ -130,7 +130,7 @@ struct ips_backend
 };
 
 // ----------------------------- Windows backend -----------------------------
-#if defined(_WIN32)
+#if !defined(SINTRA_BACKEND_POLLING) && defined(_WIN32)
 
   #if defined(_MSC_VER)
     #define bounded_swprintf(buf, cch, fmt, x)  _snwprintf_s(buf, cch, _TRUNCATE, fmt, x)
