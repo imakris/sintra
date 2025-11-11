@@ -513,9 +513,10 @@ static inline int posix_wait_equal_until(
         return -1;
     }
 #elif SINTRA_BACKEND_POLLING
+    // Polling backend: sleep 1ms and return spurious wake
     (void)addr; (void)expected; (void)deadline;
-    errno = ENOTSUP;
-    return -1;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    return 0;  // Treat as spurious wake, caller will recheck condition
 #endif
 }
 
@@ -630,9 +631,6 @@ inline bool ips_backend::try_wait_for(std::chrono::nanoseconds d) noexcept
                     return true;
                 }
                 return false;
-            }
-            if (errno == ENOTSUP) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
             // other errors treated as spurious; loop and recheck
         }
