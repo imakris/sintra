@@ -1438,6 +1438,13 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
     // assign_name requires that all group processes are instantiated, in order
     // to receive the instance_published event
     if (s_recovery_occurrence == 0) {
+        // Mark initialization complete BEFORE the barrier to avoid deadlock.
+        // The barrier requires RPC routing between all processes, which needs
+        // instance_published events. Those events are delayed while processes
+        // are in m_processes_in_initialization. We must mark complete before
+        // the barrier wait to break this circular dependency.
+        notify_init_complete();
+
         bool all_started = Process_group::rpc_barrier(m_group_all, UIBS);
 
         // If we're the coordinator and have failures to report, throw init_error
