@@ -3,6 +3,9 @@
 #include <thread>
 #include <vector>
 #include <atomic>
+#include <string>
+#include <cstring>
+#include <stdexcept>
 
 #ifdef __APPLE__
 #include <cerrno>
@@ -17,6 +20,23 @@
 #endif
 
 #if HAS_OS_SYNC
+class os_sync_not_supported : public std::runtime_error {
+public:
+    explicit os_sync_not_supported(const char* function_name)
+        : std::runtime_error(std::string(function_name) + " not supported on this macOS version")
+    {
+    }
+};
+
+[[noreturn]] static void handle_os_sync_error(const char* function_name)
+{
+    const int error = errno;
+    if (error == ENOTSUP || error == ENOSYS) {
+        throw os_sync_not_supported(function_name);
+    }
+    throw std::runtime_error(std::string(function_name) + " failed: " + std::strerror(error));
+}
+
 // os_sync implementation
 class os_sync_semaphore {
 public:
@@ -57,7 +77,7 @@ public:
             if (errno == EINTR || errno == EFAULT) {
                 continue;
             }
-            throw std::runtime_error("os_sync_wait_on_address failed");
+            handle_os_sync_error("os_sync_wait_on_address");
         }
     }
 
@@ -75,7 +95,7 @@ private:
             if (errno == EINTR) {
                 continue;
             }
-            throw std::runtime_error("os_sync_wake_by_address_any failed");
+            handle_os_sync_error("os_sync_wake_by_address_any");
         }
     }
 
@@ -145,15 +165,25 @@ int main() {
     std::cout << "  Total items: " << total_items << std::endl;
     std::cout << std::endl;
 
-    double time = benchmark_producer_consumer<os_sync_semaphore>(
-        num_producers, num_consumers, items_per_producer);
+    try {
+        double time = benchmark_producer_consumer<os_sync_semaphore>(
+            num_producers, num_consumers, items_per_producer);
 
-    std::cout << "=== RESULT ===" << std::endl;
-    std::cout << "  Time: " << time << " seconds" << std::endl;
-    std::cout << "  Throughput: " << (total_items / time) << " items/sec" << std::endl;
-    std::cout << std::endl;
-    std::cout << "Benchmark completed successfully." << std::endl;
-    return 0;
+        std::cout << "=== RESULT ===" << std::endl;
+        std::cout << "  Time: " << time << " seconds" << std::endl;
+        std::cout << "  Throughput: " << (total_items / time) << " items/sec" << std::endl;
+        std::cout << std::endl;
+        std::cout << "Benchmark completed successfully." << std::endl;
+        return 0;
+    }
+    catch (const os_sync_not_supported&) {
+        std::cout << "os_sync_wait_on_address NOT AVAILABLE on this macOS version." << std::endl;
+        return 0;
+    }
+    catch (const std::exception& ex) {
+        std::cerr << "Benchmark failed: " << ex.what() << std::endl;
+        return 1;
+    }
 }
 
 #else
