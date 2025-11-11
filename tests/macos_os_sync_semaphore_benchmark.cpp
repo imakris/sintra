@@ -3,6 +3,11 @@
 #include <thread>
 #include <vector>
 #include <atomic>
+#include <string>
+#include <cstring>
+#include <stdexcept>
+#include <mutex>
+#include <exception>
 
 #ifdef __APPLE__
 #include <cerrno>
@@ -17,6 +22,23 @@
 #endif
 
 #if HAS_OS_SYNC
+class os_sync_not_supported : public std::runtime_error {
+public:
+    explicit os_sync_not_supported(const char* function_name)
+        : std::runtime_error(std::string(function_name) + " not supported on this macOS version")
+    {
+    }
+};
+
+[[noreturn]] static void handle_os_sync_error(const char* function_name)
+{
+    const int error = errno;
+    if (error == ENOTSUP || error == ENOSYS) {
+        throw os_sync_not_supported(function_name);
+    }
+    throw std::runtime_error(std::string(function_name) + " failed: " + std::strerror(error));
+}
+
 // os_sync implementation
 class os_sync_semaphore {
 public:
@@ -57,7 +79,7 @@ public:
             if (errno == EINTR || errno == EFAULT) {
                 continue;
             }
-            throw std::runtime_error("os_sync_wait_on_address failed");
+            handle_os_sync_error("os_sync_wait_on_address");
         }
     }
 
@@ -75,7 +97,7 @@ private:
             if (errno == EINTR) {
                 continue;
             }
-            throw std::runtime_error("os_sync_wake_by_address_any failed");
+            handle_os_sync_error("os_sync_wake_by_address_any");
         }
     }
 
@@ -91,14 +113,31 @@ double benchmark_producer_consumer(int num_producers, int num_consumers, int ite
 
     auto start = std::chrono::steady_clock::now();
 
+    std::mutex exception_mutex;
+    std::exception_ptr first_exception;
+    auto record_exception = [&](std::exception_ptr ex) {
+        if (!ex) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(exception_mutex);
+        if (!first_exception) {
+            first_exception = std::move(ex);
+        }
+    };
+
     // Launch producers
     std::vector<std::thread> producers;
     for (int p = 0; p < num_producers; ++p) {
-        producers.emplace_back([&]() {
-            for (int i = 0; i < items_per_producer; ++i) {
-                empty_sem.wait();
-                items_produced.fetch_add(1);
-                full_sem.post();
+        producers.emplace_back([&, items_per_producer]() {
+            try {
+                for (int i = 0; i < items_per_producer; ++i) {
+                    empty_sem.wait();
+                    items_produced.fetch_add(1);
+                    full_sem.post();
+                }
+            }
+            catch (...) {
+                record_exception(std::current_exception());
             }
         });
     }
@@ -112,10 +151,15 @@ double benchmark_producer_consumer(int num_producers, int num_consumers, int ite
     for (int c = 0; c < num_consumers; ++c) {
         int my_items = items_per_consumer + (c < extra ? 1 : 0);
         consumers.emplace_back([&, my_items]() {
-            for (int i = 0; i < my_items; ++i) {
-                full_sem.wait();
-                items_consumed.fetch_add(1);
-                empty_sem.post();
+            try {
+                for (int i = 0; i < my_items; ++i) {
+                    full_sem.wait();
+                    items_consumed.fetch_add(1);
+                    empty_sem.post();
+                }
+            }
+            catch (...) {
+                record_exception(std::current_exception());
             }
         });
     }
@@ -123,6 +167,10 @@ double benchmark_producer_consumer(int num_producers, int num_consumers, int ite
     // Wait for completion
     for (auto& t : producers) t.join();
     for (auto& t : consumers) t.join();
+
+    if (first_exception) {
+        std::rethrow_exception(first_exception);
+    }
 
     auto end = std::chrono::steady_clock::now();
     return std::chrono::duration<double>(end - start).count();
@@ -145,15 +193,25 @@ int main() {
     std::cout << "  Total items: " << total_items << std::endl;
     std::cout << std::endl;
 
-    double time = benchmark_producer_consumer<os_sync_semaphore>(
-        num_producers, num_consumers, items_per_producer);
+    try {
+        double time = benchmark_producer_consumer<os_sync_semaphore>(
+            num_producers, num_consumers, items_per_producer);
 
-    std::cout << "=== RESULT ===" << std::endl;
-    std::cout << "  Time: " << time << " seconds" << std::endl;
-    std::cout << "  Throughput: " << (total_items / time) << " items/sec" << std::endl;
-    std::cout << std::endl;
-    std::cout << "Benchmark completed successfully." << std::endl;
-    return 0;
+        std::cout << "=== RESULT ===" << std::endl;
+        std::cout << "  Time: " << time << " seconds" << std::endl;
+        std::cout << "  Throughput: " << (total_items / time) << " items/sec" << std::endl;
+        std::cout << std::endl;
+        std::cout << "Benchmark completed successfully." << std::endl;
+        return 0;
+    }
+    catch (const os_sync_not_supported&) {
+        std::cout << "os_sync_wait_on_address NOT AVAILABLE on this macOS version." << std::endl;
+        return 0;
+    }
+    catch (const std::exception& ex) {
+        std::cerr << "Benchmark failed: " << ex.what() << std::endl;
+        return 1;
+    }
 }
 
 #else
