@@ -145,6 +145,7 @@ private:
 
     void enable_recovery(instance_id_type piid);
     void recover_if_required(instance_id_type piid);
+    void mark_initialization_complete(instance_id_type process_iid);
 
     // Blocks until all processes identified by process_group_id have called the function.
     // num_absences may be used by a caller to specify that it is aware that other callers will
@@ -158,6 +159,7 @@ private:
     mutex                                       m_type_resolution_mutex;
     mutex                                       m_publish_mutex;
     mutex                                       m_groups_mutex;
+    mutex                                       m_init_tracking_mutex;
 
     // access only after acquiring m_publish_mutex
     map<
@@ -193,6 +195,20 @@ private:
 
     std::array<std::atomic<uint8_t>, max_process_index + 1> m_draining_process_states{};
 
+    unordered_set<instance_id_type>             m_processes_in_initialization;
+
+    struct Pending_instance_publication
+    {
+        type_id_type     type_id = not_defined_type_id;
+        instance_id_type instance_id = invalid_instance_id;
+        string           assigned_name;
+    };
+
+    std::vector<Pending_instance_publication>   m_delayed_instance_publications;
+
+    std::vector<Pending_instance_publication> finalize_initialization_tracking(
+        instance_id_type process_iid);
+
 public:
     SINTRA_RPC_EXPLICIT(resolve_type)
     SINTRA_RPC_EXPLICIT(resolve_instance)
@@ -203,6 +219,7 @@ public:
     SINTRA_RPC_EXPLICIT(make_process_group)
     SINTRA_RPC_EXPLICIT(print)
     SINTRA_RPC_EXPLICIT(enable_recovery)
+    SINTRA_RPC_EXPLICIT(mark_initialization_complete)
 
     bool is_process_draining(instance_id_type process_iid) const;
 

@@ -17,11 +17,11 @@
 # Main test suite
 # Iteration counts are tuned for CI (detect flakiness and race conditions)
 
-barrier_complex_choreography_test         20
+barrier_complex_choreography_test         200
 barrier_flush_test                        50
-barrier_pathological_choreography_test    60
+barrier_pathological_choreography_test    600
 barrier_rapid_reuse_test                  40
-barrier_stress_test                       40
+barrier_stress_test                       400
 basic_pub_sub                             60
 choreography_extreme_test                 80
 complex_choreography_stress_test          60

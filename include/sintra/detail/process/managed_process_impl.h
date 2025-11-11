@@ -1259,6 +1259,11 @@ Managed_process::Spawn_result Managed_process::spawn_swarm_process(
     }
 
     int spawned_pid = -1;
+    if (s_coord) {
+        std::lock_guard<mutex> init_lock(s_coord->m_init_tracking_mutex);
+        s_coord->m_processes_in_initialization.insert(s.piid);
+    }
+
     result.success = spawn_detached(s.binary_name.c_str(), cargs.v(), &spawned_pid);
 
     if (result.success) {
@@ -1311,6 +1316,10 @@ Managed_process::Spawn_result Managed_process::spawn_swarm_process(
         //m_readers.pop_back();
         std::unique_lock<std::shared_mutex> readers_lock(m_readers_mutex);
         m_readers.erase(s.piid);
+
+        if (s_coord) {
+            s_coord->mark_initialization_complete(s.piid);
+        }
     }
 
     return result;
@@ -1329,7 +1338,38 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
     std::unordered_set<instance_id_type> successfully_spawned;
     std::vector<init_error::failed_process> spawn_failures;
 
+    bool init_completion_notified = false;
+    auto notify_init_complete = [&]() {
+        if (init_completion_notified) {
+            return;
+        }
+        init_completion_notified = true;
+
+        if (s_coord) {
+            s_coord->mark_initialization_complete(m_instance_id);
+        }
+        else if (s_coord_id != invalid_instance_id) {
+            Coordinator::rpc_mark_initialization_complete(s_coord_id, m_instance_id);
+        }
+    };
+
+    struct Init_completion_guard
+    {
+        std::function<void()> fn;
+        ~Init_completion_guard()
+        {
+            if (fn) {
+                fn();
+            }
+        }
+    } init_guard{notify_init_complete};
+
     if (s_coord) {
+
+        {
+            std::lock_guard<mutex> init_lock(s_coord->m_init_tracking_mutex);
+            s_coord->m_processes_in_initialization.insert(m_instance_id);
+        }
 
         // 1. prepare the command line for each invocation
         auto it = branch_vector.begin();
@@ -1423,14 +1463,17 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
             );
             successful_list.push_back(m_instance_id); // Include coordinator
 
+            notify_init_complete();
             throw init_error(std::move(spawn_failures), std::move(successful_list));
         }
 
         if (!all_started) {
+            notify_init_complete();
             return false;
         }
     }
 
+    notify_init_complete();
     return true;
 }
 
