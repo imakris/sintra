@@ -1416,6 +1416,7 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
 
         m_group_all      = s_coord->make_process_group("_sintra_all_processes", all_processes);
         m_group_external = s_coord->make_process_group("_sintra_external_processes", successfully_spawned);
+        notify_init_complete();
 
         s_branch_index = 0;
     }
@@ -1431,6 +1432,7 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
             exit(1);
         }
 
+        notify_init_complete();
         m_group_all      = Coordinator::rpc_wait_for_instance(s_coord_id, "_sintra_all_processes");
         m_group_external = Coordinator::rpc_wait_for_instance(s_coord_id, "_sintra_external_processes");
     }
@@ -1473,7 +1475,6 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
         }
     }
 
-    notify_init_complete();
     return true;
 }
 
