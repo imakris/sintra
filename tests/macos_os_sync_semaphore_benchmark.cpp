@@ -6,6 +6,8 @@
 #include <string>
 #include <cstring>
 #include <stdexcept>
+#include <mutex>
+#include <exception>
 
 #ifdef __APPLE__
 #include <cerrno>
@@ -111,14 +113,31 @@ double benchmark_producer_consumer(int num_producers, int num_consumers, int ite
 
     auto start = std::chrono::steady_clock::now();
 
+    std::mutex exception_mutex;
+    std::exception_ptr first_exception;
+    auto record_exception = [&](std::exception_ptr ex) {
+        if (!ex) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(exception_mutex);
+        if (!first_exception) {
+            first_exception = std::move(ex);
+        }
+    };
+
     // Launch producers
     std::vector<std::thread> producers;
     for (int p = 0; p < num_producers; ++p) {
-        producers.emplace_back([&]() {
-            for (int i = 0; i < items_per_producer; ++i) {
-                empty_sem.wait();
-                items_produced.fetch_add(1);
-                full_sem.post();
+        producers.emplace_back([&, items_per_producer]() {
+            try {
+                for (int i = 0; i < items_per_producer; ++i) {
+                    empty_sem.wait();
+                    items_produced.fetch_add(1);
+                    full_sem.post();
+                }
+            }
+            catch (...) {
+                record_exception(std::current_exception());
             }
         });
     }
@@ -132,10 +151,15 @@ double benchmark_producer_consumer(int num_producers, int num_consumers, int ite
     for (int c = 0; c < num_consumers; ++c) {
         int my_items = items_per_consumer + (c < extra ? 1 : 0);
         consumers.emplace_back([&, my_items]() {
-            for (int i = 0; i < my_items; ++i) {
-                full_sem.wait();
-                items_consumed.fetch_add(1);
-                empty_sem.post();
+            try {
+                for (int i = 0; i < my_items; ++i) {
+                    full_sem.wait();
+                    items_consumed.fetch_add(1);
+                    empty_sem.post();
+                }
+            }
+            catch (...) {
+                record_exception(std::current_exception());
             }
         });
     }
@@ -143,6 +167,10 @@ double benchmark_producer_consumer(int num_producers, int num_consumers, int ite
     // Wait for completion
     for (auto& t : producers) t.join();
     for (auto& t : consumers) t.join();
+
+    if (first_exception) {
+        std::rethrow_exception(first_exception);
+    }
 
     auto end = std::chrono::steady_clock::now();
     return std::chrono::duration<double>(end - start).count();
