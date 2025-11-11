@@ -93,7 +93,7 @@ struct Remotely_accessible: sintra::Derived_transceiver<Remotely_accessible>
 ```cpp
 // Remote exceptions thrown inside append() propagate back across the process boundary.
 try {
-    sintra::console() << Remotely_accessible::rpc_append("instance", "Hi", 42) << '\n';
+    sintra::console() << Remotely_accessible::rpc_append("instance", "Hi", 43) << '\n';
 }
 catch (const std::exception& e) {
     sintra::console() << "Remote RPC failed in callee: " << e.what() << '\n';
@@ -157,7 +157,7 @@ prefer vendoring dependencies as git submodules or fetching them during configur
 
 ## Platform requirements
 
-* **macOS** - Sintra always uses `os_sync_wait_on_address` for its interprocess semaphore implementation. The build fails if `<os/os_sync_wait_on_address.h>` or `<os/clock.h>` is missing, so ensure the runner has macOS 13 or newer with the Xcode 15 (or newer) Command Line Tools installed. No legacy semaphore fallback is provided or supported.
+* **macOS** - Sintra always uses `os_sync_wait_on_address` for its interprocess semaphore implementation. The build fails if `<os/os_sync_wait_on_address.h>` or `<os/clock.h>` is missing, so ensure the runner has macOS 15.0 or newer with the Command Line Tools for Xcode 15 or newer installed (the full Xcode IDE is not required). No legacy semaphore fallback is provided or supported.
 
 ## Tests and continuous integration
 
