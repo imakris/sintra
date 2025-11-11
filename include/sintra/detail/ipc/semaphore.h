@@ -13,13 +13,16 @@ OVERVIEW
 - Cross-platform semaphore with a 32-bit counter.
 - POSIX uses a wait-on-address shim; Windows uses a named kernel semaphore.
 - Single monotonic deadline timeline (ns). No fairness guarantee.
+- Define SINTRA_USE_SEMAPHORE_POLLING to force polling backend on all platforms.
 
 SUPPORTED OS (intentional; no fallbacks)
 - Linux (futex), macOS 14.4+ (<os/sync_wait_on_address.h>), Windows 8+ (named kernel semaphore).
+- All platforms support a polling backend via SINTRA_USE_SEMAPHORE_POLLING (1ms sleep between checks).
 - Platform notes:
   * macOS: wake-all is used; may over-wake. If Apple adds wake-one/wake-N, prefer bounded waking.
   * POSIX wait(): implemented via a very large relative wait on a monotonic clock; effectively "infinite".
   * Windows try_wait(): returns false when no token is available and does not set errno; timed waits set errno=ETIMEDOUT.
+  * Polling backend: Uses atomic counter in shared memory with nanosleep fallback; simpler than Windows named semaphores.
 
 INTERPROCESS SEMANTICS
 - POSIX: the 32-bit wait word must be in shared memory (e.g., mmap MAP_SHARED).
@@ -79,7 +82,11 @@ CAVEATS
 #include "../time_utils.h"
 
 // Platform headers MUST be included BEFORE opening namespaces to avoid polluting them
-#if defined(_WIN32)
+#if defined(SINTRA_USE_SEMAPHORE_POLLING)
+  // User explicitly requested polling backend on all platforms
+  #include <time.h>
+  #define SINTRA_BACKEND_POLLING 1
+#elif defined(_WIN32)
   #include "../sintra_windows.h"
   #include <synchapi.h>
   #include <mutex>
@@ -89,7 +96,7 @@ CAVEATS
 #else
   #include <time.h>
   // Single selection ladder for sub-platform specifics
-  #if defined(__APPLE__) && defined(__MACH__) && defined(__has_include) && __has_include(<os/sync_wait_on_address.h>)  
+  #if defined(__APPLE__) && defined(__MACH__) && defined(__has_include) && __has_include(<os/sync_wait_on_address.h>)
     #define SINTRA_BACKEND_DARWIN 1
     #include <os/clock.h>
     #include <os/sync_wait_on_address.h>
@@ -99,7 +106,7 @@ CAVEATS
     #include <linux/futex.h>
     #include <unistd.h>
   #else
-    #define SINTRA_BACKEND_UNSUPPORTED 1
+    #define SINTRA_BACKEND_POLLING 1
   #endif
 #endif
 
@@ -505,7 +512,7 @@ static inline int posix_wait_equal_until(
         if (errno == EINTR || errno == EAGAIN) continue;
         return -1;
     }
-#else
+#elif SINTRA_BACKEND_POLLING
     (void)addr; (void)expected; (void)deadline;
     errno = ENOTSUP;
     return -1;
@@ -521,8 +528,9 @@ static inline void posix_wake_some(uint32_t* addr, int n) noexcept
 #elif SINTRA_BACKEND_DARWIN
     (void)n;  // Darwin doesn't have wake-N, always use wake-all
     (void)os_sync_wake_by_address_all((void*)addr, 4, OS_SYNC_WAKE_BY_ADDRESS_SHARED);
-#else
+#elif SINTRA_BACKEND_POLLING
     (void)addr; (void)n;
+    // Polling backend doesn't need wakes - waiters poll the atomic counter
 #endif
 }
 
@@ -624,7 +632,12 @@ inline bool ips_backend::try_wait_for(std::chrono::nanoseconds d) noexcept
                 return false;
             }
             if (errno == ENOTSUP) {
-                struct timespec ts{0, 1'000'000}; nanosleep(&ts, nullptr);
+#if defined(_WIN32)
+                Sleep(1);  // Windows Sleep takes milliseconds
+#else
+                struct timespec ts{0, 1'000'000};
+                nanosleep(&ts, nullptr);
+#endif
             }
             // other errors treated as spurious; loop and recheck
         }
