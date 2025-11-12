@@ -16,12 +16,12 @@ OVERVIEW
 
 SUPPORTED OS (intentional; no fallbacks)
 - Linux (futex), macOS 14.4+ (<os/sync_wait_on_address.h>), Windows 8+ (named kernel semaphore).
-- All platforms support a polling backend via SINTRA_USE_SEMAPHORE_POLLING (1ms sleep between checks).
+- Polling backend: Define SINTRA_USE_SEMAPHORE_POLLING to force on any platform, or automatic fallback on unsupported platforms.
 - Platform notes:
   * macOS: wake-all is used; may over-wake. If Apple adds wake-one/wake-N, prefer bounded waking.
   * POSIX wait(): implemented via a very large relative wait on a monotonic clock; effectively "infinite".
   * Windows try_wait(): returns false when no token is available and does not set errno; timed waits set errno=ETIMEDOUT.
-  * Polling backend: Uses atomic counter in shared memory with nanosleep fallback.
+  * Polling backend: Atomic counter in shared memory with 1ms sleep between checks (std::this_thread::sleep_for).
 
 INTERPROCESS SEMANTICS
 - POSIX: the 32-bit wait word must be in shared memory (e.g., mmap MAP_SHARED).
