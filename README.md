@@ -53,7 +53,7 @@ structure multi-process workflows.
   patterns as your architecture requires.
 * **Header-only distribution** - integrate the library by adding the headers to your
   project; no separate build step or binaries are necessary.
-* **Cross-platform design** - shared-memory transport on Linux and Windows.
+* **Cross-platform design** - shared-memory transport on Linux, macOS, Windows, and FreeBSD.
 * **Opt-in crash recovery** - mark critical workers with `sintra::enable_recovery()` so
   the coordinator automatically respawns them after an unexpected exit.
 
@@ -104,14 +104,14 @@ catch (const std::exception& e) {
 ### Observe abnormal exits from managed peers
 
 ```cpp
-sintra::activate<sintra::Managed_process>(
+auto crash_monitor = sintra::activate_slot(
     [](const sintra::Managed_process::terminated_abnormally& crash) {
         sintra::console()
             << "Process "
             << sintra::process_of(crash.sender_instance_id)
             << " crashed with status " << crash.status << '\n';
     },
-    sintra::any_remote);
+    sintra::Typed_instance_id<sintra::Managed_process>(sintra::any_remote));
 ```
 
 
@@ -141,10 +141,10 @@ Delivery fences cost the same as rendezvous plus a short wait for readers to cat
 sintra::barrier("phase-1"); // delivery fence
 
 // Later: ensure the side effects from earlier messages are visible before reading shared data.
-sintra::barrier(sintra::processing_fence_t{}, "apply-updates");
+sintra::barrier<sintra::processing_fence_t>("apply-updates");
 ```
 
-Processing fences are safe to call from any thread, including handlers themselves: if the current thread is the reader, the fence returns immediately. When coordination between threads inside the same process is also required, combine Sintra barriers with standard threading primitives.
+Processing fences are safe to call from any thread, including handlers themselves: reader threads continue draining queued work and post-handlers while the fence waits, so invoking a fence from within a handler keeps the system making progress. When coordination between threads inside the same process is also required, combine Sintra barriers with standard threading primitives.
 
 ## Getting started
 
@@ -158,7 +158,7 @@ prefer vendoring dependencies as git submodules or fetching them during configur
 
 ## Platform requirements
 
-* **macOS** - Sintra always uses `os_sync_wait_on_address` for its interprocess semaphore implementation. The build fails if `<os/os_sync_wait_on_address.h>` or `<os/clock.h>` is missing, so ensure the runner has macOS 15.0 or newer with the Command Line Tools for Xcode 15 or newer installed (the full Xcode IDE is not required). No legacy semaphore fallback is provided or supported.
+* **macOS** - Sintra always uses `os_sync_wait_on_address` for its interprocess semaphore implementation. The build fails if `<os/os_sync_wait_on_address.h>` or `<os/clock.h>` is missing, so ensure the runner has macOS 15.0 or newer with the Command Line Tools for Xcode 15 (or newer) installed (the full Xcode IDE is not required). No legacy semaphore fallback is provided or supported.
 
 ## Tests and continuous integration
 
