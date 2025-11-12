@@ -10,6 +10,7 @@
 
 #include <cstdint>
 #include <chrono>
+#include <thread>
 
 #if defined(_WIN32)
   #ifndef NOMINMAX
@@ -19,7 +20,9 @@
     #define WIN32_LEAN_AND_MEAN
   #endif
   #include <Windows.h>
+  #include <timeapi.h>
 #elif defined(__APPLE__)
+  #include <mach/mach.h>
   #include <mach/mach_time.h>
 #elif defined(__unix__) || defined(__APPLE__)
   #include <time.h>
@@ -78,6 +81,72 @@ inline uint64_t monotonic_now_us() noexcept
 {
     return monotonic_now_ns() / 1000u;
 }
+
+#if defined(__APPLE__)
+inline void precision_sleep_for(std::chrono::duration<double> duration)
+{
+    if (duration <= std::chrono::duration<double>::zero()) {
+        return;
+    }
+
+    static const mach_timebase_info_data_t timebase = [] {
+        mach_timebase_info_data_t info{};
+        (void)mach_timebase_info(&info);
+        return info;
+    }();
+
+    const auto nanos = std::chrono::duration_cast<std::chrono::nanoseconds>(duration);
+    if (nanos.count() <= 0) {
+        return;
+    }
+
+    unsigned __int128 absolute_delta = static_cast<unsigned __int128>(nanos.count()) *
+                                       static_cast<unsigned __int128>(timebase.denom);
+    absolute_delta += static_cast<unsigned __int128>(timebase.numer - 1);
+    absolute_delta /= static_cast<unsigned __int128>(timebase.numer);
+
+    if (absolute_delta == 0) {
+        std::this_thread::sleep_for(duration);
+        return;
+    }
+
+    const uint64_t target = mach_absolute_time() + static_cast<uint64_t>(absolute_delta);
+
+    auto status = mach_wait_until(target);
+    while (status == KERN_ABORTED) {
+        status = mach_wait_until(target);
+    }
+}
+#else
+inline void precision_sleep_for(std::chrono::duration<double> duration)
+{
+    std::this_thread::sleep_for(duration);
+}
+#endif
+
+#ifdef _WIN32
+class Scoped_timer_resolution {
+public:
+    explicit Scoped_timer_resolution(UINT period)
+        : m_period(period), m_active(::timeBeginPeriod(period) == TIMERR_NOERROR) {}
+
+    ~Scoped_timer_resolution()
+    {
+        if (m_active) {
+            ::timeEndPeriod(m_period);
+        }
+    }
+
+private:
+    UINT m_period;
+    bool m_active;
+};
+#else
+class Scoped_timer_resolution {
+public:
+    explicit Scoped_timer_resolution(unsigned int) {}
+};
+#endif
 
 } // namespace sintra
 

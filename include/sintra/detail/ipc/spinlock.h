@@ -37,7 +37,7 @@ struct spinlock
         while (true) {
             if (!m_locked.test_and_set(std::memory_order_acquire)) {
                 m_owner_pid.store(self_pid, std::memory_order_release);
-                m_last_progress_ns.store(now_ns(), std::memory_order_relaxed);
+                m_last_progress_ns.store(monotonic_now_ns(), std::memory_order_relaxed);
                 return;
             }
 
@@ -84,7 +84,7 @@ struct spinlock
     void unlock()
     {
         m_owner_pid.store(0, std::memory_order_release);
-        m_last_progress_ns.store(now_ns(), std::memory_order_relaxed);
+        m_last_progress_ns.store(monotonic_now_ns(), std::memory_order_relaxed);
         m_locked.clear(std::memory_order_release);
     }
 
@@ -92,14 +92,6 @@ private:
     static constexpr size_t k_spin_yield_mask = 0x3FF; // yield every 1024 spins
     static constexpr auto k_owner_liveness_poll = std::chrono::milliseconds(5);
     static constexpr auto k_live_owner_timeout  = std::chrono::milliseconds(2000);
-
-    static uint64_t now_ns()
-    {
-        return static_cast<uint64_t>(
-            std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::steady_clock::now().time_since_epoch())
-                .count());
-    }
 
     bool try_recover_dead_owner(uint32_t self_pid)
     {
@@ -126,13 +118,13 @@ private:
             "(last progress %llu ns ago). Forcibly releasing lock.\n",
             owner,
             static_cast<unsigned long long>(
-                now_ns() > last_ns ? (now_ns() - last_ns) : 0));
+                monotonic_now_ns() > last_ns ? (monotonic_now_ns() - last_ns) : 0));
     }
 
     [[noreturn]] void report_live_owner_stall(uint32_t owner) const
     {
         const uint64_t acquired_ns = m_last_progress_ns.load(std::memory_order_relaxed);
-        const uint64_t held_ns = now_ns() - acquired_ns;
+        const uint64_t held_ns = monotonic_now_ns() - acquired_ns;
         std::fprintf(
             stderr,
             "[sintra][spinlock] Shared spinlock stuck for %.3f ms while owner PID %u is still alive. "
@@ -146,7 +138,7 @@ private:
     {
         m_owner_pid.store(0, std::memory_order_release);
         m_locked.clear(std::memory_order_release);
-        m_last_progress_ns.store(now_ns(), std::memory_order_relaxed);
+        m_last_progress_ns.store(monotonic_now_ns(), std::memory_order_relaxed);
     }
 
     std::atomic_flag    m_locked = ATOMIC_FLAG_INIT;
