@@ -20,3 +20,10 @@ CMakeUserPresets.json
 __pycache__/
 *.pyc
 *.pyo
+
+# Local tooling and generated headers
+/build_mingw/
+.claude/
+include/sintra/detail/ipc/rings.h.BASE.h
+include/sintra/detail/ipc/rings.h.LOCAL.h
+include/sintra/detail/ipc/rings.h.REMOTE.h
