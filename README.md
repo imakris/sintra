@@ -36,11 +36,12 @@
 ![C++17](https://img.shields.io/badge/C%2B%2B-17-blue)
 ![License: BSD-2-Clause](https://img.shields.io/badge/license-BSD--2--Clause-green)
 
-Sintra is a C++ library for building type-safe interprocess communication layers.
-It provides a common language for sending signals, broadcasting events, and invoking
-remote procedures across process boundaries without resorting to fragile string-based
-protocols. The library focuses on expressiveness and safety, making it easier to
-coordinate modular applications, daemons, and tools that need to communicate reliably.
+Sintra is a C++17 library for type-safe interprocess communication on a single host.
+It lets independent processes exchange typed messages, broadcast events, and invoke
+RPC-style calls with a compile-time-checked API, avoiding string-based protocols and
+external brokers. It also provides coordination primitives like named barriers to
+structure multi-process workflows.
+
 
 ## Key features
 
