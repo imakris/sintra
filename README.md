@@ -49,9 +49,9 @@ structure multi-process workflows.
   mismatched payloads are detected at compile time instead of surfacing as runtime
   protocol errors.
 * **Signal bus and RPC in one package** - publish/subscribe message dispatch and
-  synchronous remote procedure calls share the same primitives, allowing you to mix
-  patterns as your architecture requires.
-* **Header-only distribution** - integrate the library by adding the headers to your
+  synchronous remote procedure calls share the same primitives, allowing programs to mix
+  patterns as the architecture requires.
+* **Header-only distribution** - integrate the library by adding the headers to a
   project; no separate build step or binaries are necessary.
 * **Cross-platform design** - shared-memory transport on Linux, macOS, Windows, and FreeBSD.
 * **Opt-in crash recovery** - mark critical workers with `sintra::enable_recovery()` so
@@ -124,17 +124,17 @@ Sintra uses **dedicated reader threads** to process incoming messages from share
 2. The reader thread invokes the matching slot or RPC handler **asynchronously**.
 3. Handlers (and their post-handler continuations) execute on the reader thread, not the thread that published the message or called the barrier.
 
-**Concurrency reminder:** Slot handlers that touch shared state must still synchronize with other threads in your process (via mutexes, atomics, etc.). The barriers described below coordinate *when* handlers run; they do not eliminate the need for thread-safe data structures.
+**Concurrency reminder:** Slot handlers that touch shared state must still synchronize with other threads in the process (via mutexes, atomics, etc.). The barriers described below coordinate *when* handlers run; they do not eliminate the need for thread-safe data structures.
 
 ### Barrier Semantics
 
-`sintra::barrier()` coordinates progress across processes and comes in three flavors that trade off strength for cost. The template defaults to `delivery_fence_t`, so a plain `barrier("name")` is already stronger than a bare rendezvous. Pick the lightest-weight barrier whose guarantees match what your code must observe:
+`sintra::barrier()` coordinates progress across processes and comes in three flavors that trade off strength for cost. The template defaults to `delivery_fence_t`, so a plain `barrier("name")` is already stronger than a bare rendezvous. Choose the lightest-weight barrier whose guarantees match the code's requirements:
 
-* **Rendezvous barriers** (`barrier<sintra::rendezvous_t>(name)`) simply ensure that every participant has reached the synchronization point. Messages published before the barrier might still be in flight or waiting to be handled, so use this mode when you only need aligned phase progression-for example, coordinating the simultaneous start of a workload whose logic does not depend on the effects of earlier messages.
+* **Rendezvous barriers** (`barrier<sintra::rendezvous_t>(name)`) simply ensure that every participant has reached the synchronization point. Messages published before the barrier might still be in flight or waiting to be handled, so use this mode when only aligned phase progression is needed-for example, coordinating the simultaneous start of a workload whose logic does not depend on the effects of earlier messages.
 * **Delivery-fence barriers** (`barrier(name)` or `barrier<sintra::delivery_fence_t>(name)`) guarantee that all pre-barrier messages have been pulled off the shared-memory rings by each process’s reader thread and are queued locally for handling, though the handlers may still be running. Reach for the default delivery fence when the next step requires the complete set of incoming work to be staged, such as inspecting an inbox before taking action.
 * **Processing-fence barriers** (`barrier<sintra::processing_fence_t>(name)`) wait until every handler (and any continuations) for messages published before the barrier has finished executing. Choose this mode when subsequent logic must observe the completed side effects-for instance, reading shared state that earlier handlers updated or applying a configuration change only after all peers processed preparatory updates.
 
-Delivery fences cost the same as rendezvous plus a short wait for readers to catch up. Processing fences add a single control message per process and an extra rendezvous so you can observe handler side effects deterministically.
+Delivery fences cost the same as rendezvous plus a short wait for readers to catch up. Processing fences add a single control message per process and an extra rendezvous to allow deterministic observation of handler side effects.
 
 ```cpp
 // Wait until everyone reaches the same point and any prior messages are queued locally.
@@ -148,7 +148,7 @@ Processing fences are safe to call from any thread, including handlers themselve
 
 ## Getting started
 
-1. Add the `include/` directory to your project's include path.
+1. Add the `include/` directory to the project's include path.
 2. Ensure that a C++17 compliant compiler is used (GCC, Clang, or MSVC are supported).
 3. Explore the `example/` directory to see how to set up signal buses, channels, and
    remote call endpoints.
