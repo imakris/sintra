@@ -39,6 +39,11 @@
 #include <vector>
 #include <cwchar>
 
+#if defined(_WIN32)
+#include <process.h>
+#include <windows.h>
+#endif
+
 #if defined(__unix__) || defined(__APPLE__)
     #include <sys/mman.h>
     #include <sys/wait.h>

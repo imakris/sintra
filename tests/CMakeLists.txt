@@ -49,24 +49,49 @@ function(add_test_suite SUFFIX IS_DEBUG)
     # Set optimization flags
     if(IS_DEBUG)
         if(MSVC)
-            target_compile_options(${LIB_TARGET} INTERFACE /Od /Zi /RTC1)
-            target_link_options(${LIB_TARGET} INTERFACE /DEBUG:FULL)
+            target_compile_options(${LIB_TARGET} INTERFACE
+                $<$<CONFIG:Debug>:/Od>
+                $<$<CONFIG:Debug>:/Zi>
+                $<$<CONFIG:Debug>:/RTC1>
+            )
+            target_link_options(${LIB_TARGET} INTERFACE
+                $<$<CONFIG:Debug>:/DEBUG:FULL>
+            )
         else()
-            target_compile_options(${LIB_TARGET} INTERFACE -g -O0)
+            target_compile_options(${LIB_TARGET} INTERFACE
+                $<$<CONFIG:Debug>:-g>
+                $<$<CONFIG:Debug>:-O0>
+            )
         endif()
     else()
         if(MSVC)
             if(SINTRA_RELEASE_WITH_DEBUG_SYMBOLS)
-                target_compile_options(${LIB_TARGET} INTERFACE /O1 /Zi /DNDEBUG)
-                target_link_options(${LIB_TARGET} INTERFACE /DEBUG:FULL)
+                target_compile_options(${LIB_TARGET} INTERFACE
+                    $<$<CONFIG:Release>:/O1>
+                    $<$<CONFIG:Release>:/Zi>
+                    $<$<CONFIG:Release>:/DNDEBUG>
+                )
+                target_link_options(${LIB_TARGET} INTERFACE
+                    $<$<CONFIG:Release>:/DEBUG:FULL>
+                )
             else()
-                target_compile_options(${LIB_TARGET} INTERFACE /O2 /DNDEBUG)
+                target_compile_options(${LIB_TARGET} INTERFACE
+                    $<$<CONFIG:Release>:/O2>
+                    $<$<CONFIG:Release>:/DNDEBUG>
+                )
             endif()
         else()
             if(SINTRA_RELEASE_WITH_DEBUG_SYMBOLS)
-                target_compile_options(${LIB_TARGET} INTERFACE -O0 -g -DNDEBUG)
+                target_compile_options(${LIB_TARGET} INTERFACE
+                    $<$<CONFIG:Release>:-O0>
+                    $<$<CONFIG:Release>:-g>
+                    $<$<CONFIG:Release>:-DNDEBUG>
+                )
             else()
-                target_compile_options(${LIB_TARGET} INTERFACE -O3 -DNDEBUG)
+                target_compile_options(${LIB_TARGET} INTERFACE
+                    $<$<CONFIG:Release>:-O3>
+                    $<$<CONFIG:Release>:-DNDEBUG>
+                )
             endif()
         endif()
     endif()

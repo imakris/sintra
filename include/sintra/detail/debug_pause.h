@@ -25,6 +25,7 @@ namespace detail {
 #ifdef _WIN32
 inline bool is_debug_pause_requested()
 {
+#if defined(_MSC_VER)
     size_t len = 0;
     char* raw = nullptr;
     const errno_t rc = _dupenv_s(&raw, &len, "SINTRA_DEBUG_PAUSE_ON_EXIT");
@@ -33,6 +34,11 @@ inline bool is_debug_pause_requested()
         return false;
     }
     return len > 0 && env.get()[0] != '0' && env.get()[0] != '\0';
+#else
+    // MinGW may not provide _dupenv_s; fall back to the portable getenv API.
+    const char* env = std::getenv("SINTRA_DEBUG_PAUSE_ON_EXIT");
+    return env && *env && (*env != '0');
+#endif
 }
 #else
 inline bool is_debug_pause_requested()
