@@ -14,10 +14,6 @@
 // - Phase 3: True blocking sleep (semaphore) for no CPU burn on stalls
 // Memory barriers ensure cache coherency even with stale shared memory.
 
-#ifndef __clang__ 
-#define SINTRA_USE_OMP_GET_WTIME
-#endif
-
 namespace sintra {
 
     // instance_id_type is a 2-part integer variable. The first part identifies the process and

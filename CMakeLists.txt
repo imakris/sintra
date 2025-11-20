@@ -59,24 +59,8 @@ else()
     )
 endif()
 
-# OpenMP support - optional for timing
-option(SINTRA_DISABLE_OPENMP "Disable OpenMP dependency (uses chrono for timing)" OFF)
-
-if(NOT SINTRA_DISABLE_OPENMP)
-    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-        find_package(OpenMP)
-        if(OpenMP_FOUND)
-            target_link_libraries(sintra INTERFACE OpenMP::OpenMP_CXX)
-        endif()
-    else()
-        find_package(OpenMP REQUIRED)
-        target_link_libraries(sintra INTERFACE OpenMP::OpenMP_CXX)
-    endif()
-endif()
-
 option(SINTRA_BUILD_EXAMPLES "Build Sintra examples" ON)
 option(SINTRA_BUILD_TESTS "Build Sintra tests" ON)
-option(SINTRA_TESTS_DISABLE_OPENMP "Disable OpenMP in tests (uses chrono for timing)" ON)
 
 if(SINTRA_BUILD_EXAMPLES)
     add_subdirectory(example/sintra)

@@ -96,11 +96,6 @@ function(add_test_suite SUFFIX IS_DEBUG)
         endif()
     endif()
 
-    # Link OpenMP if available (for timing)
-    if(TARGET OpenMP::OpenMP_CXX)
-        target_link_libraries(${LIB_TARGET} INTERFACE OpenMP::OpenMP_CXX)
-    endif()
-
     # Read test list from active_tests.txt
     read_active_tests(TEST_PATHS)
 
