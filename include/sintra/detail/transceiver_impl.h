@@ -420,7 +420,7 @@ Transceiver::activate(
 
     using arg_type = decltype(resolve_single_functor_arg(internal_slot));
     using MT = typename remove_reference<arg_type>::type;
-    auto handler = static_cast<function<typename MT::return_type(const arg_type&)>>(internal_slot);
+    function<typename MT::return_type(const arg_type&)> handler = internal_slot;
 
     constexpr bool sender_capability =
         is_same_v    < SENDER_T, void > ||                   // generic sender (e.g. any_local)

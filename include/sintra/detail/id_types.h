@@ -136,12 +136,12 @@ uint64_t flag_most_significant_bits(uint64_t v)
 }
 
 constexpr uint64_t pid_mask =
-    flag_most_significant_bits(uint64_t(1) << num_transceiver_index_bits);
+    flag_most_significant_bits(1ull << num_transceiver_index_bits);
 
 static_assert(num_process_index_bits < 16);
-constexpr int max_process_index =       int(uint64_t(1) << (num_process_index_bits     - 1)) - 1;
+constexpr int max_process_index =       (1u   << (num_process_index_bits     - 1)) - 1;
 
-constexpr uint64_t max_instance_index = (uint64_t(1) << (num_transceiver_index_bits - 1)) - 1;
+constexpr uint64_t max_instance_index = (1ull << (num_transceiver_index_bits - 1)) - 1;
 constexpr uint64_t num_reserved_service_instances = 0x1000;
 constexpr uint64_t all_remote_processess_wildcard = (max_process_index << 1);
 constexpr uint64_t all_processes_wildcard = all_remote_processess_wildcard | 1;
@@ -272,12 +272,16 @@ bool is_local(instance_id_type iid)
 {
     const auto di = decompose_instance(iid);
     const auto process_index = di.process;
-    return
-        is_local_instance(iid) ||
+
+    const bool matches_implicit_process =
         // complement of explicitly specified process, matches this process implicitly
-        (process_index > max_process_index && ((~static_cast<uint64_t>(process_index)) >> num_transceiver_index_bits) != get_process_index(s_mproc_id)) ||
-        // all processes wildcard, always matches
-        (process_index == all_processes_wildcard);
+        process_index > max_process_index &&
+        ((~static_cast<uint64_t>(process_index)) >> num_transceiver_index_bits) != get_process_index(s_mproc_id);
+
+    return
+	    is_local_instance(iid)   ||
+		matches_implicit_process ||
+		process_index == all_processes_wildcard; // all processes wildcard, always matches
 }
 
 
