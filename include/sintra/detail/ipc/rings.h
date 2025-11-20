@@ -608,7 +608,7 @@ private:
                     region1.reset(new ipc::mapped_region(file, data_rights, 0, 0,
                         ((char*)region0->data()) + m_data_region_size, map_extra_options));
                 }
-                catch (const std::exception& ex) {
+                catch (const std::exception&) {
                     mapping_failed = true;
                 }
                 catch (...) {

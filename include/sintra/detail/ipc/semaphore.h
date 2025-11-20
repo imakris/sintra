@@ -249,8 +249,6 @@ static HANDLE ips_win_local_handle(ips_backend& b) noexcept
         // We are the first. Create (or open) the handle.
         HANDLE h = CreateSemaphoreW(nullptr, (LONG)st.initial, (LONG)st.max, st.name);
         if (!h) {
-            DWORD last = GetLastError();
-
             // Last resort: try opening if creation failed for other reasons (e.g., permissions).
             h = OpenSemaphoreW(SYNCHRONIZE | SEMAPHORE_MODIFY_STATE, FALSE, st.name);
         }

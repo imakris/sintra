@@ -66,6 +66,13 @@ CAVEATS
 
 namespace sintra { namespace detail {
 
+// The alignas(64) members intentionally request padding for cache-line isolation;
+// silence the MSVC padding warning for this type.
+#if defined(_MSC_VER)
+#  pragma warning(push)
+#  pragma warning(disable:4324)
+#endif
+
 class interprocess_mutex
 {
 public:
@@ -293,6 +300,7 @@ private:
     // Attempt robust recovery if the observed owner appears to be dead.
     bool try_recover(owner_token observed_owner, owner_token self)
     {
+        (void)self; // self is currently unused but kept for symmetry/diagnostics
         if (observed_owner == k_unowned) {
             return false;
         }
@@ -349,5 +357,9 @@ private:
     // Per-instance flag indicating if the last successful acquire recovered from a dead owner.
     alignas(64) std::atomic<std::uint32_t> m_last_recovered{ 0u };
 };
+
+#if defined(_MSC_VER)
+#  pragma warning(pop)
+#endif
 
 }} // namespace sintra::detail

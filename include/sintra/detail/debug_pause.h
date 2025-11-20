@@ -8,6 +8,7 @@
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
+#include <memory>
 #include <thread>
 
 #ifdef _WIN32
@@ -21,11 +22,25 @@ namespace sintra {
 namespace detail {
 
 // Debug pause functionality - only enabled when SINTRA_DEBUG_PAUSE_ON_EXIT is set
+#ifdef _WIN32
+inline bool is_debug_pause_requested()
+{
+    size_t len = 0;
+    char* raw = nullptr;
+    const errno_t rc = _dupenv_s(&raw, &len, "SINTRA_DEBUG_PAUSE_ON_EXIT");
+    std::unique_ptr<char, decltype(&std::free)> env(raw, &std::free);
+    if (rc != 0 || !env) {
+        return false;
+    }
+    return len > 0 && env.get()[0] != '0' && env.get()[0] != '\0';
+}
+#else
 inline bool is_debug_pause_requested()
 {
     const char* env = std::getenv("SINTRA_DEBUG_PAUSE_ON_EXIT");
     return env && *env && (*env != '0');
 }
+#endif
 
 inline std::atomic<bool>& debug_pause_state()
 {
