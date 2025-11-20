@@ -517,7 +517,7 @@ sintra::instance_id_type get_instance_id(std::string&& assigned_name)
 
 inline
 Managed_process::Managed_process():
-    Derived_transceiver<Managed_process>((void*)0),
+    Derived_transceiver<Managed_process>(nullptr),
     m_communication_state(COMMUNICATION_STOPPED),
     m_must_stop(false),
     m_swarm_id(0),

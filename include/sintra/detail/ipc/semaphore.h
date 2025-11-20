@@ -400,7 +400,7 @@ inline bool ips_backend::try_wait_for(std::chrono::nanoseconds d) noexcept
         errno = EINVAL;
         return false;
     }
-    uint64_t add = d.count() <= 0 ? 0ULL : (uint64_t)d.count();
+    uint64_t add = d.count() <= 0 ? 0ULL : d.count();
     DWORD ms;
     if (add/1000000ULL >= 0xFFFFFFFFULL) {
         ms = INFINITE - 1;
@@ -607,7 +607,7 @@ inline bool ips_backend::try_wait_for(std::chrono::nanoseconds d) noexcept
         return true;
     }
 
-    const uint64_t add = d.count() <= 0 ? 0ULL : (uint64_t)d.count();
+    const uint64_t add = d.count() <= 0 ? 0ULL : d.count();
     const uint64_t deadline = monotonic_now_ns() + add;
 
     for (;;) {

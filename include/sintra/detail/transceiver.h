@@ -14,6 +14,7 @@
 #include <map>
 #include <mutex>
 #include <type_traits>
+#include <utility>
 #include <unordered_map>
 
 
@@ -208,7 +209,7 @@ public:
         typename SENDER_T,
         typename FT,
         typename = decltype(&FT::operator()),  //must be functor
-        typename FUNCTOR_ARG_T = decltype(resolve_single_functor_arg(*((FT*)0))),
+        typename FUNCTOR_ARG_T = decltype(resolve_single_functor_arg(std::declval<const FT&>())),
 
         // prevent functors with message arguments from matching the template
         typename = enable_if_t<
@@ -230,7 +231,7 @@ public:
         typename FT,
         typename = decltype(&FT::operator()),    //must be functor
         typename = void, // differentiate from the previous template
-        typename FUNCTOR_ARG_T = decltype(resolve_single_functor_arg(*((FT*)0))),
+        typename FUNCTOR_ARG_T = decltype(resolve_single_functor_arg(std::declval<const FT&>())),
 
         // only allow functors with message arguments to match the template
         typename = enable_if_t<
@@ -509,12 +510,12 @@ public:
 
     
     // Exports a member function for RPC.
-    #define SINTRA_RPC(m)                                                                       \
+    #define SINTRA_RPC(m) \
         SINTRA_RPC_IMPL(m, &Transceiver_type :: m, sintra::invalid_type_id, true, false)
 
     // Exports a member function for RPC, provided that an ID is already reserved for a function
     // with that name. This is only meant to be used internally.
-    #define SINTRA_RPC_EXPLICIT(m)                                                              \
+    #define SINTRA_RPC_EXPLICIT(m) \
         SINTRA_RPC_IMPL(m, &Transceiver_type :: m, (type_id_type)sintra::detail::reserved_id::m, true, false)
 
     // Exports a member function exclusively for RPC use. This implies that the function is
@@ -524,19 +525,19 @@ public:
     // Functions which are meant to be used exclusively via RPC, will not take a direct-call
     // shortcut when called within the same process, but will instead use the RPC mechanism
     // in all cases.
-    #define SINTRA_RPC_STRICT(m)                                                                  \
+    #define SINTRA_RPC_STRICT(m) \
         SINTRA_RPC_IMPL(m, &Transceiver_type :: m, sintra::invalid_type_id, false, false)
 
     // Exports a member function exclusively for RPC, provided that an ID is already reserved for
     // a function with that name. This is only meant to be used internally.
-    #define SINTRA_RPC_STRICT_EXPLICIT(m)                                                         \
+    #define SINTRA_RPC_STRICT_EXPLICIT(m) \
         SINTRA_RPC_IMPL(m, &Transceiver_type :: m, (type_id_type)sintra::detail::reserved_id::m, false, false)
 
     // Exports a void member function for fire-and-forget unicast messaging.
     // Similar to SINTRA_RPC, but does not send a reply message. Only works with void functions.
     // This provides efficient one-way messaging to specific transceiver instances without
     // the overhead of reply handling.
-    #define SINTRA_UNICAST(m)                                                              \
+    #define SINTRA_UNICAST(m) \
         SINTRA_RPC_IMPL(m, &Transceiver_type :: m, sintra::invalid_type_id, true, true)
 
   //\       //\       //\       //\       //\       //\       //\       //
