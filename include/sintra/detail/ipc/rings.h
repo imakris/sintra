@@ -900,6 +900,8 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
     /**
      * A simple fixed-capacity stack of indices. Eliminates duplicate
      * push/pop/contains logic for ready_stack, sleeping_stack, unordered_stack, etc.
+     * This lives in shared memory (control file), so we avoid std::vector or other
+     * heap-backed containers that are not trivially relocation-safe across processes.
      */
     template <int N>
     struct Index_stack {
@@ -992,6 +994,7 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         //   Because each byte is an 8-bit counter, this imposes a hard limit of 255
         //   concurrently-guarding readers per octile. Combined with control-array sizing,
         //   the effective maximum readers is min(255, max_process_index).
+        //   With max_process_index statically capped at 255, wraparound to 0 is unreachable.
         std::atomic<uint64_t>                read_access{0};
 
         // NOTE: ONLY RELEVANT FOR TRACKING / DIAGNOSTICS
@@ -2372,6 +2375,9 @@ private:
     T* prepare_write(size_t num_elements_to_write)
     {
         assert(num_elements_to_write <= this->m_num_elements / 8);
+        if (num_elements_to_write > this->m_num_elements / 8) {
+            throw std::invalid_argument("Ring write size exceeds single-octile capacity (ring_size/8).");
+        }
 
         // Enforce exclusive writer (cheap fast-path loop)
         // Use thread-local index (trivial type) for reliable atomic operations across all platforms

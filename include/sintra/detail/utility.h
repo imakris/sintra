@@ -609,6 +609,22 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
         return false;
     }
 
+    // Build argv/prog copies in the parent so the child never allocates between
+    // fork() and execv(), avoiding malloc mutex deadlocks in multi-threaded parents.
+    std::string prog_storage(prog);
+    int argc = 0;
+    while (argv[argc]) { ++argc; }
+    std::vector<std::string> argv_storage;
+    argv_storage.reserve(static_cast<size_t>(argc));
+    for (int i = 0; i < argc; ++i) {
+        argv_storage.emplace_back(argv[i]);
+    }
+    std::vector<char*> argv_copy(static_cast<size_t>(argc) + 1, nullptr);
+    for (int i = 0; i < argc; ++i) {
+        argv_copy[static_cast<size_t>(i)] = const_cast<char*>(argv_storage[static_cast<size_t>(i)].c_str());
+    }
+    char* prog_copy = const_cast<char*>(prog_storage.c_str());
+
     auto report_failure = [&](detail::spawn_detached_debug_info::Stage stage, int error, int exec_error) {
         detail::spawn_detached_debug_info info;
         info.stage = stage;
@@ -669,16 +685,6 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
 
         ::setsid();
 
-        // Copy argv so the child no longer depends on copy-on-write pages
-        auto prog_copy = strdup(prog);
-        int argc = 0;
-        while (argv[argc]) { ++argc; }
-        auto argv_copy = new char*[argc + 1];
-        argv_copy[argc] = nullptr;
-        for (int i = 0; i < argc; ++i) {
-            argv_copy[i] = strdup(argv[i]);
-        }
-
         int ready_status = 0;
         if (!detail::write_fully(ready_pipe[1], &ready_status, sizeof(ready_status))) {
             report_failure(detail::spawn_detached_debug_info::Stage::ChildReadyPipeWrite, errno, 0);
@@ -688,19 +694,9 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
             ::_exit(EXIT_FAILURE);
         }
 
-        ::execv(prog_copy, (char* const*)argv_copy);
+        ::execv(prog_copy, (char* const*)argv_copy.data());
 
         int exec_errno = errno;
-
-        if (prog_copy) {
-            free(prog_copy);
-        }
-        for (int i = 0; i < argc; ++i) {
-            if (argv_copy[i]) {
-                free(argv_copy[i]);
-            }
-        }
-        delete[] argv_copy;
 
         detail::write_fully(ready_pipe[1], &exec_errno, sizeof(exec_errno));
         if (ready_pipe[1] >= 0) {
