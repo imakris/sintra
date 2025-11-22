@@ -228,14 +228,6 @@ inline bool join(const std::string& swarm_directory, const std::string& name)
         std::fprintf(stderr, "[sintra::join] rings created for process_iid=%llu\n",
             static_cast<unsigned long long>(my_id));
 
-        auto progress = std::make_shared<Process_message_reader::Delivery_progress>();
-        auto coord_reader = std::make_shared<Process_message_reader>(my_id, progress, 0u, "req");
-        {
-            std::unique_lock<std::shared_mutex> readers_lock(s_mproc->m_readers_mutex);
-            s_mproc->m_readers.emplace(my_id, coord_reader);
-        }
-        coord_reader->wait_until_ready();
-
         auto ack_promise = std::make_shared<std::promise<bool>>();
         auto ack_future = ack_promise->get_future();
         auto ack_delivered = std::make_shared<std::atomic<bool>>(false);
@@ -268,6 +260,12 @@ inline bool join(const std::string& swarm_directory, const std::string& name)
         lobby_writer.done_writing();
         std::fprintf(stderr, "[sintra::join] join request sent for process_iid=%llu\n",
             static_cast<unsigned long long>(my_id));
+        // destroy writer before waiting for coordinator to write to the same ring
+        lobby_writer.~Message_ring_W();
+
+        auto lobby_reader_progress = std::make_shared<Process_message_reader::Delivery_progress>();
+        auto lobby_reader = std::make_shared<Process_message_reader>(LOBBY_INSTANCE_ID, lobby_reader_progress, 0u, "lobby_req");
+        lobby_reader->wait_until_ready();
 
         const auto wait_status = ack_future.wait_for(std::chrono::seconds(5));
         if (wait_status != std::future_status::ready || !ack_future.get()) {

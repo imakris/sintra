@@ -268,7 +268,7 @@ inline void Coordinator::on_join_request(const join_request& req)
     {
         std::shared_lock<std::shared_mutex> readers_lock(s_mproc->m_readers_mutex);
         if (s_mproc->m_readers.find(process_iid) != s_mproc->m_readers.end()) {
-            Message_ring_W ack_writer(s_mproc->m_directory, "req", process_iid, 0u);
+            Message_ring_W ack_writer(s_mproc->m_directory, "lobby_req", LOBBY_INSTANCE_ID, 0u);
             auto* ack = ack_writer.write<join_ack>(vb_size<join_ack>(), false);
             ack->sender_instance_id   = m_instance_id;
             ack->receiver_instance_id = process_iid;
@@ -308,7 +308,7 @@ inline void Coordinator::on_join_request(const join_request& req)
     catch (...) {
     }
 
-    Message_ring_W ack_writer(s_mproc->m_directory, "req", process_iid, 0u);
+    Message_ring_W ack_writer(s_mproc->m_directory, "lobby_req", LOBBY_INSTANCE_ID, 0u);
     auto* ack = ack_writer.write<join_ack>(vb_size<join_ack>(), true);
     ack->sender_instance_id   = m_instance_id;
     ack->receiver_instance_id = process_iid;
