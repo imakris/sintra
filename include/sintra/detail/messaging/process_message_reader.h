@@ -121,7 +121,8 @@ struct Process_message_reader
     inline
     Process_message_reader(instance_id_type process_instance_id,
         Delivery_progress_ptr delivery_progress,
-        uint32_t occurrence = 0);
+        uint32_t occurrence = 0,
+        const std::string& prefix = "req");
 
     inline
     ~Process_message_reader();

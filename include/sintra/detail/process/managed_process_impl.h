@@ -1372,6 +1372,7 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
                 Coordinator::rpc_mark_initialization_complete(s_coord_id, m_instance_id);
             }
             catch (const rpc_cancelled&) {
+                // Coordinator already gone; nothing to do.
             }
         }
     };

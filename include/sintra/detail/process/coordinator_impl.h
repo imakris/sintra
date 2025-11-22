@@ -227,7 +227,7 @@ Coordinator::Coordinator():
 
     auto progress = std::make_shared<Process_message_reader::Delivery_progress>();
     auto lobby_reader = std::make_shared<Process_message_reader>(
-        LOBBY_INSTANCE_ID, progress, 0u);
+        LOBBY_INSTANCE_ID, progress, 0u, "lobby_req");
     {
         std::unique_lock<std::shared_mutex> readers_lock(s_mproc->m_readers_mutex);
         s_mproc->m_readers[LOBBY_INSTANCE_ID] = lobby_reader;
@@ -263,7 +263,7 @@ inline void Coordinator::on_join_request(const join_request& req)
         if (s_mproc->m_readers.find(process_iid) != s_mproc->m_readers.end()) {
             auto* ack = s_mproc->m_out_req_c->write<join_ack>(vb_size<join_ack>(), false);
             ack->sender_instance_id   = m_instance_id;
-            ack->receiver_instance_id = any_local_or_remote;
+            ack->receiver_instance_id = process_iid;
             s_mproc->m_out_req_c->done_writing();
             return;
         }
@@ -302,7 +302,7 @@ inline void Coordinator::on_join_request(const join_request& req)
 
     auto* ack = s_mproc->m_out_req_c->write<join_ack>(vb_size<join_ack>(), true);
     ack->sender_instance_id   = m_instance_id;
-    ack->receiver_instance_id = any_local_or_remote;
+    ack->receiver_instance_id = process_iid;
     s_mproc->m_out_req_c->done_writing();
 }
 

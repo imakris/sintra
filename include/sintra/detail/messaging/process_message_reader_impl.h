@@ -68,7 +68,8 @@ inline
 Process_message_reader::Process_message_reader(
     instance_id_type process_instance_id,
     Delivery_progress_ptr delivery_progress,
-    uint32_t occurrence):
+    uint32_t occurrence,
+    const std::string& prefix):
     m_reader_state(READER_NORMAL),
     m_process_instance_id(process_instance_id),
     m_delivery_progress(std::move(delivery_progress))
@@ -78,7 +79,7 @@ Process_message_reader::Process_message_reader(
     }
 
     m_in_req_c = std::make_shared<Message_ring_R>(
-        s_mproc->m_directory, "req", m_process_instance_id, occurrence);
+        s_mproc->m_directory, prefix, m_process_instance_id, occurrence);
     m_in_rep_c = std::make_shared<Message_ring_R>(
         s_mproc->m_directory, "rep", m_process_instance_id, occurrence);
     m_request_reader_thread = new thread([&] () { request_reader_function(); });
