@@ -231,8 +231,6 @@ inline bool join(const std::string& swarm_directory, const std::string& name)
         }
         coord_reader->wait_until_ready();
 
-        s_mproc->construct_with_id(my_id, name);
-
         auto ack_promise = std::make_shared<std::promise<bool>>();
         auto ack_future = ack_promise->get_future();
         auto ack_delivered = std::make_shared<std::atomic<bool>>(false);
@@ -277,6 +275,10 @@ inline bool join(const std::string& swarm_directory, const std::string& name)
 
         if (ack_deactivator) {
             ack_deactivator();
+        }
+        s_mproc->construct_with_id(my_id, "");
+        if (!name.empty()) {
+            s_mproc->assign_name(name);
         }
         s_mproc->m_communication_state = Managed_process::COMMUNICATION_RUNNING;
         return true;

@@ -225,18 +225,14 @@ Coordinator::Coordinator():
         draining_state = 0;
     }
 
-    try {
-        auto progress = std::make_shared<Process_message_reader::Delivery_progress>();
-        auto lobby_reader = std::make_shared<Process_message_reader>(
-            LOBBY_INSTANCE_ID, progress, 0u);
-        {
-            std::unique_lock<std::shared_mutex> readers_lock(s_mproc->m_readers_mutex);
-            s_mproc->m_readers[LOBBY_INSTANCE_ID] = lobby_reader;
-        }
-        lobby_reader->wait_until_ready();
+    auto progress = std::make_shared<Process_message_reader::Delivery_progress>();
+    auto lobby_reader = std::make_shared<Process_message_reader>(
+        LOBBY_INSTANCE_ID, progress, 0u);
+    {
+        std::unique_lock<std::shared_mutex> readers_lock(s_mproc->m_readers_mutex);
+        s_mproc->m_readers[LOBBY_INSTANCE_ID] = lobby_reader;
     }
-    catch (...) {
-    }
+    lobby_reader->wait_until_ready();
 
     auto join_handler = [this](const join_request& req) {
         on_join_request(req);
