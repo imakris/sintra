@@ -465,7 +465,9 @@ static inline void ns_to_timespec(uint64_t ns, struct timespec& ts)
     ts.tv_sec  = (time_t)sec;
     ts.tv_nsec = (long)(ns % 1000000000ULL);
 }
+#endif
 
+#if SINTRA_BACKEND_LINUX
 static inline int futex_wait(int* addr, int val, const struct timespec* rel)
 {
     return (int)syscall(SYS_futex, addr, FUTEX_WAIT, val, rel, nullptr, 0);
@@ -475,7 +477,9 @@ static inline int futex_wake(int* addr, int n)
 {
     return (int)syscall(SYS_futex, addr, FUTEX_WAKE, n, nullptr, nullptr, 0);
 }
-#elif SINTRA_BACKEND_FREEBSD
+#endif
+
+#if SINTRA_BACKEND_FREEBSD
 // FreeBSD: _umtx_op wait/wake wrappers
 static inline int umtx_wait_uint(uint32_t* addr, uint32_t expected, const struct _umtx_time* timeout)
 {
