@@ -146,8 +146,6 @@ private:
     void enable_recovery(instance_id_type piid);
     void recover_if_required(instance_id_type piid);
     void mark_initialization_complete(instance_id_type process_iid);
-    void on_join_request(const join_request& req);
-    void on_leave_request(const leave_request& req);
     void cleanup_dead_process(instance_id_type process_iid);
 
     // Blocks until all processes identified by process_group_id have called the function.
@@ -236,6 +234,8 @@ public:
         bool success)
     SINTRA_MESSAGE_RESERVED(leave_request,
         instance_id_type id)
+    void on_join_request(const join_request& req);
+    void on_leave_request(const leave_request& req);
 
     friend struct Managed_process;
     friend struct Transceiver;

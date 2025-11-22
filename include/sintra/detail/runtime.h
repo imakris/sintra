@@ -217,7 +217,6 @@ inline bool join(const std::string& swarm_directory, const std::string& name)
         registry_ptr = &registry;
         my_id = registry.allocate_process_id();
 
-        s_mproc->m_instance_id = my_id;
         s_mproc_id = my_id;
         s_coord_id = compose_instance(2u, 2ull);
 
@@ -232,7 +231,7 @@ inline bool join(const std::string& swarm_directory, const std::string& name)
         }
         coord_reader->wait_until_ready();
 
-        s_mproc->Derived_transceiver<Managed_process>::construct(name, my_id);
+        s_mproc->construct_with_id(my_id, name);
 
         auto ack_promise = std::make_shared<std::promise<bool>>();
         auto ack_future = ack_promise->get_future();
@@ -302,7 +301,16 @@ inline bool finalize()
 
     if (!s_coord) {
         try {
-            s_mproc->emit_remote<Coordinator::leave_request>(s_mproc_id);
+            auto& reg = s_mproc->registry();
+            reg.lock_lobby();
+            detail::Cleanup_guard lobby_guard([&reg]() { reg.unlock_lobby(); });
+
+            Message_ring_W lobby_writer(s_mproc->m_directory, "req", LOBBY_INSTANCE_ID, 0u);
+            auto* leave = lobby_writer.write<Coordinator::leave_request>(vb_size<Coordinator::leave_request>());
+            leave->id = s_mproc_id;
+            leave->sender_instance_id   = s_mproc_id;
+            leave->receiver_instance_id = any_local_or_remote;
+            lobby_writer.done_writing();
         }
         catch (...) {
         }

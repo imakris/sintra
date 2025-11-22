@@ -264,6 +264,7 @@ struct Managed_process: Derived_transceiver<Managed_process>
     void wait_for_delivery_fence();
     void notify_delivery_progress();
     detail::Swarm_registry& registry();
+    void construct_with_id(instance_id_type id, const std::string& name);
 
 
     size_t unblock_rpc(instance_id_type process_instance_id = invalid_instance_id);

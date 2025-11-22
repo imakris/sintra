@@ -267,7 +267,7 @@ inline void Coordinator::on_join_request(const join_request& req)
         if (s_mproc->m_readers.find(process_iid) != s_mproc->m_readers.end()) {
             auto* ack = s_mproc->m_out_req_c->write<join_ack>(vb_size<join_ack>(), false);
             ack->sender_instance_id   = m_instance_id;
-            ack->receiver_instance_id = any_local_or_remote;
+            ack->receiver_instance_id = process_iid;
             s_mproc->m_out_req_c->done_writing();
             return;
         }
@@ -306,7 +306,7 @@ inline void Coordinator::on_join_request(const join_request& req)
 
     auto* ack = s_mproc->m_out_req_c->write<join_ack>(vb_size<join_ack>(), true);
     ack->sender_instance_id   = m_instance_id;
-    ack->receiver_instance_id = any_local_or_remote;
+    ack->receiver_instance_id = process_iid;
     s_mproc->m_out_req_c->done_writing();
 }
 

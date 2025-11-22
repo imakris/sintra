@@ -1951,6 +1951,11 @@ inline detail::Swarm_registry& Managed_process::registry()
     return *m_registry;
 }
 
+inline void Managed_process::construct_with_id(instance_id_type id, const std::string& name)
+{
+    this->Derived_transceiver<Managed_process>::construct(name, id);
+}
+
 inline
 size_t Managed_process::unblock_rpc(instance_id_type process_instance_id)
 {
