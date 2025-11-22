@@ -10,6 +10,7 @@
 
 #include <atomic>
 #include <cassert>
+#include <cstdio>
 #include <chrono>
 #include <cstdint>
 #include <csignal>
@@ -216,12 +217,16 @@ inline bool join(const std::string& swarm_directory, const std::string& name)
         auto& registry = s_mproc->registry();
         registry_ptr = &registry;
         my_id = registry.allocate_process_id();
+        std::fprintf(stderr, "[sintra::join] allocated process_iid=%llu\n",
+            static_cast<unsigned long long>(my_id));
 
         s_mproc_id = my_id;
         s_coord_id = compose_instance(2u, 2ull);
 
         s_mproc->m_out_req_c = new Message_ring_W(swarm_directory, "req", my_id, s_recovery_occurrence);
         s_mproc->m_out_rep_c = new Message_ring_W(swarm_directory, "rep", my_id, s_recovery_occurrence);
+        std::fprintf(stderr, "[sintra::join] rings created for process_iid=%llu\n",
+            static_cast<unsigned long long>(my_id));
 
         auto progress = std::make_shared<Process_message_reader::Delivery_progress>();
         auto coord_reader = std::make_shared<Process_message_reader>(my_id, progress, 0u, "req");
@@ -261,9 +266,13 @@ inline bool join(const std::string& swarm_directory, const std::string& name)
         join_msg->sender_instance_id   = my_id;
         join_msg->receiver_instance_id = any_local_or_remote;
         lobby_writer.done_writing();
+        std::fprintf(stderr, "[sintra::join] join request sent for process_iid=%llu\n",
+            static_cast<unsigned long long>(my_id));
 
         const auto wait_status = ack_future.wait_for(std::chrono::seconds(5));
         if (wait_status != std::future_status::ready || !ack_future.get()) {
+            std::fprintf(stderr, "[sintra::join] join ack timeout/failure for process_iid=%llu\n",
+                static_cast<unsigned long long>(my_id));
             if (ack_deactivator) {
                 ack_deactivator();
             }
@@ -281,6 +290,8 @@ inline bool join(const std::string& swarm_directory, const std::string& name)
             s_mproc->assign_name(name);
         }
         s_mproc->m_communication_state = Managed_process::COMMUNICATION_RUNNING;
+        std::fprintf(stderr, "[sintra::join] join ack received and process ready for process_iid=%llu\n",
+            static_cast<unsigned long long>(my_id));
         return true;
     }
     catch (...) {
@@ -313,6 +324,8 @@ inline bool finalize()
             leave->sender_instance_id   = s_mproc_id;
             leave->receiver_instance_id = any_local_or_remote;
             lobby_writer.done_writing();
+            std::fprintf(stderr, "[sintra::finalize] leave request sent for process_iid=%llu\n",
+                static_cast<unsigned long long>(s_mproc_id));
         }
         catch (...) {
         }

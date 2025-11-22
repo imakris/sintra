@@ -1366,13 +1366,18 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
 
         if (s_coord) {
             s_coord->mark_initialization_complete(m_instance_id);
+            std::fprintf(stderr, "[Managed_process] mark_initialization_complete direct for process_iid=%llu\n",
+                static_cast<unsigned long long>(m_instance_id));
         }
         else if (s_coord_id != invalid_instance_id) {
             try {
                 Coordinator::rpc_mark_initialization_complete(s_coord_id, m_instance_id);
+                std::fprintf(stderr, "[Managed_process] mark_initialization_complete rpc ok for process_iid=%llu\n",
+                    static_cast<unsigned long long>(m_instance_id));
             }
             catch (const rpc_cancelled&) {
-                // Coordinator already gone; nothing to do.
+                std::fprintf(stderr, "[Managed_process] mark_initialization_complete rpc cancelled for process_iid=%llu\n",
+                    static_cast<unsigned long long>(m_instance_id));
             }
         }
     };

@@ -225,6 +225,8 @@ Coordinator::Coordinator():
         draining_state = 0;
     }
 
+    std::fprintf(stderr, "[Coordinator] setting up lobby reader for LOBBY_INSTANCE_ID=%llu\n",
+        static_cast<unsigned long long>(LOBBY_INSTANCE_ID));
     auto progress = std::make_shared<Process_message_reader::Delivery_progress>();
     auto lobby_reader = std::make_shared<Process_message_reader>(
         LOBBY_INSTANCE_ID, progress, 0u, "lobby_req");
@@ -233,6 +235,7 @@ Coordinator::Coordinator():
         s_mproc->m_readers[LOBBY_INSTANCE_ID] = lobby_reader;
     }
     lobby_reader->wait_until_ready();
+    std::fprintf(stderr, "[Coordinator] lobby reader ready\n");
 
     auto join_handler = [this](const join_request& req) {
         on_join_request(req);
@@ -257,6 +260,10 @@ Coordinator::~Coordinator()
 inline void Coordinator::on_join_request(const join_request& req)
 {
     const auto process_iid = process_of(req.process_iid);
+    std::fprintf(stderr, "[Coordinator] join_request for process_iid=%llu pid=%u name=%s\n",
+        static_cast<unsigned long long>(process_iid),
+        static_cast<unsigned int>(req.pid),
+        req.name);
 
     {
         std::shared_lock<std::shared_mutex> readers_lock(s_mproc->m_readers_mutex);
