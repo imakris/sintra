@@ -525,8 +525,14 @@ static inline void posix_wake_some(uint32_t* addr, int n) noexcept
     if (n > INT_MAX) n = INT_MAX;
     (void)futex_wake((int*)addr, n);
 #elif SINTRA_BACKEND_DARWIN
-    (void)n;  // Darwin doesn't have wake-N, always use wake-all
-    (void)os_sync_wake_by_address_all((void*)addr, 4, OS_SYNC_WAKE_BY_ADDRESS_SHARED);
+    // macOS provides wake-any (single waiter) and wake-all. Use wake-any when n==1 to
+    // avoid thundering-herd wakeups; fall back to wake-all otherwise.
+    if (n == 1) {
+        (void)os_sync_wake_by_address_any((void*)addr, 4, OS_SYNC_WAKE_BY_ADDRESS_SHARED);
+    }
+    else {
+        (void)os_sync_wake_by_address_all((void*)addr, 4, OS_SYNC_WAKE_BY_ADDRESS_SHARED);
+    }
 #elif SINTRA_BACKEND_POLLING
     (void)addr; (void)n;
     // Polling backend doesn't need wakes - waiters poll the atomic counter
