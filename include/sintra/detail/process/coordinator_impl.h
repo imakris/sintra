@@ -260,7 +260,7 @@ Coordinator::~Coordinator()
 
 inline void Coordinator::on_join_request(const join_request& req)
 {
-    const auto process_iid = process_of(req.id);
+    const auto process_iid = process_of(req.process_iid);
 
     {
         std::shared_lock<std::shared_mutex> readers_lock(s_mproc->m_readers_mutex);
@@ -290,10 +290,10 @@ inline void Coordinator::on_join_request(const join_request& req)
 
     try {
         auto scoped_map = s_mproc->m_instance_id_of_assigned_name.scoped();
-        std::string name(req.name);
-        if (!name.empty()) {
-            scoped_map.get()[name] = process_iid;
-        }
+    std::string name(req.name);
+    if (!name.empty()) {
+        scoped_map.get()[name] = process_iid;
+    }
     }
     catch (...) {
     }
@@ -312,7 +312,7 @@ inline void Coordinator::on_join_request(const join_request& req)
 
 inline void Coordinator::on_leave_request(const leave_request& req)
 {
-    cleanup_dead_process(req.id);
+    cleanup_dead_process(req.process_iid);
 }
 
 inline void Coordinator::cleanup_dead_process(instance_id_type process_iid)

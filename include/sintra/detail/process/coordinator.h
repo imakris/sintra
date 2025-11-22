@@ -229,11 +229,11 @@ public:
     SINTRA_MESSAGE_RESERVED(instance_unpublished,
         type_id_type type_id, instance_id_type instance_id, message_string assigned_name)
     SINTRA_MESSAGE_RESERVED(join_request,
-        instance_id_type id, uint32_t pid, char name[64])
+        instance_id_type process_iid, uint32_t pid, char name[64])
     SINTRA_MESSAGE_RESERVED(join_ack,
         bool success)
     SINTRA_MESSAGE_RESERVED(leave_request,
-        instance_id_type id)
+        instance_id_type process_iid)
     void on_join_request(const join_request& req);
     void on_leave_request(const leave_request& req);
 

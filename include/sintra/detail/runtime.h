@@ -256,7 +256,7 @@ inline bool join(const std::string& swarm_directory, const std::string& name)
 
         Message_ring_W lobby_writer(swarm_directory, "req", LOBBY_INSTANCE_ID, 0u);
         auto* join_msg = lobby_writer.write<Coordinator::join_request>(vb_size<Coordinator::join_request>());
-        join_msg->id = my_id;
+        join_msg->process_iid = my_id;
         join_msg->pid = static_cast<uint32_t>(detail::get_current_process_id());
         std::memset(join_msg->name, 0, sizeof(join_msg->name));
         std::strncpy(join_msg->name, name.c_str(), sizeof(join_msg->name) - 1);
@@ -307,7 +307,7 @@ inline bool finalize()
 
             Message_ring_W lobby_writer(s_mproc->m_directory, "req", LOBBY_INSTANCE_ID, 0u);
             auto* leave = lobby_writer.write<Coordinator::leave_request>(vb_size<Coordinator::leave_request>());
-            leave->id = s_mproc_id;
+            leave->process_iid = s_mproc_id;
             leave->sender_instance_id   = s_mproc_id;
             leave->receiver_instance_id = any_local_or_remote;
             lobby_writer.done_writing();
