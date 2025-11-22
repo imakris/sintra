@@ -12,11 +12,11 @@
 #include <thread>
 
 struct Hello {
-    sintra::instance_id_type from = sintra::invalid_instance_id;
+    sintra::instance_id_type from;
 };
 
 struct Hello_response {
-    sintra::instance_id_type target = sintra::invalid_instance_id;
+    sintra::instance_id_type target;
 };
 
 int worker_main(const std::string& swarm_dir)
@@ -29,7 +29,7 @@ int worker_main(const std::string& swarm_dir)
     auto reply_future = got_reply.get_future();
 
     auto handler = [&](const Hello_response& msg) {
-        if (msg.target == sintra::s_mproc_id) {
+        if (msg.target == s_mproc_id) {
             try {
                 got_reply.set_value();
             }
@@ -39,7 +39,7 @@ int worker_main(const std::string& swarm_dir)
     };
     sintra::activate_slot(handler);
 
-    sintra::world() << Hello{sintra::s_mproc_id};
+    sintra::world() << Hello{s_mproc_id};
 
     const auto status = reply_future.wait_for(std::chrono::seconds(5));
     sintra::finalize();
