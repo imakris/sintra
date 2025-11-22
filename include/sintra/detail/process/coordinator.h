@@ -146,6 +146,9 @@ private:
     void enable_recovery(instance_id_type piid);
     void recover_if_required(instance_id_type piid);
     void mark_initialization_complete(instance_id_type process_iid);
+    void on_join_request(const join_request& req);
+    void on_leave_request(const leave_request& req);
+    void cleanup_dead_process(instance_id_type process_iid);
 
     // Blocks until all processes identified by process_group_id have called the function.
     // num_absences may be used by a caller to specify that it is aware that other callers will
@@ -227,6 +230,12 @@ public:
         type_id_type type_id, instance_id_type instance_id, message_string assigned_name)
     SINTRA_MESSAGE_RESERVED(instance_unpublished,
         type_id_type type_id, instance_id_type instance_id, message_string assigned_name)
+    SINTRA_MESSAGE_RESERVED(join_request,
+        instance_id_type id, uint32_t pid, char name[64])
+    SINTRA_MESSAGE_RESERVED(join_ack,
+        bool success)
+    SINTRA_MESSAGE_RESERVED(leave_request,
+        instance_id_type id)
 
     friend struct Managed_process;
     friend struct Transceiver;

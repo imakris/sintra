@@ -11,11 +11,14 @@
 #include <atomic>
 #include <cassert>
 #include <chrono>
+#include <cstdint>
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <future>
 #include <iostream>
+#include <shared_mutex>
 #include <string>
 #include <thread>
 #include <utility>
@@ -197,6 +200,98 @@ void init(int argc, const char* const* argv, Args&&... args)
     init(argc, argv, make_branches(std::forward<Args>(args)...));
 }
 
+inline bool join(const std::string& swarm_directory, const std::string& name)
+{
+    if (s_mproc) {
+        return false;
+    }
+
+    s_mproc = new Managed_process;
+    s_mproc->m_directory = swarm_directory;
+
+    detail::Swarm_registry* registry_ptr = nullptr;
+    instance_id_type my_id = invalid_instance_id;
+
+    try {
+        auto& registry = s_mproc->registry();
+        registry_ptr = &registry;
+        my_id = registry.allocate_process_id();
+
+        s_mproc->m_instance_id = my_id;
+        s_mproc_id = my_id;
+        s_coord_id = compose_instance(2u, 2ull);
+
+        s_mproc->m_out_req_c = new Message_ring_W(swarm_directory, "req", my_id, s_recovery_occurrence);
+        s_mproc->m_out_rep_c = new Message_ring_W(swarm_directory, "rep", my_id, s_recovery_occurrence);
+
+        auto progress = std::make_shared<Process_message_reader::Delivery_progress>();
+        auto coord_reader = std::make_shared<Process_message_reader>(process_of(s_coord_id), progress, 0u);
+        {
+            std::unique_lock<std::shared_mutex> readers_lock(s_mproc->m_readers_mutex);
+            s_mproc->m_readers.emplace(process_of(s_coord_id), coord_reader);
+        }
+        coord_reader->wait_until_ready();
+
+        s_mproc->Derived_transceiver<Managed_process>::construct(name, my_id);
+
+        auto ack_promise = std::make_shared<std::promise<bool>>();
+        auto ack_future = ack_promise->get_future();
+        auto ack_delivered = std::make_shared<std::atomic<bool>>(false);
+        auto ack_handler = [ack_promise, ack_delivered](const Coordinator::join_ack& ack) {
+            bool expected = false;
+            if (!ack_delivered->compare_exchange_strong(expected, true)) {
+                return;
+            }
+            try {
+                ack_promise->set_value(ack.success);
+            }
+            catch (const std::future_error&) {
+            }
+        };
+        auto ack_deactivator = s_mproc->activate<Coordinator>(ack_handler, Typed_instance_id<Coordinator>(s_coord_id));
+
+        registry.lock_lobby();
+        detail::Cleanup_guard lobby_guard([&registry]() {
+            registry.unlock_lobby();
+        });
+
+        Message_ring_W lobby_writer(swarm_directory, "req", LOBBY_INSTANCE_ID, 0u);
+        auto* join_msg = lobby_writer.write<Coordinator::join_request>(vb_size<Coordinator::join_request>());
+        join_msg->id = my_id;
+        join_msg->pid = static_cast<uint32_t>(detail::get_current_process_id());
+        std::memset(join_msg->name, 0, sizeof(join_msg->name));
+        std::strncpy(join_msg->name, name.c_str(), sizeof(join_msg->name) - 1);
+        join_msg->sender_instance_id   = my_id;
+        join_msg->receiver_instance_id = any_local_or_remote;
+        lobby_writer.done_writing();
+
+        const auto wait_status = ack_future.wait_for(std::chrono::seconds(5));
+        if (wait_status != std::future_status::ready || !ack_future.get()) {
+            if (ack_deactivator) {
+                ack_deactivator();
+            }
+            registry.free_process_id(my_id);
+            delete s_mproc;
+            s_mproc = nullptr;
+            return false;
+        }
+
+        if (ack_deactivator) {
+            ack_deactivator();
+        }
+        s_mproc->m_communication_state = Managed_process::COMMUNICATION_RUNNING;
+        return true;
+    }
+    catch (...) {
+        if (registry_ptr && my_id != invalid_instance_id) {
+            registry_ptr->free_process_id(my_id);
+        }
+        delete s_mproc;
+        s_mproc = nullptr;
+        return false;
+    }
+}
+
 inline bool finalize()
 {
     if (!s_mproc) {
@@ -204,6 +299,14 @@ inline bool finalize()
     }
 
     sequence_counter_type flush_seq = invalid_sequence;
+
+    if (!s_coord) {
+        try {
+            s_mproc->emit_remote<Coordinator::leave_request>(s_mproc_id);
+        }
+        catch (...) {
+        }
+    }
 
     if (s_coord) {
         flush_seq = s_coord->begin_process_draining(s_mproc_id);
@@ -240,6 +343,12 @@ inline bool finalize()
 
     s_mproc->pause();
 
+    try {
+        s_mproc->registry().free_process_id(s_mproc_id);
+    }
+    catch (...) {
+    }
+
     delete s_mproc;
     s_mproc = nullptr;
 
@@ -252,7 +361,24 @@ inline size_t spawn_swarm_process(
     size_t multiplicity = 1)
 {
     size_t spawned = 0;
-    const auto piid = make_process_instance_id();
+    instance_id_type piid = invalid_instance_id;
+    if (s_mproc) {
+        try {
+            piid = s_mproc->registry().allocate_process_id();
+        }
+        catch (...) {
+        }
+    }
+    if (piid == invalid_instance_id) {
+        piid = make_process_instance_id();
+        if (s_mproc) {
+            try {
+                s_mproc->registry().reserve_process_id(piid);
+            }
+            catch (...) {
+            }
+        }
+    }
 
     args.insert(args.end(), {
         "--swarm_id",       std::to_string(s_mproc->m_swarm_id),

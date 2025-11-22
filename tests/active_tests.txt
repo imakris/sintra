@@ -35,6 +35,7 @@ ipc_rings_tests                           10
 macos_named_semaphore_benchmark          100
 macos_os_sync_semaphore_benchmark        100
 message_args_traits_test                 100
+dynamic_revolving_door_test                1
 ping_pong_multi_test                     100
 ping_pong_test                           100
 processing_fence_test                    100

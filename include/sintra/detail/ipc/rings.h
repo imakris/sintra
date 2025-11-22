@@ -2046,6 +2046,11 @@ struct Ring_W : Ring<T, false>
     :   Ring<T, false>::Ring(directory, data_filename, num_elements),
         c(*this->m_control)
     {
+        const auto leading = c.leading_sequence.load();
+        if (leading != 0) {
+            m_pending_new_sequence = leading;
+        }
+        m_octile = octile_of_sequence(m_pending_new_sequence, this->m_num_elements);
         ensure_writer_mutex_consistency();
 
         // Single writer across processes

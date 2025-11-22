@@ -73,6 +73,9 @@ namespace detail {
         // EXPLICITLY DEFINED SIGNALS HANDLED BY COORDINATOR
         base_of_messages_handled_by_coordinator = 0x80000000,
         terminated_abnormally,
+        join_request,
+        join_ack,
+        leave_request,
 
         num_reserved_type_ids
     };
@@ -172,6 +175,9 @@ struct decomposed_instance_id {
 {
     return (instance_id_type(process) << num_transceiver_index_bits) | instance_id_type(transceiver);
 }
+
+constexpr instance_id_type LOBBY_INSTANCE_ID =
+    compose_instance(max_process_index, num_reserved_service_instances - 1);
 
 
 inline

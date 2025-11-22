@@ -13,6 +13,7 @@
 #include "../ipc/spinlocked_containers.h"
 #include "../transceiver.h"
 #include "../messaging/call_function_with_message_args.h"
+#include "swarm_registry.h"
 
 #include <algorithm>
 #include <atomic>
@@ -179,6 +180,7 @@ struct Managed_process: Derived_transceiver<Managed_process>
 
     Message_ring_W*                     m_out_req_c = nullptr;
     Message_ring_W*                     m_out_rep_c = nullptr;
+    std::unique_ptr<detail::Swarm_registry> m_registry;
 
     spinlocked_umap<
         string,
@@ -261,6 +263,7 @@ struct Managed_process: Derived_transceiver<Managed_process>
 
     void wait_for_delivery_fence();
     void notify_delivery_progress();
+    detail::Swarm_registry& registry();
 
 
     size_t unblock_rpc(instance_id_type process_instance_id = invalid_instance_id);

@@ -224,6 +224,29 @@ Coordinator::Coordinator():
     for (auto& draining_state : m_draining_process_states) {
         draining_state = 0;
     }
+
+    try {
+        auto progress = std::make_shared<Process_message_reader::Delivery_progress>();
+        auto lobby_reader = std::make_shared<Process_message_reader>(
+            LOBBY_INSTANCE_ID, progress, 0u);
+        {
+            std::unique_lock<std::shared_mutex> readers_lock(s_mproc->m_readers_mutex);
+            s_mproc->m_readers[LOBBY_INSTANCE_ID] = lobby_reader;
+        }
+        lobby_reader->wait_until_ready();
+    }
+    catch (...) {
+    }
+
+    auto join_handler = [this](const join_request& req) {
+        on_join_request(req);
+    };
+    activate(join_handler, Typed_instance_id<void>(any_local_or_remote));
+
+    auto leave_handler = [this](const leave_request& req) {
+        on_leave_request(req);
+    };
+    activate(leave_handler, Typed_instance_id<void>(any_local_or_remote));
 }
 
 
@@ -233,6 +256,90 @@ Coordinator::~Coordinator()
 {
     s_coord     = nullptr;
     s_coord_id  = 0;
+}
+
+inline void Coordinator::on_join_request(const join_request& req)
+{
+    const auto process_iid = process_of(req.id);
+
+    {
+        std::shared_lock<std::shared_mutex> readers_lock(s_mproc->m_readers_mutex);
+        if (s_mproc->m_readers.find(process_iid) != s_mproc->m_readers.end()) {
+            auto* ack = s_mproc->m_out_req_c->write<join_ack>(vb_size<join_ack>(), false);
+            ack->sender_instance_id   = m_instance_id;
+            ack->receiver_instance_id = any_local_or_remote;
+            s_mproc->m_out_req_c->done_writing();
+            return;
+        }
+    }
+
+    auto progress = std::make_shared<Process_message_reader::Delivery_progress>();
+    auto reader = std::make_shared<Process_message_reader>(process_iid, progress, 0u);
+    {
+        std::unique_lock<std::shared_mutex> readers_lock(s_mproc->m_readers_mutex);
+        s_mproc->m_readers[process_iid] = reader;
+    }
+    reader->wait_until_ready();
+
+    {
+        lock_guard<mutex> lock(m_publish_mutex);
+        auto& entry = m_transceiver_registry[process_iid];
+        std::string name(req.name);
+        entry[process_iid] = { get_type_id<Managed_process>(), name };
+    }
+
+    try {
+        auto scoped_map = s_mproc->m_instance_id_of_assigned_name.scoped();
+        std::string name(req.name);
+        if (!name.empty()) {
+            scoped_map.get()[name] = process_iid;
+        }
+    }
+    catch (...) {
+    }
+
+    try {
+        s_mproc->registry().reserve_process_id(process_iid);
+    }
+    catch (...) {
+    }
+
+    auto* ack = s_mproc->m_out_req_c->write<join_ack>(vb_size<join_ack>(), true);
+    ack->sender_instance_id   = m_instance_id;
+    ack->receiver_instance_id = any_local_or_remote;
+    s_mproc->m_out_req_c->done_writing();
+}
+
+inline void Coordinator::on_leave_request(const leave_request& req)
+{
+    cleanup_dead_process(req.id);
+}
+
+inline void Coordinator::cleanup_dead_process(instance_id_type process_iid)
+{
+    const auto pid = process_of(process_iid);
+    if (pid == invalid_instance_id || pid == s_mproc_id) {
+        return;
+    }
+
+    unpublish_transceiver(pid);
+
+    {
+        std::unique_lock<std::shared_mutex> readers_lock(s_mproc->m_readers_mutex);
+        auto it = s_mproc->m_readers.find(pid);
+        if (it != s_mproc->m_readers.end()) {
+            if (it->second) {
+                it->second->stop_nowait();
+            }
+            s_mproc->m_readers.erase(it);
+        }
+    }
+
+    try {
+        s_mproc->registry().free_process_id(pid);
+    }
+    catch (...) {
+    }
 }
 
 

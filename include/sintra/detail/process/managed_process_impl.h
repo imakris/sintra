@@ -1020,6 +1020,11 @@ Managed process options:
         s_mproc_id = m_instance_id;
     }
     m_directory = obtain_swarm_directory();
+    try {
+        registry().reserve_process_id(m_instance_id);
+    }
+    catch (...) {
+    }
 
     const auto abi_path = std::filesystem::path(m_directory) / detail::abi_marker_filename();
     const std::string current_abi = detail::abi_token();
@@ -1178,6 +1183,7 @@ Managed process options:
             s_coord->unpublish_transceiver(msg.sender_instance_id);
 
             s_coord->recover_if_required(msg.sender_instance_id);
+            s_coord->cleanup_dead_process(process_of(msg.sender_instance_id));
 
             /*
             
@@ -1327,6 +1333,12 @@ Managed_process::Spawn_result Managed_process::spawn_swarm_process(
         if (s_coord) {
             s_coord->mark_initialization_complete(s.piid);
         }
+
+        try {
+            registry().free_process_id(s.piid);
+        }
+        catch (...) {
+        }
     }
 
     return result;
@@ -1387,9 +1399,21 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
                 it->entry.m_binary_name = m_binary_name;
                 options.insert(options.end(), { "--branch_index", to_string(i) });
             }
+            instance_id_type assigned_id = invalid_instance_id;
+            try {
+                assigned_id = registry().allocate_process_id();
+            }
+            catch (...) {
+                assigned_id = make_process_instance_id();
+                try {
+                    registry().reserve_process_id(assigned_id);
+                }
+                catch (...) {
+                }
+            }
             options.insert(options.end(), {
                 "--swarm_id",       to_string(m_swarm_id),
-                "--instance_id",    to_string(it->assigned_instance_id = make_process_instance_id()),
+                "--instance_id",    to_string(it->assigned_instance_id = assigned_id),
                 "--coordinator_id", to_string(s_coord_id)
             });
         }
@@ -1917,6 +1941,14 @@ inline void Managed_process::notify_delivery_progress()
     // See: wait_for_delivery_fence() which waits on this condition variable.
     std::lock_guard<std::mutex> lk(m_delivery_mutex);
     m_delivery_condition.notify_all();
+}
+
+inline detail::Swarm_registry& Managed_process::registry()
+{
+    if (!m_registry) {
+        m_registry = std::make_unique<detail::Swarm_registry>(m_directory);
+    }
+    return *m_registry;
 }
 
 inline

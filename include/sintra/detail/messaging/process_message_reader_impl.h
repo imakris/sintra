@@ -287,7 +287,8 @@ void Process_message_reader::request_reader_function()
         // it might be a good idea to kill it. If it is in the core set of processes,
         // then it would be a bug.
         assert(m_in_req_c->m_id == process_of(m->sender_instance_id) ||
-               m_in_req_c->m_id == process_of(s_coord_id));
+               m_in_req_c->m_id == process_of(s_coord_id) ||
+               m_in_req_c->m_id == LOBBY_INSTANCE_ID);
 
         assert(m->message_type_id != not_defined_type_id);
 
@@ -546,7 +547,8 @@ void Process_message_reader::reply_reader_function()
         // Only the process with the coordinator's instance is allowed to send messages on
         // someone else's behalf (for relay purposes).
         assert(m_in_rep_c->m_id == process_of(m->sender_instance_id) ||
-               m_in_rep_c->m_id == process_of(s_coord_id));
+               m_in_rep_c->m_id == process_of(s_coord_id) ||
+               m_in_rep_c->m_id == LOBBY_INSTANCE_ID);
 
         assert(m->receiver_instance_id != any_local);
 
