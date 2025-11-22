@@ -224,10 +224,10 @@ inline bool join(const std::string& swarm_directory, const std::string& name)
         s_mproc->m_out_rep_c = new Message_ring_W(swarm_directory, "rep", my_id, s_recovery_occurrence);
 
         auto progress = std::make_shared<Process_message_reader::Delivery_progress>();
-        auto coord_reader = std::make_shared<Process_message_reader>(process_of(s_coord_id), progress, 0u);
+        auto coord_reader = std::make_shared<Process_message_reader>(my_id, progress, 0u, "req");
         {
             std::unique_lock<std::shared_mutex> readers_lock(s_mproc->m_readers_mutex);
-            s_mproc->m_readers.emplace(process_of(s_coord_id), coord_reader);
+            s_mproc->m_readers.emplace(my_id, coord_reader);
         }
         coord_reader->wait_until_ready();
 
