@@ -104,6 +104,11 @@ CAVEATS
     #include <sys/syscall.h>
     #include <linux/futex.h>
     #include <unistd.h>
+  #elif defined(__FreeBSD__)
+    #define SINTRA_BACKEND_FREEBSD 1
+    #include <sys/types.h>
+    #include <sys/umtx.h>
+    #include <unistd.h>
   #else
     #define SINTRA_BACKEND_POLLING 1
   #endif
@@ -449,7 +454,7 @@ inline void ips_backend::destroy() noexcept
 
 
 
-#if SINTRA_BACKEND_LINUX
+#if SINTRA_BACKEND_LINUX || SINTRA_BACKEND_FREEBSD
 static inline void ns_to_timespec(uint64_t ns, struct timespec& ts)
 {
     uint64_t sec = ns / 1000000000ULL;
@@ -469,6 +474,17 @@ static inline int futex_wait(int* addr, int val, const struct timespec* rel)
 static inline int futex_wake(int* addr, int n)
 {
     return (int)syscall(SYS_futex, addr, FUTEX_WAKE, n, nullptr, nullptr, 0);
+}
+#elif SINTRA_BACKEND_FREEBSD
+// FreeBSD: _umtx_op wait/wake wrappers
+static inline int umtx_wait_uint(uint32_t* addr, uint32_t expected, const struct _umtx_time* timeout)
+{
+    return _umtx_op((void*)addr, UMTX_OP_WAIT_UINT, (u_long)expected, 0, (void*)timeout);
+}
+
+static inline int umtx_wake(uint32_t* addr, int n)
+{
+    return _umtx_op((void*)addr, UMTX_OP_WAKE, (u_long)n, 0, nullptr);
 }
 #endif
 
@@ -510,6 +526,31 @@ static inline int posix_wait_equal_until(
         if (errno == EINTR || errno == EAGAIN) continue;
         return -1;
     }
+#elif SINTRA_BACKEND_FREEBSD
+    for (;;) {
+        const uint64_t now = monotonic_now_ns();
+        if (now >= deadline) {
+            errno = ETIMEDOUT; return -1;
+        }
+        uint64_t rel = deadline - now;
+
+        struct _umtx_time t;
+        t._flags = 0; // Relative timeout
+        t._clockid = CLOCK_MONOTONIC;
+        ns_to_timespec(rel, t._timeout);
+
+        int rc = umtx_wait_uint(addr, expected, &t);
+        if (rc == 0) {
+            return 0;
+        }
+        if (errno == ETIMEDOUT) {
+            return -1;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        return 0; // Treat other errors as spurious wakes
+    }
 #elif SINTRA_BACKEND_POLLING
     // Polling backend: sleep 1ms and return spurious wake
     (void)addr; (void)expected; (void)deadline;
@@ -533,6 +574,11 @@ static inline void posix_wake_some(uint32_t* addr, int n) noexcept
     else {
         (void)os_sync_wake_by_address_all((void*)addr, 4, OS_SYNC_WAKE_BY_ADDRESS_SHARED);
     }
+#elif SINTRA_BACKEND_FREEBSD
+    if (n < 0) {
+        n = INT_MAX; // wake all
+    }
+    (void)umtx_wake(addr, n);
 #elif SINTRA_BACKEND_POLLING
     (void)addr; (void)n;
     // Polling backend doesn't need wakes - waiters poll the atomic counter
