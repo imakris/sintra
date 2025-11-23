@@ -732,13 +732,6 @@ instance_id_type Coordinator::join_swarm(
         "--recovery_occurrence", std::to_string(spawn_args.occurrence)
     };
     auto result = s_mproc->spawn_swarm_process(spawn_args);
-    if (!result.success) {
-        lock_guard<mutex> guard(m_publish_mutex);
-        m_inflight_joins.erase(branch_index);
-        m_joined_process_branch.erase(new_instance_id);
-        return invalid_instance_id;
-    }
-
     {
         lock_guard<mutex> groups_lock(m_groups_mutex);
         auto add_to_group = [&](const string& name) {
@@ -750,6 +743,25 @@ instance_id_type Coordinator::join_swarm(
         };
         add_to_group("_sintra_all_processes");
         add_to_group("_sintra_external_processes");
+    }
+
+    if (!result.success) {
+        // Roll back tentative group insertion on spawn failure.
+        lock_guard<mutex> groups_lock(m_groups_mutex);
+        auto remove_from_group = [&](const string& name) {
+            auto it = m_groups.find(name);
+            if (it != m_groups.end()) {
+                it->second.remove_process(new_instance_id);
+            }
+        };
+        remove_from_group("_sintra_all_processes");
+        remove_from_group("_sintra_external_processes");
+        m_groups_of_process.erase(new_instance_id);
+
+        lock_guard<mutex> guard(m_publish_mutex);
+        m_inflight_joins.erase(branch_index);
+        m_joined_process_branch.erase(new_instance_id);
+        return invalid_instance_id;
     }
 
     return new_instance_id;
