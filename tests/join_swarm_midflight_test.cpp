@@ -69,6 +69,7 @@ int worker()
 {
     const auto dir = shared_dir();
     const auto log_path = dir / "hello.log";
+    const auto trace_path = dir / "trace.log";
     const auto initiator_marker = dir / "initiator_claimed";
 
     auto hello_slot = [&](Hello) {
@@ -77,9 +78,12 @@ int worker()
     sintra::activate_slot(hello_slot);
 
     const bool initiator = std::filesystem::create_directory(initiator_marker);
+    append_line(trace_path, std::string("worker ") + std::to_string(sintra::process_of(s_mproc_id)) +
+                              (initiator ? " initiator" : " follower"));
 
     if (initiator) {
         const auto joined = sintra::join_swarm(1);
+        append_line(trace_path, std::string("join result: ") + std::to_string(joined));
         if (joined == sintra::invalid_instance_id) {
             return 1;
         }
@@ -103,8 +107,8 @@ int worker()
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
 
-    // Coordinate shutdown with the coordinator.
-    sintra::barrier("join-test-shutdown", "_sintra_all_processes");
+    append_line(trace_path, std::string("worker exit seen=") + std::to_string(seen));
+
     return seen >= 2 ? 0 : 1;
 }
 
@@ -112,18 +116,30 @@ int worker()
 
 int main(int argc, char* argv[])
 {
-    const auto dir = sintra::test::unique_scratch_directory("join_swarm_midflight");
+    const char* existing_dir = std::getenv(kSharedDirEnv);
+    const bool own_dir = !(existing_dir && *existing_dir);
+    const auto dir = own_dir
+        ? sintra::test::unique_scratch_directory("join_swarm_midflight")
+        : std::filesystem::path(existing_dir);
     std::filesystem::create_directories(dir);
     const auto log_path = dir / "hello.log";
-    std::ofstream truncate(log_path, std::ios::binary | std::ios::trunc);
-    if (!truncate) {
-        return 1;
+    const auto trace_path = dir / "trace.log";
+
+    if (own_dir) {
+        std::ofstream truncate(log_path, std::ios::binary | std::ios::trunc);
+        if (!truncate) {
+            return 1;
+        }
     }
 
 #ifdef _WIN32
-    _putenv_s(kSharedDirEnv, dir.string().c_str());
+    if (own_dir) {
+        _putenv_s(kSharedDirEnv, dir.string().c_str());
+    }
 #else
-    setenv(kSharedDirEnv, dir.string().c_str(), 1);
+    if (own_dir) {
+        setenv(kSharedDirEnv, dir.string().c_str(), 1);
+    }
 #endif
 
     sintra::init(argc, argv, worker);
@@ -139,8 +155,8 @@ int main(int argc, char* argv[])
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
 
-    // Let workers and coordinator drain together.
-    sintra::barrier("join-test-shutdown", "_sintra_all_processes");
+    append_line(trace_path, std::string("coordinator saw=") + std::to_string(seen));
+
     sintra::finalize();
 
     return seen >= 2 ? 0 : 1;
