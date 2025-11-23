@@ -989,6 +989,21 @@ class TestRunner:
                 except (ProcessLookupError, PermissionError, OSError):
                     process_group_id = None
 
+            # Hard wall-clock watchdog to ensure stuck processes can't bypass the timeout loop.
+            watchdog_stop = threading.Event()
+            def watchdog():
+                deadline = start_monotonic + timeout + 2.0  # small grace
+                while not watchdog_stop.wait(0.5):
+                    if time.monotonic() >= deadline:
+                        if process.poll() is None:
+                            print(
+                                f"\n{Color.RED}WATCHDOG: Force-killing {invocation.name} (pid {process.pid}) after {timeout}s wall time{Color.RESET}"
+                            )
+                            self._kill_process_tree(process.pid)
+                        break
+            watchdog_thread = threading.Thread(target=watchdog, daemon=True)
+            watchdog_thread.start()
+
             def attempt_live_capture(trigger_line: str) -> None:
                 nonlocal live_stack_traces, live_stack_error
                 if not trigger_line:
@@ -1476,6 +1491,8 @@ class TestRunner:
             manual_capture_event.set()
             if manual_capture_thread is not None:
                 manual_capture_thread.join(timeout=1.0)
+            watchdog_stop.set()
+            watchdog_thread.join(timeout=1.0)
             if manual_signal_registered and manual_signal_module is not None:
                 for sig, prev_handler in manual_signal_handlers.items():
                     try:
