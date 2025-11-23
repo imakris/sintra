@@ -31,6 +31,7 @@ namespace {
 constexpr const char* kSharedDirEnv = "SINTRA_JOIN_SWARM_DIR";
 
 struct Hello {};
+struct Ping { int token; };
 
 std::filesystem::path shared_dir()
 {
@@ -67,6 +68,17 @@ std::vector<std::string> read_lines(const std::filesystem::path& file)
     return lines;
 }
 
+struct Ping_receiver : sintra::Derived_transceiver<Ping_receiver>
+{
+    int ping(int token)
+    {
+        // Simple echo to prove direct RPC delivery.
+        return token + 1;
+    }
+
+    SINTRA_RPC(ping);
+};
+
 long long monotonic_millis()
 {
     using namespace std::chrono;
@@ -99,6 +111,8 @@ int worker()
     const auto log_path = dir / "hello.log";
     const auto trace_path = dir / "trace.log";
     const auto initiator_marker = dir / "initiator_claimed";
+    const auto process_iid = sintra::process_of(s_mproc_id);
+    sintra::instance_id_type joined_process = sintra::invalid_instance_id;
 
     auto hello_slot = [&](Hello) {
         append_line(log_path, std::to_string(sintra::process_of(s_mproc_id)));
@@ -106,19 +120,28 @@ int worker()
     sintra::activate_slot(hello_slot);
 
     trace_event(trace_path, "worker_start",
-        "sintra_process=" + std::to_string(sintra::process_of(s_mproc_id)) +
+        "sintra_process=" + std::to_string(process_iid) +
         " dir=" + dir.string());
+
+    // Publish a direct-call target so other processes can reach us by name.
+    Ping_receiver ping_receiver;
+    const auto ping_name = std::string("ping_") + std::to_string(process_iid);
+    const bool named = ping_receiver.assign_name(ping_name);
+    trace_event(trace_path, "ping_setup",
+        "name=" + ping_name +
+        " ping_iid=" + std::to_string(ping_receiver.instance_id()) +
+        " named=" + std::string(named ? "1" : "0"));
 
     const bool initiator = std::filesystem::create_directory(initiator_marker);
     trace_event(trace_path, "role",
-        std::string("sintra_process=") + std::to_string(sintra::process_of(s_mproc_id)) +
+        std::string("sintra_process=") + std::to_string(process_iid) +
         (initiator ? " initiator" : " follower"));
 
     if (initiator) {
         trace_event(trace_path, "join_swarm.begin", "requesting additional process");
-        const auto joined = sintra::join_swarm(1);
-        trace_event(trace_path, "join_swarm.end", "joined=" + std::to_string(joined));
-        if (joined == sintra::invalid_instance_id) {
+        joined_process = sintra::join_swarm(1);
+        trace_event(trace_path, "join_swarm.end", "joined=" + std::to_string(joined_process));
+        if (joined_process == sintra::invalid_instance_id) {
             return 1;
         }
     }
@@ -127,6 +150,33 @@ int worker()
     trace_event(trace_path, "barrier.enter", "post-join-sync");
     sintra::barrier("post-join-sync", "_sintra_external_processes");
     trace_event(trace_path, "barrier.exit", "post-join-sync");
+
+    if (initiator && joined_process != sintra::invalid_instance_id) {
+        // Probe the newly joined process via direct RPC (not world broadcast) after the barrier.
+        const auto target_name = std::string("ping_") + std::to_string(joined_process);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        int attempts = 0;
+        bool success = false;
+        std::string last_error;
+        while (std::chrono::steady_clock::now() < deadline && !success) {
+            ++attempts;
+            try {
+                const int result = Ping_receiver::rpc_ping(target_name, 42);
+                trace_event(trace_path, "direct_ping.ok",
+                    "target=" + target_name + " result=" + std::to_string(result) +
+                    " attempts=" + std::to_string(attempts));
+                success = true;
+            } catch (const std::exception& e) {
+                last_error = e.what();
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+        }
+        if (!success) {
+            trace_event(trace_path, "direct_ping.error",
+                "target=" + target_name + " attempts=" + std::to_string(attempts) +
+                " error=" + last_error);
+        }
+    }
 
     if (initiator) {
         trace_event(trace_path, "broadcast", "coordinator broadcasting Hello");
