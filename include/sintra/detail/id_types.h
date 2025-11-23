@@ -43,6 +43,7 @@ namespace detail {
         barrier,
         enable_recovery,
         begin_process_draining,
+        join_swarm,
 
         // EXPLICITLY DEFINED SIGNALS
         //instance_invalidated, // sent by Transceiver on destruction
