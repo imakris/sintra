@@ -38,6 +38,7 @@ def run_command(cmd, check=True):
 def main():
     # Path to the flip file
     flip_file = Path(__file__).parent / "flip_to_trigger_ci"
+    tests_trigger = Path(__file__).parent / "tests" / ".ci_trigger"
 
     # Read current value
     if flip_file.exists():
@@ -52,6 +53,8 @@ def main():
 
     # Write new value
     flip_file.write_text(new_value)
+    tests_trigger.parent.mkdir(parents=True, exist_ok=True)
+    tests_trigger.write_text(new_value)
 
     # Also touch a workflows file to trigger the changed filter
     # This ensures CI actually runs tests instead of skipping them
@@ -61,7 +64,7 @@ def main():
 
     # Git operations
     print("Adding files to git...")
-    run_command("git add flip_to_trigger_ci .github/workflows/.ci_trigger")
+    run_command("git add flip_to_trigger_ci tests/.ci_trigger .github/workflows/.ci_trigger")
 
     print("Creating commit...")
     commit_message = f"""Trigger CI (flip: {current_value} -> {new_value})
