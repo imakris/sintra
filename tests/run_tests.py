@@ -991,6 +991,27 @@ class TestRunner:
                 except (ProcessLookupError, PermissionError, OSError):
                     process_group_id = None
 
+            # Hard safety watchdog: absolute deadline that will force-kill the process
+            # if the normal timeout mechanism fails for any reason. This is a last-resort
+            # safety net to prevent infinite hangs.
+            hard_deadline = time.monotonic() + timeout + 60.0  # Normal timeout + 60s grace
+            hard_watchdog_stop = threading.Event()
+
+            def hard_watchdog() -> None:
+                while not hard_watchdog_stop.wait(1.0):
+                    if time.monotonic() >= hard_deadline:
+                        if process.poll() is None:
+                            print(
+                                f"\n{Color.RED}HARD WATCHDOG: Force-killing {invocation.name} "
+                                f"(pid {process.pid}) - normal timeout mechanism failed{Color.RESET}",
+                                flush=True,
+                            )
+                            self._kill_process_tree(process.pid)
+                        break
+
+            hard_watchdog_thread = threading.Thread(target=hard_watchdog, daemon=True)
+            hard_watchdog_thread.start()
+
             def attempt_live_capture(trigger_line: str) -> None:
                 nonlocal live_stack_traces, live_stack_error
                 if not trigger_line:
@@ -1472,6 +1493,8 @@ class TestRunner:
                 error=error_msg
             )
         finally:
+            hard_watchdog_stop.set()
+            hard_watchdog_thread.join(timeout=1.0)
             manual_capture_stop.set()
             manual_capture_event.set()
             if manual_capture_thread is not None:
