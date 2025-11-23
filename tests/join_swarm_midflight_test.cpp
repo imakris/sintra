@@ -72,7 +72,7 @@ int worker()
     const auto initiator_marker = dir / "initiator_claimed";
 
     auto hello_slot = [&](Hello) {
-        append_line(log_path, std::to_string(process_of(s_mproc_id)));
+        append_line(log_path, std::to_string(sintra::process_of(s_mproc_id)));
     };
     sintra::activate_slot(hello_slot);
 
