@@ -216,9 +216,20 @@ jobs:
       - name: Run stress tests with run_tests.py
         if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.core == 'true' || steps.changed.outputs.workflows == 'true'
         shell: bash
+        env:
+          SINTRA_PRESERVE_SCRATCH: "1"
         run: |
           cd tests
           python run_tests.py --timeout 30 --build-dir ../build --config Release
+
+      - name: Upload preserved scratch artifacts (failure only)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-scratch-${{ github.run_id }}
+          path: build/.sintra-test-scratch-*
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Mark status success
         if: success()

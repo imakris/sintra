@@ -228,6 +228,8 @@ class TestRunner:
         self._instrumentation_disk_root: Optional[Path] = self.build_dir
         self._instrument_disk_cache: Dict[Path, Tuple[float, str]] = {}
 
+        # Preserve failing scratch directories when requested (useful for CI artifact capture).
+        self._preserve_scratch = env_flag("SINTRA_PRESERVE_SCRATCH")
         self._debugger: DebuggerStrategy = get_debugger_strategy(
             self.verbose,
             print_fn=print,
@@ -532,6 +534,13 @@ class TestRunner:
 
     def cleanup(self) -> None:
         """Remove the root scratch directory for this runner."""
+
+        if self._preserve_scratch:
+            print(
+                f"{Color.YELLOW}Scratch preservation enabled (SINTRA_PRESERVE_SCRATCH=1); "
+                f"leaving {self._scratch_base}{Color.RESET}"
+            )
+            return
 
         self._cleanup_scratch_directory(self._scratch_base)
 
@@ -1473,6 +1482,15 @@ class TestRunner:
                         manual_signal_module.signal(sig, prev_handler)  # type: ignore
                     except Exception:
                         pass
+
+            preserve_failure = self._preserve_scratch and (result_success is False or result_success is None)
+            if preserve_failure:
+                cleanup_scratch_dir = False
+                print(
+                    f"\n{Color.YELLOW}Preserving scratch for failure ({invocation.name}): "
+                    f"{scratch_dir}{Color.RESET}"
+                )
+
             if cleanup_scratch_dir:
                 self._cleanup_scratch_directory(scratch_dir)
             self._cleanup_new_core_dumps(invocation, core_snapshot, start_time, result_success)
