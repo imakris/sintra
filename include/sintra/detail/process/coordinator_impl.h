@@ -678,6 +678,60 @@ instance_id_type Coordinator::make_process_group(
 
 // EXPORTED FOR RPC
 inline
+instance_id_type Coordinator::join_swarm(
+    const string& binary_name,
+    int32_t branch_index,
+    const std::vector<std::string>& user_options)
+{
+    if (!s_mproc || !s_coord) {
+        return invalid_instance_id;
+    }
+
+    if (branch_index < 1 || branch_index >= max_process_index) {
+        return invalid_instance_id;
+    }
+
+    const instance_id_type new_instance_id = make_process_instance_id();
+    Managed_process::Spawn_swarm_process_args spawn_args;
+    spawn_args.binary_name = binary_name.empty() ? s_mproc->m_binary_name : binary_name;
+    spawn_args.piid = new_instance_id;
+    spawn_args.args = {
+        spawn_args.binary_name,
+        "--branch_index",   std::to_string(branch_index),
+        "--swarm_id",       std::to_string(s_mproc->m_swarm_id),
+        "--instance_id",    std::to_string(new_instance_id),
+        "--coordinator_id", std::to_string(s_coord_id)
+    };
+    spawn_args.args.insert(
+        spawn_args.args.end(),
+        user_options.begin(),
+        user_options.end());
+
+    auto result = s_mproc->spawn_swarm_process(spawn_args);
+    if (!result.success) {
+        return invalid_instance_id;
+    }
+
+    {
+        lock_guard<mutex> groups_lock(m_groups_mutex);
+        auto add_to_group = [&](const string& name) {
+            auto it = m_groups.find(name);
+            if (it != m_groups.end()) {
+                it->second.add_process(new_instance_id);
+                m_groups_of_process[new_instance_id].insert(it->second.m_instance_id);
+            }
+        };
+        add_to_group("_sintra_all_processes");
+        add_to_group("_sintra_external_processes");
+    }
+
+    return new_instance_id;
+}
+
+
+
+// EXPORTED FOR RPC
+inline
 void Coordinator::print(const string& str)
 {
     cout << str;

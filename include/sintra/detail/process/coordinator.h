@@ -134,6 +134,10 @@ private:
     bool unpublish_transceiver(instance_id_type instance_id);
     sequence_counter_type begin_process_draining(instance_id_type process_iid);
     void unpublish_transceiver_notify(instance_id_type transceiver_iid);
+    instance_id_type join_swarm(
+        const string& binary_name,
+        int32_t branch_index,
+        const std::vector<std::string>& user_options);
 
     //bool add_process_into_group(instance_id_type process_id, type_id_type process_group_id);
 
@@ -220,6 +224,7 @@ public:
     SINTRA_RPC_EXPLICIT(print)
     SINTRA_RPC_EXPLICIT(enable_recovery)
     SINTRA_RPC_EXPLICIT(mark_initialization_complete)
+    SINTRA_RPC_STRICT_EXPLICIT(join_swarm)
 
     bool is_process_draining(instance_id_type process_iid) const;
 

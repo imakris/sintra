@@ -275,6 +275,31 @@ inline size_t spawn_swarm_process(
     return spawned;
 }
 
+inline instance_id_type join_swarm(
+    int branch_index,
+    std::string binary_name = std::string(),
+    std::vector<std::string> user_options = std::vector<std::string>())
+{
+    if (!s_mproc || s_coord_id == invalid_instance_id || branch_index < 1) {
+        return invalid_instance_id;
+    }
+
+    if (binary_name.empty()) {
+        binary_name = s_mproc->m_binary_name;
+    }
+
+    try {
+        return Coordinator::rpc_join_swarm(
+            s_coord_id,
+            binary_name,
+            branch_index,
+            std::move(user_options));
+    }
+    catch (...) {
+        return invalid_instance_id;
+    }
+}
+
 inline int process_index()
 {
     return s_branch_index;
