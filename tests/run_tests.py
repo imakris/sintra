@@ -753,6 +753,7 @@ class TestRunner:
     def run_test_once(self, invocation: TestInvocation) -> TestResult:
         """Run a single test with timeout and proper cleanup"""
         timeout = _lookup_test_timeout(invocation.name, self.timeout)
+        run_id = uuid.uuid4().hex[:8]
         scratch_dir = self._allocate_scratch_directory(invocation)
         process = None
         cleanup_scratch_dir = True
@@ -981,6 +982,7 @@ class TestRunner:
                         )
 
 
+            print(f"=== RUN {invocation.name} id={run_id} ===")
             process = subprocess.Popen(invocation.command(), **popen_kwargs)
 
             if hasattr(os, 'getpgid'):
@@ -997,12 +999,27 @@ class TestRunner:
                     if time.monotonic() >= deadline:
                         if process.poll() is None:
                             print(
-                                f"\n{Color.RED}WATCHDOG: Force-killing {invocation.name} (pid {process.pid}) after {timeout}s wall time{Color.RESET}"
+                                f"\n{Color.RED}WATCHDOG(inner): Force-killing {invocation.name} id={run_id} (pid {process.pid}) after {timeout}s wall time{Color.RESET}"
                             )
                             self._kill_process_tree(process.pid)
                         break
             watchdog_thread = threading.Thread(target=watchdog, daemon=True)
             watchdog_thread.start()
+
+            # Outer guard in case the inner wait loop stalls entirely.
+            outer_guard_fired = threading.Event()
+            def outer_guard():
+                deadline = start_monotonic + timeout + 5.0
+                while not outer_guard_fired.wait(0.5):
+                    if time.monotonic() >= deadline:
+                        if process.poll() is None:
+                            print(
+                                f"\n{Color.RED}WATCHDOG(outer): Force-killing {invocation.name} id={run_id} (pid {process.pid}) after {timeout}s+ grace{Color.RESET}"
+                            )
+                            self._kill_process_tree(process.pid)
+                        break
+            outer_guard_thread = threading.Thread(target=outer_guard, daemon=True)
+            outer_guard_thread.start()
 
             def attempt_live_capture(trigger_line: str) -> None:
                 nonlocal live_stack_traces, live_stack_error
@@ -1493,6 +1510,8 @@ class TestRunner:
                 manual_capture_thread.join(timeout=1.0)
             watchdog_stop.set()
             watchdog_thread.join(timeout=1.0)
+            outer_guard_fired.set()
+            outer_guard_thread.join(timeout=1.0)
             if manual_signal_registered and manual_signal_module is not None:
                 for sig, prev_handler in manual_signal_handlers.items():
                     try:
