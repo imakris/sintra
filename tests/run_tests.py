@@ -1436,11 +1436,25 @@ class TestRunner:
                 # there's no POSIX process group concept. Kill any lingering child processes
                 # by name pattern to prevent reader threads from blocking on their pipes.
                 if self.platform.is_windows:
-                    print(f"[DEBUG] Checking for lingering processes (is_windows={self.platform.is_windows})", flush=True)
-                    lingering = find_lingering_processes(("sintra_",))
+                    prefixes = ("sintra_", invocation.path.stem, invocation.name)
+                    print(f"[DEBUG] Checking for lingering processes (prefixes={prefixes})", flush=True)
+                    lingering = find_lingering_processes(prefixes)
                     print(f"[DEBUG] Found {len(lingering)} lingering processes: {lingering}", flush=True)
+                    lingering_details = self._describe_pids([pid for pid, _ in lingering]) if lingering else {}
                     if lingering:
                         for pid, name in lingering:
+                            detail = lingering_details.get(pid)
+                            if detail:
+                                print(f"[DEBUG] Lingering process detail pid={pid} name={name}: {detail}", flush=True)
+                            # Try to capture stacks before killing to understand why it is stuck.
+                            try:
+                                stacks, err = self._capture_process_stacks(pid, None)
+                                if stacks:
+                                    print(f"[DEBUG] Lingering process stacks pid={pid}:\n{stacks}", flush=True)
+                                elif err:
+                                    print(f"[DEBUG] Lingering process stack capture failed pid={pid}: {err}", flush=True)
+                            except Exception as e:
+                                print(f"[DEBUG] Failed to capture stacks for pid={pid}: {e}", flush=True)
                             print(f"[DEBUG] Killing lingering process {pid} ({name})", flush=True)
                             try:
                                 self._kill_process_tree(pid)
@@ -1562,9 +1576,22 @@ class TestRunner:
 
                 # On Windows, also kill any lingering child processes by name pattern
                 if self.platform.is_windows:
-                    lingering = find_lingering_processes(("sintra_",))
+                    prefixes = ("sintra_", invocation.path.stem, invocation.name)
+                    lingering = find_lingering_processes(prefixes)
                     if lingering:
-                        for pid, _ in lingering:
+                        lingering_details = self._describe_pids([pid for pid, _ in lingering])
+                        for pid, name in lingering:
+                            detail = lingering_details.get(pid)
+                            if detail:
+                                print(f"[DEBUG] (timeout) lingering pid={pid} name={name} detail={detail}", flush=True)
+                            try:
+                                stacks, err = self._capture_process_stacks(pid, None)
+                                if stacks:
+                                    print(f"[DEBUG] (timeout) lingering stacks pid={pid}:\n{stacks}", flush=True)
+                                elif err:
+                                    print(f"[DEBUG] (timeout) lingering stack capture failed pid={pid}: {err}", flush=True)
+                            except Exception:
+                                pass
                             try:
                                 self._kill_process_tree(pid)
                             except Exception:
