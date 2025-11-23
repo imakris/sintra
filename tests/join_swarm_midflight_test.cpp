@@ -30,7 +30,10 @@ namespace {
 
 constexpr const char* kSharedDirEnv = "SINTRA_JOIN_SWARM_DIR";
 
-struct Hello {};
+struct Hello {
+    int sender;
+    int seq;
+};
 struct Ping { int token; };
 
 std::filesystem::path shared_dir()
@@ -114,8 +117,12 @@ int worker()
     const auto process_iid = sintra::process_of(s_mproc_id);
     sintra::instance_id_type joined_process = sintra::invalid_instance_id;
 
-    auto hello_slot = [&](Hello) {
-        append_line(log_path, std::to_string(sintra::process_of(s_mproc_id)));
+    auto hello_slot = [&](Hello h) {
+        std::ostringstream oss;
+        oss << "recv=" << sintra::process_of(s_mproc_id)
+            << " sender=" << h.sender
+            << " seq=" << h.seq;
+        append_line(log_path, oss.str());
     };
     sintra::activate_slot(hello_slot);
 
@@ -178,9 +185,13 @@ int worker()
         }
     }
 
+    // Both processes broadcast after the barrier to help diagnose group membership/broadcast coverage.
     if (initiator) {
         trace_event(trace_path, "broadcast", "coordinator broadcasting Hello");
-        sintra::world() << Hello{};
+        sintra::world() << Hello{static_cast<int>(process_iid), 1};
+    } else {
+        trace_event(trace_path, "broadcast", "follower broadcasting Hello");
+        sintra::world() << Hello{static_cast<int>(process_iid), 2};
     }
 
     // Wait until both workers have handled the broadcast.

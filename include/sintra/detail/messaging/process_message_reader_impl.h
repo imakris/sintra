@@ -362,9 +362,36 @@ void Process_message_reader::request_reader_function()
                             any_local_or_remote
                         };
 
+                        // Optional debug tracing for world broadcasts to diagnose missing deliveries.
+                        const bool trace_world = [] {
+                            static bool enabled = [] {
+                                const char* env = std::getenv("SINTRA_TRACE_WORLD");
+                                return env && env[0] == '1';
+                            }();
+                            return enabled;
+                        }();
+
+                        if (trace_world) {
+                            std::fprintf(stderr,
+                                "[sintra_trace_world] pid=%d reader_state=%d msg_type=%llu sender_iid=%llu recv_iid=%llu proc_iid=%llu\n",
+                                static_cast<int>(getpid()),
+                                static_cast<int>(reader_state),
+                                static_cast<unsigned long long>(m->message_type_id),
+                                static_cast<unsigned long long>(m->sender_instance_id),
+                                static_cast<unsigned long long>(m->receiver_instance_id),
+                                static_cast<unsigned long long>(s_mproc ? s_mproc->m_instance_id : 0ULL));
+                        }
+
                         for (auto sid : sids) {
                             auto shl = it_mt->second.find(sid);
                             if (shl != it_mt->second.end()) {
+                                if (trace_world) {
+                                    std::fprintf(stderr,
+                                        "[sintra_trace_world] pid=%d sid_match=%llu handlers=%zu\n",
+                                        static_cast<int>(getpid()),
+                                        static_cast<unsigned long long>(sid),
+                                        shl->second.size());
+                                }
                                 for (auto& e : shl->second) {
                                     e(*m);
                                 }
