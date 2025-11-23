@@ -1339,23 +1339,26 @@ class TestRunner:
 
             def _heartbeat() -> None:
                 last_report = 0.0
-                while not heartbeat_stop.wait(2.0):
+                while not heartbeat_stop.wait(1.0):
                     if process.poll() is not None:
                         continue
                     elapsed = time.monotonic() - start_monotonic
-                    # First heartbeat after 5s, then every ~10s
-                    if elapsed < 5.0 or elapsed - last_report < 10.0:
+                    # First heartbeat after 1s, then every ~5s
+                    if elapsed < 1.0 or elapsed - last_report < 5.0:
                         continue
                     last_report = elapsed
                     snapshot = _snapshot_reader_states()
                     stdout_summary = _summarize_descriptor(snapshot, "stdout")
                     stderr_summary = _summarize_descriptor(snapshot, "stderr")
+                    stdout_len = sum(len(s) for s in stdout_lines)
+                    stderr_len = sum(len(s) for s in stderr_lines)
                     descendants = self._collect_descendant_pids(process.pid) if process.pid else []
                     details = self._describe_pids([process.pid] + descendants) if process.pid else {}
                     print(
                         f"[HEARTBEAT] {invocation.name} run_id={run_id} pid={process.pid} "
                         f"elapsed={elapsed:.1f}s timeout={timeout}s "
                         f"stdout={{ {stdout_summary} }} stderr={{ {stderr_summary} }} "
+                        f"stdout_len={stdout_len} stderr_len={stderr_len} "
                         f"descendants={descendants} scratch={scratch_dir}",
                         flush=True,
                     )
@@ -1782,10 +1785,7 @@ class TestRunner:
         failed = 0
 
         for i in range(repetitions):
-            print(
-                f"[RUN INVOKE] {test_name} iter={i + 1}/{repetitions}",
-                flush=True,
-            )
+            print(f"[RUN INVOKE] {test_name} iter={i + 1}/{repetitions}", flush=True)
             result = self.run_test_once(invocation)
             results.append(result)
 
