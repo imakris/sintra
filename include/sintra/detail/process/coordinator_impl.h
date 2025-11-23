@@ -686,6 +686,17 @@ instance_id_type Coordinator::join_swarm(
         return invalid_instance_id;
     }
 
+    // Safety: refuse joins when the process space is nearly exhausted to avoid
+    // runaway spawning that would otherwise trip hard asserts.
+    {
+        lock_guard<mutex> guard(m_publish_mutex);
+        const auto current_processes = m_transceiver_registry.size();
+        const auto initializing = m_processes_in_initialization.size();
+        if (current_processes + initializing >= static_cast<size_t>(max_process_index)) {
+            return invalid_instance_id;
+        }
+    }
+
     if (branch_index < 1 || branch_index >= max_process_index) {
         return invalid_instance_id;
     }
