@@ -787,6 +787,8 @@ class TestRunner:
             postmortem_stack_traces = ""
             postmortem_stack_error = ""
             failure_event = threading.Event()
+            hang_detected = False
+            hang_notes: List[str] = []
             capture_lock = threading.Lock()
             capture_pause_total = 0.0
             capture_active_start: Optional[float] = None
@@ -1452,8 +1454,10 @@ class TestRunner:
                                 stacks, err = self._capture_process_stacks(pid, None)
                                 if stacks:
                                     print(f"[DEBUG] Lingering process stacks pid={pid}:\n{stacks}", flush=True)
+                                    hang_notes.append(f"linger pid={pid} stacks captured")
                                 elif err:
                                     print(f"[DEBUG] Lingering process stack capture failed pid={pid}: {err}", flush=True)
+                                    hang_notes.append(f"linger pid={pid} stack capture failed: {err}")
                             except Exception as e:
                                 print(f"[DEBUG] Failed to capture stacks for pid={pid}: {e}", flush=True)
                             print(f"[DEBUG] Killing lingering process {pid} ({name})", flush=True)
@@ -1462,12 +1466,15 @@ class TestRunner:
                                 print(f"[DEBUG] Successfully killed {pid}", flush=True)
                             except Exception as e:
                                 print(f"[DEBUG] Failed to kill {pid}: {e}", flush=True)
+                        hang_detected = True
                     # Also look for children of this test process that may not match prefixes.
                     if process and process.pid:
                         descendants = self._collect_descendant_pids(process.pid)
                         if descendants:
                             details = self._describe_pids(descendants)
                             print(f"[DEBUG] Descendants of {process.pid} still alive after exit: {descendants}", flush=True)
+                            hang_detected = True
+                            hang_notes.append(f"descendants after exit: {descendants}")
                             for pid in descendants:
                                 detail = details.get(pid)
                                 if detail:
@@ -1476,8 +1483,10 @@ class TestRunner:
                                     stacks, err = self._capture_process_stacks(pid, None)
                                     if stacks:
                                         print(f"[DEBUG] Descendant stacks pid={pid}:\n{stacks}", flush=True)
+                                        hang_notes.append(f"descendant pid={pid} stacks captured")
                                     elif err:
                                         print(f"[DEBUG] Descendant stack capture failed pid={pid}: {err}", flush=True)
+                                        hang_notes.append(f"descendant pid={pid} stack capture failed: {err}")
                                 except Exception as e:
                                     print(f"[DEBUG] Failed to capture stacks for descendant pid={pid}: {e}", flush=True)
                                 try:
@@ -1493,7 +1502,7 @@ class TestRunner:
                 stdout = ''.join(stdout_lines)
                 stderr = ''.join(stderr_lines)
 
-                success = (process.returncode == 0)
+                success = (process.returncode == 0) and not hang_detected
                 error_msg = stderr
                 print(
                     f"[RUN END] {invocation.name} run_id={run_id} pid={process.pid} "
@@ -1501,6 +1510,10 @@ class TestRunner:
                     f"stdout_len={len(stdout)} stderr_len={len(stderr)}",
                     flush=True,
                 )
+
+                if hang_detected:
+                    hang_summary = "; ".join(hang_notes) if hang_notes else "detected lingering/descendant processes"
+                    error_msg = f"[HANG DETECTED] {hang_summary}\n{error_msg}"
 
                 if not success:
                     # Categorize failure type for better diagnostics
@@ -1684,6 +1697,12 @@ class TestRunner:
                     f"\n{Color.YELLOW}Preserving scratch for failure ({invocation.name}): "
                     f"{scratch_dir}{Color.RESET}"
                 )
+            if hang_detected:
+                cleanup_scratch_dir = False
+                print(
+                    f"\n{Color.YELLOW}Preserving scratch for hang ({invocation.name}): "
+                    f"{scratch_dir}{Color.RESET}"
+                )
 
             if cleanup_scratch_dir:
                 self._cleanup_scratch_directory(scratch_dir)
@@ -1850,6 +1869,8 @@ class TestRunner:
             else:
                 failed += 1
                 print(f"{Color.RED}F{Color.RESET}", end='', flush=True)
+                print(f"\n[ABORT] Stopping further repetitions due to failure/hang at iter {i + 1}", flush=True)
+                break
 
             # Print newline every 50 tests for readability
             if (i + 1) % 50 == 0:
