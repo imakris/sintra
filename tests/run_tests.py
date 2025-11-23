@@ -1007,6 +1007,22 @@ class TestRunner:
                                 flush=True,
                             )
                             self._kill_process_tree(process.pid)
+                        else:
+                            # Main process exited but we might be stuck on reader threads
+                            # waiting for child processes. Kill any lingering sintra processes.
+                            lingering = find_lingering_processes(("sintra_",))
+                            if lingering:
+                                pids = [pid for pid, _ in lingering]
+                                print(
+                                    f"\n{Color.RED}HARD WATCHDOG: Main process exited but found "
+                                    f"{len(lingering)} lingering child process(es): {pids} - killing them{Color.RESET}",
+                                    flush=True,
+                                )
+                                for pid, _ in lingering:
+                                    try:
+                                        self._kill_process_tree(pid)
+                                    except Exception:
+                                        pass
                         break
 
             hard_watchdog_thread = threading.Thread(target=hard_watchdog, daemon=True)
@@ -1347,6 +1363,19 @@ class TestRunner:
                             live_stack_error = error
 
                 terminate_process_group_members(f"{invocation.name} exit")
+
+                # On Windows, terminate_process_group_members does nothing useful because
+                # there's no POSIX process group concept. Kill any lingering child processes
+                # by name pattern to prevent reader threads from blocking on their pipes.
+                if self.platform.is_windows:
+                    lingering = find_lingering_processes(("sintra_",))
+                    if lingering:
+                        for pid, _ in lingering:
+                            try:
+                                self._kill_process_tree(pid)
+                            except Exception:
+                                pass
+
                 duration = time.time() - start_time
 
                 shutdown_reader_threads()
@@ -1452,6 +1481,16 @@ class TestRunner:
 
                 # Kill the process tree on timeout
                 self._kill_process_tree(process.pid)
+
+                # On Windows, also kill any lingering child processes by name pattern
+                if self.platform.is_windows:
+                    lingering = find_lingering_processes(("sintra_",))
+                    if lingering:
+                        for pid, _ in lingering:
+                            try:
+                                self._kill_process_tree(pid)
+                            except Exception:
+                                pass
 
                 try:
                     process.wait(timeout=1)

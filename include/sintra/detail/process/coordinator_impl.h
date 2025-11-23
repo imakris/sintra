@@ -719,19 +719,10 @@ instance_id_type Coordinator::join_swarm(
         return invalid_instance_id;
     }
 
-    Managed_process::Spawn_swarm_process_args spawn_args;
-    spawn_args.binary_name = binary_name.empty() ? s_mproc->m_binary_name : binary_name;
-    spawn_args.piid = new_instance_id;
-    spawn_args.occurrence = 1; // mark as non-initial to skip startup barrier
-    spawn_args.args = {
-        spawn_args.binary_name,
-        "--branch_index",   std::to_string(branch_index),
-        "--swarm_id",       std::to_string(s_mproc->m_swarm_id),
-        "--instance_id",    std::to_string(new_instance_id),
-        "--coordinator_id", std::to_string(s_coord_id),
-        "--recovery_occurrence", std::to_string(spawn_args.occurrence)
-    };
-    auto result = s_mproc->spawn_swarm_process(spawn_args);
+    // Add to groups BEFORE spawning so the process is already a group member
+    // when it starts executing. This prevents a race where the spawned process
+    // calls barrier() before being added to the group, causing it to be excluded
+    // from the barrier's processes_pending set.
     {
         lock_guard<mutex> groups_lock(m_groups_mutex);
         auto add_to_group = [&](const string& name) {
@@ -745,8 +736,22 @@ instance_id_type Coordinator::join_swarm(
         add_to_group("_sintra_external_processes");
     }
 
+    Managed_process::Spawn_swarm_process_args spawn_args;
+    spawn_args.binary_name = binary_name.empty() ? s_mproc->m_binary_name : binary_name;
+    spawn_args.piid = new_instance_id;
+    spawn_args.occurrence = 1; // mark as non-initial to skip startup barrier
+    spawn_args.args = {
+        spawn_args.binary_name,
+        "--branch_index",   std::to_string(branch_index),
+        "--swarm_id",       std::to_string(s_mproc->m_swarm_id),
+        "--instance_id",    std::to_string(new_instance_id),
+        "--coordinator_id", std::to_string(s_coord_id),
+        "--recovery_occurrence", std::to_string(spawn_args.occurrence)
+    };
+    auto result = s_mproc->spawn_swarm_process(spawn_args);
+
     if (!result.success) {
-        // Roll back tentative group insertion on spawn failure.
+        // Roll back group insertion on spawn failure.
         lock_guard<mutex> groups_lock(m_groups_mutex);
         auto remove_from_group = [&](const string& name) {
             auto it = m_groups.find(name);
