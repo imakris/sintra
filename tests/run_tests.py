@@ -983,7 +983,6 @@ class TestRunner:
                         )
 
 
-            print(f"=== RUN {invocation.name} id={run_id} ===")
             process = subprocess.Popen(invocation.command(), **popen_kwargs)
 
             if hasattr(os, 'getpgid'):
