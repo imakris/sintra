@@ -1357,15 +1357,16 @@ class TestRunner:
                         stderr_tail = [line.rstrip()[:400] for line in stderr_tail]
                     descendants = self._collect_descendant_pids(process.pid) if process.pid else []
                     details = self._describe_pids([process.pid] + descendants) if process.pid else {}
-                    print(
+                    msg = (
                         f"[HEARTBEAT] {invocation.name} run_id={run_id} pid={process.pid} "
                         f"elapsed={elapsed:.1f}s timeout={timeout}s "
                         f"stdout={{ {stdout_summary} }} stderr={{ {stderr_summary} }} "
                         f"stdout_len={stdout_len} stderr_len={stderr_len} "
-                        (f"stderr_tail={stderr_tail} " if stderr_tail else "") +
-                        f"descendants={descendants} scratch={scratch_dir}",
-                        flush=True,
                     )
+                    if stderr_tail:
+                        msg += f"stderr_tail={stderr_tail} "
+                    msg += f"descendants={descendants} scratch={scratch_dir}"
+                    print(msg, flush=True)
                     if details:
                         for pid, desc in details.items():
                             print(f"[HEARTBEAT]    pid={pid} {desc}", flush=True)
@@ -1461,6 +1462,29 @@ class TestRunner:
                                 print(f"[DEBUG] Successfully killed {pid}", flush=True)
                             except Exception as e:
                                 print(f"[DEBUG] Failed to kill {pid}: {e}", flush=True)
+                    # Also look for children of this test process that may not match prefixes.
+                    if process and process.pid:
+                        descendants = self._collect_descendant_pids(process.pid)
+                        if descendants:
+                            details = self._describe_pids(descendants)
+                            print(f"[DEBUG] Descendants of {process.pid} still alive after exit: {descendants}", flush=True)
+                            for pid in descendants:
+                                detail = details.get(pid)
+                                if detail:
+                                    print(f"[DEBUG] Descendant detail pid={pid}: {detail}", flush=True)
+                                try:
+                                    stacks, err = self._capture_process_stacks(pid, None)
+                                    if stacks:
+                                        print(f"[DEBUG] Descendant stacks pid={pid}:\n{stacks}", flush=True)
+                                    elif err:
+                                        print(f"[DEBUG] Descendant stack capture failed pid={pid}: {err}", flush=True)
+                                except Exception as e:
+                                    print(f"[DEBUG] Failed to capture stacks for descendant pid={pid}: {e}", flush=True)
+                                try:
+                                    self._kill_process_tree(pid)
+                                    print(f"[DEBUG] Killed descendant pid={pid}", flush=True)
+                                except Exception as e:
+                                    print(f"[DEBUG] Failed to kill descendant pid={pid}: {e}", flush=True)
 
                 duration = time.time() - start_time
 
