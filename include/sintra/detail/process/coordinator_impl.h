@@ -468,6 +468,12 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
     // if it is a Managed_process is being unpublished, more cleanup is required
     if (iid == process_iid) {
 
+        // Cleanup in-flight join tracking for this process/branch, if any.
+        if (auto branch_it = m_joined_process_branch.find(process_iid); branch_it != m_joined_process_branch.end()) {
+            m_inflight_joins.erase(branch_it->second);
+            m_joined_process_branch.erase(branch_it);
+        }
+
         ready_notifications = finalize_initialization_tracking(process_iid);
         if (!ready_notifications.empty()) {
             ready_notifications.erase(
@@ -804,6 +810,14 @@ Coordinator::finalize_initialization_tracking(instance_id_type process_iid)
 inline
 void Coordinator::mark_initialization_complete(instance_id_type process_iid)
 {
+    {
+        std::lock_guard<mutex> publish_lock(m_publish_mutex);
+        if (auto branch_it = m_joined_process_branch.find(process_iid); branch_it != m_joined_process_branch.end()) {
+            m_inflight_joins.erase(branch_it->second);
+            m_joined_process_branch.erase(branch_it);
+        }
+    }
+
     auto ready_notifications = finalize_initialization_tracking(process_iid);
     if (ready_notifications.empty()) {
         return;
