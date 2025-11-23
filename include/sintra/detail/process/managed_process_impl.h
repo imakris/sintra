@@ -979,9 +979,6 @@ void Managed_process::init(int argc, const char* const* argv)
     std::string instance_id_arg;
     std::string coordinator_id_arg;
     std::string recovery_arg;
-#ifdef _WIN32
-    DWORD coordinator_pid = 0;
-#endif
 
     size_t recovery_occurrence_value = 0;
     auto fa = filter_option(argc_argv_to_vector(argc, argv), "--recovery_occurrence", 1);
@@ -1104,18 +1101,6 @@ void Managed_process::init(int argc, const char* const* argv)
                 continue;
             }
 
-#ifdef _WIN32
-            if (auto value = option_value(arg, "--coordinator_pid", ' ', true, i)) {
-                try {
-                    coordinator_pid = static_cast<DWORD>(std::stoul(*value));
-                }
-                catch (...) {
-                    throw 1;
-                }
-                continue;
-            }
-#endif
-
             if (!arg.empty() && arg[0] == '-') {
                 // Ignore unknown options so the examples can run under environments
                 // that inject additional debugger flags (e.g. Visual Studio).
@@ -1175,23 +1160,6 @@ Managed process options:
         }
 
         s_mproc_id = m_instance_id;
-
-#ifdef _WIN32
-        // Start parent death monitor thread - exits process when coordinator dies
-        if (coordinator_pid != 0) {
-            std::thread([coordinator_pid]() {
-                HANDLE parent_handle = OpenProcess(SYNCHRONIZE, FALSE, coordinator_pid);
-                if (parent_handle != nullptr) {
-                    // Wait indefinitely for parent process to exit
-                    WaitForSingleObject(parent_handle, INFINITE);
-                    CloseHandle(parent_handle);
-                }
-                // Parent died or handle couldn't be opened - terminate this process
-                // Use TerminateProcess for immediate exit without cleanup
-                TerminateProcess(GetCurrentProcess(), 1);
-            }).detach();
-        }
-#endif
     }
     m_directory = obtain_swarm_directory();
 

@@ -268,7 +268,7 @@ m_publish_mutex → m_groups_mutex → m_call_mutex → b.m → atomics
 ├────────────────────────────────────────────────────────────┤
 │ 2. Flush Coordinator Channel                               │
 │    ┌─────────────────────────────────────────────────────┐ │
-│    │ flush(coordinator_pid, flush_sequence)              │ │
+│    │ flush(flush_sequence)              │ │
 │    │ → Waits until coordinator's reply ring              │ │
 │    │   sequence >= flush_sequence                        │ │
 │    │ → Guarantees all barrier completions are visible    │ │

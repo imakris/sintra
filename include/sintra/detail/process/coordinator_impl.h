@@ -746,11 +746,7 @@ instance_id_type Coordinator::join_swarm(
         "--swarm_id",       std::to_string(s_mproc->m_swarm_id),
         "--instance_id",    std::to_string(new_instance_id),
         "--coordinator_id", std::to_string(s_coord_id),
-        "--recovery_occurrence", std::to_string(spawn_args.occurrence),
-#ifdef _WIN32
-        // Pass parent PID so worker can detect coordinator death and exit
-        "--coordinator_pid", std::to_string(GetCurrentProcessId()),
-#endif
+        "--recovery_occurrence", std::to_string(spawn_args.occurrence)
     };
     auto result = s_mproc->spawn_swarm_process(spawn_args);
 
