@@ -277,8 +277,7 @@ inline size_t spawn_swarm_process(
 
 inline instance_id_type join_swarm(
     int branch_index,
-    std::string binary_name = std::string(),
-    std::vector<std::string> user_options = std::vector<std::string>())
+    std::string binary_name = std::string())
 {
     if (!s_mproc || s_coord_id == invalid_instance_id || branch_index < 1) {
         return invalid_instance_id;
@@ -292,8 +291,7 @@ inline instance_id_type join_swarm(
         return Coordinator::rpc_join_swarm(
             s_coord_id,
             binary_name,
-            branch_index,
-            std::move(user_options));
+            branch_index);
     }
     catch (...) {
         return invalid_instance_id;

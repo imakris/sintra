@@ -680,8 +680,7 @@ instance_id_type Coordinator::make_process_group(
 inline
 instance_id_type Coordinator::join_swarm(
     const string& binary_name,
-    int32_t branch_index,
-    const std::vector<std::string>& user_options)
+    int32_t branch_index)
 {
     if (!s_mproc || !s_coord) {
         return invalid_instance_id;
@@ -702,10 +701,6 @@ instance_id_type Coordinator::join_swarm(
         "--instance_id",    std::to_string(new_instance_id),
         "--coordinator_id", std::to_string(s_coord_id)
     };
-    spawn_args.args.insert(
-        spawn_args.args.end(),
-        user_options.begin(),
-        user_options.end());
 
     auto result = s_mproc->spawn_swarm_process(spawn_args);
     if (!result.success) {

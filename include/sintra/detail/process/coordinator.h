@@ -136,8 +136,7 @@ private:
     void unpublish_transceiver_notify(instance_id_type transceiver_iid);
     instance_id_type join_swarm(
         const string& binary_name,
-        int32_t branch_index,
-        const std::vector<std::string>& user_options);
+        int32_t branch_index);
 
     //bool add_process_into_group(instance_id_type process_id, type_id_type process_group_id);
 
