@@ -801,6 +801,8 @@ class TestRunner:
             manual_signal_module: Optional[object] = None
             stop_signal_desc: Optional[str] = None
             posix_signal: Optional[int] = None
+            heartbeat_stop = threading.Event()
+            heartbeat_thread: Optional[threading.Thread] = None
 
             @contextlib.contextmanager
             def stack_capture_context(mark_failure: bool) -> Iterator[bool]:
@@ -984,6 +986,11 @@ class TestRunner:
 
 
             process = subprocess.Popen(invocation.command(), **popen_kwargs)
+            print(
+                f"[RUN START] {invocation.name} run_id={run_id} pid={process.pid} "
+                f"timeout={timeout}s scratch={scratch_dir}",
+                flush=True,
+            )
 
             if hasattr(os, 'getpgid'):
                 try:
@@ -1309,6 +1316,59 @@ class TestRunner:
                 stderr_thread.start()
                 threads.append((stderr_thread, process.stderr, 'stderr', stderr_fd))
 
+            def _snapshot_reader_states() -> Dict[str, Dict[str, Any]]:
+                with reader_state_lock:
+                    return {k: dict(v) for k, v in reader_states.items()}
+
+            def _summarize_descriptor(snapshot: Dict[str, Dict[str, Any]], descriptor: str) -> str:
+                lines_read = 0
+                last_line = None
+                last_idle: Optional[float] = None
+                for state in snapshot.values():
+                    if state.get("descriptor") != descriptor:
+                        continue
+                    lines_read = max(lines_read, state.get("lines") or 0)
+                    if state.get("last_line_excerpt") is not None:
+                        last_line = state.get("last_line_excerpt")
+                    last_update = state.get("last_update")
+                    if isinstance(last_update, float):
+                        last_idle = max(time.monotonic() - last_update, 0.0)
+                idle_str = f"{last_idle:.2f}s" if last_idle is not None else "unknown"
+                last_line_str = repr(last_line) if last_line is not None else "None"
+                return f"lines={lines_read} idle={idle_str} last={last_line_str}"
+
+            def _heartbeat() -> None:
+                last_report = 0.0
+                while not heartbeat_stop.wait(2.0):
+                    if process.poll() is not None:
+                        continue
+                    elapsed = time.monotonic() - start_monotonic
+                    if elapsed < 10.0 or elapsed - last_report < 10.0:
+                        continue
+                    last_report = elapsed
+                    snapshot = _snapshot_reader_states()
+                    stdout_summary = _summarize_descriptor(snapshot, "stdout")
+                    stderr_summary = _summarize_descriptor(snapshot, "stderr")
+                    descendants = self._collect_descendant_pids(process.pid) if process.pid else []
+                    details = self._describe_pids([process.pid] + descendants) if process.pid else {}
+                    print(
+                        f"[HEARTBEAT] {invocation.name} run_id={run_id} pid={process.pid} "
+                        f"elapsed={elapsed:.1f}s timeout={timeout}s "
+                        f"stdout={{ {stdout_summary} }} stderr={{ {stderr_summary} }} "
+                        f"descendants={descendants} scratch={scratch_dir}",
+                        flush=True,
+                    )
+                    if details:
+                        for pid, desc in details.items():
+                            print(f"[HEARTBEAT]    pid={pid} {desc}", flush=True)
+
+            heartbeat_thread = threading.Thread(
+                target=_heartbeat,
+                name=f"heartbeat_{invocation.name}_{run_id}",
+                daemon=True,
+            )
+            heartbeat_thread.start()
+
             # Wait with timeout, extending the deadline for live stack captures
             try:
                 while True:
@@ -1538,6 +1598,9 @@ class TestRunner:
         finally:
             hard_watchdog_stop.set()
             hard_watchdog_thread.join(timeout=1.0)
+            heartbeat_stop.set()
+            if heartbeat_thread is not None:
+                heartbeat_thread.join(timeout=1.0)
             manual_capture_stop.set()
             manual_capture_event.set()
             if manual_capture_thread is not None:
