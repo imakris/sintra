@@ -694,12 +694,14 @@ instance_id_type Coordinator::join_swarm(
     Managed_process::Spawn_swarm_process_args spawn_args;
     spawn_args.binary_name = binary_name.empty() ? s_mproc->m_binary_name : binary_name;
     spawn_args.piid = new_instance_id;
+    spawn_args.occurrence = 1; // mark as non-initial to skip startup barrier
     spawn_args.args = {
         spawn_args.binary_name,
         "--branch_index",   std::to_string(branch_index),
         "--swarm_id",       std::to_string(s_mproc->m_swarm_id),
         "--instance_id",    std::to_string(new_instance_id),
-        "--coordinator_id", std::to_string(s_coord_id)
+        "--coordinator_id", std::to_string(s_coord_id),
+        "--recovery_occurrence", std::to_string(spawn_args.occurrence)
     };
 
     auto result = s_mproc->spawn_swarm_process(spawn_args);
