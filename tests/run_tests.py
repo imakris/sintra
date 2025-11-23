@@ -1343,7 +1343,8 @@ class TestRunner:
                     if process.poll() is not None:
                         continue
                     elapsed = time.monotonic() - start_monotonic
-                    if elapsed < 10.0 or elapsed - last_report < 10.0:
+                    # First heartbeat after 5s, then every ~10s
+                    if elapsed < 5.0 or elapsed - last_report < 10.0:
                         continue
                     last_report = elapsed
                     snapshot = _snapshot_reader_states()
@@ -1449,6 +1450,12 @@ class TestRunner:
 
                 success = (process.returncode == 0)
                 error_msg = stderr
+                print(
+                    f"[RUN END] {invocation.name} run_id={run_id} pid={process.pid} "
+                    f"rc={process.returncode} success={success} duration={duration:.2f}s "
+                    f"stdout_len={len(stdout)} stderr_len={len(stderr)}",
+                    flush=True,
+                )
 
                 if not success:
                     # Categorize failure type for better diagnostics
@@ -1775,6 +1782,10 @@ class TestRunner:
         failed = 0
 
         for i in range(repetitions):
+            print(
+                f"[RUN INVOKE] {test_name} iter={i + 1}/{repetitions}",
+                flush=True,
+            )
             result = self.run_test_once(invocation)
             results.append(result)
 
