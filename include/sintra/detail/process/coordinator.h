@@ -13,6 +13,7 @@
 #include <condition_variable>
 #include <memory>
 #include <mutex>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -195,6 +196,12 @@ private:
     >                                           m_instances_waited;
 
     set<instance_id_type>                       m_requested_recovery;
+
+    // Track in-flight join_swarm requests keyed by branch_index to avoid
+    // spawning multiple processes when callers retry the RPC. Cleared once
+    // the corresponding process completes initialization.
+    std::unordered_map<int32_t, instance_id_type> m_inflight_joins;
+    std::unordered_map<instance_id_type, int32_t> m_joined_process_branch;
 
     std::array<std::atomic<uint8_t>, max_process_index + 1> m_draining_process_states{};
 

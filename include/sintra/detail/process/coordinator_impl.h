@@ -686,22 +686,33 @@ instance_id_type Coordinator::join_swarm(
         return invalid_instance_id;
     }
 
-    // Safety: refuse joins when the process space is nearly exhausted to avoid
-    // runaway spawning that would otherwise trip hard asserts.
+    instance_id_type new_instance_id = invalid_instance_id;
     {
         lock_guard<mutex> guard(m_publish_mutex);
+
+        // Safety: refuse joins when the process space is nearly exhausted to avoid
+        // runaway spawning that would otherwise trip hard asserts.
         const auto current_processes = m_transceiver_registry.size();
         const auto initializing = m_processes_in_initialization.size();
         if (current_processes + initializing >= static_cast<size_t>(max_process_index)) {
             return invalid_instance_id;
         }
+
+        // If a join for this branch is already underway, avoid spawning another
+        // process and return the pending instance id instead.
+        if (auto it = m_inflight_joins.find(branch_index); it != m_inflight_joins.end()) {
+            return it->second;
+        }
+
+        new_instance_id = make_process_instance_id();
+        m_inflight_joins.emplace(branch_index, new_instance_id);
+        m_joined_process_branch.emplace(new_instance_id, branch_index);
     }
 
     if (branch_index < 1 || branch_index >= max_process_index) {
         return invalid_instance_id;
     }
 
-    const instance_id_type new_instance_id = make_process_instance_id();
     Managed_process::Spawn_swarm_process_args spawn_args;
     spawn_args.binary_name = binary_name.empty() ? s_mproc->m_binary_name : binary_name;
     spawn_args.piid = new_instance_id;
@@ -714,9 +725,11 @@ instance_id_type Coordinator::join_swarm(
         "--coordinator_id", std::to_string(s_coord_id),
         "--recovery_occurrence", std::to_string(spawn_args.occurrence)
     };
-
     auto result = s_mproc->spawn_swarm_process(spawn_args);
     if (!result.success) {
+        lock_guard<mutex> guard(m_publish_mutex);
+        m_inflight_joins.erase(branch_index);
+        m_joined_process_branch.erase(new_instance_id);
         return invalid_instance_id;
     }
 
