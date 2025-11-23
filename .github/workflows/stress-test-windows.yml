@@ -222,13 +222,32 @@ jobs:
           cd tests
           python run_tests.py --timeout 30 --build-dir ../build --config Release
 
+      - name: List preserved scratch (failure only)
+        if: failure()
+        shell: pwsh
+        run: |
+          Write-Host "Searching for preserved scratch under build/"
+          if (Test-Path build) {
+            Get-ChildItem -Force -Path build -Filter ".sintra-test-scratch*" | ForEach-Object {
+              Write-Host "scratch root: $($_.FullName)"
+            }
+            Get-ChildItem -Force -Recurse -Path build -Filter "trace.log" | Where-Object {
+              $_.FullName -like "*sintra-test-scratch*"
+            } | ForEach-Object {
+              Write-Host "trace file: $($_.FullName)"
+            }
+          } else {
+            Write-Warning "build directory not found"
+          }
+
       - name: Upload preserved scratch artifacts (failure only)
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: windows-scratch-${{ github.run_id }}
-          path: build/.sintra-test-scratch-*
-          if-no-files-found: ignore
+          path: |
+            build/.sintra-test-scratch-*/**
+          if-no-files-found: warn
           retention-days: 7
 
       - name: Mark status success
