@@ -257,7 +257,11 @@ inline size_t spawn_swarm_process(
     args.insert(args.end(), {
         "--swarm_id",       std::to_string(s_mproc->m_swarm_id),
         "--instance_id",    std::to_string(piid),
-        "--coordinator_id", std::to_string(s_coord_id)
+        "--coordinator_id", std::to_string(s_coord_id),
+#ifdef _WIN32
+        // Pass parent PID so worker can detect coordinator death and exit
+        "--coordinator_pid", std::to_string(GetCurrentProcessId()),
+#endif
     });
 
     Managed_process::Spawn_swarm_process_args spawn_args;
