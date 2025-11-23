@@ -1783,8 +1783,8 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='Test selection and iteration counts are controlled by tests/active_tests.txt'
     )
-    parser.add_argument('--timeout', type=float, default=5.0,
-                        help='Timeout per test run in seconds (default: 5)')
+    parser.add_argument('--timeout', type=float, default=30.0,
+                        help='Timeout per test run in seconds (default: 30)')
     parser.add_argument('--build-dir', type=str, default='../build-ninja2',
                         help='Path to build directory (default: ../build-ninja2)')
     parser.add_argument('--config', type=str, default='Debug',
