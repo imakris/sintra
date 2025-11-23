@@ -1352,6 +1352,9 @@ class TestRunner:
                     stderr_summary = _summarize_descriptor(snapshot, "stderr")
                     stdout_len = sum(len(s) for s in stdout_lines)
                     stderr_len = sum(len(s) for s in stderr_lines)
+                    stderr_tail = stderr_lines[-5:]
+                    if stderr_tail:
+                        stderr_tail = [line.rstrip()[:400] for line in stderr_tail]
                     descendants = self._collect_descendant_pids(process.pid) if process.pid else []
                     details = self._describe_pids([process.pid] + descendants) if process.pid else {}
                     print(
@@ -1359,6 +1362,7 @@ class TestRunner:
                         f"elapsed={elapsed:.1f}s timeout={timeout}s "
                         f"stdout={{ {stdout_summary} }} stderr={{ {stderr_summary} }} "
                         f"stdout_len={stdout_len} stderr_len={stderr_len} "
+                        (f"stderr_tail={stderr_tail} " if stderr_tail else "") +
                         f"descendants={descendants} scratch={scratch_dir}",
                         flush=True,
                     )
