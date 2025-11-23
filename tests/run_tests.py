@@ -1368,13 +1368,17 @@ class TestRunner:
                 # there's no POSIX process group concept. Kill any lingering child processes
                 # by name pattern to prevent reader threads from blocking on their pipes.
                 if self.platform.is_windows:
+                    print(f"[DEBUG] Checking for lingering processes (is_windows={self.platform.is_windows})", flush=True)
                     lingering = find_lingering_processes(("sintra_",))
+                    print(f"[DEBUG] Found {len(lingering)} lingering processes: {lingering}", flush=True)
                     if lingering:
-                        for pid, _ in lingering:
+                        for pid, name in lingering:
+                            print(f"[DEBUG] Killing lingering process {pid} ({name})", flush=True)
                             try:
                                 self._kill_process_tree(pid)
-                            except Exception:
-                                pass
+                                print(f"[DEBUG] Successfully killed {pid}", flush=True)
+                            except Exception as e:
+                                print(f"[DEBUG] Failed to kill {pid}: {e}", flush=True)
 
                 duration = time.time() - start_time
 
