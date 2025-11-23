@@ -27,6 +27,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
