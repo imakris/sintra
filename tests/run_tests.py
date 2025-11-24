@@ -229,6 +229,36 @@ class TestRunner:
         self._instrumentation_disk_root: Optional[Path] = self.build_dir
         self._instrument_disk_cache: Dict[Path, Tuple[float, str]] = {}
 
+        # Help the Windows debugger locate private symbols (PDBs) for tests.
+        # This is consumed by WindowsDebuggerStrategy when constructing the
+        # .sympath command, and keeps CI stacks fully symbolized.
+        if os.name == "nt":
+            symbol_paths: List[str] = []
+            # Per-configuration test binaries (e.g., build/tests/Release).
+            symbol_paths.append(str(self.build_dir / "tests" / self.config))
+            # Flat tests/ directory for single-config generators.
+            symbol_paths.append(str(self.build_dir / "tests"))
+            # Root build directory as a fallback.
+            symbol_paths.append(str(self.build_dir))
+
+            existing = os.environ.get("SINTRA_WINDOWS_SYMBOL_PATH", "")
+            if existing:
+                symbol_paths.append(existing)
+
+            # Preserve order but drop duplicates.
+            seen: Set[str] = set()
+            merged_paths: List[str] = []
+            for path in symbol_paths:
+                if not path:
+                    continue
+                if path in seen:
+                    continue
+                seen.add(path)
+                merged_paths.append(path)
+
+            if merged_paths:
+                os.environ["SINTRA_WINDOWS_SYMBOL_PATH"] = ";".join(merged_paths)
+
         # Preserve failing scratch directories when requested (useful for CI artifact capture).
         self._preserve_scratch = env_flag("SINTRA_PRESERVE_SCRATCH")
         self._debugger: DebuggerStrategy = get_debugger_strategy(
