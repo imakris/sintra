@@ -572,14 +572,11 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
         }
 
         // If a caller is waiting for all processes to reach the draining state,
-        // the removal of this process (and the associated draining-bit update
-        // above) may complete that condition. Notify any waiter so it can
-        // re-evaluate the aggregate draining state.
+        // notify so it can re-evaluate the aggregate draining predicate. The
+        // predicate itself is computed inside wait_for_all_draining() to avoid
+        // re-entrancy and lock ordering issues here.
         if (m_waiting_for_all_draining.load(std::memory_order_acquire)) {
-            std::lock_guard<std::mutex> draining_lock(m_draining_state_mutex);
-            if (all_known_processes_draining_unlocked(process_iid)) {
-                m_all_draining_cv.notify_all();
-            }
+            m_all_draining_cv.notify_all();
         }
     }
 
@@ -647,13 +644,11 @@ inline sequence_counter_type Coordinator::begin_process_draining(instance_id_typ
     auto watermark = s_mproc->m_out_rep_c->get_leading_sequence();
 
     // If a caller (typically the coordinator during shutdown) is waiting for all
-    // processes to enter the draining state, signal that the draining set has
-    // expanded and may now be complete.
+    // processes to enter the draining state, notify so it can re-evaluate the
+    // aggregate draining predicate. The predicate itself is computed inside
+    // wait_for_all_draining() to avoid lock layering here.
     if (m_waiting_for_all_draining.load(std::memory_order_acquire)) {
-        std::lock_guard<std::mutex> lk(m_draining_state_mutex);
-        if (all_known_processes_draining_unlocked(process_iid)) {
-            m_all_draining_cv.notify_all();
-        }
+        m_all_draining_cv.notify_all();
     }
 
     return watermark;
