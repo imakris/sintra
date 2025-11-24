@@ -1018,11 +1018,6 @@ class TestRunner:
 
 
             process = subprocess.Popen(invocation.command(), **popen_kwargs)
-            print(
-                f"[RUN START] {invocation.name} run_id={run_id} pid={process.pid} "
-                f"timeout={timeout}s scratch={scratch_dir}",
-                flush=True,
-            )
 
             if hasattr(os, 'getpgid'):
                 try:
@@ -1534,12 +1529,6 @@ class TestRunner:
 
                 success = (process.returncode == 0) and not hang_detected
                 error_msg = stderr
-                print(
-                    f"[RUN END] {invocation.name} run_id={run_id} pid={process.pid} "
-                    f"rc={process.returncode} success={success} duration={duration:.2f}s "
-                    f"stdout_len={len(stdout)} stderr_len={len(stderr)}",
-                    flush=True,
-                )
 
                 if hang_detected:
                     hang_summary = "; ".join(hang_notes) if hang_notes else "detected lingering/descendant processes"

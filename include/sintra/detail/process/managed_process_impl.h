@@ -1633,16 +1633,6 @@ void Managed_process::go()
     assign_name(std::string("sintra_process_") + std::to_string(m_pid));
 
     m_entry_function();
-
-    // Calling deactivate_all() is definitely wrong for the coordinator process.
-    // For the rest, it is probably harmless.
-    // The point of calling this here is to prevent running a handler
-    // while the process is not in a state capable of running a handler (e.g. during destruction).
-    // It is the responsibility of the library user to handle this situation properly, but
-    // there might just be too many expectations from the user.
-    if (!s_coord) {
-        s_mproc->deactivate_all();
-    }
 }
 
  //////////////////////////////////////////////////////////////////////////
