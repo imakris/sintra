@@ -1465,7 +1465,6 @@ class TestRunner:
                 # by name pattern to prevent reader threads from blocking on their pipes.
                 if self.platform.is_windows:
                     prefixes = ("sintra_", invocation.path.stem, invocation.name)
-                    print(f"[DEBUG] Checking for lingering processes (prefixes={prefixes})", flush=True)
                     lingering = find_lingering_processes(prefixes)
                     # Give recently-started children a brief window to exit naturally
                     # before classifying them as lingering. This avoids flagging short,
@@ -1476,7 +1475,11 @@ class TestRunner:
                         while lingering and time.time() < grace_deadline:
                             time.sleep(0.05)
                             lingering = find_lingering_processes(prefixes)
-                    print(f"[DEBUG] Found {len(lingering)} lingering processes: {lingering}", flush=True)
+                    if lingering or self.verbose:
+                        print(
+                            f"[DEBUG] Found {len(lingering)} lingering processes: {lingering}",
+                            flush=True,
+                        )
                     lingering_details = self._describe_pids([pid for pid, _ in lingering]) if lingering else {}
                     if lingering:
                         for pid, name in lingering:
