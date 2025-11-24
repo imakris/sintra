@@ -206,7 +206,14 @@ inline bool finalize()
     sequence_counter_type flush_seq = invalid_sequence;
 
     if (s_coord) {
+        // Coordinator-local finalize: announce draining to local state so that
+        // new barriers exclude this process, then wait until all known
+        // processes have entered the draining state (or been scavenged) before
+        // proceeding with teardown. This ensures that remote processes can
+        // still complete their own begin_process_draining() RPCs while the
+        // coordinator remains alive.
         flush_seq = s_coord->begin_process_draining(s_mproc_id);
+        s_coord->wait_for_all_draining(s_mproc_id);
     }
     else {
         std::atomic<bool> done{false};

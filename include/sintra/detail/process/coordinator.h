@@ -219,6 +219,22 @@ private:
     std::vector<Pending_instance_publication> finalize_initialization_tracking(
         instance_id_type process_iid);
 
+    // Draining coordination -------------------------------------------------
+    //
+    // The draining state is tracked per-process via m_draining_process_states.
+    // To tighten shutdown semantics, the coordinator can optionally wait until
+    // every known process has entered the draining state (or been scavenged)
+    // before allowing its own shutdown to proceed. This is driven by
+    // wait_for_all_draining(), which blocks the caller until the condition
+    // holds. The flag is_process_draining() remains the canonical per-slot
+    // predicate; these helpers simply aggregate it over all known processes.
+    mutable std::mutex                         m_draining_state_mutex;
+    std::condition_variable                    m_all_draining_cv;
+    std::atomic<bool>                          m_waiting_for_all_draining{false};
+
+    bool all_known_processes_draining_unlocked(instance_id_type self_process);
+    void wait_for_all_draining(instance_id_type self_process);
+
 public:
     SINTRA_RPC_EXPLICIT(resolve_type)
     SINTRA_RPC_EXPLICIT(resolve_instance)

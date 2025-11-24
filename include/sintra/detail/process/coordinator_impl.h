@@ -570,6 +570,17 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
                 }
             }
         }
+
+        // If a caller is waiting for all processes to reach the draining state,
+        // the removal of this process (and the associated draining-bit update
+        // above) may complete that condition. Notify any waiter so it can
+        // re-evaluate the aggregate draining state.
+        if (m_waiting_for_all_draining.load(std::memory_order_acquire)) {
+            std::lock_guard<std::mutex> draining_lock(m_draining_state_mutex);
+            if (all_known_processes_draining_unlocked(process_iid)) {
+                m_all_draining_cv.notify_all();
+            }
+        }
     }
 
     emit_global<instance_unpublished>(tn.type_id, iid, tn.name);
@@ -633,7 +644,19 @@ inline sequence_counter_type Coordinator::begin_process_draining(instance_id_typ
 
     // Use reply ring watermark (m_out_rep_c) since barrier completion messages
     // are sent on the reply channel. Get it at return time for the draining process.
-    return s_mproc->m_out_rep_c->get_leading_sequence();
+    auto watermark = s_mproc->m_out_rep_c->get_leading_sequence();
+
+    // If a caller (typically the coordinator during shutdown) is waiting for all
+    // processes to enter the draining state, signal that the draining set has
+    // expanded and may now be complete.
+    if (m_waiting_for_all_draining.load(std::memory_order_acquire)) {
+        std::lock_guard<std::mutex> lk(m_draining_state_mutex);
+        if (all_known_processes_draining_unlocked(process_iid)) {
+            m_all_draining_cv.notify_all();
+        }
+    }
+
+    return watermark;
 }
 
 
@@ -646,6 +669,63 @@ inline bool Coordinator::is_process_draining(instance_id_type process_iid) const
 
     const auto slot = static_cast<size_t>(draining_index);
     return m_draining_process_states[slot].load() != 0;
+}
+
+
+inline bool Coordinator::all_known_processes_draining_unlocked(instance_id_type /*self_process*/)
+{
+    // Snapshot known processes from the registry and initialization tracking.
+    // Processes that have never registered any transceivers are not represented
+    // here and therefore do not participate in coordinated draining.
+    std::vector<instance_id_type> candidates;
+    candidates.reserve(m_transceiver_registry.size() + m_processes_in_initialization.size());
+
+    {
+        std::lock_guard<mutex> publish_lock(m_publish_mutex);
+        for (const auto& entry : m_transceiver_registry) {
+            candidates.push_back(entry.first);
+        }
+    }
+
+    {
+        std::lock_guard<mutex> init_lock(m_init_tracking_mutex);
+        for (const auto& piid : m_processes_in_initialization) {
+            candidates.push_back(piid);
+        }
+    }
+
+    if (candidates.empty()) {
+        return true;
+    }
+
+    std::sort(candidates.begin(), candidates.end());
+    candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
+
+    for (auto piid : candidates) {
+        if (piid == 0) {
+            continue;
+        }
+        if (!is_process_draining(piid)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+
+inline void Coordinator::wait_for_all_draining(instance_id_type self_process)
+{
+    (void)self_process; // currently unused; kept for potential future refinements.
+
+    m_waiting_for_all_draining.store(true, std::memory_order_release);
+    std::unique_lock<std::mutex> lk(m_draining_state_mutex);
+
+    m_all_draining_cv.wait(lk, [&] {
+        return all_known_processes_draining_unlocked(self_process);
+    });
+
+    m_waiting_for_all_draining.store(false, std::memory_order_release);
 }
 
 
