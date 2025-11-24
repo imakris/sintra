@@ -1147,7 +1147,7 @@ class TestRunner:
                 manual_signal_module.signal(manual_signal, _manual_signal_handler)
                 manual_signal_registered = True
 
-                if not self._manual_stack_notice_printed:
+                if self.verbose and not self._manual_stack_notice_printed:
                     print(
                         f"{Color.BLUE}Manual stack capture enabled: send {signal_label} to PID {os.getpid()} "
                         f"({invocation.name}) to snapshot live stacks.{Color.RESET}",
@@ -1365,6 +1365,11 @@ class TestRunner:
                 return f"lines={lines_read} idle={idle_str} last={last_line_str}"
 
             def _heartbeat() -> None:
+                if not self.verbose:
+                    # Heartbeat output is only enabled in verbose mode; in
+                    # non-verbose runs this thread stays idle until teardown.
+                    heartbeat_stop.wait()
+                    return
                 last_report = 0.0
                 while not heartbeat_stop.wait(1.0):
                     if process.poll() is not None:
@@ -1978,12 +1983,13 @@ class TestRunner:
 
         print()  # Final newline
 
-        _, cleanup_messages = self.consume_core_cleanup_reports()
-        for level, message in cleanup_messages:
-            if level == 'warning':
-                print(f"  {Color.YELLOW}{message}{Color.RESET}")
-            else:
-                print(f"  {message}")
+        if self.verbose:
+            _, cleanup_messages = self.consume_core_cleanup_reports()
+            for level, message in cleanup_messages:
+                if level == 'warning':
+                    print(f"  {Color.YELLOW}{message}{Color.RESET}")
+                else:
+                    print(f"  {message}")
 
         return passed, failed, results
 
