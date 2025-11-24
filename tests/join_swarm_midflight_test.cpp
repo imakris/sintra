@@ -47,11 +47,20 @@ std::filesystem::path shared_dir()
 
 void append_line(const std::filesystem::path& file, const std::string& line)
 {
-    std::ofstream out(file, std::ios::binary | std::ios::app);
-    if (!out) {
-        throw std::runtime_error("failed to open " + file.string());
+    // Use a narrow string path and treat logging as best-effort only.
+    // Any failure to append should not crash the process – tests will
+    // detect missing lines via read_lines().
+    try {
+        const auto path_str = file.string();
+        std::ofstream out(path_str, std::ios::binary | std::ios::app);
+        if (!out) {
+            return;
+        }
+        out << line << '\n';
+    } catch (...) {
+        // Swallow I/O errors in test logging; functional correctness is
+        // validated by the presence/absence of lines, not by logging itself.
     }
-    out << line << '\n';
 }
 
 std::vector<std::string> read_lines(const std::filesystem::path& file)
@@ -117,7 +126,7 @@ int worker()
     const auto process_iid = sintra::process_of(s_mproc_id);
     sintra::instance_id_type joined_process = sintra::invalid_instance_id;
 
-    auto hello_slot = [&](Hello h) {
+    auto hello_slot = [log_path](Hello h) {
         std::ostringstream oss;
         oss << "recv=" << sintra::process_of(s_mproc_id)
             << " sender=" << h.sender
