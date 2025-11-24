@@ -203,10 +203,36 @@ inline bool finalize()
         return false;
     }
 
+    const bool trace_finalize = [] {
+        const char* env = std::getenv("SINTRA_TRACE_FINALIZE");
+        return env && *env && (*env != '0');
+    }();
+
+    auto trace = [&](const char* stage) {
+        if (trace_finalize) {
+            std::fprintf(stderr, "[sintra_finalize] stage=%s coord=%d mproc_id=%llu\n",
+                         stage,
+                         s_coord ? 1 : 0,
+                         static_cast<unsigned long long>(s_mproc_id));
+            std::fflush(stderr);
+        }
+    };
+
+    trace("begin");
+
     sequence_counter_type flush_seq = invalid_sequence;
 
     if (s_coord) {
+        trace("begin_process_draining_local.start");
+        // Coordinator-local finalize: announce draining to local state so that
+        // new barriers exclude this process, then wait until all known
+        // processes have entered the draining state (or been scavenged) before
+        // proceeding with teardown. This ensures that remote processes can
+        // still complete their own begin_process_draining() RPCs while the
+        // coordinator remains alive.
         flush_seq = s_coord->begin_process_draining(s_mproc_id);
+        s_coord->wait_for_all_draining(s_mproc_id);
+        trace("begin_process_draining_local.done");
     }
     else {
         std::atomic<bool> done{false};
@@ -220,12 +246,14 @@ inline bool finalize()
             }
         });
 
+        trace("begin_process_draining_remote.start");
         try {
             flush_seq = Coordinator::rpc_begin_process_draining(s_coord_id, s_mproc_id);
         }
         catch (...) {
             flush_seq = invalid_sequence;
         }
+        trace("begin_process_draining_remote.done");
 
         done = true;
         watchdog.join();
@@ -235,13 +263,26 @@ inline bool finalize()
         s_mproc->flush(process_of(s_coord_id), flush_seq);
     }
 
-    s_mproc->deactivate_all();
-    s_mproc->unpublish_all_transceivers();
-
+    // Transition into service mode before deactivating slots and unpublishing
+    // transceivers. This prevents user-level event handlers from running
+    // concurrently with teardown while still allowing RPCs and service
+    // messages (including unpublish notifications) to flow.
+    trace("pause.start");
     s_mproc->pause();
+    trace("pause.done");
+
+    trace("deactivate_all.start");
+    s_mproc->deactivate_all();
+    trace("deactivate_all.done");
+
+    trace("unpublish_all.start");
+    s_mproc->unpublish_all_transceivers();
+    trace("unpublish_all.done");
 
     delete s_mproc;
     s_mproc = nullptr;
+
+    trace("end");
 
     return true;
 }
@@ -273,6 +314,29 @@ inline size_t spawn_swarm_process(
     }
 
     return spawned;
+}
+
+inline instance_id_type join_swarm(
+    int branch_index,
+    std::string binary_name = std::string())
+{
+    if (!s_mproc || s_coord_id == invalid_instance_id || branch_index < 1) {
+        return invalid_instance_id;
+    }
+
+    if (binary_name.empty()) {
+        binary_name = s_mproc->m_binary_name;
+    }
+
+    try {
+        return Coordinator::rpc_join_swarm(
+            s_coord_id,
+            binary_name,
+            branch_index);
+    }
+    catch (...) {
+        return invalid_instance_id;
+    }
 }
 
 inline int process_index()

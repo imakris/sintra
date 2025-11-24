@@ -72,6 +72,119 @@ namespace {
         }};
         return slots;
     }
+
+    // Windows signal dispatcher infrastructure - matches POSIX architecture
+    // to prevent blocking in signal handlers and provide timeout guarantees.
+
+    inline HANDLE& signal_event()
+    {
+        static HANDLE evt = NULL;
+        return evt;
+    }
+
+    inline std::atomic<unsigned int>& pending_signal_mask()
+    {
+        static std::atomic<unsigned int> mask{0};
+        return mask;
+    }
+
+    inline std::atomic<uint32_t>& dispatched_signal_counter()
+    {
+        static std::atomic<uint32_t> counter{0};
+        return counter;
+    }
+
+    inline std::once_flag& signal_dispatcher_once_flag()
+    {
+        static std::once_flag flag;
+        return flag;
+    }
+
+    inline std::size_t signal_index(int sig)
+    {
+        auto& slots = signal_slots();
+        for (std::size_t idx = 0; idx < slots.size(); ++idx) {
+            if (slots[idx].sig == sig) {
+                return idx;
+            }
+        }
+        return slots.size();
+    }
+
+    inline void dispatch_signal_number_win(int sig_number)
+    {
+        // Hold shared lock to prevent s_mproc from being destroyed while we access it.
+        std::shared_lock<std::shared_mutex> dispatch_lock(dispatch_shutdown_mutex_instance);
+
+        auto* mproc = s_mproc;
+        if (mproc && mproc->m_out_req_c) {
+            mproc->emit_remote<Managed_process::terminated_abnormally>(sig_number);
+
+            std::shared_lock<std::shared_mutex> readers_lock(mproc->m_readers_mutex);
+            for (auto& reader_entry : mproc->m_readers) {
+                if (auto& reader = reader_entry.second) {
+                    reader->stop_nowait();
+                }
+            }
+
+            dispatched_signal_counter().fetch_add(1);
+        }
+    }
+
+    inline void drain_pending_signals_win()
+    {
+        auto mask = pending_signal_mask().exchange(0U);
+        if (mask == 0U) {
+            return;
+        }
+
+        auto& slots = signal_slots();
+        for (std::size_t idx = 0; idx < slots.size(); ++idx) {
+            if ((mask & (1U << idx)) != 0U) {
+                dispatch_signal_number_win(slots[idx].sig);
+            }
+        }
+    }
+
+    inline void signal_dispatch_loop_win()
+    {
+        while (true) {
+            DWORD result = WaitForSingleObject(signal_event(), INFINITE);
+            if (result == WAIT_OBJECT_0) {
+                drain_pending_signals_win();
+                // Reset the event after processing
+                ResetEvent(signal_event());
+            }
+            else {
+                // Event was closed or error occurred - exit the loop
+                break;
+            }
+        }
+    }
+
+    inline void ensure_signal_dispatcher_win()
+    {
+        std::call_once(signal_dispatcher_once_flag(), []() {
+            // Manual-reset event, initially non-signaled
+            signal_event() = CreateEventW(NULL, TRUE, FALSE, NULL);
+            if (signal_event() == NULL) {
+                return;
+            }
+            std::thread(signal_dispatch_loop_win).detach();
+        });
+    }
+
+    inline void wait_for_signal_dispatch_win(uint32_t expected_count)
+    {
+        const uint32_t target = expected_count + 1;
+        // Wait up to 200ms (matching POSIX timeout)
+        for (int spin = 0; spin < 200; ++spin) {
+            if (dispatched_signal_counter().load() >= target) {
+                return;
+            }
+            Sleep(1);  // 1 millisecond
+        }
+    }
 #else
     struct signal_slot {
         int sig;
@@ -266,28 +379,48 @@ namespace {
 inline
 static void s_signal_handler(int sig)
 {
-    // Hold shared lock to prevent s_mproc from being destroyed while we access it.
-    // Windows signal() handlers run on a CRT-managed thread (not true signal context),
-    // so we can safely use mutexes. The Managed_process destructor will acquire an
-    // exclusive lock before clearing s_mproc, ensuring this handler completes first.
-    std::shared_lock<std::shared_mutex> dispatch_lock(dispatch_shutdown_mutex_instance);
+    // Windows signal handler using dispatcher pattern (matching POSIX architecture).
+    // This ensures potentially-blocking operations (emit_remote, mutex acquisition)
+    // happen in the dispatcher thread, not in the signal handler, with a timeout
+    // to guarantee the handler eventually completes even if IPC is broken.
 
-    if (s_mproc && s_mproc->m_out_req_c) {
-        s_mproc->emit_remote<Managed_process::terminated_abnormally>(sig);
+    auto& slots = signal_slots();
 
-        std::shared_lock<std::shared_mutex> readers_lock(s_mproc->m_readers_mutex);
-        for (auto& reader_entry : s_mproc->m_readers) {
-            if (auto& reader = reader_entry.second) {
-                reader->stop_nowait();
-            }
+    auto* mproc = s_mproc;
+    const bool should_wait_for_dispatch = mproc && mproc->m_out_req_c;
+    uint32_t dispatched_before = 0;
+    if (should_wait_for_dispatch) {
+        dispatched_before = dispatched_signal_counter().load();
+    }
+
+    // Signal the dispatcher thread via the event and pending signal mask
+    if (signal_event() != NULL) {
+        auto idx = signal_index(sig);
+        if (idx < slots.size()) {
+            pending_signal_mask().fetch_or(1U << idx);
+        }
+        SetEvent(signal_event());
+    }
+
+    // Wait up to 200ms for dispatch to complete (matching POSIX timeout)
+    if (should_wait_for_dispatch) {
+        wait_for_signal_dispatch_win(dispatched_before);
+    }
+
+    // Chain to previous handler (e.g., debug_pause handler)
+    if (auto* slot = find_slot(slots, sig); slot && slot->has_previous) {
+        auto prev = slot->previous;
+        if (prev != SIG_DFL && prev != SIG_IGN && prev != s_signal_handler) {
+            prev(sig);
+            return;  // Previous handler took over (e.g., debug_pause entered infinite loop)
         }
     }
 
-    // On Windows, forcefully terminate the process to avoid deadlock during shutdown.
+    // Default: terminate the process
     // Reader threads may be blocked on semaphores, and Windows shutdown waits for
     // all threads to exit. Since this is a crashing process (signal handler was called),
     // we don't need graceful shutdown - the coordinator will detect the death and
-    // respawn if recovery is enabled. Mutex recovery will handle any abandoned locks.
+    // respawn if recovery is enabled.
     TerminateProcess(GetCurrentProcess(), 1);
 }
 #else
@@ -412,6 +545,8 @@ void install_signal_handler()
         auto& slots = signal_slots();
 
 #ifdef _WIN32
+        ensure_signal_dispatcher_win();
+
         for (auto& slot : slots) {
             auto previous = std::signal(slot.sig, s_signal_handler);
             if (previous != SIG_ERR) {
@@ -709,10 +844,17 @@ Managed_process::~Managed_process()
         s_mproc_id = 0;
     }
 #else
-    // Wait for any in-flight signal handler to complete before clearing s_mproc.
-    // The Windows CRT signal handler may be executing s_signal_handler() on a
-    // separate thread. Taking an exclusive lock ensures the handler completes
-    // before we clear s_mproc and destroy the object, preventing use-after-free.
+    // Close the signal dispatch event to allow the dispatch thread to exit cleanly
+    if (signal_event() != NULL) {
+        CloseHandle(signal_event());
+        signal_event() = NULL;
+    }
+
+    // Wait for any in-flight signal dispatches to complete before clearing s_mproc.
+    // The Windows dispatcher thread may still be executing dispatch_signal_number_win()
+    // after we closed the event above.
+    // Taking an exclusive lock ensures all shared locks are released before we
+    // clear s_mproc and destroy the object, preventing use-after-free.
     {
         std::unique_lock<std::shared_mutex> dispatch_lock(dispatch_shutdown_mutex_instance);
         s_mproc = nullptr;
@@ -1491,16 +1633,6 @@ void Managed_process::go()
     assign_name(std::string("sintra_process_") + std::to_string(m_pid));
 
     m_entry_function();
-
-    // Calling deactivate_all() is definitely wrong for the coordinator process.
-    // For the rest, it is probably harmless.
-    // The point of calling this here is to prevent running a handler
-    // while the process is not in a state capable of running a handler (e.g. during destruction).
-    // It is the responsibility of the library user to handle this situation properly, but
-    // there might just be too many expectations from the user.
-    if (!s_coord) {
-        s_mproc->deactivate_all();
-    }
 }
 
  //////////////////////////////////////////////////////////////////////////

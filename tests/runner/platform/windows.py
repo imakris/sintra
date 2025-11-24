@@ -49,16 +49,15 @@ class WindowsPlatformSupport(PlatformSupport):
         )
 
     def kill_all_sintra_processes(self) -> None:
-        test_names = [
-            "sintra_basic_pubsub_test.exe",
-            "sintra_ping_pong_test.exe",
-            "sintra_ping_pong_multi_test.exe",
-            "sintra_rpc_append_test.exe",
-            "sintra_recovery_test.exe",
+        # Broad kill to ensure any lingering test process (including dynamically spawned ones)
+        # is terminated before/after runs. Wildcard handling is done by taskkill.
+        patterns = [
+            "sintra_*.exe",
+            "join_swarm_midflight_test*.exe",
         ]
-        for name in test_names:
+        for pattern in patterns:
             subprocess.run(
-                ["taskkill", "/F", "/IM", name],
+                ["taskkill", "/F", "/T", "/IM", pattern],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 timeout=5,

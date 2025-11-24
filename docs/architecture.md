@@ -268,7 +268,7 @@ m_publish_mutex → m_groups_mutex → m_call_mutex → b.m → atomics
 ├────────────────────────────────────────────────────────────┤
 │ 2. Flush Coordinator Channel                               │
 │    ┌─────────────────────────────────────────────────────┐ │
-│    │ flush(coordinator_pid, flush_sequence)              │ │
+│    │ flush(flush_sequence)                               │ │
 │    │ → Waits until coordinator's reply ring              │ │
 │    │   sequence >= flush_sequence                        │ │
 │    │ → Guarantees all barrier completions are visible    │ │
@@ -296,6 +296,17 @@ m_publish_mutex → m_groups_mutex → m_call_mutex → b.m → atomics
 │    └─────────────────────────────────────────────────────┘ │
 └────────────────────────────────────────────────────────────┘
 ```
+
+> Implementation note:
+> The simplified diagram above presents "Unpublish" before "Pause" for
+> readability. In the current implementation (`detail::runtime::finalize`),
+> non‑coordinator processes first call `flush(process_of(s_coord_id),
+> flush_sequence)` to synchronise with the coordinator, then switch readers
+> to SERVICE_MODE via `pause()` before deactivating slots and invoking
+> `unpublish_all_transceivers()`. The coordinator path additionally waits
+> for all known processes to enter the draining state via
+> `wait_for_all_draining()`. This tightened ordering avoids races with
+> in‑flight handlers while keeping the conceptual shutdown model above.
 
 ### Draining State Management
 

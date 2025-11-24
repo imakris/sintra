@@ -27,6 +27,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -228,6 +229,38 @@ class TestRunner:
         self._instrumentation_disk_root: Optional[Path] = self.build_dir
         self._instrument_disk_cache: Dict[Path, Tuple[float, str]] = {}
 
+        # Help the Windows debugger locate private symbols (PDBs) for tests.
+        # This is consumed by WindowsDebuggerStrategy when constructing the
+        # .sympath command, and keeps CI stacks fully symbolized.
+        if os.name == "nt":
+            symbol_paths: List[str] = []
+            # Per-configuration test binaries (e.g., build/tests/Release).
+            symbol_paths.append(str(self.build_dir / "tests" / self.config))
+            # Flat tests/ directory for single-config generators.
+            symbol_paths.append(str(self.build_dir / "tests"))
+            # Root build directory as a fallback.
+            symbol_paths.append(str(self.build_dir))
+
+            existing = os.environ.get("SINTRA_WINDOWS_SYMBOL_PATH", "")
+            if existing:
+                symbol_paths.append(existing)
+
+            # Preserve order but drop duplicates.
+            seen: Set[str] = set()
+            merged_paths: List[str] = []
+            for path in symbol_paths:
+                if not path:
+                    continue
+                if path in seen:
+                    continue
+                seen.add(path)
+                merged_paths.append(path)
+
+            if merged_paths:
+                os.environ["SINTRA_WINDOWS_SYMBOL_PATH"] = ";".join(merged_paths)
+
+        # Preserve failing scratch directories when requested (useful for CI artifact capture).
+        self._preserve_scratch = env_flag("SINTRA_PRESERVE_SCRATCH")
         self._debugger: DebuggerStrategy = get_debugger_strategy(
             self.verbose,
             print_fn=print,
@@ -533,6 +566,13 @@ class TestRunner:
     def cleanup(self) -> None:
         """Remove the root scratch directory for this runner."""
 
+        if self._preserve_scratch:
+            print(
+                f"{Color.YELLOW}Scratch preservation enabled (SINTRA_PRESERVE_SCRATCH=1); "
+                f"leaving {self._scratch_base}{Color.RESET}"
+            )
+            return
+
         self._cleanup_scratch_directory(self._scratch_base)
 
     def consume_core_cleanup_reports(self) -> Tuple[int, List[Tuple[str, str]]]:
@@ -744,6 +784,7 @@ class TestRunner:
     def run_test_once(self, invocation: TestInvocation) -> TestResult:
         """Run a single test with timeout and proper cleanup"""
         timeout = _lookup_test_timeout(invocation.name, self.timeout)
+        run_id = uuid.uuid4().hex[:8]
         scratch_dir = self._allocate_scratch_directory(invocation)
         process = None
         cleanup_scratch_dir = True
@@ -776,6 +817,8 @@ class TestRunner:
             postmortem_stack_traces = ""
             postmortem_stack_error = ""
             failure_event = threading.Event()
+            hang_detected = False
+            hang_notes: List[str] = []
             capture_lock = threading.Lock()
             capture_pause_total = 0.0
             capture_active_start: Optional[float] = None
@@ -790,6 +833,8 @@ class TestRunner:
             manual_signal_module: Optional[object] = None
             stop_signal_desc: Optional[str] = None
             posix_signal: Optional[int] = None
+            heartbeat_stop = threading.Event()
+            heartbeat_thread: Optional[threading.Thread] = None
 
             @contextlib.contextmanager
             def stack_capture_context(mark_failure: bool) -> Iterator[bool]:
@@ -980,6 +1025,43 @@ class TestRunner:
                 except (ProcessLookupError, PermissionError, OSError):
                     process_group_id = None
 
+            # Hard safety watchdog: absolute deadline that will force-kill the process
+            # if the normal timeout mechanism fails for any reason. This is a last-resort
+            # safety net to prevent infinite hangs.
+            hard_deadline = time.monotonic() + timeout + 60.0  # Normal timeout + 60s grace
+            hard_watchdog_stop = threading.Event()
+
+            def hard_watchdog() -> None:
+                while not hard_watchdog_stop.wait(1.0):
+                    if time.monotonic() >= hard_deadline:
+                        if process.poll() is None:
+                            print(
+                                f"\n{Color.RED}HARD WATCHDOG: Force-killing {invocation.name} "
+                                f"(pid {process.pid}) - normal timeout mechanism failed{Color.RESET}",
+                                flush=True,
+                            )
+                            self._kill_process_tree(process.pid)
+                        else:
+                            # Main process exited but we might be stuck on reader threads
+                            # waiting for child processes. Kill any lingering sintra processes.
+                            lingering = find_lingering_processes(("sintra_",))
+                            if lingering:
+                                pids = [pid for pid, _ in lingering]
+                                print(
+                                    f"\n{Color.RED}HARD WATCHDOG: Main process exited but found "
+                                    f"{len(lingering)} lingering child process(es): {pids} - killing them{Color.RESET}",
+                                    flush=True,
+                                )
+                                for pid, _ in lingering:
+                                    try:
+                                        self._kill_process_tree(pid)
+                                    except Exception:
+                                        pass
+                        break
+
+            hard_watchdog_thread = threading.Thread(target=hard_watchdog, daemon=True)
+            hard_watchdog_thread.start()
+
             def attempt_live_capture(trigger_line: str) -> None:
                 nonlocal live_stack_traces, live_stack_error
                 if not trigger_line:
@@ -1012,11 +1094,9 @@ class TestRunner:
                         with capture_lock:
                             live_stack_error = error
 
-                    # Kill the paused process tree so test runner doesn't hang
-                    try:
-                        self._kill_process_tree(process.pid)
-                    except Exception:
-                        pass
+                    # Don't kill here - let the main timeout mechanism handle cleanup.
+                    # This allows time for manual debugger attachment if needed.
+                    # The process will be killed when the timeout expires.
 
                     return
 
@@ -1067,7 +1147,7 @@ class TestRunner:
                 manual_signal_module.signal(manual_signal, _manual_signal_handler)
                 manual_signal_registered = True
 
-                if not self._manual_stack_notice_printed:
+                if self.verbose and not self._manual_stack_notice_printed:
                     print(
                         f"{Color.BLUE}Manual stack capture enabled: send {signal_label} to PID {os.getpid()} "
                         f"({invocation.name}) to snapshot live stacks.{Color.RESET}",
@@ -1263,6 +1343,92 @@ class TestRunner:
                 stderr_thread.start()
                 threads.append((stderr_thread, process.stderr, 'stderr', stderr_fd))
 
+            def _snapshot_reader_states() -> Dict[str, Dict[str, Any]]:
+                with reader_state_lock:
+                    return {k: dict(v) for k, v in reader_states.items()}
+
+            def _summarize_descriptor(snapshot: Dict[str, Dict[str, Any]], descriptor: str) -> str:
+                lines_read = 0
+                last_line = None
+                last_idle: Optional[float] = None
+                for state in snapshot.values():
+                    if state.get("descriptor") != descriptor:
+                        continue
+                    lines_read = max(lines_read, state.get("lines") or 0)
+                    if state.get("last_line_excerpt") is not None:
+                        last_line = state.get("last_line_excerpt")
+                    last_update = state.get("last_update")
+                    if isinstance(last_update, float):
+                        last_idle = max(time.monotonic() - last_update, 0.0)
+                idle_str = f"{last_idle:.2f}s" if last_idle is not None else "unknown"
+                last_line_str = repr(last_line) if last_line is not None else "None"
+                return f"lines={lines_read} idle={idle_str} last={last_line_str}"
+
+            def _heartbeat() -> None:
+                if not self.verbose:
+                    # Heartbeat output is only enabled in verbose mode; in
+                    # non-verbose runs this thread stays idle until teardown.
+                    heartbeat_stop.wait()
+                    return
+                last_report = 0.0
+                while not heartbeat_stop.wait(1.0):
+                    if process.poll() is not None:
+                        continue
+                    elapsed = time.monotonic() - start_monotonic
+                    # First heartbeat after 5s, then every ~10s to avoid log spam.
+                    if elapsed < 5.0 or elapsed - last_report < 10.0:
+                        continue
+                    last_report = elapsed
+                    snapshot = _snapshot_reader_states()
+                    stdout_summary = _summarize_descriptor(snapshot, "stdout")
+                    stderr_summary = _summarize_descriptor(snapshot, "stderr")
+                    stdout_len = sum(len(s) for s in stdout_lines)
+                    stderr_len = sum(len(s) for s in stderr_lines)
+                    stderr_tail = stderr_lines[-5:]
+                    if stderr_tail:
+                        stderr_tail = [line.rstrip()[:400] for line in stderr_tail]
+                    descendants = (
+                        self._collect_descendant_pids(process.pid)
+                        if (self.verbose and process.pid)
+                        else []
+                    )
+                    details = (
+                        self._describe_pids([process.pid] + descendants)
+                        if (self.verbose and process.pid)
+                        else {}
+                    )
+                    if self.verbose:
+                        msg = (
+                            f"[HEARTBEAT] {invocation.name} run_id={run_id} pid={process.pid} "
+                            f"elapsed={elapsed:.1f}s timeout={timeout}s "
+                            f"stdout={{ {stdout_summary} }} stderr={{ {stderr_summary} }} "
+                            f"stdout_len={stdout_len} stderr_len={stderr_len} "
+                        )
+                        if stderr_tail:
+                            msg += f"stderr_tail={stderr_tail} "
+                        msg += f"descendants={descendants} scratch={scratch_dir}"
+                        print(msg, flush=True)
+                        if details:
+                            for pid, desc in details.items():
+                                print(f"[HEARTBEAT]    pid={pid} {desc}", flush=True)
+                    else:
+                        msg = (
+                            f"[HEARTBEAT] {invocation.name} run_id={run_id} pid={process.pid} "
+                            f"elapsed={elapsed:.1f}s timeout={timeout}s "
+                            f"stdout={{ {stdout_summary} }} stderr={{ {stderr_summary} }} "
+                            f"stdout_len={stdout_len} stderr_len={stderr_len}"
+                        )
+                        if stderr_tail:
+                            msg += f" stderr_tail={stderr_tail}"
+                        print(msg, flush=True)
+
+            heartbeat_thread = threading.Thread(
+                target=_heartbeat,
+                name=f"heartbeat_{invocation.name}_{run_id}",
+                daemon=True,
+            )
+            heartbeat_thread.start()
+
             # Wait with timeout, extending the deadline for live stack captures
             try:
                 while True:
@@ -1317,6 +1483,127 @@ class TestRunner:
                             live_stack_error = error
 
                 terminate_process_group_members(f"{invocation.name} exit")
+
+                # On Windows, terminate_process_group_members does nothing useful because
+                # there's no POSIX process group concept. Kill any lingering child processes
+                # by name pattern to prevent reader threads from blocking on their pipes.
+                if self.platform.is_windows:
+                    prefixes = ("sintra_", invocation.path.stem, invocation.name)
+                    lingering = find_lingering_processes(prefixes)
+                    # Give recently-started children a brief window to exit naturally
+                    # before classifying them as lingering. This avoids flagging short,
+                    # in-flight shutdown phases as hangs while still catching processes
+                    # that survive well beyond the test's lifetime.
+                    if lingering:
+                        grace_deadline = time.time() + 2.0
+                        while lingering and time.time() < grace_deadline:
+                            time.sleep(0.05)
+                            lingering = find_lingering_processes(prefixes)
+                    if lingering or self.verbose:
+                        print(
+                            f"[DEBUG] Found {len(lingering)} lingering processes: {lingering}",
+                            flush=True,
+                        )
+                    lingering_details = self._describe_pids([pid for pid, _ in lingering]) if lingering else {}
+                    if lingering:
+                        for pid, name in lingering:
+                            detail = lingering_details.get(pid)
+                            if detail:
+                                print(f"[DEBUG] Lingering process detail pid={pid} name={name}: {detail}", flush=True)
+                            # Try to capture stacks before killing to understand why it is stuck.
+                            try:
+                                stacks, err = self._capture_process_stacks(pid, None)
+                                if stacks:
+                                    print(f"[DEBUG] Lingering process stacks pid={pid}:\n{stacks}", flush=True)
+                                    hang_notes.append(f"linger pid={pid} stacks captured")
+                                elif err:
+                                    print(f"[DEBUG] Lingering process stack capture failed pid={pid}: {err}", flush=True)
+                                    hang_notes.append(f"linger pid={pid} stack capture failed: {err}")
+                            except Exception as e:
+                                print(f"[DEBUG] Failed to capture stacks for pid={pid}: {e}", flush=True)
+                            print(f"[DEBUG] Killing lingering process {pid} ({name})", flush=True)
+                            try:
+                                self._kill_process_tree(pid)
+                                print(f"[DEBUG] Successfully killed {pid}", flush=True)
+                            except Exception as e:
+                                print(f"[DEBUG] Failed to kill {pid}: {e}", flush=True)
+                        hang_detected = True
+                    # Also look for children of this test process that may not match prefixes.
+                    if process and process.pid:
+                        descendants = self._collect_descendant_pids(process.pid)
+                        if descendants:
+                            details = self._describe_pids(descendants)
+                            # Limit heavy-weight debugger work to descendants that look
+                            # like Sintra/test processes. Windows CI sometimes reports
+                            # a large number of unrelated descendants; attaching to
+                            # and killing arbitrary system processes is both fragile
+                            # and unnecessary.
+                            interesting: List[int] = []
+                            for pid in descendants:
+                                detail = details.get(pid, "")
+                                if any(
+                                    prefix
+                                    and prefix in detail
+                                    for prefix in prefixes
+                                ):
+                                    interesting.append(pid)
+
+                            if interesting:
+                                print(
+                                    f"[DEBUG] Descendants of {process.pid} still alive after exit: {interesting}",
+                                    flush=True,
+                                )
+                                hang_detected = True
+                                hang_notes.append(f"descendants after exit: {interesting}")
+                                for pid in interesting:
+                                    detail = details.get(pid)
+                                    if detail:
+                                        print(
+                                            f"[DEBUG] Descendant detail pid={pid}: {detail}",
+                                            flush=True,
+                                        )
+                                    try:
+                                        stacks, err = self._capture_process_stacks(pid, None)
+                                        if stacks:
+                                            print(
+                                                f"[DEBUG] Descendant stacks pid={pid}:\n{stacks}",
+                                                flush=True,
+                                            )
+                                            hang_notes.append(
+                                                f"descendant pid={pid} stacks captured"
+                                            )
+                                        elif err:
+                                            print(
+                                                f"[DEBUG] Descendant stack capture failed pid={pid}: {err}",
+                                                flush=True,
+                                            )
+                                            hang_notes.append(
+                                                f"descendant pid={pid} stack capture failed: {err}"
+                                            )
+                                    except Exception as e:
+                                        print(
+                                            f"[DEBUG] Failed to capture stacks for descendant pid={pid}: {e}",
+                                            flush=True,
+                                        )
+                                    try:
+                                        self._kill_process_tree(pid)
+                                        print(
+                                            f"[DEBUG] Killed descendant pid={pid}",
+                                            flush=True,
+                                        )
+                                    except Exception as e:
+                                        print(
+                                            f"[DEBUG] Failed to kill descendant pid={pid}: {e}",
+                                            flush=True,
+                                        )
+                            else:
+                                if self.verbose:
+                                    print(
+                                        f"[DEBUG] Descendants of {process.pid} still alive after exit "
+                                        f"(no sintra/test descendants): {descendants}",
+                                        flush=True,
+                                    )
+
                 duration = time.time() - start_time
 
                 shutdown_reader_threads()
@@ -1324,8 +1611,12 @@ class TestRunner:
                 stdout = ''.join(stdout_lines)
                 stderr = ''.join(stderr_lines)
 
-                success = (process.returncode == 0)
+                success = (process.returncode == 0) and not hang_detected
                 error_msg = stderr
+
+                if hang_detected:
+                    hang_summary = "; ".join(hang_notes) if hang_notes else "detected lingering/descendant processes"
+                    error_msg = f"[HANG DETECTED] {hang_summary}\n{error_msg}"
 
                 if not success:
                     # Categorize failure type for better diagnostics
@@ -1423,6 +1714,29 @@ class TestRunner:
                 # Kill the process tree on timeout
                 self._kill_process_tree(process.pid)
 
+                # On Windows, also kill any lingering child processes by name pattern
+                if self.platform.is_windows:
+                    prefixes = ("sintra_", invocation.path.stem, invocation.name)
+                    lingering = find_lingering_processes(prefixes)
+                    if lingering:
+                        lingering_details = self._describe_pids([pid for pid, _ in lingering])
+                        for pid, name in lingering:
+                            detail = lingering_details.get(pid)
+                            if detail:
+                                print(f"[DEBUG] (timeout) lingering pid={pid} name={name} detail={detail}", flush=True)
+                            try:
+                                stacks, err = self._capture_process_stacks(pid, None)
+                                if stacks:
+                                    print(f"[DEBUG] (timeout) lingering stacks pid={pid}:\n{stacks}", flush=True)
+                                elif err:
+                                    print(f"[DEBUG] (timeout) lingering stack capture failed pid={pid}: {err}", flush=True)
+                            except Exception:
+                                pass
+                            try:
+                                self._kill_process_tree(pid)
+                            except Exception:
+                                pass
+
                 try:
                     process.wait(timeout=1)
                 except Exception:
@@ -1463,6 +1777,11 @@ class TestRunner:
                 error=error_msg
             )
         finally:
+            hard_watchdog_stop.set()
+            hard_watchdog_thread.join(timeout=1.0)
+            heartbeat_stop.set()
+            if heartbeat_thread is not None:
+                heartbeat_thread.join(timeout=1.0)
             manual_capture_stop.set()
             manual_capture_event.set()
             if manual_capture_thread is not None:
@@ -1473,6 +1792,21 @@ class TestRunner:
                         manual_signal_module.signal(sig, prev_handler)  # type: ignore
                     except Exception:
                         pass
+
+            preserve_failure = self._preserve_scratch and (result_success is False or result_success is None)
+            if preserve_failure:
+                cleanup_scratch_dir = False
+                print(
+                    f"\n{Color.YELLOW}Preserving scratch for failure ({invocation.name}): "
+                    f"{scratch_dir}{Color.RESET}"
+                )
+            if hang_detected:
+                cleanup_scratch_dir = False
+                print(
+                    f"\n{Color.YELLOW}Preserving scratch for hang ({invocation.name}): "
+                    f"{scratch_dir}{Color.RESET}"
+                )
+
             if cleanup_scratch_dir:
                 self._cleanup_scratch_directory(scratch_dir)
             self._cleanup_new_core_dumps(invocation, core_snapshot, start_time, result_success)
@@ -1628,6 +1962,7 @@ class TestRunner:
         failed = 0
 
         for i in range(repetitions):
+            print(f"[RUN INVOKE] {test_name} iter={i + 1}/{repetitions}", flush=True)
             result = self.run_test_once(invocation)
             results.append(result)
 
@@ -1637,6 +1972,8 @@ class TestRunner:
             else:
                 failed += 1
                 print(f"{Color.RED}F{Color.RESET}", end='', flush=True)
+                print(f"\n[ABORT] Stopping further repetitions due to failure/hang at iter {i + 1}", flush=True)
+                break
 
             # Print newline every 50 tests for readability
             if (i + 1) % 50 == 0:
@@ -1646,12 +1983,13 @@ class TestRunner:
 
         print()  # Final newline
 
-        _, cleanup_messages = self.consume_core_cleanup_reports()
-        for level, message in cleanup_messages:
-            if level == 'warning':
-                print(f"  {Color.YELLOW}{message}{Color.RESET}")
-            else:
-                print(f"  {message}")
+        if self.verbose:
+            _, cleanup_messages = self.consume_core_cleanup_reports()
+            for level, message in cleanup_messages:
+                if level == 'warning':
+                    print(f"  {Color.YELLOW}{message}{Color.RESET}")
+                else:
+                    print(f"  {message}")
 
         return passed, failed, results
 
@@ -1951,12 +2289,13 @@ def main():
                     f"free disk={format_size(disk_space)}"
                 )
 
-                _, cleanup_messages = runner.consume_core_cleanup_reports()
-                for level, message in cleanup_messages:
-                    if level == 'warning':
-                        print(f"    {Color.YELLOW}{message}{Color.RESET}")
-                    else:
-                        print(f"    {message}")
+                if runner.verbose:
+                    _, cleanup_messages = runner.consume_core_cleanup_reports()
+                    for level, message in cleanup_messages:
+                        if level == 'warning':
+                            print(f"    {Color.YELLOW}{message}{Color.RESET}")
+                        else:
+                            print(f"    {message}")
 
                 if not suite_all_passed:
                     break

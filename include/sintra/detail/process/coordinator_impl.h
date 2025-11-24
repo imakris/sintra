@@ -468,6 +468,12 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
     // if it is a Managed_process is being unpublished, more cleanup is required
     if (iid == process_iid) {
 
+        // Cleanup in-flight join tracking for this process/branch, if any.
+        if (auto branch_it = m_joined_process_branch.find(process_iid); branch_it != m_joined_process_branch.end()) {
+            m_inflight_joins.erase(branch_it->second);
+            m_joined_process_branch.erase(branch_it);
+        }
+
         ready_notifications = finalize_initialization_tracking(process_iid);
         if (!ready_notifications.empty()) {
             ready_notifications.erase(
@@ -564,6 +570,14 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
                 }
             }
         }
+
+        // If a caller is waiting for all processes to reach the draining state,
+        // notify so it can re-evaluate the aggregate draining predicate. The
+        // predicate itself is computed inside wait_for_all_draining() to avoid
+        // re-entrancy and lock ordering issues here.
+        if (m_waiting_for_all_draining.load(std::memory_order_acquire)) {
+            m_all_draining_cv.notify_all();
+        }
     }
 
     emit_global<instance_unpublished>(tn.type_id, iid, tn.name);
@@ -627,7 +641,17 @@ inline sequence_counter_type Coordinator::begin_process_draining(instance_id_typ
 
     // Use reply ring watermark (m_out_rep_c) since barrier completion messages
     // are sent on the reply channel. Get it at return time for the draining process.
-    return s_mproc->m_out_rep_c->get_leading_sequence();
+    auto watermark = s_mproc->m_out_rep_c->get_leading_sequence();
+
+    // If a caller (typically the coordinator during shutdown) is waiting for all
+    // processes to enter the draining state, notify so it can re-evaluate the
+    // aggregate draining predicate. The predicate itself is computed inside
+    // wait_for_all_draining() to avoid lock layering here.
+    if (m_waiting_for_all_draining.load(std::memory_order_acquire)) {
+        m_all_draining_cv.notify_all();
+    }
+
+    return watermark;
 }
 
 
@@ -640,6 +664,63 @@ inline bool Coordinator::is_process_draining(instance_id_type process_iid) const
 
     const auto slot = static_cast<size_t>(draining_index);
     return m_draining_process_states[slot].load() != 0;
+}
+
+
+inline bool Coordinator::all_known_processes_draining_unlocked(instance_id_type /*self_process*/)
+{
+    // Snapshot known processes from the registry and initialization tracking.
+    // Processes that have never registered any transceivers are not represented
+    // here and therefore do not participate in coordinated draining.
+    std::vector<instance_id_type> candidates;
+    candidates.reserve(m_transceiver_registry.size() + m_processes_in_initialization.size());
+
+    {
+        std::lock_guard<mutex> publish_lock(m_publish_mutex);
+        for (const auto& entry : m_transceiver_registry) {
+            candidates.push_back(entry.first);
+        }
+    }
+
+    {
+        std::lock_guard<mutex> init_lock(m_init_tracking_mutex);
+        for (const auto& piid : m_processes_in_initialization) {
+            candidates.push_back(piid);
+        }
+    }
+
+    if (candidates.empty()) {
+        return true;
+    }
+
+    std::sort(candidates.begin(), candidates.end());
+    candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
+
+    for (auto piid : candidates) {
+        if (piid == 0) {
+            continue;
+        }
+        if (!is_process_draining(piid)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+
+inline void Coordinator::wait_for_all_draining(instance_id_type self_process)
+{
+    (void)self_process; // currently unused; kept for potential future refinements.
+
+    m_waiting_for_all_draining.store(true, std::memory_order_release);
+    std::unique_lock<std::mutex> lk(m_draining_state_mutex);
+
+    m_all_draining_cv.wait(lk, [&] {
+        return all_known_processes_draining_unlocked(self_process);
+    });
+
+    m_waiting_for_all_draining.store(false, std::memory_order_release);
 }
 
 
@@ -672,6 +753,98 @@ instance_id_type Coordinator::make_process_group(
 
     m_groups[name].assign_name(name);
     return ret;
+}
+
+
+
+// EXPORTED FOR RPC
+inline
+instance_id_type Coordinator::join_swarm(
+    const string& binary_name,
+    int32_t branch_index)
+{
+    if (!s_mproc || !s_coord) {
+        return invalid_instance_id;
+    }
+
+    instance_id_type new_instance_id = invalid_instance_id;
+    {
+        lock_guard<mutex> guard(m_publish_mutex);
+
+        // Safety: refuse joins when the process space is nearly exhausted to avoid
+        // runaway spawning that would otherwise trip hard asserts.
+        const auto current_processes = m_transceiver_registry.size();
+        const auto initializing = m_processes_in_initialization.size();
+        if (current_processes + initializing >= static_cast<size_t>(max_process_index)) {
+            return invalid_instance_id;
+        }
+
+        // If a join for this branch is already underway, avoid spawning another
+        // process and return the pending instance id instead.
+        if (auto it = m_inflight_joins.find(branch_index); it != m_inflight_joins.end()) {
+            return it->second;
+        }
+
+        new_instance_id = make_process_instance_id();
+        m_inflight_joins.emplace(branch_index, new_instance_id);
+        m_joined_process_branch.emplace(new_instance_id, branch_index);
+    }
+
+    if (branch_index < 1 || branch_index >= max_process_index) {
+        return invalid_instance_id;
+    }
+
+    // Add to groups BEFORE spawning so the process is already a group member
+    // when it starts executing. This prevents a race where the spawned process
+    // calls barrier() before being added to the group, causing it to be excluded
+    // from the barrier's processes_pending set.
+    {
+        lock_guard<mutex> groups_lock(m_groups_mutex);
+        auto add_to_group = [&](const string& name) {
+            auto it = m_groups.find(name);
+            if (it != m_groups.end()) {
+                it->second.add_process(new_instance_id);
+                m_groups_of_process[new_instance_id].insert(it->second.m_instance_id);
+            }
+        };
+        add_to_group("_sintra_all_processes");
+        add_to_group("_sintra_external_processes");
+    }
+
+    Managed_process::Spawn_swarm_process_args spawn_args;
+    spawn_args.binary_name = binary_name.empty() ? s_mproc->m_binary_name : binary_name;
+    spawn_args.piid = new_instance_id;
+    spawn_args.occurrence = 1; // mark as non-initial to skip startup barrier
+    spawn_args.args = {
+        spawn_args.binary_name,
+        "--branch_index",   std::to_string(branch_index),
+        "--swarm_id",       std::to_string(s_mproc->m_swarm_id),
+        "--instance_id",    std::to_string(new_instance_id),
+        "--coordinator_id", std::to_string(s_coord_id),
+        "--recovery_occurrence", std::to_string(spawn_args.occurrence)
+    };
+    auto result = s_mproc->spawn_swarm_process(spawn_args);
+
+    if (!result.success) {
+        // Roll back group insertion on spawn failure.
+        lock_guard<mutex> groups_lock(m_groups_mutex);
+        auto remove_from_group = [&](const string& name) {
+            auto it = m_groups.find(name);
+            if (it != m_groups.end()) {
+                it->second.remove_process(new_instance_id);
+            }
+        };
+        remove_from_group("_sintra_all_processes");
+        remove_from_group("_sintra_external_processes");
+        m_groups_of_process.erase(new_instance_id);
+
+        lock_guard<mutex> guard(m_publish_mutex);
+        m_inflight_joins.erase(branch_index);
+        m_joined_process_branch.erase(new_instance_id);
+        return invalid_instance_id;
+    }
+
+    return new_instance_id;
 }
 
 
@@ -729,6 +902,14 @@ Coordinator::finalize_initialization_tracking(instance_id_type process_iid)
 inline
 void Coordinator::mark_initialization_complete(instance_id_type process_iid)
 {
+    {
+        std::lock_guard<mutex> publish_lock(m_publish_mutex);
+        if (auto branch_it = m_joined_process_branch.find(process_iid); branch_it != m_joined_process_branch.end()) {
+            m_inflight_joins.erase(branch_it->second);
+            m_joined_process_branch.erase(branch_it);
+        }
+    }
+
     auto ready_notifications = finalize_initialization_tracking(process_iid);
     if (ready_notifications.empty()) {
         return;

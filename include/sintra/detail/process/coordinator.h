@@ -13,6 +13,7 @@
 #include <condition_variable>
 #include <memory>
 #include <mutex>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -134,14 +135,11 @@ private:
     bool unpublish_transceiver(instance_id_type instance_id);
     sequence_counter_type begin_process_draining(instance_id_type process_iid);
     void unpublish_transceiver_notify(instance_id_type transceiver_iid);
-
-    //bool add_process_into_group(instance_id_type process_id, type_id_type process_group_id);
-
+    instance_id_type join_swarm(const string& binary_name, int32_t branch_index);
 
     instance_id_type make_process_group(
         const string& name,
         const unordered_set<instance_id_type>& member_process_ids);
-
 
     void enable_recovery(instance_id_type piid);
     void recover_if_required(instance_id_type piid);
@@ -193,6 +191,12 @@ private:
 
     set<instance_id_type>                       m_requested_recovery;
 
+    // Track in-flight join_swarm requests keyed by branch_index to avoid
+    // spawning multiple processes when callers retry the RPC. Cleared once
+    // the corresponding process completes initialization.
+    std::unordered_map<int32_t, instance_id_type> m_inflight_joins;
+    std::unordered_map<instance_id_type, int32_t> m_joined_process_branch;
+
     std::array<std::atomic<uint8_t>, max_process_index + 1> m_draining_process_states{};
 
     unordered_set<instance_id_type>             m_processes_in_initialization;
@@ -209,6 +213,22 @@ private:
     std::vector<Pending_instance_publication> finalize_initialization_tracking(
         instance_id_type process_iid);
 
+    // Draining coordination -------------------------------------------------
+    //
+    // The draining state is tracked per-process via m_draining_process_states.
+    // To tighten shutdown semantics, the coordinator can optionally wait until
+    // every known process has entered the draining state (or been scavenged)
+    // before allowing its own shutdown to proceed. This is driven by
+    // wait_for_all_draining(), which blocks the caller until the condition
+    // holds. The flag is_process_draining() remains the canonical per-slot
+    // predicate; these helpers simply aggregate it over all known processes.
+    mutable std::mutex                         m_draining_state_mutex;
+    std::condition_variable                    m_all_draining_cv;
+    std::atomic<bool>                          m_waiting_for_all_draining{false};
+
+    bool all_known_processes_draining_unlocked(instance_id_type self_process);
+    void wait_for_all_draining(instance_id_type self_process);
+
 public:
     SINTRA_RPC_EXPLICIT(resolve_type)
     SINTRA_RPC_EXPLICIT(resolve_instance)
@@ -220,6 +240,7 @@ public:
     SINTRA_RPC_EXPLICIT(print)
     SINTRA_RPC_EXPLICIT(enable_recovery)
     SINTRA_RPC_EXPLICIT(mark_initialization_complete)
+    SINTRA_RPC_STRICT_EXPLICIT(join_swarm)
 
     bool is_process_draining(instance_id_type process_iid) const;
 

@@ -16,6 +16,7 @@ WINDOWS_DEBUGGER_CACHE_ENV = "SINTRA_WINDOWS_DEBUGGER_CACHE"
 WINSDK_INSTALLER_URL_ENV = "SINTRA_WINSDK_INSTALLER_URL"
 WINSDK_FEATURE_ENV = "SINTRA_WINSDK_FEATURE"
 WINSDK_DEBUGGER_MSI_ENV = "SINTRA_WINSDK_DEBUGGER_MSI"
+WINDOWS_SYMBOL_PATH_ENV = "SINTRA_WINDOWS_SYMBOL_PATH"
 WINSDK_INSTALLER_URL = os.environ.get(
     WINSDK_INSTALLER_URL_ENV,
     "https://download.microsoft.com/download/7/9/6/7962e9ce-cd69-4574-978c-1202654bd729/windowssdk/winsdksetup.exe",
@@ -146,6 +147,29 @@ class WindowsDebuggerStrategy(DebuggerStrategy):
 
         self._downloaded_windows_debugger_root = debugger_root
         return debugger_root, ""
+
+    def _symbol_path_command(self) -> str:
+        """Return the debugger command prefix that configures symbol paths.
+
+        By default we call `.symfix` to enable the Microsoft public symbol
+        server, and then append any user-provided local symbol search path
+        from SINTRA_WINDOWS_SYMBOL_PATH. This allows CI to point cdb/windbg at
+        the build directory containing PDBs for Sintra binaries while still
+        keeping OS symbols available.
+        """
+        extra = os.environ.get(WINDOWS_SYMBOL_PATH_ENV, "").strip()
+        if not extra:
+            return ".symfix; .reload"
+
+        # Normalize separators and deduplicate empty components
+        parts = [p for p in extra.replace("|", ";").split(";") if p]
+        if not parts:
+            return ".symfix; .reload"
+
+        symbol_path = ";".join(parts)
+        # Use a single quoted argument so embedded semicolons are preserved as
+        # path separators by the debugger.
+        return f'.symfix; .sympath+ "{symbol_path}"; .reload'
 
     def _ensure_winsdk_layout(self, layout_dir: Path) -> Optional[str]:
         installer_path, installer_error = self._ensure_winsdk_installer()
@@ -575,13 +599,15 @@ class WindowsDebuggerStrategy(DebuggerStrategy):
         capture_errors: List[str] = []
         fallback_outputs: List[Tuple[str, str, int, str]] = []
 
+        sym_cmd = self._symbol_path_command()
+
         for _, dump_path in candidate_dumps:
             try:
                 command = [debugger_path]
                 if debugger_name == "windbg":
                     command.append("-Q")
                 # Use kP to show stack with parameters (function arguments)
-                command.extend(["-z", str(dump_path), "-c", ".symfix; .reload; ~* kP; qd"])
+                command.extend(["-z", str(dump_path), "-c", f"{sym_cmd}; ~* kP; qd"])
 
                 result = subprocess.run(
                     command,
@@ -661,6 +687,8 @@ class WindowsDebuggerStrategy(DebuggerStrategy):
         if not debugger_path:
             return "", debugger_error
 
+        sym_cmd = self._symbol_path_command()
+
         target_pids = [pid]
         # Use the collect_descendant_pids callback (which has psutil support) if available,
         # otherwise fall back to the PowerShell-based method
@@ -691,7 +719,7 @@ class WindowsDebuggerStrategy(DebuggerStrategy):
                     command.append("-Q")
                 # Use kP to show stack with parameters (function arguments)
                 # Note: Full local variable display would require iterating frames with dv
-                command.extend(["-pv", "-p", str(target_pid), "-c", ".symfix; .reload; ~* kP; qd"])
+                command.extend(["-pv", "-p", str(target_pid), "-c", f"{sym_cmd}; ~* kP; qd"])
 
                 result = subprocess.run(
                     command,
@@ -814,10 +842,12 @@ class WindowsDebuggerStrategy(DebuggerStrategy):
             if not dump_path:
                 return "", "failed to create minidump"
 
+            sym_cmd = self._symbol_path_command()
+
             command = [debugger_path]
             if debugger_name == "windbg":
                 command.append("-Q")
-            command.extend(["-z", str(dump_path), "-c", ".symfix; .reload; ~* kP; qd"])
+            command.extend(["-z", str(dump_path), "-c", f"{sym_cmd}; ~* kP; qd"])
 
             result = subprocess.run(
                 command,
