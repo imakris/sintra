@@ -1370,8 +1370,8 @@ class TestRunner:
                     if process.poll() is not None:
                         continue
                     elapsed = time.monotonic() - start_monotonic
-                    # First heartbeat after 1s, then every ~5s
-                    if elapsed < 1.0 or elapsed - last_report < 5.0:
+                    # First heartbeat after 5s, then every ~10s to avoid log spam.
+                    if elapsed < 5.0 or elapsed - last_report < 10.0:
                         continue
                     last_report = elapsed
                     snapshot = _snapshot_reader_states()
@@ -1382,21 +1382,40 @@ class TestRunner:
                     stderr_tail = stderr_lines[-5:]
                     if stderr_tail:
                         stderr_tail = [line.rstrip()[:400] for line in stderr_tail]
-                    descendants = self._collect_descendant_pids(process.pid) if process.pid else []
-                    details = self._describe_pids([process.pid] + descendants) if process.pid else {}
-                    msg = (
-                        f"[HEARTBEAT] {invocation.name} run_id={run_id} pid={process.pid} "
-                        f"elapsed={elapsed:.1f}s timeout={timeout}s "
-                        f"stdout={{ {stdout_summary} }} stderr={{ {stderr_summary} }} "
-                        f"stdout_len={stdout_len} stderr_len={stderr_len} "
+                    descendants = (
+                        self._collect_descendant_pids(process.pid)
+                        if (self.verbose and process.pid)
+                        else []
                     )
-                    if stderr_tail:
-                        msg += f"stderr_tail={stderr_tail} "
-                    msg += f"descendants={descendants} scratch={scratch_dir}"
-                    print(msg, flush=True)
-                    if details:
-                        for pid, desc in details.items():
-                            print(f"[HEARTBEAT]    pid={pid} {desc}", flush=True)
+                    details = (
+                        self._describe_pids([process.pid] + descendants)
+                        if (self.verbose and process.pid)
+                        else {}
+                    )
+                    if self.verbose:
+                        msg = (
+                            f"[HEARTBEAT] {invocation.name} run_id={run_id} pid={process.pid} "
+                            f"elapsed={elapsed:.1f}s timeout={timeout}s "
+                            f"stdout={{ {stdout_summary} }} stderr={{ {stderr_summary} }} "
+                            f"stdout_len={stdout_len} stderr_len={stderr_len} "
+                        )
+                        if stderr_tail:
+                            msg += f"stderr_tail={stderr_tail} "
+                        msg += f"descendants={descendants} scratch={scratch_dir}"
+                        print(msg, flush=True)
+                        if details:
+                            for pid, desc in details.items():
+                                print(f"[HEARTBEAT]    pid={pid} {desc}", flush=True)
+                    else:
+                        msg = (
+                            f"[HEARTBEAT] {invocation.name} run_id={run_id} pid={process.pid} "
+                            f"elapsed={elapsed:.1f}s timeout={timeout}s "
+                            f"stdout={{ {stdout_summary} }} stderr={{ {stderr_summary} }} "
+                            f"stdout_len={stdout_len} stderr_len={stderr_len}"
+                        )
+                        if stderr_tail:
+                            msg += f" stderr_tail={stderr_tail}"
+                        print(msg, flush=True)
 
             heartbeat_thread = threading.Thread(
                 target=_heartbeat,
