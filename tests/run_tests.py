@@ -1467,6 +1467,15 @@ class TestRunner:
                     prefixes = ("sintra_", invocation.path.stem, invocation.name)
                     print(f"[DEBUG] Checking for lingering processes (prefixes={prefixes})", flush=True)
                     lingering = find_lingering_processes(prefixes)
+                    # Give recently-started children a brief window to exit naturally
+                    # before classifying them as lingering. This avoids flagging short,
+                    # in-flight shutdown phases as hangs while still catching processes
+                    # that survive well beyond the test's lifetime.
+                    if lingering:
+                        grace_deadline = time.time() + 2.0
+                        while lingering and time.time() < grace_deadline:
+                            time.sleep(0.05)
+                            lingering = find_lingering_processes(prefixes)
                     print(f"[DEBUG] Found {len(lingering)} lingering processes: {lingering}", flush=True)
                     lingering_details = self._describe_pids([pid for pid, _ in lingering]) if lingering else {}
                     if lingering:
@@ -1497,28 +1506,77 @@ class TestRunner:
                         descendants = self._collect_descendant_pids(process.pid)
                         if descendants:
                             details = self._describe_pids(descendants)
-                            print(f"[DEBUG] Descendants of {process.pid} still alive after exit: {descendants}", flush=True)
-                            hang_detected = True
-                            hang_notes.append(f"descendants after exit: {descendants}")
+                            print(
+                                f"[DEBUG] Descendants of {process.pid} still alive after exit: {descendants}",
+                                flush=True,
+                            )
+
+                            # Limit heavy-weight debugger work to descendants that look
+                            # like Sintra/test processes. Windows CI sometimes reports
+                            # a large number of unrelated descendants; attaching to
+                            # and killing arbitrary system processes is both fragile
+                            # and unnecessary.
+                            interesting: List[int] = []
                             for pid in descendants:
-                                detail = details.get(pid)
-                                if detail:
-                                    print(f"[DEBUG] Descendant detail pid={pid}: {detail}", flush=True)
-                                try:
-                                    stacks, err = self._capture_process_stacks(pid, None)
-                                    if stacks:
-                                        print(f"[DEBUG] Descendant stacks pid={pid}:\n{stacks}", flush=True)
-                                        hang_notes.append(f"descendant pid={pid} stacks captured")
-                                    elif err:
-                                        print(f"[DEBUG] Descendant stack capture failed pid={pid}: {err}", flush=True)
-                                        hang_notes.append(f"descendant pid={pid} stack capture failed: {err}")
-                                except Exception as e:
-                                    print(f"[DEBUG] Failed to capture stacks for descendant pid={pid}: {e}", flush=True)
-                                try:
-                                    self._kill_process_tree(pid)
-                                    print(f"[DEBUG] Killed descendant pid={pid}", flush=True)
-                                except Exception as e:
-                                    print(f"[DEBUG] Failed to kill descendant pid={pid}: {e}", flush=True)
+                                detail = details.get(pid, "")
+                                if any(
+                                    prefix
+                                    and prefix in detail
+                                    for prefix in prefixes
+                                ):
+                                    interesting.append(pid)
+
+                            if interesting:
+                                hang_detected = True
+                                hang_notes.append(f"descendants after exit: {interesting}")
+                                for pid in interesting:
+                                    detail = details.get(pid)
+                                    if detail:
+                                        print(
+                                            f"[DEBUG] Descendant detail pid={pid}: {detail}",
+                                            flush=True,
+                                        )
+                                    try:
+                                        stacks, err = self._capture_process_stacks(pid, None)
+                                        if stacks:
+                                            print(
+                                                f"[DEBUG] Descendant stacks pid={pid}:\n{stacks}",
+                                                flush=True,
+                                            )
+                                            hang_notes.append(
+                                                f"descendant pid={pid} stacks captured"
+                                            )
+                                        elif err:
+                                            print(
+                                                f"[DEBUG] Descendant stack capture failed pid={pid}: {err}",
+                                                flush=True,
+                                            )
+                                            hang_notes.append(
+                                                f"descendant pid={pid} stack capture failed: {err}"
+                                            )
+                                    except Exception as e:
+                                        print(
+                                            f"[DEBUG] Failed to capture stacks for descendant pid={pid}: {e}",
+                                            flush=True,
+                                        )
+                                    try:
+                                        self._kill_process_tree(pid)
+                                        print(
+                                            f"[DEBUG] Killed descendant pid={pid}",
+                                            flush=True,
+                                        )
+                                    except Exception as e:
+                                        print(
+                                            f"[DEBUG] Failed to kill descendant pid={pid}: {e}",
+                                            flush=True,
+                                        )
+                            else:
+                                if self.verbose:
+                                    print(
+                                        "[DEBUG] Descendants do not match sintra/test prefixes; "
+                                        "skipping stack capture and kill.",
+                                        flush=True,
+                                    )
 
                 duration = time.time() - start_time
 
