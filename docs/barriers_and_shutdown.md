@@ -16,19 +16,27 @@ Calling `sintra::finalize()` now performs the following steps:
 1. **Announce draining and quiesce.** The process issues
    `Coordinator::begin_process_draining` (or the RPC equivalent) while normal
    communication is still available. The coordinator records the new state,
-   removes the caller from in-flight barriers, and returns a **reply-ring watermark**
-   (`m_out_rep_c`) for the caller that covers all messages accepted so far.
-   The coordinator separately computes per-recipient tokens when emitting
-   completions; the return value is a single marker for the caller to flush.
-   Remote processes flush that sequence before proceeding, guaranteeing
-   that all outstanding traffic is visible before teardown continues.
-   *(Coordinator::begin_process_draining in coordinator_impl.h)*
-2. **Unpublish under normal communication.** With the coordinator aware of the
-   shutdown and the channel quiesced, the process deactivates handlers and
-   unpublishes its transceivers before pausing the message readers. This keeps
-   the synchronous unpublish path free of shutdown races.
-3. **Pause and destroy.** The process switches its readers to service mode,
-   completes teardown, and releases all Sintra resources.
+   removes the caller from in-flight barriers, and returns a **reply-ring
+   watermark** (`m_out_rep_c`) for the caller that covers all messages accepted
+   so far. The coordinator separately computes per-recipient tokens when
+   emitting completions; the return value is a single marker for the caller to
+   flush. Remote processes flush that sequence before proceeding, guaranteeing
+   that all outstanding traffic is visible before teardown continues, while the
+   coordinator path additionally blocks in `wait_for_all_draining()` until
+   every known process has entered the draining state (or been scavenged).
+   *(Coordinator::begin_process_draining and
+   Coordinator::wait_for_all_draining in coordinator_impl.h)*
+2. **Pause, then unpublish under service-mode communication.** With the
+   coordinator aware of the shutdown and remote callers flushed, the process
+   first switches its readers to service mode via `pause()`. In this mode only
+   coordinator/service messages are processed. While paused, the process
+   deactivates handlers and unpublishes its transceivers (via
+   `deactivate_all()` / `unpublish_all_transceivers()`), keeping the synchronous
+   unpublish path free of shutdown races while still allowing coordinator RPCs
+   to flow.
+3. **Destroy the managed process.** After transceivers are unpublished, the
+   runtime destroys the `Managed_process` singleton. Its destructor stops the
+   reader threads and releases all Sintra resources owned by the process.
 
 ## Barrier behaviour during shutdown
 

@@ -135,17 +135,11 @@ private:
     bool unpublish_transceiver(instance_id_type instance_id);
     sequence_counter_type begin_process_draining(instance_id_type process_iid);
     void unpublish_transceiver_notify(instance_id_type transceiver_iid);
-    instance_id_type join_swarm(
-        const string& binary_name,
-        int32_t branch_index);
-
-    //bool add_process_into_group(instance_id_type process_id, type_id_type process_group_id);
-
+    instance_id_type join_swarm(const string& binary_name, int32_t branch_index);
 
     instance_id_type make_process_group(
         const string& name,
         const unordered_set<instance_id_type>& member_process_ids);
-
 
     void enable_recovery(instance_id_type piid);
     void recover_if_required(instance_id_type piid);
