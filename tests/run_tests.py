@@ -2289,12 +2289,13 @@ def main():
                     f"free disk={format_size(disk_space)}"
                 )
 
-                _, cleanup_messages = runner.consume_core_cleanup_reports()
-                for level, message in cleanup_messages:
-                    if level == 'warning':
-                        print(f"    {Color.YELLOW}{message}{Color.RESET}")
-                    else:
-                        print(f"    {message}")
+                if runner.verbose:
+                    _, cleanup_messages = runner.consume_core_cleanup_reports()
+                    for level, message in cleanup_messages:
+                        if level == 'warning':
+                            print(f"    {Color.YELLOW}{message}{Color.RESET}")
+                        else:
+                            print(f"    {message}")
 
                 if not suite_all_passed:
                     break
