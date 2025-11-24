@@ -1506,11 +1506,6 @@ class TestRunner:
                         descendants = self._collect_descendant_pids(process.pid)
                         if descendants:
                             details = self._describe_pids(descendants)
-                            print(
-                                f"[DEBUG] Descendants of {process.pid} still alive after exit: {descendants}",
-                                flush=True,
-                            )
-
                             # Limit heavy-weight debugger work to descendants that look
                             # like Sintra/test processes. Windows CI sometimes reports
                             # a large number of unrelated descendants; attaching to
@@ -1527,6 +1522,10 @@ class TestRunner:
                                     interesting.append(pid)
 
                             if interesting:
+                                print(
+                                    f"[DEBUG] Descendants of {process.pid} still alive after exit: {interesting}",
+                                    flush=True,
+                                )
                                 hang_detected = True
                                 hang_notes.append(f"descendants after exit: {interesting}")
                                 for pid in interesting:
@@ -1573,8 +1572,8 @@ class TestRunner:
                             else:
                                 if self.verbose:
                                     print(
-                                        "[DEBUG] Descendants do not match sintra/test prefixes; "
-                                        "skipping stack capture and kill.",
+                                        f"[DEBUG] Descendants of {process.pid} still alive after exit "
+                                        f"(no sintra/test descendants): {descendants}",
                                         flush=True,
                                     )
 
