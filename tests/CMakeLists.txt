@@ -53,9 +53,11 @@ function(add_test_suite SUFFIX IS_DEBUG)
                 $<$<CONFIG:Debug>:/Od>
                 $<$<CONFIG:Debug>:/Zi>
                 $<$<CONFIG:Debug>:/RTC1>
+                $<$<AND:$<CONFIG:Release>,$<BOOL:${SINTRA_RELEASE_WITH_DEBUG_SYMBOLS}>>:/Zi>
             )
             target_link_options(${LIB_TARGET} INTERFACE
                 $<$<CONFIG:Debug>:/DEBUG:FULL>
+                $<$<AND:$<CONFIG:Release>,$<BOOL:${SINTRA_RELEASE_WITH_DEBUG_SYMBOLS}>>:/DEBUG:FULL>
             )
         else()
             target_compile_options(${LIB_TARGET} INTERFACE
