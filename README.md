@@ -26,7 +26,7 @@
     </tr>
     <tr>
       <td>FreeBSD</td>
-      <td colspan="2" style="text-align:center;"><a href="https://cirrus-ci.com/github/imakris/sintra"><img alt="FreeBSD Build &amp; Test" src="https://api.cirrus-ci.com/github/imakris/sintra.svg?task=FreeBSD%20Build%20%26%20Test&amp;branch=master" style="display:block;margin:0 auto;"></a></td>
+      <td colspan="2" style="text-align:center;"><a href="https://cirrus-ci.com/github/imakris/sintra"><img alt="FreeBSD Build &amp; Test" src="https://api.cirrus-ci.com/github/imakris/sintra.svg?task=FreeBSD%20Build%20%26%20Test&amp;branch=master&amp;v=2" style="display:block;margin:0 auto;"></a></td>
     </tr>
   </tbody>
 </table>
