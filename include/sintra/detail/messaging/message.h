@@ -477,6 +477,15 @@ struct Message: public Message_prefix, public T
     }
 };
 
+// Mark sintra::Message payloads as explicitly allowed non-trivial ring payloads.
+// They are constructed in-place inside the ring, but their layout and lifetime
+// are controlled by the messaging layer and do not own heap memory beyond the
+// ring mapping itself.
+template <typename T, typename RT, type_id_type ID, typename EXPORTER>
+struct ring_payload_traits<Message<T, RT, ID, EXPORTER>> {
+    static constexpr bool allow_nontrivial = true;
+};
+
 
   //\       //\       //\       //\       //\       //\       //\       //
  ////\     ////\     ////\     ////\     ////\     ////\     ////\     ////

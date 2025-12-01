@@ -167,6 +167,15 @@ namespace ipc = detail::ipc;
 
 using sequence_counter_type = uint64_t;
 
+// Payload traits for in-place ring writes.
+// By default, only trivially copyable/destructible payloads are allowed.
+// Specific higher-level types (e.g., sintra::Message) can opt-in to allow
+// non-trivial semantics via explicit specializations in their own headers.
+template <typename T>
+struct ring_payload_traits {
+    static constexpr bool allow_nontrivial = false;
+};
+
 struct Ring_diagnostics
 {
     sequence_counter_type max_reader_lag                  = 0;
@@ -730,6 +739,15 @@ bool has_same_mapping(const RingT1& r1, const RingT2& r2)
 template <typename T, bool READ_ONLY_DATA>
 struct Ring: Ring_data<T, READ_ONLY_DATA>
 {
+    static_assert(
+        std::is_trivially_copyable_v<T>,
+        "sintra::Ring element type T must be trivially copyable."
+    );
+    static_assert(
+        std::is_trivially_destructible_v<T>,
+        "sintra::Ring element type T must be trivially destructible."
+    );
+
     enum Reader_status : uint8_t {
         READER_STATE_INACTIVE = 0,
         READER_STATE_ACTIVE   = 1,
@@ -2092,6 +2110,14 @@ struct Ring_W : Ring<T, false>
     T2* write(size_t num_extra_elements, Args&&... args)
     {
         static_assert(sizeof(T2) % sizeof(T) == 0, "T2 must be a multiple of T");
+        static_assert(
+            std::is_trivially_copyable_v<T2> || ring_payload_traits<T2>::allow_nontrivial,
+            "Ring payload T2 must be trivially copyable or explicitly allowed by ring_payload_traits."
+        );
+        static_assert(
+            std::is_trivially_destructible_v<T2> || ring_payload_traits<T2>::allow_nontrivial,
+            "Ring payload T2 must be trivially destructible or explicitly allowed by ring_payload_traits."
+        );
         auto num_elements = sizeof(T2) / sizeof(T) + num_extra_elements;
         T2* write_location = (T2*)prepare_write(num_elements);
         try {
