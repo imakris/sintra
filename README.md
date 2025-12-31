@@ -61,6 +61,11 @@ Typical use cases include plugin hosts coordinating work with out-of-process plu
 GUI front-ends that need to communicate with background services, and distributed test
 harnesses that must keep multiple workers in sync while exchanging strongly typed data.
 
+## Supported architectures
+
+Sintra targets x86/x64 and ARM/AArch64 CPUs. Other architectures are not supported;
+builds emit a warning and use a no-op spin pause (performance not guaranteed).
+
 
 ## Interprocess Communication Patterns
 

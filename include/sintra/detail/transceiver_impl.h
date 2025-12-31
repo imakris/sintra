@@ -347,7 +347,7 @@ Transceiver::activate_impl(
         m_deactivators.erase(deactivator_it);
     };
 
-    return m_deactivators.back();
+    return *deactivator_it;
 }
 
 
@@ -729,22 +729,30 @@ void Transceiver::rpc_handler(Message_prefix& untyped_msg)
 
     clear_rpc_reply_deferred();
 
+// Macro to reduce repetition in exception catch blocks. Order matters for hierarchy.
+#define SINTRA_CATCH_STD_EX_(ex_type, ex_id) \
+    catch (ex_type& e) { etid = (type_id_type)detail::reserved_id::ex_id; what = to_exception_string(e.what()); }
+
     try {
         vf.call();
     }
-    catch(std::invalid_argument  &e) { etid = (type_id_type)detail::reserved_id::std_invalid_argument; what = to_exception_string(e.what()); }
-    catch(std::domain_error      &e) { etid = (type_id_type)detail::reserved_id::std_domain_error;     what = to_exception_string(e.what()); }
-    catch(std::length_error      &e) { etid = (type_id_type)detail::reserved_id::std_length_error;     what = to_exception_string(e.what()); }
-    catch(std::out_of_range      &e) { etid = (type_id_type)detail::reserved_id::std_out_of_range;     what = to_exception_string(e.what()); }
-    catch(std::range_error       &e) { etid = (type_id_type)detail::reserved_id::std_range_error;      what = to_exception_string(e.what()); }
-    catch(std::overflow_error    &e) { etid = (type_id_type)detail::reserved_id::std_overflow_error;   what = to_exception_string(e.what()); }
-    catch(std::underflow_error   &e) { etid = (type_id_type)detail::reserved_id::std_underflow_error;  what = to_exception_string(e.what()); }
-    catch(std::ios_base::failure &e) { etid = (type_id_type)detail::reserved_id::std_ios_base_failure; what = to_exception_string(e.what()); }
-    catch(std::logic_error       &e) { etid = (type_id_type)detail::reserved_id::std_logic_error;      what = to_exception_string(e.what()); }
-    catch(std::runtime_error     &e) { etid = (type_id_type)detail::reserved_id::std_runtime_error;    what = to_exception_string(e.what()); }
-    catch(std::exception         &e) { etid = (type_id_type)detail::reserved_id::std_exception;        what = to_exception_string(e.what()); }
-    catch(...)                       { etid = (type_id_type)detail::reserved_id::unknown_exception;    what = "An exception was thrown whose type is not serialized by sintra";
+    SINTRA_CATCH_STD_EX_(std::invalid_argument,  std_invalid_argument)
+    SINTRA_CATCH_STD_EX_(std::domain_error,      std_domain_error)
+    SINTRA_CATCH_STD_EX_(std::length_error,      std_length_error)
+    SINTRA_CATCH_STD_EX_(std::out_of_range,      std_out_of_range)
+    SINTRA_CATCH_STD_EX_(std::range_error,       std_range_error)
+    SINTRA_CATCH_STD_EX_(std::overflow_error,    std_overflow_error)
+    SINTRA_CATCH_STD_EX_(std::underflow_error,   std_underflow_error)
+    SINTRA_CATCH_STD_EX_(std::ios_base::failure, std_ios_base_failure)
+    SINTRA_CATCH_STD_EX_(std::logic_error,       std_logic_error)
+    SINTRA_CATCH_STD_EX_(std::runtime_error,     std_runtime_error)
+    SINTRA_CATCH_STD_EX_(std::exception,         std_exception)
+    catch (...) {
+        etid = (type_id_type)detail::reserved_id::unknown_exception;
+        what = "An exception was thrown whose type is not serialized by sintra";
     }
+
+#undef SINTRA_CATCH_STD_EX_
 
     if (etid == not_defined_type_id) { // normal return
 
