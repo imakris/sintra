@@ -350,6 +350,10 @@ class TestRunner:
 
         env = os.environ.copy()
         env['SINTRA_TEST_ROOT'] = str(scratch_dir)
+        # Route temp paths into the scratch directory so temp_directory_path()
+        # stays under SINTRA_TEST_ROOT (avoids stale system temp collisions).
+        env['TEMP'] = str(scratch_dir)
+        env['TMP'] = str(scratch_dir)
         # Enable debug pause handlers for crash detection and debugger attachment
         env['SINTRA_DEBUG_PAUSE_ON_EXIT'] = '1'
         return env
