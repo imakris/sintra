@@ -1315,8 +1315,37 @@ Managed process options:
             }
         };
 
+        // Deduplication for terminated_abnormally: the coordinator reads both the
+        // crashed process's ring (intended) and may receive the same message
+        // relayed through its own ring (duplicate). This tracking ensures
+        // unpublish/recover runs exactly once per crash event.
+        static std::array<std::atomic<uint8_t>, max_process_index + 1> s_crash_inflight{};
+
         auto cr_handler = [](const Managed_process::terminated_abnormally& msg)
         {
+            struct Crash_dedup_guard {
+                std::atomic<uint8_t>* flag;
+                ~Crash_dedup_guard()
+                {
+                    flag->store(0, std::memory_order_release);
+                }
+            };
+
+            const auto crash_index = get_process_index(msg.sender_instance_id);
+            if (crash_index == 0 || crash_index > static_cast<uint64_t>(max_process_index)) {
+                s_coord->unpublish_transceiver(msg.sender_instance_id);
+                s_coord->recover_if_required(msg.sender_instance_id);
+                return;
+            }
+
+            auto& inflight = s_crash_inflight[static_cast<size_t>(crash_index)];
+            uint8_t expected = 0;
+            if (!inflight.compare_exchange_strong(expected, 1, std::memory_order_acq_rel)) {
+                // Duplicate crash notification - already being handled
+                return;
+            }
+
+            Crash_dedup_guard guard{&inflight};
             s_coord->unpublish_transceiver(msg.sender_instance_id);
 
             s_coord->recover_if_required(msg.sender_instance_id);
