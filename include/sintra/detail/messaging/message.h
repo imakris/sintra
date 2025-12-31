@@ -14,6 +14,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <type_traits>
 #include <utility>
 
@@ -23,8 +24,9 @@ namespace sintra {
 using std::enable_if_t;
 using std::is_base_of;
 using std::is_convertible;
-using std::is_pod;
 using std::is_same;
+using std::is_standard_layout_v;
+using std::is_trivial_v;
 using std::remove_cv;
 using std::remove_reference;
 
@@ -264,7 +266,7 @@ struct always_false: std::false_type
 template <
     typename T,
     bool =
-        is_pod<T>::value ||
+        (is_trivial_v<T> && is_standard_layout_v<T>) ||
         is_base_of<Sintra_message_element, T>::value,
     bool = is_variable_buffer_argument<T>::value
 >
@@ -272,7 +274,7 @@ struct transformer
 {
     static_assert(
         always_false<T>::value,
-        "Unsupported message argument type. Provide a POD, Sintra_message_element, or variable_buffer-compatible type."
+        "Unsupported message argument type. Provide a trivial standard-layout type, Sintra_message_element, or variable_buffer-compatible type."
     );
     using type = void;
 };
@@ -588,7 +590,7 @@ struct ring_payload_traits<Message<T, RT, ID, EXPORTER>> {
 template <
     typename T,
     bool = is_convertible<T, variable_buffer>::value,
-    bool = is_pod<T>::value
+    bool = is_trivial_v<T> && is_standard_layout_v<T>
 >
 struct Enclosure
 {
@@ -622,7 +624,7 @@ struct Enclosure<T, true, false>
 template <
     typename T,
     bool C1 = is_convertible<T, variable_buffer>::value,
-    bool C2 = is_pod<T>::value
+    bool C2 = is_trivial_v<T> && is_standard_layout_v<T>
 >
 struct Unserialized_Enclosure: Enclosure <T, C1, C2>
 {
@@ -719,7 +721,15 @@ struct Message_ring_R: Ring_R<char>
         }
 
         bool f = false;
-        while (!m_reading_lock.compare_exchange_strong(f, true)) { f = false; }
+        unsigned spin_count = 0;
+        constexpr unsigned spin_threshold = 16;
+        while (!m_reading_lock.compare_exchange_strong(f, true)) {
+            f = false;
+            if (++spin_count >= spin_threshold) {
+                std::this_thread::yield();
+                spin_count = 0;
+            }
+        }
 
         //m_reading_lock
         if (!m_reading) {
