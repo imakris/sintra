@@ -1322,33 +1322,36 @@ Managed process options:
             }
         };
 
-        // Deduplication for terminated_abnormally: the coordinator reads both the
-        // crashed process's ring (intended) and may receive the same message
-        // relayed through its own ring (duplicate). This tracking ensures
-        // unpublish/recover runs exactly once per crash event.
-        static std::mutex s_crash_dedup_mutex;
-        static std::unordered_set<instance_id_type> s_crashes_in_progress;
+        // Deduplication for terminated_abnormally: the coordinator can see the same
+        // crash notification from both the crashed process ring and its own relay.
+        // A per-process atomic flag suppresses concurrent duplicates without locks.
+        static std::array<std::atomic<uint8_t>, max_process_index + 1> s_crash_inflight{};
 
         auto cr_handler = [](const Managed_process::terminated_abnormally& msg)
         {
             struct Crash_dedup_guard {
-                instance_id_type iid;
+                std::atomic<uint8_t>* flag;
                 ~Crash_dedup_guard()
                 {
-                    std::lock_guard<std::mutex> lock(s_crash_dedup_mutex);
-                    s_crashes_in_progress.erase(iid);
+                    flag->store(0, std::memory_order_release);
                 }
             };
 
-            {
-                std::lock_guard<std::mutex> lock(s_crash_dedup_mutex);
-                if (!s_crashes_in_progress.insert(msg.sender_instance_id).second) {
-                    // Duplicate crash notification - already being handled
-                    return;
-                }
+            const auto crash_index = get_process_index(msg.sender_instance_id);
+            if (crash_index == 0 || crash_index > static_cast<uint64_t>(max_process_index)) {
+                s_coord->unpublish_transceiver(msg.sender_instance_id);
+                s_coord->recover_if_required(msg.sender_instance_id);
+                return;
             }
 
-            Crash_dedup_guard guard{msg.sender_instance_id};
+            auto& inflight = s_crash_inflight[static_cast<size_t>(crash_index)];
+            uint8_t expected = 0;
+            if (!inflight.compare_exchange_strong(expected, 1, std::memory_order_acq_rel)) {
+                // Duplicate crash notification - already being handled
+                return;
+            }
+
+            Crash_dedup_guard guard{&inflight};
             s_coord->unpublish_transceiver(msg.sender_instance_id);
             s_coord->recover_if_required(msg.sender_instance_id);
         };
