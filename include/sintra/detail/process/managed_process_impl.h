@@ -1136,8 +1136,15 @@ Managed process options:
             ).count();
         coordinator_is_local = true;
 
-        // NOTE: leave s_branch_index uninitialized. The coordinating process does
-        // not have an entry
+        // NOTE: s_branch_index remains uninitialized here for the coordinator.
+        // This is safe because:
+        // 1. The coordinator does not have a branch entry (no entry function index)
+        // 2. s_branch_index is only used in the non-coordinator path of init() at
+        //    lines 1149-1159, which requires branch_index_arg to be provided
+        // 3. For the coordinator, s_branch_index is explicitly set to 0 in branch()
+        //    (line 1570) before any subsequent use
+        // 4. Non-coordinator processes always receive --branch_index, which sets
+        //    s_branch_index at line 1047 before it's used
     }
     else {
         if (coordinator_id_arg.empty() || (branch_index_arg.empty() && instance_id_arg.empty()) ) {
@@ -1315,34 +1322,30 @@ Managed process options:
             }
         };
 
+        // Deduplication for terminated_abnormally: the coordinator reads both the
+        // crashed process's ring (intended) and may receive the same message
+        // relayed through its own ring (duplicate). This tracking ensures
+        // unpublish/recover runs exactly once per crash event.
+        static std::mutex s_crash_dedup_mutex;
+        static std::unordered_set<instance_id_type> s_crashes_in_progress;
+
         auto cr_handler = [](const Managed_process::terminated_abnormally& msg)
         {
-            s_coord->unpublish_transceiver(msg.sender_instance_id);
+            {
+                std::lock_guard<std::mutex> lock(s_crash_dedup_mutex);
+                if (!s_crashes_in_progress.insert(msg.sender_instance_id).second) {
+                    // Duplicate crash notification - already being handled
+                    return;
+                }
+            }
 
+            s_coord->unpublish_transceiver(msg.sender_instance_id);
             s_coord->recover_if_required(msg.sender_instance_id);
 
-            /*
-            
-            There is a problem here:
-            We reach this code in the ring reader of the process that crashed.
-            The message is then relayed to the coordinator ring
-            but the coordinating process reads its own ring too
-            which will cause this to be handled twice... which is wrong
-
-            a fix would be to simply reject the message here, in one of the two cases
-            but this is not the only case that such a problem could occur. It thus needs a better solution.
-            Also, this solution would require declaring some thread-local stuff, otherwise
-            knowing whether we are reading the coordinator is impossible.
-
-            maybe an alternative would be that the coordinating process does not handle such messages
-            unless they are originating from its own ring. This would however require this to be checked
-            in the message loop, which would make it slower for ALL processes - maybe not a good idea.
-
-            another possible alternative (that requires more thought) is that the coordinating process
-            does not read its own ring. There might be several corner cases which won't work.
-
-            */
-
+            {
+                std::lock_guard<std::mutex> lock(s_crash_dedup_mutex);
+                s_crashes_in_progress.erase(msg.sender_instance_id);
+            }
         };
         activate<Managed_process>(unpublish_notify_handler, any_remote);
         activate<Managed_process>(cr_handler, any_remote);
