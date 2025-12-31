@@ -46,34 +46,54 @@ using std::lock_guard;
 
 struct Adaptive_function
 {
+    // Single shared state struct instead of two separate shared_ptrs.
+    // Preserves the same semantics: copies share state, all operations are
+    // mutex-protected, and set() replaces the function for all copies.
+    struct State {
+        function<void()> func;
+        mutex m;
+    };
+
     Adaptive_function(function<void()> f) :
-        func(new function<void()>(f)),
-        m(new mutex)
-    {}
+        state(std::make_shared<State>())
+    {
+        state->func = std::move(f);
+    }
 
     Adaptive_function(const Adaptive_function& rhs)
     {
-        lock_guard<mutex> lock(*rhs.m);
-        func = rhs.func;
-        m = rhs.m;
+        lock_guard<mutex> lock(rhs.state->m);
+        state = rhs.state;
+    }
+
+    Adaptive_function& operator=(const Adaptive_function& rhs)
+    {
+        if (this == &rhs || state == rhs.state) {
+            return *this;
+        }
+
+        auto old_state = state;
+        auto new_state = rhs.state;
+        std::scoped_lock lock(old_state->m, new_state->m);
+        state = std::move(new_state);
+        return *this;
     }
 
     void operator()()
     {
-        lock_guard<mutex> lock(*m);
-        if (*func) {
-            (*func)();
+        lock_guard<mutex> lock(state->m);
+        if (state->func) {
+            (state->func)();
         }
     }
 
     void set(function<void()> f)
     {
-        lock_guard<mutex> lock(*m);
-        *func = f;
+        lock_guard<mutex> lock(state->m);
+        state->func = std::move(f);
     }
 
-    shared_ptr<function<void()>> func;
-    shared_ptr<mutex> m;
+    shared_ptr<State> state;
 };
 
 
