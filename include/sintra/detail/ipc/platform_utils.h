@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cwchar>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -592,20 +593,59 @@ inline void mark_run_directory_for_cleanup(const std::filesystem::path& director
     std::filesystem::remove(marker, remove_marker_ec);
 }
 
+#ifdef _WIN32
+inline bool path_has_prefix_ci(const std::filesystem::path& path,
+                               const std::filesystem::path& prefix)
+{
+    const auto normalized_path = path.lexically_normal();
+    const auto normalized_prefix = prefix.lexically_normal();
+    const auto& path_native = normalized_path.native();
+    const auto& prefix_native = normalized_prefix.native();
+
+    if (prefix_native.empty() || path_native.size() < prefix_native.size()) {
+        return false;
+    }
+
+    if (_wcsnicmp(path_native.c_str(), prefix_native.c_str(), prefix_native.size()) != 0) {
+        return false;
+    }
+
+    if (path_native.size() == prefix_native.size()) {
+        return true;
+    }
+
+    const wchar_t next = path_native[prefix_native.size()];
+    return next == L'\\' || next == L'/';
+}
+#endif
+
 inline void cleanup_stale_swarm_directories(const std::filesystem::path& base_dir,
                                             uint32_t current_pid,
                                             uint64_t current_start_stamp)
 {
-#ifdef _WIN32
-    const char* preserve = std::getenv("SINTRA_PRESERVE_SCRATCH");
-    if (preserve && *preserve && *preserve != '0') {
-        return;
-    }
-#endif
     std::error_code ec;
     if (!std::filesystem::exists(base_dir, ec) || !std::filesystem::is_directory(base_dir, ec)) {
         return;
     }
+
+#ifdef _WIN32
+    const char* preserve = std::getenv("SINTRA_PRESERVE_SCRATCH");
+    if (preserve && *preserve && *preserve != '0') {
+        const char* test_root_env = std::getenv("SINTRA_TEST_ROOT");
+        if (!test_root_env || !*test_root_env) {
+            return;
+        }
+
+        std::error_code root_ec;
+        std::error_code base_ec;
+        const auto test_root = std::filesystem::weakly_canonical(
+            std::filesystem::path(test_root_env), root_ec);
+        const auto base_path = std::filesystem::weakly_canonical(base_dir, base_ec);
+        if (root_ec || base_ec || !path_has_prefix_ci(base_path, test_root)) {
+            return;
+        }
+    }
+#endif
 
     const auto now_monotonic = monotonic_now_ns();
 
