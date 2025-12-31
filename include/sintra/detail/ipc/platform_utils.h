@@ -596,6 +596,12 @@ inline void cleanup_stale_swarm_directories(const std::filesystem::path& base_di
                                             uint32_t current_pid,
                                             uint64_t current_start_stamp)
 {
+#ifdef _WIN32
+    const char* preserve = std::getenv("SINTRA_PRESERVE_SCRATCH");
+    if (preserve && *preserve && *preserve != '0') {
+        return;
+    }
+#endif
     std::error_code ec;
     if (!std::filesystem::exists(base_dir, ec) || !std::filesystem::is_directory(base_dir, ec)) {
         return;
