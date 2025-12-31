@@ -46,7 +46,8 @@ sequence_counter_type Process_group::barrier(
 
     auto barrier = barrier_entry; // keep the barrier alive even if the map rehashes
     Barrier& b = *barrier;
-    b.m.lock(); // main barrier lock
+    // Lock ordering: m_call_mutex before barrier->m to prevent deadlock.
+    b.m.lock();
 
     // Atomically snapshot membership and filter draining processes while holding m_call_mutex.
     // This ensures a consistent view: no process can be added/removed or change draining state
@@ -551,15 +552,6 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
         // when a new process is published into this slot. This prevents the race
         // where resetting too early allows concurrent barriers to include a dying process.
 
-        // remove all group associations of unpublished process
-        {
-            std::lock_guard<mutex> groups_lock(m_groups_mutex);
-            auto groups_it = m_groups_of_process.find(iid);
-            if (groups_it != m_groups_of_process.end()) {
-                m_groups_of_process.erase(groups_it);
-            }
-        }
-
         //// and finally, if the process was being read, stop reading from it
         if (iid != s_mproc_id) {
             std::shared_lock<std::shared_mutex> readers_lock(s_mproc->m_readers_mutex);
@@ -697,7 +689,9 @@ inline bool Coordinator::all_known_processes_draining_unlocked(instance_id_type 
     candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
 
     for (auto piid : candidates) {
+        // Process IDs in registry/initialization tracking must be valid (non-zero).
         if (piid == 0) {
+            assert(false && "Invalid process ID in draining candidates");
             continue;
         }
         if (!is_process_draining(piid)) {

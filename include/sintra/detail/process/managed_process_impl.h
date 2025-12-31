@@ -1136,8 +1136,15 @@ Managed process options:
             ).count();
         coordinator_is_local = true;
 
-        // NOTE: leave s_branch_index uninitialized. The coordinating process does
-        // not have an entry
+        // NOTE: s_branch_index remains uninitialized here for the coordinator.
+        // This is safe because:
+        // 1. The coordinator does not have a branch entry (no entry function index)
+        // 2. s_branch_index is only used in the non-coordinator path of init() at
+        //    lines 1149-1159, which requires branch_index_arg to be provided
+        // 3. For the coordinator, s_branch_index is explicitly set to 0 in branch()
+        //    (line 1570) before any subsequent use
+        // 4. Non-coordinator processes always receive --branch_index, which sets
+        //    s_branch_index at line 1047 before it's used
     }
     else {
         if (coordinator_id_arg.empty() || (branch_index_arg.empty() && instance_id_arg.empty()) ) {
@@ -1346,9 +1353,7 @@ Managed process options:
 
             Crash_dedup_guard guard{&inflight};
             s_coord->unpublish_transceiver(msg.sender_instance_id);
-
             s_coord->recover_if_required(msg.sender_instance_id);
-
         };
         activate<Managed_process>(unpublish_notify_handler, any_remote);
         activate<Managed_process>(cr_handler, any_remote);

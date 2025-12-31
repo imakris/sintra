@@ -148,6 +148,11 @@ std::vector<Process_descriptor> make_branches(
 
 inline bool finalize();
 
+// Tracks whether init() has been called without a corresponding finalize().
+// This flag is reset by finalize() to allow init()/finalize() cycles (e.g.,
+// in tests that repeatedly initialize and tear down the library).
+inline bool s_init_once = false;
+
 inline void init(
     int argc,
     const char* const* argv,
@@ -164,9 +169,8 @@ inline void init(
     // Install debug pause handlers if enabled via SINTRA_DEBUG_PAUSE_ON_EXIT
     detail::install_debug_pause_handlers();
 
-    static bool once = false;
-    assert(!once); // init() may only be run once.
-    once = true;
+    assert(!s_init_once); // init() may only be called once before finalize().
+    s_init_once = true;
 
     static detail::Cleanup_guard cleanup_guard([]() {
         if (s_mproc) {
@@ -281,6 +285,9 @@ inline bool finalize()
 
     delete s_mproc;
     s_mproc = nullptr;
+
+    // Reset the init flag to allow another init()/finalize() cycle.
+    s_init_once = false;
 
     trace("end");
 
