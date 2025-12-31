@@ -18,7 +18,30 @@
 #include <type_traits>
 #include <utility>
 
+#if defined(_MSC_VER)
+    #include <intrin.h>
+#endif
+
 namespace sintra {
+
+namespace detail {
+
+inline void spin_pause() noexcept
+{
+#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
+    _mm_pause();
+#elif defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#elif defined(__aarch64__)
+    __asm__ __volatile__("yield" ::: "memory");
+#elif defined(__arm__)
+    __asm__ __volatile__("yield");
+#else
+    // No-op fallback for other architectures
+#endif
+}
+
+} // namespace detail
 
 
 using std::enable_if_t;
@@ -722,10 +745,10 @@ struct Message_ring_R: Ring_R<char>
 
         bool f = false;
         unsigned spin_count = 0;
-        constexpr unsigned spin_threshold = 16;
         while (!m_reading_lock.compare_exchange_strong(f, true)) {
             f = false;
-            if (++spin_count >= spin_threshold) {
+            detail::spin_pause();
+            if (++spin_count >= 1024) {
                 std::this_thread::yield();
                 spin_count = 0;
             }
