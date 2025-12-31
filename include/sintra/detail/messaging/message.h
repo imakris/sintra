@@ -37,7 +37,12 @@ inline void spin_pause() noexcept
 #elif defined(__arm__)
     __asm__ __volatile__("yield");
 #else
-#error "Sintra requires x86/x64 or ARM/AArch64 targets; unsupported architecture for spin_pause."
+    #if defined(_MSC_VER)
+        #pragma message("Sintra: unsupported architecture; spin_pause is a no-op and performance may degrade.")
+    #elif defined(__GNUC__) || defined(__clang__)
+        #warning "Sintra: unsupported architecture; spin_pause is a no-op and performance may degrade."
+    #endif
+    // No-op fallback for other architectures
 #endif
 }
 

@@ -63,8 +63,8 @@ harnesses that must keep multiple workers in sync while exchanging strongly type
 
 ## Supported architectures
 
-Sintra targets x86/x64 and ARM/AArch64 CPUs. Builds on other architectures fail at
-compile time with a clear error.
+Sintra targets x86/x64 and ARM/AArch64 CPUs. Other architectures are not supported;
+builds emit a warning and use a no-op spin pause (performance not guaranteed).
 
 
 ## Interprocess Communication Patterns
