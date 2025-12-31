@@ -68,13 +68,14 @@ struct Adaptive_function
 
     Adaptive_function& operator=(const Adaptive_function& rhs)
     {
-        if (this != &rhs && state != rhs.state) {
-            // Lock both mutexes in a consistent order to avoid deadlock.
-            // The state != rhs.state check above prevents locking the same
-            // mutex twice when both objects already share state.
-            std::scoped_lock lock(state->m, rhs.state->m);
-            state = rhs.state;
+        if (this == &rhs || state == rhs.state) {
+            return *this;
         }
+
+        auto old_state = state;
+        auto new_state = rhs.state;
+        std::scoped_lock lock(old_state->m, new_state->m);
+        state = std::move(new_state);
         return *this;
     }
 

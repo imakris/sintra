@@ -1331,6 +1331,15 @@ Managed process options:
 
         auto cr_handler = [](const Managed_process::terminated_abnormally& msg)
         {
+            struct Crash_dedup_guard {
+                instance_id_type iid;
+                ~Crash_dedup_guard()
+                {
+                    std::lock_guard<std::mutex> lock(s_crash_dedup_mutex);
+                    s_crashes_in_progress.erase(iid);
+                }
+            };
+
             {
                 std::lock_guard<std::mutex> lock(s_crash_dedup_mutex);
                 if (!s_crashes_in_progress.insert(msg.sender_instance_id).second) {
@@ -1339,13 +1348,9 @@ Managed process options:
                 }
             }
 
+            Crash_dedup_guard guard{msg.sender_instance_id};
             s_coord->unpublish_transceiver(msg.sender_instance_id);
             s_coord->recover_if_required(msg.sender_instance_id);
-
-            {
-                std::lock_guard<std::mutex> lock(s_crash_dedup_mutex);
-                s_crashes_in_progress.erase(msg.sender_instance_id);
-            }
         };
         activate<Managed_process>(unpublish_notify_handler, any_remote);
         activate<Managed_process>(cr_handler, any_remote);
