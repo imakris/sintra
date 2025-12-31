@@ -1315,10 +1315,9 @@ Managed process options:
             }
         };
 
-        // Deduplication for terminated_abnormally: the coordinator reads both the
-        // crashed process's ring (intended) and may receive the same message
-        // relayed through its own ring (duplicate). This tracking ensures
-        // unpublish/recover runs exactly once per crash event.
+        // Deduplication for terminated_abnormally: the coordinator can see the same
+        // crash notification from both the crashed process ring and its own relay.
+        // A per-process atomic flag suppresses concurrent duplicates without locks.
         static std::array<std::atomic<uint8_t>, max_process_index + 1> s_crash_inflight{};
 
         auto cr_handler = [](const Managed_process::terminated_abnormally& msg)
@@ -1349,28 +1348,6 @@ Managed process options:
             s_coord->unpublish_transceiver(msg.sender_instance_id);
 
             s_coord->recover_if_required(msg.sender_instance_id);
-
-            /*
-            
-            There is a problem here:
-            We reach this code in the ring reader of the process that crashed.
-            The message is then relayed to the coordinator ring
-            but the coordinating process reads its own ring too
-            which will cause this to be handled twice... which is wrong
-
-            a fix would be to simply reject the message here, in one of the two cases
-            but this is not the only case that such a problem could occur. It thus needs a better solution.
-            Also, this solution would require declaring some thread-local stuff, otherwise
-            knowing whether we are reading the coordinator is impossible.
-
-            maybe an alternative would be that the coordinating process does not handle such messages
-            unless they are originating from its own ring. This would however require this to be checked
-            in the message loop, which would make it slower for ALL processes - maybe not a good idea.
-
-            another possible alternative (that requires more thought) is that the coordinating process
-            does not read its own ring. There might be several corner cases which won't work.
-
-            */
 
         };
         activate<Managed_process>(unpublish_notify_handler, any_remote);
