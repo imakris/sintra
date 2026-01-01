@@ -100,8 +100,8 @@ struct variable_buffer
 };
 
 
-template <> thread_local char*      variable_buffer::S::tl_message_start_address    = nullptr;
-template <> thread_local uint32_t*  variable_buffer::S::tl_pbytes_to_next_message   = nullptr;
+template <> inline thread_local char*      variable_buffer::S::tl_message_start_address    = nullptr;
+template <> inline thread_local uint32_t*  variable_buffer::S::tl_pbytes_to_next_message   = nullptr;
 
 
 namespace detail

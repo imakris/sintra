@@ -67,10 +67,10 @@ namespace {
 
     inline std::array<signal_slot, 6>& signal_slots()
     {
-        static std::array<signal_slot, 6> slots {{
+        static std::array<signal_slot, 6> slot_table {{
             {SIGABRT}, {SIGFPE}, {SIGILL}, {SIGINT}, {SIGSEGV}, {SIGTERM}
         }};
-        return slots;
+        return slot_table;
     }
 
     // Windows signal dispatcher infrastructure - matches POSIX architecture
@@ -102,13 +102,13 @@ namespace {
 
     inline std::size_t signal_index(int sig)
     {
-        auto& slots = signal_slots();
-        for (std::size_t idx = 0; idx < slots.size(); ++idx) {
-            if (slots[idx].sig == sig) {
+        auto& slot_table = signal_slots();
+        for (std::size_t idx = 0; idx < slot_table.size(); ++idx) {
+            if (slot_table[idx].sig == sig) {
                 return idx;
             }
         }
-        return slots.size();
+        return slot_table.size();
     }
 
     inline void dispatch_signal_number_win(int sig_number)
@@ -138,10 +138,10 @@ namespace {
             return;
         }
 
-        auto& slots = signal_slots();
-        for (std::size_t idx = 0; idx < slots.size(); ++idx) {
+        auto& slot_table = signal_slots();
+        for (std::size_t idx = 0; idx < slot_table.size(); ++idx) {
             if ((mask & (1U << idx)) != 0U) {
-                dispatch_signal_number_win(slots[idx].sig);
+                dispatch_signal_number_win(slot_table[idx].sig);
             }
         }
     }
@@ -194,10 +194,10 @@ namespace {
 
     inline std::array<signal_slot, 7>& signal_slots()
     {
-        static std::array<signal_slot, 7> slots {{
+        static std::array<signal_slot, 7> slot_table {{
             {SIGABRT}, {SIGFPE}, {SIGILL}, {SIGINT}, {SIGSEGV}, {SIGTERM}, {SIGCHLD}
         }};
-        return slots;
+        return slot_table;
     }
 
     inline std::array<char, 64 * 1024>& alt_stack_storage()
@@ -238,13 +238,13 @@ namespace {
 
     inline std::size_t signal_index(int sig)
     {
-        auto& slots = signal_slots();
-        for (std::size_t idx = 0; idx < slots.size(); ++idx) {
-            if (slots[idx].sig == sig) {
+        auto& slot_table = signal_slots();
+        for (std::size_t idx = 0; idx < slot_table.size(); ++idx) {
+            if (slot_table[idx].sig == sig) {
                 return idx;
             }
         }
-        return slots.size();
+        return slot_table.size();
     }
 
     inline void dispatch_signal_number(int sig_number)
@@ -298,10 +298,10 @@ namespace {
             return;
         }
 
-        auto& slots = signal_slots();
-        for (std::size_t idx = 0; idx < slots.size(); ++idx) {
+        auto& slot_table = signal_slots();
+        for (std::size_t idx = 0; idx < slot_table.size(); ++idx) {
             if ((mask & (1U << idx)) != 0U) {
-                dispatch_signal_number(slots[idx].sig);
+                dispatch_signal_number(slot_table[idx].sig);
             }
         }
     }
@@ -364,9 +364,9 @@ namespace {
 #endif
 
     template <std::size_t N>
-    inline signal_slot* find_slot(std::array<signal_slot, N>& slots, int sig)
+    inline signal_slot* find_slot(std::array<signal_slot, N>& slot_table, int sig)
     {
-        for (auto& candidate : slots) {
+        for (auto& candidate : slot_table) {
             if (candidate.sig == sig) {
                 return &candidate;
             }
@@ -384,7 +384,7 @@ static void s_signal_handler(int sig)
     // happen in the dispatcher thread, not in the signal handler, with a timeout
     // to guarantee the handler eventually completes even if IPC is broken.
 
-    auto& slots = signal_slots();
+    auto& slot_table = signal_slots();
 
     auto* mproc = s_mproc;
     const bool should_wait_for_dispatch = mproc && mproc->m_out_req_c;
@@ -396,7 +396,7 @@ static void s_signal_handler(int sig)
     // Signal the dispatcher thread via the event and pending signal mask
     if (signal_event() != NULL) {
         auto idx = signal_index(sig);
-        if (idx < slots.size()) {
+        if (idx < slot_table.size()) {
             pending_signal_mask().fetch_or(1U << idx);
         }
         SetEvent(signal_event());
@@ -408,7 +408,7 @@ static void s_signal_handler(int sig)
     }
 
     // Chain to previous handler (e.g., debug_pause handler)
-    if (auto* slot = find_slot(slots, sig); slot && slot->has_previous) {
+    if (auto* slot = find_slot(slot_table, sig); slot && slot->has_previous) {
         auto prev = slot->previous;
         if (prev != SIG_DFL && prev != SIG_IGN && prev != s_signal_handler) {
             prev(sig);
@@ -427,7 +427,7 @@ static void s_signal_handler(int sig)
 inline
 static void s_signal_handler(int sig, siginfo_t* info, void* ctx)
 {
-    auto& slots = signal_slots();
+    auto& slot_table = signal_slots();
 
     auto* mproc = s_mproc;
     const bool should_wait_for_dispatch = mproc && mproc->m_out_req_c && sig != SIGCHLD;
@@ -461,7 +461,7 @@ static void s_signal_handler(int sig, siginfo_t* info, void* ctx)
 
         if (!delivered && (last_errno == EAGAIN || last_errno == EINTR)) {
             auto index = signal_index(sig);
-            if (index < slots.size()) {
+            if (index < slot_table.size()) {
                 pending_signal_mask().fetch_or(1U << index);
             }
         }
@@ -471,7 +471,7 @@ static void s_signal_handler(int sig, siginfo_t* info, void* ctx)
         wait_for_signal_dispatch(dispatched_before);
     }
 
-    if (auto* slot = find_slot(slots, sig); slot && slot->has_previous) {
+    if (auto* slot = find_slot(slot_table, sig); slot && slot->has_previous) {
         if (slot->previous.sa_handler == SIG_IGN) {
             return;
         }
@@ -542,12 +542,12 @@ inline
 void install_signal_handler()
 {
     std::call_once(signal_handler_once_flag(), []() {
-        auto& slots = signal_slots();
+        auto& slot_table = signal_slots();
 
 #ifdef _WIN32
         ensure_signal_dispatcher_win();
 
-        for (auto& slot : slots) {
+        for (auto& slot : slot_table) {
             auto previous = std::signal(slot.sig, s_signal_handler);
             if (previous != SIG_ERR) {
                 slot.has_previous = previous != s_signal_handler;
@@ -572,7 +572,7 @@ void install_signal_handler()
 
         ensure_signal_dispatcher();
 
-        for (auto& slot : slots) {
+        for (auto& slot : slot_table) {
             struct sigaction sa {};
             sigemptyset(&sa.sa_mask);
             sa.sa_sigaction = s_signal_handler;
