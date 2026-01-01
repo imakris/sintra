@@ -629,9 +629,12 @@ inline void cleanup_stale_swarm_directories(const std::filesystem::path& base_di
     }
 
 #ifdef _WIN32
+#pragma warning(push)
+#pragma warning(disable: 4996)  // getenv is safe for read-only use
     const char* preserve = std::getenv("SINTRA_PRESERVE_SCRATCH");
     if (preserve && *preserve && *preserve != '0') {
         const char* test_root_env = std::getenv("SINTRA_TEST_ROOT");
+#pragma warning(pop)
         if (!test_root_env || !*test_root_env) {
             return;
         }

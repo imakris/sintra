@@ -840,24 +840,26 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
         throw std::runtime_error("Attempted to make an RPC call using an invalid instance ID.");
     }
 
-    if (RPCTC::may_be_called_directly && is_local_instance(instance_id)) {
-        // if the instance is local, then it has already been registered in the instance_map
-        // of this particular type. this will only find the object and call it.
-        // Hold spinlock while accessing the iterator to prevent use-after-invalidation
-        typename RPCTC::o_type* object = nullptr;
-        {
-            auto scoped_map = get_instance_to_object_map<RPCTC>().scoped();
-            auto it = scoped_map.get().find(instance_id);
-            if (it == scoped_map.get().end()) {
-                throw std::runtime_error("Local RPC target no longer available - it may have been shut down.");
+    if constexpr (RPCTC::may_be_called_directly) {
+        if (is_local_instance(instance_id)) {
+            // if the instance is local, then it has already been registered in the instance_map
+            // of this particular type. this will only find the object and call it.
+            // Hold spinlock while accessing the iterator to prevent use-after-invalidation
+            typename RPCTC::o_type* object = nullptr;
+            {
+                auto scoped_map = get_instance_to_object_map<RPCTC>().scoped();
+                auto it = scoped_map.get().find(instance_id);
+                if (it == scoped_map.get().end()) {
+                    throw std::runtime_error("Local RPC target no longer available - it may have been shut down.");
+                }
+                object = it->second;
             }
-            object = it->second;
+            auto guard = object->try_acquire_rpc_execution();
+            if (!guard) {
+                throw std::runtime_error("Attempted to call an RPC on a target that is shutting down.");
+            }
+            return (object->*RPCTC::mf())(args...);
         }
-        auto guard = object->try_acquire_rpc_execution();
-        if (!guard) {
-            throw std::runtime_error("Attempted to call an RPC on a target that is shutting down.");
-        }
-        return (object->*RPCTC::mf())(args...);
     }
 
     using return_type = typename MESSAGE_T::return_type;

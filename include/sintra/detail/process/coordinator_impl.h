@@ -489,13 +489,13 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
 
         // remove all name lookup entries resolving to the unpublished process
         auto name_map = s_mproc->m_instance_id_of_assigned_name.scoped();
-        for (auto it = name_map.begin(); it != name_map.end(); )
+        for (auto name_it = name_map.begin(); name_it != name_map.end(); )
         {
-            if (process_of(it->second) == process_iid) {
-                it = name_map.erase(it);
+            if (process_of(name_it->second) == process_iid) {
+                name_it = name_map.erase(name_it);
             }
             else {
-                ++it;
+                ++name_it;
             }
         }
 
@@ -520,7 +520,7 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
         std::vector<Pending_completion> pending_completions;
 
         {
-            lock_guard<mutex> lock(m_groups_mutex);
+            lock_guard<mutex> groups_lock(m_groups_mutex);
             pending_completions.reserve(m_groups.size());
 
             for (auto& [name, group] : m_groups) {
@@ -555,9 +555,9 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
         //// and finally, if the process was being read, stop reading from it
         if (iid != s_mproc_id) {
             std::shared_lock<std::shared_mutex> readers_lock(s_mproc->m_readers_mutex);
-            auto it = s_mproc->m_readers.find(process_iid);
-            if (it != s_mproc->m_readers.end()) {
-                if (auto& reader = it->second) {
+            auto reader_it = s_mproc->m_readers.find(process_iid);
+            if (reader_it != s_mproc->m_readers.end()) {
+                if (auto& reader = reader_it->second) {
                     reader->stop_nowait();
                 }
             }
