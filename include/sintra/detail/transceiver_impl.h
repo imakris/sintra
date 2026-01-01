@@ -338,7 +338,7 @@ Transceiver::activate_impl(
         deactivator_it = *deactivator_it_ptr;
     }
 
-    *deactivator_it = [=, &ms] () {
+    *deactivator_it = [=, this, &ms] () {
         lock_guard<recursive_mutex> sl(s_mproc->m_handlers_mutex);
         msm_it->second.erase(mid_sid_it);
         if (msm_it->second.empty()) {
@@ -512,7 +512,7 @@ Transceiver::activate(
     // Until the actual activation happens, this lambda will serve as a temporary deactivator.
     // It only aborts the call on availability by calling its aborter, and also removes
     // itself from the deactivator list
-    *it = [=]() {
+    *it = [=, this]() {
 
         lock_guard<recursive_mutex> sl(s_mproc->m_handlers_mutex);
 
