@@ -186,6 +186,11 @@ struct Managed_process: Derived_transceiver<Managed_process>
     >                                   m_type_id_of_type_name;
 
     spinlocked_umap<
+        type_id_type,
+        string
+    >                                   m_type_name_of_explicit_id;
+
+    spinlocked_umap<
         string,
         instance_id_type
     >                                   m_instance_id_of_assigned_name;

@@ -53,6 +53,8 @@ structure multi-process workflows.
   patterns as the architecture requires.
 * **Header-only distribution** - integrate the library by adding the headers to a
   project; no separate build step or binaries are necessary.
+* **No RTTI required** - type ids are derived from compile-time signatures (or
+  explicit ids if you choose to pin them).
 * **Cross-platform design** - shared-memory transport on Linux, macOS, Windows, and FreeBSD.
 * **Opt-in crash recovery** - mark critical workers with `sintra::enable_recovery()` so
   the coordinator automatically respawns them after an unexpected exit.
@@ -122,6 +124,29 @@ auto crash_monitor = sintra::activate_slot(
 ### Qt cursor sync example
 
 For a Qt widget example that forwards Qt signals through sintra, see `example/qt/README.md`.
+
+## Optional explicit type ids
+
+Most users do not need explicit type ids as long as every process is built with the same
+toolchain and flags. If you mix toolchains or want to remove any doubt about type id
+stability, you can pin ids explicitly for both transceivers and messages. Keep the
+ids unique and consistent across every process in the swarm.
+
+```cpp
+struct Explicit_bus : sintra::Derived_transceiver<Explicit_bus>
+{
+    SINTRA_TYPE_ID(0x120)
+    SINTRA_MESSAGE_EXPLICIT(ping, 0x121, int value)
+};
+
+Explicit_bus bus;
+sintra::activate_slot([](const Explicit_bus::ping& msg) {
+    sintra::console() << "ping value=" << msg.value << '\n';
+});
+bus.emit_global<Explicit_bus::ping>(42);
+```
+
+See `example/sintra/sintra_example_7_explicit_type_ids.cpp` for a full example.
 
 
 ## Threading Model and Barriers

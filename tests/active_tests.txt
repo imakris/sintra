@@ -28,6 +28,7 @@ complex_choreography_stress_test          60
 complex_choreography_test                 60
 dummy_test                                 2
 extreme_choreography_test                 80
+explicit_type_id_test                     20
 interprocess_file_mapping_test           100
 interprocess_mutex_test                  100
 interprocess_semaphore_test               10

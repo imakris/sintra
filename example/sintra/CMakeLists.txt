@@ -21,3 +21,6 @@ target_link_libraries(sintra_example_5_barrier_flush PRIVATE sintra)
 
 add_executable(sintra_example_6_unicast_send_to sintra_example_6_unicast_send_to.cpp)
 target_link_libraries(sintra_example_6_unicast_send_to PRIVATE sintra)
+
+add_executable(sintra_example_7_explicit_type_ids sintra_example_7_explicit_type_ids.cpp)
+target_link_libraries(sintra_example_7_explicit_type_ids PRIVATE sintra)

@@ -442,6 +442,14 @@ struct Message: public Message_prefix, public T
     using return_type = RT;
     using exporter = EXPORTER;
 
+    static constexpr type_id_type sintra_type_id()
+    {
+        if constexpr (ID != 0) {
+            return ID;
+        }
+        return invalid_type_id;
+    }
+
 
     Message(const Message&) = default;
     Message(Message&&) = default;
@@ -591,10 +599,18 @@ struct ring_payload_traits<Message<T, RT, ID, EXPORTER>> {
     using name = sintra::Message<sm_body_type_##name, void, idv, Transceiver_type>;     \
 
 
-#define SINTRA_MESSAGE(name, ...)                                                       \
+#define SINTRA_MESSAGE(name, ...)                                               \
     SINTRA_MESSAGE_BASE(name, sintra::invalid_type_id, __VA_ARGS__)
 
-#define SINTRA_MESSAGE_RESERVED(name, ...)                                              \
+#define SINTRA_MESSAGE_EXPLICIT(name, idv, ...)                                 \
+    static_assert((idv) > 0, "SINTRA_MESSAGE_EXPLICIT id must be non-zero.");   \
+    static_assert(                                                              \
+        (idv) <= sintra::max_user_type_id,                                      \
+        "SINTRA_MESSAGE_EXPLICIT id must fit in the user id range."             \
+    );                                                                          \
+    SINTRA_MESSAGE_BASE(name, sintra::make_user_type_id(idv), __VA_ARGS__)
+
+#define SINTRA_MESSAGE_RESERVED(name, ...)                                      \
     SINTRA_MESSAGE_BASE(name, (type_id_type)sintra::detail::reserved_id::name, __VA_ARGS__)
 
 

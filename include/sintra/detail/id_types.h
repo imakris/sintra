@@ -24,6 +24,10 @@ using std::atomic;
 
 constexpr type_id_type        invalid_type_id = 0;
 constexpr type_id_type        not_defined_type_id = ~0ull;
+// User-defined type ids are tagged with the high bit to avoid collisions with
+// reserved and auto-assigned ids.
+constexpr type_id_type        user_type_id_flag = (type_id_type{1} << 63);
+constexpr type_id_type        max_user_type_id = user_type_id_flag - 2;
 
 
 namespace detail {
@@ -83,17 +87,37 @@ namespace detail {
 inline
 type_id_type make_type_id()
 {
-    static_assert(sizeof(type_id_type) == 8, "type_id_type must be 64-bit");
+    static_assert(sizeof(type_id_type) == 8, "type_id_type must be 64-bit");    
     static atomic<type_id_type> counter((type_id_type)detail::reserved_id::num_reserved_type_ids);
-    return ++counter;
+    auto next = ++counter;
+    assert(next < user_type_id_flag);
+    return next;
 }
 
 inline
 type_id_type make_type_id(uint64_t v)
 {
-    assert(v <= (type_id_type)detail::reserved_id::num_reserved_type_ids || v == not_defined_type_id);
     assert(v > 0);
+    if (v == not_defined_type_id) {
+        return v;
+    }
+    if ((v & user_type_id_flag) != 0) {
+        return v;
+    }
+    assert(v <= (type_id_type)detail::reserved_id::num_reserved_type_ids);
     return v;
+}
+
+constexpr
+bool is_user_type_id(type_id_type v)
+{
+    return v != not_defined_type_id && (v & user_type_id_flag) != 0;
+}
+
+constexpr
+type_id_type make_user_type_id(type_id_type v)
+{
+    return user_type_id_flag | v;
 }
 
 

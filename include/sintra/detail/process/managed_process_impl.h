@@ -23,6 +23,7 @@
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
+#include <stdexcept>
 #include <system_error>
 #include <thread>
 #include <utility>
@@ -600,9 +601,51 @@ void install_signal_handler()
     });
 }
 
+namespace detail {
+
+template <typename T, typename = void>
+struct has_sintra_type_id : std::false_type {};
+
+template <typename T>
+struct has_sintra_type_id<T, std::void_t<decltype(T::sintra_type_id())>>
+    : std::true_type {};
+
+template <typename T>
+type_id_type explicit_type_id()
+{
+    if constexpr (has_sintra_type_id<T>::value) {
+        return T::sintra_type_id();
+    }
+    else
+    {
+        return invalid_type_id;
+    }
+}
+
+} // namespace detail
+
 template <typename T>
 sintra::type_id_type get_type_id()
 {
+    const type_id_type explicit_id = detail::explicit_type_id<T>();
+    if (explicit_id != invalid_type_id) {
+        const std::string type_name = detail::type_name<T>();
+        {
+            auto scoped_map = s_mproc->m_type_name_of_explicit_id.scoped();
+            auto it = scoped_map.get().find(explicit_id);
+            if (it != scoped_map.get().end()) {
+                if (it->second != type_name) {
+                    throw std::runtime_error("Explicit type id collision");
+                }
+            }
+            else
+            {
+                s_mproc->m_type_name_of_explicit_id[explicit_id] = type_name;
+            }
+        }
+        return make_type_id(explicit_id);
+    }
+
     const std::string type_name = detail::type_name<T>();
     // Hold spinlock while accessing the iterator to prevent use-after-invalidation
     {
