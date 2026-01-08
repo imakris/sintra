@@ -54,7 +54,7 @@ structure multi-process workflows.
 * **Header-only distribution** - integrate the library by adding the headers to a
   project; no separate build step or binaries are necessary.
 * **No RTTI required** - type ids are derived from compile-time signatures (or
-  explicit ids if you choose to pin them).
+  explicit ids when pinned).
 * **Cross-platform design** - shared-memory transport on Linux, macOS, Windows, and FreeBSD.
 * **Opt-in crash recovery** - mark critical workers with `sintra::enable_recovery()` so
   the coordinator automatically respawns them after an unexpected exit.
@@ -128,9 +128,9 @@ For a Qt widget example that forwards Qt signals through sintra, see `example/qt
 ## Optional explicit type ids
 
 Most users do not need explicit type ids as long as every process is built with the same
-toolchain and flags. If you mix toolchains or want to remove any doubt about type id
-stability, you can pin ids explicitly for both transceivers and messages. Keep the
-ids unique and consistent across every process in the swarm.
+toolchain and flags. When toolchains are mixed or there is a need to remove any doubt
+about type id stability, ids can be pinned explicitly for both transceivers and messages.
+The ids must remain unique and consistent across every process in the swarm.
 
 ```cpp
 struct Explicit_bus : sintra::Derived_transceiver<Explicit_bus>
@@ -162,11 +162,11 @@ Sintra uses **dedicated reader threads** to process incoming messages from share
 
 ### Barrier Semantics
 
-`sintra::barrier()` coordinates progress across processes and comes in three flavors that trade off strength for cost. The template defaults to `delivery_fence_t`, so a plain `barrier("name")` is already stronger than a bare rendezvous. Choose the lightest-weight barrier whose guarantees match the code's requirements:
+`sintra::barrier()` coordinates progress across processes and comes in three flavors that trade off strength for cost. The template defaults to `delivery_fence_t`, so a plain `barrier("name")` is already stronger than a bare rendezvous. The lightest-weight barrier whose guarantees match the code's requirements is preferred:
 
-* **Rendezvous barriers** (`barrier<sintra::rendezvous_t>(name)`) simply ensure that every participant has reached the synchronization point. Messages published before the barrier might still be in flight or waiting to be handled, so use this mode when only aligned phase progression is needed-for example, coordinating the simultaneous start of a workload whose logic does not depend on the effects of earlier messages.
-* **Delivery-fence barriers** (`barrier(name)` or `barrier<sintra::delivery_fence_t>(name)`) guarantee that all pre-barrier messages have been pulled off the shared-memory rings by each process’s reader thread and are queued locally for handling, though the handlers may still be running. Reach for the default delivery fence when the next step requires the complete set of incoming work to be staged, such as inspecting an inbox before taking action.
-* **Processing-fence barriers** (`barrier<sintra::processing_fence_t>(name)`) wait until every handler (and any continuations) for messages published before the barrier has finished executing. Choose this mode when subsequent logic must observe the completed side effects-for instance, reading shared state that earlier handlers updated or applying a configuration change only after all peers processed preparatory updates.
+* **Rendezvous barriers** (`barrier<sintra::rendezvous_t>(name)`) simply ensure that every participant has reached the synchronization point. Messages published before the barrier might still be in flight or waiting to be handled, so this mode is appropriate when only aligned phase progression is needed-for example, coordinating the simultaneous start of a workload whose logic does not depend on the effects of earlier messages.
+* **Delivery-fence barriers** (`barrier(name)` or `barrier<sintra::delivery_fence_t>(name)`) guarantee that all pre-barrier messages have been pulled off the shared-memory rings by each process’s reader thread and are queued locally for handling, though the handlers may still be running. The default delivery fence is suitable when the next step requires the complete set of incoming work to be staged, such as inspecting an inbox before taking action.
+* **Processing-fence barriers** (`barrier<sintra::processing_fence_t>(name)`) wait until every handler (and any continuations) for messages published before the barrier has finished executing. This mode is appropriate when subsequent logic must observe the completed side effects-for instance, reading shared state that earlier handlers updated or applying a configuration change only after all peers processed preparatory updates.
 
 Delivery fences cost the same as rendezvous plus a short wait for readers to catch up. Processing fences add a single control message per process and an extra rendezvous to allow deterministic observation of handler side effects.
 
@@ -178,21 +178,20 @@ sintra::barrier("phase-1"); // delivery fence
 sintra::barrier<sintra::processing_fence_t>("apply-updates");
 ```
 
-Processing fences are safe to call from any thread, including handlers themselves: reader threads continue draining queued work and post-handlers while the fence waits, so invoking a fence from within a handler keeps the system making progress. When coordination between threads inside the same process is also required, combine Sintra barriers with standard threading primitives.
+Processing fences are safe to call from any thread, including handlers themselves: reader threads continue draining queued work and post-handlers while the fence waits, so invoking a fence from within a handler keeps the system making progress. When coordination between threads inside the same process is also required, Sintra barriers typically pair with standard threading primitives.
 
 ## Getting started
 
-1. Add the `include/` directory to the project's include path.
-2. Ensure that a C++17 compliant compiler is used (GCC, Clang, or MSVC are supported).
-3. Explore the `example/` directory to see how to set up signal buses, channels, and
-   remote call endpoints.
+1. The `include/` directory must be on the project's include path.
+2. A C++17 compliant compiler is required (GCC, Clang, or MSVC are supported).
+3. The `example/` directory contains signal bus, channel, and remote call samples.
 
 Because everything ships as headers, Sintra works well in monorepos or projects that
 prefer vendoring dependencies as git submodules or fetching them during configuration.
 
 ## Platform requirements
 
-* **macOS** - Sintra always uses `os_sync_wait_on_address` for its interprocess semaphore implementation. The build fails if `<os/os_sync_wait_on_address.h>` or `<os/clock.h>` is missing, so ensure the runner has macOS 15.0 or newer with the Command Line Tools for Xcode 15 (or newer) installed (the full Xcode IDE is not required). No legacy semaphore fallback is provided or supported.
+* **macOS** - Sintra always uses `os_sync_wait_on_address` for its interprocess semaphore implementation. The build fails if `<os/os_sync_wait_on_address.h>` or `<os/clock.h>` is missing, so runners should use macOS 15.0 or newer with the Command Line Tools for Xcode 15 (or newer) installed (the full Xcode IDE is not required). No legacy semaphore fallback is provided or supported.
 
 ## Tests and continuous integration
 
