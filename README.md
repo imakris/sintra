@@ -119,6 +119,10 @@ auto crash_monitor = sintra::activate_slot(
     sintra::Typed_instance_id<sintra::Managed_process>(sintra::any_remote));
 ```
 
+### Qt cursor sync example
+
+For a Qt widget example that forwards Qt signals through sintra, see `example/qt/README.md`.
+
 
 ## Threading Model and Barriers
 

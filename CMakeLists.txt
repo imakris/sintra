@@ -61,9 +61,13 @@ endif()
 
 option(SINTRA_BUILD_EXAMPLES "Build Sintra examples" ON)
 option(SINTRA_BUILD_TESTS "Build Sintra tests" ON)
+option(SINTRA_BUILD_QT_EXAMPLES "Build Qt examples (requires Qt6 Widgets)" OFF)
 
 if(SINTRA_BUILD_EXAMPLES)
     add_subdirectory(example/sintra)
+    if(SINTRA_BUILD_QT_EXAMPLES)
+        add_subdirectory(example/qt)
+    endif()
 endif()
 
 if(SINTRA_BUILD_TESTS)
