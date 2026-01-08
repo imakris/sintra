@@ -5,6 +5,7 @@
 
 #include "debug_pause.h"
 #include "globals.h"
+#include "logging.h"
 #include "process/managed_process.h"
 #include "utility.h"
 
@@ -14,8 +15,8 @@
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <functional>
-#include <iostream>
 #include <string>
 #include <thread>
 #include <utility>
@@ -192,9 +193,12 @@ void init(int argc, const char* const* argv, Args&&... args)
 #ifndef NDEBUG
     const auto cache_line_size = get_cache_line_size();
     if (assumed_cache_line_size != cache_line_size) {
-        std::cerr
-            << "WARNING: assumed_cache_line_size is set to " << assumed_cache_line_size
-            << ", but on this system it is actually " << cache_line_size << "." << std::endl;
+        Log_stream(log_level::warning)
+            << "WARNING: assumed_cache_line_size is set to "
+            << static_cast<size_t>(assumed_cache_line_size)
+            << ", but on this system it is actually "
+            << static_cast<size_t>(cache_line_size)
+            << ".\n";
     }
 #endif
 
@@ -214,11 +218,11 @@ inline bool finalize()
 
     auto trace = [&](const char* stage) {
         if (trace_finalize) {
-            std::fprintf(stderr, "[sintra_finalize] stage=%s coord=%d mproc_id=%llu\n",
-                         stage,
-                         s_coord ? 1 : 0,
-                         static_cast<unsigned long long>(s_mproc_id));
-            std::fflush(stderr);
+            Log_stream(log_level::debug)
+                << "[sintra_finalize] stage=" << stage
+                << " coord=" << (s_coord ? 1 : 0)
+                << " mproc_id=" << static_cast<unsigned long long>(s_mproc_id)
+                << "\n";
         }
     };
 
@@ -301,6 +305,26 @@ inline size_t spawn_swarm_process(
 {
     size_t spawned = 0;
     const auto piid = make_process_instance_id();
+
+    // Ensure argv[0] is the program name (required on Windows); avoid duplicates.
+    auto argv0_matches = [&]() {
+        if (args.empty()) {
+            return false;
+        }
+        if (args.front() == binary_name) {
+            return true;
+        }
+        const auto front_name = std::filesystem::path(args.front()).filename().string();
+        const auto bin_name = std::filesystem::path(binary_name).filename().string();
+#ifdef _WIN32
+        return _stricmp(front_name.c_str(), bin_name.c_str()) == 0;
+#else
+        return front_name == bin_name;
+#endif
+    };
+    if (!argv0_matches()) {
+        args.insert(args.begin(), binary_name);
+    }
 
     args.insert(args.end(), {
         "--swarm_id",       std::to_string(s_mproc->m_swarm_id),

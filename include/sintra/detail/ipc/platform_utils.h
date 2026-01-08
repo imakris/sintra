@@ -21,6 +21,7 @@
 #include <system_error>
 #include <thread>
 
+#include "../logging.h"
 #include "../time_utils.h"
 
 #ifdef _WIN32
@@ -760,10 +761,10 @@ static inline void sintra_warn_if_cacheline_mismatch(size_t assumed_cache_line_s
 {
     size_t detected = sintra_detect_cache_line_size_linux();
     if (detected && detected != assumed_cache_line_size) {
-        std::fprintf(stderr,
-            "sintra(ipc_rings): warning: detected L1D line %zu != assumed %zu; "
-            "performance may be suboptimal.\n",
-            detected, assumed_cache_line_size);
+        Log_stream(log_level::warning)
+            << "sintra(ipc_rings): warning: detected L1D line " << detected
+            << " != assumed " << assumed_cache_line_size
+            << "; performance may be suboptimal.\n";
     }
 }
 #elif defined(__APPLE__)
@@ -792,10 +793,10 @@ static inline void sintra_warn_if_cacheline_mismatch(size_t assumed_cache_line_s
 {
     size_t detected = sintra_detect_cache_line_size_macos();
     if (detected && detected != assumed_cache_line_size) {
-        std::fprintf(stderr,
-            "sintra(ipc_rings): warning: detected L1D line %zu != assumed %zu; "
-            "performance may be suboptimal.\n",
-            detected, assumed_cache_line_size);
+        Log_stream(log_level::warning)
+            << "sintra(ipc_rings): warning: detected L1D line " << detected
+            << " != assumed " << assumed_cache_line_size
+            << "; performance may be suboptimal.\n";
     }
 }
 #endif

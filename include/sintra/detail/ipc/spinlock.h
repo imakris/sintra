@@ -5,10 +5,10 @@
 
 #include <atomic>
 #include <chrono>
-#include <cstdio>
 #include <thread>
 
 #include "../debug_pause.h"
+#include "../logging.h"
 #include "../process/process_id.h"
 #include "platform_utils.h"
 
@@ -62,11 +62,10 @@ struct spinlock
                 const auto owner = m_owner_pid.load(std::memory_order_acquire);
                 if (owner != 0 && owner != self_pid && is_process_alive(owner)) {
                     if (detail::is_debug_pause_active()) {
-                        std::fprintf(
-                            stderr,
-                            "[sintra][spinlock] Owner PID %u is paused under debug control; "
-                            "forcibly releasing spinlock to allow shutdown to proceed.\n",
-                            owner);
+                        Log_stream(log_level::warning)
+                            << "[sintra][spinlock] Owner PID " << owner
+                            << " is paused under debug control; "
+                            << "forcibly releasing spinlock to allow shutdown to proceed.\n";
                         force_unlock();
                         live_owner_deadline = std::chrono::steady_clock::now() + k_live_owner_timeout;
                         continue;
@@ -112,25 +111,23 @@ private:
     void log_recovery(uint32_t owner) const
     {
         const uint64_t last_ns = m_last_progress_ns.load(std::memory_order_relaxed);
-        std::fprintf(
-            stderr,
-            "[sintra][spinlock] Owner PID %u disappeared while holding a shared spinlock "
-            "(last progress %llu ns ago). Forcibly releasing lock.\n",
-            owner,
-            static_cast<unsigned long long>(
-                monotonic_now_ns() > last_ns ? (monotonic_now_ns() - last_ns) : 0));
+        Log_stream(log_level::warning)
+            << "[sintra][spinlock] Owner PID " << owner
+            << " disappeared while holding a shared spinlock (last progress "
+            << static_cast<unsigned long long>(
+                monotonic_now_ns() > last_ns ? (monotonic_now_ns() - last_ns) : 0)
+            << " ns ago). Forcibly releasing lock.\n";
     }
 
     [[noreturn]] void report_live_owner_stall(uint32_t owner) const
     {
         const uint64_t acquired_ns = m_last_progress_ns.load(std::memory_order_relaxed);
         const uint64_t held_ns = monotonic_now_ns() - acquired_ns;
-        std::fprintf(
-            stderr,
-            "[sintra][spinlock] Shared spinlock stuck for %.3f ms while owner PID %u is still alive. "
-            "Aborting to avoid corruption.\n",
-            static_cast<double>(held_ns) / 1'000'000.0,
-            owner);
+        Log_stream(log_level::error)
+            << "[sintra][spinlock] Shared spinlock stuck for "
+            << (static_cast<double>(held_ns) / 1'000'000.0)
+            << " ms while owner PID " << owner << " is still alive. "
+            << "Aborting to avoid corruption.\n";
         detail::debug_aware_abort();
     }
 

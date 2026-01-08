@@ -7,6 +7,7 @@
 #include "../type_utils.h"
 #include "../exception.h"
 #include "../ipc/platform_utils.h"
+#include "../logging.h"
 
 #include <array>
 #include <atomic>
@@ -25,7 +26,6 @@
 #include <system_error>
 #include <thread>
 #include <utility>
-#include <iostream>
 #ifdef _WIN32
 #include <errno.h>
 #endif
@@ -1109,20 +1109,19 @@ void Managed_process::init(int argc, const char* const* argv)
         }
     }
     catch(...) {
-        cout << R"(
-Managed process options:
-  --help                   (optional) produce help message and exit
-  --branch_index arg       used by the coordinator process, when it invokes
-                           itself
-                           with a different entry index. It must be 1 or
-                           greater.
-  --swarm_id arg           unique identifier of the swarm that is being joined
-  --instance_id arg        the instance id assigned to the new process
-  --coordinator_id arg     the instance id of the coordinator that this
-                           process should refer to
-  --recovery_occurrence arg (optional) number of times the process recovered an
-                           abnormal termination.
-)";
+        Log_stream(log_level::error)
+            << "\nManaged process options:\n"
+            << "  --help                   (optional) produce help message and exit\n"
+            << "  --branch_index arg       used by the coordinator process, when it invokes\n"
+            << "                           itself\n"
+            << "                           with a different entry index. It must be 1 or\n"
+            << "                           greater.\n"
+            << "  --swarm_id arg           unique identifier of the swarm that is being joined\n"
+            << "  --instance_id arg        the instance id assigned to the new process\n"
+            << "  --coordinator_id arg     the instance id of the coordinator that this\n"
+            << "                           process should refer to\n"
+            << "  --recovery_occurrence arg (optional) number of times the process recovered an\n"
+            << "                           abnormal termination.\n";
         exit(1);
     }
 
@@ -1466,12 +1465,16 @@ Managed_process::Spawn_result Managed_process::spawn_swarm_process(
         result.error_message = error_msg.str();
 
         // Still log to stderr for backwards compatibility
-        std::cerr << "failed to launch " << s.binary_name;
         if (saved_errno != 0) {
             std::error_code ec(saved_errno, std::system_category());
-            std::cerr << " (errno " << saved_errno << ": " << ec.message() << ')';
+            Log_stream(log_level::error)
+                << "failed to launch " << s.binary_name
+                << " (errno " << saved_errno << ": " << ec.message() << ")\n";
         }
-        std::cerr << std::endl;
+        else {
+            Log_stream(log_level::error)
+                << "failed to launch " << s.binary_name << "\n";
+        }
 
         //m_readers.pop_back();
         std::unique_lock<std::shared_mutex> readers_lock(m_readers_mutex);

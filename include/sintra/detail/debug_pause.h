@@ -3,10 +3,10 @@
 
 #pragma once
 
+#include "logging.h"
 #include <atomic>
 #include <chrono>
 #include <csignal>
-#include <cstdio>
 #include <cstdlib>
 #include <memory>
 #include <thread>
@@ -65,9 +65,12 @@ inline void debug_pause_forever(const char* reason)
     const auto pid = getpid();
 #endif
 
-    std::fprintf(stderr, "\n[SINTRA_DEBUG_PAUSE] Process %d paused: %s\n", pid, reason);
-    std::fprintf(stderr, "[SINTRA_DEBUG_PAUSE] Attach debugger to PID %d to capture stacks\n", pid);
-    std::fflush(stderr);
+    Log_stream(log_level::info)
+        << "\n[SINTRA_DEBUG_PAUSE] Process " << pid << " paused: " << reason
+        << "\n";
+    Log_stream(log_level::info)
+        << "[SINTRA_DEBUG_PAUSE] Attach debugger to PID " << pid
+        << " to capture stacks\n";
 
     // Infinite loop to keep process alive for debugger attachment
     while (true) {
@@ -176,8 +179,7 @@ inline void install_debug_pause_handlers()
         return;
     }
 
-    std::fprintf(stderr, "[SINTRA_DEBUG_PAUSE] Handlers installed\n");
-    std::fflush(stderr);
+    Log_stream(log_level::info) << "[SINTRA_DEBUG_PAUSE] Handlers installed\n";
 
 #ifdef _WIN32
     // AddVectoredExceptionHandler for exceptions (more reliable than SetUnhandledExceptionFilter)

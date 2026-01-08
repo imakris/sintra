@@ -3,10 +3,11 @@
 
 #pragma once
 
+#include "../logging.h"
 #include "../transceiver_impl.h"
 #include <atomic>
 #include <condition_variable>
-#include <cstdio>
+#include <cstdlib>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -190,11 +191,12 @@ bool Process_message_reader::stop_and_wait(double waiting_period)
         m_stop_condition.wait_for(
             lk, std::chrono::duration<double>(1.0), no_readers);
         if (!no_readers()) {
-            std::fprintf(stderr,
-                "Process_message_reader::stop_and_wait timeout: pid=%llu req_running=%d rep_running=%d\n",
-                static_cast<unsigned long long>(m_process_instance_id),
-                m_req_running.load(),
-                m_rep_running.load());
+            Log_stream(log_level::warning)
+                << "Process_message_reader::stop_and_wait timeout: pid="
+                << static_cast<unsigned long long>(m_process_instance_id)
+                << " req_running=" << m_req_running.load()
+                << " rep_running=" << m_rep_running.load()
+                << "\n";
         }
     }
     return no_readers();
@@ -372,25 +374,26 @@ void Process_message_reader::request_reader_function()
                         }();
 
                         if (trace_world) {
-                            std::fprintf(stderr,
-                                "[sintra_trace_world] pid=%d reader_state=%d msg_type=%llu sender_iid=%llu recv_iid=%llu proc_iid=%llu\n",
-                                static_cast<int>(getpid()),
-                                static_cast<int>(reader_state),
-                                static_cast<unsigned long long>(m->message_type_id),
-                                static_cast<unsigned long long>(m->sender_instance_id),
-                                static_cast<unsigned long long>(m->receiver_instance_id),
-                                static_cast<unsigned long long>(s_mproc ? s_mproc->m_instance_id : 0ULL));
+                            Log_stream(log_level::debug)
+                                << "[sintra_trace_world] pid=" << static_cast<int>(getpid())
+                                << " reader_state=" << static_cast<int>(reader_state)
+                                << " msg_type=" << static_cast<unsigned long long>(m->message_type_id)
+                                << " sender_iid=" << static_cast<unsigned long long>(m->sender_instance_id)
+                                << " recv_iid=" << static_cast<unsigned long long>(m->receiver_instance_id)
+                                << " proc_iid="
+                                << static_cast<unsigned long long>(s_mproc ? s_mproc->m_instance_id : 0ULL)
+                                << "\n";
                         }
 
                         for (auto sid : sids) {
                             auto shl = it_mt->second.find(sid);
                             if (shl != it_mt->second.end()) {
                                 if (trace_world) {
-                                    std::fprintf(stderr,
-                                        "[sintra_trace_world] pid=%d sid_match=%llu handlers=%zu\n",
-                                        static_cast<int>(getpid()),
-                                        static_cast<unsigned long long>(sid),
-                                        shl->second.size());
+                                    Log_stream(log_level::debug)
+                                        << "[sintra_trace_world] pid=" << static_cast<int>(getpid())
+                                        << " sid_match=" << static_cast<unsigned long long>(sid)
+                                        << " handlers=" << shl->second.size()
+                                        << "\n";
                                 }
                                 for (auto& e : shl->second) {
                                     e(*m);
@@ -630,10 +633,12 @@ void Process_message_reader::reply_reader_function()
                         // Drop it quietly unless we're fully RUNNING; in RUNNING emit a diagnostic
                         // but do not hard-assert to avoid modal dialogs on Windows Debug.
                         if (s_mproc && s_mproc->m_communication_state == Managed_process::COMMUNICATION_RUNNING) {
-                            std::fprintf(stderr,
-                                "Warning: Reply reader received message for function_instance_id=%llu but no active handler found (receiver_instance_id=%llu)\n",
-                                static_cast<unsigned long long>(m->function_instance_id),
-                                static_cast<unsigned long long>(m->receiver_instance_id));
+                            Log_stream(log_level::warning)
+                                << "Warning: Reply reader received message for function_instance_id="
+                                << static_cast<unsigned long long>(m->function_instance_id)
+                                << " but no active handler found (receiver_instance_id="
+                                << static_cast<unsigned long long>(m->receiver_instance_id)
+                                << ")\n";
                         }
                     }
                 }
@@ -642,11 +647,13 @@ void Process_message_reader::reply_reader_function()
                     // coordinator loss, late replies can legitimately arrive after objects
                     // have been torn down. Do not hard-assert; drop unless we're fully RUNNING.
                     if (s_mproc && s_mproc->m_communication_state == Managed_process::COMMUNICATION_RUNNING) {
-                        std::fprintf(stderr,
-                            "Warning: Reply reader received message for receiver_instance_id=%llu but object no longer exists (sender=%llu, function=%llu)\n",
-                            static_cast<unsigned long long>(m->receiver_instance_id),
-                            static_cast<unsigned long long>(m->sender_instance_id),
-                            static_cast<unsigned long long>(m->function_instance_id));
+                        Log_stream(log_level::warning)
+                            << "Warning: Reply reader received message for receiver_instance_id="
+                            << static_cast<unsigned long long>(m->receiver_instance_id)
+                            << " but object no longer exists (sender="
+                            << static_cast<unsigned long long>(m->sender_instance_id)
+                            << ", function=" << static_cast<unsigned long long>(m->function_instance_id)
+                            << ")\n";
                     }
                 }
             }

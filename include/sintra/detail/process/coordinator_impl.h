@@ -3,13 +3,13 @@
 
 #pragma once
 
+#include "../logging.h"
 #include "../process/coordinator.h"
 #include "../process/managed_process.h"
 
 #include <algorithm>
 #include <cassert>
 #include <functional>
-#include <iostream>
 #include <mutex>
 #include <shared_mutex>
 #include <stdexcept>
@@ -20,7 +20,6 @@
 namespace sintra {
 
 
-using std::cout;
 using std::lock_guard;
 using std::mutex;
 using std::string;
@@ -847,7 +846,7 @@ instance_id_type Coordinator::join_swarm(
 inline
 void Coordinator::print(const string& str)
 {
-    cout << str;
+    Log_stream(log_level::info) << str;
 }
 
 

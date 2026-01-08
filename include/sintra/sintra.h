@@ -159,12 +159,13 @@ void enable_recovery();
 } // namespace sintra
 
 
-// -- Runtime utilities ------------------------------------------------------
-// High-level synchronisation, logging, message composition helpers, and the
+// -- Runtime utilities ------------------------------------------------------  
+// High-level synchronisation, logging, message composition helpers, and the    
 // process runtime live here.  Historically these were gathered in
-// `detail/sintra_impl.h`; we now include the specific headers directly to keep
+// `detail/sintra_impl.h`; we now include the specific headers directly to keep 
 // dependency relationships obvious.
 #include "detail/barrier.h"
+#include "logging.h"
 #include "detail/console.h"
 #include "detail/maildrop.h"
 #include "detail/runtime.h"
