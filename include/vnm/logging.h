@@ -121,6 +121,27 @@ public:
 
     Log_stream(const Log_stream&) = delete;
     Log_stream& operator=(const Log_stream&) = delete;
+    Log_stream(Log_stream&& other) noexcept
+        : m_stream(std::move(other.m_stream))
+        , m_level(other.m_level)
+        , m_enabled(other.m_enabled)
+        , m_postfix(std::move(other.m_postfix))
+    {
+        other.m_enabled = false;
+        other.m_postfix.clear();
+    }
+    Log_stream& operator=(Log_stream&& other) noexcept
+    {
+        if (this != &other) {
+            m_stream = std::move(other.m_stream);
+            m_level = other.m_level;
+            m_enabled = other.m_enabled;
+            m_postfix = std::move(other.m_postfix);
+            other.m_enabled = false;
+            other.m_postfix.clear();
+        }
+        return *this;
+    }
 
     template <typename T>
     Log_stream& operator<<(const T& value)
