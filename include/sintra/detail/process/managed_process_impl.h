@@ -635,7 +635,12 @@ sintra::type_id_type get_type_id()
             auto it = scoped_map.get().find(explicit_id);
             if (it != scoped_map.get().end()) {
                 if (it->second != type_name) {
-                    throw std::runtime_error("Explicit type id collision");
+                    throw std::runtime_error(
+                        "Explicit type id collision: id=" +
+                        std::to_string(
+                            static_cast<unsigned long long>(explicit_id)) +
+                        " existing='" + it->second +
+                        "' new='" + type_name + "'");
                 }
             }
             else

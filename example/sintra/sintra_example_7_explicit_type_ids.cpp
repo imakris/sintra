@@ -7,8 +7,8 @@
 // want deterministic ids across builds.
 //
 #include <sintra/sintra.h>
-#include <chrono>
-#include <thread>
+#include <condition_variable>
+#include <mutex>
 
 namespace {
 
@@ -28,16 +28,30 @@ int main(int argc, char* argv[])
     sintra::init(argc, argv);
 
     Explicit_bus bus;
+    std::mutex wait_mutex;
+    std::condition_variable wait_cv;
+    bool received = false;
 
     auto slot = [](const Explicit_bus::ping& msg) {
         sintra::console() << "ping value=" << msg.value << '\n';
     };
 
-    sintra::activate_slot(slot);
+    auto notified_slot = [&](const Explicit_bus::ping& msg) {
+        slot(msg);
+        {
+            std::lock_guard<std::mutex> lock(wait_mutex);
+            received = true;
+        }
+        wait_cv.notify_one();
+    };
+
+    sintra::activate_slot(notified_slot);
     bus.emit_global<Explicit_bus::ping>(42);
 
-    sintra::barrier<sintra::processing_fence_t>(
-        "explicit-id-example", "_sintra_all_processes");
+    {
+        std::unique_lock<std::mutex> lock(wait_mutex);
+        wait_cv.wait(lock, [&] { return received; });
+    }
 
     sintra::finalize();
     return 0;
