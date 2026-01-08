@@ -12,6 +12,8 @@
 
 namespace {
 
+// Choose unique, stable values within your codebase; keep them consistent
+// across builds and toolchains when explicit ids are required.
 constexpr sintra::type_id_type k_bus_id = 0x120;
 constexpr sintra::type_id_type k_ping_id = 0x121;
 
