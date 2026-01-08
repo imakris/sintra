@@ -1,4 +1,4 @@
-// Copyright (c) 2025, Ioannis Makris
+﻿// Copyright (c) 2025, Ioannis Makris
 // Licensed under the BSD 2-Clause License, see LICENSE.md file for details.
 
 #pragma once
@@ -33,19 +33,6 @@ using std::recursive_mutex;
 using std::remove_reference;
 using std::string;
 using std::unordered_map;
-
-#define SINTRA_TYPE_ID(idv)                                                     \
-    static_assert((idv) > 0, "SINTRA_TYPE_ID id must be non-zero.");            \
-    static_assert(                                                              \
-        (idv) <= sintra::max_user_type_id,                                      \
-        "SINTRA_TYPE_ID id must fit in the user id range."                      \
-    );                                                                          \
-    static constexpr sintra::type_id_type sintra_type_id()                      \
-    {                                                                           \
-        return sintra::make_user_type_id(idv);                                  \
-    }
-
-
 
 
  //////////////////////////////////////////////////////////////////////////

@@ -195,8 +195,7 @@ bool Process_message_reader::stop_and_wait(double waiting_period)
                 << "Process_message_reader::stop_and_wait timeout: pid="
                 << static_cast<unsigned long long>(m_process_instance_id)
                 << " req_running=" << m_req_running.load()
-                << " rep_running=" << m_rep_running.load()
-                << "\n";
+                << " rep_running=" << m_rep_running.load() << "\n";
         }
     }
     return no_readers();
@@ -381,8 +380,7 @@ void Process_message_reader::request_reader_function()
                                 << " sender_iid=" << static_cast<unsigned long long>(m->sender_instance_id)
                                 << " recv_iid=" << static_cast<unsigned long long>(m->receiver_instance_id)
                                 << " proc_iid="
-                                << static_cast<unsigned long long>(s_mproc ? s_mproc->m_instance_id : 0ULL)
-                                << "\n";
+                                << static_cast<unsigned long long>(s_mproc ? s_mproc->m_instance_id : 0ULL) << "\n";
                         }
 
                         for (auto sid : sids) {
@@ -392,8 +390,7 @@ void Process_message_reader::request_reader_function()
                                     Log_stream(log_level::debug)
                                         << "[sintra_trace_world] pid=" << static_cast<int>(getpid())
                                         << " sid_match=" << static_cast<unsigned long long>(sid)
-                                        << " handlers=" << shl->second.size()
-                                        << "\n";
+                                        << " handlers=" << shl->second.size() << "\n";
                                 }
                                 for (auto& e : shl->second) {
                                     e(*m);
@@ -637,8 +634,7 @@ void Process_message_reader::reply_reader_function()
                                 << "Warning: Reply reader received message for function_instance_id="
                                 << static_cast<unsigned long long>(m->function_instance_id)
                                 << " but no active handler found (receiver_instance_id="
-                                << static_cast<unsigned long long>(m->receiver_instance_id)
-                                << ")\n";
+                                << static_cast<unsigned long long>(m->receiver_instance_id) << ")\n";
                         }
                     }
                 }
@@ -652,8 +648,7 @@ void Process_message_reader::reply_reader_function()
                             << static_cast<unsigned long long>(m->receiver_instance_id)
                             << " but object no longer exists (sender="
                             << static_cast<unsigned long long>(m->sender_instance_id)
-                            << ", function=" << static_cast<unsigned long long>(m->function_instance_id)
-                            << ")\n";
+                            << ", function=" << static_cast<unsigned long long>(m->function_instance_id) << ")\n";
                     }
                 }
             }
