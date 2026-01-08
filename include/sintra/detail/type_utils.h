@@ -4,16 +4,10 @@
 #pragma once
 
 #include <cstdlib>
-#include <memory>
 #include <sstream>
 #include <string>
 #include <string_view>
 #include <type_traits>
-#include <typeinfo>
-
-#if defined(__GNUG__)
-#include <cxxabi.h>
-#endif
 
 namespace sintra::detail {
 
@@ -89,22 +83,6 @@ constexpr std::string_view ctti_name()
 #else
     return std::string_view{};
 #endif
-}
-
-inline std::string demangle(const char* name)
-{
-#if defined(__GNUG__)
-    int status = 0;
-    std::unique_ptr<char, void(*)(void*)> demangled(
-        abi::__cxa_demangle(name, nullptr, nullptr, &status),
-        &std::free);
-    if (status == 0 && demangled) {
-        return demangled.get();
-    }
-#else
-    (void)name;
-#endif
-    return name ? name : std::string{};
 }
 
 inline std::string compiler_identity()
@@ -223,21 +201,11 @@ inline std::string describe_token_component(const std::string& component)
 
 } // namespace detail_type_utils
 
-inline std::string type_name_from_info(const std::type_info& info)
-{
-    return detail_type_utils::demangle(info.name());
-}
-
 template <typename T>
 inline std::string type_name()
 {
-    if constexpr (detail_type_utils::is_complete<T>::value) {
-        return type_name_from_info(typeid(T));
-    }
-    else {
-        constexpr auto view = detail_type_utils::ctti_name<T>();
-        return std::string(view);
-    }
+    constexpr auto view = detail_type_utils::ctti_name<T>();
+    return std::string(view);
 }
 
 inline std::string abi_token()
