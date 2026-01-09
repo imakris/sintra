@@ -142,9 +142,9 @@ void deactivate_all_slots();
 /// are done.
 void enable_recovery();
 
-///\brief Coordinator-only: configure recovery policy and lifecycle callbacks.
-void set_recovery_policy(Recovery_policy policy, Recovery_cancel_handler cancel_handler);
-void set_recovery_tick_handler(Recovery_tick_handler handler);
+///\brief Configure recovery/lifecycle callbacks (effective only in coordinator).
+void set_recovery_policy(Recovery_policy policy);
+void set_recovery_runner(Recovery_runner runner);
 void set_lifecycle_handler(Lifecycle_handler handler);
 
 } // namespace sintra

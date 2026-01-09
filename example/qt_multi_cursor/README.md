@@ -42,8 +42,8 @@ This example demonstrates advanced Sintra features using Qt:
 - Each window has a red "Crash" button that deliberately crashes the process
 - When a window crashes:
   1. The crashed process has recovery enabled via `sintra::enable_recovery()`
-  2. The coordinator's recovery policy schedules a 5-second delay
-  3. Countdown ticks are broadcast from the recovery tick handler
+  2. The coordinator's recovery runner schedules a 5-second delay
+  3. Countdown ticks are broadcast from the recovery runner
   4. After the delay, the coordinator respawns the crashed window
   5. When cursor updates resume, windows show a "recovered" message
 
@@ -99,7 +99,7 @@ example\qt_multi_cursor\run_multi_cursor.bat Release
 2. **Remote Message Emission**: `emit_remote<>()` sends messages to all other processes
 3. **Wildcard Message Handlers**: `activate()` with `Typed_instance_id<T>(any_remote)` receives from any remote sender
 4. **Join Swarm**: `join_swarm()` spawns each window with a stable branch index
-5. **Recovery Policy Hooks**: `set_recovery_policy(..., cancel_handler)` and `set_recovery_tick_handler()`
+5. **Recovery Hooks**: `set_recovery_policy()` and `set_recovery_runner()`
 6. **Lifecycle Callbacks**: `set_lifecycle_handler()` coordinates crash vs normal exit
 7. **Thread-safe UI Updates**: `post_to_ui()` helper using `QMetaObject::invokeMethod()` for safe Qt updates from Sintra handlers
 

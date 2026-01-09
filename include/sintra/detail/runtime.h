@@ -393,20 +393,20 @@ inline void enable_recovery()
     s_mproc->enable_recovery();
 }
 
-inline void set_recovery_policy(Recovery_policy policy, Recovery_cancel_handler cancel_handler)
+inline void set_recovery_policy(Recovery_policy policy)
 {
     if (!s_coord) {
         return;
     }
-    s_coord->set_recovery_policy(std::move(policy), std::move(cancel_handler));
+    s_coord->set_recovery_policy(std::move(policy));
 }
 
-inline void set_recovery_tick_handler(Recovery_tick_handler handler)
+inline void set_recovery_runner(Recovery_runner runner)
 {
     if (!s_coord) {
         return;
     }
-    s_coord->set_recovery_tick_handler(std::move(handler));
+    s_coord->set_recovery_runner(std::move(runner));
 }
 
 inline void set_lifecycle_handler(Lifecycle_handler handler)

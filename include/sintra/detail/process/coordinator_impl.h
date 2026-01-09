@@ -911,91 +911,66 @@ void Coordinator::recover_if_required(const Crash_info& info)
     }
 
     Recovery_policy policy;
-    Recovery_tick_handler tick_handler;
-    Recovery_cancel_handler cancel_handler;
+    Recovery_runner runner;
     {
         std::lock_guard<mutex> lock(m_lifecycle_mutex);
         policy = m_recovery_policy;
-        tick_handler = m_recovery_tick_handler;
-        cancel_handler = m_recovery_cancel_handler;
+        runner = m_recovery_runner;
     }
 
-    Recovery_action action = Recovery_action::immediate();
+    bool should_recover = true;
     if (policy) {
-        action = policy(info);
+        should_recover = policy(info);
     }
 
-    auto should_cancel = [cancel_handler, info]() {
-        return cancel_handler ? cancel_handler(info) : false;
+    if (!should_recover) {
+        return;
+    }
+
+    auto should_cancel = [this]() {
+        return m_shutdown.load(std::memory_order_acquire);
     };
 
-    auto spawn_now = [this, info, should_cancel]() {
-        if (m_shutdown.load(std::memory_order_acquire)) {
+    auto spawned = std::make_shared<std::atomic<bool>>(false);
+    auto spawn_now = [this, info, should_cancel, spawned]() {
+        if (should_cancel()) {
             return;
         }
-        if (should_cancel()) {
+        if (spawned->exchange(true)) {
             return;
         }
         auto& s = s_mproc->m_cached_spawns[info.process_iid];
         s_mproc->spawn_swarm_process(s);
     };
 
-    if (action.action == Recovery_action::kind::skip) {
-        return;
-    }
-
-    if (action.action == Recovery_action::kind::immediate ||
-        action.delay <= std::chrono::milliseconds(0)) {
+    if (!runner) {
         spawn_now();
         return;
     }
 
-    const auto delay = action.delay;
+    Recovery_control control;
+    control.should_cancel = should_cancel;
+    control.spawn = spawn_now;
     {
         std::lock_guard<mutex> lock(m_recovery_threads_mutex);
-        m_recovery_threads.emplace_back([this, info, delay, tick_handler, should_cancel, spawn_now]() {
-            const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(
-                delay + std::chrono::milliseconds(999));
-            int remaining = static_cast<int>(seconds.count());
-            for (; remaining > 0; --remaining) {
-                if (m_shutdown.load(std::memory_order_acquire)) {
-                    return;
-                }
-                if (should_cancel()) {
-                    return;
-                }
-                if (tick_handler) {
-                    tick_handler(info, remaining);
-                }
-                std::this_thread::sleep_for(std::chrono::seconds(1));
-            }
-            if (m_shutdown.load(std::memory_order_acquire)) {
-                return;
-            }
-            if (should_cancel()) {
-                return;
-            }
-            if (tick_handler) {
-                tick_handler(info, 0);
-            }
-            spawn_now();
+        m_recovery_threads.emplace_back([info, runner, control]() mutable {
+            runner(info, control);
         });
     }
 }
 
 inline
-void Coordinator::set_recovery_policy(Recovery_policy policy, Recovery_cancel_handler cancel_handler)
+void Coordinator::set_recovery_policy(Recovery_policy policy)
 {
     std::lock_guard<mutex> lock(m_lifecycle_mutex);
     m_recovery_policy = std::move(policy);
-    m_recovery_cancel_handler = std::move(cancel_handler);
 }
 
 inline
-void Coordinator::set_recovery_tick_handler(Recovery_tick_handler handler)      
+void Coordinator::set_recovery_runner(Recovery_runner runner)
 {
     std::lock_guard<mutex> lock(m_lifecycle_mutex);
-    m_recovery_tick_handler = std::move(handler);
+    m_recovery_runner = std::move(runner);
 }
 
 inline

@@ -4,20 +4,25 @@
 
 #include "../id_types.h"
 
-#include <chrono>
 #include <functional>
 
 namespace sintra {
 
+// Lifecycle/recovery metadata and callbacks (effective only in the coordinator).
+// See docs/process_lifecycle_notes.md for timing and threading.
 struct Crash_info
 {
+    // Process instance id and stable process slot for correlation.
     instance_id_type process_iid = invalid_instance_id;
     uint32_t         process_slot = 0;
+    // Crash status or signal code (0 for non-crash paths).
     int status = 0;
 };
 
 struct process_lifecycle_event
 {
+    // Emitted by the coordinator when a process crashes, exits normally, or
+    // is unpublished without a prior draining/crash signal.
     enum class reason
     {
         crash,
@@ -31,37 +36,19 @@ struct process_lifecycle_event
     int              status = 0;
 };
 
-struct Recovery_action
+struct Recovery_control
 {
-    enum class kind
-    {
-        skip,
-        immediate,
-        delay
-    };
-
-    kind action = kind::immediate;
-    std::chrono::milliseconds delay{0};
-
-    static Recovery_action skip()
-    {
-        return {kind::skip, std::chrono::milliseconds(0)};
-    }
-
-    static Recovery_action immediate()
-    {
-        return {kind::immediate, std::chrono::milliseconds(0)};
-    }
-
-    static Recovery_action delay_for(std::chrono::milliseconds value)
-    {
-        return {kind::delay, value};
-    }
+    // True when shutdown has begun; runners should exit early.
+    std::function<bool()> should_cancel;
+    // Spawn the replacement process once (subsequent calls are ignored).
+    std::function<void()> spawn;
 };
 
-using Recovery_policy = std::function<Recovery_action(const Crash_info&)>;      
-using Recovery_tick_handler = std::function<void(const Crash_info&, int seconds_remaining)>;
-using Recovery_cancel_handler = std::function<bool(const Crash_info&)>;
-using Lifecycle_handler = std::function<void(const process_lifecycle_event&)>;  
+// Called on the coordinator thread to decide whether recovery should occur.
+using Recovery_policy = std::function<bool(const Crash_info&)>;
+// Called on a recovery thread to perform any delay, countdown, or custom logic.
+using Recovery_runner = std::function<void(const Crash_info&, const Recovery_control&)>;
+// Called on the coordinator thread for crash/normal exit/unpublished events.
+using Lifecycle_handler = std::function<void(const process_lifecycle_event&)>;
 
 } // namespace sintra

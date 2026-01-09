@@ -41,6 +41,7 @@ struct Process_group: Derived_transceiver<Process_group>
     }
 
 
+    // Replace the membership set for this group; serialized with barrier state.
     void set(const unordered_set<instance_id_type>& member_process_ids);
 
     // barriers are deferred functions and return twice (this refers to the implementation,
@@ -78,13 +79,18 @@ struct Process_group: Derived_transceiver<Process_group>
     SINTRA_RPC_STRICT_EXPLICIT(barrier)
 
 public:
+    // Remove a draining process from pending barriers and collect completions
+    // for any barriers that become satisfied as a result.
     void drop_from_inflight_barriers(
         instance_id_type process_iid,
         std::vector<Barrier_completion>& completions);
+    // Emit barrier completion messages for the recorded recipients (per-recipient
+    // reply tokens are computed at write time).
     void emit_barrier_completions(
         const std::vector<Barrier_completion>& completions);
 
 private:
+    // Add/remove a process from the group membership (guards barrier snapshots).
     void add_process(instance_id_type process_iid);
     void remove_process(instance_id_type process_iid);
 
@@ -127,33 +133,91 @@ private:
     ~Coordinator();
 
     // EXPORTED FOR RPC
+    // Resolve or allocate a type id for a pretty type name. Unknown names are
+    // assigned a new id, since types are assumed to exist when referenced.
     type_id_type resolve_type(const string& pretty_name);
+
+    // Resolve an assigned transceiver name to an instance id; returns invalid
+    // if the name has not been published.
     instance_id_type resolve_instance(const string& assigned_name);
 
+    // Block until a named instance is published. If it is not yet available,
+    // registers the caller for a deferred reply and returns invalid_instance_id
+    // to trigger the deferral path.
     instance_id_type wait_for_instance(const string& assigned_name);
 
+    // Publish a transceiver instance and assigned name in the registry. Enforces
+    // name uniqueness and per-process limits, emits instance_published (or
+    // queues it during startup), and unblocks waiters. For Managed_process,
+    // resets the draining bit for the process slot.
     instance_id_type publish_transceiver(
         type_id_type type_id, instance_id_type instance_id, const string& assigned_name);
+
+    // Unpublish a transceiver, erase name mappings, and emit instance_unpublished.
+    // If the unpublished instance is a Managed_process, this also drops it from
+    // groups, marks draining, stops readers, emits lifecycle events, and may
+    // trigger recovery.
     bool unpublish_transceiver(instance_id_type instance_id);
+
+    // Mark a process as draining, remove it from in-flight barriers, and return
+    // the coordinator reply-ring watermark for the caller to flush.
     sequence_counter_type begin_process_draining(instance_id_type process_iid);
+
+    // Coordinator-local unpublish used during teardown when RPCs are unsafe
+    // (e.g., service mode or coordinator-local cleanup).
     void unpublish_transceiver_notify(instance_id_type transceiver_iid);
+
+    // Spawn a swarm branch with a stable branch index. Tracks in-flight joins
+    // to avoid duplicate spawns when callers retry and inserts the process into
+    // core groups before spawn.
     instance_id_type join_swarm(const string& binary_name, int32_t branch_index);
 
+    // Create a process group transceiver with explicit membership (used for
+    // built-in groups like _sintra_all_processes).
     instance_id_type make_process_group(
         const string& name,
         const unordered_set<instance_id_type>& member_process_ids);
-
+ 
+    // Record that a process opted into crash recovery; recover_if_required()
+    // ignores processes that did not call enable_recovery().
     void enable_recovery(instance_id_type piid);
+
+    // Apply recovery policy and spawn replacement if required. Delegates any
+    // delay/logic to the recovery runner and obeys shutdown state.
     void recover_if_required(const Crash_info& info);
+
+    // Release join_swarm in-flight tracking and flush delayed publications once
+    // all processes finish initialization.
     void mark_initialization_complete(instance_id_type process_iid);
+
+    // Signal shutdown to cancel delayed recovery and future spawns. Recovery
+    // threads check this flag before running or respawning.
     void begin_shutdown();
+
+    // Track crash status so unpublish can distinguish crash vs normal exit,
+    // then emit the crash lifecycle event.
     void note_process_crash(const Crash_info& info);
+
+    // Dispatch lifecycle events to the configured handler (if any).
     void emit_lifecycle_event(const process_lifecycle_event& event);
 
 public:
-    // Coordinator-only helpers (not exported for RPC).
-    void set_recovery_policy(Recovery_policy policy, Recovery_cancel_handler cancel_handler);
-    void set_recovery_tick_handler(Recovery_tick_handler handler);
+    // Helpers (not exported for RPC).
+    // ================================================
+
+    // Lifecycle/recovery hooks run during crash/unpublish handling and recovery
+    // scheduling. See docs/process_lifecycle_notes.md for timing, threading, and
+    // usage patterns (non-coordinator calls are no-ops).
+
+    // Configure recovery policy. The policy runs on the coordinator thread
+    // during recover_if_required().
+    void set_recovery_policy(Recovery_policy policy);
+
+    // Configure recovery runner. The runner runs on a recovery thread and
+    // decides when to call spawn().
+    void set_recovery_runner(Recovery_runner runner);
+
+    // Configure lifecycle event handler (crash/normal exit/unpublished).
     void set_lifecycle_handler(Lifecycle_handler handler);
 
     // Blocks until all processes identified by process_group_id have called the function.
@@ -203,8 +267,7 @@ public:
     set<instance_id_type>                       m_requested_recovery;
     mutable std::mutex                          m_lifecycle_mutex;
     Recovery_policy                             m_recovery_policy;
-    Recovery_tick_handler                       m_recovery_tick_handler;        
-    Recovery_cancel_handler                     m_recovery_cancel_handler;
+    Recovery_runner                             m_recovery_runner;
     Lifecycle_handler                           m_lifecycle_handler;
     mutable std::mutex                          m_crash_mutex;
     std::unordered_map<instance_id_type, int>   m_recent_crash_status;
@@ -231,6 +294,8 @@ public:
 
     std::vector<Pending_instance_publication>   m_delayed_instance_publications;
 
+    // Remove a process from init tracking; return delayed publications now ready
+    // to emit once startup coordination has finished.
     std::vector<Pending_instance_publication> finalize_initialization_tracking(
         instance_id_type process_iid);
 
@@ -247,7 +312,10 @@ public:
     std::condition_variable                    m_all_draining_cv;
     std::atomic<bool>                          m_waiting_for_all_draining{false};
 
+    // Aggregate draining state for all known processes based on the registry and
+    // initialization tracking (caller holds lock).
     bool all_known_processes_draining_unlocked(instance_id_type self_process);
+    // Block until all known processes are draining (or have been scavenged).
     void wait_for_all_draining(instance_id_type self_process);
 
 public:
@@ -263,6 +331,7 @@ public:
     SINTRA_RPC_EXPLICIT(mark_initialization_complete)
     SINTRA_RPC_STRICT_EXPLICIT(join_swarm)
 
+    // Read the draining bit for a process slot; does not validate liveness.
     bool is_process_draining(instance_id_type process_iid) const;
 
     SINTRA_MESSAGE_RESERVED(instance_published,

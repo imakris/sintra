@@ -17,6 +17,7 @@
 #include <condition_variable>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 
 namespace {
@@ -326,55 +327,70 @@ int main(int argc, char* argv[])
         std::lock_guard<std::mutex> lock(g_state_mutex);
         auto it = g_process_index_to_window.find(static_cast<uint64_t>(info.process_slot));
         if (it == g_process_index_to_window.end()) {
-            if (all_windows_exited_normally()) {
-                return sintra::Recovery_action::skip();
-            }
-            return sintra::Recovery_action::immediate();
+            return !all_windows_exited_normally();
         }
 
         const int window_id = it->second;
         auto& state = g_window_states[window_id];
         if (state.exited_normally) {
             state.recovering = false;
-            return sintra::Recovery_action::skip();
+            return false;
         }
 
         state.recovering = true;
-        return sintra::Recovery_action::delay_for(
-            std::chrono::seconds(sintra_example::k_recovery_delay_seconds));    
-    }, [](const sintra::Crash_info& info) {
-        std::lock_guard<std::mutex> lock(g_state_mutex);
-        auto it = g_process_index_to_window.find(static_cast<uint64_t>(info.process_slot));
-        if (it == g_process_index_to_window.end()) {
-            return all_windows_exited_normally();
-        }
-        const int window_id = it->second;
-        auto& state = g_window_states[window_id];
-        if (state.exited_normally) {
-            state.recovering = false;
-            return true;
-        }
-        return false;
+        return true;
     });
 
-    sintra::set_recovery_tick_handler([](const sintra::Crash_info& info, int seconds_remaining) {
+    sintra::set_recovery_runner([](const sintra::Crash_info& info,
+                                   const sintra::Recovery_control& control) {
         int window_id = -1;
         {
             std::lock_guard<std::mutex> lock(g_state_mutex);
             auto it = g_process_index_to_window.find(static_cast<uint64_t>(info.process_slot));
             if (it == g_process_index_to_window.end()) {
+                if (control.should_cancel && control.should_cancel()) {
+                    return;
+                }
+                if (control.spawn) {
+                    control.spawn();
+                }
                 return;
             }
             window_id = it->second;
+        }
+
+        for (int remaining = sintra_example::k_recovery_delay_seconds; remaining > 0; --remaining) {
+            if (control.should_cancel && control.should_cancel()) {
+                return;
+            }
+            {
+                std::lock_guard<std::mutex> lock(g_state_mutex);
+                auto& state = g_window_states[window_id];
+                if (state.exited_normally || all_windows_exited_normally()) {
+                    state.recovering = false;
+                    return;
+                }
+                state.recovering = true;
+            }
+            broadcast_countdown(window_id, remaining);
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+
+        if (control.should_cancel && control.should_cancel()) {
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lock(g_state_mutex);
             auto& state = g_window_states[window_id];
-            if (state.exited_normally) {
+            if (state.exited_normally || all_windows_exited_normally()) {
                 state.recovering = false;
                 return;
             }
-            state.recovering = true;
         }
-
-        broadcast_countdown(window_id, seconds_remaining);
+        broadcast_countdown(window_id, 0);
+        if (control.spawn) {
+            control.spawn();
+        }
     });
 
     sintra::set_lifecycle_handler([](const sintra::process_lifecycle_event& event) {
