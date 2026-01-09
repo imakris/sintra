@@ -7,8 +7,6 @@ namespace {
 
 struct Finalize_bus : sintra::Derived_transceiver<Finalize_bus>
 {
-    using sintra::Derived_transceiver<Finalize_bus>::Derived_transceiver;
-
     SINTRA_MESSAGE(ping, int value);
 
     int rpc_noop()
@@ -31,7 +29,11 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    Finalize_bus bus("finalize_bus");
+    Finalize_bus bus;
+    if (!bus.assign_name("finalize_bus")) {
+        std::fprintf(stderr, "Failed to assign transceiver name.\n");
+        return 1;
+    }
     sintra::finalize();
 
     try {
