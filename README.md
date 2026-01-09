@@ -123,7 +123,7 @@ auto crash_monitor = sintra::activate_slot(
 
 ### Qt cursor sync example
 
-For a Qt widget example that forwards Qt signals through sintra, see `example/qt/README.md`.
+For a Qt widget example that forwards Qt signals through sintra, see `example/qt_basic/README.md`.
 
 ## Optional explicit type ids
 

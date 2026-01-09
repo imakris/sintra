@@ -19,11 +19,11 @@ cmake --build <build_dir> --config <config>
 Start the sender; it will spawn the receiver:
 
 ```cmd
-<build_dir>\example\qt\<config>\sintra_example_qt_cursor_sync_sender.exe
+<build_dir>\example\qt_basic\<config>\sintra_example_qt_cursor_sync_sender.exe
 ```
 
 On Linux/macOS:
 
 ```bash
-./<build_dir>/example/qt/sintra_example_qt_cursor_sync_sender
+./<build_dir>/example/qt_basic/sintra_example_qt_cursor_sync_sender
 ```
