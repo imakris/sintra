@@ -2006,6 +2006,11 @@ public:
         unblock_local();
     }
 
+    bool is_stopping() const
+    {
+        return m_stopping.load();
+    }
+
 private:
     const size_t                        m_max_trailing_elements;
     std::atomic<sequence_counter_type>* m_reading_sequence       = &s_zero_rs;

@@ -6,6 +6,7 @@
 #include "debug_pause.h"
 #include "globals.h"
 #include "logging.h"
+#include "process/coordinator.h"
 #include "process/managed_process.h"
 #include "utility.h"
 
@@ -231,6 +232,7 @@ inline bool finalize()
     sequence_counter_type flush_seq = invalid_sequence;
 
     if (s_coord) {
+        s_coord->begin_shutdown();
         trace("begin_process_draining_local.start");
         // Coordinator-local finalize: announce draining to local state so that
         // new barriers exclude this process, then wait until all known
@@ -389,6 +391,30 @@ inline void deactivate_all_slots()
 inline void enable_recovery()
 {
     s_mproc->enable_recovery();
+}
+
+inline void set_recovery_policy(Recovery_policy policy, Recovery_cancel_handler cancel_handler)
+{
+    if (!s_coord) {
+        return;
+    }
+    s_coord->set_recovery_policy(std::move(policy), std::move(cancel_handler));
+}
+
+inline void set_recovery_tick_handler(Recovery_tick_handler handler)
+{
+    if (!s_coord) {
+        return;
+    }
+    s_coord->set_recovery_tick_handler(std::move(handler));
+}
+
+inline void set_lifecycle_handler(Lifecycle_handler handler)
+{
+    if (!s_coord) {
+        return;
+    }
+    s_coord->set_lifecycle_handler(std::move(handler));
 }
 
 } // namespace sintra

@@ -231,6 +231,15 @@ Coordinator::Coordinator():
 inline
 Coordinator::~Coordinator()
 {
+    m_shutdown.store(true, std::memory_order_release);
+    {
+        std::lock_guard<mutex> lock(m_recovery_threads_mutex);
+        for (auto& thread : m_recovery_threads) {
+            if (thread.joinable()) {
+                thread.join();
+            }
+        }
+    }
     s_coord     = nullptr;
     s_coord_id  = 0;
 }
@@ -505,8 +514,10 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
         // from including this process. This handles both graceful shutdown (where
         // begin_process_draining was already called) and crash scenarios (where it wasn't).
         const auto draining_index = get_process_index(process_iid);
+        bool was_draining = false;
         if (draining_index > 0 && draining_index <= static_cast<uint64_t>(max_process_index)) {
             const auto slot = static_cast<size_t>(draining_index);
+            was_draining = (m_draining_process_states[slot].load() != 0);
             m_draining_process_states[slot] = 1;
         }
 
@@ -568,6 +579,37 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
         // re-entrancy and lock ordering issues here.
         if (m_waiting_for_all_draining.load(std::memory_order_acquire)) {
             m_all_draining_cv.notify_all();
+        }
+
+        bool crash_seen = false;
+        int crash_status = 0;
+        {
+            std::lock_guard<mutex> crash_lock(m_crash_mutex);
+            auto it = m_recent_crash_status.find(process_iid);
+            if (it != m_recent_crash_status.end()) {
+                crash_seen = true;
+                crash_status = it->second;
+                m_recent_crash_status.erase(it);
+            }
+        }
+
+        if (!crash_seen) {
+            process_lifecycle_event event;
+            event.process_iid = process_iid;
+            event.process_slot = static_cast<uint32_t>(draining_index);
+            event.status = 0;
+            event.why = was_draining
+                ? process_lifecycle_event::reason::normal_exit
+                : process_lifecycle_event::reason::unpublished;
+            emit_lifecycle_event(event);
+
+            if (!was_draining) {
+                Crash_info info;
+                info.process_iid = process_iid;
+                info.process_slot = static_cast<uint32_t>(draining_index);
+                info.status = 0;
+                recover_if_required(info);
+            }
         }
     }
 
@@ -813,8 +855,7 @@ instance_id_type Coordinator::join_swarm(
         "--branch_index",   std::to_string(branch_index),
         "--swarm_id",       std::to_string(s_mproc->m_swarm_id),
         "--instance_id",    std::to_string(new_instance_id),
-        "--coordinator_id", std::to_string(s_coord_id),
-        "--recovery_occurrence", std::to_string(spawn_args.occurrence)
+        "--coordinator_id", std::to_string(s_coord_id)
     };
     auto result = s_mproc->spawn_swarm_process(spawn_args);
 
@@ -861,17 +902,140 @@ void Coordinator::enable_recovery(instance_id_type piid)
 }
 
 inline
-void Coordinator::recover_if_required(instance_id_type piid)
+void Coordinator::recover_if_required(const Crash_info& info)
 {
-    assert(is_process(piid));
-    if (m_requested_recovery.count(piid)) {
-        // respawn
-        auto& s = s_mproc->m_cached_spawns[piid];
-        s_mproc->spawn_swarm_process(s);
+    assert(is_process(info.process_iid));
+
+    if (!m_requested_recovery.count(info.process_iid)) {
+        return;
     }
-    else {
-        // remove traces
-        // ... [implement]
+
+    Recovery_policy policy;
+    Recovery_tick_handler tick_handler;
+    Recovery_cancel_handler cancel_handler;
+    {
+        std::lock_guard<mutex> lock(m_lifecycle_mutex);
+        policy = m_recovery_policy;
+        tick_handler = m_recovery_tick_handler;
+        cancel_handler = m_recovery_cancel_handler;
+    }
+
+    Recovery_action action = Recovery_action::immediate();
+    if (policy) {
+        action = policy(info);
+    }
+
+    auto should_cancel = [cancel_handler, info]() {
+        return cancel_handler ? cancel_handler(info) : false;
+    };
+
+    auto spawn_now = [this, info, should_cancel]() {
+        if (m_shutdown.load(std::memory_order_acquire)) {
+            return;
+        }
+        if (should_cancel()) {
+            return;
+        }
+        auto& s = s_mproc->m_cached_spawns[info.process_iid];
+        s_mproc->spawn_swarm_process(s);
+    };
+
+    if (action.action == Recovery_action::kind::skip) {
+        return;
+    }
+
+    if (action.action == Recovery_action::kind::immediate ||
+        action.delay <= std::chrono::milliseconds(0)) {
+        spawn_now();
+        return;
+    }
+
+    const auto delay = action.delay;
+    {
+        std::lock_guard<mutex> lock(m_recovery_threads_mutex);
+        m_recovery_threads.emplace_back([this, info, delay, tick_handler, should_cancel, spawn_now]() {
+            const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(
+                delay + std::chrono::milliseconds(999));
+            int remaining = static_cast<int>(seconds.count());
+            for (; remaining > 0; --remaining) {
+                if (m_shutdown.load(std::memory_order_acquire)) {
+                    return;
+                }
+                if (should_cancel()) {
+                    return;
+                }
+                if (tick_handler) {
+                    tick_handler(info, remaining);
+                }
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+            }
+            if (m_shutdown.load(std::memory_order_acquire)) {
+                return;
+            }
+            if (should_cancel()) {
+                return;
+            }
+            if (tick_handler) {
+                tick_handler(info, 0);
+            }
+            spawn_now();
+        });
+    }
+}
+
+inline
+void Coordinator::set_recovery_policy(Recovery_policy policy, Recovery_cancel_handler cancel_handler)
+{
+    std::lock_guard<mutex> lock(m_lifecycle_mutex);
+    m_recovery_policy = std::move(policy);
+    m_recovery_cancel_handler = std::move(cancel_handler);
+}
+
+inline
+void Coordinator::set_recovery_tick_handler(Recovery_tick_handler handler)      
+{
+    std::lock_guard<mutex> lock(m_lifecycle_mutex);
+    m_recovery_tick_handler = std::move(handler);
+}
+
+inline
+void Coordinator::set_lifecycle_handler(Lifecycle_handler handler)
+{
+    std::lock_guard<mutex> lock(m_lifecycle_mutex);
+    m_lifecycle_handler = std::move(handler);
+}
+
+inline
+void Coordinator::begin_shutdown()
+{
+    m_shutdown.store(true, std::memory_order_release);
+}
+
+inline
+void Coordinator::note_process_crash(const Crash_info& info)
+{
+    {
+        std::lock_guard<mutex> lock(m_crash_mutex);
+        m_recent_crash_status[info.process_iid] = info.status;
+    }
+    process_lifecycle_event event;
+    event.process_iid = info.process_iid;
+    event.process_slot = info.process_slot;
+    event.why = process_lifecycle_event::reason::crash;
+    event.status = info.status;
+    emit_lifecycle_event(event);
+}
+
+inline
+void Coordinator::emit_lifecycle_event(const process_lifecycle_event& event)
+{
+    Lifecycle_handler handler;
+    {
+        std::lock_guard<mutex> lock(m_lifecycle_mutex);
+        handler = m_lifecycle_handler;
+    }
+    if (handler) {
+        handler(event);
     }
 }
 

@@ -766,11 +766,20 @@ struct Message_ring_R: Ring_R<char>
             }
 
             // start with a new reading buffer. this will block until there is something to read.
-            auto range = wait_for_new_data();
-            if (!range.begin) {
-                return nullptr;
+            while (true) {
+                auto range = wait_for_new_data();
+                if (!range.begin) {
+                    if (consume_eviction_notification()) {
+                        continue;
+                    }
+                    if (is_stopping()) {
+                        return nullptr;
+                    }
+                    continue;
+                }
+                m_range = range;
+                break;
             }
-            m_range = range;
         }
 
         bool f = false;

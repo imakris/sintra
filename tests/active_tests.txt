@@ -27,6 +27,7 @@ choreography_extreme_test                 80
 complex_choreography_stress_test          60
 complex_choreography_test                 60
 dummy_test                                 2
+finalize_emit_rpc_test                    10
 extreme_choreography_test                 80
 explicit_type_id_test                     20
 interprocess_file_mapping_test           100

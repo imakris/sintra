@@ -136,11 +136,16 @@ void deactivate_all_slots();
 
 ///\brief Enable automatic recovery for the current managed process.
 ///
-/// When recovery is enabled the coordinator will respawn the process if it
+/// When recovery is enabled the coordinator will respawn the process if it     
 /// exits unexpectedly.  Applications that rely on clean shutdown can still call
-/// `sintra::finalize()` (included below via the runtime utilities) when they
+/// `sintra::finalize()` (included below via the runtime utilities) when they   
 /// are done.
 void enable_recovery();
+
+///\brief Coordinator-only: configure recovery policy and lifecycle callbacks.
+void set_recovery_policy(Recovery_policy policy, Recovery_cancel_handler cancel_handler);
+void set_recovery_tick_handler(Recovery_tick_handler handler);
+void set_lifecycle_handler(Lifecycle_handler handler);
 
 } // namespace sintra
 

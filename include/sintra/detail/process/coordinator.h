@@ -4,6 +4,7 @@
 #pragma once
 
 #include "../id_types.h"
+#include "lifecycle_types.h"
 #include "../resolvable_instance.h"
 #include "../resolve_type.h"
 #include "../transceiver.h"
@@ -15,6 +16,7 @@
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
+#include <thread>
 #include <vector>
 
 
@@ -142,8 +144,17 @@ private:
         const unordered_set<instance_id_type>& member_process_ids);
 
     void enable_recovery(instance_id_type piid);
-    void recover_if_required(instance_id_type piid);
+    void recover_if_required(const Crash_info& info);
     void mark_initialization_complete(instance_id_type process_iid);
+    void begin_shutdown();
+    void note_process_crash(const Crash_info& info);
+    void emit_lifecycle_event(const process_lifecycle_event& event);
+
+public:
+    // Coordinator-only helpers (not exported for RPC).
+    void set_recovery_policy(Recovery_policy policy, Recovery_cancel_handler cancel_handler);
+    void set_recovery_tick_handler(Recovery_tick_handler handler);
+    void set_lifecycle_handler(Lifecycle_handler handler);
 
     // Blocks until all processes identified by process_group_id have called the function.
     // num_absences may be used by a caller to specify that it is aware that other callers will
@@ -190,6 +201,16 @@ private:
     >                                           m_instances_waited;
 
     set<instance_id_type>                       m_requested_recovery;
+    mutable std::mutex                          m_lifecycle_mutex;
+    Recovery_policy                             m_recovery_policy;
+    Recovery_tick_handler                       m_recovery_tick_handler;        
+    Recovery_cancel_handler                     m_recovery_cancel_handler;
+    Lifecycle_handler                           m_lifecycle_handler;
+    mutable std::mutex                          m_crash_mutex;
+    std::unordered_map<instance_id_type, int>   m_recent_crash_status;
+    std::mutex                                  m_recovery_threads_mutex;
+    std::vector<std::thread>                    m_recovery_threads;
+    std::atomic<bool>                           m_shutdown{false};
 
     // Track in-flight join_swarm requests keyed by branch_index to avoid
     // spawning multiple processes when callers retry the RPC. Cleared once

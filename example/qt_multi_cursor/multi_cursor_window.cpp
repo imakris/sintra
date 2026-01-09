@@ -9,7 +9,6 @@
  * - Has a "Crash" button for demonstrating recovery
  * - Receives coordinator crash countdown and respawn notifications
  * - Shows countdown during crash recovery
- * - Notifies when exiting normally vs crashing
  */
 
 #include "multi_cursor_common.h"
@@ -56,12 +55,13 @@ void post_to_ui(Obj* obj, Functor&& fn)
         Qt::QueuedConnection);
 }
 
-// Parse window_id from command line arguments
+// Parse window_id from --branch_index (branch_index is 1-based)
 int parse_window_id(int argc, char* argv[])
 {
     for (int i = 1; i < argc - 1; ++i) {
-        if (std::strcmp(argv[i], "--window_id") == 0) {
-            return std::atoi(argv[i + 1]);
+        if (std::strcmp(argv[i], "--branch_index") == 0) {
+            const int branch_index = std::atoi(argv[i + 1]);
+            return (branch_index > 0) ? (branch_index - 1) : 0;
         }
     }
     return 0; // Default to window 0
@@ -163,13 +163,7 @@ protected:
 
     void closeEvent(QCloseEvent* event) override
     {
-        // Send normal exit notification before closing
-        sintra::Log_stream(sintra::log_level::info)
-            << "[Window " << m_window_id << "] Sending normal exit notification\n";
-
-        using exit_msg = sintra_example::Cursor_bus::normal_exit_notification;
-        emit_remote<exit_msg>(m_window_id);
-
+        send_goodbye_once();
         QWidget::closeEvent(event);
     }
 
@@ -294,6 +288,15 @@ private:
 
         activate(&Cursor_window::on_cursor_left,
                  sintra::Typed_instance_id<sintra_example::Cursor_bus>(sintra::any_remote));
+    }
+
+    void send_goodbye_once()
+    {
+        if (m_sent_goodbye) {
+            return;
+        }
+        m_sent_goodbye = true;
+        emit_remote<sintra_example::Cursor_bus::window_goodbye>(m_window_id);
     }
 
     // Sintra message handlers
@@ -477,6 +480,7 @@ private:
 
     std::array<GhostCursor, sintra_example::k_num_windows> m_ghost_cursors;
     std::array<WindowState, sintra_example::k_num_windows> m_window_states;
+    bool m_sent_goodbye = false;
 };
 
 } // namespace
@@ -495,6 +499,8 @@ int main(int argc, char* argv[])
             << "Failed to initialize sintra: " << e.what() << "\n";
         return 1;
     }
+
+    sintra::enable_recovery();
 
     sintra::Log_stream(sintra::log_level::info)
         << "[Window " << window_id << "] Starting\n";

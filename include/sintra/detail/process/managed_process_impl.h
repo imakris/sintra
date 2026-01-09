@@ -994,25 +994,17 @@ Filtered_args filter_option(
 )
 {
     Filtered_args ret;
-    bool found = false;
-    for (auto& e : in_args) {
-        if (!found) {
-            if (e == in_option) {
-                found = true;
-                ret.extracted.push_back(e);
-                continue;
+    for (size_t i = 0; i < in_args.size(); ++i) {
+        const auto& e = in_args[i];
+        if (e == in_option) {
+            ret.extracted.clear();
+            ret.extracted.push_back(e);
+            for (unsigned int picked = 0; picked < num_args && i + 1 < in_args.size(); ++picked) {
+                ret.extracted.push_back(in_args[++i]);
             }
-            ret.remained.push_back(e);
+            continue;
         }
-        else {
-            if (num_args) {
-                ret.extracted.push_back(e);
-                num_args--;
-            }
-            else {
-                ret.remained.push_back(e);
-            }
-        }
+        ret.remained.push_back(e);
     }
     return ret;
 }
@@ -1386,8 +1378,13 @@ void Managed_process::init(int argc, const char* const* argv)
 
             const auto crash_index = get_process_index(msg.sender_instance_id);
             if (crash_index == 0 || crash_index > static_cast<uint64_t>(max_process_index)) {
+                Crash_info info;
+                info.process_iid = msg.sender_instance_id;
+                info.process_slot = static_cast<uint32_t>(crash_index);
+                info.status = msg.status;
+                s_coord->note_process_crash(info);
                 s_coord->unpublish_transceiver(msg.sender_instance_id);
-                s_coord->recover_if_required(msg.sender_instance_id);
+                s_coord->recover_if_required(info);
                 return;
             }
 
@@ -1399,8 +1396,13 @@ void Managed_process::init(int argc, const char* const* argv)
             }
 
             Crash_dedup_guard guard{&inflight};
+            Crash_info info;
+            info.process_iid = msg.sender_instance_id;
+            info.process_slot = static_cast<uint32_t>(crash_index);
+            info.status = msg.status;
+            s_coord->note_process_crash(info);
             s_coord->unpublish_transceiver(msg.sender_instance_id);
-            s_coord->recover_if_required(msg.sender_instance_id);
+            s_coord->recover_if_required(info);
         };
         activate<Managed_process>(unpublish_notify_handler, any_remote);
         activate<Managed_process>(cr_handler, any_remote);

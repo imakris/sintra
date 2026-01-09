@@ -45,6 +45,8 @@ struct Cursor_bus : sintra::Derived_transceiver<Cursor_bus>
 
     // Sent by each window on startup so the coordinator can map process -> window
     SINTRA_MESSAGE(window_hello, int window_id);
+    // Sent by a window before exit so the coordinator can count normal exits.
+    SINTRA_MESSAGE(window_goodbye, int window_id);
 
     // Cursor position with source window info
     // x, y: cursor position
@@ -54,7 +56,7 @@ struct Cursor_bus : sintra::Derived_transceiver<Cursor_bus>
     // Cursor left a window, hide its ghost in other windows
     SINTRA_MESSAGE(cursor_left, int window_id);
 
-    // Notification sent when a window is about to exit normally
+    // Notification broadcast by the coordinator when a window exits normally
     // This allows other windows to distinguish normal exit from crash
     SINTRA_MESSAGE(normal_exit_notification, int window_id);
 

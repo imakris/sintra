@@ -4,29 +4,20 @@
  *
  * This process:
  * - Spawns 4 window processes
- * - Monitors for normal exits via normal_exit_notification messages
- * - Exits when all windows exit normally
+ * - Monitors for normal exits via coordinator lifecycle callbacks
+ * - Exits when all windows exit (normal or crash)
  *
  * Crash recovery is coordinated here with a 5-second countdown before respawn.
  */
 
 #include "multi_cursor_common.h"
 
-#include <sintra/detail/id_types.h>
-#include <sintra/detail/process/coordinator.h>
-#include <sintra/detail/process/managed_process.h>
-#include <sintra/logging.h>
-
 #include <array>
-#include <atomic>
 #include <chrono>
 #include <condition_variable>
-#include <cstdlib>
 #include <mutex>
 #include <string>
-#include <thread>
 #include <unordered_map>
-#include <vector>
 
 namespace {
 
@@ -35,17 +26,18 @@ struct Window_state {
     bool exited_normally = false;
     bool recovering = false;
     bool active = false;
-    bool seen = false;
-    std::chrono::steady_clock::time_point spawned_at{};
 };
 
 std::mutex g_state_mutex;
 std::condition_variable g_state_cv;
-std::array<Window_state, sintra_example::k_num_windows> g_window_states;        
+std::array<Window_state, sintra_example::k_num_windows> g_window_states;
 std::unordered_map<uint64_t, int> g_process_index_to_window;
 std::unordered_map<int, uint64_t> g_window_to_process_index;
-int g_active_count = 0;
-std::atomic<bool> g_stop_monitor{false};
+std::unordered_map<uint64_t, sintra::process_lifecycle_event> g_pending_lifecycle_events;
+sintra_example::Cursor_bus* g_bus = nullptr;
+
+void broadcast_countdown(int window_id, int seconds_remaining);
+void broadcast_spawned(int window_id);
 
 std::string get_window_path(const char* argv0)
 {
@@ -73,28 +65,23 @@ void update_window_mapping(int window_id, uint64_t process_index)
     g_process_index_to_window[process_index] = window_id;
 }
 
-bool all_windows_exited_normally()
+bool all_windows_inactive()
 {
-    return g_active_count == 0;
+    for (const auto& state : g_window_states) {
+        if (state.active || state.recovering) {
+            return false;
+        }
+    }
+    return true;
 }
 
-bool parse_window_id_from_name(const std::string& assigned_name, int& window_id)
+bool all_windows_exited_normally()
 {
-    const std::string prefix = "cursor_window_";
-    if (assigned_name.rfind(prefix, 0) != 0) {
-        return false;
+    for (const auto& state : g_window_states) {
+        if (!state.exited_normally) {
+            return false;
+        }
     }
-
-    const std::string suffix = assigned_name.substr(prefix.size());
-    char* end = nullptr;
-    const long parsed = std::strtol(suffix.c_str(), &end, 10);
-    if (end == suffix.c_str() || *end != '\0') {
-        return false;
-    }
-    if (parsed < 0 || parsed >= sintra_example::k_num_windows) {
-        return false;
-    }
-    window_id = static_cast<int>(parsed);
     return true;
 }
 
@@ -107,7 +94,6 @@ void mark_active(int window_id)
     auto& state = g_window_states[window_id];
     if (!state.active) {
         state.active = true;
-        ++g_active_count;
         g_state_cv.notify_all();
     }
 }
@@ -119,12 +105,10 @@ void mark_spawned(int window_id)
     }
 
     auto& state = g_window_states[window_id];
-    state.spawned_at = std::chrono::steady_clock::now();
-    state.seen = false;
     state.exited_normally = false;
+    state.recovering = false;
     if (!state.active) {
         state.active = true;
-        ++g_active_count;
         g_state_cv.notify_all();
     }
 }
@@ -138,11 +122,102 @@ void mark_inactive(int window_id)
     auto& state = g_window_states[window_id];
     if (state.active) {
         state.active = false;
-        if (g_active_count > 0) {
-            --g_active_count;
-        }
         g_state_cv.notify_all();
     }
+}
+
+struct Lifecycle_actions {
+    int window_id = -1;
+    int status = 0;
+    bool notify_cursor_left = false;
+    bool notify_normal_exit = false;
+    bool log_crash = false;
+    bool log_unpublished = false;
+    bool log_normal_exit = false;
+};
+
+Lifecycle_actions apply_lifecycle_event_locked(
+    int window_id,
+    const sintra::process_lifecycle_event& event)
+{
+    Lifecycle_actions actions;
+    actions.window_id = window_id;
+    actions.status = event.status;
+
+    auto& state = g_window_states[window_id];
+
+    switch (event.why) {
+    case sintra::process_lifecycle_event::reason::crash:
+        state.recovering = false;
+        mark_inactive(window_id);
+        actions.notify_cursor_left = true;
+        actions.log_crash = true;
+        break;
+    case sintra::process_lifecycle_event::reason::normal_exit:
+        if (!state.exited_normally) {
+            state.exited_normally = true;
+            actions.notify_normal_exit = true;
+            actions.log_normal_exit = true;
+        }
+        state.recovering = false;
+        mark_inactive(window_id);
+        break;
+    case sintra::process_lifecycle_event::reason::unpublished:
+        state.recovering = false;
+        mark_inactive(window_id);
+        if (!state.exited_normally) {
+            actions.notify_cursor_left = true;
+            actions.log_unpublished = true;
+        }
+        break;
+    }
+
+    return actions;
+}
+
+void dispatch_lifecycle_actions(const Lifecycle_actions& actions)
+{
+    if (actions.window_id < 0) {
+        return;
+    }
+
+    if (actions.notify_cursor_left && g_bus) {
+        g_bus->emit_remote<sintra_example::Cursor_bus::cursor_left>(actions.window_id);
+    }
+    if (actions.notify_normal_exit && g_bus) {
+        g_bus->emit_remote<sintra_example::Cursor_bus::normal_exit_notification>(
+            actions.window_id);
+    }
+
+    if (actions.log_crash) {
+        sintra::Log_stream(sintra::log_level::info)
+            << "[Coordinator] Window " << actions.window_id
+            << " crashed (signal " << actions.status << ")\n";
+    }
+    else
+    if (actions.log_unpublished) {
+        sintra::Log_stream(sintra::log_level::info)
+            << "[Coordinator] Window " << actions.window_id
+            << " unpublished without normal-exit notice, treating as crash\n";
+    }
+    else
+    if (actions.log_normal_exit) {
+        sintra::Log_stream(sintra::log_level::info)
+            << "[Coordinator] Window " << actions.window_id << " signaled normal exit\n";
+    }
+}
+
+bool take_pending_lifecycle_locked(
+    uint64_t process_index,
+    sintra::process_lifecycle_event& event_out)
+{
+    auto it = g_pending_lifecycle_events.find(process_index);
+    if (it == g_pending_lifecycle_events.end()) {
+        return false;
+    }
+    event_out = it->second;
+    g_pending_lifecycle_events.erase(it);
+    return true;
 }
 
 // Transceiver for the coordinator to receive/send messages
@@ -154,8 +229,7 @@ public:
     {
         activate(&Coordinator_handler::on_window_hello,
                  sintra::Typed_instance_id<sintra_example::Cursor_bus>(sintra::any_remote));
-        // Listen for normal exit notifications from any remote sender
-        activate(&Coordinator_handler::on_normal_exit,
+        activate(&Coordinator_handler::on_window_goodbye,
                  sintra::Typed_instance_id<sintra_example::Cursor_bus>(sintra::any_remote));
     }
 
@@ -167,44 +241,48 @@ private:
             return;
         }
 
-        std::lock_guard<std::mutex> lock(g_state_mutex);
-        update_window_mapping(msg.window_id, process_index);
-        g_window_states[msg.window_id].recovering = false;
-        g_window_states[msg.window_id].seen = true;
-        mark_active(msg.window_id);
+        bool should_broadcast_spawned = false;
+        {
+            std::lock_guard<std::mutex> lock(g_state_mutex);
+            update_window_mapping(msg.window_id, process_index);
+            auto& state = g_window_states[msg.window_id];
+            should_broadcast_spawned = state.recovering;
+            state.recovering = false;
+            state.exited_normally = false;
+            mark_active(msg.window_id);
+        }
+
+        if (should_broadcast_spawned) {
+            broadcast_spawned(msg.window_id);
+        }
 
         sintra::Log_stream(sintra::log_level::info)
             << "[Coordinator] Window " << msg.window_id
             << " announced (process index " << process_index << ")\n";
     }
 
-    void on_normal_exit(const sintra_example::Cursor_bus::normal_exit_notification& msg)
+    void on_window_goodbye(const sintra_example::Cursor_bus::window_goodbye& msg)
     {
-        bool should_broadcast = false;
-        std::lock_guard<std::mutex> lock(g_state_mutex);
+        const auto process_index = sintra::get_process_index(msg.sender_instance_id);
         if (msg.window_id < 0 || msg.window_id >= sintra_example::k_num_windows) {
             return;
         }
 
-        auto& state = g_window_states[msg.window_id];
-        if (!state.exited_normally) {
-            state.exited_normally = true;
-            state.recovering = false;
-            should_broadcast = true;
-            sintra::Log_stream(sintra::log_level::info)
-                << "[Coordinator] Window " << msg.window_id << " signaled normal exit\n";
+        Lifecycle_actions actions;
+        {
+            std::lock_guard<std::mutex> lock(g_state_mutex);
+            update_window_mapping(msg.window_id, process_index);
+            sintra::process_lifecycle_event event;
+            event.process_iid = msg.sender_instance_id;
+            event.process_slot = static_cast<uint32_t>(process_index);
+            event.status = 0;
+            event.why = sintra::process_lifecycle_event::reason::normal_exit;
+            actions = apply_lifecycle_event_locked(msg.window_id, event);
         }
 
-        mark_inactive(msg.window_id);
-        g_state_cv.notify_all();
-
-        if (should_broadcast) {
-            emit_remote<sintra_example::Cursor_bus::normal_exit_notification>(msg.window_id);
-        }
+        dispatch_lifecycle_actions(actions);
     }
 };
-
-Coordinator_handler* g_bus = nullptr;
 
 void broadcast_countdown(int window_id, int seconds_remaining)
 {
@@ -221,63 +299,6 @@ void broadcast_spawned(int window_id)
         return;
     }
     g_bus->emit_remote<sintra_example::Cursor_bus::recovery_spawned>(window_id);
-}
-
-void spawn_window(int window_id, const std::string& window_path)
-{
-    std::vector<std::string> args = {
-        window_path,
-        "--window_id", std::to_string(window_id)
-    };
-
-    if (sintra::spawn_swarm_process(window_path, args) == 0) {
-        sintra::Log_stream(sintra::log_level::error)
-            << "[Coordinator] Failed to spawn window " << window_id << "\n";    
-    }
-    else {
-        sintra::Log_stream(sintra::log_level::info)
-            << "[Coordinator] Respawned window " << window_id << "\n";
-        std::lock_guard<std::mutex> lock(g_state_mutex);
-        mark_spawned(window_id);
-    }
-}
-
-void start_recovery(int window_id, const std::string& window_path)
-{
-    {
-        std::lock_guard<std::mutex> lock(g_state_mutex);
-        if (window_id < 0 || window_id >= sintra_example::k_num_windows) {      
-            return;
-        }
-
-        auto& state = g_window_states[window_id];
-        if (state.exited_normally || state.recovering || g_active_count == 0) {
-            return;
-        }
-        state.recovering = true;
-    }
-
-    std::thread([window_id, window_path]() {
-        for (int seconds = sintra_example::k_recovery_delay_seconds; seconds > 0; --seconds) {
-            {
-                std::lock_guard<std::mutex> lock(g_state_mutex);
-                if (g_active_count == 0 || g_window_states[window_id].exited_normally) {
-                    g_window_states[window_id].recovering = false;
-                    return;
-                }
-            }
-            broadcast_countdown(window_id, seconds);
-            std::this_thread::sleep_for(std::chrono::seconds(1));
-        }
-
-        spawn_window(window_id, window_path);
-        broadcast_spawned(window_id);
-
-        {
-            std::lock_guard<std::mutex> lock(g_state_mutex);
-            g_window_states[window_id].recovering = false;
-        }
-    }).detach();
 }
 
 } // namespace
@@ -301,147 +322,112 @@ int main(int argc, char* argv[])
     Coordinator_handler handler;
     g_bus = &handler;
 
+    sintra::set_recovery_policy([](const sintra::Crash_info& info) {
+        std::lock_guard<std::mutex> lock(g_state_mutex);
+        auto it = g_process_index_to_window.find(static_cast<uint64_t>(info.process_slot));
+        if (it == g_process_index_to_window.end()) {
+            if (all_windows_exited_normally()) {
+                return sintra::Recovery_action::skip();
+            }
+            return sintra::Recovery_action::immediate();
+        }
+
+        const int window_id = it->second;
+        auto& state = g_window_states[window_id];
+        if (state.exited_normally) {
+            state.recovering = false;
+            return sintra::Recovery_action::skip();
+        }
+
+        state.recovering = true;
+        return sintra::Recovery_action::delay_for(
+            std::chrono::seconds(sintra_example::k_recovery_delay_seconds));    
+    }, [](const sintra::Crash_info& info) {
+        std::lock_guard<std::mutex> lock(g_state_mutex);
+        auto it = g_process_index_to_window.find(static_cast<uint64_t>(info.process_slot));
+        if (it == g_process_index_to_window.end()) {
+            return all_windows_exited_normally();
+        }
+        const int window_id = it->second;
+        auto& state = g_window_states[window_id];
+        if (state.exited_normally) {
+            state.recovering = false;
+            return true;
+        }
+        return false;
+    });
+
+    sintra::set_recovery_tick_handler([](const sintra::Crash_info& info, int seconds_remaining) {
+        int window_id = -1;
+        {
+            std::lock_guard<std::mutex> lock(g_state_mutex);
+            auto it = g_process_index_to_window.find(static_cast<uint64_t>(info.process_slot));
+            if (it == g_process_index_to_window.end()) {
+                return;
+            }
+            window_id = it->second;
+            auto& state = g_window_states[window_id];
+            if (state.exited_normally) {
+                state.recovering = false;
+                return;
+            }
+            state.recovering = true;
+        }
+
+        broadcast_countdown(window_id, seconds_remaining);
+    });
+
+    sintra::set_lifecycle_handler([](const sintra::process_lifecycle_event& event) {
+        Lifecycle_actions actions;
+        bool has_actions = false;
+        {
+            std::lock_guard<std::mutex> lock(g_state_mutex);
+            auto it = g_process_index_to_window.find(static_cast<uint64_t>(event.process_slot));
+            if (it == g_process_index_to_window.end()) {
+                g_pending_lifecycle_events[static_cast<uint64_t>(event.process_slot)] = event;
+                return;
+            }
+            actions = apply_lifecycle_event_locked(it->second, event);
+            has_actions = true;
+        }
+
+        if (has_actions) {
+            dispatch_lifecycle_actions(actions);
+        }
+    });
+
     // Spawn 4 window processes
-    const std::string window_path = get_window_path(argc > 0 ? argv[0] : "");   
+    const std::string window_path = get_window_path(argc > 0 ? argv[0] : "");
     sintra::Log_stream(sintra::log_level::info)
-        << "[Coordinator] Spawning windows from: " << window_path << "\n";      
+        << "[Coordinator] Spawning windows from: " << window_path << "\n";
 
     for (int i = 0; i < sintra_example::k_num_windows; ++i) {
-        // Pass window_id as command line argument
-        std::vector<std::string> args = {
-            window_path,
-            "--window_id", std::to_string(i)
-        };
-
-        if (sintra::spawn_swarm_process(window_path, args) == 0) {
+        const auto piid = sintra::join_swarm(i + 1, window_path);
+        if (piid == sintra::invalid_instance_id) {
             sintra::Log_stream(sintra::log_level::error)
-                << "[Coordinator] Failed to spawn window " << i << "\n";        
+                << "[Coordinator] Failed to spawn window " << i << "\n";
         }
         else {
+            Lifecycle_actions pending_actions;
+            bool has_pending_actions = false;
+            const auto process_index = sintra::get_process_index(piid);
             {
                 std::lock_guard<std::mutex> lock(g_state_mutex);
                 mark_spawned(i);
+                update_window_mapping(i, process_index);
+                sintra::process_lifecycle_event pending_event;
+                if (take_pending_lifecycle_locked(process_index, pending_event)) {
+                    pending_actions = apply_lifecycle_event_locked(i, pending_event);
+                    has_pending_actions = true;
+                }
+            }
+            if (has_pending_actions) {
+                dispatch_lifecycle_actions(pending_actions);
             }
             sintra::Log_stream(sintra::log_level::info)
                 << "[Coordinator] Spawned window " << i << "\n";
         }
     }
-
-    // Listen for crash notifications and delayed recovery
-    sintra::activate_slot(
-        [window_path](const sintra::Managed_process::terminated_abnormally& msg) {
-            const auto process_index = sintra::get_process_index(msg.sender_instance_id);
-            int window_id = -1;
-            {
-                std::lock_guard<std::mutex> lock(g_state_mutex);
-                auto it = g_process_index_to_window.find(process_index);        
-                if (it != g_process_index_to_window.end()) {
-                    window_id = it->second;
-                }
-            }
-
-            if (window_id < 0) {
-                sintra::Log_stream(sintra::log_level::warning)
-                    << "[Coordinator] Crash detected for unknown process index "
-                    << process_index << "\n";
-                return;
-            }
-
-            sintra::Log_stream(sintra::log_level::info)
-                << "[Coordinator] Window " << window_id << " crashed (signal "
-                << msg.status << "), starting recovery countdown\n";
-            {
-                std::lock_guard<std::mutex> lock(g_state_mutex);
-                mark_inactive(window_id);
-            }
-            if (g_bus) {
-                g_bus->emit_remote<sintra_example::Cursor_bus::cursor_left>(window_id);
-            }
-            start_recovery(window_id, window_path);
-        },
-        sintra::Typed_instance_id<sintra::Managed_process>(sintra::any_remote));
-
-    // Fallback: detect normal exits from coordinator unpublish events
-    sintra::activate_slot(
-        [window_path](const sintra::Coordinator::instance_unpublished& msg) {
-            const std::string assigned = msg.assigned_name;
-            int window_id = -1;
-            if (!parse_window_id_from_name(assigned, window_id)) {
-                return;
-            }
-
-            bool should_recover = false;
-            {
-                std::lock_guard<std::mutex> lock(g_state_mutex);
-                auto& state = g_window_states[window_id];
-                if (state.exited_normally) {
-                    mark_inactive(window_id);
-                    return;
-                }
-                if (state.recovering) {
-                    mark_inactive(window_id);
-                    return;
-                }
-
-                mark_inactive(window_id);
-                should_recover = (g_active_count > 0);
-            }
-
-            if (should_recover) {
-                sintra::Log_stream(sintra::log_level::info)
-                    << "[Coordinator] Window " << window_id
-                    << " unpublished without normal-exit notice, treating as crash\n";
-                if (g_bus) {
-                    g_bus->emit_remote<sintra_example::Cursor_bus::cursor_left>(window_id);
-                }
-                start_recovery(window_id, window_path);
-            }
-        },
-        sintra::Typed_instance_id<sintra::Coordinator>(sintra::any_local_or_remote));    
-
-    // Monitor for missing window transceivers as a fallback for exit/crash detection
-    std::thread presence_thread([window_path]() {
-        constexpr auto k_spawn_grace = std::chrono::seconds(3);
-        while (!g_stop_monitor.load()) {
-            std::vector<int> to_recover;
-            {
-                std::lock_guard<std::mutex> lock(g_state_mutex);
-                const auto now = std::chrono::steady_clock::now();
-                for (int i = 0; i < sintra_example::k_num_windows; ++i) {
-                    const auto iid = sintra::get_instance_id(
-                        std::string(sintra_example::window_name(i)));
-                    const bool exists = (iid != sintra::invalid_instance_id);
-                    auto& state = g_window_states[i];
-
-                    if (exists) {
-                        state.seen = true;
-                        mark_active(i);
-                        continue;
-                    }
-
-                    if (state.active) {
-                        if (!state.seen && (now - state.spawned_at) < k_spawn_grace) {
-                            continue;
-                        }
-
-                        mark_inactive(i);
-                        if (!state.exited_normally && !state.recovering && g_active_count > 0) {
-                            to_recover.push_back(i);
-                        }
-                    }
-                }
-            }
-
-            for (int window_id : to_recover) {
-                if (g_bus) {
-                    g_bus->emit_remote<sintra_example::Cursor_bus::cursor_left>(window_id);
-                }
-                start_recovery(window_id, window_path);
-            }
-
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
-        }
-    });
 
     // Wait for all windows to exit
     sintra::Log_stream(sintra::log_level::info)
@@ -450,13 +436,8 @@ int main(int argc, char* argv[])
     {
         std::unique_lock<std::mutex> lock(g_state_mutex);
         g_state_cv.wait(lock, [] {
-            return all_windows_exited_normally();
+            return all_windows_inactive();
         });
-    }
-
-    g_stop_monitor = true;
-    if (presence_thread.joinable()) {
-        presence_thread.join();
     }
 
     sintra::Log_stream(sintra::log_level::info)

@@ -15,10 +15,10 @@ This example demonstrates advanced Sintra features using Qt:
 │                        COORDINATOR PROCESS                          │
 │   - Headless (no window)                                            │
 │   - Spawns 4 window processes                                       │
-│   - Waits for all windows to exit normally                          │
+│   - Waits for all windows to exit                                   │
 │   - Crash recovery coordinated here (5s delay)                      │
 └──────────────────────────┬──────────────────────────────────────────┘
-                           │ spawn_swarm_process()
+                           │ join_swarm()
            ┌───────────────┼───────────────┬───────────────┐
            │               │               │               │
            ▼               ▼               ▼               ▼
@@ -41,15 +41,15 @@ This example demonstrates advanced Sintra features using Qt:
 ### Crash Recovery
 - Each window has a red "Crash" button that deliberately crashes the process
 - When a window crashes:
-  1. The coordinator receives `terminated_abnormally` from Sintra
-  2. The coordinator broadcasts a synchronized 5-second countdown
-  3. After the delay, the coordinator respawns the crashed window
-  4. When cursor updates resume, windows show a "recovered" message
-  5. The recovered window rejoins the swarm seamlessly
+  1. The crashed process has recovery enabled via `sintra::enable_recovery()`
+  2. The coordinator's recovery policy schedules a 5-second delay
+  3. Countdown ticks are broadcast from the recovery tick handler
+  4. After the delay, the coordinator respawns the crashed window
+  5. When cursor updates resume, windows show a "recovered" message
 
 ### Normal Exit Handling
-- If you close a window normally (click X), it sends a `normal_exit_notification`
-- The coordinator rebroadcasts the normal exit so every window stays in sync
+- If you close a window normally (click X), it calls `sintra::finalize()` on exit
+- The coordinator detects the draining state and broadcasts the normal exit
 - Other windows display "Window N exited" in the notifications area
 - The closed window is NOT restarted (unlike crash recovery)
 - When all windows exit (normal or crash), the coordinator also exits
@@ -98,9 +98,10 @@ example\qt_multi_cursor\run_multi_cursor.bat Release
 1. **Named Transceivers**: Each window registers with a unique name (`cursor_window_0`, etc.)
 2. **Remote Message Emission**: `emit_remote<>()` sends messages to all other processes
 3. **Wildcard Message Handlers**: `activate()` with `Typed_instance_id<T>(any_remote)` receives from any remote sender
-4. **Crash Signals**: `Managed_process::terminated_abnormally` notifies the coordinator about crashes
-5. **Coordinator Broadcasts**: countdown and respawn notifications keep windows synchronized
-6. **Thread-safe UI Updates**: `post_to_ui()` helper using `QMetaObject::invokeMethod()` for safe Qt updates from Sintra handlers
+4. **Join Swarm**: `join_swarm()` spawns each window with a stable branch index
+5. **Recovery Policy Hooks**: `set_recovery_policy(..., cancel_handler)` and `set_recovery_tick_handler()`
+6. **Lifecycle Callbacks**: `set_lifecycle_handler()` coordinates crash vs normal exit
+7. **Thread-safe UI Updates**: `post_to_ui()` helper using `QMetaObject::invokeMethod()` for safe Qt updates from Sintra handlers
 
 ## Message Flow
 
@@ -113,7 +114,8 @@ Window A (mouse move) -> emit_remote<cursor_position>(x, y, window_id)
 
 ### Normal Exit
 ```
-Window A (close button) -> emit_remote<normal_exit_notification>(window_id)
+Window A (close button) -> sintra::finalize() marks the process draining
+                        -> Coordinator broadcasts normal_exit_notification
                         -> All other windows receive
                         -> Displayed as "Window N exited"
                         -> Ghost cursor hidden, no recovery expected
@@ -122,7 +124,7 @@ Window A (close button) -> emit_remote<normal_exit_notification>(window_id)
 ### Crash & Recovery
 ```
 Window A (crash button) -> Process crashes (null pointer dereference)
-                        -> Coordinator receives terminated_abnormally
+                        -> Recovery policy schedules delayed respawn
                         -> Coordinator broadcasts countdown (5..1)
                         -> Coordinator respawns Window A after delay
                         -> Recovered Window A starts sending cursor updates

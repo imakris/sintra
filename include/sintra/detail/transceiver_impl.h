@@ -5,6 +5,7 @@
 
 #include "process/coordinator.h"
 #include "process/managed_process.h"
+#include "logging.h"
 #include "transceiver.h"
 
 #include <cassert>
@@ -295,6 +296,22 @@ Transceiver::activate_impl(
     // an invalid instance must never be passed to this function (must be checked earlier)
     assert(sender_id != invalid_instance_id);
 
+    instance_id_type effective_sender_id = sender_id;
+    if (sender_id == any_remote &&
+        s_coord &&
+        is_same_v<typename MESSAGE_T::exporter, Coordinator>)
+    {
+#ifndef NDEBUG
+        static std::once_flag warn_once;
+        std::call_once(warn_once, [] {
+            Log_stream(log_level::warning)
+                << "Handler subscribed with any_remote to coordinator-originated "
+                   "message; promoting to any_local_or_remote for coordinator process.\n";
+        });
+#endif
+        effective_sender_id = any_local_or_remote;
+    }
+
     auto message_type_id = MESSAGE_T::id();
 
     using Handler_function = function<typename MESSAGE_T::return_type(const MESSAGE_T&)>;
@@ -312,14 +329,14 @@ Transceiver::activate_impl(
     auto& ms  = s_mproc->m_active_handlers[message_type_id];
     list<function<void(const Message_prefix &)>>::iterator mid_sid_it;
 
-    auto  msm_it = ms.find(sender_id);
+    auto  msm_it = ms.find(effective_sender_id);
     if (msm_it == ms.end()) {
 
         // There was no record for this sender_id, thus we have to make one.
 
         list<function<void(const Message_prefix&)>> handler_list;
         handler_list.emplace_back(wrapper);
-        msm_it = ms.emplace(sender_id, std::move(handler_list)).first;
+        msm_it = ms.emplace(effective_sender_id, std::move(handler_list)).first;
         mid_sid_it = msm_it->second.begin();
     }
     else {
@@ -544,6 +561,15 @@ void Transceiver::send(Args&&... args)
     static_assert(
         std::is_base_of_v<Message_prefix, MESSAGE_T>,
         "Attempting to send something that is not a message.");
+
+    if (!s_mproc) {
+#ifndef NDEBUG
+        Log_stream(log_level::warning)
+            << "Attempted to emit message after sintra::finalize() "
+               "or before sintra::init(); dropping.\n";
+#endif
+        return;
+    }
 
     constexpr bool sender_capability =
         is_same_v    < typename MESSAGE_T::exporter, void     > ||
@@ -836,6 +862,12 @@ template <
 typename RPCTC::r_type
 Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
 {
+    if (!s_mproc) {
+        throw runtime_error(
+            "Attempted to make an RPC call after sintra::finalize() "
+            "or before sintra::init().");
+    }
+
     if (instance_id == invalid_instance_id) {
         throw std::runtime_error("Attempted to make an RPC call using an invalid instance ID.");
     }
