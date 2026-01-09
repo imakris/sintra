@@ -1,4 +1,6 @@
 # Barrier Refactor Architecture
+> Status: Draft/abandoned. Kept for historical context only; not implemented.
+
 
 ## Background
 

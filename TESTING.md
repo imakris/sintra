@@ -75,10 +75,10 @@ The same file controls both build-time and run-time behavior:
 - Runs each test for the specified number of iterations
 
 This unified approach means:
-- ✅ One file controls everything - no multiple mechanisms
-- ✅ Commented tests are not built (saves build time)
-- ✅ Iteration counts are versioned with the code
-- ✅ Easy to focus on specific tests during debugging
+- One file controls everything - no multiple mechanisms
+- Commented tests are not built (saves build time)
+- Iteration counts are versioned with the code
+- Easy to focus on specific tests during debugging
 
 ## Building Tests
 
