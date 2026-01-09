@@ -46,6 +46,12 @@ Transceiver::Transceiver(const string& name/* = ""*/, uint64_t instance_id/* = 0
     construct(name, instance_id);
 }
 
+template <typename/* = void*/>
+Transceiver::Transceiver(const char* name, uint64_t instance_id/* = 0*/)
+{
+    construct(name ? name : "", instance_id);
+}
+
 
 
 inline

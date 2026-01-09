@@ -159,6 +159,8 @@ struct Transceiver
 
     template <typename = void>
     Transceiver(const string& name = "", uint64_t id = 0);
+    template <typename = void>
+    Transceiver(const char* name, uint64_t id = 0);
 
     ~Transceiver();
 
