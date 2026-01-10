@@ -550,9 +550,9 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
                 [this, pending = std::move(pending_completions)]() mutable {
                     std::lock_guard<mutex> groups_lock(m_groups_mutex);
                     for (auto& entry : pending) {
-                        auto it = m_groups.find(entry.group_name);
-                        if (it != m_groups.end()) {
-                            it->second.emit_barrier_completions(entry.completions);
+                        auto group_it = m_groups.find(entry.group_name);
+                        if (group_it != m_groups.end()) {
+                            group_it->second.emit_barrier_completions(entry.completions);
                         }
                     }
                 });
@@ -585,11 +585,11 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
         int crash_status = 0;
         {
             std::lock_guard<mutex> crash_lock(m_crash_mutex);
-            auto it = m_recent_crash_status.find(process_iid);
-            if (it != m_recent_crash_status.end()) {
+            auto crash_it = m_recent_crash_status.find(process_iid);
+            if (crash_it != m_recent_crash_status.end()) {
                 crash_seen = true;
-                crash_status = it->second;
-                m_recent_crash_status.erase(it);
+                crash_status = crash_it->second;
+                m_recent_crash_status.erase(crash_it);
             }
         }
 

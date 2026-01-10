@@ -5,6 +5,7 @@
 
 #include "../logging.h"
 #include "../transceiver_impl.h"
+#include "../tls_post_handler.h"
 #include <atomic>
 #include <condition_variable>
 #include <cstdlib>
@@ -60,10 +61,8 @@ inline bool on_request_reader_thread()
     return tl_is_req_thread;
 }
 
-// Historical note: mingw 11.2.0 had issues with inline thread_local non-POD objects
-// (January 2022). We now store the callable directly and rely on the fixed runtime
-// behaviour to avoid manual allocation.
-inline thread_local function<void()> tl_post_handler_function;
+// Historical note: mingw 11.2.0 had issues with inline thread_local non-POD objects.
+// Keep the callable in a heap object to avoid TLS destructor crashes.
 
 inline
 Process_message_reader::Process_message_reader(
@@ -148,7 +147,7 @@ void Process_message_reader::stop_nowait()
         // exits.
 
         auto rep_ring = m_in_rep_c;
-        tl_post_handler_function = [rep_ring]() {
+        tl_post_handler_function_ref() = [rep_ring]() {
             if (!rep_ring) {
                 return;
             }
@@ -419,9 +418,9 @@ void Process_message_reader::request_reader_function()
             }
         }
 
-        if (tl_post_handler_function) {
-            auto post_handler = std::move(tl_post_handler_function);
-            tl_post_handler_function = {};
+        if (tl_post_handler_function_ready()) {
+            auto post_handler = std::move(*tl_post_handler_function);
+            tl_post_handler_function_clear();
             post_handler();
         }
 
@@ -452,9 +451,8 @@ void Process_message_reader::request_reader_function()
     s_tl_current_request_reader = nullptr;
     tl_is_req_thread = false;
 
-    if (tl_post_handler_function) {
-        tl_post_handler_function = {};
-    }
+    tl_post_handler_function_clear();
+    tl_post_handler_function_release();
 }
 
 

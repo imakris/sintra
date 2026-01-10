@@ -103,6 +103,7 @@
 #include "../config.h"      // configuration constants for adaptive waiting, cache sizes, etc.
 #include "../get_wtime.h"   // high-res wall clock (used by adaptive reader policy)
 #include "../id_types.h"    // ID and type aliases as used by the project
+#include "../logging.h"
 
 // --- STL / stdlib ------------------------------------------------------------
 #include <algorithm>     // std::reverse
@@ -956,11 +957,19 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
             return false;
         }
 
-        bool remove_if_eq_tail(int value)
+        bool remove_value(int value)
         {
             if (count > 0 && arr[count - 1] == value) {
                 arr[--count] = -1;
                 return true;
+            }
+            for (int i = 0; i < count; ++i) {
+                if (arr[i] == value) {
+                    arr[i] = arr[count - 1];
+                    arr[--count] = -1;
+                    note_non_tail_removal(value);
+                    return true;
+                }
             }
             return false;
         }
@@ -978,6 +987,22 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
 
         int& operator[](int index) { return arr[index]; }
         const int& operator[](int index) const { return arr[index]; }
+
+#ifndef NDEBUG
+        static inline std::atomic<uint64_t> s_non_tail_removals{0};
+
+        void note_non_tail_removal(int value)
+        {
+            const auto removal_count = s_non_tail_removals.fetch_add(1) + 1;
+            if (removal_count == 1) {
+                Log_stream(log_level::warning)
+                    << "[sintra][ring] Index_stack non-tail removal; "
+                    << "out-of-order wakeups detected (value=" << value << ").\n";
+            }
+        }
+#else
+        void note_non_tail_removal(int /*value*/) {}
+#endif
     };
 
     /**
@@ -1112,9 +1137,9 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         Index_stack<max_process_index>       sleeping_stack;
 
         // A stack of indices that were posted "out of order" (e.g., after a local unblock).
-        // To avoid O(n) removals from sleeping_stack, unordered posts leave the index in
-        // sleeping_stack but flag the semaphore to avoid re-posting; the next ordered post
-        // (e.g., on publish) drains unordered items back to ready_stack.
+        // Unordered posts leave the index in sleeping_stack but flag the semaphore to avoid
+        // re-posting; the next ordered post (e.g., on publish) drains unordered items back
+        // to ready_stack. This keeps the wakeup path simple while preventing double-posts.
         Index_stack<max_process_index>       unordered_stack;
 
         void flush_wakeups()
@@ -1752,7 +1777,7 @@ struct Ring_R : Ring<T, true>
                     m_seen_unblock_sequence = unblock_sequence_after;
                     const int sleepy = m_sleepy_index;
                     if (sleepy >= 0) {
-                        c.sleeping_stack.remove_if_eq_tail(sleepy);
+                        c.sleeping_stack.remove_value(sleepy);
                         c.ready_stack.push(sleepy);
                         m_sleepy_index = -1;
                     }
@@ -1780,7 +1805,7 @@ struct Ring_R : Ring<T, true>
                             spinlock::locker lock(c.m_spinlock);
                             const int current = m_sleepy_index;
                             if (current >= 0) {
-                                c.sleeping_stack.remove_if_eq_tail(current);
+                                c.sleeping_stack.remove_value(current);
                                 c.ready_stack.push(current);
                                 m_sleepy_index = -1;
                             }

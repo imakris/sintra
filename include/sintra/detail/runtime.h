@@ -16,6 +16,7 @@
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <functional>
 #include <string>
@@ -300,13 +301,39 @@ inline bool finalize()
     return true;
 }
 
+// Returns the number of processes spawned. When wait_for_instance_name is set,
+// this waits for the instance to appear and returns 0 on wait failure even if
+// spawning succeeded (the process may still be running). explicit_instance_id
+// is not validated for uniqueness; callers must ensure it is unused. Timeout
+// waits use polling with backoff to provide bounded wait durations.
 inline size_t spawn_swarm_process(
     const std::string& binary_name,
     std::vector<std::string> args = {},
-    size_t multiplicity = 1)
+    size_t multiplicity = 1,
+    instance_id_type explicit_instance_id = invalid_instance_id,
+    const std::string& wait_for_instance_name = {},
+    std::chrono::milliseconds wait_timeout = std::chrono::milliseconds(0))      
 {
+    if ((explicit_instance_id != invalid_instance_id || !wait_for_instance_name.empty()) &&
+        multiplicity != 1)
+    {
+        Log_stream(log_level::error)
+            << "spawn_swarm_process: explicit instance or wait requires multiplicity == 1\n";
+        return 0;
+    }
+
+    const bool wait_requested = !wait_for_instance_name.empty();
+    const auto coord_id = s_coord_id;
+    if (wait_requested && coord_id == invalid_instance_id) {
+        Log_stream(log_level::error)
+            << "spawn_swarm_process: wait requires a valid coordinator\n";
+        return 0;
+    }
+
     size_t spawned = 0;
-    const auto piid = make_process_instance_id();
+    const auto piid = (explicit_instance_id != invalid_instance_id)
+        ? explicit_instance_id
+        : make_process_instance_id();
 
     // Ensure argv[0] is the program name (required on Windows); avoid duplicates.
     auto argv0_matches = [&]() {
@@ -331,7 +358,7 @@ inline size_t spawn_swarm_process(
     args.insert(args.end(), {
         "--swarm_id",       std::to_string(s_mproc->m_swarm_id),
         "--instance_id",    std::to_string(piid),
-        "--coordinator_id", std::to_string(s_coord_id)
+        "--coordinator_id", std::to_string(coord_id)
     });
 
     Managed_process::Spawn_swarm_process_args spawn_args;
@@ -344,6 +371,77 @@ inline size_t spawn_swarm_process(
         if (result.success) {
             ++spawned;
         }
+    }
+
+    if (spawned == 0 || !wait_requested) {
+        return spawned;
+    }
+
+    bool wait_succeeded = false;
+    const char* wait_failure_reason = nullptr;
+    try {
+        if (wait_timeout.count() <= 0) {
+            const auto waited = Coordinator::rpc_wait_for_instance(
+                coord_id,
+                wait_for_instance_name);
+            wait_succeeded = waited != invalid_instance_id;
+            if (!wait_succeeded) {
+                wait_failure_reason = "wait returned invalid instance id";
+            }
+        }
+        else {
+            const auto deadline = std::chrono::steady_clock::now() + wait_timeout;
+            auto poll_delay = std::chrono::milliseconds(5);
+            const auto max_poll_delay = std::chrono::milliseconds(200);
+            while (std::chrono::steady_clock::now() < deadline) {
+                const auto resolved = Coordinator::rpc_resolve_instance(
+                    coord_id,
+                    wait_for_instance_name);
+                if (resolved != invalid_instance_id) {
+                    wait_succeeded = true;
+                    break;
+                }
+
+                const auto now = std::chrono::steady_clock::now();
+                if (now >= deadline) {
+                    break;
+                }
+
+                auto sleep_for = poll_delay;
+                const auto remaining = deadline - now;
+                if (sleep_for > remaining) {
+                    sleep_for = std::chrono::duration_cast<std::chrono::milliseconds>(remaining);
+                }
+                std::this_thread::sleep_for(sleep_for);
+
+                if (poll_delay < max_poll_delay) {
+                    auto next_delay = poll_delay * 2;
+                    poll_delay = (next_delay < max_poll_delay) ? next_delay : max_poll_delay;
+                }
+            }
+
+            if (!wait_succeeded) {
+                wait_failure_reason = "timeout";
+            }
+        }
+    }
+    catch (const std::exception& ex) {
+        Log_stream(log_level::warning)
+            << "spawn_swarm_process: wait failed (" << ex.what() << ")\n";
+        return 0;
+    }
+    catch (...) {
+        Log_stream(log_level::warning)
+            << "spawn_swarm_process: wait failed (unknown exception)\n";
+        return 0;
+    }
+
+    if (!wait_succeeded) {
+        Log_stream(log_level::warning)
+            << "spawn_swarm_process: wait failed (" << wait_failure_reason
+            << ") for instance '" << wait_for_instance_name
+            << "' (spawned=" << spawned << ")\n";
+        return 0;
     }
 
     return spawned;

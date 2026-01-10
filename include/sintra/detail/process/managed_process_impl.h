@@ -8,6 +8,7 @@
 #include "../exception.h"
 #include "../ipc/platform_utils.h"
 #include "../logging.h"
+#include "../tls_post_handler.h"
 
 #include <array>
 #include <atomic>
@@ -43,7 +44,6 @@
 namespace sintra {
 
 extern thread_local bool tl_is_req_thread;
-extern thread_local std::function<void()> tl_post_handler_function;
 
 // Protects access to s_mproc during signal dispatch to prevent use-after-free.
 // On POSIX: The signal dispatch thread takes a shared lock when accessing s_mproc.
@@ -752,9 +752,9 @@ Managed_process::~Managed_process()
         stop();
 
         const bool called_from_request_reader = tl_is_req_thread;
-        if (called_from_request_reader && tl_post_handler_function) {
-            auto post_handler = std::move(tl_post_handler_function);
-            tl_post_handler_function = {};
+        if (called_from_request_reader && tl_post_handler_function_ready()) {
+            auto post_handler = std::move(*tl_post_handler_function);
+            tl_post_handler_function_clear();
             if (post_handler) {
                 post_handler();
             }
@@ -1976,13 +1976,13 @@ inline void Managed_process::run_after_current_handler(function<void()> task)
         return;
     }
 
-    if (!tl_post_handler_function) {
-        tl_post_handler_function = std::move(task);
+    if (!tl_post_handler_function_ready()) {
+        tl_post_handler_function_ref() = std::move(task);
         return;
     }
 
-    auto previous = std::move(tl_post_handler_function);
-    tl_post_handler_function = [prev = std::move(previous), task = std::move(task)]() mutable {
+    auto previous = std::move(*tl_post_handler_function);
+    tl_post_handler_function_ref() = [prev = std::move(previous), task = std::move(task)]() mutable {
         if (prev) {
             prev();
         }
@@ -2079,9 +2079,9 @@ void Managed_process::wait_for_delivery_fence()
     }
 
     while (!all_targets_satisfied()) {
-        if (tl_post_handler_function) {
-            auto post_handler = std::move(tl_post_handler_function);
-            tl_post_handler_function = {};
+        if (tl_post_handler_function_ready()) {
+            auto post_handler = std::move(*tl_post_handler_function);
+            tl_post_handler_function_clear();
 
             lk.unlock();
             try {
