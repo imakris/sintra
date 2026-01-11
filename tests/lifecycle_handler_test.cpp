@@ -177,9 +177,6 @@ int process_normal_worker()
 {
     std::fprintf(stderr, "[NORMAL_WORKER] Starting\n");
 
-    // Signal ready with worker id and our process_iid for correlation
-    sintra::world() << Ready_signal{kNormalWorkerId, sintra::process_of(s_mproc_id)};
-
     // Wait for finish signal - fail if timeout
     std::condition_variable finish_cv;
     std::mutex finish_mutex;
@@ -191,6 +188,9 @@ int process_normal_worker()
         finish = true;
         finish_cv.notify_one();
     });
+
+    // Signal ready only after slots are active to avoid races with coordinator.
+    sintra::world() << Ready_signal{kNormalWorkerId, sintra::process_of(s_mproc_id)};
 
     std::unique_lock<std::mutex> lk(finish_mutex);
     const bool signaled = finish_cv.wait_for(lk, std::chrono::seconds(30), [&] { return finish; });
@@ -216,9 +216,6 @@ int process_crash_worker()
     _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
 #endif
 
-    // Signal ready with worker id and our process_iid for correlation
-    sintra::world() << Ready_signal{kCrashWorkerId, sintra::process_of(s_mproc_id)};
-
     // Wait for crash signal
     std::condition_variable crash_cv;
     std::mutex crash_mutex;
@@ -230,6 +227,9 @@ int process_crash_worker()
         do_crash = true;
         crash_cv.notify_one();
     });
+
+    // Signal ready only after slots are active to avoid races with coordinator.
+    sintra::world() << Ready_signal{kCrashWorkerId, sintra::process_of(s_mproc_id)};
 
     std::unique_lock<std::mutex> lk(crash_mutex);
     const bool signaled = crash_cv.wait_for(lk, std::chrono::seconds(30), [&] { return do_crash; });
@@ -263,9 +263,6 @@ int process_unpublished_worker()
 {
     std::fprintf(stderr, "[UNPUBLISHED_WORKER] Starting\n");
 
-    // Signal ready with worker id and our process_iid for correlation
-    sintra::world() << Ready_signal{kUnpublishedWorkerId, sintra::process_of(s_mproc_id)};
-
     // Wait for unpublish signal
     std::condition_variable unpub_cv;
     std::mutex unpub_mutex;
@@ -277,6 +274,9 @@ int process_unpublished_worker()
         do_exit = true;
         unpub_cv.notify_one();
     });
+
+    // Signal ready only after slots are active to avoid races with coordinator.
+    sintra::world() << Ready_signal{kUnpublishedWorkerId, sintra::process_of(s_mproc_id)};
 
     std::unique_lock<std::mutex> lk(unpub_mutex);
     const bool signaled = unpub_cv.wait_for(lk, std::chrono::seconds(30), [&] { return do_exit; });
