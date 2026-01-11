@@ -282,8 +282,12 @@ int process_crash_worker()
 
     sintra::disable_debug_pause_for_current_process();
 
-    // Crash via illegal instruction
+    // Crash via a deterministic signal that the handler can observe.
+#if defined(__APPLE__)
+    std::abort();
+#else
     sintra::test::trigger_illegal_instruction_crash();
+#endif
 
     // Should never reach here
     return 0;
