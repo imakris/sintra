@@ -111,9 +111,10 @@ bool has_branch_flag(int argc, char* argv[])
     return false;
 }
 
-struct Finish_signal {};
-struct Crash_signal {};
-struct Unpublish_signal {};
+constexpr auto kReadyTimeout = std::chrono::seconds(5);
+constexpr auto kSignalTimeout = std::chrono::seconds(5);
+constexpr auto kEventTimeout = std::chrono::seconds(5);
+constexpr auto kPollInterval = std::chrono::milliseconds(50);
 
 std::filesystem::path worker_ready_path(const std::filesystem::path& dir, int worker_id)
 {
@@ -151,6 +152,32 @@ bool read_worker_ready(const std::filesystem::path& dir,
     }
     *process_iid = static_cast<sintra::instance_id_type>(raw);
     return true;
+}
+
+std::filesystem::path signal_path(const std::filesystem::path& dir, const char* name)
+{
+    std::ostringstream oss;
+    oss << "signal_" << name << ".txt";
+    return dir / oss.str();
+}
+
+bool write_signal_file(const std::filesystem::path& path)
+{
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    return static_cast<bool>(out);
+}
+
+bool wait_for_signal_file(const std::filesystem::path& path,
+                          std::chrono::milliseconds timeout)
+{
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (std::filesystem::exists(path)) {
+            return true;
+        }
+        std::this_thread::sleep_for(kPollInterval);
+    }
+    return std::filesystem::exists(path);
 }
 
 // Tracked lifecycle events (only in coordinator)
@@ -200,38 +227,21 @@ void disable_core_dumps_for_intentional_crash()
 }
 #endif
 
-// Worker that exits normally after receiving Finish_signal
+// Worker that exits normally after receiving finish signal file
 int process_normal_worker()
 {
     std::fprintf(stderr, "[NORMAL_WORKER] Starting\n");
-
-    // Wait for finish signal - fail if timeout
-    std::condition_variable finish_cv;
-    std::mutex finish_mutex;
-    bool finish = false;
-
-    sintra::activate_slot([&](const Finish_signal&) {
-        std::fprintf(stderr, "[NORMAL_WORKER] Received Finish signal\n");
-        std::lock_guard<std::mutex> lk(finish_mutex);
-        finish = true;
-        finish_cv.notify_one();
-    });
 
     const auto shared_dir = get_shared_directory();
     if (!write_worker_ready(shared_dir,
                             kNormalWorkerId,
                             sintra::process_of(s_mproc_id))) {
         std::fprintf(stderr, "[NORMAL_WORKER] ERROR: Failed to write ready file\n");
-        sintra::deactivate_all_slots();
         return 1;
     }
 
-    std::unique_lock<std::mutex> lk(finish_mutex);
-    const bool signaled = finish_cv.wait_for(lk, std::chrono::seconds(30), [&] { return finish; });
-
-    sintra::deactivate_all_slots();
-
-    if (!signaled) {
+    const auto finish_signal_path = signal_path(shared_dir, "finish");
+    if (!wait_for_signal_file(finish_signal_path, kSignalTimeout)) {
         std::fprintf(stderr, "[NORMAL_WORKER] ERROR: Timed out waiting for Finish signal\n");
         return 1;  // Fail explicitly on timeout
     }
@@ -240,7 +250,7 @@ int process_normal_worker()
     return 0;
 }
 
-// Worker that crashes after receiving Crash_signal
+// Worker that crashes after receiving crash signal file
 int process_crash_worker()
 {
     std::fprintf(stderr, "[CRASH_WORKER] Starting\n");
@@ -250,34 +260,16 @@ int process_crash_worker()
     _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
 #endif
 
-    // Wait for crash signal
-    std::condition_variable crash_cv;
-    std::mutex crash_mutex;
-    bool do_crash = false;
-
-    sintra::activate_slot([&](const Crash_signal&) {
-        std::fprintf(stderr, "[CRASH_WORKER] Received Crash signal\n");
-        std::lock_guard<std::mutex> lk(crash_mutex);
-        do_crash = true;
-        crash_cv.notify_one();
-    });
-
     const auto shared_dir = get_shared_directory();
     if (!write_worker_ready(shared_dir,
                             kCrashWorkerId,
                             sintra::process_of(s_mproc_id))) {
         std::fprintf(stderr, "[CRASH_WORKER] ERROR: Failed to write ready file\n");
-        sintra::deactivate_all_slots();
         return 1;
     }
 
-    std::unique_lock<std::mutex> lk(crash_mutex);
-    const bool signaled = crash_cv.wait_for(lk, std::chrono::seconds(30), [&] { return do_crash; });
-    lk.unlock();
-
-    sintra::deactivate_all_slots();
-
-    if (!signaled) {
+    const auto crash_signal_path = signal_path(shared_dir, "crash");
+    if (!wait_for_signal_file(crash_signal_path, kSignalTimeout)) {
         std::fprintf(stderr, "[CRASH_WORKER] ERROR: Timed out waiting for Crash signal\n");
         return 1;
     }
@@ -303,34 +295,16 @@ int process_unpublished_worker()
 {
     std::fprintf(stderr, "[UNPUBLISHED_WORKER] Starting\n");
 
-    // Wait for unpublish signal
-    std::condition_variable unpub_cv;
-    std::mutex unpub_mutex;
-    bool do_exit = false;
-
-    sintra::activate_slot([&](const Unpublish_signal&) {
-        std::fprintf(stderr, "[UNPUBLISHED_WORKER] Received Unpublish signal\n");
-        std::lock_guard<std::mutex> lk(unpub_mutex);
-        do_exit = true;
-        unpub_cv.notify_one();
-    });
-
     const auto shared_dir = get_shared_directory();
     if (!write_worker_ready(shared_dir,
                             kUnpublishedWorkerId,
                             sintra::process_of(s_mproc_id))) {
         std::fprintf(stderr, "[UNPUBLISHED_WORKER] ERROR: Failed to write ready file\n");
-        sintra::deactivate_all_slots();
         return 1;
     }
 
-    std::unique_lock<std::mutex> lk(unpub_mutex);
-    const bool signaled = unpub_cv.wait_for(lk, std::chrono::seconds(30), [&] { return do_exit; });
-    lk.unlock();
-
-    sintra::deactivate_all_slots();
-
-    if (!signaled) {
+    const auto unpublish_signal_path = signal_path(shared_dir, "unpublish");
+    if (!wait_for_signal_file(unpublish_signal_path, kSignalTimeout)) {
         std::fprintf(stderr, "[UNPUBLISHED_WORKER] ERROR: Timed out waiting for Unpublish signal\n");
         return 1;
     }
@@ -367,7 +341,7 @@ int process_coordinator()
     sintra::instance_id_type crash_worker_iid = sintra::invalid_instance_id;
     sintra::instance_id_type unpub_worker_iid = sintra::invalid_instance_id;
     sintra::instance_id_type normal_worker_iid = sintra::invalid_instance_id;
-    const auto ready_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    const auto ready_deadline = std::chrono::steady_clock::now() + kReadyTimeout;
     while (std::chrono::steady_clock::now() < ready_deadline) {
         bool have_all = true;
         if (crash_worker_iid == sintra::invalid_instance_id) {
@@ -399,16 +373,23 @@ int process_coordinator()
                  (unsigned long long)crash_worker_iid,
                  (unsigned long long)unpub_worker_iid);
 
+    const auto crash_signal_path = signal_path(shared_dir, "crash");
+    const auto unpublish_signal_path = signal_path(shared_dir, "unpublish");
+    const auto finish_signal_path = signal_path(shared_dir, "finish");
+
     if (test_passed) {
         // Test 1: Trigger crash worker
         std::fprintf(stderr, "[COORDINATOR] Test 1: Triggering crash in crash_worker\n");
-        sintra::world() << Crash_signal{};
+        if (!write_signal_file(crash_signal_path)) {
+            test_passed = false;
+            failure_reason = "Failed to write crash signal file";
+        }
 
         // Wait for crash lifecycle event
         {
             std::unique_lock<std::mutex> events_lk(g_events_mutex);
             const bool crash_event = g_events_cv.wait_for(
-                events_lk, std::chrono::seconds(30),
+                events_lk, kEventTimeout,
                 [&] {
                     for (const auto& evt : g_events) {
                         if (evt.why == sintra::process_lifecycle_event::reason::crash) {
@@ -467,16 +448,21 @@ int process_coordinator()
         }
     }
 
+    // Always signal the unpublished worker so it can exit, even if crash failed.
+    if (!write_signal_file(unpublish_signal_path) && test_passed) {
+        test_passed = false;
+        failure_reason = "Failed to write unpublish signal file";
+    }
+
     if (test_passed) {
         // Test 2: Trigger unpublished worker (abrupt exit without finalize)
         std::fprintf(stderr, "[COORDINATOR] Test 2: Triggering abrupt exit in unpublished_worker\n");
-        sintra::world() << Unpublish_signal{};
 
         // Wait for unpublished lifecycle event
         {
             std::unique_lock<std::mutex> events_lk(g_events_mutex);
             const bool unpub_event = g_events_cv.wait_for(
-                events_lk, std::chrono::seconds(30),
+                events_lk, kEventTimeout,
                 [&] {
                     for (const auto& evt : g_events) {
                         if (evt.why == sintra::process_lifecycle_event::reason::unpublished) {
@@ -537,16 +523,21 @@ int process_coordinator()
         }
     }
 
+    // Always signal the normal worker so it can exit, even if earlier checks failed.
+    if (!write_signal_file(finish_signal_path) && test_passed) {
+        test_passed = false;
+        failure_reason = "Failed to write finish signal file";
+    }
+
     if (test_passed) {
         // Test 3: Signal normal worker to finish
         std::fprintf(stderr, "[COORDINATOR] Test 3: Signaling normal_worker to finish\n");
-        sintra::world() << Finish_signal{};
 
         // Wait for normal_exit lifecycle event
         {
             std::unique_lock<std::mutex> events_lk(g_events_mutex);
             const bool normal_event = g_events_cv.wait_for(
-                events_lk, std::chrono::seconds(30),
+                events_lk, kEventTimeout,
                 [&] {
                     for (const auto& evt : g_events) {
                         if (evt.why == sintra::process_lifecycle_event::reason::normal_exit) {
