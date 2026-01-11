@@ -27,7 +27,6 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
-#include <map>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -112,23 +111,52 @@ bool has_branch_flag(int argc, char* argv[])
     return false;
 }
 
-// Ready_signal now includes process_iid for event-to-worker correlation
-struct Ready_signal {
-    int worker_id;
-    sintra::instance_id_type process_iid;
-};
 struct Finish_signal {};
 struct Crash_signal {};
 struct Unpublish_signal {};
+
+std::filesystem::path worker_ready_path(const std::filesystem::path& dir, int worker_id)
+{
+    std::ostringstream oss;
+    oss << "worker_ready_" << worker_id << ".txt";
+    return dir / oss.str();
+}
+
+bool write_worker_ready(const std::filesystem::path& dir,
+                        int worker_id,
+                        sintra::instance_id_type process_iid)
+{
+    const auto path = worker_ready_path(dir, worker_id);
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        return false;
+    }
+    out << static_cast<unsigned long long>(process_iid) << "\n";
+    return static_cast<bool>(out);
+}
+
+bool read_worker_ready(const std::filesystem::path& dir,
+                       int worker_id,
+                       sintra::instance_id_type* process_iid)
+{
+    const auto path = worker_ready_path(dir, worker_id);
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        return false;
+    }
+    unsigned long long raw = 0;
+    in >> raw;
+    if (!in) {
+        return false;
+    }
+    *process_iid = static_cast<sintra::instance_id_type>(raw);
+    return true;
+}
 
 // Tracked lifecycle events (only in coordinator)
 std::mutex g_events_mutex;
 std::vector<sintra::process_lifecycle_event> g_events;
 std::condition_variable g_events_cv;
-
-// Worker ID to process_iid mapping (only in coordinator)
-std::mutex g_worker_map_mutex;
-std::map<int, sintra::instance_id_type> g_worker_process_iids;
 
 void lifecycle_handler(const sintra::process_lifecycle_event& event)
 {
@@ -189,8 +217,14 @@ int process_normal_worker()
         finish_cv.notify_one();
     });
 
-    // Signal ready only after slots are active to avoid races with coordinator.
-    sintra::world() << Ready_signal{kNormalWorkerId, sintra::process_of(s_mproc_id)};
+    const auto shared_dir = get_shared_directory();
+    if (!write_worker_ready(shared_dir,
+                            kNormalWorkerId,
+                            sintra::process_of(s_mproc_id))) {
+        std::fprintf(stderr, "[NORMAL_WORKER] ERROR: Failed to write ready file\n");
+        sintra::deactivate_all_slots();
+        return 1;
+    }
 
     std::unique_lock<std::mutex> lk(finish_mutex);
     const bool signaled = finish_cv.wait_for(lk, std::chrono::seconds(30), [&] { return finish; });
@@ -228,8 +262,14 @@ int process_crash_worker()
         crash_cv.notify_one();
     });
 
-    // Signal ready only after slots are active to avoid races with coordinator.
-    sintra::world() << Ready_signal{kCrashWorkerId, sintra::process_of(s_mproc_id)};
+    const auto shared_dir = get_shared_directory();
+    if (!write_worker_ready(shared_dir,
+                            kCrashWorkerId,
+                            sintra::process_of(s_mproc_id))) {
+        std::fprintf(stderr, "[CRASH_WORKER] ERROR: Failed to write ready file\n");
+        sintra::deactivate_all_slots();
+        return 1;
+    }
 
     std::unique_lock<std::mutex> lk(crash_mutex);
     const bool signaled = crash_cv.wait_for(lk, std::chrono::seconds(30), [&] { return do_crash; });
@@ -275,8 +315,14 @@ int process_unpublished_worker()
         unpub_cv.notify_one();
     });
 
-    // Signal ready only after slots are active to avoid races with coordinator.
-    sintra::world() << Ready_signal{kUnpublishedWorkerId, sintra::process_of(s_mproc_id)};
+    const auto shared_dir = get_shared_directory();
+    if (!write_worker_ready(shared_dir,
+                            kUnpublishedWorkerId,
+                            sintra::process_of(s_mproc_id))) {
+        std::fprintf(stderr, "[UNPUBLISHED_WORKER] ERROR: Failed to write ready file\n");
+        sintra::deactivate_all_slots();
+        return 1;
+    }
 
     std::unique_lock<std::mutex> lk(unpub_mutex);
     const bool signaled = unpub_cv.wait_for(lk, std::chrono::seconds(30), [&] { return do_exit; });
@@ -317,53 +363,35 @@ int process_coordinator()
     bool test_passed = true;
     std::string failure_reason;
 
-    // Track ready signals from workers
-    std::mutex ready_mutex;
-    std::condition_variable ready_cv;
-    int workers_ready = 0;
-
-    sintra::activate_slot([&](const Ready_signal& sig) {
-        std::fprintf(stderr, "[COORDINATOR] Received ready signal from worker %d (process_iid=%llu)\n",
-                     sig.worker_id, (unsigned long long)sig.process_iid);
-        {
-            std::lock_guard<std::mutex> lk(g_worker_map_mutex);
-            g_worker_process_iids[sig.worker_id] = sig.process_iid;
-        }
-        {
-            std::lock_guard<std::mutex> lk(ready_mutex);
-            workers_ready++;
-            ready_cv.notify_all();
-        }
-    });
-
-    // Wait for all three workers to be ready
-    {
-        std::unique_lock<std::mutex> lk(ready_mutex);
-        const bool all_ready = ready_cv.wait_for(
-            lk, std::chrono::seconds(30), [&] { return workers_ready >= 3; });
-
-        if (!all_ready) {
-            std::fprintf(stderr, "[COORDINATOR] ERROR: Not all workers ready (got %d, expected 3)\n", workers_ready);
-            test_passed = false;
-            failure_reason = "Not all workers became ready";
-        }
-    }
-
-    // Get expected process_iids for each worker
+    // Wait for workers to publish ready files (written after slot activation)
     sintra::instance_id_type crash_worker_iid = sintra::invalid_instance_id;
     sintra::instance_id_type unpub_worker_iid = sintra::invalid_instance_id;
     sintra::instance_id_type normal_worker_iid = sintra::invalid_instance_id;
-    {
-        std::lock_guard<std::mutex> lk(g_worker_map_mutex);
-        if (g_worker_process_iids.count(kCrashWorkerId)) {
-            crash_worker_iid = g_worker_process_iids[kCrashWorkerId];
+    const auto ready_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while (std::chrono::steady_clock::now() < ready_deadline) {
+        bool have_all = true;
+        if (crash_worker_iid == sintra::invalid_instance_id) {
+            have_all = read_worker_ready(shared_dir, kCrashWorkerId, &crash_worker_iid) && have_all;
         }
-        if (g_worker_process_iids.count(kUnpublishedWorkerId)) {
-            unpub_worker_iid = g_worker_process_iids[kUnpublishedWorkerId];
+        if (unpub_worker_iid == sintra::invalid_instance_id) {
+            have_all = read_worker_ready(shared_dir, kUnpublishedWorkerId, &unpub_worker_iid) && have_all;
         }
-        if (g_worker_process_iids.count(kNormalWorkerId)) {
-            normal_worker_iid = g_worker_process_iids[kNormalWorkerId];
+        if (normal_worker_iid == sintra::invalid_instance_id) {
+            have_all = read_worker_ready(shared_dir, kNormalWorkerId, &normal_worker_iid) && have_all;
         }
+        if (have_all) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+
+    if (crash_worker_iid == sintra::invalid_instance_id ||
+        unpub_worker_iid == sintra::invalid_instance_id ||
+        normal_worker_iid == sintra::invalid_instance_id) {
+        std::fprintf(stderr,
+                     "[COORDINATOR] ERROR: Not all workers ready via ready files\n");
+        test_passed = false;
+        failure_reason = "Not all workers became ready";
     }
 
     std::fprintf(stderr, "[COORDINATOR] Worker process_iids: normal=%llu, crash=%llu, unpublished=%llu\n",
