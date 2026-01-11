@@ -93,18 +93,21 @@ int test_const_char_constructor()
 
 int test_nullptr_constructor()
 {
-    // Test construction with nullptr (should be treated as empty string)
+    // Test construction with nullptr (should be treated as empty string)       
     const char* name = nullptr;
     Test_bus bus(name);
 
     if (bus.instance_id() == sintra::invalid_instance_id) {
-        std::fprintf(stderr, "nullptr constructor: invalid instance id\n");
+        std::fprintf(stderr, "nullptr constructor: invalid instance id\n");     
         return 1;
     }
 
-    if (!verify_resolve("literal_named_bus",
-                        bus.instance_id(),
-                        "Literal constructor")) {
+    const auto resolved = sintra::Coordinator::rpc_resolve_instance(
+        s_coord_id,
+        "");
+    if (resolved != sintra::invalid_instance_id) {
+        std::fprintf(stderr,
+                     "nullptr constructor: empty name should not be resolvable\n");
         return 1;
     }
 

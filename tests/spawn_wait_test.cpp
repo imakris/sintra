@@ -9,6 +9,7 @@
 // - spawn_swarm_process returns the spawned count on success
 // - spawn_swarm_process with wait_timeout returns 0 on timeout
 // - The exponential backoff polling path is exercised (via short timeout)
+// - The timeout case proves child launched (not spawn failure) by verifying a registered name
 //
 
 #include <sintra/sintra.h>
@@ -39,6 +40,8 @@ constexpr std::string_view kEnvSharedDir = "SINTRA_TEST_SHARED_DIR";
 constexpr std::string_view kEnvWorkerMode = "SPAWN_WAIT_TEST_WORKER";
 constexpr const char* kWorkerInstanceName = "spawn_wait_dynamic_worker";
 constexpr const char* kNonexistentInstanceName = "nonexistent_instance_will_timeout";
+// Name registered by the "dummy" child in Test 1 to prove it actually launched
+constexpr const char* kTimeoutChildInstanceName = "spawn_wait_timeout_child";
 
 std::filesystem::path get_shared_directory()
 {
@@ -157,6 +160,53 @@ int run_worker()
     return 0;
 }
 
+// "Dummy" child process for Test 1 - registers a name to prove it launched,
+// then waits for Done_signal before exiting
+int run_timeout_child()
+{
+    std::fprintf(stderr, "[TIMEOUT_CHILD] Starting\n");
+
+    struct Timeout_transceiver : sintra::Derived_transceiver<Timeout_transceiver>
+    {
+        Timeout_transceiver() : Derived_transceiver<Timeout_transceiver>() {}
+    };
+
+    // Set up Done_signal handler so coordinator can clean us up
+    std::condition_variable done_cv;
+    std::mutex done_mutex;
+    bool done = false;
+
+    sintra::activate_slot([&](const Done_signal&) {
+        std::fprintf(stderr, "[TIMEOUT_CHILD] Received Done signal\n");
+        std::lock_guard<std::mutex> lk(done_mutex);
+        done = true;
+        done_cv.notify_one();
+    });
+
+    // Register our name to prove we launched successfully
+    Timeout_transceiver timeout_xceiver;
+    if (!timeout_xceiver.assign_name(kTimeoutChildInstanceName)) {
+        std::fprintf(stderr, "[TIMEOUT_CHILD] Failed to assign name '%s'\n", kTimeoutChildInstanceName);
+        sintra::deactivate_all_slots();
+        return 1;
+    }
+
+    std::fprintf(stderr, "[TIMEOUT_CHILD] Registered as '%s'\n", kTimeoutChildInstanceName);
+
+    // Wait for Done_signal or timeout after 30s
+    std::unique_lock<std::mutex> lk(done_mutex);
+    const bool signaled = done_cv.wait_for(lk, std::chrono::seconds(30), [&] { return done; });
+
+    sintra::deactivate_all_slots();
+
+    if (!signaled) {
+        std::fprintf(stderr, "[TIMEOUT_CHILD] Timed out waiting for Done signal (this is expected if coordinator forgot to signal)\n");
+    }
+
+    std::fprintf(stderr, "[TIMEOUT_CHILD] Exiting normally\n");
+    return 0;
+}
+
 // Coordinator that uses spawn_swarm_process with wait options
 int run_coordinator(const std::string& binary_path)
 {
@@ -178,8 +228,8 @@ int run_coordinator(const std::string& binary_path)
 
     // Test 1: spawn_swarm_process with timeout that should fail (nonexistent instance)
     // This exercises the exponential backoff polling path.
-    // The spawned child won't register any name because SPAWN_WAIT_TEST_WORKER env var
-    // is not set, causing it to take the "dummy" path that just sleeps and exits.
+    // The spawned child registers kTimeoutChildInstanceName but we wait for kNonexistentInstanceName,
+    // so the wait times out. We then verify the child actually launched by resolving its name.
     {
         std::fprintf(stderr, "[COORDINATOR] Test 1: Testing timeout case with short wait\n");
         const auto start = std::chrono::steady_clock::now();
@@ -209,7 +259,7 @@ int run_coordinator(const std::string& binary_path)
         }
 
         // Verify the timeout was respected (should not return immediately).
-        if (elapsed_ms < 200) {
+        if (all_tests_passed && elapsed_ms < 200) {
             std::fprintf(stderr,
                          "[COORDINATOR] Test 1: Timeout returned too quickly: %lldms\n",
                          (long long)elapsed_ms);
@@ -220,6 +270,46 @@ int run_coordinator(const std::string& binary_path)
             std::fprintf(stderr,
                          "[COORDINATOR] Test 1: Timeout duration unusually long: %lldms\n",
                          (long long)elapsed_ms);
+        }
+
+        // Verify the child actually launched by checking if we can resolve its name.
+        // This distinguishes "timeout waiting for wrong name" from "spawn failed entirely".
+        if (all_tests_passed) {
+            // Give the child time to register its name without being too brittle
+            sintra::instance_id_type timeout_child_resolved = sintra::invalid_instance_id;
+            const auto resolve_deadline = std::chrono::steady_clock::now() +
+                std::chrono::seconds(2);
+            while (std::chrono::steady_clock::now() < resolve_deadline) {
+                timeout_child_resolved = sintra::Coordinator::rpc_resolve_instance(
+                    s_coord_id,
+                    kTimeoutChildInstanceName);
+                if (timeout_child_resolved != sintra::invalid_instance_id) {
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+
+            if (timeout_child_resolved == sintra::invalid_instance_id) {
+                std::fprintf(stderr,
+                             "[COORDINATOR] Test 1: ERROR - timeout child never launched "
+                             "(could not resolve '%s')\n",
+                             kTimeoutChildInstanceName);
+                all_tests_passed = false;
+                failure_reason = "Test 1: spawn_swarm_process failed - child never launched";
+            }
+            else {
+                std::fprintf(stderr,
+                             "[COORDINATOR] Test 1: Confirmed child launched "
+                             "(resolved '%s' as %llu)\n",
+                             kTimeoutChildInstanceName,
+                             (unsigned long long)timeout_child_resolved);
+
+                // Signal the timeout child to exit cleanly
+                sintra::world() << Done_signal{};
+
+                // Brief pause to allow cleanup
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
         }
     }
 
@@ -315,14 +405,13 @@ int main(int argc, char* argv[])
         return result;
     }
 
-    // If spawned but SPAWN_WAIT_TEST_WORKER env var is not set, this is the "dummy" child
-    // from Test 1. Don't register any name - just wait long enough for the coordinator's
-    // timeout to trigger, then clean up and exit.
+    // If spawned but SPAWN_WAIT_TEST_WORKER env var is not set, this is the "timeout" child
+    // from Test 1. Register a name to prove we launched, then wait for Done_signal.
     if (is_spawned && !is_worker) {
         sintra::init(argc, argv);
-        std::this_thread::sleep_for(std::chrono::seconds(2));
+        int result = run_timeout_child();
         sintra::finalize();
-        return 0;
+        return result;
     }
 
     // Main coordinator process

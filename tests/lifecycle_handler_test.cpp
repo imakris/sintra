@@ -10,6 +10,7 @@
 // - process_lifecycle_event is emitted with reason::crash on process crash
 // - process_lifecycle_event is emitted with reason::unpublished on abrupt exit without finalize
 // - process_lifecycle_event contains valid process_iid and process_slot
+// - Lifecycle events correlate to the correct worker (process_iid matches)
 // - Crash events have non-zero status (platform-dependent)
 //
 
@@ -26,6 +27,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -48,6 +50,11 @@
 namespace {
 
 constexpr std::string_view kEnvSharedDir = "SINTRA_TEST_SHARED_DIR";
+
+// Worker IDs for correlation
+constexpr int kNormalWorkerId = 1;
+constexpr int kCrashWorkerId = 2;
+constexpr int kUnpublishedWorkerId = 3;
 
 std::filesystem::path get_shared_directory()
 {
@@ -105,7 +112,11 @@ bool has_branch_flag(int argc, char* argv[])
     return false;
 }
 
-struct Ready_signal { int worker_id; };
+// Ready_signal now includes process_iid for event-to-worker correlation
+struct Ready_signal {
+    int worker_id;
+    sintra::instance_id_type process_iid;
+};
 struct Finish_signal {};
 struct Crash_signal {};
 struct Unpublish_signal {};
@@ -114,6 +125,10 @@ struct Unpublish_signal {};
 std::mutex g_events_mutex;
 std::vector<sintra::process_lifecycle_event> g_events;
 std::condition_variable g_events_cv;
+
+// Worker ID to process_iid mapping (only in coordinator)
+std::mutex g_worker_map_mutex;
+std::map<int, sintra::instance_id_type> g_worker_process_iids;
 
 void lifecycle_handler(const sintra::process_lifecycle_event& event)
 {
@@ -162,8 +177,8 @@ int process_normal_worker()
 {
     std::fprintf(stderr, "[NORMAL_WORKER] Starting\n");
 
-    // Signal ready with worker id
-    sintra::world() << Ready_signal{1};
+    // Signal ready with worker id and our process_iid for correlation
+    sintra::world() << Ready_signal{kNormalWorkerId, sintra::process_of(s_mproc_id)};
 
     // Wait for finish signal - fail if timeout
     std::condition_variable finish_cv;
@@ -201,8 +216,8 @@ int process_crash_worker()
     _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
 #endif
 
-    // Signal ready with worker id
-    sintra::world() << Ready_signal{2};
+    // Signal ready with worker id and our process_iid for correlation
+    sintra::world() << Ready_signal{kCrashWorkerId, sintra::process_of(s_mproc_id)};
 
     // Wait for crash signal
     std::condition_variable crash_cv;
@@ -248,8 +263,8 @@ int process_unpublished_worker()
 {
     std::fprintf(stderr, "[UNPUBLISHED_WORKER] Starting\n");
 
-    // Signal ready with worker id
-    sintra::world() << Ready_signal{3};
+    // Signal ready with worker id and our process_iid for correlation
+    sintra::world() << Ready_signal{kUnpublishedWorkerId, sintra::process_of(s_mproc_id)};
 
     // Wait for unpublish signal
     std::condition_variable unpub_cv;
@@ -308,10 +323,17 @@ int process_coordinator()
     int workers_ready = 0;
 
     sintra::activate_slot([&](const Ready_signal& sig) {
-        std::fprintf(stderr, "[COORDINATOR] Received ready signal from worker %d\n", sig.worker_id);
-        std::lock_guard<std::mutex> lk(ready_mutex);
-        workers_ready++;
-        ready_cv.notify_all();
+        std::fprintf(stderr, "[COORDINATOR] Received ready signal from worker %d (process_iid=%llu)\n",
+                     sig.worker_id, (unsigned long long)sig.process_iid);
+        {
+            std::lock_guard<std::mutex> lk(g_worker_map_mutex);
+            g_worker_process_iids[sig.worker_id] = sig.process_iid;
+        }
+        {
+            std::lock_guard<std::mutex> lk(ready_mutex);
+            workers_ready++;
+            ready_cv.notify_all();
+        }
     });
 
     // Wait for all three workers to be ready
@@ -326,6 +348,28 @@ int process_coordinator()
             failure_reason = "Not all workers became ready";
         }
     }
+
+    // Get expected process_iids for each worker
+    sintra::instance_id_type crash_worker_iid = sintra::invalid_instance_id;
+    sintra::instance_id_type unpub_worker_iid = sintra::invalid_instance_id;
+    sintra::instance_id_type normal_worker_iid = sintra::invalid_instance_id;
+    {
+        std::lock_guard<std::mutex> lk(g_worker_map_mutex);
+        if (g_worker_process_iids.count(kCrashWorkerId)) {
+            crash_worker_iid = g_worker_process_iids[kCrashWorkerId];
+        }
+        if (g_worker_process_iids.count(kUnpublishedWorkerId)) {
+            unpub_worker_iid = g_worker_process_iids[kUnpublishedWorkerId];
+        }
+        if (g_worker_process_iids.count(kNormalWorkerId)) {
+            normal_worker_iid = g_worker_process_iids[kNormalWorkerId];
+        }
+    }
+
+    std::fprintf(stderr, "[COORDINATOR] Worker process_iids: normal=%llu, crash=%llu, unpublished=%llu\n",
+                 (unsigned long long)normal_worker_iid,
+                 (unsigned long long)crash_worker_iid,
+                 (unsigned long long)unpub_worker_iid);
 
     if (test_passed) {
         // Test 1: Trigger crash worker
@@ -352,7 +396,7 @@ int process_coordinator()
                 failure_reason = "No crash lifecycle event received";
             }
             else {
-                // Verify crash event fields
+                // Verify crash event fields and correlation
                 for (const auto& evt : g_events) {
                     if (evt.why == sintra::process_lifecycle_event::reason::crash) {
                         std::fprintf(stderr, "[COORDINATOR] Crash event validated: iid=%llu, slot=%u, status=%d\n",
@@ -370,6 +414,19 @@ int process_coordinator()
                         if (evt.process_slot == 0) {
                             test_passed = false;
                             failure_reason = "Crash event has invalid process_slot";
+                        }
+
+                        // Verify event came from crash_worker (event-to-worker correlation)
+                        if (test_passed && evt.process_iid != crash_worker_iid) {
+                            std::fprintf(stderr, "[COORDINATOR] ERROR: Crash event process_iid mismatch: "
+                                         "expected %llu (crash_worker), got %llu\n",
+                                         (unsigned long long)crash_worker_iid,
+                                         (unsigned long long)evt.process_iid);
+                            test_passed = false;
+                            failure_reason = "Crash event process_iid does not match crash_worker";
+                        }
+                        else if (test_passed) {
+                            std::fprintf(stderr, "[COORDINATOR] Crash event correctly correlated to crash_worker\n");
                         }
 
                         // Note: status might be 0 on some platforms even for crashes
@@ -407,7 +464,7 @@ int process_coordinator()
                 failure_reason = "No unpublished lifecycle event received";
             }
             else {
-                // Verify unpublished event fields
+                // Verify unpublished event fields and correlation
                 for (const auto& evt : g_events) {
                     if (evt.why == sintra::process_lifecycle_event::reason::unpublished) {
                         std::fprintf(stderr, "[COORDINATOR] Unpublished event validated: iid=%llu, slot=%u, status=%d\n",
@@ -424,6 +481,19 @@ int process_coordinator()
                         if (evt.process_slot == 0) {
                             test_passed = false;
                             failure_reason = "Unpublished event has invalid process_slot";
+                        }
+
+                        // Verify event came from unpublished_worker (event-to-worker correlation)
+                        if (test_passed && evt.process_iid != unpub_worker_iid) {
+                            std::fprintf(stderr, "[COORDINATOR] ERROR: Unpublished event process_iid mismatch: "
+                                         "expected %llu (unpublished_worker), got %llu\n",
+                                         (unsigned long long)unpub_worker_iid,
+                                         (unsigned long long)evt.process_iid);
+                            test_passed = false;
+                            failure_reason = "Unpublished event process_iid does not match unpublished_worker";
+                        }
+                        else if (test_passed) {
+                            std::fprintf(stderr, "[COORDINATOR] Unpublished event correctly correlated to unpublished_worker\n");
                         }
 
                         // For _exit(0), status should typically be 0
@@ -464,7 +534,7 @@ int process_coordinator()
                 failure_reason = "No normal_exit lifecycle event received";
             }
             else {
-                // Verify normal_exit event fields
+                // Verify normal_exit event fields and correlation
                 for (const auto& evt : g_events) {
                     if (evt.why == sintra::process_lifecycle_event::reason::normal_exit) {
                         std::fprintf(stderr, "[COORDINATOR] Normal exit event validated: iid=%llu, slot=%u, status=%d\n",
@@ -481,6 +551,19 @@ int process_coordinator()
                         if (evt.process_slot == 0) {
                             test_passed = false;
                             failure_reason = "Normal exit event has invalid process_slot";
+                        }
+
+                        // Verify event came from normal_worker (event-to-worker correlation)
+                        if (test_passed && evt.process_iid != normal_worker_iid) {
+                            std::fprintf(stderr, "[COORDINATOR] ERROR: Normal exit event process_iid mismatch: "
+                                         "expected %llu (normal_worker), got %llu\n",
+                                         (unsigned long long)normal_worker_iid,
+                                         (unsigned long long)evt.process_iid);
+                            test_passed = false;
+                            failure_reason = "Normal exit event process_iid does not match normal_worker";
+                        }
+                        else if (test_passed) {
+                            std::fprintf(stderr, "[COORDINATOR] Normal exit event correctly correlated to normal_worker\n");
                         }
 
                         // For normal exit, status should be 0
@@ -530,7 +613,7 @@ int process_coordinator()
             failure_reason = "Missing unpublished event in final verification";
         }
         else {
-            std::fprintf(stderr, "[COORDINATOR] All three lifecycle event types verified: crash, unpublished, normal_exit\n");
+            std::fprintf(stderr, "[COORDINATOR] All three lifecycle event types verified with correct worker correlation\n");
         }
     }
 
