@@ -66,10 +66,19 @@ namespace {
         bool has_previous = false;
     };
 
-    inline std::array<signal_slot, 6>& signal_slots()
+#ifdef SIGTRAP
+    constexpr std::size_t kSignalSlotCount = 7;
+#else
+    constexpr std::size_t kSignalSlotCount = 6;
+#endif
+
+    inline std::array<signal_slot, kSignalSlotCount>& signal_slots()
     {
-        static std::array<signal_slot, 6> slot_table {{
+        static std::array<signal_slot, kSignalSlotCount> slot_table {{
             {SIGABRT}, {SIGFPE}, {SIGILL}, {SIGINT}, {SIGSEGV}, {SIGTERM}
+#ifdef SIGTRAP
+            , {SIGTRAP}
+#endif
         }};
         return slot_table;
     }
@@ -193,10 +202,20 @@ namespace {
         bool has_previous = false;
     };
 
-    inline std::array<signal_slot, 7>& signal_slots()
+#ifdef SIGTRAP
+    constexpr std::size_t kSignalSlotCount = 8;
+#else
+    constexpr std::size_t kSignalSlotCount = 7;
+#endif
+
+    inline std::array<signal_slot, kSignalSlotCount>& signal_slots()
     {
-        static std::array<signal_slot, 7> slot_table {{
-            {SIGABRT}, {SIGFPE}, {SIGILL}, {SIGINT}, {SIGSEGV}, {SIGTERM}, {SIGCHLD}
+        static std::array<signal_slot, kSignalSlotCount> slot_table {{
+            {SIGABRT}, {SIGFPE}, {SIGILL}, {SIGINT}, {SIGSEGV}, {SIGTERM},
+#ifdef SIGTRAP
+            {SIGTRAP},
+#endif
+            {SIGCHLD}
         }};
         return slot_table;
     }
