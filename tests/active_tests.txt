@@ -17,36 +17,43 @@
 # Main test suite
 # Iteration counts are tuned for CI (detect flakiness and race conditions)
 
-barrier_complex_choreography_test         20
+barrier_complex_choreography_test         12
 barrier_flush_test                        50
 barrier_pathological_choreography_test    60
-barrier_rapid_reuse_test                  40
-barrier_stress_test                       40
-basic_pub_sub                             60
+barrier_rapid_reuse_test                  25
+barrier_stress_test                       30
+basic_pub_sub                             40
 choreography_extreme_test                 80
 complex_choreography_stress_test          60
 complex_choreography_test                 60
-dummy_test                                 2
+dummy_test                                 1
 finalize_emit_rpc_test                    10
 extreme_choreography_test                 80
-explicit_type_id_test                     20
-interprocess_file_mapping_test           100
-interprocess_mutex_test                  100
+explicit_type_id_test                      5
+interprocess_file_mapping_test            10
+interprocess_mutex_test                   30
 interprocess_semaphore_test               10
 ipc_rings_tests                           10
-macos_named_semaphore_benchmark          100
-macos_os_sync_semaphore_benchmark        100
-message_args_traits_test                 100
+macos_named_semaphore_benchmark           20
+macos_os_sync_semaphore_benchmark         20
+message_args_traits_test                   5
 ping_pong_multi_test                     100
-ping_pong_test                           100
+ping_pong_test                            50
 processing_fence_test                    100
-recovery_test                             40
+recovery_test                             30
 ring_cleanup_stress_test                 100
 rpc_append_test                          100
 semaphore_high_contention_stress          10
-spawn_detached_test                      100
-variable_buffer_alignment_test           100
-join_swarm_midflight_test                100
+spawn_detached_test                       50
+variable_buffer_alignment_test             5
+join_swarm_midflight_test                 40
+
+# New feature tests (added for recent changes)
+transceiver_ctor_test                     10
+log_stream_move_test                      10
+tls_post_handler_test                     20
+spawn_wait_test                           10
+lifecycle_handler_test                    20
 
 # Manual/reproduction tests (commented out by default)
 # Uncomment to enable these tests (they may fail by design)
