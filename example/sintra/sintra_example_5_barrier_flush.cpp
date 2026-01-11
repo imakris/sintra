@@ -18,8 +18,8 @@ before joining the barrier itself.
 
 namespace {
 
-constexpr std::size_t kWorkerCount = 2;
-constexpr std::size_t kIterations  = 64;
+constexpr std::size_t k_worker_count = 2;
+constexpr std::size_t k_iterations  = 64;
 
 struct Iteration_marker
 {
@@ -45,15 +45,15 @@ int coordinator_process()
             throw std::runtime_error("iteration mismatch in coordinator");
         }
         ++messages_in_iteration;
-        if (messages_in_iteration == kWorkerCount) {
+        if (messages_in_iteration == k_worker_count) {
             cv.notify_one();
         }
     });
     barrier("barrier-flush-ready");
 
-    for (std::size_t iteration = 0; iteration < kIterations; ++iteration) {
+    for (std::size_t iteration = 0; iteration < k_iterations; ++iteration) {
         std::unique_lock<std::mutex> lock(mutex);
-        cv.wait(lock, [&] { return messages_in_iteration == kWorkerCount; });
+        cv.wait(lock, [&] { return messages_in_iteration == k_worker_count; });
         messages_in_iteration = 0;
         ++current_iteration;
         lock.unlock();
@@ -62,7 +62,7 @@ int coordinator_process()
     }
 
     barrier("barrier-flush-done");
-    std::cout << "Completed " << kIterations << " synchronized iterations.\n";
+    std::cout << "Completed " << k_iterations << " synchronized iterations.\n";
     return 0;
 }
 
@@ -72,7 +72,7 @@ int worker_process(std::uint32_t worker_index)
 
     barrier("barrier-flush-ready");
 
-    for (std::uint32_t iteration = 0; iteration < kIterations; ++iteration) {
+    for (std::uint32_t iteration = 0; iteration < k_iterations; ++iteration) {
         world() << Iteration_marker{worker_index, iteration};
         barrier("barrier-flush-iteration");
     }

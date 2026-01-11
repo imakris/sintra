@@ -35,13 +35,13 @@
 
 namespace {
 
-constexpr std::string_view kEnvSharedDir = "SINTRA_PATHOLOGICAL_DIR";
-constexpr int kWorkerCount = 4;
-constexpr int kIterations = 6;
-constexpr int kStageSteps = 5;
-constexpr int kFinalSteps = 4;
+constexpr std::string_view k_env_shared_dir = "SINTRA_PATHOLOGICAL_DIR";
+constexpr int k_worker_count = 4;
+constexpr int k_iterations = 6;
+constexpr int k_stage_steps = 5;
+constexpr int k_final_steps = 4;
 
-struct StageReport
+struct Stage_report
 {
     int worker;
     int iteration;
@@ -50,7 +50,7 @@ struct StageReport
     int moment;
 };
 
-struct NoiseMessage
+struct Noise_message
 {
     int from;
     int to;
@@ -61,7 +61,7 @@ struct NoiseMessage
 
 std::filesystem::path get_shared_directory()
 {
-    const char* value = std::getenv(kEnvSharedDir.data());
+    const char* value = std::getenv(k_env_shared_dir.data());
     if (!value) {
         throw std::runtime_error("SINTRA_PATHOLOGICAL_DIR is not set");
     }
@@ -71,15 +71,15 @@ std::filesystem::path get_shared_directory()
 void set_shared_directory_env(const std::filesystem::path& dir)
 {
 #ifdef _WIN32
-    _putenv_s(kEnvSharedDir.data(), dir.string().c_str());
+    _putenv_s(k_env_shared_dir.data(), dir.string().c_str());
 #else
-    setenv(kEnvSharedDir.data(), dir.string().c_str(), 1);
+    setenv(k_env_shared_dir.data(), dir.string().c_str(), 1);
 #endif
 }
 
 std::filesystem::path ensure_shared_directory()
 {
-    const char* value = std::getenv(kEnvSharedDir.data());
+    const char* value = std::getenv(k_env_shared_dir.data());
     if (value && *value) {
         std::filesystem::path dir(value);
         std::filesystem::create_directories(dir);
@@ -170,14 +170,14 @@ void append_line(const std::filesystem::path& file, const std::string& line)
     out << line << '\n';
 }
 
-std::array<int, kWorkerCount + 1> expected_noise_counts_for_iteration(int iteration)
+std::array<int, k_worker_count + 1> expected_noise_counts_for_iteration(int iteration)
 {
-    std::array<int, kWorkerCount + 1> counts{};
+    std::array<int, k_worker_count + 1> counts{};
     counts.fill(0);
 
-    for (int worker = 0; worker < kWorkerCount; ++worker) {
-        for (int step = 0; step < kStageSteps; ++step) {
-            const int target = (worker + step + iteration) % (kWorkerCount + 1);
+    for (int worker = 0; worker < k_worker_count; ++worker) {
+        for (int step = 0; step < k_stage_steps; ++step) {
+            const int target = (worker + step + iteration) % (k_worker_count + 1);
             counts[static_cast<std::size_t>(target)] += 1;
         }
     }
@@ -188,7 +188,7 @@ std::array<int, kWorkerCount + 1> expected_noise_counts_for_iteration(int iterat
 int total_expected_noise_for_worker(int worker_index)
 {
     int total = 0;
-    for (int iteration = 0; iteration < kIterations; ++iteration) {
+    for (int iteration = 0; iteration < k_iterations; ++iteration) {
         const auto counts = expected_noise_counts_for_iteration(iteration);
         total += counts[static_cast<std::size_t>(worker_index)];
     }
@@ -197,10 +197,10 @@ int total_expected_noise_for_worker(int worker_index)
 
 int compute_noise_target(int worker, int iteration, int step)
 {
-    return (worker + step + iteration) % (kWorkerCount + 1);
+    return (worker + step + iteration) % (k_worker_count + 1);
 }
 
-std::string stage_report_to_string(const StageReport& report)
+std::string stage_report_to_string(const Stage_report& report)
 {
     std::ostringstream oss;
     oss << "worker=" << report.worker << ",iter=" << report.iteration
@@ -222,18 +222,18 @@ bool has_branch_flag(int argc, char* argv[])
 struct Controller_state
 {
     std::mutex mutex;
-    std::vector<StageReport> stage_reports;
-    std::array<int, kIterations> controller_noise_counts{};
+    std::vector<Stage_report> stage_reports;
+    std::array<int, k_iterations> controller_noise_counts{};
     int total_controller_noise = 0;
 };
 
-void record_stage_report(Controller_state& state, const StageReport& report)
+void record_stage_report(Controller_state& state, const Stage_report& report)
 {
     std::lock_guard<std::mutex> lock(state.mutex);
     state.stage_reports.push_back(report);
 }
 
-void record_controller_noise(Controller_state& state, const NoiseMessage& msg)
+void record_controller_noise(Controller_state& state, const Noise_message& msg)
 {
     std::lock_guard<std::mutex> lock(state.mutex);
     state.controller_noise_counts[static_cast<std::size_t>(msg.iteration)] += 1;
@@ -242,11 +242,11 @@ void record_controller_noise(Controller_state& state, const NoiseMessage& msg)
 
 void write_summary(const Controller_state& state, const std::filesystem::path& dir)
 {
-    std::array<std::array<int, 2>, kIterations> pre_counts{};
-    std::array<std::array<std::array<int, 2>, kStageSteps>, kIterations> stage_counts{};
-    std::array<std::array<int, 2>, kIterations> process_counts{};
-    std::array<std::array<std::array<int, 2>, kFinalSteps>, kIterations> final_counts{};
-    std::array<std::array<int, 2>, kIterations> final_process_counts{};
+    std::array<std::array<int, 2>, k_iterations> pre_counts{};
+    std::array<std::array<std::array<int, 2>, k_stage_steps>, k_iterations> stage_counts{};
+    std::array<std::array<int, 2>, k_iterations> process_counts{};
+    std::array<std::array<std::array<int, 2>, k_final_steps>, k_iterations> final_counts{};
+    std::array<std::array<int, 2>, k_iterations> final_process_counts{};
 
     for (const auto& report : state.stage_reports) {
         const auto iter = static_cast<std::size_t>(report.iteration);
@@ -278,7 +278,7 @@ void write_summary(const Controller_state& state, const std::filesystem::path& d
     auto check_pair = [&](const auto& pair_counts, const std::string& label) {
         for (std::size_t iter = 0; iter < pair_counts.size(); ++iter) {
             for (std::size_t moment = 0; moment < pair_counts[iter].size(); ++moment) {
-                if (pair_counts[iter][moment] != kWorkerCount) {
+                if (pair_counts[iter][moment] != k_worker_count) {
                     ok = false;
                 }
             }
@@ -289,7 +289,7 @@ void write_summary(const Controller_state& state, const std::filesystem::path& d
         for (std::size_t iter = 0; iter < stage_counts_array.size(); ++iter) {
             for (std::size_t step = 0; step < stage_counts_array[iter].size(); ++step) {
                 for (std::size_t moment = 0; moment < stage_counts_array[iter][step].size(); ++moment) {
-                    if (stage_counts_array[iter][step][moment] != kWorkerCount) {
+                    if (stage_counts_array[iter][step][moment] != k_worker_count) {
                         ok = false;
                     }
                 }
@@ -307,7 +307,7 @@ void write_summary(const Controller_state& state, const std::filesystem::path& d
     out << (ok ? "ok" : "fail") << '\n';
     out << "reports=" << state.stage_reports.size() << '\n';
     out << "controller_noise_total=" << state.total_controller_noise << '\n';
-    for (int iter = 0; iter < kIterations; ++iter) {
+    for (int iter = 0; iter < k_iterations; ++iter) {
         out << "controller_noise_iter_" << iter << '='
             << state.controller_noise_counts[static_cast<std::size_t>(iter)] << '\n';
     }
@@ -321,13 +321,13 @@ int controller_process()
     const auto shared_dir = get_shared_directory();
     const auto controller_log = shared_dir / "controller_stage.log";
 
-    auto stage_slot = [&state, controller_log](const StageReport& report) {
+    auto stage_slot = [&state, controller_log](const Stage_report& report) {
         record_stage_report(state, report);
         append_line(controller_log, stage_report_to_string(report));
     };
 
-    auto noise_slot = [&state](const NoiseMessage& msg) {
-        if (msg.to == kWorkerCount) {
+    auto noise_slot = [&state](const Noise_message& msg) {
+        if (msg.to == k_worker_count) {
             record_controller_noise(state, msg);
         }
     };
@@ -337,11 +337,11 @@ int controller_process()
 
     sintra::barrier("pathological-setup");
 
-    for (int iteration = 0; iteration < kIterations; ++iteration) {
+    for (int iteration = 0; iteration < k_iterations; ++iteration) {
         const auto pre_name = make_pre_barrier_name(iteration);
         sintra::barrier(pre_name);
 
-        for (int step = 0; step < kStageSteps; ++step) {
+        for (int step = 0; step < k_stage_steps; ++step) {
             const auto stage_name = make_stage_barrier_name(iteration, step);
             sintra::barrier(stage_name);
         }
@@ -349,7 +349,7 @@ int controller_process()
         const auto processing_name = make_stage_processing_name(iteration);
         sintra::barrier<sintra::processing_fence_t>(processing_name);
 
-        std::vector<int> final_order(kFinalSteps);
+        std::vector<int> final_order(k_final_steps);
         std::iota(final_order.begin(), final_order.end(), 0);
         if (iteration % 2 == 1) {
             std::reverse(final_order.begin(), final_order.end());
@@ -371,7 +371,7 @@ int controller_process()
 }
 
 void log_stage_event(const std::filesystem::path& log_path,
-                     const StageReport& report,
+                     const Stage_report& report,
                      std::string_view phase)
 {
     std::ostringstream oss;
@@ -379,7 +379,7 @@ void log_stage_event(const std::filesystem::path& log_path,
     append_line(log_path, oss.str());
 }
 
-void log_noise_event(const std::filesystem::path& log_path, const NoiseMessage& msg)
+void log_noise_event(const std::filesystem::path& log_path, const Noise_message& msg)
 {
     std::ostringstream oss;
     oss << "from=" << msg.from << ",iter=" << msg.iteration << ",step=" << msg.step
@@ -395,7 +395,7 @@ int worker_process(int worker_index)
     const auto stage_log = shared_dir / make_stage_log_name(worker_index);
     const auto noise_log = shared_dir / make_worker_noise_log(worker_index);
 
-    auto stage_slot = [stage_log, worker_index](const StageReport& report) {
+    auto stage_slot = [stage_log, worker_index](const Stage_report& report) {
         // All workers observe every report but only write detailed entries for
         // their own messages to avoid pathological log sizes.
         if (report.worker == worker_index) {
@@ -403,7 +403,7 @@ int worker_process(int worker_index)
         }
     };
 
-    auto noise_slot = [noise_log, worker_index](const NoiseMessage& msg) {
+    auto noise_slot = [noise_log, worker_index](const Noise_message& msg) {
         if (msg.to != worker_index) {
             return;
         }
@@ -423,10 +423,10 @@ int worker_process(int worker_index)
     std::mt19937 rng(static_cast<unsigned>(worker_index * 7919 + 101));
     std::uniform_int_distribution<int> jitter(0, 5);
 
-    for (int iteration = 0; iteration < kIterations; ++iteration) {
+    for (int iteration = 0; iteration < k_iterations; ++iteration) {
         const auto pre_name = make_pre_barrier_name(iteration);
 
-        StageReport pre_before{worker_index, iteration, 0, -1, 0};
+        Stage_report pre_before{worker_index, iteration, 0, -1, 0};
         sintra::world() << pre_before;
         log_stage_event(stage_log, pre_before, "emit");
         if (jitter(rng) == 0) {
@@ -435,17 +435,17 @@ int worker_process(int worker_index)
 
         sintra::barrier(pre_name);
 
-        StageReport pre_after{worker_index, iteration, 0, -1, 1};
+        Stage_report pre_after{worker_index, iteration, 0, -1, 1};
         sintra::world() << pre_after;
         log_stage_event(stage_log, pre_after, "emit");
 
-        for (int step = 0; step < kStageSteps; ++step) {
-            StageReport step_before{worker_index, iteration, 1, step, 0};
+        for (int step = 0; step < k_stage_steps; ++step) {
+            Stage_report step_before{worker_index, iteration, 1, step, 0};
             sintra::world() << step_before;
             log_stage_event(stage_log, step_before, "emit");
 
             const int noise_target = compute_noise_target(worker_index, iteration, step);
-            NoiseMessage noise{worker_index, noise_target, iteration, step,
+            Noise_message noise{worker_index, noise_target, iteration, step,
                                worker_index * 100 + iteration * 10 + step};
             sintra::world() << noise;
 
@@ -455,30 +455,30 @@ int worker_process(int worker_index)
             }
             sintra::barrier(stage_name);
 
-            StageReport step_after{worker_index, iteration, 1, step, 1};
+            Stage_report step_after{worker_index, iteration, 1, step, 1};
             sintra::world() << step_after;
             log_stage_event(stage_log, step_after, "emit");
         }
 
-        StageReport process_pending{worker_index, iteration, 2, -1, 0};
+        Stage_report process_pending{worker_index, iteration, 2, -1, 0};
         sintra::world() << process_pending;
         log_stage_event(stage_log, process_pending, "emit");
 
         const auto processing_name = make_stage_processing_name(iteration);
         sintra::barrier<processing_fence_t>(processing_name);
 
-        StageReport process_done{worker_index, iteration, 2, -1, 1};
+        Stage_report process_done{worker_index, iteration, 2, -1, 1};
         sintra::world() << process_done;
         log_stage_event(stage_log, process_done, "emit");
 
-        std::vector<int> final_order(kFinalSteps);
+        std::vector<int> final_order(k_final_steps);
         std::iota(final_order.begin(), final_order.end(), 0);
         if (iteration % 2 == 1) {
             std::reverse(final_order.begin(), final_order.end());
         }
 
         for (int index : final_order) {
-            StageReport final_before{worker_index, iteration, 3, index, 0};
+            Stage_report final_before{worker_index, iteration, 3, index, 0};
             sintra::world() << final_before;
             log_stage_event(stage_log, final_before, "emit");
 
@@ -488,19 +488,19 @@ int worker_process(int worker_index)
             }
             sintra::barrier(final_name);
 
-            StageReport final_after{worker_index, iteration, 3, index, 1};
+            Stage_report final_after{worker_index, iteration, 3, index, 1};
             sintra::world() << final_after;
             log_stage_event(stage_log, final_after, "emit");
         }
 
-        StageReport final_pending{worker_index, iteration, 4, -1, 0};
+        Stage_report final_pending{worker_index, iteration, 4, -1, 0};
         sintra::world() << final_pending;
         log_stage_event(stage_log, final_pending, "emit");
 
         const auto final_processing = make_final_processing_name(iteration);
         sintra::barrier<processing_fence_t>(final_processing);
 
-        StageReport final_done{worker_index, iteration, 4, -1, 1};
+        Stage_report final_done{worker_index, iteration, 4, -1, 1};
         sintra::world() << final_done;
         log_stage_event(stage_log, final_done, "emit");
     }
@@ -522,7 +522,7 @@ int main(int argc, char* argv[])
     const auto shared_dir = ensure_shared_directory();
 
     if (!is_spawned) {
-        for (int worker = 0; worker < kWorkerCount; ++worker) {
+        for (int worker = 0; worker < k_worker_count; ++worker) {
             const auto stage_log = shared_dir / make_stage_log_name(worker);
             const auto noise_log = shared_dir / make_worker_noise_log(worker);
             std::filesystem::remove(stage_log);
@@ -559,7 +559,7 @@ int main(int argc, char* argv[])
             exit_code = 1;
         }
         else {
-            for (int worker = 0; worker < kWorkerCount; ++worker) {
+            for (int worker = 0; worker < k_worker_count; ++worker) {
                 const auto noise_log = shared_dir / make_worker_noise_log(worker);
                 std::ifstream in(noise_log, std::ios::binary);
                 int lines = 0;

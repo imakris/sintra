@@ -17,7 +17,7 @@ struct alignas(16) Aligned16
 
 static_assert(std::is_trivially_copyable_v<Aligned16>, "Aligned16 must be trivially copyable");
 
-struct AlignmentPayload
+struct Alignment_payload
 {
     sintra::typed_variable_buffer<std::vector<char>> chars;
     sintra::typed_variable_buffer<std::vector<Aligned16>> aligned_values;
@@ -31,7 +31,7 @@ bool is_aligned(const void* ptr, std::size_t alignment)
 
 } // namespace
 
-using AlignmentMessage = sintra::Message<AlignmentPayload, void, 0xA11E71Dull>;
+using Alignment_message = sintra::Message<Alignment_payload, void, 0xA11E71Dull>;
 
 int main()
 {
@@ -39,11 +39,11 @@ int main()
     std::vector<Aligned16> aligned_values(3);
     std::vector<double> doubles = {1.0, 2.0, 3.0, 4.0};
 
-    const std::size_t expected_extra = sintra::vb_size<AlignmentMessage>(chars, aligned_values, doubles);
-    const std::size_t total_size = sizeof(AlignmentMessage) + expected_extra;
+    const std::size_t expected_extra = sintra::vb_size<Alignment_message>(chars, aligned_values, doubles);
+    const std::size_t total_size = sizeof(Alignment_message) + expected_extra;
 
-    void* raw = ::operator new(total_size, std::align_val_t(alignof(AlignmentMessage)));
-    AlignmentMessage* message = new (raw) AlignmentMessage(chars, aligned_values, doubles);
+    void* raw = ::operator new(total_size, std::align_val_t(alignof(Alignment_message)));
+    Alignment_message* message = new (raw) Alignment_message(chars, aligned_values, doubles);
 
     const auto* base = reinterpret_cast<const char*>(message);
     const auto* chars_ptr = static_cast<const char*>(message->chars.data_address());
@@ -55,8 +55,8 @@ int main()
     };
 
     auto cleanup_and_fail = [&](int code) {
-        message->~AlignmentMessage();
-        ::operator delete(raw, std::align_val_t(alignof(AlignmentMessage)));
+        message->~Alignment_message();
+        ::operator delete(raw, std::align_val_t(alignof(Alignment_message)));
         return code;
     };
 
@@ -86,7 +86,7 @@ int main()
         return cleanup_and_fail(1);
     }
 
-    if (message->bytes_to_next_message - sizeof(AlignmentMessage) != expected_extra) {
+    if (message->bytes_to_next_message - sizeof(Alignment_message) != expected_extra) {
         std::cerr << "vb_size did not predict the aligned payload span" << std::endl;
         return cleanup_and_fail(1);
     }
@@ -96,7 +96,7 @@ int main()
         return cleanup_and_fail(1);
     }
 
-    message->~AlignmentMessage();
-    ::operator delete(raw, std::align_val_t(alignof(AlignmentMessage)));
+    message->~Alignment_message();
+    ::operator delete(raw, std::align_val_t(alignof(Alignment_message)));
     return 0;
 }

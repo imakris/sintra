@@ -511,8 +511,8 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
     std::wstring cmdline_str = build_command_line(argv);
 
     // Validate command line length (Windows limit is 32,767 characters)
-    constexpr size_t kMaxCommandLineLength = 32767;
-    if (cmdline_str.length() >= kMaxCommandLineLength) {
+    constexpr size_t k_max_command_line_length = 32767;
+    if (cmdline_str.length() >= k_max_command_line_length) {
         if (child_pid_out) {
             *child_pid_out = -1;
         }
@@ -523,13 +523,13 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
     std::vector<wchar_t> cmdline_buf(cmdline_str.begin(), cmdline_str.end());
     cmdline_buf.push_back(L'\0'); // Null-terminate
 
-    constexpr unsigned kMaxAttempts = 5;
+    constexpr unsigned k_max_attempts = 5;
     const auto retry_delay = std::chrono::milliseconds(50);
 
     int last_errno = 0;
     unsigned long last_doserrno = 0;
 
-    for (unsigned attempt = 0; attempt < kMaxAttempts; ++attempt) {
+    for (unsigned attempt = 0; attempt < k_max_attempts; ++attempt) {
         STARTUPINFOW si;
         ZeroMemory(&si, sizeof(si));
         si.cb = sizeof(si);
@@ -588,7 +588,7 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
              last_doserrno == ERROR_LOCK_VIOLATION);
         const bool transient = (last_errno == EAGAIN) || access_denied;
 
-        if (attempt + 1 < kMaxAttempts && transient) {
+        if (attempt + 1 < k_max_attempts && transient) {
             std::this_thread::sleep_for(retry_delay);
             continue;
         }

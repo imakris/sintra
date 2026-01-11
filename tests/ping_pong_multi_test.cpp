@@ -44,11 +44,11 @@ struct Ping {};
 struct Pong {};
 struct Stop {};
 
-constexpr std::string_view kEnvSharedDir = "SINTRA_TEST_SHARED_DIR";
+constexpr std::string_view k_env_shared_dir = "SINTRA_TEST_SHARED_DIR";
 
 std::filesystem::path get_shared_directory()
 {
-    const char* value = std::getenv(kEnvSharedDir.data());
+    const char* value = std::getenv(k_env_shared_dir.data());
     if (!value) {
         throw std::runtime_error("SINTRA_TEST_SHARED_DIR is not set");
     }
@@ -58,15 +58,15 @@ std::filesystem::path get_shared_directory()
 void set_shared_directory_env(const std::filesystem::path& dir)
 {
 #ifdef _WIN32
-    _putenv_s(kEnvSharedDir.data(), dir.string().c_str());
+    _putenv_s(k_env_shared_dir.data(), dir.string().c_str());
 #else
-    setenv(kEnvSharedDir.data(), dir.string().c_str(), 1);
+    setenv(k_env_shared_dir.data(), dir.string().c_str(), 1);
 #endif
 }
 
 std::filesystem::path ensure_shared_directory()
 {
-    const char* value = std::getenv(kEnvSharedDir.data());
+    const char* value = std::getenv(k_env_shared_dir.data());
     if (value && *value) {
         std::filesystem::path dir(value);
         std::filesystem::create_directories(dir);
@@ -132,7 +132,7 @@ void wait_for_stop()
     sintra::deactivate_all_slots();
 }
 
-constexpr int kTargetPingCount = 150;
+constexpr int k_target_ping_count = 150;
 
 int process_ping_responder()
 {
@@ -170,7 +170,7 @@ int process_monitor()
             return;
         }
         int count = counter.fetch_add(1) + 1;
-        if (count >= kTargetPingCount) {
+        if (count >= k_target_ping_count) {
             bool expected = false;
             if (stop_sent.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
                 sintra::world() << Stop();
@@ -214,7 +214,7 @@ int main(int argc, char* argv[])
     if (!is_spawned) {
         const auto path = shared_dir / "ping_count.txt";
         const int count = read_count(path);
-        bool ok = (count == kTargetPingCount);
+        bool ok = (count == k_target_ping_count);
         try {
             std::filesystem::remove_all(shared_dir);
         }

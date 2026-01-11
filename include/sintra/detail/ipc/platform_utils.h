@@ -318,8 +318,8 @@ inline bool is_process_alive(uint32_t pid)
         return true;
     }
 
-    constexpr int kProcStatusZombie = 5; // corresponds to SZOMB in <sys/proc.h>
-    return bsd_info.pbi_status != kProcStatusZombie;
+    constexpr int k_proc_status_zombie = 5; // corresponds to SZOMB in <sys/proc.h>
+    return bsd_info.pbi_status != k_proc_status_zombie;
 #else
     std::ifstream stat_file;
     stat_file.open(std::string("/proc/") + std::to_string(pid) + "/stat");

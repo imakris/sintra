@@ -37,10 +37,10 @@
 
 namespace {
 
-constexpr std::size_t kWorkerCount  = 2;
-constexpr std::size_t kIterations   = 64;
-constexpr std::size_t kBurstCount   = 8;
-constexpr auto kHandlerDelay        = std::chrono::milliseconds(12);
+constexpr std::size_t k_worker_count  = 2;
+constexpr std::size_t k_iterations   = 64;
+constexpr std::size_t k_burst_count   = 8;
+constexpr auto k_handler_delay        = std::chrono::milliseconds(12);
 
 struct Iteration_marker
 {
@@ -49,11 +49,11 @@ struct Iteration_marker
     std::uint32_t sequence;
 };
 
-constexpr std::string_view kEnvSharedDir = "SINTRA_DELIVERY_FENCE_DIR";
+constexpr std::string_view k_env_shared_dir = "SINTRA_DELIVERY_FENCE_DIR";
 
 std::filesystem::path get_shared_directory()
 {
-    const char* value = std::getenv(kEnvSharedDir.data());
+    const char* value = std::getenv(k_env_shared_dir.data());
     if (!value) {
         throw std::runtime_error("SINTRA_DELIVERY_FENCE_DIR is not set");
     }
@@ -63,15 +63,15 @@ std::filesystem::path get_shared_directory()
 void set_shared_directory_env(const std::filesystem::path& dir)
 {
 #ifdef _WIN32
-    _putenv_s(kEnvSharedDir.data(), dir.string().c_str());
+    _putenv_s(k_env_shared_dir.data(), dir.string().c_str());
 #else
-    setenv(kEnvSharedDir.data(), dir.string().c_str(), 1);
+    setenv(k_env_shared_dir.data(), dir.string().c_str(), 1);
 #endif
 }
 
 std::filesystem::path ensure_shared_directory()
 {
-    const char* value = std::getenv(kEnvSharedDir.data());
+    const char* value = std::getenv(k_env_shared_dir.data());
     if (value && *value) {
         std::filesystem::path dir(value);
         std::filesystem::create_directories(dir);
@@ -104,9 +104,9 @@ struct Coordinator_state
 {
     std::mutex mutex;
     std::condition_variable cv;
-    std::array<std::uint32_t, kWorkerCount> next_expected_sequence{};
-    std::array<std::uint32_t, kWorkerCount> next_expected_iteration{};
-    std::array<std::uint32_t, kWorkerCount> messages_seen_in_iteration{};
+    std::array<std::uint32_t, k_worker_count> next_expected_sequence{};
+    std::array<std::uint32_t, k_worker_count> next_expected_iteration{};
+    std::array<std::uint32_t, k_worker_count> messages_seen_in_iteration{};
     std::size_t messages_in_iteration = 0;
     std::size_t total_messages        = 0;
     bool first_message_arrived        = false;
@@ -153,9 +153,9 @@ int coordinator_process()
             }
         };
 
-        if (marker.worker >= kWorkerCount) {
+        if (marker.worker >= k_worker_count) {
             std::ostringstream oss;
-            oss << "Invalid worker index " << marker.worker << " (expected < " << kWorkerCount << ')';
+            oss << "Invalid worker index " << marker.worker << " (expected < " << k_worker_count << ')';
             mark_failure(oss.str());
             state.cv.notify_all();
             return;
@@ -186,7 +186,7 @@ int coordinator_process()
         const bool first_message = (state.messages_in_iteration == 0);
 
         lock.unlock();
-        std::this_thread::sleep_for(kHandlerDelay);
+        std::this_thread::sleep_for(k_handler_delay);
         lock.lock();
 
         ++expected_sequence;
@@ -194,7 +194,7 @@ int coordinator_process()
         ++state.messages_in_iteration;
         ++state.total_messages;
 
-        if (messages_seen == kBurstCount) {
+        if (messages_seen == k_burst_count) {
             messages_seen = 0;
             ++expected_iteration;
         }
@@ -211,7 +211,7 @@ int coordinator_process()
     constexpr auto first_marker_timeout = std::chrono::seconds(5);
     constexpr auto drain_timeout        = std::chrono::seconds(10);
 
-    for (std::size_t iteration = 0; iteration < kIterations; ++iteration) {
+    for (std::size_t iteration = 0; iteration < k_iterations; ++iteration) {
         bool barrier_called = false;
 
         {
@@ -270,7 +270,7 @@ int coordinator_process()
             lock.lock();
             if (!aborted && !state.iteration_failed) {
                 std::vector<std::size_t> missing_workers;
-                for (std::size_t worker = 0; worker < kWorkerCount; ++worker) {
+                for (std::size_t worker = 0; worker < k_worker_count; ++worker) {
                     if (state.next_expected_iteration[worker] <= iteration) {
                         missing_workers.push_back(worker);
                     }
@@ -296,7 +296,7 @@ int coordinator_process()
 
             if (!aborted && !state.iteration_failed) {
                 const bool drained = state.cv.wait_for(lock, drain_timeout, [&] {
-                    for (std::size_t worker = 0; worker < kWorkerCount; ++worker) {
+                    for (std::size_t worker = 0; worker < k_worker_count; ++worker) {
                         if (state.next_expected_iteration[worker] <= iteration) {
                             return false;
                         }
@@ -343,9 +343,9 @@ int worker_process(std::uint32_t worker_index)
 
     std::uint32_t sequence = 0;
 
-    for (std::uint32_t iteration = 0; iteration < kIterations; ++iteration) {
+    for (std::uint32_t iteration = 0; iteration < k_iterations; ++iteration) {
 
-        for (std::uint32_t burst = 0; burst < kBurstCount; ++burst) {
+        for (std::uint32_t burst = 0; burst < k_burst_count; ++burst) {
             world() << Iteration_marker{worker_index, iteration, sequence};
             ++sequence;
 
@@ -478,12 +478,12 @@ int main(int argc, char* argv[])
             std::fprintf(stderr, "Delivery fence regression repro reported failure: %s\n", reason.c_str());
             return 1;
         }
-        if (iterations_completed != kIterations) {
+        if (iterations_completed != k_iterations) {
             std::fprintf(stderr, "Expected %zu iterations, got %zu\n",
-                         kIterations, iterations_completed);
+                         k_iterations, iterations_completed);
             return 1;
         }
-        const std::size_t expected_messages = kWorkerCount * kIterations * kBurstCount;
+        const std::size_t expected_messages = k_worker_count * k_iterations * k_burst_count;
         if (total_messages != expected_messages) {
             std::fprintf(stderr, "Expected %zu total messages, got %zu\n",
                          expected_messages, total_messages);

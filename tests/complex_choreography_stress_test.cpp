@@ -59,10 +59,10 @@
 
 namespace {
 
-constexpr std::string_view kEnvSharedDir = "SINTRA_COMPLEX_CHOREO_DIR";
-constexpr const char* kGroupName = "_sintra_external_processes";
-constexpr int kWorkerCount = 4;
-constexpr std::array<int, 4> kRoundsPerPhase = {3, 5, 4, 6};
+constexpr std::string_view k_env_shared_dir = "SINTRA_COMPLEX_CHOREO_DIR";
+constexpr const char* k_group_name = "_sintra_external_processes";
+constexpr int k_worker_count = 4;
+constexpr std::array<int, 4> k_rounds_per_phase = {3, 5, 4, 6};
 
 struct Phase_plan
 {
@@ -70,11 +70,11 @@ struct Phase_plan
     int rounds = 0;
 };
 
-constexpr std::array<Phase_plan, 4> kPlan = {
-    Phase_plan{0, kRoundsPerPhase[0]},
-    Phase_plan{1, kRoundsPerPhase[1]},
-    Phase_plan{2, kRoundsPerPhase[2]},
-    Phase_plan{3, kRoundsPerPhase[3]}
+constexpr std::array<Phase_plan, 4> k_plan = {
+    Phase_plan{0, k_rounds_per_phase[0]},
+    Phase_plan{1, k_rounds_per_phase[1]},
+    Phase_plan{2, k_rounds_per_phase[2]},
+    Phase_plan{3, k_rounds_per_phase[3]}
 };
 
 struct Phase_command
@@ -143,7 +143,7 @@ std::uint64_t compute_worker_checksum(int worker_id, int phase, int round)
 std::uint64_t expected_round_checksum(int phase, int round)
 {
     std::uint64_t total = 0;
-    for (int worker = 0; worker < kWorkerCount; ++worker) {
+    for (int worker = 0; worker < k_worker_count; ++worker) {
         total += compute_worker_checksum(worker, phase, round);
     }
     return total;
@@ -151,7 +151,7 @@ std::uint64_t expected_round_checksum(int phase, int round)
 
 std::filesystem::path get_shared_directory()
 {
-    const char* value = std::getenv(kEnvSharedDir.data());
+    const char* value = std::getenv(k_env_shared_dir.data());
     if (!value) {
         throw std::runtime_error("SINTRA_COMPLEX_CHOREO_DIR is not set");
     }
@@ -161,15 +161,15 @@ std::filesystem::path get_shared_directory()
 void set_shared_directory_env(const std::filesystem::path& dir)
 {
 #ifdef _WIN32
-    _putenv_s(kEnvSharedDir.data(), dir.string().c_str());
+    _putenv_s(k_env_shared_dir.data(), dir.string().c_str());
 #else
-    setenv(kEnvSharedDir.data(), dir.string().c_str(), 1);
+    setenv(k_env_shared_dir.data(), dir.string().c_str(), 1);
 #endif
 }
 
 std::filesystem::path ensure_shared_directory()
 {
-    const char* value = std::getenv(kEnvSharedDir.data());
+    const char* value = std::getenv(k_env_shared_dir.data());
     if (value && *value) {
         std::filesystem::path dir(value);
         std::filesystem::create_directories(dir);
@@ -232,7 +232,7 @@ struct Aggregator_state
     bool round_complete = false;
     bool shutdown_received = false;
 
-    std::array<bool, kWorkerCount> worker_seen{};
+    std::array<bool, k_worker_count> worker_seen{};
     int current_count = 0;
     std::uint64_t checksum_accumulator = 0;
     std::uint64_t last_completed_token = std::numeric_limits<std::uint64_t>::max();
@@ -286,7 +286,7 @@ void aggregator_worker_status_slot(const Worker_status& status)
             ++state.errors;
         }
 
-        if (status.worker_id < 0 || status.worker_id >= kWorkerCount) {
+        if (status.worker_id < 0 || status.worker_id >= k_worker_count) {
             ++state.errors;
             return;
         }
@@ -415,18 +415,18 @@ int process_aggregator()
         aggregator_shutdown_slot(msg);
     });
 
-    barrier("complex-choreo-setup", kGroupName);
+    barrier("complex-choreo-setup", k_group_name);
 
-    for (const auto& phase : kPlan) {
+    for (const auto& phase : k_plan) {
         for (int round = 0; round < phase.rounds; ++round) {
             const auto token = make_token(phase.phase, round);
             const auto pre = barrier_name("pre", token);
             const auto post = barrier_name("post", token);
 
-            barrier(pre, kGroupName);
+            barrier(pre, k_group_name);
             wait_for_round_activation(token);
             wait_for_round_completion(token);
-            barrier(post, kGroupName);
+            barrier(post, k_group_name);
         }
     }
 
@@ -521,16 +521,16 @@ int process_inspector()
         inspector_shutdown_slot(msg);
     });
 
-    barrier("complex-choreo-setup", kGroupName);
+    barrier("complex-choreo-setup", k_group_name);
 
-    for (const auto& phase : kPlan) {
+    for (const auto& phase : k_plan) {
         for (int round = 0; round < phase.rounds; ++round) {
             const auto token = make_token(phase.phase, round);
             const auto pre = barrier_name("pre", token);
             const auto post = barrier_name("post", token);
             (void)token;
-            barrier(pre, kGroupName);
-            barrier(post, kGroupName);
+            barrier(pre, k_group_name);
+            barrier(post, k_group_name);
         }
     }
 
@@ -587,11 +587,11 @@ int worker_process_impl(int worker_id)
     sintra::activate_slot(command_slot);
     sintra::activate_slot(shutdown_slot);
 
-    barrier("complex-choreo-setup", kGroupName);
+    barrier("complex-choreo-setup", k_group_name);
 
     bool fatal_error = false;
 
-    for (const auto& phase : kPlan) {
+    for (const auto& phase : k_plan) {
         for (int round = 0; round < phase.rounds; ++round) {
             if (fatal_error) {
                 break;
@@ -601,7 +601,7 @@ int worker_process_impl(int worker_id)
             const auto pre = barrier_name("pre", token);
             const auto post = barrier_name("post", token);
 
-            barrier(pre, kGroupName);
+            barrier(pre, k_group_name);
 
             Phase_command cmd;
             {
@@ -650,7 +650,7 @@ int worker_process_impl(int worker_id)
             status.checksum = checksum;
             sintra::world() << status;
 
-            barrier(post, kGroupName);
+            barrier(post, k_group_name);
         }
         if (fatal_error) {
             break;
@@ -706,7 +706,7 @@ void conductor_summary_slot(const Phase_summary& summary)
         ++state.errors;
     }
     else {
-        if (summary.worker_count != kWorkerCount) {
+        if (summary.worker_count != k_worker_count) {
             ++state.errors;
         }
         const auto expected_checksum = expected_round_checksum(
@@ -772,15 +772,15 @@ int process_conductor()
         conductor_shutdown_complete_slot(msg);
     });
 
-    barrier("complex-choreo-setup", kGroupName);
+    barrier("complex-choreo-setup", k_group_name);
 
-    for (const auto& phase : kPlan) {
+    for (const auto& phase : k_plan) {
         for (int round = 0; round < phase.rounds; ++round) {
             const auto token = make_token(phase.phase, round);
             const auto pre = barrier_name("pre", token);
             const auto post = barrier_name("post", token);
 
-            barrier(pre, kGroupName);
+            barrier(pre, k_group_name);
 
             {
                 std::lock_guard<std::mutex> lk(conductor_state().mutex);
@@ -792,11 +792,11 @@ int process_conductor()
             cmd.phase = phase.phase;
             cmd.round = round;
             cmd.token = token;
-            cmd.expected_workers = kWorkerCount;
+            cmd.expected_workers = k_worker_count;
             sintra::world() << cmd;
 
             wait_for_summary(token);
-            barrier(post, kGroupName);
+            barrier(post, k_group_name);
         }
     }
 
@@ -889,7 +889,7 @@ bool validate_reports(const std::filesystem::path& dir)
 
     const std::size_t expected_rounds = [] {
         std::size_t total = 0;
-        for (const auto& phase : kPlan) {
+        for (const auto& phase : k_plan) {
             total += static_cast<std::size_t>(phase.rounds);
         }
         return total;
@@ -899,32 +899,32 @@ bool validate_reports(const std::filesystem::path& dir)
         return false;
     }
 
-    const std::size_t expected_messages = expected_rounds * kWorkerCount;
+    const std::size_t expected_messages = expected_rounds * k_worker_count;
     if (inspector_entries.size() != expected_messages) {
         return false;
     }
 
     std::size_t inspector_index = 0;
     std::size_t aggregator_index = 0;
-    for (const auto& phase : kPlan) {
+    for (const auto& phase : k_plan) {
         for (int round = 0; round < phase.rounds; ++round) {
             const auto expected_checksum = expected_round_checksum(phase.phase, round);
 
             const auto& aggregator_round = aggregator_results[aggregator_index++];
             if (aggregator_round.phase != phase.phase ||
                 aggregator_round.round != round ||
-                aggregator_round.count != kWorkerCount ||
+                aggregator_round.count != k_worker_count ||
                 aggregator_round.checksum != expected_checksum) {
                 return false;
             }
 
-            std::array<bool, kWorkerCount> worker_seen{};
-            for (int worker = 0; worker < kWorkerCount; ++worker) {
+            std::array<bool, k_worker_count> worker_seen{};
+            for (int worker = 0; worker < k_worker_count; ++worker) {
                 const auto& entry = inspector_entries[inspector_index++];
                 if (entry.phase != phase.phase || entry.round != round) {
                     return false;
                 }
-                if (entry.worker < 0 || entry.worker >= kWorkerCount) {
+                if (entry.worker < 0 || entry.worker >= k_worker_count) {
                     return false;
                 }
                 if (worker_seen[entry.worker]) {

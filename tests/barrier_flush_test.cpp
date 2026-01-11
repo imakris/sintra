@@ -40,8 +40,8 @@
 
 namespace {
 
-constexpr std::size_t kWorkerCount         = 2;
-constexpr std::size_t kIterations          = 128;
+constexpr std::size_t k_worker_count         = 2;
+constexpr std::size_t k_iterations          = 128;
 
 struct Iteration_marker
 {
@@ -49,11 +49,11 @@ struct Iteration_marker
     std::uint32_t iteration;
 };
 
-constexpr std::string_view kEnvSharedDir = "SINTRA_TEST_SHARED_DIR";
+constexpr std::string_view k_env_shared_dir = "SINTRA_TEST_SHARED_DIR";
 
 std::filesystem::path get_shared_directory()
 {
-    const char* value = std::getenv(kEnvSharedDir.data());
+    const char* value = std::getenv(k_env_shared_dir.data());
     if (!value) {
         throw std::runtime_error("SINTRA_TEST_SHARED_DIR is not set");
     }
@@ -63,15 +63,15 @@ std::filesystem::path get_shared_directory()
 void set_shared_directory_env(const std::filesystem::path& dir)
 {
 #ifdef _WIN32
-    _putenv_s(kEnvSharedDir.data(), dir.string().c_str());
+    _putenv_s(k_env_shared_dir.data(), dir.string().c_str());
 #else
-    setenv(kEnvSharedDir.data(), dir.string().c_str(), 1);
+    setenv(k_env_shared_dir.data(), dir.string().c_str(), 1);
 #endif
 }
 
 std::filesystem::path ensure_shared_directory()
 {
-    const char* value = std::getenv(kEnvSharedDir.data());
+    const char* value = std::getenv(k_env_shared_dir.data());
     if (value && *value) {
         std::filesystem::path dir(value);
         std::filesystem::create_directories(dir);
@@ -114,7 +114,7 @@ struct Coordinator_state
 {
     std::mutex mutex;
     std::condition_variable cv;
-    std::array<std::uint32_t, kWorkerCount> next_expected_iteration{};
+    std::array<std::uint32_t, k_worker_count> next_expected_iteration{};
     std::size_t messages_in_iteration = 0;
     std::size_t total_messages        = 0;
     bool iteration_failed             = false;
@@ -167,9 +167,9 @@ int coordinator_process()
             state.abort_requested = true;
         };
 
-        if (marker.worker >= kWorkerCount) {
+        if (marker.worker >= k_worker_count) {
             std::ostringstream oss;
-            oss << "Invalid worker index " << marker.worker << " (expected < " << kWorkerCount
+            oss << "Invalid worker index " << marker.worker << " (expected < " << k_worker_count
                 << ")";
             mark_failure(oss.str());
             state.cv.notify_all();
@@ -207,7 +207,7 @@ int coordinator_process()
     bool aborted = false;
     constexpr auto iteration_timeout = std::chrono::seconds(10);
 
-    for (std::size_t iteration = 0; iteration < kIterations; ++iteration) {
+    for (std::size_t iteration = 0; iteration < k_iterations; ++iteration) {
 
         if (aborted) {
             barrier("barrier-flush-iteration");
@@ -226,7 +226,7 @@ int coordinator_process()
             if (state.abort_requested || state.iteration_failed) {
                 return true;
             }
-            for (std::size_t worker = 0; worker < kWorkerCount; ++worker) {
+            for (std::size_t worker = 0; worker < k_worker_count; ++worker) {
                 if (state.next_expected_iteration[worker] <= state.current_iteration) {
                     return false;
                 }
@@ -240,7 +240,7 @@ int coordinator_process()
                 std::ostringstream oss;
                 oss << "Timed out waiting for iteration " << iteration << " markers. Missing workers:";
                 bool any_missing = false;
-                for (std::size_t worker = 0; worker < kWorkerCount; ++worker) {
+                for (std::size_t worker = 0; worker < k_worker_count; ++worker) {
                     if (state.next_expected_iteration[worker] <= state.current_iteration) {
                         oss << (any_missing ? " " : " ") << worker;
                         any_missing = true;
@@ -279,7 +279,7 @@ int coordinator_process()
     deactivate_all_slots();
 
     const auto shared_dir = get_shared_directory();
-    write_result(shared_dir, success, kIterations, state.total_messages, failure_reason);
+    write_result(shared_dir, success, k_iterations, state.total_messages, failure_reason);
     return success ? 0 : 1;
 }
 
@@ -289,7 +289,7 @@ int worker_process(std::uint32_t worker_index)
 
     barrier("barrier-flush-ready");
 
-    for (std::uint32_t iteration = 0; iteration < kIterations; ++iteration) {
+    for (std::uint32_t iteration = 0; iteration < k_iterations; ++iteration) {
 
         world() << Iteration_marker{worker_index, iteration};
 
@@ -410,12 +410,12 @@ int main(int argc, char* argv[])
             std::fprintf(stderr, "Barrier flush test reported failure: %s\n", reason.c_str());
             return 1;
         }
-        if (iterations_completed != kIterations) {
+        if (iterations_completed != k_iterations) {
             std::fprintf(stderr, "Expected %zu iterations, got %zu\n",
-                         kIterations, iterations_completed);
+                         k_iterations, iterations_completed);
             return 1;
         }
-        const std::size_t expected_messages = kWorkerCount * kIterations;
+        const std::size_t expected_messages = k_worker_count * k_iterations;
         if (total_messages != expected_messages) {
             std::fprintf(stderr, "Expected %zu total messages, got %zu\n",
                          expected_messages, total_messages);

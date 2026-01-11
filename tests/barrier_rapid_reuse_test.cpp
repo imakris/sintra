@@ -11,8 +11,8 @@
 #include <string_view>
 #include <thread>
 
-constexpr std::size_t kProcessCount = 3;
-constexpr std::size_t kIterations = 2048 / 20;
+constexpr std::size_t k_process_count = 3;
+constexpr std::size_t k_iterations = 2048 / 20;
 
 std::atomic<int> failures{0};
 
@@ -34,7 +34,7 @@ int worker_process(std::uint32_t worker_index)
         std::uint64_t last_reuse_seq = 0;
         std::uint64_t last_other_seq = 0;
 
-        for (std::uint32_t iter = 0; iter < kIterations; ++iter) {
+        for (std::uint32_t iter = 0; iter < k_iterations; ++iter) {
             if (((iter + worker_index) & 0x7) == 0) {
                 std::this_thread::sleep_for(std::chrono::microseconds(10));
             }

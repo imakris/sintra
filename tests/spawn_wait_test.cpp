@@ -36,16 +36,16 @@
 
 namespace {
 
-constexpr std::string_view kEnvSharedDir = "SINTRA_TEST_SHARED_DIR";
-constexpr std::string_view kEnvWorkerMode = "SPAWN_WAIT_TEST_WORKER";
-constexpr const char* kWorkerInstanceName = "spawn_wait_dynamic_worker";
-constexpr const char* kNonexistentInstanceName = "nonexistent_instance_will_timeout";
+constexpr std::string_view k_env_shared_dir = "SINTRA_TEST_SHARED_DIR";
+constexpr std::string_view k_env_worker_mode = "SPAWN_WAIT_TEST_WORKER";
+constexpr const char* k_worker_instance_name = "spawn_wait_dynamic_worker";
+constexpr const char* k_nonexistent_instance_name = "nonexistent_instance_will_timeout";
 // Name registered by the "dummy" child in Test 1 to prove it actually launched
-constexpr const char* kTimeoutChildInstanceName = "spawn_wait_timeout_child";
+constexpr const char* k_timeout_child_instance_name = "spawn_wait_timeout_child";
 
 std::filesystem::path get_shared_directory()
 {
-    const char* value = std::getenv(kEnvSharedDir.data());
+    const char* value = std::getenv(k_env_shared_dir.data());
     if (!value) {
         throw std::runtime_error("SINTRA_TEST_SHARED_DIR is not set");
     }
@@ -55,15 +55,15 @@ std::filesystem::path get_shared_directory()
 void set_shared_directory_env(const std::filesystem::path& dir)
 {
 #ifdef _WIN32
-    _putenv_s(kEnvSharedDir.data(), dir.string().c_str());
+    _putenv_s(k_env_shared_dir.data(), dir.string().c_str());
 #else
-    setenv(kEnvSharedDir.data(), dir.string().c_str(), 1);
+    setenv(k_env_shared_dir.data(), dir.string().c_str(), 1);
 #endif
 }
 
 std::filesystem::path ensure_shared_directory()
 {
-    const char* value = std::getenv(kEnvSharedDir.data());
+    const char* value = std::getenv(k_env_shared_dir.data());
     if (value && *value) {
         std::filesystem::path dir(value);
         std::filesystem::create_directories(dir);
@@ -103,7 +103,7 @@ bool has_instance_id_flag(int argc, char* argv[])
 
 bool is_worker_mode()
 {
-    const char* value = std::getenv(kEnvWorkerMode.data());
+    const char* value = std::getenv(k_env_worker_mode.data());
     return value && *value && (*value != '0');
 }
 
@@ -138,13 +138,13 @@ int run_worker()
     });
 
     Worker_transceiver worker;
-    if (!worker.assign_name(kWorkerInstanceName)) {
-        std::fprintf(stderr, "[WORKER] Failed to assign name '%s'\n", kWorkerInstanceName);
+    if (!worker.assign_name(k_worker_instance_name)) {
+        std::fprintf(stderr, "[WORKER] Failed to assign name '%s'\n", k_worker_instance_name);
         sintra::deactivate_all_slots();
         return 1;
     }
 
-    std::fprintf(stderr, "[WORKER] Registered as '%s'\n", kWorkerInstanceName);
+    std::fprintf(stderr, "[WORKER] Registered as '%s'\n", k_worker_instance_name);
 
     std::unique_lock<std::mutex> lk(done_mutex);
     const bool signaled = done_cv.wait_for(lk, std::chrono::seconds(30), [&] { return done; });
@@ -185,13 +185,13 @@ int run_timeout_child()
 
     // Register our name to prove we launched successfully
     Timeout_transceiver timeout_xceiver;
-    if (!timeout_xceiver.assign_name(kTimeoutChildInstanceName)) {
-        std::fprintf(stderr, "[TIMEOUT_CHILD] Failed to assign name '%s'\n", kTimeoutChildInstanceName);
+    if (!timeout_xceiver.assign_name(k_timeout_child_instance_name)) {
+        std::fprintf(stderr, "[TIMEOUT_CHILD] Failed to assign name '%s'\n", k_timeout_child_instance_name);
         sintra::deactivate_all_slots();
         return 1;
     }
 
-    std::fprintf(stderr, "[TIMEOUT_CHILD] Registered as '%s'\n", kTimeoutChildInstanceName);
+    std::fprintf(stderr, "[TIMEOUT_CHILD] Registered as '%s'\n", k_timeout_child_instance_name);
 
     // Wait for Done_signal or timeout after 30s
     std::unique_lock<std::mutex> lk(done_mutex);
@@ -221,14 +221,14 @@ int run_coordinator(const std::string& binary_path)
 
     // Ensure worker mode is disabled before the timeout test.
 #ifdef _WIN32
-    _putenv_s(kEnvWorkerMode.data(), "");
+    _putenv_s(k_env_worker_mode.data(), "");
 #else
-    unsetenv(kEnvWorkerMode.data());
+    unsetenv(k_env_worker_mode.data());
 #endif
 
     // Test 1: spawn_swarm_process with timeout that should fail (nonexistent instance)
     // This exercises the exponential backoff polling path.
-    // The spawned child registers kTimeoutChildInstanceName but we wait for kNonexistentInstanceName,
+    // The spawned child registers k_timeout_child_instance_name but we wait for k_nonexistent_instance_name,
     // so the wait times out. We then verify the child actually launched by resolving its name.
     {
         std::fprintf(stderr, "[COORDINATOR] Test 1: Testing timeout case with short wait\n");
@@ -239,7 +239,7 @@ int run_coordinator(const std::string& binary_path)
             {},  // No extra args; child behavior controlled by env var
             1,
             sintra::invalid_instance_id,
-            kNonexistentInstanceName,  // Wait for a name that won't exist
+            k_nonexistent_instance_name,  // Wait for a name that won't exist
             std::chrono::milliseconds(500)  // Short timeout to exercise backoff
         );
 
@@ -282,7 +282,7 @@ int run_coordinator(const std::string& binary_path)
             while (std::chrono::steady_clock::now() < resolve_deadline) {
                 timeout_child_resolved = sintra::Coordinator::rpc_resolve_instance(
                     s_coord_id,
-                    kTimeoutChildInstanceName);
+                    k_timeout_child_instance_name);
                 if (timeout_child_resolved != sintra::invalid_instance_id) {
                     break;
                 }
@@ -293,7 +293,7 @@ int run_coordinator(const std::string& binary_path)
                 std::fprintf(stderr,
                              "[COORDINATOR] Test 1: ERROR - timeout child never launched "
                              "(could not resolve '%s')\n",
-                             kTimeoutChildInstanceName);
+                             k_timeout_child_instance_name);
                 all_tests_passed = false;
                 failure_reason = "Test 1: spawn_swarm_process failed - child never launched";
             }
@@ -301,7 +301,7 @@ int run_coordinator(const std::string& binary_path)
                 std::fprintf(stderr,
                              "[COORDINATOR] Test 1: Confirmed child launched "
                              "(resolved '%s' as %llu)\n",
-                             kTimeoutChildInstanceName,
+                             k_timeout_child_instance_name,
                              (unsigned long long)timeout_child_resolved);
 
                 // Signal the timeout child to exit cleanly
@@ -319,9 +319,9 @@ int run_coordinator(const std::string& binary_path)
 
         // Set environment to tell the spawned process to run in worker mode
 #ifdef _WIN32
-        _putenv_s(kEnvWorkerMode.data(), "1");
+        _putenv_s(k_env_worker_mode.data(), "1");
 #else
-        setenv(kEnvWorkerMode.data(), "1", 1);
+        setenv(k_env_worker_mode.data(), "1", 1);
 #endif
 
         const auto start = std::chrono::steady_clock::now();
@@ -331,7 +331,7 @@ int run_coordinator(const std::string& binary_path)
             {},  // No extra args
             1,
             sintra::invalid_instance_id,
-            kWorkerInstanceName,  // Wait for worker to register this name
+            k_worker_instance_name,  // Wait for worker to register this name
             std::chrono::milliseconds(10000)  // 10s timeout should be enough
         );
 
@@ -350,7 +350,7 @@ int run_coordinator(const std::string& binary_path)
             // Verify the instance is actually resolvable
             const auto resolved = sintra::Coordinator::rpc_resolve_instance(
                 s_coord_id,
-                kWorkerInstanceName);
+                k_worker_instance_name);
 
             if (resolved == sintra::invalid_instance_id) {
                 std::fprintf(stderr, "[COORDINATOR] Test 2: Instance not resolvable after spawn returned\n");
@@ -368,9 +368,9 @@ int run_coordinator(const std::string& binary_path)
 
         // Clear worker mode env
 #ifdef _WIN32
-        _putenv_s(kEnvWorkerMode.data(), "");
+        _putenv_s(k_env_worker_mode.data(), "");
 #else
-        unsetenv(kEnvWorkerMode.data());
+        unsetenv(k_env_worker_mode.data());
 #endif
     }
 

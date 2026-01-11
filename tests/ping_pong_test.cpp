@@ -33,7 +33,7 @@ int main(int argc, char* argv[])
 {
     sintra::init(argc, argv);
 
-    constexpr int kTargetPingCount = 10000;
+    constexpr int k_target_ping_count = 10000;
     std::atomic<int> ping_count{0};
     std::atomic<bool> done{false};
     std::promise<void> done_promise;
@@ -58,7 +58,7 @@ int main(int argc, char* argv[])
             return;
         }
         int count = ping_count.fetch_add(1) + 1;
-        if (count >= kTargetPingCount) {
+        if (count >= k_target_ping_count) {
             bool expected = false;
             if (done.compare_exchange_strong(expected, true)) {
                 done_promise.set_value();
@@ -84,5 +84,5 @@ int main(int argc, char* argv[])
 
     sintra::finalize();
 
-    return ping_count.load() == kTargetPingCount ? 0 : 1;
+    return ping_count.load() == k_target_ping_count ? 0 : 1;
 }

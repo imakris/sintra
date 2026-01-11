@@ -58,14 +58,14 @@ int get_pid()
 // This mimics the ring buffer usage: many readers competing for slots
 void test_many_readers_limited_slots()
 {
-    constexpr int kReaders = 8;
-    constexpr int kSlots = 3;
-    constexpr int kIterationsPerReader = 50000;
+    constexpr int k_readers = 8;
+    constexpr int k_slots = 3;
+    constexpr int k_iterations_per_reader = 50000;
 
     std::fprintf(stderr, "[TEST] Many readers, limited slots (%d readers, %d slots, %d iterations/reader)\n",
-                 kReaders, kSlots, kIterationsPerReader);
+                 k_readers, k_slots, k_iterations_per_reader);
 
-    interprocess_semaphore sem(kSlots);
+    interprocess_semaphore sem(k_slots);
     std::atomic<int> slots_held{0};
     std::atomic<int> max_slots_held{0};
     std::atomic<long long> total_acquisitions{0};
@@ -73,14 +73,14 @@ void test_many_readers_limited_slots()
     auto reader_thread = [&](int id) {
         std::mt19937 rng(std::random_device{}() ^ id);
 
-        for (int i = 0; i < kIterationsPerReader; ++i) {
+        for (int i = 0; i < k_iterations_per_reader; ++i) {
             // Acquire slot
             auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
             CHECK(sem.timed_wait(deadline));
 
             // Track concurrent slot usage
             int held = slots_held.fetch_add(1, std::memory_order_acq_rel) + 1;
-            CHECK(held <= kSlots);
+            CHECK(held <= k_slots);
 
             // Update max
             int current_max = max_slots_held.load();
@@ -109,7 +109,7 @@ void test_many_readers_limited_slots()
     };
 
     std::vector<std::thread> readers;
-    for (int i = 0; i < kReaders; ++i) {
+    for (int i = 0; i < k_readers; ++i) {
         readers.emplace_back(reader_thread, i);
     }
 
@@ -118,7 +118,7 @@ void test_many_readers_limited_slots()
     }
 
     CHECK(slots_held == 0);
-    CHECK(total_acquisitions == kReaders * kIterationsPerReader);
+    CHECK(total_acquisitions == k_readers * k_iterations_per_reader);
 
     std::fprintf(stderr, "[PASS] Many readers test completed. Total acquisitions: %lld, Max concurrent: %d\n",
                  total_acquisitions.load(), max_slots_held.load());
@@ -128,11 +128,11 @@ void test_many_readers_limited_slots()
 // Many waiters, infrequent posts - stresses macOS wake-all behavior
 void test_wake_all_stress()
 {
-    constexpr int kWaiters = 16;
-    constexpr int kTotalPosts = 10000;
+    constexpr int k_waiters = 16;
+    constexpr int k_total_posts = 10000;
 
     std::fprintf(stderr, "[TEST] Wake-all stress (%d waiters, %d total posts)\n",
-                 kWaiters, kTotalPosts);
+                 k_waiters, k_total_posts);
 
     interprocess_semaphore sem(0);
     std::atomic<int> acquisitions{0};
@@ -153,7 +153,7 @@ void test_wake_all_stress()
     };
 
     std::vector<std::thread> waiters;
-    for (int i = 0; i < kWaiters; ++i) {
+    for (int i = 0; i < k_waiters; ++i) {
         waiters.emplace_back(waiter_thread);
     }
 
@@ -161,8 +161,8 @@ void test_wake_all_stress()
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
     // Post in bursts to create wake-all contention
-    for (int i = 0; i < kTotalPosts; i += 3) {
-        int burst = std::min(3, kTotalPosts - i);
+    for (int i = 0; i < k_total_posts; i += 3) {
+        int burst = std::min(3, k_total_posts - i);
         for (int j = 0; j < burst; ++j) {
             sem.post();
         }
@@ -174,9 +174,9 @@ void test_wake_all_stress()
 
     // Wait for all posts to be consumed
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-    while (acquisitions.load() < kTotalPosts) {
+    while (acquisitions.load() < k_total_posts) {
         if (std::chrono::steady_clock::now() > deadline) {
-            std::fprintf(stderr, "[FAIL] Timeout waiting for acquisitions: %d/%d\n", acquisitions.load(), kTotalPosts);
+            std::fprintf(stderr, "[FAIL] Timeout waiting for acquisitions: %d/%d\n", acquisitions.load(), k_total_posts);
             CHECK(false);
             break;
         }
@@ -189,18 +189,18 @@ void test_wake_all_stress()
         t.join();
     }
 
-    CHECK(acquisitions == kTotalPosts);
+    CHECK(acquisitions == k_total_posts);
     std::fprintf(stderr, "[PASS] Wake-all stress test completed\n");
 }
 
 // Test 3: Mixed operations under extreme contention
 void test_mixed_operations_extreme_contention()
 {
-    constexpr int kThreads = 12;
-    constexpr int kIterationsPerThread = 3000;
+    constexpr int k_threads = 12;
+    constexpr int k_iterations_per_thread = 3000;
 
     std::fprintf(stderr, "[TEST] Mixed operations extreme contention (%d threads, %d iterations/thread)\n",
-                 kThreads, kIterationsPerThread);
+                 k_threads, k_iterations_per_thread);
 
     interprocess_semaphore sem(0);
     std::atomic<long long> posts{0};
@@ -211,7 +211,7 @@ void test_mixed_operations_extreme_contention()
     auto worker_thread = [&](int id) {
         std::mt19937 rng(std::random_device{}() ^ id ^ get_pid());
 
-        for (int i = 0; i < kIterationsPerThread; ++i) {
+        for (int i = 0; i < k_iterations_per_thread; ++i) {
             int op = rng() % 10;
 
             if (op < 3) {
@@ -256,7 +256,7 @@ void test_mixed_operations_extreme_contention()
     };
 
     std::vector<std::thread> threads;
-    for (int i = 0; i < kThreads; ++i) {
+    for (int i = 0; i < k_threads; ++i) {
         threads.emplace_back(worker_thread, i);
     }
 
@@ -284,17 +284,17 @@ void test_mixed_operations_extreme_contention()
 // Tests for any lost wakeups or double-counting under rapid cycling
 void test_rapid_post_wait_cycling()
 {
-    constexpr int kCyclers = 10;
-    constexpr int kCyclesPerThread = 20000;
+    constexpr int k_cyclers = 10;
+    constexpr int k_cycles_per_thread = 20000;
 
     std::fprintf(stderr, "[TEST] Rapid post/wait cycling (%d threads, %d cycles/thread)\n",
-        kCyclers, kCyclesPerThread);
+        k_cyclers, k_cycles_per_thread);
 
     interprocess_semaphore sem(0);
     std::atomic<long long> cycle_count{0};
 
     auto cycler_thread = [&]() {
-        for (int i = 0; i < kCyclesPerThread; ++i) {
+        for (int i = 0; i < k_cycles_per_thread; ++i) {
             sem.post();
 
             auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
@@ -309,7 +309,7 @@ void test_rapid_post_wait_cycling()
     };
 
     std::vector<std::thread> cyclers;
-    for (int i = 0; i < kCyclers; ++i) {
+    for (int i = 0; i < k_cyclers; ++i) {
         cyclers.emplace_back(cycler_thread);
     }
 
@@ -317,7 +317,7 @@ void test_rapid_post_wait_cycling()
         t.join();
     }
 
-    CHECK(cycle_count == kCyclers * kCyclesPerThread);
+    CHECK(cycle_count == k_cyclers * k_cycles_per_thread);
     CHECK(!sem.try_wait());  // Should be empty
 
     std::fprintf(stderr, "[PASS] Rapid cycling test completed. Cycles: %lld\n", cycle_count.load());

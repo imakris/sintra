@@ -16,10 +16,10 @@
 
 namespace {
 
-struct OverrideGuard {
+struct Override_guard {
     enum class Kind { Pipe2, Write, Read, Waitpid, SpawnDebug };
 
-    OverrideGuard(Kind k, void* fn) : kind(k)
+    Override_guard(Kind k, void* fn) : kind(k)
     {
         switch (kind) {
             case Kind::Pipe2:
@@ -41,7 +41,7 @@ struct OverrideGuard {
         }
     }
 
-    ~OverrideGuard()
+    ~Override_guard()
     {
         switch (kind) {
             case Kind::Pipe2:
@@ -199,7 +199,7 @@ bool spawn_should_fail_when_pipe2_injected_failure()
         return false;
     }
 
-    OverrideGuard guard(OverrideGuard::Kind::Pipe2, reinterpret_cast<void*>(&failing_pipe2));
+    Override_guard guard(Override_guard::Kind::Pipe2, reinterpret_cast<void*>(&failing_pipe2));
     const char* const args[] = {true_prog, nullptr};
     bool result = sintra::spawn_detached(true_prog, args);
     return assert_true(!result, "spawn_detached must report failure when pipe2 fails");
@@ -232,10 +232,10 @@ bool spawn_succeeds_under_eintr_pressure()
         return false;
     }
 
-    OverrideGuard write_guard(OverrideGuard::Kind::Write, reinterpret_cast<void*>(&flaky_write));
-    OverrideGuard read_guard(OverrideGuard::Kind::Read, reinterpret_cast<void*>(&flaky_read));
+    Override_guard write_guard(Override_guard::Kind::Write, reinterpret_cast<void*>(&flaky_write));
+    Override_guard read_guard(Override_guard::Kind::Read, reinterpret_cast<void*>(&flaky_read));
     reset_spawn_debug_capture();
-    OverrideGuard debug_guard(OverrideGuard::Kind::SpawnDebug, reinterpret_cast<void*>(&capture_spawn_debug));
+    Override_guard debug_guard(Override_guard::Kind::SpawnDebug, reinterpret_cast<void*>(&capture_spawn_debug));
 
     const char* const args[] = {true_prog, nullptr};
     bool result = sintra::spawn_detached(true_prog, args);
@@ -261,7 +261,7 @@ bool spawn_succeeds_when_waitpid_reports_echild()
         return false;
     }
 
-    OverrideGuard guard(OverrideGuard::Kind::Waitpid, reinterpret_cast<void*>(&waitpid_returns_echild));
+    Override_guard guard(Override_guard::Kind::Waitpid, reinterpret_cast<void*>(&waitpid_returns_echild));
     const char* const args[] = {true_prog, nullptr};
     errno = 0;
     bool result = sintra::spawn_detached(true_prog, args);
@@ -285,7 +285,7 @@ bool spawn_fails_when_grandchild_cannot_report_readiness()
         return false;
     }
 
-    OverrideGuard guard(OverrideGuard::Kind::Write, reinterpret_cast<void*>(&broken_write));
+    Override_guard guard(Override_guard::Kind::Write, reinterpret_cast<void*>(&broken_write));
     const char* const args[] = {true_prog, nullptr};
     bool result = sintra::spawn_detached(true_prog, args);
     return assert_true(!result, "write failures must be reported as spawn failures");

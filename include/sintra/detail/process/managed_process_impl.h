@@ -67,14 +67,14 @@ namespace {
     };
 
 #ifdef SIGTRAP
-    constexpr std::size_t kSignalSlotCount = 7;
+    constexpr std::size_t k_signal_slot_count = 7;
 #else
-    constexpr std::size_t kSignalSlotCount = 6;
+    constexpr std::size_t k_signal_slot_count = 6;
 #endif
 
-    inline std::array<signal_slot, kSignalSlotCount>& signal_slots()
+    inline std::array<signal_slot, k_signal_slot_count>& signal_slots()
     {
-        static std::array<signal_slot, kSignalSlotCount> slot_table {{
+        static std::array<signal_slot, k_signal_slot_count> slot_table {{
             {SIGABRT}, {SIGFPE}, {SIGILL}, {SIGINT}, {SIGSEGV}, {SIGTERM}
 #ifdef SIGTRAP
             , {SIGTRAP}
@@ -203,14 +203,14 @@ namespace {
     };
 
 #ifdef SIGTRAP
-    constexpr std::size_t kSignalSlotCount = 8;
+    constexpr std::size_t k_signal_slot_count = 8;
 #else
-    constexpr std::size_t kSignalSlotCount = 7;
+    constexpr std::size_t k_signal_slot_count = 7;
 #endif
 
-    inline std::array<signal_slot, kSignalSlotCount>& signal_slots()
+    inline std::array<signal_slot, k_signal_slot_count>& signal_slots()
     {
-        static std::array<signal_slot, kSignalSlotCount> slot_table {{
+        static std::array<signal_slot, k_signal_slot_count> slot_table {{
             {SIGABRT}, {SIGFPE}, {SIGILL}, {SIGINT}, {SIGSEGV}, {SIGTERM},
 #ifdef SIGTRAP
             {SIGTRAP},

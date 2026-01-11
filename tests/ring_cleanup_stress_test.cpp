@@ -84,24 +84,24 @@ int main(int argc, char* argv[])
     const auto sintra_base = temp_root / "sintra";
     std::filesystem::create_directories(sintra_base);
 
-    constexpr std::uint32_t kInitialStaleRuns = 48;
-    for (std::uint32_t i = 0; i < kInitialStaleRuns; ++i) {
+    constexpr std::uint32_t k_initial_stale_runs = 48;
+    for (std::uint32_t i = 0; i < k_initial_stale_runs; ++i) {
         emit_stale_run_directory(sintra_base, i);
     }
 
     std::uint32_t initial = count_subdirectories(sintra_base);
-    if (initial < kInitialStaleRuns) {
+    if (initial < k_initial_stale_runs) {
         std::fprintf(stderr,
                      "ring_cleanup_stress: expected %u initial directories, saw %u\n",
-                     kInitialStaleRuns,
+                     k_initial_stale_runs,
                      initial);
         return 1;
     }
 
-    constexpr std::uint32_t kIterations = 24;
+    constexpr std::uint32_t k_iterations = 24;
     std::uint32_t leftover = initial;
 
-    for (std::uint32_t iter = 0; iter < kIterations; ++iter) {
+    for (std::uint32_t iter = 0; iter < k_iterations; ++iter) {
         sintra::init(argc, argv);
         sintra::finalize();
 

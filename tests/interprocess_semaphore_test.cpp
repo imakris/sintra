@@ -71,7 +71,7 @@ namespace
 using sintra::detail::interprocess_semaphore;
 
 #if defined(_WIN32)
-constexpr std::size_t kWindowsNameChars = 64;
+constexpr std::size_t k_windows_name_chars = 64;
 #endif
 
 class Test_failure : public std::runtime_error
@@ -184,9 +184,9 @@ void test_basic_semantics()
 
 void test_threaded_producer_consumer()
 {
-    constexpr int kProducerCount = 3;
-    constexpr int kConsumerCount = 4;
-    constexpr int kTotalItems = 2000;
+    constexpr int k_producer_count = 3;
+    constexpr int k_consumer_count = 4;
+    constexpr int k_total_items = 2000;
 
     interprocess_semaphore sem(0);
     std::atomic<int> next_item{0};
@@ -199,7 +199,7 @@ void test_threaded_producer_consumer()
     auto produce = [&]() {
         while (true) {
             int idx = next_item.fetch_add(1, std::memory_order_acq_rel);
-            if (idx >= kTotalItems) {
+            if (idx >= k_total_items) {
                 break;
             }
 
@@ -221,7 +221,7 @@ void test_threaded_producer_consumer()
         while (true) {
             const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
             if (!sem.timed_wait(deadline)) {
-                if (processed.load(std::memory_order_acquire) == kTotalItems) {
+                if (processed.load(std::memory_order_acquire) == k_total_items) {
                     return;
                 }
                 throw Test_failure("consumer timed out waiting for semaphore", __FILE__, __LINE__);
@@ -240,7 +240,7 @@ void test_threaded_producer_consumer()
             }
 
             REQUIRE_GE(value, 0);
-            REQUIRE_LT(value, kTotalItems);
+            REQUIRE_LT(value, k_total_items);
             processed.fetch_add(1, std::memory_order_acq_rel);
 
             if ((value & 0xFF) == 0) {
@@ -250,12 +250,12 @@ void test_threaded_producer_consumer()
     };
 
     std::vector<std::thread> producers;
-    for (int i = 0; i < kProducerCount; ++i) {
+    for (int i = 0; i < k_producer_count; ++i) {
         producers.emplace_back(produce);
     }
 
     std::vector<std::thread> consumers;
-    for (int i = 0; i < kConsumerCount; ++i) {
+    for (int i = 0; i < k_consumer_count; ++i) {
         consumers.emplace_back(consume);
     }
 
@@ -263,9 +263,9 @@ void test_threaded_producer_consumer()
         t.join();
     }
 
-    REQUIRE_EQ(kTotalItems, enqueued.load(std::memory_order_acquire));
+    REQUIRE_EQ(k_total_items, enqueued.load(std::memory_order_acquire));
 
-    for (int i = 0; i < kConsumerCount; ++i) {
+    for (int i = 0; i < k_consumer_count; ++i) {
         {
             std::lock_guard<std::mutex> lock(queue_mutex);
             queue.push(-1); // Sentinel instructing consumer to exit.
@@ -277,7 +277,7 @@ void test_threaded_producer_consumer()
         t.join();
     }
 
-    REQUIRE_EQ(kTotalItems, processed.load(std::memory_order_acquire));
+    REQUIRE_EQ(k_total_items, processed.load(std::memory_order_acquire));
 }
 
 void test_release_local_handle_idempotent()
@@ -296,8 +296,8 @@ void test_release_local_handle_idempotent()
 
 void test_multithreaded_contention()
 {
-    constexpr int kThreads = 8;
-    constexpr int kIterationsPerThread = 1500;
+    constexpr int k_threads = 8;
+    constexpr int k_iterations_per_thread = 1500;
 
     interprocess_semaphore sem(0);
     std::atomic<int> posted{0};
@@ -305,12 +305,12 @@ void test_multithreaded_contention()
 
     std::random_device rd;
     std::vector<std::thread> threads;
-    threads.reserve(kThreads);
+    threads.reserve(k_threads);
 
-    for (int t = 0; t < kThreads; ++t) {
+    for (int t = 0; t < k_threads; ++t) {
         threads.emplace_back([&, seed = rd()]() mutable {
             std::mt19937 rng(seed);
-            for (int i = 0; i < kIterationsPerThread; ++i) {
+            for (int i = 0; i < k_iterations_per_thread; ++i) {
                 if ((rng() & 3) == 0) {
                     sem.post();
                     posted.fetch_add(1);
@@ -348,8 +348,8 @@ struct Shared_state
     std::atomic<int> start{0};
     std::atomic<int> processed{0};
 
-    static constexpr int kResources = 3;
-    std::atomic<int> resource_owner[kResources];
+    static constexpr int k_resources = 3;
+    std::atomic<int> resource_owner[k_resources];
 
     typename std::aligned_storage<sizeof(interprocess_semaphore), alignof(interprocess_semaphore)>::type sem_storage;
 
@@ -358,7 +358,7 @@ struct Shared_state
         for (auto& owner : resource_owner) {
             owner = -1;
         }
-        new (&sem_storage) interprocess_semaphore(kResources);
+        new (&sem_storage) interprocess_semaphore(k_resources);
     }
 
     ~Shared_state()
@@ -395,7 +395,7 @@ void run_child(Shared_state* shared, int iterations)
         }
 
         int acquired = -1;
-        for (int i = 0; i < Shared_state::kResources; ++i) {
+        for (int i = 0; i < Shared_state::k_resources; ++i) {
             int expected = -1;
             if (shared->resource_owner[i].compare_exchange_strong(expected, pid, std::memory_order_acq_rel)) {
                 acquired = i;
@@ -425,9 +425,9 @@ void run_child(Shared_state* shared, int iterations)
 
 void test_cross_process_coordination()
 {
-    constexpr int kChildren = 4;
-    constexpr int kIterationsPerChild = 120;
-    constexpr auto kOverallTimeout = std::chrono::seconds(20);
+    constexpr int k_children = 4;
+    constexpr int k_iterations_per_child = 120;
+    constexpr auto k_overall_timeout = std::chrono::seconds(20);
 
     void* mapping = ::mmap(nullptr, sizeof(Shared_state), PROT_READ | PROT_WRITE,
                             MAP_SHARED | MAP_ANONYMOUS, -1, 0);
@@ -438,22 +438,22 @@ void test_cross_process_coordination()
     Shared_state* shared = new (mapping) Shared_state();
 
     std::vector<pid_t> children;
-    children.reserve(kChildren);
+    children.reserve(k_children);
 
     try {
-        for (int i = 0; i < kChildren; ++i) {
+        for (int i = 0; i < k_children; ++i) {
             pid_t pid = ::fork();
             if (pid == -1) {
                 throw std::system_error(errno, std::generic_category(), "fork");
             }
             if (pid == 0) {
-                run_child(shared, kIterationsPerChild);
+                run_child(shared, k_iterations_per_child);
             }
             children.push_back(pid);
         }
 
         const auto ready_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-        while (shared->ready.load(std::memory_order_acquire) < kChildren) {
+        while (shared->ready.load(std::memory_order_acquire) < k_children) {
             if (std::chrono::steady_clock::now() > ready_deadline) {
                 throw Test_failure("child processes failed to report ready", __FILE__, __LINE__);
             }
@@ -462,8 +462,8 @@ void test_cross_process_coordination()
 
         shared->start.store(1);
 
-        const int expected = kChildren * kIterationsPerChild;
-        const auto finish_deadline = std::chrono::steady_clock::now() + kOverallTimeout;
+        const int expected = k_children * k_iterations_per_child;
+        const auto finish_deadline = std::chrono::steady_clock::now() + k_overall_timeout;
         while (shared->processed.load(std::memory_order_acquire) < expected) {
             if (std::chrono::steady_clock::now() > finish_deadline) {
                 throw Test_failure("processing did not finish before timeout", __FILE__, __LINE__);
@@ -575,9 +575,9 @@ int run_interprocess_child(const std::string& work_name,
 
 void test_cross_process_coordination()
 {
-    constexpr int kChildren = 3;
-    constexpr int kIterationsPerChild = 400;
-    constexpr int kBurst = 3;
+    constexpr int k_children = 3;
+    constexpr int k_iterations_per_child = 400;
+    constexpr int k_burst = 3;
 
     interprocess_semaphore work_sem(0);
     interprocess_semaphore ack_sem(0);
@@ -602,14 +602,14 @@ void test_cross_process_coordination()
     const std::uint64_t ack_id = ack_desc.id;
 
     const std::string executable = current_executable_path();
-    const std::string iterations_arg = std::to_string(kIterationsPerChild);
+    const std::string iterations_arg = std::to_string(k_iterations_per_child);
     const std::string work_id_arg = std::to_string(static_cast<unsigned long long>(work_id));
     const std::string ack_id_arg = std::to_string(static_cast<unsigned long long>(ack_id));
 
     std::vector<intptr_t> children;
-    children.reserve(kChildren);
+    children.reserve(k_children);
 
-    for (int i = 0; i < kChildren; ++i) {
+    for (int i = 0; i < k_children; ++i) {
         std::vector<std::string> argv_strings = {
             executable,
             "--interprocess-semaphore-child",
@@ -636,9 +636,9 @@ void test_cross_process_coordination()
 
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-    const int total_iterations = kChildren * kIterationsPerChild;
-    for (int offset = 0; offset < total_iterations; offset += kBurst) {
-        const int batch_size = std::min(kBurst, total_iterations - offset);
+    const int total_iterations = k_children * k_iterations_per_child;
+    for (int offset = 0; offset < total_iterations; offset += k_burst) {
+        const int batch_size = std::min(k_burst, total_iterations - offset);
         for (int j = 0; j < batch_size; ++j) {
             work_sem.post();
         }

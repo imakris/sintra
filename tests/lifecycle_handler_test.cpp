@@ -48,16 +48,16 @@
 
 namespace {
 
-constexpr std::string_view kEnvSharedDir = "SINTRA_TEST_SHARED_DIR";
+constexpr std::string_view k_env_shared_dir = "SINTRA_TEST_SHARED_DIR";
 
 // Worker IDs for correlation
-constexpr int kNormalWorkerId = 1;
-constexpr int kCrashWorkerId = 2;
-constexpr int kUnpublishedWorkerId = 3;
+constexpr int k_normal_worker_id = 1;
+constexpr int k_crash_worker_id = 2;
+constexpr int k_unpublished_worker_id = 3;
 
 std::filesystem::path get_shared_directory()
 {
-    const char* value = std::getenv(kEnvSharedDir.data());
+    const char* value = std::getenv(k_env_shared_dir.data());
     if (!value) {
         throw std::runtime_error("SINTRA_TEST_SHARED_DIR is not set");
     }
@@ -67,15 +67,15 @@ std::filesystem::path get_shared_directory()
 void set_shared_directory_env(const std::filesystem::path& dir)
 {
 #ifdef _WIN32
-    _putenv_s(kEnvSharedDir.data(), dir.string().c_str());
+    _putenv_s(k_env_shared_dir.data(), dir.string().c_str());
 #else
-    setenv(kEnvSharedDir.data(), dir.string().c_str(), 1);
+    setenv(k_env_shared_dir.data(), dir.string().c_str(), 1);
 #endif
 }
 
 std::filesystem::path ensure_shared_directory()
 {
-    const char* value = std::getenv(kEnvSharedDir.data());
+    const char* value = std::getenv(k_env_shared_dir.data());
     if (value && *value) {
         std::filesystem::path dir(value);
         std::filesystem::create_directories(dir);
@@ -111,10 +111,10 @@ bool has_branch_flag(int argc, char* argv[])
     return false;
 }
 
-constexpr auto kReadyTimeout = std::chrono::seconds(10);
-constexpr auto kSignalTimeout = std::chrono::seconds(10);
-constexpr auto kEventTimeout = std::chrono::seconds(15);
-constexpr auto kPollInterval = std::chrono::milliseconds(50);
+constexpr auto k_ready_timeout = std::chrono::seconds(10);
+constexpr auto k_signal_timeout = std::chrono::seconds(10);
+constexpr auto k_event_timeout = std::chrono::seconds(15);
+constexpr auto k_poll_interval = std::chrono::milliseconds(50);
 
 std::filesystem::path worker_ready_path(const std::filesystem::path& dir, int worker_id)
 {
@@ -175,7 +175,7 @@ bool wait_for_signal_file(const std::filesystem::path& path,
         if (std::filesystem::exists(path)) {
             return true;
         }
-        std::this_thread::sleep_for(kPollInterval);
+        std::this_thread::sleep_for(k_poll_interval);
     }
     return std::filesystem::exists(path);
 }
@@ -234,14 +234,14 @@ int process_normal_worker()
 
     const auto shared_dir = get_shared_directory();
     if (!write_worker_ready(shared_dir,
-                            kNormalWorkerId,
+                            k_normal_worker_id,
                             sintra::process_of(s_mproc_id))) {
         std::fprintf(stderr, "[NORMAL_WORKER] ERROR: Failed to write ready file\n");
         return 1;
     }
 
     const auto finish_signal_path = signal_path(shared_dir, "finish");
-    if (!wait_for_signal_file(finish_signal_path, kSignalTimeout)) {
+    if (!wait_for_signal_file(finish_signal_path, k_signal_timeout)) {
         std::fprintf(stderr, "[NORMAL_WORKER] ERROR: Timed out waiting for Finish signal\n");
         return 1;  // Fail explicitly on timeout
     }
@@ -262,14 +262,14 @@ int process_crash_worker()
 
     const auto shared_dir = get_shared_directory();
     if (!write_worker_ready(shared_dir,
-                            kCrashWorkerId,
+                            k_crash_worker_id,
                             sintra::process_of(s_mproc_id))) {
         std::fprintf(stderr, "[CRASH_WORKER] ERROR: Failed to write ready file\n");
         return 1;
     }
 
     const auto crash_signal_path = signal_path(shared_dir, "crash");
-    if (!wait_for_signal_file(crash_signal_path, kSignalTimeout)) {
+    if (!wait_for_signal_file(crash_signal_path, k_signal_timeout)) {
         std::fprintf(stderr, "[CRASH_WORKER] ERROR: Timed out waiting for Crash signal\n");
         return 1;
     }
@@ -297,14 +297,14 @@ int process_unpublished_worker()
 
     const auto shared_dir = get_shared_directory();
     if (!write_worker_ready(shared_dir,
-                            kUnpublishedWorkerId,
+                            k_unpublished_worker_id,
                             sintra::process_of(s_mproc_id))) {
         std::fprintf(stderr, "[UNPUBLISHED_WORKER] ERROR: Failed to write ready file\n");
         return 1;
     }
 
     const auto unpublish_signal_path = signal_path(shared_dir, "unpublish");
-    if (!wait_for_signal_file(unpublish_signal_path, kSignalTimeout)) {
+    if (!wait_for_signal_file(unpublish_signal_path, k_signal_timeout)) {
         std::fprintf(stderr, "[UNPUBLISHED_WORKER] ERROR: Timed out waiting for Unpublish signal\n");
         return 1;
     }
@@ -345,17 +345,17 @@ int process_coordinator()
     sintra::instance_id_type crash_worker_iid = sintra::invalid_instance_id;
     sintra::instance_id_type unpub_worker_iid = sintra::invalid_instance_id;
     sintra::instance_id_type normal_worker_iid = sintra::invalid_instance_id;
-    const auto ready_deadline = std::chrono::steady_clock::now() + kReadyTimeout;
+    const auto ready_deadline = std::chrono::steady_clock::now() + k_ready_timeout;
     while (std::chrono::steady_clock::now() < ready_deadline) {
         bool have_all = true;
         if (crash_worker_iid == sintra::invalid_instance_id) {
-            have_all = read_worker_ready(shared_dir, kCrashWorkerId, &crash_worker_iid) && have_all;
+            have_all = read_worker_ready(shared_dir, k_crash_worker_id, &crash_worker_iid) && have_all;
         }
         if (unpub_worker_iid == sintra::invalid_instance_id) {
-            have_all = read_worker_ready(shared_dir, kUnpublishedWorkerId, &unpub_worker_iid) && have_all;
+            have_all = read_worker_ready(shared_dir, k_unpublished_worker_id, &unpub_worker_iid) && have_all;
         }
         if (normal_worker_iid == sintra::invalid_instance_id) {
-            have_all = read_worker_ready(shared_dir, kNormalWorkerId, &normal_worker_iid) && have_all;
+            have_all = read_worker_ready(shared_dir, k_normal_worker_id, &normal_worker_iid) && have_all;
         }
         if (have_all) {
             break;
@@ -418,7 +418,7 @@ int process_coordinator()
 
     if (test_passed) {
         std::unique_lock<std::mutex> events_lk(g_events_mutex);
-        const auto deadline = std::chrono::steady_clock::now() + kEventTimeout;
+        const auto deadline = std::chrono::steady_clock::now() + k_event_timeout;
         g_events_cv.wait_until(events_lk, deadline, [&] {
             return find_event(sintra::process_lifecycle_event::reason::crash, nullptr) &&
                    find_event(sintra::process_lifecycle_event::reason::unpublished, nullptr) &&

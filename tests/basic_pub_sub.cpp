@@ -43,11 +43,11 @@
 
 namespace {
 
-constexpr std::string_view kEnvSharedDir = "SINTRA_TEST_SHARED_DIR";
-constexpr int kMessageRounds = 5;
-constexpr std::array<std::string_view, 4> kBaseStringMessages{
+constexpr std::string_view k_env_shared_dir = "SINTRA_TEST_SHARED_DIR";
+constexpr int k_message_rounds = 5;
+constexpr std::array<std::string_view, 4> k_base_string_messages{
     "good morning", "good afternoon", "good evening", "good night"};
-constexpr std::array<int, 4> kBaseIntMessages{1, 2, 3, 4};
+constexpr std::array<int, 4> k_base_int_messages{1, 2, 3, 4};
 
 std::string format_string_message(std::string_view base, int round)
 {
@@ -65,7 +65,7 @@ int format_int_message(int base, int round)
 
 std::filesystem::path get_shared_directory()
 {
-    const char* value = std::getenv(kEnvSharedDir.data());
+    const char* value = std::getenv(k_env_shared_dir.data());
     if (!value) {
         throw std::runtime_error("SINTRA_TEST_SHARED_DIR is not set");
     }
@@ -75,15 +75,15 @@ std::filesystem::path get_shared_directory()
 void set_shared_directory_env(const std::filesystem::path& dir)
 {
 #ifdef _WIN32
-    _putenv_s(kEnvSharedDir.data(), dir.string().c_str());
+    _putenv_s(k_env_shared_dir.data(), dir.string().c_str());
 #else
-    setenv(kEnvSharedDir.data(), dir.string().c_str(), 1);
+    setenv(k_env_shared_dir.data(), dir.string().c_str(), 1);
 #endif
 }
 
 std::filesystem::path ensure_shared_directory()
 {
-    const char* value = std::getenv(kEnvSharedDir.data());
+    const char* value = std::getenv(k_env_shared_dir.data());
     if (value && *value) {
         std::filesystem::path dir(value);
         std::filesystem::create_directories(dir);
@@ -213,11 +213,11 @@ int process_sender()
 {
     sintra::barrier("slots-ready");
 
-    for (int round = 0; round < kMessageRounds; ++round) {
-        for (auto base : kBaseStringMessages) {
+    for (int round = 0; round < k_message_rounds; ++round) {
+        for (auto base : k_base_string_messages) {
             sintra::world() << format_string_message(base, round);
         }
-        for (int base : kBaseIntMessages) {
+        for (int base : k_base_int_messages) {
             sintra::world() << format_int_message(base, round);
         }
     }
@@ -230,17 +230,17 @@ int process_sender()
     const auto ints = read_ints(shared_dir / "ints.txt");
 
     std::vector<std::string> expected_strings;
-    expected_strings.reserve(kMessageRounds * kBaseStringMessages.size());
-    for (int round = 0; round < kMessageRounds; ++round) {
-        for (auto base : kBaseStringMessages) {
+    expected_strings.reserve(k_message_rounds * k_base_string_messages.size());
+    for (int round = 0; round < k_message_rounds; ++round) {
+        for (auto base : k_base_string_messages) {
             expected_strings.emplace_back(format_string_message(base, round));
         }
     }
 
     std::vector<int> expected_ints;
-    expected_ints.reserve(kMessageRounds * kBaseIntMessages.size());
-    for (int round = 0; round < kMessageRounds; ++round) {
-        for (int base : kBaseIntMessages) {
+    expected_ints.reserve(k_message_rounds * k_base_int_messages.size());
+    for (int round = 0; round < k_message_rounds; ++round) {
+        for (int base : k_base_int_messages) {
             expected_ints.push_back(format_int_message(base, round));
         }
     }

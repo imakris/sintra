@@ -28,7 +28,7 @@
 
 namespace {
 
-constexpr const char* kSharedDirEnv = "SINTRA_JOIN_SWARM_DIR";
+constexpr const char* k_shared_dir_env = "SINTRA_JOIN_SWARM_DIR";
 
 struct Hello {
     int sender;
@@ -38,7 +38,7 @@ struct Ping { int token; };
 
 std::filesystem::path shared_dir()
 {
-    const char* value = std::getenv(kSharedDirEnv);
+    const char* value = std::getenv(k_shared_dir_env);
     if (!value || !*value) {
         throw std::runtime_error("SINTRA_JOIN_SWARM_DIR is not set");
     }
@@ -244,7 +244,7 @@ int worker()
 
 int main(int argc, char* argv[])
 {
-    const char* existing_dir = std::getenv(kSharedDirEnv);
+    const char* existing_dir = std::getenv(k_shared_dir_env);
     const bool own_dir = !(existing_dir && *existing_dir);
     const auto dir = own_dir
         ? sintra::test::unique_scratch_directory("join_swarm_midflight")
@@ -266,11 +266,11 @@ int main(int argc, char* argv[])
 
 #ifdef _WIN32
     if (own_dir) {
-        _putenv_s(kSharedDirEnv, dir.string().c_str());
+        _putenv_s(k_shared_dir_env, dir.string().c_str());
     }
 #else
     if (own_dir) {
-        setenv(kSharedDirEnv, dir.string().c_str(), 1);
+        setenv(k_shared_dir_env, dir.string().c_str(), 1);
     }
 #endif
 

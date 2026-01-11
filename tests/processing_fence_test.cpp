@@ -28,9 +28,9 @@ struct Work_message {};
 
 struct Handler_done {};
 
-constexpr auto kHandlerDelay = std::chrono::milliseconds(300);
-constexpr std::string_view kEnvSharedDir = "SINTRA_PROCESSING_FENCE_DIR";
-constexpr std::string_view kSharedDirFlag = "--shared-dir";
+constexpr auto k_handler_delay = std::chrono::milliseconds(300);
+constexpr std::string_view k_env_shared_dir = "SINTRA_PROCESSING_FENCE_DIR";
+constexpr std::string_view k_shared_dir_flag = "--shared-dir";
 
 std::filesystem::path& shared_directory_storage()
 {
@@ -50,15 +50,15 @@ const std::filesystem::path& shared_directory()
 void set_shared_directory_env(const std::filesystem::path& dir)
 {
 #ifdef _WIN32
-    _putenv_s(kEnvSharedDir.data(), dir.string().c_str());
+    _putenv_s(k_env_shared_dir.data(), dir.string().c_str());
 #else
-    setenv(kEnvSharedDir.data(), dir.string().c_str(), 1);
+    setenv(k_env_shared_dir.data(), dir.string().c_str(), 1);
 #endif
 }
 
 std::filesystem::path ensure_shared_directory()
 {
-    const char* value = std::getenv(kEnvSharedDir.data());
+    const char* value = std::getenv(k_env_shared_dir.data());
     if (value && *value) {
         std::filesystem::path dir(value);
         std::filesystem::create_directories(dir);
@@ -103,18 +103,18 @@ std::optional<std::filesystem::path> find_shared_directory_arg(int argc, char* a
 {
     for (int i = 1; i < argc; ++i) {
         std::string_view arg(argv[i]);
-        if (arg == kSharedDirFlag) {
+        if (arg == k_shared_dir_flag) {
             if (i + 1 >= argc) {
                 throw std::runtime_error("--shared-dir requires a value");
             }
             return std::filesystem::path(argv[i + 1]);
         }
 
-        if (arg.size() > kSharedDirFlag.size() &&
-            arg.substr(0, kSharedDirFlag.size()) == kSharedDirFlag &&
-            arg[kSharedDirFlag.size()] == '=')
+        if (arg.size() > k_shared_dir_flag.size() &&
+            arg.substr(0, k_shared_dir_flag.size()) == k_shared_dir_flag &&
+            arg[k_shared_dir_flag.size()] == '=')
         {
-            return std::filesystem::path(std::string(arg.substr(kSharedDirFlag.size() + 1)));
+            return std::filesystem::path(std::string(arg.substr(k_shared_dir_flag.size() + 1)));
         }
     }
 
@@ -176,7 +176,7 @@ int controller_process()
     // the test robust against the observed scheduling jitter while still
     // validating that processing completed promptly.
     const auto handler_done_deadline =
-        start + kHandlerDelay + std::chrono::milliseconds(200);
+        start + k_handler_delay + std::chrono::milliseconds(200);
     const bool handler_done = handler_done_future.wait_until(handler_done_deadline) ==
         std::future_status::ready;
 
@@ -197,7 +197,7 @@ int worker_process()
     using namespace sintra;
 
     auto slot = [](const Work_message&) {
-        std::this_thread::sleep_for(kHandlerDelay);
+        std::this_thread::sleep_for(k_handler_delay);
         world() << Handler_done{};
     };
     activate_slot(slot);
@@ -225,9 +225,9 @@ int main(int argc, char* argv[])
 
     std::vector<sintra::Process_descriptor> processes;
     processes.emplace_back(controller_process);
-    processes.back().user_options = {std::string(kSharedDirFlag), shared_dir.string()};
+    processes.back().user_options = {std::string(k_shared_dir_flag), shared_dir.string()};
     processes.emplace_back(worker_process);
-    processes.back().user_options = {std::string(kSharedDirFlag), shared_dir.string()};
+    processes.back().user_options = {std::string(k_shared_dir_flag), shared_dir.string()};
 
     sintra::init(argc, argv, processes);
     if (!is_spawned) {
@@ -249,7 +249,7 @@ int main(int argc, char* argv[])
         in >> elapsed_ms;
         std::getline(in >> std::ws, done_state);
 
-        const long long expected_ms = kHandlerDelay.count();
+        const long long expected_ms = k_handler_delay.count();
         const bool elapsed_ok = elapsed_ms >= expected_ms;
         const bool done_ok = (done_state == "done");
         const bool success = (status == "ok") && elapsed_ok && done_ok;

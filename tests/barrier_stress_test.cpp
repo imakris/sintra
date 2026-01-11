@@ -17,11 +17,11 @@
 #include <unistd.h>
 #endif
 
-constexpr std::size_t kProcessCount = 4;
+constexpr std::size_t k_process_count = 4;
 // Keep the stress loop bounded so slower CI hosts (e.g. FreeBSD jails) still
 // show steady ctest progress. Hundreds of iterations remain enough to exercise
 // the synchronization paths without monopolizing the worker for minutes.
-constexpr std::size_t kIterations = 220;
+constexpr std::size_t k_iterations = 220;
 
 std::atomic<int> worker_failures{0};
 std::atomic<int> coordinator_failures{0};
@@ -54,7 +54,7 @@ int worker_process(std::uint32_t worker_index)
     try {
         std::uint64_t last_seq = 0;
         std::uint64_t last_alt_seq = 0;
-        for (std::uint32_t iter = 0; iter < kIterations; ++iter) {
+        for (std::uint32_t iter = 0; iter < k_iterations; ++iter) {
             // Add random tiny delay to increase chance of race conditions
             if (delay_dist(gen) == 0) {
                 std::this_thread::sleep_for(std::chrono::microseconds(1));
