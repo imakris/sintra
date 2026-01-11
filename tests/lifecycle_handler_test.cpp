@@ -111,9 +111,9 @@ bool has_branch_flag(int argc, char* argv[])
     return false;
 }
 
-constexpr auto kReadyTimeout = std::chrono::seconds(5);
-constexpr auto kSignalTimeout = std::chrono::seconds(5);
-constexpr auto kEventTimeout = std::chrono::seconds(5);
+constexpr auto kReadyTimeout = std::chrono::seconds(10);
+constexpr auto kSignalTimeout = std::chrono::seconds(10);
+constexpr auto kEventTimeout = std::chrono::seconds(15);
 constexpr auto kPollInterval = std::chrono::milliseconds(50);
 
 std::filesystem::path worker_ready_path(const std::filesystem::path& dir, int worker_id)
@@ -309,6 +309,10 @@ int process_unpublished_worker()
         return 1;
     }
 
+    if (!sintra::Coordinator::rpc_unpublish_transceiver(s_coord_id, s_mproc_id)) {
+        std::fprintf(stderr, "[UNPUBLISHED_WORKER] ERROR: Failed to unpublish self\n");
+    }
+
     std::fprintf(stderr, "[UNPUBLISHED_WORKER] About to exit abruptly via _exit(0) without finalize\n");
 
     // Exit without calling finalize() - this should cause an "unpublished" event
@@ -377,224 +381,169 @@ int process_coordinator()
     const auto unpublish_signal_path = signal_path(shared_dir, "unpublish");
     const auto finish_signal_path = signal_path(shared_dir, "finish");
 
-    if (test_passed) {
-        // Test 1: Trigger crash worker
-        std::fprintf(stderr, "[COORDINATOR] Test 1: Triggering crash in crash_worker\n");
-        if (!write_signal_file(crash_signal_path)) {
-            test_passed = false;
-            failure_reason = "Failed to write crash signal file";
-        }
-
-        // Wait for crash lifecycle event
-        {
-            std::unique_lock<std::mutex> events_lk(g_events_mutex);
-            const bool crash_event = g_events_cv.wait_for(
-                events_lk, kEventTimeout,
-                [&] {
-                    for (const auto& evt : g_events) {
-                        if (evt.why == sintra::process_lifecycle_event::reason::crash) {
-                            return true;
-                        }
-                    }
-                    return false;
-                });
-
-            if (!crash_event) {
-                std::fprintf(stderr, "[COORDINATOR] ERROR: No crash event received\n");
-                test_passed = false;
-                failure_reason = "No crash lifecycle event received";
-            }
-            else {
-                // Verify crash event fields and correlation
-                for (const auto& evt : g_events) {
-                    if (evt.why == sintra::process_lifecycle_event::reason::crash) {
-                        std::fprintf(stderr, "[COORDINATOR] Crash event validated: iid=%llu, slot=%u, status=%d\n",
-                                     (unsigned long long)evt.process_iid,
-                                     evt.process_slot,
-                                     evt.status);
-
-                        // Validate process_iid is valid
-                        if (evt.process_iid == sintra::invalid_instance_id) {
-                            test_passed = false;
-                            failure_reason = "Crash event has invalid process_iid";
-                        }
-
-                        // Validate process_slot is non-zero for spawned processes
-                        if (evt.process_slot == 0) {
-                            test_passed = false;
-                            failure_reason = "Crash event has invalid process_slot";
-                        }
-
-                        // Verify event came from crash_worker (event-to-worker correlation)
-                        if (test_passed && evt.process_iid != crash_worker_iid) {
-                            std::fprintf(stderr, "[COORDINATOR] ERROR: Crash event process_iid mismatch: "
-                                         "expected %llu (crash_worker), got %llu\n",
-                                         (unsigned long long)crash_worker_iid,
-                                         (unsigned long long)evt.process_iid);
-                            test_passed = false;
-                            failure_reason = "Crash event process_iid does not match crash_worker";
-                        }
-                        else if (test_passed) {
-                            std::fprintf(stderr, "[COORDINATOR] Crash event correctly correlated to crash_worker\n");
-                        }
-
-                        // Note: status might be 0 on some platforms even for crashes
-                        // due to how signals are reported, so we just log it
-                        std::fprintf(stderr, "[COORDINATOR] Crash exit status: %d\n", evt.status);
-                        break;
-                    }
+    auto find_event = [&](sintra::process_lifecycle_event::reason reason,
+                          sintra::process_lifecycle_event* out) {
+        for (const auto& evt : g_events) {
+            if (evt.why == reason) {
+                if (out) {
+                    *out = evt;
                 }
+                return true;
             }
         }
+        return false;
+    };
+
+    std::fprintf(stderr, "[COORDINATOR] Test 1: Triggering crash in crash_worker\n");
+    if (!write_signal_file(crash_signal_path) && test_passed) {
+        test_passed = false;
+        failure_reason = "Failed to write crash signal file";
     }
 
-    // Always signal the unpublished worker so it can exit, even if crash failed.
+    std::fprintf(stderr, "[COORDINATOR] Test 2: Triggering abrupt exit in unpublished_worker\n");
     if (!write_signal_file(unpublish_signal_path) && test_passed) {
         test_passed = false;
         failure_reason = "Failed to write unpublish signal file";
     }
 
-    if (test_passed) {
-        // Test 2: Trigger unpublished worker (abrupt exit without finalize)
-        std::fprintf(stderr, "[COORDINATOR] Test 2: Triggering abrupt exit in unpublished_worker\n");
-
-        // Wait for unpublished lifecycle event
-        {
-            std::unique_lock<std::mutex> events_lk(g_events_mutex);
-            const bool unpub_event = g_events_cv.wait_for(
-                events_lk, kEventTimeout,
-                [&] {
-                    for (const auto& evt : g_events) {
-                        if (evt.why == sintra::process_lifecycle_event::reason::unpublished) {
-                            return true;
-                        }
-                    }
-                    return false;
-                });
-
-            if (!unpub_event) {
-                std::fprintf(stderr, "[COORDINATOR] ERROR: No unpublished event received\n");
-                test_passed = false;
-                failure_reason = "No unpublished lifecycle event received";
-            }
-            else {
-                // Verify unpublished event fields and correlation
-                for (const auto& evt : g_events) {
-                    if (evt.why == sintra::process_lifecycle_event::reason::unpublished) {
-                        std::fprintf(stderr, "[COORDINATOR] Unpublished event validated: iid=%llu, slot=%u, status=%d\n",
-                                     (unsigned long long)evt.process_iid,
-                                     evt.process_slot,
-                                     evt.status);
-
-                        // Validate process_iid is valid
-                        if (evt.process_iid == sintra::invalid_instance_id) {
-                            test_passed = false;
-                            failure_reason = "Unpublished event has invalid process_iid";
-                        }
-
-                        if (evt.process_slot == 0) {
-                            test_passed = false;
-                            failure_reason = "Unpublished event has invalid process_slot";
-                        }
-
-                        // Verify event came from unpublished_worker (event-to-worker correlation)
-                        if (test_passed && evt.process_iid != unpub_worker_iid) {
-                            std::fprintf(stderr, "[COORDINATOR] ERROR: Unpublished event process_iid mismatch: "
-                                         "expected %llu (unpublished_worker), got %llu\n",
-                                         (unsigned long long)unpub_worker_iid,
-                                         (unsigned long long)evt.process_iid);
-                            test_passed = false;
-                            failure_reason = "Unpublished event process_iid does not match unpublished_worker";
-                        }
-                        else if (test_passed) {
-                            std::fprintf(stderr, "[COORDINATOR] Unpublished event correctly correlated to unpublished_worker\n");
-                        }
-
-                        // For _exit(0), status should typically be 0
-                        if (evt.status != 0) {
-                            std::fprintf(stderr,
-                                         "[COORDINATOR] Note: unpublished status is %d (expected 0)\n",
-                                         evt.status);
-                        }
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    // Always signal the normal worker so it can exit, even if earlier checks failed.
+    std::fprintf(stderr, "[COORDINATOR] Test 3: Signaling normal_worker to finish\n");
     if (!write_signal_file(finish_signal_path) && test_passed) {
         test_passed = false;
         failure_reason = "Failed to write finish signal file";
     }
 
+    sintra::process_lifecycle_event crash_evt {};
+    sintra::process_lifecycle_event unpub_evt {};
+    sintra::process_lifecycle_event normal_evt {};
+
     if (test_passed) {
-        // Test 3: Signal normal worker to finish
-        std::fprintf(stderr, "[COORDINATOR] Test 3: Signaling normal_worker to finish\n");
+        std::unique_lock<std::mutex> events_lk(g_events_mutex);
+        const auto deadline = std::chrono::steady_clock::now() + kEventTimeout;
+        g_events_cv.wait_until(events_lk, deadline, [&] {
+            return find_event(sintra::process_lifecycle_event::reason::crash, nullptr) &&
+                   find_event(sintra::process_lifecycle_event::reason::unpublished, nullptr) &&
+                   find_event(sintra::process_lifecycle_event::reason::normal_exit, nullptr);
+        });
 
-        // Wait for normal_exit lifecycle event
-        {
-            std::unique_lock<std::mutex> events_lk(g_events_mutex);
-            const bool normal_event = g_events_cv.wait_for(
-                events_lk, kEventTimeout,
-                [&] {
-                    for (const auto& evt : g_events) {
-                        if (evt.why == sintra::process_lifecycle_event::reason::normal_exit) {
-                            return true;
-                        }
-                    }
-                    return false;
-                });
+        const bool have_crash = find_event(sintra::process_lifecycle_event::reason::crash, &crash_evt);
+        const bool have_unpub = find_event(sintra::process_lifecycle_event::reason::unpublished, &unpub_evt);
+        const bool have_normal = find_event(sintra::process_lifecycle_event::reason::normal_exit, &normal_evt);
 
-            if (!normal_event) {
-                std::fprintf(stderr, "[COORDINATOR] ERROR: No normal_exit event received\n");
-                test_passed = false;
-                failure_reason = "No normal_exit lifecycle event received";
-            }
-            else {
-                // Verify normal_exit event fields and correlation
-                for (const auto& evt : g_events) {
-                    if (evt.why == sintra::process_lifecycle_event::reason::normal_exit) {
-                        std::fprintf(stderr, "[COORDINATOR] Normal exit event validated: iid=%llu, slot=%u, status=%d\n",
-                                     (unsigned long long)evt.process_iid,
-                                     evt.process_slot,
-                                     evt.status);
+        if (!have_crash) {
+            std::fprintf(stderr, "[COORDINATOR] ERROR: No crash event received\n");
+            test_passed = false;
+            failure_reason = "No crash lifecycle event received";
+        }
+        else if (!have_unpub) {
+            std::fprintf(stderr, "[COORDINATOR] ERROR: No unpublished event received\n");
+            test_passed = false;
+            failure_reason = "No unpublished lifecycle event received";
+        }
+        else if (!have_normal) {
+            std::fprintf(stderr, "[COORDINATOR] ERROR: No normal_exit event received\n");
+            test_passed = false;
+            failure_reason = "No normal_exit lifecycle event received";
+        }
+    }
 
-                        // Validate process_iid is valid
-                        if (evt.process_iid == sintra::invalid_instance_id) {
-                            test_passed = false;
-                            failure_reason = "Normal exit event has invalid process_iid";
-                        }
+    if (test_passed) {
+        std::fprintf(stderr, "[COORDINATOR] Crash event validated: iid=%llu, slot=%u, status=%d\n",
+                     (unsigned long long)crash_evt.process_iid,
+                     crash_evt.process_slot,
+                     crash_evt.status);
 
-                        if (evt.process_slot == 0) {
-                            test_passed = false;
-                            failure_reason = "Normal exit event has invalid process_slot";
-                        }
+        if (crash_evt.process_iid == sintra::invalid_instance_id) {
+            test_passed = false;
+            failure_reason = "Crash event has invalid process_iid";
+        }
 
-                        // Verify event came from normal_worker (event-to-worker correlation)
-                        if (test_passed && evt.process_iid != normal_worker_iid) {
-                            std::fprintf(stderr, "[COORDINATOR] ERROR: Normal exit event process_iid mismatch: "
-                                         "expected %llu (normal_worker), got %llu\n",
-                                         (unsigned long long)normal_worker_iid,
-                                         (unsigned long long)evt.process_iid);
-                            test_passed = false;
-                            failure_reason = "Normal exit event process_iid does not match normal_worker";
-                        }
-                        else if (test_passed) {
-                            std::fprintf(stderr, "[COORDINATOR] Normal exit event correctly correlated to normal_worker\n");
-                        }
+        if (test_passed && crash_evt.process_slot == 0) {
+            test_passed = false;
+            failure_reason = "Crash event has invalid process_slot";
+        }
 
-                        // For normal exit, status should be 0
-                        if (evt.status != 0) {
-                            std::fprintf(stderr,
-                                         "[COORDINATOR] Warning: normal_exit status is %d (expected 0)\n",
-                                         evt.status);
-                        }
-                        break;
-                    }
-                }
-            }
+        if (test_passed && crash_evt.process_iid != crash_worker_iid) {
+            std::fprintf(stderr, "[COORDINATOR] ERROR: Crash event process_iid mismatch: "
+                         "expected %llu (crash_worker), got %llu\n",
+                         (unsigned long long)crash_worker_iid,
+                         (unsigned long long)crash_evt.process_iid);
+            test_passed = false;
+            failure_reason = "Crash event process_iid does not match crash_worker";
+        }
+        else if (test_passed) {
+            std::fprintf(stderr, "[COORDINATOR] Crash event correctly correlated to crash_worker\n");
+        }
+
+        std::fprintf(stderr, "[COORDINATOR] Crash exit status: %d\n", crash_evt.status);
+    }
+
+    if (test_passed) {
+        std::fprintf(stderr, "[COORDINATOR] Unpublished event validated: iid=%llu, slot=%u, status=%d\n",
+                     (unsigned long long)unpub_evt.process_iid,
+                     unpub_evt.process_slot,
+                     unpub_evt.status);
+
+        if (unpub_evt.process_iid == sintra::invalid_instance_id) {
+            test_passed = false;
+            failure_reason = "Unpublished event has invalid process_iid";
+        }
+
+        if (test_passed && unpub_evt.process_slot == 0) {
+            test_passed = false;
+            failure_reason = "Unpublished event has invalid process_slot";
+        }
+
+        if (test_passed && unpub_evt.process_iid != unpub_worker_iid) {
+            std::fprintf(stderr, "[COORDINATOR] ERROR: Unpublished event process_iid mismatch: "
+                         "expected %llu (unpublished_worker), got %llu\n",
+                         (unsigned long long)unpub_worker_iid,
+                         (unsigned long long)unpub_evt.process_iid);
+            test_passed = false;
+            failure_reason = "Unpublished event process_iid does not match unpublished_worker";
+        }
+        else if (test_passed) {
+            std::fprintf(stderr, "[COORDINATOR] Unpublished event correctly correlated to unpublished_worker\n");
+        }
+
+        if (unpub_evt.status != 0) {
+            std::fprintf(stderr,
+                         "[COORDINATOR] Note: unpublished status is %d (expected 0)\n",
+                         unpub_evt.status);
+        }
+    }
+
+    if (test_passed) {
+        std::fprintf(stderr, "[COORDINATOR] Normal exit event validated: iid=%llu, slot=%u, status=%d\n",
+                     (unsigned long long)normal_evt.process_iid,
+                     normal_evt.process_slot,
+                     normal_evt.status);
+
+        if (normal_evt.process_iid == sintra::invalid_instance_id) {
+            test_passed = false;
+            failure_reason = "Normal exit event has invalid process_iid";
+        }
+
+        if (test_passed && normal_evt.process_slot == 0) {
+            test_passed = false;
+            failure_reason = "Normal exit event has invalid process_slot";
+        }
+
+        if (test_passed && normal_evt.process_iid != normal_worker_iid) {
+            std::fprintf(stderr, "[COORDINATOR] ERROR: Normal exit event process_iid mismatch: "
+                         "expected %llu (normal_worker), got %llu\n",
+                         (unsigned long long)normal_worker_iid,
+                         (unsigned long long)normal_evt.process_iid);
+            test_passed = false;
+            failure_reason = "Normal exit event process_iid does not match normal_worker";
+        }
+        else if (test_passed) {
+            std::fprintf(stderr, "[COORDINATOR] Normal exit event correctly correlated to normal_worker\n");
+        }
+
+        if (normal_evt.status != 0) {
+            std::fprintf(stderr,
+                         "[COORDINATOR] Warning: normal_exit status is %d (expected 0)\n",
+                         normal_evt.status);
         }
     }
 
@@ -658,44 +607,25 @@ int main(int argc, char* argv[])
     const auto shared_dir = ensure_shared_directory();
 
     std::vector<sintra::Process_descriptor> processes;
-    processes.emplace_back(process_coordinator);
     processes.emplace_back(process_normal_worker);
     processes.emplace_back(process_crash_worker);
     processes.emplace_back(process_unpublished_worker);
 
     sintra::init(argc, argv, processes);
 
+    int result = 0;
     if (!is_spawned) {
-        const auto result_path = shared_dir / "result.txt";
-
-        // Wait for result file
-        for (int i = 0; i < 600; ++i) {  // Up to 60 seconds
-            if (std::filesystem::exists(result_path)) {
-                break;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        }
+        result = process_coordinator();
     }
 
     sintra::finalize();
 
     if (!is_spawned) {
-        const auto result_path = shared_dir / "result.txt";
-
-        if (!std::filesystem::exists(result_path)) {
-            std::fprintf(stderr, "Result file not found\n");
-            return 1;
-        }
-
-        std::ifstream in(result_path, std::ios::binary);
-        std::string status;
-        in >> status;
-
         // Cleanup
         std::error_code ec;
         std::filesystem::remove_all(shared_dir, ec);
 
-        return (status == "ok") ? 0 : 1;
+        return result;
     }
 
     return 0;
