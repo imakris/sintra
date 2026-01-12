@@ -134,6 +134,29 @@ auto activate_slot(
 void deactivate_all_slots();
 
 
+///\brief Block until a message of the specified type is received.
+///
+/// This is the synchronous receiving counterpart to the asynchronous send via
+/// `world() << msg`.  It activates a temporary slot, blocks until a matching
+/// message arrives, then returns the message payload.
+///
+/// Example usage:
+/// \code
+///     // Wait for a Stop signal (empty message)
+///     receive<Stop>();
+///
+///     // Wait for a data message and capture its contents
+///     auto msg = receive<DataMessage>();
+///     std::cout << msg.value << std::endl;
+/// \endcode
+///
+/// \tparam MESSAGE_T The message type to wait for.
+/// \tparam SENDER_T  Optional sender filter (defaults to any sender).
+/// \return The received message payload.
+template <typename MESSAGE_T, typename SENDER_T = void>
+MESSAGE_T receive(Typed_instance_id<SENDER_T> sender_id = Typed_instance_id<void>(any_local_or_remote));
+
+
 ///\brief Enable automatic recovery for the current managed process.
 ///
 /// When recovery is enabled the coordinator will respawn the process if it     
