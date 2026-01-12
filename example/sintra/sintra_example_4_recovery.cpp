@@ -26,8 +26,6 @@
 #include <iostream>
 #include <chrono>
 #include <thread>
-#include <mutex>
-#include <condition_variable>
 
 using namespace std;
 using namespace sintra;
@@ -39,21 +37,8 @@ struct Done {};
 int process_observer()
 {
     console() << "[Observer] Starting - waiting for Done signal\n";
-
-    condition_variable cv;
-    mutex m;
-    bool done = false;
-
-    activate_slot([&](Done) {
-        console() << "[Observer] Received Done signal!\n";
-        lock_guard<mutex> lk(m);
-        done = true;
-        cv.notify_one();
-    });
-
-    // Wait for the Done signal
-    unique_lock<mutex> lk(m);
-    cv.wait(lk, [&]{return done;});
+    receive<Done>();
+    console() << "[Observer] Received Done signal!\n";
 
     deactivate_all_slots();
     console() << "[Observer] Exiting normally\n";

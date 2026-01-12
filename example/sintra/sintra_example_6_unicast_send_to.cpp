@@ -18,8 +18,6 @@
 #include <iostream>
 #include <thread>
 #include <atomic>
-#include <condition_variable>
-#include <mutex>
 
 
 using namespace std;
@@ -42,6 +40,11 @@ struct Stop {};
 
 instance_id_type g_process_1_id = 0;
 instance_id_type g_process_2_id = 0;
+
+void wait_for_stop()
+{
+    receive<Stop>();
+}
 
 
 // Transceiver type that can receive unicast messages
@@ -106,19 +109,7 @@ int process_1()
 
     console() << "Process 1: Sent all messages\n";
 
-    // Wait for stop signal
-    std::condition_variable cv;
-    std::mutex m;
-    bool done = false;
-
-    activate_slot([&](Stop) {
-        std::lock_guard<std::mutex> lk(m);
-        done = true;
-        cv.notify_one();
-    });
-
-    std::unique_lock<std::mutex> lk(m);
-    cv.wait(lk, [&]{return done;});
+    wait_for_stop();
 
     deactivate_all_slots();
     return 0;
@@ -150,19 +141,7 @@ int process_2()
 
     barrier("id exchange barrier");
 
-    // Wait for stop signal
-    std::condition_variable cv;
-    std::mutex m;
-    bool done = false;
-
-    activate_slot([&](Stop) {
-        std::lock_guard<std::mutex> lk(m);
-        done = true;
-        cv.notify_one();
-    });
-
-    std::unique_lock<std::mutex> lk(m);
-    cv.wait(lk, [&]{return done;});
+    wait_for_stop();
 
     console() << "Process 2: Received " << received_count.load()
               << " total unicast messages (expected 5)\n";
@@ -188,19 +167,7 @@ int process_3()
     barrier("transceiver creation barrier");
     barrier("id exchange barrier");
 
-    // Wait for stop signal
-    std::condition_variable cv;
-    std::mutex m;
-    bool done = false;
-
-    activate_slot([&](Stop) {
-        std::lock_guard<std::mutex> lk(m);
-        done = true;
-        cv.notify_one();
-    });
-
-    std::unique_lock<std::mutex> lk(m);
-    cv.wait(lk, [&]{return done;});
+    wait_for_stop();
 
     if (unicast_received.load() == 0) {
         console() << "Process 3: SUCCESS - Did not receive any unicast messages (as expected)\n";

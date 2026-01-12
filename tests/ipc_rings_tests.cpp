@@ -272,14 +272,16 @@ TEST_CASE(test_ring_write_read_single_reader)
     payload[3] = 1337;
     writer.done_writing();
 
-    auto range = reader.start_reading(payload.size());
-    ASSERT_EQ(static_cast<size_t>(range.end - range.begin), payload.size());
-    for (size_t i = 0; i < payload.size(); ++i) {
-        ASSERT_EQ(range.begin[i], payload[i]);
-    }
+    {
+        auto snapshot = sintra::make_snapshot(reader, payload.size());
+        auto range = snapshot.range();
+        ASSERT_EQ(static_cast<size_t>(range.end - range.begin), payload.size());
+        for (size_t i = 0; i < payload.size(); ++i) {
+            ASSERT_EQ(range.begin[i], payload[i]);
+        }
 
-    ASSERT_THROW(reader.start_reading(), std::logic_error);
-    reader.done_reading();
+        ASSERT_THROW(reader.start_reading(), std::logic_error);
+    }
 
     ASSERT_EQ(writer.get_leading_sequence(), payload.size());
 }
@@ -302,12 +304,12 @@ TEST_CASE(test_multiple_readers_see_same_data)
     writer.done_writing();
 
     for (auto& reader : readers) {
-        auto range = reader->start_reading(payload.size());
+        auto snapshot = sintra::make_snapshot(*reader, payload.size());
+        auto range = snapshot.range();
         ASSERT_EQ(static_cast<size_t>(range.end - range.begin), payload.size());
         for (size_t i = 0; i < payload.size(); ++i) {
             ASSERT_EQ(range.begin[i], payload[i]);
         }
-        reader->done_reading();
     }
 }
 

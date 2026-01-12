@@ -33,10 +33,14 @@ int main()
         const element_t payload[] = {1, 2, 3};
         writer.write_commit(payload, 3);
 
-        auto range = reader.start_reading(3);
-        if (!range.begin || !range.end || range.end - range.begin != 3) {
+        auto snapshot = sintra::make_snapshot(reader, 3);
+        if (!snapshot) {
             std::cerr << "Unexpected read range size" << std::endl;
-            reader.done_reading();
+            return 1;
+        }
+        auto range = snapshot.range();
+        if (range.end - range.begin != 3) {
+            std::cerr << "Unexpected read range size" << std::endl;
             return 1;
         }
 
@@ -47,7 +51,6 @@ int main()
         }
         std::cout << std::endl;
 
-        reader.done_reading();
         return 0;
     }
     catch (const std::exception& ex) {

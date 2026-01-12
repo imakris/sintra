@@ -26,21 +26,8 @@ struct Stop {};
 
 void wait_for_stop()
 {
-    std::condition_variable cv;
-    std::mutex m;
-    bool done = false;
-
-    activate_slot([&](Stop) {
-        std::lock_guard<std::mutex> lk(m);
-        done = true;
-        cv.notify_one();
-    });
-
     barrier("stop slot activation barrier");
-
-    std::unique_lock<std::mutex> lk(m);
-    cv.wait(lk, [&]{return done;});
-
+    receive<Stop>();
     deactivate_all_slots();
 }
 

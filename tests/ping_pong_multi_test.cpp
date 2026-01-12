@@ -23,10 +23,8 @@
 
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <filesystem>
 #include <fstream>
-#include <mutex>
 #include <string>
 #include <string_view>
 #include <sstream>
@@ -114,21 +112,7 @@ int read_count(const std::filesystem::path& file)
 
 void wait_for_stop()
 {
-    static std::mutex stop_mutex;
-    std::condition_variable cv;
-    bool done = false;
-
-    sintra::activate_slot([&](Stop) {
-        std::lock_guard<std::mutex> lk(stop_mutex);
-        done = true;
-        cv.notify_one();
-    });
-
-    sintra::barrier("stop-slot-ready");
-
-    std::unique_lock<std::mutex> lk(stop_mutex);
-    cv.wait(lk, [&] { return done; });
-
+    sintra::receive<Stop>();
     sintra::deactivate_all_slots();
 }
 
