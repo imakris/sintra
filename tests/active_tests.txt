@@ -34,6 +34,7 @@ interprocess_file_mapping_test            10
 interprocess_mutex_test                   30
 interprocess_semaphore_test               10
 ipc_rings_tests                           10
+ring_helpers_test                          5
 macos_named_semaphore_benchmark           20
 macos_os_sync_semaphore_benchmark         20
 message_args_traits_test                   5

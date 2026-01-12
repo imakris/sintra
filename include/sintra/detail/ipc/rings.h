@@ -250,6 +250,53 @@ std::vector<size_t> get_ring_configurations(
     return ret;
 }
 
+/**
+ * Return the smallest capacity >= requested that satisfies ring alignment
+ * requirements for the given element size. Returns 0 if requested is 0 or
+ * if the alignment cannot be computed safely.
+ */
+inline size_t aligned_capacity(size_t requested, size_t element_size)
+{
+    if (requested == 0 || element_size == 0) {
+        return 0;
+    }
+
+    auto gcd = [](size_t m, size_t n) {
+        size_t tmp;
+        while (m) { tmp = m; m = n % m; n = tmp; }
+        return n;
+    };
+
+    size_t alignment = 8;
+    const size_t page_size = system_page_size();
+    if (page_size != 0) {
+        const size_t page_step = page_size / gcd(page_size, element_size);
+        const size_t step_gcd = gcd(page_step, size_t(8));
+        const size_t step_div_gcd = page_step / step_gcd;
+        if (step_div_gcd > (std::numeric_limits<size_t>::max() / 8)) {
+            return 0;
+        }
+        alignment = step_div_gcd * 8;
+    }
+
+    const size_t remainder = requested % alignment;
+    if (remainder != 0) {
+        const size_t padding = alignment - remainder;
+        if (padding > (std::numeric_limits<size_t>::max() - requested)) {
+            return 0;
+        }
+        requested += padding;
+    }
+
+    return requested;
+}
+
+template <typename T>
+inline size_t aligned_capacity(size_t requested)
+{
+    return aligned_capacity(requested, sizeof(T));
+}
+
 //==============================================================================
 // Lightweight range view
 //==============================================================================
@@ -2160,6 +2207,21 @@ struct Ring_W : Ring<T, false>
             m_writing_thread_index = 0;
             throw;
         }
+    }
+
+    /**
+     * Write and publish in one step (convenience for single or buffered writes).
+     */
+    sequence_counter_type write_commit(const T& value)
+    {
+        write(&value, 1);
+        return done_writing();
+    }
+
+    sequence_counter_type write_commit(const T* src_buffer, size_t num_src_elements)
+    {
+        write(src_buffer, num_src_elements);
+        return done_writing();
     }
 
     /**
