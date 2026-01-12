@@ -13,12 +13,15 @@
 #include <atomic>
 #include <cassert>
 #include <chrono>
+#include <condition_variable>
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <filesystem>
 #include <functional>
+#include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -484,6 +487,35 @@ auto activate_slot(const FT& slot_function, Typed_instance_id<SENDER_T> sender_i
 inline void deactivate_all_slots()
 {
     s_mproc->deactivate_all();
+}
+
+template <typename MESSAGE_T, typename SENDER_T>
+MESSAGE_T receive(Typed_instance_id<SENDER_T> sender_id)
+{
+    std::condition_variable cv;
+    std::mutex mtx;
+    std::optional<MESSAGE_T> result;
+
+    auto deactivator = activate_slot(
+        [&](MESSAGE_T msg) {
+            std::lock_guard<std::mutex> lock(mtx);
+            result.emplace(std::move(msg));
+            cv.notify_one();
+        },
+        sender_id
+    );
+
+    std::unique_lock<std::mutex> lock(mtx);
+    cv.wait(lock, [&] { return result.has_value(); });
+
+    deactivator();
+    return std::move(*result);
+}
+
+template <typename MESSAGE_T>
+MESSAGE_T receive()
+{
+    return receive<MESSAGE_T, void>(Typed_instance_id<void>(any_local_or_remote));
 }
 
 inline void enable_recovery()

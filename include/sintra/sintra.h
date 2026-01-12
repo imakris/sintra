@@ -134,6 +134,50 @@ auto activate_slot(
 void deactivate_all_slots();
 
 
+///\brief Block until a message of the specified type is received.
+///
+/// This is the synchronous receiving counterpart to the asynchronous send via
+/// `world() << msg`.  It activates a temporary slot, blocks until a matching
+/// message arrives, then returns the message payload.
+///
+/// Example usage:
+/// \code
+///     // Wait for a Stop signal (empty message)
+///     receive<Stop>();
+///
+///     // Wait for a data message and capture its contents
+///     auto msg = receive<DataMessage>();
+///     std::cout << msg.value << std::endl;
+///
+///     // Wait for message from a specific sender
+///     auto msg2 = receive<DataMessage>(some_sender_id);
+/// \endcode
+///
+/// \warning Do not call this from within a message handler callback.  The
+///          calling thread would block waiting for a message that it is
+///          responsible for dispatching, causing a deadlock.  Use this only
+///          from main process threads (e.g., inside process entry functions).
+///
+/// \note MESSAGE_T should be a trivial, standard-layout type (POD).  Messages
+///       containing variable-length fields (message_string, variable_buffer)
+///       are copied by value; ensure the returned data is used before any
+///       subsequent message processing that might invalidate ring memory.
+///
+/// \tparam MESSAGE_T The message type to wait for (must be copy-constructible).
+/// \return The received message payload.
+template <typename MESSAGE_T>
+MESSAGE_T receive();
+
+///\brief Block until a message of the specified type is received from a specific sender.
+///
+/// \tparam MESSAGE_T The message type to wait for (must be copy-constructible).
+/// \tparam SENDER_T  The sender type for filtering.
+/// \param sender_id  The sender to filter messages from.
+/// \return The received message payload.
+template <typename MESSAGE_T, typename SENDER_T>
+MESSAGE_T receive(Typed_instance_id<SENDER_T> sender_id);
+
+
 ///\brief Enable automatic recovery for the current managed process.
 ///
 /// When recovery is enabled the coordinator will respawn the process if it     
