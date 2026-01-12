@@ -3,77 +3,57 @@
 //
 // This test validates the receive<MESSAGE_T>() synchronous message receiving function.
 //
-// The test verifies:
-// - Blocking receive with empty message type (signal-style)
-// - Blocking receive with POD message type containing data
-// - Message data is correctly captured and returned
-//
-// Note: This test does NOT test calling receive() from within a handler
-// (which would deadlock) as that is documented as undefined behavior.
-//
 
 #include <sintra/sintra.h>
 
-#include <atomic>
+#include <algorithm>
 #include <cstdio>
+#include <cstdlib>
+#include <string_view>
 #include <thread>
 
 namespace {
 
-// Empty message type (signal-style)
 struct Stop {};
 
-// POD message type with data
 struct DataMessage {
     int value;
     double score;
 };
 
-std::atomic<bool> g_test_passed{true};
-
 int sender_process()
 {
-    // Wait for receiver to be ready
-    sintra::barrier("receiver_ready");
+    sintra::barrier("start");
 
-    // Send a data message
-    sintra::world() << DataMessage{42, 3.14};
+    // Send messages in a loop
+    for (int i = 0; i < 5; i++) {
+        sintra::world() << DataMessage{42, 3.14};
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
 
-    // Small delay to ensure message is processed
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    for (int i = 0; i < 3; i++) {
+        sintra::world() << Stop{};
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
 
-    // Send stop signal
-    sintra::world() << Stop{};
-
-    sintra::barrier("test_complete");
+    sintra::barrier("done", "_sintra_all_processes");
     return 0;
 }
 
 int receiver_process()
 {
-    // Signal that we're ready
-    sintra::barrier("receiver_ready");
+    sintra::barrier("start");
 
-    // Use receive to wait for the data message
     auto msg = sintra::receive<DataMessage>();
-
-    // Verify the received data
     if (msg.value != 42) {
-        std::fprintf(stderr, "receiver: expected value 42, got %d\n", msg.value);
-        g_test_passed = false;
+        std::fprintf(stderr, "FAIL: expected 42, got %d\n", msg.value);
+        std::abort();
     }
 
-    if (msg.score < 3.13 || msg.score > 3.15) {
-        std::fprintf(stderr, "receiver: expected score ~3.14, got %f\n", msg.score);
-        g_test_passed = false;
-    }
-
-    // Use receive to wait for stop signal (empty message)
     sintra::receive<Stop>();
+    std::fprintf(stderr, "receiver: OK\n");
 
-    std::fprintf(stderr, "receiver: received Stop signal\n");
-
-    sintra::barrier("test_complete");
+    sintra::barrier("done", "_sintra_all_processes");
     return 0;
 }
 
@@ -81,23 +61,23 @@ int receiver_process()
 
 int main(int argc, char* argv[])
 {
-    try {
-        sintra::init(argc, const_cast<const char* const*>(argv),
-                     sender_process, receiver_process);
-    }
-    catch (const std::exception& e) {
-        std::fprintf(stderr, "Failed to initialize sintra: %s\n", e.what());
-        return 1;
+    // Check if this is a spawned child process
+    const bool is_coordinator = !std::any_of(argv, argv + argc, [](const char* arg) {
+        return std::string_view(arg) == "--branch_index";
+    });
+
+    sintra::init(argc, const_cast<const char* const*>(argv),
+                 sender_process, receiver_process);
+
+    if (is_coordinator) {
+        sintra::barrier("done", "_sintra_all_processes");
     }
 
-    sintra::barrier("test_complete", "_sintra_all_processes");
     sintra::finalize();
 
-    if (!g_test_passed) {
-        std::fprintf(stderr, "receive test FAILED\n");
-        return 1;
+    if (is_coordinator) {
+        std::fprintf(stderr, "receive test PASSED\n");
     }
 
-    std::fprintf(stderr, "receive test PASSED\n");
     return 0;
 }

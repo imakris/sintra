@@ -148,6 +148,9 @@ void deactivate_all_slots();
 ///     // Wait for a data message and capture its contents
 ///     auto msg = receive<DataMessage>();
 ///     std::cout << msg.value << std::endl;
+///
+///     // Wait for message from a specific sender
+///     auto msg2 = receive<DataMessage>(some_sender_id);
 /// \endcode
 ///
 /// \warning Do not call this from within a message handler callback.  The
@@ -161,10 +164,18 @@ void deactivate_all_slots();
 ///       subsequent message processing that might invalidate ring memory.
 ///
 /// \tparam MESSAGE_T The message type to wait for (must be copy-constructible).
-/// \tparam SENDER_T  Optional sender filter (defaults to any sender).
 /// \return The received message payload.
-template <typename MESSAGE_T, typename SENDER_T = void>
-MESSAGE_T receive(Typed_instance_id<SENDER_T> sender_id = Typed_instance_id<void>(any_local_or_remote));
+template <typename MESSAGE_T>
+MESSAGE_T receive();
+
+///\brief Block until a message of the specified type is received from a specific sender.
+///
+/// \tparam MESSAGE_T The message type to wait for (must be copy-constructible).
+/// \tparam SENDER_T  The sender type for filtering.
+/// \param sender_id  The sender to filter messages from.
+/// \return The received message payload.
+template <typename MESSAGE_T, typename SENDER_T>
+MESSAGE_T receive(Typed_instance_id<SENDER_T> sender_id);
 
 
 ///\brief Enable automatic recovery for the current managed process.

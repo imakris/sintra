@@ -512,6 +512,12 @@ MESSAGE_T receive(Typed_instance_id<SENDER_T> sender_id)
     return std::move(*result);
 }
 
+template <typename MESSAGE_T>
+MESSAGE_T receive()
+{
+    return receive<MESSAGE_T, void>(Typed_instance_id<void>(any_local_or_remote));
+}
+
 inline void enable_recovery()
 {
     s_mproc->enable_recovery();
