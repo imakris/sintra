@@ -150,7 +150,17 @@ void deactivate_all_slots();
 ///     std::cout << msg.value << std::endl;
 /// \endcode
 ///
-/// \tparam MESSAGE_T The message type to wait for.
+/// \warning Do not call this from within a message handler callback.  The
+///          calling thread would block waiting for a message that it is
+///          responsible for dispatching, causing a deadlock.  Use this only
+///          from main process threads (e.g., inside process entry functions).
+///
+/// \note MESSAGE_T should be a trivial, standard-layout type (POD).  Messages
+///       containing variable-length fields (message_string, variable_buffer)
+///       are copied by value; ensure the returned data is used before any
+///       subsequent message processing that might invalidate ring memory.
+///
+/// \tparam MESSAGE_T The message type to wait for (must be copy-constructible).
 /// \tparam SENDER_T  Optional sender filter (defaults to any sender).
 /// \return The received message payload.
 template <typename MESSAGE_T, typename SENDER_T = void>

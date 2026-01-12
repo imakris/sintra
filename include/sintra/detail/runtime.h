@@ -21,6 +21,7 @@
 #include <filesystem>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -493,24 +494,22 @@ MESSAGE_T receive(Typed_instance_id<SENDER_T> sender_id)
 {
     std::condition_variable cv;
     std::mutex mtx;
-    bool received = false;
-    MESSAGE_T result{};
+    std::optional<MESSAGE_T> result;
 
     auto deactivator = activate_slot(
-        [&](const MESSAGE_T& msg) {
+        [&](MESSAGE_T msg) {
             std::lock_guard<std::mutex> lock(mtx);
-            result = msg;
-            received = true;
+            result.emplace(std::move(msg));
             cv.notify_one();
         },
         sender_id
     );
 
     std::unique_lock<std::mutex> lock(mtx);
-    cv.wait(lock, [&] { return received; });
+    cv.wait(lock, [&] { return result.has_value(); });
 
     deactivator();
-    return result;
+    return std::move(*result);
 }
 
 inline void enable_recovery()
