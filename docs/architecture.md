@@ -85,6 +85,16 @@ Ring_W<T> : Ring<T, false>   // Writer API
 
 **Eviction** (when enabled): If a reader lags by more than one full ring behind the writer, the writer can forcefully evict it, clearing its guard and marking its slot as EVICTED.
 
+#### Ring Helper Utilities
+
+Sintra exposes small helpers to make ring usage less error-prone:
+
+- `aligned_capacity()` and `get_ring_configurations()` compute element counts
+  that satisfy the ring's alignment and mapping constraints.
+- `Ring_R_snapshot` is an RAII wrapper for a single reader snapshot. Use
+  `make_snapshot(reader, ...)` or `try_snapshot_e(reader, ...)` to pair
+  `start_reading()` with `done_reading()` automatically.
+
 ### Double-Mapping Details
 
 #### Windows

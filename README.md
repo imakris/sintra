@@ -86,14 +86,15 @@ sintra::activate_slot([](const Ping&) {
 ### Block until a specific message arrives
 
 ```cpp
-// Wait for a Stop signal (blocking, synchronous counterpart to the async slot above)
+// Wait for a Stop signal (synchronous receive).
 sintra::receive<Stop>();
 
-// Wait for a message and capture its payload
+// Wait for a message and capture its payload.
 auto msg = sintra::receive<DataMessage>();
-std::cout << msg.value << std::endl;
+sintra::console() << "value=" << msg.value << '\n';
 ```
 
+Note: call `receive<T>()` from main/control threads only; do not call it from a message handler.
 ### Export a transceiver method for RPC
 
 ```cpp
