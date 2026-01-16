@@ -157,6 +157,7 @@ sintra::console() << "value=" << msg.value << '\n';
 ```
 
 Note: call `receive<T>()` from main/control threads only; do not call it from a message handler.
+Debug builds abort if this is violated.
 
 ### Export a transceiver method for RPC
 
