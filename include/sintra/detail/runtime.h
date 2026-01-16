@@ -513,6 +513,15 @@ inline void deactivate_all_slots()
 template <typename MESSAGE_T, typename SENDER_T>
 MESSAGE_T receive(Typed_instance_id<SENDER_T> sender_id)
 {
+#ifndef NDEBUG
+    if (tl_is_req_thread) {
+        Log_stream(log_level::error)
+            << "receive<T>() called from a message handler thread. "
+            << "This will deadlock. Use a control thread or defer work.\n";
+        detail::debug_aware_abort();
+    }
+#endif
+
     std::condition_variable cv;
     std::mutex mtx;
     std::optional<MESSAGE_T> result;
