@@ -213,15 +213,9 @@ options.lifetime.hard_exit_timeout_ms = 100;
 sintra::spawn_swarm_process(options);
 ```
 
-Command-line arguments used by the lifeline:
-- `--lifeline_handle <value>` — Windows HANDLE or POSIX file descriptor (numeric)
-- `--lifeline_exit_code <value>` — exit code used on lifeline break (default: 99)
-- `--lifeline_timeout_ms <value>` — grace period before hard exit (default: 100)
-- `--lifeline_disable` — flag to disable lifeline monitoring
-
 Note: spawned processes require a lifeline by default. If you launch a process
-manually (outside `spawn_swarm_process`), either provide `--lifeline_handle` with
-a valid readable pipe/handle, or pass `--lifeline_disable` to skip the check.
+manually (outside `spawn_swarm_process`), you must pass lifeline arguments or
+disable the check. See `docs/process_lifecycle_notes.md` for details.
 
 ### Qt cursor sync example
 
