@@ -70,8 +70,8 @@ Key points:
 - The coordinator closes lifeline handles on unpublish and in the destructor,
   so lingering children still terminate.
 - Respawn creates a fresh lifeline for the new instance.
-- Manual launches must set `SINTRA_LIFELINE_DISABLE=1` or provide a lifeline
-  env var, otherwise the process hard-exits immediately.
+- Manual launches must pass `--lifeline_disable` or provide `--lifeline_handle`
+  with a valid pipe/handle, otherwise the process hard-exits immediately.
 
 ## Threading expectations
 

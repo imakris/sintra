@@ -41,6 +41,8 @@ constexpr const char* k_role_missing = "missing";
 constexpr const char* k_role_leak_owner = "leak_owner";
 constexpr const char* k_role_respawn_owner = "respawn_owner";
 constexpr const char* k_role_respawn_child = "respawn_child";
+constexpr const char* k_role_manual_disable = "manual_disable";
+constexpr const char* k_role_short_option = "short_option";
 
 constexpr const char* k_case_normal = "normal";
 constexpr const char* k_case_disabled = "disabled";
@@ -997,6 +999,84 @@ bool run_leak_test(const std::string& binary_path, const std::filesystem::path& 
     return true;
 }
 
+// Test: Manual --lifeline_disable argument
+// Verifies that passing --lifeline_disable directly (not via sintra spawn) works correctly.
+// The test passes if the process does NOT exit with code 99 (the lifeline hard-exit code).
+// The process may exit with other codes due to init() failing for non-lifeline reasons.
+bool run_manual_disable_case(const std::string& binary_path)
+{
+    std::vector<std::string> args = {
+        k_role_arg, k_role_manual_disable,
+        "--swarm_id", "123",
+        "--instance_id", "2",
+        "--coordinator_id", "1",
+        "--lifeline_disable"  // Manual lifeline disable
+    };
+
+    Process_handle proc{};
+    if (!spawn_process(binary_path, args, proc)) {
+        std::fprintf(stderr, "[test] failed to spawn manual_disable process\n");
+        close_process(proc);
+        return false;
+    }
+
+    int exit_code = 0;
+    if (!wait_for_exit(proc, 2000, exit_code)) {
+        std::fprintf(stderr, "[test] manual_disable process did not exit in time\n");
+        close_process(proc);
+        return false;
+    }
+    close_process(proc);
+
+    // The test passes if we didn't get exit code 99 (lifeline hard-exit).
+    // Other exit codes are acceptable (init may fail for non-lifeline reasons).
+    if (exit_code == 99) {
+        std::fprintf(stderr, "[test] manual_disable process was killed by lifeline (code 99)\n");
+        return false;
+    }
+
+    return true;
+}
+
+// Test: Short option (-f) should be ignored
+// Verifies that short options like -f don't accidentally trigger lifeline argument parsing.
+// The lifeline args use long options only ('\0' for short_name) to avoid collisions.
+bool run_short_option_case(const std::string& binary_path)
+{
+    std::vector<std::string> args = {
+        k_role_arg, k_role_short_option,
+        "--swarm_id", "123",
+        "--instance_id", "2",
+        "--coordinator_id", "1",
+        "-f", "12345"  // Short option that should be ignored, not interpreted as lifeline handle
+    };
+
+    Process_handle proc{};
+    if (!spawn_process(binary_path, args, proc)) {
+        std::fprintf(stderr, "[test] failed to spawn short_option process\n");
+        close_process(proc);
+        return false;
+    }
+
+    int exit_code = 0;
+    if (!wait_for_exit(proc, 1500, exit_code)) {
+        std::fprintf(stderr, "[test] short_option process did not exit in time\n");
+        close_process(proc);
+        return false;
+    }
+    close_process(proc);
+
+    // The process should exit with code 99 (lifeline missing) because -f is not
+    // recognized as --lifeline_handle. If it tried to use 12345 as a handle, it
+    // would either crash or behave differently.
+    if (exit_code != 99) {
+        std::fprintf(stderr, "[test] unexpected short_option exit code: %d (expected 99)\n", exit_code);
+        return false;
+    }
+
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char* argv[])
@@ -1050,6 +1130,23 @@ int main(int argc, char* argv[])
         return run_respawn_child(std::filesystem::path(*dir_value), argc, argv);
     }
 
+    // Role: manual_disable - tests that --lifeline_disable works when passed manually
+    // The test succeeds if we don't get hard-exit code 99 from lifeline check.
+    // init() will likely fail for other reasons (no coordinator), which is fine.
+    if (role && *role == k_role_manual_disable) {
+        sintra::init(argc, argv);
+        // If we get here, lifeline didn't kill us. init() might fail later but that's OK.
+        return 0;
+    }
+
+    // Role: short_option - tests that short options like -f are ignored
+    if (role && *role == k_role_short_option) {
+        sintra::init(argc, argv);
+        // This should hard-exit with code 99 because -f is not recognized as lifeline_handle
+        // If we somehow get here, the test logic was wrong
+        return 1;
+    }
+
     const std::string binary_path = get_binary_path(argc, argv);
     if (binary_path.empty()) {
         std::fprintf(stderr, "[test] binary path missing\n");
@@ -1066,7 +1163,7 @@ int main(int argc, char* argv[])
     const auto disabled_dir = sintra::test::unique_scratch_directory("lifeline_disabled");
     ok &= run_owner_case(binary_path, disabled_dir, k_case_disabled, 0, true);
 
-    // Test 3: Missing lifeline environment variable - should fail fast
+    // Test 3: Missing lifeline handle - should fail fast
     ok &= run_missing_lifeline_case(binary_path);
 
     // Test 4: Owner crash (abnormal termination) - child should still exit with code 99
@@ -1096,6 +1193,14 @@ int main(int argc, char* argv[])
     // Verifies that the lifeline mechanism works correctly with sintra's recovery feature.
     const auto respawn_dir = sintra::test::unique_scratch_directory("lifeline_respawn");
     ok &= run_respawn_test(binary_path, respawn_dir);
+
+    // Test 9: Manual --lifeline_disable argument
+    // Verifies that passing --lifeline_disable directly works correctly.
+    ok &= run_manual_disable_case(binary_path);
+
+    // Test 10: Short option handling
+    // Verifies that short options like -f don't accidentally trigger lifeline parsing.
+    ok &= run_short_option_case(binary_path);
 
     return ok ? 0 : 1;
 }

@@ -401,37 +401,17 @@ namespace {
         return flag;
     }
 
-    constexpr const char* k_lifeline_exit_code_env = "SINTRA_LIFELINE_EXIT_CODE";
-    constexpr const char* k_lifeline_timeout_env = "SINTRA_LIFELINE_TIMEOUT_MS";
-    constexpr const char* k_lifeline_handle_env_default = "SINTRA_LIFELINE_HANDLE";
-    constexpr const char* k_lifeline_fd_env_default = "SINTRA_LIFELINE_FD";
+    // Argument names for lifeline configuration (internal, fixed)
+    constexpr const char* k_lifeline_handle_arg = "--lifeline_handle";
+    constexpr const char* k_lifeline_exit_code_arg = "--lifeline_exit_code";
+    constexpr const char* k_lifeline_timeout_arg = "--lifeline_timeout_ms";
+    constexpr const char* k_lifeline_disable_arg = "--lifeline_disable";
 
-    inline bool env_flag_enabled(const char* name)
-    {
-        if (!name || !*name) {
-            return false;
-        }
-        const char* value = std::getenv(name);
-        return value && *value && (*value != '0');
-    }
-
-    inline int env_int_value(const char* name, int fallback)
-    {
-        if (!name || !*name) {
-            return fallback;
-        }
-        const char* value = std::getenv(name);
-        if (!value || !*value) {
-            return fallback;
-        }
-        errno = 0;
-        char* end = nullptr;
-        const long parsed = std::strtol(value, &end, 10);
-        if (!end || end == value || errno != 0) {
-            return fallback;
-        }
-        return static_cast<int>(parsed);
-    }
+    // Storage for parsed lifeline values (set during init, read by start_lifeline_watcher)
+    static inline std::string s_lifeline_handle_value;
+    static inline int s_lifeline_exit_code = 99;
+    static inline int s_lifeline_timeout_ms = 100;
+    static inline bool s_lifeline_disabled = false;
 
     inline void log_lifeline_message(detail::log_level level, const std::string& message)
     {
@@ -538,26 +518,18 @@ namespace {
             return;
         }
 
-        if (env_flag_enabled(policy.disable_env)) {
+        // Check if lifeline was disabled via argument
+        if (s_lifeline_disabled) {
 #ifndef NDEBUG
             log_lifeline_message(
                 detail::log_level::warning,
-                std::string("[sintra] Lifeline disabled via ") + policy.disable_env + "\n");
+                std::string("[sintra] Lifeline disabled via ") + k_lifeline_disable_arg + "\n");
 #endif
             return;
         }
 
-#ifdef _WIN32
-        const char* env_value = policy.env_handle_key_win
-            ? std::getenv(policy.env_handle_key_win)
-            : nullptr;
-#else
-        const char* env_value = policy.env_fd_key_posix
-            ? std::getenv(policy.env_fd_key_posix)
-            : nullptr;
-#endif
-
-        if (!env_value || !*env_value) {
+        // Check if handle/fd was provided via argument
+        if (s_lifeline_handle_value.empty()) {
             if (lifeline_required) {
                 log_lifeline_message(
                     detail::log_level::error,
@@ -567,10 +539,11 @@ namespace {
             return;
         }
 
+        // Parse the handle value
         errno = 0;
         char* end = nullptr;
-        const unsigned long long parsed = std::strtoull(env_value, &end, 10);
-        if (!end || end == env_value || errno != 0) {
+        const unsigned long long parsed = std::strtoull(s_lifeline_handle_value.c_str(), &end, 10);
+        if (!end || end == s_lifeline_handle_value.c_str() || errno != 0) {
             if (lifeline_required) {
                 log_lifeline_message(
                     detail::log_level::error,
@@ -580,8 +553,9 @@ namespace {
             return;
         }
 
-        const int exit_code = env_int_value(k_lifeline_exit_code_env, policy.hard_exit_code);
-        int timeout_ms = env_int_value(k_lifeline_timeout_env, policy.hard_exit_timeout_ms);
+        // Use parsed argument values
+        const int exit_code = s_lifeline_exit_code;
+        int timeout_ms = s_lifeline_timeout_ms;
         if (timeout_ms < 0) {
             timeout_ms = 0;
         }
@@ -1315,6 +1289,12 @@ void Managed_process::init(int argc, const char* const* argv)
 {
     m_binary_name = argv[0];
 
+    // Reset lifeline state to prevent stale values from a previous init() call
+    s_lifeline_handle_value.clear();
+    s_lifeline_exit_code = Lifetime_policy{}.hard_exit_code;
+    s_lifeline_timeout_ms = Lifetime_policy{}.hard_exit_timeout_ms;
+    s_lifeline_disabled = false;
+
     std::string branch_index_arg;
     std::string swarm_id_arg;
     std::string instance_id_arg;
@@ -1333,7 +1313,14 @@ void Managed_process::init(int argc, const char* const* argv)
         }
     }
 
-    m_recovery_cmd = join_strings(fa.remained, " ") + " --recovery_occurrence " +
+    // Filter out lifeline arguments from remained - they contain stale handle values
+    // and will be freshly added by spawn_swarm_process during recovery
+    auto fa2 = filter_option(std::move(fa.remained), k_lifeline_handle_arg, 1);
+    auto fa3 = filter_option(std::move(fa2.remained), k_lifeline_exit_code_arg, 1);
+    auto fa4 = filter_option(std::move(fa3.remained), k_lifeline_timeout_arg, 1);
+    auto fa5 = filter_option(std::move(fa4.remained), k_lifeline_disable_arg, 0);
+
+    m_recovery_cmd = join_strings(fa5.remained, " ") + " --recovery_occurrence " +
         std::to_string(recovery_occurrence_value+1);
 
     auto option_value = [&](const std::string& arg, const char* long_name, char short_name, bool requires_value, int& index) -> std::optional<std::string> {
@@ -1439,6 +1426,42 @@ void Managed_process::init(int argc, const char* const* argv)
                 catch (...) {
                     throw 1;
                 }
+                continue;
+            }
+
+            // Lifeline arguments - these are internal and not shown in help
+            // Long-option only to avoid collisions with user args
+            if (auto value = option_value(arg, k_lifeline_handle_arg, '\0', true, i)) {
+                s_lifeline_handle_value = *value;
+                continue;
+            }
+
+            if (auto value = option_value(arg, k_lifeline_exit_code_arg, '\0', true, i)) {
+                try {
+                    s_lifeline_exit_code = std::stoi(*value);
+                }
+                catch (...) {
+                    // Invalid value - use default
+                }
+                continue;
+            }
+
+            if (auto value = option_value(arg, k_lifeline_timeout_arg, '\0', true, i)) {
+                try {
+                    s_lifeline_timeout_ms = std::stoi(*value);
+                    if (s_lifeline_timeout_ms < 0) {
+                        s_lifeline_timeout_ms = 0;
+                    }
+                }
+                catch (...) {
+                    // Invalid value - use default
+                }
+                continue;
+            }
+
+            // Note: --lifeline_disable is a flag (no value required)
+            if (auto value = option_value(arg, k_lifeline_disable_arg, '\0', false, i)) {
+                s_lifeline_disabled = true;
                 continue;
             }
 
@@ -1747,8 +1770,6 @@ Managed_process::Spawn_result Managed_process::spawn_swarm_process(
     auto args = s.args;
     args.insert(args.end(), {"--recovery_occurrence", std::to_string(s.occurrence)} );
 
-    cstring_vector cargs(std::move(args));
-
     {
         std::unique_lock<std::shared_mutex> readers_lock(m_readers_mutex);
 
@@ -1772,12 +1793,6 @@ Managed_process::Spawn_result Managed_process::spawn_swarm_process(
         reader->wait_until_ready();
     }
 
-    int spawned_pid = -1;
-    Spawn_detached_options spawn_options;
-    spawn_options.prog = s.binary_name.c_str();
-    spawn_options.argv = cargs.v();
-    spawn_options.child_pid_out = &spawned_pid;
-
     bool spawn_ready = true;
     int spawn_error = 0;
     std::string spawn_error_message;
@@ -1791,72 +1806,61 @@ Managed_process::Spawn_result Managed_process::spawn_swarm_process(
     int lifeline_write_fd = -1;
 #endif
 
+    int spawned_pid = -1;
+    Spawn_detached_options spawn_options;
+    spawn_options.prog = s.binary_name.c_str();
+    spawn_options.child_pid_out = &spawned_pid;
+
     if (s.lifetime.enable_lifeline) {
 #ifdef _WIN32
-        const char* env_key = s.lifetime.env_handle_key_win;
-#else
-        const char* env_key = s.lifetime.env_fd_key_posix;
-#endif
-        if (!env_key || !*env_key) {
+        if (!create_lifeline_pipe(lifeline_read_handle, lifeline_write_handle_win, &spawn_error)) {
             spawn_ready = false;
-            spawn_error_message = "Lifeline environment key is empty";
+            spawn_error_message = "Failed to create lifeline pipe";
         }
         else {
-#ifdef _WIN32
-            if (!create_lifeline_pipe(lifeline_read_handle, lifeline_write_handle_win, &spawn_error)) {
-                spawn_ready = false;
-                spawn_error_message = "Failed to create lifeline pipe";
-            }
-            else {
-                lifeline_write_handle =
-                    static_cast<Managed_process::lifeline_handle_type>(
-                        reinterpret_cast<uintptr_t>(lifeline_write_handle_win));
-                spawn_options.inherit_handles.push_back(lifeline_read_handle);
-                const std::string handle_value =
-                    std::to_string(reinterpret_cast<uintptr_t>(lifeline_read_handle));
-                spawn_options.env_overrides.push_back(
-                    std::string(env_key) + "=" + handle_value);
-                if (std::string(env_key) != k_lifeline_handle_env_default) {
-                    spawn_options.env_overrides.push_back(
-                        std::string(k_lifeline_handle_env_default) + "=" + handle_value);
-                }
-                spawn_options.env_overrides.push_back(
-                    std::string(k_lifeline_exit_code_env) + "=" +
-                    std::to_string(s.lifetime.hard_exit_code));
-                spawn_options.env_overrides.push_back(
-                    std::string(k_lifeline_timeout_env) + "=" +
-                    std::to_string(s.lifetime.hard_exit_timeout_ms));
-            }
-#else
-            if (!create_lifeline_pipe(lifeline_read_fd, lifeline_write_fd, &spawn_error)) {
-                spawn_ready = false;
-                spawn_error_message = "Failed to create lifeline pipe";
-            }
-            else {
-                lifeline_write_handle =
-                    static_cast<Managed_process::lifeline_handle_type>(lifeline_write_fd);
-                const std::string handle_value = std::to_string(lifeline_read_fd);
-                spawn_options.env_overrides.push_back(
-                    std::string(env_key) + "=" + handle_value);
-                if (std::string(env_key) != k_lifeline_fd_env_default) {
-                    spawn_options.env_overrides.push_back(
-                        std::string(k_lifeline_fd_env_default) + "=" + handle_value);
-                }
-                spawn_options.env_overrides.push_back(
-                    std::string(k_lifeline_exit_code_env) + "=" +
-                    std::to_string(s.lifetime.hard_exit_code));
-                spawn_options.env_overrides.push_back(
-                    std::string(k_lifeline_timeout_env) + "=" +
-                    std::to_string(s.lifetime.hard_exit_timeout_ms));
-            }
-#endif
+            lifeline_write_handle =
+                static_cast<Managed_process::lifeline_handle_type>(
+                    reinterpret_cast<uintptr_t>(lifeline_write_handle_win));
+            spawn_options.inherit_handles.push_back(lifeline_read_handle);
+            const std::string handle_value =
+                std::to_string(reinterpret_cast<uintptr_t>(lifeline_read_handle));
+
+            // Add lifeline arguments (inserted into args, not env)
+            args.push_back(k_lifeline_handle_arg);
+            args.push_back(handle_value);
+            args.push_back(k_lifeline_exit_code_arg);
+            args.push_back(std::to_string(s.lifetime.hard_exit_code));
+            args.push_back(k_lifeline_timeout_arg);
+            args.push_back(std::to_string(s.lifetime.hard_exit_timeout_ms));
         }
+#else
+        if (!create_lifeline_pipe(lifeline_read_fd, lifeline_write_fd, &spawn_error)) {
+            spawn_ready = false;
+            spawn_error_message = "Failed to create lifeline pipe";
+        }
+        else {
+            lifeline_write_handle =
+                static_cast<Managed_process::lifeline_handle_type>(lifeline_write_fd);
+            const std::string handle_value = std::to_string(lifeline_read_fd);
+
+            // Add lifeline arguments (inserted into args, not env)
+            args.push_back(k_lifeline_handle_arg);
+            args.push_back(handle_value);
+            args.push_back(k_lifeline_exit_code_arg);
+            args.push_back(std::to_string(s.lifetime.hard_exit_code));
+            args.push_back(k_lifeline_timeout_arg);
+            args.push_back(std::to_string(s.lifetime.hard_exit_timeout_ms));
+        }
+#endif
     }
     else {
-        if (s.lifetime.disable_env && *s.lifetime.disable_env) {
-            spawn_options.env_overrides.push_back(std::string(s.lifetime.disable_env) + "=1");
-        }
+        // Lifeline disabled - add disable flag
+        args.push_back(k_lifeline_disable_arg);
     }
+
+    // Build argv after all internal arguments are appended
+    cstring_vector cargs(std::move(args));
+    spawn_options.argv = cargs.v();
 
     if (s_coord) {
         std::lock_guard<mutex> init_lock(s_coord->m_init_tracking_mutex);

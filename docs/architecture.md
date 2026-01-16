@@ -174,11 +174,10 @@ Spawned processes receive a lifeline pipe/handle from the coordinator process.
 The child reads from the lifeline in a dedicated thread; when the owner exits
 or unpublishes, the pipe closes and the child:
 - schedules shutdown (stop reader threads, unblock RPC),
-- then hard-exits after a timeout (configurable via env or policy).
+- then hard-exits after a timeout (configurable via args or policy).
 
-The handle value and timeout/exit code are passed via environment variables
-(`SINTRA_LIFELINE_HANDLE` or `SINTRA_LIFELINE_FD`, plus `SINTRA_LIFELINE_TIMEOUT_MS`
-and `SINTRA_LIFELINE_EXIT_CODE`).
+The handle value and timeout/exit code are passed via command-line arguments
+(`--lifeline_handle`, `--lifeline_timeout_ms`, and `--lifeline_exit_code`).
 
 The coordinator closes lifeline handles on unpublish and in the destructor so
 stale children still terminate. Respawn creates a new lifeline per instance.

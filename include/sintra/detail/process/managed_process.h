@@ -139,9 +139,6 @@ struct Lifetime_policy
     bool enable_lifeline = true;
     int hard_exit_code = 99;
     int hard_exit_timeout_ms = 100;
-    const char* env_handle_key_win = "SINTRA_LIFELINE_HANDLE";
-    const char* env_fd_key_posix = "SINTRA_LIFELINE_FD";
-    const char* disable_env = "SINTRA_LIFELINE_DISABLE";
 };
 
 

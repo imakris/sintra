@@ -1042,7 +1042,7 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         {
             const auto removal_count = s_non_tail_removals.fetch_add(1) + 1;
             if (removal_count == 1) {
-                Log_stream(log_level::warning)
+                Log_stream(log_level::debug)
                     << "[sintra][ring] Index_stack non-tail removal; "
                     << "out-of-order wakeups detected (value=" << value << ").\n";
             }
