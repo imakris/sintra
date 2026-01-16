@@ -14,6 +14,7 @@
 #include <atomic>
 #include <chrono>
 #include <algorithm>
+#include <cstdlib>
 #include <filesystem>
 #include <csignal>
 #include <fstream>
@@ -393,6 +394,285 @@ namespace {
         }
         return nullptr;
     }
+
+    inline std::atomic<bool>& lifeline_shutdown_flag()
+    {
+        static std::atomic<bool> flag{false};
+        return flag;
+    }
+
+    constexpr const char* k_lifeline_exit_code_env = "SINTRA_LIFELINE_EXIT_CODE";
+    constexpr const char* k_lifeline_timeout_env = "SINTRA_LIFELINE_TIMEOUT_MS";
+    constexpr const char* k_lifeline_handle_env_default = "SINTRA_LIFELINE_HANDLE";
+    constexpr const char* k_lifeline_fd_env_default = "SINTRA_LIFELINE_FD";
+
+    inline bool env_flag_enabled(const char* name)
+    {
+        if (!name || !*name) {
+            return false;
+        }
+        const char* value = std::getenv(name);
+        return value && *value && (*value != '0');
+    }
+
+    inline int env_int_value(const char* name, int fallback)
+    {
+        if (!name || !*name) {
+            return fallback;
+        }
+        const char* value = std::getenv(name);
+        if (!value || !*value) {
+            return fallback;
+        }
+        errno = 0;
+        char* end = nullptr;
+        const long parsed = std::strtol(value, &end, 10);
+        if (!end || end == value || errno != 0) {
+            return fallback;
+        }
+        return static_cast<int>(parsed);
+    }
+
+    inline void log_lifeline_message(detail::log_level level, const std::string& message)
+    {
+        detail::log_raw(level, message.c_str());
+    }
+
+    [[noreturn]] inline void lifeline_hard_exit(int exit_code)
+    {
+#ifdef _WIN32
+        TerminateProcess(GetCurrentProcess(), static_cast<UINT>(exit_code));
+        std::abort();
+#else
+        _exit(exit_code);
+#endif
+    }
+
+    inline void schedule_lifeline_hard_exit(int timeout_ms, int exit_code)
+    {
+        std::thread([timeout_ms, exit_code]() {
+            if (timeout_ms > 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(timeout_ms));
+            }
+            log_lifeline_message(
+                detail::log_level::error,
+                std::string("[sintra] Hard exit with code ") + std::to_string(exit_code) + "\n");
+            lifeline_hard_exit(exit_code);
+        }).detach();
+    }
+
+    inline void signal_lifeline_shutdown(int timeout_ms, int exit_code)
+    {
+        if (lifeline_shutdown_flag().exchange(true)) {
+            return;
+        }
+
+        log_lifeline_message(
+            detail::log_level::error,
+            std::string("[sintra] Lifeline broken - owner exited - terminating in ") +
+                std::to_string(timeout_ms) + "ms\n");
+
+        if (s_mproc) {
+            s_mproc->m_must_stop.store(true, std::memory_order_release);
+            s_mproc->stop();
+            s_mproc->unblock_rpc();
+        }
+
+        schedule_lifeline_hard_exit(timeout_ms, exit_code);
+    }
+
+#ifdef _WIN32
+    inline void lifeline_watch_loop(HANDLE handle, int timeout_ms, int exit_code)
+    {
+        if (!handle || handle == INVALID_HANDLE_VALUE) {
+            signal_lifeline_shutdown(timeout_ms, exit_code);
+            return;
+        }
+
+        char buffer = 0;
+        DWORD bytes_read = 0;
+        while (true) {
+            const BOOL ok = ReadFile(handle, &buffer, 1, &bytes_read, nullptr);
+            if (!ok) {
+                break;
+            }
+            if (bytes_read == 0) {
+                break;
+            }
+        }
+
+        CloseHandle(handle);
+        signal_lifeline_shutdown(timeout_ms, exit_code);
+    }
+#else
+    inline void lifeline_watch_loop(int fd, int timeout_ms, int exit_code)
+    {
+        if (fd < 0) {
+            signal_lifeline_shutdown(timeout_ms, exit_code);
+            return;
+        }
+
+        char buffer = 0;
+        while (true) {
+            const ssize_t bytes_read = ::read(fd, &buffer, 1);
+            if (bytes_read > 0) {
+                continue;
+            }
+            if (bytes_read == 0) {
+                break;
+            }
+            if (errno == EINTR) {
+                continue;
+            }
+            break;
+        }
+
+        ::close(fd);
+        signal_lifeline_shutdown(timeout_ms, exit_code);
+    }
+#endif
+
+    inline void start_lifeline_watcher(const Lifetime_policy& policy, bool lifeline_required)
+    {
+        if (!policy.enable_lifeline) {
+            return;
+        }
+
+        if (env_flag_enabled(policy.disable_env)) {
+#ifndef NDEBUG
+            log_lifeline_message(
+                detail::log_level::warning,
+                std::string("[sintra] Lifeline disabled via ") + policy.disable_env + "\n");
+#endif
+            return;
+        }
+
+#ifdef _WIN32
+        const char* env_value = policy.env_handle_key_win
+            ? std::getenv(policy.env_handle_key_win)
+            : nullptr;
+#else
+        const char* env_value = policy.env_fd_key_posix
+            ? std::getenv(policy.env_fd_key_posix)
+            : nullptr;
+#endif
+
+        if (!env_value || !*env_value) {
+            if (lifeline_required) {
+                log_lifeline_message(
+                    detail::log_level::error,
+                    "[sintra] Lifeline missing - terminating\n");
+                lifeline_hard_exit(policy.hard_exit_code);
+            }
+            return;
+        }
+
+        errno = 0;
+        char* end = nullptr;
+        const unsigned long long parsed = std::strtoull(env_value, &end, 10);
+        if (!end || end == env_value || errno != 0) {
+            if (lifeline_required) {
+                log_lifeline_message(
+                    detail::log_level::error,
+                    "[sintra] Lifeline parse failure - terminating\n");
+                lifeline_hard_exit(policy.hard_exit_code);
+            }
+            return;
+        }
+
+        const int exit_code = env_int_value(k_lifeline_exit_code_env, policy.hard_exit_code);
+        int timeout_ms = env_int_value(k_lifeline_timeout_env, policy.hard_exit_timeout_ms);
+        if (timeout_ms < 0) {
+            timeout_ms = 0;
+        }
+#ifdef _WIN32
+        const auto handle = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(parsed));
+        std::thread(lifeline_watch_loop, handle, timeout_ms, exit_code).detach();
+#else
+        const int fd = static_cast<int>(parsed);
+        std::thread(lifeline_watch_loop, fd, timeout_ms, exit_code).detach();
+#endif
+    }
+
+    inline bool lifeline_handle_valid(Managed_process::lifeline_handle_type handle)
+    {
+#ifdef _WIN32
+        return handle != 0 && handle != static_cast<Managed_process::lifeline_handle_type>(-1);
+#else
+        return handle != static_cast<Managed_process::lifeline_handle_type>(-1);
+#endif
+    }
+
+    inline void close_lifeline_handle(Managed_process::lifeline_handle_type handle)
+    {
+        if (!lifeline_handle_valid(handle)) {
+            return;
+        }
+#ifdef _WIN32
+        CloseHandle(reinterpret_cast<HANDLE>(handle));
+#else
+        ::close(static_cast<int>(handle));
+#endif
+    }
+
+#ifdef _WIN32
+    inline bool create_lifeline_pipe(HANDLE& read_handle, HANDLE& write_handle, int* error_out)
+    {
+        read_handle = nullptr;
+        write_handle = nullptr;
+
+        SECURITY_ATTRIBUTES sa {};
+        sa.nLength = sizeof(sa);
+        sa.bInheritHandle = TRUE;
+        if (!CreatePipe(&read_handle, &write_handle, &sa, 0)) {
+            if (error_out) {
+                *error_out = static_cast<int>(GetLastError());
+            }
+            return false;
+        }
+
+        if (!SetHandleInformation(write_handle, HANDLE_FLAG_INHERIT, 0)) {
+            if (error_out) {
+                *error_out = static_cast<int>(GetLastError());
+            }
+            CloseHandle(read_handle);
+            CloseHandle(write_handle);
+            read_handle = nullptr;
+            write_handle = nullptr;
+            return false;
+        }
+
+        return true;
+    }
+#else
+    inline bool create_lifeline_pipe(int& read_fd, int& write_fd, int* error_out)
+    {
+        read_fd = -1;
+        write_fd = -1;
+
+        int pipefd[2] = {-1, -1};
+        if (detail::call_pipe2(pipefd, O_CLOEXEC) != 0) {
+            if (error_out) {
+                *error_out = errno;
+            }
+            return false;
+        }
+
+        int flags = detail::fcntl_retry(pipefd[0], F_GETFD);
+        if (flags == -1 || detail::fcntl_retry(pipefd[0], F_SETFD, flags & ~FD_CLOEXEC) == -1) {
+            if (error_out) {
+                *error_out = errno;
+            }
+            ::close(pipefd[0]);
+            ::close(pipefd[1]);
+            return false;
+        }
+
+        read_fd = pipefd[0];
+        write_fd = pipefd[1];
+        return true;
+    }
+#endif
 }
 
 #ifdef _WIN32
@@ -781,6 +1061,8 @@ Managed_process::~Managed_process()
 
         wait_until_all_external_readers_are_done(called_from_request_reader ? 1 : 0);
     }
+
+    release_all_lifelines();
 
     assert(m_communication_state <= COMMUNICATION_PAUSED); // i.e. paused or stopped
 
@@ -1226,6 +1508,10 @@ void Managed_process::init(int argc, const char* const* argv)
 
         s_mproc_id = m_instance_id;
     }
+
+    if (!coordinator_is_local) {
+        start_lifeline_watcher(Lifetime_policy{}, true);
+    }
     m_directory = obtain_swarm_directory();
 
     const auto abi_path = std::filesystem::path(m_directory) / detail::abi_marker_filename();
@@ -1487,12 +1773,122 @@ Managed_process::Spawn_result Managed_process::spawn_swarm_process(
     }
 
     int spawned_pid = -1;
+    Spawn_detached_options spawn_options;
+    spawn_options.prog = s.binary_name.c_str();
+    spawn_options.argv = cargs.v();
+    spawn_options.child_pid_out = &spawned_pid;
+
+    bool spawn_ready = true;
+    int spawn_error = 0;
+    std::string spawn_error_message;
+    Managed_process::lifeline_handle_type lifeline_write_handle =
+        static_cast<Managed_process::lifeline_handle_type>(-1);
+#ifdef _WIN32
+    HANDLE lifeline_read_handle = nullptr;
+    HANDLE lifeline_write_handle_win = nullptr;
+#else
+    int lifeline_read_fd = -1;
+    int lifeline_write_fd = -1;
+#endif
+
+    if (s.lifetime.enable_lifeline) {
+#ifdef _WIN32
+        const char* env_key = s.lifetime.env_handle_key_win;
+#else
+        const char* env_key = s.lifetime.env_fd_key_posix;
+#endif
+        if (!env_key || !*env_key) {
+            spawn_ready = false;
+            spawn_error_message = "Lifeline environment key is empty";
+        }
+        else {
+#ifdef _WIN32
+            if (!create_lifeline_pipe(lifeline_read_handle, lifeline_write_handle_win, &spawn_error)) {
+                spawn_ready = false;
+                spawn_error_message = "Failed to create lifeline pipe";
+            }
+            else {
+                lifeline_write_handle =
+                    static_cast<Managed_process::lifeline_handle_type>(
+                        reinterpret_cast<uintptr_t>(lifeline_write_handle_win));
+                spawn_options.inherit_handles.push_back(lifeline_read_handle);
+                const std::string handle_value =
+                    std::to_string(reinterpret_cast<uintptr_t>(lifeline_read_handle));
+                spawn_options.env_overrides.push_back(
+                    std::string(env_key) + "=" + handle_value);
+                if (std::string(env_key) != k_lifeline_handle_env_default) {
+                    spawn_options.env_overrides.push_back(
+                        std::string(k_lifeline_handle_env_default) + "=" + handle_value);
+                }
+                spawn_options.env_overrides.push_back(
+                    std::string(k_lifeline_exit_code_env) + "=" +
+                    std::to_string(s.lifetime.hard_exit_code));
+                spawn_options.env_overrides.push_back(
+                    std::string(k_lifeline_timeout_env) + "=" +
+                    std::to_string(s.lifetime.hard_exit_timeout_ms));
+            }
+#else
+            if (!create_lifeline_pipe(lifeline_read_fd, lifeline_write_fd, &spawn_error)) {
+                spawn_ready = false;
+                spawn_error_message = "Failed to create lifeline pipe";
+            }
+            else {
+                lifeline_write_handle =
+                    static_cast<Managed_process::lifeline_handle_type>(lifeline_write_fd);
+                const std::string handle_value = std::to_string(lifeline_read_fd);
+                spawn_options.env_overrides.push_back(
+                    std::string(env_key) + "=" + handle_value);
+                if (std::string(env_key) != k_lifeline_fd_env_default) {
+                    spawn_options.env_overrides.push_back(
+                        std::string(k_lifeline_fd_env_default) + "=" + handle_value);
+                }
+                spawn_options.env_overrides.push_back(
+                    std::string(k_lifeline_exit_code_env) + "=" +
+                    std::to_string(s.lifetime.hard_exit_code));
+                spawn_options.env_overrides.push_back(
+                    std::string(k_lifeline_timeout_env) + "=" +
+                    std::to_string(s.lifetime.hard_exit_timeout_ms));
+            }
+#endif
+        }
+    }
+    else {
+        if (s.lifetime.disable_env && *s.lifetime.disable_env) {
+            spawn_options.env_overrides.push_back(std::string(s.lifetime.disable_env) + "=1");
+        }
+    }
+
     if (s_coord) {
         std::lock_guard<mutex> init_lock(s_coord->m_init_tracking_mutex);
         s_coord->m_processes_in_initialization.insert(s.piid);
     }
 
-    result.success = spawn_detached(s.binary_name.c_str(), cargs.v(), &spawned_pid);
+    if (spawn_ready) {
+        result.success = spawn_detached(spawn_options);
+    }
+    else {
+        result.success = false;
+        result.errno_value = spawn_error;
+        std::ostringstream error_msg;
+        error_msg << spawn_error_message;
+        if (spawn_error != 0) {
+            std::error_code ec(spawn_error, std::system_category());
+            error_msg << " (errno " << spawn_error << ": " << ec.message() << ')';
+        }
+        result.error_message = error_msg.str();
+    }
+
+#ifdef _WIN32
+    if (lifeline_read_handle) {
+        CloseHandle(lifeline_read_handle);
+        lifeline_read_handle = nullptr;
+    }
+#else
+    if (lifeline_read_fd >= 0) {
+        ::close(lifeline_read_fd);
+        lifeline_read_fd = -1;
+    }
+#endif
 
     if (result.success) {
 #ifndef _WIN32
@@ -1501,6 +1897,17 @@ Managed_process::Spawn_result Managed_process::spawn_swarm_process(
             m_spawned_child_pids.push_back(static_cast<pid_t>(spawned_pid));
         }
 #endif
+        if (lifeline_handle_valid(lifeline_write_handle)) {
+            std::lock_guard<std::mutex> guard(m_lifeline_mutex);
+            auto it = m_lifeline_writes.find(s.piid);
+            if (it != m_lifeline_writes.end()) {
+                close_lifeline_handle(it->second);
+                it->second = lifeline_write_handle;
+            }
+            else {
+                m_lifeline_writes.emplace(s.piid, lifeline_write_handle);
+            }
+        }
         // Create an entry in the coordinator's transceiver registry.
         // This is essential for the implementation of publish_transceiver()
         {
@@ -1517,28 +1924,40 @@ Managed_process::Spawn_result Managed_process::spawn_swarm_process(
         m_cached_spawns[s.piid].occurrence++;
     }
     else {
+        if (lifeline_handle_valid(lifeline_write_handle)) {
+            close_lifeline_handle(lifeline_write_handle);
+        }
         int saved_errno = 0;
 #ifdef _WIN32
-        _get_errno(&saved_errno);
-#else
-        saved_errno = errno;
-#endif
-        result.errno_value = saved_errno;
-
-        std::ostringstream error_msg;
-        error_msg << "Failed to spawn process";
-        if (saved_errno != 0) {
-            std::error_code ec(saved_errno, std::system_category());
-            error_msg << " (errno " << saved_errno << ": " << ec.message() << ')';
+        if (result.errno_value != 0 || !result.error_message.empty()) {
+            saved_errno = result.errno_value;
         }
-        result.error_message = error_msg.str();
+        else {
+            _get_errno(&saved_errno);
+        }
+#else
+        saved_errno = result.errno_value != 0 ? result.errno_value : errno;
+#endif
+        if (result.error_message.empty()) {
+            result.errno_value = saved_errno;
+            std::ostringstream error_msg;
+            error_msg << "Failed to spawn process";
+            if (saved_errno != 0) {
+                std::error_code ec(saved_errno, std::system_category());
+                error_msg << " (errno " << saved_errno << ": " << ec.message() << ')';
+            }
+            result.error_message = error_msg.str();
+        }
 
         // Still log to stderr for backwards compatibility
-        if (saved_errno != 0) {
-            std::error_code ec(saved_errno, std::system_category());
+        if (!spawn_ready && !result.error_message.empty()) {
+            Log_stream(log_level::error) << result.error_message << "\n";
+        }
+        else if (result.errno_value != 0) {
+            std::error_code ec(result.errno_value, std::system_category());
             Log_stream(log_level::error)
                 << "failed to launch " << s.binary_name
-                << " (errno " << saved_errno << ": " << ec.message() << ")\n";
+                << " (errno " << result.errno_value << ": " << ec.message() << ")\n";
         }
         else {
             Log_stream(log_level::error)
@@ -1708,6 +2127,28 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
     }
 
     return true;
+}
+
+inline
+void Managed_process::release_lifeline(instance_id_type process_instance_id)
+{
+    std::lock_guard<mutex> lock(m_lifeline_mutex);
+    auto it = m_lifeline_writes.find(process_instance_id);
+    if (it == m_lifeline_writes.end()) {
+        return;
+    }
+    close_lifeline_handle(it->second);
+    m_lifeline_writes.erase(it);
+}
+
+inline
+void Managed_process::release_all_lifelines()
+{
+    std::lock_guard<mutex> lock(m_lifeline_mutex);
+    for (auto& entry : m_lifeline_writes) {
+        close_lifeline_handle(entry.second);
+    }
+    m_lifeline_writes.clear();
 }
 
 inline

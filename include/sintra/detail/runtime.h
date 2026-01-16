@@ -29,7 +29,7 @@
 
 #ifdef _WIN32
 #include <process.h>
-#include <windows.h>
+#include "sintra_windows.h"
 #else
 #include <unistd.h>
 #endif
@@ -153,6 +153,17 @@ std::vector<Process_descriptor> make_branches(
 }
 
 inline bool finalize();
+
+struct Spawn_options
+{
+    std::string binary_path;
+    std::vector<std::string> args;
+    size_t count = 1;
+    instance_id_type process_instance_id = invalid_instance_id;
+    std::string wait_for_instance_name;
+    std::chrono::milliseconds wait_timeout{0};
+    Lifetime_policy lifetime;
+};
 
 // Tracks whether init() has been called without a corresponding finalize().
 // This flag is reset by finalize() to allow init()/finalize() cycles (e.g.,
@@ -304,28 +315,36 @@ inline bool finalize()
     return true;
 }
 
-// Returns the number of processes spawned. When wait_for_instance_name is set,
-// this waits for the instance to appear and returns 0 on wait failure even if
-// spawning succeeded (the process may still be running). explicit_instance_id
+// Returns the number of processes spawned. When wait_for_instance_name is set in
+// options, this waits for the instance to appear and returns 0 on wait failure
+// even if spawning succeeded (the process may still be running). process_instance_id
 // is not validated for uniqueness; callers must ensure it is unused. Timeout
 // waits use polling with backoff to provide bounded wait durations.
-inline size_t spawn_swarm_process(
-    const std::string& binary_name,
-    std::vector<std::string> args = {},
-    size_t multiplicity = 1,
-    instance_id_type explicit_instance_id = invalid_instance_id,
-    const std::string& wait_for_instance_name = {},
-    std::chrono::milliseconds wait_timeout = std::chrono::milliseconds(0))      
+inline size_t spawn_swarm_process(const Spawn_options& options)
 {
-    if ((explicit_instance_id != invalid_instance_id || !wait_for_instance_name.empty()) &&
-        multiplicity != 1)
-    {
+    if (options.binary_path.empty()) {
         Log_stream(log_level::error)
-            << "spawn_swarm_process: explicit instance or wait requires multiplicity == 1\n";
+            << "spawn_swarm_process: binary path is empty\n";
         return 0;
     }
 
-    const bool wait_requested = !wait_for_instance_name.empty();
+    if (options.count == 0) {
+        Log_stream(log_level::error)
+            << "spawn_swarm_process: count must be greater than zero\n";
+        return 0;
+    }
+
+    if ((options.process_instance_id != invalid_instance_id ||
+         !options.wait_for_instance_name.empty()) &&
+        options.count != 1)
+    {
+        Log_stream(log_level::error)
+            << "spawn_swarm_process: explicit instance or wait requires count == 1\n";
+        return 0;
+    }
+
+    const bool wait_requested = !options.wait_for_instance_name.empty();
+    const auto wait_timeout = options.wait_timeout;
     const auto coord_id = s_coord_id;
     if (wait_requested && coord_id == invalid_instance_id) {
         Log_stream(log_level::error)
@@ -334,20 +353,21 @@ inline size_t spawn_swarm_process(
     }
 
     size_t spawned = 0;
-    const auto piid = (explicit_instance_id != invalid_instance_id)
-        ? explicit_instance_id
+    const auto piid = (options.process_instance_id != invalid_instance_id)
+        ? options.process_instance_id
         : make_process_instance_id();
 
     // Ensure argv[0] is the program name (required on Windows); avoid duplicates.
+    auto args = options.args;
     auto argv0_matches = [&]() {
         if (args.empty()) {
             return false;
         }
-        if (args.front() == binary_name) {
+        if (args.front() == options.binary_path) {
             return true;
         }
         const auto front_name = std::filesystem::path(args.front()).filename().string();
-        const auto bin_name = std::filesystem::path(binary_name).filename().string();
+        const auto bin_name = std::filesystem::path(options.binary_path).filename().string();
 #ifdef _WIN32
         return _stricmp(front_name.c_str(), bin_name.c_str()) == 0;
 #else
@@ -355,7 +375,7 @@ inline size_t spawn_swarm_process(
 #endif
     };
     if (!argv0_matches()) {
-        args.insert(args.begin(), binary_name);
+        args.insert(args.begin(), options.binary_path);
     }
 
     args.insert(args.end(), {
@@ -365,10 +385,11 @@ inline size_t spawn_swarm_process(
     });
 
     Managed_process::Spawn_swarm_process_args spawn_args;
-    spawn_args.binary_name = binary_name;
+    spawn_args.binary_name = options.binary_path;
     spawn_args.args = args;
+    spawn_args.lifetime = options.lifetime;
 
-    for (size_t i = 0; i < multiplicity; ++i) {
+    for (size_t i = 0; i < options.count; ++i) {
         spawn_args.piid = piid;
         auto result = s_mproc->spawn_swarm_process(spawn_args);
         if (result.success) {
@@ -386,7 +407,7 @@ inline size_t spawn_swarm_process(
         if (wait_timeout.count() <= 0) {
             const auto waited = Coordinator::rpc_wait_for_instance(
                 coord_id,
-                wait_for_instance_name);
+                options.wait_for_instance_name);
             wait_succeeded = waited != invalid_instance_id;
             if (!wait_succeeded) {
                 wait_failure_reason = "wait returned invalid instance id";
@@ -399,7 +420,7 @@ inline size_t spawn_swarm_process(
             while (std::chrono::steady_clock::now() < deadline) {
                 const auto resolved = Coordinator::rpc_resolve_instance(
                     coord_id,
-                    wait_for_instance_name);
+                    options.wait_for_instance_name);
                 if (resolved != invalid_instance_id) {
                     wait_succeeded = true;
                     break;
@@ -442,7 +463,7 @@ inline size_t spawn_swarm_process(
     if (!wait_succeeded) {
         Log_stream(log_level::warning)
             << "spawn_swarm_process: wait failed (" << wait_failure_reason
-            << ") for instance '" << wait_for_instance_name
+            << ") for instance '" << options.wait_for_instance_name
             << "' (spawned=" << spawned << ")\n";
         return 0;
     }

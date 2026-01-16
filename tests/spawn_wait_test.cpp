@@ -234,14 +234,12 @@ int run_coordinator(const std::string& binary_path)
         std::fprintf(stderr, "[COORDINATOR] Test 1: Testing timeout case with short wait\n");
         const auto start = std::chrono::steady_clock::now();
 
-        const size_t spawned = sintra::spawn_swarm_process(
-            binary_path,
-            {},  // No extra args; child behavior controlled by env var
-            1,
-            sintra::invalid_instance_id,
-            k_nonexistent_instance_name,  // Wait for a name that won't exist
-            std::chrono::milliseconds(500)  // Short timeout to exercise backoff
-        );
+        sintra::Spawn_options spawn_options;
+        spawn_options.binary_path = binary_path;
+        spawn_options.wait_for_instance_name = k_nonexistent_instance_name;
+        spawn_options.wait_timeout = std::chrono::milliseconds(500); // Short timeout to exercise backoff
+
+        const size_t spawned = sintra::spawn_swarm_process(spawn_options);
 
         const auto elapsed = std::chrono::steady_clock::now() - start;
         const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
@@ -326,14 +324,12 @@ int run_coordinator(const std::string& binary_path)
 
         const auto start = std::chrono::steady_clock::now();
 
-        const size_t spawned = sintra::spawn_swarm_process(
-            binary_path,
-            {},  // No extra args
-            1,
-            sintra::invalid_instance_id,
-            k_worker_instance_name,  // Wait for worker to register this name
-            std::chrono::milliseconds(10000)  // 10s timeout should be enough
-        );
+        sintra::Spawn_options spawn_options;
+        spawn_options.binary_path = binary_path;
+        spawn_options.wait_for_instance_name = k_worker_instance_name;
+        spawn_options.wait_timeout = std::chrono::milliseconds(10000);
+
+        const size_t spawned = sintra::spawn_swarm_process(spawn_options);
 
         const auto elapsed = std::chrono::steady_clock::now() - start;
         const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();

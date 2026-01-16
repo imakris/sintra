@@ -4,6 +4,7 @@
 #pragma once
 
 #include "logging.h"
+#include "sintra_windows.h"
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -13,7 +14,6 @@
 
 #ifdef _WIN32
 #include <process.h>
-#include <windows.h>
 #else
 #include <unistd.h>
 #endif

@@ -5,6 +5,7 @@
 
 #include "config.h"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdlib>
@@ -33,6 +34,8 @@
     #include <fcntl.h>
     #include <sys/wait.h>
     #include <unistd.h>
+
+    extern char** environ;
 #endif
 
 
@@ -176,6 +179,20 @@ private:
 
     std::vector<std::string> m_storage;
     const char** m_v = nullptr;
+};
+
+
+
+struct Spawn_detached_options
+{
+    const char* prog = nullptr;
+    const char* const* argv = nullptr;
+    int* child_pid_out = nullptr;
+    std::vector<std::string> env_overrides;
+#ifdef _WIN32
+    bool inherit_standard_handles = true;
+    std::vector<HANDLE> inherit_handles;
+#endif
 };
 
 
@@ -395,6 +412,129 @@ inline bool read_fully(int fd, void* buf, size_t count)
 
 #endif // !_WIN32
 
+#ifdef _WIN32
+
+inline std::wstring to_wide_utf8(const std::string& value)
+{
+    if (value.empty()) {
+        return {};
+    }
+    const int len = MultiByteToWideChar(CP_UTF8, 0, value.c_str(), -1, nullptr, 0);
+    if (len <= 0) {
+        return {};
+    }
+    std::wstring wide(static_cast<size_t>(len - 1), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, value.c_str(), -1, &wide[0], len);
+    return wide;
+}
+
+inline std::wstring env_key_of(const std::wstring& entry)
+{
+    const auto pos = entry.find(L'=');
+    if (pos == std::wstring::npos) {
+        return entry;
+    }
+    return entry.substr(0, pos);
+}
+
+inline bool env_key_equal(const std::wstring& lhs, const std::wstring& rhs)
+{
+    return _wcsicmp(lhs.c_str(), rhs.c_str()) == 0;
+}
+
+inline std::vector<wchar_t> build_environment_block(const std::vector<std::string>& overrides)
+{
+    if (overrides.empty()) {
+        return {};
+    }
+
+    std::vector<std::wstring> env_entries;
+    LPWCH raw = GetEnvironmentStringsW();
+    if (raw) {
+        for (const wchar_t* cursor = raw; *cursor != L'\0'; ) {
+            const size_t len = wcslen(cursor);
+            env_entries.emplace_back(cursor, cursor + len);
+            cursor += len + 1;
+        }
+        FreeEnvironmentStringsW(raw);
+    }
+
+    for (const auto& override_entry : overrides) {
+        const auto wide_entry = to_wide_utf8(override_entry);
+        if (wide_entry.empty()) {
+            continue;
+        }
+        const auto override_key = env_key_of(wide_entry);
+
+        env_entries.erase(
+            std::remove_if(
+                env_entries.begin(),
+                env_entries.end(),
+                [&](const std::wstring& entry) {
+                    return env_key_equal(env_key_of(entry), override_key);
+                }),
+            env_entries.end());
+
+        env_entries.push_back(wide_entry);
+    }
+
+    size_t total_chars = 1;
+    for (const auto& entry : env_entries) {
+        total_chars += entry.size() + 1;
+    }
+
+    std::vector<wchar_t> block;
+    block.reserve(total_chars);
+    for (const auto& entry : env_entries) {
+        block.insert(block.end(), entry.begin(), entry.end());
+        block.push_back(L'\0');
+    }
+    block.push_back(L'\0');
+    return block;
+}
+
+#else
+
+inline std::string env_key_of(const std::string& entry)
+{
+    const auto pos = entry.find('=');
+    if (pos == std::string::npos) {
+        return entry;
+    }
+    return entry.substr(0, pos);
+}
+
+inline std::vector<std::string> build_environment_entries(const std::vector<std::string>& overrides)
+{
+    std::vector<std::string> env_entries;
+    if (char** env = environ) {
+        for (char** cursor = env; *cursor; ++cursor) {
+            env_entries.emplace_back(*cursor);
+        }
+    }
+
+    if (overrides.empty()) {
+        return env_entries;
+    }
+
+    for (const auto& override_entry : overrides) {
+        const auto override_key = env_key_of(override_entry);
+        env_entries.erase(
+            std::remove_if(
+                env_entries.begin(),
+                env_entries.end(),
+                [&](const std::string& entry) {
+                    return env_key_of(entry) == override_key;
+                }),
+            env_entries.end());
+        env_entries.push_back(override_entry);
+    }
+
+    return env_entries;
+}
+
+#endif
+
 } // namespace detail
 
 #ifndef _WIN32
@@ -431,11 +571,15 @@ inline detail::spawn_detached_debug_fn set_spawn_detached_debug(detail::spawn_de
 #endif // !_WIN32
 
 inline
-bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_out = nullptr)
+bool spawn_detached(const Spawn_detached_options& options)
 {
 
 #ifdef _WIN32
-    if (prog==nullptr || argv==nullptr) {
+    const char* prog = options.prog;
+    const char* const* argv = options.argv;
+    int* child_pid_out = options.child_pid_out;
+
+    if (prog == nullptr || argv == nullptr) {
         return false;
     }
 
@@ -453,9 +597,13 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
 
     // Convert UTF-8 string to wide string
     auto to_wide = [](const char* str) -> std::wstring {
-        if (!str || !*str) return std::wstring();
+        if (!str || !*str) {
+            return std::wstring();
+        }
         int len = MultiByteToWideChar(CP_UTF8, 0, str, -1, nullptr, 0);
-        if (len <= 0) return std::wstring();
+        if (len <= 0) {
+            return std::wstring();
+        }
         std::wstring result(len - 1, 0); // -1 to exclude null terminator from size
         MultiByteToWideChar(CP_UTF8, 0, str, -1, &result[0], len);
         return result;
@@ -526,17 +674,152 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
     constexpr unsigned k_max_attempts = 5;
     const auto retry_delay = std::chrono::milliseconds(50);
 
+    const auto env_block = detail::build_environment_block(options.env_overrides);
+    const bool has_env_override = !env_block.empty();
+
+    std::vector<HANDLE> inherited_handles;
+    inherited_handles.reserve(options.inherit_handles.size() + 3);
+
+    if (!options.inherit_handles.empty()) {
+        if (options.inherit_standard_handles) {
+            HANDLE std_handles[] = {
+                GetStdHandle(STD_INPUT_HANDLE),
+                GetStdHandle(STD_OUTPUT_HANDLE),
+                GetStdHandle(STD_ERROR_HANDLE)
+            };
+            for (HANDLE handle : std_handles) {
+                if (handle && handle != INVALID_HANDLE_VALUE) {
+                    inherited_handles.push_back(handle);
+                }
+            }
+        }
+
+        for (HANDLE handle : options.inherit_handles) {
+            if (handle && handle != INVALID_HANDLE_VALUE) {
+                inherited_handles.push_back(handle);
+            }
+        }
+
+        std::sort(inherited_handles.begin(), inherited_handles.end());
+        inherited_handles.erase(
+            std::unique(inherited_handles.begin(), inherited_handles.end()),
+            inherited_handles.end());
+    }
+
+    struct Handle_inherit_guard
+    {
+        HANDLE handle = nullptr;
+        DWORD flags = 0;
+        bool active = false;
+    };
+
+    std::vector<Handle_inherit_guard> handle_guards;
+    if (!inherited_handles.empty()) {
+        handle_guards.reserve(inherited_handles.size());
+        for (HANDLE handle : inherited_handles) {
+            DWORD flags = 0;
+            if (!GetHandleInformation(handle, &flags)) {
+                continue;
+            }
+            if ((flags & HANDLE_FLAG_INHERIT) == 0) {
+                SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+            }
+            handle_guards.push_back({handle, flags, true});
+        }
+    }
+
     int last_errno = 0;
     unsigned long last_doserrno = 0;
 
+    using init_proc_thread_attribute_list_fn = BOOL (WINAPI*)(
+        LPPROC_THREAD_ATTRIBUTE_LIST,
+        DWORD,
+        DWORD,
+        PSIZE_T);
+    using update_proc_thread_attribute_list_fn = BOOL (WINAPI*)(
+        LPPROC_THREAD_ATTRIBUTE_LIST,
+        DWORD,
+        DWORD_PTR,
+        PVOID,
+        SIZE_T,
+        PVOID,
+        PSIZE_T);
+    using delete_proc_thread_attribute_list_fn = VOID (WINAPI*)(
+        LPPROC_THREAD_ATTRIBUTE_LIST);
+
+    const HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
+    const auto init_proc_thread_attribute_list = kernel32
+        ? reinterpret_cast<init_proc_thread_attribute_list_fn>(
+            GetProcAddress(kernel32, "InitializeProcThreadAttributeList"))
+        : nullptr;
+    const auto update_proc_thread_attribute_list = kernel32
+        ? reinterpret_cast<update_proc_thread_attribute_list_fn>(
+            GetProcAddress(kernel32, "UpdateProcThreadAttributeList"))
+        : nullptr;
+    const auto delete_proc_thread_attribute_list = kernel32
+        ? reinterpret_cast<delete_proc_thread_attribute_list_fn>(
+            GetProcAddress(kernel32, "DeleteProcThreadAttributeList"))
+        : nullptr;
+    const bool has_attribute_list_api = init_proc_thread_attribute_list &&
+        update_proc_thread_attribute_list &&
+        delete_proc_thread_attribute_list;
+
+    SIZE_T attr_list_size = 0;
+    std::vector<unsigned char> attr_buffer;
+    STARTUPINFOEXW si_ex {};
+    bool use_handle_list = !inherited_handles.empty() && has_attribute_list_api;
+
+    if (use_handle_list) {
+        init_proc_thread_attribute_list(nullptr, 1, 0, &attr_list_size);
+        if (attr_list_size != 0) {
+            attr_buffer.resize(attr_list_size);
+            si_ex.lpAttributeList = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attr_buffer.data());
+            if (!init_proc_thread_attribute_list(si_ex.lpAttributeList, 1, 0, &attr_list_size)) {
+                attr_buffer.clear();
+                si_ex.lpAttributeList = nullptr;
+            }
+            if (si_ex.lpAttributeList) {
+                if (!update_proc_thread_attribute_list(
+                        si_ex.lpAttributeList,
+                        0,
+                        PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                        inherited_handles.data(),
+                        inherited_handles.size() * sizeof(HANDLE),
+                        nullptr,
+                        nullptr))
+                {
+                    delete_proc_thread_attribute_list(si_ex.lpAttributeList);
+                    si_ex.lpAttributeList = nullptr;
+                    use_handle_list = false;
+                }
+            }
+        }
+        if (!si_ex.lpAttributeList) {
+            use_handle_list = false;
+        }
+    }
+
     for (unsigned attempt = 0; attempt < k_max_attempts; ++attempt) {
-        STARTUPINFOW si;
-        ZeroMemory(&si, sizeof(si));
-        si.cb = sizeof(si);
-        si.dwFlags = STARTF_USESTDHANDLES;
-        si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
-        si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
-        si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+        STARTUPINFOW si {};
+        STARTUPINFOW* si_ptr = nullptr;
+        if (use_handle_list) {
+            ZeroMemory(&si_ex, sizeof(si_ex));
+            si_ex.StartupInfo.cb = sizeof(si_ex);
+            si_ex.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+            si_ex.StartupInfo.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+            si_ex.StartupInfo.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+            si_ex.StartupInfo.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+            si_ptr = &si_ex.StartupInfo;
+        }
+        else {
+            ZeroMemory(&si, sizeof(si));
+            si.cb = sizeof(si);
+            si.dwFlags = STARTF_USESTDHANDLES;
+            si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+            si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+            si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+            si_ptr = &si;
+        }
 
         PROCESS_INFORMATION pi;
         ZeroMemory(&pi, sizeof(pi));
@@ -544,6 +827,12 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
         // CREATE_NEW_PROCESS_GROUP: Like Unix setsid() - new process group for Ctrl-C isolation
         // Note: CREATE_BREAKAWAY_FROM_JOB removed - it requires special permissions and may fail
         DWORD creation_flags = CREATE_NEW_PROCESS_GROUP;
+        if (use_handle_list) {
+            creation_flags |= EXTENDED_STARTUPINFO_PRESENT;
+        }
+        if (has_env_override) {
+            creation_flags |= CREATE_UNICODE_ENVIRONMENT;
+        }
 
         BOOL success = CreateProcessW(
             full_path_w.c_str(),        // Application name - explicit resolved path (more secure)
@@ -552,9 +841,9 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
             nullptr,                    // Thread security attributes
             TRUE,                       // Inherit handles (for stdout/stderr)
             creation_flags,             // Creation flags
-            nullptr,                    // Environment (inherit)
+            has_env_override ? const_cast<wchar_t*>(env_block.data()) : nullptr, // Environment
             nullptr,                    // Current directory (inherit)
-            &si,                        // Startup info
+            si_ptr,                     // Startup info
             &pi                         // Process information
         );
 
@@ -567,6 +856,15 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
             CloseHandle(pi.hProcess);
             CloseHandle(pi.hThread);
 
+            if (use_handle_list && si_ex.lpAttributeList) {
+                delete_proc_thread_attribute_list(si_ex.lpAttributeList);
+            }
+            for (const auto& guard : handle_guards) {
+                if (guard.active) {
+                    const DWORD inherit_flag = (guard.flags & HANDLE_FLAG_INHERIT) ? HANDLE_FLAG_INHERIT : 0;
+                    SetHandleInformation(guard.handle, HANDLE_FLAG_INHERIT, inherit_flag);
+                }
+            }
             return true;
         }
 
@@ -604,6 +902,15 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
     if (last_doserrno != 0) {
         _set_doserrno(last_doserrno);
     }
+    if (use_handle_list && si_ex.lpAttributeList) {
+        delete_proc_thread_attribute_list(si_ex.lpAttributeList);
+    }
+    for (const auto& guard : handle_guards) {
+        if (guard.active) {
+            const DWORD inherit_flag = (guard.flags & HANDLE_FLAG_INHERIT) ? HANDLE_FLAG_INHERIT : 0;
+            SetHandleInformation(guard.handle, HANDLE_FLAG_INHERIT, inherit_flag);
+        }
+    }
     return false;
 #else
 
@@ -625,6 +932,10 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
         signal_ignored.sa_handler = SIG_IGN;\
         ::sigaction(SIGPIPE, &signal_ignored, 0);
 
+    const char* prog = options.prog;
+    const char* const* argv = options.argv;
+    int* child_pid_out = options.child_pid_out;
+
     if (prog == nullptr || argv == nullptr) {
         return false;
     }
@@ -644,6 +955,19 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
         argv_copy[static_cast<size_t>(i)] = const_cast<char*>(argv_storage[static_cast<size_t>(i)].c_str());
     }
     char* prog_copy = const_cast<char*>(prog_storage.c_str());
+
+    std::vector<std::string> env_storage;
+    std::vector<char*> envp;
+    char* const* exec_envp = nullptr;
+    if (!options.env_overrides.empty()) {
+        env_storage = detail::build_environment_entries(options.env_overrides);
+        envp.reserve(env_storage.size() + 1);
+        for (auto& entry : env_storage) {
+            envp.push_back(const_cast<char*>(entry.c_str()));
+        }
+        envp.push_back(nullptr);
+        exec_envp = envp.data();
+    }
 
     auto report_failure = [&](detail::spawn_detached_debug_info::Stage stage, int error, int exec_error) {
         detail::spawn_detached_debug_info info;
@@ -714,7 +1038,12 @@ bool spawn_detached(const char* prog, const char * const*argv, int* child_pid_ou
             ::_exit(EXIT_FAILURE);
         }
 
-        ::execv(prog_copy, (char* const*)argv_copy.data());
+        if (exec_envp) {
+            ::execve(prog_copy, (char* const*)argv_copy.data(), exec_envp);
+        }
+        else {
+            ::execv(prog_copy, (char* const*)argv_copy.data());
+        }
 
         int exec_errno = errno;
 

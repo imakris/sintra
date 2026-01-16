@@ -510,6 +510,10 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
         // remove the unpublished process's registry entry
         m_transceiver_registry.erase(pr_it);
 
+        if (s_mproc) {
+            s_mproc->release_lifeline(process_iid);
+        }
+
         // CRITICAL: Mark as draining BEFORE removing from groups to prevent barriers
         // from including this process. This handles both graceful shutdown (where
         // begin_process_draining was already called) and crash scenarios (where it wasn't).

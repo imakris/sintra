@@ -14,6 +14,16 @@ Usage:
 */
 
 #if defined(_WIN32)
+  #if !defined(_WIN32_WINNT)
+    #define _WIN32_WINNT 0x0600
+  #elif _WIN32_WINNT < 0x0600
+    #undef _WIN32_WINNT
+    #define _WIN32_WINNT 0x0600
+  #endif
+  #if !defined(WINVER) || (WINVER < _WIN32_WINNT)
+    #undef WINVER
+    #define WINVER _WIN32_WINNT
+  #endif
   #ifndef NOMINMAX
     #define NOMINMAX
   #endif
@@ -21,4 +31,25 @@ Usage:
     #define WIN32_LEAN_AND_MEAN
   #endif
   #include <windows.h>
+  #include <processthreadsapi.h>
+
+  extern "C" {
+  WINBASEAPI BOOL WINAPI InitializeProcThreadAttributeList(
+      LPPROC_THREAD_ATTRIBUTE_LIST lpAttributeList,
+      DWORD dwAttributeCount,
+      DWORD dwFlags,
+      PSIZE_T lpSize);
+
+  WINBASEAPI BOOL WINAPI UpdateProcThreadAttributeList(
+      LPPROC_THREAD_ATTRIBUTE_LIST lpAttributeList,
+      DWORD dwFlags,
+      DWORD_PTR Attribute,
+      PVOID lpValue,
+      SIZE_T cbSize,
+      PVOID lpPreviousValue,
+      PSIZE_T lpReturnSize);
+
+  WINBASEAPI VOID WINAPI DeleteProcThreadAttributeList(
+      LPPROC_THREAD_ATTRIBUTE_LIST lpAttributeList);
+  }
 #endif

@@ -114,7 +114,9 @@ int main(int argc, char* argv[])
     }
 
     const std::string receiver_path = get_receiver_path(argc > 0 ? argv[0] : "");
-    if (sintra::spawn_swarm_process(receiver_path) == 0) {
+    sintra::Spawn_options spawn_options;
+    spawn_options.binary_path = receiver_path;
+    if (sintra::spawn_swarm_process(spawn_options) == 0) {
         sintra::Log_stream(sintra::log_level::error)
             << "Failed to spawn receiver process: " << receiver_path << "\n";
         sintra::finalize();

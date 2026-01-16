@@ -29,6 +29,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <cstdint>
 #include <shared_mutex>
 #include <stdexcept>
 #include <string>
@@ -131,6 +132,16 @@ struct Process_descriptor
     }
 
     friend struct Managed_process;
+};
+
+struct Lifetime_policy
+{
+    bool enable_lifeline = true;
+    int hard_exit_code = 99;
+    int hard_exit_timeout_ms = 100;
+    const char* env_handle_key_win = "SINTRA_LIFELINE_HANDLE";
+    const char* env_fd_key_posix = "SINTRA_LIFELINE_FD";
+    const char* disable_env = "SINTRA_LIFELINE_DISABLE";
 };
 
 
@@ -321,6 +332,7 @@ struct Managed_process: Derived_transceiver<Managed_process>
         std::vector<std::string>        args;
         instance_id_type                piid;
         uint32_t                        occurrence = 0;
+        Lifetime_policy                 lifetime;
     };
 
     struct Spawn_result
@@ -337,6 +349,12 @@ struct Managed_process: Derived_transceiver<Managed_process>
     mutable std::mutex                  m_spawned_child_pids_mutex;
     void                                reap_finished_children();
 #endif
+
+    using lifeline_handle_type = uintptr_t;
+    map<instance_id_type, lifeline_handle_type> m_lifeline_writes;
+    mutable std::mutex                  m_lifeline_mutex;
+    void                                release_lifeline(instance_id_type process_instance_id);
+    void                                release_all_lifelines();
 
 
     Spawn_result spawn_swarm_process( const Spawn_swarm_process_args& ssp_args );

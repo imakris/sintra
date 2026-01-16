@@ -45,6 +45,9 @@ function(add_test_suite SUFFIX IS_DEBUG)
     if(WIN32)
         target_link_libraries(${LIB_TARGET} INTERFACE winmm)
     endif()
+    if(MSVC)
+        target_compile_options(${LIB_TARGET} INTERFACE /FS)
+    endif()
 
     # Set optimization flags
     if(IS_DEBUG)

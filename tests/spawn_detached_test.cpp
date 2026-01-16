@@ -146,6 +146,14 @@ const char* locate_true_binary()
 
 } // namespace
 
+bool spawn_detached_with_args(const char* prog, const char* const* args)
+{
+    sintra::Spawn_detached_options options;
+    options.prog = prog;
+    options.argv = args;
+    return sintra::spawn_detached(options);
+}
+
 bool spawn_should_fail_due_to_fd_exhaustion()
 {
     const char* true_prog = locate_true_binary();
@@ -172,7 +180,7 @@ bool spawn_should_fail_due_to_fd_exhaustion()
     }
 
     const char* const args[] = {true_prog, nullptr};
-    bool result = sintra::spawn_detached(true_prog, args);
+    bool result = spawn_detached_with_args(true_prog, args);
 
     bool sentinel_ok = (::fcntl(sentinel, F_GETFD) != -1);
 
@@ -201,7 +209,7 @@ bool spawn_should_fail_when_pipe2_injected_failure()
 
     Override_guard guard(Override_guard::Kind::Pipe2, reinterpret_cast<void*>(&failing_pipe2));
     const char* const args[] = {true_prog, nullptr};
-    bool result = sintra::spawn_detached(true_prog, args);
+    bool result = spawn_detached_with_args(true_prog, args);
     return assert_true(!result, "spawn_detached must report failure when pipe2 fails");
 }
 
@@ -238,7 +246,7 @@ bool spawn_succeeds_under_eintr_pressure()
     Override_guard debug_guard(Override_guard::Kind::SpawnDebug, reinterpret_cast<void*>(&capture_spawn_debug));
 
     const char* const args[] = {true_prog, nullptr};
-    bool result = sintra::spawn_detached(true_prog, args);
+    bool result = spawn_detached_with_args(true_prog, args);
     if (!result && debug_captured) {
         std::cerr << "spawn_detached_test: debug stage=" << stage_to_string(last_debug_info.stage)
                   << ", errno=" << last_debug_info.errno_value
@@ -264,7 +272,7 @@ bool spawn_succeeds_when_waitpid_reports_echild()
     Override_guard guard(Override_guard::Kind::Waitpid, reinterpret_cast<void*>(&waitpid_returns_echild));
     const char* const args[] = {true_prog, nullptr};
     errno = 0;
-    bool result = sintra::spawn_detached(true_prog, args);
+    bool result = spawn_detached_with_args(true_prog, args);
     int saved_errno = errno;
     return assert_true(result,
                        "spawn_detached must tolerate waitpid reporting ECHILD after a successful exec") &&
@@ -287,7 +295,7 @@ bool spawn_fails_when_grandchild_cannot_report_readiness()
 
     Override_guard guard(Override_guard::Kind::Write, reinterpret_cast<void*>(&broken_write));
     const char* const args[] = {true_prog, nullptr};
-    bool result = sintra::spawn_detached(true_prog, args);
+    bool result = spawn_detached_with_args(true_prog, args);
     return assert_true(!result, "write failures must be reported as spawn failures");
 }
 
@@ -295,7 +303,7 @@ bool spawn_reports_exec_failure()
 {
     const char* const args[] = {"/definitely/not/a/program", nullptr};
     errno = 0;
-    bool result = sintra::spawn_detached("/definitely/not/a/program", args);
+    bool result = spawn_detached_with_args("/definitely/not/a/program", args);
     int saved_errno = errno;
     return assert_true(!result, "spawn_detached must fail when execv cannot launch the target") &&
            assert_true(saved_errno == ENOENT, "spawn_detached must surface the exec errno");
