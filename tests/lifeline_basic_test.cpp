@@ -114,6 +114,11 @@ std::filesystem::path child_ready_path(const std::filesystem::path& dir, const s
     return dir / ("child_ready_" + test_case + ".txt");
 }
 
+std::filesystem::path child_done_path(const std::filesystem::path& dir, const std::string& test_case)
+{
+    return dir / ("child_done_" + test_case + ".txt");
+}
+
 std::filesystem::path respawn_occurrence_path(const std::filesystem::path& dir, uint32_t occurrence)
 {
     return dir / ("respawn_occurrence_" + std::to_string(occurrence) + ".txt");
@@ -435,12 +440,26 @@ bool is_running(Process_handle& process)
 bool process_exists(long long pid)
 {
 #ifdef _WIN32
-    HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, static_cast<DWORD>(pid));
-    if (h) {
-        CloseHandle(h);
-        return true;
+    if (pid <= 0) {
+        return false;
     }
-    return GetLastError() != ERROR_INVALID_PARAMETER;
+
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, static_cast<DWORD>(pid));
+    if (!h) {
+        const DWORD err = GetLastError();
+        if (err == ERROR_ACCESS_DENIED) {
+            return true;
+        }
+        return err != ERROR_INVALID_PARAMETER;
+    }
+
+    DWORD exit_code = 0;
+    bool alive = true;
+    if (GetExitCodeProcess(h, &exit_code)) {
+        alive = (exit_code == STILL_ACTIVE);
+    }
+    CloseHandle(h);
+    return alive;
 #else
     return ::kill(static_cast<pid_t>(pid), 0) == 0 || errno == EPERM;
 #endif
@@ -490,6 +509,11 @@ int run_child(const std::filesystem::path& dir, const std::string& test_case, in
         // Exit quickly to allow rapid iteration in leak test.
         // The lifeline write handle should be properly released by the owner.
         std::this_thread::sleep_for(std::chrono::milliseconds(k_leak_child_lifetime_ms));
+        // Write done marker before exiting - more reliable than process_exists on Windows
+        if (!write_text_file(child_done_path(dir, test_case), "done")) {
+            std::fprintf(stderr, "[child] failed to write done file\n");
+            std::_Exit(1);
+        }
         std::_Exit(0);
     }
 
@@ -549,11 +573,13 @@ int run_leak_owner(const std::filesystem::path& dir, int argc, char* argv[])
     const std::string binary_path = get_binary_path(argc, argv);
     const auto ready_file = child_ready_path(dir, k_case_leak);
     const auto pid_file = child_pid_path(dir, k_case_leak);
+    const auto done_file = child_done_path(dir, k_case_leak);
 
     for (int i = 0; i < k_leak_iterations; ++i) {
         // Remove marker files from previous iteration
         std::filesystem::remove(ready_file);
         std::filesystem::remove(pid_file);
+        std::filesystem::remove(done_file);
 
         sintra::Spawn_options spawn_options;
         spawn_options.binary_path = binary_path;
@@ -577,13 +603,19 @@ int run_leak_owner(const std::filesystem::path& dir, int argc, char* argv[])
 
         // Read child PID
         long long child_pid = 0;
-        if (!read_pid_file(pid_file, child_pid)) {
+        if (!wait_for_pid_value(pid_file, 3000, child_pid)) {
             std::fprintf(stderr, "[leak_owner] failed to read child %d pid\n", i);
             std::_Exit(3);
         }
 
-        // Wait for child to exit (it exits shortly after signaling ready).
-        // Poll until child actually exits rather than just sleeping.
+        // Wait for child to signal done (more reliable than process_exists on Windows,
+        // since sintra may hold process handles even after child exits)
+        if (!wait_for_file(done_file, k_leak_child_lifetime_ms + 3000)) {
+            std::fprintf(stderr, "[leak_owner] child %d did not signal done\n", i);
+            std::_Exit(4);
+        }
+
+        // Wait for child to exit (it exits shortly after signaling done).
         const auto deadline = std::chrono::steady_clock::now() +
             std::chrono::milliseconds(k_leak_child_lifetime_ms + 1000);
         while (std::chrono::steady_clock::now() < deadline) {
@@ -596,7 +628,7 @@ int run_leak_owner(const std::filesystem::path& dir, int argc, char* argv[])
         // Verify child actually exited
         if (process_exists(child_pid)) {
             std::fprintf(stderr, "[leak_owner] child %d (pid %lld) did not exit\n", i, child_pid);
-            std::_Exit(4);
+            std::_Exit(5);
         }
     }
 
