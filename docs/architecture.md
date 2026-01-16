@@ -43,27 +43,27 @@ Sintra's IPC foundation is a **double-mapped circular buffer** ("magic ring"), w
 #### Ring Components
 
 ```
-ΓöîΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÉ
-Γöé Ring_data<T, READ_ONLY>                                    Γöé
-Γöé ΓöîΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÉ Γöé
-Γöé Γöé File: <name>_data                                      Γöé Γöé
-Γöé Γöé - Double-mapped shared memory region (2├ù mapping)      Γöé Γöé
-Γöé Γöé - Elements stored contiguously                         Γöé Γöé
-Γöé Γöé - Mapping trick: Same physical memory appears twice    Γöé Γöé
-Γöé Γöé   at consecutive virtual addresses                     Γöé Γöé
-Γöé ΓööΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÿ Γöé
-Γöé                                                            Γöé
-Γöé Ring<T, READ_ONLY> : Ring_data<T, READ_ONLY>               Γöé
-Γöé ΓöîΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÉ Γöé
-Γöé Γöé File: <name>_data_control                              Γöé Γöé
-Γöé Γöé - Control block with atomics                           Γöé Γöé
-Γöé Γöé - leading_sequence: Published write head               Γöé Γöé
-Γöé Γöé - read_access: 8-byte octile guard bitmap              Γöé Γöé
-Γöé Γöé - reading_sequences[max_process_index]: Per-reader     Γöé Γöé
-Γöé Γöé   sequence tracking and status                         Γöé Γöé
-Γöé Γöé - Semaphores for reader wakeup (hybrid policy)         Γöé Γöé
-Γöé ΓööΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÿ Γöé
-ΓööΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÿ
+┌────────────────────────────────────────────────────────────┐
+│ Ring_data<T, READ_ONLY>                                    │
+│ ┌────────────────────────────────────────────────────────┐ │
+│ │ File: <name>_data                                      │ │
+│ │ - Double-mapped shared memory region (2× mapping)      │ │
+│ │ - Elements stored contiguously                         │ │
+│ │ - Mapping trick: Same physical memory appears twice    │ │
+│ │   at consecutive virtual addresses                     │ │
+│ └────────────────────────────────────────────────────────┘ │
+│                                                            │
+│ Ring<T, READ_ONLY> : Ring_data<T, READ_ONLY>               │
+│ ┌────────────────────────────────────────────────────────┐ │
+│ │ File: <name>_data_control                              │ │
+│ │ - Control block with atomics                           │ │
+│ │ - leading_sequence: Published write head               │ │
+│ │ - read_access: 8-byte octile guard bitmap              │ │
+│ │ - reading_sequences[max_process_index]: Per-reader     │ │
+│ │   sequence tracking and status                         │ │
+│ │ - Semaphores for reader wakeup (hybrid policy)         │ │
+│ └────────────────────────────────────────────────────────┘ │
+└────────────────────────────────────────────────────────────┘
 
 Ring_R<T> : Ring<T, true>    // Reader API
 Ring_W<T> : Ring<T, false>   // Writer API
@@ -98,13 +98,13 @@ Sintra exposes small helpers to make ring usage less error-prone:
 ### Double-Mapping Details
 
 #### Windows
-- Reserve 2├ù + granularity address space via `VirtualAlloc(MEM_RESERVE)`
+- Reserve 2x + granularity address space via `VirtualAlloc(MEM_RESERVE)`
 - Round to granularity boundary (historical layout parity)
 - Release reservation
 - Map file twice back-to-back at the rounded address
 
 #### Linux/POSIX
-- Reserve 2├ù span with `mmap(PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS)`
+- Reserve 2x span with `mmap(PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS)`
 - Map file twice using `MAP_FIXED` to **replace** the reservation
 - **Critical**: Use `MAP_FIXED`, **not** `MAP_FIXED_NOREPLACE` (the goal is to replace)
 
@@ -133,13 +133,13 @@ Other processes read from these rings via `Process_message_reader` instances.
 
 ```
 Process A (pid=1)                    Process B (pid=2)
-ΓöîΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÉ                 ΓöîΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÉ
-Γöé m_out_req_c  ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ>Γöé reader[A].req  Γöé
-Γöé m_out_rep_c  ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ>Γöé reader[A].rep  Γöé
-Γöé                 Γöé                 Γöé                 Γöé
-Γöé reader[B].req <ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ  m_out_req_c   Γöé
-Γöé reader[B].rep <ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ  m_out_rep_c   Γöé
-ΓööΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÿ                 ΓööΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÿ
+┌─────────────────┐                 ┌─────────────────┐
+│ m_out_req_c  ────────────────────>│  reader[A].req  │
+│ m_out_rep_c  ────────────────────>│  reader[A].rep  │
+│                 │                 │                 │
+│ reader[B].req <─────────────────────  m_out_req_c   │
+│ reader[B].rep <─────────────────────  m_out_rep_c   │
+└─────────────────┘                 └─────────────────┘
 ```
 
 Each process:
@@ -190,8 +190,8 @@ stale children still terminate. Respawn creates a new lifeline per instance.
 
 The `Coordinator` is a **special transceiver** that runs in process index 0 (the "starter" process). It provides:
 
-- Type resolution (string ΓåÆ type_id)
-- Instance resolution (name ΓåÆ instance_id)
+- Type resolution (string -> type_id)
+- Instance resolution (name -> instance_id)
 - Transceiver registry
 - **Process groups and barriers**
 - **Draining state tracking**
@@ -234,8 +234,8 @@ struct Process_group : Derived_transceiver<Process_group> {
 2. **Subsequent Arrivals**:
    - Mark caller as arrived
    - Remove caller from pending
-   - If pending is empty ΓåÆ barrier completes
-   - Else ΓåÆ defer (throw deferral with cleanup lambda)
+   - If pending is empty -> barrier completes
+   - Else -> defer (throw deferral with cleanup lambda)
 
 3. **Barrier Completion**:
    - Last arrival emits completion messages to all waiters
@@ -265,7 +265,7 @@ bool is_process_draining(instance_id_type process_iid) const {
 
 **Lock Hierarchy**: To prevent deadlocks:
 ```
-m_publish_mutex ΓåÆ m_groups_mutex ΓåÆ m_call_mutex ΓåÆ b.m ΓåÆ atomics
+m_publish_mutex -> m_groups_mutex -> m_call_mutex -> b.m -> atomics
 ```
 
 ---
@@ -281,44 +281,44 @@ m_publish_mutex ΓåÆ m_groups_mutex ΓåÆ m_call_mutex ΓåÆ b.m ΓåÆ atom
 ### Shutdown Sequence (sintra::finalize)
 
 ```
-ΓöîΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÉ
-Γöé 1. Announce Draining                                       Γöé
-Γöé    ΓöîΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÉ Γöé
-Γöé    Γöé Coordinator::begin_process_draining(my_pid)         Γöé Γöé
-Γöé    Γöé ΓåÆ Sets m_draining_process_states[my_slot] = 1       Γöé Γöé
-Γöé    Γöé ΓåÆ Drops process from in-flight barriers             Γöé Γöé
-Γöé    Γöé ΓåÆ Returns flush sequence (reply ring watermark)     Γöé Γöé
-Γöé    ΓööΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÿ Γöé
-Γö£ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöñ
-Γöé 2. Flush Coordinator Channel                               Γöé
-Γöé    ΓöîΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÉ Γöé
-Γöé    Γöé flush(flush_sequence)                               Γöé Γöé
-Γöé    Γöé ΓåÆ Waits until coordinator's reply ring              Γöé Γöé
-Γöé    Γöé   sequence >= flush_sequence                        Γöé Γöé
-Γöé    Γöé ΓåÆ Guarantees all barrier completions are visible    Γöé Γöé
-Γöé    ΓööΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÿ Γöé
-Γö£ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöñ
-Γöé 3. Unpublish (Normal Communication Still Active)           Γöé
-Γöé    ΓöîΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÉ Γöé
-Γöé    Γöé unpublish_all_transceivers()                        Γöé Γöé
-Γöé    Γöé ΓåÆ Sends unpublish RPCs while communication works    Γöé Γöé
-Γöé    Γöé ΓåÆ Coordinator removes from registry                 Γöé Γöé
-Γöé    ΓööΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÿ Γöé
-Γö£ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöñ
-Γöé 4. Pause Readers                                           Γöé
-Γöé    ΓöîΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÉ Γöé
-Γöé    Γöé pause()                                             Γöé Γöé
-Γöé    Γöé ΓåÆ Switches readers to SERVICE_MODE                  Γöé Γöé
-Γöé    Γöé ΓåÆ Only coordinator messages processed               Γöé Γöé
-Γöé    ΓööΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÿ Γöé
-Γö£ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöñ
-Γöé 5. Stop and Cleanup                                        Γöé
-Γöé    ΓöîΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÉ Γöé
-Γöé    Γöé stop()                                              Γöé Γöé
-Γöé    Γöé ΓåÆ Joins reader threads                              Γöé Γöé
-Γöé    Γöé ΓåÆ Releases resources                                Γöé Γöé
-Γöé    ΓööΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÿ Γöé
-ΓööΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÿ
+┌────────────────────────────────────────────────────────────┐
+│ 1. Announce Draining                                       │
+│    ┌─────────────────────────────────────────────────────┐ │
+│    │ Coordinator::begin_process_draining(my_pid)         │ │
+│    │ -> Sets m_draining_process_states[my_slot] = 1      │ │
+│    │ -> Drops process from in-flight barriers            │ │
+│    │ -> Returns flush sequence (reply ring watermark)    │ │
+│    └─────────────────────────────────────────────────────┘ │
+├────────────────────────────────────────────────────────────┤
+│ 2. Flush Coordinator Channel                               │
+│    ┌─────────────────────────────────────────────────────┐ │
+│    │ flush(flush_sequence)                               │ │
+│    │ -> Waits until coordinator's reply ring             │ │
+│    │   sequence >= flush_sequence                        │ │
+│    │ -> Guarantees all barrier completions are visible   │ │
+│    └─────────────────────────────────────────────────────┘ │
+├────────────────────────────────────────────────────────────┤
+│ 3. Unpublish (Normal Communication Still Active)           │
+│    ┌─────────────────────────────────────────────────────┐ │
+│    │ unpublish_all_transceivers()                        │ │
+│    │ -> Sends unpublish RPCs while communication works   │ │
+│    │ -> Coordinator removes from registry                │ │
+│    └─────────────────────────────────────────────────────┘ │
+├────────────────────────────────────────────────────────────┤
+│ 4. Pause Readers                                           │
+│    ┌─────────────────────────────────────────────────────┐ │
+│    │ pause()                                             │ │
+│    │ -> Switches readers to SERVICE_MODE                 │ │
+│    │ -> Only coordinator messages processed              │ │
+│    └─────────────────────────────────────────────────────┘ │
+├────────────────────────────────────────────────────────────┤
+│ 5. Stop and Cleanup                                        │
+│    ┌─────────────────────────────────────────────────────┐ │
+│    │ stop()                                              │ │
+│    │ -> Joins reader threads                             │ │
+│    │ -> Releases resources                               │ │
+│    └─────────────────────────────────────────────────────┘ │
+└────────────────────────────────────────────────────────────┘
 ```
 
 > Implementation note:
@@ -362,7 +362,7 @@ When a process drains while a barrier is in-flight:
 1. Lock m_call_mutex
 2. For each barrier:
    - Remove draining process from both pending and arrived sets
-   - If pending is now empty ΓåÆ barrier completes immediately
+   - If pending is now empty -> barrier completes immediately
 3. Emit completions to remaining waiters
 ```
 
@@ -376,55 +376,55 @@ Completions are emitted via `run_after_current_handler` to avoid re-entrancy.
 
 ```
 Caller (Process A)                Coordinator           Callee (Process B)
-     Γöé                                   Γöé                      Γöé
-     Γöé 1. rpc_foo(target, args)          Γöé                      Γöé
-     Γö£ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ> Γöé                      Γöé
-     Γöé   Write to m_out_req_c            Γöé                      Γöé
-     Γöé   Common fiid = make_instance_id()Γöé                      Γöé
-     Γöé                                   Γöé                      Γöé
-     Γöé                                   Γöé  2. Reader sees msg  Γöé
-     Γöé                                   Γöé <ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöñ
-     Γöé                                   Γöé   Dispatch to target Γöé
-     Γöé                                   Γöé                      Γöé
-     Γöé                                   Γöé 3. Execute foo()     Γöé
-     Γöé                                   Γöé  <ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöñ
-     Γöé                                   Γöé   Return value       Γöé
-     Γöé                                   Γöé                      Γöé
-     Γöé 4. Reply arrives                  Γöé                      Γöé
-     Γöé<ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöñ
-     Γöé   Reads from B's m_out_rep_c      Γöé   Write to m_out_rep_c
-     Γöé   Match common_fiid               Γöé                      Γöé
-     Γöé                                   Γöé                      Γöé
-     Γöé 5. Return to caller               Γöé                      Γöé
-     ΓööΓöÇΓöÇΓöÇ                                Γöé                      Γöé
+     │                                   │                      │
+     │ 1. rpc_foo(target, args)          │                      │
+     ├─────────────────────────────────> │                      │
+     │   Write to m_out_req_c            │                      │
+     │   Common fiid = make_instance_id()│                      │
+     │                                   │                      │
+     │                                   │  2. Reader sees msg  │
+     │                                   │ <────────────────────┤
+     │                                   │   Dispatch to target │
+     │                                   │                      │
+     │                                   │ 3. Execute foo()     │
+     │                                   │  <───────────────────┤
+     │                                   │   Return value       │
+     │                                   │                      │
+     │ 4. Reply arrives                  │                      │
+     │<─────────────────────────────────────────────────────────┤
+     │   Reads from B's m_out_rep_c      │   Write to m_out_rep_c
+     │   Match common_fiid               │                      │
+     │                                   │                      │
+     │ 5. Return to caller               │                      │
+     └───                                │                      │
 ```
 
 ### Barrier Flow
 
 ```
 Process A          Process B          Process C (Coordinator with group)
-     Γöé                   Γöé                       Γöé
-     Γöé barrier("sync")   Γöé                       Γöé
-     Γö£ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ> Γöé
-     Γöé  RPC call         Γöé                       Γöé First arrival:
-     Γöé                   Γöé                       Γöé - Snapshot membership
-     Γöé                   Γöé                       Γöé - Filter draining
-     Γöé                  barrier("sync")          Γöé - Create pending set
-     Γöé                   Γö£ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ> Γöé
-     Γöé                   Γöé                       Γöé Subsequent arrival:
-     Γöé                   Γöé                       Γöé - Add to arrived
-     Γöé                   Γöé                       Γöé - Remove from pending
-     Γöé                   Γöé                       Γöé
-     Γöé                   Γöé                       Γöé Last arrival:
-     Γöé                   Γöé                       Γöé - Emit completions
-     Γöé   <completion msg>                        Γöé   to all waiters
-     Γöé<ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöñ
-     Γöé                  <completion msg>         Γöé
-     Γöé                   Γöé<ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöñ
-     Γöé                   Γöé                       Γöé
-     Γöé Returns with      Γöé Returns with          Γöé
-     Γöé flush_seq         Γöé flush_seq             Γöé
-     ΓööΓöÇΓöÇ                 ΓööΓöÇΓöÇ                     ΓööΓöÇΓöÇ
+     │                   │                       │
+     │ barrier("sync")   │                       │
+     ├─────────────────────────────────────────> │
+     │  RPC call         │                       │ First arrival:
+     │                   │                       │ - Snapshot membership
+     │                   │                       │ - Filter draining
+     │                  barrier("sync")          │ - Create pending set
+     │                   ├─────────────────────> │
+     │                   │                       │ Subsequent arrival:
+     │                   │                       │ - Add to arrived
+     │                   │                       │ - Remove from pending
+     │                   │                       │
+     │                   │                       │ Last arrival:
+     │                   │                       │ - Emit completions
+     │   <completion msg>                        │   to all waiters
+     │<──────────────────────────────────────────┤
+     │                  <completion msg>         │
+     │                   │<──────────────────────┤
+     │                   │                       │
+     │ Returns with      │ Returns with          │
+     │ flush_seq         │ flush_seq             │
+     └──                 └──                     └──
 ```
 
 **Flush Sequence**: The watermark returned from a barrier tells the caller which sequence to wait for before proceeding. This ensures all messages (including the barrier completion itself) are visible.
@@ -437,10 +437,10 @@ Process A          Process B          Process C (Coordinator with group)
 
 ```cpp
 using instance_id_type = uint64_t;
-constexpr int  num_process_index_bits    = sintra::num_process_index_bits;      // 8 by default
+constexpr int  num_process_index_bits     = sintra::num_process_index_bits;     // 8 by default
 constexpr int  num_transceiver_index_bits = sizeof(instance_id_type) * 8 - num_process_index_bits;
-constexpr int  max_process_index         = sintra::max_process_index;          // 127 with defaults
-constexpr auto max_instance_index        = sintra::max_instance_index;
+constexpr int  max_process_index          = sintra::max_process_index;          // 127 with defaults
+constexpr auto max_instance_index         = sintra::max_instance_index;
 
 inline instance_id_type make_instance_id() {
     static std::atomic<uint64_t> instance_index_counter(2 + sintra::num_reserved_service_instances);
@@ -470,7 +470,7 @@ inline instance_id_type make_instance_id() {
    existing `Process_message_reader` for the crashing slot, which drops the shared_ptr references and unmaps the old
    occurrence's rings before new readers are created. Only the currently active occurrence consumes address space; there is
    no "bank" of pre-reserved mappings for future recoveries.
-5. Each IPC ring is double-mapped (`Ring_data::attach`) by reserving a 2├ù span and mapping the 2 MiB data file twice. The
+5. Each IPC ring is double-mapped (`Ring_data::attach`) by reserving a 2 x span and mapping the 2 MiB data file twice. The
    contiguous view is what makes zero-copy wrap-around reads work; it is unrelated to recovery itself but explains the
    large "guard"/reserved ranges seen in macOS cores. Every request/reply channel therefore claims ~4 MiB of virtual
    address space. Prior to 2025-03 we saw ~4.24 GiB logical cores in CI because those spans appeared alongside the
@@ -480,7 +480,7 @@ inline instance_id_type make_instance_id() {
    the recovery test itself sets `RLIMIT_CORE` to zero just before its intentional `std::abort()` to keep GitHub Actions
    runners from filling their disks with multi-gigabyte Mach-O cores.
 
-**What ΓÇ£safe respawnΓÇ¥ means**: by pre-mapping the request/reply readers before `spawn_detached()` the coordinator guarantees
+**What "safe respawn" means**: by pre-mapping the request/reply readers before `spawn_detached()` the coordinator guarantees
 that the recovering child sees ready-to-use channels as soon as it reaches user code. No address-space layout promises are
 required beyond the double-mapped rings themselves, and the respawned process inherits only the fresh occurrence's mappings.
 
@@ -535,7 +535,7 @@ The RPC dispatcher catches these, stores the caller's continuation, and resumes 
 using handler_registry_type = /* complex nested maps */;
 ```
 
-Maps `(type_id, handler_type)` ΓåÆ handler functions. Handlers are activated with `activate_slot<T>(lambda)`.
+Maps `(type_id, handler_type)` -> handler functions. Handlers are activated with `activate_slot<T>(lambda)`.
 
 ---
 
@@ -553,8 +553,8 @@ for (auto recipient : recipients) {
 ```
 
 **Issue**: `m_out_rep_c->get_leading_sequence()` is the watermark of the **coordinator's** reply ring. But each **recipient** reads from their **own** ring, not the coordinator's. Using a global token can cause:
-- Tokens ahead of a recipient's channel ΓåÆ indefinite wait (hang)
-- Tokens from wrong channel ΓåÆ delivery guarantee violations
+- Tokens ahead of a recipient's channel -> indefinite wait (hang)
+- Tokens from wrong channel -> delivery guarantee violations
 
 ### The Solution
 
