@@ -76,6 +76,15 @@ struct Process_handle
     int exit_code = 0;
 };
 
+void disable_debug_pause_env()
+{
+#ifdef _WIN32
+    _putenv_s("SINTRA_DEBUG_PAUSE_ON_EXIT", "0");
+#else
+    setenv("SINTRA_DEBUG_PAUSE_ON_EXIT", "0", 1);
+#endif
+}
+
 std::optional<std::string> find_arg_value(int argc, char* argv[], const char* name)
 {
     if (!name || !*name) {
@@ -1134,6 +1143,7 @@ int main(int argc, char* argv[])
     // The test succeeds if we don't get hard-exit code 99 from lifeline check.
     // init() will likely fail for other reasons (no coordinator), which is fine.
     if (role && *role == k_role_manual_disable) {
+        disable_debug_pause_env();
         sintra::disable_debug_pause_for_current_process();
         sintra::init(argc, argv);
         // If we get here, lifeline didn't kill us. init() might fail later but that's OK.
@@ -1142,6 +1152,7 @@ int main(int argc, char* argv[])
 
     // Role: short_option - tests that short options like -f are ignored
     if (role && *role == k_role_short_option) {
+        disable_debug_pause_env();
         sintra::disable_debug_pause_for_current_process();
         sintra::init(argc, argv);
         // This should hard-exit with code 99 because -f is not recognized as lifeline_handle
