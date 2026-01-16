@@ -414,6 +414,13 @@ cmake --build build
 - Verify system resources (memory, CPU)
 - Some tests legitimately need longer (e.g., `recovery_test`)
 
+### Lifeline behavior in tests
+
+- `lifeline_basic_test` covers normal exit, disabled lifeline, and missing lifeline paths.
+- Spawned processes require a lifeline by default; if you launch a test binary
+  manually, set `SINTRA_LIFELINE_DISABLE=1` for that process or launch it via
+  `spawn_swarm_process`.
+
 ### Tests Pass Locally but Fail in CI
 
 - CI runs with higher iteration counts (specified in `active_tests.txt`)

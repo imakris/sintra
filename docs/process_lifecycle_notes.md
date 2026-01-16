@@ -59,6 +59,20 @@ unpublished event occurs, the coordinator executes:
 `Coordinator::begin_shutdown()` flips the shutdown flag so `should_cancel()`
 becomes true and recovery threads can exit early.
 
+## Lifeline ownership and shutdown
+
+Spawned processes receive a lifeline pipe/handle from the parent. The child
+blocks on the read end and initiates shutdown when the pipe breaks.
+
+Key points:
+- Lifeline is separate from lifecycle hooks; it is an owner liveness signal.
+- The child schedules a hard exit after a timeout if the owner disappears.
+- The coordinator closes lifeline handles on unpublish and in the destructor,
+  so lingering children still terminate.
+- Respawn creates a fresh lifeline for the new instance.
+- Manual launches must set `SINTRA_LIFELINE_DISABLE=1` or provide a lifeline
+  env var, otherwise the process hard-exits immediately.
+
 ## Threading expectations
 
 - `Recovery_policy` and `Lifecycle_handler` run on the coordinator thread.

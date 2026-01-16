@@ -168,6 +168,21 @@ enum Communication_state {
 - `flush()`: Wait for a specific sequence to be visible
 - `run_after_current_handler()`: Queue deferred task execution (avoids re-entrancy)
 
+#### Lifeline ownership
+
+Spawned processes receive a lifeline pipe/handle from the coordinator process.
+The child reads from the lifeline in a dedicated thread; when the owner exits
+or unpublishes, the pipe closes and the child:
+- schedules shutdown (stop reader threads, unblock RPC),
+- then hard-exits after a timeout (configurable via env or policy).
+
+The handle value and timeout/exit code are passed via environment variables
+(`SINTRA_LIFELINE_HANDLE` or `SINTRA_LIFELINE_FD`, plus `SINTRA_LIFELINE_TIMEOUT_MS`
+and `SINTRA_LIFELINE_EXIT_CODE`).
+
+The coordinator closes lifeline handles on unpublish and in the destructor so
+stale children still terminate. Respawn creates a new lifeline per instance.
+
 ---
 
 ## Coordinator and Barriers

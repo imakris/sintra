@@ -69,6 +69,8 @@ structure multi-process workflows.
 * **Cross-platform design** - shared-memory transport on Linux, macOS, Windows, and FreeBSD.
 * **Opt-in crash recovery** - mark critical workers with `sintra::enable_recovery()` so
   the coordinator automatically respawns them after an unexpected exit.
+* **Lifeline ownership for spawned processes** - child processes monitor a lifeline
+  pipe/handle and hard-exit if the owner disappears (timeout and exit code are configurable).
 
 Typical use cases include plugin hosts coordinating work with out-of-process plugins,
 GUI front-ends that need to communicate with background services, and distributed test
@@ -193,6 +195,33 @@ auto crash_monitor = sintra::activate_slot(
     },
     sintra::Typed_instance_id<sintra::Managed_process>(sintra::any_remote));
 ```
+
+### Lifeline process ownership
+
+Sintra spawns managed processes with a lifeline pipe/handle. The child watches the
+read end; if the parent process exits or unpublishes, the pipe breaks and the child
+shuts down, then hard-exits after a timeout.
+
+You can configure the policy per spawn:
+
+```cpp
+sintra::Spawn_options options;
+options.binary_path = binary_path;
+options.lifetime.hard_exit_code = 99;
+options.lifetime.hard_exit_timeout_ms = 100;
+sintra::spawn_swarm_process(options);
+```
+
+Environment variables used by the lifeline:
+- `SINTRA_LIFELINE_HANDLE` (Windows handle value)
+- `SINTRA_LIFELINE_FD` (POSIX file descriptor value)
+- `SINTRA_LIFELINE_EXIT_CODE`
+- `SINTRA_LIFELINE_TIMEOUT_MS`
+- `SINTRA_LIFELINE_DISABLE` (set to `1` to disable lifeline in the child)
+
+Note: spawned processes require a lifeline by default. If you launch a process
+manually (outside `spawn_swarm_process`), either provide the lifeline env var or
+set `SINTRA_LIFELINE_DISABLE=1` for that process.
 
 ### Qt cursor sync example
 
