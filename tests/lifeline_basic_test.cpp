@@ -1038,12 +1038,13 @@ bool run_manual_disable_case(const std::string& binary_path)
     close_process(proc);
 
     // The test passes if we didn't get exit code 99 (lifeline hard-exit).
-    // Other exit codes are acceptable (init may fail for non-lifeline reasons).
+    // Expected exit codes: 0 (init succeeded) or 42 (init failed for non-lifeline reasons).
     if (exit_code == 99) {
         std::fprintf(stderr, "[test] manual_disable process was killed by lifeline (code 99)\n");
         return false;
     }
 
+    std::fprintf(stderr, "[test] manual_disable passed (exit code %d)\n", exit_code);
     return true;
 }
 
@@ -1141,12 +1142,19 @@ int main(int argc, char* argv[])
 
     // Role: manual_disable - tests that --lifeline_disable works when passed manually
     // The test succeeds if we don't get hard-exit code 99 from lifeline check.
-    // init() will likely fail for other reasons (no coordinator), which is fine.
+    // init() will fail for other reasons (no coordinator ABI file), which is fine.
     if (role && *role == k_role_manual_disable) {
         disable_debug_pause_env();
         sintra::disable_debug_pause_for_current_process();
-        sintra::init(argc, argv);
-        // If we get here, lifeline didn't kill us. init() might fail later but that's OK.
+        try {
+            sintra::init(argc, argv);
+        }
+        catch (...) {
+            // Init failed for non-lifeline reasons (expected - no actual swarm exists).
+            // Exit with code 42 to signal we passed the lifeline check.
+            return 42;
+        }
+        // If we get here, init() succeeded (unlikely with fake swarm args).
         return 0;
     }
 
