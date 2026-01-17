@@ -1151,8 +1151,9 @@ int main(int argc, char* argv[])
         }
         catch (...) {
             // Init failed for non-lifeline reasons (expected - no actual swarm exists).
-            // Exit with code 42 to signal we passed the lifeline check.
-            return 42;
+            // Use _Exit to skip static destructors - sintra's cleanup guard would hang
+            // trying to finalize a partially-initialized Managed_process.
+            std::_Exit(42);
         }
         // If we get here, init() succeeded (unlikely with fake swarm args).
         return 0;
