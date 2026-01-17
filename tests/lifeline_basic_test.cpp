@@ -1044,6 +1044,11 @@ bool run_manual_disable_case(const std::string& binary_path)
         return false;
     }
 
+    if (exit_code != 0 && exit_code != 77) {
+        std::fprintf(stderr, "[test] manual_disable unexpected exit code: %d\n", exit_code);
+        return false;
+    }
+
     std::fprintf(stderr, "[test] manual_disable passed (exit code %d)\n", exit_code);
     return true;
 }
@@ -1145,7 +1150,6 @@ int main(int argc, char* argv[])
     // init() will fail for other reasons (no coordinator ABI file), which is fine.
     if (role && *role == k_role_manual_disable) {
         disable_debug_pause_env();
-        sintra::disable_debug_pause_for_current_process();
         try {
             sintra::init(argc, argv);
         }
@@ -1162,7 +1166,6 @@ int main(int argc, char* argv[])
     // Role: short_option - tests that short options like -f are ignored
     if (role && *role == k_role_short_option) {
         disable_debug_pause_env();
-        sintra::disable_debug_pause_for_current_process();
         sintra::init(argc, argv);
         // This should hard-exit with code 99 because -f is not recognized as lifeline_handle
         // If we somehow get here, the test logic was wrong

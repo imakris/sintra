@@ -1,4 +1,4 @@
-﻿# Sintra Architecture Overview
+# Sintra Architecture Overview
 
 This document provides a comprehensive architectural overview of Sintra's internals, targeting developers and LLMs who need to understand, maintain, or extend the system.
 
