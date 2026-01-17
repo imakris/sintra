@@ -1038,7 +1038,7 @@ bool run_manual_disable_case(const std::string& binary_path)
     close_process(proc);
 
     // The test passes if we didn't get exit code 99 (lifeline hard-exit).
-    // Expected exit codes: 0 (init succeeded) or 42 (init failed for non-lifeline reasons).
+    // Expected exit codes: 0 (init succeeded) or 77 (init failed for non-lifeline reasons).
     if (exit_code == 99) {
         std::fprintf(stderr, "[test] manual_disable process was killed by lifeline (code 99)\n");
         return false;
@@ -1153,7 +1153,7 @@ int main(int argc, char* argv[])
             // Init failed for non-lifeline reasons (expected - no actual swarm exists).
             // Use _Exit to skip static destructors - sintra's cleanup guard would hang
             // trying to finalize a partially-initialized Managed_process.
-            std::_Exit(42);
+            std::_Exit(77);
         }
         // If we get here, init() succeeded (unlikely with fake swarm args).
         return 0;
