@@ -111,6 +111,8 @@ namespace {
         return flag;
     }
 
+    inline void wait_for_signal_dispatch_win(uint32_t expected_count);
+
     inline std::size_t signal_index(int sig)
     {
         auto& slot_table = signal_slots();
@@ -140,6 +142,63 @@ namespace {
 
             dispatched_signal_counter().fetch_add(1);
         }
+    }
+
+    inline void queue_signal_dispatch_win(int sig_number)
+    {
+        auto* mproc = s_mproc;
+        const bool should_wait_for_dispatch = mproc && mproc->m_out_req_c;
+        uint32_t dispatched_before = 0;
+        if (should_wait_for_dispatch) {
+            dispatched_before = dispatched_signal_counter().load();
+        }
+
+        if (signal_event() != NULL) {
+            auto idx = signal_index(sig_number);
+            if (idx < signal_slots().size()) {
+                pending_signal_mask().fetch_or(1U << idx);
+            }
+            SetEvent(signal_event());
+        }
+
+        if (should_wait_for_dispatch) {
+            wait_for_signal_dispatch_win(dispatched_before);
+        }
+    }
+
+    inline LONG WINAPI s_vectored_exception_handler(EXCEPTION_POINTERS* exception_info)
+    {
+        if (!exception_info || !exception_info->ExceptionRecord) {
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+
+        const DWORD code = exception_info->ExceptionRecord->ExceptionCode;
+        if (code == EXCEPTION_BREAKPOINT || code == EXCEPTION_SINGLE_STEP) {
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+
+        int sig_number = 0;
+        switch (code) {
+            case EXCEPTION_ACCESS_VIOLATION:
+            case EXCEPTION_IN_PAGE_ERROR:
+            case EXCEPTION_STACK_OVERFLOW:
+                sig_number = SIGSEGV;
+                break;
+            case EXCEPTION_ILLEGAL_INSTRUCTION:
+            case EXCEPTION_PRIV_INSTRUCTION:
+                sig_number = SIGILL;
+                break;
+            case EXCEPTION_FLT_DIVIDE_BY_ZERO:
+            case EXCEPTION_FLT_INVALID_OPERATION:
+            case EXCEPTION_INT_DIVIDE_BY_ZERO:
+                sig_number = SIGFPE;
+                break;
+            default:
+                return EXCEPTION_CONTINUE_SEARCH;
+        }
+
+        queue_signal_dispatch_win(sig_number);
+        return EXCEPTION_CONTINUE_SEARCH;
     }
 
     inline void drain_pending_signals_win()
@@ -660,26 +719,7 @@ static void s_signal_handler(int sig)
 
     auto& slot_table = signal_slots();
 
-    auto* mproc = s_mproc;
-    const bool should_wait_for_dispatch = mproc && mproc->m_out_req_c;
-    uint32_t dispatched_before = 0;
-    if (should_wait_for_dispatch) {
-        dispatched_before = dispatched_signal_counter().load();
-    }
-
-    // Signal the dispatcher thread via the event and pending signal mask
-    if (signal_event() != NULL) {
-        auto idx = signal_index(sig);
-        if (idx < slot_table.size()) {
-            pending_signal_mask().fetch_or(1U << idx);
-        }
-        SetEvent(signal_event());
-    }
-
-    // Wait up to 200ms for dispatch to complete (matching POSIX timeout)
-    if (should_wait_for_dispatch) {
-        wait_for_signal_dispatch_win(dispatched_before);
-    }
+    queue_signal_dispatch_win(sig);
 
     // Chain to previous handler (e.g., debug_pause handler)
     if (auto* slot = find_slot(slot_table, sig); slot && slot->has_previous) {
@@ -820,6 +860,7 @@ void install_signal_handler()
 
 #ifdef _WIN32
         ensure_signal_dispatcher_win();
+        AddVectoredExceptionHandler(0, s_vectored_exception_handler);
 
         for (auto& slot : slot_table) {
             auto previous = std::signal(slot.sig, s_signal_handler);
