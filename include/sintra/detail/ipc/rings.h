@@ -2353,6 +2353,9 @@ struct Ring_W : Ring<T, false>
 #endif
 #endif
 
+        constexpr auto k_stale_guard_delay = std::chrono::seconds(2);
+        auto blocked_start = std::chrono::steady_clock::time_point{};
+
         while (c.read_access & range_mask) {
             bool has_blocking_reader = false;
             for (int i = 0; i < max_process_index; ++i) {
@@ -2360,6 +2363,39 @@ struct Ring_W : Ring<T, false>
                 if ((guard_snapshot & 0x08) != 0 && (guard_snapshot & 0x07) == new_octile) {
                     has_blocking_reader = true;
                     break;
+                }
+            }
+
+            if (blocked_start == std::chrono::steady_clock::time_point{}) {
+                blocked_start = std::chrono::steady_clock::now();
+            }
+
+            if (!has_blocking_reader) {
+                std::this_thread::yield();
+                bool confirmed_blocking_reader = false;
+                for (int i = 0; i < max_process_index; ++i) {
+                    uint8_t guard_snapshot = c.reading_sequences[i].data.guard_token();
+                    if ((guard_snapshot & 0x08) != 0 && (guard_snapshot & 0x07) == new_octile) {
+                        confirmed_blocking_reader = true;
+                        break;
+                    }
+                }
+                has_blocking_reader = confirmed_blocking_reader;
+
+                if (!confirmed_blocking_reader) {
+                    uint64_t expected_access = c.read_access.load();
+                    const auto now = std::chrono::steady_clock::now();
+                    if ((expected_access & range_mask) != 0 &&
+                        (now - blocked_start) >= k_stale_guard_delay)
+                    {
+                        uint64_t desired_access = expected_access & ~range_mask;
+                        if (c.read_access.compare_exchange_strong(expected_access, desired_access)) {
+                            Log_stream(log_level::debug)
+                                << "[sintra][ring] Cleared stale guard for octile "
+                                << static_cast<int>(new_octile) << "\n";
+                            blocked_start = now;
+                        }
+                    }
                 }
             }
 
