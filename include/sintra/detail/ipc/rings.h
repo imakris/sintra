@@ -1690,9 +1690,7 @@ struct Ring_R : Ring<T, true>
             }
             else
             if (!guard_cleared) {
-                try_rollback_unpaired_read_access(
-                    static_cast<uint8_t>(m_trailing_octile),
-                    "done_reading.clear_guard");
+                try_rollback_unpaired_read_access(static_cast<uint8_t>(m_trailing_octile));
                 // With strong CAS, failing to clear guard means we were evicted
                 m_evicted_since_last_wait = true;
             }
@@ -1700,8 +1698,7 @@ struct Ring_R : Ring<T, true>
                 const bool had_guard = Ring<T, true>::encoded_guard_present(previous_state);
                 if (!had_guard) {
                     try_rollback_unpaired_read_access(
-                        static_cast<uint8_t>(m_trailing_octile),
-                        "done_reading.guard_missing");
+                        static_cast<uint8_t>(m_trailing_octile));
                 }
             }
             m_reading = false;
@@ -1978,9 +1975,7 @@ struct Ring_R : Ring<T, true>
 
                 if (was_evicted || !guard_present) {
                     if (!guard_present) {
-                        try_rollback_unpaired_read_access(
-                            static_cast<uint8_t>(m_trailing_octile),
-                            "done_reading_new_data.guard_missing");
+                        try_rollback_unpaired_read_access(static_cast<uint8_t>(m_trailing_octile));
                     }
                     handle_eviction_if_needed();
                     continue;  // Retry after handling eviction
@@ -2014,9 +2009,7 @@ struct Ring_R : Ring<T, true>
             return false;
         }
 
-        try_rollback_unpaired_read_access(
-            static_cast<uint8_t>(m_trailing_octile),
-            "handle_eviction_if_needed.guard_missing");
+        try_rollback_unpaired_read_access(static_cast<uint8_t>(m_trailing_octile));
 
 #ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
         if (slot.status() == Ring<T, false>::READER_STATE_EVICTED) {
@@ -2124,10 +2117,8 @@ public:
         unblock_local();
     }
 
-    bool try_rollback_unpaired_read_access(uint8_t octile, const char* context)
+    bool try_rollback_unpaired_read_access(uint8_t octile)
     {
-        (void)context;
-
         if (octile >= 8) {
             return false;
         }
