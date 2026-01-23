@@ -5,6 +5,7 @@
 
 #include "process/coordinator.h"
 #include "process/managed_process.h"
+#include "process/dispatch_wait_guard.h"
 #include "logging.h"
 #include "transceiver.h"
 
@@ -230,7 +231,7 @@ void Transceiver::destroy()
 {
     bool no_readers = true;
     if (s_mproc && s_coord_id) {
-        std::shared_lock<std::shared_mutex> readers_lock(s_mproc->m_readers_mutex);
+        Dispatch_lock_guard<std::shared_lock<std::shared_mutex>> readers_lock(s_mproc->m_readers_mutex);
         no_readers = s_mproc->m_readers.empty();
     }
 

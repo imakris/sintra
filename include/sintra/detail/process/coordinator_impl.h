@@ -6,6 +6,7 @@
 #include "../logging.h"
 #include "../process/coordinator.h"
 #include "../process/managed_process.h"
+#include "../process/dispatch_wait_guard.h"
 
 #include <algorithm>
 #include <cassert>
@@ -568,7 +569,7 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
 
         //// and finally, if the process was being read, stop reading from it
         if (iid != s_mproc_id) {
-            std::shared_lock<std::shared_mutex> readers_lock(s_mproc->m_readers_mutex);
+            Dispatch_lock_guard<std::shared_lock<std::shared_mutex>> readers_lock(s_mproc->m_readers_mutex);
             auto reader_it = s_mproc->m_readers.find(process_iid);
             if (reader_it != s_mproc->m_readers.end()) {
                 if (auto& reader = reader_it->second) {
