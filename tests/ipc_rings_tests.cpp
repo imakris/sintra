@@ -539,7 +539,7 @@ TEST_CASE(test_stale_guard_clears_after_timeout)
     const uint64_t range_mask = (uint64_t(0xff) << (8 * new_octile));
 
     writer.c.read_access.store(guard_mask);
-    for (int i = 0; i < sintra::Ring_W<uint32_t>::max_process_index; ++i) {
+    for (int i = 0; i < sintra::max_process_index; ++i) {
         writer.c.reading_sequences[i].data.set_guard_token(0);
     }
 
