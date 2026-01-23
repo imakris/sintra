@@ -2399,9 +2399,36 @@ struct Ring_W : Ring<T, false>
                         uint64_t expected_access = access_snapshot;
                         uint64_t desired_access = expected_access & ~range_mask;
                         if (c.read_access.compare_exchange_strong(expected_access, desired_access)) {
-                            Log_stream(log_level::debug)
-                                << "[sintra][ring] Cleared stale guard for octile "
-                                << static_cast<int>(new_octile) << "\n";
+                            const uint8_t octile_count = static_cast<uint8_t>(
+                                (expected_access >> (8 * new_octile)) & 0xffu);
+                            Log_stream log(log_level::debug);
+                            log << "[sintra][ring] Cleared stale guard for octile "
+                                << static_cast<int>(new_octile)
+                                << " count=" << static_cast<unsigned>(octile_count)
+                                << " read_access_before=0x" << std::hex << expected_access
+                                << " read_access_after=0x" << desired_access << std::dec
+                                << " guards=";
+                            bool any_guard = false;
+                            for (int i = 0; i < max_process_index; ++i) {
+                                uint8_t guard_snapshot = c.reading_sequences[i].data.guard_token();
+                                if ((guard_snapshot & 0x08) == 0) {
+                                    continue;
+                                }
+                                uint8_t guard_octile = guard_snapshot & 0x07;
+                                uint32_t pid = c.reading_sequences[i].data.owner_pid.load();
+                                uint8_t status = c.reading_sequences[i].data.status();
+                                if (any_guard) {
+                                    log << ",";
+                                }
+                                log << i << ":" << pid
+                                    << ":o" << static_cast<int>(guard_octile)
+                                    << ":s" << static_cast<int>(status);
+                                any_guard = true;
+                            }
+                            if (!any_guard) {
+                                log << "none";
+                            }
+                            log << "\n";
                             blocked_start = now;
                             last_access_snapshot = desired_access;
                         }
