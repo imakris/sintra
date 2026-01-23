@@ -2126,8 +2126,6 @@ public:
 
     bool try_rollback_unpaired_read_access(uint8_t octile, const char* context)
     {
-        (void)context;
-
         if (octile >= 8) {
             return false;
         }
@@ -2173,6 +2171,11 @@ public:
         if (!c.read_access.compare_exchange_strong(expected, desired)) {
             return false;
         }
+
+        Log_stream(log_level::debug)
+            << "[sintra][ring] Rolled back unpaired read_access for octile "
+            << static_cast<int>(octile) << " (" << context << ")\n";
+
         return true;
     }
 
