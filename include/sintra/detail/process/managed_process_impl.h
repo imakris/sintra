@@ -144,7 +144,7 @@ namespace {
         }
     }
 
-    inline void queue_signal_dispatch_win(int sig_number)
+    inline void queue_signal_dispatch_win(int sig_number, bool wait_for_dispatch = true)
     {
         auto* mproc = s_mproc;
         const bool should_wait_for_dispatch = mproc && mproc->m_out_req_c;
@@ -153,15 +153,18 @@ namespace {
             dispatched_before = dispatched_signal_counter().load();
         }
 
+        bool queued = false;
         if (signal_event() != NULL) {
             auto idx = signal_index(sig_number);
             if (idx < signal_slots().size()) {
-                pending_signal_mask().fetch_or(1U << idx);
+                uint32_t bit = 1U << idx;
+                uint32_t previous = pending_signal_mask().fetch_or(bit);
+                queued = (previous & bit) == 0U;
             }
             SetEvent(signal_event());
         }
 
-        if (should_wait_for_dispatch) {
+        if (should_wait_for_dispatch && wait_for_dispatch && queued) {
             wait_for_signal_dispatch_win(dispatched_before);
         }
     }
@@ -197,7 +200,7 @@ namespace {
                 return EXCEPTION_CONTINUE_SEARCH;
         }
 
-        queue_signal_dispatch_win(sig_number);
+        queue_signal_dispatch_win(sig_number, false);
         return EXCEPTION_CONTINUE_SEARCH;
     }
 

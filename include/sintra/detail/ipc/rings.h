@@ -159,6 +159,10 @@
 #define SINTRA_EVICTION_LAG_RINGS 1u  // reader is "slow" if > N rings behind
 #endif
 
+#ifndef SINTRA_STALE_GUARD_DELAY_MS
+#define SINTRA_STALE_GUARD_DELAY_MS 2000u
+#endif
+
 // -----------------------------------------------------------------------------
 
 namespace sintra {
@@ -2353,49 +2357,61 @@ struct Ring_W : Ring<T, false>
 #endif
 #endif
 
-        constexpr auto k_stale_guard_delay = std::chrono::seconds(2);
+        constexpr auto k_stale_guard_delay =
+            std::chrono::milliseconds(SINTRA_STALE_GUARD_DELAY_MS);
         auto blocked_start = std::chrono::steady_clock::time_point{};
+        uint64_t last_access_snapshot = 0;
 
-        while (c.read_access & range_mask) {
-            bool has_blocking_reader = false;
+        auto scan_blocking_readers = [&]() -> bool {
             for (int i = 0; i < max_process_index; ++i) {
                 uint8_t guard_snapshot = c.reading_sequences[i].data.guard_token();
                 if ((guard_snapshot & 0x08) != 0 && (guard_snapshot & 0x07) == new_octile) {
-                    has_blocking_reader = true;
-                    break;
+                    return true;
                 }
             }
+            return false;
+        };
 
-            if (blocked_start == std::chrono::steady_clock::time_point{}) {
-                blocked_start = std::chrono::steady_clock::now();
+        while (c.read_access & range_mask) {
+            bool has_blocking_reader = scan_blocking_readers();
+
+            if (has_blocking_reader) {
+                blocked_start = std::chrono::steady_clock::time_point{};
             }
 
             if (!has_blocking_reader) {
-                std::this_thread::yield();
-                bool confirmed_blocking_reader = false;
-                for (int i = 0; i < max_process_index; ++i) {
-                    uint8_t guard_snapshot = c.reading_sequences[i].data.guard_token();
-                    if ((guard_snapshot & 0x08) != 0 && (guard_snapshot & 0x07) == new_octile) {
-                        confirmed_blocking_reader = true;
-                        break;
-                    }
+                uint64_t access_snapshot = c.read_access.load();
+                if (blocked_start == std::chrono::steady_clock::time_point{} ||
+                    access_snapshot != last_access_snapshot) {
+                    blocked_start = std::chrono::steady_clock::now();
+                    last_access_snapshot = access_snapshot;
                 }
+
+                std::this_thread::yield();
+                bool confirmed_blocking_reader = scan_blocking_readers();
                 has_blocking_reader = confirmed_blocking_reader;
 
                 if (!confirmed_blocking_reader) {
-                    uint64_t expected_access = c.read_access.load();
                     const auto now = std::chrono::steady_clock::now();
-                    if ((expected_access & range_mask) != 0 &&
+                    if ((access_snapshot & range_mask) != 0 &&
                         (now - blocked_start) >= k_stale_guard_delay)
                     {
+                        uint64_t expected_access = access_snapshot;
                         uint64_t desired_access = expected_access & ~range_mask;
                         if (c.read_access.compare_exchange_strong(expected_access, desired_access)) {
                             Log_stream(log_level::debug)
                                 << "[sintra][ring] Cleared stale guard for octile "
                                 << static_cast<int>(new_octile) << "\n";
                             blocked_start = now;
+                            last_access_snapshot = desired_access;
+                        }
+                        else {
+                            last_access_snapshot = expected_access;
                         }
                     }
+                }
+                else {
+                    blocked_start = std::chrono::steady_clock::time_point{};
                 }
             }
 

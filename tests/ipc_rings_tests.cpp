@@ -22,6 +22,7 @@
 
 // Tune eviction behaviour for faster unit tests before including the ring header.
 #define SINTRA_EVICTION_SPIN_THRESHOLD 0
+#define SINTRA_STALE_GUARD_DELAY_MS 25
 #define private public
 #define protected public
 #include "sintra/detail/ipc/rings.h"
@@ -520,6 +521,35 @@ TEST_CASE(test_reader_eviction_does_not_underflow_octile_counter)
         join_if_joinable(writer_thread);
         throw;
     }
+}
+
+TEST_CASE(test_stale_guard_clears_after_timeout)
+{
+    Temp_ring_dir tmp("stale_guard_clear");
+    const std::string ring_name = "ring_data";
+    const size_t ring_elements = pick_ring_elements<uint32_t>(64);
+
+    sintra::Ring_W<uint32_t> writer(tmp.str(), ring_name, ring_elements);
+
+    const size_t head_index = ring_elements / 8;
+    const uint8_t new_octile = sintra::octile_of_index(head_index, ring_elements);
+    writer.m_octile = static_cast<uint8_t>((new_octile + 7) % 8);
+
+    const uint64_t guard_mask = sintra::octile_mask(new_octile);
+    const uint64_t range_mask = (uint64_t(0xff) << (8 * new_octile));
+
+    writer.c.read_access.store(guard_mask);
+    for (int i = 0; i < sintra::Ring_W<uint32_t>::max_process_index; ++i) {
+        writer.c.reading_sequences[i].data.set_guard_token(0);
+    }
+
+    auto start = std::chrono::steady_clock::now();
+    writer.advance_writer_octile_if_needed(head_index);
+    auto elapsed = std::chrono::steady_clock::now() - start;
+
+    ASSERT_EQ(new_octile, writer.m_octile);
+    ASSERT_EQ(uint64_t(0), writer.c.read_access.load() & range_mask);
+    ASSERT_LT(elapsed, 500ms);
 }
 
 TEST_CASE(test_slow_reader_eviction_restores_status)
