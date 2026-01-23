@@ -1136,15 +1136,15 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
                     continue;
                 }
 
-                uint32_t pid = slot.owner_pid;
+                const uint32_t pid = slot.owner_pid.load();
 
                 bool owner_unknown = (pid == 0);
                 bool dead = owner_unknown || !is_process_alive(pid);
 
                 if (dead) {
-                    uint8_t guard_snapshot = slot.exchange_guard_token(0);
+                    const uint8_t guard_snapshot = slot.exchange_guard_token(0);
                     if ((guard_snapshot & 0x08) != 0) {
-                        uint8_t oct = guard_snapshot & 0x07;
+                        const uint8_t oct = guard_snapshot & 0x07;
                         read_access.fetch_sub(octile_mask(oct));
                     }
 
@@ -1554,7 +1554,7 @@ struct Ring_R : Ring<T, true>
             c.read_access.fetch_add(guard_mask);
 
             bool guard_attached = false;
-            c.reading_sequences[m_rs_index].data.fetch_update_guard_token_if(
+            const uint8_t previous_state = c.reading_sequences[m_rs_index].data.fetch_update_guard_token_if(
                 [&](typename Ring<T, true>::Reader_state_union current)
                     -> std::optional<typename Ring<T, true>::Reader_state_union>
                 {
@@ -1571,6 +1571,18 @@ struct Ring_R : Ring<T, true>
                 m_reading = false;
                 m_reading_lock = false;
                 throw ring_reader_evicted_exception();
+            }
+            else {
+                if (Ring<T, true>::encoded_guard_present(previous_state)) {
+                    const uint8_t previous_octile = Ring<T, true>::encoded_guard_octile(previous_state);
+                    if (previous_octile != trailing_octile) {
+                        const uint64_t prev_mask = octile_mask(previous_octile);
+                        c.read_access.fetch_sub(prev_mask);
+                    }
+                    else {
+                        c.read_access.fetch_sub(guard_mask);
+                    }
+                }
             }
 
             auto confirmed_leading_sequence = c.leading_sequence.load();
@@ -1619,11 +1631,11 @@ struct Ring_R : Ring<T, true>
                 m_reading_lock = false;
                 throw ring_reader_evicted_exception();
             }
-
             if (Ring<T, true>::encoded_guard_present(guard_snapshot)) {
                 const uint8_t guarded_octile = Ring<T, true>::encoded_guard_octile(guard_snapshot);
                 if (guarded_octile != trailing_octile) {
-                    c.read_access.fetch_sub(octile_mask(guarded_octile));
+                    const uint64_t prev_mask = octile_mask(guarded_octile);
+                    c.read_access.fetch_sub(prev_mask);
                 }
             }
         }
@@ -1673,12 +1685,24 @@ struct Ring_R : Ring<T, true>
 
             if (guard_cleared && Ring<T, true>::encoded_guard_present(previous_state)) {
                 const uint8_t released_octile = Ring<T, true>::encoded_guard_octile(previous_state);
-                c.read_access.fetch_sub(octile_mask(released_octile));
+                const uint64_t released_mask = octile_mask(released_octile);
+                c.read_access.fetch_sub(released_mask);
             }
             else
             if (!guard_cleared) {
+                try_rollback_unpaired_read_access(
+                    static_cast<uint8_t>(m_trailing_octile),
+                    "done_reading.clear_guard");
                 // With strong CAS, failing to clear guard means we were evicted
                 m_evicted_since_last_wait = true;
+            }
+            else {
+                const bool had_guard = Ring<T, true>::encoded_guard_present(previous_state);
+                if (!had_guard) {
+                    try_rollback_unpaired_read_access(
+                        static_cast<uint8_t>(m_trailing_octile),
+                        "done_reading.guard_missing");
+                }
             }
             m_reading = false;
         }
@@ -1953,6 +1977,11 @@ struct Ring_R : Ring<T, true>
 #endif
 
                 if (was_evicted || !guard_present) {
+                    if (!guard_present) {
+                        try_rollback_unpaired_read_access(
+                            static_cast<uint8_t>(m_trailing_octile),
+                            "done_reading_new_data.guard_missing");
+                    }
                     handle_eviction_if_needed();
                     continue;  // Retry after handling eviction
                 }
@@ -1965,7 +1994,8 @@ struct Ring_R : Ring<T, true>
             // Success - clean up old guard octile
             const uint8_t previous_octile = Ring<T, true>::encoded_guard_octile(previous_state);
             if (previous_octile != new_trailing_octile) {
-                c.read_access.fetch_sub(octile_mask(previous_octile));
+                const uint64_t prev_mask = octile_mask(previous_octile);
+                c.read_access.fetch_sub(prev_mask);
             }
             else {
                 c.read_access.fetch_sub(new_mask);
@@ -1979,9 +2009,14 @@ struct Ring_R : Ring<T, true>
     bool handle_eviction_if_needed()
     {
         auto& slot = c.reading_sequences[m_rs_index].data;
-        if ((slot.guard_token() & 0x08) != 0) {
+        const uint8_t guard_snapshot = slot.guard_token();
+        if ((guard_snapshot & 0x08) != 0) {
             return false;
         }
+
+        try_rollback_unpaired_read_access(
+            static_cast<uint8_t>(m_trailing_octile),
+            "handle_eviction_if_needed.guard_missing");
 
 #ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
         if (slot.status() == Ring<T, false>::READER_STATE_EVICTED) {
@@ -2035,6 +2070,13 @@ struct Ring_R : Ring<T, true>
                 guard_updated);
 
             if (guard_updated) {
+                const uint8_t guard_snapshot = c.reading_sequences[m_rs_index].data.guard_token();
+                const bool guard_present = Ring<T, true>::encoded_guard_present(guard_snapshot);
+                const uint8_t guard_octile = Ring<T, true>::encoded_guard_octile(guard_snapshot);
+                if (!guard_present || guard_octile != static_cast<uint8_t>(m_trailing_octile)) {
+                    c.read_access.fetch_sub(mask);
+                    continue;
+                }
                 return;
             }
 
@@ -2080,6 +2122,58 @@ public:
     {
         m_stopping = true;
         unblock_local();
+    }
+
+    bool try_rollback_unpaired_read_access(uint8_t octile, const char* context)
+    {
+        (void)context;
+
+        if (octile >= 8) {
+            return false;
+        }
+
+        auto count_guards_for_octile = [&](uint8_t target) -> uint32_t {
+            uint32_t count = 0;
+            for (int i = 0; i < max_process_index; ++i) {
+                const uint8_t guard_snapshot = c.reading_sequences[i].data.guard_token();
+                if ((guard_snapshot & 0x08) == 0) {
+                    continue;
+                }
+                const uint8_t guard_octile = guard_snapshot & 0x07;
+                if (guard_octile == target) {
+                    ++count;
+                }
+            }
+            return count;
+        };
+
+        uint64_t access_snapshot = c.read_access.load();
+        uint32_t count = static_cast<uint32_t>((access_snapshot >> (8 * octile)) & 0xffu);
+        if (count == 0) {
+            return false;
+        }
+        if (count_guards_for_octile(octile) != 0) {
+            return false;
+        }
+
+        std::this_thread::yield();
+
+        access_snapshot = c.read_access.load();
+        count = static_cast<uint32_t>((access_snapshot >> (8 * octile)) & 0xffu);
+        if (count == 0) {
+            return false;
+        }
+        if (count_guards_for_octile(octile) != 0) {
+            return false;
+        }
+
+        const uint64_t decrement = (uint64_t(1) << (8 * octile));
+        uint64_t expected = access_snapshot;
+        uint64_t desired = expected - decrement;
+        if (!c.read_access.compare_exchange_strong(expected, desired)) {
+            return false;
+        }
+        return true;
     }
 
     bool is_stopping() const
@@ -2335,7 +2429,8 @@ struct Ring_W : Ring<T, false>
 
                 const size_t evicted_reader_octile = Ring<T, false>::encoded_guard_octile(previous_state);
 
-                c.read_access.fetch_sub(octile_mask(static_cast<uint8_t>(evicted_reader_octile)));
+                const uint64_t evict_mask = octile_mask(static_cast<uint8_t>(evicted_reader_octile));
+                c.read_access.fetch_sub(evict_mask);
                 c.reader_eviction_count++;
                 c.last_evicted_reader_index    = static_cast<uint32_t>(i);
                 c.last_evicted_reader_sequence = reader_seq;
@@ -2372,6 +2467,20 @@ struct Ring_W : Ring<T, false>
             return false;
         };
 
+        auto count_guards_for_octile = [&](uint8_t target_octile) -> uint32_t {
+            uint32_t count = 0;
+            for (int i = 0; i < max_process_index; ++i) {
+                uint8_t guard_snapshot = c.reading_sequences[i].data.guard_token();
+                if ((guard_snapshot & 0x08) == 0) {
+                    continue;
+                }
+                if ((guard_snapshot & 0x07) == target_octile) {
+                    ++count;
+                }
+            }
+            return count;
+        };
+
         while (c.read_access & range_mask) {
             bool has_blocking_reader = scan_blocking_readers();
 
@@ -2394,41 +2503,26 @@ struct Ring_W : Ring<T, false>
                 if (!confirmed_blocking_reader) {
                     const auto now = std::chrono::steady_clock::now();
                     if ((access_snapshot & range_mask) != 0 &&
+                        count_guards_for_octile(new_octile) == 0) {
+                        std::this_thread::yield();
+                        uint64_t confirm_snapshot = c.read_access.load();
+                        if ((confirm_snapshot & range_mask) != 0 &&
+                            count_guards_for_octile(new_octile) == 0) {
+                            uint64_t expected = confirm_snapshot;
+                            uint64_t desired = expected & ~range_mask;
+                            if (c.read_access.compare_exchange_strong(expected, desired)) {
+                                blocked_start = now;
+                                last_access_snapshot = desired;
+                                continue;
+                            }
+                        }
+                    }
+                    if ((access_snapshot & range_mask) != 0 &&
                         (now - blocked_start) >= k_stale_guard_delay)
                     {
                         uint64_t expected_access = access_snapshot;
                         uint64_t desired_access = expected_access & ~range_mask;
                         if (c.read_access.compare_exchange_strong(expected_access, desired_access)) {
-                            const uint8_t octile_count = static_cast<uint8_t>(
-                                (expected_access >> (8 * new_octile)) & 0xffu);
-                            Log_stream log(log_level::debug);
-                            log << "[sintra][ring] Cleared stale guard for octile "
-                                << static_cast<int>(new_octile)
-                                << " count=" << static_cast<unsigned>(octile_count)
-                                << " read_access_before=0x" << std::hex << expected_access
-                                << " read_access_after=0x" << desired_access << std::dec
-                                << " guards=";
-                            bool any_guard = false;
-                            for (int i = 0; i < max_process_index; ++i) {
-                                uint8_t guard_snapshot = c.reading_sequences[i].data.guard_token();
-                                if ((guard_snapshot & 0x08) == 0) {
-                                    continue;
-                                }
-                                uint8_t guard_octile = guard_snapshot & 0x07;
-                                uint32_t pid = c.reading_sequences[i].data.owner_pid.load();
-                                uint8_t status = c.reading_sequences[i].data.status();
-                                if (any_guard) {
-                                    log << ",";
-                                }
-                                log << i << ":" << pid
-                                    << ":o" << static_cast<int>(guard_octile)
-                                    << ":s" << static_cast<int>(status);
-                                any_guard = true;
-                            }
-                            if (!any_guard) {
-                                log << "none";
-                            }
-                            log << "\n";
                             blocked_start = now;
                             last_access_snapshot = desired_access;
                         }
