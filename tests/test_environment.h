@@ -2,7 +2,6 @@
 
 #include <atomic>
 #include <chrono>
-#include <csignal>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -33,18 +32,17 @@
 namespace sintra::test {
 
 /// Trigger an immediate, deterministic crash.
-/// On macOS raise SIGSEGV; elsewhere use an illegal instruction.
+/// On macOS abort; elsewhere use an illegal instruction.
 /// This avoids UB while ensuring a crash state suitable for stack capture.
 [[noreturn]] inline void trigger_illegal_instruction_crash()
 {
-#ifdef _MSC_VER
+#if defined(__APPLE__)
+    std::abort();
+#elif defined(_MSC_VER)
     __ud2();   // raises illegal-instruction on MSVC
-#elif defined(__APPLE__)
-    std::raise(SIGSEGV);
 #else
     __builtin_trap();   // raises illegal-instruction on GCC/Clang
 #endif
-    std::abort();
 }
 
 /// Trigger an immediate segmentation fault by writing through a null pointer.
