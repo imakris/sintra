@@ -16,7 +16,5 @@
 # The test runner will run each test for the specified number of iterations.
 
 # Focused stress selection (run until the CI time limit is reached)
-barrier_flush_test_release             1000000
-complex_choreography_test_debug        1000000
-crash_capture_self_test_debug          1000000
-crash_capture_child_test_debug         1000000
+barrier_flush_test_release             1000000000
+complex_choreography_test_debug        1000000000
