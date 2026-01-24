@@ -196,6 +196,10 @@ struct Ring_diagnostics
     sequence_counter_type last_overflow_reader_sequence   = 0;
     sequence_counter_type last_overflow_leading_sequence  = 0;
     sequence_counter_type last_overflow_last_consumed     = 0;
+    uint64_t              stale_guard_clear_count         = 0;
+    uint64_t              guard_rollback_attempt_count    = 0;
+    uint64_t              guard_rollback_success_count    = 0;
+    uint64_t              guard_accounting_mismatch_count = 0;
 };
 constexpr auto invalid_sequence = ~sequence_counter_type(0);
 
@@ -1109,6 +1113,10 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         std::atomic<sequence_counter_type>   last_overflow_reader_sequence{0};
         std::atomic<sequence_counter_type>   last_overflow_leading_sequence{0};
         std::atomic<sequence_counter_type>   last_overflow_last_consumed{0};
+        std::atomic<uint64_t>                stale_guard_clear_count{0};
+        std::atomic<uint64_t>                guard_rollback_attempt_count{0};
+        std::atomic<uint64_t>                guard_rollback_success_count{0};
+        std::atomic<uint64_t>                guard_accounting_mismatch_count{0};
 
         // Per-reader currently visible (snapshot) sequence. Cache-line sized to minimize
         // false sharing between reader slots. A reader sets its slot to the snapshot head
@@ -1403,6 +1411,10 @@ public:
         diag.last_overflow_reader_sequence  = m_control->last_overflow_reader_sequence;
         diag.last_overflow_leading_sequence = m_control->last_overflow_leading_sequence;
         diag.last_overflow_last_consumed    = m_control->last_overflow_last_consumed;
+        diag.stale_guard_clear_count        = m_control->stale_guard_clear_count;
+        diag.guard_rollback_attempt_count   = m_control->guard_rollback_attempt_count;
+        diag.guard_rollback_success_count   = m_control->guard_rollback_success_count;
+        diag.guard_accounting_mismatch_count = m_control->guard_accounting_mismatch_count;
         return diag;
     }
 };
@@ -2123,6 +2135,8 @@ public:
             return false;
         }
 
+        c.guard_rollback_attempt_count.fetch_add(1, std::memory_order_relaxed);
+
         auto count_guards_for_octile = [&](uint8_t target) -> uint32_t {
             uint32_t count = 0;
             for (int i = 0; i < max_process_index; ++i) {
@@ -2143,8 +2157,15 @@ public:
         if (count == 0) {
             return false;
         }
-        if (count_guards_for_octile(octile) != 0) {
+
+        const uint32_t guard_count = count_guards_for_octile(octile);
+        if (guard_count != 0) {
             return false;
+        }
+
+        // Diagnostic: read_access shows guards but no guard tokens were found.
+        if (count > 0 && guard_count == 0) {
+            c.guard_accounting_mismatch_count.fetch_add(1, std::memory_order_relaxed);
         }
 
         std::this_thread::yield();
@@ -2161,9 +2182,15 @@ public:
         const uint64_t decrement = (uint64_t(1) << (8 * octile));
         uint64_t expected = access_snapshot;
         uint64_t desired = expected - decrement;
+
+        // Critical assertion: verify we're not decrementing below zero
+        assert(count > 0 && "Attempting to rollback with zero read_access count");
+
         if (!c.read_access.compare_exchange_strong(expected, desired)) {
             return false;
         }
+
+        c.guard_rollback_success_count.fetch_add(1, std::memory_order_relaxed);
         return true;
     }
 
@@ -2502,6 +2529,7 @@ struct Ring_W : Ring<T, false>
                             uint64_t expected = confirm_snapshot;
                             uint64_t desired = expected & ~range_mask;
                             if (c.read_access.compare_exchange_strong(expected, desired)) {
+                                c.guard_accounting_mismatch_count.fetch_add(1, std::memory_order_relaxed);
                                 blocked_start = now;
                                 last_access_snapshot = desired;
                                 continue;
@@ -2514,6 +2542,15 @@ struct Ring_W : Ring<T, false>
                         uint64_t expected_access = access_snapshot;
                         uint64_t desired_access = expected_access & ~range_mask;
                         if (c.read_access.compare_exchange_strong(expected_access, desired_access)) {
+                            // Track stale guard forcible clear
+                            c.stale_guard_clear_count.fetch_add(1, std::memory_order_relaxed);
+#ifndef NDEBUG
+                            // Assertion: this should be rare - log in debug builds
+                            const uint32_t cleared_count = static_cast<uint32_t>(
+                                (expected_access >> (8 * new_octile)) & 0xffu);
+                            assert(cleared_count > 0 && cleared_count < 255 &&
+                                   "Stale guard clear with suspicious count");
+#endif
                             blocked_start = now;
                             last_access_snapshot = desired_access;
                         }

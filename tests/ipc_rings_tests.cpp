@@ -550,6 +550,250 @@ TEST_CASE(test_stale_guard_clears_after_timeout)
     ASSERT_EQ(new_octile, writer.m_octile);
     ASSERT_EQ(uint64_t(0), writer.c.read_access.load() & range_mask);
     ASSERT_LT(elapsed, 500ms);
+
+    // Verify diagnostic counter was incremented (either stale guard clear or accounting mismatch)
+    auto diag = writer.get_diagnostics();
+    ASSERT_GT(diag.stale_guard_clear_count + diag.guard_accounting_mismatch_count, uint64_t(0));
+}
+
+TEST_CASE(test_guard_rollback_success)
+{
+    Temp_ring_dir tmp("guard_rollback");
+    const std::string ring_name = "ring_data";
+    const size_t ring_elements = pick_ring_elements<uint32_t>(64);
+
+    sintra::Ring_R<uint32_t> reader(tmp.str(), ring_name, ring_elements, ring_elements / 2);
+
+    // Manually set up a stale guard scenario: increment read_access without a guard token
+    const uint8_t test_octile = 3;
+    const uint64_t increment = (uint64_t(1) << (8 * test_octile));
+    reader.c.read_access.fetch_add(increment);
+
+    // Ensure no guard token exists for this octile
+    for (int i = 0; i < sintra::max_process_index; ++i) {
+        reader.c.reading_sequences[i].data.set_guard_token(0);
+    }
+
+    // Verify the mismatch exists
+    uint64_t access_before = reader.c.read_access.load();
+    uint32_t count_before = static_cast<uint32_t>((access_before >> (8 * test_octile)) & 0xffu);
+    ASSERT_GT(count_before, uint32_t(0));
+
+    // Attempt rollback
+    bool success = reader.try_rollback_unpaired_read_access(test_octile);
+
+    // Verify it succeeded
+    ASSERT_TRUE(success);
+
+    // Verify read_access was decremented
+    uint64_t access_after = reader.c.read_access.load();
+    uint32_t count_after = static_cast<uint32_t>((access_after >> (8 * test_octile)) & 0xffu);
+    ASSERT_EQ(count_before - 1, count_after);
+
+    // Verify diagnostics
+    auto diag = reader.get_diagnostics();
+    ASSERT_GT(diag.guard_rollback_attempt_count, uint64_t(0));
+    ASSERT_GT(diag.guard_rollback_success_count, uint64_t(0));
+}
+
+TEST_CASE(test_guard_rollback_fails_with_active_guard)
+{
+    Temp_ring_dir tmp("guard_rollback_fail");
+    const std::string ring_name = "ring_data";
+    const size_t ring_elements = pick_ring_elements<uint32_t>(64);
+
+    sintra::Ring_R<uint32_t> reader(tmp.str(), ring_name, ring_elements, ring_elements / 2);
+
+    // Set up scenario: increment read_access AND set a guard token
+    const uint8_t test_octile = 2;
+    const uint64_t increment = (uint64_t(1) << (8 * test_octile));
+    reader.c.read_access.fetch_add(increment);
+
+    // Set a guard token for this octile
+    const uint8_t guard_token = 0x08 | test_octile;
+    reader.c.reading_sequences[0].data.set_guard_token(guard_token);
+
+    // Verify the guard exists
+    uint64_t access_before = reader.c.read_access.load();
+    uint32_t count_before = static_cast<uint32_t>((access_before >> (8 * test_octile)) & 0xffu);
+    ASSERT_GT(count_before, uint32_t(0));
+
+    // Attempt rollback - should fail because guard exists
+    bool success = reader.try_rollback_unpaired_read_access(test_octile);
+
+    // Verify it failed
+    ASSERT_FALSE(success);
+
+    // Verify read_access was NOT decremented
+    uint64_t access_after = reader.c.read_access.load();
+    uint32_t count_after = static_cast<uint32_t>((access_after >> (8 * test_octile)) & 0xffu);
+    ASSERT_EQ(count_before, count_after);
+}
+
+TEST_CASE(test_guard_accounting_invariant)
+{
+    Temp_ring_dir tmp("guard_invariant");
+    const std::string ring_name = "ring_data";
+    const size_t ring_elements = pick_ring_elements<uint64_t>(256);
+
+    sintra::Ring_W<uint64_t> writer(tmp.str(), ring_name, ring_elements);
+    sintra::Ring_R<uint64_t> reader1(tmp.str(), ring_name, ring_elements, ring_elements / 2);
+    sintra::Ring_R<uint64_t> reader2(tmp.str(), ring_name, ring_elements, ring_elements / 2);
+
+    // Write some data
+    std::vector<uint64_t> payload(10);
+    std::iota(payload.begin(), payload.end(), 0);
+    writer.write(payload.data(), payload.size());
+    writer.done_writing();
+
+    // Readers start reading
+    auto range1 = reader1.start_reading();
+    auto range2 = reader2.start_reading();
+
+    // Validate guard accounting: count guards in read_access should match actual guard tokens
+    auto count_guards_per_octile = [&](uint8_t octile) -> uint32_t {
+        uint32_t count = 0;
+        for (int i = 0; i < sintra::max_process_index; ++i) {
+            const uint8_t guard_snapshot = writer.m_control->reading_sequences[i].data.guard_token();
+            if ((guard_snapshot & 0x08) != 0 && (guard_snapshot & 0x07) == octile) {
+                ++count;
+            }
+        }
+        return count;
+    };
+
+    // Check each octile
+    for (uint8_t oct = 0; oct < 8; ++oct) {
+        uint64_t access_snapshot = writer.m_control->read_access.load();
+        uint32_t access_count = static_cast<uint32_t>((access_snapshot >> (8 * oct)) & 0xffu);
+        uint32_t guard_count = count_guards_per_octile(oct);
+
+        // Invariant: access_count should equal guard_count
+        ASSERT_EQ(guard_count, access_count);
+    }
+
+    reader1.done_reading();
+    reader2.done_reading();
+}
+
+TEST_CASE(test_concurrent_guard_updates)
+{
+    Temp_ring_dir tmp("concurrent_guards");
+    const std::string ring_name = "ring_data";
+    const size_t ring_elements = pick_ring_elements<uint32_t>(512);
+
+    sintra::Ring_W<uint32_t> writer(tmp.str(), ring_name, ring_elements);
+
+    // Write initial data
+    std::vector<uint32_t> payload(100);
+    std::iota(payload.begin(), payload.end(), 0);
+    writer.write(payload.data(), payload.size());
+    writer.done_writing();
+
+    std::atomic<bool> stop{false};
+    std::atomic<int> read_cycles{0};
+    std::atomic<int> readers_started{0};
+    const int reader_count = 4;
+    std::vector<std::thread> readers;
+    readers.reserve(reader_count);
+
+    // Launch multiple readers that continuously read
+    for (int r = 0; r < reader_count; ++r) {
+        readers.emplace_back([&]() {
+            sintra::Ring_R<uint32_t> reader(tmp.str(), ring_name, ring_elements, ring_elements / 2);
+            readers_started.fetch_add(1);
+
+            while (!stop.load()) {
+                try {
+                    auto range = reader.start_reading();
+                    if (range.begin && range.end && range.begin != range.end) {
+                        // Simulate some processing
+                        std::this_thread::yield();
+                    }
+                    reader.done_reading();
+                    read_cycles.fetch_add(1);
+                }
+                catch (const sintra::ring_reader_evicted_exception&) {
+                    // Expected in high-contention scenarios
+                    break;
+                }
+            }
+        });
+    }
+
+    const auto start_deadline = std::chrono::steady_clock::now() + 1s;
+    while (readers_started.load() < reader_count &&
+           std::chrono::steady_clock::now() < start_deadline) {
+        std::this_thread::sleep_for(1ms);
+    }
+
+    const auto read_deadline = std::chrono::steady_clock::now() + 1s;
+    while (read_cycles.load() == 0 &&
+           std::chrono::steady_clock::now() < read_deadline) {
+        std::this_thread::sleep_for(1ms);
+    }
+
+    // Let readers run for a bit once cycles have started
+    std::this_thread::sleep_for(50ms);
+    stop.store(true);
+
+    for (auto& t : readers) {
+        if (t.joinable()) {
+            t.join();
+        }
+    }
+
+    // Verify no guard accounting mismatches occurred
+    auto diag = writer.get_diagnostics();
+    ASSERT_EQ(uint64_t(0), diag.guard_accounting_mismatch_count);
+
+    // Should have done some reads
+    ASSERT_GT(read_cycles.load(), 0);
+}
+
+TEST_CASE(test_guard_cleanup_on_eviction)
+{
+    Temp_ring_dir tmp("guard_eviction");
+    const std::string ring_name = "ring_data";
+    const size_t ring_elements = pick_ring_elements<uint64_t>(128);
+
+    sintra::Ring_W<uint64_t> writer(tmp.str(), ring_name, ring_elements);
+    sintra::Ring_R<uint64_t> reader(tmp.str(), ring_name, ring_elements, ring_elements / 2);
+
+    // Write enough to establish reader position
+    std::vector<uint64_t> payload(10);
+    std::iota(payload.begin(), payload.end(), 0);
+    writer.write(payload.data(), payload.size());
+    writer.done_writing();
+
+    // Reader starts but doesn't finish
+    auto range = reader.start_reading();
+    ASSERT_TRUE(range.begin && range.end && range.begin != range.end);
+
+    // Capture the octile that should be guarded
+    const uint8_t guarded_octile = static_cast<uint8_t>(reader.m_trailing_octile);
+
+    // Verify guard is set
+    uint64_t access_before = writer.m_control->read_access.load();
+    uint32_t count_before = static_cast<uint32_t>((access_before >> (8 * guarded_octile)) & 0xffu);
+    ASSERT_GT(count_before, uint32_t(0));
+
+    // Force eviction by writing a full ring's worth of data
+    std::vector<uint64_t> big_payload(ring_elements / 8);
+    for (size_t i = 0; i < ring_elements * 2 / (ring_elements / 8); ++i) {
+        std::iota(big_payload.begin(), big_payload.end(), i * 1000);
+        writer.write(big_payload.data(), big_payload.size());
+        writer.done_writing();
+    }
+
+    // Verify eviction occurred
+    auto diag = writer.get_diagnostics();
+    ASSERT_GT(diag.reader_eviction_count, uint64_t(0));
+
+    // Verify guard was cleaned up during eviction
+    uint64_t access_after = writer.m_control->read_access.load();
+    uint32_t count_after = static_cast<uint32_t>((access_after >> (8 * guarded_octile)) & 0xffu);
+    ASSERT_LT(count_after, count_before);
 }
 
 TEST_CASE(test_slow_reader_eviction_restores_status)
