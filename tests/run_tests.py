@@ -381,8 +381,8 @@ class TestRunner:
         # Enable debug pause handlers for crash detection and debugger attachment
         env['SINTRA_DEBUG_PAUSE_ON_EXIT'] = '1'
         if _is_expected_crash_test(invocation.name):
+            env['SINTRA_DEBUG_PAUSE_ON_EXIT'] = '0'
             if sys.platform == "darwin":
-                env['SINTRA_DEBUG_PAUSE_ON_EXIT'] = '0'
                 env.setdefault('SINTRA_POSTMORTEM_WAIT_SEC', '30')
         return env
 
