@@ -1,5 +1,6 @@
 // Crash capture test: self-crash after a randomized delay.
 #include "test_environment.h"
+#include "sintra/detail/debug_pause.h"
 
 #include <chrono>
 #include <cstdint>
@@ -80,6 +81,8 @@ int pick_delay_ms()
 
 int main()
 {
+    sintra::detail::install_debug_pause_handlers();
+
     const int delay_ms = pick_delay_ms();
     std::fprintf(stderr, "[crash_capture_self] delay=%dms\n", delay_ms);
     std::fflush(stderr);

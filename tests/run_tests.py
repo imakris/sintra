@@ -381,8 +381,9 @@ class TestRunner:
         # Enable debug pause handlers for crash detection and debugger attachment
         env['SINTRA_DEBUG_PAUSE_ON_EXIT'] = '1'
         if _is_expected_crash_test(invocation.name):
-            env['SINTRA_DEBUG_PAUSE_ON_EXIT'] = '0'
-            env.setdefault('SINTRA_POSTMORTEM_WAIT_SEC', '30')
+            if sys.platform == "darwin":
+                env['SINTRA_DEBUG_PAUSE_ON_EXIT'] = '0'
+                env.setdefault('SINTRA_POSTMORTEM_WAIT_SEC', '30')
         return env
 
     @staticmethod
@@ -853,6 +854,7 @@ class TestRunner:
             live_stack_error = ""
             postmortem_stack_traces = ""
             postmortem_stack_error = ""
+            debug_pause_killed = False
             failure_event = threading.Event()
             hang_detected = False
             hang_notes: List[str] = []
@@ -1100,7 +1102,7 @@ class TestRunner:
             hard_watchdog_thread.start()
 
             def attempt_live_capture(trigger_line: str) -> None:
-                nonlocal live_stack_traces, live_stack_error
+                nonlocal live_stack_traces, live_stack_error, debug_pause_killed
                 if not trigger_line:
                     return
 
@@ -1131,9 +1133,13 @@ class TestRunner:
                         with capture_lock:
                             live_stack_error = error
 
-                    # Don't kill here - let the main timeout mechanism handle cleanup.
-                    # This allows time for manual debugger attachment if needed.
-                    # The process will be killed when the timeout expires.
+                    if _is_expected_crash_test(invocation.name) and not debug_pause_killed:
+                        debug_pause_killed = True
+                        self._kill_process_tree(process.pid)
+
+                    # For expected-crash tests we kill after capture to avoid
+                    # hanging on the debug-pause loop. Other tests rely on the
+                    # normal timeout mechanism to allow manual attachment.
 
                     return
 

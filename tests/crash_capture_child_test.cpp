@@ -1,5 +1,6 @@
 // Crash capture test: spawn a child that crashes, then crash the parent.
 #include "test_environment.h"
+#include "sintra/detail/debug_pause.h"
 
 #include <algorithm>
 #include <chrono>
@@ -13,6 +14,9 @@
 #include <vector>
 
 #ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #include <process.h>
 #else
@@ -295,6 +299,8 @@ int child_main(int delay_ms)
 
 int main(int argc, char** argv)
 {
+    sintra::detail::install_debug_pause_handlers();
+
     if (argc >= 2 && std::string(argv[1]) == "--child") {
         int delay_ms = read_env_int("SINTRA_CRASH_CAPTURE_CHILD_DELAY_MS", 50);
         if (argc >= 4 && std::string(argv[2]) == "--delay_ms") {
