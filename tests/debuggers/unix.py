@@ -362,6 +362,14 @@ class UnixDebuggerStrategy(DebuggerStrategy):
 
         try:
             for _, core_path in candidate_cores:
+                if sys.platform == "darwin" and core_path.suffix in (".ips", ".crash"):
+                    report, error = self._read_macos_crash_report(core_path)
+                    if report:
+                        stack_outputs.append(f"{core_path}\n{report}")
+                        break
+                    capture_errors.append(f"{core_path}: {error}")
+                    continue
+
                 prepared_path, cleanup_path, prep_error = self._prepare_core_dump(core_path)
                 if prep_error:
                     capture_errors.append(f"{core_path}: {prep_error}")
@@ -416,6 +424,23 @@ class UnixDebuggerStrategy(DebuggerStrategy):
             return "", "; ".join(capture_errors)
 
         return "", "no stack data captured"
+
+    def _read_macos_crash_report(self, path: Path) -> Tuple[str, str]:
+        max_bytes = 200000
+        try:
+            with path.open("rb") as handle:
+                content = handle.read(max_bytes + 1)
+        except OSError as exc:
+            return "", f"failed to read crash report ({exc})"
+
+        truncated = len(content) > max_bytes
+        text = content[:max_bytes].decode(errors="replace").strip()
+        if not text:
+            return "", "crash report was empty"
+
+        if truncated:
+            text += "\n...[truncated]..."
+        return text, ""
 
     def _resolve_unix_debugger(self) -> Tuple[Optional[str], Optional[List[str]], str]:
         if sys.platform == "win32":
