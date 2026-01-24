@@ -854,6 +854,8 @@ class TestRunner:
         result_success: Optional[bool] = None
         instrumentation_active = self.instrumentation_active()
         instrument = partial(self._instrument_step, disk_path=self.build_dir)
+        with self._stack_capture_history_lock:
+            self._stack_capture_history.pop(invocation.name, None)
         try:
             popen_env = self._build_test_environment(invocation, scratch_dir)
             start_time = time.time()
