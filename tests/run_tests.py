@@ -2342,21 +2342,13 @@ def main():
 
                         result_bucket = accumulated_results[test_name]
 
-                        is_stack_capture_probe = _is_stack_capture_test(test_name)
-                        probe_captured = (
-                            is_stack_capture_probe
-                            and not result.success
-                            and "STACK CAPTURE: debugger/postmortem" in (result.error or "")
-                        )
-
                         if result.success:
                             result_bucket['passed'] += 1
                             row_end = "."
                         else:
                             result_bucket['failed'] += 1
-                            if not probe_captured:
-                                suite_all_passed = False
-                                overall_all_passed = False
+                            suite_all_passed = False
+                            overall_all_passed = False
 
                             run_index = result_bucket['passed'] + result_bucket['failed']
                             error_message = (result.error or '').strip()
@@ -2371,7 +2363,7 @@ def main():
                                 'message': error_message if error_message else first_line,
                             })
 
-                            row_end = "x" if probe_captured else "F"
+                            row_end = "F"
 
                         remaining_repetitions[test_name] -= 1
 
