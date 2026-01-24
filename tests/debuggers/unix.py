@@ -15,6 +15,7 @@ from .base import DebuggerStrategy
 LIVE_STACK_ATTACH_TIMEOUT_ENV = "SINTRA_LIVE_STACK_ATTACH_TIMEOUT"
 DEFAULT_LIVE_STACK_ATTACH_TIMEOUT = 30.0
 DEFAULT_LLDB_LIVE_STACK_ATTACH_TIMEOUT = 90.0
+MACOS_SAMPLE_PREFER_ENV = "SINTRA_MACOS_PREFER_SAMPLE"
 
 
 class UnixDebuggerStrategy(DebuggerStrategy):
@@ -113,6 +114,10 @@ class UnixDebuggerStrategy(DebuggerStrategy):
         capture_errors: List[str] = []
 
         debugger_is_macos_lldb = debugger_name == "lldb" and sys.platform == "darwin"
+        prefer_sample = (
+            debugger_is_macos_lldb
+            and os.environ.get(MACOS_SAMPLE_PREFER_ENV, "").lower() in ("1", "true", "yes")
+        )
         should_pause = signal_module is not None and not debugger_is_macos_lldb
 
         if should_pause and signal_module is not None:
@@ -185,6 +190,18 @@ class UnixDebuggerStrategy(DebuggerStrategy):
             debugger_output = ""
             debugger_error = ""
             debugger_success = False
+            sample_attempted = False
+            sample_error = ""
+
+            if prefer_sample:
+                sample_attempted = True
+                sample_output, sample_error = self._capture_macos_sample_stack(
+                    target_pid,
+                    min(debugger_timeout, 3.0),
+                )
+                if sample_output:
+                    stack_outputs.append(f"PID {target_pid}\n{sample_output}")
+                    continue
 
             max_attempts = 3 if debugger_is_macos_lldb else 1
             base_command = self._build_unix_live_debugger_command(
@@ -260,10 +277,13 @@ class UnixDebuggerStrategy(DebuggerStrategy):
             fallback_error = debugger_error
 
             if debugger_is_macos_lldb and self._process_exists(target_pid):
-                fallback_output, fallback_error = self._capture_macos_sample_stack(
-                    target_pid,
-                    debugger_timeout,
-                )
+                if not sample_attempted:
+                    fallback_output, fallback_error = self._capture_macos_sample_stack(
+                        target_pid,
+                        debugger_timeout,
+                    )
+                elif sample_error:
+                    fallback_error = sample_error
 
             if fallback_output:
                 stack_outputs.append(f"PID {target_pid}\n{fallback_output}")

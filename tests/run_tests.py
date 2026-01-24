@@ -133,6 +133,7 @@ TEST_TIMEOUT_OVERRIDES = {
 STACK_CAPTURE_PREFIXES = ("crash_capture_",)
 _STACK_CAPTURE_PAUSE_ENV = "SINTRA_CRASH_CAPTURE_PAUSE_MS"
 _LIVE_STACK_ATTACH_TIMEOUT_ENV = "SINTRA_LIVE_STACK_ATTACH_TIMEOUT"
+_MACOS_SAMPLE_PREFER_ENV = "SINTRA_MACOS_PREFER_SAMPLE"
 
 # Configure the maximum amount of wall time the runner spends attaching live
 # debuggers before declaring stack capture unavailable. Users can extend this by
@@ -405,6 +406,7 @@ class TestRunner:
             env.setdefault(_STACK_CAPTURE_PAUSE_ENV, _default_stack_capture_pause_ms())
             if sys.platform == "darwin":
                 env.setdefault('SINTRA_POSTMORTEM_WAIT_SEC', '30')
+                env.setdefault(_MACOS_SAMPLE_PREFER_ENV, '1')
         return env
 
     @staticmethod
