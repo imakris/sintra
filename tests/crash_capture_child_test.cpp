@@ -51,23 +51,7 @@ int clamp_int(int value, int lo, int hi)
 
 int read_env_int(const char* name, int default_value)
 {
-    const char* value = std::getenv(name);
-    if (!value || !*value) {
-        return default_value;
-    }
-
-    char* end = nullptr;
-    long parsed = std::strtol(value, &end, 10);
-    if (!end || end == value) {
-        return default_value;
-    }
-    if (parsed > std::numeric_limits<int>::max()) {
-        return default_value;
-    }
-    if (parsed < std::numeric_limits<int>::min()) {
-        return default_value;
-    }
-    return static_cast<int>(parsed);
+    return sintra::test::read_env_int(name, default_value);
 }
 
 std::uint64_t make_seed()
@@ -292,6 +276,7 @@ int child_main(int delay_ms)
     std::fprintf(stderr, "[crash_capture_child] delay=%dms\n", delay_ms);
     std::fflush(stderr);
     std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+    sintra::test::precrash_pause("child-precrash");
     sintra::test::emit_self_stack_trace();
     sintra::test::trigger_segfault_crash();
 }
@@ -351,6 +336,7 @@ int main(int argc, char** argv)
     close_process(child);
 
     std::this_thread::sleep_for(std::chrono::milliseconds(parent_delay));
+    sintra::test::precrash_pause("parent-precrash");
     sintra::test::emit_self_stack_trace();
     sintra::test::trigger_segfault_crash();
 }

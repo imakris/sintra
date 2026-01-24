@@ -382,6 +382,7 @@ class TestRunner:
         env['SINTRA_DEBUG_PAUSE_ON_EXIT'] = '1'
         if _is_stack_capture_test(invocation.name):
             env['SINTRA_DEBUG_PAUSE_ON_EXIT'] = '0'
+            env.setdefault('SINTRA_CRASH_CAPTURE_PAUSE_MS', '2000')
             if sys.platform == "darwin":
                 env.setdefault('SINTRA_POSTMORTEM_WAIT_SEC', '30')
         return env

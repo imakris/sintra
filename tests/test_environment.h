@@ -9,6 +9,8 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <limits>
+#include <thread>
 
 #ifdef _MSC_VER
 #include <intrin.h>
@@ -101,6 +103,52 @@ inline void emit_self_stack_trace()
 #endif
     std::fprintf(stderr, "[SINTRA_SELF_STACK_END]\n");
     std::fflush(stderr);
+}
+
+inline int read_env_int(const char* name, int default_value)
+{
+    const char* value = std::getenv(name);
+    if (!value || !*value) {
+        return default_value;
+    }
+
+    char* end = nullptr;
+    long parsed = std::strtol(value, &end, 10);
+    if (!end || end == value) {
+        return default_value;
+    }
+    if (parsed > static_cast<long>(std::numeric_limits<int>::max())) {
+        return default_value;
+    }
+    if (parsed < static_cast<long>(std::numeric_limits<int>::min())) {
+        return default_value;
+    }
+    return static_cast<int>(parsed);
+}
+
+inline void precrash_pause(const char* reason)
+{
+    const int pause_ms = read_env_int("SINTRA_CRASH_CAPTURE_PAUSE_MS", 0);
+    if (pause_ms <= 0) {
+        return;
+    }
+
+#ifdef _WIN32
+    const auto pid = static_cast<unsigned long long>(GetCurrentProcessId());
+#else
+    const auto pid = static_cast<unsigned long long>(getpid());
+#endif
+
+    std::fprintf(stderr,
+                 "[SINTRA_DEBUG_PAUSE] Process %llu paused: %s\n",
+                 pid,
+                 reason ? reason : "precrash");
+    std::fprintf(stderr,
+                 "[SINTRA_DEBUG_PAUSE] Attach debugger to PID %llu to capture stacks\n",
+                 pid);
+    std::fflush(stderr);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(pause_ms));
 }
 
 inline const std::filesystem::path& scratch_root()
