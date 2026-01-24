@@ -131,6 +131,8 @@ TEST_TIMEOUT_OVERRIDES = {
 }
 
 STACK_CAPTURE_PREFIXES = ("crash_capture_",)
+_STACK_CAPTURE_PAUSE_ENV = "SINTRA_CRASH_CAPTURE_PAUSE_MS"
+_LIVE_STACK_ATTACH_TIMEOUT_ENV = "SINTRA_LIVE_STACK_ATTACH_TIMEOUT"
 
 # Configure the maximum amount of wall time the runner spends attaching live
 # debuggers before declaring stack capture unavailable. Users can extend this by
@@ -160,6 +162,24 @@ def _is_stack_capture_test(name: str) -> bool:
         canonical = canonical.split(':', 1)[0]
     canonical = _strip_config_suffix(canonical)
     return canonical.startswith(STACK_CAPTURE_PREFIXES)
+
+
+def _default_stack_capture_pause_ms() -> str:
+    """Return a conservative pause window for stack-capture probes."""
+
+    timeout_value = os.environ.get(_LIVE_STACK_ATTACH_TIMEOUT_ENV, "")
+    attach_timeout = 0.0
+    if timeout_value:
+        try:
+            attach_timeout = float(timeout_value)
+        except ValueError:
+            attach_timeout = 0.0
+
+    if attach_timeout <= 0.0:
+        attach_timeout = 90.0 if sys.platform == "darwin" else 30.0
+
+    pause_seconds = max(2.0, min(10.0, attach_timeout * 0.1))
+    return str(int(pause_seconds * 1000))
 
 
 def _lookup_test_weight(name: str, active_tests: Dict[str, int]) -> int:
@@ -382,7 +402,7 @@ class TestRunner:
         env['SINTRA_DEBUG_PAUSE_ON_EXIT'] = '1'
         if _is_stack_capture_test(invocation.name):
             env['SINTRA_DEBUG_PAUSE_ON_EXIT'] = '0'
-            env.setdefault('SINTRA_CRASH_CAPTURE_PAUSE_MS', '2000')
+            env.setdefault(_STACK_CAPTURE_PAUSE_ENV, _default_stack_capture_pause_ms())
             if sys.platform == "darwin":
                 env.setdefault('SINTRA_POSTMORTEM_WAIT_SEC', '30')
         return env
@@ -2080,6 +2100,7 @@ class TestRunner:
 
                     full_error_needed = (
                         self.verbose
+                        or _is_stack_capture_test(test_name)
                         or '=== Captured stack traces ===' in result.error
                         or '=== Post-mortem stack trace ===' in result.error
                         or '[Stack capture unavailable' in result.error

@@ -157,6 +157,23 @@ bool spawn_process(const std::string& exe, const std::vector<std::string>& args,
 
     STARTUPINFOW si {};
     si.cb = sizeof(si);
+    HANDLE std_in = GetStdHandle(STD_INPUT_HANDLE);
+    HANDLE std_out = GetStdHandle(STD_OUTPUT_HANDLE);
+    HANDLE std_err = GetStdHandle(STD_ERROR_HANDLE);
+    bool inherit_handles = false;
+    if (std_in && std_in != INVALID_HANDLE_VALUE
+        && std_out && std_out != INVALID_HANDLE_VALUE
+        && std_err && std_err != INVALID_HANDLE_VALUE) {
+        // Ensure child stdout/stderr propagate so stack-capture pauses are visible.
+        SetHandleInformation(std_in, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+        SetHandleInformation(std_out, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+        SetHandleInformation(std_err, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+        si.dwFlags |= STARTF_USESTDHANDLES;
+        si.hStdInput = std_in;
+        si.hStdOutput = std_out;
+        si.hStdError = std_err;
+        inherit_handles = true;
+    }
     PROCESS_INFORMATION pi {};
 
     const BOOL success = CreateProcessW(
@@ -164,7 +181,7 @@ bool spawn_process(const std::string& exe, const std::vector<std::string>& args,
         cmdline_buf.data(),
         nullptr,
         nullptr,
-        FALSE,
+        inherit_handles ? TRUE : FALSE,
         0,
         nullptr,
         nullptr,
