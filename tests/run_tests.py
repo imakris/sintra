@@ -126,6 +126,8 @@ TEST_TIMEOUT_OVERRIDES = {
     "barrier_stress_test": 120.0,
 }
 
+EXPECTED_CRASH_PREFIXES = ("crash_capture_",)
+
 # Configure the maximum amount of wall time the runner spends attaching live
 # debuggers before declaring stack capture unavailable. Users can extend this by
 # setting ``SINTRA_LIVE_STACK_ATTACH_TIMEOUT`` (in seconds) when particularly
@@ -140,6 +142,20 @@ def _canonical_test_name(name: str) -> str:
     if canonical.endswith("_adaptive"):
         canonical = canonical[: -len("_adaptive")]
     return canonical
+
+
+def _strip_config_suffix(name: str) -> str:
+    if name.endswith("_release") or name.endswith("_debug"):
+        return name.rsplit("_", 1)[0]
+    return name
+
+
+def _is_expected_crash_test(name: str) -> bool:
+    canonical = _canonical_test_name(name)
+    if ':' in canonical:
+        canonical = canonical.split(':', 1)[0]
+    canonical = _strip_config_suffix(canonical)
+    return canonical.startswith(EXPECTED_CRASH_PREFIXES)
 
 
 def _lookup_test_weight(name: str, active_tests: Dict[str, int]) -> int:
@@ -1690,6 +1706,28 @@ class TestRunner:
                     error_msg = f"{error_msg}\n\n=== Post-mortem stack trace ===\n{postmortem_stack_traces}"
                 elif postmortem_stack_error:
                     error_msg = f"{error_msg}\n\n[Post-mortem stack capture unavailable: {postmortem_stack_error}]"
+
+                if _is_expected_crash_test(invocation.name):
+                    crash_exit = self._is_crash_exit(process.returncode)
+                    captured = bool(live_stack_traces or postmortem_stack_traces)
+                    if crash_exit and captured and not hang_detected:
+                        success = True
+                        error_msg = ""
+                    else:
+                        success = False
+                        reasons = []
+                        if not crash_exit:
+                            reasons.append("process did not crash")
+                        if hang_detected:
+                            reasons.append("hang detected")
+                        if crash_exit and not captured:
+                            reasons.append("no stack capture")
+                        reason_text = ", ".join(reasons) if reasons else "unexpected failure"
+                        prefix = f"EXPECTED CRASH FAILED: {reason_text}"
+                        if error_msg:
+                            error_msg = f"{prefix}\n{error_msg}"
+                        else:
+                            error_msg = prefix
 
                 result_success = success
                 return TestResult(

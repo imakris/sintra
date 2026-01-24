@@ -323,32 +323,50 @@ class UnixDebuggerStrategy(DebuggerStrategy):
 
         candidate_cores: List[Tuple[float, Path]] = []
 
-        for directory in candidate_dirs:
+        deadline = None
+        if sys.platform == "darwin":
+            wait_seconds = 10.0
             try:
-                if not directory.exists():
-                    continue
-                entries = list(directory.iterdir())
-            except OSError:
-                continue
+                wait_seconds = float(os.getenv("SINTRA_POSTMORTEM_WAIT_SEC", "10"))
+            except ValueError:
+                wait_seconds = 10.0
+            if wait_seconds > 0:
+                deadline = time.time() + wait_seconds
 
-            for entry in entries:
-                if not entry.is_file():
-                    continue
-
-                name_lower = entry.name.lower()
-                exe_name = invocation.path.name.lower()
-                if exe_name not in name_lower and invocation.path.stem.lower() not in name_lower:
-                    continue
-
+        while True:
+            candidate_cores.clear()
+            for directory in candidate_dirs:
                 try:
-                    stat_info = entry.stat()
+                    if not directory.exists():
+                        continue
+                    entries = list(directory.iterdir())
                 except OSError:
                     continue
 
-                if stat_info.st_mtime + 0.001 < start_time:
-                    continue
+                for entry in entries:
+                    if not entry.is_file():
+                        continue
 
-                candidate_cores.append((stat_info.st_mtime, entry))
+                    name_lower = entry.name.lower()
+                    exe_name = invocation.path.name.lower()
+                    if exe_name not in name_lower and invocation.path.stem.lower() not in name_lower:
+                        continue
+
+                    try:
+                        stat_info = entry.stat()
+                    except OSError:
+                        continue
+
+                    if stat_info.st_mtime + 0.001 < start_time:
+                        continue
+
+                    candidate_cores.append((stat_info.st_mtime, entry))
+
+            if candidate_cores or deadline is None:
+                break
+            if time.time() >= deadline:
+                break
+            time.sleep(0.25)
 
         if not candidate_cores:
             return "", "no recent core dump found"
