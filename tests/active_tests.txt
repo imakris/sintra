@@ -15,6 +15,6 @@
 # The build system will only build tests listed here (not commented).
 # The test runner will run each test for the specified number of iterations.
 
-# Focused stress selection (run until the CI time limit is reached)
-barrier_flush_test_release             1000000000
-complex_choreography_test_debug        1000000000
+# Stack capture validation (crash + capture is the objective)
+crash_capture_self_test_debug          20
+crash_capture_child_test_debug         20
