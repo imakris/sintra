@@ -295,7 +295,7 @@ int child_main(int delay_ms)
     std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
     sintra::test::precrash_pause("child-precrash");
     sintra::test::emit_self_stack_trace();
-    sintra::test::trigger_segfault_crash();
+    sintra::test::trigger_illegal_instruction_crash();
 }
 
 } // namespace
@@ -355,5 +355,5 @@ int main(int argc, char** argv)
     std::this_thread::sleep_for(std::chrono::milliseconds(parent_delay));
     sintra::test::precrash_pause("parent-precrash");
     sintra::test::emit_self_stack_trace();
-    sintra::test::trigger_segfault_crash();
+    sintra::test::trigger_illegal_instruction_crash();
 }
