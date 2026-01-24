@@ -1169,6 +1169,21 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
             return freed;
         }
 
+        uint32_t count_guards_for_octile(uint8_t target_octile) const
+        {
+            uint32_t count = 0;
+            for (int i = 0; i < max_process_index; ++i) {
+                const uint8_t guard_snapshot = reading_sequences[i].data.guard_token();
+                if ((guard_snapshot & 0x08) == 0) {
+                    continue;
+                }
+                if ((guard_snapshot & 0x07) == target_octile) {
+                    ++count;
+                }
+            }
+            return count;
+        }
+
         void release_local_semaphores()
         {
             for (auto& sem : dirty_semaphores) {
@@ -2137,28 +2152,13 @@ public:
 
         c.guard_rollback_attempt_count.fetch_add(1, std::memory_order_relaxed);
 
-        auto count_guards_for_octile = [&](uint8_t target) -> uint32_t {
-            uint32_t count = 0;
-            for (int i = 0; i < max_process_index; ++i) {
-                const uint8_t guard_snapshot = c.reading_sequences[i].data.guard_token();
-                if ((guard_snapshot & 0x08) == 0) {
-                    continue;
-                }
-                const uint8_t guard_octile = guard_snapshot & 0x07;
-                if (guard_octile == target) {
-                    ++count;
-                }
-            }
-            return count;
-        };
-
         uint64_t access_snapshot = c.read_access.load();
         uint32_t count = static_cast<uint32_t>((access_snapshot >> (8 * octile)) & 0xffu);
         if (count == 0) {
             return false;
         }
 
-        const uint32_t guard_count = count_guards_for_octile(octile);
+        const uint32_t guard_count = c.count_guards_for_octile(octile);
         if (guard_count != 0) {
             return false;
         }
@@ -2175,7 +2175,7 @@ public:
         if (count == 0) {
             return false;
         }
-        if (count_guards_for_octile(octile) != 0) {
+        if (c.count_guards_for_octile(octile) != 0) {
             return false;
         }
 
@@ -2476,27 +2476,7 @@ struct Ring_W : Ring<T, false>
         uint64_t last_access_snapshot = 0;
 
         auto scan_blocking_readers = [&]() -> bool {
-            for (int i = 0; i < max_process_index; ++i) {
-                uint8_t guard_snapshot = c.reading_sequences[i].data.guard_token();
-                if ((guard_snapshot & 0x08) != 0 && (guard_snapshot & 0x07) == new_octile) {
-                    return true;
-                }
-            }
-            return false;
-        };
-
-        auto count_guards_for_octile = [&](uint8_t target_octile) -> uint32_t {
-            uint32_t count = 0;
-            for (int i = 0; i < max_process_index; ++i) {
-                uint8_t guard_snapshot = c.reading_sequences[i].data.guard_token();
-                if ((guard_snapshot & 0x08) == 0) {
-                    continue;
-                }
-                if ((guard_snapshot & 0x07) == target_octile) {
-                    ++count;
-                }
-            }
-            return count;
+            return c.count_guards_for_octile(new_octile) != 0;
         };
 
         while (c.read_access & range_mask) {
@@ -2521,11 +2501,11 @@ struct Ring_W : Ring<T, false>
                 if (!confirmed_blocking_reader) {
                     const auto now = std::chrono::steady_clock::now();
                     if ((access_snapshot & range_mask) != 0 &&
-                        count_guards_for_octile(new_octile) == 0) {
+                        c.count_guards_for_octile(new_octile) == 0) {
                         std::this_thread::yield();
                         uint64_t confirm_snapshot = c.read_access.load();
                         if ((confirm_snapshot & range_mask) != 0 &&
-                            count_guards_for_octile(new_octile) == 0) {
+                            c.count_guards_for_octile(new_octile) == 0) {
                             uint64_t expected = confirm_snapshot;
                             uint64_t desired = expected & ~range_mask;
                             if (c.read_access.compare_exchange_strong(expected, desired)) {

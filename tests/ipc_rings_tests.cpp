@@ -650,23 +650,11 @@ TEST_CASE(test_guard_accounting_invariant)
     auto range1 = reader1.start_reading();
     auto range2 = reader2.start_reading();
 
-    // Validate guard accounting: count guards in read_access should match actual guard tokens
-    auto count_guards_per_octile = [&](uint8_t octile) -> uint32_t {
-        uint32_t count = 0;
-        for (int i = 0; i < sintra::max_process_index; ++i) {
-            const uint8_t guard_snapshot = writer.m_control->reading_sequences[i].data.guard_token();
-            if ((guard_snapshot & 0x08) != 0 && (guard_snapshot & 0x07) == octile) {
-                ++count;
-            }
-        }
-        return count;
-    };
-
     // Check each octile
     for (uint8_t oct = 0; oct < 8; ++oct) {
         uint64_t access_snapshot = writer.m_control->read_access.load();
         uint32_t access_count = static_cast<uint32_t>((access_snapshot >> (8 * oct)) & 0xffu);
-        uint32_t guard_count = count_guards_per_octile(oct);
+        uint32_t guard_count = writer.m_control->count_guards_for_octile(oct);
 
         // Invariant: access_count should equal guard_count
         ASSERT_EQ(guard_count, access_count);
