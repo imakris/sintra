@@ -855,6 +855,7 @@ class TestRunner:
             postmortem_stack_traces = ""
             postmortem_stack_error = ""
             debug_pause_killed = False
+            self_stack_detected = False
             failure_event = threading.Event()
             hang_detected = False
             hang_notes: List[str] = []
@@ -1278,6 +1279,7 @@ class TestRunner:
                     manual_capture_thread.start()
 
             def monitor_stream(stream, buffer: List[str], descriptor: str) -> None:
+                nonlocal self_stack_detected
                 thread_name = threading.current_thread().name
                 start_time = time.monotonic()
                 lines = 0
@@ -1323,6 +1325,8 @@ class TestRunner:
                                     "last_line_excerpt": stripped,
                                 }
                             )
+                        if "[SINTRA_SELF_STACK_BEGIN]" in line:
+                            self_stack_detected = True
                         attempt_live_capture(line)
                 except (OSError, ValueError):
                     # The stream may be closed from another thread during shutdown.
@@ -1722,7 +1726,7 @@ class TestRunner:
 
                 if _is_expected_crash_test(invocation.name):
                     crash_exit = self._is_crash_exit(process.returncode)
-                    captured = bool(live_stack_traces or postmortem_stack_traces)
+                    captured = bool(live_stack_traces or postmortem_stack_traces or self_stack_detected)
                     if crash_exit and captured and not hang_detected:
                         success = True
                         error_msg = ""

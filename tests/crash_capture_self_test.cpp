@@ -87,5 +87,6 @@ int main()
     std::fprintf(stderr, "[crash_capture_self] delay=%dms\n", delay_ms);
     std::fflush(stderr);
     std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+    sintra::test::emit_self_stack_trace();
     sintra::test::trigger_segfault_crash();
 }
