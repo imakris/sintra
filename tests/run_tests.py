@@ -1735,13 +1735,17 @@ class TestRunner:
 
                 if live_stack_traces:
                     error_msg = f"{error_msg}\n\n=== Captured stack traces ===\n{live_stack_traces}"
-                elif live_stack_error:
-                    error_msg = f"{error_msg}\n\n[Stack capture unavailable: {live_stack_error}]"
 
                 if postmortem_stack_traces:
                     error_msg = f"{error_msg}\n\n=== Post-mortem stack trace ===\n{postmortem_stack_traces}"
                 elif postmortem_stack_error:
                     error_msg = f"{error_msg}\n\n[Post-mortem stack capture unavailable: {postmortem_stack_error}]"
+
+                if live_stack_error and not live_stack_traces:
+                    live_label = "Live stack capture unavailable"
+                    if postmortem_stack_traces:
+                        live_label += " (post-mortem captured)"
+                    error_msg = f"{error_msg}\n\n[{live_label}: {live_stack_error}]"
 
                 if _is_stack_capture_test(invocation.name):
                     if live_stack_traces or postmortem_stack_traces:
