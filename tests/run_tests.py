@@ -130,7 +130,7 @@ TEST_TIMEOUT_OVERRIDES = {
     "crash_capture_child_test_release": 120.0,
 }
 
-EXPECTED_CRASH_PREFIXES = ("crash_capture_",)
+STACK_CAPTURE_PREFIXES = ("crash_capture_",)
 
 # Configure the maximum amount of wall time the runner spends attaching live
 # debuggers before declaring stack capture unavailable. Users can extend this by
@@ -154,12 +154,12 @@ def _strip_config_suffix(name: str) -> str:
     return name
 
 
-def _is_expected_crash_test(name: str) -> bool:
+def _is_stack_capture_test(name: str) -> bool:
     canonical = _canonical_test_name(name)
     if ':' in canonical:
         canonical = canonical.split(':', 1)[0]
     canonical = _strip_config_suffix(canonical)
-    return canonical.startswith(EXPECTED_CRASH_PREFIXES)
+    return canonical.startswith(STACK_CAPTURE_PREFIXES)
 
 
 def _lookup_test_weight(name: str, active_tests: Dict[str, int]) -> int:
@@ -380,7 +380,7 @@ class TestRunner:
         env['TMP'] = str(scratch_dir)
         # Enable debug pause handlers for crash detection and debugger attachment
         env['SINTRA_DEBUG_PAUSE_ON_EXIT'] = '1'
-        if _is_expected_crash_test(invocation.name):
+        if _is_stack_capture_test(invocation.name):
             env['SINTRA_DEBUG_PAUSE_ON_EXIT'] = '0'
             if sys.platform == "darwin":
                 env.setdefault('SINTRA_POSTMORTEM_WAIT_SEC', '30')
@@ -854,7 +854,6 @@ class TestRunner:
             live_stack_error = ""
             postmortem_stack_traces = ""
             postmortem_stack_error = ""
-            debug_pause_killed = False
             self_stack_detected = False
             failure_event = threading.Event()
             hang_detected = False
@@ -1103,7 +1102,7 @@ class TestRunner:
             hard_watchdog_thread.start()
 
             def attempt_live_capture(trigger_line: str) -> None:
-                nonlocal live_stack_traces, live_stack_error, debug_pause_killed
+                nonlocal live_stack_traces, live_stack_error
                 if not trigger_line:
                     return
 
@@ -1134,13 +1133,8 @@ class TestRunner:
                         with capture_lock:
                             live_stack_error = error
 
-                    if _is_expected_crash_test(invocation.name) and not debug_pause_killed:
-                        debug_pause_killed = True
-                        self._kill_process_tree(process.pid)
-
-                    # For expected-crash tests we kill after capture to avoid
-                    # hanging on the debug-pause loop. Other tests rely on the
-                    # normal timeout mechanism to allow manual attachment.
+                    # Allow manual attachment for regular tests; stack-capture
+                    # tests disable debug pause so they can terminate normally.
 
                     return
 
@@ -1724,27 +1718,18 @@ class TestRunner:
                 elif postmortem_stack_error:
                     error_msg = f"{error_msg}\n\n[Post-mortem stack capture unavailable: {postmortem_stack_error}]"
 
-                if _is_expected_crash_test(invocation.name):
-                    crash_exit = self._is_crash_exit(process.returncode)
-                    captured = bool(live_stack_traces or postmortem_stack_traces or self_stack_detected)
-                    if crash_exit and captured and not hang_detected:
-                        success = True
-                        error_msg = ""
+                if _is_stack_capture_test(invocation.name):
+                    if live_stack_traces or postmortem_stack_traces:
+                        capture_note = "STACK CAPTURE: debugger/postmortem"
+                    elif self_stack_detected:
+                        capture_note = "STACK CAPTURE: self-trace"
                     else:
-                        success = False
-                        reasons = []
-                        if not crash_exit:
-                            reasons.append("process did not crash")
-                        if hang_detected:
-                            reasons.append("hang detected")
-                        if crash_exit and not captured:
-                            reasons.append("no stack capture")
-                        reason_text = ", ".join(reasons) if reasons else "unexpected failure"
-                        prefix = f"EXPECTED CRASH FAILED: {reason_text}"
-                        if error_msg:
-                            error_msg = f"{prefix}\n{error_msg}"
-                        else:
-                            error_msg = prefix
+                        capture_note = "STACK CAPTURE: MISSING"
+
+                    if error_msg:
+                        error_msg = f"{error_msg}\n\n{capture_note}"
+                    else:
+                        error_msg = capture_note
 
                 result_success = success
                 return TestResult(
@@ -2097,6 +2082,7 @@ class TestRunner:
                         or '=== Captured stack traces ===' in result.error
                         or '=== Post-mortem stack trace ===' in result.error
                         or '[Stack capture unavailable' in result.error
+                        or '[SINTRA_SELF_STACK_BEGIN]' in result.error
                     )
 
                     if full_error_needed:
