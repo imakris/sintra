@@ -152,6 +152,8 @@ def _lookup_test_weight(name: str, active_tests: Dict[str, int]) -> int:
     if ':' in canonical:
         # Extract base test name before first colon
         base_test = canonical.split(':')[0]
+        if base_test in active_tests:
+            return active_tests.get(base_test, 1)
         # Remove _release or _debug suffix
         if base_test.endswith('_release') or base_test.endswith('_debug'):
             base_test = base_test.rsplit('_', 1)[0]
@@ -160,6 +162,8 @@ def _lookup_test_weight(name: str, active_tests: Dict[str, int]) -> int:
     # For regular tests, try with and without config suffix
     # e.g., "ping_pong_test_release" -> "ping_pong_test"
     if canonical.endswith('_release') or canonical.endswith('_debug'):
+        if canonical in active_tests:
+            return active_tests.get(canonical, 1)
         base_test = canonical.rsplit('_', 1)[0]
         return active_tests.get(base_test, 1)
 
@@ -669,6 +673,10 @@ class TestRunner:
         for test_path in active_tests.keys():
             # Extract test name from path (e.g., "manual/some_test" -> "some_test")
             test_name = test_path.split('/')[-1]
+            target_config = None
+
+            if test_name.endswith('_release') or test_name.endswith('_debug'):
+                test_name, target_config = test_name.rsplit('_', 1)
 
             if test_name not in available_tests:
                 print(f"{Color.YELLOW}Warning: Test '{test_path}' from active_tests.txt not found in build directory{Color.RESET}")
@@ -676,6 +684,8 @@ class TestRunner:
 
             # Add test invocations for each available configuration
             for config, test_binary in available_tests[test_name].items():
+                if target_config is not None and config != target_config:
+                    continue
                 normalized_name = self.platform.adjust_executable_name(test_binary.name)
 
                 invocations = self._expand_test_invocations(test_binary, f"sintra_{test_name}", normalized_name)

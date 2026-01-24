@@ -120,17 +120,34 @@ function(add_test_suite SUFFIX IS_DEBUG)
 
         if(PARTS_COUNT EQUAL 1)
             # Simple test in main directory: "some_test" -> "some_test.cpp"
-            set(TEST_FILE "${TEST_PATH}.cpp")
             set(TEST_NAME "${TEST_PATH}")
             set(SUBDIR "")
         elseif(PARTS_COUNT EQUAL 2)
             # Subdirectory test: "manual/some_test" -> "manual/some_test.cpp"
             list(GET PATH_PARTS 0 SUBDIR)
             list(GET PATH_PARTS 1 TEST_NAME)
-            set(TEST_FILE "${SUBDIR}/${TEST_NAME}.cpp")
         else()
             message(WARNING "Unsupported test path format: ${TEST_PATH}")
             continue()
+        endif()
+
+        set(CONFIG_FILTER "")
+        if(TEST_NAME MATCHES "^(.*)_debug$")
+            set(TEST_NAME "${CMAKE_MATCH_1}")
+            set(CONFIG_FILTER "debug")
+        elseif(TEST_NAME MATCHES "^(.*)_release$")
+            set(TEST_NAME "${CMAKE_MATCH_1}")
+            set(CONFIG_FILTER "release")
+        endif()
+
+        if(CONFIG_FILTER AND NOT CONFIG_FILTER STREQUAL SUFFIX)
+            continue()
+        endif()
+
+        if(SUBDIR)
+            set(TEST_FILE "${SUBDIR}/${TEST_NAME}.cpp")
+        else()
+            set(TEST_FILE "${TEST_NAME}.cpp")
         endif()
 
         # Check if file exists
