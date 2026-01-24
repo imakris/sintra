@@ -1653,8 +1653,15 @@ class TestRunner:
                 stdout = ''.join(stdout_lines)
                 stderr = ''.join(stderr_lines)
 
+                stack_capture_test = _is_stack_capture_test(invocation.name)
                 success = (process.returncode == 0) and not hang_detected
                 error_msg = stderr
+
+                if stack_capture_test and success:
+                    success = False
+                    error_msg = (
+                        f"EXPECTED CRASH: Process exited with code 0\n{stderr}"
+                    )
 
                 if hang_detected:
                     hang_summary = "; ".join(hang_notes) if hang_notes else "detected lingering/descendant processes"
@@ -1719,8 +1726,9 @@ class TestRunner:
                 elif postmortem_stack_error:
                     error_msg = f"{error_msg}\n\n[Post-mortem stack capture unavailable: {postmortem_stack_error}]"
 
-                if _is_stack_capture_test(invocation.name):
-                    if live_stack_traces or postmortem_stack_traces:
+                if stack_capture_test:
+                    stack_capture_ok = bool(live_stack_traces or postmortem_stack_traces)
+                    if stack_capture_ok:
                         capture_note = "STACK CAPTURE: debugger/postmortem"
                     elif self_stack_detected:
                         capture_note = "STACK CAPTURE: self-trace"
@@ -1731,6 +1739,9 @@ class TestRunner:
                         error_msg = f"{error_msg}\n\n{capture_note}"
                     else:
                         error_msg = capture_note
+
+                    if stack_capture_ok and not hang_detected:
+                        success = True
 
                 result_success = success
                 return TestResult(
