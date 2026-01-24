@@ -288,7 +288,7 @@ int child_main(int delay_ms)
     std::fprintf(stderr, "[crash_capture_child] delay=%dms\n", delay_ms);
     std::fflush(stderr);
     std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
-    std::abort();
+    sintra::test::trigger_segfault_crash();
 }
 
 } // namespace
@@ -344,5 +344,5 @@ int main(int argc, char** argv)
     close_process(child);
 
     std::this_thread::sleep_for(std::chrono::milliseconds(parent_delay));
-    std::abort();
+    sintra::test::trigger_segfault_crash();
 }

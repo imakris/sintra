@@ -30,6 +30,15 @@ namespace sintra::test {
 #endif
 }
 
+/// Trigger an immediate segmentation fault by writing through a null pointer.
+/// This tends to produce reliable crash reports on Unix-like systems.
+[[noreturn]] inline void trigger_segfault_crash()
+{
+    volatile std::uint8_t* ptr = nullptr;
+    *ptr = 0x1;
+    std::abort();
+}
+
 inline const std::filesystem::path& scratch_root()
 {
     static const std::filesystem::path root = [] {

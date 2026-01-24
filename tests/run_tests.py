@@ -124,6 +124,10 @@ TEST_TIMEOUT_OVERRIDES = {
     "barrier_complex_choreography_test": 120.0,
     "barrier_pathological_choreography_test": 120.0,
     "barrier_stress_test": 120.0,
+    "crash_capture_self_test_debug": 120.0,
+    "crash_capture_self_test_release": 120.0,
+    "crash_capture_child_test_debug": 120.0,
+    "crash_capture_child_test_release": 120.0,
 }
 
 EXPECTED_CRASH_PREFIXES = ("crash_capture_",)
@@ -365,7 +369,7 @@ class TestRunner:
         directory.mkdir(parents=True, exist_ok=True)
         return directory
 
-    def _build_test_environment(self, scratch_dir: Path) -> Dict[str, str]:
+    def _build_test_environment(self, invocation: TestInvocation, scratch_dir: Path) -> Dict[str, str]:
         """Return the environment variables for a test invocation."""
 
         env = os.environ.copy()
@@ -376,6 +380,9 @@ class TestRunner:
         env['TMP'] = str(scratch_dir)
         # Enable debug pause handlers for crash detection and debugger attachment
         env['SINTRA_DEBUG_PAUSE_ON_EXIT'] = '1'
+        if _is_expected_crash_test(invocation.name):
+            env['SINTRA_DEBUG_PAUSE_ON_EXIT'] = '0'
+            env.setdefault('SINTRA_POSTMORTEM_WAIT_SEC', '30')
         return env
 
     @staticmethod
@@ -824,7 +831,7 @@ class TestRunner:
         instrumentation_active = self.instrumentation_active()
         instrument = partial(self._instrument_step, disk_path=self.build_dir)
         try:
-            popen_env = self._build_test_environment(scratch_dir)
+            popen_env = self._build_test_environment(invocation, scratch_dir)
             start_time = time.time()
             start_monotonic = time.monotonic()
 
