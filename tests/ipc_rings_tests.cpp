@@ -692,12 +692,16 @@ TEST_CASE(test_concurrent_guard_updates)
 
     std::atomic<bool> stop{false};
     std::atomic<int> read_cycles{0};
+    std::atomic<int> readers_started{0};
+    const int reader_count = 4;
     std::vector<std::thread> readers;
+    readers.reserve(reader_count);
 
     // Launch multiple readers that continuously read
-    for (int r = 0; r < 4; ++r) {
-        readers.emplace_back([&, r]() {
+    for (int r = 0; r < reader_count; ++r) {
+        readers.emplace_back([&]() {
             sintra::Ring_R<uint32_t> reader(tmp.str(), ring_name, ring_elements, ring_elements / 2);
+            readers_started.fetch_add(1);
 
             while (!stop.load()) {
                 try {
@@ -717,8 +721,20 @@ TEST_CASE(test_concurrent_guard_updates)
         });
     }
 
-    // Let readers run for a bit
-    std::this_thread::sleep_for(100ms);
+    const auto start_deadline = std::chrono::steady_clock::now() + 1s;
+    while (readers_started.load() < reader_count &&
+           std::chrono::steady_clock::now() < start_deadline) {
+        std::this_thread::sleep_for(1ms);
+    }
+
+    const auto read_deadline = std::chrono::steady_clock::now() + 1s;
+    while (read_cycles.load() == 0 &&
+           std::chrono::steady_clock::now() < read_deadline) {
+        std::this_thread::sleep_for(1ms);
+    }
+
+    // Let readers run for a bit once cycles have started
+    std::this_thread::sleep_for(50ms);
     stop.store(true);
 
     for (auto& t : readers) {

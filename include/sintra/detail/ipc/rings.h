@@ -2163,13 +2163,10 @@ public:
             return false;
         }
 
-#ifndef NDEBUG
-        // Assertion: if read_access shows guards but we can't find any guard tokens,
-        // this indicates a potential accounting bug
+        // Diagnostic: read_access shows guards but no guard tokens were found.
         if (count > 0 && guard_count == 0) {
             c.guard_accounting_mismatch_count.fetch_add(1, std::memory_order_relaxed);
         }
-#endif
 
         std::this_thread::yield();
 
@@ -2532,9 +2529,7 @@ struct Ring_W : Ring<T, false>
                             uint64_t expected = confirm_snapshot;
                             uint64_t desired = expected & ~range_mask;
                             if (c.read_access.compare_exchange_strong(expected, desired)) {
-#ifndef NDEBUG
                                 c.guard_accounting_mismatch_count.fetch_add(1, std::memory_order_relaxed);
-#endif
                                 blocked_start = now;
                                 last_access_snapshot = desired;
                                 continue;
