@@ -2090,6 +2090,21 @@ class TestRunner:
         print(f"  Pass Rate: {pass_rate:.1f}%")
         print(f"  Duration: avg={format_duration(avg_duration)}, min={format_duration(min_duration)}, max={format_duration(max_duration)}")
 
+        if _is_stack_capture_test(test_name):
+            captured = sum(
+                1 for r in results if "STACK CAPTURE: debugger/postmortem" in (r.error or "")
+            )
+            self_trace = sum(
+                1 for r in results if "STACK CAPTURE: self-trace" in (r.error or "")
+            )
+            missing = sum(
+                1 for r in results if "STACK CAPTURE: MISSING" in (r.error or "")
+            )
+            print(
+                "  Stack capture probe: "
+                f"captured={captured}, self-trace={self_trace}, missing={missing}"
+            )
+
         # Print details of failures if verbose or if there are failures
         if failed > 0 and (self.verbose or failed <= 5):
             print(f"\n  {Color.YELLOW}Failure Details:{Color.RESET}")
@@ -2323,13 +2338,21 @@ def main():
 
                         result_bucket = accumulated_results[test_name]
 
+                        is_stack_capture_probe = _is_stack_capture_test(test_name)
+                        probe_captured = (
+                            is_stack_capture_probe
+                            and not result.success
+                            and "STACK CAPTURE: debugger/postmortem" in (result.error or "")
+                        )
+
                         if result.success:
                             result_bucket['passed'] += 1
                             row_end = "."
                         else:
                             result_bucket['failed'] += 1
-                            suite_all_passed = False
-                            overall_all_passed = False
+                            if not probe_captured:
+                                suite_all_passed = False
+                                overall_all_passed = False
 
                             run_index = result_bucket['passed'] + result_bucket['failed']
                             error_message = (result.error or '').strip()
@@ -2344,7 +2367,7 @@ def main():
                                 'message': error_message if error_message else first_line,
                             })
 
-                            row_end = "F"
+                            row_end = "x" if probe_captured else "F"
 
                         remaining_repetitions[test_name] -= 1
 
