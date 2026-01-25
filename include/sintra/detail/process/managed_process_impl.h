@@ -749,12 +749,6 @@ static void s_signal_handler(int sig, siginfo_t* info, void* ctx)
     auto& slot_table = signal_slots();
 
     auto* mproc = s_mproc;
-    const bool can_wait = can_wait_for_signal_dispatch();
-    const bool should_wait_for_dispatch = mproc && mproc->m_out_req_c && sig != SIGCHLD;
-    uint32_t dispatched_before = 0;
-    if (should_wait_for_dispatch && can_wait) {
-        dispatched_before = dispatched_signal_counter().load();
-    }
 
     auto& pipefd = signal_pipe();
     if (pipefd[1] != -1) {
@@ -785,10 +779,6 @@ static void s_signal_handler(int sig, siginfo_t* info, void* ctx)
                 pending_signal_mask().fetch_or(1U << index);
             }
         }
-    }
-
-    if (should_wait_for_dispatch && can_wait) {
-        wait_for_signal_dispatch(dispatched_before);
     }
 
     if (auto* slot = find_slot(slot_table, sig); slot && slot->has_previous) {
@@ -863,6 +853,13 @@ void install_signal_handler()
 {
     std::call_once(signal_handler_once_flag(), []() {
         auto& slot_table = signal_slots();
+        (void)pending_signal_mask();
+        (void)dispatched_signal_counter();
+#ifdef _WIN32
+        (void)signal_event();
+#else
+        (void)signal_pipe();
+#endif
 
 #ifdef _WIN32
         ensure_signal_dispatcher_win();
