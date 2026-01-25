@@ -3,8 +3,6 @@ freebsd_instance:
 
 env:
   CIRRUS_CLONE_DEPTH: 1
-  SINTRA_DEBUG_BOOTSTRAP: "1"
-  SINTRA_DEBUG_RING: 1
 
 freebsd_build_task:
   name: "FreeBSD Build & Test"
