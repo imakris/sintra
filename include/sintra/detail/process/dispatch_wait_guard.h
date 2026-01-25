@@ -3,22 +3,24 @@
 
 #pragma once
 
+#include <atomic>
 #include <shared_mutex>
 
 namespace sintra {
 
-inline thread_local unsigned int tl_dispatch_critical_depth = 0;
+// Global depth counter avoids TLS access from signal handlers.
+inline std::atomic<unsigned int> g_dispatch_critical_depth {0};
 
 class Dispatch_wait_depth_guard {
 public:
     Dispatch_wait_depth_guard()
     {
-        ++tl_dispatch_critical_depth;
+        g_dispatch_critical_depth.fetch_add(1, std::memory_order_relaxed);
     }
 
     ~Dispatch_wait_depth_guard()
     {
-        --tl_dispatch_critical_depth;
+        g_dispatch_critical_depth.fetch_sub(1, std::memory_order_relaxed);
     }
 
     Dispatch_wait_depth_guard(const Dispatch_wait_depth_guard&) = delete;
@@ -41,7 +43,7 @@ private:
 
 inline bool can_wait_for_signal_dispatch()
 {
-    return tl_dispatch_critical_depth == 0;
+    return g_dispatch_critical_depth.load(std::memory_order_relaxed) == 0;
 }
 
 } // namespace sintra

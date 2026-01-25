@@ -808,6 +808,7 @@ static void s_signal_handler(int sig, siginfo_t* info, void* ctx)
     auto& slot_table = signal_slots();
 
     auto* mproc = s_mproc;
+    // Process-wide depth guard: conservative to avoid TLS access in signal handler.
     const bool can_wait = can_wait_for_signal_dispatch();
     const bool should_wait_for_dispatch = mproc && mproc->m_out_req_c && sig != SIGCHLD;
     uint32_t dispatched_before = 0;
