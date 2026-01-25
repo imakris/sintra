@@ -563,11 +563,11 @@ static inline int umtx_wake(uint32_t* addr, int n)
 // Unified POSIX helpers (no further #ifs elsewhere)
 static inline int posix_wait_result_common(int rc, int err, bool spurious_other) noexcept
 {
-    if (rc == 0)       return 0;  // woke or spuriously woke
+    if (rc  == 0)         return  0;  // woke or spuriously woke
     if (err == ETIMEDOUT) return -1;
-    if (err == EINTR)  return 1;  // retry
-    if (err == EAGAIN) return 0;  // value changed before wait; recheck
-    return spurious_other ? 0 : -2;
+    if (err == EINTR)     return  1;  // retry
+    if (err == EAGAIN)    return  0;  // value changed before wait; recheck
+    return spurious_other ?  0 : -2;
 }
 
 static inline int posix_wait_equal_until(
@@ -610,16 +610,10 @@ static inline int posix_wait_equal_until(
             }
         }
         const int outcome = posix_wait_result_common(rc, errno, false);
-        if (outcome == 0) {
-            return 0;
-        }
-        if (outcome == -1) {
-            return -1;
-        }
         if (outcome == 1) {
             continue;
         }
-        return -1;
+        return outcome == 0 ? 0 : -1;
     }
 #elif SINTRA_BACKEND_FREEBSD
     for (;;) {
@@ -636,16 +630,10 @@ static inline int posix_wait_equal_until(
 
         int rc = umtx_wait_uint(addr, expected, &t);
         const int outcome = posix_wait_result_common(rc, errno, true);
-        if (outcome == 0) {
-            return 0;
-        }
-        if (outcome == -1) {
-            return -1;
-        }
         if (outcome == 1) {
             continue;
         }
-        return -1;
+        return outcome == 0 ? 0 : -1;
     }
 #elif SINTRA_BACKEND_POLLING
     // Polling backend: sleep 1ms and return spurious wake
