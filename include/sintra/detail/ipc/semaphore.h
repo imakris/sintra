@@ -74,8 +74,11 @@ CAVEATS
 #include <cstdint>
 #include <chrono>
 #include <cerrno>
+#include <cstdio>
+#include <cstdlib>
 #include <climits>
 #include <cwchar>
+#include <functional>
 #include <limits>
 #include <thread>
 
@@ -118,6 +121,71 @@ namespace sintra { namespace detail {
 
 static_assert(std::atomic<uint32_t>::is_always_lock_free, "requires lock-free 32-bit atomic");
 static_assert(sizeof(std::atomic<uint32_t>) == 4, "Assume 4-byte object representation");
+
+static inline bool sem_trace_enabled() noexcept
+{
+    static int enabled = -1;
+    if (enabled == -1) {
+        const char* env = std::getenv("SINTRA_SEM_TRACE");
+        enabled = (env && env[0] != '\0' && env[0] != '0') ? 1 : 0;
+    }
+    return enabled != 0;
+}
+
+static inline uint64_t sem_trace_tid() noexcept
+{
+#if SINTRA_BACKEND_LINUX
+    return static_cast<uint64_t>(syscall(SYS_gettid));
+#else
+    return static_cast<uint64_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+#endif
+}
+
+static inline void sem_trace_wait(
+    const char* tag, const void* addr, uint32_t count, int err, uint64_t deadline, uint64_t now) noexcept
+{
+    if (!sem_trace_enabled()) {
+        return;
+    }
+    std::fprintf(stderr,
+        "[sintra.sem] %s sem=%p tid=%llu count=%u err=%d deadline_ns=%llu now_ns=%llu\n",
+        tag,
+        addr,
+        static_cast<unsigned long long>(sem_trace_tid()),
+        count,
+        err,
+        static_cast<unsigned long long>(deadline),
+        static_cast<unsigned long long>(now));
+}
+
+static inline void sem_trace_post(
+    const void* addr, uint32_t before, uint32_t after, uint32_t n) noexcept
+{
+    if (!sem_trace_enabled()) {
+        return;
+    }
+    std::fprintf(stderr,
+        "[sintra.sem] post sem=%p tid=%llu before=%u after=%u n=%u\n",
+        addr,
+        static_cast<unsigned long long>(sem_trace_tid()),
+        before,
+        after,
+        n);
+}
+
+static inline void sem_trace_post_error(const void* addr, uint32_t count, uint32_t n, int err) noexcept
+{
+    if (!sem_trace_enabled()) {
+        return;
+    }
+    std::fprintf(stderr,
+        "[sintra.sem] post_error sem=%p tid=%llu count=%u n=%u err=%d\n",
+        addr,
+        static_cast<unsigned long long>(sem_trace_tid()),
+        count,
+        n,
+        err);
+}
 
 // ========================== Backend (single #if ladder) ==========================
 struct ips_backend
@@ -678,21 +746,32 @@ inline bool ips_backend::try_wait_for(std::chrono::nanoseconds d) noexcept
                 return true;
             continue;
         }
-        if (monotonic_now_ns() >= deadline) {
+        const uint64_t now = monotonic_now_ns();
+        if (now >= deadline) {
             if (try_wait()) {
                 return true;
             }
             errno = ETIMEDOUT;
             return false;
         }
-        if (posix_wait_equal_until(reinterpret_cast<uint32_t*>(&P(*this).count), 0u, deadline) == -1) {
-            if (errno == ETIMEDOUT) {
+        sem_trace_wait("wait_sleep", &c, cur, 0, deadline, now);
+        int rc = posix_wait_equal_until(reinterpret_cast<uint32_t*>(&P(*this).count), 0u, deadline);
+        if (rc == -1) {
+            const int err = errno;
+            const char* tag = (err == ETIMEDOUT) ? "wait_timeout" : "wait_error";
+            sem_trace_wait(tag, &c, c.load(std::memory_order_relaxed), err,
+                deadline, monotonic_now_ns());
+            if (err == ETIMEDOUT) {
                 if (try_wait()) {
                     return true;
                 }
                 return false;
             }
             // other errors treated as spurious; loop and recheck
+        }
+        else {
+            sem_trace_wait("wait_wake", &c, c.load(std::memory_order_relaxed), 0,
+                deadline, monotonic_now_ns());
         }
     }
 }
@@ -710,9 +789,12 @@ inline void ips_backend::post(uint32_t n) noexcept
     for (;;) {
         if (n > maxv - v) {
             errno = EOVERFLOW;
+            sem_trace_post_error(&c, v, n, errno);
             return;
         }
-        if (c.compare_exchange_weak(v, v + n)) {
+        const uint32_t next = v + n;
+        if (c.compare_exchange_weak(v, next)) {
+            sem_trace_post(&c, next - n, next, n);
             break;
         }
     }
