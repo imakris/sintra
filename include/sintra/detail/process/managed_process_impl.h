@@ -362,17 +362,32 @@ namespace {
         }
     }
 
+    // Signal-safe pause primitive for handler waits (no syscalls).
+    inline void signal_dispatch_spin_pause() noexcept
+    {
+#if defined(__x86_64__) || defined(__i386__)
+        __builtin_ia32_pause();
+#elif defined(__aarch64__)
+        __asm__ __volatile__("yield" ::: "memory");
+#elif defined(__arm__)
+        __asm__ __volatile__("yield");
+#else
+        // No-op on other architectures.
+#endif
+    }
+
     inline void wait_for_signal_dispatch(uint32_t expected_count)
     {
         const uint32_t target = expected_count + 1;
-        timespec ts;
-        ts.tv_sec = 0;
-        ts.tv_nsec = 1'000'000; // 1 millisecond
-        for (int spin = 0; spin < 200; ++spin) {
-            if (dispatched_signal_counter().load() >= target) {
+        constexpr int k_spin_rounds = 200;
+        constexpr int k_pause_per_round = 1024;
+        for (int round = 0; round < k_spin_rounds; ++round) {
+            if (dispatched_signal_counter().load(std::memory_order_acquire) >= target) {
                 return;
             }
-            ::nanosleep(&ts, nullptr);
+            for (int pause = 0; pause < k_pause_per_round; ++pause) {
+                signal_dispatch_spin_pause();
+            }
         }
     }
 
@@ -749,6 +764,12 @@ static void s_signal_handler(int sig, siginfo_t* info, void* ctx)
     auto& slot_table = signal_slots();
 
     auto* mproc = s_mproc;
+    const bool can_wait = can_wait_for_signal_dispatch();
+    const bool should_wait_for_dispatch = mproc && mproc->m_out_req_c && sig != SIGCHLD;
+    uint32_t dispatched_before = 0;
+    if (should_wait_for_dispatch && can_wait) {
+        dispatched_before = dispatched_signal_counter().load(std::memory_order_acquire);
+    }
 
     auto& pipefd = signal_pipe();
     if (pipefd[1] != -1) {
@@ -779,6 +800,10 @@ static void s_signal_handler(int sig, siginfo_t* info, void* ctx)
                 pending_signal_mask().fetch_or(1U << index);
             }
         }
+    }
+
+    if (should_wait_for_dispatch && can_wait) {
+        wait_for_signal_dispatch(dispatched_before);
     }
 
     if (auto* slot = find_slot(slot_table, sig); slot && slot->has_previous) {
