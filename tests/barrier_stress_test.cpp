@@ -41,7 +41,7 @@ int worker_process(std::uint32_t worker_index)
     using namespace sintra;
 
     const auto now = static_cast<unsigned>(
-        std::chrono::high_resolution_clock::now().time_since_epoch().count());
+        std::chrono::steady_clock::now().time_since_epoch().count());
 #ifdef _WIN32
     const auto pid = static_cast<unsigned>(_getpid());
 #else

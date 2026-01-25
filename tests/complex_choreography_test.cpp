@@ -153,7 +153,7 @@ std::filesystem::path ensure_shared_directory()
     std::filesystem::create_directories(base);
 
     const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
-        std::chrono::high_resolution_clock::now().time_since_epoch()).count();
+        std::chrono::steady_clock::now().time_since_epoch()).count();
 #ifdef _WIN32
     const auto pid = static_cast<long long>(_getpid());
 #else
@@ -259,7 +259,7 @@ std::uint64_t make_round_seed(int round)
     static std::atomic<std::uint64_t> counter{0};
     const std::uint64_t extra = counter.fetch_add(0x9E3779B97F4A7C15ULL);
     const auto now = static_cast<std::uint64_t>(
-        std::chrono::high_resolution_clock::now().time_since_epoch().count());
+        std::chrono::steady_clock::now().time_since_epoch().count());
 #ifdef _WIN32
     const auto pid = static_cast<std::uint64_t>(_getpid());
 #else

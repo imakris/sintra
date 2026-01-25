@@ -32,7 +32,7 @@ std::filesystem::path ensure_shared_directory()
     std::filesystem::create_directories(base);
 
     auto unique_suffix = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                             std::chrono::high_resolution_clock::now().time_since_epoch())
+                             std::chrono::steady_clock::now().time_since_epoch())
                              .count();
 
     dir = base / std::to_string(unique_suffix);

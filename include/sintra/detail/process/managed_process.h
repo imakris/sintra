@@ -253,7 +253,7 @@ struct Managed_process: Derived_transceiver<Managed_process>
     uint64_t                            m_messages_rejected_since_reference_time;
     sequence_counter_type               m_total_sequences_missed;
 
-    std::chrono::time_point<std::chrono::system_clock>
+    std::chrono::time_point<std::chrono::steady_clock>
                                         m_time_instantiated;
 
     map<
