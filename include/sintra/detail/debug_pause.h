@@ -9,8 +9,11 @@
 #include <chrono>
 #include <csignal>
 #include <cstdlib>
-#include <memory>
 #include <thread>
+
+#ifndef SINTRA_DEBUG_PAUSE_ON_EXIT
+#define SINTRA_DEBUG_PAUSE_ON_EXIT 0
+#endif
 
 #ifdef _WIN32
 #include <process.h>
@@ -21,32 +24,11 @@
 namespace sintra {
 namespace detail {
 
-// Debug pause functionality - only enabled when SINTRA_DEBUG_PAUSE_ON_EXIT is set
-#ifdef _WIN32
+// Debug pause functionality - only enabled when SINTRA_DEBUG_PAUSE_ON_EXIT is non-zero.
 inline bool is_debug_pause_requested()
 {
-#if defined(_MSC_VER)
-    size_t len = 0;
-    char* raw = nullptr;
-    const errno_t rc = _dupenv_s(&raw, &len, "SINTRA_DEBUG_PAUSE_ON_EXIT");
-    std::unique_ptr<char, decltype(&std::free)> env(raw, &std::free);
-    if (rc != 0 || !env) {
-        return false;
-    }
-    return len > 0 && env.get()[0] != '0' && env.get()[0] != '\0';
-#else
-    // MinGW may not provide _dupenv_s; fall back to the portable getenv API.
-    const char* env = std::getenv("SINTRA_DEBUG_PAUSE_ON_EXIT");
-    return env && *env && (*env != '0');
-#endif
+    return SINTRA_DEBUG_PAUSE_ON_EXIT != 0;
 }
-#else
-inline bool is_debug_pause_requested()
-{
-    const char* env = std::getenv("SINTRA_DEBUG_PAUSE_ON_EXIT");
-    return env && *env && (*env != '0');
-}
-#endif
 
 inline std::atomic<bool>& debug_pause_state()
 {
@@ -86,7 +68,7 @@ inline void debug_pause_forever(const char* reason)
 // intercepts SIGABRT and calls TerminateProcess() immediately, which prevents
 // both the debug_pause signal handler and the test harness from capturing
 // crash information. By calling debug_pause_forever() BEFORE abort(), we
-// ensure the process pauses for debugging when SINTRA_DEBUG_PAUSE_ON_EXIT=1.
+// ensure the process pauses for debugging when SINTRA_DEBUG_PAUSE_ON_EXIT != 0.
 [[noreturn]] inline void debug_aware_abort()
 {
     if (is_debug_pause_active()) {

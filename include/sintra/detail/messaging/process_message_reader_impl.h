@@ -14,6 +14,10 @@
 #include <mutex>
 #include <utility>
 
+#ifndef SINTRA_TRACE_WORLD
+#define SINTRA_TRACE_WORLD 0
+#endif
+
 namespace sintra {
 
 void install_signal_handler();
@@ -362,14 +366,8 @@ void Process_message_reader::request_reader_function()
                             any_local_or_remote
                         };
 
-                        // Optional debug tracing for world broadcasts to diagnose missing deliveries.
-                        const bool trace_world = [] {
-                            static bool enabled = [] {
-                                const char* env = std::getenv("SINTRA_TRACE_WORLD");
-                                return env && env[0] == '1';
-                            }();
-                            return enabled;
-                        }();
+                        // Optional debug tracing for world broadcasts to diagnose missing deliveries (SINTRA_TRACE_WORLD).
+                        const bool trace_world = (SINTRA_TRACE_WORLD != 0);
 
                         if (trace_world) {
                             Log_stream(log_level::debug)

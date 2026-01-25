@@ -34,6 +34,10 @@
 #include <unistd.h>
 #endif
 
+#ifndef SINTRA_TRACE_FINALIZE
+#define SINTRA_TRACE_FINALIZE 0
+#endif
+
 namespace sintra {
 namespace detail {
 
@@ -227,10 +231,7 @@ inline bool finalize()
         return false;
     }
 
-    const bool trace_finalize = [] {
-        const char* env = std::getenv("SINTRA_TRACE_FINALIZE");
-        return env && *env && (*env != '0');
-    }();
+    const bool trace_finalize = (SINTRA_TRACE_FINALIZE != 0);
 
     auto trace = [&](const char* stage) {
         if (trace_finalize) {

@@ -64,6 +64,15 @@ namespace sintra {
 
 namespace detail {
 
+// Optional hooks for test builds; override via macros before including sintra.
+#ifndef SINTRA_PRESERVE_SCRATCH
+#define SINTRA_PRESERVE_SCRATCH 0
+#endif
+
+#ifndef SINTRA_TEST_ROOT
+#define SINTRA_TEST_ROOT nullptr
+#endif
+
 #ifdef _WIN32
 inline std::size_t query_system_page_size() noexcept
 {
@@ -630,12 +639,13 @@ inline void cleanup_stale_swarm_directories(const std::filesystem::path& base_di
     }
 
 #ifdef _WIN32
+#if defined(_MSC_VER)
 #pragma warning(push)
-#pragma warning(disable: 4996)  // getenv is safe for read-only use
-    const char* preserve = std::getenv("SINTRA_PRESERVE_SCRATCH");
-    if (preserve && *preserve && *preserve != '0') {
-        const char* test_root_env = std::getenv("SINTRA_TEST_ROOT");
-#pragma warning(pop)
+#pragma warning(disable: 4996)
+#endif
+    const bool preserve = (SINTRA_PRESERVE_SCRATCH);
+    if (preserve) {
+        const char* test_root_env = (SINTRA_TEST_ROOT);
         if (!test_root_env || !*test_root_env) {
             return;
         }
@@ -649,6 +659,9 @@ inline void cleanup_stale_swarm_directories(const std::filesystem::path& base_di
             return;
         }
     }
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
 #endif
 
     const auto now_monotonic = monotonic_now_ns();

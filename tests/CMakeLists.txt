@@ -39,6 +39,11 @@ function(add_test_suite SUFFIX IS_DEBUG)
     add_library(${LIB_TARGET} INTERFACE)
     target_include_directories(${LIB_TARGET} INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
     target_compile_features(${LIB_TARGET} INTERFACE cxx_std_17)
+    target_compile_definitions(${LIB_TARGET} INTERFACE
+        SINTRA_DEBUG_PAUSE_ON_EXIT=1
+        "SINTRA_PRESERVE_SCRATCH=(::std::getenv(\"SINTRA_PRESERVE_SCRATCH\") && ::std::getenv(\"SINTRA_PRESERVE_SCRATCH\")[0] != '0')"
+        "SINTRA_TEST_ROOT=::std::getenv(\"SINTRA_TEST_ROOT\")"
+    )
     target_link_libraries(${LIB_TARGET} INTERFACE Threads::Threads)
 
     # Link winmm on Windows for timeBeginPeriod/timeEndPeriod
