@@ -601,7 +601,8 @@ static inline int posix_wait_equal_until(
         }
         if (rc == 0)                           return  0; // value changed or spuriously woke; caller rechecks
         if (errno == ETIMEDOUT)                return -1;
-        if (errno == EINTR || errno == EAGAIN) continue;
+        if (errno == EINTR)                    continue;
+        if (errno == EAGAIN)                   return  0; // value changed before wait; recheck
         return -1;
     }
 #elif SINTRA_BACKEND_FREEBSD
