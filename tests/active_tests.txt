@@ -16,5 +16,7 @@
 # The test runner will run each test for the specified number of iterations.
 
 # Long-running stress (intended to run until CI time limit)
+barrier_flush_test_debug               1000000
 barrier_flush_test_release             1000000
 complex_choreography_test_debug        1000000
+complex_choreography_test_release      1000000
