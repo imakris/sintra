@@ -1555,6 +1555,7 @@ struct Ring_R : Ring<T, true>
             // so scavenger cannot race a half-updated slot.
             auto& slot = c.reading_sequences[m_rs_index].data;
             slot.owner_pid = 0;
+            slot.clear_pending();
             slot.set_status(Ring<T, true>::READER_STATE_INACTIVE);
 
             // Push only if not already in the freelist (defensive: avoid duplicates).

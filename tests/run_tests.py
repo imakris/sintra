@@ -146,6 +146,8 @@ def _canonical_test_name(name: str) -> str:
     canonical = name.strip()
     if canonical.startswith("sintra_"):
         canonical = canonical[len("sintra_"):]
+    if canonical.startswith("manual/"):
+        canonical = canonical[len("manual/"):]
     if canonical.endswith("_adaptive"):
         canonical = canonical[: -len("_adaptive")]
     return canonical
