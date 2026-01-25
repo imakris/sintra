@@ -62,6 +62,7 @@ lifeline_basic_test                        5
 # Uncomment to enable these tests (they may fail by design)
 
 # manual/barrier_delivery_fence_repro_test 1
+# manual/guard_pending_writer_integration_test 1
 # manual/hang_test 1
 # manual/coordinator_crash_children_hang_test 1
 # manual/children_crash_coordinator_deadlock_test 1

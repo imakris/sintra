@@ -28,6 +28,7 @@
 #include "sintra/detail/ipc/rings.h"
 
 #include "test_environment.h"
+#include "test_ring_utils.h"
 #include "sintra/detail/debug_pause.h"
 #undef private
 #undef protected
@@ -155,56 +156,9 @@ struct Register_test {
     static Register_test name##_registrar(#name, name, true); \
     void name()
 
-std::atomic<uint64_t>& test_counter()
-{
-    static std::atomic<uint64_t> counter{0};
-    return counter;
-}
-
-struct Temp_ring_dir {
-    std::filesystem::path path;
-
-    explicit Temp_ring_dir(const std::string& hint)
-    {
-        auto base = sintra::test::scratch_subdirectory("ipc_rings");
-
-        // Simple unique directory name
-        auto id = test_counter()++;
-        path = base / (hint + '_' + std::to_string(id));
-        std::filesystem::create_directories(path);
-    }
-
-    ~Temp_ring_dir()
-    {
-        // Clean removal - no delays needed!
-        // The library now handles uniqueness internally, so rapid create/destroy
-        // never tries to reuse the same files.
-        std::error_code ec;
-        std::filesystem::remove_all(path, ec);
-        // Ignore errors - temp cleanup is best-effort
-    }
-
-    std::string str() const { return path.string(); }
-};
-
-template <typename T>
-size_t pick_ring_elements(size_t min_elements = 8)
-{
-    size_t page_size = sintra::system_page_size();
-    size_t ring_bytes = page_size;
-    while (true) {
-        if (ring_bytes % sizeof(T) == 0) {
-            size_t elems = ring_bytes / sizeof(T);
-            if (elems % 8 == 0 && elems >= min_elements) {
-                return elems;
-            }
-        }
-        ring_bytes += page_size;
-        if (ring_bytes > page_size * 1024) {
-            throw std::runtime_error("Unable to find suitable ring size");
-        }
-    }
-}
+// Use shared test utilities from test_ring_utils.h
+using sintra::test::Temp_ring_dir;
+using sintra::test::pick_ring_elements;
 
 TEST_CASE(test_get_ring_configurations_properties)
 {

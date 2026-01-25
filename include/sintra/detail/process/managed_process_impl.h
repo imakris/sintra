@@ -363,16 +363,22 @@ namespace {
     }
 
     // Signal-safe pause primitive for handler waits (no syscalls).
+    // Provides CPU hints to reduce power consumption and contention during spin-waits.
     inline void signal_dispatch_spin_pause() noexcept
     {
 #if defined(__x86_64__) || defined(__i386__)
         __builtin_ia32_pause();
-#elif defined(__aarch64__)
+#elif defined(__aarch64__) || defined(__arm__)
         __asm__ __volatile__("yield" ::: "memory");
-#elif defined(__arm__)
-        __asm__ __volatile__("yield" ::: "memory");
+#elif defined(__riscv)
+        // RISC-V pause hint (encoding for `pause` instruction).
+        __asm__ __volatile__(".insn i 0x0F, 0, x0, x0, 0x010" ::: "memory");
+#elif defined(__powerpc__) || defined(__powerpc64__)
+        __asm__ __volatile__("or 27,27,27" ::: "memory");  // Low-priority hint
 #else
-        // No-op on other architectures.
+        // Fallback: compiler memory barrier prevents loop optimization while allowing
+        // the CPU to proceed. Not as efficient as a pause hint but better than nothing.
+        __asm__ __volatile__("" ::: "memory");
 #endif
     }
 
@@ -392,7 +398,13 @@ namespace {
         uint64_t start_ns = signal_dispatch_now_ns();
         constexpr int k_fallback_rounds = 5000;
         int fallback_rounds = (start_ns == 0) ? k_fallback_rounds : -1;
-        constexpr int k_pause_per_round = 256;
+
+        // Exponential backoff: start responsive (32 pauses), grow to max (1024).
+        // This reduces CPU usage during longer waits while staying responsive
+        // for the common case where dispatch completes quickly.
+        constexpr int k_initial_pause_count = 32;
+        constexpr int k_max_pause_count = 1024;
+        int pause_count = k_initial_pause_count;
 
         for (;;) {
             const uint32_t current = dispatched_signal_counter().load(std::memory_order_acquire);
@@ -412,8 +424,13 @@ namespace {
                 }
             }
 
-            for (int pause = 0; pause < k_pause_per_round; ++pause) {
+            for (int pause = 0; pause < pause_count; ++pause) {
                 signal_dispatch_spin_pause();
+            }
+
+            // Double pause count each iteration up to maximum (exponential backoff).
+            if (pause_count < k_max_pause_count) {
+                pause_count *= 2;
             }
         }
     }
