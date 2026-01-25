@@ -17,6 +17,7 @@
 #include <chrono>
 #include <csignal>
 #include <cstdint>
+#include <cstdarg>
 #include <cerrno>
 #include <climits>
 #include <cstdlib>
@@ -65,10 +66,77 @@ void test_get_win_semaphore_info(const interprocess_semaphore& sem,
 } // namespace sintra::detail
 #endif
 
+#if !defined(_WIN32)
+namespace sintra::detail {
+void test_get_posix_semaphore_info(const interprocess_semaphore& sem,
+                                   std::uint32_t& count,
+                                   std::uint32_t& max)
+{
+    const auto& backend = sem.m_impl;
+    const auto& state = *reinterpret_cast<const ips_backend_posix_state*>(backend.storage);
+    count = state.count.load(std::memory_order_relaxed);
+    max = state.max;
+}
+} // namespace sintra::detail
+#endif
+
 namespace
 {
 
 using sintra::detail::interprocess_semaphore;
+
+#if defined(_WIN32)
+inline int current_pid() { return _getpid(); }
+#else
+inline int current_pid() { return static_cast<int>(getpid()); }
+#endif
+
+inline uint64_t thread_id_numeric()
+{
+    return static_cast<uint64_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+}
+
+inline uint64_t elapsed_ms()
+{
+    static const auto start = std::chrono::steady_clock::now();
+    const auto now = std::chrono::steady_clock::now();
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count());
+}
+
+inline std::mutex& log_mutex()
+{
+    static std::mutex mtx;
+    return mtx;
+}
+
+inline void log_event(const char* tag, const char* fmt, ...)
+{
+    std::lock_guard<std::mutex> lock(log_mutex());
+    std::fprintf(stderr, "[interprocess_semaphore_test +%llums pid=%d tid=%llu] %s: ",
+                 static_cast<unsigned long long>(elapsed_ms()),
+                 current_pid(),
+                 static_cast<unsigned long long>(thread_id_numeric()),
+                 tag);
+    va_list args;
+    va_start(args, fmt);
+    std::vfprintf(stderr, fmt, args);
+    va_end(args);
+    std::fputc('\n', stderr);
+    std::fflush(stderr);
+}
+
+struct Thread_stats
+{
+    std::uint64_t posts = 0;
+    std::uint64_t waits = 0;
+    std::uint64_t acquired = 0;
+    std::uint64_t timeouts = 0;
+    std::uint64_t yields = 0;
+    std::uint32_t seed = 0;
+    std::uint32_t last_rng = 0;
+    int last_errno = 0;
+};
 
 #if defined(_WIN32)
 constexpr std::size_t k_windows_name_chars = 64;
@@ -302,28 +370,41 @@ void test_multithreaded_contention()
     interprocess_semaphore sem(0);
     std::atomic<int> posted{0};
     std::atomic<int> acquired{0};
+    std::vector<Thread_stats> stats(static_cast<std::size_t>(k_threads));
 
     std::random_device rd;
     std::vector<std::thread> threads;
     threads.reserve(k_threads);
 
     for (int t = 0; t < k_threads; ++t) {
-        threads.emplace_back([&, seed = rd()]() mutable {
+        threads.emplace_back([&, seed = rd(), index = t]() mutable {
+            auto& local = stats[static_cast<std::size_t>(index)];
+            local.seed = seed;
             std::mt19937 rng(seed);
             for (int i = 0; i < k_iterations_per_thread; ++i) {
-                if ((rng() & 3) == 0) {
+                const auto sample = rng();
+                local.last_rng = sample;
+                if ((sample & 3) == 0) {
                     sem.post();
                     posted.fetch_add(1);
+                    ++local.posts;
                 }
                 else {
+                    ++local.waits;
                     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(3);
                     if (sem.timed_wait(deadline)) {
                         acquired.fetch_add(1);
+                        ++local.acquired;
+                    }
+                    else {
+                        ++local.timeouts;
+                        local.last_errno = errno;
                     }
                 }
 
                 if ((i & 0x7F) == 0) {
                     std::this_thread::yield();
+                    ++local.yields;
                 }
             }
         });
@@ -333,11 +414,71 @@ void test_multithreaded_contention()
         th.join();
     }
 
+    int drained = 0;
     while (sem.try_wait()) {
         acquired.fetch_add(1);
+        ++drained;
     }
 
-    REQUIRE_EQ(posted.load(), acquired.load());
+    const auto posted_total = posted.load();
+    const auto acquired_total = acquired.load();
+
+    if (posted_total != acquired_total) {
+        std::uint64_t total_posts = 0;
+        std::uint64_t total_waits = 0;
+        std::uint64_t total_acquired = 0;
+        std::uint64_t total_timeouts = 0;
+        std::uint64_t total_yields = 0;
+        for (const auto& entry : stats) {
+            total_posts += entry.posts;
+            total_waits += entry.waits;
+            total_acquired += entry.acquired;
+            total_timeouts += entry.timeouts;
+            total_yields += entry.yields;
+        }
+
+        log_event("contention", "mismatch posted=%d acquired=%d drained=%d totals posts=%llu waits=%llu acquired=%llu timeouts=%llu yields=%llu",
+                  posted_total,
+                  acquired_total,
+                  drained,
+                  static_cast<unsigned long long>(total_posts),
+                  static_cast<unsigned long long>(total_waits),
+                  static_cast<unsigned long long>(total_acquired),
+                  static_cast<unsigned long long>(total_timeouts),
+                  static_cast<unsigned long long>(total_yields));
+
+#if defined(_WIN32)
+        std::uint64_t sem_id = 0;
+        std::wstring sem_name;
+        test_get_win_semaphore_info(sem, sem_id, sem_name);
+        log_event("contention", "win semaphore id=0x%llx name=%ls",
+                  static_cast<unsigned long long>(sem_id),
+                  sem_name.c_str());
+#else
+        std::uint32_t sem_count = 0;
+        std::uint32_t sem_max = 0;
+        test_get_posix_semaphore_info(sem, sem_count, sem_max);
+        log_event("contention", "posix semaphore count=%u max=%u",
+                  sem_count,
+                  sem_max);
+#endif
+
+        for (std::size_t idx = 0; idx < stats.size(); ++idx) {
+            const auto& entry = stats[idx];
+            log_event("contention", "thread[%zu] seed=%u last_rng=%u last_errno=%d posts=%llu waits=%llu acquired=%llu timeouts=%llu yields=%llu",
+                      idx,
+                      entry.seed,
+                      entry.last_rng,
+                      entry.last_errno,
+                      static_cast<unsigned long long>(entry.posts),
+                      static_cast<unsigned long long>(entry.waits),
+                      static_cast<unsigned long long>(entry.acquired),
+                      static_cast<unsigned long long>(entry.timeouts),
+                      static_cast<unsigned long long>(entry.yields));
+        }
+    }
+
+    REQUIRE_EQ(posted_total, acquired_total);
 }
 
 #if defined(__unix__) || defined(__APPLE__)

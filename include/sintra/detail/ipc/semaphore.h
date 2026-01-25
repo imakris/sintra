@@ -802,6 +802,9 @@ public:
 #ifdef _WIN32
     // Friend for testing: allows test to extract Windows semaphore details without hardcoded offsets
     friend void test_get_win_semaphore_info(const interprocess_semaphore&, std::uint64_t&, std::wstring&);
+#else
+    // Friend for testing: allows test to inspect POSIX semaphore state.
+    friend void test_get_posix_semaphore_info(const interprocess_semaphore&, std::uint32_t&, std::uint32_t&);
 #endif
 
 private:
