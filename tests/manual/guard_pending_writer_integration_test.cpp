@@ -3,15 +3,16 @@
 // This test exercises the writer loop under timing/scheduling assumptions,
 // so it was moved from unit tests to avoid flaky CI failures.
 
+// Include test utilities FIRST to ensure all standard library headers are
+// included with proper access specifiers before the private/protected hack.
 #include <test_environment.h>
+#include <test_ring_utils.h>
 
 #include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
-#include <filesystem>
 #include <optional>
-#include <stdexcept>
 #include <string>
 #include <thread>
 
@@ -26,41 +27,8 @@
 
 namespace {
 
-struct Temp_ring_dir {
-    std::filesystem::path path;
-
-    explicit Temp_ring_dir(const std::string& hint)
-    {
-        path = sintra::test::unique_scratch_directory(hint);
-    }
-
-    ~Temp_ring_dir()
-    {
-        std::error_code ec;
-        std::filesystem::remove_all(path, ec);
-    }
-
-    std::string str() const { return path.string(); }
-};
-
-template <typename T>
-size_t pick_ring_elements(size_t min_elements = 8)
-{
-    size_t page_size = sintra::system_page_size();
-    size_t ring_bytes = page_size;
-    while (true) {
-        if (ring_bytes % sizeof(T) == 0) {
-            size_t elems = ring_bytes / sizeof(T);
-            if (elems % 8 == 0 && elems >= min_elements) {
-                return elems;
-            }
-        }
-        ring_bytes += page_size;
-        if (ring_bytes > page_size * 1024) {
-            throw std::runtime_error("Unable to find suitable ring size");
-        }
-    }
-}
+using sintra::test::Temp_ring_dir;
+using sintra::test::pick_ring_elements;
 
 int run_test()
 {
