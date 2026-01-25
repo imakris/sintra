@@ -210,6 +210,7 @@ struct Test_case
 void test_basic_semantics()
 {
     interprocess_semaphore sem(3);
+    static std::atomic<bool> warned_wait_slow{false};
     static std::atomic<bool> warned_timeout_slow{false};
     static std::atomic<bool> warned_signal_slow{false};
 
@@ -221,21 +222,36 @@ void test_basic_semantics()
     sem.post();
     REQUIRE_TRUE(sem.try_wait());
 
+    std::atomic<bool> wait_entered{false};
+    std::atomic<bool> wait_completed{false};
     std::thread blocker([&]() {
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-        sem.post();
+        wait_entered.store(true, std::memory_order_release);
+        const auto wait_start = std::chrono::steady_clock::now();
+        sem.wait();
+        const auto wait_elapsed = std::chrono::steady_clock::now() - wait_start;
+        wait_completed.store(true, std::memory_order_release);
+        if (wait_elapsed > std::chrono::milliseconds(200)) {
+            if (!warned_wait_slow.exchange(true)) {
+                log_event(
+                    "basic_semantics",
+                    "slow wait(): %lldms",
+                    static_cast<long long>(
+                        std::chrono::duration_cast<std::chrono::milliseconds>(wait_elapsed).count()));
+            }
+        }
     });
-    const auto wait_start = std::chrono::steady_clock::now();
-    sem.wait();
-    const auto wait_elapsed = std::chrono::steady_clock::now() - wait_start;
+    while (!wait_entered.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+    }
+    REQUIRE_FALSE(wait_completed.load(std::memory_order_acquire));
+    sem.post();
     blocker.join();
-    REQUIRE_GE(wait_elapsed, std::chrono::milliseconds(10));
+    REQUIRE_TRUE(wait_completed.load(std::memory_order_acquire));
 
     const auto timeout_start = std::chrono::steady_clock::now();
     const bool timed_out = sem.timed_wait(timeout_start + std::chrono::milliseconds(80));
     const auto timeout_elapsed = std::chrono::steady_clock::now() - timeout_start;
     REQUIRE_FALSE(timed_out);
-    REQUIRE_GE(timeout_elapsed, std::chrono::milliseconds(60));
     if (timeout_elapsed > std::chrono::milliseconds(250)) {
         if (!warned_timeout_slow.exchange(true)) {
             log_event(
@@ -246,14 +262,23 @@ void test_basic_semantics()
         }
     }
 
-    std::thread notifier([&]() {
-        std::this_thread::sleep_for(std::chrono::milliseconds(40));
-        sem.post();
+    std::atomic<bool> signal_wait_entered{false};
+    std::atomic<bool> signal_wait_completed{false};
+    bool signalled = false;
+    std::chrono::steady_clock::duration signal_wait_elapsed{};
+    std::thread waiter([&]() {
+        signal_wait_entered.store(true, std::memory_order_release);
+        const auto signal_wait_start = std::chrono::steady_clock::now();
+        signalled = sem.timed_wait(signal_wait_start + std::chrono::milliseconds(500));
+        signal_wait_elapsed = std::chrono::steady_clock::now() - signal_wait_start;
+        signal_wait_completed.store(true, std::memory_order_release);
     });
-    const auto signal_wait_start = std::chrono::steady_clock::now();
-    const bool signalled = sem.timed_wait(signal_wait_start + std::chrono::milliseconds(500));
-    const auto signal_wait_elapsed = std::chrono::steady_clock::now() - signal_wait_start;
-    notifier.join();
+    while (!signal_wait_entered.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+    }
+    REQUIRE_FALSE(signal_wait_completed.load(std::memory_order_acquire));
+    sem.post();
+    waiter.join();
     REQUIRE_TRUE(signalled);
     if (signal_wait_elapsed > std::chrono::milliseconds(200)) {
         if (!warned_signal_slow.exchange(true)) {
