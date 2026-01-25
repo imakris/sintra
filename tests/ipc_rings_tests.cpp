@@ -565,11 +565,8 @@ TEST_CASE(test_guard_pending_prevents_underflow)
     sintra::Ring_W<uint32_t> writer(tmp.str(), ring_name, ring_elements);
     sintra::Ring_R<uint32_t> reader(tmp.str(), ring_name, ring_elements, ring_elements / 2);
 
-    const size_t head_index = ring_elements / 8;
-    const uint8_t new_octile = sintra::octile_of_index(head_index, ring_elements);
-    writer.m_octile = static_cast<uint8_t>((new_octile + 7) % 8);
-
-    const uint64_t guard_mask = sintra::octile_mask(new_octile);
+    const uint8_t target_octile = 3;
+    const uint64_t guard_mask = sintra::octile_mask(target_octile);
 
     auto& slot = reader.c.reading_sequences[reader.m_rs_index].data;
     using Reader_state_union = sintra::Ring<uint32_t, true>::Reader_state_union;
@@ -578,7 +575,7 @@ TEST_CASE(test_guard_pending_prevents_underflow)
     slot.fetch_update_state_if(
         [&](Reader_state_union current) -> std::optional<Reader_state_union>
         {
-            return current.with_pending(new_octile);
+            return current.with_pending(target_octile);
         },
         pending_set);
     ASSERT_TRUE(pending_set);
@@ -586,35 +583,20 @@ TEST_CASE(test_guard_pending_prevents_underflow)
     // Simulate a reader starting guard acquisition with a pending update.
     reader.c.read_access.fetch_add(guard_mask);
 
-    std::thread writer_thread([&] {
-        writer.advance_writer_octile_if_needed(head_index);
-    });
+    ASSERT_EQ(1u, writer.c.count_guards_for_octile(target_octile));
+    ASSERT_FALSE(writer.try_rollback_unpaired_read_access(target_octile));
+    ASSERT_EQ(guard_mask, reader.c.read_access.load() & guard_mask);
 
-    try {
-        slot.set_guard_token(static_cast<uint8_t>(0x08 | new_octile));
-        slot.clear_pending();
+    slot.clear_pending();
 
-        reader.m_trailing_octile = new_octile;
-        reader.m_reading = true;
-        reader.m_reading_lock = false;
-        reader.done_reading();
-
-        if (writer_thread.joinable()) {
-            writer_thread.join();
-        }
-    }
-    catch (...) {
-        if (writer_thread.joinable()) {
-            writer_thread.join();
-        }
-        throw;
-    }
+    ASSERT_EQ(0u, writer.c.count_guards_for_octile(target_octile));
+    ASSERT_TRUE(writer.try_rollback_unpaired_read_access(target_octile));
 
     uint64_t read_access = reader.c.read_access.load();
-    uint8_t guard_count = static_cast<uint8_t>((read_access >> (8 * new_octile)) & 0xffu);
+    uint8_t guard_count = static_cast<uint8_t>((read_access >> (8 * target_octile)) & 0xffu);
 
     ASSERT_EQ(0u, static_cast<unsigned>(guard_count));
-    ASSERT_EQ(new_octile, writer.m_octile);
+    ASSERT_EQ(uint64_t(0), read_access & guard_mask);
 }
 
 TEST_CASE(test_guard_rollback_success)

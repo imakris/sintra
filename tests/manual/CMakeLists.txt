@@ -8,6 +8,7 @@ function(add_manual_test_suite SUFFIX IS_DEBUG)
 
     set(MANUAL_TEST_FILES
         barrier_delivery_fence_repro_test.cpp
+        guard_pending_writer_integration_test.cpp
         hang_test.cpp
         coordinator_crash_children_hang_test.cpp
         children_crash_coordinator_deadlock_test.cpp

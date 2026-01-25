@@ -2154,13 +2154,12 @@ struct Ring_R : Ring<T, true>
 
         while (true) {
             auto& slot = c.reading_sequences[m_rs_index].data;
-            bool pending_set = false;
-            slot.fetch_update_state_if(
-                [&](Reader_state_union current) -> std::optional<Reader_state_union>
+            Reader_state_union::cas_update(
+                slot.word,
+                [&](Reader_state_union current)
                 {
                     return current.with_pending(static_cast<uint8_t>(m_trailing_octile));
-                },
-                pending_set);
+                });
 
             c.read_access.fetch_add(mask);
 
