@@ -924,15 +924,6 @@ class TestRunner:
             heartbeat_stop = threading.Event()
             heartbeat_thread: Optional[threading.Thread] = None
 
-            def _tail_lines(text: str, max_lines: int = 20, max_len: int = 400) -> str:
-                if not text:
-                    return ""
-                lines = text.splitlines()
-                tail = lines[-max_lines:]
-                if max_len > 0:
-                    tail = [line[:max_len] for line in tail]
-                return "\n".join(tail)
-
             @contextlib.contextmanager
             def stack_capture_context(mark_failure: bool) -> Iterator[bool]:
                 nonlocal capture_pause_total, capture_active_start
@@ -1811,12 +1802,6 @@ class TestRunner:
                     else:
                         error_msg = capture_note
 
-                if not success:
-                    if not stderr.strip() and stdout.strip():
-                        stdout_tail = _tail_lines(stdout)
-                        if stdout_tail:
-                            error_msg = f"{error_msg}\n\n[stdout tail]\n{stdout_tail}"
-
                 result_success = success
                 return TestResult(
                     success=success,
@@ -1891,14 +1876,6 @@ class TestRunner:
                     stderr = f"{stderr}\n\n=== Captured stack traces ===\n{stack_traces}"
                 elif stack_error:
                     stderr = f"{stderr}\n\n[Stack capture unavailable: {stack_error}]"
-
-                if not stderr.strip() and stdout.strip():
-                    stdout_tail = _tail_lines(stdout)
-                    if stdout_tail:
-                        if stderr:
-                            stderr = f"{stderr}\n\n[stdout tail]\n{stdout_tail}"
-                        else:
-                            stderr = f"[stdout tail]\n{stdout_tail}"
 
                 result_success = False
                 return TestResult(
