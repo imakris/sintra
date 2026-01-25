@@ -562,7 +562,6 @@ TEST_CASE(test_guard_pending_prevents_underflow)
     const std::string ring_name = "ring_data";
     const size_t ring_elements = pick_ring_elements<uint32_t>(64);
 
-    sintra::Ring_W<uint32_t> writer(tmp.str(), ring_name, ring_elements);
     sintra::Ring_R<uint32_t> reader(tmp.str(), ring_name, ring_elements, ring_elements / 2);
 
     const uint8_t target_octile = 3;
@@ -583,14 +582,14 @@ TEST_CASE(test_guard_pending_prevents_underflow)
     // Simulate a reader starting guard acquisition with a pending update.
     reader.c.read_access.fetch_add(guard_mask);
 
-    ASSERT_EQ(1u, writer.c.count_guards_for_octile(target_octile));
-    ASSERT_FALSE(writer.try_rollback_unpaired_read_access(target_octile));
+    ASSERT_EQ(1u, reader.c.count_guards_for_octile(target_octile));
+    ASSERT_FALSE(reader.try_rollback_unpaired_read_access(target_octile));
     ASSERT_EQ(guard_mask, reader.c.read_access.load() & guard_mask);
 
     slot.clear_pending();
 
-    ASSERT_EQ(0u, writer.c.count_guards_for_octile(target_octile));
-    ASSERT_TRUE(writer.try_rollback_unpaired_read_access(target_octile));
+    ASSERT_EQ(0u, reader.c.count_guards_for_octile(target_octile));
+    ASSERT_TRUE(reader.try_rollback_unpaired_read_access(target_octile));
 
     uint64_t read_access = reader.c.read_access.load();
     uint8_t guard_count = static_cast<uint8_t>((read_access >> (8 * target_octile)) & 0xffu);
