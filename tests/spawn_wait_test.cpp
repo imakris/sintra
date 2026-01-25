@@ -73,7 +73,7 @@ std::filesystem::path ensure_shared_directory()
     auto base = sintra::test::scratch_subdirectory("spawn_wait_test");
 
     auto unique_suffix = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                             std::chrono::high_resolution_clock::now().time_since_epoch())
+                             std::chrono::steady_clock::now().time_since_epoch())
                              .count();
 #ifdef _WIN32
     unique_suffix ^= static_cast<long long>(_getpid());

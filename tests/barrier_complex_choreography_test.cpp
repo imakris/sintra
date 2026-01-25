@@ -93,7 +93,7 @@ std::filesystem::path ensure_shared_directory()
     auto base = sintra::test::scratch_subdirectory("barrier_complex_choreography");
 
     auto unique_suffix = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                             std::chrono::high_resolution_clock::now().time_since_epoch())
+                             std::chrono::steady_clock::now().time_since_epoch())
                              .count();
 #ifdef _WIN32
     unique_suffix ^= static_cast<long long>(_getpid());
@@ -453,7 +453,7 @@ int stage_process(std::uint32_t stage, std::uint32_t worker_index)
     });
 
     const auto now_seed = static_cast<unsigned>(
-        std::chrono::high_resolution_clock::now().time_since_epoch().count());
+        std::chrono::steady_clock::now().time_since_epoch().count());
 #ifdef _WIN32
     const auto pid_seed = static_cast<unsigned>(_getpid());
 #else

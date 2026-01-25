@@ -180,7 +180,7 @@ std::filesystem::path ensure_shared_directory()
     std::filesystem::create_directories(base);
 
     const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                         std::chrono::high_resolution_clock::now().time_since_epoch())
+                         std::chrono::steady_clock::now().time_since_epoch())
                          .count();
 #ifdef _WIN32
     const auto pid = static_cast<long long>(_getpid());

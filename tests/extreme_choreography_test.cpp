@@ -208,7 +208,7 @@ std::filesystem::path ensure_shared_directory()
     std::filesystem::create_directories(base);
 
     const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
-        std::chrono::high_resolution_clock::now().time_since_epoch()).count();
+        std::chrono::steady_clock::now().time_since_epoch()).count();
 
 #ifdef _WIN32
     const auto pid = static_cast<long long>(_getpid());
@@ -389,7 +389,7 @@ int producer_process()
     bool stop_requested = false;
 
     const auto seed = static_cast<unsigned>(
-        std::chrono::high_resolution_clock::now().time_since_epoch().count());
+        std::chrono::steady_clock::now().time_since_epoch().count());
 #ifdef _WIN32
     const auto pid_component = static_cast<unsigned>(_getpid());
 #else
@@ -481,7 +481,7 @@ int consumer_process()
     bool stop_requested = false;
 
     const auto seed = static_cast<unsigned>(
-        std::chrono::high_resolution_clock::now().time_since_epoch().count());
+        std::chrono::steady_clock::now().time_since_epoch().count());
 #ifdef _WIN32
     const auto pid_component = static_cast<unsigned>(_getpid());
 #else

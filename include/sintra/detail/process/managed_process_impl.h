@@ -1116,7 +1116,7 @@ Managed_process::Managed_process():
 
     // NOTE: Do not use external library helpers for process creation time,
     // it is only implemented for Windows.
-    m_time_instantiated = std::chrono::system_clock::now();
+    m_time_instantiated = std::chrono::steady_clock::now();
 }
 
 inline

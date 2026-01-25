@@ -72,7 +72,7 @@ std::filesystem::path ensure_shared_directory()
     auto base = sintra::test::scratch_subdirectory("ping_pong_hang");
 
     auto unique_suffix = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                             std::chrono::high_resolution_clock::now().time_since_epoch())
+                             std::chrono::steady_clock::now().time_since_epoch())
                              .count();
 #ifdef _WIN32
     unique_suffix ^= static_cast<long long>(_getpid());
@@ -105,7 +105,7 @@ int process_ping_responder()
     std::string process_name = "ping_responder";
     std::vector<std::string> message_history;
     double start_time = std::chrono::duration<double>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
+        std::chrono::steady_clock::now().time_since_epoch()).count();
 
     // Create a worker thread to show multi-threading in stack traces
     std::atomic<bool> keep_running{true};
