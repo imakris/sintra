@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <csignal>
 #include <filesystem>
 #include <sstream>
 #include <string>
@@ -102,6 +103,34 @@ inline void emit_self_stack_trace()
 #endif
     std::fprintf(stderr, "[SINTRA_SELF_STACK_END]\n");
     std::fflush(stderr);
+}
+
+/// Trigger a crash for stack capture probes, with fallbacks if the first crash
+/// path is ignored.
+[[noreturn]] inline void trigger_stack_capture_crash(const char* reason)
+{
+    const char* label = reason ? reason : "stack-capture";
+    std::fprintf(stderr, "[SINTRA_STACK_CAPTURE] Triggering crash: %s\n", label);
+    std::fflush(stderr);
+
+#if defined(__APPLE__)
+    std::signal(SIGABRT, SIG_DFL);
+    std::signal(SIGILL, SIG_DFL);
+    std::signal(SIGSEGV, SIG_DFL);
+    std::raise(SIGABRT);
+    std::raise(SIGILL);
+    std::raise(SIGSEGV);
+    __builtin_trap();
+#elif defined(_MSC_VER)
+    __ud2();   // raises illegal-instruction on MSVC
+#else
+    __builtin_trap();   // raises illegal-instruction on GCC/Clang
+#endif
+
+    std::fprintf(stderr,
+                 "[SINTRA_STACK_CAPTURE] ERROR: crash did not terminate process\n");
+    std::fflush(stderr);
+    std::_Exit(127);
 }
 
 inline int read_env_int(const char* name, int default_value)

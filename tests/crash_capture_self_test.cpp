@@ -73,5 +73,5 @@ int main()
     std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
     sintra::test::precrash_pause("self-precrash");
     sintra::test::emit_self_stack_trace();
-    sintra::test::trigger_illegal_instruction_crash();
+    sintra::test::trigger_stack_capture_crash("self");
 }

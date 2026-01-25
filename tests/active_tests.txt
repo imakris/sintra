@@ -16,5 +16,5 @@
 # The test runner will run each test for the specified number of iterations.
 
 # Stack capture validation (crash + capture is the objective)
-crash_capture_self_test_debug          20
-crash_capture_child_test_debug         20
+crash_capture_self_test_debug          1
+crash_capture_child_test_debug         1

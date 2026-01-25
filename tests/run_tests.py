@@ -1679,12 +1679,21 @@ class TestRunner:
 
                 success = (process.returncode == 0) and not hang_detected
                 error_msg = stderr
+                probe_missing_crash = False
 
                 if hang_detected:
                     hang_summary = "; ".join(hang_notes) if hang_notes else "detected lingering/descendant processes"
                     error_msg = f"[HANG DETECTED] {hang_summary}\n{error_msg}"
 
-                if not success:
+                if _is_stack_capture_test(invocation.name) and process.returncode == 0 and not hang_detected:
+                    probe_missing_crash = True
+                    success = False
+                    error_msg = (
+                        "STACK CAPTURE PROBE DID NOT CRASH "
+                        f"(exit code {process.returncode})\n{stderr}"
+                    )
+
+                if not success and not probe_missing_crash:
                     # Categorize failure type for better diagnostics
                     if stop_signal_desc:
                         error_msg = (
