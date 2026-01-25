@@ -561,6 +561,15 @@ static inline int umtx_wake(uint32_t* addr, int n)
 #endif
 
 // Unified POSIX helpers (no further #ifs elsewhere)
+static inline int posix_wait_result_common(int rc, int err, bool spurious_other) noexcept
+{
+    if (rc == 0)       return 0;  // woke or spuriously woke
+    if (err == ETIMEDOUT) return -1;
+    if (err == EINTR)  return 1;  // retry
+    if (err == EAGAIN) return 0;  // value changed before wait; recheck
+    return spurious_other ? 0 : -2;
+}
+
 static inline int posix_wait_equal_until(
     uint32_t* addr, uint32_t expected, uint64_t deadline) noexcept
 {
@@ -600,10 +609,16 @@ static inline int posix_wait_equal_until(
                 rc = futex_wait((int*)addr, (int)expected, &ts);
             }
         }
-        if (rc == 0)                           return  0; // value changed or spuriously woke; caller rechecks
-        if (errno == ETIMEDOUT)                return -1;
-        if (errno == EINTR)                    continue;
-        if (errno == EAGAIN)                   return  0; // value changed before wait; recheck
+        const int outcome = posix_wait_result_common(rc, errno, false);
+        if (outcome == 0) {
+            return 0;
+        }
+        if (outcome == -1) {
+            return -1;
+        }
+        if (outcome == 1) {
+            continue;
+        }
         return -1;
     }
 #elif SINTRA_BACKEND_FREEBSD
@@ -620,16 +635,17 @@ static inline int posix_wait_equal_until(
         ns_to_timespec(rel, t._timeout);
 
         int rc = umtx_wait_uint(addr, expected, &t);
-        if (rc == 0) {
+        const int outcome = posix_wait_result_common(rc, errno, true);
+        if (outcome == 0) {
             return 0;
         }
-        if (errno == ETIMEDOUT) {
+        if (outcome == -1) {
             return -1;
         }
-        if (errno == EINTR) {
+        if (outcome == 1) {
             continue;
         }
-        return 0; // Treat other errors as spurious wakes
+        return -1;
     }
 #elif SINTRA_BACKEND_POLLING
     // Polling backend: sleep 1ms and return spurious wake
