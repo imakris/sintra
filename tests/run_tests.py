@@ -22,6 +22,7 @@ import argparse
 import contextlib
 from functools import partial
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -181,25 +182,22 @@ def _default_stack_capture_pause_ms() -> str:
     pause_seconds = max(2.0, min(10.0, attach_timeout * 0.1))
     return str(int(pause_seconds * 1000))
 
+_PAUSE_PID_PATTERNS = (
+    re.compile(r"\bProcess\s+(\d+)\b"),
+    re.compile(r"\bPID\s+(\d+)\b"),
+)
+
 
 def _extract_debug_pause_pid(line: str) -> Optional[int]:
     """Extract the paused PID from a debug-pause log line."""
 
-    for marker in ("Process ", "PID "):
-        if marker not in line:
-            continue
-        tail = line.split(marker, 1)[1]
-        digits = ""
-        for ch in tail:
-            if ch.isdigit():
-                digits += ch
-            elif digits:
-                break
-        if digits:
+    for pattern in _PAUSE_PID_PATTERNS:
+        match = pattern.search(line)
+        if match:
             try:
-                return int(digits)
+                return int(match.group(1))
             except ValueError:
-                return None
+                continue
     return None
 
 
@@ -1157,10 +1155,10 @@ class TestRunner:
 
                 # Check for SINTRA_DEBUG_PAUSE marker (process has paused for debugger attachment)
                 if '[SINTRA_DEBUG_PAUSE]' in trigger_line and 'paused:' in trigger_line:
-                    # Process has hit a crash and is paused - capture immediately
                     target_pid = _extract_debug_pause_pid(trigger_line)
-                    if target_pid is None and process is not None:
+                    if target_pid is None or target_pid <= 0:
                         target_pid = process.pid
+                    # Process has hit a crash and is paused - capture immediately
                     if not self._should_attempt_stack_capture(
                         invocation,
                         'debug_pause',
