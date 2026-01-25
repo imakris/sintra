@@ -499,11 +499,17 @@ static inline int posix_wait_equal_until(
 #if SINTRA_BACKEND_DARWIN
     const uint32_t flags = OS_SYNC_WAIT_ON_ADDRESS_SHARED;
     for (;;) {
+        const uint64_t now = monotonic_now_ns();
+        if (now >= deadline) {
+            errno = ETIMEDOUT;
+            return -1;
+        }
         int rc = os_sync_wait_on_address_with_deadline(
             (void*)addr, (uint64_t)expected, 4, flags, OS_CLOCK_MONOTONIC, deadline);
         if (rc >= 0)                           return  0;
         if (errno == ETIMEDOUT)                return -1;
-        if (errno == EINTR || errno == EAGAIN) continue;
+        if (errno == EINTR)                    continue;
+        if (errno == EAGAIN)                   return  0;
         return -1;
     }
 #elif SINTRA_BACKEND_LINUX
