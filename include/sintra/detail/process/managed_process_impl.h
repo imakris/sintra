@@ -370,21 +370,48 @@ namespace {
 #elif defined(__aarch64__)
         __asm__ __volatile__("yield" ::: "memory");
 #elif defined(__arm__)
-        __asm__ __volatile__("yield");
+        __asm__ __volatile__("yield" ::: "memory");
 #else
         // No-op on other architectures.
 #endif
     }
 
+    inline uint64_t signal_dispatch_now_ns() noexcept
+    {
+        timespec ts {};
+        if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+            return 0;
+        }
+        return static_cast<uint64_t>(ts.tv_sec) * 1'000'000'000ULL
+            + static_cast<uint64_t>(ts.tv_nsec);
+    }
+
     inline void wait_for_signal_dispatch(uint32_t expected_count)
     {
-        const uint32_t target = expected_count + 1;
-        constexpr int k_spin_rounds = 200;
-        constexpr int k_pause_per_round = 1024;
-        for (int round = 0; round < k_spin_rounds; ++round) {
-            if (dispatched_signal_counter().load(std::memory_order_acquire) >= target) {
+        constexpr uint64_t k_wait_timeout_ns = 200'000'000ULL;
+        uint64_t start_ns = signal_dispatch_now_ns();
+        constexpr int k_fallback_rounds = 5000;
+        int fallback_rounds = (start_ns == 0) ? k_fallback_rounds : -1;
+        constexpr int k_pause_per_round = 256;
+
+        for (;;) {
+            const uint32_t current = dispatched_signal_counter().load(std::memory_order_acquire);
+            if (static_cast<uint32_t>(current - expected_count) >= 1U) {
                 return;
             }
+
+            const uint64_t now_ns = signal_dispatch_now_ns();
+            if (start_ns != 0 && now_ns != 0) {
+                if ((now_ns - start_ns) >= k_wait_timeout_ns) {
+                    return;
+                }
+            }
+            else if (fallback_rounds > 0) {
+                if (--fallback_rounds == 0) {
+                    return;
+                }
+            }
+
             for (int pause = 0; pause < k_pause_per_round; ++pause) {
                 signal_dispatch_spin_pause();
             }
