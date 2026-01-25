@@ -855,10 +855,14 @@ int main(int argc, char* argv[])
         catch (const std::exception& ex) {
             ++failures;
             std::cout << "[  FAILED  ] " << test.name << " - " << ex.what() << std::endl;
+            std::fprintf(stderr, "[FAILED] %s: %s\n", test.name, ex.what());
+            std::fflush(stderr);
         }
         catch (...) {
             ++failures;
             std::cout << "[  FAILED  ] " << test.name << " - unknown exception" << std::endl;
+            std::fprintf(stderr, "[FAILED] %s: unknown exception\n", test.name);
+            std::fflush(stderr);
         }
     }
 
