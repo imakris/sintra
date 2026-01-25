@@ -69,7 +69,7 @@ inline void log_event(const char* role, const char* fmt, ...)
     std::fprintf(stderr, "[receive_test +%llums pid=%d branch=%d tid=%llu] %s: ",
                  static_cast<unsigned long long>(elapsed_ms()),
                  current_pid(),
-                 sintra::detail::process_index(),
+                 sintra::process_index(),
                  static_cast<unsigned long long>(thread_id_numeric()),
                  role);
     va_list args;
