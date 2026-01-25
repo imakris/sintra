@@ -2686,7 +2686,6 @@ private:
 #ifdef _WIN32
         constexpr uint32_t recovery_flag = 0x80000000u;
         constexpr uint32_t recovery_pid_mask = recovery_flag - 1;
-        constexpr uint32_t legacy_recovery_sentinel = std::numeric_limits<uint32_t>::max();
         static_assert(recovery_flag != 0, "Recovery flag must reserve a representable bit");
         const uint32_t self_pid = get_current_pid();
 
@@ -2701,14 +2700,7 @@ private:
             if ((value & recovery_flag) == 0) {
                 return 0;
             }
-
-            uint32_t pid = value & recovery_pid_mask;
-            if (value == legacy_recovery_sentinel && pid == recovery_pid_mask) {
-                // Old layout used 0xFFFFFFFF as a sentinel without encoding a PID.
-                // Treat it as unknown so we can reclaim it.
-                return 0;
-            }
-            return pid;
+            return value & recovery_pid_mask;
         };
 
         auto finalize_recovery = [&]() {

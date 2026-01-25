@@ -2264,7 +2264,6 @@ def main():
                         help='Show detailed output for each test run')
     parser.add_argument('--preserve-stalled-processes', action='store_true',
                         help='Leave stalled test processes running for debugging instead of terminating them')
-    parser.add_argument('--kill_stalled_processes', action='store_true', help=argparse.SUPPRESS)
 
     args = parser.parse_args()
 
@@ -2298,9 +2297,6 @@ def main():
     print(f"Timeout per test: {args.timeout}s")
     print(f"Active tests: {len(active_tests)} tests from active_tests.txt")
     print("=" * 70)
-
-    if args.kill_stalled_processes:
-        print(f"{Color.YELLOW}Warning: --kill_stalled_processes is deprecated; stalled tests are killed by default.{Color.RESET}")
 
     preserve_on_timeout = args.preserve_stalled_processes
     runner = TestRunner(build_dir, args.config, args.timeout, args.verbose, preserve_on_timeout)

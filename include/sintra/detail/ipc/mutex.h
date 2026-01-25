@@ -33,7 +33,7 @@ provide:
   - is_process_alive(uint32_t)
 No explicit initialization routine is required.
 
-COMPATIBILITY & PORTABILITY
+PORTABILITY
 The implementation is portable to any platform that supports lock-free 64-bit
 atomics and basic thread yielding. It uses adaptive spinning with exponential
 backoff and occasional sleeps under contention. No operating system-specific

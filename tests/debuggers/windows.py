@@ -369,10 +369,6 @@ class WindowsDebuggerStrategy(DebuggerStrategy):
         return None
 
     # Windows configuration helpers -------------------------------------
-    def _prepare_windows_debuggers(self) -> None:
-        # Retained for backwards compatibility; prepare() calls this indirectly.
-        self.prepare()
-
     def _ensure_windows_local_dumps(self) -> Optional[str]:
         if sys.platform != "win32":
             return None
@@ -1006,7 +1002,3 @@ class WindowsDebuggerStrategy(DebuggerStrategy):
                 continue
 
         return descendants
-
-    # Legacy compatibility ----------------------------------------------
-    def _capture_process_stacks(self, pid: int, process_group: Optional[int] = None) -> Tuple[str, str]:
-        return self.capture_process_stacks(pid, process_group)

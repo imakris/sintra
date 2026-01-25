@@ -60,9 +60,9 @@ USAGE CONTRACT (shared memory requirements)
 - POSIX: The internal 32-bit wait word must reside in shared memory (e.g., MAP_SHARED). Placing the object in process-local memory yields intra-process behavior only.
 - Windows: HANDLEs are per-process. Use a common name across processes or place this object in shared memory to carry the generated name to other processes.
 
-COMPATIBILITY & PORTABILITY
+API DESIGN
 - This API mirrors the sibling `interprocess_mutex` style: steady-clock deadlines, bool-returning timed waits, and errno for error/timeout discrimination.
-- Intended for Linux (futex), macOS 14.4+ (wait-on-address), Windows 8+. No fallback shims for older platforms.
+- Intended for Linux (futex), macOS 14.4+ (wait-on-address), Windows 8+.
 
 CAVEATS
 - Overflow: post(n) where (current + n) > max sets errno=EOVERFLOW and does not wake.
@@ -819,7 +819,6 @@ inline void ips_backend::destroy() noexcept
 class interprocess_semaphore
 {
 public:
-    // Constructor matching current API (unsigned int for compatibility)
     explicit interprocess_semaphore(unsigned int initial = 0) noexcept
     {
         m_impl.init_default(static_cast<uint32_t>(initial));
@@ -841,7 +840,7 @@ public:
     interprocess_semaphore(interprocess_semaphore&&) = delete;
     interprocess_semaphore& operator=(interprocess_semaphore&&) = delete;
 
-    // API compatibility: void wait() (loops forever until acquired or unrecoverable backend error)
+    // Blocks until the semaphore is acquired or an unrecoverable backend error occurs.
     void wait() noexcept
     {
         while (!m_impl.wait()) {
@@ -852,19 +851,19 @@ public:
         }
     }
 
-    // API compatibility: bool try_wait()
+    // Non-blocking acquire attempt. Returns true if acquired, false otherwise.
     bool try_wait() noexcept
     {
         return m_impl.try_wait();
     }
 
-    // API compatibility: void post() (posts single token)
+    // Posts a single token to the semaphore.
     void post() noexcept
     {
         m_impl.post(1);
     }
 
-    // API compatibility: templated timed_wait (requires steady clock)
+    // Waits until the specified deadline. Requires a steady clock to avoid wall-clock jumps.
     template <typename Clock, typename Duration>
     bool timed_wait(const std::chrono::time_point<Clock, Duration>& abs_time) noexcept
     {
@@ -881,16 +880,15 @@ public:
         return m_impl.try_wait_for(delta_ns);
     }
 
-    // API compatibility: try_wait_for with duration
+    // Waits for the specified duration. Returns true if acquired, false on timeout.
     bool try_wait_for(std::chrono::nanoseconds rel_timeout) noexcept
     {
         return m_impl.try_wait_for(rel_timeout);
     }
 
-    // API compatibility: no-op on current backends
+    // No-op (Windows named semaphores handle this internally).
     void release_local_handle() noexcept
     {
-        // No-op (Windows named semaphores handle this internally)
     }
 
 #ifdef _WIN32
