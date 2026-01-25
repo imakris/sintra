@@ -22,6 +22,7 @@ import argparse
 import contextlib
 from functools import partial
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -124,7 +125,15 @@ TEST_TIMEOUT_OVERRIDES = {
     "barrier_complex_choreography_test": 120.0,
     "barrier_pathological_choreography_test": 120.0,
     "barrier_stress_test": 120.0,
+    "crash_capture_self_test_debug": 120.0,
+    "crash_capture_self_test_release": 120.0,
+    "crash_capture_child_test_debug": 120.0,
+    "crash_capture_child_test_release": 120.0,
 }
+
+STACK_CAPTURE_PREFIXES = ("crash_capture_",)
+_STACK_CAPTURE_PAUSE_ENV = "SINTRA_CRASH_CAPTURE_PAUSE_MS"
+_LIVE_STACK_ATTACH_TIMEOUT_ENV = "SINTRA_LIVE_STACK_ATTACH_TIMEOUT"
 
 # Configure the maximum amount of wall time the runner spends attaching live
 # debuggers before declaring stack capture unavailable. Users can extend this by
@@ -137,9 +146,61 @@ def _canonical_test_name(name: str) -> str:
     canonical = name.strip()
     if canonical.startswith("sintra_"):
         canonical = canonical[len("sintra_"):]
+    if canonical.startswith("manual/"):
+        canonical = canonical[len("manual/"):]
     if canonical.endswith("_adaptive"):
         canonical = canonical[: -len("_adaptive")]
     return canonical
+
+
+def _strip_config_suffix(name: str) -> str:
+    if name.endswith("_release") or name.endswith("_debug"):
+        return name.rsplit("_", 1)[0]
+    return name
+
+
+def _is_stack_capture_test(name: str) -> bool:
+    canonical = _canonical_test_name(name)
+    if ':' in canonical:
+        canonical = canonical.split(':', 1)[0]
+    canonical = _strip_config_suffix(canonical)
+    return canonical.startswith(STACK_CAPTURE_PREFIXES)
+
+
+def _default_stack_capture_pause_ms() -> str:
+    """Return a conservative pause window for stack-capture probes."""
+
+    timeout_value = os.environ.get(_LIVE_STACK_ATTACH_TIMEOUT_ENV, "")
+    attach_timeout = 0.0
+    if timeout_value:
+        try:
+            attach_timeout = float(timeout_value)
+        except ValueError:
+            attach_timeout = 0.0
+
+    if attach_timeout <= 0.0:
+        attach_timeout = 90.0 if sys.platform == "darwin" else 30.0
+
+    pause_seconds = max(2.0, min(10.0, attach_timeout * 0.1))
+    return str(int(pause_seconds * 1000))
+
+_PAUSE_PID_PATTERNS = (
+    re.compile(r"\bProcess\s+(\d+)\b"),
+    re.compile(r"\bPID\s+(\d+)\b"),
+)
+
+
+def _extract_debug_pause_pid(line: str) -> Optional[int]:
+    """Extract the paused PID from a debug-pause log line."""
+
+    for pattern in _PAUSE_PID_PATTERNS:
+        match = pattern.search(line)
+        if match:
+            try:
+                return int(match.group(1))
+            except ValueError:
+                continue
+    return None
 
 
 def _lookup_test_weight(name: str, active_tests: Dict[str, int]) -> int:
@@ -349,7 +410,7 @@ class TestRunner:
         directory.mkdir(parents=True, exist_ok=True)
         return directory
 
-    def _build_test_environment(self, scratch_dir: Path) -> Dict[str, str]:
+    def _build_test_environment(self, invocation: TestInvocation, scratch_dir: Path) -> Dict[str, str]:
         """Return the environment variables for a test invocation."""
 
         env = os.environ.copy()
@@ -360,6 +421,9 @@ class TestRunner:
         env['TMP'] = str(scratch_dir)
         # Enable debug pause handlers for crash detection and debugger attachment
         env['SINTRA_DEBUG_PAUSE_ON_EXIT'] = '1'
+        if _is_stack_capture_test(invocation.name):
+            env['SINTRA_DEBUG_PAUSE_ON_EXIT'] = '0'
+            env.setdefault(_STACK_CAPTURE_PAUSE_ENV, _default_stack_capture_pause_ms())
         return env
 
     @staticmethod
@@ -807,8 +871,17 @@ class TestRunner:
         result_success: Optional[bool] = None
         instrumentation_active = self.instrumentation_active()
         instrument = partial(self._instrument_step, disk_path=self.build_dir)
+        with self._stack_capture_history_lock:
+            prefix = f"{invocation.name}:"
+            keys_to_clear = [
+                key
+                for key in self._stack_capture_history.keys()
+                if key == invocation.name or key.startswith(prefix)
+            ]
+            for key in keys_to_clear:
+                self._stack_capture_history.pop(key, None)
         try:
-            popen_env = self._build_test_environment(scratch_dir)
+            popen_env = self._build_test_environment(invocation, scratch_dir)
             start_time = time.time()
             start_monotonic = time.monotonic()
 
@@ -830,6 +903,7 @@ class TestRunner:
             live_stack_error = ""
             postmortem_stack_traces = ""
             postmortem_stack_error = ""
+            self_stack_detected = False
             failure_event = threading.Event()
             hang_detected = False
             hang_notes: List[str] = []
@@ -1083,17 +1157,26 @@ class TestRunner:
 
                 # Check for SINTRA_DEBUG_PAUSE marker (process has paused for debugger attachment)
                 if '[SINTRA_DEBUG_PAUSE]' in trigger_line and 'paused:' in trigger_line:
+                    target_pid = _extract_debug_pause_pid(trigger_line)
+                    if target_pid is None or target_pid <= 0:
+                        target_pid = process.pid
                     # Process has hit a crash and is paused - capture immediately
-                    if not self._should_attempt_stack_capture(invocation, 'debug_pause'):
+                    if not self._should_attempt_stack_capture(
+                        invocation,
+                        'debug_pause',
+                        target_pid=target_pid,
+                    ):
                         return
 
                     traces = ""
                     error = ""
-                    with stack_capture_context(mark_failure=True) as allowed:
+                    with stack_capture_context(mark_failure=False) as allowed:
                         if not allowed:
                             return
+                        if target_pid is None:
+                            return
                         traces, error = self._capture_process_stacks(
-                            process.pid,
+                            target_pid,
                             process_group_id,
                         )
 
@@ -1108,9 +1191,8 @@ class TestRunner:
                         with capture_lock:
                             live_stack_error = error
 
-                    # Don't kill here - let the main timeout mechanism handle cleanup.
-                    # This allows time for manual debugger attachment if needed.
-                    # The process will be killed when the timeout expires.
+                    # Allow manual attachment for regular tests; stack-capture
+                    # tests disable debug pause so they can terminate normally.
 
                     return
 
@@ -1249,6 +1331,7 @@ class TestRunner:
                     manual_capture_thread.start()
 
             def monitor_stream(stream, buffer: List[str], descriptor: str) -> None:
+                nonlocal self_stack_detected
                 thread_name = threading.current_thread().name
                 start_time = time.monotonic()
                 lines = 0
@@ -1294,6 +1377,8 @@ class TestRunner:
                                     "last_line_excerpt": stripped,
                                 }
                             )
+                        if "[SINTRA_SELF_STACK_BEGIN]" in line:
+                            self_stack_detected = True
                         attempt_live_capture(line)
                 except (OSError, ValueError):
                     # The stream may be closed from another thread during shutdown.
@@ -1627,12 +1712,21 @@ class TestRunner:
 
                 success = (process.returncode == 0) and not hang_detected
                 error_msg = stderr
+                probe_missing_crash = False
 
                 if hang_detected:
                     hang_summary = "; ".join(hang_notes) if hang_notes else "detected lingering/descendant processes"
                     error_msg = f"[HANG DETECTED] {hang_summary}\n{error_msg}"
 
-                if not success:
+                if _is_stack_capture_test(invocation.name) and process.returncode == 0 and not hang_detected:
+                    probe_missing_crash = True
+                    success = False
+                    error_msg = (
+                        "STACK CAPTURE PROBE DID NOT CRASH "
+                        f"(exit code {process.returncode})\n{stderr}"
+                    )
+
+                if not success and not probe_missing_crash:
                     # Categorize failure type for better diagnostics
                     if stop_signal_desc:
                         error_msg = (
@@ -1683,13 +1777,30 @@ class TestRunner:
 
                 if live_stack_traces:
                     error_msg = f"{error_msg}\n\n=== Captured stack traces ===\n{live_stack_traces}"
-                elif live_stack_error:
-                    error_msg = f"{error_msg}\n\n[Stack capture unavailable: {live_stack_error}]"
 
                 if postmortem_stack_traces:
                     error_msg = f"{error_msg}\n\n=== Post-mortem stack trace ===\n{postmortem_stack_traces}"
                 elif postmortem_stack_error:
                     error_msg = f"{error_msg}\n\n[Post-mortem stack capture unavailable: {postmortem_stack_error}]"
+
+                if live_stack_error and not live_stack_traces:
+                    live_label = "Live stack capture unavailable"
+                    if postmortem_stack_traces:
+                        live_label += " (post-mortem captured)"
+                    error_msg = f"{error_msg}\n\n[{live_label}: {live_stack_error}]"
+
+                if _is_stack_capture_test(invocation.name):
+                    if live_stack_traces or postmortem_stack_traces:
+                        capture_note = "STACK CAPTURE: debugger/postmortem"
+                    elif self_stack_detected:
+                        capture_note = "STACK CAPTURE: self-trace"
+                    else:
+                        capture_note = "STACK CAPTURE: MISSING"
+
+                    if error_msg:
+                        error_msg = f"{error_msg}\n\n{capture_note}"
+                    else:
+                        error_msg = capture_note
 
                 result_success = success
                 return TestResult(
@@ -1868,10 +1979,18 @@ class TestRunner:
 
         return any(marker in lowered for marker in failure_markers)
 
-    def _should_attempt_stack_capture(self, invocation: TestInvocation, reason: str) -> bool:
+    def _should_attempt_stack_capture(
+        self,
+        invocation: TestInvocation,
+        reason: str,
+        target_pid: Optional[int] = None,
+    ) -> bool:
         """Return True if stack capture for the invocation/reason has not run yet."""
 
-        key = invocation.name
+        if reason == 'debug_pause' and target_pid is not None:
+            key = f"{invocation.name}:pid{target_pid}"
+        else:
+            key = invocation.name
         with self._stack_capture_history_lock:
             attempted = self._stack_capture_history[key]
             if reason in attempted:
@@ -2029,6 +2148,21 @@ class TestRunner:
         print(f"  Pass Rate: {pass_rate:.1f}%")
         print(f"  Duration: avg={format_duration(avg_duration)}, min={format_duration(min_duration)}, max={format_duration(max_duration)}")
 
+        if _is_stack_capture_test(test_name):
+            captured = sum(
+                1 for r in results if "STACK CAPTURE: debugger/postmortem" in (r.error or "")
+            )
+            self_trace = sum(
+                1 for r in results if "STACK CAPTURE: self-trace" in (r.error or "")
+            )
+            missing = sum(
+                1 for r in results if "STACK CAPTURE: MISSING" in (r.error or "")
+            )
+            print(
+                "  Stack capture probe: "
+                f"captured={captured}, self-trace={self_trace}, missing={missing}"
+            )
+
         # Print details of failures if verbose or if there are failures
         if failed > 0 and (self.verbose or failed <= 5):
             print(f"\n  {Color.YELLOW}Failure Details:{Color.RESET}")
@@ -2039,9 +2173,11 @@ class TestRunner:
 
                     full_error_needed = (
                         self.verbose
+                        or _is_stack_capture_test(test_name)
                         or '=== Captured stack traces ===' in result.error
                         or '=== Post-mortem stack trace ===' in result.error
                         or '[Stack capture unavailable' in result.error
+                        or '[SINTRA_SELF_STACK_BEGIN]' in result.error
                     )
 
                     if full_error_needed:

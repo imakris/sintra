@@ -816,14 +816,16 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
             uint8_t octile;          // Octile number (0-7)
             uint8_t guard_present;   // 0 = no guard, 1 = guard present
             uint8_t status;          // Reader_status enum value
-            uint8_t padding;         // Unused, maintains 4-byte alignment
+            uint8_t pending_octile;  // 0xff = no pending update, else octile
         } fields;
         uint32_t word;
+
+        static constexpr uint8_t k_no_pending_octile = 0xff;
 
         constexpr Reader_state_union() : word(0) {}
         constexpr Reader_state_union(uint32_t w) : word(w) {}
         constexpr Reader_state_union(Reader_status s, uint8_t o, bool g)
-            : fields{o, g ? uint8_t(1) : uint8_t(0), static_cast<uint8_t>(s), 0} {}
+            : fields{o, g ? uint8_t(1) : uint8_t(0), static_cast<uint8_t>(s), k_no_pending_octile} {}
 
         static constexpr Reader_state_union make(Reader_status status, uint8_t octile, bool guard_present)
         {
@@ -833,6 +835,8 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         uint8_t status()        const { return fields.status; }
         bool    guard_present() const { return fields.guard_present != 0; }
         uint8_t guard_octile()  const { return fields.octile; }
+        bool    guard_pending() const { return fields.pending_octile != k_no_pending_octile; }
+        uint8_t pending_octile() const { return fields.pending_octile; }
 
         Reader_state_union with_status(uint8_t status_value) const
         {
@@ -846,6 +850,20 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
             Reader_state_union copy(*this);
             copy.fields.octile = octile;
             copy.fields.guard_present = present ? 1 : 0;
+            return copy;
+        }
+
+        Reader_state_union with_pending(uint8_t octile) const
+        {
+            Reader_state_union copy(*this);
+            copy.fields.pending_octile = octile;
+            return copy;
+        }
+
+        Reader_state_union clear_pending() const
+        {
+            Reader_state_union copy(*this);
+            copy.fields.pending_octile = k_no_pending_octile;
             return copy;
         }
 
@@ -956,6 +974,25 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
                 Reader_state_union previous = Reader_state_union::cas_update_if(
                     word, std::forward<F>(transform), updated);
                 return previous.guard_present() ? (0x08 | previous.guard_octile()) : 0;
+            }
+
+            Reader_state_union load_state() const
+            {
+                return Reader_state_union(word);
+            }
+
+            void clear_pending()
+            {
+                Reader_state_union::cas_update(word, [](Reader_state_union current) {
+                    return current.clear_pending();
+                });
+            }
+
+            template <typename F>
+            Reader_state_union fetch_update_state_if(F&& transform, bool& updated)
+            {
+                return Reader_state_union::cas_update_if(
+                    word, std::forward<F>(transform), updated);
             }
         };
 
@@ -1151,6 +1188,7 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
 
                 if (dead) {
                     const uint8_t guard_snapshot = slot.exchange_guard_token(0);
+                    slot.clear_pending();
                     if ((guard_snapshot & 0x08) != 0) {
                         const uint8_t oct = guard_snapshot & 0x07;
                         read_access.fetch_sub(octile_mask(oct));
@@ -1173,11 +1211,11 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         {
             uint32_t count = 0;
             for (int i = 0; i < max_process_index; ++i) {
-                const uint8_t guard_snapshot = reading_sequences[i].data.guard_token();
-                if ((guard_snapshot & 0x08) == 0) {
-                    continue;
+                const auto state = reading_sequences[i].data.load_state();
+                if (state.guard_present() && state.guard_octile() == target_octile) {
+                    ++count;
                 }
-                if ((guard_snapshot & 0x07) == target_octile) {
+                if (state.guard_pending() && state.pending_octile() == target_octile) {
                     ++count;
                 }
             }
@@ -1455,6 +1493,7 @@ public:
 template <typename T>
 struct Ring_R : Ring<T, true>
 {
+    using Reader_state_union = typename Ring<T, true>::Reader_state_union;
     // =========================================================================
     // MODIFIED CONSTRUCTOR: Acquires a reader slot for the object's lifetime.
     // =========================================================================
@@ -1516,6 +1555,7 @@ struct Ring_R : Ring<T, true>
             // so scavenger cannot race a half-updated slot.
             auto& slot = c.reading_sequences[m_rs_index].data;
             slot.owner_pid = 0;
+            slot.clear_pending();
             slot.set_status(Ring<T, true>::READER_STATE_INACTIVE);
 
             // Push only if not already in the freelist (defensive: avoid duplicates).
@@ -1578,23 +1618,42 @@ struct Ring_R : Ring<T, true>
             uint8_t trailing_octile = octile_of_index(trailing_idx, this->m_num_elements);
             uint64_t guard_mask     = octile_mask(trailing_octile);
 
+            auto& slot = c.reading_sequences[m_rs_index].data;
+            bool pending_set = false;
+            slot.fetch_update_state_if(
+                [&](Reader_state_union current) -> std::optional<Reader_state_union>
+                {
+                    if (current.status() == Ring<T, true>::READER_STATE_EVICTED) {
+                        return std::nullopt;
+                    }
+                    return current.with_pending(trailing_octile);
+                },
+                pending_set);
+
+            if (!pending_set) {
+                m_reading = false;
+                m_reading_lock = false;
+                throw ring_reader_evicted_exception();
+            }
+
             c.read_access.fetch_add(guard_mask);
 
             bool guard_attached = false;
-            const uint8_t previous_state = c.reading_sequences[m_rs_index].data.fetch_update_guard_token_if(
-                [&](typename Ring<T, true>::Reader_state_union current)
-                    -> std::optional<typename Ring<T, true>::Reader_state_union>
+            const uint8_t previous_state = slot.fetch_update_guard_token_if(
+                [&](Reader_state_union current)
+                    -> std::optional<Reader_state_union>
                 {
                     if (current.status() == Ring<T, true>::READER_STATE_EVICTED) {
                         return std::nullopt;
                     }
 
-                    return current.with_guard(trailing_octile, true);
+                    return current.with_guard(trailing_octile, true).clear_pending();
                 },
                 guard_attached);
 
             if (!guard_attached) {
                 c.read_access.fetch_sub(guard_mask);
+                slot.clear_pending();
                 m_reading = false;
                 m_reading_lock = false;
                 throw ring_reader_evicted_exception();
@@ -1639,14 +1698,14 @@ struct Ring_R : Ring<T, true>
 
             // Trailing guard requirement changed between reads; drop and retry.
             bool guard_cleared = false;
-            const uint8_t guard_snapshot = c.reading_sequences[m_rs_index].data.fetch_update_guard_token_if(
-                [&](typename Ring<T, true>::Reader_state_union current)
-                    -> std::optional<typename Ring<T, true>::Reader_state_union>
+            const uint8_t guard_snapshot = slot.fetch_update_guard_token_if(
+                [&](Reader_state_union current)
+                    -> std::optional<Reader_state_union>
                 {
                     if (current.status() == Ring<T, true>::READER_STATE_EVICTED) {
                         return std::nullopt;
                     }
-                    return current.with_guard(current.guard_octile(), false);
+                    return current.with_guard(current.guard_octile(), false).clear_pending();
                 },
                 guard_cleared);
 
@@ -1654,6 +1713,7 @@ struct Ring_R : Ring<T, true>
             c.read_access.fetch_sub(guard_mask);
 
             if (!guard_cleared) {
+                slot.clear_pending();
                 m_reading      = false;
                 m_reading_lock = false;
                 throw ring_reader_evicted_exception();
@@ -1698,15 +1758,16 @@ struct Ring_R : Ring<T, true>
         }
 
         if (m_reading) {
+            auto& slot = c.reading_sequences[m_rs_index].data;
             bool   guard_cleared       = false;
-            const uint8_t previous_state = c.reading_sequences[m_rs_index].data.fetch_update_guard_token_if(
-                [&](typename Ring<T, true>::Reader_state_union current)
-                    -> std::optional<typename Ring<T, true>::Reader_state_union>
+            const uint8_t previous_state = slot.fetch_update_guard_token_if(
+                [&](Reader_state_union current)
+                    -> std::optional<Reader_state_union>
                 {
                     if (current.status() == Ring<T, true>::READER_STATE_EVICTED) {
                         return std::nullopt;
                     }
-                    return current.with_guard(current.guard_octile(), false);
+                    return current.with_guard(current.guard_octile(), false).clear_pending();
                 },
                 guard_cleared);
 
@@ -1718,6 +1779,7 @@ struct Ring_R : Ring<T, true>
             else
             if (!guard_cleared) {
                 try_rollback_unpaired_read_access(static_cast<uint8_t>(m_trailing_octile));
+                slot.clear_pending();
                 // With strong CAS, failing to clear guard means we were evicted
                 m_evicted_since_last_wait = true;
             }
@@ -1968,12 +2030,29 @@ struct Ring_R : Ring<T, true>
 
             const uint64_t new_mask     = octile_mask(new_trailing_octile);
 
+            auto& slot = c.reading_sequences[m_rs_index].data;
+            bool pending_set = false;
+            slot.fetch_update_state_if(
+                [&](Reader_state_union current) -> std::optional<Reader_state_union>
+                {
+                    if (current.status() == Ring<T, true>::READER_STATE_EVICTED) {
+                        return std::nullopt;
+                    }
+                    return current.with_pending(static_cast<uint8_t>(new_trailing_octile));
+                },
+                pending_set);
+
+            if (!pending_set) {
+                handle_eviction_if_needed();
+                continue;
+            }
+
             c.read_access.fetch_add(new_mask);
 
             bool guard_updated = false;
-            const uint8_t previous_state = c.reading_sequences[m_rs_index].data.fetch_update_guard_token_if(
-                [&](typename Ring<T, true>::Reader_state_union current)
-                    -> std::optional<typename Ring<T, true>::Reader_state_union>
+            const uint8_t previous_state = slot.fetch_update_guard_token_if(
+                [&](Reader_state_union current)
+                    -> std::optional<Reader_state_union>
                 {
                     if (current.status() == Ring<T, true>::READER_STATE_EVICTED) {
                         return std::nullopt;
@@ -1982,12 +2061,13 @@ struct Ring_R : Ring<T, true>
                         return std::nullopt;
                     }
 
-                    return current.with_guard(static_cast<uint8_t>(new_trailing_octile), true);
+                    return current.with_guard(static_cast<uint8_t>(new_trailing_octile), true).clear_pending();
                 },
                 guard_updated);
 
             if (!guard_updated) {
                 c.read_access.fetch_sub(new_mask);
+                slot.clear_pending();
 
                 // Check why CAS failed to determine retry strategy. The guard accessor returns an
                 // encoded byte, so inspect the decoded fields directly instead of interpreting it
@@ -2073,34 +2153,46 @@ struct Ring_R : Ring<T, true>
         const uint64_t mask = octile_mask(static_cast<uint8_t>(m_trailing_octile));
 
         while (true) {
+            auto& slot = c.reading_sequences[m_rs_index].data;
+            bool pending_set = false;
+            slot.fetch_update_state_if(
+                [&](Reader_state_union current) -> std::optional<Reader_state_union>
+                {
+                    return current.with_pending(static_cast<uint8_t>(m_trailing_octile));
+                },
+                pending_set);
+
             c.read_access.fetch_add(mask);
 
             bool guard_updated = false;
-            const uint8_t previous_state = c.reading_sequences[m_rs_index].data.fetch_update_guard_token_if(
-                [&](typename Ring<T, true>::Reader_state_union current)
-                    -> std::optional<typename Ring<T, true>::Reader_state_union>
+            const uint8_t previous_state = slot.fetch_update_guard_token_if(
+                [&](Reader_state_union current)
+                    -> std::optional<Reader_state_union>
                 {
                     if (current.guard_present()) {
                         return std::nullopt;
                     }
 
                     return current.with_status(Ring<T, true>::READER_STATE_ACTIVE)
-                                  .with_guard(static_cast<uint8_t>(m_trailing_octile), true);
+                                  .with_guard(static_cast<uint8_t>(m_trailing_octile), true)
+                                  .clear_pending();
                 },
                 guard_updated);
 
             if (guard_updated) {
-                const uint8_t guard_snapshot = c.reading_sequences[m_rs_index].data.guard_token();
+                const uint8_t guard_snapshot = slot.guard_token();
                 const bool guard_present = Ring<T, true>::encoded_guard_present(guard_snapshot);
                 const uint8_t guard_octile = Ring<T, true>::encoded_guard_octile(guard_snapshot);
                 if (!guard_present || guard_octile != static_cast<uint8_t>(m_trailing_octile)) {
                     c.read_access.fetch_sub(mask);
+                    slot.clear_pending();
                     continue;
                 }
                 return;
             }
 
             c.read_access.fetch_sub(mask);
+            slot.clear_pending();
 
             // Check if someone else already attached the correct guard
             if (Ring<T, true>::encoded_guard_present(previous_state) &&
@@ -2436,7 +2528,7 @@ struct Ring_W : Ring<T, false>
                         if (!current.guard_present()) {
                             return std::nullopt;
                         }
-                        auto cleared = current.with_guard(current.guard_octile(), false);
+                        auto cleared = current.with_guard(current.guard_octile(), false).clear_pending();
                         return cleared.with_status(Ring<T, false>::READER_STATE_EVICTED);
                     },
                     guard_evicted);

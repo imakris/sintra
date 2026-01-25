@@ -15,6 +15,7 @@ from .base import DebuggerStrategy
 LIVE_STACK_ATTACH_TIMEOUT_ENV = "SINTRA_LIVE_STACK_ATTACH_TIMEOUT"
 DEFAULT_LIVE_STACK_ATTACH_TIMEOUT = 30.0
 DEFAULT_LLDB_LIVE_STACK_ATTACH_TIMEOUT = 90.0
+DEFAULT_MACOS_POSTMORTEM_WAIT_SEC = 30.0
 
 
 class UnixDebuggerStrategy(DebuggerStrategy):
@@ -113,6 +114,7 @@ class UnixDebuggerStrategy(DebuggerStrategy):
         capture_errors: List[str] = []
 
         debugger_is_macos_lldb = debugger_name == "lldb" and sys.platform == "darwin"
+        prefer_sample = debugger_is_macos_lldb
         should_pause = signal_module is not None and not debugger_is_macos_lldb
 
         if should_pause and signal_module is not None:
@@ -185,6 +187,18 @@ class UnixDebuggerStrategy(DebuggerStrategy):
             debugger_output = ""
             debugger_error = ""
             debugger_success = False
+            sample_attempted = False
+            sample_error = ""
+
+            if prefer_sample:
+                sample_attempted = True
+                sample_output, sample_error = self._capture_macos_sample_stack(
+                    target_pid,
+                    min(debugger_timeout, 3.0),
+                )
+                if sample_output:
+                    stack_outputs.append(f"PID {target_pid}\n{sample_output}")
+                    continue
 
             max_attempts = 3 if debugger_is_macos_lldb else 1
             base_command = self._build_unix_live_debugger_command(
@@ -260,10 +274,13 @@ class UnixDebuggerStrategy(DebuggerStrategy):
             fallback_error = debugger_error
 
             if debugger_is_macos_lldb and self._process_exists(target_pid):
-                fallback_output, fallback_error = self._capture_macos_sample_stack(
-                    target_pid,
-                    debugger_timeout,
-                )
+                if not sample_attempted:
+                    fallback_output, fallback_error = self._capture_macos_sample_stack(
+                        target_pid,
+                        debugger_timeout,
+                    )
+                elif sample_error:
+                    fallback_error = sample_error
 
             if fallback_output:
                 stack_outputs.append(f"PID {target_pid}\n{fallback_output}")
@@ -323,32 +340,45 @@ class UnixDebuggerStrategy(DebuggerStrategy):
 
         candidate_cores: List[Tuple[float, Path]] = []
 
-        for directory in candidate_dirs:
-            try:
-                if not directory.exists():
-                    continue
-                entries = list(directory.iterdir())
-            except OSError:
-                continue
+        deadline = None
+        if sys.platform == "darwin":
+            if DEFAULT_MACOS_POSTMORTEM_WAIT_SEC > 0:
+                deadline = time.time() + DEFAULT_MACOS_POSTMORTEM_WAIT_SEC
 
-            for entry in entries:
-                if not entry.is_file():
-                    continue
-
-                name_lower = entry.name.lower()
-                exe_name = invocation.path.name.lower()
-                if exe_name not in name_lower and invocation.path.stem.lower() not in name_lower:
-                    continue
-
+        while True:
+            candidate_cores.clear()
+            for directory in candidate_dirs:
                 try:
-                    stat_info = entry.stat()
+                    if not directory.exists():
+                        continue
+                    entries = list(directory.iterdir())
                 except OSError:
                     continue
 
-                if stat_info.st_mtime + 0.001 < start_time:
-                    continue
+                for entry in entries:
+                    if not entry.is_file():
+                        continue
 
-                candidate_cores.append((stat_info.st_mtime, entry))
+                    name_lower = entry.name.lower()
+                    exe_name = invocation.path.name.lower()
+                    if exe_name not in name_lower and invocation.path.stem.lower() not in name_lower:
+                        continue
+
+                    try:
+                        stat_info = entry.stat()
+                    except OSError:
+                        continue
+
+                    if stat_info.st_mtime + 0.001 < start_time:
+                        continue
+
+                    candidate_cores.append((stat_info.st_mtime, entry))
+
+            if candidate_cores or deadline is None:
+                break
+            if time.time() >= deadline:
+                break
+            time.sleep(0.25)
 
         if not candidate_cores:
             return "", "no recent core dump found"

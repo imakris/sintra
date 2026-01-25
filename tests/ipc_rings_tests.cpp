@@ -556,6 +556,67 @@ TEST_CASE(test_stale_guard_clears_after_timeout)
     ASSERT_GT(diag.stale_guard_clear_count + diag.guard_accounting_mismatch_count, uint64_t(0));
 }
 
+TEST_CASE(test_guard_pending_prevents_underflow)
+{
+    Temp_ring_dir tmp("stale_guard_pending");
+    const std::string ring_name = "ring_data";
+    const size_t ring_elements = pick_ring_elements<uint32_t>(64);
+
+    sintra::Ring_W<uint32_t> writer(tmp.str(), ring_name, ring_elements);
+    sintra::Ring_R<uint32_t> reader(tmp.str(), ring_name, ring_elements, ring_elements / 2);
+
+    const size_t head_index = ring_elements / 8;
+    const uint8_t new_octile = sintra::octile_of_index(head_index, ring_elements);
+    writer.m_octile = static_cast<uint8_t>((new_octile + 7) % 8);
+
+    const uint64_t guard_mask = sintra::octile_mask(new_octile);
+
+    auto& slot = reader.c.reading_sequences[reader.m_rs_index].data;
+    using Reader_state_union = sintra::Ring<uint32_t, true>::Reader_state_union;
+
+    bool pending_set = false;
+    slot.fetch_update_state_if(
+        [&](Reader_state_union current) -> std::optional<Reader_state_union>
+        {
+            return current.with_pending(new_octile);
+        },
+        pending_set);
+    ASSERT_TRUE(pending_set);
+
+    // Simulate a reader starting guard acquisition with a pending update.
+    reader.c.read_access.fetch_add(guard_mask);
+
+    std::thread writer_thread([&] {
+        writer.advance_writer_octile_if_needed(head_index);
+    });
+
+    try {
+        slot.set_guard_token(static_cast<uint8_t>(0x08 | new_octile));
+        slot.clear_pending();
+
+        reader.m_trailing_octile = new_octile;
+        reader.m_reading = true;
+        reader.m_reading_lock = false;
+        reader.done_reading();
+
+        if (writer_thread.joinable()) {
+            writer_thread.join();
+        }
+    }
+    catch (...) {
+        if (writer_thread.joinable()) {
+            writer_thread.join();
+        }
+        throw;
+    }
+
+    uint64_t read_access = reader.c.read_access.load();
+    uint8_t guard_count = static_cast<uint8_t>((read_access >> (8 * new_octile)) & 0xffu);
+
+    ASSERT_EQ(0u, static_cast<unsigned>(guard_count));
+    ASSERT_EQ(new_octile, writer.m_octile);
+}
+
 TEST_CASE(test_guard_rollback_success)
 {
     Temp_ring_dir tmp("guard_rollback");
