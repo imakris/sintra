@@ -124,12 +124,11 @@ static_assert(sizeof(std::atomic<uint32_t>) == 4, "Assume 4-byte object represen
 
 static inline bool sem_trace_enabled() noexcept
 {
-    static int enabled = -1;
-    if (enabled == -1) {
-        const char* env = std::getenv("SINTRA_SEM_TRACE");
-        enabled = (env && env[0] != '\0' && env[0] != '0') ? 1 : 0;
-    }
-    return enabled != 0;
+#ifdef SINTRA_SEM_TRACE
+    return true;
+#else
+    return false;
+#endif
 }
 
 static inline uint64_t sem_trace_tid() noexcept
