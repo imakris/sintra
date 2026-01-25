@@ -574,6 +574,7 @@ static inline int posix_wait_equal_until(
         }
         int rc = os_sync_wait_on_address_with_deadline(
             (void*)addr, (uint64_t)expected, 4, flags, OS_CLOCK_MONOTONIC, deadline);
+        // Darwin returns the number of outstanding waiters on success, so rc can be > 0.
         if (rc >= 0)                           return  0;
         if (errno == ETIMEDOUT)                return -1;
         if (errno == EINTR)                    continue;
