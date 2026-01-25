@@ -2066,7 +2066,7 @@ Managed_process::Spawn_result Managed_process::spawn_swarm_process(
             result.error_message = error_msg.str();
         }
 
-        // Still log to stderr for backwards compatibility
+        // Log spawn failures to stderr
         if (!spawn_ready && !result.error_message.empty()) {
             Log_stream(log_level::error) << result.error_message << "\n";
         }

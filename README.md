@@ -107,8 +107,8 @@ prefer vendoring dependencies as git submodules or fetching them during configur
 * **macOS requirement** - Sintra always uses `os_sync_wait_on_address` for its interprocess
   semaphore implementation. The build fails if `<os/os_sync_wait_on_address.h>` or
   `<os/clock.h>` is missing, so runners should use macOS 15.0 or newer with the Command
-  Line Tools for Xcode 15 (or newer) installed (the full Xcode IDE is not required). No
-  legacy semaphore fallback is provided or supported.
+  Line Tools for Xcode 15 (or newer) installed (the full Xcode IDE is not required). Older
+  macOS versions are not supported.
 
 
 ## Interprocess Communication Patterns
