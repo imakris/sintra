@@ -101,42 +101,53 @@ std::wstring to_wide(const std::string& input)
     return wide;
 }
 
-std::wstring build_command_line(const std::string& exe, const std::vector<std::string>& args)
+void append_quoted_argument(std::wstring& cmdline, const std::string& arg)
 {
-    std::wstring cmdline = to_wide(exe);
-    for (const auto& arg : args) {
+    const std::wstring wide_arg = to_wide(arg);
+    if (cmdline.empty()) {
+        cmdline.reserve(wide_arg.size() + 2);
+    }
+    else {
         cmdline += L' ';
-        const std::wstring wide_arg = to_wide(arg);
-        const bool needs_quoting = wide_arg.find(L' ') != std::wstring::npos || wide_arg.empty();
+    }
 
-        if (needs_quoting) {
-            cmdline += L'"';
+    const bool needs_quoting = wide_arg.find(L' ') != std::wstring::npos || wide_arg.empty();
+    if (needs_quoting) {
+        cmdline += L'"';
+    }
+
+    for (size_t i = 0; i < wide_arg.length(); ++i) {
+        wchar_t ch = wide_arg[i];
+        if (ch == L'"') {
+            cmdline += L"\\\"";
         }
-
-        for (size_t i = 0; i < wide_arg.length(); ++i) {
-            wchar_t ch = wide_arg[i];
-            if (ch == L'"') {
-                cmdline += L"\\\"";
+        else if (ch == L'\\') {
+            if (i + 1 < wide_arg.length() && wide_arg[i + 1] == L'"') {
+                cmdline += L"\\\\";
             }
-            else if (ch == L'\\') {
-                if (i + 1 < wide_arg.length() && wide_arg[i + 1] == L'"') {
-                    cmdline += L"\\\\";
-                }
-                else if (i + 1 == wide_arg.length() && needs_quoting) {
-                    cmdline += L"\\\\";
-                }
-                else {
-                    cmdline += L'\\';
-                }
+            else if (i + 1 == wide_arg.length() && needs_quoting) {
+                cmdline += L"\\\\";
             }
             else {
-                cmdline += ch;
+                cmdline += L'\\';
             }
         }
-
-        if (needs_quoting) {
-            cmdline += L'"';
+        else {
+            cmdline += ch;
         }
+    }
+
+    if (needs_quoting) {
+        cmdline += L'"';
+    }
+}
+
+std::wstring build_command_line(const std::string& exe, const std::vector<std::string>& args)
+{
+    std::wstring cmdline;
+    append_quoted_argument(cmdline, exe);
+    for (const auto& arg : args) {
+        append_quoted_argument(cmdline, arg);
     }
 
     return cmdline;

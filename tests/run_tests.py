@@ -182,6 +182,27 @@ def _default_stack_capture_pause_ms() -> str:
     return str(int(pause_seconds * 1000))
 
 
+def _extract_debug_pause_pid(line: str) -> Optional[int]:
+    """Extract the paused PID from a debug-pause log line."""
+
+    for marker in ("Process ", "PID "):
+        if marker not in line:
+            continue
+        tail = line.split(marker, 1)[1]
+        digits = ""
+        for ch in tail:
+            if ch.isdigit():
+                digits += ch
+            elif digits:
+                break
+        if digits:
+            try:
+                return int(digits)
+            except ValueError:
+                return None
+    return None
+
+
 def _lookup_test_weight(name: str, active_tests: Dict[str, int]) -> int:
     """Return the repetition weight for the provided test invocation from active_tests.txt."""
 
@@ -851,7 +872,14 @@ class TestRunner:
         instrumentation_active = self.instrumentation_active()
         instrument = partial(self._instrument_step, disk_path=self.build_dir)
         with self._stack_capture_history_lock:
-            self._stack_capture_history.pop(invocation.name, None)
+            prefix = f"{invocation.name}:"
+            keys_to_clear = [
+                key
+                for key in self._stack_capture_history.keys()
+                if key == invocation.name or key.startswith(prefix)
+            ]
+            for key in keys_to_clear:
+                self._stack_capture_history.pop(key, None)
         try:
             popen_env = self._build_test_environment(invocation, scratch_dir)
             start_time = time.time()
@@ -1130,16 +1158,25 @@ class TestRunner:
                 # Check for SINTRA_DEBUG_PAUSE marker (process has paused for debugger attachment)
                 if '[SINTRA_DEBUG_PAUSE]' in trigger_line and 'paused:' in trigger_line:
                     # Process has hit a crash and is paused - capture immediately
-                    if not self._should_attempt_stack_capture(invocation, 'debug_pause'):
+                    target_pid = _extract_debug_pause_pid(trigger_line)
+                    if target_pid is None and process is not None:
+                        target_pid = process.pid
+                    if not self._should_attempt_stack_capture(
+                        invocation,
+                        'debug_pause',
+                        target_pid=target_pid,
+                    ):
                         return
 
                     traces = ""
                     error = ""
-                    with stack_capture_context(mark_failure=True) as allowed:
+                    with stack_capture_context(mark_failure=False) as allowed:
                         if not allowed:
                             return
+                        if target_pid is None:
+                            return
                         traces, error = self._capture_process_stacks(
-                            process.pid,
+                            target_pid,
                             process_group_id,
                         )
 
@@ -1942,10 +1979,18 @@ class TestRunner:
 
         return any(marker in lowered for marker in failure_markers)
 
-    def _should_attempt_stack_capture(self, invocation: TestInvocation, reason: str) -> bool:
+    def _should_attempt_stack_capture(
+        self,
+        invocation: TestInvocation,
+        reason: str,
+        target_pid: Optional[int] = None,
+    ) -> bool:
         """Return True if stack capture for the invocation/reason has not run yet."""
 
-        key = invocation.name
+        if reason == 'debug_pause' and target_pid is not None:
+            key = f"{invocation.name}:pid{target_pid}"
+        else:
+            key = invocation.name
         with self._stack_capture_history_lock:
             attempted = self._stack_capture_history[key]
             if reason in attempted:
