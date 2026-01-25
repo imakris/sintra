@@ -89,10 +89,21 @@ jobs:
           set -euo pipefail
           if [ -n "${BASE_SHA}" ]; then
             base_commit="$BASE_SHA"
-          elif git rev-parse "${HEAD_SHA}^" >/dev/null 2>&1; then
-            base_commit="$(git rev-parse "${HEAD_SHA}^")"
           else
-            base_commit="$HEAD_SHA"
+            read -ra parents <<< "$(git rev-list --parents -n 1 "${HEAD_SHA}")"
+            if [ "${#parents[@]}" -ge 3 ]; then
+              parent1="${parents[1]}"
+              parent2="${parents[2]}"
+              if git diff --quiet "$parent1" "${HEAD_SHA}"; then
+                base_commit="$parent2"
+              else
+                base_commit="$parent1"
+              fi
+            elif git rev-parse "${HEAD_SHA}^" >/dev/null 2>&1; then
+              base_commit="$(git rev-parse "${HEAD_SHA}^")"
+            else
+              base_commit="$HEAD_SHA"
+            fi
           fi
           echo "base=$base_commit" >> "$GITHUB_OUTPUT"
 
