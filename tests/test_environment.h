@@ -46,15 +46,6 @@ namespace sintra::test {
 #endif
 }
 
-/// Trigger an immediate segmentation fault by writing through a null pointer.
-/// This tends to produce reliable crash reports on Unix-like systems.
-[[noreturn]] inline void trigger_segfault_crash()
-{
-    volatile std::uint8_t* ptr = nullptr;
-    *ptr = 0x1;
-    std::abort();
-}
-
 inline void emit_self_stack_trace()
 {
     std::fprintf(stderr, "[SINTRA_SELF_STACK_BEGIN]\n");

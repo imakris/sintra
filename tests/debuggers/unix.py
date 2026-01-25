@@ -15,7 +15,7 @@ from .base import DebuggerStrategy
 LIVE_STACK_ATTACH_TIMEOUT_ENV = "SINTRA_LIVE_STACK_ATTACH_TIMEOUT"
 DEFAULT_LIVE_STACK_ATTACH_TIMEOUT = 30.0
 DEFAULT_LLDB_LIVE_STACK_ATTACH_TIMEOUT = 90.0
-MACOS_SAMPLE_PREFER_ENV = "SINTRA_MACOS_PREFER_SAMPLE"
+DEFAULT_MACOS_POSTMORTEM_WAIT_SEC = 30.0
 
 
 class UnixDebuggerStrategy(DebuggerStrategy):
@@ -114,10 +114,7 @@ class UnixDebuggerStrategy(DebuggerStrategy):
         capture_errors: List[str] = []
 
         debugger_is_macos_lldb = debugger_name == "lldb" and sys.platform == "darwin"
-        prefer_sample = (
-            debugger_is_macos_lldb
-            and os.environ.get(MACOS_SAMPLE_PREFER_ENV, "").lower() in ("1", "true", "yes")
-        )
+        prefer_sample = debugger_is_macos_lldb
         should_pause = signal_module is not None and not debugger_is_macos_lldb
 
         if should_pause and signal_module is not None:
@@ -345,13 +342,8 @@ class UnixDebuggerStrategy(DebuggerStrategy):
 
         deadline = None
         if sys.platform == "darwin":
-            wait_seconds = 10.0
-            try:
-                wait_seconds = float(os.getenv("SINTRA_POSTMORTEM_WAIT_SEC", "10"))
-            except ValueError:
-                wait_seconds = 10.0
-            if wait_seconds > 0:
-                deadline = time.time() + wait_seconds
+            if DEFAULT_MACOS_POSTMORTEM_WAIT_SEC > 0:
+                deadline = time.time() + DEFAULT_MACOS_POSTMORTEM_WAIT_SEC
 
         while True:
             candidate_cores.clear()
