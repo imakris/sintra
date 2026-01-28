@@ -59,6 +59,10 @@ function(add_test_suite SUFFIX IS_DEBUG)
         if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
             target_compile_options(${LIB_TARGET} INTERFACE -fprofile-instr-generate -fcoverage-mapping)
             target_link_options(${LIB_TARGET} INTERFACE -fprofile-instr-generate -fcoverage-mapping)
+            # Clang on Linux needs libatomic for some atomic operations with coverage
+            if(NOT APPLE)
+                target_link_libraries(${LIB_TARGET} INTERFACE atomic)
+            endif()
         else()
             # GCC
             target_compile_options(${LIB_TARGET} INTERFACE --coverage)
