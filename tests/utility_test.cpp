@@ -18,7 +18,7 @@ void require_true(bool condition, const std::string& message)
 void test_adaptive_function_basic()
 {
     int call_count = 0;
-    sintra::detail::Adaptive_function af([&call_count]() {
+    sintra::Adaptive_function af([&call_count]() {
         ++call_count;
     });
 
@@ -32,11 +32,11 @@ void test_adaptive_function_basic()
 void test_adaptive_function_copy_constructor()
 {
     int call_count = 0;
-    sintra::detail::Adaptive_function af1([&call_count]() {
+    sintra::Adaptive_function af1([&call_count]() {
         ++call_count;
     });
 
-    sintra::detail::Adaptive_function af2(af1);
+    sintra::Adaptive_function af2(af1);
 
     af1();
     require_true(call_count == 1, "Original should work after copy");
@@ -50,8 +50,8 @@ void test_adaptive_function_copy_assignment()
     int count1 = 0;
     int count2 = 0;
 
-    sintra::detail::Adaptive_function af1([&count1]() { ++count1; });
-    sintra::detail::Adaptive_function af2([&count2]() { ++count2; });
+    sintra::Adaptive_function af1([&count1]() { ++count1; });
+    sintra::Adaptive_function af2([&count2]() { ++count2; });
 
     af2 = af1;
 
@@ -66,7 +66,7 @@ void test_adaptive_function_copy_assignment()
 void test_cstring_vector_from_lvalue()
 {
     std::vector<std::string> strings = {"hello", "world", "test"};
-    sintra::detail::cstring_vector csv(strings);
+    sintra::cstring_vector csv(strings);
 
     require_true(csv.size() == 3, "cstring_vector size should match input");
 
@@ -80,7 +80,7 @@ void test_cstring_vector_from_lvalue()
 void test_cstring_vector_from_rvalue()
 {
     std::vector<std::string> strings = {"foo", "bar"};
-    sintra::detail::cstring_vector csv(std::move(strings));
+    sintra::cstring_vector csv(std::move(strings));
 
     require_true(csv.size() == 2, "cstring_vector size should match input");
 
@@ -93,7 +93,7 @@ void test_cstring_vector_from_rvalue()
 void test_cstring_vector_empty()
 {
     std::vector<std::string> empty;
-    sintra::detail::cstring_vector csv(empty);
+    sintra::cstring_vector csv(empty);
 
     require_true(csv.size() == 0, "Empty cstring_vector should have size 0");
 }
