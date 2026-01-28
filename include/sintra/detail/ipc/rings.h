@@ -1211,7 +1211,7 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
                     ++count;
                 }
                 if (state.guard_pending() && state.pending_octile() == target_octile) {
-                    const uint32_t pid = reading_sequences[i].data.owner_pid.load(std::memory_order_relaxed);
+                    const uint32_t pid = reading_sequences[i].data.owner_pid.load();
                     if (pid != 0 && is_process_alive(pid)) {
                         ++count;
                     }
