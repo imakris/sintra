@@ -245,6 +245,80 @@ int main()
         }
     }
 
+    // Test move constructor for file_mapping.
+    temp.write(original_data);
+    {
+        ipc::file_mapping mapping1(temp.path, ipc::read_only);
+        ipc::file_mapping mapping2(std::move(mapping1));
+        ipc::mapped_region region(mapping2, ipc::read_only, 0, 0);
+        expect(region.size() == original_data.size(),
+               "move-constructed file_mapping should work");
+        auto* bytes = static_cast<const std::uint8_t*>(region.data());
+        expect(bytes != nullptr, "move-constructed mapping returned null");
+    }
+
+    // Test move assignment for file_mapping.
+    {
+        ipc::file_mapping mapping1(temp.path, ipc::read_only);
+        ipc::file_mapping mapping2(temp.path, ipc::read_only);
+        mapping2 = std::move(mapping1);
+        ipc::mapped_region region(mapping2, ipc::read_only, 0, 0);
+        expect(region.size() == original_data.size(),
+               "move-assigned file_mapping should work");
+    }
+
+    // Test move constructor for mapped_region.
+    {
+        ipc::file_mapping mapping(temp.path, ipc::read_only);
+        ipc::mapped_region region1(mapping, ipc::read_only, 0, 0);
+        ipc::mapped_region region2(std::move(region1));
+        expect(region2.size() == original_data.size(),
+               "move-constructed mapped_region should work");
+        auto* bytes = static_cast<const std::uint8_t*>(region2.data());
+        expect(bytes != nullptr, "move-constructed region returned null");
+    }
+
+    // Test move assignment for mapped_region.
+    {
+        ipc::file_mapping mapping(temp.path, ipc::read_only);
+        ipc::mapped_region region1(mapping, ipc::read_only, 0, 0);
+        ipc::mapped_region region2(mapping, ipc::read_only, 0, 0);
+        region2 = std::move(region1);
+        expect(region2.size() == original_data.size(),
+               "move-assigned mapped_region should work");
+    }
+
+    // Test const data() accessor.
+    {
+        ipc::file_mapping mapping(temp.path, ipc::read_only);
+        ipc::mapped_region region(mapping, ipc::read_only, 0, 0);
+        const ipc::mapped_region& const_region = region;
+        const void* const_data = const_region.data();
+        expect(const_data != nullptr, "const data() should return non-null");
+        expect(const_data == region.data(), "const data() should match non-const");
+    }
+
+    // Test flush() on read-write mapping.
+    temp.write(original_data);
+    {
+        ipc::file_mapping mapping(temp.path, ipc::read_write);
+        ipc::mapped_region region(mapping, ipc::read_write, 0, 0);
+        auto* bytes = static_cast<std::uint8_t*>(region.data());
+        bytes[0] = static_cast<std::uint8_t>(bytes[0] ^ 0xFF);
+        region.flush();  // Flush entire region
+        region.flush(0, 64);  // Flush partial region
+    }
+
+    // Test flush_file() on file_mapping.
+    temp.write(original_data);
+    {
+        ipc::file_mapping mapping(temp.path, ipc::read_write);
+        ipc::mapped_region region(mapping, ipc::read_write, 0, 0);
+        auto* bytes = static_cast<std::uint8_t*>(region.data());
+        bytes[0] = static_cast<std::uint8_t>(bytes[0] ^ 0xFF);
+        mapping.flush_file();
+    }
+
     return 0;
 }
 

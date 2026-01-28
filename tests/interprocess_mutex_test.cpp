@@ -183,6 +183,71 @@ int main()
     expect(lock_detected_recursion, "lock recursion should throw");
     mtx.unlock();
 
+    // Test try_lock_for with immediate success.
+    {
+        test_mutex timed_mtx;
+        bool acquired = timed_mtx.try_lock_for(100ms);
+        expect(acquired, "try_lock_for should succeed on unlocked mutex");
+        timed_mtx.unlock();
+    }
+
+    // Test try_lock_for with timeout (mutex held by another thread).
+    {
+        test_mutex timed_mtx;
+        timed_mtx.lock();
+
+        std::atomic<bool> timed_out{false};
+        std::thread waiter([&] {
+            auto start = std::chrono::steady_clock::now();
+            bool acquired = timed_mtx.try_lock_for(50ms);
+            auto elapsed = std::chrono::steady_clock::now() - start;
+            if (!acquired && elapsed >= 40ms) {
+                timed_out.store(true);
+            }
+            if (acquired) {
+                timed_mtx.unlock();
+            }
+        });
+        waiter.join();
+
+        expect(timed_out.load(), "try_lock_for should timeout when mutex is held");
+        timed_mtx.unlock();
+    }
+
+    // Test try_lock_until with immediate success.
+    {
+        test_mutex timed_mtx;
+        auto deadline = std::chrono::steady_clock::now() + 100ms;
+        bool acquired = timed_mtx.try_lock_until(deadline);
+        expect(acquired, "try_lock_until should succeed on unlocked mutex");
+        timed_mtx.unlock();
+    }
+
+    // Test try_lock_until with past deadline.
+    {
+        test_mutex timed_mtx;
+        timed_mtx.lock();
+
+        std::atomic<bool> failed_immediately{false};
+        std::thread waiter([&] {
+            auto past_deadline = std::chrono::steady_clock::now() - 10ms;
+            auto start = std::chrono::steady_clock::now();
+            bool acquired = timed_mtx.try_lock_until(past_deadline);
+            auto elapsed = std::chrono::steady_clock::now() - start;
+            if (!acquired && elapsed < 20ms) {
+                failed_immediately.store(true);
+            }
+            if (acquired) {
+                timed_mtx.unlock();
+            }
+        });
+        waiter.join();
+
+        expect(failed_immediately.load(),
+               "try_lock_until with past deadline should fail quickly");
+        timed_mtx.unlock();
+    }
+
     // Recovery from a dead owner should succeed.
     test_mutex recovery;
     const auto dead_pid = static_cast<uint32_t>(0);

@@ -47,10 +47,11 @@ processing_fence_test                    100
 recovery_test                             30
 ring_cleanup_stress_test                 100
 rpc_append_test                          100
-rendezvous_barrier_error_paths_test        1
+rendezvous_barrier_error_paths_test        5
 semaphore_high_contention_stress          10
 spawn_detached_test                       50
 variable_buffer_alignment_test             5
+utility_test                               1
 join_swarm_midflight_test                 40
 
 # New feature tests (added for recent changes)

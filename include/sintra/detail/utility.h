@@ -390,26 +390,6 @@ inline bool write_fully(int fd, const void* buf, size_t count)
     return true;
 }
 
-inline bool read_fully(int fd, void* buf, size_t count)
-{
-    char* ptr = static_cast<char*>(buf);
-    size_t total_read = 0;
-    while (total_read < count) {
-        ssize_t rv = call_read(fd, ptr + total_read, count - total_read);
-        if (rv < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            return false;
-        }
-        if (rv == 0) {
-            return false;
-        }
-        total_read += static_cast<size_t>(rv);
-    }
-    return true;
-}
-
 #endif // !_WIN32
 
 #ifdef _WIN32

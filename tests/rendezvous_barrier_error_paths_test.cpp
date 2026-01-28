@@ -28,17 +28,19 @@ int main(int argc, char* argv[])
     bool ok = true;
 
     // Case 1: rpc_cancelled path in rendezvous_barrier.
+    // Keep the group alive until finalize() so any late request reader dispatch
+    // still finds a valid local receiver after cancellation.
+    sintra::Process_group cancel_group;
     {
-        sintra::Process_group group;
         const auto group_name = unique_group_name("rendezvous_cancel_group");
         const auto barrier_name = std::string("rendezvous_cancel_barrier");
 
         std::unordered_set<sintra::instance_id_type> members;
         members.insert(s_mproc_id);
         members.insert(sintra::make_process_instance_id(2));
-        group.set(members);
+        cancel_group.set(members);
 
-        if (!group.assign_name(group_name)) {
+        if (!cancel_group.assign_name(group_name)) {
             std::fprintf(stderr, "Failed to assign group name for cancel test.\n");
             ok = false;
         } else {
