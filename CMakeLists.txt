@@ -11,6 +11,7 @@ endif()
 find_package(Threads REQUIRED)
 
 option(SINTRA_RELEASE_WITH_DEBUG_SYMBOLS "Emit debug symbols when building Release configuration" ON)
+option(SINTRA_ENABLE_COVERAGE "Build with coverage instrumentation" OFF)
 
 # Force Debug build by default
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
