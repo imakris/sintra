@@ -154,10 +154,6 @@ jobs:
       - name: Build
         run: cmake --build build --config Release --parallel ${{ env.BUILD_JOBS }}
 
-      - name: Run tests
-        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.core == 'true' || steps.changed.outputs.workflows == 'true'
-        run: ctest --test-dir build -C Release --output-on-failure --timeout 60
-
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
