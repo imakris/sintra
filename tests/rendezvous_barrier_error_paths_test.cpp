@@ -3,7 +3,6 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
-#include <mutex>
 #include <string>
 #include <thread>
 #include <unordered_set>
@@ -11,21 +10,6 @@
 namespace {
 
 using namespace std::chrono_literals;
-
-bool wait_for_outstanding_rpcs(size_t min_count, std::chrono::milliseconds timeout)
-{
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (std::chrono::steady_clock::now() < deadline) {
-        {
-            std::lock_guard<std::mutex> lock(sintra::s_outstanding_rpcs_mutex());
-            if (sintra::s_outstanding_rpcs().size() >= min_count) {
-                return true;
-            }
-        }
-        std::this_thread::sleep_for(1ms);
-    }
-    return false;
-}
 
 std::string unique_group_name(const char* prefix)
 {
@@ -59,22 +43,33 @@ int main(int argc, char* argv[])
             ok = false;
         } else {
             std::atomic<bool> barrier_result{false};
+            std::atomic<bool> barrier_done{false};
             std::thread waiter([&] {
                 barrier_result = sintra::barrier<sintra::rendezvous_t>(barrier_name, group_name);
+                barrier_done = true;
             });
 
-            const bool saw_outstanding = wait_for_outstanding_rpcs(1, 250ms);
-            if (saw_outstanding) {
-                s_mproc->unblock_rpc(sintra::process_of(s_coord_id));
-            } else {
-                std::fprintf(stderr,
-                             "Did not observe outstanding RPC (cancel test); "
-                             "letting the barrier block for timeout.\n");
+            bool cancelled = false;
+            const auto cancel_deadline = std::chrono::steady_clock::now() + 5s;
+            while (!barrier_done.load() &&
+                   std::chrono::steady_clock::now() < cancel_deadline)
+            {
+                if (s_mproc->unblock_rpc(sintra::process_of(s_coord_id)) > 0) {
+                    cancelled = true;
+                    break;
+                }
+                std::this_thread::sleep_for(1ms);
             }
 
             waiter.join();
 
-            if (saw_outstanding && !barrier_result.load()) {
+            if (!cancelled) {
+                std::fprintf(stderr,
+                             "Did not observe cancellable outstanding RPC (cancel test).\n");
+                ok = false;
+            }
+
+            if (cancelled && !barrier_result.load()) {
                 std::fprintf(stderr, "Expected rendezvous barrier to return true after cancellation.\n");
                 ok = false;
             }
