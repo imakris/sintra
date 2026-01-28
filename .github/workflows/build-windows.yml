@@ -74,6 +74,17 @@ jobs:
           fi
           echo "CMAKE_FLAGS=$CT $CE $CS" >> "$GITHUB_OUTPUT"
 
+      - name: Compute build parallelism
+        shell: pwsh
+        run: |
+          $total = [int]($env:NUMBER_OF_PROCESSORS)
+          if ($total -lt 1) { $total = 2 }
+          $jobs = $total - 2
+          if ($jobs -lt 2) { $jobs = 2 }
+          if ($jobs -gt $total) { $jobs = $total }
+          Add-Content -Path $env:GITHUB_ENV -Value "BUILD_JOBS=$jobs"
+          Write-Host "Using $jobs build jobs (detected $total cores)."
+
       - name: Ensure Windows debugging tools
         shell: pwsh
         run: |
@@ -153,11 +164,14 @@ jobs:
         run: cmake -B build -S . -DCMAKE_BUILD_TYPE=Release ${{ steps.flags.outputs.CMAKE_FLAGS }}
 
       - name: Build
-        run: cmake --build build --config Release
+        run: cmake --build build --config Release --parallel ${{ env.BUILD_JOBS }}
 
       - name: Run tests
         if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.core == 'true' || steps.changed.outputs.workflows == 'true'
-        run: ctest --test-dir build -C Release --output-on-failure --timeout 60
+        shell: pwsh
+        run: |
+          Set-Location tests
+          python run_tests.py --timeout 60 --build-dir ..\build --config Release
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4

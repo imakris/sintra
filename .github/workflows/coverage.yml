@@ -52,8 +52,30 @@ jobs:
               -DCMAKE_CXX_COMPILER=clang++
           fi
 
+      - name: Compute build parallelism
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v nproc >/dev/null 2>&1; then
+            total=$(nproc)
+          else
+            total=$(getconf _NPROCESSORS_ONLN || echo 2)
+          fi
+          if [ -z "$total" ] || [ "$total" -lt 1 ]; then
+            total=2
+          fi
+          jobs=$(( total - 2 ))
+          if [ "$jobs" -lt 2 ]; then
+            jobs=2
+          fi
+          if [ "$jobs" -gt "$total" ]; then
+            jobs="$total"
+          fi
+          echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
+          echo "Using $jobs build jobs (detected $total cores)."
+
       - name: Build
-        run: cmake --build "$BUILD_DIR" -j2
+        run: cmake --build "$BUILD_DIR" --parallel ${{ env.BUILD_JOBS }}
 
       - name: Run tests
         working-directory: tests

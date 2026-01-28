@@ -71,53 +71,49 @@ function(add_test_suite SUFFIX IS_DEBUG)
         endif()
     endif()
 
-    # Set optimization flags
+    # Set optimization flags based on the suite, independent of CMAKE_BUILD_TYPE.
     if(IS_DEBUG)
         if(MSVC)
             target_compile_options(${LIB_TARGET} INTERFACE
-                $<$<CONFIG:Debug>:/Od>
-                $<$<CONFIG:Debug>:/Zi>
-                $<$<CONFIG:Debug>:/RTC1>
-                $<$<AND:$<CONFIG:Release>,$<BOOL:${SINTRA_RELEASE_WITH_DEBUG_SYMBOLS}>>:/Zi>
+                /Od
+                /Zi
+                /RTC1
+                /UNDEBUG
             )
-            target_link_options(${LIB_TARGET} INTERFACE
-                $<$<CONFIG:Debug>:/DEBUG:FULL>
-                $<$<AND:$<CONFIG:Release>,$<BOOL:${SINTRA_RELEASE_WITH_DEBUG_SYMBOLS}>>:/DEBUG:FULL>
-            )
+            target_link_options(${LIB_TARGET} INTERFACE /DEBUG:FULL)
         else()
             target_compile_options(${LIB_TARGET} INTERFACE
-                $<$<CONFIG:Debug>:-g>
-                $<$<CONFIG:Debug>:-O0>
+                -g
+                -O0
+                -UNDEBUG
             )
         endif()
     else()
         if(MSVC)
             if(SINTRA_RELEASE_WITH_DEBUG_SYMBOLS)
                 target_compile_options(${LIB_TARGET} INTERFACE
-                    $<$<CONFIG:Release>:/O1>
-                    $<$<CONFIG:Release>:/Zi>
-                    $<$<CONFIG:Release>:/DNDEBUG>
+                    /O1
+                    /Zi
+                    /DNDEBUG
                 )
-                target_link_options(${LIB_TARGET} INTERFACE
-                    $<$<CONFIG:Release>:/DEBUG:FULL>
-                )
+                target_link_options(${LIB_TARGET} INTERFACE /DEBUG:FULL)
             else()
                 target_compile_options(${LIB_TARGET} INTERFACE
-                    $<$<CONFIG:Release>:/O2>
-                    $<$<CONFIG:Release>:/DNDEBUG>
+                    /O2
+                    /DNDEBUG
                 )
             endif()
         else()
             if(SINTRA_RELEASE_WITH_DEBUG_SYMBOLS)
                 target_compile_options(${LIB_TARGET} INTERFACE
-                    $<$<CONFIG:Release>:-O0>
-                    $<$<CONFIG:Release>:-g>
-                    $<$<CONFIG:Release>:-DNDEBUG>
+                    -O0
+                    -g
+                    -DNDEBUG
                 )
             else()
                 target_compile_options(${LIB_TARGET} INTERFACE
-                    $<$<CONFIG:Release>:-O3>
-                    $<$<CONFIG:Release>:-DNDEBUG>
+                    -O3
+                    -DNDEBUG
                 )
             endif()
         endif()
