@@ -91,37 +91,30 @@ struct Process_descriptor
     Entry_descriptor entry;
     vector<string> sintra_options;
     vector<string> user_options;
-    int num_children = 0; // quota
     instance_id_type assigned_instance_id = invalid_instance_id;
 
     Process_descriptor(
         const Entry_descriptor& aentry,
-        const vector<string>& auser_options = vector<string>(),
-        int anum_children = 0)
+        const vector<string>& auser_options = vector<string>())
     :
         entry(aentry),
-        user_options(auser_options),
-        num_children(anum_children)
+        user_options(auser_options)
     {
     }
     Process_descriptor(
         const string& binary_path,
-        const vector<string>& auser_options = vector<string>(),
-        int anum_children = 0)
+        const vector<string>& auser_options = vector<string>())
     :
         entry(binary_path),
-        user_options(auser_options),
-        num_children(anum_children)
+        user_options(auser_options)
     {
     }
     Process_descriptor(
         const char* binary_path,
-        const vector<string>& auser_options = vector<string>(),
-        int anum_children = 0)
+        const vector<string>& auser_options = vector<string>())
     :
         entry(binary_path),
-        user_options(auser_options),
-        num_children(anum_children)
+        user_options(auser_options)
     {
     }
 
@@ -241,7 +234,6 @@ struct Managed_process: Derived_transceiver<Managed_process>
     string obtain_swarm_directory();
 
     function<int()> m_entry_function = [&] ()->int { return 0; };
-    int                                 m_children_quota = 0;
 
     sequence_counter_type               m_last_message_sequence;
 
@@ -316,9 +308,6 @@ struct Managed_process: Derived_transceiver<Managed_process>
     instance_id_type                    m_group_external        = invalid_instance_id;
 
     // recovery
-    double                              m_average_runnning_time = std::numeric_limits<double>::max();
-    double                              m_last_running_time     = std::numeric_limits<double>::max();
-    uint32_t                            m_times_recovered       = 0;
     bool                                m_recoverable           = false;
     std::string                         m_recovery_cmd;
 

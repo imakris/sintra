@@ -29,7 +29,9 @@ complex_choreography_test                 60
 dummy_test                                 1
 finalize_emit_rpc_test                    10
 extreme_choreography_test                 80
+exception_conversions_test                 5
 explicit_type_id_test                      5
+init_error_spawn_failure_test              1
 interprocess_file_mapping_test            10
 interprocess_mutex_test                   30
 interprocess_semaphore_test               10
@@ -44,6 +46,7 @@ processing_fence_test                    100
 recovery_test                             30
 ring_cleanup_stress_test                 100
 rpc_append_test                          100
+rendezvous_barrier_error_paths_test        1
 semaphore_high_contention_stress          10
 spawn_detached_test                       50
 variable_buffer_alignment_test             5
@@ -57,6 +60,7 @@ spawn_wait_test                           10
 lifecycle_handler_test                    20
 receive_test                              20
 lifeline_basic_test                        5
+locality_messaging_test                    1
 
 # Manual/reproduction tests (commented out by default)
 # Uncomment to enable these tests (they may fail by design)

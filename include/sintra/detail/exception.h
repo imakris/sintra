@@ -131,16 +131,6 @@ public:
 
     // Get detailed diagnostic report suitable for logging/stderr
     const std::string& diagnostic_report() const { return m_diagnostic; }
-
-    // Helper to get a specific failure cause name
-    static const char* cause_to_string(cause c) {
-        switch (c) {
-            case cause::spawn_failed: return "spawn_failed";
-            case cause::barrier_timeout: return "barrier_timeout";
-            case cause::ipc_setup_failed: return "ipc_setup_failed";
-            default: return "unknown";
-        }
-    }
 };
 
 } // namespace sintra

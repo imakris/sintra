@@ -60,13 +60,6 @@ struct Typed_instance_id
 };
 
 
-template <typename T>
-Typed_instance_id<T> make_typed_instance_id(const T& transceiver)
-{
-    return Typed_instance_id<T>(transceiver);
-}
-
-
 // This specialization applies to non-typed generic groups such as any_local etc.
 template<>
 struct Typed_instance_id<void>
@@ -77,13 +70,6 @@ struct Typed_instance_id<void>
         id = id_;
     }
 };
-
-
-inline
-Typed_instance_id<void> make_untyped_instance_id(instance_id_type naked_instance_id)
-{
-    return Typed_instance_id<void>(naked_instance_id);
-}
 
 
   //\       //\       //\       //\       //\       //\       //\       //
@@ -637,6 +623,16 @@ struct Derived_transceiver: Parent
 
     using Transceiver_type = Derived_T;
 
+    /// @name Typed Message Emission
+    /// These methods send typed protocol messages from this transceiver.
+    /// The message type is specified explicitly as a template parameter.
+    ///
+    /// For simple data broadcasting where the message type doesn't matter,
+    /// use the Maildrop streaming API instead: world() << value, local() << value,
+    /// or remote() << value. Those wrap values in Message<Enclosure<T>> automatically.
+    /// @{
+
+    /// Send a typed message to local recipients only (same process).
     template <
         typename MESSAGE_T,
         typename SENDER_T = Transceiver_type,
@@ -646,6 +642,7 @@ struct Derived_transceiver: Parent
         base.send<MESSAGE_T, any_local, SENDER_T>(std::forward<Args>(args)...);
     }
 
+    /// Send a typed message to remote recipients only (other processes).
     template <
         typename MESSAGE_T,
         typename SENDER_T = Transceiver_type,
@@ -655,6 +652,7 @@ struct Derived_transceiver: Parent
         base.send<MESSAGE_T, any_remote, SENDER_T>(std::forward<Args>(args)...);
     }
 
+    /// Send a typed message to all recipients (local and remote).
     template <
         typename MESSAGE_T,
         typename SENDER_T = Transceiver_type,
@@ -663,6 +661,8 @@ struct Derived_transceiver: Parent
     {
         base.send<MESSAGE_T, any_local_or_remote, SENDER_T>(std::forward<Args>(args)...);
     }
+
+    /// @}
 
 
     static Named_instance<Transceiver_type> named_instance(const std::string& name)

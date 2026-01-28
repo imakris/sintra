@@ -296,47 +296,82 @@ void Process_message_reader::request_reader_function()
         assert(m->message_type_id != not_defined_type_id);
 
         if (is_local_instance(m->receiver_instance_id)) {
-            // If the coordinator is local and this request targets a *service* instance
-            // (e.g., Coordinator), relay it to the coordinator's ring and *skip* local
-            // dispatch to avoid double-processing (local dispatch + relay).
-            if (s_coord && !has_same_mapping(*m_in_req_c, *s_mproc->m_out_req_c) &&
-                is_service_instance(m->receiver_instance_id))
-            {
-                s_mproc->m_out_req_c->relay(*m);
-                continue;
-            }
-
-            // If addressed to a specified local receiver, this may only be an RPC call,
-            // thus the receiver must exist.
-            assert(
-                reader_state == READER_NORMAL ?
-                    s_mproc->m_local_pointer_of_instance_id.find(m->receiver_instance_id) !=
-                    s_mproc->m_local_pointer_of_instance_id.end()
-                :
-                    true
-            );
-
-            if ((reader_state == READER_NORMAL) ||
-                (is_service_instance(m->receiver_instance_id) && s_coord) ||
-                (m->sender_instance_id == s_coord_id) )
-            {
-                // If addressed to a specified local receiver, this may only be an RPC call,
-                // thus the named receiver must exist.
-
-                // if the receiver registered handler, call the handler
-                // Hold spinlock while accessing the iterator to prevent use-after-invalidation
-                void (*handler_fn)(Message_prefix&);
+            if (m->receiver_instance_id == any_local) {
+                // Local event: only handle on the originating process ring.
+                const bool reading_local_ring =
+                    has_same_mapping(*m_in_req_c, *s_mproc->m_out_req_c);
+                if (reading_local_ring &&
+                    ((reader_state == READER_NORMAL) ||
+                     (s_coord && m->message_type_id >
+                         (type_id_type)detail::reserved_id::base_of_messages_handled_by_coordinator)))
                 {
-                    auto scoped_map = Transceiver::get_rpc_handler_map().scoped();
-                    auto it = scoped_map.get().find(m->message_type_id);
-                    assert(it != scoped_map.get().end()); // this would be a library error
+                    lock_guard<recursive_mutex> sl(s_mproc->m_handlers_mutex);
 
-                    // Copy the function pointer while holding the lock
-                    handler_fn = it->second;
-                    // Spinlock released here automatically when scoped_map goes out of scope
+                    auto& active_handlers = s_mproc->m_active_handlers;
+                    auto it_mt = active_handlers.find(m->message_type_id);
+
+                    if (it_mt != active_handlers.end()) {
+                        instance_id_type sids[] = {
+                            m->sender_instance_id,
+                            any_local,
+                            any_local_or_remote
+                        };
+
+                        for (auto sid : sids) {
+                            auto shl = it_mt->second.find(sid);
+                            if (shl != it_mt->second.end()) {
+                                for (auto& e : shl->second) {
+                                    e(*m);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            else {
+                // If the coordinator is local and this request targets a *service* instance
+                // (e.g., Coordinator), relay it to the coordinator's ring and *skip* local
+                // dispatch to avoid double-processing (local dispatch + relay).
+                if (s_coord && !has_same_mapping(*m_in_req_c, *s_mproc->m_out_req_c) &&
+                    is_service_instance(m->receiver_instance_id))
+                {
+                    s_mproc->m_out_req_c->relay(*m);
+                    publish_request_progress(m_in_req_c->get_message_reading_sequence());
+                    continue;
                 }
 
-                (*handler_fn)(*m); // call the handler
+                // If addressed to a specified local receiver, this may only be an RPC call,
+                // thus the receiver must exist.
+                assert(
+                    reader_state == READER_NORMAL ?
+                        s_mproc->m_local_pointer_of_instance_id.find(m->receiver_instance_id) !=
+                        s_mproc->m_local_pointer_of_instance_id.end()
+                    :
+                        true
+                );
+
+                if ((reader_state == READER_NORMAL) ||
+                    (is_service_instance(m->receiver_instance_id) && s_coord) ||
+                    (m->sender_instance_id == s_coord_id) )
+                {
+                    // If addressed to a specified local receiver, this may only be an RPC call,
+                    // thus the named receiver must exist.
+
+                    // if the receiver registered handler, call the handler
+                    // Hold spinlock while accessing the iterator to prevent use-after-invalidation
+                    void (*handler_fn)(Message_prefix&);
+                    {
+                        auto scoped_map = Transceiver::get_rpc_handler_map().scoped();
+                        auto it = scoped_map.get().find(m->message_type_id);
+                        assert(it != scoped_map.get().end()); // this would be a library error
+
+                        // Copy the function pointer while holding the lock
+                        handler_fn = it->second;
+                        // Spinlock released here automatically when scoped_map goes out of scope
+                    }
+
+                    (*handler_fn)(*m); // call the handler
+                }
             }
         }
         else
@@ -352,7 +387,11 @@ void Process_message_reader::request_reader_function()
                 // In that case, skip local event handling here and let the relayed
                 // copy be handled when reading the coordinator's ring.
                 const bool coordinator_reading_remote = (s_coord && !has_same_mapping(*m_in_req_c, *s_mproc->m_out_req_c));
-                if (!coordinator_reading_remote) {
+                const bool sender_is_local = is_local(m->sender_instance_id);
+                const bool skip_local_sender =
+                    (m->receiver_instance_id == any_remote) && sender_is_local;
+
+                if (!coordinator_reading_remote && !skip_local_sender) {
                     lock_guard<recursive_mutex> sl(s_mproc->m_handlers_mutex);
 
                     // find handlers that operate with this type of message in this process

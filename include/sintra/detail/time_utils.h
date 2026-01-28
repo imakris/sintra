@@ -77,11 +77,6 @@ inline uint64_t monotonic_now_ns() noexcept
 #endif
 }
 
-inline uint64_t monotonic_now_us() noexcept
-{
-    return monotonic_now_ns() / 1000u;
-}
-
 #if defined(__APPLE__)
 inline void precision_sleep_for(std::chrono::duration<double> duration)
 {

@@ -33,7 +33,7 @@ template <
 >
 std::pair<type_id_type, std::string> exception_to_string(const T& ex)
 {
-    return std::make_pair(get_type_id<T>, ex.what());
+    return std::make_pair(get_type_id<T>(), ex.what());
 }
 
 
@@ -44,7 +44,7 @@ template <
 >
 std::pair<type_id_type, std::string> exception_to_string(const T& ex)
 {
-    return std::make_pair(get_type_id<message_string>, std::to_string(ex));
+    return std::make_pair(get_type_id<message_string>(), std::to_string(ex));
 }
 
 
@@ -58,7 +58,7 @@ template <
 std::pair<type_id_type, std::string> exception_to_string(const T& ex)
 {
     return std::make_pair(
-        get_type_id<message_string>,
+        get_type_id<message_string>(),
         std::string("Exception of type ") +
         detail::type_name<T>() +
         ", which is not serialized by sintra"

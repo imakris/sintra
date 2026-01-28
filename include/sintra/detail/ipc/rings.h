@@ -325,11 +325,6 @@ inline uint8_t octile_of_index(size_t idx, size_t ring) noexcept
     return static_cast<uint8_t>((8u * idx) / ring);
 }
 
-inline uint8_t octile_of_sequence(sequence_counter_type seq, size_t ring) noexcept
-{
-    return octile_of_index(mod_u64(seq, ring), ring);
-}
-
 //==============================================================================
 // Small helper types
 //==============================================================================

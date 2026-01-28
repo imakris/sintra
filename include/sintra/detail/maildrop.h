@@ -12,6 +12,21 @@
 
 namespace sintra {
 
+/// Maildrop provides a streaming API for broadcasting simple data values.
+///
+/// Usage:
+///   world() << myValue;   // broadcast to all (local + remote)
+///   local() << myValue;   // send to local recipients only
+///   remote() << myValue;  // send to remote recipients only
+///
+/// Values are automatically wrapped in Message<Enclosure<T>>. The sender is
+/// always the managed process (s_mproc).
+///
+/// For sending typed protocol messages from a specific transceiver, use the
+/// emit_* methods on Derived_transceiver instead (emit_local, emit_remote,
+/// emit_global). Those allow specifying explicit message types and preserve
+/// the sender's transceiver identity.
+
 template <instance_id_type LOCALITY>
 struct Maildrop
 {
