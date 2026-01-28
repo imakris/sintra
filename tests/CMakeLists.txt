@@ -54,15 +54,16 @@ function(add_test_suite SUFFIX IS_DEBUG)
         target_compile_options(${LIB_TARGET} INTERFACE /FS)
     endif()
 
+    # Clang on Linux needs libatomic for some atomic operations
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND NOT APPLE AND NOT MSVC)
+        target_link_libraries(${LIB_TARGET} INTERFACE atomic)
+    endif()
+
     # Coverage instrumentation (only for debug builds on non-MSVC)
     if(SINTRA_ENABLE_COVERAGE AND IS_DEBUG AND NOT MSVC)
         if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
             target_compile_options(${LIB_TARGET} INTERFACE -fprofile-instr-generate -fcoverage-mapping)
             target_link_options(${LIB_TARGET} INTERFACE -fprofile-instr-generate -fcoverage-mapping)
-            # Clang on Linux needs libatomic for some atomic operations with coverage
-            if(NOT APPLE)
-                target_link_libraries(${LIB_TARGET} INTERFACE atomic)
-            endif()
         else()
             # GCC
             target_compile_options(${LIB_TARGET} INTERFACE --coverage)
