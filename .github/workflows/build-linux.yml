@@ -159,7 +159,7 @@ jobs:
         shell: bash
         run: |
           cd tests
-          python3 run_tests.py --timeout 60 --build-dir ../build --config Release
+          python3 run_tests.py --timeout 60 --build-dir ../build --config Release --max-repetitions 1
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
