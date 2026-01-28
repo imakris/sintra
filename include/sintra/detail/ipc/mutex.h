@@ -39,12 +39,6 @@ atomics and basic thread yielding. It uses adaptive spinning with exponential
 backoff and occasional sleeps under contention. No operating system-specific
 kernel synchronization primitives are required.
 
-RECOVERY FLAG
-The method recovered_last_acquire() reports whether the most recent successful
-acquisition followed an owner-death recovery. The flag is set to true only when
-a lock is taken after recovery and reset to false on the next normal acquisition.
-Failed try_* attempts do not affect the flag.
-
 CAVEATS
 - Thread death within a still-running process is not detected.
 - Recovery preemption may result in short overlapping recovery attempts,
@@ -182,14 +176,6 @@ public:
             throw std::system_error(std::make_error_code(std::errc::operation_not_permitted),
                                     "interprocess_mutex unlock by non-owner");
         }
-        // Clearing flag here is optional; leave as-is so that a subsequent query still
-        // reflects whether the *last* successful acquire was via recovery.
-    }
-
-    // Indicates whether the last successful acquire of *this mutex instance* was via recovery
-    bool recovered_last_acquire() const noexcept
-    {
-        return m_last_recovered != 0u;
     }
 
 private:
@@ -269,8 +255,6 @@ private:
     {
         owner_token expected = k_unowned;
         if (m_owner.compare_exchange_strong(expected, self)) {
-            // Successful normal acquisition -> clear recovery flag
-            m_last_recovered = 0u;
             return true;
         }
 
@@ -288,8 +272,6 @@ private:
         if (expected != k_unowned && try_recover(expected, self)) {
             expected = k_unowned;
             if (m_owner.compare_exchange_strong(expected, self)) {
-                // Successful post-recovery acquisition -> set recovery flag
-                m_last_recovered = 1;
                 return true;
             }
         }
@@ -354,8 +336,6 @@ private:
     // to allow preemption if a recoverer stalls without dying.
     alignas(64) std::atomic<recover_token> m_recovering{ 0 };
 
-    // Per-instance flag indicating if the last successful acquire recovered from a dead owner.
-    alignas(64) std::atomic<std::uint32_t> m_last_recovered{ 0u };
 };
 
 #if defined(_MSC_VER)
