@@ -40,6 +40,7 @@ ring_helpers_test                          5
 macos_named_semaphore_benchmark           20
 macos_os_sync_semaphore_benchmark         20
 message_args_traits_test                   5
+abi_description_test                       1
 ping_pong_multi_test                     100
 ping_pong_test                            50
 processing_fence_test                    100
@@ -54,6 +55,7 @@ join_swarm_midflight_test                 40
 
 # New feature tests (added for recent changes)
 transceiver_ctor_test                     10
+console_test                               1
 log_stream_move_test                      10
 tls_post_handler_test                     20
 spawn_wait_test                           10

@@ -31,6 +31,7 @@ struct is_complete<volatile void, void> : std::true_type {};
 template <>
 struct is_complete<const volatile void, void> : std::true_type {};
 
+// LCOV_EXCL_START - constexpr function evaluated at compile time
 template <typename T>
 constexpr std::string_view ctti_name()
 {
@@ -84,6 +85,7 @@ constexpr std::string_view ctti_name()
     return std::string_view{};
 #endif
 }
+// LCOV_EXCL_STOP
 
 inline std::string compiler_identity()
 {

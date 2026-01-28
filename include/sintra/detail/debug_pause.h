@@ -39,6 +39,7 @@ inline std::atomic<bool>& debug_pause_state()
 inline void set_debug_pause_active(bool active) { debug_pause_state() = active;      }
 inline bool is_debug_pause_active()             { return debug_pause_state().load(); }
 
+// LCOV_EXCL_START - debug pause infrastructure only activated via environment variable
 inline void debug_pause_forever(const char* reason)
 {
 #ifdef _WIN32
@@ -151,6 +152,7 @@ inline void debug_signal_handler_win(int signum)
 
     debug_pause_forever(signal_name);
 }
+// LCOV_EXCL_STOP
 
 inline void install_debug_pause_handlers()
 {
@@ -161,6 +163,7 @@ inline void install_debug_pause_handlers()
         return;
     }
 
+    // LCOV_EXCL_START - only reached when debug pause is requested via environment variable
     Log_stream(log_level::info) << "[SINTRA_DEBUG_PAUSE] Handlers installed\n";
 
 #ifdef _WIN32
@@ -181,6 +184,7 @@ inline void install_debug_pause_handlers()
     std::signal(SIGBUS,  debug_signal_handler);
 #endif
 }
+// LCOV_EXCL_STOP
 
 } // namespace detail
 } // namespace sintra
