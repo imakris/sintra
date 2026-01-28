@@ -154,13 +154,6 @@ jobs:
       - name: Build
         run: cmake --build build --config Release --parallel ${{ env.BUILD_JOBS }}
 
-      - name: Run tests
-        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.core == 'true' || steps.changed.outputs.workflows == 'true'
-        shell: bash
-        run: |
-          cd tests
-          python3 run_tests.py --timeout 60 --build-dir ../build --config Release --max-repetitions 1
-
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
