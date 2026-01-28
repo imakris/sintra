@@ -70,7 +70,7 @@ void test_cstring_vector_from_lvalue()
 
     require_true(csv.size() == 3, "cstring_vector size should match input");
 
-    const char* const* data = csv.data();
+    const char* const* data = csv.v();
     require_true(data != nullptr, "cstring_vector data should not be null");
     require_true(std::string(data[0]) == "hello", "First element should match");
     require_true(std::string(data[1]) == "world", "Second element should match");
@@ -84,7 +84,7 @@ void test_cstring_vector_from_rvalue()
 
     require_true(csv.size() == 2, "cstring_vector size should match input");
 
-    const char* const* data = csv.data();
+    const char* const* data = csv.v();
     require_true(data != nullptr, "cstring_vector data should not be null");
     require_true(std::string(data[0]) == "foo", "First element should match");
     require_true(std::string(data[1]) == "bar", "Second element should match");
