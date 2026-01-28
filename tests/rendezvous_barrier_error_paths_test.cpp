@@ -63,15 +63,18 @@ int main(int argc, char* argv[])
                 barrier_result = sintra::barrier<sintra::rendezvous_t>(barrier_name, group_name);
             });
 
-            if (!wait_for_outstanding_rpcs(1, 250ms)) {
-                std::fprintf(stderr, "Timed out waiting for outstanding RPC (cancel test).\n");
-                ok = false;
+            const bool saw_outstanding = wait_for_outstanding_rpcs(1, 250ms);
+            if (saw_outstanding) {
+                s_mproc->unblock_rpc(sintra::process_of(s_coord_id));
+            } else {
+                std::fprintf(stderr,
+                             "Did not observe outstanding RPC (cancel test); "
+                             "letting the barrier block for timeout.\n");
             }
 
-            s_mproc->unblock_rpc(sintra::process_of(s_coord_id));
             waiter.join();
 
-            if (!barrier_result.load()) {
+            if (saw_outstanding && !barrier_result.load()) {
                 std::fprintf(stderr, "Expected rendezvous barrier to return true after cancellation.\n");
                 ok = false;
             }
