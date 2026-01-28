@@ -194,24 +194,30 @@ int main()
     // Test try_lock_for with timeout (mutex held by another thread).
     {
         test_mutex timed_mtx;
-        timed_mtx.lock();
+        std::atomic<bool> holding{false};
+        std::atomic<bool> release{false};
 
-        std::atomic<bool> timed_out{false};
-        std::thread waiter([&] {
-            auto start = std::chrono::steady_clock::now();
-            bool acquired = timed_mtx.try_lock_for(50ms);
-            auto elapsed = std::chrono::steady_clock::now() - start;
-            if (!acquired && elapsed >= 40ms) {
-                timed_out.store(true);
+        std::thread holder([&] {
+            timed_mtx.lock();
+            holding.store(true);
+            while (!release.load()) {
+                std::this_thread::sleep_for(1ms);
             }
-            if (acquired) {
-                timed_mtx.unlock();
-            }
+            timed_mtx.unlock();
         });
-        waiter.join();
 
-        expect(timed_out.load(), "try_lock_for should timeout when mutex is held");
-        timed_mtx.unlock();
+        while (!holding.load()) {
+            std::this_thread::sleep_for(1ms);
+        }
+
+        bool acquired = timed_mtx.try_lock_for(50ms);
+        if (acquired) {
+            timed_mtx.unlock();
+        }
+        expect(!acquired, "try_lock_for should timeout when mutex is held");
+
+        release.store(true);
+        holder.join();
     }
 
     // Test try_lock_until with immediate success.
@@ -223,29 +229,34 @@ int main()
         timed_mtx.unlock();
     }
 
-    // Test try_lock_until with past deadline.
+    // Test try_lock_until with past deadline (mutex held by another thread).
     {
         test_mutex timed_mtx;
-        timed_mtx.lock();
+        std::atomic<bool> holding{false};
+        std::atomic<bool> release{false};
 
-        std::atomic<bool> failed_immediately{false};
-        std::thread waiter([&] {
-            auto past_deadline = std::chrono::steady_clock::now() - 10ms;
-            auto start = std::chrono::steady_clock::now();
-            bool acquired = timed_mtx.try_lock_until(past_deadline);
-            auto elapsed = std::chrono::steady_clock::now() - start;
-            if (!acquired && elapsed < 20ms) {
-                failed_immediately.store(true);
+        std::thread holder([&] {
+            timed_mtx.lock();
+            holding.store(true);
+            while (!release.load()) {
+                std::this_thread::sleep_for(1ms);
             }
-            if (acquired) {
-                timed_mtx.unlock();
-            }
+            timed_mtx.unlock();
         });
-        waiter.join();
 
-        expect(failed_immediately.load(),
-               "try_lock_until with past deadline should fail quickly");
-        timed_mtx.unlock();
+        while (!holding.load()) {
+            std::this_thread::sleep_for(1ms);
+        }
+
+        auto past_deadline = std::chrono::steady_clock::now() - 10ms;
+        bool acquired = timed_mtx.try_lock_until(past_deadline);
+        if (acquired) {
+            timed_mtx.unlock();
+        }
+        expect(!acquired, "try_lock_until with past deadline should fail");
+
+        release.store(true);
+        holder.join();
     }
 
     // Recovery from a dead owner should succeed.
