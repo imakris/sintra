@@ -106,6 +106,32 @@ jobs:
       - name: Build
         run: cmake --build build --config Release --parallel ${{ env.BUILD_JOBS }}
 
+      - name: Run tests (LLDB backtrace on failure)
+        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.core == 'true' || steps.changed.outputs.workflows == 'true'
+        env:
+          CTEST_OUTPUT_ON_FAILURE: "1"
+        run: |
+          set -Eeuo pipefail
+          export PS4='+ $(date "+%H:%M:%S") ${BASH_SOURCE}:${LINENO}: '
+          set -x
+
+          if ctest --test-dir build -C Release --output-on-failure --timeout 60 -VV -j1; then
+            exit 0
+          fi
+
+          status=$?
+          echo "::warning::CTest failed with exit code ${status}. Attempting LLDB backtraces for failing tests."
+
+          failed_log="build/Testing/Temporary/LastTestsFailed.log"
+          if [ ! -f "${failed_log}" ]; then
+            echo "::warning::No LastTestsFailed.log found at ${failed_log}; unable to determine failing tests for LLDB rerun."
+            exit "${status}"
+          fi
+
+          python3 scripts/collect_lldb_backtraces.py --build-dir build --config Release
+
+          exit "${status}"
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:

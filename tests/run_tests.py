@@ -2260,8 +2260,6 @@ def main():
     parser.add_argument('--config', type=str, default='Debug',
                         choices=['Debug', 'Release'],
                         help='Build configuration (default: Debug)')
-    parser.add_argument('--max-repetitions', type=int, default=None,
-                        help='Cap per-test repetitions (useful for quick CI runs)')
     parser.add_argument('--verbose', action='store_true',
                         help='Show detailed output for each test run')
     parser.add_argument('--preserve-stalled-processes', action='store_true',
@@ -2296,13 +2294,7 @@ def main():
     print(f"Requested configuration root: {args.config}")
     if compiler_metadata and compiler_metadata.get("generator"):
         print(f"CMake generator: {compiler_metadata['generator']}")
-    if args.max_repetitions is not None and args.max_repetitions < 1:
-        print(f"{Color.RED}Error: --max-repetitions must be >= 1{Color.RESET}")
-        return 1
-
     print(f"Timeout per test: {args.timeout}s")
-    if args.max_repetitions is not None:
-        print(f"Repetition cap: {args.max_repetitions}")
     print(f"Active tests: {len(active_tests)} tests from active_tests.txt")
     print("=" * 70)
 
@@ -2336,13 +2328,7 @@ def main():
                 invocation.name: {'passed': 0, 'failed': 0, 'durations': [], 'failures': []}
                 for invocation in tests
             }
-            target_repetitions = {}
-            for invocation in tests:
-                repetitions = _lookup_test_weight(invocation.name, active_tests)
-                if args.max_repetitions is not None:
-                    repetitions = min(repetitions, args.max_repetitions)
-                repetitions = max(1, repetitions)
-                target_repetitions[invocation.name] = repetitions
+            target_repetitions = {invocation.name: _lookup_test_weight(invocation.name, active_tests) for invocation in tests}
             remaining_repetitions = target_repetitions.copy()
             suite_all_passed = True
             batch_size = 1
