@@ -184,9 +184,28 @@ int run_deadlock_child(const std::string& ready_path)
     const auto group_name = unique_group_name("rendezvous_deadlock_group");
     const auto barrier_name = std::string("rendezvous_deadlock_barrier");
 
+    const auto local_index = static_cast<uint32_t>(sintra::get_process_index(s_mproc_id));
+    uint32_t remote_index = local_index + 1;
+    if (remote_index > static_cast<uint32_t>(sintra::max_process_index)) {
+        if (local_index > 2) {
+            remote_index = local_index - 1;
+        } else {
+            remote_index = local_index;
+        }
+    }
+
+    if (remote_index == local_index || remote_index == 1) {
+        std::fprintf(stderr,
+                     "Unable to select a non-local process index for deadlock test (local=%u).\n",
+                     local_index);
+        ok = false;
+    }
+
     std::unordered_set<sintra::instance_id_type> members;
     members.insert(s_mproc_id);
-    members.insert(sintra::make_process_instance_id(2));
+    if (ok) {
+        members.insert(sintra::make_process_instance_id(remote_index));
+    }
     sintra::Process_group group;
     group.set(members);
 
