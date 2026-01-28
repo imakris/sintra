@@ -1258,6 +1258,29 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
             unordered_stack.drain([&](int idx) { ready_stack.push(idx); });
         }
 
+        // Collect sleeping indices into the provided array without posting.
+        // Returns the number of indices collected. Also drains unordered_stack
+        // to ready_stack. This allows the caller to release the spinlock before
+        // posting, which is important on Windows where semaphore posts may block
+        // on a mutex for handle cache lookup.
+        int collect_wakeup_indices(int* out_indices)
+        {
+            int count = 0;
+            sleeping_stack.drain([&](int idx) {
+                out_indices[count++] = idx;
+            });
+            unordered_stack.drain([&](int idx) { ready_stack.push(idx); });
+            return count;
+        }
+
+        // Post to the given semaphore indices. Call this after releasing the spinlock.
+        void post_to_indices(const int* indices, int count)
+        {
+            for (int i = 0; i < count; ++i) {
+                dirty_semaphores[indices[i]].post_ordered();
+            }
+        }
+
         // Spinlock guarding the ready/sleeping/unordered stacks.
         spinlock                             m_spinlock;
 
@@ -2439,12 +2462,19 @@ struct Ring_W : Ring<T, false>
      */
     sequence_counter_type done_writing()
     {
+        // Collect wakeup indices under spinlock, then post outside the lock.
+        // On Windows, semaphore posts may block on a mutex for handle cache
+        // lookup, so we must not hold the spinlock during posting.
+        int wakeup_indices[max_process_index];
+        int wakeup_count = 0;
         {
             spinlock::locker lock(c.m_spinlock);
             assert(m_writing_thread_index == thread_index());
             c.leading_sequence = m_pending_new_sequence;
-            c.flush_wakeups();
+            wakeup_count = c.collect_wakeup_indices(wakeup_indices);
         }
+        // Post outside the spinlock to avoid blocking on Windows semaphore handle cache
+        c.post_to_indices(wakeup_indices, wakeup_count);
         m_writing_thread_index = 0;
         return m_pending_new_sequence;
     }
@@ -2457,8 +2487,15 @@ struct Ring_W : Ring<T, false>
     {
         c.global_unblock_sequence++;
 
-        spinlock::locker lock(c.m_spinlock);
-        c.flush_wakeups();
+        // Same pattern as done_writing: collect indices under spinlock,
+        // post outside to avoid blocking on Windows semaphore handle cache.
+        int wakeup_indices[max_process_index];
+        int wakeup_count = 0;
+        {
+            spinlock::locker lock(c.m_spinlock);
+            wakeup_count = c.collect_wakeup_indices(wakeup_indices);
+        }
+        c.post_to_indices(wakeup_indices, wakeup_count);
     }
 
     /**
