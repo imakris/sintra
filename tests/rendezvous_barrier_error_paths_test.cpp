@@ -174,38 +174,37 @@ void terminate_child(Child_process& child)
 #endif
 }
 
+// Child process entry point for deadlock test.
+// Communication is NOT paused here - we want the barrier to actually block
+// waiting for the non-existent peer, rather than treating RPC failures as satisfied.
 int run_deadlock_child(const std::string& ready_path)
 {
-    const auto previous_state = s_mproc->m_communication_state;
-    s_mproc->m_communication_state = sintra::Managed_process::COMMUNICATION_PAUSED;
+    // Do NOT pause communication here. The barrier should block forever waiting
+    // for the missing peer. If we paused, RPC failures would be treated as
+    // "satisfied" and the barrier would return early.
 
     bool ok = true;
 
     const auto group_name = unique_group_name("rendezvous_deadlock_group");
     const auto barrier_name = std::string("rendezvous_deadlock_barrier");
 
-    const auto local_index = static_cast<uint32_t>(sintra::get_process_index(s_mproc_id));
+    // Use a process index that is definitely not local.
+    // The local process index is typically 2 (first user process after coordinator).
+    // We use index 3 to ensure we're referencing a non-existent remote process.
+    const uint32_t local_index = sintra::get_process_index(s_mproc_id);
     uint32_t remote_index = local_index + 1;
-    if (remote_index > static_cast<uint32_t>(sintra::max_process_index)) {
-        if (local_index > 2) {
-            remote_index = local_index - 1;
-        } else {
-            remote_index = local_index;
-        }
+    if (remote_index > sintra::max_process_index) {
+        remote_index = (local_index > 2) ? (local_index - 1) : local_index;
     }
-
     if (remote_index == local_index || remote_index == 1) {
-        std::fprintf(stderr,
-                     "Unable to select a non-local process index for deadlock test (local=%u).\n",
-                     local_index);
-        ok = false;
+        std::fprintf(stderr, "Could not determine a valid remote process index.\n");
+        sintra::finalize();
+        return 1;
     }
 
     std::unordered_set<sintra::instance_id_type> members;
     members.insert(s_mproc_id);
-    if (ok) {
-        members.insert(sintra::make_process_instance_id(remote_index));
-    }
+    members.insert(sintra::make_process_instance_id(remote_index));
     sintra::Process_group group;
     group.set(members);
 
@@ -221,21 +220,21 @@ int run_deadlock_child(const std::string& ready_path)
         }
 
         if (!ok) {
-            s_mproc->m_communication_state = previous_state;
             sintra::finalize();
             return 1;
         }
 
+        // This should block forever because the remote process doesn't exist.
         const bool barrier_result =
             sintra::barrier<sintra::rendezvous_t>(barrier_name, group_name);
 
+        // If we reach here, the barrier didn't deadlock as expected.
         std::fprintf(stderr,
                      "Expected rendezvous barrier to deadlock; got result=%s\n",
                      barrier_result ? "true" : "false");
         ok = false;
     }
 
-    s_mproc->m_communication_state = previous_state;
     sintra::finalize();
     return ok ? 0 : 1;
 }
@@ -257,7 +256,104 @@ int main(int argc, char* argv[])
 
     bool ok = true;
 
-    // Case 1: deadlock path in rendezvous_barrier.
+    // Case 1: rpc_cancelled path in rendezvous_barrier.
+    // Keep the group alive until finalize() so any late request reader dispatch
+    // still finds a valid local receiver after cancellation.
+    sintra::Process_group cancel_group;
+    {
+        const auto group_name = unique_group_name("rendezvous_cancel_group");
+        const auto barrier_name = std::string("rendezvous_cancel_barrier");
+
+        std::unordered_set<sintra::instance_id_type> members;
+        members.insert(s_mproc_id);
+        members.insert(sintra::make_process_instance_id(2));
+        cancel_group.set(members);
+
+        if (!cancel_group.assign_name(group_name)) {
+            std::fprintf(stderr, "Failed to assign group name for cancel test.\n");
+            ok = false;
+        } else {
+            std::atomic<bool> barrier_result{false};
+            std::atomic<bool> barrier_done{false};
+            std::thread waiter([&] {
+                barrier_result = sintra::barrier<sintra::rendezvous_t>(barrier_name, group_name);
+                barrier_done = true;
+            });
+
+            bool cancelled = false;
+            const auto cancel_deadline = std::chrono::steady_clock::now() + 5s;
+            while (!barrier_done.load() &&
+                   std::chrono::steady_clock::now() < cancel_deadline)
+            {
+                if (s_mproc->unblock_rpc(sintra::process_of(s_coord_id)) > 0) {
+                    cancelled = true;
+                    break;
+                }
+                std::this_thread::sleep_for(1ms);
+            }
+
+            waiter.join();
+
+            if (!cancelled) {
+                std::fprintf(stderr,
+                             "Did not observe cancellable outstanding RPC (cancel test).\n");
+                ok = false;
+            }
+
+            if (cancelled && !barrier_result.load()) {
+                std::fprintf(stderr, "Expected rendezvous barrier to return true after cancellation.\n");
+                ok = false;
+            }
+        }
+    }
+
+    // Case 2: runtime_error path in rendezvous_barrier (target shutting down).
+    {
+        sintra::Process_group group;
+        const auto group_name = unique_group_name("rendezvous_shutdown_group");
+        const auto barrier_name = std::string("rendezvous_shutdown_barrier");
+
+        std::unordered_set<sintra::instance_id_type> members;
+        members.insert(s_mproc_id);
+        group.set(members);
+
+        if (!group.assign_name(group_name)) {
+            std::fprintf(stderr, "Failed to assign group name for shutdown test.\n");
+            ok = false;
+        } else {
+            const auto group_iid = group.instance_id();
+            group.destroy();
+            s_mproc->m_instance_id_of_assigned_name[group_name] = group_iid;
+            s_mproc->m_local_pointer_of_instance_id[group_iid] = &group;
+            sintra::Transceiver::get_instance_to_object_map<sintra::Process_group::barrier_mftc>()[group_iid] = &group;
+
+            const bool barrier_result =
+                sintra::barrier<sintra::rendezvous_t>(barrier_name, group_name);
+
+            if (!barrier_result) {
+                std::fprintf(stderr, "Expected rendezvous barrier to return true for shutdown target.\n");
+                ok = false;
+            }
+
+            {
+                auto scoped = s_mproc->m_instance_id_of_assigned_name.scoped();
+                scoped.get().erase(group_name);
+            }
+            {
+                auto scoped = s_mproc->m_local_pointer_of_instance_id.scoped();
+                scoped.get().erase(group_iid);
+            }
+            {
+                auto scoped =
+                    sintra::Transceiver::get_instance_to_object_map<sintra::Process_group::barrier_mftc>().scoped();
+                scoped.get().erase(group_iid);
+            }
+        }
+    }
+
+    // Case 3: Deadlock path - barrier should hang when peer doesn't exist.
+    // This runs in a child process with communication NOT paused, so the barrier
+    // actually blocks instead of treating RPC failures as satisfied.
     {
         const auto ready_path = make_ready_path();
         const std::string ready_arg = std::string(k_deadlock_ready_arg) + "=" + ready_path.string();
@@ -309,50 +405,7 @@ int main(int argc, char* argv[])
             }
 
             terminate_child(child);
-        }
-    }
-
-    // Case 2: runtime_error path in rendezvous_barrier (target shutting down).
-    {
-        sintra::Process_group group;
-        const auto group_name = unique_group_name("rendezvous_shutdown_group");
-        const auto barrier_name = std::string("rendezvous_shutdown_barrier");
-
-        std::unordered_set<sintra::instance_id_type> members;
-        members.insert(s_mproc_id);
-        group.set(members);
-
-        if (!group.assign_name(group_name)) {
-            std::fprintf(stderr, "Failed to assign group name for shutdown test.\n");
-            ok = false;
-        } else {
-            const auto group_iid = group.instance_id();
-            group.destroy();
-            s_mproc->m_instance_id_of_assigned_name[group_name] = group_iid;
-            s_mproc->m_local_pointer_of_instance_id[group_iid] = &group;
-            sintra::Transceiver::get_instance_to_object_map<sintra::Process_group::barrier_mftc>()[group_iid] = &group;
-
-            const bool barrier_result =
-                sintra::barrier<sintra::rendezvous_t>(barrier_name, group_name);
-
-            if (!barrier_result) {
-                std::fprintf(stderr, "Expected rendezvous barrier to return true for shutdown target.\n");
-                ok = false;
-            }
-
-            {
-                auto scoped = s_mproc->m_instance_id_of_assigned_name.scoped();
-                scoped.get().erase(group_name);
-            }
-            {
-                auto scoped = s_mproc->m_local_pointer_of_instance_id.scoped();
-                scoped.get().erase(group_iid);
-            }
-            {
-                auto scoped =
-                    sintra::Transceiver::get_instance_to_object_map<sintra::Process_group::barrier_mftc>().scoped();
-                scoped.get().erase(group_iid);
-            }
+            std::filesystem::remove(ready_path);
         }
     }
 
