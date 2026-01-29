@@ -22,6 +22,7 @@ barrier_flush_test                        50
 barrier_pathological_choreography_test    60
 barrier_rapid_reuse_test                  25
 barrier_stress_test                       30
+barrier_drain_and_unpublish_test           1
 basic_pub_sub                             40
 choreography_extreme_test                 80
 complex_choreography_stress_test          60
@@ -45,14 +46,17 @@ ping_pong_multi_test                     100
 ping_pong_test                            50
 processing_fence_test                    100
 recovery_test                             30
+recovery_runner_thread_test                1
 ring_cleanup_stress_test                 100
 rpc_append_test                          100
 rendezvous_barrier_error_paths_test        5
 semaphore_high_contention_stress          10
 spawn_detached_test                       50
+spinlock_recovery_test                     1
 variable_buffer_alignment_test             5
 utility_test                               1
 join_swarm_midflight_test                 40
+join_swarm_failure_test                    1
 
 # New feature tests (added for recent changes)
 transceiver_ctor_test                     10

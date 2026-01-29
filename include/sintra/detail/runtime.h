@@ -539,8 +539,10 @@ MESSAGE_T receive(Typed_instance_id<SENDER_T> sender_id)
     std::unique_lock<std::mutex> lock(mtx);
     cv.wait(lock, [&] { return result.has_value(); });
 
+    auto value = std::move(*result);
+    lock.unlock();
     deactivator();
-    return std::move(*result);
+    return value;
 }
 
 template <typename MESSAGE_T>

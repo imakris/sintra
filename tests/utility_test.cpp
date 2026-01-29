@@ -99,6 +99,47 @@ void test_cstring_vector_empty()
     require_true(csv.size() == 0, "Empty cstring_vector should have size 0");
 }
 
+#ifndef _WIN32
+void test_env_key_of()
+{
+    using sintra::detail::env_key_of;
+
+    require_true(env_key_of("FOO=bar") == "FOO", "env_key_of should split at '='");
+    require_true(env_key_of("NOEQ") == "NOEQ", "env_key_of should return whole string when no '='");
+    require_true(env_key_of("A=B=C") == "A", "env_key_of should split at first '='");
+}
+
+void test_build_environment_entries()
+{
+    using sintra::detail::build_environment_entries;
+    using sintra::detail::env_key_of;
+
+    const std::string key = "SINTRA_TEST_ENV_KEY";
+    const std::string override_entry = key + "=OVERRIDE";
+
+    setenv(key.c_str(), "ORIGINAL", 1);
+
+    auto env_before = build_environment_entries({});
+    require_true(!env_before.empty(), "build_environment_entries should return environment entries");
+
+    auto env_after = build_environment_entries({override_entry});
+
+    int match_count = 0;
+    bool found_override = false;
+    for (const auto& entry : env_after) {
+        if (env_key_of(entry) == key) {
+            ++match_count;
+            if (entry == override_entry) {
+                found_override = true;
+            }
+        }
+    }
+
+    require_true(match_count == 1, "override should replace existing entry exactly once");
+    require_true(found_override, "override entry should be present");
+}
+#endif
+
 void test_spinlocked_umap_scoped_erase()
 {
     // Test scoped_access::erase(iterator) - exercises the uncovered code path
@@ -140,6 +181,10 @@ int main()
         test_cstring_vector_from_lvalue();
         test_cstring_vector_from_rvalue();
         test_cstring_vector_empty();
+#ifndef _WIN32
+        test_env_key_of();
+        test_build_environment_entries();
+#endif
         test_spinlocked_umap_scoped_erase();
     }
     catch (const std::exception& ex) {
