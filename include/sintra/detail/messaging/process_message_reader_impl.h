@@ -151,13 +151,28 @@ void Process_message_reader::stop_nowait()
         // exits.
 
         auto rep_ring = m_in_rep_c;
-        tl_post_handler_function_ref() = [rep_ring]() {
-            if (!rep_ring) {
-                return;
-            }
-            rep_ring->done_reading();
-            rep_ring->request_stop();
-        };
+        if (!tl_post_handler_function_ready()) {
+            tl_post_handler_function_ref() = [rep_ring]() {
+                if (!rep_ring) {
+                    return;
+                }
+                rep_ring->done_reading();
+                rep_ring->request_stop();
+            };
+        }
+        else {
+            auto previous = std::move(*tl_post_handler_function);
+            tl_post_handler_function_ref() = [prev = std::move(previous), rep_ring]() mutable {
+                if (prev) {
+                    prev();
+                }
+                if (!rep_ring) {
+                    return;
+                }
+                rep_ring->done_reading();
+                rep_ring->request_stop();
+            };
+        }
     }
 }
 

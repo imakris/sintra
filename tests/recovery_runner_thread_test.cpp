@@ -56,6 +56,21 @@ void set_shared_directory_env(const std::filesystem::path& dir)
 #endif
 }
 
+std::filesystem::path ensure_shared_directory()
+{
+    const char* value = std::getenv(k_env_shared_dir.data());
+    if (value && *value) {
+        std::filesystem::path dir(value);
+        std::filesystem::create_directories(dir);
+        return dir;
+    }
+
+    auto dir = sintra::test::unique_scratch_directory("recovery_runner_thread");
+    std::filesystem::create_directories(dir);
+    set_shared_directory_env(dir);
+    return dir;
+}
+
 void write_marker(const std::filesystem::path& path)
 {
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
@@ -107,18 +122,7 @@ int crash_worker()
 int main(int argc, char* argv[])
 {
     const bool is_spawned = has_branch_flag(argc, argv);
-
-    // For spawned processes, use the inherited environment variable from the coordinator.
-    // Creating a new directory would cause coordinator and child to use different paths.
-    std::filesystem::path dir;
-    if (is_spawned) {
-        dir = shared_directory();
-    }
-    else {
-        dir = sintra::test::unique_scratch_directory("recovery_runner_thread");
-        std::filesystem::create_directories(dir);
-        set_shared_directory_env(dir);
-    }
+    const auto dir = ensure_shared_directory();
 
     const auto ready_timeout_ms =
         sintra::test::read_env_int(k_env_ready_timeout_ms.data(), 30000);
