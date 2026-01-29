@@ -1,6 +1,6 @@
-#include "cursor_sync_common.h"
+﻿#include "cursor_sync_common.h"
 
-#include <sintra/logging.h>
+#include <sintra/detail/logging.h>
 
 #include <QApplication>
 #include <QLabel>

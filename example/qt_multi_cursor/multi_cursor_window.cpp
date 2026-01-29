@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file multi_cursor_window.cpp
  * @brief Window process for the multi-cursor Qt example.
  *
@@ -13,7 +13,7 @@
 
 #include "multi_cursor_common.h"
 
-#include <sintra/logging.h>
+#include <sintra/detail/logging.h>
 
 #include <QApplication>
 #include <QCloseEvent>

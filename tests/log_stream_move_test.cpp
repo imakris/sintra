@@ -1,5 +1,5 @@
-//
-// vnm::Log_stream Move Semantics Test
+﻿//
+// sintra::Log_stream Move Semantics Test
 //
 // This test validates the move constructor and move assignment operator
 // for Log_stream that was introduced in commit 392597d.
@@ -14,7 +14,7 @@
 // - Postfix is preserved after move
 //
 
-#include <vnm/logging.h>
+#include <sintra/detail/logging.h>
 
 #include <atomic>
 #include <cstdio>
@@ -30,7 +30,7 @@ std::mutex g_log_mutex;
 std::vector<std::string> g_captured_logs;
 std::atomic<int> g_callback_count{0};
 
-void test_log_callback(vnm::log_level /*level*/, const char* message, void* /*user_data*/)
+void test_log_callback(sintra::log_level /*level*/, const char* message, void* /*user_data*/)
 {
     if (message) {
         std::lock_guard<std::mutex> lock(g_log_mutex);
@@ -80,11 +80,11 @@ int test_move_constructor()
     reset_captured_logs();
 
     {
-        vnm::Log_stream source(vnm::log_level::info);
+        sintra::Log_stream source(sintra::log_level::info);
         source << "move_ctor_test";
 
         // Move construct destination from source
-        vnm::Log_stream destination(std::move(source));
+        sintra::Log_stream destination(std::move(source));
         destination << "_additional";
 
         // Both go out of scope here, but only destination should output
@@ -111,10 +111,10 @@ int test_move_assignment()
     reset_captured_logs();
 
     {
-        vnm::Log_stream source(vnm::log_level::info);
+        sintra::Log_stream source(sintra::log_level::info);
         source << "move_assign_source";
 
-        vnm::Log_stream destination(vnm::log_level::info);
+        sintra::Log_stream destination(sintra::log_level::info);
         destination << "move_assign_dest";
 
         // Move assign source to destination
@@ -149,11 +149,11 @@ int test_move_from_factory_forced()
 
     {
         // Force a real move by using an intermediate variable and std::move
-        vnm::Log_stream temp = vnm::ls_info();
+        sintra::Log_stream temp = sintra::ls_info();
         temp << "forced_factory_move";
 
         // Explicitly move from temp to stream
-        vnm::Log_stream stream(std::move(temp));
+        sintra::Log_stream stream(std::move(temp));
         stream << "_extended";
 
         // temp is now moved-from, should not output
@@ -179,7 +179,7 @@ int test_self_move_assignment()
     reset_captured_logs();
 
     {
-        vnm::Log_stream stream(vnm::log_level::info);
+        sintra::Log_stream stream(sintra::log_level::info);
         stream << "self_move_content";
 
         // Self-move assignment - this should be handled safely
@@ -214,7 +214,7 @@ int test_disabled_stream_no_output()
     reset_captured_logs();
 
     {
-        vnm::Log_stream stream(vnm::log_level::info, false); // disabled
+        sintra::Log_stream stream(sintra::log_level::info, false); // disabled
         stream << "disabled_stream_test";
     }
 
@@ -230,11 +230,11 @@ int test_moved_from_stream_disabled()
 {
     reset_captured_logs();
 
-    vnm::Log_stream source(vnm::log_level::info);
+    sintra::Log_stream source(sintra::log_level::info);
     source << "source_content";
 
     // Move the stream
-    vnm::Log_stream destination(std::move(source));
+    sintra::Log_stream destination(std::move(source));
 
     // Verify source can still be used (but does nothing)
     source << "_should_not_appear";
@@ -242,7 +242,7 @@ int test_moved_from_stream_disabled()
     // Destroy both explicitly by scope exit
     {
         // Move destination to ensure we test the moved-to stream's output
-        vnm::Log_stream final_dest(std::move(destination));
+        sintra::Log_stream final_dest(std::move(destination));
     }
 
     if (logs_contain("_should_not_appear")) {
@@ -263,10 +263,10 @@ int test_postfix_preserved()
     reset_captured_logs();
 
     {
-        vnm::Log_stream source(vnm::log_level::info, true, "_postfix");
+        sintra::Log_stream source(sintra::log_level::info, true, "_postfix");
         source << "postfix_test";
 
-        vnm::Log_stream destination(std::move(source));
+        sintra::Log_stream destination(std::move(source));
     }
 
     if (!logs_contain("postfix_test_postfix")) {
@@ -282,13 +282,13 @@ int test_chain_of_moves()
     reset_captured_logs();
 
     {
-        vnm::Log_stream s1(vnm::log_level::info);
+        sintra::Log_stream s1(sintra::log_level::info);
         s1 << "chain";
 
-        vnm::Log_stream s2(std::move(s1));
+        sintra::Log_stream s2(std::move(s1));
         s2 << "_of";
 
-        vnm::Log_stream s3(std::move(s2));
+        sintra::Log_stream s3(std::move(s2));
         s3 << "_moves";
 
         // Only s3 should output when it goes out of scope
@@ -312,10 +312,10 @@ int test_move_assignment_to_active_stream()
     reset_captured_logs();
 
     {
-        vnm::Log_stream active(vnm::log_level::info);
+        sintra::Log_stream active(sintra::log_level::info);
         active << "will_be_replaced";
 
-        vnm::Log_stream source(vnm::log_level::info);
+        sintra::Log_stream source(sintra::log_level::info);
         source << "replacement";
 
         // Move assign - active's content is replaced by source's
@@ -342,7 +342,7 @@ int test_move_assignment_to_active_stream()
 int main()
 {
     // Install our test callback
-    vnm::set_log_callback(test_log_callback);
+    sintra::set_log_callback(test_log_callback);
 
     int result = 0;
 
@@ -410,7 +410,7 @@ int main()
     std::fprintf(stderr, "test_move_assignment_to_active_stream passed\n");
 
     // Restore default callback
-    vnm::set_log_callback(nullptr);
+    sintra::set_log_callback(nullptr);
 
     std::fprintf(stderr, "All Log_stream move tests passed\n");
     return 0;
