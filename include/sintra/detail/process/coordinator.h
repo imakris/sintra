@@ -314,6 +314,7 @@ public:
 
     // Aggregate draining state for all known processes based on the registry and
     // initialization tracking (caller holds lock).
+    void collect_known_process_candidates_unlocked(std::vector<instance_id_type>& candidates);
     bool all_known_processes_draining_unlocked(instance_id_type self_process);
     // Block until all known processes are draining (or have been scavenged).
     void wait_for_all_draining(instance_id_type self_process);

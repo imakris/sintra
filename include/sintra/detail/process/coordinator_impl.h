@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <functional>
 #include <mutex>
 #include <shared_mutex>
@@ -705,14 +706,13 @@ inline bool Coordinator::is_process_draining(instance_id_type process_iid) const
 }
 
 
-inline bool Coordinator::all_known_processes_draining_unlocked(instance_id_type /*self_process*/)
+inline void Coordinator::collect_known_process_candidates_unlocked(
+    std::vector<instance_id_type>& candidates)
 {
+    candidates.clear();
     // Snapshot known processes from the registry and initialization tracking.
     // Processes that have never registered any transceivers are not represented
     // here and therefore do not participate in coordinated draining.
-    std::vector<instance_id_type> candidates;
-    candidates.reserve(m_transceiver_registry.size() + m_processes_in_initialization.size());
-
     {
         std::lock_guard<mutex> publish_lock(m_publish_mutex);
         for (const auto& entry : m_transceiver_registry) {
@@ -727,6 +727,24 @@ inline bool Coordinator::all_known_processes_draining_unlocked(instance_id_type 
         }
     }
 
+    {
+        lock_guard<mutex> groups_lock(m_groups_mutex);
+        auto it = m_groups.find("_sintra_all_processes");
+        if (it != m_groups.end()) {
+            auto& group = it->second;
+            std::lock_guard<mutex> group_lock(group.m_call_mutex);
+            for (const auto& piid : group.m_process_ids) {
+                candidates.push_back(piid);
+            }
+        }
+    }
+}
+
+inline bool Coordinator::all_known_processes_draining_unlocked(instance_id_type /*self_process*/)
+{
+    std::vector<instance_id_type> candidates;
+    collect_known_process_candidates_unlocked(candidates);
+
     if (candidates.empty()) {
         return true;
     }
@@ -736,7 +754,7 @@ inline bool Coordinator::all_known_processes_draining_unlocked(instance_id_type 
 
     for (auto piid : candidates) {
         // Process IDs in registry/initialization tracking must be valid (non-zero).
-        if (piid == 0) {
+        if (piid == invalid_instance_id) {
             assert(false && "Invalid process ID in draining candidates");
             continue;
         }
@@ -756,9 +774,40 @@ inline void Coordinator::wait_for_all_draining(instance_id_type self_process)
     m_waiting_for_all_draining.store(true, std::memory_order_release);
     std::unique_lock<std::mutex> lk(m_draining_state_mutex);
 
-    m_all_draining_cv.wait(lk, [&] {
-        return all_known_processes_draining_unlocked(self_process);
-    });
+    constexpr auto k_all_draining_timeout = std::chrono::seconds(20);
+    const auto deadline = std::chrono::steady_clock::now() + k_all_draining_timeout;
+
+    while (!all_known_processes_draining_unlocked(self_process)) {
+        if (m_all_draining_cv.wait_until(lk, deadline) == std::cv_status::timeout) {
+            std::vector<instance_id_type> candidates;
+            collect_known_process_candidates_unlocked(candidates);
+            if (!candidates.empty()) {
+                std::sort(candidates.begin(), candidates.end());
+                candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
+            }
+
+            std::vector<instance_id_type> not_draining;
+            not_draining.reserve(candidates.size());
+            for (auto piid : candidates) {
+                if (piid == invalid_instance_id) {
+                    continue;
+                }
+                if (!is_process_draining(piid)) {
+                    not_draining.push_back(piid);
+                }
+            }
+
+            if (!not_draining.empty()) {
+                auto ls = Log_stream(log_level::warning);
+                ls << "Coordinator shutdown timed out waiting for draining processes:";
+                for (auto piid : not_draining) {
+                    ls << " " << static_cast<unsigned long long>(piid);
+                }
+                ls << "\n";
+            }
+            break;
+        }
+    }
 
     m_waiting_for_all_draining.store(false, std::memory_order_release);
 }
