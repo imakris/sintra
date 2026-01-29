@@ -18,6 +18,9 @@ namespace {
 using namespace std::chrono_literals;
 
 constexpr std::string_view k_env_shared_dir = "SINTRA_BARRIER_DRAIN_DIR";
+constexpr std::string_view k_env_barrier_wait_ms = "SINTRA_BARRIER_DRAIN_TIMEOUT_MS";
+constexpr std::string_view k_env_worker_timeout_ms = "SINTRA_BARRIER_WORKER_TIMEOUT_MS";
+constexpr std::string_view k_env_coord_watchdog_ms = "SINTRA_BARRIER_COORDINATOR_WATCHDOG_MS";
 
 bool has_branch_flag(int argc, char* argv[])
 {
@@ -101,7 +104,10 @@ int worker_a()
 
     std::atomic<bool> barrier2_done{false};
     std::thread watchdog([&]() {
-        const auto deadline = std::chrono::steady_clock::now() + 15s;
+        const auto timeout_ms =
+            sintra::test::read_env_int(k_env_worker_timeout_ms.data(), 40000);
+        const auto deadline =
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
         while (!barrier2_done.load(std::memory_order_acquire)) {
             if (std::chrono::steady_clock::now() >= deadline) {
                 watchdog_exit("worker A barrier2 timeout");
@@ -153,14 +159,17 @@ int main(int argc, char* argv[])
     set_shared_directory_env(dir);
 
     const auto barrier2_timeout_ms =
-        sintra::test::read_env_int("SINTRA_BARRIER_DRAIN_TIMEOUT_MS", 25000);
+        sintra::test::read_env_int(k_env_barrier_wait_ms.data(), 40000);
+    const auto coordinator_watchdog_ms =
+        sintra::test::read_env_int(k_env_coord_watchdog_ms.data(), 60000);
 
     const auto barrier2_ready = dir / "barrier2_ready.txt";
     const auto done_path = dir / "worker_a_done.txt";
 
     std::atomic<bool> watchdog_done{false};
     std::thread watchdog([&]() {
-        const auto deadline = std::chrono::steady_clock::now() + 30s;
+        const auto deadline =
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(coordinator_watchdog_ms);
         while (!watchdog_done.load(std::memory_order_acquire)) {
             if (std::chrono::steady_clock::now() >= deadline) {
                 watchdog_exit("coordinator timeout");

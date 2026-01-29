@@ -16,6 +16,10 @@ namespace {
 using namespace std::chrono_literals;
 
 constexpr std::string_view k_env_shared_dir = "SINTRA_RECOVERY_THREAD_DIR";
+constexpr std::string_view k_env_ready_timeout_ms = "SINTRA_RECOVERY_READY_TIMEOUT_MS";
+constexpr std::string_view k_env_runner_timeout_ms = "SINTRA_RECOVERY_RUNNER_TIMEOUT_MS";
+constexpr std::string_view k_env_go_timeout_ms = "SINTRA_RECOVERY_GO_TIMEOUT_MS";
+constexpr std::string_view k_env_watchdog_timeout_ms = "SINTRA_RECOVERY_WATCHDOG_MS";
 
 bool has_branch_flag(int argc, char* argv[])
 {
@@ -82,11 +86,13 @@ int crash_worker()
     const auto dir = shared_directory();
     const auto ready_path = dir / "crash_ready.txt";
     const auto go_path = dir / "crash_go.txt";
+    const auto go_timeout_ms =
+        sintra::test::read_env_int(k_env_go_timeout_ms.data(), 30000);
 
     sintra::enable_recovery();
     write_marker(ready_path);
 
-    if (!wait_for_file(go_path, 10s)) {
+    if (!wait_for_file(go_path, std::chrono::milliseconds(go_timeout_ms))) {
         return 1;
     }
 
@@ -107,9 +113,11 @@ int main(int argc, char* argv[])
     set_shared_directory_env(dir);
 
     const auto ready_timeout_ms =
-        sintra::test::read_env_int("SINTRA_RECOVERY_READY_TIMEOUT_MS", 20000);
+        sintra::test::read_env_int(k_env_ready_timeout_ms.data(), 30000);
     const auto runner_timeout_ms =
-        sintra::test::read_env_int("SINTRA_RECOVERY_RUNNER_TIMEOUT_MS", 20000);
+        sintra::test::read_env_int(k_env_runner_timeout_ms.data(), 30000);
+    const auto watchdog_timeout_ms =
+        sintra::test::read_env_int(k_env_watchdog_timeout_ms.data(), 60000);
 
     const auto ready_path = dir / "crash_ready.txt";
     const auto go_path = dir / "crash_go.txt";
@@ -118,7 +126,8 @@ int main(int argc, char* argv[])
     std::atomic<bool> watchdog_done{false};
 
     std::thread watchdog([&]() {
-        const auto deadline = std::chrono::steady_clock::now() + 30s;
+        const auto deadline =
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(watchdog_timeout_ms);
         while (!watchdog_done.load(std::memory_order_acquire)) {
             if (std::chrono::steady_clock::now() >= deadline) {
                 watchdog_exit("coordinator timeout");

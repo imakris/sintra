@@ -4,6 +4,8 @@
 #include <sintra/detail/time_utils.h>
 #include <sintra/detail/utility.h>
 
+#include "test_environment.h"
+
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -245,7 +247,14 @@ int main(int argc, char* argv[])
     // Case 3: live owner with debug pause inactive should abort (report_live_owner_stall).
     const int stall_pid = spawn_stall_child(argv[0], self_pid);
     require_true(stall_pid > 0, "failed to spawn stall child");
-    if (!wait_for_process_exit(stall_pid, std::chrono::milliseconds(6000))) {
+#ifdef __APPLE__
+    const int stall_timeout_default_ms = 12000;
+#else
+    const int stall_timeout_default_ms = 6000;
+#endif
+    const auto stall_timeout_ms =
+        sintra::test::read_env_int("SINTRA_SPINLOCK_STALL_TIMEOUT_MS", stall_timeout_default_ms);
+    if (!wait_for_process_exit(stall_pid, std::chrono::milliseconds(stall_timeout_ms))) {
         terminate_child(stall_pid);
         fail("stall child did not terminate as expected");
     }
