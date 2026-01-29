@@ -108,9 +108,17 @@ int main(int argc, char* argv[])
 {
     const bool is_spawned = has_branch_flag(argc, argv);
 
-    const auto dir = sintra::test::unique_scratch_directory("recovery_runner_thread");
-    std::filesystem::create_directories(dir);
-    set_shared_directory_env(dir);
+    // For spawned processes, use the inherited environment variable from the coordinator.
+    // Creating a new directory would cause coordinator and child to use different paths.
+    std::filesystem::path dir;
+    if (is_spawned) {
+        dir = shared_directory();
+    }
+    else {
+        dir = sintra::test::unique_scratch_directory("recovery_runner_thread");
+        std::filesystem::create_directories(dir);
+        set_shared_directory_env(dir);
+    }
 
     const auto ready_timeout_ms =
         sintra::test::read_env_int(k_env_ready_timeout_ms.data(), 30000);
