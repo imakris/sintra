@@ -115,6 +115,55 @@ std::string get_binary_path(int argc, char* argv[])
     return "";
 }
 
+bool assert_true(bool condition, const char* message)
+{
+    if (!condition) {
+        std::fprintf(stderr, "[PREINIT] %s\n", message);
+    }
+    return condition;
+}
+
+bool run_preinit_spawn_swarm_validation()
+{
+    bool ok = true;
+
+    {
+        sintra::Spawn_options options;
+        options.binary_path = "";
+        const size_t spawned = sintra::spawn_swarm_process(options);
+        ok &= assert_true(spawned == 0, "spawn_swarm_process should return 0 when binary_path is empty");
+    }
+
+    {
+        sintra::Spawn_options options;
+        options.binary_path = "dummy_binary";
+        options.count = 0;
+        const size_t spawned = sintra::spawn_swarm_process(options);
+        ok &= assert_true(spawned == 0, "spawn_swarm_process should return 0 when count == 0");
+    }
+
+    {
+        sintra::Spawn_options options;
+        options.binary_path = "dummy_binary";
+        options.count = 2;
+        options.wait_for_instance_name = "dummy_instance";
+        const size_t spawned = sintra::spawn_swarm_process(options);
+        ok &= assert_true(spawned == 0,
+                          "spawn_swarm_process should return 0 when wait_for_instance_name is set with count != 1");
+    }
+
+    {
+        sintra::Spawn_options options;
+        options.binary_path = "dummy_binary";
+        options.wait_for_instance_name = "dummy_instance";
+        const size_t spawned = sintra::spawn_swarm_process(options);
+        ok &= assert_true(spawned == 0,
+                          "spawn_swarm_process should return 0 when wait requires a coordinator before init");
+    }
+
+    return ok;
+}
+
 // Worker process entry point - registers itself with a name and waits
 int run_worker()
 {
@@ -392,6 +441,12 @@ int main(int argc, char* argv[])
     const bool is_worker = is_worker_mode();
     const auto shared_dir = ensure_shared_directory();
     const std::string binary_path = get_binary_path(argc, argv);
+
+    if (!is_spawned) {
+        if (!run_preinit_spawn_swarm_validation()) {
+            return 1;
+        }
+    }
 
     // If spawned by spawn_swarm_process in worker mode, run as worker
     if (is_spawned && is_worker) {

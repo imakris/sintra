@@ -57,6 +57,7 @@ variable_buffer_alignment_test             5
 utility_test                               1
 join_swarm_midflight_test                 40
 join_swarm_failure_test                    1
+managed_process_publish_test               1
 
 # New feature tests (added for recent changes)
 transceiver_ctor_test                     10

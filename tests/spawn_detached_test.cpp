@@ -1,16 +1,22 @@
 #include "sintra/detail/utility.h"
 
+#include "test_environment.h"
+
 #include <iostream>
 
 #ifndef _WIN32
 
+#include <chrono>
 #include <cerrno>
 #include <csignal>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <fcntl.h>
 #include <string>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <thread>
 #include <unistd.h>
 #include <vector>
 
@@ -128,6 +134,28 @@ const char* locate_true_binary()
         static const char* const candidates[] = {
             "/bin/true",
             "/usr/bin/true",
+            nullptr,
+        };
+
+        for (const char* candidate : candidates) {
+            if (candidate == nullptr) {
+                break;
+            }
+            if (::access(candidate, X_OK) == 0) {
+                return candidate;
+            }
+        }
+        return nullptr;
+    }();
+    return cached;
+}
+
+const char* locate_shell_binary()
+{
+    static const char* const cached = []() -> const char* {
+        static const char* const candidates[] = {
+            "/bin/sh",
+            "/usr/bin/sh",
             nullptr,
         };
 
@@ -309,6 +337,50 @@ bool spawn_reports_exec_failure()
            assert_true(saved_errno == ENOENT, "spawn_detached must surface the exec errno");
 }
 
+bool spawn_detached_sets_env_overrides()
+{
+    const char* shell = locate_shell_binary();
+    if (!assert_true(shell != nullptr, "failed to locate /bin/sh for env override test")) {
+        return false;
+    }
+
+    auto dir = sintra::test::unique_scratch_directory("spawn_detached_env");
+    auto output_path = dir / "env_override_output.txt";
+    std::string command = "printf \"%s\" \"$SINTRA_ENV_OVERRIDE_TEST\" > \"" + output_path.string() + "\"";
+    const char* const args[] = {shell, "-c", command.c_str(), nullptr};
+
+    sintra::Spawn_detached_options options;
+    options.prog = shell;
+    options.argv = args;
+    options.env_overrides["SINTRA_ENV_OVERRIDE_TEST"] = "spawn_detached_env_value";
+
+    bool result = sintra::spawn_detached(options);
+    if (!assert_true(result, "spawn_detached failed to launch shell with env override")) {
+        return false;
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (std::filesystem::exists(output_path)) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    if (!assert_true(std::filesystem::exists(output_path), "env override output file not created")) {
+        return false;
+    }
+
+    std::ifstream in(output_path, std::ios::binary);
+    if (!assert_true(in.good(), "failed to read env override output file")) {
+        return false;
+    }
+
+    std::string content;
+    std::getline(in, content);
+    return assert_true(content == "spawn_detached_env_value", "env override value mismatch");
+}
+
 } // namespace
 
 int main()
@@ -320,6 +392,7 @@ int main()
     ok &= spawn_succeeds_when_waitpid_reports_echild();
     ok &= spawn_fails_when_grandchild_cannot_report_readiness();
     ok &= spawn_reports_exec_failure();
+    ok &= spawn_detached_sets_env_overrides();
     return ok ? 0 : 1;
 }
 

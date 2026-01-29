@@ -11,6 +11,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <memory>
 #include <mutex>
@@ -220,6 +221,10 @@ public:
     // Configure lifecycle event handler (crash/normal exit/unpublished).
     void set_lifecycle_handler(Lifecycle_handler handler);
 
+    // Configure the drain timeout for wait_for_all_draining(). A value of 0
+    // means wait indefinitely. Default is 20 seconds.
+    void set_drain_timeout(std::chrono::seconds timeout);
+
     // Blocks until all processes identified by process_group_id have called the function.
     // num_absences may be used by a caller to specify that it is aware that other callers will
     // not make it to the barrier, thus prevent a deadlock.
@@ -312,12 +317,18 @@ public:
     std::condition_variable                    m_all_draining_cv;
     std::atomic<bool>                          m_waiting_for_all_draining{false};
 
+    // Configurable timeout for wait_for_all_draining(). A value of 0 means
+    // wait indefinitely (no timeout). Default is 20 seconds.
+    std::chrono::seconds                       m_drain_timeout{20};
+
     // Aggregate draining state for all known processes based on the registry and
     // initialization tracking (caller holds lock).
     void collect_known_process_candidates_unlocked(std::vector<instance_id_type>& candidates);
     bool all_known_processes_draining_unlocked(instance_id_type self_process);
     // Block until all known processes are draining (or have been scavenged).
-    void wait_for_all_draining(instance_id_type self_process);
+    // Returns true if all processes reached draining state, false if timed out.
+    // A timeout of 0 (set via set_drain_timeout) means wait indefinitely.
+    bool wait_for_all_draining(instance_id_type self_process);
 
 public:
     SINTRA_RPC_EXPLICIT(resolve_type)

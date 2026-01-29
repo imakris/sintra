@@ -4,6 +4,7 @@
 #pragma once
 
 #include <functional>
+#include <cassert>
 
 namespace sintra {
 
@@ -14,13 +15,28 @@ namespace sintra {
 // thread exits without calling tl_post_handler_function_release(), the pointer
 // is intentionally leaked to avoid TLS destructor crashes.
 inline thread_local std::function<void()>* tl_post_handler_function = nullptr;
-inline thread_local bool tl_in_post_handler = false;
+
+// Depth counter for post-handler reentrancy. A simple boolean would be cleared
+// too early if post-handlers are nested (directly or via run_after_current_handler
+// composition). Using a counter ensures the "in post-handler" state remains true
+// until all nested levels have exited.
+inline thread_local int tl_post_handler_depth = 0;
+
+inline bool tl_in_post_handler() { return tl_post_handler_depth > 0; }
 
 class Post_handler_guard
 {
 public:
-    Post_handler_guard() { tl_in_post_handler = true; }
-    ~Post_handler_guard() { tl_in_post_handler = false; }
+    Post_handler_guard() { ++tl_post_handler_depth; }
+    ~Post_handler_guard()
+    {
+        if (tl_post_handler_depth <= 0) {
+            assert(false && "Post_handler_guard depth underflow");
+            tl_post_handler_depth = 0;
+            return;
+        }
+        --tl_post_handler_depth;
+    }
 
     Post_handler_guard(const Post_handler_guard&) = delete;
     Post_handler_guard& operator=(const Post_handler_guard&) = delete;

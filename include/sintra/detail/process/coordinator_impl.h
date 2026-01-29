@@ -774,18 +774,32 @@ inline bool Coordinator::all_known_processes_draining_unlocked(instance_id_type 
 }
 
 
-inline void Coordinator::wait_for_all_draining(instance_id_type self_process)
+inline bool Coordinator::wait_for_all_draining(instance_id_type self_process)
 {
     (void)self_process; // currently unused; kept for potential future refinements.
 
     m_waiting_for_all_draining.store(true, std::memory_order_release);
     std::unique_lock<std::mutex> lk(m_draining_state_mutex);
 
-    constexpr auto k_all_draining_timeout = std::chrono::seconds(20);
-    const auto deadline = std::chrono::steady_clock::now() + k_all_draining_timeout;
+    const auto timeout = m_drain_timeout;
+    const bool has_timeout = (timeout.count() > 0);
+    const auto deadline = has_timeout
+        ? std::chrono::steady_clock::now() + timeout
+        : std::chrono::steady_clock::time_point::max();
+
+    bool all_drained = true;
 
     while (!all_known_processes_draining_unlocked(self_process)) {
-        if (m_all_draining_cv.wait_until(lk, deadline) == std::cv_status::timeout) {
+        std::cv_status status;
+        if (has_timeout) {
+            status = m_all_draining_cv.wait_until(lk, deadline);
+        }
+        else {
+            m_all_draining_cv.wait(lk);
+            status = std::cv_status::no_timeout;
+        }
+
+        if (status == std::cv_status::timeout) {
             std::vector<instance_id_type> candidates;
             collect_known_process_candidates_unlocked(candidates);
             if (!candidates.empty()) {
@@ -812,11 +826,20 @@ inline void Coordinator::wait_for_all_draining(instance_id_type self_process)
                 }
                 ls << "\n";
             }
+            all_drained = false;
             break;
         }
     }
 
     m_waiting_for_all_draining.store(false, std::memory_order_release);
+    return all_drained;
+}
+
+
+inline void Coordinator::set_drain_timeout(std::chrono::seconds timeout)
+{
+    std::lock_guard<std::mutex> lk(m_draining_state_mutex);
+    m_drain_timeout = timeout;
 }
 
 

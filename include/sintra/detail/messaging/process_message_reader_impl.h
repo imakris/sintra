@@ -134,7 +134,7 @@ void Process_message_reader::stop_nowait()
     s_mproc->unblock_rpc();
 
 
-    if (!tl_is_req_thread || tl_in_post_handler) {
+    if (!tl_is_req_thread || tl_in_post_handler()) {
         m_in_rep_c->done_reading();
         m_in_rep_c->request_stop();
     }
