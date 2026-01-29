@@ -2362,8 +2362,22 @@ def main():
 
             print("  " + "=" * table_width)
 
-            # Create header for round display
-            header = " ".join(f"{index + 1:02d}" for index, _ in enumerate(tests))
+            max_tests_per_line = 30
+            total_tests = len(tests)
+            num_lines = (total_tests + max_tests_per_line - 1) // max_tests_per_line
+            base_line_size = total_tests // num_lines
+            extra = total_tests % num_lines
+            line_ranges = []
+            start = 0
+            for line_idx in range(num_lines):
+                line_size = base_line_size + (1 if line_idx < extra else 0)
+                end = start + line_size
+                line_ranges.append((start, end))
+                start = end
+            header_lines = [
+                " ".join(f"{index + 1:02d}" for index in range(start, end))
+                for start, end in line_ranges
+            ]
 
             while True:
                 remaining_counts = [count for count in remaining_repetitions.values() if count > 0]
@@ -2373,7 +2387,8 @@ def main():
                 max_remaining = max(remaining_counts)
                 reps_in_this_round = min(batch_size, max_remaining)
                 print(f"\n{Color.BLUE}--- Round: {reps_in_this_round} repetition(s) ---{Color.RESET}")
-                print(header)
+                for header in header_lines:
+                    print(header)
 
                 lingering = find_lingering_processes(("sintra_",))
                 if lingering:
@@ -2423,7 +2438,8 @@ def main():
 
                         row_segments[index] = f"{row_start}{row_end}"
 
-                    print(" ".join(row_segments))
+                    for start, end in line_ranges:
+                        print(" ".join(row_segments[start:end]))
                     if not suite_all_passed:
                         break
 
