@@ -21,6 +21,7 @@
 #else
 #include <cerrno>
 #include <csignal>
+#include <sys/resource.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
@@ -78,6 +79,12 @@ void disable_abort_dialog()
 {
 #if defined(_MSC_VER)
     _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+#else
+    // Disable core dumps on POSIX to speed up abort() termination.
+    // On macOS especially, core dump generation can take many seconds,
+    // causing waitpid to report the process as still running.
+    struct rlimit core_limit = {0, 0};
+    (void)setrlimit(RLIMIT_CORE, &core_limit);
 #endif
 }
 
