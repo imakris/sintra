@@ -1,4 +1,4 @@
-// Copyright (c) 2025, Ioannis Makris
+﻿// Copyright (c) 2025, Ioannis Makris
 // Licensed under the BSD 2-Clause License, see LICENSE.md file for details.
 
 /* ipc_rings.h - SINTRA SPMC IPC Ring
@@ -57,7 +57,7 @@
  * ----------
  *  * Effective maximum readers = min(255, max_process_index).
  *    - The control block allocates per-reader state arrays sized by
- *      max_process_index; and the octile guard uses an 8×1-byte pattern which
+ *      max_process_index; and the octile guard uses an 8Ã—1-byte pattern which
  *      caps actively guarded readers at 255.
  *
  * READER EVICTION (WHEN ENABLED)
@@ -82,7 +82,7 @@
  * PLATFORM MAPPING OVERVIEW
  * -------------------------
  *  * Windows:
- *      - Reserve address space (2× region + granularity) via ::VirtualAlloc.
+ *      - Reserve address space (2Ã— region + granularity) via ::VirtualAlloc.
  *      - Apply the historical rounding to preserve layout parity:
  *            char* ptr = (char*)(
  *                (uintptr_t)((char*)mem + granularity) & ~((uintptr_t)granularity - 1)
@@ -90,11 +90,11 @@
  *      - Release the reservation and immediately map the file twice contiguously,
  *        expecting the OS to reuse the address.
  *  * Linux / POSIX:
- *      - Reserve a 2× span with mmap(NULL, 2*size, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS, ...).
+ *      - Reserve a 2Ã— span with mmap(NULL, 2*size, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS, ...).
  *      - Map the file TWICE into that span using MAP_FIXED (by design replaces
  *        the reservation). Do NOT use MAP_FIXED_NOREPLACE for this step.
  *      - Use ptr = mem (mmap returns a page-aligned address).
- *      - On ANY failure after reserving, munmap the 2× span before returning.
+ *      - On ANY failure after reserving, munmap the 2Ã— span before returning.
  */
 
 #pragma once
@@ -149,7 +149,7 @@
 // compile-time value tailored to your deployment if desired.
 #ifndef SINTRA_EVICTION_SPIN_BUDGET_US
 // Give readers a wider scheduling window (5ms by default) before the writer
-// initiates an eviction pass. The previous 500µs budget was occasionally too
+// initiates an eviction pass. The previous 500Âµs budget was occasionally too
 // tight on heavily loaded macOS runners, where short deschedules allowed the
 // writer to evict still-progressing readers and triggered data overflows.
 #define SINTRA_EVICTION_SPIN_BUDGET_US 5000u
@@ -587,18 +587,18 @@ private:
      * Attach the data file with a "double mapping".
      *
      * WINDOWS
-     *   * Reserve address space: 2× region + one granularity page.
+     *   * Reserve address space: 2Ã— region + one granularity page.
      *   * Compute ptr by rounding (mem + granularity) down to granularity
      *     (historical layout parity).
      *   * Release the reservation, then map the file twice contiguously starting
      *     at ptr.
      *
      * LINUX / POSIX
-     *   * Reserve a 2× span with mmap(PROT_NONE). POSIX guarantees page alignment.
+     *   * Reserve a 2Ã— span with mmap(PROT_NONE). POSIX guarantees page alignment.
      *   * Map the file twice using MAP_FIXED so the mappings REPLACE the reservation.
      *   * IMPORTANT: Do NOT use MAP_FIXED_NOREPLACE here. The whole point is to
      *     overwrite the reservation.
-     *   * On ANY failure after reserving, munmap the 2× span and fail cleanly.
+     *   * On ANY failure after reserving, munmap the 2Ã— span and fail cleanly.
      */
     bool attach()
     {
@@ -630,7 +630,7 @@ private:
                 ipc::map_options_t map_extra_options = 0;
 
 #ifdef _WIN32
-                // -- Windows: VirtualAlloc → round → VirtualFree → map --------------
+                // -- Windows: VirtualAlloc â†’ round â†’ VirtualFree â†’ map --------------
                 void* mem = ::VirtualAlloc(nullptr, m_data_region_size * 2 + page_size,
                                            MEM_RESERVE, PAGE_READWRITE);
                 if (!mem) {
@@ -1186,7 +1186,7 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
                     slot.clear_pending();
                     if ((guard_snapshot & 0x08) != 0) {
                         const uint8_t oct = guard_snapshot & 0x07;
-                        read_access.fetch_sub(octile_mask(oct));
+                        try_decrement_read_access(oct);
                     }
 
                     slot.set_status(READER_STATE_INACTIVE);
@@ -1219,6 +1219,27 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
             }
             return count;
         }
+        bool try_decrement_read_access(uint8_t octile)
+        {
+            if (octile >= 8) {
+                return false;
+            }
+
+            const uint64_t decrement = (uint64_t(1) << (8 * octile));
+            uint64_t access_snapshot = read_access.load();
+            while (true) {
+                const uint32_t count = static_cast<uint32_t>((access_snapshot >> (8 * octile)) & 0xffu);
+                if (count == 0) {
+                    guard_accounting_mismatch_count.fetch_add(1, std::memory_order_relaxed);
+                    return false;
+                }
+                const uint64_t desired = access_snapshot - decrement;
+                if (read_access.compare_exchange_weak(access_snapshot, desired)) {
+                    return true;
+                }
+            }
+        }
+
 
         void release_local_semaphores()
         {
@@ -1650,7 +1671,7 @@ struct Ring_R : Ring<T, true>
                 guard_attached);
 
             if (!guard_attached) {
-                c.read_access.fetch_sub(guard_mask);
+                c.try_decrement_read_access(trailing_octile);
                 slot.clear_pending();
                 m_reading = false;
                 m_reading_lock = false;
@@ -1660,11 +1681,10 @@ struct Ring_R : Ring<T, true>
                 if (Ring<T, true>::encoded_guard_present(previous_state)) {
                     const uint8_t previous_octile = Ring<T, true>::encoded_guard_octile(previous_state);
                     if (previous_octile != trailing_octile) {
-                        const uint64_t prev_mask = octile_mask(previous_octile);
-                        c.read_access.fetch_sub(prev_mask);
+                        c.try_decrement_read_access(previous_octile);
                     }
                     else {
-                        c.read_access.fetch_sub(guard_mask);
+                        c.try_decrement_read_access(trailing_octile);
                     }
                 }
             }
@@ -1708,7 +1728,7 @@ struct Ring_R : Ring<T, true>
                 guard_cleared);
 
             // Always release our own guard contribution before deciding next steps.
-            c.read_access.fetch_sub(guard_mask);
+            c.try_decrement_read_access(trailing_octile);
 
             if (!guard_cleared) {
                 slot.clear_pending();
@@ -1719,8 +1739,7 @@ struct Ring_R : Ring<T, true>
             if (Ring<T, true>::encoded_guard_present(guard_snapshot)) {
                 const uint8_t guarded_octile = Ring<T, true>::encoded_guard_octile(guard_snapshot);
                 if (guarded_octile != trailing_octile) {
-                    const uint64_t prev_mask = octile_mask(guarded_octile);
-                    c.read_access.fetch_sub(prev_mask);
+                    c.try_decrement_read_access(guarded_octile);
                 }
             }
         }
@@ -1771,8 +1790,7 @@ struct Ring_R : Ring<T, true>
 
             if (guard_cleared && Ring<T, true>::encoded_guard_present(previous_state)) {
                 const uint8_t released_octile = Ring<T, true>::encoded_guard_octile(previous_state);
-                const uint64_t released_mask = octile_mask(released_octile);
-                c.read_access.fetch_sub(released_mask);
+                c.try_decrement_read_access(released_octile);
             }
             else
             if (!guard_cleared) {
@@ -1879,7 +1897,7 @@ struct Ring_R : Ring<T, true>
             }
 
             // Phase 1 - fast spin: aggressively poll for a very short window to
-            // deliver sub-100µs wakeups when the writer is still active.
+            // deliver sub-100Âµs wakeups when the writer is still active.
             const double fast_spin_end = get_wtime() + fast_spin_duration;
             while (sequences_equal() && get_wtime() < fast_spin_end) {
                 if (m_stopping) {
@@ -2064,7 +2082,7 @@ struct Ring_R : Ring<T, true>
                 guard_updated);
 
             if (!guard_updated) {
-                c.read_access.fetch_sub(new_mask);
+                c.try_decrement_read_access(new_trailing_octile);
                 slot.clear_pending();
 
                 // Check why CAS failed to determine retry strategy. The guard accessor returns an
@@ -2094,11 +2112,10 @@ struct Ring_R : Ring<T, true>
             // Success - clean up old guard octile
             const uint8_t previous_octile = Ring<T, true>::encoded_guard_octile(previous_state);
             if (previous_octile != new_trailing_octile) {
-                const uint64_t prev_mask = octile_mask(previous_octile);
-                c.read_access.fetch_sub(prev_mask);
+                c.try_decrement_read_access(previous_octile);
             }
             else {
-                c.read_access.fetch_sub(new_mask);
+                c.try_decrement_read_access(new_trailing_octile);
             }
 
             m_trailing_octile = static_cast<uint8_t>(new_trailing_octile);
@@ -2181,14 +2198,14 @@ struct Ring_R : Ring<T, true>
                 const bool guard_present = Ring<T, true>::encoded_guard_present(guard_snapshot);
                 const uint8_t guard_octile = Ring<T, true>::encoded_guard_octile(guard_snapshot);
                 if (!guard_present || guard_octile != static_cast<uint8_t>(m_trailing_octile)) {
-                    c.read_access.fetch_sub(mask);
+                    c.try_decrement_read_access(static_cast<uint8_t>(m_trailing_octile));
                     slot.clear_pending();
                     continue;
                 }
                 return;
             }
 
-            c.read_access.fetch_sub(mask);
+            c.try_decrement_read_access(static_cast<uint8_t>(m_trailing_octile));
             slot.clear_pending();
 
             // Check if someone else already attached the correct guard
@@ -2536,8 +2553,7 @@ struct Ring_W : Ring<T, false>
 
                 const size_t evicted_reader_octile = Ring<T, false>::encoded_guard_octile(previous_state);
 
-                const uint64_t evict_mask = octile_mask(static_cast<uint8_t>(evicted_reader_octile));
-                c.read_access.fetch_sub(evict_mask);
+                c.try_decrement_read_access(static_cast<uint8_t>(evicted_reader_octile));
                 c.reader_eviction_count++;
                 c.last_evicted_reader_index    = static_cast<uint32_t>(i);
                 c.last_evicted_reader_sequence = reader_seq;
