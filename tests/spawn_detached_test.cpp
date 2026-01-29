@@ -352,7 +352,7 @@ bool spawn_detached_sets_env_overrides()
     sintra::Spawn_detached_options options;
     options.prog = shell;
     options.argv = args;
-    options.env_overrides["SINTRA_ENV_OVERRIDE_TEST"] = "spawn_detached_env_value";
+    options.env_overrides.push_back("SINTRA_ENV_OVERRIDE_TEST=spawn_detached_env_value");
 
     bool result = sintra::spawn_detached(options);
     if (!assert_true(result, "spawn_detached failed to launch shell with env override")) {
