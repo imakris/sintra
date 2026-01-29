@@ -154,9 +154,19 @@ int main(int argc, char* argv[])
 {
     const bool is_spawned = has_branch_flag(argc, argv);
 
-    const auto dir = sintra::test::unique_scratch_directory("barrier_drain_unpublish");
-    std::filesystem::create_directories(dir);
-    set_shared_directory_env(dir);
+    // Only the coordinator creates the scratch directory. Spawned workers inherit
+    // the SINTRA_BARRIER_DRAIN_DIR environment variable from the coordinator.
+    // Previously, every process called unique_scratch_directory() which created
+    // different directories, breaking file-based coordination between processes.
+    std::filesystem::path dir;
+    if (!is_spawned) {
+        dir = sintra::test::unique_scratch_directory("barrier_drain_unpublish");
+        std::filesystem::create_directories(dir);
+        set_shared_directory_env(dir);
+    }
+    else {
+        dir = shared_directory();
+    }
 
     const auto barrier2_timeout_ms =
         sintra::test::read_env_int(k_env_barrier_wait_ms.data(), 40000);

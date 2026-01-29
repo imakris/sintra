@@ -150,14 +150,33 @@ void Process_message_reader::stop_nowait()
         // reading thread to exit will happen only after the request reading loop
         // exits.
 
+        // Chain onto any existing post handler instead of replacing it.
+        // This is critical for barrier drain: unpublish_transceiver() queues
+        // barrier completion via run_after_current_handler(), then calls
+        // stop_nowait() which also needs to run after the handler. If we
+        // replace instead of chain, the barrier completion is lost.
         auto rep_ring = m_in_rep_c;
-        tl_post_handler_function_ref() = [rep_ring]() {
+        auto stop_task = [rep_ring]() {
             if (!rep_ring) {
                 return;
             }
             rep_ring->done_reading();
             rep_ring->request_stop();
         };
+
+        if (!tl_post_handler_function_ready()) {
+            tl_post_handler_function_ref() = std::move(stop_task);
+        }
+        else {
+            auto previous = std::move(*tl_post_handler_function);
+            tl_post_handler_function_ref() = [prev = std::move(previous),
+                                              task = std::move(stop_task)]() mutable {
+                if (prev) {
+                    prev();
+                }
+                task();
+            };
+        }
     }
 }
 
