@@ -19,6 +19,10 @@ enum class log_level
 
 using log_callback_fn = void(*)(log_level level, const char* message, void* user_data);
 
+class Log_stream;
+void log_raw(log_level level, const char* message);
+
+
 namespace detail {
 
 inline void default_log_callback(log_level level, const char* message, void* /*user_data*/)
@@ -169,4 +173,5 @@ inline Log_stream ls_error()   { return Log_stream(log_level::error); }
 inline Log_stream ls_debug()   { return Log_stream(log_level::debug); }
 
 } // namespace sintra
+
 
