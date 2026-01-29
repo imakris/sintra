@@ -1143,6 +1143,7 @@ Managed_process::~Managed_process()
             auto post_handler = std::move(*tl_post_handler_function);
             tl_post_handler_function_clear();
             if (post_handler) {
+                Post_handler_guard post_guard;
                 post_handler();
             }
         }
@@ -2668,6 +2669,7 @@ void Managed_process::wait_for_delivery_fence()
             tl_post_handler_function_clear();
 
             lk.unlock();
+            Post_handler_guard post_guard;
             try {
                 post_handler();
             }

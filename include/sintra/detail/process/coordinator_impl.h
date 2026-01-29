@@ -738,6 +738,13 @@ inline void Coordinator::collect_known_process_candidates_unlocked(
             }
         }
     }
+
+    if (s_mproc) {
+        Dispatch_lock_guard<std::shared_lock<std::shared_mutex>> readers_lock(s_mproc->m_readers_mutex);
+        for (const auto& entry : s_mproc->m_readers) {
+            candidates.push_back(entry.first);
+        }
+    }
 }
 
 inline bool Coordinator::all_known_processes_draining_unlocked(instance_id_type /*self_process*/)

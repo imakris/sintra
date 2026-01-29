@@ -134,7 +134,7 @@ void Process_message_reader::stop_nowait()
     s_mproc->unblock_rpc();
 
 
-    if (!tl_is_req_thread) {
+    if (!tl_is_req_thread || tl_in_post_handler) {
         m_in_rep_c->done_reading();
         m_in_rep_c->request_stop();
     }
@@ -458,6 +458,7 @@ void Process_message_reader::request_reader_function()
         if (tl_post_handler_function_ready()) {
             auto post_handler = std::move(*tl_post_handler_function);
             tl_post_handler_function_clear();
+            Post_handler_guard post_guard;
             post_handler();
         }
 

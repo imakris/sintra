@@ -14,6 +14,17 @@ namespace sintra {
 // thread exits without calling tl_post_handler_function_release(), the pointer
 // is intentionally leaked to avoid TLS destructor crashes.
 inline thread_local std::function<void()>* tl_post_handler_function = nullptr;
+inline thread_local bool tl_in_post_handler = false;
+
+class Post_handler_guard
+{
+public:
+    Post_handler_guard() { tl_in_post_handler = true; }
+    ~Post_handler_guard() { tl_in_post_handler = false; }
+
+    Post_handler_guard(const Post_handler_guard&) = delete;
+    Post_handler_guard& operator=(const Post_handler_guard&) = delete;
+};
 
 inline std::function<void()>& tl_post_handler_function_ref()
 {
