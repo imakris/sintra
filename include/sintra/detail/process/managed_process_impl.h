@@ -2083,8 +2083,14 @@ Managed_process::Spawn_result Managed_process::spawn_swarm_process(
         }
 
         //m_readers.pop_back();
-        Dispatch_lock_guard<std::unique_lock<std::shared_mutex>> readers_lock(m_readers_mutex);
-        m_readers.erase(s.piid);
+        // Avoid destroying readers from within the request handler thread.
+        run_after_current_handler([piid = s.piid]() {
+            if (!s_mproc) {
+                return;
+            }
+            Dispatch_lock_guard<std::unique_lock<std::shared_mutex>> readers_lock(s_mproc->m_readers_mutex);
+            s_mproc->m_readers.erase(piid);
+        });
 
         if (s_coord) {
             s_coord->mark_initialization_complete(s.piid);
