@@ -1,4 +1,4 @@
-// Copyright (c) 2025, Ioannis Makris
+﻿// Copyright (c) 2025, Ioannis Makris
 // Licensed under the BSD 2-Clause License, see LICENSE.md file for details.
 
 #pragma once
@@ -9,7 +9,7 @@
 ///  Sintra is a header-only message-passing library built around transceivers
 ///  and a coordinator that supervises managed processes.  This header is the
 ///  single entry point that applications should include.  It gathers the pieces
-///  that make up the façade API and documents the major components so that
+///  that make up the faÃ§ade API and documents the major components so that
 ///  nothing is "secret" from consumers of the library.
 ///
 ///  The library is composed of four broad areas:
@@ -21,7 +21,7 @@
 ///
 ///  The includes below are intentionally explicit: each block exposes one of
 ///  the areas above and is followed by a short description so that readers of
-///  this façade understand which features they are pulling in.
+///  this faÃ§ade understand which features they are pulling in.
 
 
 #include <string>
@@ -68,7 +68,7 @@
 // Messages are the communication primitive in Sintra.  They travel over
 // transceivers, and the process message reader consumes them on behalf of a
 // managed process.  These includes wire up the request/reply rings, message
-// envelopes, and the transceiver façade that user code interacts with.
+// envelopes, and the transceiver faÃ§ade that user code interacts with.
 #include "detail/messaging/message_impl.h"
 #include "detail/messaging/process_message_reader_impl.h"
 #include "detail/transceiver.h"
@@ -200,7 +200,7 @@ void set_lifecycle_handler(Lifecycle_handler handler);
 // `detail/sintra_impl.h`; we now include the specific headers directly to keep
 // dependency relationships obvious.
 #include "detail/barrier.h"
-#include "logging.h"
+#include "detail/logging.h"
 #include "detail/console.h"
 #include "detail/maildrop.h"
 #include "detail/runtime.h"
