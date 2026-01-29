@@ -1,4 +1,4 @@
-﻿// Copyright (c) 2025, Ioannis Makris
+// Copyright (c) 2025, Ioannis Makris
 // Licensed under the BSD 2-Clause License, see LICENSE.md file for details.
 
 /* ipc_rings.h - SINTRA SPMC IPC Ring
@@ -57,7 +57,7 @@
  * ----------
  *  * Effective maximum readers = min(255, max_process_index).
  *    - The control block allocates per-reader state arrays sized by
- *      max_process_index; and the octile guard uses an 8Ã—1-byte pattern which
+ *      max_process_index; and the octile guard uses an 8x1-byte pattern which
  *      caps actively guarded readers at 255.
  *
  * READER EVICTION (WHEN ENABLED)
@@ -82,19 +82,19 @@
  * PLATFORM MAPPING OVERVIEW
  * -------------------------
  *  * Windows:
- *      - Reserve address space (2Ã— region + granularity) via ::VirtualAlloc.
- *      - Apply the historical rounding to preserve layout parity:
+ *      - Reserve address space (2x region + granularity) via ::VirtualAlloc.
+ *      - Align pointer to granularity boundary:
  *            char* ptr = (char*)(
  *                (uintptr_t)((char*)mem + granularity) & ~((uintptr_t)granularity - 1)
  *            );
  *      - Release the reservation and immediately map the file twice contiguously,
  *        expecting the OS to reuse the address.
  *  * Linux / POSIX:
- *      - Reserve a 2Ã— span with mmap(NULL, 2*size, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS, ...).
+ *      - Reserve a 2x span with mmap(NULL, 2*size, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS, ...).
  *      - Map the file TWICE into that span using MAP_FIXED (by design replaces
  *        the reservation). Do NOT use MAP_FIXED_NOREPLACE for this step.
  *      - Use ptr = mem (mmap returns a page-aligned address).
- *      - On ANY failure after reserving, munmap the 2Ã— span before returning.
+ *      - On ANY failure after reserving, munmap the 2x span before returning.
  */
 
 #pragma once
@@ -148,10 +148,8 @@
 // the writer will tolerate before triggering an eviction scan. Override with a
 // compile-time value tailored to your deployment if desired.
 #ifndef SINTRA_EVICTION_SPIN_BUDGET_US
-// Give readers a wider scheduling window (5ms by default) before the writer
-// initiates an eviction pass. The previous 500Âµs budget was occasionally too
-// tight on heavily loaded macOS runners, where short deschedules allowed the
-// writer to evict still-progressing readers and triggered data overflows.
+// Give readers a wide scheduling window (5ms) before the writer initiates
+// an eviction pass, to avoid evicting still-progressing readers.
 #define SINTRA_EVICTION_SPIN_BUDGET_US 5000u
 #endif
 
@@ -587,18 +585,17 @@ private:
      * Attach the data file with a "double mapping".
      *
      * WINDOWS
-     *   * Reserve address space: 2Ã— region + one granularity page.
-     *   * Compute ptr by rounding (mem + granularity) down to granularity
-     *     (historical layout parity).
+     *   * Reserve address space: 2x region + one granularity page.
+     *   * Compute ptr by rounding (mem + granularity) down to granularity.
      *   * Release the reservation, then map the file twice contiguously starting
      *     at ptr.
      *
      * LINUX / POSIX
-     *   * Reserve a 2Ã— span with mmap(PROT_NONE). POSIX guarantees page alignment.
+     *   * Reserve a 2x span with mmap(PROT_NONE). POSIX guarantees page alignment.
      *   * Map the file twice using MAP_FIXED so the mappings REPLACE the reservation.
      *   * IMPORTANT: Do NOT use MAP_FIXED_NOREPLACE here. The whole point is to
      *     overwrite the reservation.
-     *   * On ANY failure after reserving, munmap the 2Ã— span and fail cleanly.
+     *   * On ANY failure after reserving, munmap the 2x span and fail cleanly.
      */
     bool attach()
     {
@@ -630,7 +627,7 @@ private:
                 ipc::map_options_t map_extra_options = 0;
 
 #ifdef _WIN32
-                // -- Windows: VirtualAlloc â†’ round â†’ VirtualFree â†’ map --------------
+                // -- Windows: VirtualAlloc -> round -> VirtualFree -> map --------------
                 void* mem = ::VirtualAlloc(nullptr, m_data_region_size * 2 + page_size,
                                            MEM_RESERVE, PAGE_READWRITE);
                 if (!mem) {
@@ -1879,7 +1876,7 @@ struct Ring_R : Ring<T, true>
             }
 
             // Phase 1 - fast spin: aggressively poll for a very short window to
-            // deliver sub-100Âµs wakeups when the writer is still active.
+            // deliver sub-100us wakeups when the writer is still active.
             const double fast_spin_end = get_wtime() + fast_spin_duration;
             while (sequences_equal() && get_wtime() < fast_spin_end) {
                 if (m_stopping) {
