@@ -17,7 +17,9 @@
 #ifdef _WIN32
 #include <windows.h>
 #else
+#include <cerrno>
 #include <csignal>
+#include <sys/wait.h>
 #include <unistd.h>
 #endif
 
@@ -142,12 +144,21 @@ bool wait_for_process_exit(int pid, std::chrono::milliseconds timeout)
 #else
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
-        if (!sintra::is_process_alive(static_cast<uint32_t>(pid))) {
+        int status = 0;
+        const pid_t result = ::waitpid(static_cast<pid_t>(pid), &status, WNOHANG);
+        if (result == static_cast<pid_t>(pid)) {
+            return true;
+        }
+        if (result == 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
+        if (errno != EINTR) {
             return true;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
-    return !sintra::is_process_alive(static_cast<uint32_t>(pid));
+    return false;
 #endif
 }
 

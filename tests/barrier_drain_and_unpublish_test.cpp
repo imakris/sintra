@@ -152,6 +152,9 @@ int main(int argc, char* argv[])
     std::filesystem::create_directories(dir);
     set_shared_directory_env(dir);
 
+    const auto barrier2_timeout_ms =
+        sintra::test::read_env_int("SINTRA_BARRIER_DRAIN_TIMEOUT_MS", 25000);
+
     const auto barrier2_ready = dir / "barrier2_ready.txt";
     const auto done_path = dir / "worker_a_done.txt";
 
@@ -175,7 +178,7 @@ int main(int argc, char* argv[])
         return 0;
     }
 
-    if (!wait_for_file(barrier2_ready, 10s)) {
+    if (!wait_for_file(barrier2_ready, std::chrono::milliseconds(barrier2_timeout_ms))) {
         sintra::finalize();
         watchdog_done.store(true, std::memory_order_release);
         watchdog.join();

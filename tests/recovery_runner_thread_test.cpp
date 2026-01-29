@@ -106,6 +106,11 @@ int main(int argc, char* argv[])
     std::filesystem::create_directories(dir);
     set_shared_directory_env(dir);
 
+    const auto ready_timeout_ms =
+        sintra::test::read_env_int("SINTRA_RECOVERY_READY_TIMEOUT_MS", 20000);
+    const auto runner_timeout_ms =
+        sintra::test::read_env_int("SINTRA_RECOVERY_RUNNER_TIMEOUT_MS", 20000);
+
     const auto ready_path = dir / "crash_ready.txt";
     const auto go_path = dir / "crash_go.txt";
 
@@ -135,7 +140,7 @@ int main(int argc, char* argv[])
         runner_seen.store(true, std::memory_order_release);
     });
 
-    if (!wait_for_file(ready_path, 10s)) {
+    if (!wait_for_file(ready_path, std::chrono::milliseconds(ready_timeout_ms))) {
         sintra::finalize();
         watchdog_done.store(true, std::memory_order_release);
         watchdog.join();
@@ -144,7 +149,8 @@ int main(int argc, char* argv[])
 
     write_marker(go_path);
 
-    const auto runner_deadline = std::chrono::steady_clock::now() + 10s;
+    const auto runner_deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(runner_timeout_ms);
     while (!runner_seen.load(std::memory_order_acquire)) {
         if (std::chrono::steady_clock::now() >= runner_deadline) {
             sintra::finalize();
