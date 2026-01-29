@@ -264,45 +264,58 @@ int main(int argc, char* argv[])
         const auto group_name = unique_group_name("rendezvous_cancel_group");
         const auto barrier_name = std::string("rendezvous_cancel_barrier");
 
-        std::unordered_set<sintra::instance_id_type> members;
-        members.insert(s_mproc_id);
-        members.insert(sintra::make_process_instance_id(2));
-        cancel_group.set(members);
-
-        if (!cancel_group.assign_name(group_name)) {
-            std::fprintf(stderr, "Failed to assign group name for cancel test.\n");
+        // Use a non-existent remote process so the barrier actually blocks.
+        // If we use process index 2, that's the local process, and the barrier
+        // would complete immediately (only one unique member).
+        const uint32_t local_index = sintra::get_process_index(s_mproc_id);
+        uint32_t remote_index = local_index + 1;
+        if (remote_index > sintra::max_process_index) {
+            remote_index = (local_index > 2) ? (local_index - 1) : local_index;
+        }
+        if (remote_index == local_index || remote_index == 1) {
+            std::fprintf(stderr, "Could not determine a valid remote process index for cancel test.\n");
             ok = false;
         } else {
-            std::atomic<bool> barrier_result{false};
-            std::atomic<bool> barrier_done{false};
-            std::thread waiter([&] {
-                barrier_result = sintra::barrier<sintra::rendezvous_t>(barrier_name, group_name);
-                barrier_done = true;
-            });
+            std::unordered_set<sintra::instance_id_type> members;
+            members.insert(s_mproc_id);
+            members.insert(sintra::make_process_instance_id(remote_index));
+            cancel_group.set(members);
 
-            bool cancelled = false;
-            const auto cancel_deadline = std::chrono::steady_clock::now() + 5s;
-            while (!barrier_done.load() &&
-                   std::chrono::steady_clock::now() < cancel_deadline)
-            {
-                if (s_mproc->unblock_rpc(sintra::process_of(s_coord_id)) > 0) {
-                    cancelled = true;
-                    break;
+            if (!cancel_group.assign_name(group_name)) {
+                std::fprintf(stderr, "Failed to assign group name for cancel test.\n");
+                ok = false;
+            } else {
+                std::atomic<bool> barrier_result{false};
+                std::atomic<bool> barrier_done{false};
+                std::thread waiter([&] {
+                    barrier_result = sintra::barrier<sintra::rendezvous_t>(barrier_name, group_name);
+                    barrier_done = true;
+                });
+
+                bool cancelled = false;
+                const auto cancel_deadline = std::chrono::steady_clock::now() + 5s;
+                while (!barrier_done.load() &&
+                       std::chrono::steady_clock::now() < cancel_deadline)
+                {
+                    if (s_mproc->unblock_rpc(sintra::process_of(s_coord_id)) > 0) {
+                        cancelled = true;
+                        break;
+                    }
+                    std::this_thread::sleep_for(1ms);
                 }
-                std::this_thread::sleep_for(1ms);
-            }
 
-            waiter.join();
+                waiter.join();
 
-            if (!cancelled) {
-                std::fprintf(stderr,
-                             "Did not observe cancellable outstanding RPC (cancel test).\n");
-                ok = false;
-            }
+                if (!cancelled) {
+                    std::fprintf(stderr,
+                                 "Did not observe cancellable outstanding RPC (cancel test).\n");
+                    ok = false;
+                }
 
-            if (cancelled && !barrier_result.load()) {
-                std::fprintf(stderr, "Expected rendezvous barrier to return true after cancellation.\n");
-                ok = false;
+                if (cancelled && !barrier_result.load()) {
+                    std::fprintf(stderr, "Expected rendezvous barrier to return true after cancellation.\n");
+                    ok = false;
+                }
             }
         }
     }
