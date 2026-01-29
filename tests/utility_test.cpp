@@ -1,4 +1,5 @@
 #include <sintra/detail/utility.h>
+#include <sintra/detail/ipc/spinlocked_containers.h>
 
 #include <cstdio>
 #include <functional>
@@ -98,6 +99,36 @@ void test_cstring_vector_empty()
     require_true(csv.size() == 0, "Empty cstring_vector should have size 0");
 }
 
+void test_spinlocked_umap_scoped_erase()
+{
+    // Test scoped_access::erase(iterator) - exercises the uncovered code path
+    sintra::detail::spinlocked<std::unordered_map, std::string, int> map;
+
+    // Insert some entries
+    map.emplace("one", 1);
+    map.emplace("two", 2);
+    map.emplace("three", 3);
+
+    // Use scoped access to iterate and erase
+    {
+        auto scoped = map.scoped();
+        for (auto it = scoped.begin(); it != scoped.end(); ) {
+            if (it->second == 2) {
+                it = scoped.erase(it);  // This is the uncovered line!
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    // Verify the entry was erased
+    auto scoped = map.scoped();
+    require_true(scoped.get().size() == 2, "Map should have 2 entries after erase");
+    require_true(scoped.get().find("two") == scoped.get().end(), "'two' should be erased");
+    require_true(scoped.get().find("one") != scoped.get().end(), "'one' should remain");
+    require_true(scoped.get().find("three") != scoped.get().end(), "'three' should remain");
+}
+
 } // namespace
 
 int main()
@@ -109,6 +140,7 @@ int main()
         test_cstring_vector_from_lvalue();
         test_cstring_vector_from_rvalue();
         test_cstring_vector_empty();
+        test_spinlocked_umap_scoped_erase();
     }
     catch (const std::exception& ex) {
         std::fprintf(stderr, "utility_test failed: %s\n", ex.what());
