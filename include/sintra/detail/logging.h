@@ -51,6 +51,10 @@ inline std::mutex& log_mutex()
     return mutex;
 }
 
+using sintra::log_level;
+using sintra::log_raw;
+using sintra::Log_stream;
+
 } // namespace detail
 
 // Set a logging callback; pass nullptr to restore the default sink.
@@ -165,3 +169,4 @@ inline Log_stream ls_error()   { return Log_stream(log_level::error); }
 inline Log_stream ls_debug()   { return Log_stream(log_level::debug); }
 
 } // namespace sintra
+
