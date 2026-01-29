@@ -21,6 +21,7 @@
 #else
 #include <cerrno>
 #include <csignal>
+#include <sys/resource.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
@@ -78,6 +79,12 @@ void disable_abort_dialog()
 {
 #if defined(_MSC_VER)
     _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+#else
+    // Disable core dumps on POSIX to speed up abort() termination.
+    // On macOS especially, core dump generation can take many seconds,
+    // causing waitpid to report the process as still running.
+    struct rlimit core_limit = {0, 0};
+    (void)setrlimit(RLIMIT_CORE, &core_limit);
 #endif
 }
 
@@ -180,6 +187,17 @@ void terminate_child(int pid)
     }
 #else
     ::kill(static_cast<pid_t>(pid), SIGKILL);
+    // Wait for the child to exit to prevent zombies and ensure clean termination.
+    // Use a timeout to avoid blocking indefinitely in case of unexpected behavior.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
+    while (std::chrono::steady_clock::now() < deadline) {
+        int status = 0;
+        const pid_t result = ::waitpid(static_cast<pid_t>(pid), &status, WNOHANG);
+        if (result == static_cast<pid_t>(pid) || (result == -1 && errno != EINTR)) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
 #endif
 }
 

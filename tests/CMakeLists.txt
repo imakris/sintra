@@ -55,7 +55,7 @@ function(add_test_suite SUFFIX IS_DEBUG)
     endif()
 
     # Clang on Linux needs libatomic for some atomic operations
-    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND NOT APPLE AND NOT MSVC)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_link_libraries(${LIB_TARGET} INTERFACE atomic)
     endif()
 
