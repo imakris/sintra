@@ -28,8 +28,8 @@
  *          * POSIX: page size
  *        We assert this at attach() time.
  *  * Power-of-two size:
- *      - RECOMMENDED (not strictly required): choose power-of-two sizes.
- *        Our helper that proposes configurations typically does that.
+ *      - RECOMMENDED (not strictly required): choose power-of-two sizes when it
+ *        fits the use case.
  *
  * PUBLISH / MEMORY ORDERING SEMANTICS
  * -----------------------------------
@@ -208,8 +208,8 @@ constexpr auto invalid_sequence = ~sequence_counter_type(0);
 /**
  * Compute candidate ring sizes (in element counts) between min_elements and the
  * maximum byte size constraint, with up to max_subdivisions sizes. The algorithm
- * prefers power-of-two-like sizes aligned to the system's page size so that
- * double-mapping constraints are naturally satisfied.
+ * aligns to the system's page size so that double-mapping constraints are
+ * naturally satisfied, then steps down to smaller aligned sizes.
  *
  * Constraints embodied here:
  *  * The base size (bytes) is the LCM(sizeof(T), page_size).
@@ -236,20 +236,30 @@ std::vector<size_t> get_ring_configurations(
 
     // Respect caller's minimum element constraint
     size_t min_size = std::max(min_elements * sizeof(T), base_size);
-    size_t tmp_size = base_size;
 
     std::vector<size_t> ret;
 
-    // Find the largest power-of-two-ish size <= max_size
-    while (tmp_size * 2 <= max_size) {
-        tmp_size *= 2;
+    if (base_size == 0 || max_size < base_size) {
+        return ret;
     }
 
-    // Produce up to max_subdivisions sizes by halving down
+    // Find the largest aligned size <= max_size
+    size_t tmp_size = (max_size / base_size) * base_size;
+    if (tmp_size < min_size) {
+        return ret;
+    }
+
+    // Produce up to max_subdivisions sizes by halving down, then re-aligning.
     for (size_t i = 0; i < max_subdivisions && tmp_size >= min_size; i++) {
         // (Caller must still ensure multiple-of-8 elements.)
         ret.push_back(tmp_size / sizeof(T));
-        tmp_size /= 2;
+
+        size_t next_size = tmp_size / 2;
+        next_size = (next_size / base_size) * base_size;
+        if (next_size == 0 || next_size >= tmp_size) {
+            break;
+        }
+        tmp_size = next_size;
     }
 
     std::reverse(ret.begin(), ret.end());
