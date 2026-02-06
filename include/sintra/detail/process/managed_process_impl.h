@@ -106,6 +106,10 @@ namespace {
     // Windows signal dispatcher infrastructure - matches POSIX architecture
     // to prevent blocking in signal handlers and provide timeout guarantees.
 
+    // Forward declarations - defined after #endif in the common section
+    inline std::size_t signal_index(int sig);
+    inline void dispatch_signal_number(int sig_number);
+
     inline HANDLE& signal_event()
     {
         static HANDLE evt = NULL;
