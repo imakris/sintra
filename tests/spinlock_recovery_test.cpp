@@ -4,7 +4,7 @@
 #include <sintra/detail/time_utils.h>
 #include <sintra/detail/utility.h>
 
-#include "test_environment.h"
+#include "test_utils.h"
 
 #include <atomic>
 #include <chrono>

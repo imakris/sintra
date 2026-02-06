@@ -3,6 +3,8 @@
 
 #include <sintra/sintra.h>
 
+#include "test_utils.h"
+
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -10,12 +12,6 @@
 #include <random>
 #include <string_view>
 #include <thread>
-
-#ifdef _WIN32
-#include <process.h>
-#else
-#include <unistd.h>
-#endif
 
 constexpr std::size_t k_process_count = 4;
 // Keep the stress loop bounded so slower CI hosts (e.g. FreeBSD jails) still
@@ -25,16 +21,6 @@ constexpr std::size_t k_iterations = 220;
 
 std::atomic<int> worker_failures{0};
 std::atomic<int> coordinator_failures{0};
-
-bool has_branch_flag(int argc, char* argv[])
-{
-    for (int i = 0; i < argc; ++i) {
-        if (std::string_view(argv[i]) == "--branch_index") {
-            return true;
-        }
-    }
-    return false;
-}
 
 int worker_process(std::uint32_t worker_index)
 {
@@ -122,7 +108,7 @@ int worker3_process() { return worker_process(3); }
 
 int main(int argc, char* argv[])
 {
-    const bool is_spawned = has_branch_flag(argc, argv);
+    const bool is_spawned = sintra::test::has_branch_flag(argc, argv);
 
     std::vector<sintra::Process_descriptor> processes;
     processes.emplace_back(worker0_process);

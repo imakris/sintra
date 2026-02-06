@@ -7,7 +7,7 @@
 
 #include <sintra/sintra.h>
 
-#include "test_environment.h"
+#include "test_utils.h"
 
 #include <algorithm>
 #include <array>
@@ -27,15 +27,8 @@
 #include <thread>
 #include <vector>
 
-#ifdef _WIN32
-#include <process.h>
-#else
-#include <unistd.h>
-#endif
-
 namespace {
 
-constexpr std::string_view k_env_shared_dir = "SINTRA_PATHOLOGICAL_DIR";
 constexpr int k_worker_count = 4;
 constexpr int k_iterations = 6;
 constexpr int k_stage_steps = 5;
@@ -58,62 +51,6 @@ struct Noise_message
     int step;
     int payload;
 };
-
-std::filesystem::path get_shared_directory()
-{
-    const char* value = std::getenv(k_env_shared_dir.data());
-    if (!value) {
-        throw std::runtime_error("SINTRA_PATHOLOGICAL_DIR is not set");
-    }
-    return std::filesystem::path(value);
-}
-
-void set_shared_directory_env(const std::filesystem::path& dir)
-{
-#ifdef _WIN32
-    _putenv_s(k_env_shared_dir.data(), dir.string().c_str());
-#else
-    setenv(k_env_shared_dir.data(), dir.string().c_str(), 1);
-#endif
-}
-
-std::filesystem::path ensure_shared_directory()
-{
-    const char* value = std::getenv(k_env_shared_dir.data());
-    if (value && *value) {
-        std::filesystem::path dir(value);
-        std::filesystem::create_directories(dir);
-        return dir;
-    }
-
-    auto base = sintra::test::scratch_subdirectory("barrier_pathological");
-    std::filesystem::create_directories(base);
-
-    auto unique_suffix = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                             std::chrono::steady_clock::now().time_since_epoch())
-                             .count();
-#ifdef _WIN32
-    unique_suffix ^= static_cast<long long>(_getpid());
-#else
-    unique_suffix ^= static_cast<long long>(getpid());
-#endif
-
-    static std::atomic<long long> counter{0};
-    unique_suffix ^= counter.fetch_add(1);
-
-    std::ostringstream oss;
-    oss << "pathological_" << unique_suffix;
-    auto dir = base / oss.str();
-    std::filesystem::create_directories(dir);
-    set_shared_directory_env(dir);
-    return dir;
-}
-
-void cleanup_directory(const std::filesystem::path& dir)
-{
-    std::error_code ec;
-    std::filesystem::remove_all(dir, ec);
-}
 
 std::string make_pre_barrier_name(int iteration)
 {
@@ -207,16 +144,6 @@ std::string stage_report_to_string(const Stage_report& report)
         << ",stage=" << report.stage << ",step=" << report.step
         << ",moment=" << report.moment;
     return oss.str();
-}
-
-bool has_branch_flag(int argc, char* argv[])
-{
-    for (int i = 0; i < argc; ++i) {
-        if (std::string_view(argv[i]) == "--branch_index") {
-            return true;
-        }
-    }
-    return false;
 }
 
 struct Controller_state
@@ -318,7 +245,8 @@ int controller_process()
     using namespace sintra;
 
     Controller_state state;
-    const auto shared_dir = get_shared_directory();
+    sintra::test::Shared_directory shared("SINTRA_PATHOLOGICAL_DIR", "barrier_pathological");
+    const auto shared_dir = shared.path();
     const auto controller_log = shared_dir / "controller_stage.log";
 
     auto stage_slot = [&state, controller_log](const Stage_report& report) {
@@ -391,7 +319,8 @@ int worker_process(int worker_index)
 {
     using namespace sintra;
 
-    const auto shared_dir = get_shared_directory();
+    sintra::test::Shared_directory shared("SINTRA_PATHOLOGICAL_DIR", "barrier_pathological");
+    const auto shared_dir = shared.path();
     const auto stage_log = shared_dir / make_stage_log_name(worker_index);
     const auto noise_log = shared_dir / make_worker_noise_log(worker_index);
 
@@ -518,8 +447,9 @@ int worker3_process() { return worker_process(3); }
 
 int main(int argc, char* argv[])
 {
-    const bool is_spawned = has_branch_flag(argc, argv);
-    const auto shared_dir = ensure_shared_directory();
+    const bool is_spawned = sintra::test::has_branch_flag(argc, argv);
+    sintra::test::Shared_directory shared("SINTRA_PATHOLOGICAL_DIR", "barrier_pathological");
+    const auto shared_dir = shared.path();
 
     if (!is_spawned) {
         for (int worker = 0; worker < k_worker_count; ++worker) {
@@ -575,7 +505,6 @@ int main(int argc, char* argv[])
             }
         }
 
-        cleanup_directory(shared_dir);
     }
 
     return exit_code;

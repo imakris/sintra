@@ -20,7 +20,7 @@
 
 #include <sintra/sintra.h>
 
-#include "test_environment.h"
+#include "test_utils.h"
 
 #include <array>
 #include <atomic>
@@ -39,12 +39,6 @@
 #include <string_view>
 #include <thread>
 #include <vector>
-
-#ifdef _WIN32
-#include <process.h>
-#else
-#include <unistd.h>
-#endif
 
 namespace {
 
@@ -174,75 +168,6 @@ struct Failure_notice
 struct Stop
 {
 };
-
-constexpr std::string_view k_env_shared_dir = "SINTRA_EXTREME_CHOREOGRAPHY_DIR";
-
-std::filesystem::path get_shared_directory()
-{
-    const char* value = std::getenv(k_env_shared_dir.data());
-    if (!value) {
-        throw std::runtime_error("extreme choreography shared directory is not set");
-    }
-    return std::filesystem::path(value);
-}
-
-void set_shared_directory_env(const std::filesystem::path& dir)
-{
-#ifdef _WIN32
-    _putenv_s(k_env_shared_dir.data(), dir.string().c_str());
-#else
-    setenv(k_env_shared_dir.data(), dir.string().c_str(), 1);
-#endif
-}
-
-std::filesystem::path ensure_shared_directory()
-{
-    const char* value = std::getenv(k_env_shared_dir.data());
-    if (value && *value) {
-        std::filesystem::path dir(value);
-        std::filesystem::create_directories(dir);
-        return dir;
-    }
-
-    auto base = sintra::test::scratch_subdirectory("extreme_choreography");
-    std::filesystem::create_directories(base);
-
-    const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
-
-#ifdef _WIN32
-    const auto pid = static_cast<long long>(_getpid());
-#else
-    const auto pid = static_cast<long long>(getpid());
-#endif
-
-    static std::atomic<long long> counter{0};
-    const auto unique = counter.fetch_add(1);
-
-    std::ostringstream oss;
-    oss << "run_" << now << '_' << pid << '_' << unique;
-
-    auto dir = base / oss.str();
-    std::filesystem::create_directories(dir);
-    set_shared_directory_env(dir);
-    return dir;
-}
-
-void cleanup_directory(const std::filesystem::path& dir)
-{
-    std::error_code ec;
-    std::filesystem::remove_all(dir, ec);
-}
-
-bool has_branch_flag(int argc, char* argv[])
-{
-    for (int i = 0; i < argc; ++i) {
-        if (std::string_view(argv[i]) == "--branch_index") {
-            return true;
-        }
-    }
-    return false;
-}
 
 const std::array<std::string, k_phase_count>& fence_names()
 {
@@ -697,7 +622,8 @@ int aggregator_process()
 {
     using namespace sintra;
 
-    const auto shared_dir = get_shared_directory();
+    sintra::test::Shared_directory shared("SINTRA_EXTREME_CHOREOGRAPHY_DIR", "extreme_choreography");
+    const auto shared_dir = shared.path();
     const auto summary_path = shared_dir / "extreme_summary.txt";
 
     Sequence_tracker tracker = make_sequence_tracker();
@@ -876,8 +802,9 @@ int aggregator_process()
 
 int main(int argc, char* argv[])
 {
-    const bool is_spawned = has_branch_flag(argc, argv);
-    const auto shared_dir = ensure_shared_directory();
+    const bool is_spawned = sintra::test::has_branch_flag(argc, argv);
+    sintra::test::Shared_directory shared("SINTRA_EXTREME_CHOREOGRAPHY_DIR", "extreme_choreography");
+    const auto shared_dir = shared.path();
     const auto summary_path = shared_dir / "extreme_summary.txt";
 
     if (!is_spawned) {
@@ -905,7 +832,7 @@ int main(int argc, char* argv[])
     if (!is_spawned) {
         std::ifstream in(summary_path, std::ios::binary);
         if (!in) {
-            cleanup_directory(shared_dir);
+            shared.cleanup();
             return 1;
         }
 
@@ -960,7 +887,7 @@ int main(int argc, char* argv[])
             }
         }
 
-        cleanup_directory(shared_dir);
+        shared.cleanup();
         return ok ? 0 : 1;
     }
 

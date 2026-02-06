@@ -1,5 +1,5 @@
 // Crash capture test: self-crash after a randomized delay.
-#include "test_environment.h"
+#include "test_utils.h"
 #include "sintra/detail/debug_pause.h"
 
 #include <chrono>
@@ -9,12 +9,6 @@
 #include <limits>
 #include <random>
 #include <thread>
-
-#ifdef _WIN32
-#include <process.h>
-#else
-#include <unistd.h>
-#endif
 
 namespace {
 
@@ -27,11 +21,6 @@ int clamp_int(int value, int lo, int hi)
         return hi;
     }
     return value;
-}
-
-int read_env_int(const char* name, int default_value)
-{
-    return sintra::test::read_env_int(name, default_value);
 }
 
 std::uint64_t make_seed()
@@ -48,8 +37,8 @@ std::uint64_t make_seed()
 
 int pick_delay_ms()
 {
-    int min_ms = read_env_int("SINTRA_CRASH_CAPTURE_MIN_MS", 5);
-    int max_ms = read_env_int("SINTRA_CRASH_CAPTURE_MAX_MS", 250);
+    int min_ms = sintra::test::read_env_int("SINTRA_CRASH_CAPTURE_MIN_MS", 5);
+    int max_ms = sintra::test::read_env_int("SINTRA_CRASH_CAPTURE_MAX_MS", 250);
     if (max_ms < min_ms) {
         std::swap(max_ms, min_ms);
     }

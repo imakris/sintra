@@ -23,7 +23,7 @@
 #include <sintra/sintra.h>
 #include <sintra/detail/process/managed_process.h>
 
-#include "test_environment.h"
+#include "test_utils.h"
 
 #include <chrono>
 #include <condition_variable>
@@ -38,40 +38,26 @@
 #include <thread>
 #include <vector>
 
-#ifdef _WIN32
-#include <process.h>
 #if defined(_MSC_VER)
 #include <crtdbg.h>
 #endif
-#else
-#include <unistd.h>
 #if defined(__APPLE__)
 #include <sys/resource.h>
-#endif
 #endif
 
 namespace {
 
 struct Stop {};
 
-constexpr std::string_view k_env_shared_dir = "SINTRA_TEST_SHARED_DIR";
 std::string g_shared_dir;
 
-std::filesystem::path get_shared_directory()
-{
-    const char* value = std::getenv(k_env_shared_dir.data());
-    if (!value) {
-        throw std::runtime_error("SINTRA_TEST_SHARED_DIR is not set");
-    }
-    return std::filesystem::path(value);
-}
 std::filesystem::path current_shared_directory()
 {
     if (!g_shared_dir.empty()) {
         return std::filesystem::path(g_shared_dir);
     }
 
-    const char* value = std::getenv(k_env_shared_dir.data());
+    const char* value = std::getenv("SINTRA_TEST_SHARED_DIR");
     if (value && *value) {
         std::filesystem::path dir(value);
         std::filesystem::create_directories(dir);
@@ -108,60 +94,6 @@ void write_ready_marker(std::string_view tag, uint32_t occurrence = 0)
         out.flush();
     }
 }
-void set_shared_directory_env(const std::filesystem::path& dir)
-{
-#ifdef _WIN32
-    _putenv_s(k_env_shared_dir.data(), dir.string().c_str());
-#else
-    setenv(k_env_shared_dir.data(), dir.string().c_str(), 1);
-#endif
-}
-
-std::filesystem::path ensure_shared_directory()
-{
-    const char* value = std::getenv(k_env_shared_dir.data());
-    if (value && *value) {
-        std::filesystem::path dir(value);
-        std::filesystem::create_directories(dir);
-        return dir;
-    }
-
-    auto base = sintra::test::scratch_subdirectory("recovery_test");
-
-    auto unique_suffix = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                             std::chrono::steady_clock::now().time_since_epoch())
-                             .count();
-#ifdef _WIN32
-    unique_suffix ^= static_cast<long long>(_getpid());
-#else
-    unique_suffix ^= static_cast<long long>(getpid());
-#endif
-
-    std::ostringstream oss;
-    oss << "recovery_test_" << unique_suffix;
-    auto dir = base / oss.str();
-    std::filesystem::create_directories(dir);
-    set_shared_directory_env(dir);
-    return dir;
-}
-
-std::vector<std::string> read_lines(const std::filesystem::path& file)
-{
-    std::vector<std::string> values;
-    std::ifstream in(file, std::ios::binary);
-    if (!in) {
-        return values;
-    }
-    std::string line;
-    while (std::getline(in, line)) {
-        if (!line.empty() && line.back() == '\r') {
-            line.pop_back();
-        }
-        values.push_back(line);
-    }
-    return values;
-}
-
 void append_line(const std::filesystem::path& file, const std::string& value)
 {
     std::ofstream out(file, std::ios::binary | std::ios::app);
@@ -198,7 +130,8 @@ void disable_core_dumps_for_intentional_abort()
 int process_watchdog()
 {
     std::fprintf(stderr, "[WATCHDOG] Starting watchdog process\n");
-    const auto shared_dir = get_shared_directory();
+    const sintra::test::Shared_directory shared("SINTRA_TEST_SHARED_DIR", "recovery_test");
+    const auto& shared_dir = shared.path();
     const auto result_path = shared_dir / "result.txt";
     write_ready_marker("watchdog");
 
@@ -223,7 +156,7 @@ int process_watchdog()
     std::fprintf(stderr, "[WATCHDOG] Wait complete, signalled=%d\n", signalled);
     bool ok = false;
     if (signalled) {
-        const auto run_entries = read_lines(shared_dir / "runs.txt");
+        const auto run_entries = sintra::test::read_lines(shared_dir / "runs.txt");
         std::fprintf(stderr, "[WATCHDOG] Run entries: %zu\n", run_entries.size());
         ok = (run_entries.size() >= 2);
     }
@@ -300,7 +233,8 @@ int process_crasher()
         shared_dir = g_shared_dir;
     }
     else {
-        shared_dir = get_shared_directory();
+        sintra::test::Shared_directory shared_obj("SINTRA_TEST_SHARED_DIR", "recovery_test");
+        shared_dir = shared_obj.path();
     }
     const auto runs_path = shared_dir / "runs.txt";
     const auto log_path = shared_dir / "crasher.log";
@@ -336,16 +270,6 @@ int process_crasher()
     return 0;
 }
 
-bool has_branch_flag(int argc, char* argv[])
-{
-    for (int i = 0; i < argc; ++i) {
-        if (std::string_view(argv[i]) == "--branch_index") {
-            return true;
-        }
-    }
-    return false;
-}
-
 std::string get_arg_value(int argc, char* argv[], const std::string& arg_name)
 {
     for (int i = 0; i < argc - 1; ++i) {
@@ -373,7 +297,11 @@ int main(int argc, char* argv[])
         std::string early_shared_dir_arg = get_arg_value(argc, argv, "--shared_dir");
 
         if (!early_shared_dir_arg.empty()) {
-            set_shared_directory_env(std::filesystem::path(early_shared_dir_arg));
+#ifdef _WIN32
+            _putenv_s("SINTRA_TEST_SHARED_DIR", early_shared_dir_arg.c_str());
+#else
+            setenv("SINTRA_TEST_SHARED_DIR", early_shared_dir_arg.c_str(), 1);
+#endif
             shared_dir_env = early_shared_dir_arg.c_str();
         }
 
@@ -397,11 +325,16 @@ int main(int argc, char* argv[])
     std::string shared_dir_arg = get_arg_value(argc, argv, "--shared_dir");
     if (!shared_dir_arg.empty()) {
         std::fprintf(stderr, "[MAIN] Setting shared_dir from argument: %s\n", shared_dir_arg.c_str());
-        set_shared_directory_env(std::filesystem::path(shared_dir_arg));
+#ifdef _WIN32
+        _putenv_s("SINTRA_TEST_SHARED_DIR", shared_dir_arg.c_str());
+#else
+        setenv("SINTRA_TEST_SHARED_DIR", shared_dir_arg.c_str(), 1);
+#endif
     }
 
-    const bool is_spawned = has_branch_flag(argc, argv);
-    const auto shared_dir = ensure_shared_directory();
+    const bool is_spawned = sintra::test::has_branch_flag(argc, argv);
+    sintra::test::Shared_directory shared_dir_raii("SINTRA_TEST_SHARED_DIR", "recovery_test");
+    const auto& shared_dir = shared_dir_raii.path();
 
     std::fprintf(stderr, "[MAIN] Using shared_dir: %s\n", shared_dir.string().c_str());
     g_shared_dir = shared_dir.string();
@@ -473,12 +406,7 @@ int main(int argc, char* argv[])
         std::string status;
         in >> status;
 
-        // Best effort cleanup - ignore failures (files may still be in use)
-        std::error_code ec;
-        std::filesystem::remove_all(shared_dir, ec);
-        if (ec) {
-            std::fprintf(stderr, "[MAIN] Cleanup warning: %s\n", ec.message().c_str());
-        }
+        shared_dir_raii.cleanup();
         return (status == "ok") ? 0 : 1;
     }
 

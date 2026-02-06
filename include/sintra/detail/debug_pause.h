@@ -112,7 +112,8 @@ inline LONG WINAPI debug_vectored_exception_handler(EXCEPTION_POINTERS* exceptio
     debug_pause_forever(exception_name);
     return EXCEPTION_CONTINUE_SEARCH; // Never reached due to infinite loop
 }
-#else
+#endif
+
 inline void debug_signal_handler(int signum)
 {
     if (!is_debug_pause_active()) {
@@ -127,27 +128,9 @@ inline void debug_signal_handler(int signum)
         case SIGSEGV: signal_name = "SIGSEGV (segmentation fault)";      break;
         case SIGFPE:  signal_name = "SIGFPE (floating point exception)"; break;
         case SIGILL:  signal_name = "SIGILL (illegal instruction)";      break;
+#ifdef SIGBUS
         case SIGBUS:  signal_name = "SIGBUS (bus error)";                break;
-    }
-
-    debug_pause_forever(signal_name);
-}
 #endif
-
-inline void debug_signal_handler_win(int signum)
-{
-    if (!is_debug_pause_active()) {
-        std::signal(signum, SIG_DFL);
-        std::raise(signum);
-        return;
-    }
-
-    const char* signal_name = "Unknown signal";
-    switch (signum) {
-        case SIGABRT: signal_name = "SIGABRT (abort)";                   break;
-        case SIGFPE:  signal_name = "SIGFPE (floating point exception)"; break;
-        case SIGILL:  signal_name = "SIGILL (illegal instruction)";      break;
-        case SIGSEGV: signal_name = "SIGSEGV (segmentation fault)";      break;
     }
 
     debug_pause_forever(signal_name);
@@ -170,17 +153,13 @@ inline void install_debug_pause_handlers()
     // AddVectoredExceptionHandler for exceptions (more reliable than SetUnhandledExceptionFilter)
     // First parameter: 1 = add as first handler in chain
     AddVectoredExceptionHandler(1, debug_vectored_exception_handler);
+#endif
 
-    // Also install signal handlers for abort() etc.
-    std::signal(SIGABRT, debug_signal_handler_win);
-    std::signal(SIGFPE,  debug_signal_handler_win);
-    std::signal(SIGILL,  debug_signal_handler_win);
-    std::signal(SIGSEGV, debug_signal_handler_win);
-#else
     std::signal(SIGABRT, debug_signal_handler);
     std::signal(SIGSEGV, debug_signal_handler);
     std::signal(SIGFPE,  debug_signal_handler);
     std::signal(SIGILL,  debug_signal_handler);
+#ifdef SIGBUS
     std::signal(SIGBUS,  debug_signal_handler);
 #endif
 }

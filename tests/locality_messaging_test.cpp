@@ -16,7 +16,7 @@
 
 #include <sintra/sintra.h>
 
-#include "test_environment.h"
+#include "test_utils.h"
 
 #include <algorithm>
 #include <atomic>
@@ -30,12 +30,6 @@
 #include <string_view>
 #include <thread>
 #include <vector>
-
-#ifdef _WIN32
-#include <process.h>
-#else
-#include <unistd.h>
-#endif
 
 namespace {
 
@@ -69,7 +63,6 @@ struct TestTransceiver : sintra::Derived_transceiver<TestTransceiver>
     }
 };
 
-constexpr std::string_view k_env_shared_dir = "SINTRA_LOCALITY_TEST_DIR";
 constexpr std::string_view k_env_trace = "SINTRA_LOCALITY_TEST_TRACE";
 constexpr int k_num_messages = 5;
 
@@ -91,54 +84,6 @@ void trace(const char* label)
 #endif
     std::fprintf(stderr, "[locality_test][pid=%d] %s\n", pid, label);
     std::fflush(stderr);
-}
-
-std::filesystem::path get_shared_directory()
-{
-    const char* value = std::getenv(k_env_shared_dir.data());
-    if (!value) {
-        throw std::runtime_error("SINTRA_LOCALITY_TEST_DIR is not set");
-    }
-    return std::filesystem::path(value);
-}
-
-void set_shared_directory_env(const std::filesystem::path& dir)
-{
-#ifdef _WIN32
-    _putenv_s(k_env_shared_dir.data(), dir.string().c_str());
-#else
-    setenv(k_env_shared_dir.data(), dir.string().c_str(), 1);
-#endif
-}
-
-std::filesystem::path ensure_shared_directory()
-{
-    const char* value = std::getenv(k_env_shared_dir.data());
-    if (value && *value) {
-        std::filesystem::path dir(value);
-        std::filesystem::create_directories(dir);
-        return dir;
-    }
-
-    auto base = sintra::test::scratch_subdirectory("locality_test");
-    auto unique_suffix = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                             std::chrono::steady_clock::now().time_since_epoch())
-                             .count();
-#ifdef _WIN32
-    unique_suffix ^= static_cast<long long>(_getpid());
-#else
-    unique_suffix ^= static_cast<long long>(getpid());
-#endif
-
-    static std::atomic<long long> counter{0};
-    unique_suffix ^= counter.fetch_add(1);
-
-    std::ostringstream oss;
-    oss << "locality_" << unique_suffix;
-    auto dir = base / oss.str();
-    std::filesystem::create_directories(dir);
-    set_shared_directory_env(dir);
-    return dir;
 }
 
 void write_counts(const std::filesystem::path& file,
@@ -168,16 +113,6 @@ bool read_counts(const std::filesystem::path& file,
     in >> local_count >> remote_count >> world_count
        >> typed_local_count >> typed_remote_count >> typed_global_count;
     return !in.fail();
-}
-
-bool has_branch_flag(int argc, char* argv[])
-{
-    for (int i = 0; i < argc; ++i) {
-        if (std::string_view(argv[i]) == "--branch_index") {
-            return true;
-        }
-    }
-    return false;
 }
 
 // Counters for coordinator process (local slots)
@@ -244,7 +179,8 @@ int child_process()
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
     // Write results to shared file
-    const auto shared_dir = get_shared_directory();
+    sintra::test::Shared_directory shared("SINTRA_LOCALITY_TEST_DIR", "locality_messaging");
+    const auto shared_dir = shared.path();
     write_counts(shared_dir / "child_counts.txt",
                  g_child_local_count.load(),
                  g_child_remote_count.load(),
@@ -263,8 +199,9 @@ int child_process()
 
 int main(int argc, char* argv[])
 {
-    const bool is_spawned = has_branch_flag(argc, argv);
-    const auto shared_dir = ensure_shared_directory();
+    const bool is_spawned = sintra::test::has_branch_flag(argc, argv);
+    sintra::test::Shared_directory shared("SINTRA_LOCALITY_TEST_DIR", "locality_messaging");
+    const auto shared_dir = shared.path();
 
     std::vector<sintra::Process_descriptor> processes;
     processes.emplace_back(child_process);
@@ -439,23 +376,7 @@ int main(int argc, char* argv[])
         }
 
         // Cleanup
-        bool cleanup_succeeded = false;
-        for (int retry = 0; retry < 3 && !cleanup_succeeded; ++retry) {
-            try {
-                std::filesystem::remove_all(shared_dir);
-                cleanup_succeeded = true;
-            }
-            catch (const std::exception& e) {
-                if (retry < 2) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                }
-                else {
-                    std::fprintf(stderr,
-                                 "Warning: failed to remove temp directory %s after 3 attempts: %s\n",
-                                 shared_dir.string().c_str(), e.what());
-                }
-            }
-        }
+        shared.cleanup();
 
         if (passed) {
             std::fprintf(stderr, "locality_messaging_test PASSED\n");

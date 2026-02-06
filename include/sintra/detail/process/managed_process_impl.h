@@ -61,6 +61,24 @@ inline std::once_flag& signal_handler_once_flag()
 
 namespace {
 
+    inline std::atomic<unsigned int>& pending_signal_mask()
+    {
+        static std::atomic<unsigned int> mask{0};
+        return mask;
+    }
+
+    inline std::atomic<uint32_t>& dispatched_signal_counter()
+    {
+        static std::atomic<uint32_t> counter{0};
+        return counter;
+    }
+
+    inline std::once_flag& signal_dispatcher_once_flag()
+    {
+        static std::once_flag flag;
+        return flag;
+    }
+
 #ifdef _WIN32
     struct signal_slot {
         int sig;
@@ -94,56 +112,7 @@ namespace {
         return evt;
     }
 
-    inline std::atomic<unsigned int>& pending_signal_mask()
-    {
-        static std::atomic<unsigned int> mask{0};
-        return mask;
-    }
-
-    inline std::atomic<uint32_t>& dispatched_signal_counter()
-    {
-        static std::atomic<uint32_t> counter{0};
-        return counter;
-    }
-
-    inline std::once_flag& signal_dispatcher_once_flag()
-    {
-        static std::once_flag flag;
-        return flag;
-    }
-
     inline void wait_for_signal_dispatch_win(uint32_t expected_count);
-
-    inline std::size_t signal_index(int sig)
-    {
-        auto& slot_table = signal_slots();
-        for (std::size_t idx = 0; idx < slot_table.size(); ++idx) {
-            if (slot_table[idx].sig == sig) {
-                return idx;
-            }
-        }
-        return slot_table.size();
-    }
-
-    inline void dispatch_signal_number_win(int sig_number)
-    {
-        // Hold shared lock to prevent s_mproc from being destroyed while we access it.
-        Dispatch_lock_guard<std::shared_lock<std::shared_mutex>> dispatch_lock(dispatch_shutdown_mutex_instance);
-
-        auto* mproc = s_mproc;
-        if (mproc && mproc->m_out_req_c) {
-            mproc->emit_remote<Managed_process::terminated_abnormally>(sig_number);
-
-            Dispatch_lock_guard<std::shared_lock<std::shared_mutex>> readers_lock(mproc->m_readers_mutex);
-            for (auto& reader_entry : mproc->m_readers) {
-                if (auto& reader = reader_entry.second) {
-                    reader->stop_nowait();
-                }
-            }
-
-            dispatched_signal_counter().fetch_add(1);
-        }
-    }
 
     inline void queue_signal_dispatch_win(int sig_number, bool wait_for_dispatch = true)
     {
@@ -216,7 +185,7 @@ namespace {
         auto& slot_table = signal_slots();
         for (std::size_t idx = 0; idx < slot_table.size(); ++idx) {
             if ((mask & (1U << idx)) != 0U) {
-                dispatch_signal_number_win(slot_table[idx].sig);
+                dispatch_signal_number(slot_table[idx].sig);
             }
         }
     }
@@ -303,84 +272,9 @@ namespace {
         return pipefd;
     }
 
-    inline std::atomic<unsigned int>& pending_signal_mask()
-    {
-        static std::atomic<unsigned int> mask {0};
-        return mask;
-    }
-
-    inline std::atomic<uint32_t>& dispatched_signal_counter()
-    {
-        static std::atomic<uint32_t> counter {0};
-        return counter;
-    }
-
-    inline std::once_flag& signal_dispatcher_once_flag()
-    {
-        static std::once_flag flag;
-        return flag;
-    }
-
-    inline std::size_t signal_index(int sig)
-    {
-        auto& slot_table = signal_slots();
-        for (std::size_t idx = 0; idx < slot_table.size(); ++idx) {
-            if (slot_table[idx].sig == sig) {
-                return idx;
-            }
-        }
-        return slot_table.size();
-    }
-
-    inline void dispatch_signal_number(int sig_number)
-    {
-        // Hold shared lock to prevent s_mproc from being destroyed while we access it.
-        // The Managed_process destructor will acquire an exclusive lock before clearing
-        // s_mproc and destroying the object, ensuring this function completes first.
-        Dispatch_lock_guard<std::shared_lock<std::shared_mutex>> dispatch_lock(dispatch_shutdown_mutex_instance);
-
-        auto* mproc = s_mproc;
-#ifndef _WIN32
-        if (sig_number == SIGCHLD) {
-            if (mproc) {
-                mproc->reap_finished_children();
-            }
-            return;
-        }
-#endif
-        if (mproc && mproc->m_out_req_c) {
-            mproc->emit_remote<Managed_process::terminated_abnormally>(sig_number);
-
-            Dispatch_lock_guard<std::shared_lock<std::shared_mutex>> readers_lock(mproc->m_readers_mutex);
-            for (auto& reader_entry : mproc->m_readers) {
-                if (auto& reader = reader_entry.second) {
-                    reader->stop_nowait();
-                }
-            }
-
-            dispatched_signal_counter().fetch_add(1);
-        }
-    }
-
-    // Signal-safe pause primitive for handler waits (no syscalls).
-    // Provides CPU hints to reduce power consumption and contention during spin-waits.
-    inline void signal_dispatch_spin_pause() noexcept
-    {
-#if defined(__x86_64__) || defined(__i386__)
-        __builtin_ia32_pause();
-#elif defined(__aarch64__) || defined(__arm__)
-        __asm__ __volatile__("yield" ::: "memory");
-#elif defined(__riscv)
-        // RISC-V pause hint (encoding for `pause` instruction).
-        __asm__ __volatile__(".insn i 0x0F, 0, x0, x0, 0x010" ::: "memory");
-#elif defined(__powerpc__) || defined(__powerpc64__)
-        __asm__ __volatile__("or 27,27,27" ::: "memory");  // Low-priority hint
-#else
-        // Fallback: compiler memory barrier prevents loop optimization while allowing
-        // the CPU to proceed. Not as efficient as a pause hint but better than nothing.
-        __asm__ __volatile__("" ::: "memory");
-#endif
-    }
+    // Forward declarations - defined after #endif in the common section
+    inline std::size_t signal_index(int sig);
+    inline void dispatch_signal_number(int sig_number);
 
     inline uint64_t signal_dispatch_now_ns() noexcept
     {
@@ -425,7 +319,7 @@ namespace {
             }
 
             for (int pause = 0; pause < pause_count; ++pause) {
-                signal_dispatch_spin_pause();
+                sintra::detail::spin_pause();
             }
 
             // Double pause count each iteration up to maximum (exponential backoff).
@@ -506,6 +400,46 @@ namespace {
         });
     }
 #endif
+
+    // --- Common signal infrastructure (shared across platforms) ---
+
+    inline std::size_t signal_index(int sig)
+    {
+        auto& slot_table = signal_slots();
+        for (std::size_t idx = 0; idx < slot_table.size(); ++idx) {
+            if (slot_table[idx].sig == sig) {
+                return idx;
+            }
+        }
+        return slot_table.size();
+    }
+
+    inline void dispatch_signal_number(int sig_number)
+    {
+        Dispatch_lock_guard<std::shared_lock<std::shared_mutex>> dispatch_lock(dispatch_shutdown_mutex_instance);
+
+        auto* mproc = s_mproc;
+#ifndef _WIN32
+        if (sig_number == SIGCHLD) {
+            if (mproc) {
+                mproc->reap_finished_children();
+            }
+            return;
+        }
+#endif
+        if (mproc && mproc->m_out_req_c) {
+            mproc->emit_remote<Managed_process::terminated_abnormally>(sig_number);
+
+            Dispatch_lock_guard<std::shared_lock<std::shared_mutex>> readers_lock(mproc->m_readers_mutex);
+            for (auto& reader_entry : mproc->m_readers) {
+                if (auto& reader = reader_entry.second) {
+                    reader->stop_nowait();
+                }
+            }
+
+            dispatched_signal_counter().fetch_add(1);
+        }
+    }
 
     template <std::size_t N>
     inline signal_slot* find_slot(std::array<signal_slot, N>& slot_table, int sig)
@@ -1289,7 +1223,7 @@ Managed_process::~Managed_process()
     }
 
     // Wait for any in-flight signal dispatches to complete before clearing s_mproc.
-    // The Windows dispatcher thread may still be executing dispatch_signal_number_win()
+    // The Windows dispatcher thread may still be executing dispatch_signal_number()
     // after we closed the event above.
     // Taking an exclusive lock ensures all shared locks are released before we
     // clear s_mproc and destroy the object, preventing use-after-free.
@@ -2037,7 +1971,6 @@ Managed_process::Spawn_result Managed_process::spawn_swarm_process(
         // create the readers. The next line will start the reader threads,
         // which might take some time. At this stage, we do not have to wait
         // until they are ready for messages.
-        //m_readers.emplace_back(std::move(reader));
 
         m_cached_spawns[s.piid] = s;
         m_cached_spawns[s.piid].occurrence++;
@@ -2083,7 +2016,6 @@ Managed_process::Spawn_result Managed_process::spawn_swarm_process(
                 << "failed to launch " << s.binary_name << "\n";
         }
 
-        //m_readers.pop_back();
         // Avoid destroying readers from within the request handler thread.
         run_after_current_handler([piid = s.piid]() {
             if (!s_mproc) {
@@ -2165,7 +2097,6 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
 
         // 2. spawn
         it = branch_vector.begin();
-        //auto readers_it = m_readers.begin();
         for (int i = 0; it != branch_vector.end(); it++, i++) {
 
             std::vector<std::string> all_args = {it->entry.m_binary_name.c_str()};

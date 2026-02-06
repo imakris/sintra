@@ -14,7 +14,7 @@
 
 #include <sintra/sintra.h>
 
-#include "test_environment.h"
+#include "test_utils.h"
 
 #include <atomic>
 #include <chrono>
@@ -28,65 +28,11 @@
 #include <thread>
 #include <vector>
 
-#ifdef _WIN32
-#include <process.h>
-#else
-#include <unistd.h>
-#endif
-
 namespace {
 
 struct Ping {};
 struct Pong {};
 struct Stop {};
-
-constexpr std::string_view k_env_shared_dir = "SINTRA_TEST_SHARED_DIR";
-
-std::filesystem::path get_shared_directory()
-{
-    const char* value = std::getenv(k_env_shared_dir.data());
-    if (!value) {
-        throw std::runtime_error("SINTRA_TEST_SHARED_DIR is not set");
-    }
-    return std::filesystem::path(value);
-}
-
-void set_shared_directory_env(const std::filesystem::path& dir)
-{
-#ifdef _WIN32
-    _putenv_s(k_env_shared_dir.data(), dir.string().c_str());
-#else
-    setenv(k_env_shared_dir.data(), dir.string().c_str(), 1);
-#endif
-}
-
-std::filesystem::path ensure_shared_directory()
-{
-    const char* value = std::getenv(k_env_shared_dir.data());
-    if (value && *value) {
-        std::filesystem::path dir(value);
-        std::filesystem::create_directories(dir);
-        return dir;
-    }
-
-    auto base = sintra::test::scratch_subdirectory("ping_pong_hang");
-
-    auto unique_suffix = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                             std::chrono::steady_clock::now().time_since_epoch())
-                             .count();
-#ifdef _WIN32
-    unique_suffix ^= static_cast<long long>(_getpid());
-#else
-    unique_suffix ^= static_cast<long long>(getpid());
-#endif
-
-    std::ostringstream oss;
-    oss << "ping_pong_hang_" << unique_suffix;
-    auto dir = base / oss.str();
-    std::filesystem::create_directories(dir);
-    set_shared_directory_env(dir);
-    return dir;
-}
 
 void write_count(const std::filesystem::path& file, int value)
 {
@@ -258,8 +204,8 @@ int process_monitor()
     keep_monitoring = false;
     monitor_thread.join();
 
-    const auto shared_dir = get_shared_directory();
-    write_count(shared_dir / "ping_count.txt", ping_counter.load());
+    const sintra::test::Shared_directory shared("SINTRA_TEST_SHARED_DIR", "ping_pong_hang");
+    write_count(shared.path() / "ping_count.txt", ping_counter.load());
 
     return 0;
 }
@@ -268,10 +214,8 @@ int process_monitor()
 
 int main(int argc, char* argv[])
 {
-    const bool is_spawned = std::any_of(argv, argv + argc, [](const char* arg) {
-        return std::string_view(arg) == "--branch_index";
-    });
-    const auto shared_dir = ensure_shared_directory();
+    const bool is_spawned = sintra::test::has_branch_flag(argc, argv);
+    sintra::test::Shared_directory shared("SINTRA_TEST_SHARED_DIR", "ping_pong_hang");
 
     std::vector<sintra::Process_descriptor> processes;
     processes.emplace_back(process_ping_responder);

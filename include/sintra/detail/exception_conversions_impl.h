@@ -82,43 +82,6 @@ void throw_typed_exception(const std::string& what)
 {
     throw T(what);
 }
-/*
-
-
-// For the following exceptions, due to non-trivial constructor, a generic std::exception is thrown
-
-
-
-{get_type_id<std::invalid_argument    >(), throw_typed_exception<std::invalid_argument >},
-{get_type_id<std::domain_error        >(), throw_typed_exception<std::domain_error     >},
-{get_type_id<std::length_error        >(), throw_typed_exception<std::length_error     >},
-{get_type_id<std::out_of_range        >(), throw_typed_exception<std::out_of_range     >},
-{get_type_id<std::range_error         >(), throw_typed_exception<std::range_error      >},
-{get_type_id<std::overflow_error      >(), throw_typed_exception<std::overflow_error   >},
-{get_type_id<std::underflow_error     >(), throw_typed_exception<std::underflow_error  >},
-{get_type_id<std::ios_base::failure   >(), throw_typed_exception<std::ios_base::failure>},
-
-
-{get_type_id<std::logic_error         >(), throw_typed_exception<std::logic_error      >},
-{get_type_id<std::runtime_error       >(), throw_typed_exception<std::runtime_error    >},
-
-// Due to their non-trivial constructor, the following exceptions are handled with their parent type
-std::future_error         -> std::logic_error  
-std::regex_error          -> std::runtime_error
-std::system_error         -> std::runtime_error
-fs::filesystem_error      -> std::runtime_error
-std::bad_optional_access  -> std::exception
-std::bad_typeid           -> std::exception
-std::bad_cast             -> std::exception
-std::bad_weak_ptr         -> std::exception
-std::bad_function_call    -> std::exception
-std::bad_alloc            -> std::exception
-std::bad_array_new_length -> std::exception
-std::bad_exception        -> std::exception
-std::bad_variant_access   -> std::exception
-
-
-*/
 
 inline
 void string_to_exception(type_id_type exception_type, const std::string& str)

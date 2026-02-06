@@ -130,6 +130,12 @@ struct Coordinator: public Derived_transceiver<Coordinator>
 {
 
 private:
+    struct Pending_completion
+    {
+        std::string group_name;
+        std::vector<Process_group::Barrier_completion> completions;
+    };
+
     Coordinator();
     ~Coordinator();
 

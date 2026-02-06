@@ -1,5 +1,5 @@
 // Crash capture test: spawn a child that crashes, then crash the parent.
-#include "test_environment.h"
+#include "test_utils.h"
 #include "sintra/detail/debug_pause.h"
 
 #include <algorithm>
@@ -49,11 +49,6 @@ int clamp_int(int value, int lo, int hi)
     return value;
 }
 
-int read_env_int(const char* name, int default_value)
-{
-    return sintra::test::read_env_int(name, default_value);
-}
-
 std::uint64_t make_seed()
 {
     const auto now = static_cast<std::uint64_t>(
@@ -68,8 +63,8 @@ std::uint64_t make_seed()
 
 int pick_delay_ms(const char* min_env, const char* max_env, int fallback_min, int fallback_max)
 {
-    int min_ms = read_env_int(min_env, fallback_min);
-    int max_ms = read_env_int(max_env, fallback_max);
+    int min_ms = sintra::test::read_env_int(min_env, fallback_min);
+    int max_ms = sintra::test::read_env_int(max_env, fallback_max);
     if (max_ms < min_ms) {
         std::swap(max_ms, min_ms);
     }
@@ -316,7 +311,7 @@ int main(int argc, char** argv)
     sintra::detail::install_debug_pause_handlers();
 
     if (argc >= 2 && std::string(argv[1]) == "--child") {
-        int delay_ms = read_env_int("SINTRA_CRASH_CAPTURE_CHILD_DELAY_MS", 50);
+        int delay_ms = sintra::test::read_env_int("SINTRA_CRASH_CAPTURE_CHILD_DELAY_MS", 50);
         if (argc >= 4 && std::string(argv[2]) == "--delay_ms") {
             delay_ms = std::max(0, std::atoi(argv[3]));
         }

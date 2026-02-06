@@ -6,7 +6,7 @@
 #include <string>
 
 #include "sintra/detail/ipc/rings.h"
-#include "test_environment.h"
+#include "test_utils.h"
 
 namespace {
 

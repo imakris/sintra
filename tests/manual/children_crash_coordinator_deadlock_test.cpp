@@ -15,6 +15,8 @@
 
 #include <sintra/sintra.h>
 
+#include "test_utils.h"
+
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -77,21 +79,11 @@ int child_crash_after_short_delay()
     return 0; // unreachable
 }
 
-bool has_branch_flag(int argc, char* argv[])
-{
-    for (int i = 0; i < argc; ++i) {
-        if (std::string_view(argv[i]) == "--branch_index") {
-            return true;
-        }
-    }
-    return false;
-}
-
 } // namespace
 
 int main(int argc, char* argv[])
 {
-    const bool is_spawned = has_branch_flag(argc, argv);
+    const bool is_spawned = sintra::test::has_branch_flag(argc, argv);
 
     // Define child processes only (coordinator runs in parent)
     std::vector<sintra::Process_descriptor> processes;

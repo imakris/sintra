@@ -10,7 +10,7 @@
 #include <sintra/sintra.h>
 #include <sintra/detail/ipc/platform_utils.h>
 
-#include "test_environment.h"
+#include "test_utils.h"
 
 #include <chrono>
 #include <cstdint>

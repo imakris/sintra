@@ -8,7 +8,7 @@
 
 #include <sintra/sintra.h>
 
-#include "test_environment.h"
+#include "test_utils.h"
 
 #include <chrono>
 #include <filesystem>
@@ -20,30 +20,13 @@
 #include <thread>
 #include <vector>
 
-#ifdef _WIN32
-#include <process.h>
-#else
-#include <unistd.h>
-#endif
-
 namespace {
-
-constexpr const char* k_shared_dir_env = "SINTRA_JOIN_SWARM_DIR";
 
 struct Hello {
     int sender;
     int seq;
 };
 struct Ping { int token; };
-
-std::filesystem::path shared_dir()
-{
-    const char* value = std::getenv(k_shared_dir_env);
-    if (!value || !*value) {
-        throw std::runtime_error("SINTRA_JOIN_SWARM_DIR is not set");
-    }
-    return std::filesystem::path(value);
-}
 
 void append_line(const std::filesystem::path& file, const std::string& line)
 {
@@ -61,23 +44,6 @@ void append_line(const std::filesystem::path& file, const std::string& line)
         // Swallow I/O errors in test logging; functional correctness is
         // validated by the presence/absence of lines, not by logging itself.
     }
-}
-
-std::vector<std::string> read_lines(const std::filesystem::path& file)
-{
-    std::vector<std::string> lines;
-    std::ifstream in(file, std::ios::binary);
-    if (!in) {
-        return lines;
-    }
-    std::string line;
-    while (std::getline(in, line)) {
-        if (!line.empty() && line.back() == '\r') {
-            line.pop_back();
-        }
-        lines.push_back(line);
-    }
-    return lines;
 }
 
 struct Ping_receiver : sintra::Derived_transceiver<Ping_receiver>
@@ -119,7 +85,8 @@ void trace_event(const std::filesystem::path& trace_path, const char* stage, con
 
 int worker()
 {
-    const auto dir = shared_dir();
+    const sintra::test::Shared_directory shared("SINTRA_JOIN_SWARM_DIR", "join_swarm_midflight");
+    const auto dir = shared.path();
     const auto log_path = dir / "hello.log";
     const auto trace_path = dir / "trace.log";
     const auto initiator_marker = dir / "initiator_claimed";
@@ -208,7 +175,7 @@ int worker()
     size_t seen = 0;
     size_t last_reported = 0;
     while (std::chrono::steady_clock::now() < deadline) {
-        seen = read_lines(log_path).size();
+        seen = sintra::test::read_lines(log_path).size();
         if (seen != last_reported) {
             trace_event(trace_path, "progress",
                 "sintra_process=" + std::to_string(sintra::process_of(s_mproc_id)) +
@@ -222,7 +189,7 @@ int worker()
     }
 
     if (seen < 2) {
-        const auto contents = read_lines(log_path);
+        const auto contents = sintra::test::read_lines(log_path);
         std::ostringstream oss;
         oss << "worker exit seen=" << seen << " log=[";
         for (size_t i = 0; i < contents.size(); ++i) {
@@ -244,35 +211,20 @@ int worker()
 
 int main(int argc, char* argv[])
 {
-    const char* existing_dir = std::getenv(k_shared_dir_env);
-    const bool own_dir = !(existing_dir && *existing_dir);
-    const auto dir = own_dir
-        ? sintra::test::unique_scratch_directory("join_swarm_midflight")
-        : std::filesystem::path(existing_dir);
-    std::filesystem::create_directories(dir);
+    sintra::test::Shared_directory shared("SINTRA_JOIN_SWARM_DIR", "join_swarm_midflight");
+    const auto dir = shared.path();
     const auto log_path = dir / "hello.log";
     const auto trace_path = dir / "trace.log";
 
     trace_event(trace_path, "coordinator_start",
-        std::string("dir=") + dir.string() + " own_dir=" + (own_dir ? "1" : "0") +
-        (existing_dir ? std::string(" existing_env=") + existing_dir : ""));
+        std::string("dir=") + dir.string());
 
-    if (own_dir) {
+    {
         std::ofstream truncate(log_path, std::ios::binary | std::ios::trunc);
         if (!truncate) {
             return 1;
         }
     }
-
-#ifdef _WIN32
-    if (own_dir) {
-        _putenv_s(k_shared_dir_env, dir.string().c_str());
-    }
-#else
-    if (own_dir) {
-        setenv(k_shared_dir_env, dir.string().c_str(), 1);
-    }
-#endif
 
     trace_event(trace_path, "init.begin", "starting sintra runtime");
     sintra::init(argc, argv, worker);
@@ -283,7 +235,7 @@ int main(int argc, char* argv[])
     size_t seen = 0;
     size_t last_reported = 0;
     while (std::chrono::steady_clock::now() < deadline) {
-        seen = read_lines(log_path).size();
+        seen = sintra::test::read_lines(log_path).size();
         if (seen != last_reported) {
             trace_event(trace_path, "coordinator_progress", "seen=" + std::to_string(seen));
             last_reported = seen;
@@ -295,7 +247,7 @@ int main(int argc, char* argv[])
     }
 
     if (seen < 2) {
-        const auto contents = read_lines(log_path);
+        const auto contents = sintra::test::read_lines(log_path);
         std::ostringstream oss;
         oss << "coordinator saw=" << seen << " log=[";
         for (size_t i = 0; i < contents.size(); ++i) {

@@ -11,7 +11,7 @@
 #include <sintra/detail/messaging/process_message_reader.h>
 #include <sintra/detail/process/dispatch_wait_guard.h>
 
-#include "test_environment.h"
+#include "test_utils.h"
 
 #include <chrono>
 #include <condition_variable>

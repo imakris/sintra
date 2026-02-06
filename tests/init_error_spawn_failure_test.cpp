@@ -1,21 +1,13 @@
 #include <sintra/sintra.h>
 
+#include "test_utils.h"
+
 #include <cstdio>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace {
-
-bool has_branch_flag(int argc, char* argv[])
-{
-    for (int i = 0; i < argc; ++i) {
-        if (std::string_view(argv[i]) == "--branch_index") {
-            return true;
-        }
-    }
-    return false;
-}
 
 int worker_entry()
 {
@@ -34,7 +26,7 @@ std::vector<sintra::Process_descriptor> build_processes()
 
 int main(int argc, char* argv[])
 {
-    const bool is_spawned = has_branch_flag(argc, argv);
+    const bool is_spawned = sintra::test::has_branch_flag(argc, argv);
     auto processes = build_processes();
 
     if (is_spawned) {

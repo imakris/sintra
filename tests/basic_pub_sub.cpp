@@ -19,7 +19,7 @@
 
 #include <sintra/sintra.h>
 
-#include "test_environment.h"
+#include "test_utils.h"
 
 #include <algorithm>
 #include <array>
@@ -35,15 +35,8 @@
 #include <thread>
 #include <vector>
 
-#ifdef _WIN32
-#include <process.h>
-#else
-#include <unistd.h>
-#endif
-
 namespace {
 
-constexpr std::string_view k_env_shared_dir = "SINTRA_TEST_SHARED_DIR";
 constexpr int k_message_rounds = 5;
 constexpr std::array<std::string_view, 4> k_base_string_messages{
     "good morning", "good afternoon", "good evening", "good night"};
@@ -61,56 +54,6 @@ std::string format_string_message(std::string_view base, int round)
 int format_int_message(int base, int round)
 {
     return base + (round * 10);
-}
-
-std::filesystem::path get_shared_directory()
-{
-    const char* value = std::getenv(k_env_shared_dir.data());
-    if (!value) {
-        throw std::runtime_error("SINTRA_TEST_SHARED_DIR is not set");
-    }
-    return std::filesystem::path(value);
-}
-
-void set_shared_directory_env(const std::filesystem::path& dir)
-{
-#ifdef _WIN32
-    _putenv_s(k_env_shared_dir.data(), dir.string().c_str());
-#else
-    setenv(k_env_shared_dir.data(), dir.string().c_str(), 1);
-#endif
-}
-
-std::filesystem::path ensure_shared_directory()
-{
-    const char* value = std::getenv(k_env_shared_dir.data());
-    if (value && *value) {
-        std::filesystem::path dir(value);
-        std::filesystem::create_directories(dir);
-        return dir;
-    }
-
-    auto base = sintra::test::scratch_subdirectory("basic_pub_sub");
-
-    // Generate a highly unique suffix combining timestamp, PID, and a monotonic counter
-    auto unique_suffix = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                             std::chrono::steady_clock::now().time_since_epoch())
-                             .count();
-#ifdef _WIN32
-    unique_suffix ^= static_cast<long long>(_getpid());
-#else
-    unique_suffix ^= static_cast<long long>(getpid());
-#endif
-
-    static std::atomic<long long> counter{0};
-    unique_suffix ^= counter.fetch_add(1);
-
-    std::ostringstream oss;
-    oss << "basic_pubsub_" << unique_suffix;
-    auto dir = base / oss.str();
-    std::filesystem::create_directories(dir);
-    set_shared_directory_env(dir);
-    return dir;
 }
 
 void write_strings(const std::filesystem::path& file, const std::vector<std::string>& values)
@@ -194,16 +137,6 @@ void write_result(const std::filesystem::path& dir,
     }
 }
 
-bool has_branch_flag(int argc, char* argv[])
-{
-    for (int i = 0; i < argc; ++i) {
-        if (std::string_view(argv[i]) == "--branch_index") {
-            return true;
-        }
-    }
-    return false;
-}
-
 // These vectors are modified by slot handlers (reader thread) and read
 // by main thread after barrier synchronization
 std::vector<std::string> g_received_strings;
@@ -225,7 +158,8 @@ int process_sender()
     sintra::barrier("messages-done");
     sintra::barrier("write-phase");
 
-    const auto shared_dir = get_shared_directory();
+    sintra::test::Shared_directory shared("SINTRA_TEST_SHARED_DIR", "basic_pub_sub");
+    const auto shared_dir = shared.path();
     const auto strings = read_strings(shared_dir / "strings.txt");
     const auto ints = read_ints(shared_dir / "ints.txt");
 
@@ -268,7 +202,8 @@ int process_string_receiver()
     // by the reader thread, so g_received_strings contains all messages
     sintra::barrier("messages-done");
 
-    const auto shared_dir = get_shared_directory();
+    sintra::test::Shared_directory shared("SINTRA_TEST_SHARED_DIR", "basic_pub_sub");
+    const auto shared_dir = shared.path();
     write_strings(shared_dir / "strings.txt", g_received_strings);
 
     sintra::barrier("write-phase");
@@ -292,7 +227,8 @@ int process_int_receiver()
     // by the reader thread, so g_received_ints contains all messages
     sintra::barrier("messages-done");
 
-    const auto shared_dir = get_shared_directory();
+    sintra::test::Shared_directory shared("SINTRA_TEST_SHARED_DIR", "basic_pub_sub");
+    const auto shared_dir = shared.path();
     write_ints(shared_dir / "ints.txt", g_received_ints);
 
     sintra::barrier("write-phase");
@@ -302,35 +238,13 @@ int process_int_receiver()
 
 } // namespace
 
-void custom_terminate_handler() {
-    std::fprintf(stderr, "std::terminate called!\n");
-    std::fprintf(stderr, "Uncaught exceptions: %d\n", std::uncaught_exceptions());
-
-    try {
-        auto eptr = std::current_exception();
-        if (eptr) {
-            std::rethrow_exception(eptr);
-        }
-        else {
-            std::fprintf(stderr, "terminate called without an active exception\n");
-        }
-    }
-    catch (const std::exception& e) {
-        std::fprintf(stderr, "Uncaught exception: %s\n", e.what());
-    }
-    catch (...) {
-        std::fprintf(stderr, "Uncaught exception of unknown type\n");
-    }
-
-    std::abort();
-}
-
 int main(int argc, char* argv[])
 {
-    std::set_terminate(custom_terminate_handler);
+    std::set_terminate(sintra::test::custom_terminate_handler);
 
-    const bool is_spawned = has_branch_flag(argc, argv);
-    const auto shared_dir = ensure_shared_directory();
+    const bool is_spawned = sintra::test::has_branch_flag(argc, argv);
+    sintra::test::Shared_directory shared("SINTRA_TEST_SHARED_DIR", "basic_pub_sub");
+    const auto shared_dir = shared.path();
 
     std::vector<sintra::Process_descriptor> processes;
     processes.emplace_back(process_sender);
@@ -360,24 +274,6 @@ int main(int argc, char* argv[])
         else {
             in >> status;
             status_loaded = true;
-        }
-
-        bool cleanup_succeeded = false;
-        for (int retry = 0; retry < 3 && !cleanup_succeeded; ++retry) {
-            try {
-                std::filesystem::remove_all(shared_dir);
-                cleanup_succeeded = true;
-            }
-            catch (const std::exception& e) {
-                if (retry < 2) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                }
-                else {
-                    std::fprintf(stderr,
-                                  "Warning: failed to remove temp directory %s after 3 attempts: %s\n",
-                                  shared_dir.string().c_str(), e.what());
-                }
-            }
         }
 
         if (exit_code == 0 && status_loaded) {

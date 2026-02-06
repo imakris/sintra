@@ -18,7 +18,7 @@
 #include <sintra/detail/process/managed_process.h>
 #include <sintra/detail/process/lifecycle_types.h>
 
-#include "test_environment.h"
+#include "test_utils.h"
 
 #include <atomic>
 #include <chrono>
@@ -34,82 +34,19 @@
 #include <thread>
 #include <vector>
 
-#ifdef _WIN32
-#include <process.h>
 #if defined(_MSC_VER)
 #include <crtdbg.h>
 #endif
-#else
-#include <unistd.h>
 #if defined(__APPLE__)
 #include <sys/resource.h>
 #endif
-#endif
 
 namespace {
-
-constexpr std::string_view k_env_shared_dir = "SINTRA_TEST_SHARED_DIR";
 
 // Worker IDs for correlation
 constexpr int k_normal_worker_id = 1;
 constexpr int k_crash_worker_id = 2;
 constexpr int k_unpublished_worker_id = 3;
-
-std::filesystem::path get_shared_directory()
-{
-    const char* value = std::getenv(k_env_shared_dir.data());
-    if (!value) {
-        throw std::runtime_error("SINTRA_TEST_SHARED_DIR is not set");
-    }
-    return std::filesystem::path(value);
-}
-
-void set_shared_directory_env(const std::filesystem::path& dir)
-{
-#ifdef _WIN32
-    _putenv_s(k_env_shared_dir.data(), dir.string().c_str());
-#else
-    setenv(k_env_shared_dir.data(), dir.string().c_str(), 1);
-#endif
-}
-
-std::filesystem::path ensure_shared_directory()
-{
-    const char* value = std::getenv(k_env_shared_dir.data());
-    if (value && *value) {
-        std::filesystem::path dir(value);
-        std::filesystem::create_directories(dir);
-        return dir;
-    }
-
-    auto base = sintra::test::scratch_subdirectory("lifecycle_handler_test");
-
-    auto unique_suffix = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                             std::chrono::steady_clock::now().time_since_epoch())
-                             .count();
-#ifdef _WIN32
-    unique_suffix ^= static_cast<long long>(_getpid());
-#else
-    unique_suffix ^= static_cast<long long>(getpid());
-#endif
-
-    std::ostringstream oss;
-    oss << "lifecycle_" << unique_suffix;
-    auto dir = base / oss.str();
-    std::filesystem::create_directories(dir);
-    set_shared_directory_env(dir);
-    return dir;
-}
-
-bool has_branch_flag(int argc, char* argv[])
-{
-    for (int i = 0; i < argc; ++i) {
-        if (std::string_view(argv[i]) == "--branch_index") {
-            return true;
-        }
-    }
-    return false;
-}
 
 constexpr auto k_ready_timeout = std::chrono::seconds(10);
 constexpr auto k_signal_timeout = std::chrono::seconds(10);
@@ -232,7 +169,8 @@ int process_normal_worker()
 {
     std::fprintf(stderr, "[NORMAL_WORKER] Starting\n");
 
-    const auto shared_dir = get_shared_directory();
+    sintra::test::Shared_directory shared("SINTRA_TEST_SHARED_DIR", "lifecycle_handler");
+    const auto shared_dir = shared.path();
     if (!write_worker_ready(shared_dir,
                             k_normal_worker_id,
                             sintra::process_of(s_mproc_id))) {
@@ -260,7 +198,8 @@ int process_crash_worker()
     _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
 #endif
 
-    const auto shared_dir = get_shared_directory();
+    sintra::test::Shared_directory shared("SINTRA_TEST_SHARED_DIR", "lifecycle_handler");
+    const auto shared_dir = shared.path();
     if (!write_worker_ready(shared_dir,
                             k_crash_worker_id,
                             sintra::process_of(s_mproc_id))) {
@@ -295,7 +234,8 @@ int process_unpublished_worker()
 {
     std::fprintf(stderr, "[UNPUBLISHED_WORKER] Starting\n");
 
-    const auto shared_dir = get_shared_directory();
+    sintra::test::Shared_directory shared("SINTRA_TEST_SHARED_DIR", "lifecycle_handler");
+    const auto shared_dir = shared.path();
     if (!write_worker_ready(shared_dir,
                             k_unpublished_worker_id,
                             sintra::process_of(s_mproc_id))) {
@@ -330,7 +270,8 @@ int process_unpublished_worker()
 // Coordinator that sets up lifecycle handler and verifies events
 int process_coordinator()
 {
-    const auto shared_dir = get_shared_directory();
+    sintra::test::Shared_directory shared("SINTRA_TEST_SHARED_DIR", "lifecycle_handler");
+    const auto shared_dir = shared.path();
     const auto result_path = shared_dir / "result.txt";
 
     std::fprintf(stderr, "[COORDINATOR] Starting, setting up lifecycle handler\n");
@@ -603,8 +544,9 @@ int process_coordinator()
 
 int main(int argc, char* argv[])
 {
-    const bool is_spawned = has_branch_flag(argc, argv);
-    const auto shared_dir = ensure_shared_directory();
+    const bool is_spawned = sintra::test::has_branch_flag(argc, argv);
+    sintra::test::Shared_directory shared("SINTRA_TEST_SHARED_DIR", "lifecycle_handler");
+    const auto shared_dir = shared.path();
 
     std::vector<sintra::Process_descriptor> processes;
     processes.emplace_back(process_normal_worker);
@@ -622,8 +564,7 @@ int main(int argc, char* argv[])
 
     if (!is_spawned) {
         // Cleanup
-        std::error_code ec;
-        std::filesystem::remove_all(shared_dir, ec);
+        shared.cleanup();
 
         return result;
     }
