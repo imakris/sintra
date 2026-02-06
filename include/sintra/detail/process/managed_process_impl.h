@@ -79,6 +79,10 @@ namespace {
         return flag;
     }
 
+    // Forward declarations - defined later in the common section.
+    inline std::size_t signal_index(int sig);
+    inline void dispatch_signal_number(int sig_number);
+
 #ifdef _WIN32
     struct signal_slot {
         int sig;
