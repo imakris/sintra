@@ -527,12 +527,6 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
             m_draining_process_states[slot] = 1;
         }
 
-        struct Pending_completion
-        {
-            std::string group_name;
-            std::vector<Process_group::Barrier_completion> completions;
-        };
-
         std::vector<Pending_completion> pending_completions;
 
         {
@@ -641,12 +635,6 @@ inline sequence_counter_type Coordinator::begin_process_draining(instance_id_typ
         const auto slot = static_cast<size_t>(draining_index);
         m_draining_process_states[slot] = 1;
     }
-
-    struct Pending_completion
-    {
-        std::string group_name;
-        std::vector<Process_group::Barrier_completion> completions;
-    };
 
     std::vector<Pending_completion> pending_completions;
     {

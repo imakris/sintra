@@ -21,11 +21,7 @@
 #include <thread>
 #include <vector>
 
-#ifdef _WIN32
-#include <process.h>
-#else
-#include <unistd.h>
-#endif
+#include "test_utils.h"
 
 namespace {
 

@@ -4,6 +4,8 @@
 
 #include <sintra/sintra.h>
 
+#include "test_utils.h"
+
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -15,16 +17,6 @@ constexpr std::size_t k_process_count = 3;
 constexpr std::size_t k_iterations = 2048 / 20;
 
 std::atomic<int> failures{0};
-
-bool has_branch_flag(int argc, char* argv[])
-{
-    for (int i = 0; i < argc; ++i) {
-        if (std::string_view(argv[i]) == "--branch_index") {
-            return true;
-        }
-    }
-    return false;
-}
 
 int worker_process(std::uint32_t worker_index)
 {
@@ -124,7 +116,7 @@ int worker2_process() { return worker_process(2); }
 
 int main(int argc, char* argv[])
 {
-    const bool is_spawned = has_branch_flag(argc, argv);
+    const bool is_spawned = sintra::test::has_branch_flag(argc, argv);
 
     std::vector<sintra::Process_descriptor> processes;
     processes.emplace_back(worker0_process);

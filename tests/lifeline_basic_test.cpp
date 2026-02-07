@@ -3,7 +3,7 @@
 #include <sintra/sintra.h>
 #include <sintra/detail/process/managed_process.h>
 
-#include "test_environment.h"
+#include "test_utils.h"
 
 #include <algorithm>
 #include <chrono>

@@ -1,6 +1,6 @@
 #include <sintra/sintra.h>
 
-#include "test_environment.h"
+#include "test_utils.h"
 
 #include <atomic>
 #include <chrono>
@@ -17,59 +17,15 @@ namespace {
 
 using namespace std::chrono_literals;
 
-constexpr std::string_view k_env_shared_dir = "SINTRA_BARRIER_DRAIN_DIR";
 constexpr std::string_view k_env_barrier_wait_ms = "SINTRA_BARRIER_DRAIN_TIMEOUT_MS";
 constexpr std::string_view k_env_worker_timeout_ms = "SINTRA_BARRIER_WORKER_TIMEOUT_MS";
 constexpr std::string_view k_env_coord_watchdog_ms = "SINTRA_BARRIER_COORDINATOR_WATCHDOG_MS";
-
-bool has_branch_flag(int argc, char* argv[])
-{
-    for (int i = 0; i < argc; ++i) {
-        if (std::string_view(argv[i]) == "--branch_index") {
-            return true;
-        }
-    }
-    return false;
-}
 
 void disable_abort_dialog()
 {
 #if defined(_MSC_VER)
     _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
 #endif
-}
-
-std::filesystem::path shared_directory()
-{
-    const char* value = std::getenv(k_env_shared_dir.data());
-    if (!value || !*value) {
-        throw std::runtime_error("SINTRA_BARRIER_DRAIN_DIR is not set");
-    }
-    return std::filesystem::path(value);
-}
-
-void set_shared_directory_env(const std::filesystem::path& dir)
-{
-#ifdef _WIN32
-    _putenv_s(k_env_shared_dir.data(), dir.string().c_str());
-#else
-    setenv(k_env_shared_dir.data(), dir.string().c_str(), 1);
-#endif
-}
-
-std::filesystem::path ensure_shared_directory()
-{
-    const char* value = std::getenv(k_env_shared_dir.data());
-    if (value && *value) {
-        std::filesystem::path dir(value);
-        std::filesystem::create_directories(dir);
-        return dir;
-    }
-
-    auto dir = sintra::test::unique_scratch_directory("barrier_drain_unpublish");
-    std::filesystem::create_directories(dir);
-    set_shared_directory_env(dir);
-    return dir;
 }
 
 void write_marker(const std::filesystem::path& path)
@@ -99,7 +55,8 @@ bool wait_for_file(const std::filesystem::path& path, std::chrono::milliseconds 
 
 int worker_a()
 {
-    const auto dir = shared_directory();
+    sintra::test::Shared_directory shared("SINTRA_BARRIER_DRAIN_DIR", "barrier_drain_unpublish");
+    const auto dir = shared.path();
     const auto barrier1_ready = dir / "barrier1_ready.txt";
     const auto barrier2_ready = dir / "barrier2_ready.txt";
     const auto done_path = dir / "worker_a_done.txt";
@@ -149,7 +106,8 @@ int worker_a()
 
 int worker_b()
 {
-    const auto dir = shared_directory();
+    sintra::test::Shared_directory shared("SINTRA_BARRIER_DRAIN_DIR", "barrier_drain_unpublish");
+    const auto dir = shared.path();
     const auto barrier1_ready = dir / "barrier1_ready.txt";
 
     if (!wait_for_file(barrier1_ready, 5s)) {
@@ -167,9 +125,9 @@ int worker_b()
 
 int main(int argc, char* argv[])
 {
-    const bool is_spawned = has_branch_flag(argc, argv);
-
-    const auto dir = ensure_shared_directory();
+    const bool is_spawned = sintra::test::has_branch_flag(argc, argv);
+    sintra::test::Shared_directory shared("SINTRA_BARRIER_DRAIN_DIR", "barrier_drain_unpublish");
+    const auto dir = shared.path();
 
     const auto barrier2_timeout_ms =
         sintra::test::read_env_int(k_env_barrier_wait_ms.data(), 40000);

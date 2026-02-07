@@ -20,7 +20,7 @@
 
 #include <sintra/sintra.h>
 
-#include "test_environment.h"
+#include "test_utils.h"
 
 #include <algorithm>
 #include <chrono>
@@ -33,89 +33,7 @@
 #include <string_view>
 #include <vector>
 
-#ifdef _WIN32
-#include <process.h>
-#else
-#include <unistd.h>
-#endif
-
 namespace {
-
-constexpr std::string_view k_env_shared_dir = "SINTRA_TEST_SHARED_DIR";
-
-std::filesystem::path get_shared_directory()
-{
-    const char* value = std::getenv(k_env_shared_dir.data());
-    if (!value) {
-        throw std::runtime_error("SINTRA_TEST_SHARED_DIR is not set");
-    }
-    return std::filesystem::path(value);
-}
-
-void set_shared_directory_env(const std::filesystem::path& dir)
-{
-#ifdef _WIN32
-    _putenv_s(k_env_shared_dir.data(), dir.string().c_str());
-#else
-    setenv(k_env_shared_dir.data(), dir.string().c_str(), 1);
-#endif
-}
-
-std::filesystem::path ensure_shared_directory()
-{
-    const char* value = std::getenv(k_env_shared_dir.data());
-    if (value && *value) {
-        std::filesystem::path dir(value);
-        std::filesystem::create_directories(dir);
-        return dir;
-    }
-
-    auto base = sintra::test::scratch_subdirectory("rpc_append");
-
-    auto unique_suffix = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                             std::chrono::steady_clock::now().time_since_epoch())
-                             .count();
-#ifdef _WIN32
-    unique_suffix ^= static_cast<long long>(_getpid());
-#else
-    unique_suffix ^= static_cast<long long>(getpid());
-#endif
-
-    std::ostringstream oss;
-    oss << "rpc_append_" << unique_suffix;
-    auto dir = base / oss.str();
-    std::filesystem::create_directories(dir);
-    set_shared_directory_env(dir);
-    return dir;
-}
-
-void write_lines(const std::filesystem::path& file, const std::vector<std::string>& values)
-{
-    std::ofstream out(file, std::ios::binary | std::ios::trunc);
-    if (!out) {
-        throw std::runtime_error("failed to open " + file.string() + " for writing");
-    }
-    for (const auto& value : values) {
-        out << value << '\n';
-    }
-}
-
-std::vector<std::string> read_lines(const std::filesystem::path& file)
-{
-    std::vector<std::string> values;
-    std::ifstream in(file, std::ios::binary);
-    if (!in) {
-        return values;
-    }
-    std::string line;
-    while (std::getline(in, line)) {
-        if (!line.empty() && line.back() == '\r') {
-            line.pop_back();
-        }
-        values.push_back(line);
-    }
-    return values;
-}
 
 struct Remotely_accessible : sintra::Derived_transceiver<Remotely_accessible> {
     std::string append(const std::string& s, int v)
@@ -169,9 +87,9 @@ int process_client()
         }
     }
 
-    const auto shared_dir = get_shared_directory();
-    write_lines(shared_dir / "rpc_success.txt", successes);
-    write_lines(shared_dir / "rpc_failures.txt", failures);
+    const sintra::test::Shared_directory shared("SINTRA_TEST_SHARED_DIR", "rpc_append");
+    sintra::test::write_lines(shared.path() / "rpc_success.txt", successes);
+    sintra::test::write_lines(shared.path() / "rpc_failures.txt", failures);
 
     sintra::barrier("calls-finished", "_sintra_all_processes");
     return 0;
@@ -181,10 +99,8 @@ int process_client()
 
 int main(int argc, char* argv[])
 {
-    const bool is_spawned = std::any_of(argv, argv + argc, [](const char* arg) {
-        return std::string_view(arg) == "--branch_index";
-    });
-    const auto shared_dir = ensure_shared_directory();
+    const bool is_spawned = sintra::test::has_branch_flag(argc, argv);
+    sintra::test::Shared_directory shared("SINTRA_TEST_SHARED_DIR", "rpc_append");
 
     std::vector<sintra::Process_descriptor> processes;
     processes.emplace_back(process_owner);
@@ -199,11 +115,11 @@ int main(int argc, char* argv[])
     sintra::finalize();
 
     if (!is_spawned) {
-        const auto success_path = shared_dir / "rpc_success.txt";
-        const auto failure_path = shared_dir / "rpc_failures.txt";
+        const auto success_path = shared.path() / "rpc_success.txt";
+        const auto failure_path = shared.path() / "rpc_failures.txt";
 
-        const auto successes = read_lines(success_path);
-        const auto failures = read_lines(failure_path);
+        const auto successes = sintra::test::read_lines(success_path);
+        const auto failures = sintra::test::read_lines(failure_path);
 
         const std::vector<std::string> expected_successes = {
             "2000: Sydney",
@@ -218,12 +134,7 @@ int main(int argc, char* argv[])
             return 1;
         }
 
-        try {
-            std::filesystem::remove_all(shared_dir);
-        }
-        catch (...) {
-            // best-effort cleanup; ignore failures
-        }
+        shared.cleanup();
     }
 
     return 0;

@@ -27,7 +27,7 @@
 #define protected public
 #include "sintra/detail/ipc/rings.h"
 
-#include "test_environment.h"
+#include "test_utils.h"
 #include "test_ring_utils.h"
 #include "sintra/detail/debug_pause.h"
 #undef private

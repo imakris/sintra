@@ -11,7 +11,7 @@
 
 #include <sintra/sintra.h>
 
-#include "test_environment.h"
+#include "test_utils.h"
 
 #include <array>
 #include <atomic>
@@ -29,12 +29,6 @@
 #include <thread>
 #include <vector>
 
-#ifdef _WIN32
-#include <process.h>
-#else
-#include <unistd.h>
-#endif
-
 namespace {
 
 constexpr std::size_t k_worker_count  = 2;
@@ -48,57 +42,6 @@ struct Iteration_marker
     std::uint32_t iteration;
     std::uint32_t sequence;
 };
-
-constexpr std::string_view k_env_shared_dir = "SINTRA_DELIVERY_FENCE_DIR";
-
-std::filesystem::path get_shared_directory()
-{
-    const char* value = std::getenv(k_env_shared_dir.data());
-    if (!value) {
-        throw std::runtime_error("SINTRA_DELIVERY_FENCE_DIR is not set");
-    }
-    return std::filesystem::path(value);
-}
-
-void set_shared_directory_env(const std::filesystem::path& dir)
-{
-#ifdef _WIN32
-    _putenv_s(k_env_shared_dir.data(), dir.string().c_str());
-#else
-    setenv(k_env_shared_dir.data(), dir.string().c_str(), 1);
-#endif
-}
-
-std::filesystem::path ensure_shared_directory()
-{
-    const char* value = std::getenv(k_env_shared_dir.data());
-    if (value && *value) {
-        std::filesystem::path dir(value);
-        std::filesystem::create_directories(dir);
-        return dir;
-    }
-
-    auto base = sintra::test::scratch_subdirectory("barrier_delivery_fence");
-
-    auto unique_suffix = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                             std::chrono::steady_clock::now().time_since_epoch())
-                             .count();
-#ifdef _WIN32
-    unique_suffix ^= static_cast<long long>(_getpid());
-#else
-    unique_suffix ^= static_cast<long long>(getpid());
-#endif
-
-    static std::atomic<long long> counter{0};
-    unique_suffix ^= counter.fetch_add(1);
-
-    std::ostringstream oss;
-    oss << "delivery_fence_repro_" << unique_suffix;
-    auto dir = base / oss.str();
-    std::filesystem::create_directories(dir);
-    set_shared_directory_env(dir);
-    return dir;
-}
 
 struct Coordinator_state
 {
@@ -330,8 +273,8 @@ int coordinator_process()
     barrier("delivery-fence-repro-done", "_sintra_all_processes");
     deactivate_all_slots();
 
-    const auto shared_dir = get_shared_directory();
-    write_result(shared_dir, success, iterations_completed, state.total_messages, failure_reason);
+    const sintra::test::Shared_directory shared("SINTRA_DELIVERY_FENCE_DIR", "barrier_delivery_fence");
+    write_result(shared.path(), success, iterations_completed, state.total_messages, failure_reason);
     return success ? 0 : 1;
 }
 
@@ -371,67 +314,15 @@ int worker1_process()
     return worker_process(1);
 }
 
-void custom_terminate_handler()
-{
-    std::fprintf(stderr, "std::terminate called!\n");
-    std::fprintf(stderr, "Uncaught exceptions: %d\n", std::uncaught_exceptions());
-
-    try {
-        auto eptr = std::current_exception();
-        if (eptr) {
-            std::rethrow_exception(eptr);
-        }
-        else {
-            std::fprintf(stderr, "terminate called without an active exception\n");
-        }
-    }
-    catch (const std::exception& e) {
-        std::fprintf(stderr, "Uncaught exception: %s\n", e.what());
-    }
-    catch (...) {
-        std::fprintf(stderr, "Uncaught exception of unknown type\n");
-    }
-
-    std::abort();
-}
-
-void cleanup_directory_with_retries(const std::filesystem::path& dir)
-{
-    bool cleanup_succeeded = false;
-    for (int retry = 0; retry < 3 && !cleanup_succeeded; ++retry) {
-        try {
-            std::filesystem::remove_all(dir);
-            cleanup_succeeded = true;
-        }
-        catch (const std::exception& e) {
-            if (retry < 2) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            }
-            else {
-                std::fprintf(stderr,
-                             "Warning: failed to remove temp directory %s after 3 attempts: %s\n",
-                             dir.string().c_str(), e.what());
-            }
-        }
-    }
-}
-
 } // namespace
 
 int main(int argc, char* argv[])
 {
-    std::set_terminate(custom_terminate_handler);
+    std::set_terminate(sintra::test::custom_terminate_handler);
 
-    const bool is_spawned = [] (int argc, char* argv[]) {
-        for (int i = 0; i < argc; ++i) {
-            if (std::string_view(argv[i]) == "--branch_index") {
-                return true;
-            }
-        }
-        return false;
-    }(argc, argv);
+    const bool is_spawned = sintra::test::has_branch_flag(argc, argv);
 
-    const auto shared_dir = ensure_shared_directory();
+    sintra::test::Shared_directory shared("SINTRA_DELIVERY_FENCE_DIR", "barrier_delivery_fence");
 
     std::vector<sintra::Process_descriptor> processes;
     processes.emplace_back(coordinator_process);
@@ -447,17 +338,17 @@ int main(int argc, char* argv[])
     sintra::finalize();
 
     if (!is_spawned) {
-        const auto result_path = shared_dir / "delivery_fence_repro_result.txt";
+        const auto result_path = shared.path() / "delivery_fence_repro_result.txt";
         if (!std::filesystem::exists(result_path)) {
             std::fprintf(stderr, "Error: result file not found at %s\n", result_path.string().c_str());
-            cleanup_directory_with_retries(shared_dir);
+            shared.cleanup();
             return 1;
         }
 
         std::ifstream in(result_path, std::ios::binary);
         if (!in) {
             std::fprintf(stderr, "Error: failed to open result file %s\n", result_path.string().c_str());
-            cleanup_directory_with_retries(shared_dir);
+            shared.cleanup();
             return 1;
         }
 
@@ -472,7 +363,7 @@ int main(int argc, char* argv[])
         std::getline(in >> std::ws, reason);
         in.close();
 
-        cleanup_directory_with_retries(shared_dir);
+        shared.cleanup();
 
         if (status != "ok") {
             std::fprintf(stderr, "Delivery fence regression repro reported failure: %s\n", reason.c_str());

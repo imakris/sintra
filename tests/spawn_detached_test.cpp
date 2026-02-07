@@ -1,6 +1,6 @@
 #include "sintra/detail/utility.h"
 
-#include "test_environment.h"
+#include "test_utils.h"
 
 #include <iostream>
 

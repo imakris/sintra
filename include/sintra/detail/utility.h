@@ -1196,12 +1196,21 @@ bool spawn_detached(const Spawn_detached_options& options)
 struct Instantiator
 {
     Instantiator(std::function<void()>&& deinstantiator):
+        m_deinstantiator(std::move(deinstantiator))
+    {}
+
+    Instantiator(const std::function<void()>& deinstantiator):
         m_deinstantiator(deinstantiator)
     {}
 
+    Instantiator(const Instantiator&) = delete;
+    Instantiator& operator=(const Instantiator&) = delete;
+
     ~Instantiator()
     {
-        m_deinstantiator();
+        if (m_deinstantiator) {
+            m_deinstantiator();
+        }
     }
 
     std::function<void()> m_deinstantiator;

@@ -13,24 +13,6 @@ namespace sintra::detail {
 
 namespace detail_type_utils {
 
-template <typename, typename = void>
-struct is_complete : std::false_type {};
-
-template <typename T>
-struct is_complete<T, std::void_t<decltype(sizeof(T))>> : std::true_type {};
-
-template <>
-struct is_complete<void, void> : std::true_type {};
-
-template <>
-struct is_complete<const void, void> : std::true_type {};
-
-template <>
-struct is_complete<volatile void, void> : std::true_type {};
-
-template <>
-struct is_complete<const volatile void, void> : std::true_type {};
-
 // LCOV_EXCL_START - constexpr function evaluated at compile time
 template <typename T>
 constexpr std::string_view ctti_name()

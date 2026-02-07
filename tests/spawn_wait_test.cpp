@@ -15,7 +15,7 @@
 #include <sintra/sintra.h>
 #include <sintra/detail/process/managed_process.h>
 
-#include "test_environment.h"
+#include "test_utils.h"
 
 #include <chrono>
 #include <condition_variable>
@@ -28,66 +28,13 @@
 #include <string_view>
 #include <thread>
 
-#ifdef _WIN32
-#include <process.h>
-#else
-#include <unistd.h>
-#endif
-
 namespace {
 
-constexpr std::string_view k_env_shared_dir = "SINTRA_TEST_SHARED_DIR";
 constexpr std::string_view k_env_worker_mode = "SPAWN_WAIT_TEST_WORKER";
 constexpr const char* k_worker_instance_name = "spawn_wait_dynamic_worker";
 constexpr const char* k_nonexistent_instance_name = "nonexistent_instance_will_timeout";
 // Name registered by the "dummy" child in Test 1 to prove it actually launched
 constexpr const char* k_timeout_child_instance_name = "spawn_wait_timeout_child";
-
-std::filesystem::path get_shared_directory()
-{
-    const char* value = std::getenv(k_env_shared_dir.data());
-    if (!value) {
-        throw std::runtime_error("SINTRA_TEST_SHARED_DIR is not set");
-    }
-    return std::filesystem::path(value);
-}
-
-void set_shared_directory_env(const std::filesystem::path& dir)
-{
-#ifdef _WIN32
-    _putenv_s(k_env_shared_dir.data(), dir.string().c_str());
-#else
-    setenv(k_env_shared_dir.data(), dir.string().c_str(), 1);
-#endif
-}
-
-std::filesystem::path ensure_shared_directory()
-{
-    const char* value = std::getenv(k_env_shared_dir.data());
-    if (value && *value) {
-        std::filesystem::path dir(value);
-        std::filesystem::create_directories(dir);
-        return dir;
-    }
-
-    auto base = sintra::test::scratch_subdirectory("spawn_wait_test");
-
-    auto unique_suffix = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                             std::chrono::steady_clock::now().time_since_epoch())
-                             .count();
-#ifdef _WIN32
-    unique_suffix ^= static_cast<long long>(_getpid());
-#else
-    unique_suffix ^= static_cast<long long>(getpid());
-#endif
-
-    std::ostringstream oss;
-    oss << "spawn_wait_" << unique_suffix;
-    auto dir = base / oss.str();
-    std::filesystem::create_directories(dir);
-    set_shared_directory_env(dir);
-    return dir;
-}
 
 struct Done_signal {};
 
@@ -259,8 +206,8 @@ int run_timeout_child()
 // Coordinator that uses spawn_swarm_process with wait options
 int run_coordinator(const std::string& binary_path)
 {
-    const auto shared_dir = get_shared_directory();
-    const auto result_path = shared_dir / "result.txt";
+    const sintra::test::Shared_directory shared("SINTRA_TEST_SHARED_DIR", "spawn_wait_test");
+    const auto result_path = shared.path() / "result.txt";
 
     std::fprintf(stderr, "[COORDINATOR] Starting spawn_swarm_process wait tests\n");
     std::fprintf(stderr, "[COORDINATOR] Binary path: %s\n", binary_path.c_str());
@@ -439,7 +386,7 @@ int main(int argc, char* argv[])
 {
     const bool is_spawned = has_instance_id_flag(argc, argv);
     const bool is_worker = is_worker_mode();
-    const auto shared_dir = ensure_shared_directory();
+    sintra::test::Shared_directory shared("SINTRA_TEST_SHARED_DIR", "spawn_wait_test");
     const std::string binary_path = get_binary_path(argc, argv);
 
     if (!is_spawned) {
@@ -471,7 +418,7 @@ int main(int argc, char* argv[])
     int result = run_coordinator(binary_path);
 
     // Wait for result file
-    const auto result_path = shared_dir / "result.txt";
+    const auto result_path = shared.path() / "result.txt";
     for (int i = 0; i < 100; ++i) {
         if (std::filesystem::exists(result_path)) {
             break;
@@ -492,8 +439,7 @@ int main(int argc, char* argv[])
     in >> status;
 
     // Cleanup
-    std::error_code ec;
-    std::filesystem::remove_all(shared_dir, ec);
+    shared.cleanup();
 
     return (status == "ok") ? 0 : 1;
 }

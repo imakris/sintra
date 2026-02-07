@@ -8,6 +8,8 @@
 
 #include <sintra/sintra.h>
 
+#include "test_utils.h"
+
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
@@ -21,28 +23,10 @@ namespace fs = std::filesystem;
 
 std::atomic<int> g_test_iteration{0};
 
-std::filesystem::path ensure_shared_directory()
-{
-    static std::filesystem::path dir;
-    if (!dir.empty()) {
-        return dir;
-    }
-
-    auto base = std::filesystem::temp_directory_path() / "sintra_deadlock_repro";
-    std::filesystem::create_directories(base);
-
-    auto unique_suffix = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                             std::chrono::steady_clock::now().time_since_epoch())
-                             .count();
-
-    dir = base / std::to_string(unique_suffix);
-    std::filesystem::create_directories(dir);
-    return dir;
-}
-
 void worker_process(int worker_id, int num_workers, int num_barriers)
 {
-    const auto shared_dir = ensure_shared_directory();
+    sintra::test::Shared_directory shared("SINTRA_DEADLOCK_REPRO_DIR", "deadlock_repro");
+    const auto shared_dir = shared.path();
     const auto swarm_path = (shared_dir / "swarm_id.txt").string();
 
     std::ifstream swarm_file(swarm_path);
@@ -132,10 +116,11 @@ int main(int argc, char* argv[])
     int successes = 0;
     int timeouts = 0;
 
+    sintra::test::Shared_directory shared("SINTRA_DEADLOCK_REPRO_DIR", "deadlock_repro");
+    const auto shared_dir = shared.path();
+
     for (int iter = 0; iter < NUM_ITERATIONS; ++iter) {
         std::cout << "\n=== Iteration " << (iter + 1) << "/" << NUM_ITERATIONS << " ===\n" << std::flush;
-
-        const auto shared_dir = ensure_shared_directory();
 
         // Clean up old iteration
         try {
@@ -252,6 +237,8 @@ int main(int argc, char* argv[])
     std::cout << "  Successful: " << successes << "/" << NUM_ITERATIONS << "\n";
     std::cout << "  Deadlocks:  " << timeouts << "/" << NUM_ITERATIONS << "\n";
     std::cout << "========================================\n";
+
+    shared.cleanup();
 
     if (timeouts > 0) {
         std::cout << "\n*** DEADLOCK REPRODUCED! ***\n";

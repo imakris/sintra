@@ -79,24 +79,6 @@ void collect_branches(
     collect_branches(branches, std::forward<Args>(rest)...);
 }
 
-class Cleanup_guard {
-public:
-    explicit Cleanup_guard(std::function<void()> callback)
-        : m_callback(std::move(callback))
-    {}
-
-    Cleanup_guard(const Cleanup_guard&) = delete;
-    Cleanup_guard& operator=(const Cleanup_guard&) = delete;
-
-    ~Cleanup_guard()
-    {
-        m_callback();
-    }
-
-private:
-    std::function<void()> m_callback;
-};
-
 } // namespace detail
 
 inline void disable_debug_pause_for_current_process()
@@ -193,11 +175,11 @@ inline void init(
     assert(!s_init_once); // init() may only be called once before finalize().
     s_init_once = true;
 
-    static detail::Cleanup_guard cleanup_guard([]() {
+    static Instantiator cleanup_guard(std::function<void()>([]() {
         if (s_mproc) {
             finalize();
         }
-    });
+    }));
 
     s_mproc = new Managed_process;
     s_mproc->init(argc, argv);
