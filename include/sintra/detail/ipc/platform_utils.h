@@ -26,13 +26,7 @@
 #include "../time_utils.h"
 
 #ifdef _WIN32
-  #ifndef NOMINMAX
-  #define NOMINMAX
-  #endif
-  #ifndef WIN32_LEAN_AND_MEAN
-  #define WIN32_LEAN_AND_MEAN
-  #endif
-  #include <Windows.h>
+  #include "../sintra_windows.h"
   #include <timeapi.h>
 #else
 #include <cerrno>
