@@ -279,13 +279,6 @@ using message_string = typed_variable_buffer<string>;
 class Sintra_message_element {};
 
 
-class No
-{
-private:
-    No(){}
-    virtual int no()=0;
-};
-
 template <typename...>
 struct always_false: std::false_type
 {};

@@ -2803,18 +2803,12 @@ private:
  ////     \////     \////     \////     \////     \////     \////     \////
   //       \//       \//       \//       \//       \//       \//       \//
 
-#if __cplusplus >= 202002L
-#define SINTRA_NODISCARD [[nodiscard]]
-#else
-#define SINTRA_NODISCARD
-#endif
-
 // RAII snapshot: calls reader.done_reading() iff start_reading() succeeded.
 // NOTE: Only one active snapshot per Ring_R<T> instance. Attempting to start a new snapshot before
 // done_reading() will throw (use a separate Ring_R<T> instance if you need concurrent snapshots).
 
 template <class Reader>
-class SINTRA_NODISCARD Ring_R_snapshot {
+class [[nodiscard]] Ring_R_snapshot {
 public:
     using element_t = typename Reader::element_t;
 
@@ -2847,13 +2841,13 @@ public:
         if (m_active && m_reader) { m_reader->done_reading(); }
     }
 
-    SINTRA_NODISCARD explicit operator bool() const noexcept {
+    [[nodiscard]] explicit operator bool() const noexcept {
         return m_active && m_range.begin && m_range.end && (m_range.end > m_range.begin);
     }
 
-    SINTRA_NODISCARD Range<element_t> range() const noexcept { return m_range; }
-    SINTRA_NODISCARD element_t*       begin() const noexcept { return m_range.begin; }
-    SINTRA_NODISCARD element_t*       end()   const noexcept { return m_range.end; }
+    [[nodiscard]] Range<element_t> range() const noexcept { return m_range; }
+    [[nodiscard]] element_t*       begin() const noexcept { return m_range.begin; }
+    [[nodiscard]] element_t*       end()   const noexcept { return m_range.end; }
 
     // If caller finished early, prevent done_reading() in dtor.
     void dismiss() noexcept { m_active = false; }
@@ -2866,7 +2860,7 @@ private:
 
 // Throwing helper: propagates exceptions from start_reading(...)
 template <class Reader, class... Args>
-SINTRA_NODISCARD inline Ring_R_snapshot<Reader>
+[[nodiscard]] inline Ring_R_snapshot<Reader>
 make_snapshot(Reader& reader, Args&&... args) {
     auto rg = reader.start_reading(std::forward<Args>(args)...);
     return Ring_R_snapshot<Reader>(reader, rg);
@@ -2877,7 +2871,7 @@ enum class Ring_R_snapshot_error : uint8_t { none, evicted, exception };
 
 // Nothrow helper: returns {snapshot, error}; never logs by itself.
 template <class Reader, class... Args>
-SINTRA_NODISCARD inline std::pair<Ring_R_snapshot<Reader>, Ring_R_snapshot_error>
+[[nodiscard]] inline std::pair<Ring_R_snapshot<Reader>, Ring_R_snapshot_error>
 try_snapshot_e(Reader& reader, Args&&... args) noexcept
 {
     try {
