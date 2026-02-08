@@ -19,7 +19,7 @@ using detail::message_args_size;
 namespace detail {
 
 template <typename F, typename MA, std::size_t... Is>
-inline auto call_with_msg_args_impl(
+inline decltype(auto) call_with_msg_args_impl(
     F&& f,
     const MA& args,
     std::index_sequence<Is...>)
@@ -28,7 +28,7 @@ inline auto call_with_msg_args_impl(
 }
 
 template <typename TObj, typename F, typename MA, std::size_t... Is>
-inline auto call_with_msg_args_impl(
+inline decltype(auto) call_with_msg_args_impl(
     TObj& obj,
     F&& f,
     const MA& args,
@@ -40,7 +40,7 @@ inline auto call_with_msg_args_impl(
 } // namespace detail
 
 template <typename TFunction, typename TVector>
-inline auto call_function_with_message_args(const TFunction& f, const TVector& t)
+inline decltype(auto) call_function_with_message_args(const TFunction& f, const TVector& t)
 {
     constexpr std::size_t arity = message_args_size<TVector>::value;
     return detail::call_with_msg_args_impl(
@@ -50,7 +50,7 @@ inline auto call_function_with_message_args(const TFunction& f, const TVector& t
 }
 
 template <typename TObj, typename TFunction, typename TVector>
-inline auto call_function_with_message_args(TObj& obj, const TFunction& f, const TVector& t)
+inline decltype(auto) call_function_with_message_args(TObj& obj, const TFunction& f, const TVector& t)
 {
     constexpr std::size_t arity = message_args_size<TVector>::value;
     return detail::call_with_msg_args_impl(
