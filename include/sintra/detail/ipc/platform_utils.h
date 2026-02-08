@@ -253,7 +253,7 @@ inline uint32_t get_current_tid()
 
 inline uint32_t get_current_pid()
 {
-    return static_cast<uint32_t>(get_current_process_id());
+    return static_cast<uint32_t>(detail::get_current_process_id());
 }
 
 inline bool is_process_alive(uint32_t pid)
