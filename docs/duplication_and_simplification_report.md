@@ -544,7 +544,7 @@ inline void prepare_for_intentional_crash()
 
 - `drain_pending_signals()` (POSIX, line ~1340) and
   `drain_pending_signals_win()` (Windows, line ~1350) have **identical bodies**
-  ??? the function contains no platform-specific code, only the name differs.
+  - the function contains no platform-specific code, only the name differs.
 
 - `signal_slot` is **platform-specific** (Windows stores a function pointer,
   POSIX stores a `sigaction`), so both definitions are required.
