@@ -53,7 +53,7 @@ considering for the long term.
   - [4B. Scattered `using std::` declarations](#4b-scattered-using-std-declarations)
   - [4C. `static inline thread_local` linkage conflict](#4c-static-inline-thread_local-linkage)
   - [4D. `spinlocked_containers.h` unsafe iterators](#4d-spinlocked_containersh-unsafe-iterators)
-  - [4E. `variable_buffer::Statics<void>` pre-C++17 workaround](#4e-variable_bufferstatics-pre-c17-workaround)
+  - [4E. `variable_buffer::Statics<void>` simplification](#4e-variable_bufferstatics-simplification)
   - [4F. Test choreography scaffolding](#4f-test-choreography-scaffolding)
 
 ---
@@ -67,41 +67,37 @@ considering for the long term.
 
 #### Problem
 
-The file contains two parallel recursive template hierarchies that manually
-unpack message arguments one-by-one:
+The file contains two parallel recursive template chains that manually unpack
+message arguments one-by-one:
 
-- `_sfb` (static/free functions): recursive templates indexed 0..N, each
-  extracting `get<I>(args)` and forwarding to the next level.
-- `_mfb` (member functions): the same structure but dispatching to
-  `(obj->*fn)(...)`.
+- `call_function_with_message_args_sfb(...)` for free/static functions
+- `call_function_with_message_args_mfb(...)` for member functions
 
-Each hierarchy has `N+1` partial specializations for every supported arity.
-This is exactly the kind of code that `std::index_sequence` was designed to
-replace.
+Both use `message_args_size<TVector>` to stop recursion and repeatedly call
+`get<I>(t)` to expand arguments. The logic is duplicated across the two
+backends; only the call form differs.
 
 #### Current code (simplified pattern)
 
 ```cpp
-// Free function, arity 0
-template <typename R, typename MA>
-struct _sfb<R(*)(void), MA, 0> {
-    static R call(R(*f)(void), const MA&) { return f(); }
-};
+template <typename F, typename MA, typename... Args,
+          typename = enable_if_t<message_args_size<MA>::value == sizeof...(Args)>>
+auto call_function_with_message_args_sfb(
+    const F& f, const MA&, const Args&... args) -> decltype(f(args...))
+{
+    return f(args...);
+}
 
-// Free function, arity 1
-template <typename R, typename A0, typename MA>
-struct _sfb<R(*)(A0), MA, 1> {
-    static R call(R(*f)(A0), const MA& a) { return f(get<0>(a)); }
-};
+template <typename F, typename MA, typename... Args,
+          typename = enable_if_t<message_args_size<MA>::value != sizeof...(Args)>>
+auto call_function_with_message_args_sfb(
+    const F& f, const MA& a, const Args&... args)
+{
+    return call_function_with_message_args_sfb(
+        f, a, args..., get<sizeof...(Args)>(a));
+}
 
-// Free function, arity 2
-template <typename R, typename A0, typename A1, typename MA>
-struct _sfb<R(*)(A0, A1), MA, 2> {
-    static R call(R(*f)(A0,A1), const MA& a) { return f(get<0>(a), get<1>(a)); }
-};
-
-// ... and so on up to some max arity.
-// Then the entire thing is duplicated for member function pointers.
+// Same pattern duplicated for member functions with (obj.*f)(args...).
 ```
 
 #### Proposed replacement
@@ -115,37 +111,38 @@ struct _sfb<R(*)(A0, A1), MA, 2> {
 
 namespace sintra { namespace detail {
 
-// Implementation: unpack message_args tuple via index_sequence.
+// Implementation: unpack message_args via index_sequence.
 template <typename F, typename MA, std::size_t... Is>
 inline auto call_with_msg_args_impl(
     F&& f, const MA& args, std::index_sequence<Is...>)
 {
-    // std::invoke handles free functions, member-function pointers,
-    // and functors uniformly (C++17).
     return std::invoke(std::forward<F>(f), get<Is>(args)...);
+}
+
+template <typename TObj, typename F, typename MA, std::size_t... Is>
+inline auto call_with_msg_args_impl(
+    TObj& obj, F&& f, const MA& args, std::index_sequence<Is...>)
+{
+    return std::invoke(std::forward<F>(f), obj, get<Is>(args)...);
 }
 
 // Public entry point.
 template <typename F, typename MA>
 inline auto call_function_with_message_args(F&& f, const MA& args)
 {
-    constexpr auto arity = std::tuple_size_v<MA>;
+    constexpr auto arity = message_args_size<MA>::value;
     return call_with_msg_args_impl(
         std::forward<F>(f), args, std::make_index_sequence<arity>{});
 }
 
-// Overload for member-function-pointer + object.
-template <typename R, typename C, typename... As, typename MA>
+// Overload for member-function + object.
+template <typename TObj, typename F, typename MA>
 inline auto call_function_with_message_args(
-    R(C::*mfp)(As...), C* obj, const MA& args)
+    TObj& obj, F&& f, const MA& args)
 {
-    constexpr auto arity = std::tuple_size_v<MA>;
+    constexpr auto arity = message_args_size<MA>::value;
     return call_with_msg_args_impl(
-        [mfp, obj](auto&&... a) -> R {
-            return (obj->*mfp)(std::forward<decltype(a)>(a)...);
-        },
-        args,
-        std::make_index_sequence<arity>{});
+        obj, std::forward<F>(f), args, std::make_index_sequence<arity>{});
 }
 
 }} // namespace sintra::detail
@@ -156,15 +153,8 @@ This handles **any arity** with zero manual specializations.
 #### Steps
 
 1. Replace the entire file body with the ~40-line implementation above.
-2. Verify that `message_args` provides a `std::tuple_size` specialization (it
-   should, given the existing `get<I>()` overloads). If not, add one:
-   ```cpp
-   namespace std {
-       template <typename... Ts>
-       struct tuple_size<sintra::detail::message_args<Ts...>>
-           : std::integral_constant<std::size_t, sizeof...(Ts)> {};
-   }
-   ```
+2. Use `message_args_size<MA>::value` (already defined in `message_args.h`) to
+   derive the arity. No `std::tuple_size` specialization is needed.
 3. Audit all call sites — there are only a handful in `transceiver_impl.h` and
    `process_message_reader_impl.h`.
 4. Run the full test suite.
@@ -186,19 +176,22 @@ branches (Windows and POSIX). Inside the Windows branch:
 - A local lambda `build_command_line` (lines ~595–633) is 38 lines of logic
   that should be a standalone helper.
 
-The POSIX branch similarly has a large `env_key_of()` helper and merge logic
-that duplicates the Windows version.
+The POSIX branch similarly has `env_key_of()` and merge logic, but the Windows
+side compares environment keys case-insensitively via `_wcsicmp`. Any merge
+helper must preserve that behavior.
 
 #### Proposed refactor
 
 ```
 spawn_detached()        // thin dispatcher
-├── spawn_detached_win32()     // ~280 lines, Windows-only
-│   ├── to_wide_utf8()         // reuse existing free function (line 397)
-│   ├── build_command_line()   // extract as named function
-│   └── env_key_of<wstring>()  // template, shared
-└── spawn_detached_posix()     // ~300 lines, POSIX-only
-    └── env_key_of<string>()   // template, shared
+|-- spawn_detached_win32()     // ~280 lines, Windows-only
+|   |-- to_wide_utf8()         // reuse existing free function (line 397)
+|   |-- build_command_line()   // extract as named function
+|   |-- env_key_of<wstring>()  // template, shared
+|   `-- env_key_equal(wstring) // case-insensitive compare
+`-- spawn_detached_posix()     // ~300 lines, POSIX-only
+    |-- env_key_of<string>()   // template, shared
+    `-- env_key_equal(string)  // case-sensitive compare
 ```
 
 #### Implementation details
@@ -213,9 +206,18 @@ spawn_detached()        // thin dispatcher
        return entry.substr(0, pos);
    }
    ```
+   Keep a key-compare helper so Windows stays case-insensitive:
+   ```cpp
+   inline bool env_key_equal(const std::wstring& a, const std::wstring& b) {
+       return _wcsicmp(a.c_str(), b.c_str()) == 0;
+   }
+   inline bool env_key_equal(const std::string& a, const std::string& b) {
+       return a == b;
+   }
+   ```
 
 2. **Templatize the environment-override merge** — the 15-line block at
-   lines 442–458 (Windows) and 500–511 (POSIX) is identical in structure:
+   lines 442–458 (Windows) and 500–511 (POSIX) is identical in structure, but must use the correct equality check:
    ```cpp
    template <typename StringT>
    inline void merge_env_overrides(
@@ -226,14 +228,22 @@ spawn_detached()        // thin dispatcher
            auto key = env_key_of(ov);
            env.erase(
                std::remove_if(env.begin(), env.end(),
-                   [&](const StringT& e) { return env_key_of(e) == key; }),
+                   [&](const StringT& e) { return env_key_equal(env_key_of(e), key); }),
                env.end());
            env.push_back(ov);
        }
    }
    ```
 
-3. **Delete `to_wide` lambda** at line 579 and call `to_wide_utf8()` instead.
+3. **Replace the local `to_wide` lambda** at line 579 with a small overload
+   that forwards to `to_wide_utf8()` but still handles `const char*` and nulls:
+   ```cpp
+   inline std::wstring to_wide_utf8(const char* value)
+   {
+       if (!value || !*value) return {};
+       return to_wide_utf8(std::string(value));
+   }
+   ```
 
 4. **Extract `build_command_line()`** as a free function above
    `spawn_detached_win32()`.
@@ -245,12 +255,12 @@ spawn_detached()        // thin dispatcher
 
 ### 1C. Test suite — extract multi-process test harness
 
-**Files:** 23 test `.cpp` files
+**Files:** Many test `.cpp` files (apply only to those matching the exact pattern)
 **Estimated saving:** ~460 lines
 
 #### Problem
 
-23 test files repeat the same `main()` boilerplate:
+Many test files repeat the same `main()` boilerplate:
 
 ```cpp
 int main(int argc, char* argv[])
@@ -333,7 +343,12 @@ int main(int argc, char* argv[])
 }
 ```
 
-#### Affected files (all 23)
+**Scope notes:** Some tests do extra work in `main()` (extra barriers, custom
+shutdown ordering, or additional file verification). Those should either keep
+their explicit flow or use an extended helper that accepts optional pre/post
+hooks and custom barrier names.
+
+#### Affected files (subset)
 
 | File | Current `main()` LOC |
 |------|---------------------|
@@ -370,6 +385,10 @@ files. Each should be consolidated into `test_utils.h` or `test_environment.h`.
 | `managed_process_publish_test.cpp` | 109 | `wait_for_path()` | 20ms |
 | `lifecycle_handler_test.cpp` | 107 | `wait_for_signal_file()` | 10ms |
 
+There is also `wait_for_path()` in `managed_process_publish_test.cpp` and
+`wait_for_file_until()` in `lifeline_basic_test.cpp`. A single helper with
+timeout + poll interval plus a small deadline wrapper would cover all of these.
+
 **Proposed canonical implementation** in `test_utils.h`:
 
 ```cpp
@@ -397,7 +416,11 @@ Found in: `complex_choreography_test.cpp:116`, `barrier_flush_test.cpp:59`,
 `barrier_delivery_fence_repro_test.cpp:60`,
 `manual/barrier_delivery_fence_repro_test.cpp:60`.
 
-**Proposed canonical implementation:**
+These functions are **not identical**: some write only ok/fail + detail, while
+others write extra counters and custom filenames. Two helpers cover the common
+cases without forcing a single format.
+
+**Proposed helper for simple ok/fail cases only:**
 
 ```cpp
 inline void write_test_result(
@@ -420,6 +443,9 @@ inline std::pair<bool, std::string> read_test_result(
     return {ok, detail};
 }
 ```
+
+For structured results (counts, multiple fields), keep a small per-test wrapper
+that uses `write_lines()` / `read_lines()` from `test_utils.h`.
 
 #### 1D-iii. `append_line()` — 3 copies
 
@@ -487,6 +513,9 @@ Found in: `recovery_test.cpp:107`, `lifecycle_handler_test.cpp:152`,
 `lifeline_basic_test.cpp`, `barrier_drain_and_unpublish_test.cpp`,
 `recovery_runner_thread_test.cpp`, `spinlock_recovery_test.cpp`.
 
+Note: some files name this helper differently (e.g. `disable_core_dumps_for_intentional_abort`)
+and guard it to specific platforms (Apple-only in `recovery_test.cpp`).
+
 Add to `test_environment.h`:
 
 ```cpp
@@ -515,9 +544,10 @@ inline void prepare_for_intentional_crash()
 
 - `drain_pending_signals()` (POSIX, line ~1340) and
   `drain_pending_signals_win()` (Windows, line ~1350) have **identical bodies**
-  — the function contains no platform-specific code, only the name differs.
+  ??? the function contains no platform-specific code, only the name differs.
 
-- `signal_slot` is defined twice (lines ~87–91 and ~241–245).
+- `signal_slot` is **platform-specific** (Windows stores a function pointer,
+  POSIX stores a `sigaction`), so both definitions are required.
 
 - `signal_index` is forward-declared **three times** (lines ~83, ~114, ~284).
 
@@ -525,7 +555,7 @@ inline void prepare_for_intentional_crash()
 
 1. Keep one `drain_pending_signals()` with no platform suffix, guarded only at
    the call site.
-2. Remove the duplicate `signal_slot` definition.
+2. Keep both `signal_slot` definitions (they differ by platform).
 3. Reduce `signal_index` forward declarations to one.
 
 ---
@@ -568,6 +598,10 @@ void collect_and_schedule_barrier_completions(
     m_all_draining_cv.notify_all();
 }
 ```
+
+Note: keep the existing lock ordering around `m_groups_mutex` and the
+`run_after_current_handler` lambda. The helper should not move that lock
+inside/outside in a way that changes sequencing.
 
 ---
 
@@ -628,16 +662,18 @@ void stop()  { transition_communication(comm_transition::stop);  }
 are structurally identical: check local cache → RPC to coordinator → cache result.
 
 ```cpp
-template <typename Map, typename Key, typename RpcFn>
-auto cached_resolve(Map& cache, const Key& key, RpcFn&& rpc, auto invalid) {
+template <typename Map, typename Key, typename RpcFn, typename Invalid>
+auto cached_resolve(Map& cache, const Key& key, RpcFn&& rpc, Invalid invalid)
+{
     {
-        std::shared_lock lk(m_resolve_mutex);
-        auto it = cache.find(key);
-        if (it != cache.end()) return it->second;
+        auto scoped = cache.scoped();
+        auto it = scoped.get().find(key);
+        if (it != scoped.get().end()) return it->second;
     }
+
+    // Keep the explicit temporary; it matters when the coordinator is local.
     auto result = rpc(key);
     if (result != invalid) {
-        std::unique_lock lk(m_resolve_mutex);
         cache[key] = result;
     }
     return result;
@@ -652,9 +688,10 @@ auto cached_resolve(Map& cache, const Key& key, RpcFn&& rpc, auto invalid) {
 **Estimated saving:** ~30 lines
 
 `Ring_data::create()` (lines ~557–592) and `Ring::create()` (lines ~1388–1418)
-are structurally identical: create file → debug-fill or truncate → close. The
-debug-fill pattern (write `0xCD` bytes in chunks) is also duplicated
-(lines ~576–585 and ~1402–1411).
+are structurally similar: create file → debug-fill or truncate → close. Both
+use the "UNINITIALIZED" fill pattern (not `0xCD`). `Ring_data::create()` also
+ensures the directory exists before creating the data file, so any helper needs
+to either accept a `create_directory` flag or be used from a wrapper.
 
 ```cpp
 inline void create_ring_backing_file(
@@ -675,7 +712,8 @@ inline void create_ring_backing_file(
 
 `file_mapping.h` defines its own `get_page_size()` in an anonymous namespace,
 while `platform_utils.h` has the more robust `system_page_size()`. The former
-should simply call the latter:
+should simply call the latter (or include a tiny local wrapper to avoid pulling
+in the full `platform_utils.h` dependency):
 
 ```cpp
 // file_mapping.h — replace anonymous namespace function with:
@@ -720,6 +758,10 @@ void dispatch_handlers(
 
 Then the two call sites become one-liners.
 
+Note: the remote-event path currently has optional `SINTRA_TRACE_WORLD` logging.
+If you extract a helper, keep a trace hook or a flag so that logging remains
+identical.
+
 ---
 
 ### 2H. Unify reader thread startup/shutdown bookkeeping
@@ -733,6 +775,10 @@ The mirror shutdown pattern appears at lines ~483–493 and ~721–731.
 
 Extract `begin_reading_session()` and `end_reading_session()` helpers.
 
+Note: the request reader also sets TLS (`tl_is_req_thread`,
+`s_tl_current_request_reader`) and updates request-specific progress flags.
+Any shared helper needs parameters or wrapper lambdas to keep those semantics.
+
 ---
 
 ### 2I. Eliminate duplicate exception dispatch tables
@@ -741,10 +787,13 @@ Extract `begin_reading_session()` and `end_reading_session()` helpers.
 **Estimated saving:** ~30 lines
 
 `string_to_exception()` has both a `switch` (reserved IDs) and an
-`unordered_map` (type IDs) that map the same set of exception types.
+`unordered_map` (type IDs) with overlapping sets of exception types. The
+reserved-id path is still necessary because those IDs are not the same as
+`get_type_id<T>()`.
 
-**Approach:** Use a single lookup table (either a constexpr array or a macro
-list) that generates both the switch cases and the map entries:
+**Approach:** Use a shared list (constexpr array or macro list) to generate
+both the switch cases and the map entries, keeping the two lookup paths but
+eliminating the duplicated type list:
 
 ```cpp
 #define SINTRA_EXCEPTION_LIST(X) \
@@ -757,40 +806,20 @@ list) that generates both the switch cases and the map entries:
 
 ---
 
-### 2J. Collapse `make_branches()` overloads
+### 2J. Reduce `make_branches()` repetition (keep multiplicity support)
 
 **File:** `include/sintra/detail/runtime.h`, lines ~59–138
 **Estimated saving:** ~35 lines
 
 Six overloads of `make_branches()` plus two recursive `collect_branches`
-helpers. A single variadic template with `if constexpr` branching on the first
-argument type replaces all of them:
+helpers. The overloads are not fully collapsible because the API supports
+`int multiplicity, Process_descriptor` pairs. Any refactor should keep that
+behavior.
 
 ```cpp
-template <typename... Args>
-std::vector<Process_descriptor> make_branches(Args&&... args)
-{
-    std::vector<Process_descriptor> result;
-    (collect_one(result, std::forward<Args>(args)), ...);
-    return result;
-}
-
-template <typename T>
-void collect_one(std::vector<Process_descriptor>& out, T&& arg)
-{
-    if constexpr (std::is_same_v<std::decay_t<T>, Process_descriptor>) {
-        out.push_back(std::forward<T>(arg));
-    }
-    else if constexpr (std::is_invocable_r_v<int, T>) {
-        out.emplace_back(std::forward<T>(arg));
-    }
-    else if constexpr (is_range_of_descriptors_v<T>) {
-        out.insert(out.end(), arg.begin(), arg.end());
-    }
-    else {
-        static_assert(always_false_v<T>, "Unsupported argument type");
-    }
-}
+// Keep the existing overloads but reduce repetition by sharing the
+// "create vector + call collect_branches" steps in a small helper.
+// The multiplicity overloads still need to remain explicit.
 ```
 
 ---
@@ -809,9 +838,10 @@ void collect_one(std::vector<Process_descriptor>& out, T&& arg)
 
 All three are the same `#ifdef _WIN32 GetCurrentProcessId() #else getpid()`.
 
-**Fix:** Keep `platform_utils.h::get_current_pid()` as the single canonical
-implementation (it's in the lowest-level header). Have `process_id.h` call it
-with a cast. Replace the inline call in `debug_pause.h`.
+**Fix:** Keep `process_id.h::get_current_process_id()` as the single canonical
+implementation (it is the smallest, lowest-level header). Have
+`platform_utils.h::get_current_pid()` and the inline call in `debug_pause.h`
+delegate to it, with the appropriate cast.
 
 ---
 
@@ -848,7 +878,9 @@ Decorative multi-line ASCII art banners total ~120 lines across:
 `get_wtime()` returns `double` seconds. `monotonic_now_ns()` (in `time_utils.h`)
 returns `uint64_t` nanoseconds.
 
-**Fix:** Delete `get_wtime.h` and add to `time_utils.h`:
+**Fix:** Add `get_wtime()` next to `monotonic_now_ns()` in `time_utils.h` and
+have `get_wtime.h` forward to it (or keep `get_wtime.h` as the thin wrapper
+if you want to avoid pulling `time_utils.h` into every include site):
 
 ```cpp
 inline double get_wtime() {
@@ -893,6 +925,9 @@ sintra_semaphore& get() {
     return *m_sem;
 }
 ```
+
+Note: `std::call_once` is one-shot. This is fine as long as the semaphore is
+not expected to be re-initialized after destruction within the same object.
 
 ---
 
@@ -964,17 +999,11 @@ line width significantly at 18 call sites.
 
 **File:** `message_args.h`, lines ~108–133
 
-Four cv/ref-qualified overloads of `get<I>()`. A single forwarding-reference
-overload replaces all four:
-
-```cpp
-template <size_t I, typename MsgArgs>
-decltype(auto) get(MsgArgs&& args) {
-    return std::get<I>(std::forward<MsgArgs>(args).m_tuple);
-}
-```
-
-Saves ~20 lines.
+Four cv/ref-qualified overloads of `get<I>()`. `message_args` is not a tuple
+and does not expose `m_tuple`, so this cannot be collapsed into a trivial
+`std::get` forwarding overload. If you want to reduce repetition, factor the
+shared body into a small helper (e.g. `get_impl<storage_t>(value)`), and keep
+the four overloads thin.
 
 ---
 
@@ -983,8 +1012,10 @@ Saves ~20 lines.
 **File:** `file_mapping.h`, lines ~41–58
 
 Three constructors for `const char*`, `std::string`, and
-`std::filesystem::path`. Since `path` implicitly converts from the other two,
-only the `path` overload is needed. Saves ~12 lines.
+`std::filesystem::path`. The `const char*` overload currently provides a null
+check; dropping it would lose that validation. If you want to dedupe, keep the
+`const char*` overload (for the guard) and forward the `std::string` overload
+to the `path` overload. Saves a few lines without reducing input validation.
 
 ---
 
@@ -1081,7 +1112,9 @@ static inline thread_local Managed_process* s_mproc = nullptr;
 `static` gives internal linkage; `inline` gives external linkage; `static`
 wins. If these variables are meant to be shared across TUs (which the usage
 pattern suggests — they're in a header), `static` should be removed, leaving
-`inline thread_local`. This may be a latent bug in multi-TU scenarios.
+`inline thread_local`. This is a correctness issue for multi-TU consumers: the
+request-reader thread sets TLS in one TU, while callers in another TU read a
+different `static` TLS slot.
 
 ### 4D. `spinlocked_containers.h` unsafe iterators
 
@@ -1093,13 +1126,12 @@ reference. The safe `scoped_access` pattern coexists with these unsafe methods.
 This is a correctness concern, not a LOC concern, but if the unsafe methods
 are removed, the class shrinks by ~30 lines.
 
-### 4E. `variable_buffer::Statics<void>` pre-C++17 workaround
+### 4E. `variable_buffer::Statics<void>` simplification
 
 **File:** `message.h`, lines ~83–89
 
-This is a template wrapper used to define `thread_local` inline statics — a
-pattern needed before C++17's `inline` variables. Since the project requires
-C++17, these can be replaced with direct `inline thread_local` variables.
+This template wrapper can be replaced with direct `inline thread_local`
+variables since the project already targets C++17.
 
 ### 4F. Test choreography scaffolding
 
