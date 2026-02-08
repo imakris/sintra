@@ -79,10 +79,6 @@ namespace {
         return flag;
     }
 
-    // Forward declarations - defined later in the common section.
-    inline std::size_t signal_index(int sig);
-    inline void dispatch_signal_number(int sig_number);
-
 #ifdef _WIN32
     struct signal_slot {
         int sig;
@@ -113,6 +109,7 @@ namespace {
     // Forward declarations - defined after #endif in the common section
     inline std::size_t signal_index(int sig);
     inline void dispatch_signal_number(int sig_number);
+    inline void drain_pending_signals();
 
     inline HANDLE& signal_event()
     {
@@ -183,27 +180,12 @@ namespace {
         return EXCEPTION_CONTINUE_SEARCH;
     }
 
-    inline void drain_pending_signals_win()
-    {
-        auto mask = pending_signal_mask().exchange(0U);
-        if (mask == 0U) {
-            return;
-        }
-
-        auto& slot_table = signal_slots();
-        for (std::size_t idx = 0; idx < slot_table.size(); ++idx) {
-            if ((mask & (1U << idx)) != 0U) {
-                dispatch_signal_number(slot_table[idx].sig);
-            }
-        }
-    }
-
     inline void signal_dispatch_loop_win()
     {
         while (true) {
             DWORD result = WaitForSingleObject(signal_event(), INFINITE);
             if (result == WAIT_OBJECT_0) {
-                drain_pending_signals_win();
+                drain_pending_signals();
                 // Reset the event after processing
                 ResetEvent(signal_event());
             }
@@ -283,6 +265,7 @@ namespace {
     // Forward declarations - defined after #endif in the common section
     inline std::size_t signal_index(int sig);
     inline void dispatch_signal_number(int sig_number);
+    inline void drain_pending_signals();
 
     inline uint64_t signal_dispatch_now_ns() noexcept
     {
@@ -333,21 +316,6 @@ namespace {
             // Double pause count each iteration up to maximum (exponential backoff).
             if (pause_count < k_max_pause_count) {
                 pause_count *= 2;
-            }
-        }
-    }
-
-    inline void drain_pending_signals()
-    {
-        auto mask = pending_signal_mask().exchange(0U);
-        if (mask == 0U) {
-            return;
-        }
-
-        auto& slot_table = signal_slots();
-        for (std::size_t idx = 0; idx < slot_table.size(); ++idx) {
-            if ((mask & (1U << idx)) != 0U) {
-                dispatch_signal_number(slot_table[idx].sig);
             }
         }
     }
@@ -410,6 +378,21 @@ namespace {
 #endif
 
     // --- Common signal infrastructure (shared across platforms) ---
+
+    inline void drain_pending_signals()
+    {
+        auto mask = pending_signal_mask().exchange(0U);
+        if (mask == 0U) {
+            return;
+        }
+
+        auto& slot_table = signal_slots();
+        for (std::size_t idx = 0; idx < slot_table.size(); ++idx) {
+            if ((mask & (1U << idx)) != 0U) {
+                dispatch_signal_number(slot_table[idx].sig);
+            }
+        }
+    }
 
     inline std::size_t signal_index(int sig)
     {
