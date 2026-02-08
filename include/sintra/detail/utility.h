@@ -407,6 +407,13 @@ inline bool env_key_equal(const std::string& lhs, const std::string& rhs)
     return lhs == rhs;
 }
 
+#ifdef _WIN32
+inline bool env_key_equal(const std::wstring& lhs, const std::wstring& rhs)
+{
+    return _wcsicmp(lhs.c_str(), rhs.c_str()) == 0;
+}
+#endif
+
 template <typename StringT>
 inline void merge_env_overrides(
     std::vector<StringT>& env,
@@ -448,11 +455,6 @@ inline std::wstring to_wide_utf8(const char* value)
         return {};
     }
     return to_wide_utf8(std::string(value));
-}
-
-inline bool env_key_equal(const std::wstring& lhs, const std::wstring& rhs)
-{
-    return _wcsicmp(lhs.c_str(), rhs.c_str()) == 0;
 }
 
 inline std::vector<wchar_t> build_environment_block(const std::vector<std::string>& overrides)
