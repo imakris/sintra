@@ -22,6 +22,7 @@
 #include <thread>
 
 #include "../logging.h"
+#include "../process/process_id.h"
 #include "../time_utils.h"
 
 #ifdef _WIN32
@@ -258,11 +259,7 @@ inline uint32_t get_current_tid()
 
 inline uint32_t get_current_pid()
 {
-#ifdef _WIN32
-    return static_cast<uint32_t>(::GetCurrentProcessId());
-#else
-    return static_cast<uint32_t>(::getpid());
-#endif
+    return static_cast<uint32_t>(get_current_process_id());
 }
 
 inline bool is_process_alive(uint32_t pid)
