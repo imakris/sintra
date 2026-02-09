@@ -75,6 +75,12 @@ struct message_args
 };
 
 template <typename T>
+struct is_message_args : std::false_type {};
+
+template <typename... Args>
+struct is_message_args<message_args<Args...>> : std::true_type {};
+
+template <typename T>
 using message_args_decay_t =
     typename std::remove_cv<typename std::remove_reference<T>::type>::type;
 
@@ -111,8 +117,10 @@ constexpr decltype(auto) access_message_arg(StorageT&& storage) noexcept
     return storage_type::access(std::forward<StorageT>(storage).value);
 }
 
-template <std::size_t I, typename ArgsT>
-constexpr decltype(auto) get_impl(ArgsT&& args) noexcept
+template <std::size_t I,
+          typename ArgsT,
+          typename = std::enable_if_t<is_message_args<message_args_decay_t<ArgsT>>::value>>
+constexpr decltype(auto) get(ArgsT&& args) noexcept
 {
     using args_decay_t = message_args_decay_t<ArgsT>;
     using storage_t = message_arg_storage<I, typename message_args_nth_type<args_decay_t, I>::type>;
@@ -133,30 +141,6 @@ constexpr decltype(auto) get_impl(ArgsT&& args) noexcept
             return access_message_arg(static_cast<storage_t&&>(std::move(args)));
         }
     }
-}
-
-template <std::size_t I, typename... Args>
-constexpr decltype(auto) get(message_args<Args...>& args) noexcept
-{
-    return get_impl<I>(args);
-}
-
-template <std::size_t I, typename... Args>
-constexpr decltype(auto) get(const message_args<Args...>& args) noexcept
-{
-    return get_impl<I>(args);
-}
-
-template <std::size_t I, typename... Args>
-constexpr decltype(auto) get(message_args<Args...>&& args) noexcept
-{
-    return get_impl<I>(std::move(args));
-}
-
-template <std::size_t I, typename... Args>
-constexpr decltype(auto) get(const message_args<Args...>&& args) noexcept
-{
-    return get_impl<I>(std::move(args));
 }
 
 } // namespace detail
