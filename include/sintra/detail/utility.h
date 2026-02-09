@@ -15,6 +15,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -392,7 +393,20 @@ inline bool write_fully(int fd, const void* buf, size_t count)
 
 #endif // !_WIN32
 
-template <typename StringT>
+inline std::string env_key_of(const char* entry)
+{
+    if (!entry) {
+        return {};
+    }
+    std::string value(entry);
+    const auto pos = value.find('=');
+    if (pos == std::string::npos) {
+        return value;
+    }
+    return value.substr(0, pos);
+}
+
+template <typename StringT, typename = std::enable_if_t<!std::is_array<StringT>::value>>
 inline StringT env_key_of(const StringT& entry)
 {
     const auto pos = entry.find(typename StringT::value_type('='));
