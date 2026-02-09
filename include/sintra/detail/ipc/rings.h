@@ -530,7 +530,7 @@ private:
         }
     }
 
-    std::aligned_storage_t<sizeof(impl), alignof(impl)> m_storage;
+    alignas(impl) std::byte m_storage[sizeof(impl)];
     std::atomic<uint8_t> m_state{state_uninitialized};
 };
 
