@@ -1,11 +1,11 @@
 // test_ring_utils.h
 // Shared utilities for ring buffer tests.
-// Can be included before or after rings.h - only depends on platform_utils.h
+// Can be included before or after rings.h - only depends on platform_defs.h
 
 #pragma once
 
 #include "test_utils.h"
-#include "sintra/detail/ipc/platform_utils.h"
+#include "sintra/detail/ipc/platform_defs.h"
 
 #include <cstddef>
 #include <filesystem>

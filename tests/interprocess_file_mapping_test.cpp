@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "sintra/detail/ipc/file_mapping.h"
-#include "sintra/detail/ipc/platform_utils.h"
+#include "sintra/detail/ipc/platform_defs.h"
 
 #include "test_utils.h"
 

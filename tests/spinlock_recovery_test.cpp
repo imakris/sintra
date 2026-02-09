@@ -1,5 +1,5 @@
 #include <sintra/detail/ipc/spinlock.h>
-#include <sintra/detail/ipc/platform_utils.h>
+#include <sintra/detail/ipc/process_utils.h>
 #include <sintra/detail/debug_pause.h>
 #include <sintra/detail/time_utils.h>
 #include <sintra/detail/utility.h>

@@ -8,7 +8,8 @@
 //
 
 #include <sintra/sintra.h>
-#include <sintra/detail/ipc/platform_utils.h>
+#include <sintra/detail/ipc/process_utils.h>
+#include <sintra/detail/time_utils.h>
 
 #include "test_utils.h"
 

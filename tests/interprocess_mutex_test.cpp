@@ -11,7 +11,6 @@ using namespace std::chrono_literals;
 #include "test_utils.h"
 
 #include "sintra/detail/ipc/mutex.h"
-#include "sintra/detail/ipc/platform_utils.h"
 
 namespace
 {

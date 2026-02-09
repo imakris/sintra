@@ -137,7 +137,9 @@
 #include "../ipc/semaphore.h"
 #include "../ipc/spinlock.h"
 
-#include "../ipc/platform_utils.h"
+#include "../ipc/file_utils.h"
+#include "../ipc/platform_defs.h"
+#include "../ipc/process_utils.h"
 
 // Enables the writer to forcefully evict readers that are too slow.
 #ifndef SINTRA_ENABLE_SLOW_READER_EVICTION

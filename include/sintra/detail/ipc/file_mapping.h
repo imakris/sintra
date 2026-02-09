@@ -13,7 +13,7 @@
 #include <system_error>
 #include <utility>
 
-#include "platform_utils.h"
+#include "platform_defs.h"
 
 #if defined(_WIN32)
 #    include "../sintra_windows.h"

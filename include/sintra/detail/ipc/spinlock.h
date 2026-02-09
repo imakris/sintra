@@ -10,7 +10,8 @@
 #include "../debug_pause.h"
 #include "../logging.h"
 #include "../process/process_id.h"
-#include "platform_utils.h"
+#include "../time_utils.h"
+#include "process_utils.h"
 
 namespace sintra {
 
