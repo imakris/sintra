@@ -506,6 +506,7 @@ int main(int argc, char* argv[])
         "SINTRA_TEST_SHARED_DIR",
         "lifecycle_handler",
         {process_normal_worker, process_crash_worker, process_unpublished_worker},
+        [](const std::filesystem::path&) {},
         [](const std::filesystem::path&) { return process_coordinator(); },
         [](const std::filesystem::path&) { return 0; },
         nullptr);
