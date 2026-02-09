@@ -1089,15 +1089,18 @@ Managed_process::~Managed_process()
         m_readers.clear();
     }
 
-    // no more writing
-    if (m_out_req_c) {
-        delete m_out_req_c;
-        m_out_req_c = nullptr;
-    }
+    // no more writing (prevent signal dispatch from using freed rings)
+    {
+        Dispatch_unique_lock dispatch_lock(dispatch_shutdown_mutex_instance);
+        if (m_out_req_c) {
+            delete m_out_req_c;
+            m_out_req_c = nullptr;
+        }
 
-    if (m_out_rep_c) {
-        delete m_out_rep_c;
-        m_out_rep_c = nullptr;
+        if (m_out_rep_c) {
+            delete m_out_rep_c;
+            m_out_rep_c = nullptr;
+        }
     }
 
     if (s_coord) {
