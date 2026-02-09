@@ -99,43 +99,29 @@ int process_client()
 
 int main(int argc, char* argv[])
 {
-    const bool is_spawned = sintra::test::has_branch_flag(argc, argv);
-    sintra::test::Shared_directory shared("SINTRA_TEST_SHARED_DIR", "rpc_append");
+    return sintra::test::run_multi_process_test(
+        argc,
+        argv,
+        "SINTRA_TEST_SHARED_DIR",
+        "rpc_append",
+        {process_owner, process_client},
+        [](const std::filesystem::path& shared_dir) {
+            const auto success_path = shared_dir / "rpc_success.txt";
+            const auto failure_path = shared_dir / "rpc_failures.txt";
 
-    std::vector<sintra::Process_descriptor> processes;
-    processes.emplace_back(process_owner);
-    processes.emplace_back(process_client);
+            const auto successes = sintra::test::read_lines(success_path);
+            const auto failures = sintra::test::read_lines(failure_path);
 
-    sintra::init(argc, argv, processes);
+            const std::vector<std::string> expected_successes = {
+                "2000: Sydney",
+                "2004: Athens",
+                "2008: Beijing",
+            };
+            const std::vector<std::string> expected_failures = {
+                "string too long",
+            };
 
-    if (!is_spawned) {
-        sintra::barrier("calls-finished", "_sintra_all_processes");
-    }
-
-    sintra::finalize();
-
-    if (!is_spawned) {
-        const auto success_path = shared.path() / "rpc_success.txt";
-        const auto failure_path = shared.path() / "rpc_failures.txt";
-
-        const auto successes = sintra::test::read_lines(success_path);
-        const auto failures = sintra::test::read_lines(failure_path);
-
-        const std::vector<std::string> expected_successes = {
-            "2000: Sydney",
-            "2004: Athens",
-            "2008: Beijing",
-        };
-        const std::vector<std::string> expected_failures = {
-            "string too long",
-        };
-
-        if (successes != expected_successes || failures != expected_failures) {
-            return 1;
-        }
-
-        shared.cleanup();
-    }
-
-    return 0;
+            return (successes == expected_successes && failures == expected_failures) ? 0 : 1;
+        },
+        "calls-finished");
 }

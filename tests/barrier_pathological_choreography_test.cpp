@@ -101,12 +101,6 @@ std::string make_stage_log_name(int worker)
     return oss.str();
 }
 
-void append_line(const std::filesystem::path& file, const std::string& line)
-{
-    std::ofstream out(file, std::ios::binary | std::ios::app);
-    out << line << '\n';
-}
-
 std::array<int, k_worker_count + 1> expected_noise_counts_for_iteration(int iteration)
 {
     std::array<int, k_worker_count + 1> counts{};
@@ -251,7 +245,7 @@ int controller_process()
 
     auto stage_slot = [&state, controller_log](const Stage_report& report) {
         record_stage_report(state, report);
-        append_line(controller_log, stage_report_to_string(report));
+        sintra::test::append_line(controller_log, stage_report_to_string(report));
     };
 
     auto noise_slot = [&state](const Noise_message& msg) {
@@ -304,7 +298,7 @@ void log_stage_event(const std::filesystem::path& log_path,
 {
     std::ostringstream oss;
     oss << phase << ':' << stage_report_to_string(report);
-    append_line(log_path, oss.str());
+    sintra::test::append_line(log_path, oss.str());
 }
 
 void log_noise_event(const std::filesystem::path& log_path, const Noise_message& msg)
@@ -312,7 +306,7 @@ void log_noise_event(const std::filesystem::path& log_path, const Noise_message&
     std::ostringstream oss;
     oss << "from=" << msg.from << ",iter=" << msg.iteration << ",step=" << msg.step
         << ",payload=" << msg.payload;
-    append_line(log_path, oss.str());
+    sintra::test::append_line(log_path, oss.str());
 }
 
 int worker_process(int worker_index)

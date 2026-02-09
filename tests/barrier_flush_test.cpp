@@ -56,25 +56,6 @@ struct Coordinator_state
 };
 
 
-void write_result(const std::filesystem::path& dir,
-                  bool success,
-                  std::size_t iterations_completed,
-                  std::size_t total_messages,
-                  const std::string& failure_reason)
-{
-    std::ofstream out(dir / "barrier_flush_result.txt", std::ios::binary | std::ios::trunc);
-    if (!out) {
-        throw std::runtime_error("failed to open barrier_flush_result.txt for writing");
-    }
-
-    out << (success ? "ok" : "fail") << '\n';
-    out << iterations_completed << '\n';
-    out << total_messages << '\n';
-    if (!success) {
-        out << failure_reason << '\n';
-    }
-}
-
 int coordinator_process()
 {
     using namespace sintra;
@@ -213,7 +194,15 @@ int coordinator_process()
 
     sintra::test::Shared_directory shared("SINTRA_TEST_SHARED_DIR", "barrier_flush");
     const auto shared_dir = shared.path();
-    write_result(shared_dir, success, k_iterations, state.total_messages, failure_reason);
+    std::vector<std::string> lines;
+    lines.reserve(success ? 3 : 4);
+    lines.push_back(success ? "ok" : "fail");
+    lines.push_back(std::to_string(k_iterations));
+    lines.push_back(std::to_string(state.total_messages));
+    if (!success) {
+        lines.push_back(failure_reason);
+    }
+    sintra::test::write_lines(shared_dir / "barrier_flush_result.txt", lines);
     return success ? 0 : 1;
 }
 
@@ -250,64 +239,55 @@ int worker1_process()
 int main(int argc, char* argv[])
 {
     std::set_terminate(sintra::test::custom_terminate_handler);
+    return sintra::test::run_multi_process_test(
+        argc,
+        argv,
+        "SINTRA_TEST_SHARED_DIR",
+        "barrier_flush",
+        {coordinator_process, worker0_process, worker1_process},
+        [](const std::filesystem::path& shared_dir) {
+            const auto result_path = shared_dir / "barrier_flush_result.txt";
+            if (!std::filesystem::exists(result_path)) {
+                std::fprintf(stderr,
+                             "Error: result file not found at %s\n",
+                             result_path.string().c_str());
+                return 1;
+            }
 
-    const bool is_spawned = sintra::test::has_branch_flag(argc, argv);
-    sintra::test::Shared_directory shared("SINTRA_TEST_SHARED_DIR", "barrier_flush");
-    const auto shared_dir = shared.path();
+            std::ifstream in(result_path, std::ios::binary);
+            if (!in) {
+                std::fprintf(stderr,
+                             "Error: failed to open result file %s\n",
+                             result_path.string().c_str());
+                return 1;
+            }
 
-    std::vector<sintra::Process_descriptor> processes;
-    processes.emplace_back(coordinator_process);
-    processes.emplace_back(worker0_process);
-    processes.emplace_back(worker1_process);
+            std::string status;
+            std::size_t iterations_completed = 0;
+            std::size_t total_messages = 0;
+            std::string reason;
 
-    sintra::init(argc, argv, processes);
+            std::getline(in, status);
+            in >> iterations_completed;
+            in >> total_messages;
+            std::getline(in >> std::ws, reason);
 
-    if (!is_spawned) {
-        sintra::barrier("barrier-flush-done", "_sintra_all_processes");
-    }
-
-    sintra::finalize();
-
-    if (!is_spawned) {
-        const auto result_path = shared_dir / "barrier_flush_result.txt";
-        if (!std::filesystem::exists(result_path)) {
-            std::fprintf(stderr, "Error: result file not found at %s\n", result_path.string().c_str());
-            return 1;
-        }
-
-        std::ifstream in(result_path, std::ios::binary);
-        if (!in) {
-            std::fprintf(stderr, "Error: failed to open result file %s\n", result_path.string().c_str());
-            return 1;
-        }
-
-        std::string status;
-        std::size_t iterations_completed = 0;
-        std::size_t total_messages = 0;
-        std::string reason;
-
-        std::getline(in, status);
-        in >> iterations_completed;
-        in >> total_messages;
-        std::getline(in >> std::ws, reason);
-        in.close();
-
-        if (status != "ok") {
-            std::fprintf(stderr, "Barrier flush test reported failure: %s\n", reason.c_str());
-            return 1;
-        }
-        if (iterations_completed != k_iterations) {
-            std::fprintf(stderr, "Expected %zu iterations, got %zu\n",
-                         k_iterations, iterations_completed);
-            return 1;
-        }
-        const std::size_t expected_messages = k_worker_count * k_iterations;
-        if (total_messages != expected_messages) {
-            std::fprintf(stderr, "Expected %zu total messages, got %zu\n",
-                         expected_messages, total_messages);
-            return 1;
-        }
-    }
-
-    return 0;
+            if (status != "ok") {
+                std::fprintf(stderr, "Barrier flush test reported failure: %s\n", reason.c_str());
+                return 1;
+            }
+            if (iterations_completed != k_iterations) {
+                std::fprintf(stderr, "Expected %zu iterations, got %zu\n",
+                             k_iterations, iterations_completed);
+                return 1;
+            }
+            const std::size_t expected_messages = k_worker_count * k_iterations;
+            if (total_messages != expected_messages) {
+                std::fprintf(stderr, "Expected %zu total messages, got %zu\n",
+                             expected_messages, total_messages);
+                return 1;
+            }
+            return 0;
+        },
+        "barrier-flush-done");
 }

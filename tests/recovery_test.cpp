@@ -38,13 +38,6 @@
 #include <thread>
 #include <vector>
 
-#if defined(_MSC_VER)
-#include <crtdbg.h>
-#endif
-#if defined(__APPLE__)
-#include <sys/resource.h>
-#endif
-
 namespace {
 
 struct Stop {};
@@ -88,39 +81,6 @@ void write_ready_marker(std::string_view tag, uint32_t occurrence = 0)
         out.flush();
     }
 }
-void append_line(const std::filesystem::path& file, const std::string& value)
-{
-    std::ofstream out(file, std::ios::binary | std::ios::app);
-    if (!out) {
-        throw std::runtime_error("failed to open " + file.string() + " for writing");
-    }
-    out << value << '\n';
-}
-
-#if defined(__APPLE__)
-void disable_core_dumps_for_intentional_abort()
-{
-    struct rlimit current {};
-    if (getrlimit(RLIMIT_CORE, &current) != 0) {
-        std::fprintf(stderr, "[CRASHER] getrlimit(RLIMIT_CORE) failed: %d\n", errno);
-        return;
-    }
-
-    if (current.rlim_cur == 0) {
-        return;
-    }
-
-    struct rlimit updated = current;
-    updated.rlim_cur = 0;
-    if (setrlimit(RLIMIT_CORE, &updated) != 0) {
-        std::fprintf(stderr, "[CRASHER] setrlimit(RLIMIT_CORE) failed: %d\n", errno);
-        return;
-    }
-
-    std::fprintf(stderr, "[CRASHER] Disabled core dumps for intentional abort\n");
-}
-#endif
-
 int process_watchdog()
 {
     std::fprintf(stderr, "[WATCHDOG] Starting watchdog process\n");
@@ -204,10 +164,7 @@ int process_crasher()
 
     sintra::enable_recovery();
 
-#if defined(_MSC_VER)
-    // Suppress the CRT abort dialog so the crash propagates automatically in Debug builds.
-    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
-#endif
+    sintra::test::prepare_for_intentional_crash("CRASHER");
 
     std::filesystem::path shared_dir;
     if (!g_shared_dir.empty()) {
@@ -228,15 +185,12 @@ int process_crasher()
         << std::endl;
 
     log << "Recovery occurrence: " << occurrence << std::endl;
-    append_line(runs_path, "run");
+    sintra::test::append_line_or_throw(runs_path, "run");
 
     if (occurrence == 0) {
         log << "First run - about to abort!" << std::endl;
         log.close();
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
-#if defined(__APPLE__)
-        disable_core_dumps_for_intentional_abort();
-#endif
         sintra::disable_debug_pause_for_current_process();
         std::abort();
     }
@@ -245,16 +199,6 @@ int process_crasher()
     log.close();
     sintra::world() << Stop{};
     return 0;
-}
-
-std::string get_arg_value(int argc, char* argv[], const std::string& arg_name)
-{
-    for (int i = 0; i < argc - 1; ++i) {
-        if (std::string_view(argv[i]) == arg_name) {
-            return argv[i + 1];
-        }
-    }
-    return "";
 }
 
 } // namespace
@@ -271,7 +215,7 @@ int main(int argc, char* argv[])
     // Log main() entry to file immediately
     {
         const char* shared_dir_env = std::getenv("SINTRA_TEST_SHARED_DIR");
-        std::string early_shared_dir_arg = get_arg_value(argc, argv, "--shared_dir");
+        std::string early_shared_dir_arg = sintra::test::get_argv_value(argc, argv, "--shared_dir");
 
         if (!early_shared_dir_arg.empty()) {
 #ifdef _WIN32
@@ -295,7 +239,7 @@ int main(int argc, char* argv[])
     }
 
     // Check if --shared_dir was passed (from recovery spawn)
-    std::string shared_dir_arg = get_arg_value(argc, argv, "--shared_dir");
+    std::string shared_dir_arg = sintra::test::get_argv_value(argc, argv, "--shared_dir");
     if (!shared_dir_arg.empty()) {
         std::fprintf(stderr, "[MAIN] Setting shared_dir from argument: %s\n", shared_dir_arg.c_str());
 #ifdef _WIN32

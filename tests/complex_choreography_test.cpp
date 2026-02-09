@@ -113,15 +113,6 @@ std::string barrier_round_complete_name(int round)
     return oss.str();
 }
 
-void write_result(const std::filesystem::path& file, const std::string& status,
-                  int completed_rounds, bool failure)
-{
-    std::ofstream out(file, std::ios::binary | std::ios::trunc);
-    out << status << '\n';
-    out << completed_rounds << '\n';
-    out << (failure ? "failure" : "success") << '\n';
-}
-
 std::uint64_t rotl64(std::uint64_t value, unsigned int shift)
 {
     shift %= 64U;
@@ -289,8 +280,11 @@ int conductor_process()
         sintra::world() << Stop{due_to_failure};
     }
 
-    write_result(result_path, due_to_failure ? "fail" : "ok",
-                 std::max(last_completed_round, -1), due_to_failure);
+    std::vector<std::string> lines;
+    lines.push_back(due_to_failure ? "fail" : "ok");
+    lines.push_back(std::to_string(std::max(last_completed_round, -1)));
+    lines.push_back(due_to_failure ? "failure" : "success");
+    sintra::test::write_lines(result_path, lines);
 
     sintra::barrier(std::string(k_final_barrier), "_sintra_all_processes");
     return due_to_failure ? 1 : 0;
@@ -687,47 +681,37 @@ int verifier_process()
 
 int main(int argc, char* argv[])
 {
-    const bool is_spawned = sintra::test::has_branch_flag(argc, argv);
-    sintra::test::Shared_directory shared("SINTRA_COMPLEX_TEST_DIR", "complex_choreography");
-    const auto shared_dir = shared.path();
-    const auto result_path = shared_dir / "result.txt";
+    return sintra::test::run_multi_process_test(
+        argc,
+        argv,
+        "SINTRA_COMPLEX_TEST_DIR",
+        "complex_choreography",
+        {conductor_process,
+         aggregator_process,
+         verifier_process,
+         worker_process0,
+         worker_process1,
+         worker_process2},
+        [](const std::filesystem::path& shared_dir) {
+            std::filesystem::remove(shared_dir / "result.txt");
+        },
+        [](const std::filesystem::path&) { return 0; },
+        [](const std::filesystem::path& shared_dir) {
+            const auto result_path = shared_dir / "result.txt";
+            std::ifstream in(result_path, std::ios::binary);
+            if (!in) {
+                return 1;
+            }
+            std::string status;
+            int completed_rounds = -1;
+            std::string failure_state;
+            std::getline(in, status);
+            in >> completed_rounds;
+            std::getline(in >> std::ws, failure_state);
 
-    if (!is_spawned)
-    {
-        std::filesystem::remove(result_path);
-    }
-
-    std::vector<sintra::Process_descriptor> processes;
-    processes.emplace_back(conductor_process);
-    processes.emplace_back(aggregator_process);
-    processes.emplace_back(verifier_process);
-    processes.emplace_back(worker_process0);
-    processes.emplace_back(worker_process1);
-    processes.emplace_back(worker_process2);
-
-    sintra::init(argc, argv, processes);
-    if (!is_spawned) {
-        sintra::barrier(std::string(k_final_barrier), "_sintra_all_processes");
-    }
-    sintra::finalize();
-
-    if (!is_spawned) {
-        std::ifstream in(result_path, std::ios::binary);
-        if (!in) {
-            return 1;
-        }
-        std::string status;
-        int completed_rounds = -1;
-        std::string failure_state;
-        std::getline(in, status);
-        in >> completed_rounds;
-        std::getline(in >> std::ws, failure_state);
-
-        const bool ok = (status == "ok") && (completed_rounds >= k_rounds - 1) &&
-                        (failure_state == "success");
-        shared.cleanup();
-        return ok ? 0 : 1;
-    }
-
-    return 0;
+            const bool ok = (status == "ok") && (completed_rounds >= k_rounds - 1) &&
+                            (failure_state == "success");
+            return ok ? 0 : 1;
+        },
+        k_final_barrier.data());
 }

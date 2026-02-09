@@ -5,6 +5,8 @@
 
 #include "test_environment.h"
 
+#include <sintra/sintra.h>
+
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -17,6 +19,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 
@@ -36,6 +39,66 @@ inline bool has_branch_flag(int argc, char* argv[])
         }
     }
     return false;
+}
+
+inline bool has_argv_flag(int argc, char* argv[], std::string_view flag)
+{
+    if (flag.empty()) {
+        return false;
+    }
+    for (int i = 1; i < argc; ++i) {
+        const char* arg = argv[i];
+        if (!arg) {
+            continue;
+        }
+        std::string_view view(arg);
+        if (view == flag) {
+            return true;
+        }
+        if (view.size() > flag.size() + 1 &&
+            view.rfind(flag, 0) == 0 &&
+            view[flag.size()] == '=') {
+            return true;
+        }
+    }
+    return false;
+}
+
+inline std::string get_argv_value(int argc,
+                                  char* argv[],
+                                  std::string_view flag,
+                                  std::string_view default_value = {})
+{
+    if (flag.empty()) {
+        return std::string(default_value);
+    }
+    for (int i = 1; i < argc; ++i) {
+        const char* arg = argv[i];
+        if (!arg) {
+            continue;
+        }
+        std::string_view view(arg);
+        if (view == flag) {
+            if (i + 1 < argc && argv[i + 1]) {
+                return std::string(argv[i + 1]);
+            }
+            break;
+        }
+        if (view.size() > flag.size() + 1 &&
+            view.rfind(flag, 0) == 0 &&
+            view[flag.size()] == '=') {
+            return std::string(view.substr(flag.size() + 1));
+        }
+    }
+    return std::string(default_value);
+}
+
+inline std::string get_binary_path(int argc, char* argv[])
+{
+    if (argc > 0 && argv[0]) {
+        return std::string(argv[0]);
+    }
+    return {};
 }
 
 
@@ -148,6 +211,99 @@ private:
 
 
 // ---------------------------------------------------------------------------
+// Multi-process test runner
+// ---------------------------------------------------------------------------
+
+template <typename Setup,
+          typename Coordinator_action,
+          typename Verifier>
+int run_multi_process_test(int argc,
+                           char* argv[],
+                           const char* env_var,
+                           const char* test_name,
+                           std::vector<sintra::Process_descriptor> processes,
+                           Setup&& setup,
+                           Coordinator_action&& coordinator_action,
+                           Verifier&& verify,
+                           const char* final_barrier = nullptr,
+                           const char* barrier_group = "_sintra_all_processes")
+{
+    const bool is_spawned = sintra::test::has_branch_flag(argc, argv);
+    sintra::test::Shared_directory shared(env_var, test_name);
+
+    if (!is_spawned) {
+        setup(shared.path());
+    }
+
+    sintra::init(argc, argv, processes);
+
+    int coordinator_result = 0;
+    if (!is_spawned) {
+        coordinator_result = coordinator_action(shared.path());
+        if (final_barrier && *final_barrier) {
+            sintra::barrier(final_barrier, barrier_group);
+        }
+    }
+
+    sintra::finalize();
+
+    if (!is_spawned) {
+        if (coordinator_result != 0) {
+            return coordinator_result;
+        }
+        return verify(shared.path());
+    }
+
+    return 0;
+}
+
+template <typename Coordinator_action,
+          typename Verifier>
+int run_multi_process_test(int argc,
+                           char* argv[],
+                           const char* env_var,
+                           const char* test_name,
+                           std::vector<sintra::Process_descriptor> processes,
+                           Coordinator_action&& coordinator_action,
+                           Verifier&& verify,
+                           const char* final_barrier = nullptr,
+                           const char* barrier_group = "_sintra_all_processes")
+{
+    return run_multi_process_test(argc,
+                                  argv,
+                                  env_var,
+                                  test_name,
+                                  std::move(processes),
+                                  [](const std::filesystem::path&) {},
+                                  std::forward<Coordinator_action>(coordinator_action),
+                                  std::forward<Verifier>(verify),
+                                  final_barrier,
+                                  barrier_group);
+}
+
+template <typename Verifier>
+int run_multi_process_test(int argc,
+                           char* argv[],
+                           const char* env_var,
+                           const char* test_name,
+                           std::vector<sintra::Process_descriptor> processes,
+                           Verifier&& verify,
+                           const char* final_barrier = nullptr,
+                           const char* barrier_group = "_sintra_all_processes")
+{
+    return run_multi_process_test(argc,
+                                  argv,
+                                  env_var,
+                                  test_name,
+                                  std::move(processes),
+                                  [](const std::filesystem::path&) { return 0; },
+                                  std::forward<Verifier>(verify),
+                                  final_barrier,
+                                  barrier_group);
+}
+
+
+// ---------------------------------------------------------------------------
 // Custom terminate handler
 // ---------------------------------------------------------------------------
 
@@ -174,6 +330,47 @@ private:
     }
 
     std::abort();
+}
+
+
+// ---------------------------------------------------------------------------
+// Assertions
+// ---------------------------------------------------------------------------
+
+inline void print_test_message(std::string_view prefix, std::string_view message)
+{
+    std::fprintf(stderr,
+                 "%.*s%.*s\n",
+                 static_cast<int>(prefix.size()),
+                 prefix.data(),
+                 static_cast<int>(message.size()),
+                 message.data());
+}
+
+[[noreturn]] inline void fail(std::string_view prefix, std::string_view message)
+{
+    print_test_message(prefix, message);
+    std::exit(1);
+}
+
+inline void expect(bool condition, std::string_view prefix, std::string_view message)
+{
+    if (!condition) {
+        fail(prefix, message);
+    }
+}
+
+inline void require_true(bool condition, std::string_view prefix, std::string_view message)
+{
+    expect(condition, prefix, message);
+}
+
+inline bool assert_true(bool condition, std::string_view prefix, std::string_view message)
+{
+    if (!condition) {
+        print_test_message(prefix, message);
+    }
+    return condition;
 }
 
 
@@ -211,6 +408,66 @@ inline std::vector<std::string> read_lines(const std::filesystem::path& file)
         }
     }
     return lines;
+}
+
+inline bool append_line(const std::filesystem::path& file, std::string_view line)
+{
+    std::ofstream out(file, std::ios::binary | std::ios::app);
+    if (!out) {
+        return false;
+    }
+    out << line << '\n';
+    return static_cast<bool>(out);
+}
+
+inline void append_line_or_throw(const std::filesystem::path& file, std::string_view line)
+{
+    if (!append_line(file, line)) {
+        throw std::runtime_error("failed to open " + file.string() + " for writing");
+    }
+}
+
+inline void append_line_best_effort(const std::filesystem::path& file, std::string_view line)
+{
+    try {
+        const auto path_str = file.string();
+        std::ofstream out(path_str, std::ios::binary | std::ios::app);
+        if (!out) {
+            return;
+        }
+        out << line << '\n';
+    }
+    catch (...) {
+        // Swallow I/O errors in best-effort logging.
+    }
+}
+
+inline bool wait_for_file_until(const std::filesystem::path& path,
+                                std::chrono::steady_clock::time_point deadline,
+                                std::chrono::milliseconds poll = std::chrono::milliseconds(10))
+{
+    while (!std::filesystem::exists(path)) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            return false;
+        }
+        std::this_thread::sleep_for(poll);
+    }
+    return true;
+}
+
+inline bool wait_for_file(const std::filesystem::path& path,
+                          std::chrono::milliseconds timeout = std::chrono::milliseconds(30000),
+                          std::chrono::milliseconds poll = std::chrono::milliseconds(10))
+{
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    return wait_for_file_until(path, deadline, poll);
+}
+
+inline bool wait_for_path(const std::filesystem::path& path,
+                          std::chrono::milliseconds timeout = std::chrono::milliseconds(30000),
+                          std::chrono::milliseconds poll = std::chrono::milliseconds(10))
+{
+    return wait_for_file(path, timeout, poll);
 }
 
 

@@ -12,9 +12,11 @@
 #include <string_view>
 #include <limits>
 #include <thread>
+#include <cerrno>
 
 #ifdef _MSC_VER
 #include <intrin.h>
+#include <crtdbg.h>
 #endif
 
 #ifdef _WIN32
@@ -28,6 +30,7 @@
 
 #ifndef _WIN32
 #include <execinfo.h>
+#include <sys/resource.h>
 #include <unistd.h>
 #endif
 
@@ -152,6 +155,40 @@ inline int get_pid()
     return _getpid();
 #else
     return ::getpid();
+#endif
+}
+
+inline void prepare_for_intentional_crash(const char* context = nullptr)
+{
+#if defined(_MSC_VER)
+    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+#endif
+#if defined(__APPLE__) || defined(__linux__) || defined(__FreeBSD__)
+    struct rlimit current {};
+    if (getrlimit(RLIMIT_CORE, &current) != 0) {
+        if (context) {
+            std::fprintf(stderr,
+                         "[%s] getrlimit(RLIMIT_CORE) failed: %d\n",
+                         context,
+                         errno);
+        }
+        return;
+    }
+
+    if (current.rlim_cur == 0) {
+        return;
+    }
+
+    struct rlimit updated = current;
+    updated.rlim_cur = 0;
+    if (setrlimit(RLIMIT_CORE, &updated) != 0) {
+        if (context) {
+            std::fprintf(stderr,
+                         "[%s] setrlimit(RLIMIT_CORE) failed: %d\n",
+                         context,
+                         errno);
+        }
+    }
 #endif
 }
 

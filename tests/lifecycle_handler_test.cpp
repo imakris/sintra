@@ -34,13 +34,6 @@
 #include <thread>
 #include <vector>
 
-#if defined(_MSC_VER)
-#include <crtdbg.h>
-#endif
-#if defined(__APPLE__)
-#include <sys/resource.h>
-#endif
-
 namespace {
 
 // Worker IDs for correlation
@@ -104,19 +97,6 @@ bool write_signal_file(const std::filesystem::path& path)
     return static_cast<bool>(out);
 }
 
-bool wait_for_signal_file(const std::filesystem::path& path,
-                          std::chrono::milliseconds timeout)
-{
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (std::filesystem::exists(path)) {
-            return true;
-        }
-        std::this_thread::sleep_for(k_poll_interval);
-    }
-    return std::filesystem::exists(path);
-}
-
 // Tracked lifecycle events (only in coordinator)
 std::mutex g_events_mutex;
 std::vector<sintra::process_lifecycle_event> g_events;
@@ -148,22 +128,6 @@ void lifecycle_handler(const sintra::process_lifecycle_event& event)
     g_events_cv.notify_all();
 }
 
-#if defined(__APPLE__)
-void disable_core_dumps_for_intentional_crash()
-{
-    struct rlimit current {};
-    if (getrlimit(RLIMIT_CORE, &current) != 0) {
-        return;
-    }
-    if (current.rlim_cur == 0) {
-        return;
-    }
-    struct rlimit updated = current;
-    updated.rlim_cur = 0;
-    setrlimit(RLIMIT_CORE, &updated);
-}
-#endif
-
 // Worker that exits normally after receiving finish signal file
 int process_normal_worker()
 {
@@ -179,7 +143,7 @@ int process_normal_worker()
     }
 
     const auto finish_signal_path = signal_path(shared_dir, "finish");
-    if (!wait_for_signal_file(finish_signal_path, k_signal_timeout)) {
+    if (!sintra::test::wait_for_file(finish_signal_path, k_signal_timeout, k_poll_interval)) {
         std::fprintf(stderr, "[NORMAL_WORKER] ERROR: Timed out waiting for Finish signal\n");
         return 1;  // Fail explicitly on timeout
     }
@@ -193,11 +157,6 @@ int process_crash_worker()
 {
     std::fprintf(stderr, "[CRASH_WORKER] Starting\n");
 
-#if defined(_MSC_VER)
-    // Suppress the CRT abort dialog
-    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
-#endif
-
     sintra::test::Shared_directory shared("SINTRA_TEST_SHARED_DIR", "lifecycle_handler");
     const auto shared_dir = shared.path();
     if (!write_worker_ready(shared_dir,
@@ -208,16 +167,13 @@ int process_crash_worker()
     }
 
     const auto crash_signal_path = signal_path(shared_dir, "crash");
-    if (!wait_for_signal_file(crash_signal_path, k_signal_timeout)) {
+    if (!sintra::test::wait_for_file(crash_signal_path, k_signal_timeout, k_poll_interval)) {
         std::fprintf(stderr, "[CRASH_WORKER] ERROR: Timed out waiting for Crash signal\n");
         return 1;
     }
 
     std::fprintf(stderr, "[CRASH_WORKER] About to crash via illegal instruction\n");
-
-#if defined(__APPLE__)
-    disable_core_dumps_for_intentional_crash();
-#endif
+    sintra::test::prepare_for_intentional_crash();
 
     sintra::disable_debug_pause_for_current_process();
 
@@ -244,7 +200,7 @@ int process_unpublished_worker()
     }
 
     const auto unpublish_signal_path = signal_path(shared_dir, "unpublish");
-    if (!wait_for_signal_file(unpublish_signal_path, k_signal_timeout)) {
+    if (!sintra::test::wait_for_file(unpublish_signal_path, k_signal_timeout, k_poll_interval)) {
         std::fprintf(stderr, "[UNPUBLISHED_WORKER] ERROR: Timed out waiting for Unpublish signal\n");
         return 1;
     }
@@ -544,30 +500,13 @@ int process_coordinator()
 
 int main(int argc, char* argv[])
 {
-    const bool is_spawned = sintra::test::has_branch_flag(argc, argv);
-    sintra::test::Shared_directory shared("SINTRA_TEST_SHARED_DIR", "lifecycle_handler");
-    const auto shared_dir = shared.path();
-
-    std::vector<sintra::Process_descriptor> processes;
-    processes.emplace_back(process_normal_worker);
-    processes.emplace_back(process_crash_worker);
-    processes.emplace_back(process_unpublished_worker);
-
-    sintra::init(argc, argv, processes);
-
-    int result = 0;
-    if (!is_spawned) {
-        result = process_coordinator();
-    }
-
-    sintra::finalize();
-
-    if (!is_spawned) {
-        // Cleanup
-        shared.cleanup();
-
-        return result;
-    }
-
-    return 0;
+    return sintra::test::run_multi_process_test(
+        argc,
+        argv,
+        "SINTRA_TEST_SHARED_DIR",
+        "lifecycle_handler",
+        {process_normal_worker, process_crash_worker, process_unpublished_worker},
+        [](const std::filesystem::path&) { return process_coordinator(); },
+        [](const std::filesystem::path&) { return 0; },
+        nullptr);
 }

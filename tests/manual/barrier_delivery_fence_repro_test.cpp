@@ -57,25 +57,6 @@ struct Coordinator_state
     std::string failure_detail;
 };
 
-void write_result(const std::filesystem::path& dir,
-                  bool success,
-                  std::size_t iterations_completed,
-                  std::size_t total_messages,
-                  const std::string& failure_reason)
-{
-    std::ofstream out(dir / "delivery_fence_repro_result.txt", std::ios::binary | std::ios::trunc);
-    if (!out) {
-        throw std::runtime_error("failed to open delivery_fence_repro_result.txt for writing");
-    }
-
-    out << (success ? "ok" : "fail") << '\n';
-    out << iterations_completed << '\n';
-    out << total_messages << '\n';
-    if (!success) {
-        out << failure_reason << '\n';
-    }
-}
-
 int coordinator_process()
 {
     using namespace sintra;
@@ -274,7 +255,15 @@ int coordinator_process()
     deactivate_all_slots();
 
     const sintra::test::Shared_directory shared("SINTRA_DELIVERY_FENCE_DIR", "barrier_delivery_fence");
-    write_result(shared.path(), success, iterations_completed, state.total_messages, failure_reason);
+    std::vector<std::string> lines;
+    lines.reserve(success ? 3 : 4);
+    lines.push_back(success ? "ok" : "fail");
+    lines.push_back(std::to_string(iterations_completed));
+    lines.push_back(std::to_string(state.total_messages));
+    if (!success) {
+        lines.push_back(failure_reason);
+    }
+    sintra::test::write_lines(shared.path() / "delivery_fence_repro_result.txt", lines);
     return success ? 0 : 1;
 }
 
