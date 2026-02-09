@@ -230,9 +230,10 @@ jobs:
         shell: bash
         env:
           SINTRA_PRESERVE_SCRATCH: "1"
+          PYTHONUNBUFFERED: "1"
         run: |
           cd tests
-          python run_tests.py --timeout 30 --build-dir ../build --config Release
+          python run_tests.py --timeout 30 --build-dir ../build --config Release --verbose --heartbeat --heartbeat-interval 10
 
       - name: List preserved scratch (failure only)
         if: failure()

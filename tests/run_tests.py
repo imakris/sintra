@@ -15,6 +15,9 @@ Options:
     --build-dir PATH                Path to build directory (default: ../build-ninja2)
     --config CONFIG                 Build configuration Debug/Release (default: Debug)
     --verbose                       Show detailed output for each test run
+    --heartbeat                     Emit periodic heartbeat lines during each test run
+    --heartbeat-interval SECONDS    Seconds between heartbeat reports (default: 10)
+    --only FILTERS                  Comma-separated substrings to filter which tests run
     --preserve-stalled-processes    Keep stalled processes running for debugging (default: terminate)
 """
 
@@ -244,6 +247,29 @@ def _lookup_test_timeout(name: str, default: float) -> float:
         return default
     return max(default, override)
 
+def _parse_test_filter(value: str) -> List[str]:
+    if not value:
+        return []
+    tokens = [token.strip().lower() for token in value.split(',') if token.strip()]
+    return tokens
+
+def _matches_test_filter(name: str, tokens: Sequence[str]) -> bool:
+    if not tokens:
+        return True
+    canonical = _canonical_test_name(name).lower()
+    raw = name.lower()
+    return any(token in canonical or token in raw for token in tokens)
+
+def _filter_active_tests(active_tests: Dict[str, int], tokens: Sequence[str]) -> Dict[str, int]:
+    if not tokens:
+        return active_tests
+    filtered = {
+        name: weight
+        for name, weight in active_tests.items()
+        if _matches_test_filter(name, tokens)
+    }
+    return filtered
+
 
 class TestResult:
     """Result of a single test run"""
@@ -269,12 +295,16 @@ class TestRunner:
     """Manages test execution with timeout and repetition"""
 
     def __init__(self, build_dir: Path, config: str, timeout: float, verbose: bool,
-                 preserve_on_timeout: bool = False):
+                 preserve_on_timeout: bool = False,
+                 heartbeat_always: bool = False,
+                 heartbeat_interval: float = 10.0):
         self.build_dir = build_dir
         self.config = config
         self.timeout = timeout
         self.verbose = verbose
         self.preserve_on_timeout = preserve_on_timeout
+        self._heartbeat_always = heartbeat_always
+        self._heartbeat_interval = max(1.0, float(heartbeat_interval))
         self.platform: PlatformSupport = get_platform_support(verbose=verbose)
         sanitized_config = ''.join(c.lower() if c.isalnum() else '_' for c in config)
         timestamp_ms = int(time.time() * 1000)
@@ -927,6 +957,7 @@ class TestRunner:
             posix_signal: Optional[int] = None
             heartbeat_stop = threading.Event()
             heartbeat_thread: Optional[threading.Thread] = None
+            heartbeat_enabled = self.verbose or self._heartbeat_always
 
             @contextlib.contextmanager
             def stack_capture_context(mark_failure: bool) -> Iterator[bool]:
@@ -1105,11 +1136,16 @@ class TestRunner:
                     if thread.is_alive():
                         print(
                             f"\n{Color.YELLOW}Warning: Log reader thread did not terminate cleanly; "
-                            "closing descriptors to avoid resource leak.{Color.RESET}"
+                            f"closing descriptors to avoid resource leak.{Color.RESET}"
                         )
 
 
             process = subprocess.Popen(invocation.command(), **popen_kwargs)
+            print(
+                f"[TEST START] {invocation.name} run_id={run_id} pid={process.pid} "
+                f"timeout={timeout}s scratch={scratch_dir}",
+                flush=True,
+            )
 
             if hasattr(os, 'getpgid'):
                 try:
@@ -1468,18 +1504,16 @@ class TestRunner:
                 return f"lines={lines_read} idle={idle_str} last={last_line_str}"
 
             def _heartbeat() -> None:
-                if not self.verbose:
-                    # Heartbeat output is only enabled in verbose mode; in
-                    # non-verbose runs this thread stays idle until teardown.
+                if not heartbeat_enabled:
                     heartbeat_stop.wait()
                     return
                 last_report = 0.0
-                while not heartbeat_stop.wait(1.0):
+                while not heartbeat_stop.wait(0.5):
                     if process.poll() is not None:
                         continue
                     elapsed = time.monotonic() - start_monotonic
-                    # First heartbeat after 5s, then every ~10s to avoid log spam.
-                    if elapsed < 5.0 or elapsed - last_report < 10.0:
+                    # First heartbeat after 5s, then every configured interval.
+                    if elapsed < 5.0 or elapsed - last_report < self._heartbeat_interval:
                         continue
                     last_report = elapsed
                     snapshot = _snapshot_reader_states()
@@ -1500,30 +1534,25 @@ class TestRunner:
                         if (self.verbose and process.pid)
                         else {}
                     )
+                    available_memory = self.platform.available_memory_bytes()
+                    free_disk = available_disk_bytes(self.build_dir)
+                    mem_str = format_size(available_memory) if available_memory is not None else "unknown"
+                    disk_str = format_size(free_disk)
+                    msg = (
+                        f"[HEARTBEAT] {invocation.name} run_id={run_id} pid={process.pid} "
+                        f"elapsed={elapsed:.1f}s timeout={timeout}s "
+                        f"stdout={{ {stdout_summary} }} stderr={{ {stderr_summary} }} "
+                        f"stdout_len={stdout_len} stderr_len={stderr_len} "
+                        f"mem={mem_str} disk_free={disk_str}"
+                    )
+                    if stderr_tail:
+                        msg += f" stderr_tail={stderr_tail}"
                     if self.verbose:
-                        msg = (
-                            f"[HEARTBEAT] {invocation.name} run_id={run_id} pid={process.pid} "
-                            f"elapsed={elapsed:.1f}s timeout={timeout}s "
-                            f"stdout={{ {stdout_summary} }} stderr={{ {stderr_summary} }} "
-                            f"stdout_len={stdout_len} stderr_len={stderr_len} "
-                        )
-                        if stderr_tail:
-                            msg += f"stderr_tail={stderr_tail} "
-                        msg += f"descendants={descendants} scratch={scratch_dir}"
-                        print(msg, flush=True)
-                        if details:
-                            for pid, desc in details.items():
-                                print(f"[HEARTBEAT]    pid={pid} {desc}", flush=True)
-                    else:
-                        msg = (
-                            f"[HEARTBEAT] {invocation.name} run_id={run_id} pid={process.pid} "
-                            f"elapsed={elapsed:.1f}s timeout={timeout}s "
-                            f"stdout={{ {stdout_summary} }} stderr={{ {stderr_summary} }} "
-                            f"stdout_len={stdout_len} stderr_len={stderr_len}"
-                        )
-                        if stderr_tail:
-                            msg += f" stderr_tail={stderr_tail}"
-                        print(msg, flush=True)
+                        msg += f" descendants={descendants} scratch={scratch_dir}"
+                    print(msg, flush=True)
+                    if self.verbose and details:
+                        for pid, desc in details.items():
+                            print(f"[HEARTBEAT]    pid={pid} {desc}", flush=True)
 
             heartbeat_thread = threading.Thread(
                 target=_heartbeat,
@@ -1807,6 +1836,12 @@ class TestRunner:
                         error_msg = capture_note
 
                 result_success = success
+                print(
+                    f"[TEST END] {invocation.name} run_id={run_id} pid={process.pid} "
+                    f"exit={process.returncode} duration={duration:.2f}s "
+                    f"success={success} hang={hang_detected}",
+                    flush=True,
+                )
                 return TestResult(
                     success=success,
                     duration=duration,
@@ -1816,6 +1851,11 @@ class TestRunner:
 
             except subprocess.TimeoutExpired as e:
                 duration = timeout
+                print(
+                    f"[TEST TIMEOUT] {invocation.name} run_id={run_id} pid={process.pid} "
+                    f"timeout={timeout}s scratch={scratch_dir}",
+                    flush=True,
+                )
 
                 if self.preserve_on_timeout:
                     print(f"\n{Color.RED}TIMEOUT: Process exceeded timeout of {timeout}s (PID {process.pid}). Preserving for debugging as requested.{Color.RESET}")
@@ -2266,6 +2306,12 @@ def main():
                         help='Build configuration (default: Debug)')
     parser.add_argument('--verbose', action='store_true',
                         help='Show detailed output for each test run')
+    parser.add_argument('--heartbeat', action='store_true',
+                        help='Emit periodic heartbeat lines during each test run')
+    parser.add_argument('--heartbeat-interval', type=float, default=10.0,
+                        help='Seconds between heartbeat reports (default: 10)')
+    parser.add_argument('--only', type=str, default='',
+                        help='Comma-separated substrings to filter which tests run')
     parser.add_argument('--preserve-stalled-processes', action='store_true',
                         help='Leave stalled test processes running for debugging instead of terminating them')
 
@@ -2292,6 +2338,18 @@ def main():
         print(f"Please ensure tests/active_tests.txt exists and contains test entries")
         return 1
 
+    filter_tokens = _parse_test_filter(args.only)
+    if filter_tokens:
+        filtered = _filter_active_tests(active_tests, filter_tokens)
+        print(
+            f"Test filter: {', '.join(filter_tokens)} -> {len(filtered)} test(s)",
+            flush=True,
+        )
+        active_tests = filtered
+        if not active_tests:
+            print(f"{Color.RED}No tests left after applying --only filter{Color.RESET}")
+            return 1
+
     compiler_metadata = collect_compiler_metadata(build_dir)
 
     print(f"Build directory: {build_dir}")
@@ -2303,7 +2361,13 @@ def main():
     print("=" * 70)
 
     preserve_on_timeout = args.preserve_stalled_processes
-    runner = TestRunner(build_dir, args.config, args.timeout, args.verbose, preserve_on_timeout)
+    runner = TestRunner(build_dir,
+                        args.config,
+                        args.timeout,
+                        args.verbose,
+                        preserve_on_timeout,
+                        heartbeat_always=args.heartbeat,
+                        heartbeat_interval=args.heartbeat_interval)
     try:
         test_suites, active_tests = runner.find_test_suites(active_tests)
 
