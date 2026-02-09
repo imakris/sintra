@@ -498,22 +498,18 @@ private:
 
     impl& ensure_initialized()
     {
-        while (true) {
-            uint8_t current = m_state;
+        for (;;) {
+            const uint8_t current = m_state.load(std::memory_order_acquire);
             if (current == state_initialized) {
                 return access();
             }
             if (current == state_uninitialized) {
-                if (m_state.compare_exchange_strong(current, state_initializing)) {
-                    try {
-                        new (&m_storage) impl();
-                        m_state = state_initialized;
-                        return access();
-                    }
-                    catch (...) {
-                        m_state = state_uninitialized;
-                        throw;
-                    }
+                uint8_t expected = state_uninitialized;
+                if (m_state.compare_exchange_strong(expected, state_initializing,
+                                                    std::memory_order_acq_rel)) {
+                    new (&m_storage) impl();
+                    m_state.store(state_initialized, std::memory_order_release);
+                    return access();
                 }
             }
             std::this_thread::yield();
