@@ -5,6 +5,7 @@
 
 #include "config.h"
 #include "globals.h"
+#include "std_imports.h"
 
 #include <atomic>
 #include <cassert>
@@ -14,9 +15,6 @@
 
 
 namespace sintra {
-
-using std::atomic;
-
 
 // type id
 //========

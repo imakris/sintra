@@ -5,6 +5,7 @@
 
 #include "../globals.h"
 #include "../messaging/message.h"
+#include "../std_imports.h"
 
 #include <atomic>
 #include <condition_variable>
@@ -14,13 +15,6 @@
 #include <thread>
 namespace sintra {
 
-
-using std::atomic;
-using std::atomic_flag;
-using std::string;
-using std::mutex;
-using std::condition_variable;
-using std::thread;
 
 struct Outstanding_rpc_control;
 struct Process_message_reader;

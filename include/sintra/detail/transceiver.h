@@ -7,6 +7,7 @@
 #include "id_types.h"
 #include "messaging/message.h"
 #include "ipc/spinlocked_containers.h"
+#include "std_imports.h"
 
 #include <condition_variable>
 #include <functional>
@@ -19,20 +20,6 @@
 
 
 namespace sintra {
-
-
-using std::condition_variable;
-using std::function;
-using std::is_base_of;
-using std::is_const;
-using std::is_reference;
-using std::list;
-using std::map;
-using std::mutex;
-using std::recursive_mutex;
-using std::remove_reference;
-using std::string;
-using std::unordered_map;
 
 
  //////////////////////////////////////////////////////////////////////////

@@ -8,6 +8,7 @@
 #include "process/dispatch_wait_guard.h"
 #include "logging.h"
 #include "transceiver.h"
+#include "std_imports.h"
 
 #include <cassert>
 #include <cstring>
@@ -26,19 +27,6 @@
 
 
 namespace sintra {
-
-
-using std::enable_if;
-using std::function;
-using std::make_pair;
-using std::remove_reference;
-using std::runtime_error;
-using std::shared_ptr;
-using std::string;
-using std::is_same_v;
-using std::is_base_of_v;
-using std::unique_lock;
-
 
 
 template <typename/* = void*/>
@@ -1135,4 +1123,3 @@ Transceiver::export_rpc(RT(OBJECT_T::* /*resolution dummy arg*/)(Args...))
 
 
 } // namespace sintra
-

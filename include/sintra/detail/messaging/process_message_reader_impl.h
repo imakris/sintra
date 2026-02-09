@@ -6,6 +6,7 @@
 #include "../logging.h"
 #include "../transceiver_impl.h"
 #include "../tls_post_handler.h"
+#include "../std_imports.h"
 #include <atomic>
 #include <condition_variable>
 #include <cstdlib>
@@ -22,10 +23,6 @@
 namespace sintra {
 
 void install_signal_handler();
-
-
-using std::thread;
-using std::function;
 
 
 inline bool thread_local tl_is_req_thread = false;

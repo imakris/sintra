@@ -4,6 +4,7 @@
 #pragma once
 
 #include "config.h"
+#include "std_imports.h"
 
 #include <algorithm>
 #include <array>
@@ -42,11 +43,6 @@
 
 namespace sintra {
 
-
-using std::function;
-using std::shared_ptr;
-using std::mutex;
-using std::lock_guard;
 
 struct Adaptive_function
 {

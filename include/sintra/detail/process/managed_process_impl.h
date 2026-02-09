@@ -2034,7 +2034,6 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
     assert(!branch_vector.empty());
 
     using namespace sintra;
-    using std::to_string;
 
     // Variables for error tracking (used by coordinator)
     std::unordered_set<instance_id_type> successfully_spawned;
@@ -2080,12 +2079,12 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
             auto& options = it->sintra_options;
             if (it->entry.m_binary_name.empty()) {
                 it->entry.m_binary_name = m_binary_name;
-                options.insert(options.end(), { "--branch_index", to_string(i) });
+                options.insert(options.end(), { "--branch_index", std::to_string(i) });
             }
             options.insert(options.end(), {
-                "--swarm_id",       to_string(m_swarm_id),
-                "--instance_id",    to_string(it->assigned_instance_id = make_process_instance_id()),
-                "--coordinator_id", to_string(s_coord_id)
+                "--swarm_id",       std::to_string(m_swarm_id),
+                "--instance_id",    std::to_string(it->assigned_instance_id = make_process_instance_id()),
+                "--coordinator_id", std::to_string(s_coord_id)
             });
         }
 

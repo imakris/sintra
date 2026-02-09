@@ -7,6 +7,7 @@
 #include "../process/coordinator.h"
 #include "../process/managed_process.h"
 #include "../process/dispatch_wait_guard.h"
+#include "../std_imports.h"
 
 #include <algorithm>
 #include <cassert>
@@ -20,13 +21,6 @@
 
 
 namespace sintra {
-
-
-using std::lock_guard;
-using std::mutex;
-using std::string;
-using std::unique_lock;
-
 
 
 // EXPORTED EXCLUSIVELY FOR RPC
@@ -1147,4 +1141,3 @@ void Coordinator::mark_initialization_complete(instance_id_type process_iid)
 
 
 } // sintra
-

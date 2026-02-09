@@ -13,6 +13,7 @@
 #include "../ipc/spinlocked_containers.h"
 #include "../transceiver.h"
 #include "../messaging/call_function_with_message_args.h"
+#include "../std_imports.h"
 
 #include <algorithm>
 #include <atomic>
@@ -42,18 +43,6 @@
 
 
 namespace sintra {
-
-
-using std::atomic_flag;
-using std::condition_variable;
-using std::deque;
-using std::function;
-using std::list;
-using std::map;
-using std::mutex;
-using std::string;
-using std::thread;
-using std::vector;
 
 
 inline
