@@ -21,6 +21,8 @@
 #include <thread>
 #include <utility>
 #include <vector>
+#include <cerrno>
+#include <cstring>
 
 
 namespace sintra::test {
@@ -369,6 +371,24 @@ inline bool assert_true(bool condition, std::string_view prefix, std::string_vie
 {
     if (!condition) {
         print_test_message(prefix, message);
+    }
+    return condition;
+}
+
+inline bool assert_true_errno(bool condition, std::string_view prefix, std::string_view message)
+{
+    if (!condition) {
+        const int saved_errno = errno;
+        std::fprintf(stderr,
+                     "%.*s%.*s",
+                     static_cast<int>(prefix.size()),
+                     prefix.data(),
+                     static_cast<int>(message.size()),
+                     message.data());
+        if (saved_errno != 0) {
+            std::fprintf(stderr, " (errno=%d %s)", saved_errno, std::strerror(saved_errno));
+        }
+        std::fprintf(stderr, "\n");
     }
     return condition;
 }

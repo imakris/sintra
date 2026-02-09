@@ -78,18 +78,7 @@ struct Override_guard {
     } previous{};
 };
 
-bool assert_true(bool condition, const std::string& message)
-{
-    if (!condition) {
-        int saved_errno = errno;
-        std::cerr << "spawn_detached_test: " << message;
-        if (saved_errno != 0) {
-            std::cerr << " (errno=" << saved_errno << " " << std::strerror(saved_errno) << ")";
-        }
-        std::cerr << std::endl;
-    }
-    return condition;
-}
+constexpr std::string_view k_failure_prefix = "spawn_detached_test: ";
 
 namespace {
 
@@ -185,7 +174,7 @@ bool spawn_detached_with_args(const char* prog, const char* const* args)
 bool spawn_should_fail_due_to_fd_exhaustion()
 {
     const char* true_prog = locate_true_binary();
-    if (!assert_true(true_prog != nullptr, "failed to locate executable for 'true'")) {
+    if (!sintra::test::assert_true_errno(true_prog != nullptr, k_failure_prefix, "failed to locate executable for 'true'")) {
         return false;
     }
 
@@ -217,9 +206,9 @@ bool spawn_should_fail_due_to_fd_exhaustion()
     }
     ::close(sentinel);
 
-    return assert_true(exhausted, "failed to exhaust file descriptors for test") &&
-           assert_true(!result, "spawn_detached should fail when the pipe cannot be created") &&
-           assert_true(sentinel_ok, "existing descriptors must remain untouched");
+    return sintra::test::assert_true_errno(exhausted, k_failure_prefix, "failed to exhaust file descriptors for test") &&
+           sintra::test::assert_true_errno(!result, k_failure_prefix, "spawn_detached should fail when the pipe cannot be created") &&
+           sintra::test::assert_true_errno(sentinel_ok, k_failure_prefix, "existing descriptors must remain untouched");
 }
 
 int failing_pipe2(int[2], int)
@@ -231,14 +220,14 @@ int failing_pipe2(int[2], int)
 bool spawn_should_fail_when_pipe2_injected_failure()
 {
     const char* true_prog = locate_true_binary();
-    if (!assert_true(true_prog != nullptr, "failed to locate executable for 'true'")) {
+    if (!sintra::test::assert_true_errno(true_prog != nullptr, k_failure_prefix, "failed to locate executable for 'true'")) {
         return false;
     }
 
     Override_guard guard(Override_guard::Kind::Pipe2, reinterpret_cast<void*>(&failing_pipe2));
     const char* const args[] = {true_prog, nullptr};
     bool result = spawn_detached_with_args(true_prog, args);
-    return assert_true(!result, "spawn_detached must report failure when pipe2 fails");
+    return sintra::test::assert_true_errno(!result, k_failure_prefix, "spawn_detached must report failure when pipe2 fails");
 }
 
 ssize_t flaky_write(int fd, const void* buf, size_t count)
@@ -264,7 +253,7 @@ ssize_t flaky_read(int fd, void* buf, size_t count)
 bool spawn_succeeds_under_eintr_pressure()
 {
     const char* true_prog = locate_true_binary();
-    if (!assert_true(true_prog != nullptr, "failed to locate executable for 'true'")) {
+    if (!sintra::test::assert_true_errno(true_prog != nullptr, k_failure_prefix, "failed to locate executable for 'true'")) {
         return false;
     }
 
@@ -281,7 +270,7 @@ bool spawn_succeeds_under_eintr_pressure()
                   << ", exec_errno=" << last_debug_info.exec_errno
                   << std::endl;
     }
-    return assert_true(result, "spawn_detached must retry on EINTR and eventually succeed");
+    return sintra::test::assert_true_errno(result, k_failure_prefix, "spawn_detached must retry on EINTR and eventually succeed");
 }
 
 pid_t waitpid_returns_echild(pid_t, int*, int)
@@ -293,7 +282,7 @@ pid_t waitpid_returns_echild(pid_t, int*, int)
 bool spawn_succeeds_when_waitpid_reports_echild()
 {
     const char* true_prog = locate_true_binary();
-    if (!assert_true(true_prog != nullptr, "failed to locate executable for 'true'")) {
+    if (!sintra::test::assert_true_errno(true_prog != nullptr, k_failure_prefix, "failed to locate executable for 'true'")) {
         return false;
     }
 
@@ -302,9 +291,9 @@ bool spawn_succeeds_when_waitpid_reports_echild()
     errno = 0;
     bool result = spawn_detached_with_args(true_prog, args);
     int saved_errno = errno;
-    return assert_true(result,
+    return sintra::test::assert_true_errno(result, k_failure_prefix,
                        "spawn_detached must tolerate waitpid reporting ECHILD after a successful exec") &&
-           assert_true(saved_errno == 0,
+           sintra::test::assert_true_errno(saved_errno == 0, k_failure_prefix,
                        "spawn_detached must clear errno when waitpid reports ECHILD after success");
 }
 
@@ -317,14 +306,14 @@ ssize_t broken_write(int, const void*, size_t)
 bool spawn_fails_when_grandchild_cannot_report_readiness()
 {
     const char* true_prog = locate_true_binary();
-    if (!assert_true(true_prog != nullptr, "failed to locate executable for 'true'")) {
+    if (!sintra::test::assert_true_errno(true_prog != nullptr, k_failure_prefix, "failed to locate executable for 'true'")) {
         return false;
     }
 
     Override_guard guard(Override_guard::Kind::Write, reinterpret_cast<void*>(&broken_write));
     const char* const args[] = {true_prog, nullptr};
     bool result = spawn_detached_with_args(true_prog, args);
-    return assert_true(!result, "write failures must be reported as spawn failures");
+    return sintra::test::assert_true_errno(!result, k_failure_prefix, "write failures must be reported as spawn failures");
 }
 
 bool spawn_reports_exec_failure()
@@ -333,14 +322,14 @@ bool spawn_reports_exec_failure()
     errno = 0;
     bool result = spawn_detached_with_args("/definitely/not/a/program", args);
     int saved_errno = errno;
-    return assert_true(!result, "spawn_detached must fail when execv cannot launch the target") &&
-           assert_true(saved_errno == ENOENT, "spawn_detached must surface the exec errno");
+    return sintra::test::assert_true_errno(!result, k_failure_prefix, "spawn_detached must fail when execv cannot launch the target") &&
+           sintra::test::assert_true_errno(saved_errno == ENOENT, k_failure_prefix, "spawn_detached must surface the exec errno");
 }
 
 bool spawn_detached_sets_env_overrides()
 {
     const char* shell = locate_shell_binary();
-    if (!assert_true(shell != nullptr, "failed to locate /bin/sh for env override test")) {
+    if (!sintra::test::assert_true_errno(shell != nullptr, k_failure_prefix, "failed to locate /bin/sh for env override test")) {
         return false;
     }
 
@@ -355,7 +344,7 @@ bool spawn_detached_sets_env_overrides()
     options.env_overrides.push_back("SINTRA_ENV_OVERRIDE_TEST=spawn_detached_env_value");
 
     bool result = sintra::spawn_detached(options);
-    if (!assert_true(result, "spawn_detached failed to launch shell with env override")) {
+    if (!sintra::test::assert_true_errno(result, k_failure_prefix, "spawn_detached failed to launch shell with env override")) {
         return false;
     }
 
@@ -367,18 +356,18 @@ bool spawn_detached_sets_env_overrides()
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
-    if (!assert_true(std::filesystem::exists(output_path), "env override output file not created")) {
+    if (!sintra::test::assert_true_errno(std::filesystem::exists(output_path), k_failure_prefix, "env override output file not created")) {
         return false;
     }
 
     std::ifstream in(output_path, std::ios::binary);
-    if (!assert_true(in.good(), "failed to read env override output file")) {
+    if (!sintra::test::assert_true_errno(in.good(), k_failure_prefix, "failed to read env override output file")) {
         return false;
     }
 
     std::string content;
     std::getline(in, content);
-    return assert_true(content == "spawn_detached_env_value", "env override value mismatch");
+    return sintra::test::assert_true_errno(content == "spawn_detached_env_value", k_failure_prefix, "env override value mismatch");
 }
 
 } // namespace

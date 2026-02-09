@@ -1,20 +1,16 @@
 #include <sintra/detail/utility.h>
 #include <sintra/detail/ipc/spinlocked_containers.h>
 
+#include "test_utils.h"
+
 #include <cstdio>
 #include <functional>
-#include <stdexcept>
 #include <string>
 #include <vector>
 
 namespace {
 
-void require_true(bool condition, const std::string& message)
-{
-    if (!condition) {
-        throw std::runtime_error(message);
-    }
-}
+constexpr std::string_view k_failure_prefix = "utility_test: ";
 
 void test_adaptive_function_basic()
 {
@@ -24,10 +20,14 @@ void test_adaptive_function_basic()
     });
 
     af();
-    require_true(call_count == 1, "Adaptive_function should call the function");
+    sintra::test::require_true(call_count == 1,
+                               k_failure_prefix,
+                               "Adaptive_function should call the function");
 
     af();
-    require_true(call_count == 2, "Adaptive_function should be callable multiple times");
+    sintra::test::require_true(call_count == 2,
+                               k_failure_prefix,
+                               "Adaptive_function should be callable multiple times");
 }
 
 void test_adaptive_function_copy_constructor()
@@ -40,10 +40,14 @@ void test_adaptive_function_copy_constructor()
     sintra::Adaptive_function af2(af1);
 
     af1();
-    require_true(call_count == 1, "Original should work after copy");
+    sintra::test::require_true(call_count == 1,
+                               k_failure_prefix,
+                               "Original should work after copy");
 
     af2();
-    require_true(call_count == 2, "Copy should work");
+    sintra::test::require_true(call_count == 2,
+                               k_failure_prefix,
+                               "Copy should work");
 }
 
 void test_adaptive_function_copy_assignment()
@@ -57,11 +61,17 @@ void test_adaptive_function_copy_assignment()
     af2 = af1;
 
     af1();
-    require_true(count1 == 1, "Original should work after assignment");
+    sintra::test::require_true(count1 == 1,
+                               k_failure_prefix,
+                               "Original should work after assignment");
 
     af2();
-    require_true(count1 == 2, "Assigned function should call original's function");
-    require_true(count2 == 0, "Original function of af2 should not be called");
+    sintra::test::require_true(count1 == 2,
+                               k_failure_prefix,
+                               "Assigned function should call original's function");
+    sintra::test::require_true(count2 == 0,
+                               k_failure_prefix,
+                               "Original function of af2 should not be called");
 }
 
 void test_cstring_vector_from_lvalue()
@@ -69,13 +79,23 @@ void test_cstring_vector_from_lvalue()
     std::vector<std::string> strings = {"hello", "world", "test"};
     sintra::cstring_vector csv(strings);
 
-    require_true(csv.size() == 3, "cstring_vector size should match input");
+    sintra::test::require_true(csv.size() == 3,
+                               k_failure_prefix,
+                               "cstring_vector size should match input");
 
     const char* const* data = csv.v();
-    require_true(data != nullptr, "cstring_vector data should not be null");
-    require_true(std::string(data[0]) == "hello", "First element should match");
-    require_true(std::string(data[1]) == "world", "Second element should match");
-    require_true(std::string(data[2]) == "test", "Third element should match");
+    sintra::test::require_true(data != nullptr,
+                               k_failure_prefix,
+                               "cstring_vector data should not be null");
+    sintra::test::require_true(std::string(data[0]) == "hello",
+                               k_failure_prefix,
+                               "First element should match");
+    sintra::test::require_true(std::string(data[1]) == "world",
+                               k_failure_prefix,
+                               "Second element should match");
+    sintra::test::require_true(std::string(data[2]) == "test",
+                               k_failure_prefix,
+                               "Third element should match");
 }
 
 void test_cstring_vector_from_rvalue()
@@ -83,12 +103,20 @@ void test_cstring_vector_from_rvalue()
     std::vector<std::string> strings = {"foo", "bar"};
     sintra::cstring_vector csv(std::move(strings));
 
-    require_true(csv.size() == 2, "cstring_vector size should match input");
+    sintra::test::require_true(csv.size() == 2,
+                               k_failure_prefix,
+                               "cstring_vector size should match input");
 
     const char* const* data = csv.v();
-    require_true(data != nullptr, "cstring_vector data should not be null");
-    require_true(std::string(data[0]) == "foo", "First element should match");
-    require_true(std::string(data[1]) == "bar", "Second element should match");
+    sintra::test::require_true(data != nullptr,
+                               k_failure_prefix,
+                               "cstring_vector data should not be null");
+    sintra::test::require_true(std::string(data[0]) == "foo",
+                               k_failure_prefix,
+                               "First element should match");
+    sintra::test::require_true(std::string(data[1]) == "bar",
+                               k_failure_prefix,
+                               "Second element should match");
 }
 
 void test_cstring_vector_empty()
@@ -96,7 +124,9 @@ void test_cstring_vector_empty()
     std::vector<std::string> empty;
     sintra::cstring_vector csv(empty);
 
-    require_true(csv.size() == 0, "Empty cstring_vector should have size 0");
+    sintra::test::require_true(csv.size() == 0,
+                               k_failure_prefix,
+                               "Empty cstring_vector should have size 0");
 }
 
 #ifndef _WIN32
@@ -104,9 +134,15 @@ void test_env_key_of()
 {
     using sintra::detail::env_key_of;
 
-    require_true(env_key_of("FOO=bar") == "FOO", "env_key_of should split at '='");
-    require_true(env_key_of("NOEQ") == "NOEQ", "env_key_of should return whole string when no '='");
-    require_true(env_key_of("A=B=C") == "A", "env_key_of should split at first '='");
+    sintra::test::require_true(env_key_of("FOO=bar") == "FOO",
+                               k_failure_prefix,
+                               "env_key_of should split at '='");
+    sintra::test::require_true(env_key_of("NOEQ") == "NOEQ",
+                               k_failure_prefix,
+                               "env_key_of should return whole string when no '='");
+    sintra::test::require_true(env_key_of("A=B=C") == "A",
+                               k_failure_prefix,
+                               "env_key_of should split at first '='");
 }
 
 void test_build_environment_entries()
@@ -120,7 +156,9 @@ void test_build_environment_entries()
     setenv(key.c_str(), "ORIGINAL", 1);
 
     auto env_before = build_environment_entries({});
-    require_true(!env_before.empty(), "build_environment_entries should return environment entries");
+    sintra::test::require_true(!env_before.empty(),
+                               k_failure_prefix,
+                               "build_environment_entries should return environment entries");
 
     auto env_after = build_environment_entries({override_entry});
 
@@ -135,8 +173,12 @@ void test_build_environment_entries()
         }
     }
 
-    require_true(match_count == 1, "override should replace existing entry exactly once");
-    require_true(found_override, "override entry should be present");
+    sintra::test::require_true(match_count == 1,
+                               k_failure_prefix,
+                               "override should replace existing entry exactly once");
+    sintra::test::require_true(found_override,
+                               k_failure_prefix,
+                               "override entry should be present");
 }
 #endif
 
@@ -164,10 +206,18 @@ void test_spinlocked_umap_scoped_erase()
 
     // Verify the entry was erased
     auto scoped = map.scoped();
-    require_true(scoped.get().size() == 2, "Map should have 2 entries after erase");
-    require_true(scoped.get().find("two") == scoped.get().end(), "'two' should be erased");
-    require_true(scoped.get().find("one") != scoped.get().end(), "'one' should remain");
-    require_true(scoped.get().find("three") != scoped.get().end(), "'three' should remain");
+    sintra::test::require_true(scoped.get().size() == 2,
+                               k_failure_prefix,
+                               "Map should have 2 entries after erase");
+    sintra::test::require_true(scoped.get().find("two") == scoped.get().end(),
+                               k_failure_prefix,
+                               "'two' should be erased");
+    sintra::test::require_true(scoped.get().find("one") != scoped.get().end(),
+                               k_failure_prefix,
+                               "'one' should remain");
+    sintra::test::require_true(scoped.get().find("three") != scoped.get().end(),
+                               k_failure_prefix,
+                               "'three' should remain");
 }
 
 } // namespace
