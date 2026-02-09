@@ -1669,18 +1669,24 @@ void Managed_process::init(int argc, const char* const* argv)
             function<void()> next_call;
             {
                 lock_guard<mutex> lock(m_availability_mutex);
+                const bool has_call = m_queued_availability_calls.with_lock(
+                    [&](auto& queued_calls) {
+                        auto it = queued_calls.find(tn);
+                        if (it == queued_calls.end()) {
+                            return false;
+                        }
 
-                auto it = m_queued_availability_calls.find(tn);
-                if (it == m_queued_availability_calls.end()) {
+                        if (it->second.empty()) {
+                            queued_calls.erase(it);
+                            return false;
+                        }
+
+                        next_call = it->second.front();
+                        return true;
+                    });
+                if (!has_call) {
                     return;
                 }
-
-                if (it->second.empty()) {
-                    m_queued_availability_calls.erase(it);
-                    return;
-                }
-
-                next_call = it->second.front();
             }
 
             // each function call, which is a lambda defined inside
@@ -2328,13 +2334,17 @@ function<void()> Managed_process::call_on_availability(Named_instance<T> transce
     tn_type tn = { get_type_id<T>(), std::move(transceiver_name) };
 
     // insert an empty function, in order to be able to capture the iterator within it
-    auto& call_list = m_queued_availability_calls[tn];
-    call_list.emplace_back();
-    auto f_it = std::prev(call_list.end());
+    using Call_list_iterator = list<function<void()>>::iterator;
+    Call_list_iterator f_it = m_queued_availability_calls.with_lock(
+        [&](auto& queued_calls) {
+            auto& call_list = queued_calls[tn];
+            call_list.emplace_back();
+            return std::prev(call_list.end());
+        });
 
     struct availability_call_state {
         bool active = true;
-        decltype(call_list.begin()) iterator;
+        Call_list_iterator iterator;
     };
 
     auto state = std::make_shared<availability_call_state>();
@@ -2346,21 +2356,31 @@ function<void()> Managed_process::call_on_availability(Named_instance<T> transce
             return false;
         }
 
-        auto queue_it = m_queued_availability_calls.find(tn);
-        if (queue_it == m_queued_availability_calls.end()) {
+        bool completed = false;
+        bool found_queue = false;
+        m_queued_availability_calls.with_lock([&](auto& queued_calls) {
+            auto queue_it = queued_calls.find(tn);
+            if (queue_it == queued_calls.end()) {
+                return;
+            }
+
+            found_queue = true;
+            auto call_it = state->iterator;
+            queue_it->second.erase(call_it);
+            if (erase_empty_entry && queue_it->second.empty()) {
+                queued_calls.erase(queue_it);
+            }
+            completed = true;
+        });
+
+        if (!found_queue) {
             state->active = false;
             state->iterator = decltype(state->iterator){};
             return false;
         }
-
-        auto call_it = state->iterator;
-        queue_it->second.erase(call_it);
-        if (erase_empty_entry && queue_it->second.empty()) {
-            m_queued_availability_calls.erase(queue_it);
-        }
         state->active = false;
         state->iterator = decltype(state->iterator){};
-        return true;
+        return completed;
     };
 
     // this is the abort call
