@@ -48,9 +48,8 @@ public:
     }
 
     file_mapping(const std::string& filename, map_mode_t mode)
-    {
-        open_impl(std::filesystem::path(filename), mode);
-    }
+        : file_mapping(std::filesystem::path(filename), mode)
+    {}
 
     file_mapping(const std::filesystem::path& filename, map_mode_t mode)
     {
