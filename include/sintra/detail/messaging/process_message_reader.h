@@ -22,9 +22,6 @@ using std::thread;
 struct Outstanding_rpc_control;
 struct Process_message_reader;
 
-// Returns true when called from the request reader thread of this process.
-bool on_request_reader_thread();
-
 // Note: this should be a specialization of Message_reader (which does not exist), but for the sake
 // of simplicity and code coverage, the Message_reader was not implemented.
 // The idea is that a Message_reader would support the exchange of messages between individual

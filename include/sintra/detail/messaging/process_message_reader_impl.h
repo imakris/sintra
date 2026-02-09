@@ -33,11 +33,6 @@ void install_signal_handler();
 
 inline bool thread_local tl_is_req_thread = false;
 
-inline bool on_request_reader_thread()
-{
-    return tl_is_req_thread;
-}
-
 inline void dispatch_event_handlers(
     Message_prefix& message,
     std::initializer_list<instance_id_type> scope_ids,

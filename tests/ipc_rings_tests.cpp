@@ -373,6 +373,44 @@ TEST_CASE(test_wait_for_new_data)
     }
 }
 
+TEST_CASE(test_unblock_local_returns_empty)
+{
+    Temp_ring_dir tmp("unblock_local");
+    size_t ring_elements = pick_ring_elements<int>(128);
+    sintra::Ring_W<int> writer(tmp.str(), "ring_data", ring_elements);
+    auto reader = std::make_shared<sintra::Ring_R<int>>(tmp.str(), "ring_data", ring_elements, (ring_elements * 3) / 4);
+
+    std::atomic<bool> ready{false};
+    sintra::Range<int> result{};
+    std::exception_ptr thread_error;
+
+    std::thread reader_thread([&]() {
+        try {
+            auto initial = reader->start_reading();
+            ASSERT_EQ(static_cast<size_t>(initial.end - initial.begin), size_t(0));
+            ready = true;
+            result = reader->wait_for_new_data();
+            reader->done_reading();
+        }
+        catch (...) {
+            thread_error = std::current_exception();
+        }
+    });
+
+    while (!ready) {
+        std::this_thread::sleep_for(1ms);
+    }
+
+    reader->unblock_local();
+
+    reader_thread.join();
+    if (thread_error) {
+        std::rethrow_exception(thread_error);
+    }
+
+    ASSERT_TRUE(result.begin == nullptr || result.begin == result.end);
+}
+
 TEST_CASE(test_reader_eviction_does_not_underflow_octile_counter)
 {
     Temp_ring_dir tmp("guard_underflow");
