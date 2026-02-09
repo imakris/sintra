@@ -14,6 +14,7 @@
 #include <condition_variable>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -26,6 +27,7 @@ namespace sintra {
 using std::condition_variable;
 using std::map;
 using std::mutex;
+using std::set;
 using std::shared_ptr;
 using std::string;
 using std::unordered_map;
