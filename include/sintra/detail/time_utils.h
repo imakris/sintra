@@ -71,6 +71,11 @@ inline uint64_t monotonic_now_ns() noexcept
 #endif
 }
 
+inline double get_wtime() noexcept
+{
+    return static_cast<double>(monotonic_now_ns()) * 1e-9;
+}
+
 #if defined(__APPLE__)
 inline void precision_sleep_for(std::chrono::duration<double> duration)
 {
