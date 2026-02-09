@@ -113,6 +113,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstddef>       // std::byte
+#include <cstdio>
 #include <cstring>       // std::strlen
 #include <cstdint>
 #include <filesystem>
