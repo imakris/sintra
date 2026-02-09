@@ -566,7 +566,7 @@ private:
     instance_id_type            m_instance_id       = invalid_instance_id;
     bool                        m_published         = false;
 
-    spinlocked_umap<string, instance_id_type>::iterator m_cache_iterator;
+    string                      m_cache_name;
 
 
 protected:

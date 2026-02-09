@@ -73,7 +73,10 @@ void Transceiver::construct(const string& name/* = ""*/, uint64_t instance_id/* 
         throw runtime_error("Failed to create a Transceiver instance id.");
     }
 
-    s_mproc->m_local_pointer_of_instance_id[m_instance_id] = this;
+    {
+        auto scoped_map = s_mproc->m_local_pointer_of_instance_id.scoped();
+        scoped_map.get()[m_instance_id] = this;
+    }
 
     // A transceiver instance may as well not have a name (in which case, name lookups fail).
     if (!name.empty()) {
@@ -203,9 +206,10 @@ bool Transceiver::assign_name(const string& name)
 
         if (!s_coord) {
             auto cache_entry = make_pair(name, m_instance_id);
-            auto rvp = s_mproc->m_instance_id_of_assigned_name.insert(cache_entry);
+            auto scoped_map = s_mproc->m_instance_id_of_assigned_name.scoped();
+            auto rvp = scoped_map.get().insert(cache_entry);
             assert(rvp.second == true);
-            m_cache_iterator = rvp.first;
+            m_cache_name = name;
         }
         return true;
     }
@@ -269,14 +273,19 @@ void Transceiver::destroy()
 
         // if the coordinator is local, it would be deleted already in the unpublish call
         if (!s_coord) {
-            s_mproc->m_instance_id_of_assigned_name.erase(m_cache_iterator);
+            if (!m_cache_name.empty()) {
+                auto scoped_map = s_mproc->m_instance_id_of_assigned_name.scoped();
+                scoped_map.get().erase(m_cache_name);
+                m_cache_name.clear();
+            }
         }
     }
 
     // Always remove from local pointer map (for both published and unpublished transceivers)
     // to prevent stale pointers when unpublish_all_transceivers() is called during finalize().
     if (m_instance_id != s_coord_id) {
-        s_mproc->m_local_pointer_of_instance_id.erase(m_instance_id);
+        auto scoped_map = s_mproc->m_local_pointer_of_instance_id.scoped();
+        scoped_map.get().erase(m_instance_id);
     }
 }
 
@@ -321,21 +330,29 @@ Transceiver::activate_impl(
 
     lock_guard<recursive_mutex> sl(s_mproc->m_handlers_mutex);
 
-    auto& ms  = s_mproc->m_active_handlers[message_type_id];
-    list<function<void(const Message_prefix &)>>::iterator mid_sid_it;
-
-    auto  msm_it = ms.find(effective_sender_id);
-    if (msm_it == ms.end()) {
-
-        // There was no record for this sender_id, thus we have to make one.
-
-        list<function<void(const Message_prefix&)>> handler_list;
-        handler_list.emplace_back(wrapper);
-        msm_it = ms.emplace(effective_sender_id, std::move(handler_list)).first;
-        mid_sid_it = msm_it->second.begin();
+    handler_proc_registry_mid_record_type* sender_map = nullptr;
+    {
+        auto scoped_handlers = s_mproc->m_active_handlers.scoped();
+        auto& ms = scoped_handlers.get()[message_type_id];
+        sender_map = &ms;
     }
-    else {
-        mid_sid_it = msm_it->second.emplace(msm_it->second.end(), wrapper);
+
+    list<function<void(const Message_prefix &)>>::iterator mid_sid_it;
+    {
+        auto scoped_sender_map = sender_map->scoped();
+        auto msm_it = scoped_sender_map.get().find(effective_sender_id);
+        if (msm_it == scoped_sender_map.get().end()) {
+
+            // There was no record for this sender_id, thus we have to make one.
+
+            list<function<void(const Message_prefix&)>> handler_list;
+            handler_list.emplace_back(wrapper);
+            msm_it = scoped_sender_map.get().emplace(effective_sender_id, std::move(handler_list)).first;
+            mid_sid_it = msm_it->second.begin();
+        }
+        else {
+            mid_sid_it = msm_it->second.emplace(msm_it->second.end(), wrapper);
+        }
     }
 
     decltype(m_deactivators)::iterator deactivator_it;
@@ -350,11 +367,29 @@ Transceiver::activate_impl(
         deactivator_it = *deactivator_it_ptr;
     }
 
-    *deactivator_it = [this, msm_it, mid_sid_it, deactivator_it, &ms] () {
+    *deactivator_it = [this, message_type_id, effective_sender_id, mid_sid_it, deactivator_it] () {
         lock_guard<recursive_mutex> sl(s_mproc->m_handlers_mutex);
+        handler_proc_registry_mid_record_type* sender_map = nullptr;
+        {
+            auto scoped_handlers = s_mproc->m_active_handlers.scoped();
+            auto it_mt = scoped_handlers.get().find(message_type_id);
+            if (it_mt == scoped_handlers.get().end()) {
+                m_deactivators.erase(deactivator_it);
+                return;
+            }
+            sender_map = &it_mt->second;
+        }
+
+        auto scoped_sender_map = sender_map->scoped();
+        auto msm_it = scoped_sender_map.get().find(effective_sender_id);
+        if (msm_it == scoped_sender_map.get().end()) {
+            m_deactivators.erase(deactivator_it);
+            return;
+        }
+
         msm_it->second.erase(mid_sid_it);
         if (msm_it->second.empty()) {
-            ms.erase(msm_it);
+            scoped_sender_map.get().erase(msm_it);
         }
         m_deactivators.erase(deactivator_it);
     };
@@ -1073,21 +1108,28 @@ Transceiver::export_rpc_impl()
     auto* self = static_cast<typename RPCTC::o_type*>(this);
     const auto instance_id = m_instance_id;
 
-    get_instance_to_object_map<RPCTC>()[instance_id] = self;
+    {
+        auto scoped_map = get_instance_to_object_map<RPCTC>().scoped();
+        scoped_map.get()[instance_id] = self;
+    }
 
     uint64_t test = MT::id();
 
     // handler registration
     using RPCTC_o_type = typename RPCTC::o_type;
-    static auto once = get_rpc_handler_map()[test] =
-        &RPCTC_o_type::template rpc_handler<RPCTC, MT>;
+    static auto once = [&] {
+        auto scoped_map = get_rpc_handler_map().scoped();
+        scoped_map.get()[test] = &RPCTC_o_type::template rpc_handler<RPCTC, MT>;
+        return test;
+    }();
     (void)(once); // suppress unused variable warning
 
     return [instance_id]() {
         // Note: do NOT call ensure_rpc_shutdown() here - the transceiver may already
         // be destroyed by the time this cleanup lambda is invoked during finalize().
         // RPC shutdown is handled by the transceiver's destructor (via destroy()).
-        get_instance_to_object_map<RPCTC>().erase(instance_id);
+        auto scoped_map = get_instance_to_object_map<RPCTC>().scoped();
+        scoped_map.get().erase(instance_id);
     };
 }
 

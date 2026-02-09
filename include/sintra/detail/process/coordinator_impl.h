@@ -258,7 +258,10 @@ type_id_type Coordinator::resolve_type(const string& pretty_name)
     }
 
     // a type is always assumed to exist
-    return s_mproc->m_type_id_of_type_name[pretty_name] = make_type_id();
+    auto scoped_map = s_mproc->m_type_id_of_type_name.scoped();
+    const auto new_id = make_type_id();
+    scoped_map.get().emplace(pretty_name, new_id);
+    return new_id;
 }
 
 
@@ -401,7 +404,8 @@ instance_id_type Coordinator::publish_transceiver(type_id_type tid, instance_id_
             return invalid_instance_id;
         }
 
-        s_mproc->m_instance_id_of_assigned_name[entry.name] = iid;
+        auto scoped_map = s_mproc->m_instance_id_of_assigned_name.scoped();
+        scoped_map.get()[entry.name] = iid;
         pr[iid] = entry;
 
         // Do NOT reset draining state here - only reset when publishing a NEW PROCESS (Managed_process),
@@ -417,7 +421,8 @@ instance_id_type Coordinator::publish_transceiver(type_id_type tid, instance_id_
             return invalid_instance_id;
         }
 
-        s_mproc->m_instance_id_of_assigned_name[entry.name] = iid;
+        auto scoped_map = s_mproc->m_instance_id_of_assigned_name.scoped();
+        scoped_map.get()[entry.name] = iid;
         m_transceiver_registry[iid][iid] = entry;
 
         // Reset draining state to 0 (ACTIVE) when publishing a Managed_process.
@@ -462,7 +467,10 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
     assert(!it->second.name.empty());
 
     // delete the reverse name lookup entry
-    s_mproc->m_instance_id_of_assigned_name.erase(it->second.name);
+    {
+        auto scoped_map = s_mproc->m_instance_id_of_assigned_name.scoped();
+        scoped_map.get().erase(it->second.name);
+    }
 
     // keep a copy of the assigned name before deleting it
     auto tn = it->second;
@@ -798,7 +806,10 @@ instance_id_type Coordinator::make_process_group(
     auto ret = m_groups[name].m_instance_id;
 
     for (auto& e : member_process_ids) {
-        m_groups_of_process[e].insert(ret);
+        {
+            auto scoped_set = m_groups_of_process[e].scoped();
+            scoped_set.get().insert(ret);
+        }
     }
 
     m_groups[name].assign_name(name);
@@ -854,7 +865,10 @@ instance_id_type Coordinator::join_swarm(
             auto it = m_groups.find(name);
             if (it != m_groups.end()) {
                 it->second.add_process(new_instance_id);
-                m_groups_of_process[new_instance_id].insert(it->second.m_instance_id);
+                {
+                    auto scoped_set = m_groups_of_process[new_instance_id].scoped();
+                    scoped_set.get().insert(it->second.m_instance_id);
+                }
             }
         };
         add_to_group("_sintra_all_processes");

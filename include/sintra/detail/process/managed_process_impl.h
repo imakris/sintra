@@ -956,7 +956,8 @@ auto cached_resolve(MapT& cache, const KeyT& key, RpcFn&& rpc, InvalidT invalid)
 
     // If it is not invalid, cache it.
     if (resolved != invalid) {
-        cache[key] = resolved;
+        auto scoped_map = cache.scoped();
+        scoped_map.get()[key] = resolved;
     }
 
     return resolved;
@@ -985,7 +986,8 @@ sintra::type_id_type get_type_id()
             }
             else
             {
-                s_mproc->m_type_name_of_explicit_id[explicit_id] = type_name;
+                auto scoped_map = s_mproc->m_type_name_of_explicit_id.scoped();
+                scoped_map.get()[explicit_id] = type_name;
             }
         }
         return make_type_id(explicit_id);
@@ -1668,13 +1670,14 @@ void Managed_process::init(int argc, const char* const* argv)
             {
                 lock_guard<mutex> lock(m_availability_mutex);
 
-                auto it = m_queued_availability_calls.find(tn);
-                if (it == m_queued_availability_calls.end()) {
+                auto scoped_calls = m_queued_availability_calls.scoped();
+                auto it = scoped_calls.get().find(tn);
+                if (it == scoped_calls.get().end()) {
                     return;
                 }
 
                 if (it->second.empty()) {
-                    m_queued_availability_calls.erase(it);
+                    scoped_calls.get().erase(it);
                     return;
                 }
 
@@ -2339,9 +2342,14 @@ function<void()> Managed_process::call_on_availability(Named_instance<T> transce
     tn_type tn = { get_type_id<T>(), std::move(transceiver_name) };
 
     // insert an empty function, in order to be able to capture the iterator within it
-    auto& call_list = m_queued_availability_calls[tn];
-    call_list.emplace_back();
-    auto f_it = std::prev(call_list.end());
+    using Call_list_iterator = list<function<void()>>::iterator;
+    Call_list_iterator f_it;
+    {
+        auto scoped_calls = m_queued_availability_calls.scoped();
+        auto& call_list = scoped_calls.get()[tn];
+        call_list.emplace_back();
+        f_it = std::prev(call_list.end());
+    }
 
     struct availability_call_state {
         bool active = true;
@@ -2357,8 +2365,9 @@ function<void()> Managed_process::call_on_availability(Named_instance<T> transce
             return false;
         }
 
-        auto queue_it = m_queued_availability_calls.find(tn);
-        if (queue_it == m_queued_availability_calls.end()) {
+        auto scoped_calls = m_queued_availability_calls.scoped();
+        auto queue_it = scoped_calls.get().find(tn);
+        if (queue_it == scoped_calls.get().end()) {
             state->active = false;
             state->iterator = decltype(state->iterator){};
             return false;
@@ -2367,7 +2376,7 @@ function<void()> Managed_process::call_on_availability(Named_instance<T> transce
         auto call_it = state->iterator;
         queue_it->second.erase(call_it);
         if (erase_empty_entry && queue_it->second.empty()) {
-            m_queued_availability_calls.erase(queue_it);
+            scoped_calls.get().erase(queue_it);
         }
         state->active = false;
         state->iterator = decltype(state->iterator){};

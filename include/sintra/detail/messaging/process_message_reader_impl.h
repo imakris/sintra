@@ -39,25 +39,44 @@ inline void dispatch_event_handlers(
 {
     lock_guard<recursive_mutex> sl(s_mproc->m_handlers_mutex);
 
-    auto& active_handlers = s_mproc->m_active_handlers;
-    auto it_mt = active_handlers.find(message.message_type_id);
-
-    if (it_mt == active_handlers.end()) {
-        return;
+    handler_proc_registry_mid_record_type* sender_map = nullptr;
+    {
+        auto scoped_handlers = s_mproc->m_active_handlers.scoped();
+        auto it_mt = scoped_handlers.get().find(message.message_type_id);
+        if (it_mt == scoped_handlers.get().end()) {
+            return;
+        }
+        sender_map = &it_mt->second;
     }
 
     for (auto sid : scope_ids) {
-        auto shl = it_mt->second.find(sid);
-        if (shl != it_mt->second.end()) {
-            if (trace_world) {
-                Log_stream(log_level::debug)
-                    << "[sintra_trace_world] pid=" << static_cast<int>(getpid())
-                    << " sid_match=" << static_cast<unsigned long long>(sid)
-                    << " handlers=" << shl->second.size() << "\n";
+        std::vector<function<void(const Message_prefix&)>> handlers;
+        std::size_t handler_count = 0;
+        {
+            auto scoped_sender_map = sender_map->scoped();
+            auto shl = scoped_sender_map.get().find(sid);
+            if (shl != scoped_sender_map.get().end()) {
+                handler_count = shl->second.size();
+                handlers.reserve(handler_count);
+                for (auto& handler : shl->second) {
+                    handlers.push_back(handler);
+                }
             }
-            for (auto& e : shl->second) {
-                e(message);
-            }
+        }
+
+        if (handlers.empty()) {
+            continue;
+        }
+
+        if (trace_world) {
+            Log_stream(log_level::debug)
+                << "[sintra_trace_world] pid=" << static_cast<int>(getpid())
+                << " sid_match=" << static_cast<unsigned long long>(sid)
+                << " handlers=" << handler_count << "\n";
+        }
+
+        for (auto& handler : handlers) {
+            handler(message);
         }
     }
 }
@@ -363,13 +382,12 @@ void Process_message_reader::request_reader_function()
 
                 // If addressed to a specified local receiver, this may only be an RPC call,
                 // thus the receiver must exist.
-                assert(
-                    reader_state == READER_NORMAL ?
-                        s_mproc->m_local_pointer_of_instance_id.find(m->receiver_instance_id) !=
-                        s_mproc->m_local_pointer_of_instance_id.end()
-                    :
-                        true
-                );
+                if (reader_state == READER_NORMAL) {
+                    auto scoped_map = s_mproc->m_local_pointer_of_instance_id.scoped();
+                    const bool receiver_known =
+                        scoped_map.get().find(m->receiver_instance_id) != scoped_map.get().end();
+                    assert(receiver_known);
+                }
 
                 if ((reader_state == READER_NORMAL) ||
                     (is_service_instance(m->receiver_instance_id) && s_coord) ||
