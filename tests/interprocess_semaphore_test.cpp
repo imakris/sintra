@@ -12,6 +12,8 @@
 
 #include <sintra/detail/ipc/semaphore.h>
 
+#include "test_environment.h"
+
 #include <atomic>
 #include <array>
 #include <chrono>
