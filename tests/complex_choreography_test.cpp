@@ -270,10 +270,9 @@ int conductor_process()
     }
 
     std::vector<std::string> lines;
-    lines.push_back(due_to_failure ? "fail" : "ok");
     lines.push_back(std::to_string(std::max(last_completed_round, -1)));
     lines.push_back(due_to_failure ? "failure" : "success");
-    sintra::test::write_lines(result_path, lines);
+    sintra::test::write_choreography_result(result_path, !due_to_failure, lines);
 
     sintra::barrier(std::string(k_final_barrier), "_sintra_all_processes");
     return due_to_failure ? 1 : 0;
@@ -695,18 +694,20 @@ int main(int argc, char* argv[])
         [](const std::filesystem::path&) { return 0; },
         [](const std::filesystem::path& shared_dir) {
             const auto result_path = shared_dir / "result.txt";
-            std::ifstream in(result_path, std::ios::binary);
-            if (!in) {
+            const auto result = sintra::test::read_choreography_result(result_path);
+            if (result.lines.size() < 2) {
                 return 1;
             }
-            std::string status;
             int completed_rounds = -1;
-            std::string failure_state;
-            std::getline(in, status);
-            in >> completed_rounds;
-            std::getline(in >> std::ws, failure_state);
+            try {
+                completed_rounds = std::stoi(result.lines[0]);
+            }
+            catch (const std::exception&) {
+                return 1;
+            }
+            const auto& failure_state = result.lines[1];
 
-            const bool ok = (status == "ok") && (completed_rounds >= k_rounds - 1) &&
+            const bool ok = result.ok && (completed_rounds >= k_rounds - 1) &&
                             (failure_state == "success");
             return ok ? 0 : 1;
         },
