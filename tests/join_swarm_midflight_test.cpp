@@ -65,11 +65,7 @@ long long monotonic_millis()
 
 int process_id()
 {
-#ifdef _WIN32
-    return _getpid();
-#else
-    return getpid();
-#endif
+    return sintra::test::get_pid();
 }
 
 void trace_event(const std::filesystem::path& trace_path, const char* stage, const std::string& detail)

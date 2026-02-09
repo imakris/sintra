@@ -19,11 +19,6 @@
 #include <thread>
 #include <vector>
 
-#ifdef _WIN32
-#include <process.h>
-#else
-#include <unistd.h>
-#endif
 
 namespace sintra::test {
 
@@ -79,11 +74,7 @@ public:
         auto unique_suffix = std::chrono::duration_cast<std::chrono::nanoseconds>(
                                  std::chrono::steady_clock::now().time_since_epoch())
                                  .count();
-#ifdef _WIN32
-        unique_suffix ^= static_cast<long long>(_getpid());
-#else
-        unique_suffix ^= static_cast<long long>(getpid());
-#endif
+        unique_suffix ^= static_cast<long long>(get_pid());
         static std::atomic<long long> counter{0};
         unique_suffix ^= counter.fetch_add(1);
 

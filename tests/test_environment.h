@@ -23,6 +23,7 @@
 #endif
 #include <windows.h>
 #include <DbgHelp.h>
+#include <process.h>
 #endif
 
 #ifndef _WIN32
@@ -145,6 +146,15 @@ inline int read_env_int(const char* name, int default_value)
     return static_cast<int>(parsed);
 }
 
+inline int get_pid()
+{
+#ifdef _WIN32
+    return _getpid();
+#else
+    return ::getpid();
+#endif
+}
+
 inline void precrash_pause(const char* reason)
 {
     const int pause_ms = read_env_int("SINTRA_CRASH_CAPTURE_PAUSE_MS", 0);
@@ -152,11 +162,7 @@ inline void precrash_pause(const char* reason)
         return;
     }
 
-#ifdef _WIN32
-    const auto pid = static_cast<unsigned long long>(GetCurrentProcessId());
-#else
-    const auto pid = static_cast<unsigned long long>(getpid());
-#endif
+    const auto pid = static_cast<unsigned long long>(get_pid());
 
     std::fprintf(stderr,
                  "[SINTRA_DEBUG_PAUSE] Process %llu paused: %s\n",

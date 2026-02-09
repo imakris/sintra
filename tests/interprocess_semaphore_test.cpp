@@ -387,7 +387,7 @@ struct Shared_state
 
 void run_child(Shared_state* shared, int iterations)
 {
-    const int pid = static_cast<int>(::getpid());
+    const int pid = static_cast<int>(sintra::test::get_pid());
 
     shared->ready.fetch_add(1, std::memory_order_acq_rel);
     while (shared->start.load(std::memory_order_acquire) == 0) {

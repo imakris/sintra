@@ -315,11 +315,7 @@ int producer_process()
 
     const auto seed = static_cast<unsigned>(
         std::chrono::steady_clock::now().time_since_epoch().count());
-#ifdef _WIN32
-    const auto pid_component = static_cast<unsigned>(_getpid());
-#else
-    const auto pid_component = static_cast<unsigned>(getpid());
-#endif
+    const auto pid_component = static_cast<unsigned>(sintra::test::get_pid());
     std::seed_seq seed_seq{seed, pid_component, static_cast<unsigned>(ProducerId)};
     std::mt19937 rng(seed_seq);
     std::uniform_int_distribution<int> jitter_us(0, 120);
@@ -407,11 +403,7 @@ int consumer_process()
 
     const auto seed = static_cast<unsigned>(
         std::chrono::steady_clock::now().time_since_epoch().count());
-#ifdef _WIN32
-    const auto pid_component = static_cast<unsigned>(_getpid());
-#else
-    const auto pid_component = static_cast<unsigned>(getpid());
-#endif
+    const auto pid_component = static_cast<unsigned>(sintra::test::get_pid());
     std::seed_seq seed_seq{seed, pid_component, static_cast<unsigned>(ConsumerId + 10)};
     std::mt19937 rng(seed_seq);
     std::uniform_int_distribution<int> jitter_us(10, 200);

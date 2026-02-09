@@ -89,11 +89,7 @@ int main(int argc, char* argv[])
 
         // Let parent know we're starting
         std::cout << "Worker " << worker_id << " process started, PID="
-#ifdef _WIN32
-                  << _getpid()
-#else
-                  << getpid()
-#endif
+                  << sintra::test::get_pid()
                   << "\n" << std::flush;
 
         const int num_workers = 3; // hardcoded for now

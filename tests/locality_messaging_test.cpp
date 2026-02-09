@@ -77,11 +77,7 @@ void trace(const char* label)
     if (!trace_enabled()) {
         return;
     }
-#ifdef _WIN32
-    const int pid = _getpid();
-#else
-    const int pid = getpid();
-#endif
+    const int pid = sintra::test::get_pid();
     std::fprintf(stderr, "[locality_test][pid=%d] %s\n", pid, label);
     std::fflush(stderr);
 }

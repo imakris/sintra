@@ -191,11 +191,7 @@ std::uint64_t make_round_seed(int round)
     const std::uint64_t extra = counter.fetch_add(0x9E3779B97F4A7C15ULL);
     const auto now = static_cast<std::uint64_t>(
         std::chrono::steady_clock::now().time_since_epoch().count());
-#ifdef _WIN32
-    const auto pid = static_cast<std::uint64_t>(_getpid());
-#else
-    const auto pid = static_cast<std::uint64_t>(getpid());
-#endif
+    const auto pid = static_cast<std::uint64_t>(sintra::test::get_pid());
     return now ^ (pid << 32U) ^ extra ^ static_cast<std::uint64_t>((round + 1) * 0xD1B54A32D192ED03ULL);
 }
 

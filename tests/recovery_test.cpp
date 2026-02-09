@@ -79,13 +79,7 @@ void write_ready_marker(std::string_view tag, uint32_t occurrence = 0)
     if (occurrence != 0) {
         filename << "_" << occurrence;
     }
-    filename << "_pid_"
-#ifdef _WIN32
-             << _getpid()
-#else
-             << getpid()
-#endif
-             ;
+    filename << "_pid_" << sintra::test::get_pid();
     const auto ready_path = shared_dir / (filename.str() + ".txt");
 
     std::ofstream out(ready_path, std::ios::binary | std::ios::trunc);
@@ -172,12 +166,7 @@ int process_crasher()
     // Early diagnostic to confirm entry on recovery occurrences
     std::fprintf(stderr, "[CRASHER] start occ=%u pid=%lu\n",
         (unsigned)sintra::s_recovery_occurrence,
-#ifdef _WIN32
-        (unsigned long)_getpid()
-#else
-        (unsigned long)getpid()
-#endif
-    );
+        static_cast<unsigned long>(sintra::test::get_pid()));
     if (g_shared_dir.empty()) {
         if (const char* shared_dir_env = std::getenv("SINTRA_TEST_SHARED_DIR")) {
             g_shared_dir = shared_dir_env;
@@ -187,11 +176,7 @@ int process_crasher()
     {
         std::ofstream diag(sintra::test::scratch_subdirectory("recovery_test") / "sintra_crasher_diag.log", std::ios::app);
         diag << "process_crasher pid="
-#ifdef _WIN32
-             << _getpid()
-#else
-             << getpid()
-#endif
+             << sintra::test::get_pid()
              << " g_shared_dir=" << (g_shared_dir.empty() ? "<empty>" : g_shared_dir)
              << " env=" << (std::getenv("SINTRA_TEST_SHARED_DIR") ? "set" : "unset")
              << std::endl;
@@ -211,12 +196,8 @@ int process_crasher()
         if (!log_dir.empty()) {
             std::filesystem::path early_log = log_dir / "entry.log";
             std::ofstream elog(early_log, std::ios::app);
-            elog << "process_crasher() entered, pid=" <<
-#ifdef _WIN32
-                _getpid()
-#else
-                getpid()
-#endif
+            elog << "process_crasher() entered, pid="
+                << sintra::test::get_pid()
                 << std::endl;
         }
     }
@@ -242,12 +223,8 @@ int process_crasher()
     write_ready_marker("crasher", occurrence);
 
     std::ofstream log(log_path, std::ios::app);
-    log << "Crasher starting, pid=" <<
-#ifdef _WIN32
-        _getpid()
-#else
-        getpid()
-#endif
+    log << "Crasher starting, pid="
+        << sintra::test::get_pid()
         << std::endl;
 
     log << "Recovery occurrence: " << occurrence << std::endl;
@@ -308,13 +285,9 @@ int main(int argc, char* argv[])
         if (shared_dir_env) {
             std::filesystem::path log_path = std::filesystem::path(shared_dir_env) / "main.log";
             std::ofstream main_log(log_path, std::ios::app);
-            main_log << "main() entered, pid=" <<
-#ifdef _WIN32
-                _getpid()
-#else
-                getpid()
-#endif
-                << ", argc=" << argc << std::endl;
+            main_log << "main() entered, pid="
+                     << sintra::test::get_pid()
+                     << ", argc=" << argc << std::endl;
             for (int i = 0; i < argc; ++i) {
                 main_log << "  argv[" << i << "]: " << argv[i] << std::endl;
             }
@@ -342,11 +315,7 @@ int main(int argc, char* argv[])
     {
         std::ofstream state_log(shared_dir / "state.log", std::ios::app);
         state_log << "main() set g_shared_dir to " << g_shared_dir
-#ifdef _WIN32
-                  << " pid=" << _getpid()
-#else
-                  << " pid=" << getpid()
-#endif
+                  << " pid=" << sintra::test::get_pid()
                   << std::endl;
     }
 
@@ -360,11 +329,7 @@ int main(int argc, char* argv[])
     {
         std::ofstream state_log(shared_dir / "state.log", std::ios::app);
         state_log << "calling sintra::init, pid="
-#ifdef _WIN32
-                  << _getpid()
-#else
-                  << getpid()
-#endif
+                  << sintra::test::get_pid()
                   << std::endl;
     }
 
@@ -373,11 +338,7 @@ int main(int argc, char* argv[])
     {
         std::ofstream state_log(shared_dir / "state.log", std::ios::app);
         state_log << "sintra::init completed, pid="
-#ifdef _WIN32
-                  << _getpid()
-#else
-                  << getpid()
-#endif
+                  << sintra::test::get_pid()
                   << std::endl;
     }
 

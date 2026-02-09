@@ -481,7 +481,7 @@ int child_pid_value()
 #ifdef _WIN32
     return static_cast<int>(GetCurrentProcessId());
 #else
-    return static_cast<int>(getpid());
+    return static_cast<int>(sintra::test::get_pid());
 #endif
 }
 

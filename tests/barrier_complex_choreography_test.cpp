@@ -343,11 +343,7 @@ int stage_process(std::uint32_t stage, std::uint32_t worker_index)
 
     const auto now_seed = static_cast<unsigned>(
         std::chrono::steady_clock::now().time_since_epoch().count());
-#ifdef _WIN32
-    const auto pid_seed = static_cast<unsigned>(_getpid());
-#else
-    const auto pid_seed = static_cast<unsigned>(getpid());
-#endif
+    const auto pid_seed = static_cast<unsigned>(sintra::test::get_pid());
     std::seed_seq seed{now_seed, pid_seed, static_cast<unsigned>(stage), static_cast<unsigned>(worker_index)};
     std::mt19937 gen(seed);
     std::uniform_int_distribution<int> delay_dist(0, 40);
