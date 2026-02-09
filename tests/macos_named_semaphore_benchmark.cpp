@@ -7,6 +7,8 @@
 #include <cstdint>
 #include <stdexcept>
 
+#include "test_environment.h"
+
 #ifdef __APPLE__
 #include <cerrno>
 #include <fcntl.h>
