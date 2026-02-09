@@ -8,14 +8,13 @@
 #include "../resolvable_instance.h"
 #include "../resolve_type.h"
 #include "../transceiver.h"
-#include "../std_imports.h"
-
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <thread>
@@ -23,6 +22,14 @@
 
 
 namespace sintra {
+
+using std::condition_variable;
+using std::map;
+using std::mutex;
+using std::shared_ptr;
+using std::string;
+using std::unordered_map;
+using std::unordered_set;
 
 
 struct Process_group: Derived_transceiver<Process_group>

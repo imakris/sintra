@@ -6,7 +6,6 @@
 #include "../logging.h"
 #include "../transceiver_impl.h"
 #include "../tls_post_handler.h"
-#include "../std_imports.h"
 #include <atomic>
 #include <condition_variable>
 #include <cstdlib>
@@ -14,13 +13,20 @@
 #include <initializer_list>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <utility>
+#include <vector>
 
 #ifndef SINTRA_TRACE_WORLD
 #define SINTRA_TRACE_WORLD 0
 #endif
 
 namespace sintra {
+
+using std::function;
+using std::lock_guard;
+using std::recursive_mutex;
+using std::thread;
 
 void install_signal_handler();
 

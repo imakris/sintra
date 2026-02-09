@@ -4,10 +4,12 @@
 #pragma once
 
 #include "messaging/message.h"
-#include "std_imports.h"
+#include <string>
 
 
 namespace sintra {
+
+using std::string;
 
 
 struct Resolvable_instance_id: Sintra_message_element

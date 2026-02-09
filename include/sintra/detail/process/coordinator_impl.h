@@ -7,8 +7,6 @@
 #include "../process/coordinator.h"
 #include "../process/managed_process.h"
 #include "../process/dispatch_wait_guard.h"
-#include "../std_imports.h"
-
 #include <algorithm>
 #include <cassert>
 #include <chrono>
@@ -21,6 +19,10 @@
 
 
 namespace sintra {
+
+using std::lock_guard;
+using std::mutex;
+using std::string;
 
 
 // EXPORTED EXCLUSIVELY FOR RPC

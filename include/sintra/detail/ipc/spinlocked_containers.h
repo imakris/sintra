@@ -14,8 +14,6 @@
 
 
 #include "../ipc/spinlock.h"
-#include "../std_imports.h"
-
 #include <deque>
 #include <list>
 #include <map>
@@ -27,6 +25,14 @@
 
 
 namespace sintra {
+
+using std::deque;
+using std::list;
+using std::map;
+using std::set;
+using std::unordered_map;
+using std::unordered_set;
+using std::vector;
 
 
 namespace detail {
