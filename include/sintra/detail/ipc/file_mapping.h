@@ -13,6 +13,8 @@
 #include <system_error>
 #include <utility>
 
+#include "platform_utils.h"
+
 #if defined(_WIN32)
 #    include "../sintra_windows.h"
 #else
@@ -238,24 +240,6 @@ private:
 #endif
 };
 
-#ifndef _WIN32
-namespace {
-// Cache the page size to avoid repeated sysconf() calls
-inline long get_page_size()
-{
-    static const long page_size = []() {
-        long sz = ::sysconf(_SC_PAGE_SIZE);
-        if (sz <= 0) {
-            throw std::system_error(std::make_error_code(std::errc::invalid_argument),
-                                    "could not determine page size");
-        }
-        return sz;
-    }();
-    return page_size;
-}
-} // anonymous namespace
-#endif
-
 class mapped_region
 {
 public:
@@ -305,8 +289,7 @@ public:
         ::GetSystemInfo(&si);
         const std::size_t allocation_granularity = static_cast<std::size_t>(si.dwAllocationGranularity);
 #else
-        const long page_size_long = get_page_size();
-        const std::size_t allocation_granularity = static_cast<std::size_t>(page_size_long);
+        const std::size_t allocation_granularity = ::sintra::system_page_size();
 #endif
 
         const std::uint64_t misalignment = offset % static_cast<std::uint64_t>(allocation_granularity);
@@ -459,7 +442,7 @@ public:
             throw std::system_error(::GetLastError(), std::system_category(), "FlushViewOfFile failed");
         }
 #else
-        const long page = get_page_size();
+        const std::size_t page = ::sintra::system_page_size();
         std::uintptr_t base = reinterpret_cast<std::uintptr_t>(m_address);
         if (base > std::numeric_limits<std::uintptr_t>::max() - offset) {
             throw std::system_error(std::make_error_code(std::errc::value_too_large),

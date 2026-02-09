@@ -231,7 +231,7 @@ void Transceiver::destroy()
 {
     bool no_readers = true;
     if (s_mproc && s_coord_id) {
-        Dispatch_lock_guard<std::shared_lock<std::shared_mutex>> readers_lock(s_mproc->m_readers_mutex);
+        Dispatch_shared_lock readers_lock(s_mproc->m_readers_mutex);
         no_readers = s_mproc->m_readers.empty();
     }
 
@@ -1135,5 +1135,4 @@ Transceiver::export_rpc(RT(OBJECT_T::* /*resolution dummy arg*/)(Args...))
 
 
 } // namespace sintra
-
 

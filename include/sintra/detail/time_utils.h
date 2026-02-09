@@ -24,6 +24,18 @@
 
 namespace sintra {
 
+#if defined(__APPLE__)
+inline const mach_timebase_info_data_t& mach_timebase_info_cached() noexcept
+{
+    static const mach_timebase_info_data_t info = [] {
+        mach_timebase_info_data_t cached{};
+        (void)mach_timebase_info(&cached);
+        return cached;
+    }();
+    return info;
+}
+#endif
+
 inline uint64_t monotonic_now_ns() noexcept
 {
 #if defined(_WIN32)
@@ -46,17 +58,10 @@ inline uint64_t monotonic_now_ns() noexcept
     const long double per_second = static_cast<long double>(freq.value.QuadPart);
     return static_cast<uint64_t>((ticks * 1000000000.0L) / per_second);
 #elif defined(__APPLE__)
-    static const struct timebase_wrapper {
-        mach_timebase_info_data_t info{};
-        timebase_wrapper()
-        {
-            (void)::mach_timebase_info(&info);
-        }
-    } timebase;
-
+    const auto& timebase = mach_timebase_info_cached();
     const uint64_t now = ::mach_absolute_time();
-    return (now * static_cast<uint64_t>(timebase.info.numer)) /
-           static_cast<uint64_t>(timebase.info.denom);
+    return (now * static_cast<uint64_t>(timebase.numer)) /
+           static_cast<uint64_t>(timebase.denom);
 #elif defined(CLOCK_MONOTONIC)
     struct timespec ts;
     ::clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -83,11 +88,7 @@ inline void precision_sleep_for(std::chrono::duration<double> duration)
         return;
     }
 
-    static const mach_timebase_info_data_t timebase = [] {
-        mach_timebase_info_data_t info{};
-        (void)mach_timebase_info(&info);
-        return info;
-    }();
+    const auto& timebase = mach_timebase_info_cached();
 
     const auto nanos = std::chrono::duration_cast<std::chrono::nanoseconds>(duration);
     if (nanos.count() <= 0) {

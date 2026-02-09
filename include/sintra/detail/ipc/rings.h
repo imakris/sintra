@@ -346,6 +346,46 @@ struct ring_reader_evicted_exception : public std::runtime_error {
               "Ring reader was evicted by the writer due to being too slow.") {}
 };
 
+inline bool create_ring_backing_file(
+    const std::string& path,
+    size_t size,
+    const std::string* directory)
+{
+    try {
+        if (directory && !check_or_create_directory(*directory)) {
+            return false;
+        }
+
+        detail::native_file_handle file_handle = detail::create_new_file(path.c_str());
+        if (file_handle == detail::invalid_file()) {
+            return false;
+        }
+
+#ifdef NDEBUG
+        if (!detail::truncate_file(file_handle, size)) {
+            detail::close_file(file_handle);
+            return false;
+        }
+#else
+        // Fill with a recognizable pattern to aid debugging
+        const char* ustr = "UNINITIALIZED";
+        const size_t dv = std::strlen(ustr); // std::strlen: see header notes
+        std::unique_ptr<char[]> tmp(new char[size]);
+        for (size_t i = 0; i < size; ++i) {
+            tmp[i] = ustr[i % dv];
+        }
+        if (!detail::write_file(file_handle, tmp.get(), size)) {
+            detail::close_file(file_handle);
+            return false;
+        }
+#endif
+        return detail::close_file(file_handle);
+    }
+    catch (...) {
+    }
+    return false;
+}
+
 // A binary semaphore tailored for the ring's reader wakeup policy.
 class sintra_ring_semaphore
 {
@@ -556,39 +596,7 @@ private:
     // Create the backing data file (filled with a debug pattern in !NDEBUG).
     bool create()
     {
-        try {
-            if (!check_or_create_directory(m_directory)) {
-                return false;
-            }
-
-            detail::native_file_handle fh_data = detail::create_new_file(m_data_filename.c_str());
-            if (fh_data == detail::invalid_file()) {
-                return false;
-            }
-
-#ifdef NDEBUG
-            if (!detail::truncate_file(fh_data, m_data_region_size)) {
-                detail::close_file(fh_data);
-                return false;
-            }
-#else
-            // Fill with a recognizable pattern to aid debugging
-            const char* ustr = "UNINITIALIZED";
-            const size_t dv = std::strlen(ustr); // std::strlen: see header notes
-            std::unique_ptr<char[]> tmp(new char[m_data_region_size]);
-            for (size_t i = 0; i < m_data_region_size; ++i) {
-                tmp[i] = ustr[i % dv];
-            }
-            if (!detail::write_file(fh_data, tmp.get(), m_data_region_size)) {
-                detail::close_file(fh_data);
-                return false;
-            }
-#endif
-            return detail::close_file(fh_data);
-        }
-        catch (...) {
-        }
-        return false;
+        return create_ring_backing_file(m_data_filename, m_data_region_size, &m_directory);
     }
 
     /**
@@ -1387,34 +1395,7 @@ private:
     // Create the control file (debug-filled in !NDEBUG).
     bool create()
     {
-        try {
-            detail::native_file_handle fh_control =
-                detail::create_new_file(m_control_filename.c_str());
-            if (fh_control == detail::invalid_file())
-                return false;
-
-#ifdef NDEBUG
-            if (!detail::truncate_file(fh_control, sizeof(Control))) {
-                detail::close_file(fh_control);
-                return false;
-            }
-#else
-            const char* ustr = "UNINITIALIZED";
-            const size_t dv = std::strlen(ustr);
-            std::unique_ptr<char[]> tmp(new char[sizeof(Control)]);
-            for (size_t i = 0; i < sizeof(Control); ++i) {
-                tmp[i] = ustr[i % dv];
-            }
-            if (!detail::write_file(fh_control, tmp.get(), sizeof(Control))) {
-                detail::close_file(fh_control);
-                return false;
-            }
-#endif
-            return detail::close_file(fh_control);
-        }
-        catch (...) {
-        }
-        return false;
+        return create_ring_backing_file(m_control_filename, sizeof(Control), nullptr);
     }
 
     // Map the control file read-write.

@@ -537,7 +537,7 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
 
         //// and finally, if the process was being read, stop reading from it
         if (iid != s_mproc_id) {
-            Dispatch_lock_guard<std::shared_lock<std::shared_mutex>> readers_lock(s_mproc->m_readers_mutex);
+            Dispatch_shared_lock readers_lock(s_mproc->m_readers_mutex);
             auto reader_it = s_mproc->m_readers.find(process_iid);
             if (reader_it != s_mproc->m_readers.end()) {
                 if (auto& reader = reader_it->second) {
@@ -677,7 +677,7 @@ inline void Coordinator::collect_known_process_candidates_unlocked(
     }
 
     if (s_mproc) {
-        Dispatch_lock_guard<std::shared_lock<std::shared_mutex>> readers_lock(s_mproc->m_readers_mutex);
+        Dispatch_shared_lock readers_lock(s_mproc->m_readers_mutex);
         for (const auto& entry : s_mproc->m_readers) {
             candidates.push_back(entry.first);
         }
@@ -1147,5 +1147,4 @@ void Coordinator::mark_initialization_complete(instance_id_type process_iid)
 
 
 } // sintra
-
 

@@ -407,7 +407,7 @@ namespace {
 
     inline void dispatch_signal_number(int sig_number)
     {
-        Dispatch_lock_guard<std::shared_lock<std::shared_mutex>> dispatch_lock(dispatch_shutdown_mutex_instance);
+        Dispatch_shared_lock dispatch_lock(dispatch_shutdown_mutex_instance);
 
         auto* mproc = s_mproc;
 #ifndef _WIN32
@@ -421,7 +421,7 @@ namespace {
         if (mproc && mproc->m_out_req_c) {
             mproc->emit_remote<Managed_process::terminated_abnormally>(sig_number);
 
-            Dispatch_lock_guard<std::shared_lock<std::shared_mutex>> readers_lock(mproc->m_readers_mutex);
+            Dispatch_shared_lock readers_lock(mproc->m_readers_mutex);
             for (auto& reader_entry : mproc->m_readers) {
                 if (auto& reader = reader_entry.second) {
                     reader->stop_nowait();
@@ -1085,7 +1085,7 @@ Managed_process::~Managed_process()
 
     // no more reading
     {
-        Dispatch_lock_guard<std::unique_lock<std::shared_mutex>> readers_lock(m_readers_mutex);
+        Dispatch_unique_lock readers_lock(m_readers_mutex);
         m_readers.clear();
     }
 
@@ -1201,7 +1201,7 @@ Managed_process::~Managed_process()
     // Taking an exclusive lock here ensures all shared locks are released before we
     // clear s_mproc and destroy the object, preventing use-after-free.
     {
-        Dispatch_lock_guard<std::unique_lock<std::shared_mutex>> dispatch_lock(dispatch_shutdown_mutex_instance);
+        Dispatch_unique_lock dispatch_lock(dispatch_shutdown_mutex_instance);
         s_mproc = nullptr;
         s_mproc_id = 0;
     }
@@ -1218,7 +1218,7 @@ Managed_process::~Managed_process()
     // Taking an exclusive lock ensures all shared locks are released before we
     // clear s_mproc and destroy the object, preventing use-after-free.
     {
-        Dispatch_lock_guard<std::unique_lock<std::shared_mutex>> dispatch_lock(dispatch_shutdown_mutex_instance);
+        Dispatch_unique_lock dispatch_lock(dispatch_shutdown_mutex_instance);
         s_mproc = nullptr;
         s_mproc_id = 0;
     }
@@ -1640,7 +1640,7 @@ void Managed_process::init(int argc, const char* const* argv)
     }
 
     {
-        Dispatch_lock_guard<std::unique_lock<std::shared_mutex>> readers_lock(m_readers_mutex);
+        Dispatch_unique_lock readers_lock(m_readers_mutex);
         assert(!m_readers.count(process_of(s_coord_id)));
         auto progress = std::make_shared<Process_message_reader::Delivery_progress>();
         auto reader = std::make_shared<Process_message_reader>(
@@ -1810,7 +1810,7 @@ Managed_process::Spawn_result Managed_process::spawn_swarm_process(
     args.insert(args.end(), {"--recovery_occurrence", std::to_string(s.occurrence)} );
 
     {
-        Dispatch_lock_guard<std::unique_lock<std::shared_mutex>> readers_lock(m_readers_mutex);
+        Dispatch_unique_lock readers_lock(m_readers_mutex);
 
         // If a reader for this process id exists (from a previous crashed instance),
         // stop it and remove it before creating a fresh one for recovery.
@@ -2011,7 +2011,7 @@ Managed_process::Spawn_result Managed_process::spawn_swarm_process(
             if (!s_mproc) {
                 return;
             }
-            Dispatch_lock_guard<std::unique_lock<std::shared_mutex>> readers_lock(s_mproc->m_readers_mutex);
+            Dispatch_unique_lock readers_lock(s_mproc->m_readers_mutex);
             s_mproc->m_readers.erase(piid);
         });
 
@@ -2242,7 +2242,7 @@ inline void transition_communication(Managed_process& process, communication_tra
     }
 
     {
-        Dispatch_lock_guard<std::shared_lock<std::shared_mutex>> readers_lock(process.m_readers_mutex);
+        Dispatch_shared_lock readers_lock(process.m_readers_mutex);
         for (auto& entry : process.m_readers) {
             if (auto& reader = entry.second) {
                 if (is_pause) {
@@ -2443,7 +2443,7 @@ inline void Managed_process::flush(instance_id_type process_id, sequence_counter
     std::shared_ptr<Process_message_reader> reader;
     sequence_counter_type rs = invalid_sequence;
     {
-        Dispatch_lock_guard<std::shared_lock<std::shared_mutex>> readers_lock(m_readers_mutex);
+        Dispatch_shared_lock readers_lock(m_readers_mutex);
         auto it = m_readers.find(process_id);
         if (it == m_readers.end()) {
             throw std::logic_error(
@@ -2515,7 +2515,7 @@ void Managed_process::wait_for_delivery_fence()
     std::vector<Process_message_reader::Delivery_target> targets;
 
     {
-        Dispatch_lock_guard<std::shared_lock<std::shared_mutex>> readers_lock(m_readers_mutex);
+        Dispatch_shared_lock readers_lock(m_readers_mutex);
         targets.reserve(m_readers.size() * 2);
 
         for (auto& [process_id, reader_ptr] : m_readers) {
@@ -2661,4 +2661,5 @@ size_t Managed_process::unblock_rpc(instance_id_type process_instance_id)
 }
 
 } // sintra
+
 
