@@ -45,14 +45,14 @@ bool on_request_reader_thread();
 
 
 
-static inline thread_local Message_prefix* s_tl_current_message = nullptr;
-static inline thread_local instance_id_type s_tl_common_function_iid = invalid_instance_id;
+inline thread_local Message_prefix* s_tl_current_message = nullptr;
+inline thread_local instance_id_type s_tl_common_function_iid = invalid_instance_id;
 
-static inline thread_local Process_message_reader* s_tl_current_request_reader = nullptr;
+inline thread_local Process_message_reader* s_tl_current_request_reader = nullptr;
 
-static inline thread_local instance_id_type s_tl_additional_piids[max_process_index];
-static inline thread_local size_t s_tl_additional_piids_size = 0;
-static inline thread_local bool s_tl_rpc_reply_deferred = false;
+inline thread_local instance_id_type s_tl_additional_piids[max_process_index];
+inline thread_local size_t s_tl_additional_piids_size = 0;
+inline thread_local bool s_tl_rpc_reply_deferred = false;
 
 inline void clear_rpc_reply_deferred()
 {
@@ -193,6 +193,13 @@ struct Process_message_reader
     State state() const { return m_reader_state.load(); }
 
 private:
+
+    void begin_reading_session(
+        const std::shared_ptr<Message_ring_R>& ring,
+        std::atomic<bool>& running_flag);
+    void end_reading_session(
+        const std::shared_ptr<Message_ring_R>& ring,
+        std::atomic<bool>& running_flag);
 
     atomic<State>                       m_reader_state              = READER_NORMAL;
 

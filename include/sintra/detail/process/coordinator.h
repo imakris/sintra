@@ -310,6 +310,13 @@ public:
     std::vector<Pending_instance_publication> finalize_initialization_tracking(
         instance_id_type process_iid);
 
+    void collect_and_schedule_barrier_completions(
+        instance_id_type process_iid,
+        bool remove_process,
+        bool lock_groups_once);
+
+    bool draining_slot_of_index(uint64_t draining_index, size_t& slot) const;
+
     // Draining coordination -------------------------------------------------
     //
     // The draining state is tracked per-process via m_draining_process_states.
