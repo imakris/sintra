@@ -381,7 +381,7 @@ TEST_CASE(test_unblock_local_returns_empty)
     auto reader = std::make_shared<sintra::Ring_R<int>>(tmp.str(), "ring_data", ring_elements, (ring_elements * 3) / 4);
 
     std::atomic<bool> ready{false};
-    sintra::Ring_R<int>::Range result{};
+    sintra::Range<int> result{};
     std::exception_ptr thread_error;
 
     std::thread reader_thread([&]() {
