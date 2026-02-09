@@ -7,6 +7,7 @@
 
 #include <sintra/sintra.h>
 
+#include "test_choreography_utils.h"
 #include "test_utils.h"
 
 #include <algorithm>
@@ -51,41 +52,6 @@ struct Noise_message
     int step;
     int payload;
 };
-
-std::string make_pre_barrier_name(int iteration)
-{
-    std::ostringstream oss;
-    oss << "pathological-pre-" << iteration;
-    return oss.str();
-}
-
-std::string make_stage_barrier_name(int iteration, int step)
-{
-    std::ostringstream oss;
-    oss << "pathological-stage-" << iteration << "-step-" << step;
-    return oss.str();
-}
-
-std::string make_stage_processing_name(int iteration)
-{
-    std::ostringstream oss;
-    oss << "pathological-stage-" << iteration << "-processed";
-    return oss.str();
-}
-
-std::string make_final_barrier_name(int iteration, int index)
-{
-    std::ostringstream oss;
-    oss << "pathological-final-" << iteration << "-slot-" << index;
-    return oss.str();
-}
-
-std::string make_final_processing_name(int iteration)
-{
-    std::ostringstream oss;
-    oss << "pathological-final-" << iteration << "-processed";
-    return oss.str();
-}
 
 std::string make_worker_noise_log(int worker)
 {
@@ -260,15 +226,17 @@ int controller_process()
     sintra::barrier("pathological-setup");
 
     for (int iteration = 0; iteration < k_iterations; ++iteration) {
-        const auto pre_name = make_pre_barrier_name(iteration);
+        const auto pre_name = sintra::test::make_barrier_name("pathological-pre", iteration);
         sintra::barrier(pre_name);
 
         for (int step = 0; step < k_stage_steps; ++step) {
-            const auto stage_name = make_stage_barrier_name(iteration, step);
+            const auto stage_name =
+                sintra::test::make_barrier_name("pathological-stage", iteration, "step", step);
             sintra::barrier(stage_name);
         }
 
-        const auto processing_name = make_stage_processing_name(iteration);
+        const auto processing_name =
+            sintra::test::make_barrier_name("pathological-stage", iteration, "processed");
         sintra::barrier<sintra::processing_fence_t>(processing_name);
 
         std::vector<int> final_order(k_final_steps);
@@ -278,11 +246,13 @@ int controller_process()
         }
 
         for (int index : final_order) {
-            const auto final_name = make_final_barrier_name(iteration, index);
+            const auto final_name =
+                sintra::test::make_barrier_name("pathological-final", iteration, "slot", index);
             sintra::barrier(final_name);
         }
 
-        const auto final_processing = make_final_processing_name(iteration);
+        const auto final_processing =
+            sintra::test::make_barrier_name("pathological-final", iteration, "processed");
         sintra::barrier<sintra::processing_fence_t>(final_processing);
     }
 
@@ -347,7 +317,7 @@ int worker_process(int worker_index)
     std::uniform_int_distribution<int> jitter(0, 5);
 
     for (int iteration = 0; iteration < k_iterations; ++iteration) {
-        const auto pre_name = make_pre_barrier_name(iteration);
+        const auto pre_name = sintra::test::make_barrier_name("pathological-pre", iteration);
 
         Stage_report pre_before{worker_index, iteration, 0, -1, 0};
         sintra::world() << pre_before;
@@ -372,7 +342,8 @@ int worker_process(int worker_index)
                                worker_index * 100 + iteration * 10 + step};
             sintra::world() << noise;
 
-            const auto stage_name = make_stage_barrier_name(iteration, step);
+            const auto stage_name =
+                sintra::test::make_barrier_name("pathological-stage", iteration, "step", step);
             if ((iteration + worker_index + step) % 3 == 0) {
                 std::this_thread::sleep_for(std::chrono::microseconds(5));
             }
@@ -387,7 +358,8 @@ int worker_process(int worker_index)
         sintra::world() << process_pending;
         log_stage_event(stage_log, process_pending, "emit");
 
-        const auto processing_name = make_stage_processing_name(iteration);
+        const auto processing_name =
+            sintra::test::make_barrier_name("pathological-stage", iteration, "processed");
         sintra::barrier<processing_fence_t>(processing_name);
 
         Stage_report process_done{worker_index, iteration, 2, -1, 1};
@@ -405,7 +377,8 @@ int worker_process(int worker_index)
             sintra::world() << final_before;
             log_stage_event(stage_log, final_before, "emit");
 
-            const auto final_name = make_final_barrier_name(iteration, index);
+            const auto final_name =
+                sintra::test::make_barrier_name("pathological-final", iteration, "slot", index);
             if ((index + worker_index) % 2 == 0) {
                 std::this_thread::sleep_for(std::chrono::microseconds(3));
             }
@@ -420,7 +393,8 @@ int worker_process(int worker_index)
         sintra::world() << final_pending;
         log_stage_event(stage_log, final_pending, "emit");
 
-        const auto final_processing = make_final_processing_name(iteration);
+        const auto final_processing =
+            sintra::test::make_barrier_name("pathological-final", iteration, "processed");
         sintra::barrier<processing_fence_t>(final_processing);
 
         Stage_report final_done{worker_index, iteration, 4, -1, 1};

@@ -20,6 +20,7 @@
 
 #include <sintra/sintra.h>
 
+#include "test_choreography_utils.h"
 #include "test_utils.h"
 
 #include <array>
@@ -174,9 +175,8 @@ const std::array<std::string, k_phase_count>& fence_names()
     static const std::array<std::string, k_phase_count> names = [] {
         std::array<std::string, k_phase_count> values{};
         for (std::size_t phase = 0; phase < k_phase_count; ++phase) {
-            std::ostringstream oss;
-            oss << "extreme-choreography-fence-phase-" << phase;
-            values[phase] = oss.str();
+            values[phase] =
+                sintra::test::make_barrier_name("extreme-choreography-fence-phase", phase);
         }
         return values;
     }();

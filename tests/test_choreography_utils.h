@@ -27,6 +27,16 @@ inline std::string make_barrier_name(std::string_view prefix,
 
 inline std::string make_barrier_name(std::string_view prefix,
                                      std::uint64_t a,
+                                     std::string_view mid,
+                                     std::uint64_t b)
+{
+    std::ostringstream oss;
+    oss << prefix << '-' << a << '-' << mid << '-' << b;
+    return oss.str();
+}
+
+inline std::string make_barrier_name(std::string_view prefix,
+                                     std::uint64_t a,
                                      std::string_view suffix)
 {
     std::ostringstream oss;
