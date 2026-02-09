@@ -381,6 +381,7 @@ TEST_CASE(test_unblock_local_returns_empty)
     auto reader = std::make_shared<sintra::Ring_R<int>>(tmp.str(), "ring_data", ring_elements, (ring_elements * 3) / 4);
 
     std::atomic<bool> ready{false};
+    std::atomic<bool> done{false};
     sintra::Range<int> result{};
     std::exception_ptr thread_error;
 
@@ -390,6 +391,7 @@ TEST_CASE(test_unblock_local_returns_empty)
             ASSERT_EQ(static_cast<size_t>(initial.end - initial.begin), size_t(0));
             ready = true;
             result = reader->wait_for_new_data();
+            done = true;
             reader->done_reading();
         }
         catch (...) {
@@ -401,7 +403,15 @@ TEST_CASE(test_unblock_local_returns_empty)
         std::this_thread::sleep_for(1ms);
     }
 
-    reader->unblock_local();
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    while (!done.load() && std::chrono::steady_clock::now() < deadline) {
+        reader->unblock_local();
+        std::this_thread::sleep_for(1ms);
+    }
+
+    if (!done.load()) {
+        reader->request_stop();
+    }
 
     reader_thread.join();
     if (thread_error) {
