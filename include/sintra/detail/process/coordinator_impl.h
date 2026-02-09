@@ -404,8 +404,7 @@ instance_id_type Coordinator::publish_transceiver(type_id_type tid, instance_id_
             return invalid_instance_id;
         }
 
-        auto scoped_map = s_mproc->m_instance_id_of_assigned_name.scoped();
-        scoped_map.get()[entry.name] = iid;
+        s_mproc->m_instance_id_of_assigned_name.set_value(entry.name, iid);
         pr[iid] = entry;
 
         // Do NOT reset draining state here - only reset when publishing a NEW PROCESS (Managed_process),
@@ -421,8 +420,7 @@ instance_id_type Coordinator::publish_transceiver(type_id_type tid, instance_id_
             return invalid_instance_id;
         }
 
-        auto scoped_map = s_mproc->m_instance_id_of_assigned_name.scoped();
-        scoped_map.get()[entry.name] = iid;
+        s_mproc->m_instance_id_of_assigned_name.set_value(entry.name, iid);
         m_transceiver_registry[iid][iid] = entry;
 
         // Reset draining state to 0 (ACTIVE) when publishing a Managed_process.

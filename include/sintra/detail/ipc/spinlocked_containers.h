@@ -166,6 +166,13 @@ struct spinlocked_umap: detail::spinlocked<unordered_map, Key, T>
         out.assign(it->second.begin(), it->second.end());
         return !out.empty();
     }
+
+    template <typename K, typename V>
+    void set_value(K&& key, V&& value)
+    {
+        locker l(this->m_sl);
+        this->m_c[std::forward<K>(key)] = std::forward<V>(value);
+    }
 };
 
 

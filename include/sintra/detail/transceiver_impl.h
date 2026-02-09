@@ -73,10 +73,7 @@ void Transceiver::construct(const string& name/* = ""*/, uint64_t instance_id/* 
         throw runtime_error("Failed to create a Transceiver instance id.");
     }
 
-    {
-        auto scoped_map = s_mproc->m_local_pointer_of_instance_id.scoped();
-        scoped_map.get()[m_instance_id] = this;
-    }
+    s_mproc->m_local_pointer_of_instance_id.set_value(m_instance_id, this);
 
     // A transceiver instance may as well not have a name (in which case, name lookups fail).
     if (!name.empty()) {
@@ -1108,18 +1105,14 @@ Transceiver::export_rpc_impl()
     auto* self = static_cast<typename RPCTC::o_type*>(this);
     const auto instance_id = m_instance_id;
 
-    {
-        auto scoped_map = get_instance_to_object_map<RPCTC>().scoped();
-        scoped_map.get()[instance_id] = self;
-    }
+    get_instance_to_object_map<RPCTC>().set_value(instance_id, self);
 
     uint64_t test = MT::id();
 
     // handler registration
     using RPCTC_o_type = typename RPCTC::o_type;
     static auto once = [&] {
-        auto scoped_map = get_rpc_handler_map().scoped();
-        scoped_map.get()[test] = &RPCTC_o_type::template rpc_handler<RPCTC, MT>;
+        get_rpc_handler_map().set_value(test, &RPCTC_o_type::template rpc_handler<RPCTC, MT>);
         return test;
     }();
     (void)(once); // suppress unused variable warning

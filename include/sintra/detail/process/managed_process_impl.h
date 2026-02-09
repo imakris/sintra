@@ -984,10 +984,8 @@ sintra::type_id_type get_type_id()
                         "' new='" + type_name + "'");
                 }
             }
-            else
-            {
-                auto scoped_map = s_mproc->m_type_name_of_explicit_id.scoped();
-                scoped_map.get()[explicit_id] = type_name;
+            else {
+                s_mproc->m_type_name_of_explicit_id.set_value(explicit_id, type_name);
             }
         }
         return make_type_id(explicit_id);
