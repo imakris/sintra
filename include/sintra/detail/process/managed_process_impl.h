@@ -46,6 +46,8 @@
 
 namespace sintra {
 
+using std::unique_lock;
+
 extern thread_local bool tl_is_req_thread;
 
 // Protects access to s_mproc during signal dispatch to prevent use-after-free.

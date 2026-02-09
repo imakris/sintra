@@ -18,6 +18,7 @@
 #include <list>
 #include <map>
 #include <set>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -156,13 +157,22 @@ struct spinlocked_umap: detail::spinlocked<unordered_map, Key, T>
 {
     using locker = spinlock::locker;
 
+    template <typename U, typename = void>
+    struct has_value_type : std::false_type
+    {};
+
+    template <typename U>
+    struct has_value_type<U, std::void_t<typename U::value_type>> : std::true_type
+    {};
+
     bool contains_key(const Key& key) const
     {
         locker l(this->m_sl);
         return this->m_c.find(key) != this->m_c.end();
     }
 
-    bool copy_value(const Key& key, std::vector<typename T::value_type>& out) const
+    template <typename U = T, typename = std::enable_if_t<has_value_type<U>::value>>
+    bool copy_value(const Key& key, std::vector<typename U::value_type>& out) const
     {
         locker l(this->m_sl);
         auto it = this->m_c.find(key);
