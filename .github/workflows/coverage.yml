@@ -110,19 +110,18 @@ jobs:
           # Merge all profile data files
           $PROFDATA merge -sparse *.profraw -o default.profdata
 
-          # Find a test binary (debug configuration) - binaries are in tests/ subdirectory
-          TEST_BIN=$(find tests -name "sintra_*_debug" -type f -executable | head -1)
-          if [ -z "$TEST_BIN" ]; then
+          # Collect all test binaries — each has its own instrumentation mappings,
+          # so we must pass every one to get complete coverage data.
+          mapfile -t TEST_BINS < <(find tests -name "sintra_*_debug" -type f -executable)
+          if [ "${#TEST_BINS[@]}" -eq 0 ]; then
             echo "No test binaries found"
             ls -la tests/
             exit 1
           fi
 
-          # Use the first test binary as the primary object for coverage export
-          # All binaries share the same instrumented source files
-          $COV export -format=lcov -instr-profile default.profdata "$TEST_BIN" > lcov.all.info
+          $COV export -format=lcov -instr-profile default.profdata "${TEST_BINS[@]}" > lcov.all.info
           lcov --quiet --extract lcov.all.info "*/include/sintra/*" --ignore-errors negative -o lcov.info
-          $COV report -instr-profile default.profdata "$TEST_BIN" || true
+          $COV report -instr-profile default.profdata "${TEST_BINS[@]}" || true
 
       - name: Upload coverage to Codecov
         if: always()
