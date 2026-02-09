@@ -7,6 +7,7 @@
 #include "lifecycle_types.h"
 #include "../resolvable_instance.h"
 #include "../resolve_type.h"
+#include "../ipc/spinlocked_containers.h"
 #include "../transceiver.h"
 #include <array>
 #include <atomic>

@@ -336,30 +336,10 @@ Transceiver::activate_impl(
 
     lock_guard<recursive_mutex> sl(s_mproc->m_handlers_mutex);
 
-    handler_proc_registry_mid_record_type* sender_map = nullptr;
-    {
-        auto scoped_handlers = s_mproc->m_active_handlers.scoped();
-        auto& ms = scoped_handlers.get()[message_type_id];
-        sender_map = &ms;
-    }
+    auto& sender_map = s_mproc->m_active_handlers[message_type_id];
 
-    list<function<void(const Message_prefix &)>>::iterator mid_sid_it;
-    {
-        auto scoped_sender_map = sender_map->scoped();
-        auto msm_it = scoped_sender_map.get().find(effective_sender_id);
-        if (msm_it == scoped_sender_map.get().end()) {
-
-            // There was no record for this sender_id, thus we have to make one.
-
-            list<function<void(const Message_prefix&)>> handler_list;
-            handler_list.emplace_back(wrapper);
-            msm_it = scoped_sender_map.get().emplace(effective_sender_id, std::move(handler_list)).first;
-            mid_sid_it = msm_it->second.begin();
-        }
-        else {
-            mid_sid_it = msm_it->second.emplace(msm_it->second.end(), wrapper);
-        }
-    }
+    auto& handler_list = sender_map[effective_sender_id];
+    auto mid_sid_it = handler_list.emplace(handler_list.end(), wrapper);
 
     decltype(m_deactivators)::iterator deactivator_it;
 
@@ -375,27 +355,22 @@ Transceiver::activate_impl(
 
     *deactivator_it = [this, message_type_id, effective_sender_id, mid_sid_it, deactivator_it] () {
         lock_guard<recursive_mutex> sl(s_mproc->m_handlers_mutex);
-        handler_proc_registry_mid_record_type* sender_map = nullptr;
-        {
-            auto scoped_handlers = s_mproc->m_active_handlers.scoped();
-            auto it_mt = scoped_handlers.get().find(message_type_id);
-            if (it_mt == scoped_handlers.get().end()) {
-                m_deactivators.erase(deactivator_it);
-                return;
-            }
-            sender_map = &it_mt->second;
+        auto it_mt = s_mproc->m_active_handlers.find(message_type_id);
+        if (it_mt == s_mproc->m_active_handlers.end()) {
+            m_deactivators.erase(deactivator_it);
+            return;
         }
+        auto& sender_map = it_mt->second;
 
-        auto scoped_sender_map = sender_map->scoped();
-        auto msm_it = scoped_sender_map.get().find(effective_sender_id);
-        if (msm_it == scoped_sender_map.get().end()) {
+        auto msm_it = sender_map.find(effective_sender_id);
+        if (msm_it == sender_map.end()) {
             m_deactivators.erase(deactivator_it);
             return;
         }
 
         msm_it->second.erase(mid_sid_it);
         if (msm_it->second.empty()) {
-            scoped_sender_map.get().erase(msm_it);
+            sender_map.erase(msm_it);
         }
         m_deactivators.erase(deactivator_it);
     };

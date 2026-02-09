@@ -6,7 +6,7 @@
 #include "globals.h"
 #include "id_types.h"
 #include "messaging/message.h"
-#include "ipc/spinlocked_containers.h"
+#include "std_imports.h"
 
 #include <condition_variable>
 #include <functional>
@@ -124,15 +124,15 @@ struct Named_instance: std::string
 
 
 
-using handler_proc_registry_mid_record_type = 
-    spinlocked_umap <
+using handler_proc_registry_mid_record_type =
+    unordered_map<
         instance_id_type,                                // sender
         list<function<void(const Message_prefix &)>>
     >;
 
 
 using handler_registry_type =
-    spinlocked_umap <
+    unordered_map<
         type_id_type,                                    // message type
         handler_proc_registry_mid_record_type
     >;

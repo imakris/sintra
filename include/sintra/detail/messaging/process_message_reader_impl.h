@@ -46,18 +46,25 @@ inline void dispatch_event_handlers(
     lock_guard<recursive_mutex> sl(s_mproc->m_handlers_mutex);
 
     handler_proc_registry_mid_record_type* sender_map = nullptr;
-    {
-        auto scoped_handlers = s_mproc->m_active_handlers.scoped();
-        auto it_mt = scoped_handlers.get().find(message.message_type_id);
-        if (it_mt == scoped_handlers.get().end()) {
-            return;
-        }
-        sender_map = &it_mt->second;
+    auto it_mt = s_mproc->m_active_handlers.find(message.message_type_id);
+    if (it_mt == s_mproc->m_active_handlers.end()) {
+        return;
     }
+    sender_map = &it_mt->second;
 
     for (auto sid : scope_ids) {
         std::vector<function<void(const Message_prefix&)>> handlers;
-        if (!sender_map->copy_value(sid, handlers)) {
+        std::size_t handler_count = 0;
+        auto shl = sender_map->find(sid);
+        if (shl != sender_map->end()) {
+            handler_count = shl->second.size();
+            handlers.reserve(handler_count);
+            for (auto& handler : shl->second) {
+                handlers.push_back(handler);
+            }
+        }
+
+        if (handlers.empty()) {
             continue;
         }
 

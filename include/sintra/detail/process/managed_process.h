@@ -276,7 +276,7 @@ struct Managed_process: Derived_transceiver<Managed_process>
     SINTRA_MESSAGE_RESERVED(terminated_abnormally, int status);
     SINTRA_MESSAGE_RESERVED(unpublish_transceiver_notify, instance_id_type transceiver_instance_id);
 
-    spinlocked_umap<tn_type, list<function<void()>>>
+    unordered_map<tn_type, list<function<void()>>>
                                         m_queued_availability_calls;
 
     // Guards access to queued availability callbacks.  The corresponding
@@ -300,6 +300,7 @@ struct Managed_process: Derived_transceiver<Managed_process>
     mutex                               m_flush_sequence_mutex;
     condition_variable                  m_flush_sequence_condition;
 
+    // Guarded by m_handlers_mutex.
     handler_registry_type               m_active_handlers;
 
     // standard process groups
