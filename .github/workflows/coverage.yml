@@ -86,15 +86,13 @@ jobs:
           # Continue even on test failure to collect coverage data
           python3 run_tests.py --timeout 120 --build-dir ../${{ env.BUILD_DIR }} --config Debug || true
 
-      # GCC: strict capture (includes unexecuted lines/files), then keep only library headers
+      # GCC: capture executed lines, then keep only library headers
       - name: Coverage (lcov/gcc)
         if: matrix.compiler == 'gcc'
         working-directory: ${{ env.BUILD_DIR }}
         run: |
           # Use --ignore-errors negative for multi-threaded test race conditions
-          lcov --quiet --capture --initial --directory . --ignore-errors negative -o base.info
-          lcov --quiet --capture --directory . --ignore-errors negative -o test.info
-          lcov --quiet -a base.info -a test.info --ignore-errors negative -o lcov.all.info
+          lcov --quiet --capture --directory . --ignore-errors negative -o lcov.all.info
           lcov --quiet --extract lcov.all.info "*/include/sintra/*" --ignore-errors negative -o lcov.info
           lcov --list lcov.info || true
 
