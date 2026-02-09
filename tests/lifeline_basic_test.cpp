@@ -478,11 +478,7 @@ bool process_exists(long long pid)
 
 int child_pid_value()
 {
-#ifdef _WIN32
-    return static_cast<int>(GetCurrentProcessId());
-#else
     return static_cast<int>(sintra::test::get_pid());
-#endif
 }
 
 int run_child(const std::filesystem::path& dir, const std::string& test_case, int argc, char* argv[])
