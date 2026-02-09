@@ -70,6 +70,8 @@ lifecycle_handler_test                    20
 receive_test                              20
 lifeline_basic_test                        5
 locality_messaging_test                    1
+defensive_paths_test                       1
+fault_injection_defensive_test             1
 
 # Manual/reproduction tests (commented out by default)
 # Uncomment to enable these tests (they may fail by design)

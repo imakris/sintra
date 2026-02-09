@@ -1116,13 +1116,6 @@ bool spawn_detached_posix(const Spawn_detached_options& options)
             break;
     }
 
-    if (!spawn_failed && ready_status != 0) {
-        exec_errno = ready_status > 0 ? ready_status : -ready_status;
-        spawn_failed = true;
-        observed_errno = exec_errno;
-        failure_stage = spawn_detached_debug_info::Stage::ParentReadReadyStatus;
-    }
-
     if (!spawn_failed) {
         int exec_status = 0;
         switch (read_int(&exec_status, &exec_errno)) {
