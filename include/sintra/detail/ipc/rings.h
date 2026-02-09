@@ -507,9 +507,15 @@ private:
                 uint8_t expected = state_uninitialized;
                 if (m_state.compare_exchange_strong(expected, state_initializing,
                                                     std::memory_order_acq_rel)) {
-                    new (&m_storage) impl();
-                    m_state.store(state_initialized, std::memory_order_release);
-                    return access();
+                    try {
+                        new (&m_storage) impl();
+                        m_state.store(state_initialized, std::memory_order_release);
+                        return access();
+                    }
+                    catch (...) {
+                        m_state.store(state_uninitialized, std::memory_order_release);
+                        throw;
+                    }
                 }
             }
             std::this_thread::yield();
