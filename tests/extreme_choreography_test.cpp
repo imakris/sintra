@@ -762,33 +762,25 @@ int aggregator_process()
     deactivate_all_slots();
     barrier("extreme-choreography-finished", "_sintra_all_processes");
 
-    int completed_phases = 0;
-    for (bool value : phase_finalised) {
-        if (value) {
-            ++completed_phases;
+    std::ofstream out(summary_path, std::ios::binary | std::ios::trunc);
+    if (out) {
+        out << (failure_flag ? "fail" : "ok") << '\n';
+        int completed_phases = 0;
+        for (bool value : phase_finalised) {
+            if (value) {
+                ++completed_phases;
+            }
         }
-    }
-
-    std::vector<std::string> lines;
-    lines.reserve(3 + failure_messages.size());
-    lines.push_back("completed_phases " + std::to_string(completed_phases));
-    {
-        std::ostringstream ack_line;
-        ack_line << "ack_counts";
+        out << "completed_phases " << completed_phases << '\n';
+        out << "ack_counts";
         for (std::size_t phase = 0; phase < k_phase_count; ++phase) {
-            ack_line << ' ' << phase_completion_counts[phase];
+            out << ' ' << phase_completion_counts[phase];
         }
-        lines.push_back(ack_line.str());
-    }
-    lines.push_back("failures " + std::to_string(failure_messages.size()));
-    for (const auto& msg : failure_messages) {
-        lines.push_back(msg);
-    }
-    try {
-        sintra::test::write_choreography_result(summary_path, !failure_flag, lines);
-    }
-    catch (const std::exception&) {
-        // Preserve best-effort summary output.
+        out << '\n';
+        out << "failures " << failure_messages.size() << '\n';
+        for (const auto& msg : failure_messages) {
+            out << msg << '\n';
+        }
     }
 
     return failure_flag ? 1 : 0;
@@ -830,17 +822,22 @@ int main(int argc, char* argv[])
     sintra::finalize();
 
     if (!is_spawned) {
-        const auto result = sintra::test::read_choreography_result(summary_path);
-        if (result.lines.size() < 3) {
+        std::ifstream in(summary_path, std::ios::binary);
+        if (!in) {
             shared.cleanup();
             return 1;
         }
 
-        const auto& completed_line = result.lines[0];
-        const auto& ack_line = result.lines[1];
-        const auto& failure_line = result.lines[2];
+        std::string status;
+        std::getline(in, status);
+        std::string completed_line;
+        std::getline(in, completed_line);
+        std::string ack_line;
+        std::getline(in, ack_line);
+        std::string failure_line;
+        std::getline(in, failure_line);
 
-        bool ok = result.ok;
+        bool ok = (status == "ok");
 
         int completed_phases = 0;
         {

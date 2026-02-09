@@ -264,16 +264,15 @@ int coordinator_process()
         sintra::test::Shared_directory shared("SINTRA_TEST_SHARED_DIR", "barrier_complex_choreography");
         const auto shared_dir = shared.path();
         std::vector<std::string> lines;
-        lines.reserve(success ? 3 : 4);
+        lines.reserve(success ? 4 : 5);
+        lines.push_back(success ? "ok" : "fail");
         lines.push_back(std::to_string(iterations_completed));
         lines.push_back(std::to_string(stage_a_total));
         lines.push_back(std::to_string(stage_b_total));
         if (!success) {
             lines.push_back(failure_reason);
         }
-        sintra::test::write_choreography_result(shared_dir / "complex_choreography_result.txt",
-                                                success,
-                                                lines);
+        sintra::test::write_lines(shared_dir / "complex_choreography_result.txt", lines);
     }
     catch (const std::exception& e) {
         std::fprintf(stderr, "Failed to write result: %s\n", e.what());
@@ -445,38 +444,30 @@ int main(int argc, char* argv[])
                 return 1;
             }
 
-            const auto result = sintra::test::read_choreography_result(result_path);
-            if (result.lines.size() < 3) {
+            std::ifstream in(result_path, std::ios::binary);
+            if (!in) {
                 std::fprintf(stderr,
                              "Error: failed to open result file %s\n",
                              result_path.string().c_str());
                 return 1;
             }
 
+            std::string status;
             std::size_t iterations_completed = 0;
             std::size_t stage_a_total = 0;
             std::size_t stage_b_total = 0;
             std::string reason;
 
-            try {
-                iterations_completed = static_cast<std::size_t>(std::stoull(result.lines[0]));
-                stage_a_total = static_cast<std::size_t>(std::stoull(result.lines[1]));
-                stage_b_total = static_cast<std::size_t>(std::stoull(result.lines[2]));
-                if (result.lines.size() > 3) {
-                    reason = result.lines[3];
-                }
-            }
-            catch (const std::exception&) {
-                std::fprintf(stderr,
-                             "Error: failed to parse result file %s\n",
-                             result_path.string().c_str());
-                return 1;
-            }
+            std::getline(in, status);
+            in >> iterations_completed;
+            in >> stage_a_total;
+            in >> stage_b_total;
+            std::getline(in >> std::ws, reason);
 
             const std::size_t expected_stage_a = k_stage_a_workers * k_iterations;
             const std::size_t expected_stage_b = k_stage_b_workers * k_iterations;
 
-            if (!result.ok) {
+            if (status != "ok") {
                 std::fprintf(stderr,
                              "Complex choreography test reported failure: %s\n",
                              reason.c_str());

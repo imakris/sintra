@@ -108,6 +108,13 @@ std::uint64_t make_token(int phase, int round)
            static_cast<std::uint32_t>(round);
 }
 
+std::string barrier_name(const char* stage, std::uint64_t token)
+{
+    const int phase = static_cast<int>(token >> 32);
+    const int round = static_cast<int>(token & 0xffffffffu);
+    return sintra::test::make_barrier_name("complex", phase, round, stage);
+}
+
 std::uint32_t compute_sequence_id(int worker_id, int phase, int round)
 {
     return static_cast<std::uint32_t>((phase << 16) | (round << 8) | worker_id);
@@ -312,19 +319,19 @@ void write_aggregator_report()
     auto& state = aggregator_state();
     std::lock_guard<std::mutex> lk(state.mutex);
 
-    std::vector<std::string> lines;
-    lines.reserve(2 + state.completed_rounds.size());
-    lines.push_back(std::to_string(state.errors));
-    lines.push_back(std::to_string(state.completed_rounds.size()));
-
-    for (const auto& result : state.completed_rounds) {
-        std::ostringstream oss;
-        oss << result.phase << ' ' << result.round << ' ' << result.count << ' '
-            << result.checksum;
-        lines.push_back(oss.str());
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        throw std::runtime_error("failed to open aggregator report");
     }
 
-    sintra::test::write_choreography_result(path, state.errors == 0, lines);
+    out << (state.errors == 0 ? "ok" : "fail") << '\n';
+    out << state.errors << '\n';
+    out << state.completed_rounds.size() << '\n';
+
+    for (const auto& result : state.completed_rounds) {
+        out << result.phase << ' ' << result.round << ' ' << result.count << ' '
+            << result.checksum << '\n';
+    }
 }
 
 int process_aggregator()
@@ -343,19 +350,18 @@ int process_aggregator()
 
     barrier("complex-choreo-setup", k_group_name);
 
-    sintra::test::for_each_phase_round(
-        k_plan,
-        "complex",
-        "pre",
-        "post",
-        make_token,
-        [&](const sintra::test::Phase_round& ctx) {
-            barrier(ctx.pre_barrier, k_group_name);
-            wait_for_round_activation(ctx.token);
-            wait_for_round_completion(ctx.token);
-            barrier(ctx.post_barrier, k_group_name);
-            return true;
-        });
+    for (const auto& phase : k_plan) {
+        for (int round = 0; round < phase.rounds; ++round) {
+            const auto token = make_token(phase.phase, round);
+            const auto pre = barrier_name("pre", token);
+            const auto post = barrier_name("post", token);
+
+            barrier(pre, k_group_name);
+            wait_for_round_activation(token);
+            wait_for_round_completion(token);
+            barrier(post, k_group_name);
+        }
+    }
 
     wait_for_shutdown();
     write_aggregator_report();
@@ -451,17 +457,16 @@ int process_inspector()
 
     barrier("complex-choreo-setup", k_group_name);
 
-    sintra::test::for_each_phase_round(
-        k_plan,
-        "complex",
-        "pre",
-        "post",
-        make_token,
-        [&](const sintra::test::Phase_round& ctx) {
-            barrier(ctx.pre_barrier, k_group_name);
-            barrier(ctx.post_barrier, k_group_name);
-            return true;
-        });
+    for (const auto& phase : k_plan) {
+        for (int round = 0; round < phase.rounds; ++round) {
+            const auto token = make_token(phase.phase, round);
+            const auto pre = barrier_name("pre", token);
+            const auto post = barrier_name("post", token);
+            (void)token;
+            barrier(pre, k_group_name);
+            barrier(post, k_group_name);
+        }
+    }
 
     wait_for_inspector_shutdown();
     write_inspector_report();
@@ -520,15 +525,17 @@ int worker_process_impl(int worker_id)
 
     bool fatal_error = false;
 
-    const auto stop_requested = [&] { return fatal_error; };
-    sintra::test::for_each_phase_round(
-        k_plan,
-        "complex",
-        "pre",
-        "post",
-        make_token,
-        [&](const sintra::test::Phase_round& ctx) {
-            barrier(ctx.pre_barrier, k_group_name);
+    for (const auto& phase : k_plan) {
+        for (int round = 0; round < phase.rounds; ++round) {
+            if (fatal_error) {
+                break;
+            }
+
+            const auto token = make_token(phase.phase, round);
+            const auto pre = barrier_name("pre", token);
+            const auto post = barrier_name("post", token);
+
+            barrier(pre, k_group_name);
 
             Phase_command cmd;
             {
@@ -536,25 +543,25 @@ int worker_process_impl(int worker_id)
                 const bool got_command = state.cv.wait_for(
                     lk, std::chrono::seconds(5), [&] {
                         return state.has_command &&
-                               state.pending_command.token == ctx.token;
+                               state.pending_command.token == token;
                     });
                 if (!got_command) {
                     ++state.errors;
                     fatal_error = true;
-                    return false;
+                    break;
                 }
                 cmd = state.pending_command;
                 state.has_command = false;
             }
 
-            if (cmd.phase != ctx.phase || cmd.round != ctx.round) {
+            if (cmd.phase != phase.phase || cmd.round != round) {
                 ++state.errors;
             }
 
-            if (state.last_token != 0 && ctx.token <= state.last_token) {
+            if (state.last_token != 0 && token <= state.last_token) {
                 ++state.errors;
             }
-            state.last_token = ctx.token;
+            state.last_token = token;
 
             const auto sequence_id =
                 compute_sequence_id(worker_id, cmd.phase, cmd.round);
@@ -577,10 +584,12 @@ int worker_process_impl(int worker_id)
             status.checksum = checksum;
             sintra::world() << status;
 
-            barrier(ctx.post_barrier, k_group_name);
-            return true;
-        },
-        stop_requested);
+            barrier(post, k_group_name);
+        }
+        if (fatal_error) {
+            break;
+        }
+    }
 
     {
         std::unique_lock<std::mutex> lk(state.mutex);
@@ -699,32 +708,31 @@ int process_conductor()
 
     barrier("complex-choreo-setup", k_group_name);
 
-    sintra::test::for_each_phase_round(
-        k_plan,
-        "complex",
-        "pre",
-        "post",
-        make_token,
-        [&](const sintra::test::Phase_round& ctx) {
-            barrier(ctx.pre_barrier, k_group_name);
+    for (const auto& phase : k_plan) {
+        for (int round = 0; round < phase.rounds; ++round) {
+            const auto token = make_token(phase.phase, round);
+            const auto pre = barrier_name("pre", token);
+            const auto post = barrier_name("post", token);
+
+            barrier(pre, k_group_name);
 
             {
                 std::lock_guard<std::mutex> lk(conductor_state().mutex);
-                conductor_state().expected_token = ctx.token;
+                conductor_state().expected_token = token;
                 conductor_state().awaiting_summary = true;
             }
 
             Phase_command cmd;
-            cmd.phase = ctx.phase;
-            cmd.round = ctx.round;
-            cmd.token = ctx.token;
+            cmd.phase = phase.phase;
+            cmd.round = round;
+            cmd.token = token;
             cmd.expected_workers = k_worker_count;
             sintra::world() << cmd;
 
-            wait_for_summary(ctx.token);
-            barrier(ctx.post_barrier, k_group_name);
-            return true;
-        });
+            wait_for_summary(token);
+            barrier(post, k_group_name);
+        }
+    }
 
     sintra::world() << Shutdown{};
     wait_for_shutdown_confirmation();
@@ -744,41 +752,24 @@ std::vector<Round_result> read_aggregator_results(const std::filesystem::path& p
                                                  bool& ok,
                                                  int& errors)
 {
-    const auto result = sintra::test::read_choreography_result(path);
-    if (result.lines.size() < 2) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
         throw std::runtime_error("failed to open aggregator report for reading");
     }
 
-    ok = result.ok;
-    try {
-        errors = std::stoi(result.lines[0]);
-    }
-    catch (const std::exception&) {
-        throw std::runtime_error("failed to parse aggregator report errors");
-    }
-
+    std::string status;
+    in >> status;
+    ok = (status == "ok");
+    in >> errors;
     std::size_t rounds = 0;
-    try {
-        rounds = static_cast<std::size_t>(std::stoull(result.lines[1]));
-    }
-    catch (const std::exception&) {
-        throw std::runtime_error("failed to parse aggregator report rounds");
-    }
-
-    if (result.lines.size() < 2 + rounds) {
-        throw std::runtime_error("aggregator report missing rounds");
-    }
+    in >> rounds;
 
     std::vector<Round_result> results;
     results.reserve(rounds);
 
     for (std::size_t i = 0; i < rounds; ++i) {
         Round_result r;
-        std::istringstream iss(result.lines[2 + i]);
-        iss >> r.phase >> r.round >> r.count >> r.checksum;
-        if (!iss) {
-            throw std::runtime_error("failed to parse aggregator report round");
-        }
+        in >> r.phase >> r.round >> r.count >> r.checksum;
         r.token = make_token(r.phase, r.round);
         results.push_back(r);
     }
