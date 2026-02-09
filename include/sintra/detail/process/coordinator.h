@@ -304,8 +304,7 @@ public:
 
     void collect_and_schedule_barrier_completions(
         instance_id_type process_iid,
-        bool remove_process,
-        bool lock_groups_once);
+        bool remove_process);
 
     bool draining_slot_of_index(uint64_t draining_index, size_t& slot) const;
 

@@ -1670,14 +1670,13 @@ void Managed_process::init(int argc, const char* const* argv)
             {
                 lock_guard<mutex> lock(m_availability_mutex);
 
-                auto scoped_calls = m_queued_availability_calls.scoped();
-                auto it = scoped_calls.get().find(tn);
-                if (it == scoped_calls.get().end()) {
+                auto it = m_queued_availability_calls.find(tn);
+                if (it == m_queued_availability_calls.end()) {
                     return;
                 }
 
                 if (it->second.empty()) {
-                    scoped_calls.get().erase(it);
+                    m_queued_availability_calls.erase(it);
                     return;
                 }
 
@@ -2218,68 +2217,55 @@ void Managed_process::go()
  ////     \////     \////     \////     \////     \////     \////     \////
   //       \//       \//       \//       \//       \//       \//       \//
 
-namespace detail {
-
-enum class communication_transition
+inline
+void Managed_process::pause()
 {
-    pause,
-    stop
-};
-
-inline void transition_communication(Managed_process& process, communication_transition transition)
-{
-    std::lock_guard<mutex> start_stop_lock(process.m_start_stop_mutex);
-
-    const bool is_pause = (transition == communication_transition::pause);
-    const bool should_skip = is_pause
-        ? (process.m_communication_state <= Managed_process::COMMUNICATION_PAUSED)
-        : (process.m_communication_state == Managed_process::COMMUNICATION_STOPPED);
+    std::lock_guard<mutex> start_stop_lock(m_start_stop_mutex);
 
     // pause() might be called when the entry function finishes execution,
     // explicitly from one of the handlers, or from the entry function itself.
     // If called when the process is already paused, this should not have any
     // side effects.
-    //
-    // stop() might be called explicitly from one of the handlers, or from the
-    // entry function. If called when the process is already stopped, this
-    // should not have any side effects.
-    if (should_skip) {
+    if (m_communication_state <= COMMUNICATION_PAUSED)
         return;
-    }
 
     {
-        Dispatch_shared_lock readers_lock(process.m_readers_mutex);
-        for (auto& entry : process.m_readers) {
+        Dispatch_shared_lock readers_lock(m_readers_mutex);
+        for (auto& entry : m_readers) {
             if (auto& reader = entry.second) {
-                if (is_pause) {
-                    reader->pause();
-                }
-                else {
-                    reader->stop_nowait();
-                }
+                reader->pause();
             }
         }
     }
 
-    process.m_communication_state = is_pause
-        ? Managed_process::COMMUNICATION_PAUSED
-        : Managed_process::COMMUNICATION_STOPPED;
-    process.m_start_stop_condition.notify_all();
-    process.m_delivery_condition.notify_all();
-}
-
-} // namespace detail
-
-inline
-void Managed_process::pause()
-{
-    detail::transition_communication(*this, detail::communication_transition::pause);
+    m_communication_state = COMMUNICATION_PAUSED;
+    m_start_stop_condition.notify_all();
+    m_delivery_condition.notify_all();
 }
 
 inline
 void Managed_process::stop()
 {
-    detail::transition_communication(*this, detail::communication_transition::stop);
+    std::lock_guard<mutex> start_stop_lock(m_start_stop_mutex);
+
+    // stop() might be called explicitly from one of the handlers, or from the
+    // entry function. If called when the process is already stopped, this
+    // should not have any side effects.
+    if (m_communication_state == COMMUNICATION_STOPPED)
+        return;
+
+    {
+        Dispatch_shared_lock readers_lock(m_readers_mutex);
+        for (auto& entry : m_readers) {
+            if (auto& reader = entry.second) {
+                reader->stop_nowait();
+            }
+        }
+    }
+
+    m_communication_state = COMMUNICATION_STOPPED;
+    m_start_stop_condition.notify_all();
+    m_delivery_condition.notify_all();
 }
 
 inline
@@ -2342,14 +2328,9 @@ function<void()> Managed_process::call_on_availability(Named_instance<T> transce
     tn_type tn = { get_type_id<T>(), std::move(transceiver_name) };
 
     // insert an empty function, in order to be able to capture the iterator within it
-    using Call_list_iterator = list<function<void()>>::iterator;
-    Call_list_iterator f_it;
-    {
-        auto scoped_calls = m_queued_availability_calls.scoped();
-        auto& call_list = scoped_calls.get()[tn];
-        call_list.emplace_back();
-        f_it = std::prev(call_list.end());
-    }
+    auto& call_list = m_queued_availability_calls[tn];
+    call_list.emplace_back();
+    auto f_it = std::prev(call_list.end());
 
     struct availability_call_state {
         bool active = true;
@@ -2365,9 +2346,8 @@ function<void()> Managed_process::call_on_availability(Named_instance<T> transce
             return false;
         }
 
-        auto scoped_calls = m_queued_availability_calls.scoped();
-        auto queue_it = scoped_calls.get().find(tn);
-        if (queue_it == scoped_calls.get().end()) {
+        auto queue_it = m_queued_availability_calls.find(tn);
+        if (queue_it == m_queued_availability_calls.end()) {
             state->active = false;
             state->iterator = decltype(state->iterator){};
             return false;
@@ -2376,7 +2356,7 @@ function<void()> Managed_process::call_on_availability(Named_instance<T> transce
         auto call_it = state->iterator;
         queue_it->second.erase(call_it);
         if (erase_empty_entry && queue_it->second.empty()) {
-            scoped_calls.get().erase(queue_it);
+            m_queued_availability_calls.erase(queue_it);
         }
         state->active = false;
         state->iterator = decltype(state->iterator){};
