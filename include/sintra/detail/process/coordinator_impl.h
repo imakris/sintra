@@ -804,10 +804,7 @@ instance_id_type Coordinator::make_process_group(
     auto ret = m_groups[name].m_instance_id;
 
     for (auto& e : member_process_ids) {
-        {
-            auto scoped_set = m_groups_of_process[e].scoped();
-            scoped_set.get().insert(ret);
-        }
+        m_groups_of_process[e].insert(ret);
     }
 
     m_groups[name].assign_name(name);
@@ -863,10 +860,7 @@ instance_id_type Coordinator::join_swarm(
             auto it = m_groups.find(name);
             if (it != m_groups.end()) {
                 it->second.add_process(new_instance_id);
-                {
-                    auto scoped_set = m_groups_of_process[new_instance_id].scoped();
-                    scoped_set.get().insert(it->second.m_instance_id);
-                }
+                m_groups_of_process[new_instance_id].insert(it->second.m_instance_id);
             }
         };
         add_to_group("_sintra_all_processes");

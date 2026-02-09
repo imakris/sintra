@@ -7,7 +7,6 @@
 #include "lifecycle_types.h"
 #include "../resolvable_instance.h"
 #include "../resolve_type.h"
-#include "../ipc/spinlocked_containers.h"
 #include "../transceiver.h"
 #include <array>
 #include <atomic>
@@ -257,7 +256,7 @@ public:
     // access only after acquiring m_groups_mutex
     map<
         instance_id_type,
-        spinlocked_uset< instance_id_type >
+        unordered_set< instance_id_type >
     >                                           m_groups_of_process;
     map<string, Process_group>                  m_groups;
 
