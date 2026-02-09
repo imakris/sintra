@@ -349,9 +349,22 @@ bool spawn_detached_sets_env_overrides()
     }
 
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    const std::string expected = "spawn_detached_env_value";
+    std::string content;
+    bool matched = false;
     while (std::chrono::steady_clock::now() < deadline) {
-        if (std::filesystem::exists(output_path)) {
-            break;
+        if (!std::filesystem::exists(output_path)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
+
+        std::ifstream in(output_path, std::ios::binary);
+        if (in.good()) {
+            std::getline(in, content);
+            if (content == expected) {
+                matched = true;
+                break;
+            }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
@@ -360,14 +373,7 @@ bool spawn_detached_sets_env_overrides()
         return false;
     }
 
-    std::ifstream in(output_path, std::ios::binary);
-    if (!sintra::test::assert_true_errno(in.good(), k_failure_prefix, "failed to read env override output file")) {
-        return false;
-    }
-
-    std::string content;
-    std::getline(in, content);
-    return sintra::test::assert_true_errno(content == "spawn_detached_env_value", k_failure_prefix, "env override value mismatch");
+    return sintra::test::assert_true_errno(matched, k_failure_prefix, "env override value mismatch");
 }
 
 } // namespace
