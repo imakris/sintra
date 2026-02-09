@@ -173,9 +173,17 @@ public:
         const owner_token self = make_owner_token();
         owner_token expected = self;
         if (!m_owner.compare_exchange_strong(expected, k_unowned)) {
+            if (expected != k_unowned && owner_pid(expected) == owner_pid(self)) {
+                owner_token expected_owner = expected;
+                if (m_owner.compare_exchange_strong(expected_owner, k_unowned)) {
+                    return;
+                }
+            }
+
             // Either unlocked by someone else (after recovery) or not owned by us.
-            throw std::system_error(std::make_error_code(std::errc::operation_not_permitted),
-                                    "interprocess_mutex unlock by non-owner");
+            throw std::system_error(
+                std::make_error_code(std::errc::operation_not_permitted),
+                "interprocess_mutex unlock by non-owner");
         }
     }
 
