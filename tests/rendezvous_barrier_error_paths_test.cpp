@@ -294,9 +294,11 @@ int main(int argc, char* argv[])
         } else {
             const auto group_iid = group.instance_id();
             group.destroy();
-            s_mproc->m_instance_id_of_assigned_name[group_name] = group_iid;
-            s_mproc->m_local_pointer_of_instance_id[group_iid] = &group;
-            sintra::Transceiver::get_instance_to_object_map<sintra::Process_group::barrier_mftc>()[group_iid] = &group;
+            s_mproc->m_instance_id_of_assigned_name.set_value(group_name, group_iid);
+            s_mproc->m_local_pointer_of_instance_id.set_value(group_iid, &group);
+            auto& instance_to_object =
+                sintra::Transceiver::get_instance_to_object_map<sintra::Process_group::barrier_mftc>();
+            instance_to_object.set_value(group_iid, &group);
 
             const bool barrier_result =
                 sintra::barrier<sintra::rendezvous_t>(barrier_name, group_name);
