@@ -100,8 +100,8 @@ void string_to_exception(type_id_type exception_type, const std::string& str)
 
     if (exception_type < static_cast<type_id_type>(detail::reserved_id::num_reserved_type_ids)) {
         switch (static_cast<detail::reserved_id>(exception_type)) {
-#define SINTRA_EXCEPTION_SWITCH_CASE(reserved_id, exception_type_name) \
-        case detail::reserved_id::reserved_id: \
+#define SINTRA_EXCEPTION_SWITCH_CASE(reserved_id_value, exception_type_name) \
+        case detail::reserved_id::reserved_id_value: \
             throw_typed_exception<exception_type_name>(str);
         SINTRA_EXCEPTION_COMMON_LIST(SINTRA_EXCEPTION_SWITCH_CASE)
 #undef SINTRA_EXCEPTION_SWITCH_CASE
@@ -114,7 +114,7 @@ void string_to_exception(type_id_type exception_type, const std::string& str)
     }
 
     static unordered_map<type_id_type, void(*)(const std::string&)> ex_map = {
-#define SINTRA_EXCEPTION_MAP_ENTRY(reserved_id, exception_type_name) \
+#define SINTRA_EXCEPTION_MAP_ENTRY(reserved_id_value, exception_type_name) \
         {get_type_id<exception_type_name>(), throw_typed_exception<exception_type_name>},
         SINTRA_EXCEPTION_COMMON_LIST(SINTRA_EXCEPTION_MAP_ENTRY)
 #undef SINTRA_EXCEPTION_MAP_ENTRY
