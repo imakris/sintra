@@ -7,7 +7,6 @@
 #include "../ipc/rings.h"
 #include "../utility.h"
 #include "../messaging/message_args.h"
-#include "../std_imports.h"
 
 #include <cassert>
 #include <cstdint>
@@ -24,6 +23,16 @@
 #endif
 
 namespace sintra {
+
+using std::enable_if_t;
+using std::is_base_of;
+using std::is_convertible;
+using std::is_same;
+using std::is_standard_layout_v;
+using std::is_trivial_v;
+using std::remove_cv;
+using std::remove_reference;
+using std::string;
 
 namespace detail {
 

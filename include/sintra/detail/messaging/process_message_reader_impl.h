@@ -6,7 +6,6 @@
 #include "../logging.h"
 #include "../transceiver_impl.h"
 #include "../tls_post_handler.h"
-#include "../std_imports.h"
 #include <atomic>
 #include <condition_variable>
 #include <cstdlib>
@@ -14,13 +13,20 @@
 #include <initializer_list>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <utility>
+#include <vector>
 
 #ifndef SINTRA_TRACE_WORLD
 #define SINTRA_TRACE_WORLD 0
 #endif
 
 namespace sintra {
+
+using std::function;
+using std::lock_guard;
+using std::recursive_mutex;
+using std::thread;
 
 void install_signal_handler();
 
@@ -51,20 +57,7 @@ inline void dispatch_event_handlers(
 
     for (auto sid : scope_ids) {
         std::vector<function<void(const Message_prefix&)>> handlers;
-        std::size_t handler_count = 0;
-        {
-            auto scoped_sender_map = sender_map->scoped();
-            auto shl = scoped_sender_map.get().find(sid);
-            if (shl != scoped_sender_map.get().end()) {
-                handler_count = shl->second.size();
-                handlers.reserve(handler_count);
-                for (auto& handler : shl->second) {
-                    handlers.push_back(handler);
-                }
-            }
-        }
-
-        if (handlers.empty()) {
+        if (!sender_map->copy_value(sid, handlers)) {
             continue;
         }
 
@@ -72,7 +65,7 @@ inline void dispatch_event_handlers(
             Log_stream(log_level::debug)
                 << "[sintra_trace_world] pid=" << static_cast<int>(getpid())
                 << " sid_match=" << static_cast<unsigned long long>(sid)
-                << " handlers=" << handler_count << "\n";
+                << " handlers=" << handlers.size() << "\n";
         }
 
         for (auto& handler : handlers) {
@@ -382,12 +375,12 @@ void Process_message_reader::request_reader_function()
 
                 // If addressed to a specified local receiver, this may only be an RPC call,
                 // thus the receiver must exist.
-                if (reader_state == READER_NORMAL) {
-                    auto scoped_map = s_mproc->m_local_pointer_of_instance_id.scoped();
-                    const bool receiver_known =
-                        scoped_map.get().find(m->receiver_instance_id) != scoped_map.get().end();
-                    assert(receiver_known);
-                }
+                assert(
+                    reader_state == READER_NORMAL ?
+                        s_mproc->m_local_pointer_of_instance_id.contains_key(m->receiver_instance_id)
+                    :
+                        true
+                );
 
                 if ((reader_state == READER_NORMAL) ||
                     (is_service_instance(m->receiver_instance_id) && s_coord) ||

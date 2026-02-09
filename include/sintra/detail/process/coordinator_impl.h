@@ -7,8 +7,6 @@
 #include "../process/coordinator.h"
 #include "../process/managed_process.h"
 #include "../process/dispatch_wait_guard.h"
-#include "../std_imports.h"
-
 #include <algorithm>
 #include <cassert>
 #include <chrono>
@@ -21,6 +19,10 @@
 
 
 namespace sintra {
+
+using std::lock_guard;
+using std::mutex;
+using std::string;
 
 
 // EXPORTED EXCLUSIVELY FOR RPC
@@ -404,8 +406,7 @@ instance_id_type Coordinator::publish_transceiver(type_id_type tid, instance_id_
             return invalid_instance_id;
         }
 
-        auto scoped_map = s_mproc->m_instance_id_of_assigned_name.scoped();
-        scoped_map.get()[entry.name] = iid;
+        s_mproc->m_instance_id_of_assigned_name.set_value(entry.name, iid);
         pr[iid] = entry;
 
         // Do NOT reset draining state here - only reset when publishing a NEW PROCESS (Managed_process),
@@ -421,8 +422,7 @@ instance_id_type Coordinator::publish_transceiver(type_id_type tid, instance_id_
             return invalid_instance_id;
         }
 
-        auto scoped_map = s_mproc->m_instance_id_of_assigned_name.scoped();
-        scoped_map.get()[entry.name] = iid;
+        s_mproc->m_instance_id_of_assigned_name.set_value(entry.name, iid);
         m_transceiver_registry[iid][iid] = entry;
 
         // Reset draining state to 0 (ACTIVE) when publishing a Managed_process.
@@ -530,7 +530,6 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
 
         collect_and_schedule_barrier_completions(
             process_iid,
-            true,
             true);
 
         // Keep the draining bit set; it will be re-initialized to 0 (ACTIVE)
@@ -612,7 +611,6 @@ inline sequence_counter_type Coordinator::begin_process_draining(instance_id_typ
 
     collect_and_schedule_barrier_completions(
         process_iid,
-        false,
         false);
 
     // Note: No explicit event-loop "pump" is required here; queued completions
@@ -1063,8 +1061,7 @@ Coordinator::finalize_initialization_tracking(instance_id_type process_iid)
 inline
 void Coordinator::collect_and_schedule_barrier_completions(
     instance_id_type process_iid,
-    bool remove_process,
-    bool lock_groups_once)
+    bool remove_process)
 {
     std::vector<Pending_completion> pending_completions;
     {
@@ -1091,30 +1088,16 @@ void Coordinator::collect_and_schedule_barrier_completions(
         return;
     }
 
-    if (lock_groups_once) {
-        s_mproc->run_after_current_handler(
-            [this, pending = std::move(pending_completions)]() mutable {
-                lock_guard<mutex> groups_lock(m_groups_mutex);
-                for (auto& entry : pending) {
-                    auto group_it = m_groups.find(entry.group_name);
-                    if (group_it != m_groups.end()) {
-                        group_it->second.emit_barrier_completions(entry.completions);
-                    }
+    s_mproc->run_after_current_handler(
+        [this, pending = std::move(pending_completions)]() mutable {
+            lock_guard<mutex> groups_lock(m_groups_mutex);
+            for (auto& entry : pending) {
+                auto group_it = m_groups.find(entry.group_name);
+                if (group_it != m_groups.end()) {
+                    group_it->second.emit_barrier_completions(entry.completions);
                 }
-            });
-    }
-    else {
-        s_mproc->run_after_current_handler(
-            [this, pending = std::move(pending_completions)]() mutable {
-                for (auto& entry : pending) {
-                    lock_guard<mutex> groups_lock(m_groups_mutex);
-                    auto it = m_groups.find(entry.group_name);
-                    if (it != m_groups.end()) {
-                        it->second.emit_barrier_completions(entry.completions);
-                    }
-                }
-            });
-    }
+            }
+        });
 }
 
 inline

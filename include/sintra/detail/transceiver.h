@@ -7,19 +7,31 @@
 #include "id_types.h"
 #include "messaging/message.h"
 #include "ipc/spinlocked_containers.h"
-#include "std_imports.h"
 
 #include <condition_variable>
 #include <functional>
 #include <list>
 #include <map>
 #include <mutex>
+#include <string>
 #include <type_traits>
 #include <utility>
 #include <unordered_map>
 
 
 namespace sintra {
+
+using std::condition_variable;
+using std::enable_if_t;
+using std::function;
+using std::is_base_of;
+using std::is_const;
+using std::is_reference;
+using std::list;
+using std::mutex;
+using std::remove_reference;
+using std::string;
+using std::unordered_map;
 
 
  //////////////////////////////////////////////////////////////////////////

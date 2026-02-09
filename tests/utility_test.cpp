@@ -188,9 +188,9 @@ void test_spinlocked_umap_scoped_erase()
     sintra::detail::spinlocked<std::unordered_map, std::string, int> map;
 
     // Insert some entries
-    map.emplace("one", 1);
-    map.emplace("two", 2);
-    map.emplace("three", 3);
+    map.with_lock([](auto& inner) { inner.emplace("one", 1); });
+    map.with_lock([](auto& inner) { inner.emplace("two", 2); });
+    map.with_lock([](auto& inner) { inner.emplace("three", 3); });
 
     // Use scoped access to iterate and erase
     {

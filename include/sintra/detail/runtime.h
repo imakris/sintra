@@ -79,15 +79,6 @@ void collect_branches(
     collect_branches(branches, std::forward<Args>(rest)...);
 }
 
-template <typename... Args>
-std::vector<Process_descriptor> make_branches_inplace(
-    std::vector<Process_descriptor>& branches,
-    Args&&... rest)
-{
-    collect_branches(branches, std::forward<Args>(rest)...);
-    return branches;
-}
-
 } // namespace detail
 
 inline void disable_debug_pause_for_current_process()
@@ -102,7 +93,7 @@ inline std::vector<Process_descriptor> make_branches()
 
 inline std::vector<Process_descriptor> make_branches(std::vector<Process_descriptor>& branches)
 {
-    return detail::make_branches_inplace(branches);
+    return branches;
 }
 
 template <typename... Args>
@@ -111,7 +102,8 @@ std::vector<Process_descriptor> make_branches(
     const Process_descriptor& descriptor,
     Args&&... rest)
 {
-    return detail::make_branches_inplace(branches, descriptor, std::forward<Args>(rest)...);
+    detail::collect_branches(branches, descriptor, std::forward<Args>(rest)...);
+    return branches;
 }
 
 template <typename... Args>
@@ -121,11 +113,8 @@ std::vector<Process_descriptor> make_branches(
     const Process_descriptor& descriptor,
     Args&&... rest)
 {
-    return detail::make_branches_inplace(
-        branches,
-        multiplicity,
-        descriptor,
-        std::forward<Args>(rest)...);
+    detail::collect_branches(branches, multiplicity, descriptor, std::forward<Args>(rest)...);
+    return branches;
 }
 
 template <typename... Args>
@@ -134,7 +123,8 @@ std::vector<Process_descriptor> make_branches(
     Args&&... rest)
 {
     std::vector<Process_descriptor> branches;
-    return detail::make_branches_inplace(branches, descriptor, std::forward<Args>(rest)...);
+    detail::collect_branches(branches, descriptor, std::forward<Args>(rest)...);
+    return branches;
 }
 
 template <typename... Args>
@@ -144,11 +134,8 @@ std::vector<Process_descriptor> make_branches(
     Args&&... rest)
 {
     std::vector<Process_descriptor> branches;
-    return detail::make_branches_inplace(
-        branches,
-        multiplicity,
-        descriptor,
-        std::forward<Args>(rest)...);
+    detail::collect_branches(branches, multiplicity, descriptor, std::forward<Args>(rest)...);
+    return branches;
 }
 
 inline bool finalize();

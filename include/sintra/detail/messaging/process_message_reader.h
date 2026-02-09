@@ -5,8 +5,6 @@
 
 #include "../globals.h"
 #include "../messaging/message.h"
-#include "../std_imports.h"
-
 #include <atomic>
 #include <condition_variable>
 #include <memory>
@@ -14,6 +12,11 @@
 #include <set>
 #include <thread>
 namespace sintra {
+
+using std::atomic;
+using std::condition_variable;
+using std::mutex;
+using std::thread;
 
 
 struct Outstanding_rpc_control;
