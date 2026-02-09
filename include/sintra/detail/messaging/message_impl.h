@@ -34,7 +34,7 @@ variable_buffer::variable_buffer(const TC& container)
         throw std::runtime_error("sintra::variable_buffer overflow: payload exceeds 32-bit limit");
     }
 
-    const size_t current_offset = static_cast<size_t>(*S::tl_pbytes_to_next_message);
+    const size_t current_offset = static_cast<size_t>(*variable_buffer::tl_pbytes_to_next_message);
     const size_t aligned_offset = detail::align_up_size(current_offset, alignof(T));
 
     if (aligned_offset > std::numeric_limits<uint32_t>::max()) {
@@ -50,7 +50,7 @@ variable_buffer::variable_buffer(const TC& container)
         throw std::runtime_error("sintra::variable_buffer overflow: message span exceeds representable range");
     }
 
-    char* data = S::tl_message_start_address + aligned_offset;
+    char* data = variable_buffer::tl_message_start_address + aligned_offset;
     assert(
         (reinterpret_cast<std::uintptr_t>(data) % alignof(T)) == 0 &&
         "variable_buffer storage must satisfy alignment requirements."
@@ -59,9 +59,9 @@ variable_buffer::variable_buffer(const TC& container)
     std::uninitialized_copy(container.begin(), container.end(), reinterpret_cast<T*>(data));
 
     const size_t self_offset = static_cast<size_t>(
-        reinterpret_cast<char*>(this) - S::tl_message_start_address);
+        reinterpret_cast<char*>(this) - variable_buffer::tl_message_start_address);
     offset_in_bytes = aligned_offset - self_offset;
-    *S::tl_pbytes_to_next_message = static_cast<uint32_t>(span_end);
+    *variable_buffer::tl_pbytes_to_next_message = static_cast<uint32_t>(span_end);
 }
 
 

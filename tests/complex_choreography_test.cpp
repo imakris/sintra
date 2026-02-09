@@ -26,6 +26,7 @@
 //
 #include <sintra/sintra.h>
 
+#include "test_choreography_utils.h"
 #include "test_utils.h"
 
 #include <algorithm>
@@ -98,20 +99,6 @@ struct Stop
 {
     bool due_to_failure;
 };
-
-std::string barrier_round_start_name(int round)
-{
-    std::ostringstream oss;
-    oss << "complex-round-" << round << "-start";
-    return oss.str();
-}
-
-std::string barrier_round_complete_name(int round)
-{
-    std::ostringstream oss;
-    oss << "complex-round-" << round << "-complete";
-    return oss.str();
-}
 
 std::uint64_t rotl64(std::uint64_t value, unsigned int shift)
 {
@@ -236,7 +223,7 @@ int conductor_process()
 
     for (int round = 0; round < k_rounds && !stop_requested; ++round) {
         const std::uint64_t seed = make_round_seed(round);
-        sintra::barrier(barrier_round_start_name(round), group);
+        sintra::barrier(sintra::test::make_barrier_name("complex-round", round, "start"), group);
 
         sintra::world() << Kickoff{round, seed};
 
@@ -266,7 +253,9 @@ int conductor_process()
             stop_broadcasted = true;
         }
 
-        sintra::barrier<sintra::processing_fence_t>(barrier_round_complete_name(round), group);
+        sintra::barrier<sintra::processing_fence_t>(
+            sintra::test::make_barrier_name("complex-round", round, "complete"),
+            group);
 
         if (local_failure) {
             break;
@@ -378,7 +367,7 @@ int worker_process_impl(int worker_index)
             round_completed = false;
         }
 
-        sintra::barrier(barrier_round_start_name(round), group);
+        sintra::barrier(sintra::test::make_barrier_name("complex-round", round, "start"), group);
 
         {
             std::unique_lock<std::mutex> lk(state_mutex);
@@ -391,8 +380,9 @@ int worker_process_impl(int worker_index)
             // entered the library's draining path. Other participants may already be parked on
             // the processing fence for this round, so the worker still has to rendezvous before
             // exiting to avoid leaving the barrier short-handed.
-            sintra::barrier<sintra::processing_fence_t>(barrier_round_complete_name(round),
-                                                        group);
+            sintra::barrier<sintra::processing_fence_t>(
+                sintra::test::make_barrier_name("complex-round", round, "complete"),
+                group);
             break;
         }
 
@@ -405,12 +395,15 @@ int worker_process_impl(int worker_index)
         if (stop_requested.load(std::memory_order_acquire)) {
             // See comment above: we must still participate in the in-flight processing fence
             // before breaking out once a stop is observed.
-            sintra::barrier<sintra::processing_fence_t>(barrier_round_complete_name(round),
-                                                        group);
+            sintra::barrier<sintra::processing_fence_t>(
+                sintra::test::make_barrier_name("complex-round", round, "complete"),
+                group);
             break;
         }
 
-        sintra::barrier<sintra::processing_fence_t>(barrier_round_complete_name(round), group);
+        sintra::barrier<sintra::processing_fence_t>(
+            sintra::test::make_barrier_name("complex-round", round, "complete"),
+            group);
     }
 
     sintra::barrier(std::string(k_final_barrier), "_sintra_all_processes");
@@ -498,7 +491,7 @@ int aggregator_process()
             }
         }
 
-        sintra::barrier(barrier_round_start_name(round), group);
+        sintra::barrier(sintra::test::make_barrier_name("complex-round", round, "start"), group);
 
         std::array<Aggregator_worker_state, k_worker_count> snapshot{};
         bool local_failure = false;
@@ -542,7 +535,9 @@ int aggregator_process()
                                           worker.xor_checksum, worker.sum_checksum};
         }
 
-        sintra::barrier<sintra::processing_fence_t>(barrier_round_complete_name(round), group);
+        sintra::barrier<sintra::processing_fence_t>(
+            sintra::test::make_barrier_name("complex-round", round, "complete"),
+            group);
     }
 
     sintra::barrier(std::string(k_final_barrier), "_sintra_all_processes");
@@ -618,7 +613,7 @@ int verifier_process()
             }
         }
 
-        sintra::barrier(barrier_round_start_name(round), group);
+        sintra::barrier(sintra::test::make_barrier_name("complex-round", round, "start"), group);
 
         std::uint64_t seed = 0;
         {
@@ -666,7 +661,9 @@ int verifier_process()
             stop_requested.store(true);
         }
 
-        sintra::barrier<sintra::processing_fence_t>(barrier_round_complete_name(round), group);
+        sintra::barrier<sintra::processing_fence_t>(
+            sintra::test::make_barrier_name("complex-round", round, "complete"),
+            group);
     }
 
     sintra::barrier(std::string(k_final_barrier), "_sintra_all_processes");

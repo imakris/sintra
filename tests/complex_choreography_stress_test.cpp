@@ -29,6 +29,7 @@
 //
 #include <sintra/sintra.h>
 
+#include "test_choreography_utils.h"
 #include "test_utils.h"
 
 #include <algorithm>
@@ -111,9 +112,7 @@ std::string barrier_name(const char* stage, std::uint64_t token)
 {
     const int phase = static_cast<int>(token >> 32);
     const int round = static_cast<int>(token & 0xffffffffu);
-    std::ostringstream oss;
-    oss << "complex-" << phase << '-' << round << '-' << stage;
-    return oss.str();
+    return sintra::test::make_barrier_name("complex", phase, round, stage);
 }
 
 std::uint32_t compute_sequence_id(int worker_id, int phase, int round)

@@ -9,6 +9,7 @@
 
 #include <sintra/sintra.h>
 
+#include "test_choreography_utils.h"
 #include "test_utils.h"
 
 #include <array>
@@ -54,20 +55,6 @@ struct Stage_directive
     std::uint32_t extra_rounds;
     std::uint32_t token;
 };
-
-std::string make_iteration_barrier_name(const std::string& prefix, std::uint32_t iteration)
-{
-    std::ostringstream oss;
-    oss << prefix << '-' << iteration;
-    return oss.str();
-}
-
-std::string make_extra_barrier_name(std::uint32_t iteration, std::uint32_t extra_index)
-{
-    std::ostringstream oss;
-    oss << "complex-extra-" << iteration << '-' << extra_index;
-    return oss.str();
-}
 
 std::uint32_t directive_token(std::uint32_t stage, std::uint32_t iteration)
 {
@@ -207,7 +194,7 @@ int coordinator_process()
     std::size_t iterations_completed = 0;
 
     for (std::uint32_t iteration = 0; iteration < k_iterations; ++iteration) {
-        const auto start_barrier = make_iteration_barrier_name("complex-start", iteration);
+        const auto start_barrier = sintra::test::make_barrier_name("complex-start", iteration);
         barrier(start_barrier);
 
         {
@@ -221,7 +208,8 @@ int coordinator_process()
         const auto stage0_token = directive_token(0, iteration);
         world() << Stage_directive{0u, iteration, extra_rounds, stage0_token};
 
-        const auto phase_a_barrier = make_iteration_barrier_name("complex-phase-a", iteration);
+        const auto phase_a_barrier =
+            sintra::test::make_barrier_name("complex-phase-a", iteration);
         barrier(phase_a_barrier);
 
         {
@@ -239,15 +227,17 @@ int coordinator_process()
             });
         }
 
-        const auto phase_b_barrier = make_iteration_barrier_name("complex-phase-b", iteration);
+        const auto phase_b_barrier =
+            sintra::test::make_barrier_name("complex-phase-b", iteration);
         barrier(phase_b_barrier);
 
         for (std::uint32_t extra = 0; extra < extra_rounds; ++extra) {
-            const auto extra_barrier = make_extra_barrier_name(iteration, extra);
+            const auto extra_barrier =
+                sintra::test::make_barrier_name("complex-extra", iteration, extra);
             barrier(extra_barrier);
         }
 
-        const auto done_barrier = make_iteration_barrier_name("complex-done", iteration);
+        const auto done_barrier = sintra::test::make_barrier_name("complex-done", iteration);
         barrier(done_barrier);
 
         ++iterations_completed;
@@ -343,12 +333,14 @@ int stage_process(std::uint32_t stage, std::uint32_t worker_index)
     };
 
     for (std::uint32_t iteration = 0; iteration < k_iterations; ++iteration) {
-        const auto start_barrier = make_iteration_barrier_name("complex-start", iteration);
+        const auto start_barrier = sintra::test::make_barrier_name("complex-start", iteration);
         barrier(start_barrier);
 
-        const auto phase_a_barrier = make_iteration_barrier_name("complex-phase-a", iteration);
-        const auto phase_b_barrier = make_iteration_barrier_name("complex-phase-b", iteration);
-        const auto done_barrier    = make_iteration_barrier_name("complex-done", iteration);
+        const auto phase_a_barrier =
+            sintra::test::make_barrier_name("complex-phase-a", iteration);
+        const auto phase_b_barrier =
+            sintra::test::make_barrier_name("complex-phase-b", iteration);
+        const auto done_barrier    = sintra::test::make_barrier_name("complex-done", iteration);
 
         if (stage == 0) {
             const int delay = delay_dist(gen);
@@ -373,7 +365,8 @@ int stage_process(std::uint32_t stage, std::uint32_t worker_index)
                 extra_rounds = k_max_extra_rounds;
             }
             for (std::uint32_t extra = 0; extra < extra_rounds; ++extra) {
-                const auto extra_barrier = make_extra_barrier_name(iteration, extra);
+                const auto extra_barrier =
+                    sintra::test::make_barrier_name("complex-extra", iteration, extra);
                 barrier(extra_barrier);
             }
 
@@ -403,7 +396,8 @@ int stage_process(std::uint32_t stage, std::uint32_t worker_index)
                 extra_rounds = k_max_extra_rounds;
             }
             for (std::uint32_t extra = 0; extra < extra_rounds; ++extra) {
-                const auto extra_barrier = make_extra_barrier_name(iteration, extra);
+                const auto extra_barrier =
+                    sintra::test::make_barrier_name("complex-extra", iteration, extra);
                 barrier(extra_barrier);
             }
 
