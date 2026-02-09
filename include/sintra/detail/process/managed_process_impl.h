@@ -934,6 +934,33 @@ type_id_type explicit_type_id()
     }
 }
 
+template <typename MapT, typename KeyT, typename RpcFn, typename InvalidT>
+auto cached_resolve(MapT& cache, const KeyT& key, RpcFn&& rpc, InvalidT invalid)
+    -> decltype(rpc(key))
+{
+    // Hold spinlock while accessing the iterator to prevent use-after-invalidation.
+    {
+        auto scoped_map = cache.scoped();
+        auto it = scoped_map.get().find(key);
+        if (it != scoped_map.get().end()) {
+            return it->second;
+        }
+        // Spinlock released here automatically when scoped_map goes out of scope
+    }
+
+    // Caution the Coordinator call will refer to the map that is being assigned,
+    // if the Coordinator is local. Do not be tempted to simplify the temporary,
+    // because depending on the order of evaluation, it may or it may not work.
+    auto resolved = rpc(key);
+
+    // If it is not invalid, cache it.
+    if (resolved != invalid) {
+        cache[key] = resolved;
+    }
+
+    return resolved;
+}
+
 } // namespace detail
 
 template <typename T>
@@ -964,27 +991,13 @@ sintra::type_id_type get_type_id()
     }
 
     const std::string type_name = detail::type_name<T>();
-    // Hold spinlock while accessing the iterator to prevent use-after-invalidation
-    {
-        auto scoped_map = s_mproc->m_type_id_of_type_name.scoped();
-        auto it = scoped_map.get().find(type_name);
-        if (it != scoped_map.get().end()) {
-            return it->second;
-        }
-        // Spinlock released here automatically when scoped_map goes out of scope
-    }
-
-    // Caution the Coordinator call will refer to the map that is being assigned,
-    // if the Coordinator is local. Do not be tempted to simplify the temporary,
-    // because depending on the order of evaluation, it may or it may not work.
-    auto tid = Coordinator::rpc_resolve_type(s_coord_id, type_name);
-
-    // if it is not invalid, cache it
-    if (tid != invalid_type_id) {
-        s_mproc->m_type_id_of_type_name[type_name] = tid;
-    }
-
-    return tid;
+    return detail::cached_resolve(
+        s_mproc->m_type_id_of_type_name,
+        type_name,
+        [](const std::string& name) {
+            return Coordinator::rpc_resolve_type(s_coord_id, name);
+        },
+        invalid_type_id);
 }
 
 // helper
@@ -994,27 +1007,13 @@ sintra::type_id_type get_type_id(const T&) {return get_type_id<T>();}
 template <typename>
 sintra::instance_id_type get_instance_id(std::string&& assigned_name)
 {
-    // Hold spinlock while accessing the iterator to prevent use-after-invalidation
-    {
-        auto scoped_map = s_mproc->m_instance_id_of_assigned_name.scoped();
-        auto it = scoped_map.get().find(assigned_name);
-        if (it != scoped_map.get().end()) {
-            return it->second;
-        }
-        // Spinlock released here automatically when scoped_map goes out of scope
-    }
-
-    // Caution the Coordinator call will refer to the map that is being assigned,
-    // if the Coordinator is local. Do not be tempted to simplify the temporary,
-    // because depending on the order of evaluation, it may or it may not work.
-    auto iid = Coordinator::rpc_resolve_instance(s_coord_id, assigned_name);
-
-    // if it is not invalid, cache it
-    if (iid != invalid_instance_id) {
-        s_mproc->m_instance_id_of_assigned_name[assigned_name] = iid;
-    }
-
-    return iid;
+    return detail::cached_resolve(
+        s_mproc->m_instance_id_of_assigned_name,
+        assigned_name,
+        [](const std::string& name) {
+            return Coordinator::rpc_resolve_instance(s_coord_id, name);
+        },
+        invalid_instance_id);
 }
 
 inline
@@ -2213,55 +2212,68 @@ void Managed_process::go()
  ////     \////     \////     \////     \////     \////     \////     \////
   //       \//       \//       \//       \//       \//       \//       \//
 
-inline
-void Managed_process::pause()
+namespace detail {
+
+enum class communication_transition
 {
-    std::lock_guard<mutex> start_stop_lock(m_start_stop_mutex);
+    pause,
+    stop
+};
+
+inline void transition_communication(Managed_process& process, communication_transition transition)
+{
+    std::lock_guard<mutex> start_stop_lock(process.m_start_stop_mutex);
+
+    const bool is_pause = (transition == communication_transition::pause);
+    const bool should_skip = is_pause
+        ? (process.m_communication_state <= Managed_process::COMMUNICATION_PAUSED)
+        : (process.m_communication_state == Managed_process::COMMUNICATION_STOPPED);
 
     // pause() might be called when the entry function finishes execution,
     // explicitly from one of the handlers, or from the entry function itself.
     // If called when the process is already paused, this should not have any
     // side effects.
-    if (m_communication_state <= COMMUNICATION_PAUSED)
+    //
+    // stop() might be called explicitly from one of the handlers, or from the
+    // entry function. If called when the process is already stopped, this
+    // should not have any side effects.
+    if (should_skip) {
         return;
+    }
 
     {
-        Dispatch_lock_guard<std::shared_lock<std::shared_mutex>> readers_lock(m_readers_mutex);
-        for (auto& entry : m_readers) {
+        Dispatch_lock_guard<std::shared_lock<std::shared_mutex>> readers_lock(process.m_readers_mutex);
+        for (auto& entry : process.m_readers) {
             if (auto& reader = entry.second) {
-                reader->pause();
+                if (is_pause) {
+                    reader->pause();
+                }
+                else {
+                    reader->stop_nowait();
+                }
             }
         }
     }
 
-    m_communication_state = COMMUNICATION_PAUSED;
-    m_start_stop_condition.notify_all();
-    m_delivery_condition.notify_all();
+    process.m_communication_state = is_pause
+        ? Managed_process::COMMUNICATION_PAUSED
+        : Managed_process::COMMUNICATION_STOPPED;
+    process.m_start_stop_condition.notify_all();
+    process.m_delivery_condition.notify_all();
+}
+
+} // namespace detail
+
+inline
+void Managed_process::pause()
+{
+    detail::transition_communication(*this, detail::communication_transition::pause);
 }
 
 inline
 void Managed_process::stop()
 {
-    std::lock_guard<mutex> start_stop_lock(m_start_stop_mutex);
-
-    // stop() might be called explicitly from one of the handlers, or from the
-    // entry function. If called when the process is already stopped, this
-    // should not have any side effects.
-    if (m_communication_state == COMMUNICATION_STOPPED)
-        return;
-
-    {
-        Dispatch_lock_guard<std::shared_lock<std::shared_mutex>> readers_lock(m_readers_mutex);
-        for (auto& entry : m_readers) {
-            if (auto& reader = entry.second) {
-                reader->stop_nowait();
-            }
-        }
-    }
-
-    m_communication_state = COMMUNICATION_STOPPED;
-    m_start_stop_condition.notify_all();
-    m_delivery_condition.notify_all();
+    detail::transition_communication(*this, detail::communication_transition::stop);
 }
 
 inline

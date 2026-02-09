@@ -86,28 +86,25 @@ void throw_typed_exception(const std::string& what)
 inline
 void string_to_exception(type_id_type exception_type, const std::string& str)
 {
+#define SINTRA_EXCEPTION_COMMON_LIST(X) \
+    X(std_invalid_argument, std::invalid_argument) \
+    X(std_domain_error, std::domain_error) \
+    X(std_length_error, std::length_error) \
+    X(std_out_of_range, std::out_of_range) \
+    X(std_range_error, std::range_error) \
+    X(std_overflow_error, std::overflow_error) \
+    X(std_underflow_error, std::underflow_error) \
+    X(std_ios_base_failure, std::ios_base::failure) \
+    X(std_logic_error, std::logic_error) \
+    X(std_runtime_error, std::runtime_error)
+
     if (exception_type < static_cast<type_id_type>(detail::reserved_id::num_reserved_type_ids)) {
         switch (static_cast<detail::reserved_id>(exception_type)) {
-        case detail::reserved_id::std_invalid_argument:
-            throw_typed_exception<std::invalid_argument>(str);
-        case detail::reserved_id::std_domain_error:
-            throw_typed_exception<std::domain_error>(str);
-        case detail::reserved_id::std_length_error:
-            throw_typed_exception<std::length_error>(str);
-        case detail::reserved_id::std_out_of_range:
-            throw_typed_exception<std::out_of_range>(str);
-        case detail::reserved_id::std_range_error:
-            throw_typed_exception<std::range_error>(str);
-        case detail::reserved_id::std_overflow_error:
-            throw_typed_exception<std::overflow_error>(str);
-        case detail::reserved_id::std_underflow_error:
-            throw_typed_exception<std::underflow_error>(str);
-        case detail::reserved_id::std_ios_base_failure:
-            throw_typed_exception<std::ios_base::failure>(str);
-        case detail::reserved_id::std_logic_error:
-            throw_typed_exception<std::logic_error>(str);
-        case detail::reserved_id::std_runtime_error:
-            throw_typed_exception<std::runtime_error>(str);
+#define SINTRA_EXCEPTION_SWITCH_CASE(reserved_id, exception_type_name) \
+        case detail::reserved_id::reserved_id: \
+            throw_typed_exception<exception_type_name>(str);
+        SINTRA_EXCEPTION_COMMON_LIST(SINTRA_EXCEPTION_SWITCH_CASE)
+#undef SINTRA_EXCEPTION_SWITCH_CASE
         case detail::reserved_id::std_exception:
         case detail::reserved_id::unknown_exception:
             throw_generic_exception(str);
@@ -117,17 +114,11 @@ void string_to_exception(type_id_type exception_type, const std::string& str)
     }
 
     static unordered_map<type_id_type, void(*)(const std::string&)> ex_map = {
-        {get_type_id<std::logic_error         >(), throw_typed_exception<std::logic_error      >},
-        {get_type_id<std::invalid_argument    >(), throw_typed_exception<std::invalid_argument >},
-        {get_type_id<std::domain_error        >(), throw_typed_exception<std::domain_error     >},
-        {get_type_id<std::length_error        >(), throw_typed_exception<std::length_error     >},
-        {get_type_id<std::out_of_range        >(), throw_typed_exception<std::out_of_range     >},
-        {get_type_id<std::runtime_error       >(), throw_typed_exception<std::runtime_error    >},
-        {get_type_id<std::range_error         >(), throw_typed_exception<std::range_error      >},
-        {get_type_id<std::overflow_error      >(), throw_typed_exception<std::overflow_error   >},
-        {get_type_id<std::underflow_error     >(), throw_typed_exception<std::underflow_error  >},
+#define SINTRA_EXCEPTION_MAP_ENTRY(reserved_id, exception_type_name) \
+        {get_type_id<exception_type_name>(), throw_typed_exception<exception_type_name>},
+        SINTRA_EXCEPTION_COMMON_LIST(SINTRA_EXCEPTION_MAP_ENTRY)
+#undef SINTRA_EXCEPTION_MAP_ENTRY
         {get_type_id<std::system_error        >(), throw_typed_exception<std::runtime_error    >},
-        {get_type_id<std::ios_base::failure   >(), throw_typed_exception<std::ios_base::failure>},
 
         // For the following exceptions, due to non-trivial constructor, their parent type is thrown
         {get_type_id<std::future_error        >(), throw_typed_exception<std::logic_error      >},
@@ -145,6 +136,8 @@ void string_to_exception(type_id_type exception_type, const std::string& str)
         {get_type_id<std::bad_exception       >(), throw_generic_exception},
         {get_type_id<std::bad_variant_access  >(), throw_generic_exception}
     };
+
+#undef SINTRA_EXCEPTION_COMMON_LIST
 
     auto it = ex_map.find(exception_type);
     if (it != ex_map.end()) {
