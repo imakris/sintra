@@ -27,11 +27,7 @@ std::uint64_t make_seed()
 {
     const auto now = static_cast<std::uint64_t>(
         std::chrono::steady_clock::now().time_since_epoch().count());
-#ifdef _WIN32
-    const auto pid = static_cast<std::uint64_t>(_getpid());
-#else
-    const auto pid = static_cast<std::uint64_t>(getpid());
-#endif
+    const auto pid = static_cast<std::uint64_t>(sintra::test::get_pid());
     return now ^ (pid << 1U);
 }
 

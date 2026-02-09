@@ -4,10 +4,10 @@
 #pragma once
 
 #include "messaging/message.h"
+#include <string>
 
 
 namespace sintra {
-
 
 using std::string;
 

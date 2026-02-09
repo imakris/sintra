@@ -22,10 +22,9 @@
 
 namespace sintra {
 
-namespace fs = std::filesystem;
-
-using std::string;
 using std::unordered_map;
+
+namespace fs = std::filesystem;
 
 template <
     typename T,

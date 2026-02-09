@@ -21,29 +21,10 @@ constexpr std::string_view k_env_barrier_wait_ms = "SINTRA_BARRIER_DRAIN_TIMEOUT
 constexpr std::string_view k_env_worker_timeout_ms = "SINTRA_BARRIER_WORKER_TIMEOUT_MS";
 constexpr std::string_view k_env_coord_watchdog_ms = "SINTRA_BARRIER_COORDINATOR_WATCHDOG_MS";
 
-void disable_abort_dialog()
-{
-#if defined(_MSC_VER)
-    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
-#endif
-}
-
 void write_marker(const std::filesystem::path& path)
 {
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
     out << "ok";
-}
-
-bool wait_for_file(const std::filesystem::path& path, std::chrono::milliseconds timeout)
-{
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (std::filesystem::exists(path)) {
-            return true;
-        }
-        std::this_thread::sleep_for(5ms);
-    }
-    return std::filesystem::exists(path);
 }
 
 [[noreturn]] void watchdog_exit(const char* message)
@@ -110,13 +91,13 @@ int worker_b()
     const auto dir = shared.path();
     const auto barrier1_ready = dir / "barrier1_ready.txt";
 
-    if (!wait_for_file(barrier1_ready, 5s)) {
+    if (!sintra::test::wait_for_file(barrier1_ready, 5s, 5ms)) {
         return 1;
     }
 
     std::this_thread::sleep_for(50ms);
     sintra::disable_debug_pause_for_current_process();
-    disable_abort_dialog();
+    sintra::test::prepare_for_intentional_crash();
     std::abort();
     return 0;
 }
@@ -158,7 +139,7 @@ int main(int argc, char* argv[])
         return 0;
     }
 
-    if (!wait_for_file(barrier2_ready, std::chrono::milliseconds(barrier2_timeout_ms))) {
+    if (!sintra::test::wait_for_file(barrier2_ready, std::chrono::milliseconds(barrier2_timeout_ms))) {
         sintra::finalize();
         watchdog_done.store(true, std::memory_order_release);
         watchdog.join();

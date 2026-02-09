@@ -44,26 +44,6 @@ constexpr std::string_view k_delayed_b_marked_file = "managed_process_publish_de
 constexpr std::string_view k_delayed_done_file = "managed_process_publish_delayed_done.txt";
 constexpr std::string_view k_delayed_exit_file = "managed_process_publish_delayed_exit.txt";
 
-bool has_flag(int argc, char* argv[], std::string_view flag)
-{
-    for (int i = 0; i < argc; ++i) {
-        if (std::string_view(argv[i]) == flag) {
-            return true;
-        }
-    }
-    return false;
-}
-
-std::string read_flag_value(int argc, char* argv[], std::string_view flag)
-{
-    for (int i = 0; i + 1 < argc; ++i) {
-        if (std::string_view(argv[i]) == flag) {
-            return std::string(argv[i + 1]);
-        }
-    }
-    return {};
-}
-
 struct Worker_info
 {
     sintra::instance_id_type instance_id = sintra::invalid_instance_id;
@@ -106,18 +86,6 @@ std::optional<Worker_info> read_worker_info(const std::filesystem::path& dir)
     return info;
 }
 
-bool wait_for_path(const std::filesystem::path& path, std::chrono::milliseconds timeout)
-{
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (std::filesystem::exists(path)) {
-            return true;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-    return std::filesystem::exists(path);
-}
-
 struct Publication_waiter
 {
     std::mutex mutex;
@@ -148,7 +116,7 @@ bool run_drain_timeout_probe()
 
 int run_worker(int argc, char* argv[])
 {
-    const std::string dir_value = read_flag_value(argc, argv, k_dir_flag);
+    const std::string dir_value = sintra::test::get_argv_value(argc, argv, k_dir_flag);
     if (dir_value.empty()) {
         std::fprintf(stderr, "managed_process_publish_test: missing %s\n", k_dir_flag.data());
         return 1;
@@ -190,13 +158,13 @@ int run_worker(int argc, char* argv[])
 
 int run_delayed_publication_worker(int argc, char* argv[])
 {
-    const std::string dir_value = read_flag_value(argc, argv, k_delayed_dir_flag);
+    const std::string dir_value = sintra::test::get_argv_value(argc, argv, k_delayed_dir_flag);
     if (dir_value.empty()) {
         std::fprintf(stderr, "managed_process_publish_test: missing %s\n", k_delayed_dir_flag.data());
         return 1;
     }
 
-    const std::string role = read_flag_value(argc, argv, k_delayed_role_flag);
+    const std::string role = sintra::test::get_argv_value(argc, argv, k_delayed_role_flag);
     if (role.empty()) {
         std::fprintf(stderr, "managed_process_publish_test: missing %s\n", k_delayed_role_flag.data());
         return 1;
@@ -223,7 +191,7 @@ int run_delayed_publication_worker(int argc, char* argv[])
         marked_file << "marked\n";
         marked_file.close();
 
-        if (!wait_for_path(done_path, std::chrono::seconds(10))) {
+        if (!sintra::test::wait_for_path(done_path, std::chrono::seconds(10))) {
             std::fprintf(stderr, "managed_process_publish_test: delayed worker timed out\n");
             sintra::finalize();
             return 1;
@@ -235,7 +203,7 @@ int run_delayed_publication_worker(int argc, char* argv[])
         exit_file.close();
     }
     else if (role == "a") {
-        if (!wait_for_path(marked_path, std::chrono::seconds(10))) {
+        if (!sintra::test::wait_for_path(marked_path, std::chrono::seconds(10))) {
             std::fprintf(stderr, "managed_process_publish_test: delayed worker missing mark\n");
             sintra::finalize();
             return 1;
@@ -354,7 +322,7 @@ bool run_manual_publish_scenario(
     }
 
     const auto info_path = shared_dir / std::string(k_info_file);
-    if (!wait_for_path(info_path, std::chrono::seconds(5))) {
+    if (!sintra::test::wait_for_path(info_path, std::chrono::seconds(5))) {
         std::fprintf(stderr, "managed_process_publish_test: worker info file not found\n");
         return false;
     }
@@ -388,7 +356,7 @@ bool run_manual_publish_scenario(
     done.close();
 
     const auto exit_path = shared_dir / std::string(k_exit_file);
-    if (!wait_for_path(exit_path, std::chrono::seconds(5))) {
+    if (!sintra::test::wait_for_path(exit_path, std::chrono::seconds(5))) {
         std::fprintf(stderr, "managed_process_publish_test: worker did not confirm exit\n");
         resolved_ok = false;
     }
@@ -444,7 +412,7 @@ bool run_delayed_publication_scenario(const std::string& binary_path)
     }
 
     const auto name_path = shared_dir / std::string(k_delayed_b_name_file);
-    if (!wait_for_path(name_path, std::chrono::seconds(5))) {
+    if (!sintra::test::wait_for_path(name_path, std::chrono::seconds(5))) {
         std::fprintf(stderr, "managed_process_publish_test: delayed name file missing\n");
         return false;
     }
@@ -458,7 +426,7 @@ bool run_delayed_publication_scenario(const std::string& binary_path)
     }
 
     const auto marked_path = shared_dir / std::string(k_delayed_b_marked_file);
-    if (!wait_for_path(marked_path, std::chrono::seconds(5))) {
+    if (!sintra::test::wait_for_path(marked_path, std::chrono::seconds(5))) {
         std::fprintf(stderr, "managed_process_publish_test: delayed mark file missing\n");
         return false;
     }
@@ -481,7 +449,7 @@ bool run_delayed_publication_scenario(const std::string& binary_path)
     done.close();
 
     const auto exit_path = shared_dir / std::string(k_delayed_exit_file);
-    if (!wait_for_path(exit_path, std::chrono::seconds(5))) {
+    if (!sintra::test::wait_for_path(exit_path, std::chrono::seconds(5))) {
         std::fprintf(stderr, "managed_process_publish_test: delayed worker did not exit\n");
         published = false;
     }
@@ -496,10 +464,10 @@ bool run_delayed_publication_scenario(const std::string& binary_path)
 
 int main(int argc, char* argv[])
 {
-    if (has_flag(argc, argv, k_worker_flag)) {
+    if (sintra::test::has_argv_flag(argc, argv, k_worker_flag)) {
         return run_worker(argc, argv);
     }
-    if (has_flag(argc, argv, k_delayed_worker_flag)) {
+    if (sintra::test::has_argv_flag(argc, argv, k_delayed_worker_flag)) {
         return run_delayed_publication_worker(argc, argv);
     }
 

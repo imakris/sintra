@@ -38,36 +38,10 @@ constexpr const char* k_timeout_child_instance_name = "spawn_wait_timeout_child"
 
 struct Done_signal {};
 
-bool has_instance_id_flag(int argc, char* argv[])
-{
-    for (int i = 0; i < argc; ++i) {
-        if (std::string_view(argv[i]) == "--instance_id") {
-            return true;
-        }
-    }
-    return false;
-}
-
 bool is_worker_mode()
 {
     const char* value = std::getenv(k_env_worker_mode.data());
     return value && *value && (*value != '0');
-}
-
-std::string get_binary_path(int argc, char* argv[])
-{
-    if (argc > 0 && argv[0]) {
-        return argv[0];
-    }
-    return "";
-}
-
-bool assert_true(bool condition, const char* message)
-{
-    if (!condition) {
-        std::fprintf(stderr, "[PREINIT] %s\n", message);
-    }
-    return condition;
 }
 
 bool run_preinit_spawn_swarm_validation()
@@ -78,7 +52,9 @@ bool run_preinit_spawn_swarm_validation()
         sintra::Spawn_options options;
         options.binary_path = "";
         const size_t spawned = sintra::spawn_swarm_process(options);
-        ok &= assert_true(spawned == 0, "spawn_swarm_process should return 0 when binary_path is empty");
+        ok &= sintra::test::assert_true(spawned == 0,
+                                        "[PREINIT] ",
+                                        "spawn_swarm_process should return 0 when binary_path is empty");
     }
 
     {
@@ -86,7 +62,9 @@ bool run_preinit_spawn_swarm_validation()
         options.binary_path = "dummy_binary";
         options.count = 0;
         const size_t spawned = sintra::spawn_swarm_process(options);
-        ok &= assert_true(spawned == 0, "spawn_swarm_process should return 0 when count == 0");
+        ok &= sintra::test::assert_true(spawned == 0,
+                                        "[PREINIT] ",
+                                        "spawn_swarm_process should return 0 when count == 0");
     }
 
     {
@@ -95,8 +73,10 @@ bool run_preinit_spawn_swarm_validation()
         options.count = 2;
         options.wait_for_instance_name = "dummy_instance";
         const size_t spawned = sintra::spawn_swarm_process(options);
-        ok &= assert_true(spawned == 0,
-                          "spawn_swarm_process should return 0 when wait_for_instance_name is set with count != 1");
+        ok &= sintra::test::assert_true(
+            spawned == 0,
+            "[PREINIT] ",
+            "spawn_swarm_process should return 0 when wait_for_instance_name is set with count != 1");
     }
 
     {
@@ -104,8 +84,10 @@ bool run_preinit_spawn_swarm_validation()
         options.binary_path = "dummy_binary";
         options.wait_for_instance_name = "dummy_instance";
         const size_t spawned = sintra::spawn_swarm_process(options);
-        ok &= assert_true(spawned == 0,
-                          "spawn_swarm_process should return 0 when wait requires a coordinator before init");
+        ok &= sintra::test::assert_true(
+            spawned == 0,
+            "[PREINIT] ",
+            "spawn_swarm_process should return 0 when wait requires a coordinator before init");
     }
 
     return ok;
@@ -384,10 +366,10 @@ int run_coordinator(const std::string& binary_path)
 
 int main(int argc, char* argv[])
 {
-    const bool is_spawned = has_instance_id_flag(argc, argv);
+    const bool is_spawned = sintra::test::has_argv_flag(argc, argv, "--instance_id");
     const bool is_worker = is_worker_mode();
     sintra::test::Shared_directory shared("SINTRA_TEST_SHARED_DIR", "spawn_wait_test");
-    const std::string binary_path = get_binary_path(argc, argv);
+    const std::string binary_path = sintra::test::get_binary_path(argc, argv);
 
     if (!is_spawned) {
         if (!run_preinit_spawn_swarm_validation()) {

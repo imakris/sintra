@@ -7,7 +7,6 @@
 #include "../process/coordinator.h"
 #include "../process/managed_process.h"
 #include "../process/dispatch_wait_guard.h"
-
 #include <algorithm>
 #include <cassert>
 #include <chrono>
@@ -21,12 +20,9 @@
 
 namespace sintra {
 
-
 using std::lock_guard;
 using std::mutex;
 using std::string;
-using std::unique_lock;
-
 
 
 // EXPORTED EXCLUSIVELY FOR RPC
@@ -264,7 +260,10 @@ type_id_type Coordinator::resolve_type(const string& pretty_name)
     }
 
     // a type is always assumed to exist
-    return s_mproc->m_type_id_of_type_name[pretty_name] = make_type_id();
+    auto scoped_map = s_mproc->m_type_id_of_type_name.scoped();
+    const auto new_id = make_type_id();
+    scoped_map.get().emplace(pretty_name, new_id);
+    return new_id;
 }
 
 
@@ -407,7 +406,7 @@ instance_id_type Coordinator::publish_transceiver(type_id_type tid, instance_id_
             return invalid_instance_id;
         }
 
-        s_mproc->m_instance_id_of_assigned_name[entry.name] = iid;
+        s_mproc->m_instance_id_of_assigned_name.set_value(entry.name, iid);
         pr[iid] = entry;
 
         // Do NOT reset draining state here - only reset when publishing a NEW PROCESS (Managed_process),
@@ -423,15 +422,14 @@ instance_id_type Coordinator::publish_transceiver(type_id_type tid, instance_id_
             return invalid_instance_id;
         }
 
-        s_mproc->m_instance_id_of_assigned_name[entry.name] = iid;
+        s_mproc->m_instance_id_of_assigned_name.set_value(entry.name, iid);
         m_transceiver_registry[iid][iid] = entry;
 
         // Reset draining state to 0 (ACTIVE) when publishing a Managed_process.
         // This handles recovery/restart scenarios where the process slot might still be marked as draining.
-        const auto draining_index = get_process_index(process_iid);
-        if (draining_index > 0 && draining_index <= static_cast<uint64_t>(max_process_index)) {
-            const auto slot = static_cast<size_t>(draining_index);
-            m_draining_process_states[slot] = 0;
+        size_t draining_slot = 0;
+        if (draining_slot_of_index(get_process_index(process_iid), draining_slot)) {
+            m_draining_process_states[draining_slot] = 0;
         }
 
         return true_sequence(true);
@@ -469,7 +467,10 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
     assert(!it->second.name.empty());
 
     // delete the reverse name lookup entry
-    s_mproc->m_instance_id_of_assigned_name.erase(it->second.name);
+    {
+        auto scoped_map = s_mproc->m_instance_id_of_assigned_name.scoped();
+        scoped_map.get().erase(it->second.name);
+    }
 
     // keep a copy of the assigned name before deleting it
     auto tn = it->second;
@@ -521,42 +522,15 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
         // begin_process_draining was already called) and crash scenarios (where it wasn't).
         const auto draining_index = get_process_index(process_iid);
         bool was_draining = false;
-        if (draining_index > 0 && draining_index <= static_cast<uint64_t>(max_process_index)) {
-            const auto slot = static_cast<size_t>(draining_index);
-            was_draining = (m_draining_process_states[slot].load() != 0);
-            m_draining_process_states[slot] = 1;
+        size_t draining_slot = 0;
+        if (draining_slot_of_index(draining_index, draining_slot)) {
+            was_draining = (m_draining_process_states[draining_slot].load() != 0);
+            m_draining_process_states[draining_slot] = 1;
         }
 
-        std::vector<Pending_completion> pending_completions;
-
-        {
-            lock_guard<mutex> groups_lock(m_groups_mutex);
-            pending_completions.reserve(m_groups.size());
-
-            for (auto& [name, group] : m_groups) {
-                std::vector<Process_group::Barrier_completion> completions;
-                group.drop_from_inflight_barriers(process_iid, completions);
-                if (!completions.empty()) {
-                    pending_completions.push_back({name, std::move(completions)});
-                }
-                group.remove_process(process_iid);
-            }
-
-            m_groups_of_process.erase(process_iid);
-        }
-
-        if (!pending_completions.empty() && s_mproc) {
-            s_mproc->run_after_current_handler(
-                [this, pending = std::move(pending_completions)]() mutable {
-                    std::lock_guard<mutex> groups_lock(m_groups_mutex);
-                    for (auto& entry : pending) {
-                        auto group_it = m_groups.find(entry.group_name);
-                        if (group_it != m_groups.end()) {
-                            group_it->second.emit_barrier_completions(entry.completions);
-                        }
-                    }
-                });
-        }
+        collect_and_schedule_barrier_completions(
+            process_iid,
+            true);
 
         // Keep the draining bit set; it will be re-initialized to 0 (ACTIVE)
         // when a new process is published into this slot. This prevents the race
@@ -564,7 +538,7 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
 
         //// and finally, if the process was being read, stop reading from it
         if (iid != s_mproc_id) {
-            Dispatch_lock_guard<std::shared_lock<std::shared_mutex>> readers_lock(s_mproc->m_readers_mutex);
+            Dispatch_shared_lock readers_lock(s_mproc->m_readers_mutex);
             auto reader_it = s_mproc->m_readers.find(process_iid);
             if (reader_it != s_mproc->m_readers.end()) {
                 if (auto& reader = reader_it->second) {
@@ -630,41 +604,17 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
 
 inline sequence_counter_type Coordinator::begin_process_draining(instance_id_type process_iid)
 {
-    const auto draining_index = get_process_index(process_iid);
-    if (draining_index > 0 && draining_index <= static_cast<uint64_t>(max_process_index)) {
-        const auto slot = static_cast<size_t>(draining_index);
-        m_draining_process_states[slot] = 1;
+    size_t draining_slot = 0;
+    if (draining_slot_of_index(get_process_index(process_iid), draining_slot)) {
+        m_draining_process_states[draining_slot] = 1;
     }
 
-    std::vector<Pending_completion> pending_completions;
-    {
-        lock_guard<mutex> lock(m_groups_mutex);
-        pending_completions.reserve(m_groups.size());
+    collect_and_schedule_barrier_completions(
+        process_iid,
+        false);
 
-        for (auto& [name, group] : m_groups) {
-            std::vector<Process_group::Barrier_completion> completions;
-            group.drop_from_inflight_barriers(process_iid, completions);
-            if (!completions.empty()) {
-                pending_completions.push_back({name, std::move(completions)});
-            }
-        }
-    }
-
-    if (!pending_completions.empty() && s_mproc) {
-        s_mproc->run_after_current_handler(
-            [this, pending = std::move(pending_completions)]() mutable {
-                for (auto& entry : pending) {
-                    std::lock_guard<mutex> groups_lock(m_groups_mutex);
-                    auto it = m_groups.find(entry.group_name);
-                    if (it != m_groups.end()) {
-                        it->second.emit_barrier_completions(entry.completions);
-                    }
-                }
-            });
-
-        // Note: No explicit event-loop "pump" is required here; queued completions
-        // run via run_after_current_handler() and the request loop's post-handler hook.
-    }
+    // Note: No explicit event-loop "pump" is required here; queued completions
+    // run via run_after_current_handler() and the request loop's post-handler hook.
 
     // Use reply ring watermark (m_out_rep_c) since barrier completion messages
     // are sent on the reply channel. Get it at return time for the draining process.
@@ -684,13 +634,12 @@ inline sequence_counter_type Coordinator::begin_process_draining(instance_id_typ
 
 inline bool Coordinator::is_process_draining(instance_id_type process_iid) const
 {
-    const auto draining_index = get_process_index(process_iid);
-    if (draining_index == 0 || draining_index > static_cast<uint64_t>(max_process_index)) {
+    size_t draining_slot = 0;
+    if (!draining_slot_of_index(get_process_index(process_iid), draining_slot)) {
         return false;
     }
 
-    const auto slot = static_cast<size_t>(draining_index);
-    return m_draining_process_states[slot].load() != 0;
+    return m_draining_process_states[draining_slot].load() != 0;
 }
 
 
@@ -728,7 +677,7 @@ inline void Coordinator::collect_known_process_candidates_unlocked(
     }
 
     if (s_mproc) {
-        Dispatch_lock_guard<std::shared_lock<std::shared_mutex>> readers_lock(s_mproc->m_readers_mutex);
+        Dispatch_shared_lock readers_lock(s_mproc->m_readers_mutex);
         for (const auto& entry : s_mproc->m_readers) {
             candidates.push_back(entry.first);
         }
@@ -1104,6 +1053,59 @@ Coordinator::finalize_initialization_tracking(instance_id_type process_iid)
 }
 
 inline
+void Coordinator::collect_and_schedule_barrier_completions(
+    instance_id_type process_iid,
+    bool remove_process)
+{
+    std::vector<Pending_completion> pending_completions;
+    {
+        lock_guard<mutex> groups_lock(m_groups_mutex);
+        pending_completions.reserve(m_groups.size());
+
+        for (auto& [name, group] : m_groups) {
+            std::vector<Process_group::Barrier_completion> completions;
+            group.drop_from_inflight_barriers(process_iid, completions);
+            if (!completions.empty()) {
+                pending_completions.push_back({name, std::move(completions)});
+            }
+            if (remove_process) {
+                group.remove_process(process_iid);
+            }
+        }
+
+        if (remove_process) {
+            m_groups_of_process.erase(process_iid);
+        }
+    }
+
+    if (pending_completions.empty() || !s_mproc) {
+        return;
+    }
+
+    s_mproc->run_after_current_handler(
+        [this, pending = std::move(pending_completions)]() mutable {
+            lock_guard<mutex> groups_lock(m_groups_mutex);
+            for (auto& entry : pending) {
+                auto group_it = m_groups.find(entry.group_name);
+                if (group_it != m_groups.end()) {
+                    group_it->second.emit_barrier_completions(entry.completions);
+                }
+            }
+        });
+}
+
+inline
+bool Coordinator::draining_slot_of_index(uint64_t draining_index, size_t& slot) const
+{
+    if (draining_index == 0 || draining_index > static_cast<uint64_t>(max_process_index)) {
+        return false;
+    }
+
+    slot = static_cast<size_t>(draining_index);
+    return true;
+}
+
+inline
 void Coordinator::mark_initialization_complete(instance_id_type process_iid)
 {
     {
@@ -1130,5 +1132,3 @@ void Coordinator::mark_initialization_complete(instance_id_type process_iid)
 
 
 } // sintra
-
-

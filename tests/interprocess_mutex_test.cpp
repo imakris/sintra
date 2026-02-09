@@ -8,24 +8,14 @@
 
 using namespace std::chrono_literals;
 
+#include "test_utils.h"
+
 #include "sintra/detail/ipc/mutex.h"
-#include "sintra/detail/ipc/platform_utils.h"
 
 namespace
 {
 
-[[noreturn]] void fail(const std::string& message)
-{
-    std::cerr << "interprocess_mutex_test failure: " << message << std::endl;
-    std::exit(1);
-}
-
-void expect(bool condition, const std::string& message)
-{
-    if (!condition) {
-        fail(message);
-    }
-}
+constexpr std::string_view k_failure_prefix = "interprocess_mutex_test failure: ";
 
 void expect_error_code(const std::system_error& error, std::errc expected, const std::string& context)
 {
@@ -95,11 +85,13 @@ int main()
     test_mutex mtx;
 
     // Fresh mutex should be acquirable via try_lock.
-    expect(mtx.try_lock(), "try_lock should succeed on an unlocked mutex");
+    sintra::test::expect(mtx.try_lock(), k_failure_prefix,
+                         "try_lock should succeed on an unlocked mutex");
 
     // Recursive try_lock must return false (same thread cannot reacquire).
     bool recursive_try_lock_result = mtx.try_lock();
-    expect(!recursive_try_lock_result, "try_lock recursion should return false");
+    sintra::test::expect(!recursive_try_lock_result, k_failure_prefix,
+                         "try_lock recursion should return false");
 
     // While locked, another thread attempting try_lock should fail without throwing.
     std::atomic<bool> other_thread_attempted{false};
@@ -125,10 +117,12 @@ int main()
     }
     contender.join();
 
-    expect(!other_thread_threw.load(std::memory_order_acquire),
-           "try_lock from another thread should not throw");
-    expect(!other_thread_acquired.load(std::memory_order_acquire),
-           "try_lock from another thread should fail while mutex is locked");
+    sintra::test::expect(!other_thread_threw.load(std::memory_order_acquire),
+                         k_failure_prefix,
+                         "try_lock from another thread should not throw");
+    sintra::test::expect(!other_thread_acquired.load(std::memory_order_acquire),
+                         k_failure_prefix,
+                         "try_lock from another thread should fail while mutex is locked");
 
     // Unlock for subsequent tests.
     mtx.unlock();
@@ -146,8 +140,9 @@ int main()
         std::this_thread::sleep_for(1ms);
     }
     locker.join();
-    expect(second_thread_locked.load(std::memory_order_acquire),
-           "second thread should acquire the mutex after it is unlocked");
+    sintra::test::expect(second_thread_locked.load(std::memory_order_acquire),
+                         k_failure_prefix,
+                         "second thread should acquire the mutex after it is unlocked");
 
     // Unlock attempt by a non-owner thread must throw.
     mtx.lock();
@@ -165,8 +160,9 @@ int main()
         }
     });
     non_owner.join();
-    expect(non_owner_detected.load(std::memory_order_acquire),
-           "unlock from non-owner should throw operation_not_permitted");
+    sintra::test::expect(non_owner_detected.load(std::memory_order_acquire),
+                         k_failure_prefix,
+                         "unlock from non-owner should throw operation_not_permitted");
     mtx.unlock();
 
     // Recursive lock must throw resource_deadlock_would_occur.
@@ -180,14 +176,16 @@ int main()
                           "lock recursion");
         lock_detected_recursion = true;
     }
-    expect(lock_detected_recursion, "lock recursion should throw");
+    sintra::test::expect(lock_detected_recursion, k_failure_prefix,
+                         "lock recursion should throw");
     mtx.unlock();
 
     // Test try_lock_for with immediate success.
     {
         test_mutex timed_mtx;
         bool acquired = timed_mtx.try_lock_for(100ms);
-        expect(acquired, "try_lock_for should succeed on unlocked mutex");
+        sintra::test::expect(acquired, k_failure_prefix,
+                             "try_lock_for should succeed on unlocked mutex");
         timed_mtx.unlock();
     }
 
@@ -214,7 +212,8 @@ int main()
         if (acquired) {
             timed_mtx.unlock();
         }
-        expect(!acquired, "try_lock_for should timeout when mutex is held");
+        sintra::test::expect(!acquired, k_failure_prefix,
+                             "try_lock_for should timeout when mutex is held");
 
         release.store(true);
         holder.join();
@@ -225,7 +224,8 @@ int main()
         test_mutex timed_mtx;
         auto deadline = std::chrono::steady_clock::now() + 100ms;
         bool acquired = timed_mtx.try_lock_until(deadline);
-        expect(acquired, "try_lock_until should succeed on unlocked mutex");
+        sintra::test::expect(acquired, k_failure_prefix,
+                             "try_lock_until should succeed on unlocked mutex");
         timed_mtx.unlock();
     }
 
@@ -253,7 +253,8 @@ int main()
         if (acquired) {
             timed_mtx.unlock();
         }
-        expect(!acquired, "try_lock_until with past deadline should fail");
+        sintra::test::expect(!acquired, k_failure_prefix,
+                             "try_lock_until with past deadline should fail");
 
         release.store(true);
         holder.join();
@@ -272,11 +273,13 @@ int main()
 
     recovery.lock();
     const auto expected_owner = test_mutex::make_current_owner_token();
-    expect(recovery.raw_owner() == expected_owner,
-           "lock should recover ownership from a dead process");
+    sintra::test::expect(recovery.raw_owner() == expected_owner,
+                         k_failure_prefix,
+                         "lock should recover ownership from a dead process");
 
     recovery.unlock();
-    expect(recovery.try_lock(), "mutex should be usable after recovery");
+    sintra::test::expect(recovery.try_lock(), k_failure_prefix,
+                         "mutex should be usable after recovery");
     recovery.unlock();
 
     return 0;

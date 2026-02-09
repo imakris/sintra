@@ -114,29 +114,6 @@ std::vector<int> read_ints(const std::filesystem::path& file)
     return values;
 }
 
-void write_result(const std::filesystem::path& dir,
-                  bool ok,
-                  const std::vector<std::string>& strings,
-                  const std::vector<int>& ints)
-{
-    std::ofstream out(dir / "result.txt", std::ios::binary | std::ios::trunc);
-    if (!out) {
-        throw std::runtime_error("failed to open result file");
-    }
-    out << (ok ? "ok" : "fail") << '\n';
-    if (!ok) {
-        out << "strings:";
-        for (const auto& value : strings) {
-            out << ' ' << value;
-        }
-        out << "\nints:";
-        for (int value : ints) {
-            out << ' ' << value;
-        }
-        out << '\n';
-    }
-}
-
 // These vectors are modified by slot handlers (reader thread) and read
 // by main thread after barrier synchronization
 std::vector<std::string> g_received_strings;
@@ -180,7 +157,23 @@ int process_sender()
     }
 
     const bool ok = (strings == expected_strings) && (ints == expected_ints);
-    write_result(shared_dir, ok, strings, ints);
+    std::vector<std::string> lines;
+    lines.push_back(ok ? "ok" : "fail");
+    if (!ok) {
+        std::ostringstream strings_line;
+        strings_line << "strings:";
+        for (const auto& value : strings) {
+            strings_line << ' ' << value;
+        }
+        std::ostringstream ints_line;
+        ints_line << "ints:";
+        for (int value : ints) {
+            ints_line << ' ' << value;
+        }
+        lines.push_back(strings_line.str());
+        lines.push_back(ints_line.str());
+    }
+    sintra::test::write_lines(shared_dir / "result.txt", lines);
 
     sintra::barrier("result-ready", "_sintra_all_processes");
     return 0;
@@ -241,48 +234,25 @@ int process_int_receiver()
 int main(int argc, char* argv[])
 {
     std::set_terminate(sintra::test::custom_terminate_handler);
-
-    const bool is_spawned = sintra::test::has_branch_flag(argc, argv);
-    sintra::test::Shared_directory shared("SINTRA_TEST_SHARED_DIR", "basic_pub_sub");
-    const auto shared_dir = shared.path();
-
-    std::vector<sintra::Process_descriptor> processes;
-    processes.emplace_back(process_sender);
-    processes.emplace_back(process_string_receiver);
-    processes.emplace_back(process_int_receiver);
-
-    sintra::init(argc, argv, processes);
-
-    int exit_code = 0;
-    std::string status;
-    bool status_loaded = false;
-    const auto result_path = shared_dir / "result.txt";
-
-    if (!is_spawned) {
-        sintra::barrier("result-ready", "_sintra_all_processes");
-    }
-
-    sintra::finalize();
-
-    if (!is_spawned) {
-        std::ifstream in(result_path, std::ios::binary);
-        if (!in) {
-            std::fprintf(stderr, "Error: failed to open result file at %s\n",
-                          result_path.string().c_str());
-            exit_code = 1;
-        }
-        else {
+    return sintra::test::run_multi_process_test(
+        argc,
+        argv,
+        "SINTRA_TEST_SHARED_DIR",
+        "basic_pub_sub",
+        {process_sender, process_string_receiver, process_int_receiver},
+        [](const std::filesystem::path& shared_dir) {
+            const auto result_path = shared_dir / "result.txt";
+            std::ifstream in(result_path, std::ios::binary);
+            if (!in) {
+                std::fprintf(stderr,
+                             "Error: failed to open result file at %s\n",
+                             result_path.string().c_str());
+                return 1;
+            }
+            std::string status;
             in >> status;
-            status_loaded = true;
-        }
-
-        if (exit_code == 0 && status_loaded) {
-            exit_code = (status == "ok") ? 0 : 1;
-        }
-
-        return exit_code;
-    }
-
-    return 0;
+            return (status == "ok") ? 0 : 1;
+        },
+        "result-ready");
 }
 

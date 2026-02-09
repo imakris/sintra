@@ -4,6 +4,7 @@
 #pragma once
 
 #include "logging.h"
+#include "process/process_id.h"
 #include "sintra_windows.h"
 #include <atomic>
 #include <chrono>
@@ -13,12 +14,6 @@
 
 #ifndef SINTRA_DEBUG_PAUSE_ON_EXIT
 #define SINTRA_DEBUG_PAUSE_ON_EXIT 0
-#endif
-
-#ifdef _WIN32
-#include <process.h>
-#else
-#include <unistd.h>
 #endif
 
 namespace sintra {
@@ -42,11 +37,7 @@ inline bool is_debug_pause_active()             { return debug_pause_state().loa
 // LCOV_EXCL_START - debug pause infrastructure only activated via environment variable
 inline void debug_pause_forever(const char* reason)
 {
-#ifdef _WIN32
-    const auto pid = _getpid();
-#else
-    const auto pid = getpid();
-#endif
+    const auto pid = static_cast<unsigned long long>(get_current_process_id());
 
     Log_stream(log_level::info)
         << "\n[SINTRA_DEBUG_PAUSE] Process " << pid << " paused: " << reason

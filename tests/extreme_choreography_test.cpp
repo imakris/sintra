@@ -20,6 +20,7 @@
 
 #include <sintra/sintra.h>
 
+#include "test_choreography_utils.h"
 #include "test_utils.h"
 
 #include <array>
@@ -174,9 +175,8 @@ const std::array<std::string, k_phase_count>& fence_names()
     static const std::array<std::string, k_phase_count> names = [] {
         std::array<std::string, k_phase_count> values{};
         for (std::size_t phase = 0; phase < k_phase_count; ++phase) {
-            std::ostringstream oss;
-            oss << "extreme-choreography-fence-phase-" << phase;
-            values[phase] = oss.str();
+            values[phase] =
+                sintra::test::make_barrier_name("extreme-choreography-fence-phase", phase);
         }
         return values;
     }();
@@ -315,11 +315,7 @@ int producer_process()
 
     const auto seed = static_cast<unsigned>(
         std::chrono::steady_clock::now().time_since_epoch().count());
-#ifdef _WIN32
-    const auto pid_component = static_cast<unsigned>(_getpid());
-#else
-    const auto pid_component = static_cast<unsigned>(getpid());
-#endif
+    const auto pid_component = static_cast<unsigned>(sintra::test::get_pid());
     std::seed_seq seed_seq{seed, pid_component, static_cast<unsigned>(ProducerId)};
     std::mt19937 rng(seed_seq);
     std::uniform_int_distribution<int> jitter_us(0, 120);
@@ -407,11 +403,7 @@ int consumer_process()
 
     const auto seed = static_cast<unsigned>(
         std::chrono::steady_clock::now().time_since_epoch().count());
-#ifdef _WIN32
-    const auto pid_component = static_cast<unsigned>(_getpid());
-#else
-    const auto pid_component = static_cast<unsigned>(getpid());
-#endif
+    const auto pid_component = static_cast<unsigned>(sintra::test::get_pid());
     std::seed_seq seed_seq{seed, pid_component, static_cast<unsigned>(ConsumerId + 10)};
     std::mt19937 rng(seed_seq);
     std::uniform_int_distribution<int> jitter_us(10, 200);

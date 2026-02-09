@@ -7,6 +7,8 @@
 #include <cstdint>
 #include <stdexcept>
 
+#include "test_environment.h"
+
 #ifdef __APPLE__
 #include <cerrno>
 #include <fcntl.h>
@@ -20,7 +22,7 @@ public:
     explicit named_semaphore(unsigned int initial_count = 0) {
         // Generate unique name
         static std::atomic<uint64_t> counter{0};
-        uint64_t id = (static_cast<uint64_t>(getpid()) << 32) | counter++;
+        uint64_t id = (static_cast<uint64_t>(sintra::test::get_pid()) << 32) | counter++;
 
         std::snprintf(m_name, sizeof(m_name), "/sintra_bench_%016llx",
                      static_cast<unsigned long long>(id));

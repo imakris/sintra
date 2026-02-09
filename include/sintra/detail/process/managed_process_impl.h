@@ -6,7 +6,8 @@
 #include "../utility.h"
 #include "../type_utils.h"
 #include "../exception.h"
-#include "../ipc/platform_utils.h"
+#include "../ipc/file_utils.h"
+#include "../ipc/process_utils.h"
 #include "../logging.h"
 #include "../tls_post_handler.h"
 #include "dispatch_wait_guard.h"
@@ -45,6 +46,8 @@
 
 namespace sintra {
 
+using std::unique_lock;
+
 extern thread_local bool tl_is_req_thread;
 
 // Protects access to s_mproc during signal dispatch to prevent use-after-free.
@@ -79,10 +82,6 @@ namespace {
         return flag;
     }
 
-    // Forward declarations - defined later in the common section.
-    inline std::size_t signal_index(int sig);
-    inline void dispatch_signal_number(int sig_number);
-
 #ifdef _WIN32
     struct signal_slot {
         int sig;
@@ -113,6 +112,7 @@ namespace {
     // Forward declarations - defined after #endif in the common section
     inline std::size_t signal_index(int sig);
     inline void dispatch_signal_number(int sig_number);
+    inline void drain_pending_signals();
 
     inline HANDLE& signal_event()
     {
@@ -183,27 +183,12 @@ namespace {
         return EXCEPTION_CONTINUE_SEARCH;
     }
 
-    inline void drain_pending_signals_win()
-    {
-        auto mask = pending_signal_mask().exchange(0U);
-        if (mask == 0U) {
-            return;
-        }
-
-        auto& slot_table = signal_slots();
-        for (std::size_t idx = 0; idx < slot_table.size(); ++idx) {
-            if ((mask & (1U << idx)) != 0U) {
-                dispatch_signal_number(slot_table[idx].sig);
-            }
-        }
-    }
-
     inline void signal_dispatch_loop_win()
     {
         while (true) {
             DWORD result = WaitForSingleObject(signal_event(), INFINITE);
             if (result == WAIT_OBJECT_0) {
-                drain_pending_signals_win();
+                drain_pending_signals();
                 // Reset the event after processing
                 ResetEvent(signal_event());
             }
@@ -283,6 +268,7 @@ namespace {
     // Forward declarations - defined after #endif in the common section
     inline std::size_t signal_index(int sig);
     inline void dispatch_signal_number(int sig_number);
+    inline void drain_pending_signals();
 
     inline uint64_t signal_dispatch_now_ns() noexcept
     {
@@ -333,21 +319,6 @@ namespace {
             // Double pause count each iteration up to maximum (exponential backoff).
             if (pause_count < k_max_pause_count) {
                 pause_count *= 2;
-            }
-        }
-    }
-
-    inline void drain_pending_signals()
-    {
-        auto mask = pending_signal_mask().exchange(0U);
-        if (mask == 0U) {
-            return;
-        }
-
-        auto& slot_table = signal_slots();
-        for (std::size_t idx = 0; idx < slot_table.size(); ++idx) {
-            if ((mask & (1U << idx)) != 0U) {
-                dispatch_signal_number(slot_table[idx].sig);
             }
         }
     }
@@ -411,6 +382,21 @@ namespace {
 
     // --- Common signal infrastructure (shared across platforms) ---
 
+    inline void drain_pending_signals()
+    {
+        auto mask = pending_signal_mask().exchange(0U);
+        if (mask == 0U) {
+            return;
+        }
+
+        auto& slot_table = signal_slots();
+        for (std::size_t idx = 0; idx < slot_table.size(); ++idx) {
+            if ((mask & (1U << idx)) != 0U) {
+                dispatch_signal_number(slot_table[idx].sig);
+            }
+        }
+    }
+
     inline std::size_t signal_index(int sig)
     {
         auto& slot_table = signal_slots();
@@ -424,7 +410,7 @@ namespace {
 
     inline void dispatch_signal_number(int sig_number)
     {
-        Dispatch_lock_guard<std::shared_lock<std::shared_mutex>> dispatch_lock(dispatch_shutdown_mutex_instance);
+        Dispatch_shared_lock dispatch_lock(dispatch_shutdown_mutex_instance);
 
         auto* mproc = s_mproc;
 #ifndef _WIN32
@@ -438,7 +424,7 @@ namespace {
         if (mproc && mproc->m_out_req_c) {
             mproc->emit_remote<Managed_process::terminated_abnormally>(sig_number);
 
-            Dispatch_lock_guard<std::shared_lock<std::shared_mutex>> readers_lock(mproc->m_readers_mutex);
+            Dispatch_shared_lock readers_lock(mproc->m_readers_mutex);
             for (auto& reader_entry : mproc->m_readers) {
                 if (auto& reader = reader_entry.second) {
                     reader->stop_nowait();
@@ -951,6 +937,34 @@ type_id_type explicit_type_id()
     }
 }
 
+template <typename MapT, typename KeyT, typename RpcFn, typename InvalidT>
+auto cached_resolve(MapT& cache, const KeyT& key, RpcFn&& rpc, InvalidT invalid)
+    -> decltype(rpc(key))
+{
+    // Hold spinlock while accessing the iterator to prevent use-after-invalidation.
+    {
+        auto scoped_map = cache.scoped();
+        auto it = scoped_map.get().find(key);
+        if (it != scoped_map.get().end()) {
+            return it->second;
+        }
+        // Spinlock released here automatically when scoped_map goes out of scope
+    }
+
+    // Caution the Coordinator call will refer to the map that is being assigned,
+    // if the Coordinator is local. Do not be tempted to simplify the temporary,
+    // because depending on the order of evaluation, it may or it may not work.
+    auto resolved = rpc(key);
+
+    // If it is not invalid, cache it.
+    if (resolved != invalid) {
+        auto scoped_map = cache.scoped();
+        scoped_map.get()[key] = resolved;
+    }
+
+    return resolved;
+}
+
 } // namespace detail
 
 template <typename T>
@@ -972,36 +986,21 @@ sintra::type_id_type get_type_id()
                         "' new='" + type_name + "'");
                 }
             }
-            else
-            {
-                s_mproc->m_type_name_of_explicit_id[explicit_id] = type_name;
+            else {
+                s_mproc->m_type_name_of_explicit_id.set_value(explicit_id, type_name);
             }
         }
         return make_type_id(explicit_id);
     }
 
     const std::string type_name = detail::type_name<T>();
-    // Hold spinlock while accessing the iterator to prevent use-after-invalidation
-    {
-        auto scoped_map = s_mproc->m_type_id_of_type_name.scoped();
-        auto it = scoped_map.get().find(type_name);
-        if (it != scoped_map.get().end()) {
-            return it->second;
-        }
-        // Spinlock released here automatically when scoped_map goes out of scope
-    }
-
-    // Caution the Coordinator call will refer to the map that is being assigned,
-    // if the Coordinator is local. Do not be tempted to simplify the temporary,
-    // because depending on the order of evaluation, it may or it may not work.
-    auto tid = Coordinator::rpc_resolve_type(s_coord_id, type_name);
-
-    // if it is not invalid, cache it
-    if (tid != invalid_type_id) {
-        s_mproc->m_type_id_of_type_name[type_name] = tid;
-    }
-
-    return tid;
+    return detail::cached_resolve(
+        s_mproc->m_type_id_of_type_name,
+        type_name,
+        [](const std::string& name) {
+            return Coordinator::rpc_resolve_type(s_coord_id, name);
+        },
+        invalid_type_id);
 }
 
 // helper
@@ -1011,27 +1010,13 @@ sintra::type_id_type get_type_id(const T&) {return get_type_id<T>();}
 template <typename>
 sintra::instance_id_type get_instance_id(std::string&& assigned_name)
 {
-    // Hold spinlock while accessing the iterator to prevent use-after-invalidation
-    {
-        auto scoped_map = s_mproc->m_instance_id_of_assigned_name.scoped();
-        auto it = scoped_map.get().find(assigned_name);
-        if (it != scoped_map.get().end()) {
-            return it->second;
-        }
-        // Spinlock released here automatically when scoped_map goes out of scope
-    }
-
-    // Caution the Coordinator call will refer to the map that is being assigned,
-    // if the Coordinator is local. Do not be tempted to simplify the temporary,
-    // because depending on the order of evaluation, it may or it may not work.
-    auto iid = Coordinator::rpc_resolve_instance(s_coord_id, assigned_name);
-
-    // if it is not invalid, cache it
-    if (iid != invalid_instance_id) {
-        s_mproc->m_instance_id_of_assigned_name[assigned_name] = iid;
-    }
-
-    return iid;
+    return detail::cached_resolve(
+        s_mproc->m_instance_id_of_assigned_name,
+        assigned_name,
+        [](const std::string& name) {
+            return Coordinator::rpc_resolve_instance(s_coord_id, name);
+        },
+        invalid_instance_id);
 }
 
 inline
@@ -1103,19 +1088,22 @@ Managed_process::~Managed_process()
 
     // no more reading
     {
-        Dispatch_lock_guard<std::unique_lock<std::shared_mutex>> readers_lock(m_readers_mutex);
+        Dispatch_unique_lock readers_lock(m_readers_mutex);
         m_readers.clear();
     }
 
-    // no more writing
-    if (m_out_req_c) {
-        delete m_out_req_c;
-        m_out_req_c = nullptr;
-    }
+    // no more writing (prevent signal dispatch from using freed rings)
+    {
+        Dispatch_unique_lock dispatch_lock(dispatch_shutdown_mutex_instance);
+        if (m_out_req_c) {
+            delete m_out_req_c;
+            m_out_req_c = nullptr;
+        }
 
-    if (m_out_rep_c) {
-        delete m_out_rep_c;
-        m_out_rep_c = nullptr;
+        if (m_out_rep_c) {
+            delete m_out_rep_c;
+            m_out_rep_c = nullptr;
+        }
     }
 
     if (s_coord) {
@@ -1219,7 +1207,7 @@ Managed_process::~Managed_process()
     // Taking an exclusive lock here ensures all shared locks are released before we
     // clear s_mproc and destroy the object, preventing use-after-free.
     {
-        Dispatch_lock_guard<std::unique_lock<std::shared_mutex>> dispatch_lock(dispatch_shutdown_mutex_instance);
+        Dispatch_unique_lock dispatch_lock(dispatch_shutdown_mutex_instance);
         s_mproc = nullptr;
         s_mproc_id = 0;
     }
@@ -1236,7 +1224,7 @@ Managed_process::~Managed_process()
     // Taking an exclusive lock ensures all shared locks are released before we
     // clear s_mproc and destroy the object, preventing use-after-free.
     {
-        Dispatch_lock_guard<std::unique_lock<std::shared_mutex>> dispatch_lock(dispatch_shutdown_mutex_instance);
+        Dispatch_unique_lock dispatch_lock(dispatch_shutdown_mutex_instance);
         s_mproc = nullptr;
         s_mproc_id = 0;
     }
@@ -1658,7 +1646,7 @@ void Managed_process::init(int argc, const char* const* argv)
     }
 
     {
-        Dispatch_lock_guard<std::unique_lock<std::shared_mutex>> readers_lock(m_readers_mutex);
+        Dispatch_unique_lock readers_lock(m_readers_mutex);
         assert(!m_readers.count(process_of(s_coord_id)));
         auto progress = std::make_shared<Process_message_reader::Delivery_progress>();
         auto reader = std::make_shared<Process_message_reader>(
@@ -1681,7 +1669,6 @@ void Managed_process::init(int argc, const char* const* argv)
             function<void()> next_call;
             {
                 lock_guard<mutex> lock(m_availability_mutex);
-
                 auto it = m_queued_availability_calls.find(tn);
                 if (it == m_queued_availability_calls.end()) {
                     return;
@@ -1828,7 +1815,7 @@ Managed_process::Spawn_result Managed_process::spawn_swarm_process(
     args.insert(args.end(), {"--recovery_occurrence", std::to_string(s.occurrence)} );
 
     {
-        Dispatch_lock_guard<std::unique_lock<std::shared_mutex>> readers_lock(m_readers_mutex);
+        Dispatch_unique_lock readers_lock(m_readers_mutex);
 
         // If a reader for this process id exists (from a previous crashed instance),
         // stop it and remove it before creating a fresh one for recovery.
@@ -2029,7 +2016,7 @@ Managed_process::Spawn_result Managed_process::spawn_swarm_process(
             if (!s_mproc) {
                 return;
             }
-            Dispatch_lock_guard<std::unique_lock<std::shared_mutex>> readers_lock(s_mproc->m_readers_mutex);
+            Dispatch_unique_lock readers_lock(s_mproc->m_readers_mutex);
             s_mproc->m_readers.erase(piid);
         });
 
@@ -2048,7 +2035,6 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
     assert(!branch_vector.empty());
 
     using namespace sintra;
-    using std::to_string;
 
     // Variables for error tracking (used by coordinator)
     std::unordered_set<instance_id_type> successfully_spawned;
@@ -2094,12 +2080,12 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
             auto& options = it->sintra_options;
             if (it->entry.m_binary_name.empty()) {
                 it->entry.m_binary_name = m_binary_name;
-                options.insert(options.end(), { "--branch_index", to_string(i) });
+                options.insert(options.end(), { "--branch_index", std::to_string(i) });
             }
             options.insert(options.end(), {
-                "--swarm_id",       to_string(m_swarm_id),
-                "--instance_id",    to_string(it->assigned_instance_id = make_process_instance_id()),
-                "--coordinator_id", to_string(s_coord_id)
+                "--swarm_id",       std::to_string(m_swarm_id),
+                "--instance_id",    std::to_string(it->assigned_instance_id = make_process_instance_id()),
+                "--coordinator_id", std::to_string(s_coord_id)
             });
         }
 
@@ -2243,7 +2229,7 @@ void Managed_process::pause()
         return;
 
     {
-        Dispatch_lock_guard<std::shared_lock<std::shared_mutex>> readers_lock(m_readers_mutex);
+        Dispatch_shared_lock readers_lock(m_readers_mutex);
         for (auto& entry : m_readers) {
             if (auto& reader = entry.second) {
                 reader->pause();
@@ -2268,7 +2254,7 @@ void Managed_process::stop()
         return;
 
     {
-        Dispatch_lock_guard<std::shared_lock<std::shared_mutex>> readers_lock(m_readers_mutex);
+        Dispatch_shared_lock readers_lock(m_readers_mutex);
         for (auto& entry : m_readers) {
             if (auto& reader = entry.second) {
                 reader->stop_nowait();
@@ -2341,13 +2327,17 @@ function<void()> Managed_process::call_on_availability(Named_instance<T> transce
     tn_type tn = { get_type_id<T>(), std::move(transceiver_name) };
 
     // insert an empty function, in order to be able to capture the iterator within it
-    auto& call_list = m_queued_availability_calls[tn];
-    call_list.emplace_back();
-    auto f_it = std::prev(call_list.end());
+    using Call_list_iterator = list<function<void()>>::iterator;
+    Call_list_iterator f_it;
+    {
+        auto& call_list = m_queued_availability_calls[tn];
+        call_list.emplace_back();
+        f_it = std::prev(call_list.end());
+    }
 
     struct availability_call_state {
         bool active = true;
-        decltype(call_list.begin()) iterator;
+        Call_list_iterator iterator;
     };
 
     auto state = std::make_shared<availability_call_state>();
@@ -2448,7 +2438,7 @@ inline void Managed_process::flush(instance_id_type process_id, sequence_counter
     std::shared_ptr<Process_message_reader> reader;
     sequence_counter_type rs = invalid_sequence;
     {
-        Dispatch_lock_guard<std::shared_lock<std::shared_mutex>> readers_lock(m_readers_mutex);
+        Dispatch_shared_lock readers_lock(m_readers_mutex);
         auto it = m_readers.find(process_id);
         if (it == m_readers.end()) {
             throw std::logic_error(
@@ -2520,7 +2510,7 @@ void Managed_process::wait_for_delivery_fence()
     std::vector<Process_message_reader::Delivery_target> targets;
 
     {
-        Dispatch_lock_guard<std::shared_lock<std::shared_mutex>> readers_lock(m_readers_mutex);
+        Dispatch_shared_lock readers_lock(m_readers_mutex);
         targets.reserve(m_readers.size() * 2);
 
         for (auto& [process_id, reader_ptr] : m_readers) {
@@ -2666,4 +2656,5 @@ size_t Managed_process::unblock_rpc(instance_id_type process_instance_id)
 }
 
 } // sintra
+
 

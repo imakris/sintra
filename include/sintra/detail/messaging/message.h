@@ -24,6 +24,16 @@
 
 namespace sintra {
 
+using std::enable_if_t;
+using std::is_base_of;
+using std::is_convertible;
+using std::is_same;
+using std::is_standard_layout_v;
+using std::is_trivial_v;
+using std::remove_cv;
+using std::remove_reference;
+using std::string;
+
 namespace detail {
 
 inline void spin_pause() noexcept
@@ -49,16 +59,6 @@ inline void spin_pause() noexcept
 } // namespace detail
 
 
-using std::enable_if_t;
-using std::is_base_of;
-using std::is_convertible;
-using std::is_same;
-using std::is_standard_layout_v;
-using std::is_trivial_v;
-using std::remove_cv;
-using std::remove_reference;
-
-
 constexpr uint64_t  message_magic        = 0xc18a1aca1ebac17a;
 constexpr int       message_ring_size    = 0x200000;
 
@@ -80,13 +80,8 @@ struct variable_buffer
     // this is set by the message constructor
     size_t offset_in_bytes = 0;
 
-    template <typename = void>
-    struct Statics
-    {
-        thread_local static char*        tl_message_start_address;
-        thread_local static uint32_t*    tl_pbytes_to_next_message;
-    };
-    using S = Statics<void>;
+    inline static thread_local char*     tl_message_start_address = nullptr;
+    inline static thread_local uint32_t* tl_pbytes_to_next_message = nullptr;
 
     bool empty() const { return num_bytes == 0; }
 
@@ -99,9 +94,6 @@ struct variable_buffer
     variable_buffer(const TC& container);
 };
 
-
-template <> inline thread_local char*      variable_buffer::S::tl_message_start_address    = nullptr;
-template <> inline thread_local uint32_t*  variable_buffer::S::tl_pbytes_to_next_message   = nullptr;
 
 
 namespace detail
@@ -252,8 +244,6 @@ size_t vb_size(Args&&... args)
 }
 
 
-using std::string;
-
 struct void_placeholder_t
 {};
 
@@ -278,13 +268,6 @@ using message_string = typed_variable_buffer<string>;
 
 class Sintra_message_element {};
 
-
-class No
-{
-private:
-    No(){}
-    virtual int no()=0;
-};
 
 template <typename...>
 struct always_false: std::false_type
@@ -494,14 +477,14 @@ struct Message: public Message_prefix, public T
     {
         bytes_to_next_message = sizeof(Message);
 
-        variable_buffer::S::tl_message_start_address = (char*) this;
-        variable_buffer::S::tl_pbytes_to_next_message = &bytes_to_next_message;
+        variable_buffer::tl_message_start_address = (char*) this;
+        variable_buffer::tl_pbytes_to_next_message = &bytes_to_next_message;
 
         void* body_ptr = static_cast<body_type*>(this);
         new (body_ptr) body_type{args...};
 
-        variable_buffer::S::tl_message_start_address = nullptr;
-        variable_buffer::S::tl_pbytes_to_next_message = nullptr;
+        variable_buffer::tl_message_start_address = nullptr;
+        variable_buffer::tl_pbytes_to_next_message = nullptr;
 
         assert(bytes_to_next_message < (message_ring_size / 8));
 

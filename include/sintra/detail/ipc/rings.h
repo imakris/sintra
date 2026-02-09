@@ -113,6 +113,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstddef>       // std::byte
+#include <cstdio>
 #include <cstring>       // std::strlen
 #include <cstdint>
 #include <filesystem>
@@ -137,7 +138,9 @@
 #include "../ipc/semaphore.h"
 #include "../ipc/spinlock.h"
 
-#include "../ipc/platform_utils.h"
+#include "../ipc/file_utils.h"
+#include "../ipc/platform_defs.h"
+#include "../ipc/process_utils.h"
 
 // Enables the writer to forcefully evict readers that are too slow.
 #ifndef SINTRA_ENABLE_SLOW_READER_EVICTION
@@ -346,6 +349,46 @@ struct ring_reader_evicted_exception : public std::runtime_error {
               "Ring reader was evicted by the writer due to being too slow.") {}
 };
 
+inline bool create_ring_backing_file(
+    const std::string& path,
+    size_t size,
+    const std::string* directory)
+{
+    try {
+        if (directory && !check_or_create_directory(*directory)) {
+            return false;
+        }
+
+        detail::native_file_handle file_handle = detail::create_new_file(path.c_str());
+        if (file_handle == detail::invalid_file()) {
+            return false;
+        }
+
+#ifdef NDEBUG
+        if (!detail::truncate_file(file_handle, size)) {
+            detail::close_file(file_handle);
+            return false;
+        }
+#else
+        // Fill with a recognizable pattern to aid debugging
+        const char* ustr = "UNINITIALIZED";
+        const size_t dv = std::strlen(ustr); // std::strlen: see header notes
+        std::unique_ptr<char[]> tmp(new char[size]);
+        for (size_t i = 0; i < size; ++i) {
+            tmp[i] = ustr[i % dv];
+        }
+        if (!detail::write_file(file_handle, tmp.get(), size)) {
+            detail::close_file(file_handle);
+            return false;
+        }
+#endif
+        return detail::close_file(file_handle);
+    }
+    catch (...) {
+    }
+    return false;
+}
+
 // A binary semaphore tailored for the ring's reader wakeup policy.
 class sintra_ring_semaphore
 {
@@ -458,20 +501,22 @@ private:
 
     impl& ensure_initialized()
     {
-        while (true) {
-            uint8_t current = m_state;
+        for (;;) {
+            const uint8_t current = m_state.load(std::memory_order_acquire);
             if (current == state_initialized) {
                 return access();
             }
             if (current == state_uninitialized) {
-                if (m_state.compare_exchange_strong(current, state_initializing)) {
+                uint8_t expected = state_uninitialized;
+                if (m_state.compare_exchange_strong(expected, state_initializing,
+                                                    std::memory_order_acq_rel)) {
                     try {
                         new (&m_storage) impl();
-                        m_state = state_initialized;
+                        m_state.store(state_initialized, std::memory_order_release);
                         return access();
                     }
                     catch (...) {
-                        m_state = state_uninitialized;
+                        m_state.store(state_uninitialized, std::memory_order_release);
                         throw;
                     }
                 }
@@ -488,7 +533,7 @@ private:
         }
     }
 
-    std::aligned_storage_t<sizeof(impl), alignof(impl)> m_storage;
+    alignas(impl) std::byte m_storage[sizeof(impl)];
     std::atomic<uint8_t> m_state{state_uninitialized};
 };
 
@@ -556,39 +601,7 @@ private:
     // Create the backing data file (filled with a debug pattern in !NDEBUG).
     bool create()
     {
-        try {
-            if (!check_or_create_directory(m_directory)) {
-                return false;
-            }
-
-            detail::native_file_handle fh_data = detail::create_new_file(m_data_filename.c_str());
-            if (fh_data == detail::invalid_file()) {
-                return false;
-            }
-
-#ifdef NDEBUG
-            if (!detail::truncate_file(fh_data, m_data_region_size)) {
-                detail::close_file(fh_data);
-                return false;
-            }
-#else
-            // Fill with a recognizable pattern to aid debugging
-            const char* ustr = "UNINITIALIZED";
-            const size_t dv = std::strlen(ustr); // std::strlen: see header notes
-            std::unique_ptr<char[]> tmp(new char[m_data_region_size]);
-            for (size_t i = 0; i < m_data_region_size; ++i) {
-                tmp[i] = ustr[i % dv];
-            }
-            if (!detail::write_file(fh_data, tmp.get(), m_data_region_size)) {
-                detail::close_file(fh_data);
-                return false;
-            }
-#endif
-            return detail::close_file(fh_data);
-        }
-        catch (...) {
-        }
-        return false;
+        return create_ring_backing_file(m_data_filename, m_data_region_size, &m_directory);
     }
 
     /**
@@ -1387,34 +1400,7 @@ private:
     // Create the control file (debug-filled in !NDEBUG).
     bool create()
     {
-        try {
-            detail::native_file_handle fh_control =
-                detail::create_new_file(m_control_filename.c_str());
-            if (fh_control == detail::invalid_file())
-                return false;
-
-#ifdef NDEBUG
-            if (!detail::truncate_file(fh_control, sizeof(Control))) {
-                detail::close_file(fh_control);
-                return false;
-            }
-#else
-            const char* ustr = "UNINITIALIZED";
-            const size_t dv = std::strlen(ustr);
-            std::unique_ptr<char[]> tmp(new char[sizeof(Control)]);
-            for (size_t i = 0; i < sizeof(Control); ++i) {
-                tmp[i] = ustr[i % dv];
-            }
-            if (!detail::write_file(fh_control, tmp.get(), sizeof(Control))) {
-                detail::close_file(fh_control);
-                return false;
-            }
-#endif
-            return detail::close_file(fh_control);
-        }
-        catch (...) {
-        }
-        return false;
+        return create_ring_backing_file(m_control_filename, sizeof(Control), nullptr);
     }
 
     // Map the control file read-write.
@@ -2358,10 +2344,30 @@ struct Ring_W : Ring<T, false>
         }
 
         c.writer_pid = get_current_pid();
+        m_owner_pid = c.writer_pid;
+        m_owner_tid = get_current_tid();
     }
 
     ~Ring_W()
     {
+        const uint32_t current_tid = get_current_tid();
+        if (m_owner_tid != 0 && m_owner_tid != current_tid) {
+            char message[256];
+            const int message_len = std::snprintf(
+                message,
+                sizeof(message),
+                "[sintra][ring] Ring_W destroyed on a different thread than it was created. "
+                "ring=%s owner_pid=%u owner_tid=%u current_pid=%u current_tid=%u\n",
+                this->m_data_filename.c_str(),
+                m_owner_pid,
+                m_owner_tid,
+                get_current_pid(),
+                current_tid);
+            if (message_len > 0) {
+                log_raw(log_level::error, message);
+            }
+        }
+
         // Wake any sleeping readers to avoid deadlocks during teardown
         unblock_global();
         c.ownership_mutex.unlock();
@@ -2785,6 +2791,8 @@ private:
     std::atomic<uint32_t>           m_writing_thread_index   = {0};
     size_t                          m_octile                 = 0;
     sequence_counter_type           m_pending_new_sequence   = 0;
+    uint32_t                        m_owner_tid              = 0;
+    uint32_t                        m_owner_pid              = 0;
 
     typename Ring<T, false>::Control& c;
 };
@@ -2803,18 +2811,12 @@ private:
  ////     \////     \////     \////     \////     \////     \////     \////
   //       \//       \//       \//       \//       \//       \//       \//
 
-#if __cplusplus >= 202002L
-#define SINTRA_NODISCARD [[nodiscard]]
-#else
-#define SINTRA_NODISCARD
-#endif
-
 // RAII snapshot: calls reader.done_reading() iff start_reading() succeeded.
 // NOTE: Only one active snapshot per Ring_R<T> instance. Attempting to start a new snapshot before
 // done_reading() will throw (use a separate Ring_R<T> instance if you need concurrent snapshots).
 
 template <class Reader>
-class SINTRA_NODISCARD Ring_R_snapshot {
+class [[nodiscard]] Ring_R_snapshot {
 public:
     using element_t = typename Reader::element_t;
 
@@ -2847,13 +2849,13 @@ public:
         if (m_active && m_reader) { m_reader->done_reading(); }
     }
 
-    SINTRA_NODISCARD explicit operator bool() const noexcept {
+    [[nodiscard]] explicit operator bool() const noexcept {
         return m_active && m_range.begin && m_range.end && (m_range.end > m_range.begin);
     }
 
-    SINTRA_NODISCARD Range<element_t> range() const noexcept { return m_range; }
-    SINTRA_NODISCARD element_t*       begin() const noexcept { return m_range.begin; }
-    SINTRA_NODISCARD element_t*       end()   const noexcept { return m_range.end; }
+    [[nodiscard]] Range<element_t> range() const noexcept { return m_range; }
+    [[nodiscard]] element_t*       begin() const noexcept { return m_range.begin; }
+    [[nodiscard]] element_t*       end()   const noexcept { return m_range.end; }
 
     // If caller finished early, prevent done_reading() in dtor.
     void dismiss() noexcept { m_active = false; }
@@ -2866,7 +2868,7 @@ private:
 
 // Throwing helper: propagates exceptions from start_reading(...)
 template <class Reader, class... Args>
-SINTRA_NODISCARD inline Ring_R_snapshot<Reader>
+[[nodiscard]] inline Ring_R_snapshot<Reader>
 make_snapshot(Reader& reader, Args&&... args) {
     auto rg = reader.start_reading(std::forward<Args>(args)...);
     return Ring_R_snapshot<Reader>(reader, rg);
@@ -2877,7 +2879,7 @@ enum class Ring_R_snapshot_error : uint8_t { none, evicted, exception };
 
 // Nothrow helper: returns {snapshot, error}; never logs by itself.
 template <class Reader, class... Args>
-SINTRA_NODISCARD inline std::pair<Ring_R_snapshot<Reader>, Ring_R_snapshot_error>
+[[nodiscard]] inline std::pair<Ring_R_snapshot<Reader>, Ring_R_snapshot_error>
 try_snapshot_e(Reader& reader, Args&&... args) noexcept
 {
     try {

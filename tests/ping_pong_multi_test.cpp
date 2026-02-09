@@ -123,29 +123,16 @@ int process_monitor()
 
 int main(int argc, char* argv[])
 {
-    const bool is_spawned = sintra::test::has_branch_flag(argc, argv);
-    sintra::test::Shared_directory shared("SINTRA_TEST_SHARED_DIR", "ping_pong_multi");
-
-    std::vector<sintra::Process_descriptor> processes;
-    processes.emplace_back(process_ping_responder);
-    processes.emplace_back(process_pong_responder);
-    processes.emplace_back(process_monitor);
-
-    sintra::init(argc, argv, processes);
-
-    if (!is_spawned) {
-        sintra::barrier("ping-pong-finished", "_sintra_all_processes");
-    }
-
-    sintra::finalize();
-
-    if (!is_spawned) {
-        const auto path = shared.path() / "ping_count.txt";
-        const int count = read_count(path);
-        bool ok = (count == k_target_ping_count);
-        shared.cleanup();
-        return ok ? 0 : 1;
-    }
-
-    return 0;
+    return sintra::test::run_multi_process_test(
+        argc,
+        argv,
+        "SINTRA_TEST_SHARED_DIR",
+        "ping_pong_multi",
+        {process_ping_responder, process_pong_responder, process_monitor},
+        [](const std::filesystem::path& shared_dir) {
+            const auto path = shared_dir / "ping_count.txt";
+            const int count = read_count(path);
+            return (count == k_target_ping_count) ? 0 : 1;
+        },
+        "ping-pong-finished");
 }

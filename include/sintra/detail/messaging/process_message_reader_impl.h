@@ -10,9 +10,12 @@
 #include <condition_variable>
 #include <cstdlib>
 #include <functional>
+#include <initializer_list>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <utility>
+#include <vector>
 
 #ifndef SINTRA_TRACE_WORLD
 #define SINTRA_TRACE_WORLD 0
@@ -20,42 +23,12 @@
 
 namespace sintra {
 
-void install_signal_handler();
-
-
-using std::thread;
-using std::unique_ptr;
 using std::function;
+using std::lock_guard;
+using std::recursive_mutex;
+using std::thread;
 
-
-// ============================================================================
-// Defensive utilities for zero-copy + deferral safety
-// ============================================================================
-// These helpers provide a safe way to clone ring messages when storing
-// references in deferred work. While the current implementation executes
-// deferred work before advancing the ring, future code might capture message
-// pointers in lambdas that outlive the ring's read cycle.
-//
-// Usage: If you need to capture a message pointer for deferred execution:
-//   auto cloned = sintra_clone_message(m);
-//   run_after_current_handler([buf = std::move(cloned)]() {
-//       auto* msg = reinterpret_cast<const Message_prefix*>(buf.get());
-//       // safely access msg
-//   });
-
-inline size_t sintra_message_total_size(const Message_prefix* m)
-{
-    return static_cast<size_t>(m->bytes_to_next_message);
-}
-
-inline std::unique_ptr<std::byte[]> sintra_clone_message(const Message_prefix* m)
-{
-    const size_t n = sintra_message_total_size(m);
-    auto buf = std::unique_ptr<std::byte[]>(new std::byte[n]);
-    std::memcpy(buf.get(), reinterpret_cast<const void*>(m), n);
-    return buf;
-}
-// ============================================================================
+void install_signal_handler();
 
 
 inline bool thread_local tl_is_req_thread = false;
@@ -63,6 +36,49 @@ inline bool thread_local tl_is_req_thread = false;
 inline bool on_request_reader_thread()
 {
     return tl_is_req_thread;
+}
+
+inline void dispatch_event_handlers(
+    Message_prefix& message,
+    std::initializer_list<instance_id_type> scope_ids,
+    bool trace_world)
+{
+    lock_guard<recursive_mutex> sl(s_mproc->m_handlers_mutex);
+
+    handler_proc_registry_mid_record_type* sender_map = nullptr;
+    auto it_mt = s_mproc->m_active_handlers.find(message.message_type_id);
+    if (it_mt == s_mproc->m_active_handlers.end()) {
+        return;
+    }
+    sender_map = &it_mt->second;
+
+    for (auto sid : scope_ids) {
+        std::vector<function<void(const Message_prefix&)>> handlers;
+        std::size_t handler_count = 0;
+        auto shl = sender_map->find(sid);
+        if (shl != sender_map->end()) {
+            handler_count = shl->second.size();
+            handlers.reserve(handler_count);
+            for (auto& handler : shl->second) {
+                handlers.push_back(handler);
+            }
+        }
+
+        if (handlers.empty()) {
+            continue;
+        }
+
+        if (trace_world) {
+            Log_stream(log_level::debug)
+                << "[sintra_trace_world] pid=" << static_cast<int>(getpid())
+                << " sid_match=" << static_cast<unsigned long long>(sid)
+                << " handlers=" << handlers.size() << "\n";
+        }
+
+        for (auto& handler : handlers) {
+            handler(message);
+        }
+    }
 }
 
 // Historical note: mingw 11.2.0 had issues with inline thread_local non-POD objects.
@@ -236,6 +252,41 @@ Process_message_reader::~Process_message_reader()
     m_in_rep_c.reset();
 }
 
+inline
+void Process_message_reader::begin_reading_session(
+    const std::shared_ptr<Message_ring_R>& ring,
+    std::atomic<bool>& running_flag)
+{
+    s_mproc->m_num_active_readers_mutex.lock();
+    s_mproc->m_num_active_readers++;
+    s_mproc->m_num_active_readers_mutex.unlock();
+
+    ring->start_reading();
+    {
+        std::lock_guard<std::mutex> ready_guard(m_ready_mutex);
+        running_flag = true;
+    }
+    m_ready_condition.notify_all();
+}
+
+inline
+void Process_message_reader::end_reading_session(
+    const std::shared_ptr<Message_ring_R>& ring,
+    std::atomic<bool>& running_flag)
+{
+    ring->done_reading();
+
+    s_mproc->m_num_active_readers_mutex.lock();
+    s_mproc->m_num_active_readers--;
+    s_mproc->m_num_active_readers_mutex.unlock();
+    s_mproc->m_num_active_readers_condition.notify_all();
+
+    std::lock_guard<std::mutex> lk(m_stop_mutex);
+    running_flag = false;
+    m_ready_condition.notify_all();
+    m_stop_condition.notify_one();
+}
+
 
 // This implementation of the following functions assumes the following:
 // We have two types of messages: rpc messages and events
@@ -269,16 +320,7 @@ void Process_message_reader::request_reader_function()
         }
     };
 
-    s_mproc->m_num_active_readers_mutex.lock();
-    s_mproc->m_num_active_readers++;
-    s_mproc->m_num_active_readers_mutex.unlock();
-
-    m_in_req_c->start_reading();
-    {
-        std::lock_guard<std::mutex> ready_guard(m_ready_mutex);
-        m_req_running = true;
-    }
-    m_ready_condition.notify_all();
+    begin_reading_session(m_in_req_c, m_req_running);
 
     publish_request_progress(m_in_req_c->get_message_reading_sequence());
 
@@ -320,27 +362,10 @@ void Process_message_reader::request_reader_function()
                      (s_coord && m->message_type_id >
                          (type_id_type)detail::reserved_id::base_of_messages_handled_by_coordinator)))
                 {
-                    lock_guard<recursive_mutex> sl(s_mproc->m_handlers_mutex);
-
-                    auto& active_handlers = s_mproc->m_active_handlers;
-                    auto it_mt = active_handlers.find(m->message_type_id);
-
-                    if (it_mt != active_handlers.end()) {
-                        instance_id_type sids[] = {
-                            m->sender_instance_id,
-                            any_local,
-                            any_local_or_remote
-                        };
-
-                        for (auto sid : sids) {
-                            auto shl = it_mt->second.find(sid);
-                            if (shl != it_mt->second.end()) {
-                                for (auto& e : shl->second) {
-                                    e(*m);
-                                }
-                            }
-                        }
-                    }
+                    dispatch_event_handlers(
+                        *m,
+                        {m->sender_instance_id, any_local, any_local_or_remote},
+                        false);
                 }
             }
             else {
@@ -359,8 +384,7 @@ void Process_message_reader::request_reader_function()
                 // thus the receiver must exist.
                 assert(
                     reader_state == READER_NORMAL ?
-                        s_mproc->m_local_pointer_of_instance_id.find(m->receiver_instance_id) !=
-                        s_mproc->m_local_pointer_of_instance_id.end()
+                        s_mproc->m_local_pointer_of_instance_id.contains_key(m->receiver_instance_id)
                     :
                         true
                 );
@@ -407,48 +431,24 @@ void Process_message_reader::request_reader_function()
                     (m->receiver_instance_id == any_remote) && sender_is_local;
 
                 if (!coordinator_reading_remote && !skip_local_sender) {
-                    lock_guard<recursive_mutex> sl(s_mproc->m_handlers_mutex);
+                    // Optional debug tracing for world broadcasts to diagnose missing deliveries (SINTRA_TRACE_WORLD).
+                    const bool trace_world = (SINTRA_TRACE_WORLD != 0);
 
-                    // find handlers that operate with this type of message in this process
-                    auto& active_handlers = s_mproc->m_active_handlers;
-                    auto it_mt = active_handlers.find(m->message_type_id);
-
-                    if (it_mt != active_handlers.end()) {
-                        instance_id_type sids[] = {
-                            m->sender_instance_id,
-                            any_remote,
-                            any_local_or_remote
-                        };
-
-                        // Optional debug tracing for world broadcasts to diagnose missing deliveries (SINTRA_TRACE_WORLD).
-                        const bool trace_world = (SINTRA_TRACE_WORLD != 0);
-
-                        if (trace_world) {
-                            Log_stream(log_level::debug)
-                                << "[sintra_trace_world] pid=" << static_cast<int>(getpid())
-                                << " reader_state=" << static_cast<int>(reader_state)
-                                << " msg_type=" << static_cast<unsigned long long>(m->message_type_id)
-                                << " sender_iid=" << static_cast<unsigned long long>(m->sender_instance_id)
-                                << " recv_iid=" << static_cast<unsigned long long>(m->receiver_instance_id)
-                                << " proc_iid="
-                                << static_cast<unsigned long long>(s_mproc ? s_mproc->m_instance_id : 0ULL) << "\n";
-                        }
-
-                        for (auto sid : sids) {
-                            auto shl = it_mt->second.find(sid);
-                            if (shl != it_mt->second.end()) {
-                                if (trace_world) {
-                                    Log_stream(log_level::debug)
-                                        << "[sintra_trace_world] pid=" << static_cast<int>(getpid())
-                                        << " sid_match=" << static_cast<unsigned long long>(sid)
-                                        << " handlers=" << shl->second.size() << "\n";
-                                }
-                                for (auto& e : shl->second) {
-                                    e(*m);
-                                }
-                            }
-                        }
+                    if (trace_world) {
+                        Log_stream(log_level::debug)
+                            << "[sintra_trace_world] pid=" << static_cast<int>(getpid())
+                            << " reader_state=" << static_cast<int>(reader_state)
+                            << " msg_type=" << static_cast<unsigned long long>(m->message_type_id)
+                            << " sender_iid=" << static_cast<unsigned long long>(m->sender_instance_id)
+                            << " recv_iid=" << static_cast<unsigned long long>(m->receiver_instance_id)
+                            << " proc_iid="
+                            << static_cast<unsigned long long>(s_mproc ? s_mproc->m_instance_id : 0ULL) << "\n";
                     }
+
+                    dispatch_event_handlers(
+                        *m,
+                        {m->sender_instance_id, any_remote, any_local_or_remote},
+                        trace_world);
                 }
             }
 
@@ -480,17 +480,7 @@ void Process_message_reader::request_reader_function()
         publish_request_progress(m_in_req_c->get_message_reading_sequence());
     }
 
-    m_in_req_c->done_reading();
-
-    s_mproc->m_num_active_readers_mutex.lock();
-    s_mproc->m_num_active_readers--;
-    s_mproc->m_num_active_readers_mutex.unlock();
-    s_mproc->m_num_active_readers_condition.notify_all();
-
-    std::lock_guard<std::mutex> lk(m_stop_mutex);
-    m_req_running = false;
-    m_ready_condition.notify_all();
-    m_stop_condition.notify_one();
+    end_reading_session(m_in_req_c, m_req_running);
 
     if (progress) {
         const auto seq = m_in_req_c->get_message_reading_sequence();
@@ -559,10 +549,6 @@ void Process_message_reader::reply_reader_function()
 {
     install_signal_handler();
 
-    s_mproc->m_num_active_readers_mutex.lock();
-    s_mproc->m_num_active_readers++;
-    s_mproc->m_num_active_readers_mutex.unlock();
-
     auto progress = m_delivery_progress;
     if (progress) {
         progress->reply_stopped = false;
@@ -578,12 +564,7 @@ void Process_message_reader::reply_reader_function()
         }
     };
 
-    m_in_rep_c->start_reading();
-    {
-        std::lock_guard<std::mutex> ready_guard(m_ready_mutex);
-        m_rep_running = true;
-    }
-    m_ready_condition.notify_all();
+    begin_reading_session(m_in_rep_c, m_rep_running);
 
     publish_reply_progress(m_in_rep_c->get_message_reading_sequence());
 
@@ -718,17 +699,7 @@ void Process_message_reader::reply_reader_function()
         publish_reply_progress(m_in_rep_c->get_message_reading_sequence());
     }
 
-    m_in_rep_c->done_reading();
-
-    s_mproc->m_num_active_readers_mutex.lock();
-    s_mproc->m_num_active_readers--;
-    s_mproc->m_num_active_readers_mutex.unlock();
-    s_mproc->m_num_active_readers_condition.notify_all();
-
-    std::lock_guard<std::mutex> lk(m_stop_mutex);
-    m_rep_running = false;
-    m_ready_condition.notify_all();
-    m_stop_condition.notify_one();
+    end_reading_session(m_in_rep_c, m_rep_running);
 
     publish_reply_progress(m_in_rep_c->get_message_reading_sequence());
 

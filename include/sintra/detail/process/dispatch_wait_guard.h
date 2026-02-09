@@ -4,6 +4,7 @@
 #pragma once
 
 #include <atomic>
+#include <mutex>
 #include <shared_mutex>
 
 namespace sintra {
@@ -40,6 +41,9 @@ private:
     Dispatch_wait_depth_guard depth_guard_;
     LockT lock_;
 };
+
+using Dispatch_shared_lock = Dispatch_lock_guard<std::shared_lock<std::shared_mutex>>;
+using Dispatch_unique_lock = Dispatch_lock_guard<std::unique_lock<std::shared_mutex>>;
 
 inline bool can_wait_for_signal_dispatch()
 {

@@ -20,29 +20,10 @@ constexpr std::string_view k_env_runner_timeout_ms = "SINTRA_RECOVERY_RUNNER_TIM
 constexpr std::string_view k_env_go_timeout_ms = "SINTRA_RECOVERY_GO_TIMEOUT_MS";
 constexpr std::string_view k_env_watchdog_timeout_ms = "SINTRA_RECOVERY_WATCHDOG_MS";
 
-void disable_abort_dialog()
-{
-#if defined(_MSC_VER)
-    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
-#endif
-}
-
 void write_marker(const std::filesystem::path& path)
 {
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
     out << "ok";
-}
-
-bool wait_for_file(const std::filesystem::path& path, std::chrono::milliseconds timeout)
-{
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (std::filesystem::exists(path)) {
-            return true;
-        }
-        std::this_thread::sleep_for(5ms);
-    }
-    return std::filesystem::exists(path);
 }
 
 [[noreturn]] void watchdog_exit(const char* message)
@@ -64,12 +45,12 @@ int crash_worker()
     sintra::enable_recovery();
     write_marker(ready_path);
 
-    if (!wait_for_file(go_path, std::chrono::milliseconds(go_timeout_ms))) {
+    if (!sintra::test::wait_for_file(go_path, std::chrono::milliseconds(go_timeout_ms), 5ms)) {
         return 1;
     }
 
     sintra::disable_debug_pause_for_current_process();
-    disable_abort_dialog();
+    sintra::test::prepare_for_intentional_crash();
     std::abort();
     return 0;
 }
@@ -119,7 +100,7 @@ int main(int argc, char* argv[])
         runner_seen.store(true, std::memory_order_release);
     });
 
-    if (!wait_for_file(ready_path, std::chrono::milliseconds(ready_timeout_ms))) {
+    if (!sintra::test::wait_for_file(ready_path, std::chrono::milliseconds(ready_timeout_ms), 5ms)) {
         sintra::finalize();
         watchdog_done.store(true, std::memory_order_release);
         watchdog.join();

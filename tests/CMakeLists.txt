@@ -179,6 +179,16 @@ function(add_test_suite SUFFIX IS_DEBUG)
         add_executable(sintra_${TEST_NAME}_${SUFFIX} ${TEST_FILE})
         target_link_libraries(sintra_${TEST_NAME}_${SUFFIX} PRIVATE ${LIB_TARGET})
 
+        if(MSVC AND CMAKE_CONFIGURATION_TYPES)
+            if(IS_DEBUG)
+                set_property(TARGET sintra_${TEST_NAME}_${SUFFIX}
+                             PROPERTY EXCLUDE_FROM_DEFAULT_BUILD_RELEASE TRUE)
+            else()
+                set_property(TARGET sintra_${TEST_NAME}_${SUFFIX}
+                             PROPERTY EXCLUDE_FROM_DEFAULT_BUILD_DEBUG TRUE)
+            endif()
+        endif()
+
         # Include parent directory for manual tests that need test utilities
         if(SUBDIR)
             target_include_directories(sintra_${TEST_NAME}_${SUFFIX} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

@@ -1,5 +1,7 @@
 #include <sintra/sintra.h>
 
+#include "test_utils.h"
+
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -33,55 +35,11 @@ std::string unique_group_name(const char* prefix)
     return std::string(prefix) + "_" + std::to_string(static_cast<unsigned long long>(s_mproc_id));
 }
 
-bool has_arg(int argc, char* argv[], const char* flag)
-{
-    if (!flag || !*flag) {
-        return false;
-    }
-    for (int i = 1; i < argc; ++i) {
-        const char* arg = argv[i];
-        if (arg && std::string(arg) == flag) {
-            return true;
-        }
-    }
-    return false;
-}
-
-std::string get_arg_value(int argc, char* argv[], const char* name)
-{
-    if (!name || !*name) {
-        return {};
-    }
-    const std::string prefix = std::string(name) + "=";
-    for (int i = 1; i < argc; ++i) {
-        const std::string arg = argv[i] ? argv[i] : "";
-        if (arg.rfind(prefix, 0) == 0) {
-            return arg.substr(prefix.size());
-        }
-        if (arg == name && i + 1 < argc && argv[i + 1]) {
-            return std::string(argv[i + 1]);
-        }
-    }
-    return {};
-}
-
 std::filesystem::path make_ready_path()
 {
     const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
     auto filename = std::string("sintra_rendezvous_ready_") + std::to_string(now) + ".txt";
     return std::filesystem::temp_directory_path() / filename;
-}
-
-bool wait_for_file(const std::filesystem::path& path, std::chrono::milliseconds timeout)
-{
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (std::filesystem::exists(path)) {
-            return true;
-        }
-        std::this_thread::sleep_for(5ms);
-    }
-    return std::filesystem::exists(path);
 }
 
 bool write_ready_file(const std::filesystem::path& path)
@@ -243,9 +201,9 @@ int run_deadlock_child(const std::string& ready_path)
 
 int main(int argc, char* argv[])
 {
-    if (has_arg(argc, argv, k_deadlock_child_arg)) {
+    if (sintra::test::has_argv_flag(argc, argv, k_deadlock_child_arg)) {
         sintra::init(argc, argv);
-        const std::string ready_path = get_arg_value(argc, argv, k_deadlock_ready_arg);
+        const std::string ready_path = sintra::test::get_argv_value(argc, argv, k_deadlock_ready_arg);
         return run_deadlock_child(ready_path);
     }
 
@@ -336,9 +294,11 @@ int main(int argc, char* argv[])
         } else {
             const auto group_iid = group.instance_id();
             group.destroy();
-            s_mproc->m_instance_id_of_assigned_name[group_name] = group_iid;
-            s_mproc->m_local_pointer_of_instance_id[group_iid] = &group;
-            sintra::Transceiver::get_instance_to_object_map<sintra::Process_group::barrier_mftc>()[group_iid] = &group;
+            s_mproc->m_instance_id_of_assigned_name.set_value(group_name, group_iid);
+            s_mproc->m_local_pointer_of_instance_id.set_value(group_iid, &group);
+            auto& instance_to_object =
+                sintra::Transceiver::get_instance_to_object_map<sintra::Process_group::barrier_mftc>();
+            instance_to_object.set_value(group_iid, &group);
 
             const bool barrier_result =
                 sintra::barrier<sintra::rendezvous_t>(barrier_name, group_name);
@@ -387,7 +347,7 @@ int main(int argc, char* argv[])
             std::fprintf(stderr, "Failed to spawn deadlock child process.\n");
             ok = false;
         } else {
-            if (!wait_for_file(ready_path, 2s)) {
+            if (!sintra::test::wait_for_file(ready_path, 2s, 5ms)) {
                 std::fprintf(stderr, "Deadlock child did not signal readiness.\n");
                 ok = false;
             }

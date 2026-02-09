@@ -6,13 +6,12 @@
 #include "globals.h"
 #include "id_types.h"
 #include "messaging/message.h"
-#include "ipc/spinlocked_containers.h"
-
 #include <condition_variable>
 #include <functional>
 #include <list>
 #include <map>
 #include <mutex>
+#include <string>
 #include <type_traits>
 #include <utility>
 #include <unordered_map>
@@ -20,16 +19,14 @@
 
 namespace sintra {
 
-
 using std::condition_variable;
+using std::enable_if_t;
 using std::function;
 using std::is_base_of;
 using std::is_const;
 using std::is_reference;
 using std::list;
-using std::map;
 using std::mutex;
-using std::recursive_mutex;
 using std::remove_reference;
 using std::string;
 using std::unordered_map;
@@ -125,15 +122,15 @@ struct Named_instance: std::string
 
 
 
-using handler_proc_registry_mid_record_type = 
-    spinlocked_umap <
+using handler_proc_registry_mid_record_type =
+    unordered_map<
         instance_id_type,                                // sender
         list<function<void(const Message_prefix &)>>
     >;
 
 
 using handler_registry_type =
-    spinlocked_umap <
+    unordered_map<
         type_id_type,                                    // message type
         handler_proc_registry_mid_record_type
     >;
@@ -579,7 +576,7 @@ private:
     instance_id_type            m_instance_id       = invalid_instance_id;
     bool                        m_published         = false;
 
-    spinlocked_umap<string, instance_id_type>::iterator m_cache_iterator;
+    string                      m_cache_name;
 
 
 protected:

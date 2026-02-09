@@ -28,24 +28,6 @@ struct Hello {
 };
 struct Ping { int token; };
 
-void append_line(const std::filesystem::path& file, const std::string& line)
-{
-    // Use a narrow string path and treat logging as best-effort only.
-    // Any failure to append should not crash the process – tests will
-    // detect missing lines via read_lines().
-    try {
-        const auto path_str = file.string();
-        std::ofstream out(path_str, std::ios::binary | std::ios::app);
-        if (!out) {
-            return;
-        }
-        out << line << '\n';
-    } catch (...) {
-        // Swallow I/O errors in test logging; functional correctness is
-        // validated by the presence/absence of lines, not by logging itself.
-    }
-}
-
 struct Ping_receiver : sintra::Derived_transceiver<Ping_receiver>
 {
     int ping(int token)
@@ -65,11 +47,7 @@ long long monotonic_millis()
 
 int process_id()
 {
-#ifdef _WIN32
-    return _getpid();
-#else
-    return getpid();
-#endif
+    return sintra::test::get_pid();
 }
 
 void trace_event(const std::filesystem::path& trace_path, const char* stage, const std::string& detail)
@@ -79,7 +57,7 @@ void trace_event(const std::filesystem::path& trace_path, const char* stage, con
         << " pid=" << process_id()
         << " [" << stage << "] " << detail;
     const auto line = oss.str();
-    append_line(trace_path, line);
+    sintra::test::append_line_best_effort(trace_path, line);
     std::cerr << "[join_swarm_midflight] " << line << std::endl;
 }
 
@@ -98,7 +76,7 @@ int worker()
         oss << "recv=" << sintra::process_of(s_mproc_id)
             << " sender=" << h.sender
             << " seq=" << h.seq;
-        append_line(log_path, oss.str());
+        sintra::test::append_line_best_effort(log_path, oss.str());
     };
     sintra::activate_slot(hello_slot);
 

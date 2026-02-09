@@ -9,6 +9,7 @@
 
 #include <sintra/sintra.h>
 
+#include "test_choreography_utils.h"
 #include "test_utils.h"
 
 #include <array>
@@ -55,20 +56,6 @@ struct Stage_directive
     std::uint32_t token;
 };
 
-std::string make_iteration_barrier_name(const std::string& prefix, std::uint32_t iteration)
-{
-    std::ostringstream oss;
-    oss << prefix << '-' << iteration;
-    return oss.str();
-}
-
-std::string make_extra_barrier_name(std::uint32_t iteration, std::uint32_t extra_index)
-{
-    std::ostringstream oss;
-    oss << "complex-extra-" << iteration << '-' << extra_index;
-    return oss.str();
-}
-
 std::uint32_t directive_token(std::uint32_t stage, std::uint32_t iteration)
 {
     return static_cast<std::uint32_t>(0xAC00u + iteration * 17u + stage * 5u);
@@ -107,27 +94,6 @@ struct Coordinator_state
         stage_b_release_sent.assign(k_iterations, false);
     }
 };
-
-void write_result(const std::filesystem::path& dir,
-                  bool success,
-                  std::size_t iterations_completed,
-                  std::size_t stage_a_total,
-                  std::size_t stage_b_total,
-                  const std::string& failure_reason)
-{
-    std::ofstream out(dir / "complex_choreography_result.txt", std::ios::binary | std::ios::trunc);
-    if (!out) {
-        throw std::runtime_error("failed to open complex_choreography_result.txt for writing");
-    }
-
-    out << (success ? "ok" : "fail") << '\n';
-    out << iterations_completed << '\n';
-    out << stage_a_total << '\n';
-    out << stage_b_total << '\n';
-    if (!success) {
-        out << failure_reason << '\n';
-    }
-}
 
 int coordinator_process()
 {
@@ -228,7 +194,7 @@ int coordinator_process()
     std::size_t iterations_completed = 0;
 
     for (std::uint32_t iteration = 0; iteration < k_iterations; ++iteration) {
-        const auto start_barrier = make_iteration_barrier_name("complex-start", iteration);
+        const auto start_barrier = sintra::test::make_barrier_name("complex-start", iteration);
         barrier(start_barrier);
 
         {
@@ -242,7 +208,8 @@ int coordinator_process()
         const auto stage0_token = directive_token(0, iteration);
         world() << Stage_directive{0u, iteration, extra_rounds, stage0_token};
 
-        const auto phase_a_barrier = make_iteration_barrier_name("complex-phase-a", iteration);
+        const auto phase_a_barrier =
+            sintra::test::make_barrier_name("complex-phase-a", iteration);
         barrier(phase_a_barrier);
 
         {
@@ -260,15 +227,17 @@ int coordinator_process()
             });
         }
 
-        const auto phase_b_barrier = make_iteration_barrier_name("complex-phase-b", iteration);
+        const auto phase_b_barrier =
+            sintra::test::make_barrier_name("complex-phase-b", iteration);
         barrier(phase_b_barrier);
 
         for (std::uint32_t extra = 0; extra < extra_rounds; ++extra) {
-            const auto extra_barrier = make_extra_barrier_name(iteration, extra);
+            const auto extra_barrier =
+                sintra::test::make_barrier_name("complex-extra", iteration, extra);
             barrier(extra_barrier);
         }
 
-        const auto done_barrier = make_iteration_barrier_name("complex-done", iteration);
+        const auto done_barrier = sintra::test::make_barrier_name("complex-done", iteration);
         barrier(done_barrier);
 
         ++iterations_completed;
@@ -294,7 +263,16 @@ int coordinator_process()
     try {
         sintra::test::Shared_directory shared("SINTRA_TEST_SHARED_DIR", "barrier_complex_choreography");
         const auto shared_dir = shared.path();
-        write_result(shared_dir, success, iterations_completed, stage_a_total, stage_b_total, failure_reason);
+        std::vector<std::string> lines;
+        lines.reserve(success ? 4 : 5);
+        lines.push_back(success ? "ok" : "fail");
+        lines.push_back(std::to_string(iterations_completed));
+        lines.push_back(std::to_string(stage_a_total));
+        lines.push_back(std::to_string(stage_b_total));
+        if (!success) {
+            lines.push_back(failure_reason);
+        }
+        sintra::test::write_lines(shared_dir / "complex_choreography_result.txt", lines);
     }
     catch (const std::exception& e) {
         std::fprintf(stderr, "Failed to write result: %s\n", e.what());
@@ -343,11 +321,7 @@ int stage_process(std::uint32_t stage, std::uint32_t worker_index)
 
     const auto now_seed = static_cast<unsigned>(
         std::chrono::steady_clock::now().time_since_epoch().count());
-#ifdef _WIN32
-    const auto pid_seed = static_cast<unsigned>(_getpid());
-#else
-    const auto pid_seed = static_cast<unsigned>(getpid());
-#endif
+    const auto pid_seed = static_cast<unsigned>(sintra::test::get_pid());
     std::seed_seq seed{now_seed, pid_seed, static_cast<unsigned>(stage), static_cast<unsigned>(worker_index)};
     std::mt19937 gen(seed);
     std::uniform_int_distribution<int> delay_dist(0, 40);
@@ -359,12 +333,14 @@ int stage_process(std::uint32_t stage, std::uint32_t worker_index)
     };
 
     for (std::uint32_t iteration = 0; iteration < k_iterations; ++iteration) {
-        const auto start_barrier = make_iteration_barrier_name("complex-start", iteration);
+        const auto start_barrier = sintra::test::make_barrier_name("complex-start", iteration);
         barrier(start_barrier);
 
-        const auto phase_a_barrier = make_iteration_barrier_name("complex-phase-a", iteration);
-        const auto phase_b_barrier = make_iteration_barrier_name("complex-phase-b", iteration);
-        const auto done_barrier    = make_iteration_barrier_name("complex-done", iteration);
+        const auto phase_a_barrier =
+            sintra::test::make_barrier_name("complex-phase-a", iteration);
+        const auto phase_b_barrier =
+            sintra::test::make_barrier_name("complex-phase-b", iteration);
+        const auto done_barrier    = sintra::test::make_barrier_name("complex-done", iteration);
 
         if (stage == 0) {
             const int delay = delay_dist(gen);
@@ -389,7 +365,8 @@ int stage_process(std::uint32_t stage, std::uint32_t worker_index)
                 extra_rounds = k_max_extra_rounds;
             }
             for (std::uint32_t extra = 0; extra < extra_rounds; ++extra) {
-                const auto extra_barrier = make_extra_barrier_name(iteration, extra);
+                const auto extra_barrier =
+                    sintra::test::make_barrier_name("complex-extra", iteration, extra);
                 barrier(extra_barrier);
             }
 
@@ -419,7 +396,8 @@ int stage_process(std::uint32_t stage, std::uint32_t worker_index)
                 extra_rounds = k_max_extra_rounds;
             }
             for (std::uint32_t extra = 0; extra < extra_rounds; ++extra) {
-                const auto extra_barrier = make_extra_barrier_name(iteration, extra);
+                const auto extra_barrier =
+                    sintra::test::make_barrier_name("complex-extra", iteration, extra);
                 barrier(extra_barrier);
             }
 
@@ -445,77 +423,73 @@ int stage_b2_process() { return stage_process(1, 2); }
 int main(int argc, char* argv[])
 {
     std::set_terminate(sintra::test::custom_terminate_handler);
+    return sintra::test::run_multi_process_test(
+        argc,
+        argv,
+        "SINTRA_TEST_SHARED_DIR",
+        "barrier_complex_choreography",
+        {coordinator_process,
+         stage_a0_process,
+         stage_a1_process,
+         stage_a2_process,
+         stage_b0_process,
+         stage_b1_process,
+         stage_b2_process},
+        [](const std::filesystem::path& shared_dir) {
+            const auto result_path = shared_dir / "complex_choreography_result.txt";
+            if (!std::filesystem::exists(result_path)) {
+                std::fprintf(stderr,
+                             "Error: result file not found at %s\n",
+                             result_path.string().c_str());
+                return 1;
+            }
 
-    const bool is_spawned = sintra::test::has_branch_flag(argc, argv);
-    sintra::test::Shared_directory shared("SINTRA_TEST_SHARED_DIR", "barrier_complex_choreography");
-    const auto shared_dir = shared.path();
+            std::ifstream in(result_path, std::ios::binary);
+            if (!in) {
+                std::fprintf(stderr,
+                             "Error: failed to open result file %s\n",
+                             result_path.string().c_str());
+                return 1;
+            }
 
-    std::vector<sintra::Process_descriptor> processes;
-    processes.emplace_back(coordinator_process);
-    processes.emplace_back(stage_a0_process);
-    processes.emplace_back(stage_a1_process);
-    processes.emplace_back(stage_a2_process);
-    processes.emplace_back(stage_b0_process);
-    processes.emplace_back(stage_b1_process);
-    processes.emplace_back(stage_b2_process);
+            std::string status;
+            std::size_t iterations_completed = 0;
+            std::size_t stage_a_total = 0;
+            std::size_t stage_b_total = 0;
+            std::string reason;
 
-    sintra::init(argc, argv, processes);
+            std::getline(in, status);
+            in >> iterations_completed;
+            in >> stage_a_total;
+            in >> stage_b_total;
+            std::getline(in >> std::ws, reason);
 
-    if (!is_spawned) {
-        sintra::barrier("complex-choreography-test-done", "_sintra_all_processes");
-    }
+            const std::size_t expected_stage_a = k_stage_a_workers * k_iterations;
+            const std::size_t expected_stage_b = k_stage_b_workers * k_iterations;
 
-    sintra::finalize();
-
-    if (!is_spawned) {
-        const auto result_path = shared_dir / "complex_choreography_result.txt";
-        if (!std::filesystem::exists(result_path)) {
-            std::fprintf(stderr, "Error: result file not found at %s\n", result_path.string().c_str());
-            return 1;
-        }
-
-        std::ifstream in(result_path, std::ios::binary);
-        if (!in) {
-            std::fprintf(stderr, "Error: failed to open result file %s\n", result_path.string().c_str());
-            return 1;
-        }
-
-        std::string status;
-        std::size_t iterations_completed = 0;
-        std::size_t stage_a_total = 0;
-        std::size_t stage_b_total = 0;
-        std::string reason;
-
-        std::getline(in, status);
-        in >> iterations_completed;
-        in >> stage_a_total;
-        in >> stage_b_total;
-        std::getline(in >> std::ws, reason);
-
-        const std::size_t expected_stage_a = k_stage_a_workers * k_iterations;
-        const std::size_t expected_stage_b = k_stage_b_workers * k_iterations;
-
-        if (status != "ok") {
-            std::fprintf(stderr, "Complex choreography test reported failure: %s\n", reason.c_str());
-            return 1;
-        }
-        if (iterations_completed != k_iterations) {
-            std::fprintf(stderr, "Expected %zu iterations, got %zu\n",
-                         k_iterations, iterations_completed);
-            return 1;
-        }
-        if (stage_a_total != expected_stage_a) {
-            std::fprintf(stderr, "Expected %zu stage A reports, got %zu\n",
-                         expected_stage_a, stage_a_total);
-            return 1;
-        }
-        if (stage_b_total != expected_stage_b) {
-            std::fprintf(stderr, "Expected %zu stage B reports, got %zu\n",
-                         expected_stage_b, stage_b_total);
-            return 1;
-        }
-    }
-
-    return 0;
+            if (status != "ok") {
+                std::fprintf(stderr,
+                             "Complex choreography test reported failure: %s\n",
+                             reason.c_str());
+                return 1;
+            }
+            if (iterations_completed != k_iterations) {
+                std::fprintf(stderr, "Expected %zu iterations, got %zu\n",
+                             k_iterations, iterations_completed);
+                return 1;
+            }
+            if (stage_a_total != expected_stage_a) {
+                std::fprintf(stderr, "Expected %zu stage A reports, got %zu\n",
+                             expected_stage_a, stage_a_total);
+                return 1;
+            }
+            if (stage_b_total != expected_stage_b) {
+                std::fprintf(stderr, "Expected %zu stage B reports, got %zu\n",
+                             expected_stage_b, stage_b_total);
+                return 1;
+            }
+            return 0;
+        },
+        "complex-choreography-test-done");
 }
 

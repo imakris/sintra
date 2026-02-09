@@ -43,11 +43,7 @@ std::atomic<int> g_failure_line{0};
 
 int get_pid()
 {
-#ifdef _WIN32
-    return _getpid();
-#else
-    return getpid();
-#endif
+    return sintra::test::get_pid();
 }
 
 // Test 1: High-contention multi-reader single-writer pattern

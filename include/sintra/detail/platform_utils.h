@@ -3,4 +3,6 @@
 
 #pragma once
 
-#include "../platform_utils.h"
+#include "ipc/file_utils.h"
+#include "ipc/platform_defs.h"
+#include "ipc/process_utils.h"

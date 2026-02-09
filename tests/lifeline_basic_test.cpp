@@ -85,36 +85,6 @@ void disable_debug_pause_env()
 #endif
 }
 
-std::optional<std::string> find_arg_value(int argc, char* argv[], const char* name)
-{
-    if (!name || !*name) {
-        return std::nullopt;
-    }
-
-    const std::string prefix = std::string(name) + "=";
-    for (int i = 1; i < argc; ++i) {
-        const std::string arg = argv[i] ? argv[i] : "";
-        if (arg == name) {
-            if (i + 1 < argc) {
-                return std::string(argv[i + 1]);
-            }
-            return std::nullopt;
-        }
-        if (arg.rfind(prefix, 0) == 0) {
-            return arg.substr(prefix.size());
-        }
-    }
-    return std::nullopt;
-}
-
-std::string get_binary_path(int argc, char* argv[])
-{
-    if (argc > 0 && argv[0]) {
-        return argv[0];
-    }
-    return {};
-}
-
 std::filesystem::path child_pid_path(const std::filesystem::path& dir, const std::string& test_case)
 {
     return dir / ("child_pid_" + test_case + ".txt");
@@ -155,18 +125,6 @@ bool write_text_file(const std::filesystem::path& path, const std::string& text)
     return static_cast<bool>(out);
 }
 
-bool wait_for_file(const std::filesystem::path& path, int timeout_ms)
-{
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (std::filesystem::exists(path)) {
-            return true;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-    return std::filesystem::exists(path);
-}
-
 int remaining_ms(const std::chrono::steady_clock::time_point& deadline)
 {
     const auto now = std::chrono::steady_clock::now();
@@ -175,16 +133,6 @@ int remaining_ms(const std::chrono::steady_clock::time_point& deadline)
     }
     return static_cast<int>(
         std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count());
-}
-
-bool wait_for_file_until(const std::filesystem::path& path,
-    const std::chrono::steady_clock::time_point& deadline)
-{
-    const int remaining = remaining_ms(deadline);
-    if (remaining <= 0) {
-        return std::filesystem::exists(path);
-    }
-    return wait_for_file(path, remaining);
 }
 
 bool read_pid_file(const std::filesystem::path& path, long long& pid_out)
@@ -478,11 +426,7 @@ bool process_exists(long long pid)
 
 int child_pid_value()
 {
-#ifdef _WIN32
-    return static_cast<int>(GetCurrentProcessId());
-#else
-    return static_cast<int>(getpid());
-#endif
+    return static_cast<int>(sintra::test::get_pid());
 }
 
 int run_child(const std::filesystem::path& dir, const std::string& test_case, int argc, char* argv[])
@@ -537,7 +481,7 @@ int run_owner(const std::filesystem::path& dir, const std::string& test_case, in
     sintra::init(argc, argv);
 
     sintra::Spawn_options spawn_options;
-    spawn_options.binary_path = get_binary_path(argc, argv);
+    spawn_options.binary_path = sintra::test::get_binary_path(argc, argv);
     spawn_options.args = {
         k_role_arg, k_role_child,
         k_case_arg, test_case,
@@ -558,7 +502,7 @@ int run_owner(const std::filesystem::path& dir, const std::string& test_case, in
         std::_Exit(2);
     }
 
-    if (!wait_for_file(child_ready_path(dir, test_case), 3000)) {
+    if (!sintra::test::wait_for_file(child_ready_path(dir, test_case), std::chrono::milliseconds(3000))) {
         std::fprintf(stderr, "[owner] child did not signal ready\n");
         std::_Exit(3);
     }
@@ -581,7 +525,7 @@ int run_leak_owner(const std::filesystem::path& dir, int argc, char* argv[])
     // If there are handle/fd leaks, they would accumulate in this process.
     sintra::init(argc, argv);
 
-    const std::string binary_path = get_binary_path(argc, argv);
+    const std::string binary_path = sintra::test::get_binary_path(argc, argv);
     const auto ready_file = child_ready_path(dir, k_case_leak);
     const auto pid_file = child_pid_path(dir, k_case_leak);
     const auto done_file = child_done_path(dir, k_case_leak);
@@ -607,7 +551,7 @@ int run_leak_owner(const std::filesystem::path& dir, int argc, char* argv[])
         }
 
         // Wait for child to signal ready
-        if (!wait_for_file(ready_file, 3000)) {
+        if (!sintra::test::wait_for_file(ready_file, std::chrono::milliseconds(3000))) {
             std::fprintf(stderr, "[leak_owner] child %d did not signal ready\n", i);
             std::_Exit(2);
         }
@@ -621,7 +565,8 @@ int run_leak_owner(const std::filesystem::path& dir, int argc, char* argv[])
 
         // Wait for child to signal done (more reliable than process_exists on Windows,
         // since sintra may hold process handles even after child exits)
-        if (!wait_for_file(done_file, k_leak_child_lifetime_ms + 3000)) {
+        if (!sintra::test::wait_for_file(done_file,
+                                          std::chrono::milliseconds(k_leak_child_lifetime_ms + 3000))) {
             std::fprintf(stderr, "[leak_owner] child %d did not signal done\n", i);
             std::_Exit(4);
         }
@@ -685,12 +630,7 @@ int run_respawn_child(const std::filesystem::path& dir, int argc, char* argv[])
 
         // Now crash to trigger respawn
         std::fprintf(stderr, "[respawn_child] first run, recovery enabled, crashing...\n");
-#ifdef _WIN32
-        // Suppress CRT abort dialog
-#if defined(_MSC_VER)
-        _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
-#endif
-#endif
+        sintra::test::prepare_for_intentional_crash();
         sintra::disable_debug_pause_for_current_process();
         std::abort();
     }
@@ -709,7 +649,7 @@ int run_respawn_owner(const std::filesystem::path& dir, int argc, char* argv[])
     sintra::init(argc, argv);
 
     sintra::Spawn_options spawn_options;
-    spawn_options.binary_path = get_binary_path(argc, argv);
+    spawn_options.binary_path = sintra::test::get_binary_path(argc, argv);
     spawn_options.args = {
         k_role_arg, k_role_respawn_child,
         k_dir_arg, dir.string()
@@ -726,7 +666,7 @@ int run_respawn_owner(const std::filesystem::path& dir, int argc, char* argv[])
 
     // Wait for first occurrence marker (child before crash)
     const auto first_occurrence_file = respawn_occurrence_path(dir, 0);
-    if (!wait_for_file_until(first_occurrence_file, deadline)) {
+    if (!sintra::test::wait_for_file_until(first_occurrence_file, deadline)) {
         std::fprintf(stderr, "[respawn_owner] child did not write first occurrence marker\n");
         std::_Exit(3);
     }
@@ -734,7 +674,7 @@ int run_respawn_owner(const std::filesystem::path& dir, int argc, char* argv[])
 
     // Wait for recovery registration confirmation before expecting crash/respawn
     const auto recovery_ready_file = respawn_recovery_ready_path(dir);
-    if (!wait_for_file_until(recovery_ready_file, deadline)) {
+    if (!sintra::test::wait_for_file_until(recovery_ready_file, deadline)) {
         std::fprintf(stderr, "[respawn_owner] child did not confirm recovery registration\n");
         std::_Exit(5);
     }
@@ -742,7 +682,7 @@ int run_respawn_owner(const std::filesystem::path& dir, int argc, char* argv[])
 
     // Wait for second occurrence marker (child after respawn)
     const auto second_occurrence_file = respawn_occurrence_path(dir, 1);
-    if (!wait_for_file_until(second_occurrence_file, deadline)) {
+    if (!sintra::test::wait_for_file_until(second_occurrence_file, deadline)) {
         std::fprintf(stderr, "[respawn_owner] child did not write second occurrence marker\n");
         std::_Exit(4);
     }
@@ -750,7 +690,7 @@ int run_respawn_owner(const std::filesystem::path& dir, int argc, char* argv[])
 
     // Wait for the test runner to confirm it is ready to monitor the respawned child.
     const auto test_ready_file = respawn_test_ready_path(dir);
-    if (!wait_for_file_until(test_ready_file, deadline)) {
+    if (!sintra::test::wait_for_file_until(test_ready_file, deadline)) {
         std::fprintf(stderr, "[respawn_owner] test runner did not confirm ready state\n");
         std::_Exit(6);
     }
@@ -1096,59 +1036,59 @@ bool run_short_option_case(const std::string& binary_path)
 
 int main(int argc, char* argv[])
 {
-    const auto role = find_arg_value(argc, argv, k_role_arg);
-    const auto test_case = find_arg_value(argc, argv, k_case_arg);
-    const auto dir_value = find_arg_value(argc, argv, k_dir_arg);
+    const std::string role = sintra::test::get_argv_value(argc, argv, k_role_arg);
+    const std::string test_case = sintra::test::get_argv_value(argc, argv, k_case_arg);
+    const std::string dir_value = sintra::test::get_argv_value(argc, argv, k_dir_arg);
 
-    if (role && *role == k_role_missing) {
+    if (!role.empty() && role == k_role_missing) {
         sintra::init(argc, argv);
         return 1;
     }
 
-    if (role && *role == k_role_child) {
-        if (!test_case || !dir_value) {
+    if (!role.empty() && role == k_role_child) {
+        if (test_case.empty() || dir_value.empty()) {
             std::fprintf(stderr, "[child] missing args\n");
             return 1;
         }
-        return run_child(std::filesystem::path(*dir_value), *test_case, argc, argv);
+        return run_child(std::filesystem::path(dir_value), test_case, argc, argv);
     }
 
-    if (role && *role == k_role_owner) {
-        if (!test_case || !dir_value) {
+    if (!role.empty() && role == k_role_owner) {
+        if (test_case.empty() || dir_value.empty()) {
             std::fprintf(stderr, "[owner] missing args\n");
             return 1;
         }
-        return run_owner(std::filesystem::path(*dir_value), *test_case, argc, argv);
+        return run_owner(std::filesystem::path(dir_value), test_case, argc, argv);
     }
 
-    if (role && *role == k_role_leak_owner) {
-        if (!dir_value) {
+    if (!role.empty() && role == k_role_leak_owner) {
+        if (dir_value.empty()) {
             std::fprintf(stderr, "[leak_owner] missing dir arg\n");
             return 1;
         }
-        return run_leak_owner(std::filesystem::path(*dir_value), argc, argv);
+        return run_leak_owner(std::filesystem::path(dir_value), argc, argv);
     }
 
-    if (role && *role == k_role_respawn_owner) {
-        if (!dir_value) {
+    if (!role.empty() && role == k_role_respawn_owner) {
+        if (dir_value.empty()) {
             std::fprintf(stderr, "[respawn_owner] missing dir arg\n");
             return 1;
         }
-        return run_respawn_owner(std::filesystem::path(*dir_value), argc, argv);
+        return run_respawn_owner(std::filesystem::path(dir_value), argc, argv);
     }
 
-    if (role && *role == k_role_respawn_child) {
-        if (!dir_value) {
+    if (!role.empty() && role == k_role_respawn_child) {
+        if (dir_value.empty()) {
             std::fprintf(stderr, "[respawn_child] missing dir arg\n");
             return 1;
         }
-        return run_respawn_child(std::filesystem::path(*dir_value), argc, argv);
+        return run_respawn_child(std::filesystem::path(dir_value), argc, argv);
     }
 
     // Role: manual_disable - tests that --lifeline_disable works when passed manually
     // The test succeeds if we don't get hard-exit code 99 from lifeline check.
     // init() will fail for other reasons (no coordinator ABI file), which is fine.
-    if (role && *role == k_role_manual_disable) {
+    if (!role.empty() && role == k_role_manual_disable) {
         disable_debug_pause_env();
         try {
             sintra::init(argc, argv);
@@ -1164,7 +1104,7 @@ int main(int argc, char* argv[])
     }
 
     // Role: short_option - tests that short options like -f are ignored
-    if (role && *role == k_role_short_option) {
+    if (!role.empty() && role == k_role_short_option) {
         disable_debug_pause_env();
         sintra::init(argc, argv);
         // This should hard-exit with code 99 because -f is not recognized as lifeline_handle
@@ -1172,7 +1112,7 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    const std::string binary_path = get_binary_path(argc, argv);
+    const std::string binary_path = sintra::test::get_binary_path(argc, argv);
     if (binary_path.empty()) {
         std::fprintf(stderr, "[test] binary path missing\n");
         return 1;

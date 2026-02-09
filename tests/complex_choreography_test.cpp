@@ -26,6 +26,7 @@
 //
 #include <sintra/sintra.h>
 
+#include "test_choreography_utils.h"
 #include "test_utils.h"
 
 #include <algorithm>
@@ -99,29 +100,6 @@ struct Stop
     bool due_to_failure;
 };
 
-std::string barrier_round_start_name(int round)
-{
-    std::ostringstream oss;
-    oss << "complex-round-" << round << "-start";
-    return oss.str();
-}
-
-std::string barrier_round_complete_name(int round)
-{
-    std::ostringstream oss;
-    oss << "complex-round-" << round << "-complete";
-    return oss.str();
-}
-
-void write_result(const std::filesystem::path& file, const std::string& status,
-                  int completed_rounds, bool failure)
-{
-    std::ofstream out(file, std::ios::binary | std::ios::trunc);
-    out << status << '\n';
-    out << completed_rounds << '\n';
-    out << (failure ? "failure" : "success") << '\n';
-}
-
 std::uint64_t rotl64(std::uint64_t value, unsigned int shift)
 {
     shift %= 64U;
@@ -191,11 +169,7 @@ std::uint64_t make_round_seed(int round)
     const std::uint64_t extra = counter.fetch_add(0x9E3779B97F4A7C15ULL);
     const auto now = static_cast<std::uint64_t>(
         std::chrono::steady_clock::now().time_since_epoch().count());
-#ifdef _WIN32
-    const auto pid = static_cast<std::uint64_t>(_getpid());
-#else
-    const auto pid = static_cast<std::uint64_t>(getpid());
-#endif
+    const auto pid = static_cast<std::uint64_t>(sintra::test::get_pid());
     return now ^ (pid << 32U) ^ extra ^ static_cast<std::uint64_t>((round + 1) * 0xD1B54A32D192ED03ULL);
 }
 
@@ -249,7 +223,7 @@ int conductor_process()
 
     for (int round = 0; round < k_rounds && !stop_requested; ++round) {
         const std::uint64_t seed = make_round_seed(round);
-        sintra::barrier(barrier_round_start_name(round), group);
+        sintra::barrier(sintra::test::make_barrier_name("complex-round", round, "start"), group);
 
         sintra::world() << Kickoff{round, seed};
 
@@ -279,7 +253,9 @@ int conductor_process()
             stop_broadcasted = true;
         }
 
-        sintra::barrier<sintra::processing_fence_t>(barrier_round_complete_name(round), group);
+        sintra::barrier<sintra::processing_fence_t>(
+            sintra::test::make_barrier_name("complex-round", round, "complete"),
+            group);
 
         if (local_failure) {
             break;
@@ -293,8 +269,11 @@ int conductor_process()
         sintra::world() << Stop{due_to_failure};
     }
 
-    write_result(result_path, due_to_failure ? "fail" : "ok",
-                 std::max(last_completed_round, -1), due_to_failure);
+    std::vector<std::string> lines;
+    lines.push_back(due_to_failure ? "fail" : "ok");
+    lines.push_back(std::to_string(std::max(last_completed_round, -1)));
+    lines.push_back(due_to_failure ? "failure" : "success");
+    sintra::test::write_lines(result_path, lines);
 
     sintra::barrier(std::string(k_final_barrier), "_sintra_all_processes");
     return due_to_failure ? 1 : 0;
@@ -388,7 +367,7 @@ int worker_process_impl(int worker_index)
             round_completed = false;
         }
 
-        sintra::barrier(barrier_round_start_name(round), group);
+        sintra::barrier(sintra::test::make_barrier_name("complex-round", round, "start"), group);
 
         {
             std::unique_lock<std::mutex> lk(state_mutex);
@@ -401,8 +380,9 @@ int worker_process_impl(int worker_index)
             // entered the library's draining path. Other participants may already be parked on
             // the processing fence for this round, so the worker still has to rendezvous before
             // exiting to avoid leaving the barrier short-handed.
-            sintra::barrier<sintra::processing_fence_t>(barrier_round_complete_name(round),
-                                                        group);
+            sintra::barrier<sintra::processing_fence_t>(
+                sintra::test::make_barrier_name("complex-round", round, "complete"),
+                group);
             break;
         }
 
@@ -415,12 +395,15 @@ int worker_process_impl(int worker_index)
         if (stop_requested.load(std::memory_order_acquire)) {
             // See comment above: we must still participate in the in-flight processing fence
             // before breaking out once a stop is observed.
-            sintra::barrier<sintra::processing_fence_t>(barrier_round_complete_name(round),
-                                                        group);
+            sintra::barrier<sintra::processing_fence_t>(
+                sintra::test::make_barrier_name("complex-round", round, "complete"),
+                group);
             break;
         }
 
-        sintra::barrier<sintra::processing_fence_t>(barrier_round_complete_name(round), group);
+        sintra::barrier<sintra::processing_fence_t>(
+            sintra::test::make_barrier_name("complex-round", round, "complete"),
+            group);
     }
 
     sintra::barrier(std::string(k_final_barrier), "_sintra_all_processes");
@@ -508,7 +491,7 @@ int aggregator_process()
             }
         }
 
-        sintra::barrier(barrier_round_start_name(round), group);
+        sintra::barrier(sintra::test::make_barrier_name("complex-round", round, "start"), group);
 
         std::array<Aggregator_worker_state, k_worker_count> snapshot{};
         bool local_failure = false;
@@ -552,7 +535,9 @@ int aggregator_process()
                                           worker.xor_checksum, worker.sum_checksum};
         }
 
-        sintra::barrier<sintra::processing_fence_t>(barrier_round_complete_name(round), group);
+        sintra::barrier<sintra::processing_fence_t>(
+            sintra::test::make_barrier_name("complex-round", round, "complete"),
+            group);
     }
 
     sintra::barrier(std::string(k_final_barrier), "_sintra_all_processes");
@@ -628,7 +613,7 @@ int verifier_process()
             }
         }
 
-        sintra::barrier(barrier_round_start_name(round), group);
+        sintra::barrier(sintra::test::make_barrier_name("complex-round", round, "start"), group);
 
         std::uint64_t seed = 0;
         {
@@ -676,7 +661,9 @@ int verifier_process()
             stop_requested.store(true);
         }
 
-        sintra::barrier<sintra::processing_fence_t>(barrier_round_complete_name(round), group);
+        sintra::barrier<sintra::processing_fence_t>(
+            sintra::test::make_barrier_name("complex-round", round, "complete"),
+            group);
     }
 
     sintra::barrier(std::string(k_final_barrier), "_sintra_all_processes");
@@ -691,47 +678,37 @@ int verifier_process()
 
 int main(int argc, char* argv[])
 {
-    const bool is_spawned = sintra::test::has_branch_flag(argc, argv);
-    sintra::test::Shared_directory shared("SINTRA_COMPLEX_TEST_DIR", "complex_choreography");
-    const auto shared_dir = shared.path();
-    const auto result_path = shared_dir / "result.txt";
+    return sintra::test::run_multi_process_test(
+        argc,
+        argv,
+        "SINTRA_COMPLEX_TEST_DIR",
+        "complex_choreography",
+        {conductor_process,
+         aggregator_process,
+         verifier_process,
+         worker_process0,
+         worker_process1,
+         worker_process2},
+        [](const std::filesystem::path& shared_dir) {
+            std::filesystem::remove(shared_dir / "result.txt");
+        },
+        [](const std::filesystem::path&) { return 0; },
+        [](const std::filesystem::path& shared_dir) {
+            const auto result_path = shared_dir / "result.txt";
+            std::ifstream in(result_path, std::ios::binary);
+            if (!in) {
+                return 1;
+            }
+            std::string status;
+            int completed_rounds = -1;
+            std::string failure_state;
+            std::getline(in, status);
+            in >> completed_rounds;
+            std::getline(in >> std::ws, failure_state);
 
-    if (!is_spawned)
-    {
-        std::filesystem::remove(result_path);
-    }
-
-    std::vector<sintra::Process_descriptor> processes;
-    processes.emplace_back(conductor_process);
-    processes.emplace_back(aggregator_process);
-    processes.emplace_back(verifier_process);
-    processes.emplace_back(worker_process0);
-    processes.emplace_back(worker_process1);
-    processes.emplace_back(worker_process2);
-
-    sintra::init(argc, argv, processes);
-    if (!is_spawned) {
-        sintra::barrier(std::string(k_final_barrier), "_sintra_all_processes");
-    }
-    sintra::finalize();
-
-    if (!is_spawned) {
-        std::ifstream in(result_path, std::ios::binary);
-        if (!in) {
-            return 1;
-        }
-        std::string status;
-        int completed_rounds = -1;
-        std::string failure_state;
-        std::getline(in, status);
-        in >> completed_rounds;
-        std::getline(in >> std::ws, failure_state);
-
-        const bool ok = (status == "ok") && (completed_rounds >= k_rounds - 1) &&
-                        (failure_state == "success");
-        shared.cleanup();
-        return ok ? 0 : 1;
-    }
-
-    return 0;
+            const bool ok = (status == "ok") && (completed_rounds >= k_rounds - 1) &&
+                            (failure_state == "success");
+            return ok ? 0 : 1;
+        },
+        k_final_barrier.data());
 }

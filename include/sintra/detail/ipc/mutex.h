@@ -26,8 +26,8 @@ All atomic members are required to be lock-free.
 
 USAGE CONTRACT
 The mutex object must reside in shared memory accessible by all participant
-processes. The platform utilities defined in `ipc_platform_utils.h` must
-provide:
+processes. The platform utilities defined in `platform_defs.h` and
+`process_utils.h` must provide:
   - get_current_pid()
   - get_current_tid()
   - is_process_alive(uint32_t)
@@ -56,7 +56,8 @@ CAVEATS
 #include <system_error>
 #include <thread>
 
-#include "../ipc/platform_utils.h"  // expected to provide: get_current_pid(), get_current_tid(), is_process_alive(uint32_t)
+#include "../ipc/platform_defs.h"
+#include "../ipc/process_utils.h"
 
 namespace sintra { namespace detail {
 

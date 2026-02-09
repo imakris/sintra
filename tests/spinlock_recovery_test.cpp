@@ -1,5 +1,5 @@
 #include <sintra/detail/ipc/spinlock.h>
-#include <sintra/detail/ipc/platform_utils.h>
+#include <sintra/detail/ipc/process_utils.h>
 #include <sintra/detail/debug_pause.h>
 #include <sintra/detail/time_utils.h>
 #include <sintra/detail/utility.h>
@@ -28,19 +28,7 @@
 
 namespace {
 
-[[noreturn]] void fail(const std::string& message)
-{
-    std::fprintf(stderr, "spinlock_recovery_test failure: %s\n", message.c_str());
-    std::fflush(stderr);
-    std::exit(1);
-}
-
-void require_true(bool condition, const std::string& message)
-{
-    if (!condition) {
-        fail(message);
-    }
-}
+constexpr std::string_view k_failure_prefix = "spinlock_recovery_test failure: ";
 
 struct spinlock_layout {
     std::atomic_flag m_locked;
@@ -73,19 +61,6 @@ uint32_t find_dead_pid(uint32_t self_pid)
     }
 
     return 0;
-}
-
-void disable_abort_dialog()
-{
-#if defined(_MSC_VER)
-    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
-#else
-    // Disable core dumps on POSIX to speed up abort() termination.
-    // On macOS especially, core dump generation can take many seconds,
-    // causing waitpid to report the process as still running.
-    struct rlimit core_limit = {0, 0};
-    (void)setrlimit(RLIMIT_CORE, &core_limit);
-#endif
 }
 
 int spawn_sleep_child(const char* program, int sleep_ms)
@@ -216,7 +191,7 @@ int main(int argc, char* argv[])
 
     if (argc >= 3 && std::string_view(argv[1]) == "--spinlock-stall-child") {
         sintra::detail::set_debug_pause_active(false);
-        disable_abort_dialog();
+        sintra::test::prepare_for_intentional_crash();
         const uint32_t owner_pid = static_cast<uint32_t>(std::strtoul(argv[2], nullptr, 10));
         sintra::spinlock stall_lock;
         auto& stall_layout = access_layout(stall_lock);
@@ -235,8 +210,10 @@ int main(int argc, char* argv[])
 
     // Case 1: recover from a dead owner.
     const uint32_t dead_pid = find_dead_pid(self_pid);
-    require_true(dead_pid != 0 && dead_pid != self_pid, "failed to locate a dead pid");
-    require_true(!sintra::is_process_alive(dead_pid), "dead pid should not be alive");
+    sintra::test::require_true(dead_pid != 0 && dead_pid != self_pid, k_failure_prefix,
+                               "failed to locate a dead pid");
+    sintra::test::require_true(!sintra::is_process_alive(dead_pid), k_failure_prefix,
+                               "dead pid should not be alive");
 
     layout.m_locked.clear(std::memory_order_release);
     layout.m_locked.test_and_set(std::memory_order_acquire);
@@ -248,7 +225,8 @@ int main(int argc, char* argv[])
 
     // Case 2: live owner with debug pause active should force unlock.
     int child_pid = spawn_sleep_child(argv[0], 5000);
-    require_true(child_pid > 0, "failed to spawn live-owner child");
+    sintra::test::require_true(child_pid > 0, k_failure_prefix,
+                               "failed to spawn live-owner child");
 
     layout.m_locked.clear(std::memory_order_release);
     layout.m_locked.test_and_set(std::memory_order_acquire);
@@ -264,7 +242,8 @@ int main(int argc, char* argv[])
 
     // Case 3: live owner with debug pause inactive should abort (report_live_owner_stall).
     const int stall_pid = spawn_stall_child(argv[0], self_pid);
-    require_true(stall_pid > 0, "failed to spawn stall child");
+    sintra::test::require_true(stall_pid > 0, k_failure_prefix,
+                               "failed to spawn stall child");
 #ifdef __APPLE__
     const int stall_timeout_default_ms = 12000;
 #else
@@ -274,7 +253,7 @@ int main(int argc, char* argv[])
         sintra::test::read_env_int("SINTRA_SPINLOCK_STALL_TIMEOUT_MS", stall_timeout_default_ms);
     if (!wait_for_process_exit(stall_pid, std::chrono::milliseconds(stall_timeout_ms))) {
         terminate_child(stall_pid);
-        fail("stall child did not terminate as expected");
+        sintra::test::fail(k_failure_prefix, "stall child did not terminate as expected");
     }
 
     return 0;

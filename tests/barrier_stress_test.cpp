@@ -28,11 +28,7 @@ int worker_process(std::uint32_t worker_index)
 
     const auto now = static_cast<unsigned>(
         std::chrono::steady_clock::now().time_since_epoch().count());
-#ifdef _WIN32
-    const auto pid = static_cast<unsigned>(_getpid());
-#else
-    const auto pid = static_cast<unsigned>(getpid());
-#endif
+    const auto pid = static_cast<unsigned>(sintra::test::get_pid());
     std::seed_seq seed{now, pid, static_cast<unsigned>(worker_index)};
     std::mt19937 gen(seed);
     std::uniform_int_distribution<> delay_dist(0, 5);  // 0-5 microseconds

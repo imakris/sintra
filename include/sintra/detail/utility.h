@@ -4,7 +4,6 @@
 #pragma once
 
 #include "config.h"
-
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -15,6 +14,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -41,11 +41,11 @@
 
 namespace sintra {
 
-
 using std::function;
-using std::shared_ptr;
-using std::mutex;
 using std::lock_guard;
+using std::mutex;
+using std::shared_ptr;
+
 
 struct Adaptive_function
 {
@@ -392,6 +392,60 @@ inline bool write_fully(int fd, const void* buf, size_t count)
 
 #endif // !_WIN32
 
+inline std::string env_key_of(const char* entry)
+{
+    if (!entry) {
+        return {};
+    }
+    std::string value(entry);
+    const auto pos = value.find('=');
+    if (pos == std::string::npos) {
+        return value;
+    }
+    return value.substr(0, pos);
+}
+
+template <typename StringT, typename = std::enable_if_t<!std::is_array<StringT>::value>>
+inline StringT env_key_of(const StringT& entry)
+{
+    const auto pos = entry.find(typename StringT::value_type('='));
+    if (pos == StringT::npos) {
+        return entry;
+    }
+    return entry.substr(0, pos);
+}
+
+inline bool env_key_equal(const std::string& lhs, const std::string& rhs)
+{
+    return lhs == rhs;
+}
+
+#ifdef _WIN32
+inline bool env_key_equal(const std::wstring& lhs, const std::wstring& rhs)
+{
+    return _wcsicmp(lhs.c_str(), rhs.c_str()) == 0;
+}
+#endif
+
+template <typename StringT>
+inline void merge_env_overrides(
+    std::vector<StringT>& env,
+    const std::vector<StringT>& overrides)
+{
+    for (const auto& override_entry : overrides) {
+        const auto override_key = env_key_of(override_entry);
+        env.erase(
+            std::remove_if(
+                env.begin(),
+                env.end(),
+                [&](const StringT& entry) {
+                    return env_key_equal(env_key_of(entry), override_key);
+                }),
+            env.end());
+        env.push_back(override_entry);
+    }
+}
+
 #ifdef _WIN32
 
 inline std::wstring to_wide_utf8(const std::string& value)
@@ -408,18 +462,12 @@ inline std::wstring to_wide_utf8(const std::string& value)
     return wide;
 }
 
-inline std::wstring env_key_of(const std::wstring& entry)
+inline std::wstring to_wide_utf8(const char* value)
 {
-    const auto pos = entry.find(L'=');
-    if (pos == std::wstring::npos) {
-        return entry;
+    if (!value || !*value) {
+        return {};
     }
-    return entry.substr(0, pos);
-}
-
-inline bool env_key_equal(const std::wstring& lhs, const std::wstring& rhs)
-{
-    return _wcsicmp(lhs.c_str(), rhs.c_str()) == 0;
+    return to_wide_utf8(std::string(value));
 }
 
 inline std::vector<wchar_t> build_environment_block(const std::vector<std::string>& overrides)
@@ -439,24 +487,17 @@ inline std::vector<wchar_t> build_environment_block(const std::vector<std::strin
         FreeEnvironmentStringsW(raw);
     }
 
+    std::vector<std::wstring> override_entries;
+    override_entries.reserve(overrides.size());
     for (const auto& override_entry : overrides) {
-        const auto wide_entry = to_wide_utf8(override_entry);
+        auto wide_entry = to_wide_utf8(override_entry);
         if (wide_entry.empty()) {
             continue;
         }
-        const auto override_key = env_key_of(wide_entry);
-
-        env_entries.erase(
-            std::remove_if(
-                env_entries.begin(),
-                env_entries.end(),
-                [&](const std::wstring& entry) {
-                    return env_key_equal(env_key_of(entry), override_key);
-                }),
-            env_entries.end());
-
-        env_entries.push_back(wide_entry);
+        override_entries.push_back(std::move(wide_entry));
     }
+
+    merge_env_overrides(env_entries, override_entries);
 
     size_t total_chars = 1;
     for (const auto& entry : env_entries) {
@@ -475,15 +516,6 @@ inline std::vector<wchar_t> build_environment_block(const std::vector<std::strin
 
 #else
 
-inline std::string env_key_of(const std::string& entry)
-{
-    const auto pos = entry.find('=');
-    if (pos == std::string::npos) {
-        return entry;
-    }
-    return entry.substr(0, pos);
-}
-
 inline std::vector<std::string> build_environment_entries(const std::vector<std::string>& overrides)
 {
     std::vector<std::string> env_entries;
@@ -497,18 +529,7 @@ inline std::vector<std::string> build_environment_entries(const std::vector<std:
         return env_entries;
     }
 
-    for (const auto& override_entry : overrides) {
-        const auto override_key = env_key_of(override_entry);
-        env_entries.erase(
-            std::remove_if(
-                env_entries.begin(),
-                env_entries.end(),
-                [&](const std::string& entry) {
-                    return env_key_of(entry) == override_key;
-                }),
-            env_entries.end());
-        env_entries.push_back(override_entry);
-    }
+    merge_env_overrides(env_entries, overrides);
 
     return env_entries;
 }
@@ -550,11 +571,61 @@ inline detail::spawn_detached_debug_fn set_spawn_detached_debug(detail::spawn_de
 
 #endif // !_WIN32
 
-inline
-bool spawn_detached(const Spawn_detached_options& options)
-{
+namespace detail {
 
 #ifdef _WIN32
+
+inline std::wstring build_command_line(const char* const* argv)
+{
+    std::wstring cmdline;
+    bool first = true;
+
+    for (const char* const* arg = argv; *arg != nullptr; ++arg) {
+        if (!first) {
+            cmdline += L' ';
+        }
+        first = false;
+
+        std::wstring ws = to_wide_utf8(*arg);
+        // Quote argument if it contains space or is empty
+        bool needs_quoting = ws.find(L' ') != std::wstring::npos || ws.empty();
+
+        if (needs_quoting) {
+            cmdline += L'"';
+        }
+
+        // Escape internal quotes and backslashes before quotes
+        for (size_t i = 0; i < ws.length(); ++i) {
+            wchar_t c = ws[i];
+            if (c == L'"') {
+                cmdline += L"\\\"";
+            } else if (c == L'\\') {
+                // Check if backslash is before quote
+                if (i + 1 < ws.length() && ws[i + 1] == L'"') {
+                    cmdline += L"\\\\";
+                }
+                // Check if trailing backslash in quoted argument
+                else if (i + 1 == ws.length() && needs_quoting) {
+                    cmdline += L"\\\\";
+                } else {
+                    cmdline += L'\\';
+                }
+            } else {
+                cmdline += c;
+            }
+        }
+
+        if (needs_quoting) {
+            cmdline += L'"';
+        }
+    }
+    return cmdline;
+}
+
+inline
+bool spawn_detached_win32(const Spawn_detached_options& options)
+{
+
     const char* prog = options.prog;
     const char* const* argv = options.argv;
     int* child_pid_out = options.child_pid_out;
@@ -575,65 +646,8 @@ bool spawn_detached(const Spawn_detached_options& options)
         return false;
     }
 
-    // Convert UTF-8 string to wide string
-    auto to_wide = [](const char* str) -> std::wstring {
-        if (!str || !*str) {
-            return std::wstring();
-        }
-        int len = MultiByteToWideChar(CP_UTF8, 0, str, -1, nullptr, 0);
-        if (len <= 0) {
-            return std::wstring();
-        }
-        std::wstring result(len - 1, 0); // -1 to exclude null terminator from size
-        MultiByteToWideChar(CP_UTF8, 0, str, -1, &result[0], len);
-        return result;
-    };
-
-    // Build command line from argv with proper escaping
-    // Windows requires command line as single string with proper quoting
-    // argv should already include program name at [0]
-    auto build_command_line = [&to_wide](const char* const* argv) -> std::wstring {
-        std::wstring cmdline;
-        bool first = true;
-
-        for (const char* const* arg = argv; *arg != nullptr; ++arg) {
-            if (!first) cmdline += L' ';
-            first = false;
-
-            std::wstring ws = to_wide(*arg);
-            // Quote argument if it contains space or is empty
-            bool needs_quoting = ws.find(L' ') != std::wstring::npos || ws.empty();
-
-            if (needs_quoting) cmdline += L'"';
-
-            // Escape internal quotes and backslashes before quotes
-            for (size_t i = 0; i < ws.length(); ++i) {
-                wchar_t c = ws[i];
-                if (c == L'"') {
-                    cmdline += L"\\\"";
-                } else if (c == L'\\') {
-                    // Check if backslash is before quote
-                    if (i + 1 < ws.length() && ws[i + 1] == L'"') {
-                        cmdline += L"\\\\";
-                    }
-                    // Check if trailing backslash in quoted argument
-                    else if (i + 1 == ws.length() && needs_quoting) {
-                        cmdline += L"\\\\";
-                    } else {
-                        cmdline += L'\\';
-                    }
-                } else {
-                    cmdline += c;
-                }
-            }
-
-            if (needs_quoting) cmdline += L'"';
-        }
-        return cmdline;
-    };
-
     // Convert full path to wide string for lpApplicationName
-    std::wstring full_path_w = to_wide(full_path);
+    std::wstring full_path_w = to_wide_utf8(full_path);
 
     // Build command line - argv already includes program name at [0] (Windows convention)
     std::wstring cmdline_str = build_command_line(argv);
@@ -654,7 +668,7 @@ bool spawn_detached(const Spawn_detached_options& options)
     constexpr unsigned k_max_attempts = 5;
     const auto retry_delay = std::chrono::milliseconds(50);
 
-    const auto env_block = detail::build_environment_block(options.env_overrides);
+    const auto env_block = build_environment_block(options.env_overrides);
     const bool has_env_override = !env_block.empty();
 
     std::vector<HANDLE> inherited_handles;
@@ -892,7 +906,12 @@ bool spawn_detached(const Spawn_detached_options& options)
         }
     }
     return false;
+}
 #else
+inline
+bool spawn_detached_posix(const Spawn_detached_options& options)
+{
+
 
     // 1. we fork to obtain an inbetween process
     // 2. the inbetween child process gets a new terminal and makes a pipe
@@ -940,7 +959,7 @@ bool spawn_detached(const Spawn_detached_options& options)
     std::vector<char*> envp;
     char* const* exec_envp = nullptr;
     if (!options.env_overrides.empty()) {
-        env_storage = detail::build_environment_entries(options.env_overrides);
+        env_storage = build_environment_entries(options.env_overrides);
         envp.reserve(env_storage.size() + 1);
         for (auto& entry : env_storage) {
             envp.push_back(const_cast<char*>(entry.c_str()));
@@ -949,17 +968,17 @@ bool spawn_detached(const Spawn_detached_options& options)
         exec_envp = envp.data();
     }
 
-    auto report_failure = [&](detail::spawn_detached_debug_info::Stage stage, int error, int exec_error) {
-        detail::spawn_detached_debug_info info;
+    auto report_failure = [&](spawn_detached_debug_info::Stage stage, int error, int exec_error) {
+        spawn_detached_debug_info info;
         info.stage = stage;
         info.errno_value = error;
         info.exec_errno = exec_error;
-        detail::emit_spawn_detached_debug(info);
+        emit_spawn_detached_debug(info);
     };
 
     int ready_pipe[2] = {-1, -1};
     while (true) {
-        if (detail::call_pipe2(ready_pipe, O_CLOEXEC) == 0) {
+        if (call_pipe2(ready_pipe, O_CLOEXEC) == 0) {
             break;
         }
         int saved_errno = errno;
@@ -972,7 +991,7 @@ bool spawn_detached(const Spawn_detached_options& options)
             ready_pipe[1] = -1;
         }
         if (saved_errno != EINTR) {
-            report_failure(detail::spawn_detached_debug_info::Stage::PipeCreation, saved_errno, saved_errno);
+            report_failure(spawn_detached_debug_info::Stage::PipeCreation, saved_errno, saved_errno);
             errno = saved_errno;
             return false;
         }
@@ -990,7 +1009,7 @@ bool spawn_detached(const Spawn_detached_options& options)
         if (ready_pipe[1] >= 0) {
             close(ready_pipe[1]);
         }
-        report_failure(detail::spawn_detached_debug_info::Stage::Fork, errno, errno);
+        report_failure(spawn_detached_debug_info::Stage::Fork, errno, errno);
         return false;
     }
 
@@ -1002,16 +1021,16 @@ bool spawn_detached(const Spawn_detached_options& options)
         }
 
         // Ensure the status pipe closes on exec so the parent observes EOF
-        int flags = detail::fcntl_retry(ready_pipe[1], F_GETFD);
+        int flags = fcntl_retry(ready_pipe[1], F_GETFD);
         if (flags != -1) {
-            detail::fcntl_retry(ready_pipe[1], F_SETFD, flags | FD_CLOEXEC);
+            fcntl_retry(ready_pipe[1], F_SETFD, flags | FD_CLOEXEC);
         }
 
         ::setsid();
 
         int ready_status = 0;
-        if (!detail::write_fully(ready_pipe[1], &ready_status, sizeof(ready_status))) {
-            report_failure(detail::spawn_detached_debug_info::Stage::ChildReadyPipeWrite, errno, 0);
+        if (!write_fully(ready_pipe[1], &ready_status, sizeof(ready_status))) {
+            report_failure(spawn_detached_debug_info::Stage::ChildReadyPipeWrite, errno, 0);
             if (ready_pipe[1] >= 0) {
                 close(ready_pipe[1]);
             }
@@ -1027,7 +1046,7 @@ bool spawn_detached(const Spawn_detached_options& options)
 
         int exec_errno = errno;
 
-        detail::write_fully(ready_pipe[1], &exec_errno, sizeof(exec_errno));
+        write_fully(ready_pipe[1], &exec_errno, sizeof(exec_errno));
         if (ready_pipe[1] >= 0) {
             close(ready_pipe[1]);
         }
@@ -1048,7 +1067,7 @@ bool spawn_detached(const Spawn_detached_options& options)
         std::array<char, sizeof(int)> buffer{};
         size_t offset = 0;
         while (offset < buffer.size()) {
-            ssize_t rv = detail::call_read(ready_pipe[0], buffer.data() + offset, buffer.size() - offset);
+            ssize_t rv = call_read(ready_pipe[0], buffer.data() + offset, buffer.size() - offset);
             if (rv < 0) {
                 if (errno == EINTR) {
                     continue;
@@ -1078,7 +1097,7 @@ bool spawn_detached(const Spawn_detached_options& options)
     int exec_errno = 0;
     bool spawn_failed = false;
     int observed_errno = 0;
-    auto failure_stage = detail::spawn_detached_debug_info::Stage::ParentReadReadyStatus;
+    auto failure_stage = spawn_detached_debug_info::Stage::ParentReadReadyStatus;
 
     int ready_status = 0;
     switch (read_int(&ready_status, &exec_errno)) {
@@ -1088,12 +1107,12 @@ bool spawn_detached(const Spawn_detached_options& options)
             spawn_failed = true;
             exec_errno = exec_errno ? exec_errno : EPIPE;
             observed_errno = exec_errno;
-            failure_stage = detail::spawn_detached_debug_info::Stage::ParentReadReadyStatus;
+            failure_stage = spawn_detached_debug_info::Stage::ParentReadReadyStatus;
             break;
         case Read_result::Error:
             spawn_failed = true;
             observed_errno = exec_errno;
-            failure_stage = detail::spawn_detached_debug_info::Stage::ParentReadReadyStatus;
+            failure_stage = spawn_detached_debug_info::Stage::ParentReadReadyStatus;
             break;
     }
 
@@ -1101,7 +1120,7 @@ bool spawn_detached(const Spawn_detached_options& options)
         exec_errno = ready_status > 0 ? ready_status : -ready_status;
         spawn_failed = true;
         observed_errno = exec_errno;
-        failure_stage = detail::spawn_detached_debug_info::Stage::ParentReadReadyStatus;
+        failure_stage = spawn_detached_debug_info::Stage::ParentReadReadyStatus;
     }
 
     if (!spawn_failed) {
@@ -1111,14 +1130,14 @@ bool spawn_detached(const Spawn_detached_options& options)
                 exec_errno = exec_status > 0 ? exec_status : -exec_status;
                 spawn_failed = true;
                 observed_errno = exec_errno;
-                failure_stage = detail::spawn_detached_debug_info::Stage::ParentReadExecStatus;
+                failure_stage = spawn_detached_debug_info::Stage::ParentReadExecStatus;
                 break;
             case Read_result::Eof:
                 break;
             case Read_result::Error:
                 spawn_failed = true;
                 observed_errno = exec_errno;
-                failure_stage = detail::spawn_detached_debug_info::Stage::ParentReadExecStatus;
+                failure_stage = spawn_detached_debug_info::Stage::ParentReadExecStatus;
                 break;
         }
     }
@@ -1131,7 +1150,7 @@ bool spawn_detached(const Spawn_detached_options& options)
 
     if (!read_success) {
         int status = 0;
-        while (detail::call_waitpid(child_pid, &status, 0) == -1) {
+        while (call_waitpid(child_pid, &status, 0) == -1) {
             if (errno != EINTR) {
                 break;
             }
@@ -1148,13 +1167,13 @@ bool spawn_detached(const Spawn_detached_options& options)
     int wait_status = 0;
     pid_t wait_result = 0;
     do {
-        wait_result = detail::call_waitpid(child_pid, &wait_status, WNOHANG);
+        wait_result = call_waitpid(child_pid, &wait_status, WNOHANG);
     }
     while (wait_result == -1 && errno == EINTR);
 
     if (wait_result == child_pid) {
         if (!(WIFEXITED(wait_status) && WEXITSTATUS(wait_status) == 0)) {
-            report_failure(detail::spawn_detached_debug_info::Stage::ParentWaitpid,
+            report_failure(spawn_detached_debug_info::Stage::ParentWaitpid,
                            exec_errno ? exec_errno : ECHILD,
                            exec_errno);
             errno = exec_errno ? exec_errno : ECHILD;
@@ -1174,7 +1193,7 @@ bool spawn_detached(const Spawn_detached_options& options)
             errno = 0;
             return true;
         }
-        report_failure(detail::spawn_detached_debug_info::Stage::ParentWaitpid, errno, exec_errno);
+        report_failure(spawn_detached_debug_info::Stage::ParentWaitpid, errno, exec_errno);
         return false;
     }
 #endif
@@ -1187,9 +1206,23 @@ bool spawn_detached(const Spawn_detached_options& options)
 
     #undef IGNORE_SIGPIPE
 
-#endif // !defined(_WIN32)
-
 }
+#endif
+
+} // namespace detail
+
+inline
+bool spawn_detached(const Spawn_detached_options& options)
+{
+#ifdef _WIN32
+    return detail::spawn_detached_win32(options);
+#else
+    return detail::spawn_detached_posix(options);
+#endif
+}
+
+
+
 
 
 

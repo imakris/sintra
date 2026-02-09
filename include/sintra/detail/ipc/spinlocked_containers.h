@@ -14,11 +14,11 @@
 
 
 #include "../ipc/spinlock.h"
-
 #include <deque>
 #include <list>
 #include <map>
 #include <set>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -26,7 +26,6 @@
 
 
 namespace sintra {
-
 
 using std::deque;
 using std::list;
@@ -98,62 +97,27 @@ struct spinlocked
         const CT<Args...>&   m_c;
     };
 
-    reference back() noexcept                      {locker l(m_sl); return m_c.back();            }
-    const_reference back() const noexcept          {locker l(m_sl); return m_c.back();            }
-    iterator begin() noexcept                      {locker l(m_sl); return m_c.begin();           }
-    const_iterator begin() const noexcept          {locker l(m_sl); return m_c.begin();           }
-    void clear() noexcept                          {locker l(m_sl); return m_c.clear();           }
-
-
-    template <class... FArgs>
-    auto emplace(FArgs&&... args)
+    template <typename Fn>
+    decltype(auto) with_lock(Fn&& fn)
     {
-        locker l(this->m_sl);
-        return this->m_c.emplace(std::forward<FArgs>(args)...);
+        locker l(m_sl);
+        return fn(m_c);
     }
 
-    template <class... FArgs>
-    auto emplace_hint(const_iterator hint, FArgs&&... args)
-    {
-        locker l(this->m_sl);
-        return this->m_c.emplace_hint(hint, std::forward<FArgs>(args)...);
-    }
+    void clear() noexcept                          {locker l(m_sl); m_c.clear();                  }
 
     bool empty() const noexcept                    {locker l(m_sl); return m_c.empty();           }
-    iterator end() noexcept                        {locker l(m_sl); return m_c.end();             }
-    const_iterator end() const noexcept            {locker l(m_sl); return m_c.end();             }
+
+    auto pop_front()                               {locker l(m_sl); m_c.pop_front();              }
 
     template <typename... FArgs>
-    auto erase(FArgs&&... v)                       {locker l(m_sl); return m_c.erase(std::forward<FArgs>(v)...);       }
-
-    template <typename... FArgs>
-    auto find(FArgs&&... v)                        {locker l(m_sl); return m_c.find(std::forward<FArgs>(v)...);        }
-    template <typename... FArgs>
-    auto find(FArgs&&... v) const                  {locker l(m_sl); return m_c.find(std::forward<FArgs>(v)...);        }
-
-    reference front() noexcept                     {locker l(m_sl); return m_c.front();           }
-    const_reference front() const noexcept         {locker l(m_sl); return m_c.front();           }
-
-    template <typename... FArgs>
-    auto insert(FArgs&&... v)                      {locker l(m_sl); return m_c.insert(std::forward<FArgs>(v)...);      }
-
-    auto pop_front()                               {locker l(m_sl); return m_c.pop_front();       }
-
-    template <typename... FArgs>
-    auto push_back(FArgs&&... v)                   {locker l(m_sl); return m_c.push_back(std::forward<FArgs>(v)...);   }
+    auto push_back(FArgs&&... v)                   {locker l(m_sl); m_c.push_back(std::forward<FArgs>(v)...);   }
 
     auto size()  const noexcept                    {locker l(m_sl); return m_c.size();            }
 
     operator CT<Args...>() const                   {locker l(m_sl); return m_c;                   }
-    auto operator=(const CT<Args...>& x)           {locker l(m_sl); return m_c.operator=(x);      }
-    auto operator=(CT<Args...>&& x)                {locker l(m_sl); return m_c.operator=(std::move(x));      }
-
-
-    //auto operator=(const CT<Args...>& x)           {locker l(m_sl); return m_c.operator=(x.m_c);  }
-    //auto operator=(CT<Args...>&& x)                {locker l(m_sl); return m_c.operator=(x.m_c);  }
-
-    reference operator[] (size_type p)             {locker l(m_sl); return m_c[p];                }
-    const_reference operator[] (size_type p) const {locker l(m_sl); return m_c[p];                }
+    spinlocked& operator=(const CT<Args...>& x)    {locker l(m_sl); m_c = x; return *this; }
+    spinlocked& operator=(CT<Args...>&& x)         {locker l(m_sl); m_c = std::move(x); return *this; }
 
     scoped_access scoped() noexcept                {return scoped_access(m_sl, m_c);              }
     const_scoped_access scoped() const noexcept    {return const_scoped_access(m_sl, m_c);        }
@@ -185,16 +149,6 @@ using spinlocked_uset = detail::spinlocked<unordered_set, T>;
 template <typename Key, typename T>
 struct spinlocked_map: detail::spinlocked<map, Key, T>
 {
-    using locker = spinlock::locker;
-
-    template <typename... FArgs>
-    auto lower_bound(FArgs&&... v) {
-        locker l(this->m_sl);
-        return this->m_c.lower_bound(std::forward<FArgs>(v)...);
-    }
-
-    T& operator[] (const Key& k)                   {locker l(this->m_sl); return this->m_c[k];    }
-    T& operator[] (Key&& k)                        {locker l(this->m_sl); return this->m_c[std::move(k)];    }
 };
 
 
@@ -202,8 +156,39 @@ template <typename Key, typename T>
 struct spinlocked_umap: detail::spinlocked<unordered_map, Key, T>
 {
     using locker = spinlock::locker;
-    T& operator[] (const Key& k)                   {locker l(this->m_sl); return this->m_c[k];    }
-    T& operator[] (Key&& k)                        {locker l(this->m_sl); return this->m_c[std::move(k)];    }
+
+    template <typename U, typename = void>
+    struct has_value_type : std::false_type
+    {};
+
+    template <typename U>
+    struct has_value_type<U, std::void_t<typename U::value_type>> : std::true_type
+    {};
+
+    bool contains_key(const Key& key) const
+    {
+        locker l(this->m_sl);
+        return this->m_c.find(key) != this->m_c.end();
+    }
+
+    template <typename U = T, typename = std::enable_if_t<has_value_type<U>::value>>
+    bool copy_value(const Key& key, std::vector<typename U::value_type>& out) const
+    {
+        locker l(this->m_sl);
+        auto it = this->m_c.find(key);
+        if (it == this->m_c.end()) {
+            return false;
+        }
+        out.assign(it->second.begin(), it->second.end());
+        return !out.empty();
+    }
+
+    template <typename K, typename V>
+    void set_value(K&& key, V&& value)
+    {
+        locker l(this->m_sl);
+        this->m_c[std::forward<K>(key)] = std::forward<V>(value);
+    }
 };
 
 

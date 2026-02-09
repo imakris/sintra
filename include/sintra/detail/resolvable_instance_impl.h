@@ -3,11 +3,11 @@
 
 #pragma once
 
+#include <string>
+
 namespace sintra {
 
-
 using std::string;
-
 
 template<typename>
 void Resolvable_instance_id::from_string(const string& str)

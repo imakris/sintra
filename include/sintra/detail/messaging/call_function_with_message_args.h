@@ -3,7 +3,8 @@
 
 #pragma once
 
-#include <type_traits>
+#include <functional>
+#include <utility>
 
 #include "../messaging/message_args.h"
 
@@ -11,187 +12,53 @@
 namespace sintra {
 
     
-using std::enable_if_t;
 using detail::get;
 using detail::message_args_size;
 
 
- //////////////////////////////////////////////////////////////////////////
-///// BEGIN simple function backend ////////////////////////////////////////
-////////////////////////////////////////////////////////////////////////////
-//////    //////    //////    //////    //////    //////    //////    //////
- ////      ////      ////      ////      ////      ////      ////      ////
-  //        //        //        //        //        //        //        //
+namespace detail {
 
-
-template <
-    typename TFunction,
-    typename TVector,
-    typename... Args,
-    typename = enable_if_t<
-        message_args_size<TVector>::value == sizeof...(Args)
-    >
->
-auto call_function_with_message_args_sfb(
-    const TFunction& f, const TVector&,
-    const Args&... args) -> decltype(f(args...))
+template <typename F, typename MA, std::size_t... Is>
+inline decltype(auto) call_with_msg_args_impl(
+    F&& f,
+    const MA& args,
+    std::index_sequence<Is...>)
 {
-    return f(args...);
+    return std::invoke(std::forward<F>(f), get<Is>(args)...);
 }
 
-
-template <
-    typename TFunction,
-    typename TVector,
-    typename... Args,
-    typename = enable_if_t<
-        message_args_size<TVector>::value != sizeof...(Args)
-    >
->
-auto call_function_with_message_args_sfb(
-    const TFunction& f,
-    const TVector& t,
-    const Args&... args)
-{
-    return call_function_with_message_args_sfb(
-        f, t, args..., get< sizeof...(Args) >(t));
-}
-
-
-template <
-    typename TFunction,
-    typename TVector,
-    typename = enable_if_t<
-        message_args_size<TVector>::value != 0
-    >
->
-auto call_function_with_message_args(const TFunction& f, const TVector& t)
-{
-    // TODO: implement a static assertion for the statement that follows, to provide the message
-    // in the compiler output.
-
-    // if the compiler complains here, make sure that the function you are trying to call has
-    // no non-const references
-    return call_function_with_message_args_sfb(f, t, get<0>(t));
-}
-
-
-template <
-    typename TFunction,
-    typename TVector,
-    typename = enable_if_t<
-        message_args_size<TVector>::value == 0
-    >
->
-auto call_function_with_message_args(const TFunction& f, const TVector&) -> decltype(f())
-{
-    // the function is called without arguments
-    return f();
-}
-
-
-
-  //        //        //        //        //        //        //        //
- ////      ////      ////      ////      ////      ////      ////      ////
-//////    //////    //////    //////    //////    //////    //////    //////
-////////////////////////////////////////////////////////////////////////////
-///// END simple function backend //////////////////////////////////////////
- //////////////////////////////////////////////////////////////////////////
-
-
- //////////////////////////////////////////////////////////////////////////
-///// BEGIN member function backend ////////////////////////////////////////
-////////////////////////////////////////////////////////////////////////////
-//////    //////    //////    //////    //////    //////    //////    //////
- ////      ////      ////      ////      ////      ////      ////      ////
-  //        //        //        //        //        //        //        //
-
-
-
-template <
-    typename TObj,
-    typename TFunction,
-    typename TVector,
-    typename... Args,
-    typename = enable_if_t<
-        message_args_size<TVector>::value == sizeof...(Args)
-    >
->
-auto call_function_with_message_args_mfb(
+template <typename TObj, typename F, typename MA, std::size_t... Is>
+inline decltype(auto) call_with_msg_args_impl(
     TObj& obj,
-    const TFunction& f,
-    const TVector& /* t */,
-    const Args&... args) -> decltype((obj.*f)(args...))
+    F&& f,
+    const MA& args,
+    std::index_sequence<Is...>)
 {
-    return (obj.*f)(args...);
+    return std::invoke(std::forward<F>(f), obj, get<Is>(args)...);
 }
 
+} // namespace detail
 
-template <
-    typename TObj,
-    typename TFunction,
-    typename TVector,
-    typename... Args,
-    typename = enable_if_t<
-        message_args_size<TVector>::value != sizeof...(Args)
-    >
->
-auto call_function_with_message_args_mfb(
-    TObj& obj,
-    const TFunction& f,
-    const TVector& t,
-    const Args&... args)
+template <typename TFunction, typename TVector>
+inline decltype(auto) call_function_with_message_args(const TFunction& f, const TVector& t)
 {
-    return call_function_with_message_args_mfb(
-        obj, f, t, args..., get< sizeof...(Args) >(t));
+    constexpr std::size_t arity = message_args_size<TVector>::value;
+    return detail::call_with_msg_args_impl(
+        f,
+        t,
+        std::make_index_sequence<arity>{});
 }
 
-
-template <
-    typename TObj,
-    typename TFunction,
-    typename TVector,
-    typename = enable_if_t<
-        message_args_size<TVector>::value != 0
-    >
->
-auto call_function_with_message_args(TObj& obj, const TFunction& f, const TVector& t)
+template <typename TObj, typename TFunction, typename TVector>
+inline decltype(auto) call_function_with_message_args(TObj& obj, const TFunction& f, const TVector& t)
 {
-    // TODO: implement a static assertion for the statement that follows, to provide the message
-    // in the compiler output.
-
-    // if the compiler complains here, make sure that none of the function arguments is either
-    // - a non-const reference
-    // - a non-POD and non STL container object
-    return call_function_with_message_args_mfb(obj, f, t, get<0>(t));
+    constexpr std::size_t arity = message_args_size<TVector>::value;
+    return detail::call_with_msg_args_impl(
+        obj,
+        f,
+        t,
+        std::make_index_sequence<arity>{});
 }
-
-
-template <
-    typename TObj,
-    typename TFunction,
-    typename TVector,
-    typename = enable_if_t<
-        message_args_size<TVector>::value == 0
-    >
->
-auto call_function_with_message_args(
-    TObj& obj,
-    TFunction f,
-    const TVector&) -> decltype((obj.*f)())
-{
-    // the function is called without arguments
-    return (obj.*f)();
-}
-
-
-
-  //        //        //        //        //        //        //        //
- ////      ////      ////      ////      ////      ////      ////      ////
-//////    //////    //////    //////    //////    //////    //////    //////
-////////////////////////////////////////////////////////////////////////////
-///// END member function backend //////////////////////////////////////////
- //////////////////////////////////////////////////////////////////////////
 
 
 } // namespace sintra;

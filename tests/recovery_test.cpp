@@ -38,13 +38,6 @@
 #include <thread>
 #include <vector>
 
-#if defined(_MSC_VER)
-#include <crtdbg.h>
-#endif
-#if defined(__APPLE__)
-#include <sys/resource.h>
-#endif
-
 namespace {
 
 struct Stop {};
@@ -79,13 +72,7 @@ void write_ready_marker(std::string_view tag, uint32_t occurrence = 0)
     if (occurrence != 0) {
         filename << "_" << occurrence;
     }
-    filename << "_pid_"
-#ifdef _WIN32
-             << _getpid()
-#else
-             << getpid()
-#endif
-             ;
+    filename << "_pid_" << sintra::test::get_pid();
     const auto ready_path = shared_dir / (filename.str() + ".txt");
 
     std::ofstream out(ready_path, std::ios::binary | std::ios::trunc);
@@ -94,39 +81,6 @@ void write_ready_marker(std::string_view tag, uint32_t occurrence = 0)
         out.flush();
     }
 }
-void append_line(const std::filesystem::path& file, const std::string& value)
-{
-    std::ofstream out(file, std::ios::binary | std::ios::app);
-    if (!out) {
-        throw std::runtime_error("failed to open " + file.string() + " for writing");
-    }
-    out << value << '\n';
-}
-
-#if defined(__APPLE__)
-void disable_core_dumps_for_intentional_abort()
-{
-    struct rlimit current {};
-    if (getrlimit(RLIMIT_CORE, &current) != 0) {
-        std::fprintf(stderr, "[CRASHER] getrlimit(RLIMIT_CORE) failed: %d\n", errno);
-        return;
-    }
-
-    if (current.rlim_cur == 0) {
-        return;
-    }
-
-    struct rlimit updated = current;
-    updated.rlim_cur = 0;
-    if (setrlimit(RLIMIT_CORE, &updated) != 0) {
-        std::fprintf(stderr, "[CRASHER] setrlimit(RLIMIT_CORE) failed: %d\n", errno);
-        return;
-    }
-
-    std::fprintf(stderr, "[CRASHER] Disabled core dumps for intentional abort\n");
-}
-#endif
-
 int process_watchdog()
 {
     std::fprintf(stderr, "[WATCHDOG] Starting watchdog process\n");
@@ -172,12 +126,7 @@ int process_crasher()
     // Early diagnostic to confirm entry on recovery occurrences
     std::fprintf(stderr, "[CRASHER] start occ=%u pid=%lu\n",
         (unsigned)sintra::s_recovery_occurrence,
-#ifdef _WIN32
-        (unsigned long)_getpid()
-#else
-        (unsigned long)getpid()
-#endif
-    );
+        static_cast<unsigned long>(sintra::test::get_pid()));
     if (g_shared_dir.empty()) {
         if (const char* shared_dir_env = std::getenv("SINTRA_TEST_SHARED_DIR")) {
             g_shared_dir = shared_dir_env;
@@ -187,11 +136,7 @@ int process_crasher()
     {
         std::ofstream diag(sintra::test::scratch_subdirectory("recovery_test") / "sintra_crasher_diag.log", std::ios::app);
         diag << "process_crasher pid="
-#ifdef _WIN32
-             << _getpid()
-#else
-             << getpid()
-#endif
+             << sintra::test::get_pid()
              << " g_shared_dir=" << (g_shared_dir.empty() ? "<empty>" : g_shared_dir)
              << " env=" << (std::getenv("SINTRA_TEST_SHARED_DIR") ? "set" : "unset")
              << std::endl;
@@ -211,22 +156,15 @@ int process_crasher()
         if (!log_dir.empty()) {
             std::filesystem::path early_log = log_dir / "entry.log";
             std::ofstream elog(early_log, std::ios::app);
-            elog << "process_crasher() entered, pid=" <<
-#ifdef _WIN32
-                _getpid()
-#else
-                getpid()
-#endif
+            elog << "process_crasher() entered, pid="
+                << sintra::test::get_pid()
                 << std::endl;
         }
     }
 
     sintra::enable_recovery();
 
-#if defined(_MSC_VER)
-    // Suppress the CRT abort dialog so the crash propagates automatically in Debug builds.
-    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
-#endif
+    sintra::test::prepare_for_intentional_crash("CRASHER");
 
     std::filesystem::path shared_dir;
     if (!g_shared_dir.empty()) {
@@ -242,24 +180,17 @@ int process_crasher()
     write_ready_marker("crasher", occurrence);
 
     std::ofstream log(log_path, std::ios::app);
-    log << "Crasher starting, pid=" <<
-#ifdef _WIN32
-        _getpid()
-#else
-        getpid()
-#endif
+    log << "Crasher starting, pid="
+        << sintra::test::get_pid()
         << std::endl;
 
     log << "Recovery occurrence: " << occurrence << std::endl;
-    append_line(runs_path, "run");
+    sintra::test::append_line_or_throw(runs_path, "run");
 
     if (occurrence == 0) {
         log << "First run - about to abort!" << std::endl;
         log.close();
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
-#if defined(__APPLE__)
-        disable_core_dumps_for_intentional_abort();
-#endif
         sintra::disable_debug_pause_for_current_process();
         std::abort();
     }
@@ -268,16 +199,6 @@ int process_crasher()
     log.close();
     sintra::world() << Stop{};
     return 0;
-}
-
-std::string get_arg_value(int argc, char* argv[], const std::string& arg_name)
-{
-    for (int i = 0; i < argc - 1; ++i) {
-        if (std::string_view(argv[i]) == arg_name) {
-            return argv[i + 1];
-        }
-    }
-    return "";
 }
 
 } // namespace
@@ -294,7 +215,7 @@ int main(int argc, char* argv[])
     // Log main() entry to file immediately
     {
         const char* shared_dir_env = std::getenv("SINTRA_TEST_SHARED_DIR");
-        std::string early_shared_dir_arg = get_arg_value(argc, argv, "--shared_dir");
+        std::string early_shared_dir_arg = sintra::test::get_argv_value(argc, argv, "--shared_dir");
 
         if (!early_shared_dir_arg.empty()) {
 #ifdef _WIN32
@@ -308,13 +229,9 @@ int main(int argc, char* argv[])
         if (shared_dir_env) {
             std::filesystem::path log_path = std::filesystem::path(shared_dir_env) / "main.log";
             std::ofstream main_log(log_path, std::ios::app);
-            main_log << "main() entered, pid=" <<
-#ifdef _WIN32
-                _getpid()
-#else
-                getpid()
-#endif
-                << ", argc=" << argc << std::endl;
+            main_log << "main() entered, pid="
+                     << sintra::test::get_pid()
+                     << ", argc=" << argc << std::endl;
             for (int i = 0; i < argc; ++i) {
                 main_log << "  argv[" << i << "]: " << argv[i] << std::endl;
             }
@@ -322,7 +239,7 @@ int main(int argc, char* argv[])
     }
 
     // Check if --shared_dir was passed (from recovery spawn)
-    std::string shared_dir_arg = get_arg_value(argc, argv, "--shared_dir");
+    std::string shared_dir_arg = sintra::test::get_argv_value(argc, argv, "--shared_dir");
     if (!shared_dir_arg.empty()) {
         std::fprintf(stderr, "[MAIN] Setting shared_dir from argument: %s\n", shared_dir_arg.c_str());
 #ifdef _WIN32
@@ -342,11 +259,7 @@ int main(int argc, char* argv[])
     {
         std::ofstream state_log(shared_dir / "state.log", std::ios::app);
         state_log << "main() set g_shared_dir to " << g_shared_dir
-#ifdef _WIN32
-                  << " pid=" << _getpid()
-#else
-                  << " pid=" << getpid()
-#endif
+                  << " pid=" << sintra::test::get_pid()
                   << std::endl;
     }
 
@@ -360,11 +273,7 @@ int main(int argc, char* argv[])
     {
         std::ofstream state_log(shared_dir / "state.log", std::ios::app);
         state_log << "calling sintra::init, pid="
-#ifdef _WIN32
-                  << _getpid()
-#else
-                  << getpid()
-#endif
+                  << sintra::test::get_pid()
                   << std::endl;
     }
 
@@ -373,11 +282,7 @@ int main(int argc, char* argv[])
     {
         std::ofstream state_log(shared_dir / "state.log", std::ios::app);
         state_log << "sintra::init completed, pid="
-#ifdef _WIN32
-                  << _getpid()
-#else
-                  << getpid()
-#endif
+                  << sintra::test::get_pid()
                   << std::endl;
     }
 
