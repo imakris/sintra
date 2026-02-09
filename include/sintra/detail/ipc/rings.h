@@ -2343,10 +2343,30 @@ struct Ring_W : Ring<T, false>
         }
 
         c.writer_pid = get_current_pid();
+        m_owner_pid = c.writer_pid;
+        m_owner_tid = get_current_tid();
     }
 
     ~Ring_W()
     {
+        const uint32_t current_tid = get_current_tid();
+        if (m_owner_tid != 0 && m_owner_tid != current_tid) {
+            char message[256];
+            const int message_len = std::snprintf(
+                message,
+                sizeof(message),
+                "[sintra][ring] Ring_W destroyed on a different thread than it was created. "
+                "ring=%s owner_pid=%u owner_tid=%u current_pid=%u current_tid=%u\n",
+                this->m_data_filename.c_str(),
+                m_owner_pid,
+                m_owner_tid,
+                get_current_pid(),
+                current_tid);
+            if (message_len > 0) {
+                log_raw(log_level::error, message);
+            }
+        }
+
         // Wake any sleeping readers to avoid deadlocks during teardown
         unblock_global();
         c.ownership_mutex.unlock();
@@ -2770,6 +2790,8 @@ private:
     std::atomic<uint32_t>           m_writing_thread_index   = {0};
     size_t                          m_octile                 = 0;
     sequence_counter_type           m_pending_new_sequence   = 0;
+    uint32_t                        m_owner_tid              = 0;
+    uint32_t                        m_owner_pid              = 0;
 
     typename Ring<T, false>::Control& c;
 };
