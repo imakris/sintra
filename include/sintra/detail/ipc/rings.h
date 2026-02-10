@@ -1747,15 +1747,18 @@ struct Ring_R : Ring<T, true>
                 },
                 guard_cleared);
 
-            // Always release our own guard contribution before deciding next steps.
-            SINTRA_READ_ACCESS_FETCH_SUB(c, trailing_octile, guard_mask);
-
             if (!guard_cleared) {
+                // Writer eviction cleared our guard and will decrement
+                // read_access.  Do NOT decrement here: doing so would
+                // double-release the octile counter, causing underflow.
                 slot.clear_pending();
                 m_reading      = false;
                 m_reading_lock = false;
                 throw ring_reader_evicted_exception();
             }
+
+            // We cleared the guard ourselves; release our own contribution.
+            SINTRA_READ_ACCESS_FETCH_SUB(c, trailing_octile, guard_mask);
             if (Ring<T, true>::encoded_guard_present(guard_snapshot)) {
                 const uint8_t guarded_octile = Ring<T, true>::encoded_guard_octile(guard_snapshot);
                 if (guarded_octile != trailing_octile) {
@@ -1816,7 +1819,12 @@ struct Ring_R : Ring<T, true>
             }
             else
             if (!guard_cleared) {
-                try_rollback_unpaired_read_access(static_cast<uint8_t>(m_trailing_octile));
+                // Writer eviction cleared our guard and will decrement
+                // read_access.  Do NOT call try_rollback here: the writer's
+                // decrement may still be in flight, and rolling back would
+                // double-decrement the octile counter, causing underflow.
+                // The writer-side stale-guard clearing provides a fallback
+                // if the count becomes orphaned for any reason.
                 slot.clear_pending();
                 // With strong CAS, failing to clear guard means we were evicted
                 m_evicted_since_last_wait = true;
@@ -1824,6 +1832,9 @@ struct Ring_R : Ring<T, true>
             else {
                 const bool had_guard = Ring<T, true>::encoded_guard_present(previous_state);
                 if (!had_guard) {
+                    // guard_cleared succeeded but no guard was present in the
+                    // previous state.  No eviction is in progress (our CAS
+                    // succeeded), so rollback is safe.
                     try_rollback_unpaired_read_access(
                         static_cast<uint8_t>(m_trailing_octile));
                 }
@@ -2151,11 +2162,14 @@ struct Ring_R : Ring<T, true>
             return false;
         }
 
-        try_rollback_unpaired_read_access(static_cast<uint8_t>(m_trailing_octile));
-
 #ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
         if (slot.status() == Ring<T, false>::READER_STATE_EVICTED) {
             // Reader was evicted by writer for being too slow.
+            // The writer clears the guard and decrements read_access during
+            // eviction.  Do NOT call try_rollback here: the writer's decrement
+            // may still be in flight, and rolling back would double-decrement
+            // the octile counter, causing underflow.
+            //
             // Skip all missed data and jump to writer's current position.
             // This is the only safe recovery strategy since old data has been overwritten.
             sequence_counter_type new_seq = c.leading_sequence;
@@ -2173,6 +2187,11 @@ struct Ring_R : Ring<T, true>
             return true;
         }
 #endif
+
+        // Not evicted, but guard is not present.  Try to rollback any orphaned
+        // read_access count before reattaching.  This is safe because no writer
+        // eviction decrement is in flight for our slot.
+        try_rollback_unpaired_read_access(static_cast<uint8_t>(m_trailing_octile));
 
         const size_t trailing_idx = mod_pos_i64(
             int64_t(m_reading_sequence->load()) - int64_t(m_max_trailing_elements),
@@ -2214,14 +2233,10 @@ struct Ring_R : Ring<T, true>
                 guard_updated);
 
             if (guard_updated) {
-                const uint8_t guard_snapshot = slot.guard_token();
-                const bool guard_present = Ring<T, true>::encoded_guard_present(guard_snapshot);
-                const uint8_t guard_octile = Ring<T, true>::encoded_guard_octile(guard_snapshot);
-                if (!guard_present || guard_octile != static_cast<uint8_t>(m_trailing_octile)) {
-                    SINTRA_READ_ACCESS_FETCH_SUB(c, m_trailing_octile, mask);
-                    slot.clear_pending();
-                    continue;
-                }
+                // Guard successfully attached via CAS.  Do NOT re-read the slot
+                // to verify: between our successful CAS and a re-read, the writer
+                // could evict us (clearing the guard and decrementing read_access).
+                // A second decrement here would underflow the octile counter.
                 return;
             }
 
