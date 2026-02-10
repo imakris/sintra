@@ -2204,7 +2204,15 @@ void Managed_process::release_all_lifelines()
 inline
 void Managed_process::go()
 {
-    assign_name(std::string("sintra_process_") + std::to_string(m_pid));
+    try {
+        assign_name(std::string("sintra_process_") + std::to_string(m_pid));
+    }
+    catch (const rpc_cancelled&) {
+        // The coordinator has shut down (e.g., due to init_error from a spawn
+        // failure).  There is nothing left for this worker to do -- return
+        // gracefully and let the lifeline mechanism handle termination.
+        return;
+    }
 
     m_entry_function();
 }
