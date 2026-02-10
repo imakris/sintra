@@ -43,7 +43,7 @@
       <td style="text-align:center;"><img alt="Codecov GCC" src="https://codecov.io/gh/imakris/sintra/branch/master/graph/badge.svg?flag=gcc" style="display:block;margin:0 auto;"></td>
     </tr>
     <tr>
-      <td>Linux (clang, llvm-cov)</td>
+      <td>Linux (clang, llvm-cov gcov)</td>
       <td style="text-align:center;"><img alt="Codecov Clang" src="https://codecov.io/gh/imakris/sintra/branch/master/graph/badge.svg?flag=clang" style="display:block;margin:0 auto;"></td>
     </tr>
   </tbody>

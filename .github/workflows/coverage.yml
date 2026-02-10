@@ -80,9 +80,6 @@ jobs:
       - name: Run tests
         working-directory: tests
         run: |
-          if [ "${{ matrix.compiler }}" = "clang" ]; then
-            export LLVM_PROFILE_FILE="${{ github.workspace }}/${{ env.BUILD_DIR }}/code-%p-%m.profraw"
-          fi
           # Continue even on test failure to collect coverage data
           python3 run_tests.py --timeout 120 --build-dir ../${{ env.BUILD_DIR }} --config Debug || true
 
@@ -96,37 +93,26 @@ jobs:
           lcov --quiet --extract lcov.all.info "*/include/sintra/*" --ignore-errors negative -o lcov.info
           lcov --list lcov.info || true
 
-      # Clang/LLVM: export to LCOV, then filter to sintra headers
-      - name: Coverage (llvm-cov/clang)
+      # Clang: capture gcov-compatible data with llvm-cov gcov, then filter to sintra headers
+      - name: Coverage (lcov/clang)
         if: matrix.compiler == 'clang'
         working-directory: ${{ env.BUILD_DIR }}
         run: |
-          # Find llvm tools (may be versioned on Ubuntu)
-          PROFDATA=$(command -v llvm-profdata || command -v llvm-profdata-18 || command -v llvm-profdata-17)
-          COV=$(command -v llvm-cov || command -v llvm-cov-18 || command -v llvm-cov-17)
-
-          # Merge all profile data files
-          $PROFDATA merge -sparse *.profraw -o default.profdata
-
-          # Export coverage per binary then merge with lcov.
-          # Each binary has unique function hashes for inline/template code, so
-          # a single llvm-cov invocation with all binaries discards mismatched
-          # functions. Exporting individually and merging avoids this.
-          mapfile -t TEST_BINS < <(find tests -name "sintra_*_debug" -type f -executable)
-          if [ "${#TEST_BINS[@]}" -eq 0 ]; then
-            echo "No test binaries found"
-            ls -la tests/
+          # Find llvm-cov (may be versioned on Ubuntu)
+          GCOV_TOOL=$(command -v llvm-cov || command -v llvm-cov-18 || command -v llvm-cov-17)
+          if [ -z "$GCOV_TOOL" ]; then
+            echo "llvm-cov not found"
             exit 1
           fi
 
-          LCOV_PARTS=""
-          for bin in "${TEST_BINS[@]}"; do
-            part="lcov_$(basename "$bin").info"
-            $COV export -format=lcov -instr-profile default.profdata "$bin" > "$part"
-            LCOV_PARTS="$LCOV_PARTS -a $part"
-          done
+          cat > llvm-cov-gcov <<EOF
+          #!/usr/bin/env bash
+          exec "$GCOV_TOOL" gcov "\$@"
+          EOF
+          chmod +x llvm-cov-gcov
 
-          lcov --quiet $LCOV_PARTS --ignore-errors negative -o lcov.all.info
+          lcov --quiet --capture --directory . --ignore-errors negative \
+            --gcov-tool "$(pwd)/llvm-cov-gcov" -o lcov.all.info
           lcov --quiet --extract lcov.all.info "*/include/sintra/*" --ignore-errors negative -o lcov.info
           lcov --list lcov.info || true
 
