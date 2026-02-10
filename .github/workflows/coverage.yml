@@ -130,6 +130,31 @@ jobs:
           lcov --quiet --extract lcov.all.info "*/include/sintra/*" --ignore-errors negative -o lcov.info
           lcov --list lcov.info || true
 
+      - name: Summarize coverage (lcov)
+        if: always()
+        working-directory: ${{ env.BUILD_DIR }}
+        shell: bash
+        run: |
+          if [ ! -f lcov.info ]; then
+            echo "No lcov.info found; skipping summary."
+            exit 0
+          fi
+
+          LF=$(grep -h "^LF:" lcov.info | awk -F: '{s+=$2} END{print s+0}')
+          LH=$(grep -h "^LH:" lcov.info | awk -F: '{s+=$2} END{print s+0}')
+          if [ "$LF" -gt 0 ]; then
+            PCT=$(awk -v lh="$LH" -v lf="$LF" 'BEGIN { printf "%.2f", (lh/lf*100.0) }')
+          else
+            PCT="0.00"
+          fi
+
+          echo "Line coverage: $LH / $LF ($PCT%)"
+          {
+            echo "### ${{ matrix.compiler }} coverage"
+            echo ""
+            echo "Line coverage: **$LH / $LF ($PCT%)**"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Upload coverage to Codecov
         if: always()
         uses: codecov/codecov-action@v5
