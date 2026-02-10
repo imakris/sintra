@@ -183,24 +183,30 @@ inline void debug_read_access_fetch_sub(
     int line,
     const char* func)
 {
-    const uint64_t prev = read_access.fetch_sub(mask);
-    const uint32_t count = static_cast<uint32_t>((prev >> (8 * octile)) & 0xffu);
-    if (count == 0) {
-        mismatch_counter.fetch_add(1, std::memory_order_relaxed);
-        char message[256];
-        const int message_len = std::snprintf(
-            message,
-            sizeof(message),
-            "[sintra][ring] read_access underflow at %s (%s:%d) octile=%u read_access=0x%016llx\n",
-            func ? func : "<unknown>",
-            file ? file : "<unknown>",
-            line,
-            static_cast<unsigned>(octile),
-            static_cast<unsigned long long>(prev));
-        if (message_len > 0) {
-            log_raw(log_level::error, message);
+    uint64_t prev = read_access.load();
+    while (true) {
+        const uint32_t count = static_cast<uint32_t>((prev >> (8 * octile)) & 0xffu);
+        if (count == 0) {
+            mismatch_counter.fetch_add(1, std::memory_order_relaxed);
+            char message[256];
+            const int message_len = std::snprintf(
+                message,
+                sizeof(message),
+                "[sintra][ring] read_access underflow at %s (%s:%d) octile=%u read_access=0x%016llx\n",
+                func ? func : "<unknown>",
+                file ? file : "<unknown>",
+                line,
+                static_cast<unsigned>(octile),
+                static_cast<unsigned long long>(prev));
+            if (message_len > 0) {
+                log_raw(log_level::error, message);
+            }
+            assert(count != 0 && "read_access underflow (see log)");
+            return;
         }
-        assert(count != 0 && "read_access underflow (see log)");
+        if (read_access.compare_exchange_weak(prev, prev - mask)) {
+            return;
+        }
     }
 }
 #endif
