@@ -1013,12 +1013,14 @@ STRESS_TEST(stress_multi_reader_throughput)
     const bool has_overflow = diagnostics.reader_lag_overflow_count > 0;
     const bool has_regressions = diagnostics.reader_sequence_regressions > 0;
     const bool has_evictions = diagnostics.reader_eviction_count > 0;
-    if (has_overflow || has_regressions || has_evictions) {
+    const bool has_guard_mismatch = diagnostics.guard_accounting_mismatch_count > 0;
+    if (has_overflow || has_regressions || has_evictions || has_guard_mismatch) {
         std::cerr << "[sintra::ring] diagnostics: max_reader_lag="
                   << diagnostics.max_reader_lag
                   << ", overflow_count=" << diagnostics.reader_lag_overflow_count
                   << ", worst_overflow_lag=" << diagnostics.worst_overflow_lag
                   << ", sequence_regressions=" << diagnostics.reader_sequence_regressions
+                  << ", guard_mismatch_count=" << diagnostics.guard_accounting_mismatch_count
                   << ", eviction_count=" << diagnostics.reader_eviction_count
                   << std::endl;
 
@@ -1047,6 +1049,7 @@ STRESS_TEST(stress_multi_reader_throughput)
             std::rethrow_exception(err);
         }
     }
+    ASSERT_FALSE(has_guard_mismatch);
 
     bool any_reader_evicted = false;
     for (auto& flag : reader_evicted) {

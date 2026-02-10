@@ -2116,7 +2116,12 @@ struct Ring_R : Ring<T, true>
                         return std::nullopt;
                     }
 
-                    return current.with_guard(static_cast<uint8_t>(new_trailing_octile), true).clear_pending();
+                    // Keep the previous octile in pending until we release its
+                    // read_access count below. This closes a race where the
+                    // writer's stale-guard cleanup could observe the old octile
+                    // as guardless and clear it before we decrement it.
+                    return current.with_guard(static_cast<uint8_t>(new_trailing_octile), true)
+                                  .with_pending(current.guard_octile());
                 },
                 guard_updated);
 
@@ -2155,6 +2160,7 @@ struct Ring_R : Ring<T, true>
                 SINTRA_READ_ACCESS_FETCH_SUB(c, new_trailing_octile, new_mask);
             }
 
+            slot.clear_pending();
             m_trailing_octile = static_cast<uint8_t>(new_trailing_octile);
             return;
         }
