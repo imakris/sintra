@@ -475,8 +475,10 @@ void Process_message_reader::request_reader_function()
         publish_request_progress(m_in_req_c->get_message_reading_sequence());
     }
 
-    end_reading_session(m_in_req_c, m_req_running);
-
+    // Update delivery progress BEFORE end_reading_session, which sets
+    // m_req_running = false.  Once that flag is cleared the destructor's
+    // stop_and_wait() may return and reset m_in_req_c, so all accesses
+    // to the ring must happen while the flag still indicates "running".
     if (progress) {
         const auto seq = m_in_req_c->get_message_reading_sequence();
         progress->request_sequence = seq;
@@ -485,6 +487,8 @@ void Process_message_reader::request_reader_function()
     if (s_mproc) {
         s_mproc->notify_delivery_progress();
     }
+
+    end_reading_session(m_in_req_c, m_req_running);
 
     s_tl_current_request_reader = nullptr;
     tl_is_req_thread = false;
@@ -694,8 +698,10 @@ void Process_message_reader::reply_reader_function()
         publish_reply_progress(m_in_rep_c->get_message_reading_sequence());
     }
 
-    end_reading_session(m_in_rep_c, m_rep_running);
-
+    // Update delivery progress BEFORE end_reading_session, which sets
+    // m_rep_running = false.  Once that flag is cleared the destructor's
+    // stop_and_wait() may return and reset m_in_rep_c, so all accesses
+    // to the ring must happen while the flag still indicates "running".
     publish_reply_progress(m_in_rep_c->get_message_reading_sequence());
 
     if (progress) {
@@ -704,6 +710,8 @@ void Process_message_reader::reply_reader_function()
     if (s_mproc) {
         s_mproc->notify_delivery_progress();
     }
+
+    end_reading_session(m_in_rep_c, m_rep_running);
 
 }
 
