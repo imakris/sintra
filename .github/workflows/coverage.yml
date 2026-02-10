@@ -86,15 +86,13 @@ jobs:
           # Continue even on test failure to collect coverage data
           python3 run_tests.py --timeout 120 --build-dir ../${{ env.BUILD_DIR }} --config Debug || true
 
-      # GCC: strict capture (includes unexecuted lines/files), then keep only library headers
+      # GCC: capture executed lines, then keep only library headers
       - name: Coverage (lcov/gcc)
         if: matrix.compiler == 'gcc'
         working-directory: ${{ env.BUILD_DIR }}
         run: |
           # Use --ignore-errors negative for multi-threaded test race conditions
-          lcov --quiet --capture --initial --directory . --ignore-errors negative -o base.info
-          lcov --quiet --capture --directory . --ignore-errors negative -o test.info
-          lcov --quiet -a base.info -a test.info --ignore-errors negative -o lcov.all.info
+          lcov --quiet --capture --directory . --ignore-errors negative -o lcov.all.info
           lcov --quiet --extract lcov.all.info "*/include/sintra/*" --ignore-errors negative -o lcov.info
           lcov --list lcov.info || true
 
@@ -131,6 +129,31 @@ jobs:
           lcov --quiet $LCOV_PARTS --ignore-errors negative -o lcov.all.info
           lcov --quiet --extract lcov.all.info "*/include/sintra/*" --ignore-errors negative -o lcov.info
           lcov --list lcov.info || true
+
+      - name: Summarize coverage (lcov)
+        if: always()
+        working-directory: ${{ env.BUILD_DIR }}
+        shell: bash
+        run: |
+          if [ ! -f lcov.info ]; then
+            echo "No lcov.info found; skipping summary."
+            exit 0
+          fi
+
+          LF=$(grep -h "^LF:" lcov.info | awk -F: '{s+=$2} END{print s+0}')
+          LH=$(grep -h "^LH:" lcov.info | awk -F: '{s+=$2} END{print s+0}')
+          if [ "$LF" -gt 0 ]; then
+            PCT=$(awk -v lh="$LH" -v lf="$LF" 'BEGIN { printf "%.2f", (lh/lf*100.0) }')
+          else
+            PCT="0.00"
+          fi
+
+          echo "Line coverage: $LH / $LF ($PCT%)"
+          {
+            echo "### ${{ matrix.compiler }} coverage"
+            echo ""
+            echo "Line coverage: **$LH / $LF ($PCT%)**"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload coverage to Codecov
         if: always()

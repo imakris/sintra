@@ -35,7 +35,8 @@
 ![Header-only](https://img.shields.io/badge/header--only-yes-lightgrey)
 ![C++17](https://img.shields.io/badge/C%2B%2B-17-blue)
 ![License: BSD-2-Clause](https://img.shields.io/badge/license-BSD--2--Clause-green)
-![Codecov](https://codecov.io/gh/imakris/sintra/branch/master/graph/badge.svg)
+![Codecov GCC](https://codecov.io/gh/imakris/sintra/branch/master/graph/badge.svg?flag=gcc)
+![Codecov Clang](https://codecov.io/gh/imakris/sintra/branch/master/graph/badge.svg?flag=clang)
 
 Sintra is a C++17 library for type-safe interprocess communication on a single host.
 It lets independent processes exchange typed messages, broadcast events, and invoke
