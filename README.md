@@ -31,12 +31,28 @@
   </tbody>
 </table>
 
+<table>
+  <thead>
+    <tr>
+      <th colspan="2">Coverage</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Linux (gcc)</td>
+      <td style="text-align:center;"><img alt="Codecov GCC" src="https://codecov.io/gh/imakris/sintra/branch/master/graph/badge.svg?flag=gcc" style="display:block;margin:0 auto;"></td>
+    </tr>
+    <tr>
+      <td>Linux (clang)</td>
+      <td style="text-align:center;"><img alt="Codecov Clang" src="https://codecov.io/gh/imakris/sintra/branch/master/graph/badge.svg?flag=clang" style="display:block;margin:0 auto;"></td>
+    </tr>
+  </tbody>
+</table>
+
 
 ![Header-only](https://img.shields.io/badge/header--only-yes-lightgrey)
 ![C++17](https://img.shields.io/badge/C%2B%2B-17-blue)
 ![License: BSD-2-Clause](https://img.shields.io/badge/license-BSD--2--Clause-green)
-![Codecov GCC](https://codecov.io/gh/imakris/sintra/branch/master/graph/badge.svg?flag=gcc)
-![Codecov Clang](https://codecov.io/gh/imakris/sintra/branch/master/graph/badge.svg?flag=clang)
 
 Sintra is a C++17 library for type-safe interprocess communication on a single host.
 It lets independent processes exchange typed messages, broadcast events, and invoke
