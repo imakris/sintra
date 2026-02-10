@@ -111,9 +111,9 @@ jobs:
           EOF
           chmod +x llvm-cov-gcov
 
-          lcov --quiet --capture --directory . --ignore-errors negative \
+          lcov --quiet --capture --directory . --ignore-errors negative,inconsistent \
             --gcov-tool "$(pwd)/llvm-cov-gcov" -o lcov.all.info
-          lcov --quiet --extract lcov.all.info "*/include/sintra/*" --ignore-errors negative -o lcov.info
+          lcov --quiet --extract lcov.all.info "*/include/sintra/*" --ignore-errors negative,inconsistent -o lcov.info
           lcov --list lcov.info || true
 
       - name: Summarize coverage (lcov)
