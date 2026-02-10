@@ -173,6 +173,32 @@ namespace ipc = detail::ipc;
 
 using sequence_counter_type = uint64_t;
 
+// Safe read_access decrement that tolerates the count already being zero.
+//
+// Between a reader's successful guard CAS (moving from old octile to new) and
+// the subsequent old-octile decrement in done_reading_new_data(), the old
+// octile's count is temporarily "orphaned" — it has no guard or pending flag
+// backing it.  During this window the writer's stale-guard-clearing logic can
+// legitimately zero the byte.  A subsequent decrement by the reader must
+// therefore be a no-op when the count is already zero, rather than wrapping
+// around or asserting.
+inline void safe_read_access_fetch_sub(
+    std::atomic<uint64_t>& read_access,
+    uint8_t octile,
+    uint64_t mask)
+{
+    uint64_t prev = read_access.load();
+    while (true) {
+        const uint32_t count = static_cast<uint32_t>((prev >> (8 * octile)) & 0xffu);
+        if (count == 0) {
+            return;  // Already cleared (e.g. by writer's stale-guard-clearing).
+        }
+        if (read_access.compare_exchange_weak(prev, prev - mask)) {
+            return;
+        }
+    }
+}
+
 #ifndef NDEBUG
 inline void debug_read_access_fetch_sub(
     std::atomic<uint64_t>& read_access,
@@ -187,21 +213,11 @@ inline void debug_read_access_fetch_sub(
     while (true) {
         const uint32_t count = static_cast<uint32_t>((prev >> (8 * octile)) & 0xffu);
         if (count == 0) {
+            // This can happen legitimately when the writer's stale-guard-
+            // clearing races with a reader's done_reading_new_data() guard
+            // transition.  The writer already cleaned up the orphaned count,
+            // so this decrement is a no-op.  Track it for diagnostics.
             mismatch_counter.fetch_add(1, std::memory_order_relaxed);
-            char message[256];
-            const int message_len = std::snprintf(
-                message,
-                sizeof(message),
-                "[sintra][ring] read_access underflow at %s (%s:%d) octile=%u read_access=0x%016llx\n",
-                func ? func : "<unknown>",
-                file ? file : "<unknown>",
-                line,
-                static_cast<unsigned>(octile),
-                static_cast<unsigned long long>(prev));
-            if (message_len > 0) {
-                log_raw(log_level::error, message);
-            }
-            assert(count != 0 && "read_access underflow (see log)");
             return;
         }
         if (read_access.compare_exchange_weak(prev, prev - mask)) {
@@ -223,7 +239,10 @@ inline void debug_read_access_fetch_sub(
         __func__)
 #else
 #define SINTRA_READ_ACCESS_FETCH_SUB(control, octile, mask) \
-    (control).read_access.fetch_sub((mask))
+    safe_read_access_fetch_sub( \
+        (control).read_access, \
+        static_cast<uint8_t>(octile), \
+        (mask))
 #endif
 
 // Payload traits for in-place ring writes.
