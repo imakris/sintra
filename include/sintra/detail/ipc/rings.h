@@ -1929,39 +1929,42 @@ struct Ring_R : Ring<T, true>
             return m_reading_sequence->load() == c.leading_sequence;
         };
 
+        bool stay_in_blocking_phase = false;
         while (true) {
-            bool heartbeat_timeout = false;
+            bool blocking_wait_timed_out = false;
             if (m_stopping) {
                 return Range<T>{};
             }
 
-            // Phase 1 - fast spin: aggressively poll for a very short window to
-            // deliver sub-100us wakeups when the writer is still active.
-            const double fast_spin_end = get_wtime() + fast_spin_duration;
-            while (sequences_equal() && get_wtime() < fast_spin_end) {
-                if (m_stopping) {
-                    return Range<T>{};
-                }
-            }
-
-            if (sequences_equal()) {
-                // Phase 2 - precision sleeps: yield the CPU in 1ms slices while
-                // still polling at a high enough cadence to catch bursts quickly.
-                Scoped_timer_resolution timer_resolution_guard(1);
-                const double precision_sleep_end = get_wtime() + precision_sleep_duration;
-                while (sequences_equal() && get_wtime() < precision_sleep_end) {
+            if (!stay_in_blocking_phase) {
+                // Phase 1 - fast spin: aggressively poll for a very short window to
+                // deliver sub-100us wakeups when the writer is still active.
+                const double fast_spin_end = get_wtime() + fast_spin_duration;
+                while (sequences_equal() && get_wtime() < fast_spin_end) {
                     if (m_stopping) {
                         return Range<T>{};
                     }
-                    const auto seq_now = c.global_unblock_sequence.load();
-                    if (seq_now != m_seen_unblock_sequence) {
-                        m_seen_unblock_sequence = seq_now;
-                        if (!sequences_equal()) {
-                            return produce_range();
+                }
+
+                if (sequences_equal()) {
+                    // Phase 2 - precision sleeps: yield the CPU in 1ms slices while
+                    // still polling at a high enough cadence to catch bursts quickly.
+                    Scoped_timer_resolution timer_resolution_guard(1);
+                    const double precision_sleep_end = get_wtime() + precision_sleep_duration;
+                    while (sequences_equal() && get_wtime() < precision_sleep_end) {
+                        if (m_stopping) {
+                            return Range<T>{};
                         }
-                        return Range<T>{};
+                        const auto seq_now = c.global_unblock_sequence.load();
+                        if (seq_now != m_seen_unblock_sequence) {
+                            m_seen_unblock_sequence = seq_now;
+                            if (!sequences_equal()) {
+                                return produce_range();
+                            }
+                            return Range<T>{};
+                        }
+                        precision_sleep_for(std::chrono::duration<double>(precision_sleep_cycle));
                     }
-                    precision_sleep_for(std::chrono::duration<double>(precision_sleep_cycle));
                 }
             }
 
@@ -2025,7 +2028,8 @@ struct Ring_R : Ring<T, true>
                                 c.ready_stack.push(current);
                                 m_sleepy_index = -1;
                             }
-                            heartbeat_timeout = true;
+                            stay_in_blocking_phase = true;
+                            blocking_wait_timed_out = true;
                             break;
                         }
 
@@ -2050,7 +2054,7 @@ struct Ring_R : Ring<T, true>
             if (!sequences_equal()) {
                 return produce_range();
             }
-            if (heartbeat_timeout) {
+            if (blocking_wait_timed_out) {
                 continue;
             }
             return Range<T>{};
