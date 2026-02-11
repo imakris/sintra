@@ -2272,6 +2272,9 @@ struct Ring_R : Ring<T, true>
     }
 
 public:
+    // Eviction notification is edge-triggered and independent from the returned
+    // range shape. Callers should consume it after each wait_for_new_data() call;
+    // an eviction may be reported alongside either empty or non-empty ranges.
     bool consume_eviction_notification()
     {
         return m_evicted_since_last_wait.exchange(false);

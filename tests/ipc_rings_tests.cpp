@@ -952,7 +952,6 @@ STRESS_TEST(stress_multi_reader_throughput)
                     auto range = reader.wait_for_new_data();
                     if (reader.consume_eviction_notification()) {
                         reader_evicted[rid] = true;
-                        continue;
                     }
                     if (!range.begin || range.begin == range.end) {
                         if (writer_done) {
