@@ -908,45 +908,48 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
     using return_type = typename MESSAGE_T::return_type;
     using return_message_type = Message<Enclosure<return_type>, void, not_defined_type_id>;
 
-    Outstanding_rpc_control orpcc;
-    orpcc.remote_instance = instance_id;
-    Unserialized_Enclosure<return_type> rm_body;
-    
-    type_id_type ex_tid = not_defined_type_id;
-    std::string ex_what;
+    struct Rpc_state
+    {
+        Outstanding_rpc_control control;
+        Unserialized_Enclosure<return_type> return_body;
+        type_id_type exception_type_id = not_defined_type_id;
+        std::string exception_what;
+        instance_id_type function_instance_id = invalid_instance_id;
+    };
 
-    instance_id_type function_instance_id = invalid_instance_id;
+    auto rpc_state = std::make_shared<Rpc_state>();
+    rpc_state->control.remote_instance = instance_id;
 
     Return_handler rh;
-    rh.return_handler = [&] (const Message_prefix& msg) {
+    rh.return_handler = [rpc_state] (const Message_prefix& msg) {
         const auto& returned_message = (const return_message_type&)(msg);
-        lock_guard<mutex> sl(orpcc.keep_waiting_mutex);
-        rm_body = returned_message;
-        orpcc.success = true;
-        orpcc.keep_waiting = false;
-        orpcc.keep_waiting_condition.notify_all();
+        lock_guard<mutex> sl(rpc_state->control.keep_waiting_mutex);
+        rpc_state->return_body = returned_message;
+        rpc_state->control.success = true;
+        rpc_state->control.keep_waiting = false;
+        rpc_state->control.keep_waiting_condition.notify_all();
     };
-    rh.exception_handler = [&] (const Message_prefix& msg) {
+    rh.exception_handler = [rpc_state] (const Message_prefix& msg) {
         const auto& returned_message = (const exception&)(msg);
-        lock_guard<mutex> sl(orpcc.keep_waiting_mutex);
-        orpcc.success = false;
-        ex_tid = returned_message.exception_type_id;
-        ex_what = returned_message.what;
-        orpcc.keep_waiting = false;
-        orpcc.keep_waiting_condition.notify_all();
+        lock_guard<mutex> sl(rpc_state->control.keep_waiting_mutex);
+        rpc_state->control.success = false;
+        rpc_state->exception_type_id = returned_message.exception_type_id;
+        rpc_state->exception_what = returned_message.what;
+        rpc_state->control.keep_waiting = false;
+        rpc_state->control.keep_waiting_condition.notify_all();
     };
-    rh.deferral_handler = [&] (const Message_prefix& msg) {
+    rh.deferral_handler = [rpc_state] (const Message_prefix& msg) {
 
         const auto& returned_message = (const deferral&)(msg);
-        lock_guard<mutex> sl(orpcc.keep_waiting_mutex);
+        lock_guard<mutex> sl(rpc_state->control.keep_waiting_mutex);
         // the 'success' variable here is irrelevant
 
         // if the new_id differs, then replace it
-        assert(returned_message.new_fiid != function_instance_id);
+        assert(returned_message.new_fiid != rpc_state->function_instance_id);
         // Move the active return handler from the temporary id to the final id
-        s_mproc->replace_return_handler_id(function_instance_id, returned_message.new_fiid);
+        s_mproc->replace_return_handler_id(rpc_state->function_instance_id, returned_message.new_fiid);
         // Keep the caller-side handle in sync so that later cleanup removes the correct entry
-        function_instance_id = returned_message.new_fiid;
+        rpc_state->function_instance_id = returned_message.new_fiid;
 
         // replaces the placement of the handler (message instance id)
         // with the one received by the remote call
@@ -960,23 +963,38 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
     // s_outstanding_rpcs_mutex first, then keep_waiting_mutex).
     {
         unique_lock<mutex> orpclock(s_outstanding_rpcs_mutex());
-        s_outstanding_rpcs().insert(&orpcc);
+        s_outstanding_rpcs().insert(&rpc_state->control);
     }
 
     // block until reading thread either receives results or the call fails
-    unique_lock<mutex> sl(orpcc.keep_waiting_mutex);
+    unique_lock<mutex> sl(rpc_state->control.keep_waiting_mutex);
 
     rh.instance_id = instance_id;
-    function_instance_id = s_mproc->activate_return_handler(rh);
+    try {
+        rpc_state->function_instance_id = s_mproc->activate_return_handler(rh);
 
-    // write the message for the rpc call into the communication ring
-    static auto once = MESSAGE_T::id();
-    (void)(once); // suppress unused variable warning
-    MESSAGE_T* msg = s_mproc->m_out_req_c->write<MESSAGE_T>(vb_size<MESSAGE_T>(args...), args...);
-    msg->sender_instance_id = s_mproc->m_instance_id;
-    msg->receiver_instance_id = instance_id;
-    msg->function_instance_id = function_instance_id;
-    s_mproc->m_out_req_c->done_writing();
+        // write the message for the rpc call into the communication ring
+        static auto once = MESSAGE_T::id();
+        (void)(once); // suppress unused variable warning
+        MESSAGE_T* msg = s_mproc->m_out_req_c->write<MESSAGE_T>(vb_size<MESSAGE_T>(args...), args...);
+        msg->sender_instance_id = s_mproc->m_instance_id;
+        msg->receiver_instance_id = instance_id;
+        msg->function_instance_id = rpc_state->function_instance_id;
+        s_mproc->m_out_req_c->done_writing();
+    }
+    catch (...) {
+        const auto function_instance_id = rpc_state->function_instance_id;
+
+        if (function_instance_id != invalid_instance_id) {
+            s_mproc->deactivate_return_handler(function_instance_id);
+        }
+        sl.unlock();
+        {
+            unique_lock<mutex> orpclock(s_outstanding_rpcs_mutex());
+            s_outstanding_rpcs().erase(&rpc_state->control);
+        }
+        throw;
+    }
 
     //    _       .//'
     //   (_).  .//'                          TODO: for an asynchronous implementation, cut here
@@ -986,22 +1004,25 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
 
     // Check if this is a fire-and-forget message (no reply expected)
     if constexpr (RPCTC::is_fire_and_forget) {
+        const auto function_instance_id = rpc_state->function_instance_id;
         // For fire-and-forget functions, don't wait for a reply
         sl.unlock();
         {
             unique_lock<mutex> orpclock(s_outstanding_rpcs_mutex());
-            s_outstanding_rpcs().erase(&orpcc);
+            s_outstanding_rpcs().erase(&rpc_state->control);
         }
         s_mproc->deactivate_return_handler(function_instance_id);
         // Return void (void_placeholder_t will be handled by the caller)
-        return rm_body.get_value();
+        return rpc_state->return_body.get_value();
     }
 
     // Wait until either a normal reply arrives or the RPC gets unblocked.
     // With predicate waiting plus Managed_process::unblock_rpc() (invoked on
     // coordinator loss and during finalize()), this wait is bounded and cannot
     // deadlock via lost notifications.
-    orpcc.keep_waiting_condition.wait(sl, [&]{ return !orpcc.keep_waiting; });
+    rpc_state->control.keep_waiting_condition.wait(sl, [&]{ return !rpc_state->control.keep_waiting; });
+
+    const auto function_instance_id = rpc_state->function_instance_id;
 
     // Release per-RPC mutex before touching the global outstanding set.
     // This maintains the lock ordering rule: always acquire s_outstanding_rpcs_mutex
@@ -1010,20 +1031,20 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
 
     {
         unique_lock<mutex> orpclock(s_outstanding_rpcs_mutex());
-        s_outstanding_rpcs().erase(&orpcc);
+        s_outstanding_rpcs().erase(&rpc_state->control);
     }
 
     // we can now disable the return message handler
     s_mproc->deactivate_return_handler(function_instance_id);
 
-    if (!orpcc.success) {
-        if (ex_tid != not_defined_type_id) {
+    if (!rpc_state->control.success) {
+        if (rpc_state->exception_type_id != not_defined_type_id) {
             // interprocess exception
-            string_to_exception(ex_tid, ex_what);
+            string_to_exception(rpc_state->exception_type_id, rpc_state->exception_what);
         }
         else {
             // rpc failure (distinguish between cancelled vs. other failures)
-            if (orpcc.cancelled) {
+            if (rpc_state->control.cancelled) {
                 throw rpc_cancelled("rpc cancelled");
             }
             else {
@@ -1032,7 +1053,7 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
         }
     }
 
-    return rm_body.get_value();
+    return rpc_state->return_body.get_value();
 }
 
 
