@@ -65,12 +65,5 @@ constexpr static decltype(resolve_single_arg(&LAMBDA_T::operator()))
 resolve_single_functor_arg(const LAMBDA_T&) {}
 
 
-template<typename VAR_T, typename OBJECT_T>
-constexpr static VAR_T resolve_var_type(VAR_T OBJECT_T::*) {}
-
-
-template<typename VAR_T, typename OBJECT_T>
-constexpr static OBJECT_T resolve_object_type(VAR_T OBJECT_T::*) {}
-
 } // namespace sintra
 

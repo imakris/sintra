@@ -90,11 +90,6 @@ void Transceiver::construct(const string& name/* = ""*/, uint64_t instance_id/* 
             throw runtime_error("Transceiver name assignment failed.");
         }
     }
-    /*
-    activate(
-        &Transceiver::instance_invalidated_handler,
-        Typed_instance_id<void>(any_local_or_remote) );
-    */
 }
 
 
@@ -172,14 +167,6 @@ Transceiver::release_rpc_execution()
 
 inline
 void
-Transceiver::stop_accepting_rpc_calls_and_wait()
-{
-    ensure_rpc_shutdown();
-}
-
-
-inline
-void
 Transceiver::ensure_rpc_shutdown()
 {
     unique_lock<mutex> lock(m_rpc_lifecycle_mutex);
@@ -240,7 +227,7 @@ void Transceiver::destroy()
         return;
     }
 
-    stop_accepting_rpc_calls_and_wait();
+    ensure_rpc_shutdown();
 
     if (this != s_mproc) {
         deactivate_all();
@@ -588,8 +575,7 @@ void Transceiver::send(Args&&... args)
 
     static_assert(sender_capability, "This type of sender cannot send messages of this type.");
 
-    static auto once = MESSAGE_T::id();
-    (void)(once); // suppress unused variable warning
+    [[maybe_unused]] static auto once = MESSAGE_T::id();
 
     MESSAGE_T* msg = s_mproc->m_out_req_c->write<MESSAGE_T>(vb_size<MESSAGE_T>(args...), args...);
     msg->sender_instance_id = m_instance_id;
@@ -749,8 +735,7 @@ void Transceiver::rpc_handler(Message_prefix& untyped_msg)
         return;
     }
     using return_message_type = Message<Enclosure<r_type>, void, not_defined_type_id>;
-    static auto once = return_message_type::id();
-    (void)(once); // suppress unused variable warning
+    [[maybe_unused]] static auto once = return_message_type::id();
 
     type_id_type etid = not_defined_type_id;
     string what;
@@ -1116,11 +1101,10 @@ Transceiver::export_rpc_impl()
 
     // handler registration
     using RPCTC_o_type = typename RPCTC::o_type;
-    static auto once = [&] {
+    [[maybe_unused]] static auto once = [&] {
         get_rpc_handler_map().set_value(test, &RPCTC_o_type::template rpc_handler<RPCTC, MT>);
         return test;
     }();
-    (void)(once); // suppress unused variable warning
 
     return [instance_id]() {
         // Note: do NOT call ensure_rpc_shutdown() here - the transceiver may already

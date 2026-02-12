@@ -115,7 +115,7 @@ inline uint32_t get_current_pid()
 }
 
 #if defined(__linux__)
-static inline size_t sintra_detect_cache_line_size_linux()
+static inline size_t sintra_detect_cache_line_size()
 {
 #ifdef _SC_LEVEL1_DCACHE_LINESIZE
     long v = ::sysconf(_SC_LEVEL1_DCACHE_LINESIZE);
@@ -145,19 +145,8 @@ static inline size_t sintra_detect_cache_line_size_linux()
     }
     return 64;
 }
-
-static inline void sintra_warn_if_cacheline_mismatch(size_t assumed_cache_line_size)
-{
-    size_t detected = sintra_detect_cache_line_size_linux();
-    if (detected && detected != assumed_cache_line_size) {
-        Log_stream(log_level::warning)
-            << "sintra(ipc_rings): warning: detected L1D line " << detected
-            << " != assumed " << assumed_cache_line_size
-            << "; performance may be suboptimal.\n";
-    }
-}
 #elif defined(__APPLE__)
-static inline size_t sintra_detect_cache_line_size_macos()
+static inline size_t sintra_detect_cache_line_size()
 {
     auto query_size = [](const char* name) -> size_t {
         size_t value = 0;
@@ -177,10 +166,12 @@ static inline size_t sintra_detect_cache_line_size_macos()
 
     return 64;
 }
+#endif
 
+#if defined(__linux__) || defined(__APPLE__)
 static inline void sintra_warn_if_cacheline_mismatch(size_t assumed_cache_line_size)
 {
-    size_t detected = sintra_detect_cache_line_size_macos();
+    size_t detected = sintra_detect_cache_line_size();
     if (detected && detected != assumed_cache_line_size) {
         Log_stream(log_level::warning)
             << "sintra(ipc_rings): warning: detected L1D line " << detected
