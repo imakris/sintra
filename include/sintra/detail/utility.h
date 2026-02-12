@@ -793,25 +793,33 @@ bool spawn_detached_win32(const Spawn_detached_options& options)
         }
     }
 
+    auto init_startup_info = [](STARTUPINFOW& si_ref, DWORD cb_size) {
+        ZeroMemory(&si_ref, cb_size);
+        si_ref.cb = cb_size;
+        si_ref.dwFlags = STARTF_USESTDHANDLES;
+        si_ref.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+        si_ref.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+        si_ref.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+    };
+
+    auto restore_handle_flags = [&handle_guards]() {
+        for (const auto& guard : handle_guards) {
+            if (guard.active) {
+                const DWORD inherit_flag = (guard.flags & HANDLE_FLAG_INHERIT) ? HANDLE_FLAG_INHERIT : 0;
+                SetHandleInformation(guard.handle, HANDLE_FLAG_INHERIT, inherit_flag);
+            }
+        }
+    };
+
     for (unsigned attempt = 0; attempt < k_max_attempts; ++attempt) {
         STARTUPINFOW si {};
         STARTUPINFOW* si_ptr = nullptr;
         if (use_handle_list) {
-            ZeroMemory(&si_ex, sizeof(si_ex));
-            si_ex.StartupInfo.cb = sizeof(si_ex);
-            si_ex.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
-            si_ex.StartupInfo.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
-            si_ex.StartupInfo.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
-            si_ex.StartupInfo.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+            init_startup_info(si_ex.StartupInfo, sizeof(si_ex));
             si_ptr = &si_ex.StartupInfo;
         }
         else {
-            ZeroMemory(&si, sizeof(si));
-            si.cb = sizeof(si);
-            si.dwFlags = STARTF_USESTDHANDLES;
-            si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
-            si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
-            si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+            init_startup_info(si, sizeof(si));
             si_ptr = &si;
         }
 
@@ -853,12 +861,7 @@ bool spawn_detached_win32(const Spawn_detached_options& options)
             if (use_handle_list && si_ex.lpAttributeList) {
                 delete_proc_thread_attribute_list(si_ex.lpAttributeList);
             }
-            for (const auto& guard : handle_guards) {
-                if (guard.active) {
-                    const DWORD inherit_flag = (guard.flags & HANDLE_FLAG_INHERIT) ? HANDLE_FLAG_INHERIT : 0;
-                    SetHandleInformation(guard.handle, HANDLE_FLAG_INHERIT, inherit_flag);
-                }
-            }
+            restore_handle_flags();
             return true;
         }
 
@@ -899,12 +902,7 @@ bool spawn_detached_win32(const Spawn_detached_options& options)
     if (use_handle_list && si_ex.lpAttributeList) {
         delete_proc_thread_attribute_list(si_ex.lpAttributeList);
     }
-    for (const auto& guard : handle_guards) {
-        if (guard.active) {
-            const DWORD inherit_flag = (guard.flags & HANDLE_FLAG_INHERIT) ? HANDLE_FLAG_INHERIT : 0;
-            SetHandleInformation(guard.handle, HANDLE_FLAG_INHERIT, inherit_flag);
-        }
-    }
+    restore_handle_flags();
     return false;
 }
 #else

@@ -392,15 +392,6 @@ public:
         type_id_type ex_tid,
         instance_id_type fallback_sender_iid = invalid_instance_id);
 
-    //template <
-    //    typename RPCTC,
-    //    typename MESSAGE_T,
-    //    typename = void,
-    //    typename = enable_if_t<is_same< typename RPCTC::r_type, void>::value>
-    //>
-    //static void rpc_handler(Message_prefix& untyped_msg);
-
-
     template <
         typename RPCTC,
         typename MESSAGE_T
@@ -554,7 +545,6 @@ private:
 
     Rpc_execution_guard try_acquire_rpc_execution();
     void release_rpc_execution();
-    void stop_accepting_rpc_calls_and_wait();
     void ensure_rpc_shutdown();
 
     // Handlers of return messages (i.e. messages delivering the results of function messages).
