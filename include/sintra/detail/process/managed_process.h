@@ -284,8 +284,9 @@ struct Managed_process: Derived_transceiver<Managed_process>
     // avoid reentrancy issues.
     mutex                               m_availability_mutex;
 
-    // TODO: FIXME: The recursive can be easily avoided. Implement an additional
-    // activation path.
+    // Named-instance activation can re-enter the activation path when
+    // call_on_availability() invokes the callback inline for an already
+    // published transceiver, so this registry lock must currently be recursive.
     recursive_mutex                     m_handlers_mutex;
 
     // Calls f when the specified transceiver becomes available.

@@ -982,10 +982,10 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
     }
 
     //    _       .//'
-    //   (_).  .//'                          TODO: for an asynchronous implementation, cut here
+    //   (_).  .//'                          NOTE: This is intentionally synchronous.
     // -- _  O|| --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --
-    //   (_)'  '\\.
-    //            '\\.
+    //   (_)'  '\\.                          An async variant could split here and keep
+    //            '\\.                       waiting on rpc_state as a continuation.
 
     // Check if this is a fire-and-forget message (no reply expected)
     if constexpr (RPCTC::is_fire_and_forget) {
