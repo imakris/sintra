@@ -33,6 +33,60 @@ void install_signal_handler();
 
 inline bool thread_local tl_is_req_thread = false;
 
+inline bool validate_relay_sender(
+    Message_prefix& message,
+    instance_id_type ring_owner,
+    const char* ring_name)
+{
+    const instance_id_type sender_process = process_of(message.sender_instance_id);
+    const instance_id_type coordinator_process = process_of(s_coord_id);
+    if (ring_owner == sender_process || ring_owner == coordinator_process) {
+        return true;
+    }
+
+    Log_stream(log_level::warning)
+        << "Sintra dropped a message on the " << ring_name
+        << " ring because sender_instance_id="
+        << static_cast<unsigned long long>(message.sender_instance_id)
+        << " does not belong to ring owner "
+        << static_cast<unsigned long long>(ring_owner)
+        << " or coordinator process "
+        << static_cast<unsigned long long>(coordinator_process) << ".\n";
+    return false;
+}
+
+inline bool validate_request_message(Message_prefix& message, instance_id_type ring_owner)
+{
+    if (!validate_relay_sender(message, ring_owner, "request")) {
+        return false;
+    }
+
+    if (message.message_type_id == not_defined_type_id) {
+        Log_stream(log_level::warning)
+            << "Sintra dropped a request message with undefined message_type_id from sender_instance_id="
+            << static_cast<unsigned long long>(message.sender_instance_id) << ".\n";
+        return false;
+    }
+
+    return true;
+}
+
+inline bool validate_reply_message(Message_prefix& message, instance_id_type ring_owner)
+{
+    if (!validate_relay_sender(message, ring_owner, "reply")) {
+        return false;
+    }
+
+    if (message.receiver_instance_id == any_local) {
+        Log_stream(log_level::warning)
+            << "Sintra dropped a reply message with invalid any_local receiver from sender_instance_id="
+            << static_cast<unsigned long long>(message.sender_instance_id) << ".\n";
+        return false;
+    }
+
+    return true;
+}
+
 inline void dispatch_event_handlers(
     Message_prefix& message,
     std::initializer_list<instance_id_type> scope_ids,
@@ -337,15 +391,10 @@ void Process_message_reader::request_reader_function()
             break;
         }
 
-        // Only the process with the coordinator's instance is allowed to send messages on
-        // someone else's behalf (for relay purposes).
-        // TODO: If some process not being part of the core set of processes sends nonsense,
-        // it might be a good idea to kill it. If it is in the core set of processes,
-        // then it would be a bug.
-        assert(m_in_req_c->m_id == process_of(m->sender_instance_id) ||
-               m_in_req_c->m_id == process_of(s_coord_id));
-
-        assert(m->message_type_id != not_defined_type_id);
+        if (!validate_request_message(*m, m_in_req_c->m_id)) {
+            publish_request_progress(m_in_req_c->get_message_reading_sequence());
+            continue;
+        }
 
         if (is_local_instance(m->receiver_instance_id)) {
             if (m->receiver_instance_id == any_local) {
@@ -601,12 +650,10 @@ void Process_message_reader::reply_reader_function()
             break;
         }
 
-        // Only the process with the coordinator's instance is allowed to send messages on
-        // someone else's behalf (for relay purposes).
-        assert(m_in_rep_c->m_id == process_of(m->sender_instance_id) ||
-               m_in_rep_c->m_id == process_of(s_coord_id));
-
-        assert(m->receiver_instance_id != any_local);
+        if (!validate_reply_message(*m, m_in_rep_c->m_id)) {
+            publish_reply_progress(m_in_rep_c->get_message_reading_sequence());
+            continue;
+        }
 
         if (is_local_instance(m->receiver_instance_id)) {
 
