@@ -396,6 +396,29 @@ bool is_running(Process_handle& process)
     return !poll_exit(process);
 }
 
+bool wait_for_child_completion(
+    const std::filesystem::path& dir,
+    const std::string& test_case,
+    Process_handle& child,
+    int timeout_ms,
+    int& child_exit)
+{
+    if (test_case == k_case_disabled) {
+        if (!sintra::test::wait_for_file(child_done_path(dir, test_case), std::chrono::milliseconds(timeout_ms))) {
+            return false;
+        }
+
+        if (child.waitable) {
+            return wait_for_exit(child, timeout_ms, child_exit);
+        }
+
+        child_exit = 0;
+        return true;
+    }
+
+    return wait_for_exit(child, timeout_ms, child_exit);
+}
+
 bool process_exists(long long pid)
 {
 #ifdef _WIN32
@@ -447,6 +470,10 @@ int run_child(const std::filesystem::path& dir, const std::string& test_case, in
 
     if (test_case == k_case_disabled) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+        if (!write_text_file(child_done_path(dir, test_case), "done")) {
+            std::fprintf(stderr, "[child] failed to write done file\n");
+            std::_Exit(1);
+        }
         std::_Exit(0);
     }
 
@@ -869,7 +896,7 @@ bool run_owner_case(
     }
 
     int child_exit = 0;
-    if (!wait_for_exit(child, child_exit_timeout_ms, child_exit)) {
+    if (!wait_for_child_completion(dir, test_case, child, child_exit_timeout_ms, child_exit)) {
         std::fprintf(stderr, "[test] child did not exit in time\n");
         close_process(child);
         return false;
