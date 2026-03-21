@@ -34,15 +34,9 @@
 
 
 #ifdef _MSC_VER  // if compiling with Visual Studio
-
-#pragma warning( push )
-#pragma warning( disable : 4996 )
-
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-
-
 #endif // _MSC_VER
 
 
@@ -204,10 +198,4 @@ void set_lifecycle_handler(Lifecycle_handler handler);
 #include "detail/console.h"
 #include "detail/maildrop.h"
 #include "detail/runtime.h"
-
-
-#ifdef _MSC_VER
-#pragma warning( pop )
-#endif
-
 

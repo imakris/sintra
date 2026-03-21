@@ -22,7 +22,15 @@ namespace detail {
 // Debug pause functionality - only enabled when SINTRA_DEBUG_PAUSE_ON_EXIT is non-zero.
 inline bool is_debug_pause_requested()
 {
-    return SINTRA_DEBUG_PAUSE_ON_EXIT != 0;
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable: 4996)
+#endif
+    const bool requested = (SINTRA_DEBUG_PAUSE_ON_EXIT != 0);
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
+    return requested;
 }
 
 inline std::atomic<bool>& debug_pause_state()
