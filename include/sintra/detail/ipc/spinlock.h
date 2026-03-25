@@ -139,7 +139,7 @@ private:
         m_last_progress_ns.store(monotonic_now_ns(), std::memory_order_relaxed);
     }
 
-    std::atomic_flag    m_locked = ATOMIC_FLAG_INIT;
+    std::atomic_flag    m_locked{};
     std::atomic<uint32_t> m_owner_pid{0};
     std::atomic<uint64_t> m_last_progress_ns{0};
 };

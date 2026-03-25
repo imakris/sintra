@@ -26,6 +26,11 @@
 #include <thread>
 #include <vector>
 
+using sintra::s_mproc;
+using sintra::s_mproc_id;
+using sintra::s_coord;
+using sintra::s_coord_id;
+
 namespace {
 
 constexpr std::string_view k_worker_flag = "--managed_process_publish_worker";

@@ -154,14 +154,8 @@ p = ~3, i = ~4 -> All transceivers except 4, in all processes except process 3
 constexpr int num_transceiver_index_bits =
     sizeof(instance_id_type) * 8 - num_process_index_bits;
 
-static constexpr
-uint64_t flag_most_significant_bits(uint64_t v)
-{
-    return (v == (v | (v << 1))) ? v : flag_most_significant_bits(v | (v << 1));
-}
-
 constexpr uint64_t pid_mask =
-    flag_most_significant_bits(1ull << num_transceiver_index_bits);
+    ~((1ull << num_transceiver_index_bits) - 1);
 
 static_assert(num_process_index_bits < 16);
 constexpr int max_process_index =       (1u   << (num_process_index_bits     - 1)) - 1;

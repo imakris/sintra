@@ -150,9 +150,9 @@ Process_message_reader::Process_message_reader(
         s_mproc->m_directory, "req", m_process_instance_id, occurrence);
     m_in_rep_c = std::make_shared<Message_ring_R>(
         s_mproc->m_directory, "rep", m_process_instance_id, occurrence);
-    m_request_reader_thread = new thread([&] () { request_reader_function(); });
+    m_request_reader_thread = std::make_unique<thread>([&] () { request_reader_function(); });
     m_request_reader_thread->detach();
-    m_reply_reader_thread   = new thread([&] () { reply_reader_function();   });
+    m_reply_reader_thread   = std::make_unique<thread>([&] () { reply_reader_function();   });
     m_reply_reader_thread->detach();
 }
 
@@ -295,9 +295,9 @@ Process_message_reader::~Process_message_reader()
         exit(1);
     }
 
-    delete m_request_reader_thread;
+    m_request_reader_thread.reset();
     m_in_req_c.reset();
-    delete m_reply_reader_thread;
+    m_reply_reader_thread.reset();
     m_in_rep_c.reset();
 }
 

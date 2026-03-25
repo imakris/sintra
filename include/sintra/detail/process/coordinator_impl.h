@@ -78,7 +78,7 @@ sequence_counter_type Process_group::barrier(
     b.processes_arrived.insert(caller_piid);
     b.processes_pending.erase(caller_piid);
 
-    if (b.processes_pending.size() == 0) {
+    if (b.processes_pending.empty()) {
         // Last arrival
         auto additional_pids = b.processes_arrived;
         additional_pids.erase(caller_piid);

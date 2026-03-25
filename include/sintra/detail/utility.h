@@ -153,32 +153,26 @@ struct cstring_vector
         initialize();
     }
 
-    ~cstring_vector()
-    {
-        delete [] m_v;
-    }
-
     cstring_vector(const cstring_vector&) = delete;
     cstring_vector& operator=(const cstring_vector&) = delete;
     cstring_vector(cstring_vector&&) = delete;
     cstring_vector& operator=(cstring_vector&&) = delete;
 
-    const char* const* v() const { return m_v; }
+    const char* const* v() const { return m_v.data(); }
     size_t size() const { return m_storage.size(); }
 
 private:
     void initialize()
     {
-        const auto count = m_storage.size();
-        m_v = new const char*[count + 1];
-        for (size_t i = 0; i < count; ++i) {
-            m_v[i] = m_storage[i].c_str();
+        m_v.reserve(m_storage.size() + 1);
+        for (auto& s : m_storage) {
+            m_v.push_back(s.c_str());
         }
-        m_v[count] = nullptr;
+        m_v.push_back(nullptr);
     }
 
     std::vector<std::string> m_storage;
-    const char** m_v = nullptr;
+    std::vector<const char*> m_v;
 };
 
 
@@ -405,7 +399,7 @@ inline std::string env_key_of(const char* entry)
     return value.substr(0, pos);
 }
 
-template <typename StringT, typename = std::enable_if_t<!std::is_array<StringT>::value>>
+template <typename StringT, typename = std::enable_if_t<!std::is_array_v<StringT>>>
 inline StringT env_key_of(const StringT& entry)
 {
     const auto pos = entry.find(typename StringT::value_type('='));
@@ -923,11 +917,12 @@ bool spawn_detached_posix(const Spawn_detached_options& options)
 
     // yes, all that (because, Linux...)
 
-    #define IGNORE_SIGPIPE\
-        struct sigaction signal_ignored;\
-        memset(&signal_ignored, 0, sizeof(signal_ignored));\
-        signal_ignored.sa_handler = SIG_IGN;\
+    auto ignore_sigpipe = [] {
+        struct sigaction signal_ignored;
+        memset(&signal_ignored, 0, sizeof(signal_ignored));
+        signal_ignored.sa_handler = SIG_IGN;
         ::sigaction(SIGPIPE, &signal_ignored, 0);
+    };
 
     const char* prog = options.prog;
     const char* const* argv = options.argv;
@@ -1012,7 +1007,7 @@ bool spawn_detached_posix(const Spawn_detached_options& options)
     }
 
     if (child_pid == 0) {
-        IGNORE_SIGPIPE
+        ignore_sigpipe();
 
         if (ready_pipe[0] >= 0) {
             close(ready_pipe[0]);
@@ -1195,7 +1190,6 @@ bool spawn_detached_posix(const Spawn_detached_options& options)
 
     return true;
 
-    #undef IGNORE_SIGPIPE
 
 }
 #endif
@@ -1219,12 +1213,8 @@ bool spawn_detached(const Spawn_detached_options& options)
 
 struct Instantiator
 {
-    Instantiator(std::function<void()>&& deinstantiator):
+    Instantiator(std::function<void()> deinstantiator):
         m_deinstantiator(std::move(deinstantiator))
-    {}
-
-    Instantiator(const std::function<void()>& deinstantiator):
-        m_deinstantiator(deinstantiator)
     {}
 
     Instantiator(const Instantiator&) = delete;

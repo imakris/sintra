@@ -20,6 +20,8 @@
 #include <thread>
 #include <vector>
 
+using sintra::s_mproc_id;
+
 namespace {
 
 struct Hello {

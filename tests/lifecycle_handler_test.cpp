@@ -34,6 +34,9 @@
 #include <thread>
 #include <vector>
 
+using sintra::s_mproc_id;
+using sintra::s_coord_id;
+
 namespace {
 
 // Worker IDs for correlation

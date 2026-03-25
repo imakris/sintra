@@ -51,10 +51,10 @@
 
 
 ![Header-only](https://img.shields.io/badge/header--only-yes-lightgrey)
-![C++17](https://img.shields.io/badge/C%2B%2B-17-blue)
+![C++20](https://img.shields.io/badge/C%2B%2B-20-blue)
 ![License: BSD-2-Clause](https://img.shields.io/badge/license-BSD--2--Clause-green)
 
-Sintra is a C++17 library for type-safe interprocess communication on a single host.
+Sintra is a C++20 library for type-safe interprocess communication on a single host.
 It lets independent processes exchange typed messages, broadcast events, and invoke
 RPC-style calls with a compile-time-checked API, avoiding string-based protocols and
 external brokers. It also provides coordination primitives such as named barriers,
@@ -116,7 +116,7 @@ sintra::activate_slot([](const Ping&) {
 ## Getting started
 
 1. The `include/` directory must be on the project's include path.
-2. A C++17 compliant compiler is required (GCC, Clang, or MSVC are supported).
+2. A C++20 compliant compiler is required (GCC, Clang, or MSVC are supported).
 3. The `example/` directory contains signal bus, channel, and remote call samples.
 
 Because everything ships as headers, Sintra works well in monorepos or projects that

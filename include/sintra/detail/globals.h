@@ -47,10 +47,10 @@ private:
     instance_id_type   m_coordinator_id       = 0;
 };
 
-#define s_mproc    sintra::runtime_state::instance().managed_process_ref()
-#define s_coord    sintra::runtime_state::instance().coordinator_ref()
-#define s_mproc_id sintra::runtime_state::instance().managed_process_id_ref()
-#define s_coord_id sintra::runtime_state::instance().coordinator_id_ref()
+inline auto& s_mproc    = runtime_state::instance().managed_process_ref();
+inline auto& s_coord    = runtime_state::instance().coordinator_ref();
+inline auto& s_mproc_id = runtime_state::instance().managed_process_id_ref();
+inline auto& s_coord_id = runtime_state::instance().coordinator_id_ref();
 
 }
 
