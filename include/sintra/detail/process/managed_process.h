@@ -215,7 +215,7 @@ struct Managed_process: Derived_transceiver<Managed_process>
 
 
     Managed_process(Managed_process const&) = delete;
-    void operator=(Managed_process const&)  = delete;
+    Managed_process& operator=(Managed_process const&) = delete;
 
 
     string                              m_binary_name;
@@ -232,7 +232,7 @@ struct Managed_process: Derived_transceiver<Managed_process>
     inline
     string obtain_swarm_directory();
 
-    function<int()> m_entry_function = [&] ()->int { return 0; };
+    function<int()> m_entry_function = [] { return 0; };
 
     sequence_counter_type               m_last_message_sequence;
 

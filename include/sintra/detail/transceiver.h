@@ -83,12 +83,7 @@ struct tn_type
     type_id_type                            type_id = 0;
     string                                  name;
 
-    bool operator==(const tn_type& rhs) const
-    {
-        return
-            type_id == rhs.type_id &&
-            name    == rhs.name;
-    }
+    bool operator==(const tn_type&) const = default;
 };
 
 
