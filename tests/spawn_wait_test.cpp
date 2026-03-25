@@ -28,6 +28,8 @@
 #include <string_view>
 #include <thread>
 
+using sintra::s_coord_id;
+
 namespace {
 
 constexpr std::string_view k_env_worker_mode = "SPAWN_WAIT_TEST_WORKER";

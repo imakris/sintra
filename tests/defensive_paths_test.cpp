@@ -11,6 +11,8 @@
 #include <string_view>
 #include <vector>
 
+using sintra::s_mproc_id;
+
 namespace {
 
 constexpr std::string_view k_prefix = "defensive_paths_test: ";

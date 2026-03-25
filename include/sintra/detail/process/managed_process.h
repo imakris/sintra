@@ -37,8 +37,6 @@
 #include <type_traits>
 #include <vector>
 
-#undef max
-
 
 
 namespace sintra {

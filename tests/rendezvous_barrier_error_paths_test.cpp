@@ -26,6 +26,9 @@
 namespace {
 
 using namespace std::chrono_literals;
+using sintra::s_mproc;
+using sintra::s_mproc_id;
+using sintra::s_coord_id;
 
 constexpr const char* k_deadlock_child_arg = "--rendezvous_deadlock_child";
 constexpr const char* k_deadlock_ready_arg = "--rendezvous_deadlock_ready";

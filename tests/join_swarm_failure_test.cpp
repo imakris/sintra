@@ -5,6 +5,8 @@
 #include <filesystem>
 #include <string>
 
+using sintra::s_coord;
+
 int main(int argc, char* argv[])
 {
     sintra::init(argc, argv);

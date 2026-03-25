@@ -20,6 +20,8 @@
 #include <stdexcept>
 #include <string>
 
+using sintra::s_coord_id;
+
 namespace {
 
 struct Test_bus : sintra::Derived_transceiver<Test_bus>
