@@ -399,7 +399,7 @@ inline std::string env_key_of(const char* entry)
     return value.substr(0, pos);
 }
 
-template <typename StringT, typename = std::enable_if_t<!std::is_array<StringT>::value>>
+template <typename StringT, typename = std::enable_if_t<!std::is_array_v<StringT>>>
 inline StringT env_key_of(const StringT& entry)
 {
     const auto pos = entry.find(typename StringT::value_type('='));

@@ -112,10 +112,7 @@ struct typed_variable_buffer_alignment<
 >
 {
     using value_type = typename std::decay_t<T>::value_type;
-    static constexpr std::size_t value =
-        alignof(value_type) < alignof(variable_buffer)
-            ? alignof(variable_buffer)
-            : alignof(value_type);
+    static constexpr std::size_t value = std::max(alignof(value_type), alignof(variable_buffer));
 };
 
 } // namespace detail
@@ -158,13 +155,9 @@ public:
 
 template <typename T>
 struct is_variable_buffer_argument
-    : std::integral_constant<
-        bool,
+    : std::bool_constant<
         is_convertible<T, variable_buffer>::value ||
-        is_base_of<
-            variable_buffer,
-            typename remove_cv<typename remove_reference<T>::type>::type
-        >::value
+        is_base_of<variable_buffer, std::remove_cvref_t<T>>::value
     >
 {};
 
@@ -207,7 +200,7 @@ inline size_t accumulate_vb_size(size_t offset)
 template <typename T, typename... Args>
 size_t accumulate_vb_size(size_t offset, const T& value, Args&&... args)
 {
-    using decayed = typename std::remove_reference<T>::type;
+    using decayed = std::remove_reference_t<T>;
 
     if constexpr (
         std::is_convertible_v<decayed, variable_buffer> &&
@@ -301,13 +294,12 @@ struct transformer<T, true, IRRELEVANT>
 template <typename T>
 struct transformer<T, false, true>
 {
-    using decayed_type = typename remove_reference<T>::type;
-    using bare_type = typename remove_cv<decayed_type>::type;
-    using type = typename std::conditional<
+    using bare_type = std::remove_cvref_t<T>;
+    using type = std::conditional_t<
         is_base_of<variable_buffer, bare_type>::value,
-        decayed_type,
+        std::remove_reference_t<T>,
         typed_variable_buffer<bare_type>
-    >::type;
+    >;
 };
 
 
@@ -328,14 +320,14 @@ struct serializable_type_impl
 {
     using arg_type = typename detail::message_args_nth_type<SEQ_T, I>::type;
     using transformed_type =
-        typename transformer<typename remove_reference<arg_type>::type>::type;
+        typename transformer<std::remove_reference_t<arg_type>>::type;
     using aggregate_type =
         serializable_type_impl<SEQ_T, I + 1, J, Args..., transformed_type>;
     using type = typename aggregate_type::type;
     static constexpr bool has_variable_buffers = aggregate_type::has_variable_buffers ||
         !is_same<
-            typename remove_reference<arg_type        >::type,
-            typename remove_reference<transformed_type>::type
+            std::remove_reference_t<arg_type>,
+            std::remove_reference_t<transformed_type>
         >::value;
 };
 
@@ -652,7 +644,7 @@ template <typename T>
 struct Enclosure<T, true, false>
 {
     T get_value() const { return value; }
-    typed_variable_buffer<typename remove_reference<T>::type> value;
+    typed_variable_buffer<std::remove_reference_t<T>> value;
 };
 
 
@@ -684,7 +676,7 @@ struct Unserialized_Enclosure<T, true, false>: Enclosure <T, true, false>
         return *this;
     }
 
-    typename remove_reference<T>::type free_value;
+    std::remove_reference_t<T> free_value;
 
     T get_value() const { return free_value; }
 };

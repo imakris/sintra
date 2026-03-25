@@ -11,8 +11,8 @@ namespace detail {
 
 template <typename T>
 using message_arg_storage_value_t = std::conditional_t<
-    std::is_reference<T>::value,
-    std::reference_wrapper<typename std::remove_reference<T>::type>,
+    std::is_reference_v<T>,
+    std::reference_wrapper<std::remove_reference_t<T>>,
     T>;
 
 template <std::size_t I, typename T>
@@ -22,16 +22,16 @@ struct message_arg_storage {
     storage_type value;
 
     template <typename U = storage_type,
-              typename = std::enable_if_t<std::is_default_constructible<U>::value>>
-    constexpr message_arg_storage() noexcept(std::is_nothrow_default_constructible<U>::value)
+              typename = std::enable_if_t<std::is_default_constructible_v<U>>>
+    constexpr message_arg_storage() noexcept(std::is_nothrow_default_constructible_v<U>)
         : value()
     {
     }
 
     template <typename U,
-              typename = std::enable_if_t<std::is_constructible<storage_type, U&&>::value>>
+              typename = std::enable_if_t<std::is_constructible_v<storage_type, U&&>>>
     constexpr message_arg_storage(U&& v) noexcept(
-        std::is_nothrow_constructible<storage_type, U&&>::value)
+        std::is_nothrow_constructible_v<storage_type, U&&>)
         : value(std::forward<U>(v))
     {
     }
@@ -39,7 +39,7 @@ struct message_arg_storage {
     template <typename U>
     static constexpr decltype(auto) access(U&& v) noexcept
     {
-        if constexpr (std::is_reference<T>::value) {
+        if constexpr (std::is_reference_v<T>) {
             return v.get();
         }
         else {
@@ -75,8 +75,7 @@ struct message_args
 };
 
 template <typename T>
-using message_args_decay_t =
-    typename std::remove_cv<typename std::remove_reference<T>::type>::type;
+using message_args_decay_t = std::remove_cvref_t<T>;
 
 template <typename T>
 struct message_args_size
@@ -97,7 +96,7 @@ template <std::size_t I, typename... Args>
 struct message_args_nth_type<message_args<Args...>, I>
 {
     static_assert(I < sizeof...(Args), "message_args index out of range");
-    using type = typename std::tuple_element<I, std::tuple<Args...>>::type;
+    using type = std::tuple_element_t<I, std::tuple<Args...>>;
 };
 
 template <std::size_t I, typename... Args>

@@ -192,10 +192,7 @@ public:
 
         // prevent functors with message arguments from matching the template
         typename = enable_if_t<
-            !is_base_of<
-                Message_prefix,
-                typename remove_reference<FUNCTOR_ARG_T>::type
-            >::value
+            !is_base_of<Message_prefix, std::remove_reference_t<FUNCTOR_ARG_T>>::value
         >
     >
     handler_deactivator activate(
@@ -214,10 +211,7 @@ public:
 
         // only allow functors with message arguments to match the template
         typename = enable_if_t<
-            is_base_of<
-                Message_prefix,
-                typename remove_reference<FUNCTOR_ARG_T>::type
-            >::value
+            is_base_of<Message_prefix, std::remove_reference_t<FUNCTOR_ARG_T>>::value
         >
     >
     handler_deactivator activate(
@@ -335,8 +329,8 @@ public:
         using arg_type = typename detail::message_args_nth_type<SEQ_T, I>::type;
 
         static_assert(
-            !is_reference<arg_type>::value ||
-            is_const<typename remove_reference<arg_type>::type>::value,
+            !std::is_reference_v<arg_type> ||
+            std::is_const_v<std::remove_reference_t<arg_type>>,
             "A function with non-const reference arguments cannot be exported for RPC. "
             "Read Sintra documentation for details."
             );

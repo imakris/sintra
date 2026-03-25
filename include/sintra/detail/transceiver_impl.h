@@ -376,10 +376,7 @@ template<
 
     // prevent functors with message arguments from matching the template
     typename /* = typename enable_if_t<
-        !std::is_base_of<
-            Message_prefix,
-            typename std::remove_reference<FUNCTOR_ARG_T>::type
-        >::value
+        !std::is_base_of<Message_prefix, std::remove_reference_t<FUNCTOR_ARG_T>>::value
     >*/
 >
 typename Transceiver::handler_deactivator
@@ -417,10 +414,7 @@ template<
 
     // only allow functors with message arguments to match the template
     typename /* = typename enable_if_t<
-        is_base_of<
-            Message_prefix,
-            typename remove_reference<FUNCTOR_ARG_T>::type
-        >::value
+        is_base_of<Message_prefix, std::remove_reference_t<FUNCTOR_ARG_T>>::value
     >*/
 >
 typename Transceiver::handler_deactivator
@@ -434,7 +428,7 @@ Transceiver::activate(
     // we don't know what kind of functor it is.
 
     using arg_type = decltype(resolve_single_functor_arg(internal_slot));
-    using MT = typename remove_reference<arg_type>::type;
+    using MT = std::remove_reference_t<arg_type>;
     function<typename MT::return_type(const arg_type&)> handler = internal_slot;
 
     constexpr bool sender_capability =
