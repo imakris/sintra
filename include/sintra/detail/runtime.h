@@ -243,12 +243,13 @@ inline bool finalize()
         trace("begin_process_draining_local.done");
     }
     else {
-        std::jthread watchdog([&](std::stop_token st) {
+        std::atomic<bool> done{false};
+        std::thread watchdog([&] {
             const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-            while (!st.stop_requested() && std::chrono::steady_clock::now() < deadline) {
+            while (!done.load() && std::chrono::steady_clock::now() < deadline) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
-            if (!st.stop_requested()) {
+            if (!done.load()) {
                 s_mproc->unblock_rpc(process_of(s_coord_id));
             }
         });
@@ -262,8 +263,8 @@ inline bool finalize()
         }
         trace("begin_process_draining_remote.done");
 
-        watchdog.request_stop();
-        // jthread joins automatically on scope exit
+        done = true;
+        watchdog.join();
     }
 
     if (!s_coord && flush_seq != invalid_sequence) {
