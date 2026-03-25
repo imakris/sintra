@@ -4,7 +4,7 @@
 #pragma once
 
 #include <cstdlib>
-#include <sstream>
+#include <format>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -72,21 +72,13 @@ constexpr std::string_view ctti_name()
 inline std::string compiler_identity()
 {
 #if defined(_MSC_VER)
-    std::ostringstream oss;
-    oss << "msvc-" << _MSC_VER;
-    return oss.str();
+    return std::format("msvc-{}", _MSC_VER);
 #elif defined(__clang__)
-    std::ostringstream oss;
-    oss << "clang-" << __clang_major__ << '.' << __clang_minor__ << '.' << __clang_patchlevel__;
-    return oss.str();
+    return std::format("clang-{}.{}.{}", __clang_major__, __clang_minor__, __clang_patchlevel__);
 #elif defined(__GNUC__)
-    std::ostringstream oss;
-    oss << "gnu-" << __GNUC__ << '.' << __GNUC_MINOR__ << '.' << __GNUC_PATCHLEVEL__;
-    return oss.str();
+    return std::format("gnu-{}.{}.{}", __GNUC__, __GNUC_MINOR__, __GNUC_PATCHLEVEL__);
 #elif defined(__INTEL_COMPILER)
-    std::ostringstream oss;
-    oss << "intel-" << __INTEL_COMPILER;
-    return oss.str();
+    return std::format("intel-{}", __INTEL_COMPILER);
 #else
     return "unknown-compiler";
 #endif
@@ -95,17 +87,11 @@ inline std::string compiler_identity()
 inline std::string stdlib_identity()
 {
 #if defined(_MSVC_STL_VERSION)
-    std::ostringstream oss;
-    oss << "msvc-stl-" << _MSVC_STL_VERSION;
-    return oss.str();
+    return std::format("msvc-stl-{}", _MSVC_STL_VERSION);
 #elif defined(_LIBCPP_VERSION)
-    std::ostringstream oss;
-    oss << "libc++-" << _LIBCPP_VERSION;
-    return oss.str();
+    return std::format("libc++-{}", _LIBCPP_VERSION);
 #elif defined(__GLIBCXX__)
-    std::ostringstream oss;
-    oss << "libstdc++-" << __GLIBCXX__;
-    return oss.str();
+    return std::format("libstdc++-{}", __GLIBCXX__);
 #else
     return "unknown-stdlib";
 #endif
@@ -194,43 +180,39 @@ inline std::string type_name()
 
 inline std::string abi_token()
 {
-    std::ostringstream oss;
-    oss << "compiler=" << detail_type_utils::compiler_identity();
-    oss << ";stdlib=" << detail_type_utils::stdlib_identity();
-    oss << ";platform=" << detail_type_utils::platform_identity();
-    oss << ";arch=" << detail_type_utils::architecture_identity();
-    return oss.str();
+    return std::format("compiler={};stdlib={};platform={};arch={}",
+        detail_type_utils::compiler_identity(),
+        detail_type_utils::stdlib_identity(),
+        detail_type_utils::platform_identity(),
+        detail_type_utils::architecture_identity());
 }
 
 inline std::string abi_description()
 {
-    std::ostringstream oss;
-    oss << "compiler " << detail_type_utils::compiler_identity();
-    oss << ", standard library " << detail_type_utils::stdlib_identity();
-    oss << ", platform " << detail_type_utils::platform_identity();
-    oss << ", architecture " << detail_type_utils::architecture_identity();
-    return oss.str();
+    return std::format("compiler {}, standard library {}, platform {}, architecture {}",
+        detail_type_utils::compiler_identity(),
+        detail_type_utils::stdlib_identity(),
+        detail_type_utils::platform_identity(),
+        detail_type_utils::architecture_identity());
 }
 
 inline std::string describe_abi_token(const std::string& token)
 {
     if (token.empty()) {
-        return std::string("(unspecified ABI)");
+        return "(unspecified ABI)";
     }
 
-    std::ostringstream oss;
-    bool first = true;
+    std::string description;
     std::size_t start = 0;
     while (start < token.size()) {
         auto next = token.find(';', start);
         auto component = token.substr(start, next == std::string::npos ? std::string::npos : next - start);
         auto readable = detail_type_utils::describe_token_component(component);
         if (!readable.empty()) {
-            if (!first) {
-                oss << ", ";
+            if (!description.empty()) {
+                description += ", ";
             }
-            oss << readable;
-            first = false;
+            description += readable;
         }
         if (next == std::string::npos) {
             break;
@@ -238,11 +220,7 @@ inline std::string describe_abi_token(const std::string& token)
         start = next + 1;
     }
 
-    auto description = oss.str();
-    if (description.empty()) {
-        return token;
-    }
-    return description;
+    return description.empty() ? token : description;
 }
 
 inline const char* abi_marker_filename()

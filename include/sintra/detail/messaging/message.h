@@ -11,7 +11,7 @@
 #include <cassert>
 #include <cstdint>
 #include <limits>
-#include <sstream>
+#include <format>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -701,12 +701,10 @@ struct Unserialized_Enclosure<T, true, false>: Enclosure <T, true, false>
 inline
 std::string get_base_filename(const string& prefix, uint64_t id, uint32_t occurrence = 0)
 {
-    std::stringstream stream;
-    stream << std::hex << id;
     if (occurrence > 0) {
-        stream << "_occ" << std::dec << occurrence;
+        return std::format("{}{:x}_occ{}", prefix, id, occurrence);
     }
-    return prefix + stream.str();
+    return std::format("{}{:x}", prefix, id);
 }
 
 
