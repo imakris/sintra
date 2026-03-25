@@ -128,6 +128,7 @@
 #include <thread>
 #include <type_traits>
 #include <new>
+#include <numeric>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -277,18 +278,9 @@ template <typename T>
 std::vector<size_t> get_ring_configurations(
     size_t min_elements, size_t max_size, size_t max_subdivisions)
 {
-    auto gcd = [](size_t m, size_t n) {
-        size_t tmp;
-        while (m) { tmp = m; m = n % m; n = tmp; }
-        return n;
-    };
-    auto lcm = [=](size_t m, size_t n) {
-        return m / gcd(m, n) * n;
-    };
-
     size_t page_size = system_page_size();
     // Round up to a page-size multiple that is also a multiple of sizeof(T)
-    size_t base_size = lcm(sizeof(T), page_size);
+    size_t base_size = std::lcm(sizeof(T), page_size);
 
     // Respect caller's minimum element constraint
     size_t min_size = std::max(min_elements * sizeof(T), base_size);
@@ -333,17 +325,11 @@ inline size_t aligned_capacity(size_t requested, size_t element_size)
         return 0;
     }
 
-    auto gcd = [](size_t m, size_t n) {
-        size_t tmp;
-        while (m) { tmp = m; m = n % m; n = tmp; }
-        return n;
-    };
-
     size_t alignment = 8;
     const size_t page_size = system_page_size();
     if (page_size != 0) {
-        const size_t page_step = page_size / gcd(page_size, element_size);
-        const size_t step_gcd = gcd(page_step, size_t(8));
+        const size_t page_step = page_size / std::gcd(page_size, element_size);
+        const size_t step_gcd = std::gcd(page_step, size_t(8));
         const size_t step_div_gcd = page_step / step_gcd;
         if (step_div_gcd > (std::numeric_limits<size_t>::max() / 8)) {
             return 0;
