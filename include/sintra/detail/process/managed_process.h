@@ -136,10 +136,10 @@ struct Lifetime_policy
 // -1: No branching has taken place - this variable is not relevant
 //  0: The starter process, with the coordinator.
 // >0: A spawned process.
-static inline int32_t s_branch_index = -1;
+inline int32_t s_branch_index = -1;
 
 
-static inline uint32_t s_recovery_occurrence = 0;
+inline uint32_t s_recovery_occurrence = 0;
 
 
 
