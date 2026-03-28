@@ -4,6 +4,7 @@
 #pragma once
 
 #include "../logging.h"
+#include "../process/process_id.h"
 #include "../transceiver_impl.h"
 #include "../tls_post_handler.h"
 #include <atomic>
@@ -119,7 +120,7 @@ inline void dispatch_event_handlers(
 
         if (trace_world) {
             Log_stream(log_level::debug)
-                << "[sintra_trace_world] pid=" << static_cast<int>(getpid())
+                << "[sintra_trace_world] pid=" << static_cast<int>(detail::get_current_process_id())
                 << " sid_match=" << static_cast<unsigned long long>(sid)
                 << " handlers=" << handlers.size() << "\n";
         }
@@ -480,7 +481,7 @@ void Process_message_reader::request_reader_function()
 
                     if (trace_world) {
                         Log_stream(log_level::debug)
-                            << "[sintra_trace_world] pid=" << static_cast<int>(getpid())
+                            << "[sintra_trace_world] pid=" << static_cast<int>(detail::get_current_process_id())
                             << " reader_state=" << static_cast<int>(reader_state)
                             << " msg_type=" << static_cast<unsigned long long>(m->message_type_id)
                             << " sender_iid=" << static_cast<unsigned long long>(m->sender_instance_id)
