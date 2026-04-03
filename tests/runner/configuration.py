@@ -12,6 +12,14 @@ TEST_TIMEOUT_OVERRIDES = {
     "barrier_complex_choreography_test": 120.0,
     "barrier_pathological_choreography_test": 120.0,
     "barrier_stress_test": 120.0,
+    "barrier_drain_and_unpublish_test_debug": 75.0,
+    "barrier_drain_and_unpublish_test_release": 75.0,
+    "recovery_runner_thread_test_debug": 75.0,
+    "recovery_runner_thread_test_release": 75.0,
+    "crash_capture_self_test_debug": 120.0,
+    "crash_capture_self_test_release": 120.0,
+    "crash_capture_child_test_debug": 120.0,
+    "crash_capture_child_test_release": 120.0,
 }
 
 
@@ -32,18 +40,25 @@ def parse_active_tests(tests_dir: Path) -> Dict[str, int]:
                 if not text or text.startswith("#"):
                     continue
                 parts = text.split()
-                if len(parts) < 2:
-                    continue
+                if len(parts) != 2:
+                    raise ValueError(
+                        f"Malformed active_tests entry at {active_tests_file}:{line_num}: "
+                        f"expected '<test_path> <iterations>', got '{text}'"
+                    )
                 test_path = parts[0]
                 try:
                     iterations = int(parts[1])
                 except ValueError:
-                    continue
+                    raise ValueError(
+                        f"Malformed iteration count at {active_tests_file}:{line_num}: '{parts[1]}'"
+                    ) from None
                 if iterations < 1:
-                    continue
+                    raise ValueError(
+                        f"Invalid iteration count at {active_tests_file}:{line_num}: {iterations}"
+                    )
                 active_tests[test_path] = iterations
-    except OSError:
-        return {}
+    except OSError as exc:
+        raise RuntimeError(f"Failed to read {active_tests_file}: {exc}") from exc
 
     return active_tests
 

@@ -7,16 +7,21 @@ function(add_manual_test_suite SUFFIX IS_DEBUG)
     set(LIB_TARGET sintra_for_${SUFFIX})
 
     set(MANUAL_TEST_FILES
+        barrier_deadlock_reproduction_test.cpp
         barrier_delivery_fence_repro_test.cpp
+        crash_capture_child_test.cpp
+        crash_capture_self_test.cpp
         guard_pending_writer_integration_test.cpp
         hang_test.cpp
         coordinator_crash_children_hang_test.cpp
         children_crash_coordinator_deadlock_test.cpp
-        ../../temp_ring.cpp
     )
 
     foreach(TEST_FILE IN LISTS MANUAL_TEST_FILES)
         get_filename_component(TEST_NAME "${TEST_FILE}" NAME_WE)
+        if(TARGET sintra_${TEST_NAME}_${SUFFIX})
+            continue()
+        endif()
         add_executable(sintra_${TEST_NAME}_${SUFFIX} ${TEST_FILE})
         target_include_directories(sintra_${TEST_NAME}_${SUFFIX} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
         target_link_libraries(sintra_${TEST_NAME}_${SUFFIX} PRIVATE ${LIB_TARGET})

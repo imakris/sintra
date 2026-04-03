@@ -80,6 +80,7 @@ if _signal_module is not None:
 
 
 PRESERVE_CORES_ENV = "SINTRA_PRESERVE_CORES"
+DID_NOT_RUN_MARKER = "[SINTRA_DID_NOT_RUN]"
 
 
 
@@ -113,27 +114,6 @@ def _describe_processes(processes: Iterable[Tuple[int, str]]) -> str:
     formatted = [f"{name} (pid={pid})" for pid, name in processes]
     return ", ".join(formatted) if formatted else ""
 
-
-# NOTE: Test iteration counts are now managed via active_tests.txt
-
-# Tests that need extended timeouts beyond the global ``--timeout`` argument.
-# Values represent the minimum timeout (in seconds) that should be enforced for
-# the corresponding test invocation.
-TEST_TIMEOUT_OVERRIDES = {
-    "recovery_test_debug": 120.0,
-    "recovery_test_release": 120.0,
-    "barrier_complex_choreography_test": 120.0,
-    "barrier_pathological_choreography_test": 120.0,
-    "barrier_stress_test": 120.0,
-    "barrier_drain_and_unpublish_test_debug": 75.0,
-    "barrier_drain_and_unpublish_test_release": 75.0,
-    "recovery_runner_thread_test_debug": 75.0,
-    "recovery_runner_thread_test_release": 75.0,
-    "crash_capture_self_test_debug": 120.0,
-    "crash_capture_self_test_release": 120.0,
-    "crash_capture_child_test_debug": 120.0,
-    "crash_capture_child_test_release": 120.0,
-}
 
 STACK_CAPTURE_PREFIXES = ("crash_capture_",)
 _STACK_CAPTURE_PAUSE_ENV = "SINTRA_CRASH_CAPTURE_PAUSE_MS"
@@ -245,13 +225,55 @@ def _lookup_test_timeout(name: str, default: float) -> float:
     return max(default, override)
 
 
+def _extract_did_not_run_reason(output: str, error: str) -> str:
+    for stream in (output, error):
+        for line in stream.splitlines():
+            if line.startswith(DID_NOT_RUN_MARKER):
+                reason = line[len(DID_NOT_RUN_MARKER):].strip()
+                return reason or "binary reported did not run"
+    return ""
+
+
 class TestResult:
     """Result of a single test run"""
-    def __init__(self, success: bool, duration: float, output: str = "", error: str = ""):
+    def __init__(
+        self,
+        success: bool,
+        duration: float,
+        output: str = "",
+        error: str = "",
+        result_kind: str = "pass",
+    ):
         self.success = success
         self.duration = duration
         self.output = output
         self.error = error
+        self.result_kind = result_kind
+
+
+def _count_result_kinds(results: Sequence[TestResult]) -> Tuple[int, int, int]:
+    passed = sum(1 for result in results if result.result_kind == "pass")
+    failed = sum(1 for result in results if result.result_kind == "fail")
+    did_not_run = sum(1 for result in results if result.result_kind == "did_not_run")
+    return passed, failed, did_not_run
+
+
+def _format_result_overview(passed: int, failed: int, did_not_run: int) -> str:
+    if failed > 0:
+        return f"{passed} PASS / {failed} FAIL / {did_not_run} N/A"
+    if passed > 0 and did_not_run > 0:
+        return f"{passed} PASS / {did_not_run} N/A"
+    if passed > 0:
+        return f"{passed} PASS"
+    return f"{did_not_run} N/A"
+
+
+@dataclass(frozen=True)
+class CleanupOutcome:
+    found_children: bool = False
+    termination_attempted: bool = False
+    survivors_remaining: bool = False
+    note: str = ""
 
 
 @dataclass(frozen=True)
@@ -953,12 +975,12 @@ class TestRunner:
                             capture_pause_total += capture_finished - capture_active_start
                             capture_active_start = None
 
-            def terminate_process_group_members(reason: str) -> bool:
+            def terminate_process_group_members(reason: str) -> CleanupOutcome:
                 """Ensure helpers in the spawned process group terminate."""
 
                 pgid = process_group_id
                 if pgid is None:
-                    return False
+                    return CleanupOutcome()
 
                 try:
                     base_exclusions = {0, os.getpid()}
@@ -983,14 +1005,24 @@ class TestRunner:
                 )
 
                 if not survivors:
-                    return False
+                    return CleanupOutcome()
 
                 survivor_list = sorted(survivors)
+                survivor_details = self._describe_pids(survivor_list)
+                survivor_summary = _describe_processes(
+                    (pid, survivor_details.get(pid, "unknown")) for pid in survivor_list
+                )
+                if not survivor_summary:
+                    survivor_summary = ", ".join(str(pid) for pid in survivor_list)
+                cleanup_note = f"{reason}: lingering process-group members {survivor_summary}"
 
                 try:
                     import signal
                 except ImportError:
-                    return bool(survivors)
+                    return CleanupOutcome(
+                        found_children=True,
+                        note=cleanup_note,
+                    )
 
                 for target_pid in survivor_list:
                     try:
@@ -1010,7 +1042,11 @@ class TestRunner:
                         if pid not in base_exclusions
                     )
                     if not survivors:
-                        return False
+                        return CleanupOutcome(
+                            found_children=True,
+                            termination_attempted=True,
+                            note=cleanup_note,
+                        )
                     time.sleep(0.05)
 
                 survivors = set(
@@ -1020,7 +1056,11 @@ class TestRunner:
                 )
 
                 if not survivors:
-                    return False
+                    return CleanupOutcome(
+                        found_children=True,
+                        termination_attempted=True,
+                        note=cleanup_note,
+                    )
 
                 survivor_list = sorted(survivors)
 
@@ -1043,10 +1083,16 @@ class TestRunner:
                 )
 
 
-                return bool(survivors)
+                return CleanupOutcome(
+                    found_children=True,
+                    termination_attempted=True,
+                    survivors_remaining=bool(survivors),
+                    note=cleanup_note,
+                )
 
             def shutdown_reader_threads() -> None:
                 """Ensure log reader threads terminate to avoid leaking resources."""
+                nonlocal hang_detected
                 join_step = 0.2
                 max_join_time = 5.0
 
@@ -1085,9 +1131,12 @@ class TestRunner:
                         thread.join(timeout=join_timeout)
 
                     if thread.is_alive():
-                        terminate_process_group_members(
+                        cleanup_outcome = terminate_process_group_members(
                             f"log reader stall ({descriptor}) for {invocation.name}"
                         )
+                        if cleanup_outcome.found_children:
+                            hang_detected = True
+                            hang_notes.append(cleanup_outcome.note)
                         forcible_close_applied = False
                         if stream_fd is not None:
                             try:
@@ -1585,7 +1634,10 @@ class TestRunner:
                         elif error and not live_stack_traces:
                             live_stack_error = error
 
-                terminate_process_group_members(f"{invocation.name} exit")
+                cleanup_outcome = terminate_process_group_members(f"{invocation.name} exit")
+                if cleanup_outcome.found_children:
+                    hang_detected = True
+                    hang_notes.append(cleanup_outcome.note)
 
                 # On Windows, terminate_process_group_members does nothing useful because
                 # there's no POSIX process group concept. Kill any lingering child processes
@@ -1717,6 +1769,7 @@ class TestRunner:
                 success = (process.returncode == 0) and not hang_detected
                 error_msg = stderr
                 probe_missing_crash = False
+                result_kind = "pass"
 
                 if hang_detected:
                     hang_summary = "; ".join(hang_notes) if hang_notes else "detected lingering/descendant processes"
@@ -1730,7 +1783,14 @@ class TestRunner:
                         f"(exit code {process.returncode})\n{stderr}"
                     )
 
+                if success:
+                    did_not_run_reason = _extract_did_not_run_reason(stdout, stderr)
+                    if did_not_run_reason:
+                        result_kind = "did_not_run"
+                        error_msg = did_not_run_reason
+
                 if not success and not probe_missing_crash:
+                    result_kind = "fail"
                     # Categorize failure type for better diagnostics
                     if stop_signal_desc:
                         error_msg = (
@@ -1811,7 +1871,8 @@ class TestRunner:
                     success=success,
                     duration=duration,
                     output=stdout,
-                    error=error_msg
+                    error=error_msg,
+                    result_kind=result_kind,
                 )
 
             except subprocess.TimeoutExpired as e:
@@ -1886,7 +1947,8 @@ class TestRunner:
                     success=False,
                     duration=duration,
                     output=stdout,
-                    error=f"TIMEOUT: Test exceeded {timeout}s and was terminated.\n{stderr}"
+                    error=f"TIMEOUT: Test exceeded {timeout}s and was terminated.\n{stderr}",
+                    result_kind="fail",
                 )
 
         except Exception as e:
@@ -1903,7 +1965,8 @@ class TestRunner:
                 success=False,
                 duration=0,
                 output=stdout,
-                error=error_msg
+                error=error_msg,
+                result_kind="fail",
             )
         finally:
             hard_watchdog_stop.set()
@@ -2103,9 +2166,11 @@ class TestRunner:
             result = self.run_test_once(invocation)
             results.append(result)
 
-            if result.success:
+            if result.result_kind == "pass":
                 passed += 1
                 print(f"{Color.GREEN}.{Color.RESET}", end='', flush=True)
+            elif result.result_kind == "did_not_run":
+                print(f"{Color.YELLOW}N{Color.RESET}", end='', flush=True)
             else:
                 failed += 1
                 print(f"{Color.RED}F{Color.RESET}", end='', flush=True)
@@ -2133,8 +2198,10 @@ class TestRunner:
     def print_summary(self, invocation: TestInvocation, passed: int, failed: int, results: List[TestResult]):
         """Print summary statistics for a test"""
         test_name = invocation.name
-        total = passed + failed
-        pass_rate = (passed / total * 100) if total > 0 else 0
+        passed, failed, did_not_run = _count_result_kinds(results)
+        executed = passed + failed
+        total = executed + did_not_run
+        pass_rate = (passed / executed * 100) if executed > 0 else 0
 
         # Calculate duration statistics
         durations = [r.duration for r in results]
@@ -2142,14 +2209,25 @@ class TestRunner:
         min_duration = min(durations) if durations else 0
         max_duration = max(durations) if durations else 0
 
-        if failed == 0:
+        if failed == 0 and did_not_run == 0:
             status = f"{Color.GREEN}PASS{Color.RESET}"
+        elif failed == 0:
+            status = f"{Color.YELLOW}PASS WITH N/A{Color.RESET}"
         else:
             status = f"{Color.RED}FAIL{Color.RESET}"
 
         print(f"  {Color.BOLD}Result: {status}{Color.RESET}")
-        print(f"  Passed: {Color.GREEN}{passed}{Color.RESET} / Failed: {Color.RED}{failed}{Color.RESET} / Total: {total}")
-        print(f"  Pass Rate: {pass_rate:.1f}%")
+        print(
+            "  "
+            f"Passed: {Color.GREEN}{passed}{Color.RESET} / "
+            f"Failed: {Color.RED}{failed}{Color.RESET} / "
+            f"N/A: {Color.YELLOW}{did_not_run}{Color.RESET} / "
+            f"Total: {total}"
+        )
+        if executed > 0:
+            print(f"  Pass Rate: {pass_rate:.1f}%")
+        else:
+            print(f"  Pass Rate: {Color.YELLOW}N/A (no executed runs){Color.RESET}")
         print(f"  Duration: avg={format_duration(avg_duration)}, min={format_duration(min_duration)}, max={format_duration(max_duration)}")
 
         if _is_stack_capture_test(test_name):
@@ -2286,7 +2364,11 @@ def main():
         return 1
 
     # Parse active_tests.txt
-    active_tests = parse_active_tests(script_dir)
+    try:
+        active_tests = parse_active_tests(script_dir)
+    except (RuntimeError, ValueError) as exc:
+        print(f"{Color.RED}Error: {exc}{Color.RESET}")
+        return 1
     if not active_tests:
         print(f"{Color.RED}Error: No tests found in active_tests.txt{Color.RESET}")
         print(f"Please ensure tests/active_tests.txt exists and contains test entries")
@@ -2316,6 +2398,7 @@ def main():
 
         overall_start_time = time.time()
         overall_all_passed = True
+        overall_did_not_run = 0
 
         # Run each configuration suite independently
         for config_idx, (config_name, tests) in enumerate(test_suites.items(), 1):
@@ -2329,7 +2412,14 @@ def main():
 
             # Adaptive soak test for this suite
             accumulated_results = {
-                invocation.name: {'passed': 0, 'failed': 0, 'durations': [], 'failures': []}
+                invocation.name: {
+                    'passed': 0,
+                    'failed': 0,
+                    'did_not_run': 0,
+                    'durations': [],
+                    'failures': [],
+                    'did_not_run_reasons': [],
+                }
                 for invocation in tests
             }
             target_repetitions = {invocation.name: _lookup_test_weight(invocation.name, active_tests) for invocation in tests}
@@ -2404,16 +2494,20 @@ def main():
                         if remaining_repetitions[test_name] <= 0:
                             continue
 
-                        row_start = "."
                         result = runner.run_test_once(invocation)
 
                         accumulated_results[test_name]['durations'].append(result.duration)
 
                         result_bucket = accumulated_results[test_name]
 
-                        if result.success:
+                        if result.result_kind == "pass":
                             result_bucket['passed'] += 1
-                            row_end = "."
+                            row_segments[index] = f"{Color.GREEN}..{Color.RESET}"
+                        elif result.result_kind == "did_not_run":
+                            result_bucket['did_not_run'] += 1
+                            reason = (result.error or '').strip() or 'binary reported did not run'
+                            result_bucket['did_not_run_reasons'].append(reason)
+                            row_segments[index] = f"{Color.YELLOW}NA{Color.RESET}"
                         else:
                             result_bucket['failed'] += 1
                             suite_all_passed = False
@@ -2432,11 +2526,9 @@ def main():
                                 'message': error_message if error_message else first_line,
                             })
 
-                            row_end = "F"
+                            row_segments[index] = f"{Color.RED}.F{Color.RESET}"
 
                         remaining_repetitions[test_name] -= 1
-
-                        row_segments[index] = f"{row_start}{row_end}"
 
                     for start, end in line_ranges:
                         print(" ".join(row_segments[start:end]))
@@ -2501,9 +2593,17 @@ def main():
 
             ordered_test_names = sorted(accumulated_results.keys(), key=sort_key)
             formatted_names = [format_test_name(name) for name in ordered_test_names]
+            result_strings = [
+                _format_result_overview(
+                    accumulated_results[name]['passed'],
+                    accumulated_results[name]['failed'],
+                    accumulated_results[name]['did_not_run'],
+                )
+                for name in ordered_test_names
+            ]
 
             test_col_width = max([len(name) for name in formatted_names] + [4]) + 2
-            passrate_col_width = 20
+            passrate_col_width = max([len(value) for value in result_strings] + [6]) + 2
             avg_runtime_col_width = 17
 
             header_fmt = (
@@ -2515,27 +2615,52 @@ def main():
             table_width = test_col_width + passrate_col_width + avg_runtime_col_width + 2
 
             print("=" * table_width)
-            print(header_fmt.format('Test', 'Pass rate', 'Avg runtime (s)'))
+            print(header_fmt.format('Test', 'Result', 'Avg runtime (s)'))
             print("=" * table_width)
 
-            for test_name, display_name in zip(ordered_test_names, formatted_names):
+            for test_name, display_name, result_summary in zip(
+                ordered_test_names,
+                formatted_names,
+                result_strings,
+            ):
                 passed = accumulated_results[test_name]['passed']
                 failed = accumulated_results[test_name]['failed']
-                total = passed + failed
-                pass_rate = (passed / total * 100) if total > 0 else 0
+                did_not_run = accumulated_results[test_name]['did_not_run']
 
                 durations = accumulated_results[test_name]['durations']
                 avg_duration = sum(durations) / len(durations) if durations else 0
 
-                pass_rate_str = f"{passed}/{total} ({pass_rate:6.2f}%)"
                 avg_duration_str = f"{avg_duration:.2f}"
-                print(row_fmt.format(display_name, pass_rate_str, avg_duration_str))
+                print(row_fmt.format(display_name, result_summary, avg_duration_str))
 
             print("=" * table_width)
             print(f"Suite duration: {format_duration(suite_duration)}")
 
-            if suite_all_passed:
+            suite_did_not_run = sum(data['did_not_run'] for data in accumulated_results.values())
+            overall_did_not_run += suite_did_not_run
+
+            skipped_tests = {
+                name: data['did_not_run_reasons']
+                for name, data in accumulated_results.items()
+                if data['did_not_run_reasons']
+            }
+            if skipped_tests:
+                print(f"\n{Color.YELLOW}Did-not-run summary:{Color.RESET}")
+                for test_name, reasons in skipped_tests.items():
+                    print(f"  {test_name}:")
+                    for index, reason in enumerate(reasons[:5], start=1):
+                        print(f"    Run #{index}: {reason}")
+                    if len(reasons) > 5:
+                        remaining = len(reasons) - 5
+                        print(f"    ... and {remaining} more N/A run(s)")
+
+            if suite_all_passed and suite_did_not_run == 0:
                 print(f"Suite result: {Color.GREEN}PASSED{Color.RESET}")
+            elif suite_all_passed:
+                print(
+                    "Suite result: "
+                    f"{Color.YELLOW}PASSED WITH {suite_did_not_run} N/A RUN(S){Color.RESET}"
+                )
             else:
                 print(f"Suite result: {Color.RED}FAILED{Color.RESET}")
                 failing_tests = {
@@ -2580,8 +2705,14 @@ def main():
         print(f"{Color.BOLD}OVERALL SUMMARY{Color.RESET}")
         print(f"Total duration: {format_duration(total_duration)}")
 
-        if overall_all_passed:
+        if overall_all_passed and overall_did_not_run == 0:
             print(f"Overall result: {Color.GREEN}ALL SUITES PASSED{Color.RESET}")
+            return 0
+        if overall_all_passed:
+            print(
+                "Overall result: "
+                f"{Color.YELLOW}ALL SUITES PASSED WITH {overall_did_not_run} N/A RUN(S){Color.RESET}"
+            )
             return 0
         else:
             print(f"Overall result: {Color.RED}FAILED{Color.RESET}")

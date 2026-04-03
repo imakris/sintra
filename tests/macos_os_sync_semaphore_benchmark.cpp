@@ -205,7 +205,7 @@ int main() {
         return 0;
     }
     catch (const os_sync_not_supported&) {
-        std::cout << "os_sync_wait_on_address NOT AVAILABLE on this macOS version." << std::endl;
+        std::cout << "[SINTRA_DID_NOT_RUN] os_sync_wait_on_address is not available on this macOS version." << std::endl;
         return 0;
     }
     catch (const std::exception& ex) {
@@ -216,7 +216,7 @@ int main() {
 
 #else
 int main() {
-    std::cout << "os_sync_wait_on_address NOT AVAILABLE on this macOS version." << std::endl;
+    std::cout << "[SINTRA_DID_NOT_RUN] os_sync_wait_on_address is not available on this macOS version." << std::endl;
     return 0;
 }
 #endif
@@ -224,7 +224,7 @@ int main() {
 #else
 // Non-macOS platforms
 int main() {
-    std::cout << "This benchmark only runs on macOS." << std::endl;
+    std::cout << "[SINTRA_DID_NOT_RUN] This benchmark only runs on macOS." << std::endl;
     return 0;
 }
 #endif

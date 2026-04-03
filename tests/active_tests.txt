@@ -32,6 +32,7 @@ finalize_emit_rpc_test                    10
 extreme_choreography_test                 80
 exception_conversions_test                 5
 explicit_type_id_test                      5
+id_types_locality_test                     5
 init_error_spawn_failure_test              1
 interprocess_file_mapping_test            10
 interprocess_mutex_test                   30
@@ -47,6 +48,7 @@ ping_pong_multi_test                     100
 ping_pong_test                            50
 processing_fence_test                    100
 recovery_test                             30
+recovery_policy_test                       1
 recovery_runner_thread_test                1
 ring_cleanup_stress_test                 100
 rpc_append_test                          100
