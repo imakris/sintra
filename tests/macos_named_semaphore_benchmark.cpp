@@ -137,7 +137,7 @@ int main() {
 #else
 // Non-macOS platforms
 int main() {
-    std::cout << "This benchmark only runs on macOS." << std::endl;
+    std::cout << "[SINTRA_DID_NOT_RUN] This benchmark only runs on macOS." << std::endl;
     return 0;
 }
 #endif

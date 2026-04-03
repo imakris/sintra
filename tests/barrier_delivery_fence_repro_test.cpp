@@ -278,7 +278,11 @@ int worker_process(std::uint32_t worker_index)
             }
         }
 
-        barrier("delivery-fence-repro-iteration");
+        const bool barrier_ok = barrier("delivery-fence-repro-iteration");
+        if (!barrier_ok) {
+            std::fprintf(stderr, "Worker %u barrier returned false at iteration %u\n", worker_index, iteration);
+            return 1;
+        }
     }
 
     barrier("delivery-fence-repro-done", "_sintra_all_processes");

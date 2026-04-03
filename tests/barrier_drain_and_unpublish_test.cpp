@@ -27,6 +27,12 @@ void write_marker(const std::filesystem::path& path)
     out << "ok";
 }
 
+void write_result(const std::filesystem::path& path, const std::string& result)
+{
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out << result;
+}
+
 [[noreturn]] void watchdog_exit(const char* message)
 {
     std::fprintf(stderr, "barrier_drain_and_unpublish_test watchdog: %s\n", message);
@@ -40,7 +46,7 @@ int worker_a()
     const auto dir = shared.path();
     const auto barrier1_ready = dir / "barrier1_ready.txt";
     const auto barrier2_ready = dir / "barrier2_ready.txt";
-    const auto done_path = dir / "worker_a_done.txt";
+    const auto result_path = dir / "worker_a_result.txt";
 
     write_marker(barrier1_ready);
 
@@ -81,8 +87,18 @@ int worker_a()
     barrier2_done.store(true, std::memory_order_release);
     watchdog.join();
 
-    write_marker(done_path);
-    return (ok1 && ok2) ? 0 : 1;
+    if (!ok1) {
+        write_result(result_path, "fail: external_barrier returned false");
+        return 1;
+    }
+
+    if (!ok2) {
+        write_result(result_path, "fail: coord_barrier returned false");
+        return 1;
+    }
+
+    write_result(result_path, "ok");
+    return 0;
 }
 
 int worker_b()
@@ -116,7 +132,7 @@ int main(int argc, char* argv[])
         sintra::test::read_env_int(k_env_coord_watchdog_ms.data(), 60000);
 
     const auto barrier2_ready = dir / "barrier2_ready.txt";
-    const auto done_path = dir / "worker_a_done.txt";
+    const auto result_path = dir / "worker_a_result.txt";
 
     std::atomic<bool> watchdog_done{false};
     std::thread watchdog([&]() {
@@ -148,7 +164,12 @@ int main(int argc, char* argv[])
 
     sintra::finalize();
 
-    const bool ok = std::filesystem::exists(done_path);
+    std::ifstream result_in(result_path, std::ios::binary);
+    std::string result;
+    if (result_in) {
+        std::getline(result_in, result);
+    }
+    const bool ok = (result == "ok");
     watchdog_done.store(true, std::memory_order_release);
     watchdog.join();
 

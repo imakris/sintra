@@ -293,11 +293,17 @@ bool is_local(instance_id_type iid)
 {
     const auto di = decompose_instance(iid);
     const auto process_index = di.process;
+    const auto local_process_index = get_process_index(s_mproc_id);
+
+    const auto excluded_process_index =
+        static_cast<uint32_t>(~process_index) &
+        static_cast<uint32_t>((1u << num_process_index_bits) - 1);
 
     const bool matches_implicit_process =
         // complement of explicitly specified process, matches this process implicitly
         process_index > max_process_index &&
-        ((~static_cast<uint64_t>(process_index)) >> num_transceiver_index_bits) != get_process_index(s_mproc_id);
+        excluded_process_index != 1 &&
+        excluded_process_index != local_process_index;
 
     return
 	    is_local_instance(iid)   ||

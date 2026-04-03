@@ -8,8 +8,11 @@ function(read_active_tests OUT_VAR)
 
     file(STRINGS "${ACTIVE_TESTS_FILE}" LINES)
     set(TEST_PATHS "")
+    set(LINE_NUMBER 0)
 
     foreach(LINE IN LISTS LINES)
+        math(EXPR LINE_NUMBER "${LINE_NUMBER} + 1")
+
         # Strip leading/trailing whitespace
         string(STRIP "${LINE}" LINE)
 
@@ -18,12 +21,13 @@ function(read_active_tests OUT_VAR)
             continue()
         endif()
 
-        # Parse line: <test_path> <iterations>
-        # We only care about test_path for building
-        string(REGEX MATCH "^([^ \t]+)" TEST_PATH "${LINE}")
-        if(TEST_PATH)
-            list(APPEND TEST_PATHS "${TEST_PATH}")
+        if(NOT LINE MATCHES "^([^ \t]+)[ \t]+([1-9][0-9]*)$")
+            message(FATAL_ERROR
+                "Malformed active_tests.txt entry at line ${LINE_NUMBER}: '${LINE}'. "
+                "Expected '<test_path> <iterations>' with iterations >= 1.")
         endif()
+
+        list(APPEND TEST_PATHS "${CMAKE_MATCH_1}")
     endforeach()
 
     set(${OUT_VAR} ${TEST_PATHS} PARENT_SCOPE)
@@ -210,3 +214,7 @@ endfunction()
 # Build test suites for both build types
 add_test_suite("release" FALSE)
 add_test_suite("debug" TRUE)
+
+if(SINTRA_BUILD_MANUAL_TESTS)
+    add_subdirectory(manual)
+endif()

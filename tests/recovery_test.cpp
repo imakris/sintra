@@ -25,6 +25,7 @@
 
 #include "test_utils.h"
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -58,6 +59,40 @@ std::filesystem::path current_shared_directory()
     }
 
     return {};
+}
+
+void append_shared_line(const std::filesystem::path& path, const std::string& line)
+{
+    sintra::test::append_line_or_throw(path, line);
+}
+
+bool parse_occurrence_and_pid(
+    const std::string& line,
+    const char* prefix,
+    uint32_t& occurrence,
+    int& pid)
+{
+    if (!line.starts_with(prefix)) {
+        return false;
+    }
+
+    const auto occurrence_pos = line.find("occurrence=");
+    const auto pid_pos = line.find("pid=");
+    if (occurrence_pos == std::string::npos || pid_pos == std::string::npos || pid_pos <= occurrence_pos) {
+        return false;
+    }
+
+    try {
+        const auto occurrence_start = occurrence_pos + 11;
+        const auto occurrence_size = pid_pos - occurrence_start - 1;
+        occurrence = static_cast<uint32_t>(std::stoul(line.substr(occurrence_start, occurrence_size)));
+        pid = std::stoi(line.substr(pid_pos + 4));
+    }
+    catch (...) {
+        return false;
+    }
+
+    return true;
 }
 
 void write_ready_marker(std::string_view tag, uint32_t occurrence = 0)
@@ -112,7 +147,33 @@ int process_watchdog()
     if (signalled) {
         const auto run_entries = sintra::test::read_lines(shared_dir / "runs.txt");
         std::fprintf(stderr, "[WATCHDOG] Run entries: %zu\n", run_entries.size());
-        ok = (run_entries.size() >= 2);
+        bool saw_initial_run = false;
+        bool saw_recovered_run = false;
+        bool stop_from_recovered_run = false;
+        std::vector<int> recovered_pids;
+
+        for (const auto& entry : run_entries) {
+            uint32_t occurrence = 0;
+            int pid = 0;
+            if (parse_occurrence_and_pid(entry, "run ", occurrence, pid)) {
+                if (occurrence == 0) {
+                    saw_initial_run = true;
+                }
+                else {
+                    saw_recovered_run = true;
+                    recovered_pids.push_back(pid);
+                }
+                continue;
+            }
+
+            if (parse_occurrence_and_pid(entry, "stop ", occurrence, pid)) {
+                stop_from_recovered_run =
+                    occurrence > 0 &&
+                    std::find(recovered_pids.begin(), recovered_pids.end(), pid) != recovered_pids.end();
+            }
+        }
+
+        ok = saw_initial_run && saw_recovered_run && stop_from_recovered_run;
     }
 
     std::ofstream out(result_path, std::ios::binary | std::ios::trunc);
@@ -185,7 +246,10 @@ int process_crasher()
         << std::endl;
 
     log << "Recovery occurrence: " << occurrence << std::endl;
-    sintra::test::append_line_or_throw(runs_path, "run");
+    append_shared_line(
+        runs_path,
+        "run occurrence=" + std::to_string(occurrence) +
+        " pid=" + std::to_string(sintra::test::get_pid()));
 
     if (occurrence == 0) {
         log << "First run - about to abort!" << std::endl;
@@ -197,6 +261,10 @@ int process_crasher()
 
     log << "Second+ run - sending Stop" << std::endl;
     log.close();
+    append_shared_line(
+        runs_path,
+        "stop occurrence=" + std::to_string(occurrence) +
+        " pid=" + std::to_string(sintra::test::get_pid()));
     sintra::world() << Stop{};
     return 0;
 }
