@@ -31,6 +31,64 @@ That is different from:
 The design goal is to make caller-side abandonment honest, first-class, and
 usable without forcing higher-level libraries to build ad hoc watchdog logic.
 
+## User-facing summary
+
+The public API should be read in two layers:
+
+- `rpc_<method>(...)` is the normal blocking RPC surface
+- `rpc_async_<method>(...)` returns `Rpc_handle<T>` for explicit async waiting
+
+Those are distinct usage models.
+
+The current implementation may reuse the same internal transported state for
+both, but callers should not think of synchronous RPC as "async RPC with the
+handle hidden". The public meaning remains:
+
+- blocking RPC: call, block, return-or-throw
+- async RPC: call, retain a handle, wait or stop waiting later
+
+### Blocking example
+
+```cpp
+struct Calculator : sintra::Derived_transceiver<Calculator>
+{
+    int add(int a, int b) { return a + b; }
+    SINTRA_RPC(add)
+};
+
+auto sum = Calculator::rpc_add(target, 10, 15);
+```
+
+### Async example
+
+```cpp
+struct Worker : sintra::Derived_transceiver<Worker>
+{
+    int slow_step(int input) { return input + 1; }
+    SINTRA_RPC_STRICT(slow_step)
+};
+
+auto handle = Worker::rpc_async_slow_step(target, 10);
+
+if (handle.wait_until(deadline) == sintra::Rpc_wait_status::completed) {
+    auto value = handle.get();
+}
+else {
+    handle.abandon();
+}
+```
+
+### Choosing between `SINTRA_RPC` and `SINTRA_RPC_STRICT`
+
+- `SINTRA_RPC` is appropriate when a same-process blocking call may legitimately
+  take the direct-call shortcut
+- `SINTRA_RPC_STRICT` is appropriate when the exported function must always use
+  the transported RPC path, including same-process targets
+
+That distinction matters for async RPC: same-process non-strict async is
+rejected explicitly, while strict exports can use the transported async path
+locally as well.
+
 ## Objectives
 
 Any Sintra-level change in this area should satisfy the following objectives:
@@ -272,6 +330,10 @@ specified is the exact point at which a handle may deactivate its handler and
 how the shared state prevents false completion when a callback was already
 copied before deactivation.
 
+At the moment, a dropped late reply may still emit the existing
+"no active handler found" warning while communication is alive. That is
+observability noise, not a correctness signal by itself.
+
 ### Likely internal refactoring
 
 Today, `rpc_impl(...)` constructs `Rpc_state` and then blocks until completion.
@@ -322,6 +384,14 @@ from `wait_until(...)` and then either keep waiting later or call `abandon()`.
 first grows a real internal classification for it. In the current code, many
 transport-adjacent failures still surface either as `rpc_cancelled` or as a
 serialized remote `std::runtime_error`.
+
+Practical caller guidance:
+
+- `returned`: `get()` yields the reply value
+- `remote_exception`: `get()` rethrows the remote exception locally
+- `cancelled`: the wait ended because Sintra teardown/lifeline handling
+  cancelled outstanding waits; `get()` throws `rpc_cancelled`
+- `abandoned`: the caller gave up interest; `get()` throws `std::runtime_error`
 
 ## Meaning of `abandon()`
 
@@ -405,6 +475,12 @@ executing some local calls synchronously inline.
 For an initial implementation, explicitly rejecting same-process non-strict
 targets is a valid narrower choice if preserving current reentrancy semantics
 matters more than maximizing coverage on day one.
+
+That means the user-facing rule is simple:
+
+- blocking `rpc_<method>()` works with either `SINTRA_RPC` or `SINTRA_RPC_STRICT`
+- async `rpc_async_<method>()` requires the transported path
+- therefore, same-process async requires `SINTRA_RPC_STRICT`
 
 ## Finalize and teardown interaction
 

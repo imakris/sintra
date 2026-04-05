@@ -37,7 +37,11 @@ using std::unordered_map;
 // surface returned by rpc_async_<method>().
 enum class Rpc_wait_status
 {
+    // The async RPC reached a terminal state before the deadline.
     completed,
+
+    // The deadline expired but the async RPC may still complete later unless
+    // the caller abandons interest.
     deadline_exceeded,
 };
 
@@ -48,10 +52,19 @@ enum class Rpc_wait_status
 // - abandoned: caller explicitly gave up interest via abandon()
 enum class Rpc_completion_state
 {
+    // The async RPC is still waiting for a final outcome.
     pending,
+
+    // A normal reply was received and can be retrieved with get().
     returned,
+
+    // The remote side reported an exception; get() rethrows it locally.
     remote_exception,
+
+    // The wait ended because teardown or lifeline loss unblocked outstanding RPCs.
     cancelled,
+
+    // The caller explicitly gave up interest via abandon().
     abandoned,
 };
 
@@ -794,17 +807,23 @@ public:
     // Public async RPC result handle returned by rpc_async_<method>().
     // Synchronous rpc_<method>() remains a blocking surface and only reuses the
     // same transported state internally.
+    // Default-constructed handles are empty; moved-from handles should only be
+    // destroyed or assigned a new state.
     Rpc_handle() = default;
     Rpc_handle(const Rpc_handle&) = delete;
     Rpc_handle(Rpc_handle&&) noexcept = default;
     Rpc_handle& operator=(const Rpc_handle&) = delete;
     Rpc_handle& operator=(Rpc_handle&& other) noexcept;
+
+    // Destroying a pending handle is equivalent to non-blocking abandon().
     ~Rpc_handle();
 
     // Block until the async RPC reaches a terminal state.
     void wait() const;
 
     // Wait until deadline or terminal completion, whichever happens first.
+    // Repeated bounded waits are allowed; deadline expiry does not change the
+    // terminal state by itself.
     template<typename Clock, typename Duration>
     Rpc_wait_status wait_until(const std::chrono::time_point<Clock, Duration>& deadline) const;
 
@@ -815,9 +834,14 @@ public:
     Rpc_completion_state state() const;
 
     // Give up caller-side interest without cancelling remote execution.
+    // Idempotent: returns true only on the transition from pending to abandoned.
     bool abandon();
 
     // Block if needed, then return the value or rethrow the terminal failure.
+    // - returned: yields the reply value
+    // - remote_exception: rethrows the remote exception locally
+    // - cancelled: throws rpc_cancelled
+    // - abandoned: throws std::runtime_error
     auto get() const -> RT;
 
 private:

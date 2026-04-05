@@ -22,7 +22,7 @@ inline bool should_treat_rpc_failure_as_satisfied()
 
 inline void wait_for_processing_quiescence();
 
-inline bool rendezvous_barrier(const std::string& barrier_name, const std::string& group_name)
+inline sequence_counter_type rendezvous_barrier(const std::string& barrier_name, const std::string& group_name)
 {
     sequence_counter_type flush_seq = invalid_sequence;
     try {
@@ -30,7 +30,7 @@ inline bool rendezvous_barrier(const std::string& barrier_name, const std::strin
     }
     catch (const rpc_cancelled&) {
         if (should_treat_rpc_failure_as_satisfied()) {
-            return true;
+            return 0;
         }
         throw;
     }
@@ -41,53 +41,53 @@ inline bool rendezvous_barrier(const std::string& barrier_name, const std::strin
             (message.find("no longer available") != std::string::npos) ||
             (message.find("shutting down") != std::string::npos);
         if (rpc_unavailable && should_treat_rpc_failure_as_satisfied()) {
-            return true;
+            return 0;
         }
         throw;
     }
 
     if (flush_seq == invalid_sequence) {
-        return false;
+        return 0;
     }
 
     if (!s_coord) {
         s_mproc->flush(process_of(s_coord_id), flush_seq);
     }
 
-    return true;
+    return flush_seq;
 }
 
-inline bool barrier_dispatch(rendezvous_t,
-                             const std::string& barrier_name,
-                             const std::string& group_name)
+inline sequence_counter_type barrier_dispatch(rendezvous_t,
+                                              const std::string& barrier_name,
+                                              const std::string& group_name)
 {
     return rendezvous_barrier(barrier_name, group_name);
 }
 
-inline bool barrier_dispatch(delivery_fence_t,
-                             const std::string& barrier_name,
-                             const std::string& group_name)
+inline sequence_counter_type barrier_dispatch(delivery_fence_t,
+                                              const std::string& barrier_name,
+                                              const std::string& group_name)
 {
-    const bool rendezvous_completed = barrier_dispatch(rendezvous_t{}, barrier_name, group_name);
-    if (!rendezvous_completed) {
-        return false;
+    const auto rendezvous_seq = barrier_dispatch(rendezvous_t{}, barrier_name, group_name);
+    if (rendezvous_seq == 0) {
+        return 0;
     }
 
     if (!s_mproc) {
-        return true;
+        return rendezvous_seq;
     }
 
     s_mproc->wait_for_delivery_fence();
-    return true;
+    return rendezvous_seq;
 }
 
-inline bool barrier_dispatch(processing_fence_t,
-                             const std::string& barrier_name,
-                             const std::string& group_name)
+inline sequence_counter_type barrier_dispatch(processing_fence_t,
+                                              const std::string& barrier_name,
+                                              const std::string& group_name)
 {
-    const bool rendezvous_completed = barrier_dispatch(rendezvous_t{}, barrier_name, group_name);
-    if (!rendezvous_completed) {
-        return false;
+    const auto rendezvous_seq = barrier_dispatch(rendezvous_t{}, barrier_name, group_name);
+    if (rendezvous_seq == 0) {
+        return 0;
     }
 
     wait_for_processing_quiescence();
@@ -113,25 +113,25 @@ inline void wait_for_processing_quiescence()
 } // namespace detail
 
 template <>
-inline bool barrier<rendezvous_t>(const std::string& barrier_name, const std::string& group_name)
+inline sequence_counter_type barrier<rendezvous_t>(const std::string& barrier_name, const std::string& group_name)
 {
     return detail::barrier_dispatch(rendezvous_t{}, barrier_name, group_name);
 }
 
 template <>
-inline bool barrier<delivery_fence_t>(const std::string& barrier_name, const std::string& group_name)
+inline sequence_counter_type barrier<delivery_fence_t>(const std::string& barrier_name, const std::string& group_name)
 {
     return detail::barrier_dispatch(delivery_fence_t{}, barrier_name, group_name);
 }
 
 template <>
-inline bool barrier<processing_fence_t>(const std::string& barrier_name, const std::string& group_name)
+inline sequence_counter_type barrier<processing_fence_t>(const std::string& barrier_name, const std::string& group_name)
 {
     return detail::barrier_dispatch(processing_fence_t{}, barrier_name, group_name);
 }
 
 template <typename BarrierMode>
-inline bool barrier(const std::string& barrier_name, const std::string& group_name)
+inline sequence_counter_type barrier(const std::string& barrier_name, const std::string& group_name)
 {
     return detail::barrier_dispatch(BarrierMode{}, barrier_name, group_name);
 }

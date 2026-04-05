@@ -68,6 +68,32 @@
 // - `rpc_<method>(...)` remains the blocking call/return API
 // - `rpc_async_<method>(...)` returns an `Rpc_handle<T>` for async waiting,
 //   deadline-bounded waits, abandonment, and later result retrieval
+//
+// Typical usage:
+// \code
+// struct Calculator : sintra::Derived_transceiver<Calculator>
+// {
+//     int add(int a, int b) { return a + b; }
+//     int slow_add(int a, int b) { return a + b; }
+//
+//     SINTRA_RPC(add)
+//     SINTRA_RPC_STRICT(slow_add)
+// };
+//
+// auto sum = Calculator::rpc_add(target, 10, 15); // blocking
+//
+// auto handle = Calculator::rpc_async_slow_add(target, 10, 15); // async
+// if (handle.wait_until(deadline) == sintra::Rpc_wait_status::completed) {
+//     auto value = handle.get();
+// } else {
+//     handle.abandon();
+// }
+// \endcode
+//
+// Export choice matters for local targets:
+// - `SINTRA_RPC` may take a direct same-process shortcut for blocking RPC
+// - `SINTRA_RPC_STRICT` always uses the transported RPC path and is therefore
+//   the export to use when the async-handle surface must also work locally
 #include "detail/messaging/message_impl.h"
 #include "detail/messaging/process_message_reader_impl.h"
 #include "detail/transceiver.h"
@@ -113,8 +139,10 @@ struct processing_fence_t {};
 /// unspecified order.  Barrier is an inter-process synchronisation mechanism -
 /// combine it with traditional threading primitives if you also need
 /// thread-level coordination within a process.
+/// Returns the reply-ring watermark for the completed barrier, or `0` when the
+/// barrier is treated as satisfied during shutdown/drain handling.
 template<typename BarrierMode = delivery_fence_t>
-bool barrier(const std::string& barrier_name, const std::string& group_name = "_sintra_external_processes");
+sequence_counter_type barrier(const std::string& barrier_name, const std::string& group_name = "_sintra_external_processes");
 
 
 template <typename FT, typename SENDER_T = void>
