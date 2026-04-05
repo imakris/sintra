@@ -139,8 +139,9 @@ struct processing_fence_t {};
 /// unspecified order.  Barrier is an inter-process synchronisation mechanism -
 /// combine it with traditional threading primitives if you also need
 /// thread-level coordination within a process.
-/// Returns the reply-ring watermark for the completed barrier, or `0` when the
-/// barrier is treated as satisfied during shutdown/drain handling.
+/// Returns the reply-ring watermark for the completed barrier, or
+/// `invalid_sequence` when the barrier is treated as satisfied during
+/// shutdown/drain handling.
 template<typename BarrierMode = delivery_fence_t>
 sequence_counter_type barrier(const std::string& barrier_name, const std::string& group_name = "_sintra_external_processes");
 

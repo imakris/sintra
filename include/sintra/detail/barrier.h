@@ -30,7 +30,7 @@ inline sequence_counter_type rendezvous_barrier(const std::string& barrier_name,
     }
     catch (const rpc_cancelled&) {
         if (should_treat_rpc_failure_as_satisfied()) {
-            return 0;
+            return invalid_sequence;
         }
         throw;
     }
@@ -41,13 +41,13 @@ inline sequence_counter_type rendezvous_barrier(const std::string& barrier_name,
             (message.find("no longer available") != std::string::npos) ||
             (message.find("shutting down") != std::string::npos);
         if (rpc_unavailable && should_treat_rpc_failure_as_satisfied()) {
-            return 0;
+            return invalid_sequence;
         }
         throw;
     }
 
     if (flush_seq == invalid_sequence) {
-        return 0;
+        return invalid_sequence;
     }
 
     if (!s_coord) {
@@ -69,8 +69,8 @@ inline sequence_counter_type barrier_dispatch(delivery_fence_t,
                                               const std::string& group_name)
 {
     const auto rendezvous_seq = barrier_dispatch(rendezvous_t{}, barrier_name, group_name);
-    if (rendezvous_seq == 0) {
-        return 0;
+    if (rendezvous_seq == invalid_sequence) {
+        return invalid_sequence;
     }
 
     if (!s_mproc) {
@@ -86,8 +86,8 @@ inline sequence_counter_type barrier_dispatch(processing_fence_t,
                                               const std::string& group_name)
 {
     const auto rendezvous_seq = barrier_dispatch(rendezvous_t{}, barrier_name, group_name);
-    if (rendezvous_seq == 0) {
-        return 0;
+    if (rendezvous_seq == invalid_sequence) {
+        return invalid_sequence;
     }
 
     wait_for_processing_quiescence();
