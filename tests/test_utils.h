@@ -308,6 +308,10 @@ int run_multi_process_test(int argc,
                                   std::forward<Verifier>(verify));
 }
 
+// Use this helper when every process reaches the same top-level shutdown point
+// and can safely participate in sintra::shutdown(). Tests that need their own
+// final rendezvous or exceptional teardown path should keep using
+// run_multi_process_test(...) and make that final protocol explicit.
 template <typename Setup,
           typename Coordinator_action,
           typename Verifier>

@@ -137,6 +137,19 @@ python3 run_tests.py --build-dir ../build --config Release
 python3 run_tests.py --build-dir ../build --config Debug
 ```
 
+### Multi-process teardown helpers
+
+Tests that end with the ordinary "all participants reach the same top-level
+shutdown point" pattern should prefer
+`sintra::test::run_multi_process_shutdown_test(...)` from `tests/test_utils.h`.
+That helper runs the coordinator action, then calls `sintra::shutdown()` in
+every process.
+
+Keep using `run_multi_process_test(...)` when a test needs a more specific
+final protocol before teardown, such as an explicit final rendezvous inside the
+test logic or an abnormal-exit path that cannot participate in symmetric
+shutdown.
+
 ### Change Iteration Counts
 
 Edit the iteration counts directly in `active_tests.txt`:

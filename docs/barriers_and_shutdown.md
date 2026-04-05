@@ -28,6 +28,11 @@ Keep calling `sintra::finalize()` directly for single-process programs, crash
 paths, or tests/processes that cannot participate in a symmetric shutdown
 barrier.
 
+`shutdown()` is not meant to replace every explicit final barrier pattern.
+When a workflow needs a stronger algorithm-specific handoff, such as an
+application-defined final rendezvous or a staged ownership transfer, keep that
+protocol explicit and only enter `shutdown()` after it completes.
+
 ## `sintra::finalize()`
 
 Calling `sintra::finalize()` now performs the following steps:

@@ -294,6 +294,30 @@ sintra::barrier<sintra::processing_fence_t>("apply-updates");
 
 Processing fences are safe to call from any thread, including handlers themselves: reader threads continue draining queued work and post-handlers while the fence waits, so invoking a fence from within a handler keeps the system making progress. When coordination between threads inside the same process is also required, Sintra barriers typically pair with standard threading primitives.
 
+### Coordinated shutdown
+
+For the standard multi-process teardown path, prefer:
+
+```cpp
+sintra::shutdown();
+```
+
+`shutdown()` is the one-call counterpart to the common:
+
+```cpp
+sintra::barrier<sintra::processing_fence_t>("done", "_sintra_all_processes");
+sintra::finalize();
+```
+
+pattern. It performs the final all-process processing fence and then tears down
+the local runtime. This is the recommended shutdown path when every live
+participant reaches the same top-level handoff before exit.
+
+`shutdown()` is not a universal replacement for every explicit final barrier.
+Some more complex workflows still need their own final rendezvous or
+membership protocol before shutdown, and then call `shutdown()` or
+`finalize()` only after that higher-level handoff is complete.
+
 ### Optional explicit type ids
 
 Most users do not need explicit type ids as long as every process is built with the same
