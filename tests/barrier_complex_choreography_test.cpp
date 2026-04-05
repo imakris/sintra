@@ -34,6 +34,8 @@
 
 namespace {
 
+constexpr const char* k_shutdown_barrier = "complex-choreography-test-done";
+
 constexpr std::size_t k_stage_a_workers = 3;
 constexpr std::size_t k_stage_b_workers = 3;
 constexpr std::size_t k_iterations     = 64;
@@ -243,8 +245,8 @@ int coordinator_process()
         ++iterations_completed;
     }
 
-    barrier("complex-choreography-test-done", "_sintra_all_processes");
     deactivate_all_slots();
+    barrier(k_shutdown_barrier, "_sintra_all_processes");
 
     std::size_t stage_a_total = 0;
     std::size_t stage_b_total = 0;
@@ -406,7 +408,7 @@ int stage_process(std::uint32_t stage, std::uint32_t worker_index)
     }
 
     deactivate_all_slots();
-    barrier("complex-choreography-test-done", "_sintra_all_processes");
+    barrier(k_shutdown_barrier, "_sintra_all_processes");
 
     return failure.load() ? 1 : 0;
 }
@@ -435,6 +437,10 @@ int main(int argc, char* argv[])
          stage_b0_process,
          stage_b1_process,
          stage_b2_process},
+        [](const std::filesystem::path&) {
+            sintra::barrier(k_shutdown_barrier, "_sintra_all_processes");
+            return 0;
+        },
         [](const std::filesystem::path& shared_dir) {
             const auto result_path = shared_dir / "complex_choreography_result.txt";
             if (!std::filesystem::exists(result_path)) {
@@ -489,7 +495,6 @@ int main(int argc, char* argv[])
                 return 1;
             }
             return 0;
-        },
-        "complex-choreography-test-done");
+        });
 }
 

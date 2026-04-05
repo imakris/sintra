@@ -18,7 +18,6 @@ namespace {
 constexpr const char* k_service_name = "async lifecycle service";
 constexpr const char* k_ready_barrier = "async-lifecycle-service-ready";
 constexpr const char* k_finished_barrier = "async-lifecycle-test-finished";
-
 std::filesystem::path owner_events_path(const std::filesystem::path& shared_dir)
 {
     return shared_dir / "owner_events.txt";
@@ -166,7 +165,7 @@ int process_owner()
     service.assign_name(k_service_name);
 
     sintra::barrier(k_ready_barrier);
-    sintra::barrier(k_finished_barrier, "_sintra_all_processes");
+    sintra::barrier(k_finished_barrier);
     return 0;
 }
 
@@ -468,7 +467,7 @@ int process_client()
         sintra::test::append_line_or_throw(client_path, "unicast_delivery:observed");
     }
 
-    sintra::barrier(k_finished_barrier, "_sintra_all_processes");
+    sintra::barrier(k_finished_barrier);
     return 0;
 }
 
@@ -541,12 +540,12 @@ int verify_results(const std::filesystem::path& shared_dir)
 
 int main(int argc, char* argv[])
 {
-    return sintra::test::run_multi_process_test(
+    return sintra::test::run_multi_process_shutdown_test(
         argc,
         argv,
         "SINTRA_TEST_SHARED_DIR",
         "rpc_async_lifecycle",
-        {process_owner, process_client},
-        verify_results,
-        k_finished_barrier);
+        {process_owner,
+         process_client},
+        verify_results);
 }

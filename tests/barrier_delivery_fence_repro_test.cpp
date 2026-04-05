@@ -242,7 +242,6 @@ int coordinator_process()
         }
     }
 
-    barrier("delivery-fence-repro-done", "_sintra_all_processes");
     deactivate_all_slots();
 
     sintra::test::Shared_directory shared("SINTRA_DELIVERY_FENCE_DIR", "barrier_delivery_fence");
@@ -285,7 +284,6 @@ int worker_process(std::uint32_t worker_index)
         }
     }
 
-    barrier("delivery-fence-repro-done", "_sintra_all_processes");
     return 0;
 }
 
@@ -304,7 +302,7 @@ int worker1_process()
 int main(int argc, char* argv[])
 {
     std::set_terminate(sintra::test::custom_terminate_handler);
-    return sintra::test::run_multi_process_test(
+    return sintra::test::run_multi_process_shutdown_test(
         argc,
         argv,
         "SINTRA_DELIVERY_FENCE_DIR",
@@ -355,6 +353,5 @@ int main(int argc, char* argv[])
                 return 1;
             }
             return 0;
-        },
-        "delivery-fence-repro-done");
+        });
 }

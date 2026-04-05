@@ -54,6 +54,7 @@ recovery_runner_thread_test                1
 ring_cleanup_stress_test                 100
 rpc_append_test                          100
 rpc_async_lifecycle_test                 10
+shutdown_helper_test                     10
 rendezvous_barrier_error_paths_test        5
 semaphore_high_contention_stress          10
 spawn_detached_test                       50

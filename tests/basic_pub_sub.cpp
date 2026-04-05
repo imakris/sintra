@@ -175,7 +175,6 @@ int process_sender()
     }
     sintra::test::write_lines(shared_dir / "result.txt", lines);
 
-    sintra::barrier("result-ready", "_sintra_all_processes");
     return 0;
 }
 
@@ -200,7 +199,6 @@ int process_string_receiver()
     write_strings(shared_dir / "strings.txt", g_received_strings);
 
     sintra::barrier("write-phase");
-    sintra::barrier("result-ready", "_sintra_all_processes");
     return 0;
 }
 
@@ -225,7 +223,6 @@ int process_int_receiver()
     write_ints(shared_dir / "ints.txt", g_received_ints);
 
     sintra::barrier("write-phase");
-    sintra::barrier("result-ready", "_sintra_all_processes");
     return 0;
 }
 
@@ -234,7 +231,7 @@ int process_int_receiver()
 int main(int argc, char* argv[])
 {
     std::set_terminate(sintra::test::custom_terminate_handler);
-    return sintra::test::run_multi_process_test(
+    return sintra::test::run_multi_process_shutdown_test(
         argc,
         argv,
         "SINTRA_TEST_SHARED_DIR",
@@ -252,7 +249,6 @@ int main(int argc, char* argv[])
             std::string status;
             in >> status;
             return (status == "ok") ? 0 : 1;
-        },
-        "result-ready");
+        });
 }
 

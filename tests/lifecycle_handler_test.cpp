@@ -511,6 +511,5 @@ int main(int argc, char* argv[])
         {process_normal_worker, process_crash_worker, process_unpublished_worker},
         [](const std::filesystem::path&) {},
         [](const std::filesystem::path&) { return process_coordinator(); },
-        [](const std::filesystem::path&) { return 0; },
-        nullptr);
+        [](const std::filesystem::path&) { return 0; });
 }

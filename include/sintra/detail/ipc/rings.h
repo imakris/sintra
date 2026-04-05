@@ -1064,7 +1064,7 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
 
     /**
      * A simple fixed-capacity stack of indices. Eliminates duplicate
-     * push/pop/contains logic for ready_stack, sleeping_stack, and similar pools.
+     * push/pop/contains logic for ready_stack, sleeping_stack, unordered_stack, etc.
      * This lives in shared memory (control file), so we avoid std::vector or other
      * heap-backed containers that are not trivially relocation-safe across processes.
      */
@@ -1301,16 +1301,23 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         // Initially all semaphores are ready.
         Index_stack<max_process_index>       ready_stack;
 
-        // A stack of indices allocated to readers that are currently blocking or about
-        // to block on a semaphore.
+        // A stack of indices allocated to readers that are blocking / about to block /
+        // or were blocking and not yet redistributed.
         Index_stack<max_process_index>       sleeping_stack;
+
+        // A stack of indices that were posted "out of order" (e.g., after a local unblock).
+        // Unordered posts leave the index in sleeping_stack but flag the semaphore to avoid
+        // re-posting; the next ordered post (e.g., on publish) drains unordered items back
+        // to ready_stack. This keeps the wakeup path simple while preventing double-posts.
+        Index_stack<max_process_index>       unordered_stack;
 
         void flush_wakeups()
         {
             sleeping_stack.drain([&]( int idx) { dirty_semaphores[idx].post_ordered(); });
+            unordered_stack.drain([&](int idx) { ready_stack.push(idx); });
         }
 
-        // Spinlock guarding the ready/sleeping stacks.
+        // Spinlock guarding the ready/sleeping/unordered stacks.
         spinlock                             m_spinlock;
 
         Control()
@@ -1967,8 +1974,10 @@ struct Ring_R : Ring<T, true>
                         return Range<T>{};
                     }
                     int sleepy = c.ready_stack.pop_or(-1);
-                    m_sleepy_index = sleepy;
-                    c.sleeping_stack.push(sleepy);
+                    if (sleepy >= 0) {
+                        m_sleepy_index = sleepy;
+                        c.sleeping_stack.push(sleepy);
+                    }
                 }
                 const auto unblock_sequence_after = c.global_unblock_sequence.load();
                 if (unblock_sequence_after != m_seen_unblock_sequence) {
@@ -2012,9 +2021,14 @@ struct Ring_R : Ring<T, true>
                             break;
                         }
 
-                        spinlock::locker lock(c.m_spinlock);
-                        c.sleeping_stack.remove_value(sleepy_index);
-                        c.ready_stack.push(sleepy_index);
+                        if (wait_status == sintra_ring_semaphore::wait_result::unordered) {
+                            spinlock::locker lock(c.m_spinlock);
+                            c.unordered_stack.push(sleepy_index);
+                        }
+                        else {
+                            spinlock::locker lock(c.m_spinlock);
+                            c.ready_stack.push(sleepy_index);
+                        }
                         m_sleepy_index = -1;
 
                         if (m_stopping) {
@@ -2022,6 +2036,10 @@ struct Ring_R : Ring<T, true>
                         }
                         break;
                     }
+                }
+                else {
+                    stay_in_blocking_phase = true;
+                    blocking_wait_timed_out = true;
                 }
             }
 

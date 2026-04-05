@@ -85,11 +85,9 @@ int main(int argc, char* argv[])
 {
     init(argc, argv, process_observer, process_worker);
 
-    // Coordinate teardown with the worker so the runtime is not finalized while
-    // a recovered process is still completing its work.
-    barrier("example-4-finished", "_sintra_all_processes");
-
-    finalize();
+    // shutdown() performs the final all-process processing fence and then
+    // tears down the Sintra runtime.
+    shutdown();
 
     if (process_index() == 0) {
         cout << "\nRecovery demonstration complete.\n";

@@ -145,6 +145,21 @@ struct processing_fence_t {};
 template<typename BarrierMode = delivery_fence_t>
 sequence_counter_type barrier(const std::string& barrier_name, const std::string& group_name = "_sintra_external_processes");
 
+///\brief Perform the standard coordinated multi-process shutdown sequence.
+///
+/// `shutdown()` is the safe one-call counterpart to the common
+/// `barrier<processing_fence_t>(..., "_sintra_all_processes"); finalize();`
+/// pattern used by multi-process applications. It first runs a processing fence
+/// across `group_name`, then tears down the local Sintra runtime via
+/// `finalize()`. The coordinator side stays alive until the rest of the group
+/// has unpublished itself, so peers do not lose their lifeline owner mid-teardown.
+///
+/// Use this when every live participant is expected to reach the same top-level
+/// shutdown handoff before teardown. Keep calling `finalize()` directly for
+/// single-process programs, exceptional/error paths, or cases where a process
+/// cannot participate in a symmetric shutdown rendezvous.
+bool shutdown(const std::string& group_name = "_sintra_all_processes");
+
 
 template <typename FT, typename SENDER_T = void>
 ///\brief Activate a slot for handling messages from an optional sender.

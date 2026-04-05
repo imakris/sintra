@@ -193,10 +193,9 @@ int main(int argc, char* argv[])
         world() << Stop();
     }
 
-    // Ensure all processes have observed the stop signal
-    barrier("example-6-finished", "_sintra_all_processes");
-
-    finalize();
+    // shutdown() performs the final all-process processing fence and then
+    // tears down the Sintra runtime.
+    shutdown();
 
     return 0;
 }

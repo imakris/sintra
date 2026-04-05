@@ -189,7 +189,6 @@ int coordinator_process()
 
     }
 
-    barrier("barrier-flush-done", "_sintra_all_processes");
     deactivate_all_slots();
 
     sintra::test::Shared_directory shared("SINTRA_TEST_SHARED_DIR", "barrier_flush");
@@ -220,7 +219,6 @@ int worker_process(std::uint32_t worker_index)
 
     }
 
-    barrier("barrier-flush-done", "_sintra_all_processes");
     return 0;
 }
 
@@ -239,7 +237,7 @@ int worker1_process()
 int main(int argc, char* argv[])
 {
     std::set_terminate(sintra::test::custom_terminate_handler);
-    return sintra::test::run_multi_process_test(
+    return sintra::test::run_multi_process_shutdown_test(
         argc,
         argv,
         "SINTRA_TEST_SHARED_DIR",
@@ -288,6 +286,5 @@ int main(int argc, char* argv[])
                 return 1;
             }
             return 0;
-        },
-        "barrier-flush-done");
+        });
 }

@@ -9,6 +9,25 @@ coordinated execution:
   progress.
 - **TERMINATED** - the process has exited and its resources have been scavenged.
 
+## `sintra::shutdown()`
+
+For the standard multi-process teardown path, prefer:
+
+```cpp
+sintra::shutdown();
+```
+
+`shutdown()` performs a `processing_fence_t` barrier on
+`"_sintra_all_processes"` and then calls `sintra::finalize()`. This is the
+safe one-call shutdown handoff for programs where every live participant is
+expected to reach the same top-level shutdown point. On the coordinator, the
+helper waits for the rest of the shutdown group to unpublish itself before
+finalizing locally, so peers do not lose their lifeline owner mid-teardown.
+
+Keep calling `sintra::finalize()` directly for single-process programs, crash
+paths, or tests/processes that cannot participate in a symmetric shutdown
+barrier.
+
 ## `sintra::finalize()`
 
 Calling `sintra::finalize()` now performs the following steps:
@@ -71,8 +90,9 @@ Calling `sintra::finalize()` now performs the following steps:
   early allows concurrent barriers to include a dying process.
   *(Coordinator::begin_process_draining and Coordinator::drop_from_inflight_barriers in coordinator_impl.h)*
 
-These rules eliminate shutdown deadlocks and let client code call
-`sintra::finalize()` without inserting additional coordination barriers. If an
-algorithm needs stronger guarantees about group membership, it should layer an
-explicit membership protocol (or a future library helper) on top of these
-barrier semantics.
+These rules eliminate shutdown deadlocks during teardown, but they do not turn
+`sintra::finalize()` into a collective "safe to shut down now" handshake by
+themselves. For ordinary multi-process completion, use `sintra::shutdown()`.
+If an algorithm needs stronger guarantees about group membership than the
+default shutdown helper provides, it should layer an explicit membership
+protocol on top of these barrier semantics.

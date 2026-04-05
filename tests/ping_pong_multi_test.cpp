@@ -128,9 +128,7 @@ int main(int argc, char* argv[])
         argv,
         {process_ping_responder, process_pong_responder, process_monitor});
 
-    sintra::barrier<sintra::processing_fence_t>("ping-pong-finished", "_sintra_all_processes");
-
-    sintra::finalize();
+    sintra::shutdown();
 
     if (is_spawned) {
         return 0;

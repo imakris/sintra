@@ -71,11 +71,9 @@ int controller_process()
     out << elapsed.count() << '\n';
     out << (handler_done ? "done" : "pending") << '\n';
 
-    barrier("processing-fence-test-done", "_sintra_all_processes");
-
+    const bool success = barrier_result && handler_done;
     handler_done_deactivator();
-
-    return (barrier_result && handler_done) ? 0 : 1;
+    return success ? 0 : 1;
 }
 
 int worker_process()
@@ -91,8 +89,6 @@ int worker_process()
     const std::string group = "_sintra_external_processes";
     barrier("processing-fence-setup", group);
     barrier<processing_fence_t>("processing-fence", group);
-    barrier("processing-fence-test-done", "_sintra_all_processes");
-
     return 0;
 }
 
@@ -100,7 +96,7 @@ int worker_process()
 
 int main(int argc, char* argv[])
 {
-    return sintra::test::run_multi_process_test(
+    return sintra::test::run_multi_process_shutdown_test(
         argc,
         argv,
         "SINTRA_PROCESSING_FENCE_DIR",
@@ -130,6 +126,5 @@ int main(int argc, char* argv[])
             const bool success = (status == "ok") && elapsed_ok && done_ok;
 
             return success ? 0 : 1;
-        },
-        "processing-fence-test-done");
+        });
 }

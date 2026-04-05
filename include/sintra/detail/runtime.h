@@ -297,6 +297,50 @@ inline bool finalize()
     return true;
 }
 
+inline bool shutdown(const std::string& group_name)
+{
+    if (!s_mproc) {
+        return false;
+    }
+
+    constexpr const char* shutdown_barrier_name = "_sintra_shutdown";
+    barrier<processing_fence_t>(shutdown_barrier_name, group_name);
+
+    if (s_coord) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+        while (true) {
+            bool only_self_remains = true;
+            {
+                std::lock_guard<std::mutex> groups_lock(s_coord->m_groups_mutex);
+                auto group_it = s_coord->m_groups.find(group_name);
+                if (group_it != s_coord->m_groups.end()) {
+                    auto& group = group_it->second;
+                    std::lock_guard<std::mutex> group_lock(group.m_call_mutex);
+                    only_self_remains =
+                        (group.m_process_ids.size() == 1) &&
+                        (group.m_process_ids.find(s_mproc_id) != group.m_process_ids.end());
+                }
+            }
+
+            if (only_self_remains) {
+                break;
+            }
+
+            if (std::chrono::steady_clock::now() >= deadline) {
+                Log_stream(log_level::warning)
+                    << "shutdown(): coordinator timed out waiting for peers to exit group '"
+                    << group_name
+                    << "' before finalizing.\n";
+                break;
+            }
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+
+    return finalize();
+}
+
 // Returns the number of processes spawned. When wait_for_instance_name is set in
 // options, this waits for the instance to appear and returns 0 on wait failure
 // even if spawning succeeded (the process may still be running). process_instance_id
