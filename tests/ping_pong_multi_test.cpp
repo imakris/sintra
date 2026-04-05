@@ -72,7 +72,6 @@ int process_ping_responder()
     sintra::barrier("ping-pong-slot-activation");
 
     wait_for_stop();
-    sintra::barrier("ping-pong-finished", "_sintra_all_processes");
     return 0;
 }
 
@@ -86,7 +85,6 @@ int process_pong_responder()
     sintra::world() << Ping();
 
     wait_for_stop();
-    sintra::barrier("ping-pong-finished", "_sintra_all_processes");
     return 0;
 }
 
@@ -115,7 +113,6 @@ int process_monitor()
 
     const sintra::test::Shared_directory shared("SINTRA_TEST_SHARED_DIR", "ping_pong_multi");
     write_count(shared.path() / "ping_count.txt", counter.load());
-    sintra::barrier("ping-pong-finished", "_sintra_all_processes");
     return 0;
 }
 
@@ -123,16 +120,23 @@ int process_monitor()
 
 int main(int argc, char* argv[])
 {
-    return sintra::test::run_multi_process_test(
+    const bool is_spawned = sintra::test::has_branch_flag(argc, argv);
+    const sintra::test::Shared_directory shared("SINTRA_TEST_SHARED_DIR", "ping_pong_multi");
+
+    sintra::init(
         argc,
         argv,
-        "SINTRA_TEST_SHARED_DIR",
-        "ping_pong_multi",
-        {process_ping_responder, process_pong_responder, process_monitor},
-        [](const std::filesystem::path& shared_dir) {
-            const auto path = shared_dir / "ping_count.txt";
-            const int count = read_count(path);
-            return (count == k_target_ping_count) ? 0 : 1;
-        },
-        "ping-pong-finished");
+        {process_ping_responder, process_pong_responder, process_monitor});
+
+    sintra::barrier<sintra::processing_fence_t>("ping-pong-finished", "_sintra_all_processes");
+
+    sintra::finalize();
+
+    if (is_spawned) {
+        return 0;
+    }
+
+    const auto path = shared.path() / "ping_count.txt";
+    const int count = read_count(path);
+    return (count == k_target_ping_count) ? 0 : 1;
 }
