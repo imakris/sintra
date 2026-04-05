@@ -296,27 +296,32 @@ Processing fences are safe to call from any thread, including handlers themselve
 
 ### Coordinated shutdown
 
-For the standard multi-process teardown path, prefer:
+Most multi-process Sintra programs follow this top-level shape:
 
 ```cpp
+sintra::init(argc, argv, process_a, process_b, process_c);
+
+// branch-specific work
+// ...
+
 sintra::shutdown();
 ```
 
-`shutdown()` is the one-call counterpart to the common:
+`shutdown()` is the recommended teardown call when every live participant is
+expected to finish together. It first performs the library's standard
+all-process shutdown handoff, making sure earlier interprocess work has been
+fully processed, and then tears down the local runtime.
 
-```cpp
-sintra::barrier<sintra::processing_fence_t>("done", "_sintra_all_processes");
-sintra::finalize();
-```
+Call `finalize()` directly only when there is no collective shutdown handoff to
+perform, for example in a single-process program, an abnormal-exit path, or a
+workflow that uses its own explicit final rendezvous before teardown.
 
-pattern. It performs the final all-process processing fence and then tears down
-the local runtime. This is the recommended shutdown path when every live
-participant reaches the same top-level handoff before exit.
+In other words:
 
-`shutdown()` is not a universal replacement for every explicit final barrier.
-Some more complex workflows still need their own final rendezvous or
-membership protocol before shutdown, and then call `shutdown()` or
-`finalize()` only after that higher-level handoff is complete.
+* Use `shutdown()` for the ordinary "all processes are done, now exit cleanly"
+  case.
+* Use `finalize()` when the program cannot participate in that symmetric
+  shutdown step.
 
 ### Optional explicit type ids
 
