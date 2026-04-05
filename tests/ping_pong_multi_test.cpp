@@ -35,6 +35,7 @@ namespace {
 struct Ping {};
 struct Pong {};
 struct Stop {};
+constexpr const char* k_finished_barrier = "ping-pong-finished";
 
 void write_count(const std::filesystem::path& file, int value)
 {
@@ -72,6 +73,7 @@ int process_ping_responder()
     sintra::barrier("ping-pong-slot-activation");
 
     wait_for_stop();
+    sintra::barrier(k_finished_barrier, "_sintra_all_processes");
     return 0;
 }
 
@@ -85,6 +87,7 @@ int process_pong_responder()
     sintra::world() << Ping();
 
     wait_for_stop();
+    sintra::barrier(k_finished_barrier, "_sintra_all_processes");
     return 0;
 }
 
@@ -113,6 +116,7 @@ int process_monitor()
 
     const sintra::test::Shared_directory shared("SINTRA_TEST_SHARED_DIR", "ping_pong_multi");
     write_count(shared.path() / "ping_count.txt", counter.load());
+    sintra::barrier(k_finished_barrier, "_sintra_all_processes");
     return 0;
 }
 
@@ -120,21 +124,21 @@ int process_monitor()
 
 int main(int argc, char* argv[])
 {
-    const bool is_spawned = sintra::test::has_branch_flag(argc, argv);
-    const sintra::test::Shared_directory shared("SINTRA_TEST_SHARED_DIR", "ping_pong_multi");
-
-    sintra::init(
+    return sintra::test::run_multi_process_shutdown_test(
         argc,
         argv,
-        {process_ping_responder, process_pong_responder, process_monitor});
-
-    sintra::shutdown();
-
-    if (is_spawned) {
-        return 0;
-    }
-
-    const auto path = shared.path() / "ping_count.txt";
-    const int count = read_count(path);
-    return (count == k_target_ping_count) ? 0 : 1;
+        "SINTRA_TEST_SHARED_DIR",
+        "ping_pong_multi",
+        {process_ping_responder,
+         process_pong_responder,
+         process_monitor},
+        [](const std::filesystem::path&) {
+            sintra::barrier(k_finished_barrier, "_sintra_all_processes");
+            return 0;
+        },
+        [](const std::filesystem::path& shared_dir) {
+            const auto path = shared_dir / "ping_count.txt";
+            const int count = read_count(path);
+            return (count == k_target_ping_count) ? 0 : 1;
+        });
 }
