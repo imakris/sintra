@@ -327,7 +327,76 @@ int main(int argc, char* argv[])
         }
     }
 
-    // Case 3: Deadlock path - barrier should hang when peer doesn't exist.
+    // Case 3: rpc_cancelled while communication still reports RUNNING, but
+    // shutdown has already been signalled via m_must_stop.
+    {
+        s_mproc->m_communication_state = sintra::Managed_process::COMMUNICATION_RUNNING;
+        s_mproc->m_must_stop.store(true, std::memory_order_release);
+
+        sintra::Process_group group;
+        const auto group_name = unique_group_name("rendezvous_must_stop_group");
+        const auto barrier_name = std::string("rendezvous_must_stop_barrier");
+
+        const uint32_t local_index = sintra::get_process_index(s_mproc_id);
+        uint32_t remote_index = local_index + 1;
+        if (remote_index > sintra::max_process_index) {
+            remote_index = (local_index > 2) ? (local_index - 1) : local_index;
+        }
+        if (remote_index == local_index || remote_index == 1) {
+            std::fprintf(stderr, "Could not determine a valid remote process index for must-stop test.\n");
+            ok = false;
+        }
+        else {
+            std::unordered_set<sintra::instance_id_type> members;
+            members.insert(s_mproc_id);
+            members.insert(sintra::make_process_instance_id(remote_index));
+            group.set(members);
+
+            if (!group.assign_name(group_name)) {
+                std::fprintf(stderr, "Failed to assign group name for must-stop test.\n");
+                ok = false;
+            }
+            else {
+                std::atomic<bool> barrier_result{false};
+                std::atomic<bool> barrier_done{false};
+                std::thread waiter([&] {
+                    barrier_result = sintra::barrier<sintra::rendezvous_t>(barrier_name, group_name);
+                    barrier_done = true;
+                });
+
+                bool cancelled = false;
+                const auto cancel_deadline = std::chrono::steady_clock::now() + 5s;
+                while (!barrier_done.load() &&
+                       std::chrono::steady_clock::now() < cancel_deadline)
+                {
+                    if (s_mproc->unblock_rpc(sintra::process_of(s_coord_id)) > 0) {
+                        cancelled = true;
+                        break;
+                    }
+                    std::this_thread::sleep_for(1ms);
+                }
+
+                waiter.join();
+
+                if (!cancelled) {
+                    std::fprintf(stderr,
+                                 "Did not observe cancellable outstanding RPC (must-stop test).\n");
+                    ok = false;
+                }
+
+                if (cancelled && !barrier_result.load()) {
+                    std::fprintf(stderr,
+                                 "Expected rendezvous barrier to return true after must-stop cancellation.\n");
+                    ok = false;
+                }
+            }
+        }
+
+        s_mproc->m_must_stop.store(false, std::memory_order_release);
+        s_mproc->m_communication_state = sintra::Managed_process::COMMUNICATION_PAUSED;
+    }
+
+    // Case 4: Deadlock path - barrier should hang when peer doesn't exist.
     // This runs in a child process with communication NOT paused, so the barrier
     // actually blocks instead of treating RPC failures as satisfied.
     {

@@ -311,6 +311,13 @@ public:
     std::vector<Pending_instance_publication> finalize_initialization_tracking(
         instance_id_type process_iid);
 
+    std::vector<Pending_completion> collect_pending_barrier_completions(
+        instance_id_type process_iid,
+        bool remove_process);
+
+    void emit_pending_barrier_completions(
+        const std::vector<Pending_completion>& pending_completions);
+
     void collect_and_schedule_barrier_completions(
         instance_id_type process_iid,
         bool remove_process);

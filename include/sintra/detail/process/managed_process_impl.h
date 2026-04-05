@@ -1712,6 +1712,7 @@ void Managed_process::init(int argc, const char* const* argv)
 
         // if the unpublished transceiver is the coordinator process, we have to stop.
         if (process_of(s_coord_id) == msg.instance_id) {
+            s_mproc->m_must_stop.store(true, std::memory_order_release);
             // Coordinator process has unpublished - pause communication outside the handler
             // to avoid reentrancy into barrier machinery.
             s_mproc->run_after_current_handler([]{
@@ -1784,6 +1785,7 @@ void Managed_process::init(int argc, const char* const* argv)
         {
             // Remote coordinator crashed: fail outstanding RPCs and pause communication
             if (process_of(s_coord_id) == msg.sender_instance_id) {
+                s_mproc->m_must_stop.store(true, std::memory_order_release);
                 // 1) Wake any RPCs waiting on the coordinator so they fail fast.
                 s_mproc->unblock_rpc(process_of(s_coord_id));
                 // 2) Pause communication *after* this handler completes to avoid reentrancy.
@@ -2260,6 +2262,8 @@ void Managed_process::stop()
     // should not have any side effects.
     if (m_communication_state == COMMUNICATION_STOPPED)
         return;
+
+    m_must_stop.store(true, std::memory_order_release);
 
     {
         Dispatch_shared_lock readers_lock(m_readers_mutex);

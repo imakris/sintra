@@ -16,6 +16,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <string_view>
 #include <thread>
 
@@ -137,9 +138,27 @@ int receiver_process()
     }
     sintra::world() << Ack_a{};
 
+    std::condition_variable second_cv;
+    std::mutex second_mtx;
+    std::optional<DataMessage> second_message;
+    auto second_message_slot = sintra::activate_slot([&](DataMessage msg) {
+        std::lock_guard<std::mutex> lock(second_mtx);
+        if (!second_message.has_value()) {
+            second_message.emplace(std::move(msg));
+            second_cv.notify_one();
+        }
+    });
+
     sintra::barrier("phase-two");
 
-    auto other_msg = sintra::receive<DataMessage>();
+    DataMessage other_msg{};
+    {
+        std::unique_lock<std::mutex> lock(second_mtx);
+        second_cv.wait(lock, [&] { return second_message.has_value(); });
+        other_msg = std::move(*second_message);
+    }
+    second_message_slot();
+
     if (other_msg.value != 91) {
         std::fprintf(stderr, "FAIL: expected second value 91, got %d\n", other_msg.value);
         std::abort();

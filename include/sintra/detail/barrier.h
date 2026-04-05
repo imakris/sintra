@@ -17,7 +17,8 @@ namespace detail {
 inline bool should_treat_rpc_failure_as_satisfied()
 {
     return s_mproc &&
-           s_mproc->m_communication_state != Managed_process::COMMUNICATION_RUNNING;
+           (s_mproc->m_communication_state != Managed_process::COMMUNICATION_RUNNING ||
+            s_mproc->m_must_stop.load(std::memory_order_acquire));
 }
 
 inline void wait_for_processing_quiescence();

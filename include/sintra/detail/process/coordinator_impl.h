@@ -609,12 +609,14 @@ inline sequence_counter_type Coordinator::begin_process_draining(instance_id_typ
         m_draining_process_states[draining_slot] = 1;
     }
 
-    collect_and_schedule_barrier_completions(
+    auto pending_completions = collect_pending_barrier_completions(
         process_iid,
         false);
 
-    // Note: No explicit event-loop "pump" is required here; queued completions
-    // run via run_after_current_handler() and the request loop's post-handler hook.
+    // Emit any barrier completions before reporting the reply-ring watermark for
+    // this drain RPC. Callers use that watermark to flush the coordinator reply
+    // channel, so it must include the completions that draining just triggered.
+    emit_pending_barrier_completions(pending_completions);
 
     // Use reply ring watermark (m_out_rep_c) since barrier completion messages
     // are sent on the reply channel. Get it at return time for the draining process.
@@ -1053,7 +1055,8 @@ Coordinator::finalize_initialization_tracking(instance_id_type process_iid)
 }
 
 inline
-void Coordinator::collect_and_schedule_barrier_completions(
+std::vector<Coordinator::Pending_completion>
+Coordinator::collect_pending_barrier_completions(
     instance_id_type process_iid,
     bool remove_process)
 {
@@ -1078,19 +1081,39 @@ void Coordinator::collect_and_schedule_barrier_completions(
         }
     }
 
+    return pending_completions;
+}
+
+inline
+void Coordinator::emit_pending_barrier_completions(
+    const std::vector<Pending_completion>& pending_completions)
+{
+    if (pending_completions.empty() || !s_mproc) {
+        return;
+    }
+
+    lock_guard<mutex> groups_lock(m_groups_mutex);
+    for (const auto& entry : pending_completions) {
+        auto group_it = m_groups.find(entry.group_name);
+        if (group_it != m_groups.end()) {
+            group_it->second.emit_barrier_completions(entry.completions);
+        }
+    }
+}
+
+inline
+void Coordinator::collect_and_schedule_barrier_completions(
+    instance_id_type process_iid,
+    bool remove_process)
+{
+    auto pending_completions = collect_pending_barrier_completions(process_iid, remove_process);
     if (pending_completions.empty() || !s_mproc) {
         return;
     }
 
     s_mproc->run_after_current_handler(
         [this, pending = std::move(pending_completions)]() mutable {
-            lock_guard<mutex> groups_lock(m_groups_mutex);
-            for (auto& entry : pending) {
-                auto group_it = m_groups.find(entry.group_name);
-                if (group_it != m_groups.end()) {
-                    group_it->second.emit_barrier_completions(entry.completions);
-                }
-            }
+            emit_pending_barrier_completions(pending);
         });
 }
 
