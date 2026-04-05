@@ -221,6 +221,7 @@ int main(int argc, char* argv[])
     // Keep the group alive until finalize() so any late request reader dispatch
     // still finds a valid local receiver after cancellation.
     sintra::Process_group cancel_group;
+    sintra::Process_group must_stop_group;
     {
         const auto group_name = unique_group_name("rendezvous_cancel_group");
         const auto barrier_name = std::string("rendezvous_cancel_barrier");
@@ -333,7 +334,6 @@ int main(int argc, char* argv[])
         s_mproc->m_communication_state = sintra::Managed_process::COMMUNICATION_RUNNING;
         s_mproc->m_must_stop.store(true, std::memory_order_release);
 
-        sintra::Process_group group;
         const auto group_name = unique_group_name("rendezvous_must_stop_group");
         const auto barrier_name = std::string("rendezvous_must_stop_barrier");
 
@@ -350,9 +350,9 @@ int main(int argc, char* argv[])
             std::unordered_set<sintra::instance_id_type> members;
             members.insert(s_mproc_id);
             members.insert(sintra::make_process_instance_id(remote_index));
-            group.set(members);
+            must_stop_group.set(members);
 
-            if (!group.assign_name(group_name)) {
+            if (!must_stop_group.assign_name(group_name)) {
                 std::fprintf(stderr, "Failed to assign group name for must-stop test.\n");
                 ok = false;
             }
