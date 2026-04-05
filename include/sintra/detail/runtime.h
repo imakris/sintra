@@ -243,28 +243,23 @@ inline bool finalize()
         trace("begin_process_draining_local.done");
     }
     else {
-        std::atomic<bool> done{false};
-        std::thread watchdog([&] {
-            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-            while (!done.load() && std::chrono::steady_clock::now() < deadline) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            }
-            if (!done.load()) {
-                s_mproc->unblock_rpc(process_of(s_coord_id));
-            }
-        });
-
         trace("begin_process_draining_remote.start");
         try {
-            flush_seq = Coordinator::rpc_begin_process_draining(s_coord_id, s_mproc_id);
+            auto handle = Coordinator::rpc_async_begin_process_draining(s_coord_id, s_mproc_id);
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            if (handle.wait_until(deadline) == Rpc_wait_status::completed) {
+                flush_seq = handle.get();
+            }
+            else {
+                handle.abandon();
+                s_mproc->unblock_rpc(process_of(s_coord_id));
+                flush_seq = invalid_sequence;
+            }
         }
         catch (...) {
             flush_seq = invalid_sequence;
         }
         trace("begin_process_draining_remote.done");
-
-        done = true;
-        watchdog.join();
     }
 
     if (!s_coord && flush_seq != invalid_sequence) {
@@ -278,6 +273,10 @@ inline bool finalize()
     trace("pause.start");
     s_mproc->pause();
     trace("pause.done");
+
+    trace("unblock_rpc.start");
+    s_mproc->unblock_rpc();
+    trace("unblock_rpc.done");
 
     trace("deactivate_all.start");
     s_mproc->deactivate_all();

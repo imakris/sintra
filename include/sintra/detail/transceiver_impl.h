@@ -178,7 +178,23 @@ Transceiver::ensure_rpc_shutdown()
     if (!m_rpc_shutdown_requested) {
         m_rpc_shutdown_requested = true;
         m_accepting_rpc_calls = false;
-        m_rpc_lifecycle_condition.wait(lock, [&]() { return m_active_rpc_calls == 0; });
+        constexpr auto shutdown_warning_interval = std::chrono::seconds(5);
+        while (m_active_rpc_calls != 0) {
+            if (m_rpc_lifecycle_condition.wait_for(
+                    lock,
+                    shutdown_warning_interval,
+                    [&]() { return m_active_rpc_calls == 0; }))
+            {
+                break;
+            }
+
+            Log_stream(log_level::warning)
+                << "Transceiver shutdown is waiting for "
+                << m_active_rpc_calls
+                << " active RPC handler(s) on instance "
+                << m_instance_id
+                << ". Forced timeout is unsafe while handlers still execute against the object.\n";
+        }
         m_rpc_shutdown_complete = true;
         // Notify while still holding the lock to prevent race conditions
         m_rpc_lifecycle_condition.notify_all();
@@ -683,9 +699,214 @@ struct Void_filter<void_placeholder_t>
     void call() { f(); }
 };
 
+template<typename T>
+struct Rpc_state
+{
+    Outstanding_rpc_control control;
+    Unserialized_Enclosure<T> return_body;
+    type_id_type exception_type_id = not_defined_type_id;
+    std::string exception_what;
+    instance_id_type function_instance_id = invalid_instance_id;
+};
 
-template<typename T> struct unvoid       { using type = T;                  };
-template<>           struct unvoid<void> { using type = void_placeholder_t; };
+template<typename T>
+void cleanup_rpc_state_if_needed(const std::shared_ptr<Rpc_state<T>>& rpc_state)
+{
+    if (!rpc_state) {
+        return;
+    }
+
+    instance_id_type function_instance_id = invalid_instance_id;
+    bool needs_cleanup = false;
+
+    {
+        lock_guard<mutex> lock(rpc_state->control.keep_waiting_mutex);
+        if (!rpc_state->control.cleaned_up) {
+            rpc_state->control.cleaned_up = true;
+            function_instance_id = rpc_state->function_instance_id;
+            needs_cleanup = true;
+        }
+    }
+
+    if (!needs_cleanup) {
+        return;
+    }
+
+    {
+        unique_lock<mutex> outstanding_lock(s_outstanding_rpcs_mutex());
+        s_outstanding_rpcs().erase(&rpc_state->control);
+    }
+
+    if (function_instance_id != invalid_instance_id) {
+        Dispatch_shared_lock dispatch_lock(dispatch_shutdown_mutex_instance);
+        if (s_mproc) {
+            s_mproc->deactivate_return_handler(function_instance_id);
+        }
+    }
+}
+
+template<typename RT>
+Rpc_handle<RT>::Rpc_handle(std::shared_ptr<state_type> state):
+    m_state(std::move(state))
+{}
+
+template<typename RT>
+Rpc_handle<RT>::~Rpc_handle()
+{
+    abandon();
+}
+
+template<typename RT>
+Rpc_handle<RT>& Rpc_handle<RT>::operator=(Rpc_handle&& other) noexcept
+{
+    if (this != &other) {
+        abandon();
+        m_state = std::move(other.m_state);
+    }
+    return *this;
+}
+
+template<typename RT>
+void Rpc_handle<RT>::wait() const
+{
+    if (!m_state) {
+        return;
+    }
+
+    unique_lock<mutex> lock(m_state->control.keep_waiting_mutex);
+    m_state->control.keep_waiting_condition.wait(lock, [&] { return !m_state->control.keep_waiting; });
+    lock.unlock();
+
+    cleanup_rpc_state_if_needed(m_state);
+}
+
+template<typename RT>
+template<typename Clock, typename Duration>
+Rpc_wait_status Rpc_handle<RT>::wait_until(const std::chrono::time_point<Clock, Duration>& deadline) const
+{
+    if (!m_state) {
+        return Rpc_wait_status::completed;
+    }
+
+    unique_lock<mutex> lock(m_state->control.keep_waiting_mutex);
+    if (!m_state->control.keep_waiting) {
+        lock.unlock();
+        cleanup_rpc_state_if_needed(m_state);
+        return Rpc_wait_status::completed;
+    }
+
+    if (m_state->control.keep_waiting_condition.wait_until(
+            lock,
+            deadline,
+            [&] { return !m_state->control.keep_waiting; }))
+    {
+        lock.unlock();
+        cleanup_rpc_state_if_needed(m_state);
+        return Rpc_wait_status::completed;
+    }
+
+    return Rpc_wait_status::deadline_exceeded;
+}
+
+template<typename RT>
+bool Rpc_handle<RT>::ready() const
+{
+    return state() != Rpc_completion_state::pending;
+}
+
+template<typename RT>
+Rpc_completion_state Rpc_handle<RT>::state() const
+{
+    if (!m_state) {
+        return Rpc_completion_state::abandoned;
+    }
+
+    Rpc_completion_state completion_state = Rpc_completion_state::pending;
+
+    {
+        lock_guard<mutex> lock(m_state->control.keep_waiting_mutex);
+        if (m_state->control.keep_waiting) {
+            return Rpc_completion_state::pending;
+        }
+        if (m_state->control.abandoned) {
+            completion_state = Rpc_completion_state::abandoned;
+        }
+        else
+        if (m_state->control.cancelled) {
+            completion_state = Rpc_completion_state::cancelled;
+        }
+        else
+        if (m_state->exception_type_id != not_defined_type_id) {
+            completion_state = Rpc_completion_state::remote_exception;
+        }
+        else {
+            completion_state = Rpc_completion_state::returned;
+        }
+    }
+
+    cleanup_rpc_state_if_needed(m_state);
+    return completion_state;
+}
+
+template<typename RT>
+bool Rpc_handle<RT>::abandon()
+{
+    if (!m_state) {
+        return false;
+    }
+
+    bool transitioned = false;
+
+    {
+        lock_guard<mutex> lock(m_state->control.keep_waiting_mutex);
+        if (m_state->control.keep_waiting) {
+            m_state->control.keep_waiting = false;
+            m_state->control.abandoned = true;
+            m_state->control.keep_waiting_condition.notify_all();
+            transitioned = true;
+        }
+    }
+
+    cleanup_rpc_state_if_needed(m_state);
+    return transitioned;
+}
+
+template<typename RT>
+auto Rpc_handle<RT>::get() const -> RT
+{
+    if (!m_state) {
+        throw runtime_error("RPC handle has no state.");
+    }
+
+    wait();
+
+    const auto completion_state = state();
+    switch (completion_state) {
+        case Rpc_completion_state::pending:
+            throw runtime_error("RPC is still pending.");
+
+        case Rpc_completion_state::abandoned:
+            throw runtime_error("RPC was abandoned.");
+
+        case Rpc_completion_state::cancelled:
+            throw rpc_cancelled("rpc cancelled");
+
+        case Rpc_completion_state::remote_exception:
+            string_to_exception(m_state->exception_type_id, m_state->exception_what);
+            throw runtime_error("RPC remote exception conversion unexpectedly returned.");
+
+        case Rpc_completion_state::returned:
+            if constexpr (std::is_void_v<RT>) {
+                m_state->return_body.get_value();
+                return;
+            }
+            else {
+                return m_state->return_body.get_value();
+            }
+    }
+
+    throw runtime_error("RPC entered an unknown completion state.");
+}
 
 
 template <
@@ -694,7 +915,7 @@ template <
 >
 void Transceiver::rpc_handler(Message_prefix& untyped_msg)
 {
-    using r_type = typename unvoid<typename RPCTC::r_type>::type;
+    using r_type = typename rpc_storage_type<typename RPCTC::r_type>::type;
 
     MESSAGE_T& msg = (MESSAGE_T&)untyped_msg;
     typename RPCTC::o_type* obj = nullptr;
@@ -842,6 +1063,38 @@ RT Transceiver::rpc(
     return rpc_impl<RPCTC, message_type, FArgs...>(instance_id, args...);
 }
 
+template <
+    typename RPCTC,
+    typename RT,
+    typename OBJECT_T,
+    typename... FArgs,
+    typename... RArgs
+>
+Rpc_handle<RT> Transceiver::rpc_async(
+    RT(OBJECT_T::* /*resolution dummy arg*/)(FArgs...),
+    instance_id_type instance_id,
+    RArgs&&... args)
+{
+    using message_type = Message<unique_message_body<RPCTC, FArgs...>, RT, RPCTC::id>;
+    return rpc_async_impl<RPCTC, message_type, FArgs...>(instance_id, args...);
+}
+
+template <
+    typename RPCTC,
+    typename RT,
+    typename OBJECT_T,
+    typename... FArgs,
+    typename... RArgs
+>
+Rpc_handle<RT> Transceiver::rpc_async(
+    RT(OBJECT_T::* /*resolution dummy arg*/)(FArgs...) const,
+    instance_id_type instance_id,
+    RArgs&&... args)
+{
+    using message_type = Message<unique_message_body<RPCTC, FArgs...>, RT, RPCTC::id>;
+    return rpc_async_impl<RPCTC, message_type, FArgs...>(instance_id, args...);
+}
+
 
 
 template <
@@ -849,8 +1102,8 @@ template <
     typename MESSAGE_T,
     typename... Args
 >
-typename RPCTC::r_type
-Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
+Rpc_handle<typename RPCTC::r_type>
+Transceiver::rpc_async_impl(instance_id_type instance_id, Args... args)
 {
     if (!s_mproc) {
         throw runtime_error(
@@ -864,54 +1117,40 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
 
     if constexpr (RPCTC::may_be_called_directly) {
         if (is_local_instance(instance_id)) {
-            // if the instance is local, then it has already been registered in the instance_map
-            // of this particular type. this will only find the object and call it.
-            // Hold spinlock while accessing the iterator to prevent use-after-invalidation
-            typename RPCTC::o_type* object = nullptr;
-            {
-                auto scoped_map = get_instance_to_object_map<RPCTC>().scoped();
-                auto it = scoped_map.get().find(instance_id);
-                if (it == scoped_map.get().end()) {
-                    throw std::runtime_error("Local RPC target no longer available - it may have been shut down.");
-                }
-                object = it->second;
-            }
-            auto guard = object->try_acquire_rpc_execution();
-            if (!guard) {
-                throw std::runtime_error("Attempted to call an RPC on a target that is shutting down.");
-            }
-            return (object->*RPCTC::mf())(args...);
+            throw std::runtime_error(
+                "rpc_async is not supported for same-process non-strict RPC targets. "
+                "Use a SINTRA_RPC_STRICT export for transported same-process async RPC, "
+                "or call rpc_<method>() for the blocking non-strict path.");
         }
     }
 
-    using return_type = typename MESSAGE_T::return_type;
+    if constexpr (RPCTC::is_fire_and_forget) {
+        throw std::runtime_error("rpc_async is not available for fire-and-forget RPC exports.");
+    }
+
+    using return_type = typename rpc_storage_type<typename MESSAGE_T::return_type>::type;
     using return_message_type = Message<Enclosure<return_type>, void, not_defined_type_id>;
 
-    struct Rpc_state
-    {
-        Outstanding_rpc_control control;
-        Unserialized_Enclosure<return_type> return_body;
-        type_id_type exception_type_id = not_defined_type_id;
-        std::string exception_what;
-        instance_id_type function_instance_id = invalid_instance_id;
-    };
-
-    auto rpc_state = std::make_shared<Rpc_state>();
+    auto rpc_state = std::make_shared<Rpc_state<return_type>>();
     rpc_state->control.remote_instance = instance_id;
 
     Return_handler rh;
     rh.return_handler = [rpc_state] (const Message_prefix& msg) {
         const auto& returned_message = (const return_message_type&)(msg);
         lock_guard<mutex> sl(rpc_state->control.keep_waiting_mutex);
+        if (!rpc_state->control.keep_waiting) {
+            return;
+        }
         rpc_state->return_body = returned_message;
-        rpc_state->control.success = true;
         rpc_state->control.keep_waiting = false;
         rpc_state->control.keep_waiting_condition.notify_all();
     };
     rh.exception_handler = [rpc_state] (const Message_prefix& msg) {
         const auto& returned_message = (const exception&)(msg);
         lock_guard<mutex> sl(rpc_state->control.keep_waiting_mutex);
-        rpc_state->control.success = false;
+        if (!rpc_state->control.keep_waiting) {
+            return;
+        }
         rpc_state->exception_type_id = returned_message.exception_type_id;
         rpc_state->exception_what = returned_message.what;
         rpc_state->control.keep_waiting = false;
@@ -921,6 +1160,9 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
 
         const auto& returned_message = (const deferral&)(msg);
         lock_guard<mutex> sl(rpc_state->control.keep_waiting_mutex);
+        if (!rpc_state->control.keep_waiting) {
+            return;
+        }
         // the 'success' variable here is irrelevant
 
         // if the new_id differs, then replace it
@@ -974,65 +1216,54 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
         }
         throw;
     }
-
-    //    _       .//'
-    //   (_).  .//'                          NOTE: This is intentionally synchronous.
-    // -- _  O|| --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --
-    //   (_)'  '\\.                          An async variant could split here and keep
-    //            '\\.                       waiting on rpc_state as a continuation.
-
-    // Check if this is a fire-and-forget message (no reply expected)
-    if constexpr (RPCTC::is_fire_and_forget) {
-        const auto function_instance_id = rpc_state->function_instance_id;
-        // For fire-and-forget functions, don't wait for a reply
-        sl.unlock();
-        {
-            unique_lock<mutex> orpclock(s_outstanding_rpcs_mutex());
-            s_outstanding_rpcs().erase(&rpc_state->control);
-        }
-        s_mproc->deactivate_return_handler(function_instance_id);
-        // Return void (void_placeholder_t will be handled by the caller)
-        return rpc_state->return_body.get_value();
-    }
-
-    // Wait until either a normal reply arrives or the RPC gets unblocked.
-    // With predicate waiting plus Managed_process::unblock_rpc() (invoked on
-    // coordinator loss and during finalize()), this wait is bounded and cannot
-    // deadlock via lost notifications.
-    rpc_state->control.keep_waiting_condition.wait(sl, [&]{ return !rpc_state->control.keep_waiting; });
-
-    const auto function_instance_id = rpc_state->function_instance_id;
-
-    // Release per-RPC mutex before touching the global outstanding set.
-    // This maintains the lock ordering rule: always acquire s_outstanding_rpcs_mutex
-    // before any keep_waiting_mutex (never the reverse).
     sl.unlock();
+    return Rpc_handle<typename RPCTC::r_type>(std::move(rpc_state));
+}
 
-    {
-        unique_lock<mutex> orpclock(s_outstanding_rpcs_mutex());
-        s_outstanding_rpcs().erase(&rpc_state->control);
+template <
+    typename RPCTC,
+    typename MESSAGE_T,
+    typename... Args
+>
+typename RPCTC::r_type
+Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
+{
+    if constexpr (RPCTC::may_be_called_directly) {
+        if (is_local_instance(instance_id)) {
+            // if the instance is local, then it has already been registered in the instance_map
+            // of this particular type. this will only find the object and call it.
+            // Hold spinlock while accessing the iterator to prevent use-after-invalidation
+            typename RPCTC::o_type* object = nullptr;
+            {
+                auto scoped_map = get_instance_to_object_map<RPCTC>().scoped();
+                auto it = scoped_map.get().find(instance_id);
+                if (it == scoped_map.get().end()) {
+                    throw std::runtime_error("Local RPC target no longer available - it may have been shut down.");
+                }
+                object = it->second;
+            }
+            auto guard = object->try_acquire_rpc_execution();
+            if (!guard) {
+                throw std::runtime_error("Attempted to call an RPC on a target that is shutting down.");
+            }
+            return (object->*RPCTC::mf())(args...);
+        }
     }
 
-    // we can now disable the return message handler
-    s_mproc->deactivate_return_handler(function_instance_id);
-
-    if (!rpc_state->control.success) {
-        if (rpc_state->exception_type_id != not_defined_type_id) {
-            // interprocess exception
-            string_to_exception(rpc_state->exception_type_id, rpc_state->exception_what);
-        }
-        else {
-            // rpc failure (distinguish between cancelled vs. other failures)
-            if (rpc_state->control.cancelled) {
-                throw rpc_cancelled("rpc cancelled");
-            }
-            else {
-                throw std::runtime_error("RPC failed");
-            }
-        }
+    if constexpr (RPCTC::is_fire_and_forget) {
+        static auto once = MESSAGE_T::id();
+        (void)(once);
+        MESSAGE_T* msg = s_mproc->m_out_req_c->write<MESSAGE_T>(vb_size<MESSAGE_T>(args...), args...);
+        msg->sender_instance_id = s_mproc->m_instance_id;
+        msg->receiver_instance_id = instance_id;
+        msg->function_instance_id = make_instance_id();
+        s_mproc->m_out_req_c->done_writing();
+        return;
     }
 
-    return rpc_state->return_body.get_value();
+    auto handle = rpc_async_impl<RPCTC, MESSAGE_T, Args...>(instance_id, args...);
+    handle.wait();
+    return handle.get();
 }
 
 
@@ -1074,6 +1305,7 @@ Transceiver::replace_return_handler_id(instance_id_type old_id, instance_id_type
 
     auto handler = std::move(it->second);
     m_active_return_handlers.erase(it);
+    assert(m_active_return_handlers.find(new_id) == m_active_return_handlers.end());
     m_active_return_handlers[new_id] = std::move(handler);
 }
 

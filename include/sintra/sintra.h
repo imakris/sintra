@@ -63,6 +63,11 @@
 // transceivers, and the process message reader consumes them on behalf of a
 // managed process.  These includes wire up the request/reply rings, message
 // envelopes, and the transceiver faÃ§ade that user code interacts with.
+//
+// RPC is part of this surface as well:
+// - `rpc_<method>(...)` remains the blocking call/return API
+// - `rpc_async_<method>(...)` returns an `Rpc_handle<T>` for async waiting,
+//   deadline-bounded waits, abandonment, and later result retrieval
 #include "detail/messaging/message_impl.h"
 #include "detail/messaging/process_message_reader_impl.h"
 #include "detail/transceiver.h"

@@ -6,10 +6,12 @@
 #include "globals.h"
 #include "id_types.h"
 #include "messaging/message.h"
+#include <chrono>
 #include <condition_variable>
 #include <functional>
 #include <list>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <type_traits>
@@ -30,6 +32,46 @@ using std::mutex;
 using std::remove_reference;
 using std::string;
 using std::unordered_map;
+
+// Wait results for Rpc_handle::wait_until(...). This is part of the async RPC
+// surface returned by rpc_async_<method>().
+enum class Rpc_wait_status
+{
+    completed,
+    deadline_exceeded,
+};
+
+// Observable lifecycle states for an async Rpc_handle. Synchronous rpc_<method>()
+// does not expose this state machine publicly, even though transported sync RPC
+// reuses the same internal wait/result plumbing.
+// - cancelled: wait ended because process/coordinator teardown unblocked it
+// - abandoned: caller explicitly gave up interest via abandon()
+enum class Rpc_completion_state
+{
+    pending,
+    returned,
+    remote_exception,
+    cancelled,
+    abandoned,
+};
+
+template<typename RT>
+class Rpc_handle;
+
+template<typename T>
+struct Rpc_state;
+
+template<typename T>
+struct rpc_storage_type
+{
+    using type = T;
+};
+
+template<>
+struct rpc_storage_type<void>
+{
+    using type = void_placeholder_t;
+};
 
 
  //////////////////////////////////////////////////////////////////////////
@@ -413,6 +455,34 @@ public:
         instance_id_type instance_id,
         RArgs&&... args);
 
+    template <
+        typename RPCTC,
+        typename RT,
+        typename OBJECT_T,
+        typename... FArgs,
+        typename... RArgs
+    >
+    // Async-only public surface. Synchronous rpc_<method>() stays blocking and
+    // reuses the same transported machinery internally without exposing a handle.
+    static Rpc_handle<RT> rpc_async(
+        RT(OBJECT_T::* /*resolution dummy arg*/)(FArgs...),
+        instance_id_type instance_id,
+        RArgs&&... args);
+
+    template <
+        typename RPCTC,
+        typename RT,
+        typename OBJECT_T,
+        typename... FArgs,
+        typename... RArgs
+    >
+    // Async-only public surface. Synchronous rpc_<method>() stays blocking and
+    // reuses the same transported machinery internally without exposing a handle.
+    static Rpc_handle<RT> rpc_async(
+        RT(OBJECT_T::* /*resolution dummy arg*/)(FArgs...) const,
+        instance_id_type instance_id,
+        RArgs&&... args);
+
 
     template <
         typename RPCTC,
@@ -420,6 +490,13 @@ public:
         typename... Args
     >
     static auto rpc_impl(instance_id_type instance_id, Args... args) -> typename RPCTC::r_type;
+
+    template <
+        typename RPCTC,
+        typename MESSAGE_T,
+        typename... Args
+    >
+    static auto rpc_async_impl(instance_id_type instance_id, Args... args) -> Rpc_handle<typename RPCTC::r_type>;
 
 
 
@@ -470,6 +547,14 @@ public:
     static auto rpc_ ## m (sintra::Resolvable_instance_id instance_id, Args&&... args)          \
     {                                                                                           \
         return rpc<m ## _mftc>(mfp, instance_id, args...);                                      \
+    }                                                                                           \
+                                                                                                \
+    template<typename... Args>                                                                  \
+    static auto rpc_async_ ## m (sintra::Resolvable_instance_id instance_id, Args&&... args)    \
+    {                                                                                           \
+        static_assert(!m ## _mftc::is_fire_and_forget,                                           \
+            "rpc_async_<method>() is not available for fire-and-forget exports.");              \
+        return rpc_async<m ## _mftc>(mfp, instance_id, args...);                                \
     }
 
     
@@ -697,8 +782,53 @@ struct Outstanding_rpc_control
     instance_id_type    remote_instance = invalid_instance_id;
 
     bool                keep_waiting = true;
-    bool                success = false;
     bool                cancelled = false;
+    bool                abandoned = false;
+    bool                cleaned_up = false;
+};
+
+template<typename RT>
+class Rpc_handle
+{
+public:
+    // Public async RPC result handle returned by rpc_async_<method>().
+    // Synchronous rpc_<method>() remains a blocking surface and only reuses the
+    // same transported state internally.
+    Rpc_handle() = default;
+    Rpc_handle(const Rpc_handle&) = delete;
+    Rpc_handle(Rpc_handle&&) noexcept = default;
+    Rpc_handle& operator=(const Rpc_handle&) = delete;
+    Rpc_handle& operator=(Rpc_handle&& other) noexcept;
+    ~Rpc_handle();
+
+    // Block until the async RPC reaches a terminal state.
+    void wait() const;
+
+    // Wait until deadline or terminal completion, whichever happens first.
+    template<typename Clock, typename Duration>
+    Rpc_wait_status wait_until(const std::chrono::time_point<Clock, Duration>& deadline) const;
+
+    // True once the handle is no longer pending.
+    bool ready() const;
+
+    // Inspect the current async terminal state without consuming the result.
+    Rpc_completion_state state() const;
+
+    // Give up caller-side interest without cancelling remote execution.
+    bool abandon();
+
+    // Block if needed, then return the value or rethrow the terminal failure.
+    auto get() const -> RT;
+
+private:
+    using storage_type = typename rpc_storage_type<RT>::type;
+    using state_type = Rpc_state<storage_type>;
+
+    explicit Rpc_handle(std::shared_ptr<state_type> state);
+
+    std::shared_ptr<state_type> m_state;
+
+    friend struct Transceiver;
 };
 
 

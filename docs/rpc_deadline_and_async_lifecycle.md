@@ -80,7 +80,7 @@ The actual generic need is simpler:
 
 Sintra already provides important pieces of this model.
 
-### 1. Outstanding RPC waits can already be unblocked
+### 1. Process-scoped outstanding RPC waits can already be unblocked
 
 `Managed_process::unblock_rpc(...)` marks matching outstanding RPCs as
 cancelled and wakes their waiters.
@@ -90,7 +90,10 @@ Relevant code:
 - `include/sintra/detail/process/managed_process_impl.h`
 - `include/sintra/detail/transceiver_impl.h`
 
-This is already used during communication teardown and some shutdown paths.
+This is already used in some teardown paths, but it is not yet a general
+caller-side abandonment primitive. In particular, the current implementation is
+process-scoped and should not be described as if it already provides a complete
+"cancel any outstanding wait" lifecycle model.
 
 ### 2. Synchronous RPC already has a caller-side wait state
 
@@ -99,11 +102,14 @@ registers return handlers, waits on a condition variable, and distinguishes:
 
 - normal return
 - remote exception
-- generic RPC failure
 - cancelled wait via `rpc_cancelled`
+- a generic fallback failure path
 
 This is an excellent starting point because the lifecycle state already exists,
 even though it is currently exposed only through the synchronous API.
+
+It is important not to overstate this: the current internal state does not yet
+carry a first-class `deadline_exceeded` or `transport_failed` classification.
 
 ### 3. Receiver-side RPC shutdown already exists
 
@@ -123,7 +129,12 @@ variant could split at the point where the request has been written and the
 return handler is registered, then continue waiting via stored RPC state.
 
 That means the design space is not foreign to the implementation. The library
-already has the right internal seam.
+already has a promising transported-RPC seam.
+
+That seam does not currently cover every existing RPC call path. Same-process
+non-strict RPCs can still take a direct-call fast path that bypasses
+`Rpc_state`, return-handler registration, and outstanding-RPC tracking. Any
+async/deadline API must define explicitly how local same-process targets behave.
 
 ## The key semantic distinction
 
@@ -193,44 +204,42 @@ that Sintra already has internally.
 Illustrative only:
 
 ```cpp
-auto handle = Some_service::rpc_async(target, arg1, arg2);
+auto handle = Some_service::rpc_async_method(target, arg1, arg2);
 
 switch (handle.wait_until(deadline)) {
-case rpc_wait_status::completed:
-    auto value = handle.get();
+case Rpc_wait_status::completed:
+    switch (handle.state()) {
+    case Rpc_completion_state::returned:
+        auto value = handle.get();
+        break;
+
+    case Rpc_completion_state::remote_exception:
+        handle.get(); // rethrows
+        break;
+
+    case Rpc_completion_state::cancelled:
+        break;
+
+    case Rpc_completion_state::abandoned:
+        break;
+    }
     break;
 
-case rpc_wait_status::deadline_exceeded:
+case Rpc_wait_status::deadline_exceeded:
     handle.abandon();
-    break;
-
-case rpc_wait_status::cancelled:
-    break;
-
-case rpc_wait_status::transport_failed:
     break;
 }
 ```
 
-Possible companion forms:
-
-```cpp
-auto result = Some_service::rpc_with_deadline(target, deadline, arg1, arg2);
-```
-
-where `result` would explicitly distinguish:
-
-- completed
-- remote_exception
-- cancelled
-- deadline_exceeded
-- transport_failed
+The exact spelling should follow Sintra's existing generated `rpc_<method>(...)`
+style rather than inventing an unrelated naming family.
 
 ## Why an async handle is better than a sync timeout wrapper
 
-A synchronous wrapper with timeout can be useful, but it is not enough on its
-own. The important capability is not merely "wait for at most N milliseconds".
-The important capability is:
+A synchronous timeout wrapper can be layered on top later if it proves useful,
+but it is not the primitive that needs to be added first. The important
+capability is not merely "wait for at most N milliseconds". The important
+capability is:
 
 - the caller can retain or drop interest in the eventual result
 - late reply handling remains safe and explicit
@@ -252,6 +261,17 @@ This proposal fits the existing Sintra internals well.
 - `rpc_cancelled`
 - `Managed_process::unblock_rpc(...)`
 
+### Existing behavioral baseline for late replies
+
+The current reply dispatch path already drops replies safely when the caller-side
+handler is gone or the receiver object has already disappeared locally.
+
+That behavior is a useful baseline because it means abandonment does not require
+inventing a brand-new late-reply policy from scratch. What still needs to be
+specified is the exact point at which a handle may deactivate its handler and
+how the shared state prevents false completion when a callback was already
+copied before deactivation.
+
 ### Likely internal refactoring
 
 Today, `rpc_impl(...)` constructs `Rpc_state` and then blocks until completion.
@@ -261,16 +281,47 @@ An async variant would instead:
 1. construct and register `Rpc_state`
 2. write the request
 3. return a lightweight handle that owns/shared-owns the RPC state
-4. let callers wait, poll, or abandon
+4. let callers wait, try-wait, inspect state, or abandon
 5. clean up return handlers and outstanding state when the lifecycle completes
 
-The synchronous path could then be defined in terms of the async path:
+The synchronous path could then reuse the same transported-state machinery:
 
-- create handle
+- create transported handle state
 - wait without deadline
 - extract result
 
-That would keep semantics centralized.
+That would keep semantics centralized for transported RPCs without implying that
+the existing local direct-call fast path must disappear.
+
+The public contract should still stay explicit:
+
+- `Rpc_handle` and `rpc_async_<method>()` are the async-facing surface
+- `rpc_<method>()` remains a synchronous API
+- any sync reuse of the handle/state machinery is an internal implementation
+  detail, not a mixed caller model
+
+## Terminal and wait states
+
+The design should define a small explicit state machine.
+
+### Handle terminal states
+
+Recommended initial handle states:
+
+- `pending`
+- `returned`
+- `remote_exception`
+- `cancelled`
+- `abandoned`
+
+`deadline_exceeded` is not a handle terminal state by itself. It is the result
+of a specific bounded wait attempt. A caller may receive `deadline_exceeded`
+from `wait_until(...)` and then either keep waiting later or call `abandon()`.
+
+`transport_failed` should not be introduced as a distinct state unless Sintra
+first grows a real internal classification for it. In the current code, many
+transport-adjacent failures still surface either as `rpc_cancelled` or as a
+serialized remote `std::runtime_error`.
 
 ## Meaning of `abandon()`
 
@@ -278,7 +329,8 @@ That would keep semantics centralized.
 
 - the caller is no longer interested in the result
 - local waiting state may be released
-- late replies must be ignored or consumed safely
+- the handle transitions to a terminal abandoned state exactly once
+- late replies must be ignored or dropped safely
 
 It should not mean:
 
@@ -287,6 +339,15 @@ It should not mean:
 - terminate a process
 
 That separation is critical.
+
+Additional required rules:
+
+- `abandon()` must be idempotent
+- destroying a still-pending handle must be equivalent to non-blocking
+  `abandon()`
+- `get()` on an abandoned handle must not report false success
+- once a handle reaches a terminal state, later replies or duplicate cleanup
+  attempts must become no-ops
 
 ## Late replies
 
@@ -302,10 +363,89 @@ Required properties:
 
 A clean model is:
 
-- the reply handler remains valid until final completion or explicit safe
-  deactivation
-- if the handle has been abandoned, the handler consumes and drops the reply
+- a copied in-flight reply callback must re-check the shared RPC state under the
+  same mutex before completing the call
+- `abandon()` may safely deactivate the current return handler once the shared
+  state is already terminal
+- if the handle has already been abandoned or cancelled, any later reply must be
+  ignored or dropped without changing the terminal state
+- deferral remapping must update the current handler id under the same shared
+  state lock used by abandonment and completion
 - metrics or tracing may record that the reply arrived late
+
+This matters because the reply reader may already have copied a handler before
+the caller deactivates it. Safe behavior therefore depends on exact-once shared
+state transitions, not only on handler-map removal.
+
+Additional invariant:
+
+- deferral messages and the eventual final reply for a given RPC must remain
+  serialized through the same reply-reader execution stream
+
+If that invariant is not preserved, handler-id remapping can race the final
+reply dispatch and lose the completion entirely.
+
+## Same-process targets
+
+This proposal must define how local same-process targets behave.
+
+Today, non-strict synchronous RPC can bypass the transported path and call the
+target directly. That is compatible with a synchronous API, but it is not by
+itself an honest async/deadline seam.
+
+If a public async handle is added, the design should choose one explicit rule:
+
+- either handle-based RPC always uses the transported request/reply path, even
+  for same-process targets
+- or local same-process handle-based RPC is out of scope initially
+
+What should be avoided is an API that appears deadline-aware while silently
+executing some local calls synchronously inline.
+
+For an initial implementation, explicitly rejecting same-process non-strict
+targets is a valid narrower choice if preserving current reentrancy semantics
+matters more than maximizing coverage on day one.
+
+## Finalize and teardown interaction
+
+Handle lifetime during teardown must be explicit.
+
+Required properties:
+
+- outstanding handles must reach a deterministic terminal state before the local
+  `Managed_process` infrastructure is torn down
+- handle destruction must not dereference process-owned handler maps after
+  finalization has begun
+- caller-side abandonment and process teardown must share the same cleanup rules
+
+In practice, that means the implementation should not rely on a live
+`Managed_process` still existing after finalization starts. The retained handle
+state must be sufficient to report the terminal outcome to the caller.
+
+This proposal also does not automatically solve bounded receiver-side drain in
+`ensure_rpc_shutdown()`. Caller-side abandonment helps the waiting side stop
+blocking, but a callee that is already waiting for its own active handlers is a
+separate teardown problem.
+
+The current implementation intentionally keeps `ensure_rpc_shutdown()` blocking
+until active handlers finish and only adds stalled-shutdown warnings. A forced
+deadline there would let the transceiver object disappear while one of its RPC
+bodies is still executing against it, which is not a safe trade.
+
+## Lock ordering
+
+Any implementation in this area must preserve the existing lock discipline.
+
+Current ordering is:
+
+1. `s_outstanding_rpcs_mutex`
+2. per-RPC state mutex
+3. return-handler-map mutex
+
+Reply dispatch must continue to copy handler state while holding the
+return-handler lock and then release that lock before invoking callbacks.
+Abandonment, cancellation, deferral remapping, and terminal completion all need
+to respect that same ordering.
 
 ## Process liveness vs RPC lifecycle
 
@@ -316,7 +456,7 @@ These are separate concepts and should remain separate.
 - whether the caller is still waiting
 - whether a reply arrived
 - whether the wait was cancelled
-- whether the transport failed
+- whether the caller abandoned interest
 
 ### Process lifecycle tells us
 
@@ -393,23 +533,24 @@ No deadlines yet, except as a thin `wait_until(...)` convenience.
 
 ### Stage 2
 
-Add a public deadline-aware convenience layer:
+Add a public async handle surface:
 
-- `rpc_async(...)`
-- `rpc_with_deadline(...)`
+- `rpc_async_<method>(...)`
 
-with explicit result states.
+The public handle can already support bounded waiting through
+`wait_until(...)`, so a separate `rpc_with_deadline(...)` wrapper is not
+needed in the initial scope.
 
-### Stage 3
-
-Consider optional diagnostics:
-
-- abandoned request counters
-- late reply counters
-- tracing hooks
+This does not change the public meaning of synchronous `rpc_<method>(...)`.
+That remains a blocking call/return surface. The transported synchronous path
+may reuse the same internal shared state as `Rpc_handle`, but callers should
+still treat sync RPC and async-handle RPC as distinct usage models rather than
+as interchangeable styles of the same public API.
 
 ### Explicitly defer
 
+- a separate `rpc_with_deadline(...)` convenience wrapper
+- tracing or counter-oriented diagnostics
 - remote cooperative cancellation protocol
 - preemptive handler interruption
 - automatic process termination on deadline expiry
@@ -418,6 +559,7 @@ Consider optional diagnostics:
 
 This design would need careful review for:
 
+- exact-once terminal-state transitions
 - return-handler lifetime after abandonment
 - deferral path correctness
 - outstanding RPC set cleanup
@@ -435,8 +577,15 @@ abandonment:
 
 - per-RPC wait state
 - outstanding RPC tracking
-- unblock-on-shutdown cancellation
+- process-scoped unblock on some shutdown paths
 - receiver-side RPC drain control
+
+What is still missing is the precise lifecycle contract:
+
+- explicit terminal states
+- exact abandonment semantics
+- local-target rules
+- teardown-safe cleanup rules
 
 What it does not currently expose is a clean public model for:
 
@@ -454,3 +603,7 @@ The right interpretation is:
 
 If this idea is pursued, it should be reviewed as a careful lifecycle API
 addition, not as a broad redefinition of Sintra RPC semantics.
+
+One practical acceptance criterion is that Sintra should be able to replace its
+own ad hoc finalize-time watchdog around `rpc_begin_process_draining(...)` with
+this primitive before claiming the surface is ready.

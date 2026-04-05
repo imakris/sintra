@@ -2648,14 +2648,16 @@ size_t Managed_process::unblock_rpc(instance_id_type process_instance_id)
 
         for (auto& c : s_outstanding_rpcs()) {
             unique_lock<mutex> il(c->keep_waiting_mutex);
+            if (!c->keep_waiting) {
+                continue;
+            }
 
-            if (process_instance_id != invalid_instance_id &&
+            if (process_instance_id == invalid_instance_id ||
                 process_of(c->remote_instance) == process_instance_id)
             {
-                c->success = false;
                 c->keep_waiting = false;
                 c->cancelled = true;
-                c->keep_waiting_condition.notify_one();
+                c->keep_waiting_condition.notify_all();
                 ret++;
             }
         }
