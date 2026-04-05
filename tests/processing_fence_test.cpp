@@ -22,6 +22,7 @@ struct Work_message {};
 
 struct Handler_done {};
 
+constexpr const char* k_processing_fence_done = "processing-fence-test-done";
 constexpr auto k_handler_delay = std::chrono::milliseconds(300);
 int controller_process()
 {
@@ -72,6 +73,7 @@ int controller_process()
     out << (handler_done ? "done" : "pending") << '\n';
 
     const bool success = barrier_result && handler_done;
+    barrier(k_processing_fence_done, "_sintra_all_processes");
     handler_done_deactivator();
     return success ? 0 : 1;
 }
@@ -89,6 +91,7 @@ int worker_process()
     const std::string group = "_sintra_external_processes";
     barrier("processing-fence-setup", group);
     barrier<processing_fence_t>("processing-fence", group);
+    barrier(k_processing_fence_done, "_sintra_all_processes");
     return 0;
 }
 
@@ -96,7 +99,7 @@ int worker_process()
 
 int main(int argc, char* argv[])
 {
-    return sintra::test::run_multi_process_shutdown_test(
+    return sintra::test::run_multi_process_test(
         argc,
         argv,
         "SINTRA_PROCESSING_FENCE_DIR",
@@ -105,7 +108,10 @@ int main(int argc, char* argv[])
         [](const std::filesystem::path& shared_dir) {
             std::filesystem::remove(shared_dir / "result.txt");
         },
-        [](const std::filesystem::path&) { return 0; },
+        [](const std::filesystem::path&) {
+            sintra::barrier(k_processing_fence_done, "_sintra_all_processes");
+            return 0;
+        },
         [](const std::filesystem::path& shared_dir) {
             const auto result_path = shared_dir / "result.txt";
             std::ifstream in(result_path, std::ios::binary);

@@ -38,6 +38,7 @@
 namespace {
 
 constexpr int k_message_rounds = 5;
+constexpr const char* k_result_ready_barrier = "result-ready";
 constexpr std::array<std::string_view, 4> k_base_string_messages{
     "good morning", "good afternoon", "good evening", "good night"};
 constexpr std::array<int, 4> k_base_int_messages{1, 2, 3, 4};
@@ -175,6 +176,7 @@ int process_sender()
     }
     sintra::test::write_lines(shared_dir / "result.txt", lines);
 
+    sintra::barrier(k_result_ready_barrier, "_sintra_all_processes");
     return 0;
 }
 
@@ -199,6 +201,7 @@ int process_string_receiver()
     write_strings(shared_dir / "strings.txt", g_received_strings);
 
     sintra::barrier("write-phase");
+    sintra::barrier(k_result_ready_barrier, "_sintra_all_processes");
     return 0;
 }
 
@@ -223,6 +226,7 @@ int process_int_receiver()
     write_ints(shared_dir / "ints.txt", g_received_ints);
 
     sintra::barrier("write-phase");
+    sintra::barrier(k_result_ready_barrier, "_sintra_all_processes");
     return 0;
 }
 
@@ -231,12 +235,16 @@ int process_int_receiver()
 int main(int argc, char* argv[])
 {
     std::set_terminate(sintra::test::custom_terminate_handler);
-    return sintra::test::run_multi_process_shutdown_test(
+    return sintra::test::run_multi_process_test(
         argc,
         argv,
         "SINTRA_TEST_SHARED_DIR",
         "basic_pub_sub",
         {process_sender, process_string_receiver, process_int_receiver},
+        [](const std::filesystem::path&) {
+            sintra::barrier(k_result_ready_barrier, "_sintra_all_processes");
+            return 0;
+        },
         [](const std::filesystem::path& shared_dir) {
             const auto result_path = shared_dir / "result.txt";
             std::ifstream in(result_path, std::ios::binary);
