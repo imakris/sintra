@@ -36,6 +36,7 @@ namespace {
 
 constexpr std::size_t k_worker_count = 2;
 constexpr std::size_t k_iterations   = 128;
+constexpr const char* k_result_ready_barrier = "barrier-flush-result-ready";
 
 struct Iteration_marker
 {
@@ -203,6 +204,7 @@ int coordinator_process()
         lines.push_back(failure_reason);
     }
     sintra::test::write_lines(shared_dir / "barrier_flush_result.txt", lines);
+    barrier(k_result_ready_barrier, "_sintra_all_processes");
     return success ? 0 : 1;
 }
 
@@ -221,6 +223,7 @@ int worker_process(std::uint32_t worker_index)
     }
 
     barrier("barrier-flush-done", "_sintra_all_processes");
+    barrier(k_result_ready_barrier, "_sintra_all_processes");
     return 0;
 }
 
@@ -247,6 +250,7 @@ int main(int argc, char* argv[])
         {coordinator_process, worker0_process, worker1_process},
         [](const std::filesystem::path&) {
             sintra::barrier("barrier-flush-done", "_sintra_all_processes");
+            sintra::barrier(k_result_ready_barrier, "_sintra_all_processes");
             return 0;
         },
         [](const std::filesystem::path& shared_dir) {
