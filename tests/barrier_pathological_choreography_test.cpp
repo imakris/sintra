@@ -34,6 +34,8 @@ constexpr int k_worker_count = 4;
 constexpr int k_iterations = 6;
 constexpr int k_stage_steps = 5;
 constexpr int k_final_steps = 4;
+constexpr const char* k_done_processed_barrier = "pathological-done-processed";
+constexpr const char* k_summary_ready_barrier = "pathological-summary-ready";
 
 struct Stage_report
 {
@@ -256,8 +258,9 @@ int controller_process()
         sintra::barrier<sintra::processing_fence_t>(final_processing);
     }
 
+    sintra::barrier<sintra::processing_fence_t>(k_done_processed_barrier, "_sintra_all_processes");
     write_summary(state, shared_dir);
-    sintra::barrier("pathological-done", "_sintra_all_processes");
+    sintra::barrier(k_summary_ready_barrier, "_sintra_all_processes");
     return 0;
 }
 
@@ -401,7 +404,8 @@ int worker_process(int worker_index)
         log_stage_event(stage_log, final_done, "emit");
     }
 
-    sintra::barrier("pathological-done", "_sintra_all_processes");
+    sintra::barrier<processing_fence_t>(k_done_processed_barrier, "_sintra_all_processes");
+    sintra::barrier(k_summary_ready_barrier, "_sintra_all_processes");
     return 0;
 }
 
@@ -438,7 +442,8 @@ int main(int argc, char* argv[])
 
     sintra::init(argc, argv, processes);
     if (!is_spawned) {
-        sintra::barrier("pathological-done", "_sintra_all_processes");
+        sintra::barrier<sintra::processing_fence_t>(k_done_processed_barrier, "_sintra_all_processes");
+        sintra::barrier(k_summary_ready_barrier, "_sintra_all_processes");
     }
     sintra::finalize();
 
