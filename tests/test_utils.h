@@ -216,6 +216,28 @@ private:
 // Multi-process test runner
 // ---------------------------------------------------------------------------
 
+inline int report_deferred_exception_and_fail(std::exception_ptr deferred_exception,
+                                              std::string_view context)
+{
+    if (!deferred_exception) {
+        return 1;
+    }
+
+    try {
+        std::rethrow_exception(deferred_exception);
+    }
+    catch (const std::exception& e) {
+        std::fprintf(stderr, "%.*s: uncaught exception: %s\n",
+                     static_cast<int>(context.size()), context.data(), e.what());
+    }
+    catch (...) {
+        std::fprintf(stderr, "%.*s: uncaught exception of unknown type\n",
+                     static_cast<int>(context.size()), context.data());
+    }
+
+    return 1;
+}
+
 template <typename Setup,
           typename Coordinator_action,
           typename Verifier>
@@ -342,7 +364,9 @@ int run_multi_process_shutdown_test(int argc,
     }
 
     if (deferred_exception) {
-        std::rethrow_exception(deferred_exception);
+        return report_deferred_exception_and_fail(
+            deferred_exception,
+            "run_multi_process_shutdown_test");
     }
 
     if (!is_spawned) {
@@ -441,7 +465,9 @@ int run_multi_process_shutdown_test(int argc,
     }
 
     if (deferred_exception) {
-        std::rethrow_exception(deferred_exception);
+        return report_deferred_exception_and_fail(
+            deferred_exception,
+            "run_multi_process_shutdown_test(options)");
     }
 
     if (!is_spawned) {
