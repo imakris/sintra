@@ -34,9 +34,8 @@
 
 namespace {
 
-constexpr std::size_t k_worker_count         = 2;
-constexpr std::size_t k_iterations          = 128;
-constexpr const char* k_barrier_flush_done = "barrier-flush-done";
+constexpr std::size_t k_worker_count = 2;
+constexpr std::size_t k_iterations   = 128;
 
 struct Iteration_marker
 {
@@ -190,7 +189,7 @@ int coordinator_process()
 
     }
 
-    barrier(k_barrier_flush_done, "_sintra_all_processes");
+    barrier("barrier-flush-done", "_sintra_all_processes");
     deactivate_all_slots();
 
     sintra::test::Shared_directory shared("SINTRA_TEST_SHARED_DIR", "barrier_flush");
@@ -221,7 +220,7 @@ int worker_process(std::uint32_t worker_index)
 
     }
 
-    barrier(k_barrier_flush_done, "_sintra_all_processes");
+    barrier("barrier-flush-done", "_sintra_all_processes");
     return 0;
 }
 
@@ -246,10 +245,6 @@ int main(int argc, char* argv[])
         "SINTRA_TEST_SHARED_DIR",
         "barrier_flush",
         {coordinator_process, worker0_process, worker1_process},
-        [](const std::filesystem::path&) {
-            sintra::barrier(k_barrier_flush_done, "_sintra_all_processes");
-            return 0;
-        },
         [](const std::filesystem::path& shared_dir) {
             const auto result_path = shared_dir / "barrier_flush_result.txt";
             if (!std::filesystem::exists(result_path)) {
@@ -293,5 +288,6 @@ int main(int argc, char* argv[])
                 return 1;
             }
             return 0;
-        });
+        },
+        "barrier-flush-done");
 }
