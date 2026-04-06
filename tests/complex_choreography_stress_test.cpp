@@ -368,8 +368,6 @@ int process_aggregator()
 
     sintra::world() << Shutdown_complete{};
 
-    barrier("complex-choreography-finished", "_sintra_all_processes");
-
     auto& state = aggregator_state();
     std::lock_guard<std::mutex> lk(state.mutex);
     return state.errors == 0 ? 0 : 1;
@@ -471,7 +469,6 @@ int process_inspector()
     wait_for_inspector_shutdown();
     write_inspector_report();
 
-    barrier("complex-choreography-finished", "_sintra_all_processes");
     return 0;
 }
 
@@ -599,8 +596,6 @@ int worker_process_impl(int worker_id)
             ++state.errors;
         }
     }
-
-    barrier("complex-choreography-finished", "_sintra_all_processes");
 
     return state.errors == 0 ? 0 : 1;
 }
@@ -736,8 +731,6 @@ int process_conductor()
 
     sintra::world() << Shutdown{};
     wait_for_shutdown_confirmation();
-
-    barrier("complex-choreography-finished", "_sintra_all_processes");
 
     auto& state = conductor_state();
     std::lock_guard<std::mutex> lk(state.mutex);
@@ -896,9 +889,7 @@ int main(int argc, char* argv[])
 
     sintra::init(argc, argv, processes);
 
-    if (!is_spawned) {
-        sintra::barrier("complex-choreography-finished", "_sintra_all_processes");
-    }
+    sintra::barrier("complex-choreography-finished", "_sintra_all_processes");
 
     sintra::finalize();
 

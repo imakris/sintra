@@ -115,7 +115,7 @@ int main(int argc, char* argv[])
 
     sintra::init(argc, argv, processes);
 
-    sintra::barrier<sintra::processing_fence_t>("barrier-stress-done", "_sintra_all_processes");
+    sintra::barrier("barrier-stress-done", "_sintra_all_processes");
 
     sintra::finalize();
 
