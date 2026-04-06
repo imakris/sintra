@@ -107,7 +107,10 @@ int main(int argc, char* argv[])
         [](const std::filesystem::path& shared_dir) {
             std::filesystem::remove(shared_dir / "result.txt");
         },
-        [](const std::filesystem::path&) { return 0; },
+        [](const std::filesystem::path&) {
+            sintra::barrier("processing-fence-test-done", "_sintra_all_processes");
+            return 0;
+        },
         [](const std::filesystem::path& shared_dir) {
             const auto result_path = shared_dir / "result.txt";
             std::ifstream in(result_path, std::ios::binary);
@@ -128,6 +131,5 @@ int main(int argc, char* argv[])
             const bool success = (status == "ok") && elapsed_ok && done_ok;
 
             return success ? 0 : 1;
-        },
-        "processing-fence-test-done");
+        });
 }

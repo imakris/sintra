@@ -547,6 +547,9 @@ int main(int argc, char* argv[])
         "rpc_async_lifecycle",
         {process_owner,
          process_client},
-        verify_results,
-        k_finished_barrier);
+        [](const std::filesystem::path&) {
+            sintra::barrier(k_finished_barrier, "_sintra_all_processes");
+            return 0;
+        },
+        verify_results);
 }

@@ -305,9 +305,10 @@ int run_multi_process_test(int argc,
 }
 
 // Use this helper when every process reaches the same top-level shutdown point
-// and can safely participate in sintra::shutdown(). Tests that need their own
-// final rendezvous or exceptional teardown path should keep using
-// run_multi_process_test(...) and make that final protocol explicit.
+// and can safely participate in sintra::shutdown() with no extra final
+// _sintra_all_processes rendezvous layered on top. Tests that need their own
+// final barrier, post-barrier side effects, or exceptional teardown path should
+// keep using run_multi_process_test(...) and make that final protocol explicit.
 template <typename Setup,
           typename Coordinator_action,
           typename Verifier>

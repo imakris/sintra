@@ -240,6 +240,10 @@ int main(int argc, char* argv[])
         "SINTRA_TEST_SHARED_DIR",
         "basic_pub_sub",
         {process_sender, process_string_receiver, process_int_receiver},
+        [](const std::filesystem::path&) {
+            sintra::barrier("result-ready", "_sintra_all_processes");
+            return 0;
+        },
         [](const std::filesystem::path& shared_dir) {
             const auto result_path = shared_dir / "result.txt";
             std::ifstream in(result_path, std::ios::binary);
@@ -252,7 +256,6 @@ int main(int argc, char* argv[])
             std::string status;
             in >> status;
             return (status == "ok") ? 0 : 1;
-        },
-        "result-ready");
+        });
 }
 

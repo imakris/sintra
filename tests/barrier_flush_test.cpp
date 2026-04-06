@@ -245,6 +245,10 @@ int main(int argc, char* argv[])
         "SINTRA_TEST_SHARED_DIR",
         "barrier_flush",
         {coordinator_process, worker0_process, worker1_process},
+        [](const std::filesystem::path&) {
+            sintra::barrier("barrier-flush-done", "_sintra_all_processes");
+            return 0;
+        },
         [](const std::filesystem::path& shared_dir) {
             const auto result_path = shared_dir / "barrier_flush_result.txt";
             if (!std::filesystem::exists(result_path)) {
@@ -288,6 +292,5 @@ int main(int argc, char* argv[])
                 return 1;
             }
             return 0;
-        },
-        "barrier-flush-done");
+        });
 }

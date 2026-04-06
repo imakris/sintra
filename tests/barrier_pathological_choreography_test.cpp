@@ -256,9 +256,8 @@ int controller_process()
         sintra::barrier<sintra::processing_fence_t>(final_processing);
     }
 
-    sintra::barrier("pathological-done", "_sintra_all_processes");
-
     write_summary(state, shared_dir);
+    sintra::barrier("pathological-done", "_sintra_all_processes");
     return 0;
 }
 

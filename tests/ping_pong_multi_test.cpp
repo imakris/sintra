@@ -124,7 +124,7 @@ int process_monitor()
 
 int main(int argc, char* argv[])
 {
-    return sintra::test::run_multi_process_shutdown_test(
+    return sintra::test::run_multi_process_test(
         argc,
         argv,
         "SINTRA_TEST_SHARED_DIR",

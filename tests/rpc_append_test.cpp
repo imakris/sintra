@@ -105,6 +105,10 @@ int main(int argc, char* argv[])
         "SINTRA_TEST_SHARED_DIR",
         "rpc_append",
         {process_owner, process_client},
+        [](const std::filesystem::path&) {
+            sintra::barrier("calls-finished", "_sintra_all_processes");
+            return 0;
+        },
         [](const std::filesystem::path& shared_dir) {
             const auto success_path = shared_dir / "rpc_success.txt";
             const auto failure_path = shared_dir / "rpc_failures.txt";
@@ -122,6 +126,5 @@ int main(int argc, char* argv[])
             };
 
             return (successes == expected_successes && failures == expected_failures) ? 0 : 1;
-        },
-        "calls-finished");
+        });
 }

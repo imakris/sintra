@@ -33,6 +33,8 @@
 
 namespace {
 
+constexpr const char* k_messages_processed_barrier = "messages-processed";
+
 // Message types for the Maildrop API tests (uses Enclosure<T>)
 struct LocalMsg { int value; };
 struct RemoteMsg { int value; };
@@ -171,8 +173,9 @@ int child_process()
     sintra::barrier("sending-done", "_sintra_all_processes");
     trace("child: sending-done barrier exit");
 
-    // Small delay to ensure all messages are processed
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    trace("child: messages-processed barrier enter");
+    sintra::barrier<sintra::processing_fence_t>(k_messages_processed_barrier, "_sintra_all_processes");
+    trace("child: messages-processed barrier exit");
 
     // Write results to shared file
     sintra::test::Shared_directory shared("SINTRA_LOCALITY_TEST_DIR", "locality_messaging");
@@ -257,12 +260,13 @@ int main(int argc, char* argv[])
             test_transceiver.send_typed_global(i);  // Should reach both
         }
 
-        // Small delay to ensure messages are processed
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-
         trace("coord: sending-done barrier enter");
         sintra::barrier("sending-done", "_sintra_all_processes");
         trace("coord: sending-done barrier exit");
+
+        trace("coord: messages-processed barrier enter");
+        sintra::barrier<sintra::processing_fence_t>(k_messages_processed_barrier, "_sintra_all_processes");
+        trace("coord: messages-processed barrier exit");
 
         // Write coordinator results
         write_counts(shared_dir / "coord_counts.txt",
