@@ -99,6 +99,8 @@ Examples:
 - validation that required phases completed before teardown proceeds
 - stronger diagnostics when barriers or RPC waits are cancelled during a phase
   that should have completed normally
+- rejection of "safe" APIs that still require callers to provide barrier names,
+  group names, intermediate phase labels, or protocol-object bookkeeping
 
 ### 5. Do the tests prove the safety mechanism?
 
@@ -118,16 +120,25 @@ focus because it exposed several of the latent problems.
 Review:
 
 - `sintra::shutdown()`
-- `sintra::finalize()`
+- raw teardown primitives, including `detail::finalize()`
 - helper layers that wrap them
 - tests that use custom final barriers or post-barrier work
 
 Questions:
 
+- Is the standard lifecycle story clearly centered on `shutdown()` rather than
+  split between `shutdown()` and `finalize()`?
 - Is the required participation pattern explicit?
 - Can a caller layer a second teardown rendezvous on top of shutdown?
 - Can important side effects still happen after the supposed final handoff?
 - Are cancellation paths surfacing too late?
+
+Current direction:
+
+- the standard safe path is `shutdown()` or `shutdown(shutdown_options{...})`
+- direct `detail::finalize()` and manual final barrier choreography are
+  low-level escape hatches, not peer alternatives in the normal lifecycle
+  story
 
 ### B. Barrier semantics
 
@@ -175,6 +186,8 @@ Questions:
   caller?
 - Can the helper be narrowed or split so invalid combinations are harder to
   express?
+- Does the supposedly safe API still make the caller name intermediate phases
+  or manage protocol objects manually?
 
 ### E. Messaging and RPC lifecycle assumptions
 
@@ -207,6 +220,20 @@ At minimum, the output should include:
 4. A set of recommended debug/runtime assertions or diagnostics.
 5. Targeted tests that prove misuse is caught early.
 
+The recommended API output should prefer:
+
+- one clear default surface for the common case
+- optional intent-bearing arguments over families of subtly different helper
+  names
+- established Sintra terminology such as `coordinator` instead of ambiguous
+  words such as `root`
+- caller-facing names that do not pull low-level teardown primitives such as
+  `finalize` back into the public vocabulary
+- supported shutdown variants expressed through `shutdown_options` by default,
+  rather than a second family of loosely related helper names
+- separate public shutdown helpers only when the operation is no longer
+  semantically "shutdown with declared extra behavior"
+
 ## Decision rule
 
 When a concrete issue surfaces, do not stop at "how do we fix this test?"
@@ -232,6 +259,17 @@ The direction of this workstream is:
 - make valid lifecycle and synchronization patterns explicit
 - make invalid patterns hard to write
 - make remaining invalid patterns fail early
+
+Tests and experiments are not user-facing API consumers. They may use low-level
+or `detail` surfaces when that is necessary to exercise primitives directly.
+That should not be used as justification for keeping low-level teardown
+primitives in the main public namespace.
+
+Supported non-happy-path application scenarios should still receive explicit
+public lifecycle support. If a shutdown shape is realistic and intended for
+user code, it belongs in `shutdown_options` unless it is no longer
+semantically just shutdown. Raw teardown primitives belong in `detail` for
+tests, experiments, and deliberate low-level work.
 
 That should remain the primary goal even when specific CI failures or test
 regressions pull attention toward a narrow local fix.
