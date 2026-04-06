@@ -332,7 +332,6 @@ int process_conductor()
     }
     summary_out.flush();
 
-    sintra::barrier<sintra::rendezvous_t>("extreme-choreo-finished", "_sintra_all_processes");
     return 0;
 }
 
@@ -532,7 +531,6 @@ int process_aggregator()
     }
     aggregator_out.flush();
 
-    sintra::barrier<sintra::rendezvous_t>("extreme-choreo-finished", "_sintra_all_processes");
     return 0;
 }
 
@@ -653,7 +651,6 @@ int run_producer(int producer_index)
     }
 
     sintra::deactivate_all_slots();
-    sintra::barrier<sintra::rendezvous_t>("extreme-choreo-finished", "_sintra_all_processes");
     return 0;
 }
 
@@ -773,7 +770,6 @@ int process_chaos()
     }
 
     sintra::deactivate_all_slots();
-    sintra::barrier<sintra::rendezvous_t>("extreme-choreo-finished", "_sintra_all_processes");
     return 0;
 }
 
@@ -960,9 +956,7 @@ int main(int argc, char* argv[])
 
     sintra::init(argc, argv, processes);
 
-    if (!is_spawned) {
-        sintra::barrier<sintra::rendezvous_t>("extreme-choreo-finished", "_sintra_all_processes");
-    }
+    sintra::barrier<sintra::rendezvous_t>("extreme-choreo-finished", "_sintra_all_processes");
 
     sintra::detail::finalize();
 
