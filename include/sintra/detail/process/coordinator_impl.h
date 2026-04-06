@@ -28,7 +28,8 @@ using std::string;
 // EXPORTED EXCLUSIVELY FOR RPC
 inline
 sequence_counter_type Process_group::barrier(
-    const string& barrier_name)
+    const string& barrier_name,
+    int32_t barrier_mode_tag)
 {
     std::unique_lock basic_lock(m_call_mutex);
     instance_id_type caller_piid = s_tl_current_message->sender_instance_id;
@@ -54,6 +55,7 @@ sequence_counter_type Process_group::barrier(
         b.processes_pending = m_process_ids;
         b.processes_arrived.clear();
         b.failed = false;
+        b.mode_tag = barrier_mode_tag;
         b.common_function_iid = make_instance_id();
 
         // Filter out draining processes while still holding m_call_mutex for atomicity
@@ -69,6 +71,12 @@ sequence_counter_type Process_group::barrier(
                 }
             }
         }
+    }
+    else if (b.mode_tag != barrier_mode_tag) {
+        b.m.unlock();
+        throw std::logic_error(
+            "Barrier mode mismatch for barrier '" + barrier_name +
+            "'. All participants must use the same barrier mode.");
     }
 
     // Now safe to release m_call_mutex - barrier state is consistent and other threads

@@ -121,7 +121,8 @@ namespace sintra {
 // The tag types below select the strength of barrier synchronisation:
 //   - rendezvous_t: wait until every participant has reached the barrier.
 //   - delivery_fence_t (default): additionally ensure all pre-barrier messages
-//     have been fetched by local request readers.
+//     have been fetched by local request readers in this process. It does not
+//     perform a second rendezvous to prove that peers have also drained.
 //   - processing_fence_t: the strongest guarantee - all pre-barrier message
 //     handlers have run to completion everywhere.
 struct rendezvous_t {};
@@ -139,11 +140,19 @@ struct processing_fence_t {};
 /// unspecified order.  Barrier is an inter-process synchronisation mechanism -
 /// combine it with traditional threading primitives if you also need
 /// thread-level coordination within a process.
+/// Barrier names beginning with `_sintra_` are reserved for internal runtime
+/// protocols and will fail fast.
 /// Returns the reply-ring watermark for the completed barrier, or
 /// `invalid_sequence` when the barrier is treated as satisfied during
 /// shutdown/drain handling.
 template<typename BarrierMode = delivery_fence_t>
 sequence_counter_type barrier(const std::string& barrier_name, const std::string& group_name = "_sintra_external_processes");
+
+/// Returns true only when a barrier completed normally.
+inline bool barrier_completed(sequence_counter_type barrier_sequence)
+{
+    return barrier_sequence != invalid_sequence;
+}
 
 ///\brief Perform the standard coordinated multi-process shutdown sequence.
 ///

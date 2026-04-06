@@ -172,7 +172,10 @@ inline void init(
     // Install debug pause handlers if enabled via SINTRA_DEBUG_PAUSE_ON_EXIT
     detail::install_debug_pause_handlers();
 
-    assert(!s_init_once); // init() may only be called once before finalize().
+    if (s_init_once || s_mproc) {
+        throw std::runtime_error(
+            "sintra::init() called twice without a matching sintra::finalize().");
+    }
     s_init_once = true;
 
     static Instantiator cleanup_guard(std::function<void()>([]() {
@@ -254,10 +257,28 @@ inline bool finalize()
                 handle.abandon();
                 s_mproc->unblock_rpc(process_of(s_coord_id));
                 flush_seq = invalid_sequence;
+                Log_stream(log_level::warning)
+                    << "finalize(): begin_process_draining timed out after 5 seconds for process "
+                    << static_cast<unsigned long long>(s_mproc_id)
+                    << " while waiting on coordinator "
+                    << static_cast<unsigned long long>(s_coord_id)
+                    << ". Proceeding with degraded shutdown semantics.\n";
             }
+        }
+        catch (const std::exception& e) {
+            flush_seq = invalid_sequence;
+            Log_stream(log_level::warning)
+                << "finalize(): begin_process_draining failed for process "
+                << static_cast<unsigned long long>(s_mproc_id)
+                << " with: " << e.what()
+                << ". Proceeding with degraded shutdown semantics.\n";
         }
         catch (...) {
             flush_seq = invalid_sequence;
+            Log_stream(log_level::warning)
+                << "finalize(): begin_process_draining failed for process "
+                << static_cast<unsigned long long>(s_mproc_id)
+                << " with an unknown exception. Proceeding with degraded shutdown semantics.\n";
         }
         trace("begin_process_draining_remote.done");
     }
@@ -304,37 +325,39 @@ inline bool shutdown(const std::string& group_name)
     }
 
     constexpr const char* shutdown_barrier_name = "_sintra_shutdown";
-    barrier<processing_fence_t>(shutdown_barrier_name, group_name);
+    detail::internal_processing_fence_barrier(shutdown_barrier_name, group_name);
 
     if (s_coord) {
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
-        while (true) {
-            bool only_self_remains = true;
-            {
-                std::lock_guard<std::mutex> groups_lock(s_coord->m_groups_mutex);
-                auto group_it = s_coord->m_groups.find(group_name);
-                if (group_it != s_coord->m_groups.end()) {
-                    auto& group = group_it->second;
-                    std::lock_guard<std::mutex> group_lock(group.m_call_mutex);
-                    only_self_remains =
-                        (group.m_process_ids.size() == 1) &&
-                        (group.m_process_ids.find(s_mproc_id) != group.m_process_ids.end());
-                }
+        auto only_self_remains = [&]() {
+            std::lock_guard<std::mutex> groups_lock(s_coord->m_groups_mutex);
+            auto group_it = s_coord->m_groups.find(group_name);
+            if (group_it == s_coord->m_groups.end()) {
+                return true;
             }
 
-            if (only_self_remains) {
-                break;
-            }
+            auto& group = group_it->second;
+            std::lock_guard<std::mutex> group_lock(group.m_call_mutex);
+            return (group.m_process_ids.size() == 1) &&
+                   (group.m_process_ids.find(s_mproc_id) != group.m_process_ids.end());
+        };
 
-            if (std::chrono::steady_clock::now() >= deadline) {
-                Log_stream(log_level::warning)
-                    << "shutdown(): coordinator timed out waiting for peers to exit group '"
-                    << group_name
-                    << "' before finalizing.\n";
-                break;
-            }
+        bool group_drained = false;
+        s_coord->m_waiting_for_all_draining.store(true, std::memory_order_release);
+        {
+            std::unique_lock<std::mutex> wait_lock(s_coord->m_draining_state_mutex);
+            group_drained = s_coord->m_all_draining_cv.wait_until(
+                wait_lock,
+                deadline,
+                only_self_remains);
+        }
+        s_coord->m_waiting_for_all_draining.store(false, std::memory_order_release);
 
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if (!group_drained) {
+            Log_stream(log_level::warning)
+                << "shutdown(): coordinator timed out waiting for peers to exit group '"
+                << group_name
+                << "' before finalizing.\n";
         }
     }
 

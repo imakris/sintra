@@ -2143,7 +2143,7 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
     // assign_name requires that all group processes are instantiated, in order
     // to receive the instance_published event
     if (s_recovery_occurrence == 0) {
-        bool all_started = Process_group::rpc_barrier(m_group_all, UIBS);
+        bool all_started = Process_group::rpc_barrier(m_group_all, UIBS, 0);
 
         // If we're the coordinator and have failures to report, throw init_error
         if (s_coord && (!spawn_failures.empty() || !all_started)) {

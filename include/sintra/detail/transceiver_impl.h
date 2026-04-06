@@ -179,6 +179,8 @@ Transceiver::ensure_rpc_shutdown()
         m_rpc_shutdown_requested = true;
         m_accepting_rpc_calls = false;
         constexpr auto shutdown_warning_interval = std::chrono::seconds(5);
+        constexpr size_t max_shutdown_warning_count = 6;
+        size_t warning_count = 0;
         while (m_active_rpc_calls != 0) {
             if (m_rpc_lifecycle_condition.wait_for(
                     lock,
@@ -194,6 +196,17 @@ Transceiver::ensure_rpc_shutdown()
                 << " active RPC handler(s) on instance "
                 << m_instance_id
                 << ". Forced timeout is unsafe while handlers still execute against the object.\n";
+
+            ++warning_count;
+            if (warning_count >= max_shutdown_warning_count) {
+                Log_stream(log_level::error)
+                    << "Transceiver shutdown exceeded "
+                    << (shutdown_warning_interval * max_shutdown_warning_count).count()
+                    << " seconds while waiting for active RPC handlers on instance "
+                    << m_instance_id
+                    << ". Terminating to fail fast.\n";
+                std::terminate();
+            }
         }
         m_rpc_shutdown_complete = true;
         // Notify while still holding the lock to prevent race conditions
@@ -1022,6 +1035,14 @@ void Transceiver::rpc_handler(Message_prefix& untyped_msg)
         finalize_rpc_write(placed_msg, msg, obj, etid);
     }
     else {
+        if constexpr (RPCTC::is_fire_and_forget) {
+            Log_stream(log_level::warning)
+                << "Unhandled exception escaped a SINTRA_UNICAST handler on instance "
+                << obj->m_instance_id
+                << ". The caller cannot observe exceptions from fire-and-forget RPC exports.\n";
+            return;
+        }
+
         exception* placed_msg = s_mproc->m_out_rep_c->write<exception>(vb_size<exception>(what), what);
         finalize_rpc_write(placed_msg, msg, obj, etid);
     }
@@ -1274,6 +1295,7 @@ Transceiver::activate_return_handler(const Return_handler &rh)
 {
     instance_id_type function_instance_id = make_instance_id();
     lock_guard<mutex> sl(m_return_handlers_mutex);
+    m_retired_return_handler_ids.erase(function_instance_id);
     m_active_return_handlers[function_instance_id] = rh;
     return function_instance_id;
 }
@@ -1285,7 +1307,18 @@ void
 Transceiver::deactivate_return_handler(instance_id_type function_instance_id)
 {
     lock_guard<mutex> sl(m_return_handlers_mutex);
-    m_active_return_handlers.erase(function_instance_id);
+    if (m_active_return_handlers.erase(function_instance_id) == 0) {
+        return;
+    }
+
+    if (m_retired_return_handler_ids.insert(function_instance_id).second) {
+        m_retired_return_handler_fifo.push_back(function_instance_id);
+        while (m_retired_return_handler_fifo.size() > max_retired_return_handlers) {
+            const auto retired_id = m_retired_return_handler_fifo.front();
+            m_retired_return_handler_fifo.pop_front();
+            m_retired_return_handler_ids.erase(retired_id);
+        }
+    }
 }
 
 
@@ -1305,7 +1338,11 @@ Transceiver::replace_return_handler_id(instance_id_type old_id, instance_id_type
 
     auto handler = std::move(it->second);
     m_active_return_handlers.erase(it);
-    assert(m_active_return_handlers.find(new_id) == m_active_return_handlers.end());
+    if (m_active_return_handlers.find(new_id) != m_active_return_handlers.end()) {
+        throw std::logic_error(
+            "Attempted to remap an RPC return handler onto an already-active function_instance_id.");
+    }
+    m_retired_return_handler_ids.erase(new_id);
     m_active_return_handlers[new_id] = std::move(handler);
 }
 

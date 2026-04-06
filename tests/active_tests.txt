@@ -23,6 +23,7 @@ barrier_pathological_choreography_test    60
 barrier_rapid_reuse_test                  25
 barrier_stress_test                       30
 barrier_drain_and_unpublish_test           1
+barrier_guardrails_test                    5
 basic_pub_sub                             40
 choreography_extreme_test                 80
 complex_choreography_stress_test          60

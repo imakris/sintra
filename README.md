@@ -279,10 +279,12 @@ Sintra uses **dedicated reader threads** to process incoming messages from share
 * **Rendezvous barriers** (`barrier<sintra::rendezvous_t>(name)`) simply ensure that every participant has reached the synchronization point. Messages published before the barrier might still be in flight or waiting to be handled, so this mode is appropriate when only aligned phase progression is needed-for example, coordinating the simultaneous start of a workload whose logic does not depend on the effects of earlier messages.
 
   *Warning: Two peers can both reach the rendezvous while still missing each other's prior messages (A sends x, B sends y, both call rendezvous, neither is guaranteed to have received the other). Prefer delivery or processing fences when correctness depends on pre-barrier messages being observed.*
-* **Delivery-fence barriers** (`barrier(name)` or `barrier<sintra::delivery_fence_t>(name)`) guarantee that all pre-barrier messages have been pulled off the shared-memory rings by each process's reader thread and are queued locally for handling, though the handlers may still be running. The default delivery fence is suitable when the next step requires the complete set of incoming work to be staged, such as inspecting an inbox before taking action.
+* **Delivery-fence barriers** (`barrier(name)` or `barrier<sintra::delivery_fence_t>(name)`) guarantee that all pre-barrier messages have been pulled off the shared-memory rings by each process's reader thread and are queued locally for handling, though the handlers may still be running. This is a local guarantee for the caller; it does not add a second rendezvous proving that peers have also drained their readers. The default delivery fence is suitable when the next step requires the complete set of incoming work to be staged locally, such as inspecting an inbox before taking action.
 * **Processing-fence barriers** (`barrier<sintra::processing_fence_t>(name)`) wait until every handler (and any continuations) for messages published before the barrier has finished executing. This mode is appropriate when subsequent logic must observe the completed side effects-for instance, reading shared state that earlier handlers updated or applying a configuration change only after all peers processed preparatory updates.
 
 Delivery fences cost the same as rendezvous plus a short wait for readers to catch up. Processing fences add a single control message per process and an extra rendezvous to allow deterministic observation of handler side effects.
+
+Barrier names beginning with `_sintra_` are reserved for internal runtime coordination and now fail fast.
 
 ```cpp
 // Wait until everyone reaches the same point and any prior messages are queued locally.

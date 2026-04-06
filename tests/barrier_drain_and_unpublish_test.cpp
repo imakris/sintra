@@ -53,7 +53,7 @@ int worker_a()
     bool ok1 = false;
     try {
         auto seq = sintra::barrier("external_barrier", "_sintra_external_processes");
-        ok1 = (seq != 0);
+        ok1 = sintra::barrier_completed(seq);
     }
     catch (...) {
         ok1 = false;
@@ -78,7 +78,7 @@ int worker_a()
     bool ok2 = false;
     try {
         auto seq = sintra::barrier("coord_barrier", "_sintra_all_processes");
-        ok2 = (seq != 0);
+        ok2 = sintra::barrier_completed(seq);
     }
     catch (...) {
         ok2 = false;

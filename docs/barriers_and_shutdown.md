@@ -24,6 +24,9 @@ expected to reach the same top-level shutdown point. On the coordinator, the
 helper waits for the rest of the shutdown group to unpublish itself before
 finalizing locally, so peers do not lose their lifeline owner mid-teardown.
 
+Barrier names beginning with `"_sintra_"` are reserved for internal runtime
+protocols. User code should not reuse them.
+
 Keep calling `sintra::finalize()` directly for single-process programs, crash
 paths, or tests/processes that cannot participate in a symmetric shutdown
 barrier.
@@ -82,6 +85,18 @@ Calling `sintra::finalize()` now performs the following steps:
   the moment their message is written** (not a global token), preventing hangs
   where a global watermark might be ahead of a recipient's channel.
   *(Process_group::barrier in coordinator_impl.h)*
+
+## Barrier mode guardrails
+
+- **Delivery fences are local-only:** `barrier()` / `barrier<delivery_fence_t>()`
+  proves that this process drained its readers up to the barrier point. It does
+  not add a second rendezvous proving that peers also finished draining.
+- **Processing-fence phase names are internal:** the runtime now keeps the
+  second `processing_fence_t` rendezvous out of the user barrier namespace.
+- **Mixed barrier modes fail fast:** all participants in a given barrier round
+  must use the same barrier mode. Mixing `rendezvous_t`, `delivery_fence_t`,
+  and `processing_fence_t` on the same barrier name is rejected immediately
+  instead of hanging in the hidden processing phase.
 
 ### Draining state lifecycle
 

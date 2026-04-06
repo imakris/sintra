@@ -54,7 +54,7 @@ struct Process_group: Derived_transceiver<Process_group>
     // processes waiting on the barrier. This message would contain
     // - the serial number, for identification purposes
     // - the sequence counter (i.e. at which ring sequence was the barrier completed)
-    sequence_counter_type barrier(const string& barrier_name);
+    sequence_counter_type barrier(const string& barrier_name, int32_t barrier_mode_tag);
 
 
     struct Barrier
@@ -65,6 +65,7 @@ struct Process_group: Derived_transceiver<Process_group>
         unordered_set<instance_id_type>         processes_arrived;
         //sequence_counter_type                   flush_sequence = 0;
         bool                                    failed = false;
+        int32_t                                 mode_tag = 0;
         instance_id_type                        common_function_iid = invalid_instance_id;
     };
 

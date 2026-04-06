@@ -3,13 +3,18 @@
 #include "test_utils.h"
 
 #include <algorithm>
+#include <chrono>
+#include <atomic>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 namespace {
 
 std::mutex g_seen_markers_mutex;
 std::vector<int> g_seen_markers;
+std::atomic<int> g_started_handlers{0};
+std::atomic<int> g_finished_handlers{0};
 
 int worker_process(int worker_index)
 {
@@ -43,9 +48,14 @@ int main(int argc, char* argv[])
         [](const std::filesystem::path&) {
             std::lock_guard<std::mutex> lock(g_seen_markers_mutex);
             g_seen_markers.clear();
+            g_started_handlers.store(0, std::memory_order_release);
+            g_finished_handlers.store(0, std::memory_order_release);
             sintra::activate_slot([](int worker_index) {
+                g_started_handlers.fetch_add(1, std::memory_order_acq_rel);
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 std::lock_guard<std::mutex> lock(g_seen_markers_mutex);
                 g_seen_markers.push_back(worker_index);
+                g_finished_handlers.fetch_add(1, std::memory_order_acq_rel);
             });
             sintra::barrier("shutdown-helper-ready", "_sintra_all_processes");
             return 0;
@@ -59,6 +69,10 @@ int main(int argc, char* argv[])
 
             std::sort(seen.begin(), seen.end());
             const std::vector<int> expected{0, 1};
-            return seen == expected ? 0 : 1;
+            const bool handlers_started =
+                g_started_handlers.load(std::memory_order_acquire) == 2;
+            const bool handlers_finished =
+                g_finished_handlers.load(std::memory_order_acquire) == 2;
+            return (seen == expected && handlers_started && handlers_finished) ? 0 : 1;
         });
 }

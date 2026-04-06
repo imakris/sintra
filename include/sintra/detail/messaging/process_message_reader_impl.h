@@ -668,6 +668,7 @@ void Process_message_reader::reply_reader_function()
                 Transceiver::Return_handler handler_copy;
                 bool have_handler = false;
                 bool object_found = false;
+                bool handler_was_retired = false;
                 {
                     auto scoped_map = s_mproc->m_local_pointer_of_instance_id.scoped();
                     auto it = scoped_map.get().find(m->receiver_instance_id);
@@ -682,6 +683,11 @@ void Process_message_reader::reply_reader_function()
                             if (it2 != return_handlers.end()) {
                                 handler_copy = it2->second;
                                 have_handler = true;
+                            }
+                            else {
+                                handler_was_retired =
+                                    it->second->m_retired_return_handler_ids.find(m->function_instance_id) !=
+                                    it->second->m_retired_return_handler_ids.end();
                             }
                         }
                     }
@@ -708,7 +714,10 @@ void Process_message_reader::reply_reader_function()
                         // (e.g., after cancellation/shutdown) and a late/duplicate message arrived.
                         // Drop it quietly unless we're fully RUNNING; in RUNNING emit a diagnostic
                         // but do not hard-assert to avoid modal dialogs on Windows Debug.
-                        if (s_mproc && s_mproc->m_communication_state == Managed_process::COMMUNICATION_RUNNING) {
+                        if (!handler_was_retired &&
+                            s_mproc &&
+                            s_mproc->m_communication_state == Managed_process::COMMUNICATION_RUNNING)
+                        {
                             Log_stream(log_level::warning)
                                 << "Warning: Reply reader received message for function_instance_id="
                                 << static_cast<unsigned long long>(m->function_instance_id)

@@ -4,15 +4,47 @@
 #pragma once
 
 #include "globals.h"
+#include "logging.h"
 #include "process/managed_process.h"
 #include "messaging/process_message_reader_impl.h"
 
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 
 namespace sintra {
 namespace detail {
+
+constexpr std::string_view k_reserved_barrier_prefix = "_sintra_";
+constexpr int32_t k_barrier_mode_rendezvous = 0;
+constexpr int32_t k_barrier_mode_delivery = 1;
+constexpr int32_t k_barrier_mode_processing = 2;
+constexpr int32_t k_barrier_mode_processing_phase = 3;
+
+inline void validate_user_barrier_name(const std::string& barrier_name)
+{
+    if (barrier_name.rfind(k_reserved_barrier_prefix.data(), 0) == 0) {
+        throw std::invalid_argument(
+            "Barrier names beginning with '_sintra_' are reserved for internal use.");
+    }
+}
+
+inline std::string make_processing_phase_barrier_name(const std::string& barrier_name)
+{
+    return "_sintra_processing_phase/" + barrier_name;
+}
+
+inline void log_barrier_bypass(const std::string& barrier_name,
+                               const std::string& group_name,
+                               const char* reason)
+{
+    Log_stream(log_level::warning)
+        << "Barrier '" << barrier_name
+        << "' in group '" << group_name
+        << "' was treated as satisfied during shutdown/drain handling ("
+        << reason << ").\n";
+}
 
 inline bool should_treat_rpc_failure_as_satisfied()
 {
@@ -23,14 +55,17 @@ inline bool should_treat_rpc_failure_as_satisfied()
 
 inline void wait_for_processing_quiescence();
 
-inline sequence_counter_type rendezvous_barrier(const std::string& barrier_name, const std::string& group_name)
+inline sequence_counter_type rendezvous_barrier(const std::string& barrier_name,
+                                                const std::string& group_name,
+                                                int32_t barrier_mode_tag)
 {
     sequence_counter_type flush_seq = invalid_sequence;
     try {
-        flush_seq = Process_group::rpc_barrier(group_name, barrier_name);
+        flush_seq = Process_group::rpc_barrier(group_name, barrier_name, barrier_mode_tag);
     }
     catch (const rpc_cancelled&) {
         if (should_treat_rpc_failure_as_satisfied()) {
+            log_barrier_bypass(barrier_name, group_name, "rpc cancelled");
             return invalid_sequence;
         }
         throw;
@@ -42,6 +77,7 @@ inline sequence_counter_type rendezvous_barrier(const std::string& barrier_name,
             (message.find("no longer available") != std::string::npos) ||
             (message.find("shutting down") != std::string::npos);
         if (rpc_unavailable && should_treat_rpc_failure_as_satisfied()) {
+            log_barrier_bypass(barrier_name, group_name, message.c_str());
             return invalid_sequence;
         }
         throw;
@@ -62,14 +98,16 @@ inline sequence_counter_type barrier_dispatch(rendezvous_t,
                                               const std::string& barrier_name,
                                               const std::string& group_name)
 {
-    return rendezvous_barrier(barrier_name, group_name);
+    validate_user_barrier_name(barrier_name);
+    return rendezvous_barrier(barrier_name, group_name, k_barrier_mode_rendezvous);
 }
 
 inline sequence_counter_type barrier_dispatch(delivery_fence_t,
                                               const std::string& barrier_name,
                                               const std::string& group_name)
 {
-    const auto rendezvous_seq = barrier_dispatch(rendezvous_t{}, barrier_name, group_name);
+    validate_user_barrier_name(barrier_name);
+    const auto rendezvous_seq = rendezvous_barrier(barrier_name, group_name, k_barrier_mode_delivery);
     if (rendezvous_seq == invalid_sequence) {
         return invalid_sequence;
     }
@@ -86,22 +124,41 @@ inline sequence_counter_type barrier_dispatch(processing_fence_t,
                                               const std::string& barrier_name,
                                               const std::string& group_name)
 {
-    const auto rendezvous_seq = barrier_dispatch(rendezvous_t{}, barrier_name, group_name);
+    validate_user_barrier_name(barrier_name);
+    const auto rendezvous_seq = rendezvous_barrier(barrier_name, group_name, k_barrier_mode_processing);
     if (rendezvous_seq == invalid_sequence) {
         return invalid_sequence;
     }
 
     wait_for_processing_quiescence();
 
-    const std::string processing_phase_name = barrier_name + "/processing";
-    return barrier_dispatch(rendezvous_t{}, processing_phase_name, group_name);
+    const auto processing_phase_name = make_processing_phase_barrier_name(barrier_name);
+    return rendezvous_barrier(
+        processing_phase_name,
+        group_name,
+        k_barrier_mode_processing_phase);
+}
+
+inline sequence_counter_type internal_processing_fence_barrier(const std::string& barrier_name,
+                                                               const std::string& group_name)
+{
+    const auto rendezvous_seq = rendezvous_barrier(barrier_name, group_name, k_barrier_mode_processing);
+    if (rendezvous_seq == invalid_sequence) {
+        return invalid_sequence;
+    }
+
+    wait_for_processing_quiescence();
+
+    const auto processing_phase_name = make_processing_phase_barrier_name(barrier_name);
+    return rendezvous_barrier(
+        processing_phase_name,
+        group_name,
+        k_barrier_mode_processing_phase);
 }
 
 inline void wait_for_processing_quiescence()
 {
-    if (!s_mproc ||
-        s_mproc->m_communication_state != Managed_process::COMMUNICATION_RUNNING)
-    {
+    if (!s_mproc) {
         return;
     }
 

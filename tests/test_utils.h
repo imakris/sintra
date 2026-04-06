@@ -219,6 +219,9 @@ private:
 template <typename Setup,
           typename Coordinator_action,
           typename Verifier>
+// If final_barrier is provided, only the root/coordinator process calls it here.
+// Every spawned process that belongs to barrier_group must explicitly call the
+// same barrier in its own body, or the root will wait forever.
 int run_multi_process_test(int argc,
                            char* argv[],
                            const char* env_var,
