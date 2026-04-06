@@ -964,7 +964,7 @@ int main(int argc, char* argv[])
         sintra::barrier<sintra::rendezvous_t>("extreme-choreo-finished", "_sintra_all_processes");
     }
 
-    sintra::finalize();
+    sintra::detail::finalize();
 
     if (!is_spawned) {
         bool ok = verify_aggregator_results(shared_dir) && verify_conductor_summary(shared_dir);

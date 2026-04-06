@@ -94,7 +94,7 @@ int main(int argc, char* argv[])
     sintra::init(argc, argv, crash_worker);
 
     if (is_spawned) {
-        sintra::finalize();
+        sintra::detail::finalize();
         watchdog_done.store(true, std::memory_order_release);
         watchdog.join();
         return 0;
@@ -111,7 +111,7 @@ int main(int argc, char* argv[])
     });
 
     if (!sintra::test::wait_for_file(ready_path, std::chrono::milliseconds(ready_timeout_ms), 5ms)) {
-        sintra::finalize();
+        sintra::detail::finalize();
         watchdog_done.store(true, std::memory_order_release);
         watchdog.join();
         return 1;
@@ -120,7 +120,7 @@ int main(int argc, char* argv[])
     write_marker(go_path);
 
     if (!sintra::test::wait_for_file(crash_seen_path, std::chrono::milliseconds(crash_timeout_ms), 5ms)) {
-        sintra::finalize();
+        sintra::detail::finalize();
         watchdog_done.store(true, std::memory_order_release);
         watchdog.join();
         return 1;
@@ -132,7 +132,7 @@ int main(int argc, char* argv[])
         std::filesystem::exists(respawned_path) ||
         std::filesystem::exists(dir / "ready_1.txt");
 
-    sintra::finalize();
+    sintra::detail::finalize();
 
     watchdog_done.store(true, std::memory_order_release);
     watchdog.join();

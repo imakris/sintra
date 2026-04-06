@@ -24,6 +24,7 @@
 ///  this faÃ§ade understand which features they are pulling in.
 
 
+#include <functional>
 #include <string>
 
 // -- Platform and toolchain adjustments ------------------------------------
@@ -154,20 +155,67 @@ inline bool barrier_completed(sequence_counter_type barrier_sequence)
     return barrier_sequence != invalid_sequence;
 }
 
+// ---------------------------------------------------------------------------
+// Shutdown options
+// ---------------------------------------------------------------------------
+/// Configuration for the standard coordinated shutdown protocol.
+///
+/// Ordinary callers use `shutdown()` for the common symmetric case.
+/// When the coordinator must run a bounded side-effect (e.g. writing a
+/// summary file) before raw teardown, pass a `shutdown_options` with a
+/// `coordinator_shutdown_hook`.  Non-coordinator processes wait inside
+/// the standard shutdown path while the hook is active.
+///
+/// Supported non-happy-path shutdowns should be expressed through additional
+/// fields here, rather than through a parallel family of helper names.
+/// Introduce a separate public helper only if the operation is no longer
+/// semantically just shutdown.
+struct shutdown_options {
+    /// Optional callback that runs on the coordinator during shutdown, after
+    /// the collective processing fence completes and before raw teardown
+    /// begins.  The hook is coordinator-local and must not initiate new peer
+    /// coordination, extra barriers, or additional custom protocol steps.
+    ///
+    /// If the hook throws, shutdown fails and the exception is surfaced to
+    /// the caller.  If it blocks indefinitely, peers will not silently drift
+    /// into unrelated teardown paths.
+    std::function<void()> coordinator_shutdown_hook;
+};
+
+// ---------------------------------------------------------------------------
+// Standard lifecycle terminal API
+// ---------------------------------------------------------------------------
 ///\brief Perform the standard coordinated multi-process shutdown sequence.
 ///
-/// `shutdown()` is the safe one-call counterpart to the common
-/// `barrier<processing_fence_t>(..., "_sintra_all_processes"); finalize();`
-/// pattern used by multi-process applications. It first runs a processing fence
-/// across `group_name`, then tears down the local Sintra runtime via
-/// `finalize()`. The coordinator side stays alive until the rest of the group
-/// has unpublished itself, so peers do not lose their lifeline owner mid-teardown.
+/// `shutdown()` is the single terminal API for the standard lifecycle.
+/// All live participants that use this path enter the same collective
+/// shutdown protocol; the runtime owns the internal synchronization.
 ///
-/// Use this when every live participant is expected to reach the same top-level
-/// shutdown handoff before teardown. Keep calling `finalize()` directly for
-/// single-process programs, exceptional/error paths, or cases where a process
-/// cannot participate in a symmetric shutdown rendezvous.
-bool shutdown(const std::string& group_name = "_sintra_all_processes");
+/// The simple form is appropriate when:
+/// - all participants reach the same top-level handoff
+/// - no important final side effect remains
+/// - teardown may begin immediately
+///
+/// For single-process programs, exceptional/error paths, or cases where a
+/// process cannot participate in a symmetric shutdown rendezvous, use
+/// `detail::finalize()` — a low-level escape hatch for tests, experiments,
+/// and deliberate primitive-level work.
+///
+/// Ordinary callers should not pair `shutdown()` with extra final
+/// `_sintra_all_processes` barriers or a direct subsequent `detail::finalize()`.
+bool shutdown();
+
+///\brief Shutdown with options (e.g. a coordinator-side shutdown hook).
+///
+/// All participants call `shutdown(options)`.  If a coordinator_shutdown_hook
+/// is configured, non-coordinator processes wait inside the standard shutdown
+/// path while the coordinator runs the hook.  The library owns the necessary
+/// internal synchronization.
+///
+/// The hook runs at a defined point within shutdown before raw teardown
+/// begins.  It is coordinator-local and must not initiate new peer
+/// coordination.
+bool shutdown(const shutdown_options& options);
 
 
 template <typename FT, typename SENDER_T = void>
@@ -232,10 +280,9 @@ MESSAGE_T receive(Typed_instance_id<SENDER_T> sender_id);
 
 ///\brief Enable automatic recovery for the current managed process.
 ///
-/// When recovery is enabled the coordinator will respawn the process if it     
-/// exits unexpectedly.  Applications that rely on clean shutdown can still call
-/// `sintra::finalize()` (included below via the runtime utilities) when they   
-/// are done.
+/// When recovery is enabled the coordinator will respawn the process if it
+/// exits unexpectedly.  Applications that rely on clean shutdown should use
+/// `sintra::shutdown()` as the standard terminal path.
 void enable_recovery();
 
 ///\brief Configure recovery/lifecycle callbacks (effective only in coordinator).

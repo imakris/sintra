@@ -129,7 +129,7 @@ int main(int argc, char* argv[])
         sintra::barrier("barrier-rapid-reuse-done", "_sintra_all_processes");
     }
 
-    sintra::finalize();
+    sintra::detail::finalize();
 
     std::printf("Barrier rapid reuse test completed\n");
     std::printf("Failures: %d\n", failures.load());

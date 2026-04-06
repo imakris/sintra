@@ -282,7 +282,7 @@ int main(int argc, char* argv[])
         trace("coord: results-written barrier exit");
     }
 
-    sintra::finalize();
+    sintra::detail::finalize();
 
     // Validation (coordinator only)
     if (!is_spawned) {

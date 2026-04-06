@@ -78,11 +78,11 @@ int main(int argc, char* argv[])
 
     const auto wait_status = done_future.wait_for(std::chrono::seconds(5));
     if (wait_status != std::future_status::ready) {
-        sintra::finalize();
+        sintra::detail::finalize();
         return 1;
     }
 
-    sintra::finalize();
+    sintra::detail::finalize();
 
     return ping_count.load() == k_target_ping_count ? 0 : 1;
 }

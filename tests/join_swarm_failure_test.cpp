@@ -12,7 +12,7 @@ int main(int argc, char* argv[])
     sintra::init(argc, argv);
 
     if (!s_coord) {
-        sintra::finalize();
+        sintra::detail::finalize();
         return 1;
     }
 
@@ -29,7 +29,7 @@ int main(int argc, char* argv[])
     const bool joined_ok = (s_coord->m_joined_process_branch.size() == before_joined);
     const bool groups_ok = (s_coord->m_groups_of_process.size() == before_groups);
 
-    sintra::finalize();
+    sintra::detail::finalize();
 
     if (result != sintra::invalid_instance_id) {
         return 1;

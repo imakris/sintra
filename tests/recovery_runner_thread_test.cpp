@@ -90,7 +90,7 @@ int main(int argc, char* argv[])
     sintra::init(argc, argv, crash_worker);
 
     if (is_spawned) {
-        sintra::finalize();
+        sintra::detail::finalize();
         watchdog_done.store(true, std::memory_order_release);
         watchdog.join();
         return 0;
@@ -101,7 +101,7 @@ int main(int argc, char* argv[])
     });
 
     if (!sintra::test::wait_for_file(ready_path, std::chrono::milliseconds(ready_timeout_ms), 5ms)) {
-        sintra::finalize();
+        sintra::detail::finalize();
         watchdog_done.store(true, std::memory_order_release);
         watchdog.join();
         return 1;
@@ -113,7 +113,7 @@ int main(int argc, char* argv[])
         std::chrono::steady_clock::now() + std::chrono::milliseconds(runner_timeout_ms);
     while (!runner_seen.load(std::memory_order_acquire)) {
         if (std::chrono::steady_clock::now() >= runner_deadline) {
-            sintra::finalize();
+            sintra::detail::finalize();
             watchdog_done.store(true, std::memory_order_release);
             watchdog.join();
             return 1;
@@ -121,7 +121,7 @@ int main(int argc, char* argv[])
         std::this_thread::sleep_for(10ms);
     }
 
-    sintra::finalize();
+    sintra::detail::finalize();
 
     watchdog_done.store(true, std::memory_order_release);
     watchdog.join();

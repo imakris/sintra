@@ -445,7 +445,7 @@ int main(int argc, char* argv[])
         sintra::barrier<sintra::processing_fence_t>(k_done_processed_barrier, "_sintra_all_processes");
         sintra::barrier(k_summary_ready_barrier, "_sintra_all_processes");
     }
-    sintra::finalize();
+    sintra::detail::finalize();
 
     int exit_code = 0;
 

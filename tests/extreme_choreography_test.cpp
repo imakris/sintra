@@ -819,7 +819,7 @@ int main(int argc, char* argv[])
         sintra::barrier("extreme-choreography-finished", "_sintra_all_processes");
     }
 
-    sintra::finalize();
+    sintra::detail::finalize();
 
     if (!is_spawned) {
         std::ifstream in(summary_path, std::ios::binary);

@@ -46,6 +46,11 @@ This effort is not primarily about:
 - preserving old helper behavior just because some test or call site depends
   on it
 
+Broad source breakage during migration is expected and intended if that is
+what it takes to remove ambiguous lifecycle contracts. A large number of
+affected call sites is not, by itself, a reason to keep a misleading public
+API shape in place.
+
 ## Review questions
 
 Every investigation in this workstream should try to answer these questions.
@@ -233,6 +238,9 @@ The recommended API output should prefer:
   rather than a second family of loosely related helper names
 - separate public shutdown helpers only when the operation is no longer
   semantically "shutdown with declared extra behavior"
+- implementation prompts and reviews that reject the conservative fallback of
+  "keep the old public API and add checks around it" unless a concrete blocker
+  is identified and explained
 
 ## Decision rule
 
@@ -270,6 +278,17 @@ public lifecycle support. If a shutdown shape is realistic and intended for
 user code, it belongs in `shutdown_options` unless it is no longer
 semantically just shutdown. Raw teardown primitives belong in `detail` for
 tests, experiments, and deliberate low-level work.
+
+Implementation work should therefore assume the following by default:
+
+- breaking tests, examples, and ordinary call sites during migration is
+  acceptable
+- updating those call sites to the cleaner lifecycle surface is part of the
+  intended work
+- preserving a misleading public `finalize()`-shaped user path just to avoid
+  migration churn is not an acceptable default
+- if an implementation pass keeps that path, it must name the concrete
+  technical blocker rather than appealing only to breadth of breakage
 
 That should remain the primary goal even when specific CI failures or test
 regressions pull attention toward a narrow local fix.

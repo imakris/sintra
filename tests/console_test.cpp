@@ -40,7 +40,7 @@ int main(int argc, char* argv[])
     test_console_multiple_insertions();
     test_console_separate_instances();
 
-    sintra::finalize();
+    sintra::detail::finalize();
     std::fprintf(stderr, "Console test passed\n");
     return 0;
 }

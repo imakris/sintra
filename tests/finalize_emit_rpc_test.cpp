@@ -34,7 +34,7 @@ int main(int argc, char* argv[])
         std::fprintf(stderr, "Failed to assign transceiver name.\n");
         return 1;
     }
-    sintra::finalize();
+    sintra::detail::finalize();
 
     try {
         bus.emit_remote<Finalize_bus::ping>(1);

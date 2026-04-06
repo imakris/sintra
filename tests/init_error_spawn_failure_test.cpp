@@ -31,7 +31,7 @@ int main(int argc, char* argv[])
 
     if (is_spawned) {
         sintra::init(argc, argv, processes);
-        sintra::finalize();
+        sintra::detail::finalize();
         return 0;
     }
 
@@ -51,27 +51,27 @@ int main(int argc, char* argv[])
 
         if (!has_spawn_failed) {
             std::fprintf(stderr, "Expected spawn_failed in init_error failures.\n");
-            sintra::finalize();
+            sintra::detail::finalize();
             return 1;
         }
     }
     catch (const std::exception& e) {
         std::fprintf(stderr, "Unexpected exception: %s\n", e.what());
-        sintra::finalize();
+        sintra::detail::finalize();
         return 1;
     }
     catch (...) {
         std::fprintf(stderr, "Unexpected non-std exception.\n");
-        sintra::finalize();
+        sintra::detail::finalize();
         return 1;
     }
 
     if (!caught) {
         std::fprintf(stderr, "Expected sintra::init to throw init_error.\n");
-        sintra::finalize();
+        sintra::detail::finalize();
         return 1;
     }
 
-    sintra::finalize();
+    sintra::detail::finalize();
     return 0;
 }

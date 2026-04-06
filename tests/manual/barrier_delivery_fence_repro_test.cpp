@@ -324,7 +324,7 @@ int main(int argc, char* argv[])
         sintra::barrier("delivery-fence-repro-done", "_sintra_all_processes");
     }
 
-    sintra::finalize();
+    sintra::detail::finalize();
 
     if (!is_spawned) {
         const auto result_path = shared.path() / "delivery_fence_repro_result.txt";

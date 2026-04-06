@@ -45,6 +45,6 @@ int main(int argc, char* argv[])
 {
     sintra::init(argc, argv);
     const int result = run_checks();
-    sintra::finalize();
+    sintra::detail::finalize();
     return result;
 }

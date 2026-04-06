@@ -190,7 +190,7 @@ int main(int argc, char* argv[])
         sintra::barrier("done", "_sintra_all_processes");
     }
 
-    sintra::finalize();
+    sintra::detail::finalize();
 
     if (is_coordinator) {
         std::fprintf(stderr, "receive test PASSED\n");

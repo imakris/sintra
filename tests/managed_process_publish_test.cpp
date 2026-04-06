@@ -137,7 +137,7 @@ int run_worker(int argc, char* argv[])
 
     if (!write_worker_info(shared_dir, info)) {
         std::fprintf(stderr, "managed_process_publish_test: failed to write worker info\n");
-        sintra::finalize();
+        sintra::detail::finalize();
         return 1;
     }
 
@@ -150,14 +150,14 @@ int run_worker(int argc, char* argv[])
     const bool done = std::filesystem::exists(done_path);
     if (!done) {
         std::fprintf(stderr, "managed_process_publish_test: timed out waiting for done signal\n");
-        sintra::finalize();
+        sintra::detail::finalize();
         return 1;
     }
 
     std::ofstream exit_marker(shared_dir / std::string(k_exit_file), std::ios::binary | std::ios::trunc);
     exit_marker << "exit\n";
 
-    sintra::finalize();
+    sintra::detail::finalize();
     return 0;
 }
 
@@ -198,7 +198,7 @@ int run_delayed_publication_worker(int argc, char* argv[])
 
         if (!sintra::test::wait_for_path(done_path, std::chrono::seconds(10))) {
             std::fprintf(stderr, "managed_process_publish_test: delayed worker timed out\n");
-            sintra::finalize();
+            sintra::detail::finalize();
             return 1;
         }
 
@@ -210,17 +210,17 @@ int run_delayed_publication_worker(int argc, char* argv[])
     else if (role == "a") {
         if (!sintra::test::wait_for_path(marked_path, std::chrono::seconds(10))) {
             std::fprintf(stderr, "managed_process_publish_test: delayed worker missing mark\n");
-            sintra::finalize();
+            sintra::detail::finalize();
             return 1;
         }
     }
     else {
         std::fprintf(stderr, "managed_process_publish_test: unknown delayed role '%s'\n", role.c_str());
-        sintra::finalize();
+        sintra::detail::finalize();
         return 1;
     }
 
-    sintra::finalize();
+    sintra::detail::finalize();
     return 0;
 }
 
@@ -500,7 +500,7 @@ int main(int argc, char* argv[])
         ok = run_delayed_publication_scenario(binary_path);
     }
 
-    sintra::finalize();
+    sintra::detail::finalize();
 
     std::error_code ec;
     std::filesystem::remove_all(shared_dir, ec);

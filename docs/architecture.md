@@ -278,7 +278,7 @@ m_publish_mutex -> m_groups_mutex -> m_call_mutex -> b.m -> atomics
 2. **DRAINING**: Process is shutting down; excluded from new barriers and dropped from in-flight barriers
 3. **TERMINATED**: Process exited; resources scavenged
 
-### Shutdown Sequence (sintra::finalize)
+### Shutdown Sequence (detail::finalize)
 
 ```
 ┌────────────────────────────────────────────────────────────┐
@@ -298,39 +298,35 @@ m_publish_mutex -> m_groups_mutex -> m_call_mutex -> b.m -> atomics
 │    │ -> Guarantees all barrier completions are visible   │ │
 │    └─────────────────────────────────────────────────────┘ │
 ├────────────────────────────────────────────────────────────┤
-│ 3. Unpublish (Normal Communication Still Active)           │
-│    ┌─────────────────────────────────────────────────────┐ │
-│    │ unpublish_all_transceivers()                        │ │
-│    │ -> Sends unpublish RPCs while communication works   │ │
-│    │ -> Coordinator removes from registry                │ │
-│    └─────────────────────────────────────────────────────┘ │
-├────────────────────────────────────────────────────────────┤
-│ 4. Pause Readers                                           │
+│ 3. Pause (SERVICE_MODE)                                    │
 │    ┌─────────────────────────────────────────────────────┐ │
 │    │ pause()                                             │ │
 │    │ -> Switches readers to SERVICE_MODE                 │ │
-│    │ -> Only coordinator messages processed              │ │
+│    │ -> Only coordinator/service messages processed      │ │
+│    │ -> User-level handlers no longer run concurrently   │ │
 │    └─────────────────────────────────────────────────────┘ │
 ├────────────────────────────────────────────────────────────┤
-│ 5. Stop and Cleanup                                        │
+│ 4. Deactivate and Unpublish                                │
 │    ┌─────────────────────────────────────────────────────┐ │
-│    │ stop()                                              │ │
-│    │ -> Joins reader threads                             │ │
-│    │ -> Releases resources                               │ │
+│    │ unblock_rpc()                                       │ │
+│    │ deactivate_all()                                    │ │
+│    │ unpublish_all_transceivers()                        │ │
+│    │ -> Handlers deactivated and transceivers unpublished│ │
+│    │    while service-mode communication still flows     │ │
+│    └─────────────────────────────────────────────────────┘ │
+├────────────────────────────────────────────────────────────┤
+│ 5. Destroy and Cleanup                                     │
+│    ┌─────────────────────────────────────────────────────┐ │
+│    │ delete s_mproc                                      │ │
+│    │ -> Stops reader threads and releases resources      │ │
 │    └─────────────────────────────────────────────────────┘ │
 └────────────────────────────────────────────────────────────┘
 ```
 
 > Implementation note:
-> The simplified diagram above presents "Unpublish" before "Pause" for
-> readability. In the current implementation (`detail::runtime::finalize`),
-> non-coordinator processes first call `flush(process_of(s_coord_id),
-> flush_sequence)` to synchronise with the coordinator, then switch readers
-> to SERVICE_MODE via `pause()` before deactivating slots and invoking
-> `unpublish_all_transceivers()`. The coordinator path additionally waits
-> for all known processes to enter the draining state via
-> `wait_for_all_draining()`. This tightened ordering avoids races with
-> in-flight handlers while keeping the conceptual shutdown model above.
+> The coordinator path additionally waits for all known processes to enter
+> the draining state via `wait_for_all_draining()` before proceeding to
+> step 3.
 
 ### Draining State Management
 

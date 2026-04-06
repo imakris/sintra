@@ -367,7 +367,7 @@ int main(int argc, char* argv[])
         }
     }
 
-    sintra::finalize();
+    sintra::detail::finalize();
 
     if (!is_spawned) {
         const auto result_path = shared_dir / "result.txt";

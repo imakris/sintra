@@ -11,34 +11,83 @@ coordinated execution:
 
 ## `sintra::shutdown()`
 
-For the standard multi-process teardown path, prefer:
+`shutdown()` is the standard terminal API for the multi-process lifecycle.
+All live participants call `shutdown()` and the runtime owns the collective
+handoff and internal synchronization.
+
+### Shape 1: simple collective shutdown
 
 ```cpp
 sintra::shutdown();
 ```
 
-`shutdown()` performs a `processing_fence_t` barrier on
-`"_sintra_all_processes"` and then calls `sintra::finalize()`. This is the
-safe one-call shutdown handoff for programs where every live participant is
-expected to reach the same top-level shutdown point. On the coordinator, the
-helper waits for the rest of the shutdown group to unpublish itself before
-finalizing locally, so peers do not lose their lifeline owner mid-teardown.
+This performs a `processing_fence_t` barrier on `"_sintra_all_processes"` and
+then tears down the local Sintra runtime. On the coordinator, the helper waits
+for the rest of the shutdown group to unpublish itself before finalizing
+locally, so peers do not lose their lifeline owner mid-teardown.
+
+### Shape 2: coordinator-side shutdown hook
+
+```cpp
+sintra::shutdown(
+    sintra::shutdown_options{
+        .coordinator_shutdown_hook = [&] {
+            write_summary_file(path);
+        }
+    });
+```
+
+All participants call `shutdown(options)`. After the collective processing
+fence, the coordinator runs the hook while non-coordinator processes wait
+inside the standard shutdown path. The runtime owns the necessary internal
+synchronization. The hook is coordinator-local and must not initiate new peer
+coordination, extra barriers, or additional custom protocol steps.
+
+### Extension rule
+
+Supported non-happy-path shutdowns should be expressed through additional
+fields in `shutdown_options`, rather than a parallel family of helper names.
+Introduce a separate public helper only if the operation is no longer
+semantically just shutdown.
+
+### Protocol state and fail-fast guardrails
+
+The runtime tracks the active shutdown protocol state (in
+`detail::shutdown_protocol_state`, not part of the public API):
+
+- `idle` — no shutdown in progress
+- `collective_shutdown_entered` — `shutdown()` has been called
+- `coordinator_hook_running` — coordinator hook is executing
+- `coordinator_hook_completed` — hook finished, awaiting peer synchronization
+- `finalizing` — raw teardown in progress
+
+Illegal compositions are rejected immediately:
+
+- Calling `shutdown()` while another shutdown is already in progress
+- Calling `detail::finalize()` while a standard shutdown is active
+- Calling a user-facing barrier on `_sintra_all_processes` while a standard
+  shutdown is active
+
+### Notes
 
 Barrier names beginning with `"_sintra_"` are reserved for internal runtime
 protocols. User code should not reuse them.
-
-Keep calling `sintra::finalize()` directly for single-process programs, crash
-paths, or tests/processes that cannot participate in a symmetric shutdown
-barrier.
 
 `shutdown()` is not meant to replace every explicit final barrier pattern.
 When a workflow needs a stronger algorithm-specific handoff, such as an
 application-defined final rendezvous or a staged ownership transfer, keep that
 protocol explicit and only enter `shutdown()` after it completes.
 
-## `sintra::finalize()`
+## `detail::finalize()` (low-level teardown)
 
-Calling `sintra::finalize()` now performs the following steps:
+`detail::finalize()` is the low-level teardown path for single-process
+programs, exceptional/error paths, or test code that cannot participate in a
+symmetric shutdown. It lives in the `sintra::detail` namespace — ordinary
+multi-process callers should use `shutdown()` instead. The internal
+implementation (`detail::finalize_impl()`) is also available for deliberate
+low-level work in tests and experiments.
+
+Calling `detail::finalize()` performs the following steps:
 
 1. **Announce draining and quiesce.** The process issues
    `Coordinator::begin_process_draining` (or the RPC equivalent) while normal
@@ -111,8 +160,9 @@ Calling `sintra::finalize()` now performs the following steps:
   *(Coordinator::begin_process_draining and Coordinator::drop_from_inflight_barriers in coordinator_impl.h)*
 
 These rules eliminate shutdown deadlocks during teardown, but they do not turn
-`sintra::finalize()` into a collective "safe to shut down now" handshake by
-themselves. For ordinary multi-process completion, use `sintra::shutdown()`.
-If an algorithm needs stronger guarantees about group membership than the
-default shutdown helper provides, it should layer an explicit membership
-protocol on top of these barrier semantics.
+`detail::finalize()` into a collective "safe to shut down now" handshake by itself.
+For ordinary multi-process completion, use `sintra::shutdown()` or
+`sintra::shutdown(sintra::shutdown_options{...})`.  If an algorithm needs
+stronger guarantees about group membership than the default shutdown helper
+provides, it should layer an explicit membership protocol on top of these
+barrier semantics.

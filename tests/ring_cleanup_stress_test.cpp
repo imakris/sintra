@@ -104,7 +104,7 @@ int main(int argc, char* argv[])
 
     for (std::uint32_t iter = 0; iter < k_iterations; ++iter) {
         sintra::init(argc, argv);
-        sintra::finalize();
+        sintra::detail::finalize();
 
         leftover = count_subdirectories(sintra_base);
         if (leftover == 0) {
@@ -125,7 +125,7 @@ int main(int argc, char* argv[])
     // Run a few extra init/finalize cycles to ensure directories stay clean.
     for (std::uint32_t iter = 0; iter < 8; ++iter) {
         sintra::init(argc, argv);
-        sintra::finalize();
+        sintra::detail::finalize();
         if (count_subdirectories(sintra_base) != 0) {
             std::fprintf(stderr,
                          "ring_cleanup_stress: directories reappeared on cycle %u\n",

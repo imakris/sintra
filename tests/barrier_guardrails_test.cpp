@@ -2,7 +2,6 @@
 
 #include "test_utils.h"
 
-#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -104,14 +103,6 @@ int main(int argc, char* argv[])
                     std::string("unexpected:") + e.what());
                 return 1;
             }
-
-            const bool processing_done = sintra::test::wait_for_file(
-                shared_dir / "processing_worker.txt",
-                std::chrono::seconds(10));
-            const bool rendezvous_done = sintra::test::wait_for_file(
-                shared_dir / "rendezvous_worker.txt",
-                std::chrono::seconds(10));
-            return (processing_done && rendezvous_done) ? 0 : 1;
         },
         [](const std::filesystem::path& shared_dir) {
             const auto processing_result = read_text(shared_dir / "processing_worker.txt");

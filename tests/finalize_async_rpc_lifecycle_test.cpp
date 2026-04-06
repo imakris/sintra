@@ -46,7 +46,7 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    sintra::finalize();
+    sintra::detail::finalize();
 
     if (!handle.ready()) {
         std::fprintf(stderr, "Handle was still pending after finalize.\n");

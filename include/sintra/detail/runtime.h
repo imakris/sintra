@@ -138,7 +138,10 @@ std::vector<Process_descriptor> make_branches(
     return branches;
 }
 
+namespace detail {
+inline bool finalize_impl();
 inline bool finalize();
+} // namespace detail
 
 struct Spawn_options
 {
@@ -151,9 +154,9 @@ struct Spawn_options
     Lifetime_policy lifetime;
 };
 
-// Tracks whether init() has been called without a corresponding finalize().
-// This flag is reset by finalize() to allow init()/finalize() cycles (e.g.,
-// in tests that repeatedly initialize and tear down the library).
+// Tracks whether init() has been called without a corresponding teardown.
+// This flag is reset by detail::finalize_impl() to allow init/teardown cycles
+// (e.g., in tests that repeatedly initialize and tear down the library).
 inline bool s_init_once = false;
 
 inline void init(
@@ -174,13 +177,14 @@ inline void init(
 
     if (s_init_once || s_mproc) {
         throw std::runtime_error(
-            "sintra::init() called twice without a matching sintra::finalize().");
+            "sintra::init() called twice without a matching teardown "
+            "(use sintra::shutdown() or sintra::detail::finalize()).");
     }
     s_init_once = true;
 
     static Instantiator cleanup_guard(std::function<void()>([]() {
         if (s_mproc) {
-            finalize();
+            detail::finalize_impl();
         }
     }));
 
@@ -210,11 +214,21 @@ void init(int argc, const char* const* argv, Args&&... args)
     init(argc, argv, make_branches(std::forward<Args>(args)...));
 }
 
-inline bool finalize()
+namespace detail {
+
+/// Low-level teardown implementation.  This is the internal workhorse used by
+/// both the standard `shutdown()` path and the low-level `detail::finalize()`
+/// entry point.
+/// Ordinary callers should use `shutdown()` instead.
+inline bool finalize_impl()
 {
     if (!s_mproc) {
         return false;
     }
+
+    const auto prev = s_shutdown_state.exchange(
+        shutdown_protocol_state::finalizing, std::memory_order_acq_rel);
+    (void)prev;  // Previous state is informational; no assertion needed here.
 
     const bool trace_finalize = (SINTRA_TRACE_FINALIZE != 0);
 
@@ -310,58 +324,156 @@ inline bool finalize()
     delete s_mproc;
     s_mproc = nullptr;
 
-    // Reset the init flag to allow another init()/finalize() cycle.
+    // Reset flags to allow another init()/finalize() cycle.
     s_init_once = false;
+    s_shutdown_state.store(shutdown_protocol_state::idle, std::memory_order_release);
 
     trace("end");
 
     return true;
 }
 
-inline bool shutdown(const std::string& group_name)
+/// Low-level teardown for single-process programs, exceptional/error
+/// paths, or test code that cannot participate in a symmetric shutdown.
+/// Ordinary multi-process callers should use `shutdown()` instead.
+///
+/// Fails fast if a standard shutdown protocol is already in progress
+/// (state is not idle), because mixing raw finalize with the standard
+/// shutdown path is an illegal composition.
+inline bool finalize()
 {
+    // Protocol state check comes first: calling finalize() during an active
+    // shutdown is always an error, even if s_mproc happens to be null.
+    const auto state = s_shutdown_state.load(std::memory_order_acquire);
+    if (state != shutdown_protocol_state::idle) {
+        throw std::logic_error(
+            "detail::finalize() called while a standard shutdown protocol is in progress "
+            "(state=" + std::to_string(static_cast<int>(state)) + "). "
+            "Use shutdown() for the standard terminal path.");
+    }
+
     if (!s_mproc) {
         return false;
     }
 
-    constexpr const char* shutdown_barrier_name = "_sintra_shutdown";
-    detail::internal_processing_fence_barrier(shutdown_barrier_name, group_name);
+    return finalize_impl();
+}
 
-    if (s_coord) {
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
-        auto only_self_remains = [&]() {
-            std::lock_guard<std::mutex> groups_lock(s_coord->m_groups_mutex);
-            auto group_it = s_coord->m_groups.find(group_name);
-            if (group_it == s_coord->m_groups.end()) {
-                return true;
-            }
-
-            auto& group = group_it->second;
-            std::lock_guard<std::mutex> group_lock(group.m_call_mutex);
-            return (group.m_process_ids.size() == 1) &&
-                   (group.m_process_ids.find(s_mproc_id) != group.m_process_ids.end());
-        };
-
-        bool group_drained = false;
-        s_coord->m_waiting_for_all_draining.store(true, std::memory_order_release);
-        {
-            std::unique_lock<std::mutex> wait_lock(s_coord->m_draining_state_mutex);
-            group_drained = s_coord->m_all_draining_cv.wait_until(
-                wait_lock,
-                deadline,
-                only_self_remains);
-        }
-        s_coord->m_waiting_for_all_draining.store(false, std::memory_order_release);
-
-        if (!group_drained) {
-            Log_stream(log_level::warning)
-                << "shutdown(): coordinator timed out waiting for peers to exit group '"
-                << group_name
-                << "' before finalizing.\n";
-        }
+/// Shared coordinator drain-wait logic used by all shutdown paths.
+/// After the collective barrier (and optional coordinator hook), the coordinator
+/// waits for all peers to leave the group before proceeding to finalize.
+inline void shutdown_coordinator_drain_wait(const std::string& group_name)
+{
+    if (!s_coord) {
+        return;
     }
 
-    return finalize();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    auto only_self_remains = [&]() {
+        std::lock_guard<std::mutex> groups_lock(s_coord->m_groups_mutex);
+        auto group_it = s_coord->m_groups.find(group_name);
+        if (group_it == s_coord->m_groups.end()) {
+            return true;
+        }
+
+        auto& group = group_it->second;
+        std::lock_guard<std::mutex> group_lock(group.m_call_mutex);
+        return (group.m_process_ids.size() == 1) &&
+               (group.m_process_ids.find(s_mproc_id) != group.m_process_ids.end());
+    };
+
+    bool group_drained = false;
+    s_coord->m_waiting_for_all_draining.store(true, std::memory_order_release);
+    {
+        std::unique_lock<std::mutex> wait_lock(s_coord->m_draining_state_mutex);
+        group_drained = s_coord->m_all_draining_cv.wait_until(
+            wait_lock,
+            deadline,
+            only_self_remains);
+    }
+    s_coord->m_waiting_for_all_draining.store(false, std::memory_order_release);
+
+    if (!group_drained) {
+        Log_stream(log_level::warning)
+            << "shutdown(): coordinator timed out waiting for peers to exit group '"
+            << group_name
+            << "' before finalizing.\n";
+    }
+}
+
+} // namespace detail
+
+inline bool shutdown()
+{
+    return shutdown(shutdown_options{});
+}
+
+inline bool shutdown(const shutdown_options& options)
+{
+    // Fail fast: reject if another shutdown or finalize is already in progress.
+    auto expected = detail::shutdown_protocol_state::idle;
+    if (!detail::s_shutdown_state.compare_exchange_strong(
+            expected,
+            detail::shutdown_protocol_state::collective_shutdown_entered,
+            std::memory_order_acq_rel))
+    {
+        throw std::logic_error(
+            "sintra::shutdown() called while another shutdown/finalize is already in progress "
+            "(state=" + std::to_string(static_cast<int>(expected)) + ").");
+    }
+
+    if (!s_mproc) {
+        detail::s_shutdown_state.store(
+            detail::shutdown_protocol_state::idle, std::memory_order_release);
+        return false;
+    }
+
+    const std::string group_name = "_sintra_all_processes";
+    constexpr const char* shutdown_barrier_name = "_sintra_shutdown";
+    constexpr const char* hook_done_barrier_name = "_sintra_shutdown_hook_done";
+
+    // Step 1: Collective processing fence — all participants synchronize here.
+    detail::internal_processing_fence_barrier(shutdown_barrier_name, group_name);
+
+    // Step 2: The hook-done rendezvous is always part of the shutdown protocol.
+    // Local hook presence only affects coordinator-local work inside the phase;
+    // it must not change collective barrier cardinality.
+    if (s_coord && options.coordinator_shutdown_hook) {
+        detail::s_shutdown_state.store(
+            detail::shutdown_protocol_state::coordinator_hook_running,
+            std::memory_order_release);
+        try {
+            options.coordinator_shutdown_hook();
+        }
+        catch (...) {
+            // The coordinator enters the hook-done rendezvous exactly once.
+            // On the throwing path, this catch block performs that entry before
+            // draining/finalize and rethrowing.
+            detail::s_shutdown_state.store(
+                detail::shutdown_protocol_state::coordinator_hook_completed,
+                std::memory_order_release);
+            detail::rendezvous_barrier(
+                hook_done_barrier_name, group_name,
+                detail::k_barrier_mode_rendezvous);
+            detail::shutdown_coordinator_drain_wait(group_name);
+            detail::finalize_impl();
+            throw;
+        }
+        detail::s_shutdown_state.store(
+            detail::shutdown_protocol_state::coordinator_hook_completed,
+            std::memory_order_release);
+    }
+
+    // All participants always enter the same hook-done rendezvous, regardless
+    // of local hook presence or which shutdown overload they used.
+    detail::rendezvous_barrier(
+        hook_done_barrier_name, group_name,
+        detail::k_barrier_mode_rendezvous);
+
+    // Step 3: Coordinator drain-wait and finalize.
+    detail::shutdown_coordinator_drain_wait(group_name);
+
+    return detail::finalize_impl();
 }
 
 // Returns the number of processes spawned. When wait_for_instance_name is set in

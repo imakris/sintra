@@ -30,6 +30,23 @@ inline void validate_user_barrier_name(const std::string& barrier_name)
     }
 }
 
+/// Reject user-facing barrier calls on the all-processes group while a standard
+/// shutdown protocol is active.  This catches the common footgun of layering
+/// extra final barriers on top of shutdown().
+inline void validate_no_barrier_during_shutdown(const std::string& group_name)
+{
+    if (group_name != "_sintra_all_processes") {
+        return;
+    }
+    const auto state = s_shutdown_state.load(std::memory_order_acquire);
+    if (state != shutdown_protocol_state::idle) {
+        throw std::logic_error(
+            "User barrier on '_sintra_all_processes' called while a standard shutdown "
+            "protocol is active (state=" + std::to_string(static_cast<int>(state)) + "). "
+            "Do not layer extra barriers on top of shutdown().");
+    }
+}
+
 inline std::string make_processing_phase_barrier_name(const std::string& barrier_name)
 {
     return "_sintra_processing_phase/" + barrier_name;
@@ -99,6 +116,7 @@ inline sequence_counter_type barrier_dispatch(rendezvous_t,
                                               const std::string& group_name)
 {
     validate_user_barrier_name(barrier_name);
+    validate_no_barrier_during_shutdown(group_name);
     return rendezvous_barrier(barrier_name, group_name, k_barrier_mode_rendezvous);
 }
 
@@ -107,6 +125,7 @@ inline sequence_counter_type barrier_dispatch(delivery_fence_t,
                                               const std::string& group_name)
 {
     validate_user_barrier_name(barrier_name);
+    validate_no_barrier_during_shutdown(group_name);
     const auto rendezvous_seq = rendezvous_barrier(barrier_name, group_name, k_barrier_mode_delivery);
     if (rendezvous_seq == invalid_sequence) {
         return invalid_sequence;
@@ -125,6 +144,7 @@ inline sequence_counter_type barrier_dispatch(processing_fence_t,
                                               const std::string& group_name)
 {
     validate_user_barrier_name(barrier_name);
+    validate_no_barrier_during_shutdown(group_name);
     const auto rendezvous_seq = rendezvous_barrier(barrier_name, group_name, k_barrier_mode_processing);
     if (rendezvous_seq == invalid_sequence) {
         return invalid_sequence;

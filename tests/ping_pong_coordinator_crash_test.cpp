@@ -94,7 +94,7 @@ int main(int argc, char* argv[])
         std::this_thread::sleep_for(std::chrono::seconds(5));
     }
 
-    sintra::finalize();
+    sintra::detail::finalize();
 
     if (is_spawned) {
         return 0;

@@ -891,7 +891,7 @@ int main(int argc, char* argv[])
 
     sintra::barrier("complex-choreography-finished", "_sintra_all_processes");
 
-    sintra::finalize();
+    sintra::detail::finalize();
 
     int exit_code = 0;
 

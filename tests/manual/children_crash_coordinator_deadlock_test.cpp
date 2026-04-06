@@ -98,7 +98,7 @@ int main(int argc, char* argv[])
     }
 
     // Should never reach finalize due to crashes/deadlock
-    sintra::finalize();
+    sintra::detail::finalize();
 
     return 0;
 }

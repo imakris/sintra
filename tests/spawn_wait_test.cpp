@@ -383,7 +383,7 @@ int main(int argc, char* argv[])
     if (is_spawned && is_worker) {
         sintra::init(argc, argv);
         int result = run_worker();
-        sintra::finalize();
+        sintra::detail::finalize();
         return result;
     }
 
@@ -392,7 +392,7 @@ int main(int argc, char* argv[])
     if (is_spawned && !is_worker) {
         sintra::init(argc, argv);
         int result = run_timeout_child();
-        sintra::finalize();
+        sintra::detail::finalize();
         return result;
     }
 
@@ -410,7 +410,7 @@ int main(int argc, char* argv[])
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
-    sintra::finalize();
+    sintra::detail::finalize();
 
     // Read and verify result
     if (!std::filesystem::exists(result_path)) {

@@ -26,8 +26,9 @@ The coordinator emits lifecycle events in these paths:
      duplicate normal-exit/unpublished event.
 
 2. **Normal exit**
-   - `sintra::finalize()` calls `Coordinator::begin_process_draining`, which
-     sets the draining bit for the process slot.
+   - `sintra::shutdown()` (the standard terminal API) or a direct
+     `detail::finalize()` call triggers `Coordinator::begin_process_draining`,
+     which sets the draining bit for the process slot.
    - When the process later unpublishes, the coordinator sees the draining bit
      and emits `process_lifecycle_event{reason::normal_exit}`.
 

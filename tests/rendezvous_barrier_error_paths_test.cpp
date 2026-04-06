@@ -159,7 +159,7 @@ int run_deadlock_child(const std::string& ready_path)
     }
     if (remote_index == local_index || remote_index == 1) {
         std::fprintf(stderr, "Could not determine a valid remote process index.\n");
-        sintra::finalize();
+        sintra::detail::finalize();
         return 1;
     }
 
@@ -181,7 +181,7 @@ int run_deadlock_child(const std::string& ready_path)
         }
 
         if (!ok) {
-            sintra::finalize();
+            sintra::detail::finalize();
             return 1;
         }
 
@@ -196,7 +196,7 @@ int run_deadlock_child(const std::string& ready_path)
         ok = false;
     }
 
-    sintra::finalize();
+    sintra::detail::finalize();
     return ok ? 0 : 1;
 }
 
@@ -455,6 +455,6 @@ int main(int argc, char* argv[])
     }
 
     s_mproc->m_communication_state = previous_state;
-    sintra::finalize();
+    sintra::detail::finalize();
     return ok ? 0 : 1;
 }

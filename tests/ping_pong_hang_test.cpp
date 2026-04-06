@@ -235,7 +235,7 @@ int main(int argc, char* argv[])
         hang_cv.wait(lk, []{ return false; });
     }
 
-    sintra::finalize();
+    sintra::detail::finalize();
 
     return 0;
 }

@@ -586,7 +586,7 @@ void Transceiver::send(Args&&... args)
     if (!s_mproc) {
 #ifndef NDEBUG
         Log_stream(log_level::warning)
-            << "Attempted to emit message after sintra::finalize() "
+            << "Attempted to emit message after teardown "
                "or before sintra::init(); dropping.\n";
 #endif
         return;
@@ -1128,7 +1128,7 @@ Transceiver::rpc_async_impl(instance_id_type instance_id, Args... args)
 {
     if (!s_mproc) {
         throw runtime_error(
-            "Attempted to make an RPC call after sintra::finalize() "
+            "Attempted to make an RPC call after teardown "
             "or before sintra::init().");
     }
 

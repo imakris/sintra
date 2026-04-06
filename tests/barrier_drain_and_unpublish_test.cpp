@@ -149,20 +149,20 @@ int main(int argc, char* argv[])
     sintra::init(argc, argv, worker_a, worker_b);
 
     if (is_spawned) {
-        sintra::finalize();
+        sintra::detail::finalize();
         watchdog_done.store(true, std::memory_order_release);
         watchdog.join();
         return 0;
     }
 
     if (!sintra::test::wait_for_file(barrier2_ready, std::chrono::milliseconds(barrier2_timeout_ms))) {
-        sintra::finalize();
+        sintra::detail::finalize();
         watchdog_done.store(true, std::memory_order_release);
         watchdog.join();
         return 1;
     }
 
-    sintra::finalize();
+    sintra::detail::finalize();
 
     std::ifstream result_in(result_path, std::ios::binary);
     std::string result;

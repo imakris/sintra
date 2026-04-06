@@ -24,6 +24,9 @@
 
 namespace sintra {
 
+// Forward declaration for friend access from Coordinator.
+namespace detail { inline bool finalize_impl(); }
+
 using std::condition_variable;
 using std::map;
 using std::mutex;
@@ -375,6 +378,7 @@ public:
     friend struct Managed_process;
     friend struct Transceiver;
     friend bool finalize();
+    friend bool detail::finalize_impl();
 };
 
 }
