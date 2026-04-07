@@ -238,13 +238,68 @@ inline int report_deferred_exception_and_fail(std::exception_ptr deferred_except
     return 1;
 }
 
+// ---------------------------------------------------------------------------
+// Raw multi-process test helper (finalize_impl)
+// ---------------------------------------------------------------------------
+// Uses finalize_impl() directly for teardown.  Only for tests that
+// deliberately break processes (crashes, stuck barriers, etc.) where
+// collective shutdown() would deadlock.
 template <typename Setup,
           typename Coordinator_action,
           typename Verifier>
-// Low-level test helper that uses detail::finalize_impl() directly.
-// Tests that need their own final protocol, post-barrier side effects, or
-// exceptional teardown path use this. For the standard lifecycle path,
-// prefer run_multi_process_shutdown_test().
+int run_multi_process_test_raw(int argc,
+                               char* argv[],
+                               const char* env_var,
+                               const char* test_name,
+                               std::vector<sintra::Process_descriptor> processes,
+                               Setup&& setup,
+                               Coordinator_action&& coordinator_action,
+                               Verifier&& verify)
+{
+    const bool is_spawned = sintra::test::has_branch_flag(argc, argv);
+    sintra::test::Shared_directory shared(env_var, test_name);
+
+    if (!is_spawned) {
+        setup(shared.path());
+    }
+
+    sintra::init(argc, argv, processes);
+
+    int coordinator_result = 0;
+    std::exception_ptr deferred_exception;
+    if (!is_spawned) {
+        try {
+            coordinator_result = coordinator_action(shared.path());
+        }
+        catch (...) {
+            deferred_exception = std::current_exception();
+        }
+    }
+
+    sintra::detail::finalize_impl();
+
+    if (deferred_exception) {
+        return report_deferred_exception_and_fail(
+            deferred_exception,
+            "run_multi_process_test_raw");
+    }
+
+    if (!is_spawned) {
+        if (coordinator_result != 0) {
+            return coordinator_result;
+        }
+        return verify(shared.path());
+    }
+
+    return 0;
+}
+
+template <typename Setup,
+          typename Coordinator_action,
+          typename Verifier>
+// Multi-process test helper.  After the coordinator action completes,
+// shutdown() performs coordinated collective teardown so that no process
+// races into finalize while others are still in flight.
 int run_multi_process_test(int argc,
                            char* argv[],
                            const char* env_var,
@@ -274,7 +329,14 @@ int run_multi_process_test(int argc,
         }
     }
 
-    sintra::detail::finalize_impl();
+    try {
+        sintra::shutdown();
+    }
+    catch (...) {
+        if (!deferred_exception) {
+            deferred_exception = std::current_exception();
+        }
+    }
 
     if (deferred_exception) {
         return report_deferred_exception_and_fail(

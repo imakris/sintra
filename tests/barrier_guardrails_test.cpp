@@ -78,7 +78,7 @@ int main(int argc, char* argv[])
 {
     std::set_terminate(sintra::test::custom_terminate_handler);
 
-    return sintra::test::run_multi_process_test(
+    return sintra::test::run_multi_process_test_raw(
         argc,
         argv,
         "SINTRA_TEST_SHARED_DIR",
