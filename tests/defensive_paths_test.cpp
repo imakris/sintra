@@ -45,6 +45,6 @@ int main(int argc, char* argv[])
 
     ok &= test_null_barrier_cleanup();
 
-    sintra::detail::finalize();
+    sintra::shutdown();
     return ok ? 0 : 1;
 }

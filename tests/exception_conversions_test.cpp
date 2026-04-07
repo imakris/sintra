@@ -451,46 +451,46 @@ int main(int argc, char* argv[])
     result = test_reserved_id_exceptions();
     if (result != 0) {
         std::cerr << "test_reserved_id_exceptions failed" << std::endl;
-        sintra::detail::finalize();
+        sintra::shutdown();
         return result;
     }
 
     result = test_type_id_exceptions();
     if (result != 0) {
         std::cerr << "test_type_id_exceptions failed" << std::endl;
-        sintra::detail::finalize();
+        sintra::shutdown();
         return result;
     }
 
     result = test_generic_exceptions();
     if (result != 0) {
         std::cerr << "test_generic_exceptions failed" << std::endl;
-        sintra::detail::finalize();
+        sintra::shutdown();
         return result;
     }
 
     result = test_unknown_type_exception();
     if (result != 0) {
         std::cerr << "test_unknown_type_exception failed" << std::endl;
-        sintra::detail::finalize();
+        sintra::shutdown();
         return result;
     }
 
     result = test_exception_to_string();
     if (result != 0) {
         std::cerr << "test_exception_to_string failed" << std::endl;
-        sintra::detail::finalize();
+        sintra::shutdown();
         return result;
     }
 
     result = test_round_trip();
     if (result != 0) {
         std::cerr << "test_round_trip failed" << std::endl;
-        sintra::detail::finalize();
+        sintra::shutdown();
         return result;
     }
 
     std::cout << "All exception conversion tests passed" << std::endl;
-    sintra::detail::finalize();
+    sintra::shutdown();
     return 0;
 }

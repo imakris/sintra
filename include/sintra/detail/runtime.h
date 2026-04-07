@@ -401,6 +401,24 @@ inline void shutdown_coordinator_drain_wait(const std::string& group_name)
     }
 }
 
+inline bool shutdown_group_is_trivial(const std::string& group_name)
+{
+    if (!s_coord) {
+        return true;
+    }
+
+    std::lock_guard<std::mutex> groups_lock(s_coord->m_groups_mutex);
+    auto group_it = s_coord->m_groups.find(group_name);
+    if (group_it == s_coord->m_groups.end()) {
+        return true;
+    }
+
+    auto& group = group_it->second;
+    std::lock_guard<std::mutex> group_lock(group.m_call_mutex);
+    return (group.m_process_ids.size() == 1) &&
+           (group.m_process_ids.find(s_mproc_id) != group.m_process_ids.end());
+}
+
 } // namespace detail
 
 inline bool shutdown()
@@ -428,9 +446,39 @@ inline bool shutdown(const shutdown_options& options)
         return false;
     }
 
+    // Single-process runtimes have no coordinator-backed collective shutdown
+    // protocol to participate in. Fall back to raw teardown instead of
+    // forcing the multi-process barrier path.
+    if (!s_coord) {
+        return detail::finalize_impl();
+    }
+
     const std::string group_name = "_sintra_all_processes";
     constexpr const char* shutdown_barrier_name = "_sintra_shutdown";
     constexpr const char* hook_done_barrier_name = "_sintra_shutdown_hook_done";
+
+    if (detail::shutdown_group_is_trivial(group_name)) {
+        if (s_coord && options.coordinator_shutdown_hook) {
+            detail::s_shutdown_state.store(
+                detail::shutdown_protocol_state::coordinator_hook_running,
+                std::memory_order_release);
+            try {
+                options.coordinator_shutdown_hook();
+            }
+            catch (...) {
+                detail::s_shutdown_state.store(
+                    detail::shutdown_protocol_state::coordinator_hook_completed,
+                    std::memory_order_release);
+                detail::finalize_impl();
+                throw;
+            }
+            detail::s_shutdown_state.store(
+                detail::shutdown_protocol_state::coordinator_hook_completed,
+                std::memory_order_release);
+        }
+
+        return detail::finalize_impl();
+    }
 
     // Step 1: Collective processing fence — all participants synchronize here.
     detail::internal_processing_fence_barrier(shutdown_barrier_name, group_name);

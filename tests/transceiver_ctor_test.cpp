@@ -224,7 +224,7 @@ int main(int argc, char* argv[])
     result = test_string_constructor();
     if (result != 0) {
         std::fprintf(stderr, "test_string_constructor failed\n");
-        sintra::detail::finalize();
+        sintra::shutdown();
         return result;
     }
     std::fprintf(stderr, "test_string_constructor passed\n");
@@ -232,7 +232,7 @@ int main(int argc, char* argv[])
     result = test_const_char_constructor();
     if (result != 0) {
         std::fprintf(stderr, "test_const_char_constructor failed\n");
-        sintra::detail::finalize();
+        sintra::shutdown();
         return result;
     }
     std::fprintf(stderr, "test_const_char_constructor passed\n");
@@ -240,7 +240,7 @@ int main(int argc, char* argv[])
     result = test_nullptr_constructor();
     if (result != 0) {
         std::fprintf(stderr, "test_nullptr_constructor failed\n");
-        sintra::detail::finalize();
+        sintra::shutdown();
         return result;
     }
     std::fprintf(stderr, "test_nullptr_constructor passed\n");
@@ -248,7 +248,7 @@ int main(int argc, char* argv[])
     result = test_empty_string_constructor();
     if (result != 0) {
         std::fprintf(stderr, "test_empty_string_constructor failed\n");
-        sintra::detail::finalize();
+        sintra::shutdown();
         return result;
     }
     std::fprintf(stderr, "test_empty_string_constructor passed\n");
@@ -256,7 +256,7 @@ int main(int argc, char* argv[])
     result = test_literal_constructor();
     if (result != 0) {
         std::fprintf(stderr, "test_literal_constructor failed\n");
-        sintra::detail::finalize();
+        sintra::shutdown();
         return result;
     }
     std::fprintf(stderr, "test_literal_constructor passed\n");
@@ -264,7 +264,7 @@ int main(int argc, char* argv[])
     result = test_named_transceiver_publish_and_resolve();
     if (result != 0) {
         std::fprintf(stderr, "test_named_transceiver_publish_and_resolve failed\n");
-        sintra::detail::finalize();
+        sintra::shutdown();
         return result;
     }
     std::fprintf(stderr, "test_named_transceiver_publish_and_resolve passed\n");
@@ -272,12 +272,12 @@ int main(int argc, char* argv[])
     result = test_const_char_with_name_and_resolve();
     if (result != 0) {
         std::fprintf(stderr, "test_const_char_with_name_and_resolve failed\n");
-        sintra::detail::finalize();
+        sintra::shutdown();
         return result;
     }
     std::fprintf(stderr, "test_const_char_with_name_and_resolve passed\n");
 
-    sintra::detail::finalize();
+    sintra::shutdown();
     std::fprintf(stderr, "All transceiver constructor tests passed\n");
     return 0;
 }
