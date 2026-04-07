@@ -264,11 +264,23 @@ int run_multi_process_test(int argc,
     sintra::init(argc, argv, processes);
 
     int coordinator_result = 0;
+    std::exception_ptr deferred_exception;
     if (!is_spawned) {
-        coordinator_result = coordinator_action(shared.path());
+        try {
+            coordinator_result = coordinator_action(shared.path());
+        }
+        catch (...) {
+            deferred_exception = std::current_exception();
+        }
     }
 
     sintra::detail::finalize_impl();
+
+    if (deferred_exception) {
+        return report_deferred_exception_and_fail(
+            deferred_exception,
+            "run_multi_process_test");
+    }
 
     if (!is_spawned) {
         if (coordinator_result != 0) {

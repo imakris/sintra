@@ -514,7 +514,7 @@ int main(int argc, char* argv[])
     sintra::Log_stream(sintra::log_level::info)
         << "[Window " << window_id << "] Exiting with code " << result << "\n";
 
-    sintra::finalize();
+    sintra::shutdown();
     return result;
 }
 

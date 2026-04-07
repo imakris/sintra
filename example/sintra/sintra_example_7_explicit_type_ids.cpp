@@ -55,6 +55,6 @@ int main(int argc, char* argv[])
         wait_cv.wait(lock, [&] { return received; });
     }
 
-    sintra::finalize();
+    sintra::shutdown();
     return 0;
 }
