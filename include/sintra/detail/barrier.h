@@ -101,6 +101,15 @@ inline sequence_counter_type rendezvous_barrier(const std::string& barrier_name,
         }
         throw;
     }
+    catch (const std::exception& e) {
+        // Catch-all for exception types not covered above (e.g. std::logic_error
+        // propagated from a remote barrier call via string_to_exception()).
+        if (should_treat_rpc_failure_as_satisfied()) {
+            log_barrier_bypass(barrier_name, group_name, e.what());
+            return invalid_sequence;
+        }
+        throw;
+    }
 
     if (flush_seq == invalid_sequence) {
         return invalid_sequence;

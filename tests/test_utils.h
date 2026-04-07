@@ -265,7 +265,17 @@ int run_multi_process_test(int argc,
 
     int coordinator_result = 0;
     if (!is_spawned) {
-        coordinator_result = coordinator_action(shared.path());
+        try {
+            coordinator_result = coordinator_action(shared.path());
+        }
+        catch (const std::exception& e) {
+            std::fprintf(stderr, "Coordinator action failed: %s\n", e.what());
+            coordinator_result = 1;
+        }
+        catch (...) {
+            std::fprintf(stderr, "Coordinator action failed with an unknown exception\n");
+            coordinator_result = 1;
+        }
     }
 
     sintra::detail::finalize_impl();
