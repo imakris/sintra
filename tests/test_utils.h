@@ -265,6 +265,10 @@ int run_multi_process_test(int argc,
 
     int coordinator_result = 0;
     if (!is_spawned) {
+        // Wrap in try/catch so that exceptions from the coordinator action
+        // (e.g. a barrier RPC failure when a worker dies mid-test) are reported
+        // as a test failure instead of escaping to std::terminate.
+        // run_multi_process_shutdown_test() already follows this pattern.
         try {
             coordinator_result = coordinator_action(shared.path());
         }

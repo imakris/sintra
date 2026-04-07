@@ -73,7 +73,7 @@ int main(int argc, char* argv[])
     std::this_thread::sleep_for(std::chrono::duration<double>(timeout_in_seconds));
 
     // Clean up Sintra
-    finalize();
+    shutdown();
 
     return 0;
 }
