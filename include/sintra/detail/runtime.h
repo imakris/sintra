@@ -404,7 +404,10 @@ inline void shutdown_coordinator_drain_wait(const std::string& group_name)
 inline bool shutdown_group_is_trivial(const std::string& group_name)
 {
     if (!s_coord) {
-        return true;
+        // Workers cannot inspect group membership locally.  If there is a
+        // known remote coordinator, this process participates in a
+        // multi-process group and must enter the collective barriers.
+        return s_coord_id == invalid_instance_id;
     }
 
     std::lock_guard<std::mutex> groups_lock(s_coord->m_groups_mutex);
@@ -446,10 +449,11 @@ inline bool shutdown(const shutdown_options& options)
         return false;
     }
 
-    // Single-process runtimes have no coordinator-backed collective shutdown
-    // protocol to participate in. Fall back to raw teardown instead of
-    // forcing the multi-process barrier path.
-    if (!s_coord) {
+    // True single-process runtimes (no coordinator anywhere) have no
+    // collective shutdown protocol to participate in.  Workers in a
+    // multi-process setup (s_coord_id is valid) must enter the collective
+    // barriers so that the coordinator's processing-fence can complete.
+    if (!s_coord && s_coord_id == invalid_instance_id) {
         return detail::finalize_impl();
     }
 
@@ -480,48 +484,58 @@ inline bool shutdown(const shutdown_options& options)
         return detail::finalize_impl();
     }
 
-    // Step 1: Collective processing fence — all participants synchronize here.
-    detail::internal_processing_fence_barrier(shutdown_barrier_name, group_name);
+    // Wrap the collective protocol in a catch-all so that an unexpected
+    // exception from a barrier or hook always leaves the runtime torn down
+    // and s_shutdown_state reset to idle.  finalize_impl() is safe to call
+    // more than once (returns false if already finalized).
+    try {
+        // Step 1: Collective processing fence — all participants synchronize here.
+        detail::internal_processing_fence_barrier(shutdown_barrier_name, group_name);
 
-    // Step 2: The hook-done rendezvous is always part of the shutdown protocol.
-    // Local hook presence only affects coordinator-local work inside the phase;
-    // it must not change collective barrier cardinality.
-    if (s_coord && options.coordinator_shutdown_hook) {
-        detail::s_shutdown_state.store(
-            detail::shutdown_protocol_state::coordinator_hook_running,
-            std::memory_order_release);
-        try {
-            options.coordinator_shutdown_hook();
-        }
-        catch (...) {
-            // The coordinator enters the hook-done rendezvous exactly once.
-            // On the throwing path, this catch block performs that entry before
-            // draining/finalize and rethrowing.
+        // Step 2: The hook-done rendezvous is always part of the shutdown protocol.
+        // Local hook presence only affects coordinator-local work inside the phase;
+        // it must not change collective barrier cardinality.
+        if (s_coord && options.coordinator_shutdown_hook) {
+            detail::s_shutdown_state.store(
+                detail::shutdown_protocol_state::coordinator_hook_running,
+                std::memory_order_release);
+            try {
+                options.coordinator_shutdown_hook();
+            }
+            catch (...) {
+                // The coordinator enters the hook-done rendezvous exactly once.
+                // On the throwing path, this catch block performs that entry before
+                // draining/finalize and rethrowing.
+                detail::s_shutdown_state.store(
+                    detail::shutdown_protocol_state::coordinator_hook_completed,
+                    std::memory_order_release);
+                detail::rendezvous_barrier(
+                    hook_done_barrier_name, group_name,
+                    detail::k_barrier_mode_rendezvous);
+                detail::shutdown_coordinator_drain_wait(group_name);
+                detail::finalize_impl();
+                throw;
+            }
             detail::s_shutdown_state.store(
                 detail::shutdown_protocol_state::coordinator_hook_completed,
                 std::memory_order_release);
-            detail::rendezvous_barrier(
-                hook_done_barrier_name, group_name,
-                detail::k_barrier_mode_rendezvous);
-            detail::shutdown_coordinator_drain_wait(group_name);
-            detail::finalize_impl();
-            throw;
         }
-        detail::s_shutdown_state.store(
-            detail::shutdown_protocol_state::coordinator_hook_completed,
-            std::memory_order_release);
+
+        // All participants always enter the same hook-done rendezvous, regardless
+        // of local hook presence or which shutdown overload they used.
+        detail::rendezvous_barrier(
+            hook_done_barrier_name, group_name,
+            detail::k_barrier_mode_rendezvous);
+
+        // Step 3: Coordinator drain-wait and finalize.
+        detail::shutdown_coordinator_drain_wait(group_name);
+
+        return detail::finalize_impl();
     }
-
-    // All participants always enter the same hook-done rendezvous, regardless
-    // of local hook presence or which shutdown overload they used.
-    detail::rendezvous_barrier(
-        hook_done_barrier_name, group_name,
-        detail::k_barrier_mode_rendezvous);
-
-    // Step 3: Coordinator drain-wait and finalize.
-    detail::shutdown_coordinator_drain_wait(group_name);
-
-    return detail::finalize_impl();
+    catch (...) {
+        detail::finalize_impl();
+        throw;
+    }
 }
 
 // Returns the number of processes spawned. When wait_for_instance_name is set in
