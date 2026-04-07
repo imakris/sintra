@@ -2216,7 +2216,22 @@ void Managed_process::go()
         return;
     }
 
-    m_entry_function();
+    try {
+        m_entry_function();
+    }
+    catch (const rpc_cancelled&) {
+        // A barrier or RPC failed because a peer process exited (e.g. the
+        // coordinator died, or a sibling worker crashed).  Swallow the
+        // exception so the worker exits cleanly instead of crashing with
+        // std::terminate, which would cascade-kill the remaining processes
+        // and prevent useful diagnostics.
+        Log_stream(log_level::warning)
+            << "Worker entry function exited with rpc_cancelled.\n";
+    }
+    catch (const std::exception& e) {
+        Log_stream(log_level::warning)
+            << "Worker entry function exited with exception: " << e.what() << "\n";
+    }
 }
 
  //////////////////////////////////////////////////////////////////////////
