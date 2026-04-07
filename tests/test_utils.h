@@ -294,108 +294,13 @@ int run_multi_process_test_raw(int argc,
     return 0;
 }
 
-template <typename Setup,
-          typename Coordinator_action,
-          typename Verifier>
-// Multi-process test helper.  After the coordinator action completes,
-// shutdown() performs coordinated collective teardown so that no process
-// races into finalize while others are still in flight.
-int run_multi_process_test(int argc,
-                           char* argv[],
-                           const char* env_var,
-                           const char* test_name,
-                           std::vector<sintra::Process_descriptor> processes,
-                           Setup&& setup,
-                           Coordinator_action&& coordinator_action,
-                           Verifier&& verify)
-{
-    const bool is_spawned = sintra::test::has_branch_flag(argc, argv);
-    sintra::test::Shared_directory shared(env_var, test_name);
+// ---------------------------------------------------------------------------
+// Multi-process test runner (coordinated shutdown)
+// ---------------------------------------------------------------------------
+// After the coordinator action completes, shutdown() performs coordinated
+// collective teardown so that no process races into finalize while others
+// are still in flight.
 
-    if (!is_spawned) {
-        setup(shared.path());
-    }
-
-    sintra::init(argc, argv, processes);
-
-    int coordinator_result = 0;
-    std::exception_ptr deferred_exception;
-    if (!is_spawned) {
-        try {
-            coordinator_result = coordinator_action(shared.path());
-        }
-        catch (...) {
-            deferred_exception = std::current_exception();
-        }
-    }
-
-    try {
-        sintra::shutdown();
-    }
-    catch (...) {
-        if (!deferred_exception) {
-            deferred_exception = std::current_exception();
-        }
-    }
-
-    if (deferred_exception) {
-        return report_deferred_exception_and_fail(
-            deferred_exception,
-            "run_multi_process_test");
-    }
-
-    if (!is_spawned) {
-        if (coordinator_result != 0) {
-            return coordinator_result;
-        }
-        return verify(shared.path());
-    }
-
-    return 0;
-}
-
-template <typename Coordinator_action,
-          typename Verifier>
-int run_multi_process_test(int argc,
-                           char* argv[],
-                           const char* env_var,
-                           const char* test_name,
-                           std::vector<sintra::Process_descriptor> processes,
-                           Coordinator_action&& coordinator_action,
-                           Verifier&& verify)
-{
-    return run_multi_process_test(argc,
-                                  argv,
-                                  env_var,
-                                  test_name,
-                                  std::move(processes),
-                                  [](const std::filesystem::path&) {},
-                                  std::forward<Coordinator_action>(coordinator_action),
-                                  std::forward<Verifier>(verify));
-}
-
-template <typename Verifier>
-int run_multi_process_test(int argc,
-                           char* argv[],
-                           const char* env_var,
-                           const char* test_name,
-                           std::vector<sintra::Process_descriptor> processes,
-                           Verifier&& verify)
-{
-    return run_multi_process_test(argc,
-                                  argv,
-                                  env_var,
-                                  test_name,
-                                  std::move(processes),
-                                  [](const std::filesystem::path&) { return 0; },
-                                  std::forward<Verifier>(verify));
-}
-
-// Use this helper when every process reaches the same top-level shutdown point
-// and can safely participate in sintra::shutdown() with no extra final
-// _sintra_all_processes rendezvous layered on top. Tests that need their own
-// final barrier, post-barrier side effects, or exceptional teardown path should
-// keep using run_multi_process_test(...) and make that final protocol explicit.
 template <typename Setup,
           typename Coordinator_action,
           typename Verifier>
@@ -573,6 +478,70 @@ int run_multi_process_shutdown_test(int argc,
                                            options,
                                            [](const std::filesystem::path&) {},
                                            std::forward<Coordinator_action>(coordinator_action),
+                                           std::forward<Verifier>(verify));
+}
+
+
+// ---------------------------------------------------------------------------
+// run_multi_process_test — convenience aliases
+// ---------------------------------------------------------------------------
+// Delegates to run_multi_process_shutdown_test.  Use
+// run_multi_process_test_raw() for tests that deliberately break processes.
+
+template <typename Setup,
+          typename Coordinator_action,
+          typename Verifier>
+int run_multi_process_test(int argc,
+                           char* argv[],
+                           const char* env_var,
+                           const char* test_name,
+                           std::vector<sintra::Process_descriptor> processes,
+                           Setup&& setup,
+                           Coordinator_action&& coordinator_action,
+                           Verifier&& verify)
+{
+    return run_multi_process_shutdown_test(argc,
+                                           argv,
+                                           env_var,
+                                           test_name,
+                                           std::move(processes),
+                                           std::forward<Setup>(setup),
+                                           std::forward<Coordinator_action>(coordinator_action),
+                                           std::forward<Verifier>(verify));
+}
+
+template <typename Coordinator_action,
+          typename Verifier>
+int run_multi_process_test(int argc,
+                           char* argv[],
+                           const char* env_var,
+                           const char* test_name,
+                           std::vector<sintra::Process_descriptor> processes,
+                           Coordinator_action&& coordinator_action,
+                           Verifier&& verify)
+{
+    return run_multi_process_shutdown_test(argc,
+                                           argv,
+                                           env_var,
+                                           test_name,
+                                           std::move(processes),
+                                           std::forward<Coordinator_action>(coordinator_action),
+                                           std::forward<Verifier>(verify));
+}
+
+template <typename Verifier>
+int run_multi_process_test(int argc,
+                           char* argv[],
+                           const char* env_var,
+                           const char* test_name,
+                           std::vector<sintra::Process_descriptor> processes,
+                           Verifier&& verify)
+{
+    return run_multi_process_shutdown_test(argc,
+                                           argv,
+                                           env_var,
+                                           test_name,
+                                           std::move(processes),
                                            std::forward<Verifier>(verify));
 }
 
