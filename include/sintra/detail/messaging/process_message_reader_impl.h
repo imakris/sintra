@@ -93,41 +93,45 @@ inline void dispatch_event_handlers(
     std::initializer_list<instance_id_type> scope_ids,
     bool trace_world)
 {
-    lock_guard<recursive_mutex> sl(s_mproc->m_handlers_mutex);
+    // Collect matching handlers under the lock, then invoke them after releasing
+    // it.  This prevents mutex starvation: on Windows, CRITICAL_SECTION is unfair,
+    // so a reader thread that rapidly re-acquires m_handlers_mutex for every
+    // message can starve the main thread trying to register a handler via
+    // activate_slot() / receive<T>().  Releasing before invocation gives waiting
+    // threads a chance to acquire the lock between messages.
+    std::vector<function<void(const Message_prefix&)>> collected;
 
-    handler_proc_registry_mid_record_type* sender_map = nullptr;
-    auto it_mt = s_mproc->m_active_handlers.find(message.message_type_id);
-    if (it_mt == s_mproc->m_active_handlers.end()) {
-        return;
-    }
-    sender_map = &it_mt->second;
+    {
+        lock_guard<recursive_mutex> sl(s_mproc->m_handlers_mutex);
 
-    for (auto sid : scope_ids) {
-        std::vector<function<void(const Message_prefix&)>> handlers;
-        std::size_t handler_count = 0;
-        auto shl = sender_map->find(sid);
-        if (shl != sender_map->end()) {
-            handler_count = shl->second.size();
-            handlers.reserve(handler_count);
-            for (auto& handler : shl->second) {
-                handlers.push_back(handler);
+        auto it_mt = s_mproc->m_active_handlers.find(message.message_type_id);
+        if (it_mt == s_mproc->m_active_handlers.end()) {
+            return;
+        }
+        auto* sender_map = &it_mt->second;
+
+        for (auto sid : scope_ids) {
+            auto shl = sender_map->find(sid);
+            if (shl != sender_map->end()) {
+                for (auto& handler : shl->second) {
+                    collected.push_back(handler);
+                }
             }
         }
+    } // m_handlers_mutex released here, before invoking callbacks
 
-        if (handlers.empty()) {
-            continue;
-        }
+    if (collected.empty()) {
+        return;
+    }
 
-        if (trace_world) {
-            Log_stream(log_level::debug)
-                << "[sintra_trace_world] pid=" << static_cast<int>(detail::get_current_process_id())
-                << " sid_match=" << static_cast<unsigned long long>(sid)
-                << " handlers=" << handlers.size() << "\n";
-        }
+    if (trace_world) {
+        Log_stream(log_level::debug)
+            << "[sintra_trace_world] pid=" << static_cast<int>(detail::get_current_process_id())
+            << " handlers=" << collected.size() << "\n";
+    }
 
-        for (auto& handler : handlers) {
-            handler(message);
-        }
+    for (auto& handler : collected) {
+        handler(message);
     }
 }
 
