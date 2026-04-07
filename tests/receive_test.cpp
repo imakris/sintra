@@ -80,7 +80,6 @@ int sender_a_process()
     }
 
     sintra::barrier("phase-two");
-    sintra::barrier("done", "_sintra_all_processes");
     return 0;
 }
 
@@ -112,7 +111,6 @@ int sender_b_process()
         std::abort();
     }
 
-    sintra::barrier("done", "_sintra_all_processes");
     return 0;
 }
 
@@ -169,7 +167,6 @@ int receiver_process()
     }
     sintra::world() << Ack_b{};
 
-    sintra::barrier("done", "_sintra_all_processes");
     return 0;
 }
 
@@ -186,11 +183,7 @@ int main(int argc, char* argv[])
     sintra::init(argc, const_cast<const char* const*>(argv),
                  sender_a_process, sender_b_process, receiver_process);
 
-    if (is_coordinator) {
-        sintra::barrier("done", "_sintra_all_processes");
-    }
-
-    sintra::detail::finalize();
+    sintra::shutdown();
 
     if (is_coordinator) {
         std::fprintf(stderr, "receive test PASSED\n");

@@ -106,7 +106,6 @@ int worker_process(std::uint32_t worker_index)
         return 1;
     }
 
-    barrier("barrier-rapid-reuse-done", "_sintra_all_processes");
     return 0;
 }
 
@@ -116,8 +115,6 @@ int worker2_process() { return worker_process(2); }
 
 int main(int argc, char* argv[])
 {
-    const bool is_spawned = sintra::test::has_branch_flag(argc, argv);
-
     std::vector<sintra::Process_descriptor> processes;
     processes.emplace_back(worker0_process);
     processes.emplace_back(worker1_process);
@@ -125,11 +122,7 @@ int main(int argc, char* argv[])
 
     sintra::init(argc, argv, processes);
 
-    if (!is_spawned) {
-        sintra::barrier("barrier-rapid-reuse-done", "_sintra_all_processes");
-    }
-
-    sintra::detail::finalize();
+    sintra::shutdown();
 
     std::printf("Barrier rapid reuse test completed\n");
     std::printf("Failures: %d\n", failures.load());

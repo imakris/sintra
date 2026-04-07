@@ -258,9 +258,9 @@ int controller_process()
         sintra::barrier<sintra::processing_fence_t>(final_processing);
     }
 
-    sintra::barrier<sintra::processing_fence_t>(k_done_processed_barrier, "_sintra_all_processes");
+    sintra::barrier<sintra::processing_fence_t>(k_done_processed_barrier, "_sintra_external_processes");
     write_summary(state, shared_dir);
-    sintra::barrier(k_summary_ready_barrier, "_sintra_all_processes");
+    sintra::barrier(k_summary_ready_barrier, "_sintra_external_processes");
     return 0;
 }
 
@@ -404,8 +404,8 @@ int worker_process(int worker_index)
         log_stage_event(stage_log, final_done, "emit");
     }
 
-    sintra::barrier<processing_fence_t>(k_done_processed_barrier, "_sintra_all_processes");
-    sintra::barrier(k_summary_ready_barrier, "_sintra_all_processes");
+    sintra::barrier<processing_fence_t>(k_done_processed_barrier, "_sintra_external_processes");
+    sintra::barrier(k_summary_ready_barrier, "_sintra_external_processes");
     return 0;
 }
 
@@ -418,11 +418,10 @@ int worker3_process() { return worker_process(3); }
 
 int main(int argc, char* argv[])
 {
-    const bool is_spawned = sintra::test::has_branch_flag(argc, argv);
     sintra::test::Shared_directory shared("SINTRA_PATHOLOGICAL_DIR", "barrier_pathological");
     const auto shared_dir = shared.path();
 
-    if (!is_spawned) {
+    if (!sintra::test::has_branch_flag(argc, argv)) {
         for (int worker = 0; worker < k_worker_count; ++worker) {
             const auto stage_log = shared_dir / make_stage_log_name(worker);
             const auto noise_log = shared_dir / make_worker_noise_log(worker);
@@ -441,15 +440,11 @@ int main(int argc, char* argv[])
     processes.emplace_back(worker3_process);
 
     sintra::init(argc, argv, processes);
-    if (!is_spawned) {
-        sintra::barrier<sintra::processing_fence_t>(k_done_processed_barrier, "_sintra_all_processes");
-        sintra::barrier(k_summary_ready_barrier, "_sintra_all_processes");
-    }
-    sintra::detail::finalize();
+    sintra::shutdown();
 
     int exit_code = 0;
 
-    if (!is_spawned) {
+    if (!sintra::test::has_branch_flag(argc, argv)) {
         const auto summary_path = shared_dir / "summary.txt";
         std::ifstream summary_in(summary_path, std::ios::binary);
         std::string status;

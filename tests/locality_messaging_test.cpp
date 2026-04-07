@@ -188,9 +188,6 @@ int child_process()
                  g_child_typed_remote_count.load(),
                  g_child_typed_global_count.load());
 
-    trace("child: results-written barrier enter");
-    sintra::barrier("results-written", "_sintra_all_processes");
-    trace("child: results-written barrier exit");
     return 0;
 }
 
@@ -277,12 +274,9 @@ int main(int argc, char* argv[])
                      g_coord_typed_remote_count.load(),
                      g_coord_typed_global_count.load());
 
-        trace("coord: results-written barrier enter");
-        sintra::barrier("results-written", "_sintra_all_processes");
-        trace("coord: results-written barrier exit");
     }
 
-    sintra::detail::finalize();
+    sintra::shutdown();
 
     // Validation (coordinator only)
     if (!is_spawned) {

@@ -295,7 +295,6 @@ int coordinator_process()
     }
 
     deactivate_all_slots();
-    barrier("extreme-choreography-finished", "_sintra_all_processes");
 
     return failure_observed ? 1 : 0;
 }
@@ -380,7 +379,6 @@ int producer_process()
     cv.wait(lk, [&] { return stop_requested; });
 
     deactivate_all_slots();
-    barrier("extreme-choreography-finished", "_sintra_all_processes");
 
     return 0;
 }
@@ -509,7 +507,6 @@ int consumer_process()
     cv.wait(lk, [&] { return stop_requested; });
 
     deactivate_all_slots();
-    barrier("extreme-choreography-finished", "_sintra_all_processes");
 
     return 0;
 }
@@ -601,7 +598,6 @@ int monitor_process()
     cv.wait(lk, [&] { return stop_requested; });
 
     deactivate_all_slots();
-    barrier("extreme-choreography-finished", "_sintra_all_processes");
 
     return 0;
 }
@@ -760,7 +756,6 @@ int aggregator_process()
     }
 
     deactivate_all_slots();
-    barrier("extreme-choreography-finished", "_sintra_all_processes");
 
     std::ofstream out(summary_path, std::ios::binary | std::ios::trunc);
     if (out) {
@@ -815,11 +810,7 @@ int main(int argc, char* argv[])
 
     sintra::init(argc, argv, processes);
 
-    if (!is_spawned) {
-        sintra::barrier("extreme-choreography-finished", "_sintra_all_processes");
-    }
-
-    sintra::detail::finalize();
+    sintra::shutdown();
 
     if (!is_spawned) {
         std::ifstream in(summary_path, std::ios::binary);

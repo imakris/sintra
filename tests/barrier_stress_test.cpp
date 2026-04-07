@@ -115,9 +115,7 @@ int main(int argc, char* argv[])
 
     sintra::init(argc, argv, processes);
 
-    sintra::barrier("barrier-stress-done", "_sintra_all_processes");
-
-    sintra::detail::finalize();
+    sintra::shutdown();
 
     auto end = std::chrono::steady_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);

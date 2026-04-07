@@ -242,7 +242,7 @@ int main(int argc, char* argv[])
         trace_event(trace_path, "coordinator_exit", "seen=" + std::to_string(seen));
     }
 
-    sintra::detail::finalize();
+    sintra::shutdown();
 
     return seen >= 2 ? 0 : 1;
 }

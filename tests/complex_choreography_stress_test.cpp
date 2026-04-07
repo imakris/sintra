@@ -889,9 +889,7 @@ int main(int argc, char* argv[])
 
     sintra::init(argc, argv, processes);
 
-    sintra::barrier("complex-choreography-finished", "_sintra_all_processes");
-
-    sintra::detail::finalize();
+    sintra::shutdown();
 
     int exit_code = 0;
 

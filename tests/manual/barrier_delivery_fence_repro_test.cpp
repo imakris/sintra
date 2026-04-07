@@ -251,7 +251,6 @@ int coordinator_process()
         }
     }
 
-    barrier("delivery-fence-repro-done", "_sintra_all_processes");
     deactivate_all_slots();
 
     const sintra::test::Shared_directory shared("SINTRA_DELIVERY_FENCE_DIR", "barrier_delivery_fence");
@@ -309,8 +308,6 @@ int main(int argc, char* argv[])
 {
     std::set_terminate(sintra::test::custom_terminate_handler);
 
-    const bool is_spawned = sintra::test::has_branch_flag(argc, argv);
-
     sintra::test::Shared_directory shared("SINTRA_DELIVERY_FENCE_DIR", "barrier_delivery_fence");
 
     std::vector<sintra::Process_descriptor> processes;
@@ -320,13 +317,9 @@ int main(int argc, char* argv[])
 
     sintra::init(argc, argv, processes);
 
-    if (!is_spawned) {
-        sintra::barrier("delivery-fence-repro-done", "_sintra_all_processes");
-    }
+    sintra::shutdown();
 
-    sintra::detail::finalize();
-
-    if (!is_spawned) {
+    if (!sintra::test::has_branch_flag(argc, argv)) {
         const auto result_path = shared.path() / "delivery_fence_repro_result.txt";
         if (!std::filesystem::exists(result_path)) {
             std::fprintf(stderr, "Error: result file not found at %s\n", result_path.string().c_str());
