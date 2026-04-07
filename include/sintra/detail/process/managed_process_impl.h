@@ -207,7 +207,7 @@ namespace {
             if (signal_event() == NULL) {
                 return;
             }
-            std::thread(signal_dispatch_loop_win).detach();
+            std::thread(detail::exception_boundary{"signal_dispatch_win"}.wrap(signal_dispatch_loop_win)).detach();
         });
     }
 
@@ -375,7 +375,7 @@ namespace {
             pipefd[0] = pipefd_local[0];
             pipefd[1] = pipefd_local[1];
 
-            std::thread(signal_dispatch_loop).detach();
+            std::thread(detail::exception_boundary{"signal_dispatch"}.wrap(signal_dispatch_loop)).detach();
         });
     }
 #endif
@@ -612,10 +612,12 @@ namespace {
         }
 #ifdef _WIN32
         const auto handle = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(parsed));
-        std::thread(lifeline_watch_loop, handle, timeout_ms, exit_code).detach();
+        std::thread(detail::exception_boundary{"lifeline_watch"}.wrap(
+            [=]{ lifeline_watch_loop(handle, timeout_ms, exit_code); })).detach();
 #else
         const int fd = static_cast<int>(parsed);
-        std::thread(lifeline_watch_loop, fd, timeout_ms, exit_code).detach();
+        std::thread(detail::exception_boundary{"lifeline_watch"}.wrap(
+            [=]{ lifeline_watch_loop(fd, timeout_ms, exit_code); })).detach();
 #endif
     }
 
@@ -1071,7 +1073,7 @@ Managed_process::~Managed_process()
             tl_post_handler_function_clear();
             if (post_handler) {
                 Post_handler_guard post_guard;
-                post_handler();
+                detail::exception_boundary{"destructor_post_handler"}([&]{ post_handler(); });
             }
         }
 
@@ -2216,22 +2218,7 @@ void Managed_process::go()
         return;
     }
 
-    try {
-        m_entry_function();
-    }
-    catch (const rpc_cancelled&) {
-        // A barrier or RPC failed because a peer process exited (e.g. the
-        // coordinator died, or a sibling worker crashed).  Swallow the
-        // exception so the worker exits cleanly instead of crashing with
-        // std::terminate, which would cascade-kill the remaining processes
-        // and prevent useful diagnostics.
-        Log_stream(log_level::warning)
-            << "Worker entry function exited with rpc_cancelled.\n";
-    }
-    catch (const std::exception& e) {
-        Log_stream(log_level::warning)
-            << "Worker entry function exited with exception: " << e.what() << "\n";
-    }
+    detail::exception_boundary{"worker_entry"}([&]{ m_entry_function(); });
 }
 
  //////////////////////////////////////////////////////////////////////////

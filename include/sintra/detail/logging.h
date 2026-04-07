@@ -172,6 +172,61 @@ inline Log_stream ls_warning() { return Log_stream(log_level::warning); }
 inline Log_stream ls_error()   { return Log_stream(log_level::error); }
 inline Log_stream ls_debug()   { return Log_stream(log_level::debug); }
 
+namespace detail {
+
+/// Exception boundary for threads and callbacks.
+///
+/// Wraps a callable so that any escaping exception is caught and logged
+/// instead of reaching std::terminate.  Use at every detached-thread entry
+/// point, user-provided callback invocation, or destructor callback where
+/// an uncaught exception would be fatal.
+///
+/// Usage:
+///   std::thread(exception_boundary("signal_dispatch", signal_dispatch_loop_win)).detach();
+///   exception_boundary("lifecycle_handler", [&]{ handler(event); })();
+///
+struct exception_boundary {
+    const char* context;
+
+    template <typename F>
+    auto operator()(F&& fn) const noexcept -> void
+    {
+        try {
+            fn();
+        }
+        catch (const std::exception& e) {
+            Log_stream(log_level::warning)
+                << "[sintra] Exception at boundary '" << context << "': " << e.what() << "\n";
+        }
+        catch (...) {
+            Log_stream(log_level::warning)
+                << "[sintra] Unknown exception at boundary '" << context << "'\n";
+        }
+    }
+
+    // Returns a callable that wraps fn with exception protection.
+    // Suitable for passing to std::thread or storing as std::function.
+    template <typename F>
+    auto wrap(F&& fn) const
+    {
+        return [ctx = context, f = std::forward<F>(fn)]() mutable noexcept {
+            try {
+                f();
+            }
+            catch (const std::exception& e) {
+                Log_stream(log_level::warning)
+                    << "[sintra] Exception at boundary '" << ctx << "': " << e.what() << "\n";
+            }
+            catch (...) {
+                Log_stream(log_level::warning)
+                    << "[sintra] Unknown exception at boundary '" << ctx << "'\n";
+            }
+        };
+    }
+};
+
+} // namespace detail
+
 } // namespace sintra
 
 

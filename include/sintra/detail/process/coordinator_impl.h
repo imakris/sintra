@@ -951,7 +951,13 @@ void Coordinator::recover_if_required(const Crash_info& info)
 
     bool should_recover = true;
     if (policy) {
-        should_recover = policy(info);
+        try {
+            should_recover = policy(info);
+        }
+        catch (const std::exception& e) {
+            Log_stream(log_level::warning)
+                << "[sintra] Exception in recovery policy: " << e.what() << "\n";
+        }
     }
 
     if (!should_recover) {
@@ -984,9 +990,8 @@ void Coordinator::recover_if_required(const Crash_info& info)
     control.spawn = spawn_now;
     {
         std::lock_guard<mutex> lock(m_recovery_threads_mutex);
-        m_recovery_threads.emplace_back([info, runner, control]() mutable {
-            runner(info, control);
-        });
+        m_recovery_threads.emplace_back(detail::exception_boundary{"recovery_runner"}.wrap(
+            [info, runner, control]() mutable { runner(info, control); }));
     }
 }
 
@@ -1041,7 +1046,7 @@ void Coordinator::emit_lifecycle_event(const process_lifecycle_event& event)
         handler = m_lifecycle_handler;
     }
     if (handler) {
-        handler(event);
+        detail::exception_boundary{"lifecycle_handler"}([&]{ handler(event); });
     }
 }
 
