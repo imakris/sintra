@@ -2346,8 +2346,13 @@ def main():
                         help='Show detailed output for each test run')
     parser.add_argument('--preserve-stalled-processes', action='store_true',
                         help='Leave stalled test processes running for debugging instead of terminating them')
+    parser.add_argument('--time-budget', type=float, default=None,
+                        help='Total time budget in seconds for the test run. When '
+                             'exceeded, the runner stops early. Exit code is 0 if every '
+                             'test passed at least once with no failures, 1 otherwise.')
 
     args = parser.parse_args()
+    time_budget = args.time_budget
 
     # Resolve build directory
     script_dir = Path(__file__).parent
@@ -2382,6 +2387,8 @@ def main():
         print(f"CMake generator: {compiler_metadata['generator']}")
     print(f"Timeout per test: {args.timeout}s")
     print(f"Active tests: {len(active_tests)} tests from active_tests.txt")
+    if time_budget is not None:
+        print(f"Time budget: {format_duration(time_budget)}")
     print("=" * 70)
 
     preserve_on_timeout = args.preserve_stalled_processes
@@ -2399,6 +2406,8 @@ def main():
         overall_start_time = time.time()
         overall_all_passed = True
         overall_did_not_run = 0
+        deadline = overall_start_time + time_budget if time_budget is not None else None
+        budget_exhausted = False
 
         # Run each configuration suite independently
         for config_idx, (config_name, tests) in enumerate(test_suites.items(), 1):
@@ -2494,6 +2503,10 @@ def main():
                         if remaining_repetitions[test_name] <= 0:
                             continue
 
+                        if deadline is not None and time.time() >= deadline:
+                            budget_exhausted = True
+                            break
+
                         result = runner.run_test_once(invocation)
 
                         accumulated_results[test_name]['durations'].append(result.duration)
@@ -2532,7 +2545,7 @@ def main():
 
                     for start, end in line_ranges:
                         print(" ".join(row_segments[start:end]))
-                    if not suite_all_passed:
+                    if budget_exhausted or not suite_all_passed:
                         break
 
                 round_elapsed = time.time() - suite_start_time
@@ -2555,10 +2568,31 @@ def main():
                         else:
                             print(f"    {message}")
 
-                if not suite_all_passed:
+                if budget_exhausted or not suite_all_passed:
                     break
 
                 batch_size = min(batch_size * 2, max_remaining)
+
+            if budget_exhausted:
+                elapsed = time.time() - overall_start_time
+                every_test_attempted = all(
+                    data['passed'] + data['failed'] + data['did_not_run'] > 0
+                    for data in accumulated_results.values()
+                )
+                if every_test_attempted and suite_all_passed:
+                    print(
+                        f"\n{Color.YELLOW}Time budget exhausted after "
+                        f"{format_duration(elapsed)}. "
+                        f"All tests passed at least once.{Color.RESET}"
+                    )
+                else:
+                    print(
+                        f"\n{Color.RED}Time budget exhausted after "
+                        f"{format_duration(elapsed)}. "
+                        f"Not all tests completed successfully.{Color.RESET}"
+                    )
+                    suite_all_passed = False
+                    overall_all_passed = False
 
             # Print suite results
             suite_duration = time.time() - suite_start_time
@@ -2694,6 +2728,9 @@ def main():
                 print(f"\n{Color.RED}Stopping - suite {config_name} failed{Color.RESET}")
                 break
 
+            if budget_exhausted:
+                break
+
             # Add spacing between suites if not the last one
             if config_idx < total_configs:
                 print()
@@ -2704,6 +2741,15 @@ def main():
         print(f"\n{'=' * 80}")
         print(f"{Color.BOLD}OVERALL SUMMARY{Color.RESET}")
         print(f"Total duration: {format_duration(total_duration)}")
+        if budget_exhausted:
+            print(f"{Color.YELLOW}Terminated early: time budget exhausted{Color.RESET}")
+            if overall_all_passed and config_idx < total_configs:
+                skipped = total_configs - config_idx
+                print(
+                    f"{Color.RED}{skipped} suite(s) not started due to "
+                    f"time budget{Color.RESET}"
+                )
+                overall_all_passed = False
 
         if overall_all_passed and overall_did_not_run == 0:
             print(f"Overall result: {Color.GREEN}ALL SUITES PASSED{Color.RESET}")
