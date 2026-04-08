@@ -7,11 +7,13 @@ env:
 freebsd_build_task:
   name: "FreeBSD Build & Test"
   install_script:
+    - date +%s > /tmp/ci_start_time
     - pkg install -y cmake python
   build_script:
     - cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
     - cmake --build build
   test_script:
     - cd tests
-    - python3 run_tests.py --timeout 30 --build-dir ../build --config Release --time-budget 2700
+    - BUDGET=$(( 3500 - $(date +%s) + $(cat /tmp/ci_start_time) ))
+    - python3 run_tests.py --timeout 30 --build-dir ../build --config Release --time-budget $BUDGET
 
