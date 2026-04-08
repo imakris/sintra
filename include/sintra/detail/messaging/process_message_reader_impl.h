@@ -101,6 +101,7 @@ inline void dispatch_event_handlers(
     // Releasing before invocation gives waiting threads a chance to acquire the
     // lock between messages.
     std::vector<function<void(const Message_prefix&)>> collected;
+    bool dispatch_registered = false;
 
     {
         lock_guard<recursive_mutex> sl(s_mproc->m_handlers_mutex);
@@ -119,9 +120,18 @@ inline void dispatch_event_handlers(
                 }
             }
         }
+
+        // Register the out-of-lock invocation while still holding the
+        // handler mutex. This closes the race where a deactivator could
+        // remove the slot and observe depth==0 after we copied the handler
+        // list but before we started invoking it.
+        if (!collected.empty()) {
+            s_mproc->m_handlers_dispatch_depth.fetch_add(1, std::memory_order_acq_rel);
+            dispatch_registered = true;
+        }
     }
 
-    if (collected.empty()) {
+    if (!dispatch_registered) {
         return;
     }
 
@@ -131,15 +141,17 @@ inline void dispatch_event_handlers(
             << " handlers=" << collected.size() << "\n";
     }
 
-    // Signal that handlers are being invoked outside the mutex.  Slot
-    // deactivation checks this counter and waits for it to reach zero
-    // so that no in-flight handler can access captured state after the
-    // deactivator returns.
-    s_mproc->m_handlers_dispatch_depth.fetch_add(1, std::memory_order_acquire);
-    for (auto& handler : collected) {
-        handler(message);
+    try {
+        for (auto& handler : collected) {
+            handler(message);
+        }
     }
-    s_mproc->m_handlers_dispatch_depth.fetch_sub(1, std::memory_order_release);
+    catch (...) {
+        s_mproc->m_handlers_dispatch_depth.fetch_sub(1, std::memory_order_acq_rel);
+        throw;
+    }
+
+    s_mproc->m_handlers_dispatch_depth.fetch_sub(1, std::memory_order_acq_rel);
 }
 
 // Historical note: mingw 11.2.0 had issues with inline thread_local non-POD objects.
