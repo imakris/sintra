@@ -458,17 +458,10 @@ void Process_message_reader::request_reader_function()
 
                 const bool receiver_exists =
                     s_mproc->m_local_pointer_of_instance_id.contains_key(m->receiver_instance_id);
-                const bool strict_receiver_invariant =
-                    (reader_state == READER_NORMAL) &&
-                    (detail::s_shutdown_state.load(std::memory_order_acquire) ==
-                        detail::shutdown_protocol_state::idle);
-
-                // A targeted local request normally requires a live receiver. During
-                // teardown, though, a queued request can outlive the receiver entry
-                // after shutdown/finalize has already started. Fail the call
-                // immediately instead of asserting on a stale pre-fetch reader_state
-                // snapshot or silently dropping the request and orphaning the caller.
-                assert(!strict_receiver_invariant || receiver_exists);
+                // Targeted local RPCs can legitimately race with receiver
+                // destruction after name resolution or enqueue. Treat a missing
+                // receiver as a normal unavailable-target reply instead of as an
+                // invariant violation.
                 if (!receiver_exists) {
                     const std::string reason = "RPC target is no longer available.";
                     auto* placed_msg =
