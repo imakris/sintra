@@ -1289,6 +1289,11 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         // Used to avoid accidentally having multiple writers on the same ring
         // across processes. Only one writer may hold this at a time.
         std::atomic<uint32_t>                writer_pid{0};
+
+        // Set to 1 by the writer on teardown, before posting reader semaphores.
+        // Readers check this after waking with no new data to detect that the
+        // writer has exited and no further data will arrive.
+        std::atomic<uint32_t>                writer_closed{0};
         detail::interprocess_mutex           ownership_mutex;
 
         // The following synchronization structures may only be accessed between lock()/unlock().
@@ -1922,6 +1927,17 @@ struct Ring_R : Ring<T, true>
                 return Range<T>{};
             }
 
+            // If the writer has closed the ring and there is no unread data,
+            // signal stop and return immediately instead of parking on the
+            // semaphore forever.  Setting m_stopping causes fetch_message()
+            // to return nullptr, which cleanly exits the reader loop.
+            if (sequences_equal() &&
+                c.writer_closed.load(std::memory_order_acquire))
+            {
+                m_stopping = true;
+                return Range<T>{};
+            }
+
             if (!stay_in_blocking_phase) {
                 // Phase 1 - fast spin: aggressively poll for a very short window to
                 // deliver sub-100us wakeups when the writer is still active.
@@ -2416,6 +2432,7 @@ struct Ring_W : Ring<T, false>
             throw ring_acquisition_failure_exception();
         }
 
+        c.writer_closed.store(0, std::memory_order_release);
         c.writer_pid = get_current_pid();
         m_owner_pid = c.writer_pid;
         m_owner_tid = get_current_tid();
@@ -2441,7 +2458,10 @@ struct Ring_W : Ring<T, false>
             }
         }
 
-        // Wake any sleeping readers to avoid deadlocks during teardown
+        // Signal readers that no more data will be written, then wake them.
+        // Order matters: set the flag before posting semaphores so that
+        // readers see writer_closed==1 when they wake and find no new data.
+        c.writer_closed.store(1, std::memory_order_release);
         unblock_global();
         c.ownership_mutex.unlock();
         c.writer_pid = 0;
