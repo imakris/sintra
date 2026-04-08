@@ -453,7 +453,7 @@ instance_id_type Coordinator::publish_transceiver(type_id_type tid, instance_id_
 inline
 bool Coordinator::unpublish_transceiver(instance_id_type iid)
 {
-    std::unique_lock<mutex> publish_lock(m_publish_mutex);
+    lock_guard<mutex> publish_lock(m_publish_mutex);
 
     // the process of the transceiver must have been registered
     auto process_iid = process_of(iid);
@@ -484,7 +484,6 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
     auto tn = it->second;
 
     std::vector<Pending_instance_publication> ready_notifications;
-    bool should_note_draining_state_change = false;
     bool crash_seen = false;
     int crash_status = 0;
     uint64_t draining_index = 0;
@@ -559,7 +558,7 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
             }
         }
 
-        should_note_draining_state_change = true;
+        note_draining_state_change();
         {
             std::lock_guard<mutex> crash_lock(m_crash_mutex);
             auto crash_it = m_recent_crash_status.find(process_iid);
@@ -569,12 +568,6 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
                 m_recent_crash_status.erase(crash_it);
             }
         }
-    }
-
-    publish_lock.unlock();
-
-    if (should_note_draining_state_change) {
-        note_draining_state_change();
     }
 
     if (iid == process_iid && !crash_seen) {
@@ -747,6 +740,7 @@ inline bool Coordinator::wait_for_all_draining(instance_id_type self_process)
     (void)self_process; // currently unused; kept for potential future refinements.
 
     std::unique_lock<std::mutex> lk(m_draining_state_mutex);
+    assert(!m_waiting_for_all_draining.load(std::memory_order_acquire));
     m_waiting_for_all_draining.store(true, std::memory_order_release);
 
     const auto timeout = m_drain_timeout;

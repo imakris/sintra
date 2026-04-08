@@ -451,6 +451,7 @@ inline void shutdown_coordinator_drain_wait(const std::string& group_name)
 
     bool group_drained = false;
     std::unique_lock<std::mutex> wait_lock(s_coord->m_draining_state_mutex);
+    assert(!s_coord->m_waiting_for_all_draining.load(std::memory_order_acquire));
     s_coord->m_waiting_for_all_draining.store(true, std::memory_order_release);
     while (true) {
         const uint64_t observed_generation = s_coord->m_draining_state_generation;
