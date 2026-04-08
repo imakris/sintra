@@ -1073,7 +1073,7 @@ Managed_process::~Managed_process()
             tl_post_handler_function_clear();
             if (post_handler) {
                 Post_handler_guard post_guard;
-                detail::exception_boundary{"post_handler"}([&]{ post_handler(); });
+                post_handler();
             }
         }
 
@@ -2218,7 +2218,20 @@ void Managed_process::go()
         return;
     }
 
-    detail::exception_boundary{"worker_entry"}([&]{ m_entry_function(); });
+    try {
+        m_entry_function();
+    }
+    catch (const rpc_cancelled&) {
+        // Expected during shutdown cascades — a peer exited and our RPC
+        // or barrier was cancelled.  Swallow so the worker exits cleanly
+        // instead of hitting std::terminate, which would cascade-kill
+        // remaining processes and destroy diagnostics.
+        Log_stream(log_level::warning)
+            << "Worker entry function exited with rpc_cancelled.\n";
+    }
+    // Other exceptions (real bugs) propagate — they should be visible
+    // to the coordinator via crash/lifecycle detection, not silently
+    // swallowed.
 }
 
  //////////////////////////////////////////////////////////////////////////

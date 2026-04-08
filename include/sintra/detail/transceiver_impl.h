@@ -370,25 +370,33 @@ Transceiver::activate_impl(
     }
 
     *deactivator_it = [this, message_type_id, effective_sender_id, mid_sid_it, deactivator_it] () {
-        lock_guard<recursive_mutex> sl(s_mproc->m_handlers_mutex);
-        auto it_mt = s_mproc->m_active_handlers.find(message_type_id);
-        if (it_mt == s_mproc->m_active_handlers.end()) {
-            m_deactivators.erase(deactivator_it);
-            return;
-        }
-        auto& sender_map = it_mt->second;
+        {
+            lock_guard<recursive_mutex> sl(s_mproc->m_handlers_mutex);
+            auto it_mt = s_mproc->m_active_handlers.find(message_type_id);
+            if (it_mt == s_mproc->m_active_handlers.end()) {
+                m_deactivators.erase(deactivator_it);
+                return;
+            }
+            auto& sender_map = it_mt->second;
 
-        auto msm_it = sender_map.find(effective_sender_id);
-        if (msm_it == sender_map.end()) {
-            m_deactivators.erase(deactivator_it);
-            return;
-        }
+            auto msm_it = sender_map.find(effective_sender_id);
+            if (msm_it == sender_map.end()) {
+                m_deactivators.erase(deactivator_it);
+                return;
+            }
 
-        msm_it->second.erase(mid_sid_it);
-        if (msm_it->second.empty()) {
-            sender_map.erase(msm_it);
+            msm_it->second.erase(mid_sid_it);
+            if (msm_it->second.empty()) {
+                sender_map.erase(msm_it);
+            }
+            m_deactivators.erase(deactivator_it);
         }
-        m_deactivators.erase(deactivator_it);
+        // Wait for any in-flight dispatch_event_handlers invocation to
+        // finish before returning, so the caller can safely destroy
+        // state captured by the handler (e.g. receive()'s stack locals).
+        while (s_mproc->m_handlers_dispatch_depth.load(std::memory_order_acquire) > 0) {
+            std::this_thread::yield();
+        }
     };
 
     return *deactivator_it;

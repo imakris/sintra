@@ -131,9 +131,15 @@ inline void dispatch_event_handlers(
             << " handlers=" << collected.size() << "\n";
     }
 
+    // Signal that handlers are being invoked outside the mutex.  Slot
+    // deactivation checks this counter and waits for it to reach zero
+    // so that no in-flight handler can access captured state after the
+    // deactivator returns.
+    s_mproc->m_handlers_dispatch_depth.fetch_add(1, std::memory_order_acquire);
     for (auto& handler : collected) {
         handler(message);
     }
+    s_mproc->m_handlers_dispatch_depth.fetch_sub(1, std::memory_order_release);
 }
 
 // Historical note: mingw 11.2.0 had issues with inline thread_local non-POD objects.
