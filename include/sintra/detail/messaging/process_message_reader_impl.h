@@ -463,16 +463,7 @@ void Process_message_reader::request_reader_function()
                 // receiver as a normal unavailable-target reply instead of as an
                 // invariant violation.
                 if (!receiver_exists) {
-                    bool reply_expected = true;
-                    {
-                        auto scoped_reply_expected = Transceiver::get_rpc_reply_expected_map().scoped();
-                        auto it = scoped_reply_expected.get().find(m->message_type_id);
-                        if (it != scoped_reply_expected.get().end()) {
-                            reply_expected = it->second;
-                        }
-                    }
-
-                    if (!reply_expected) {
+                    if (m->function_instance_id == invalid_instance_id) {
                         publish_request_progress(m_in_req_c->get_message_reading_sequence());
                         continue;
                     }

@@ -643,15 +643,6 @@ auto& Transceiver::get_rpc_handler_map()
     return message_id_to_handler;
 }
 
-inline
-auto& Transceiver::get_rpc_reply_expected_map()
-{
-    static spinlocked_umap<type_id_type, bool> message_id_to_reply_expected;
-    return message_id_to_reply_expected;
-}
-
-
-
 template <typename RPCTC>
 auto& Transceiver::get_instance_to_object_map()
 {
@@ -1301,7 +1292,7 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
         MESSAGE_T* msg = s_mproc->m_out_req_c->write<MESSAGE_T>(vb_size<MESSAGE_T>(args...), args...);
         msg->sender_instance_id = s_mproc->m_instance_id;
         msg->receiver_instance_id = instance_id;
-        msg->function_instance_id = make_instance_id();
+        msg->function_instance_id = invalid_instance_id;
         s_mproc->m_out_req_c->done_writing();
         return;
     }
@@ -1390,7 +1381,6 @@ Transceiver::export_rpc_impl()
     using RPCTC_o_type = typename RPCTC::o_type;
     [[maybe_unused]] static auto once = [&] {
         get_rpc_handler_map().set_value(test, &RPCTC_o_type::template rpc_handler<RPCTC, MT>);
-        get_rpc_reply_expected_map().set_value(test, !RPCTC::is_fire_and_forget);
         return test;
     }();
 
