@@ -1173,6 +1173,11 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         // issued the unblock.
         std::atomic<uint64_t>                global_unblock_sequence{0};
 
+        // Set by the writer on teardown.  Readers check this in their wait
+        // loop and return an empty range when the writer is permanently gone
+        // instead of looping back into the semaphore wait.
+        std::atomic<uint32_t>                writer_closed{0};
+
         // Octile read guards:
         //   An 8-byte integer where each *byte* corresponds to one octile of the ring
         //   (the ring is conceptually split into 8 equal parts). Each byte is a reader
@@ -1922,6 +1927,26 @@ struct Ring_R : Ring<T, true>
                 return Range<T>{};
             }
 
+            // If the writer has closed the ring and there is no unread data,
+            // set m_stopping so fetch_message() returns nullptr, cleanly
+            // exiting the reader loop.  Each Ring_R reads from exactly one
+            // ring — if that writer is gone, this reader has nothing left
+            // to do.  Other rings have their own Ring_R instances with
+            // independent m_stopping flags.
+            //
+            // Check writer_closed FIRST (with acquire) so that all prior
+            // writer stores — including the final leading_sequence from
+            // done_writing() — are visible before sequences_equal() runs.
+            // Reversing the order would be a TOCTOU race: the reader could
+            // see stale leading_sequence, conclude there's no data, then
+            // see writer_closed and exit — losing the last message.
+            if (c.writer_closed.load(std::memory_order_acquire) &&
+                sequences_equal())
+            {
+                m_stopping = true;
+                return Range<T>{};
+            }
+
             if (!stay_in_blocking_phase) {
                 // Phase 1 - fast spin: aggressively poll for a very short window to
                 // deliver sub-100us wakeups when the writer is still active.
@@ -2416,6 +2441,7 @@ struct Ring_W : Ring<T, false>
             throw ring_acquisition_failure_exception();
         }
 
+        c.writer_closed.store(0, std::memory_order_release);
         c.writer_pid = get_current_pid();
         m_owner_pid = c.writer_pid;
         m_owner_tid = get_current_tid();
@@ -2441,7 +2467,8 @@ struct Ring_W : Ring<T, false>
             }
         }
 
-        // Wake any sleeping readers to avoid deadlocks during teardown
+        // Signal readers that no more data will arrive, then wake them.
+        c.writer_closed.store(1, std::memory_order_release);
         unblock_global();
         c.ownership_mutex.unlock();
         c.writer_pid = 0;
