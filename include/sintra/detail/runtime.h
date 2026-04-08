@@ -178,7 +178,7 @@ inline void init(
     if (s_init_once || s_mproc) {
         throw std::runtime_error(
             "sintra::init() called twice without a matching teardown "
-            "(use sintra::shutdown() or sintra::detail::finalize()).");
+            "(use sintra::shutdown(), sintra::leave(), or sintra::detail::finalize()).");
     }
     s_init_once = true;
 
@@ -216,9 +216,9 @@ void init(int argc, const char* const* argv, Args&&... args)
 
 namespace detail {
 
-/// Low-level teardown implementation.  This is the internal workhorse used by
-/// both the standard `shutdown()` path and the low-level `detail::finalize()`
-/// entry point.
+/// Low-level teardown implementation. This is the internal workhorse used by
+/// the standard `shutdown()` path, the public `leave()` path, and the low-level
+/// `detail::finalize()` entry point.
 /// Ordinary callers should use `shutdown()` instead.
 inline bool finalize_impl()
 {
@@ -333,30 +333,63 @@ inline bool finalize_impl()
     return true;
 }
 
+inline void claim_lifecycle_teardown_state(
+    shutdown_protocol_state desired_state,
+    const char* api_name)
+{
+    auto expected = shutdown_protocol_state::idle;
+    if (!s_shutdown_state.compare_exchange_strong(
+            expected,
+            desired_state,
+            std::memory_order_acq_rel))
+    {
+        throw std::logic_error(
+            std::string(api_name) + " called while another lifecycle teardown is already in progress "
+            "(state=" + std::to_string(static_cast<int>(expected)) + ").");
+    }
+}
+
+inline bool lifecycle_teardown_requested()
+{
+    return s_shutdown_state.load(std::memory_order_acquire) !=
+           shutdown_protocol_state::idle;
+}
+
+inline std::unique_lock<std::mutex> lock_coordinator_teardown_admission()
+{
+    if (!s_coord) {
+        return std::unique_lock<std::mutex>{};
+    }
+
+    return std::unique_lock<std::mutex>{detail::s_teardown_admission_mutex};
+}
+
 /// Low-level teardown for single-process programs, exceptional/error
 /// paths, or test code that cannot participate in a symmetric shutdown.
 /// Ordinary multi-process callers should use `shutdown()` instead.
 ///
-/// Fails fast if a standard shutdown protocol is already in progress
-/// (state is not idle), because mixing raw finalize with the standard
-/// shutdown path is an illegal composition.
+/// Fails fast if any lifecycle teardown protocol is already in progress
+/// (state is not idle), because mixing raw finalize with another terminal
+/// path is an illegal composition.
 inline bool finalize()
 {
-    // Protocol state check comes first: calling finalize() during an active
-    // shutdown is always an error, even if s_mproc happens to be null.
-    const auto state = s_shutdown_state.load(std::memory_order_acquire);
-    if (state != shutdown_protocol_state::idle) {
-        throw std::logic_error(
-            "detail::finalize() called while a standard shutdown protocol is in progress "
-            "(state=" + std::to_string(static_cast<int>(state)) + "). "
-            "Use shutdown() for the standard terminal path.");
-    }
+    auto admission_lock = lock_coordinator_teardown_admission();
+    claim_lifecycle_teardown_state(
+        shutdown_protocol_state::finalizing,
+        "sintra::detail::finalize()");
 
     if (!s_mproc) {
+        s_shutdown_state.store(shutdown_protocol_state::idle, std::memory_order_release);
         return false;
     }
 
-    return finalize_impl();
+    try {
+        return finalize_impl();
+    }
+    catch (...) {
+        s_shutdown_state.store(shutdown_protocol_state::idle, std::memory_order_release);
+        throw;
+    }
 }
 
 /// Shared coordinator drain-wait logic used by all shutdown paths.
@@ -422,6 +455,11 @@ inline bool shutdown_group_is_trivial(const std::string& group_name)
            (group.m_process_ids.find(s_mproc_id) != group.m_process_ids.end());
 }
 
+inline bool coordinator_can_leave_now()
+{
+    return !s_coord || s_coord->is_sole_known_process(s_mproc_id);
+}
+
 } // namespace detail
 
 inline bool shutdown()
@@ -431,6 +469,8 @@ inline bool shutdown()
 
 inline bool shutdown(const shutdown_options& options)
 {
+    auto admission_lock = detail::lock_coordinator_teardown_admission();
+
     // Fail fast: reject if another shutdown or finalize is already in progress.
     auto expected = detail::shutdown_protocol_state::idle;
     if (!detail::s_shutdown_state.compare_exchange_strong(
@@ -439,7 +479,7 @@ inline bool shutdown(const shutdown_options& options)
             std::memory_order_acq_rel))
     {
         throw std::logic_error(
-            "sintra::shutdown() called while another shutdown/finalize is already in progress "
+            "sintra::shutdown() called while another lifecycle teardown is already in progress "
             "(state=" + std::to_string(static_cast<int>(expected)) + ").");
     }
 
@@ -534,6 +574,36 @@ inline bool shutdown(const shutdown_options& options)
     }
     catch (...) {
         detail::finalize_impl();
+        throw;
+    }
+}
+
+inline bool leave()
+{
+    auto admission_lock = detail::lock_coordinator_teardown_admission();
+
+    detail::claim_lifecycle_teardown_state(
+        detail::shutdown_protocol_state::local_departure_entered,
+        "sintra::leave()");
+
+    if (!s_mproc) {
+        detail::s_shutdown_state.store(
+            detail::shutdown_protocol_state::idle, std::memory_order_release);
+        return false;
+    }
+
+    try {
+        if (s_coord && !detail::coordinator_can_leave_now()) {
+            throw std::logic_error(
+                "sintra::leave() is not supported on a coordinator while other known "
+                "processes are still alive. Use shutdown() for collective termination.");
+        }
+
+        return detail::finalize_impl();
+    }
+    catch (...) {
+        detail::s_shutdown_state.store(
+            detail::shutdown_protocol_state::idle, std::memory_order_release);
         throw;
     }
 }
@@ -699,6 +769,10 @@ inline instance_id_type join_swarm(
     std::string binary_name = std::string())
 {
     if (!s_mproc || s_coord_id == invalid_instance_id || branch_index < 1) {
+        return invalid_instance_id;
+    }
+
+    if (detail::lifecycle_teardown_requested()) {
         return invalid_instance_id;
     }
 

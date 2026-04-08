@@ -196,14 +196,24 @@ struct shutdown_options {
 /// - no important final side effect remains
 /// - teardown may begin immediately
 ///
-/// For single-process programs, exceptional/error paths, or cases where a
-/// process cannot participate in a symmetric shutdown rendezvous, use
-/// `detail::finalize()` — a low-level escape hatch for tests, experiments,
-/// and deliberate primitive-level work.
+/// For an intentional unilateral departure where peers may continue running,
+/// use `leave()`. For single-process programs, exceptional/error paths, or
+/// deliberate primitive-level work in tests and experiments, use
+/// `detail::finalize()`.
 ///
 /// Ordinary callers should not pair `shutdown()` with extra final
 /// `_sintra_all_processes` barriers or a direct subsequent `detail::finalize()`.
 bool shutdown();
+
+///\brief Perform a clean local departure without entering collective shutdown.
+///
+/// Use `leave()` when this process is intentionally exiting and peers may
+/// continue running. This is the public form of the local drain-and-unpublish
+/// lifecycle path used by leaf-like participants.
+///
+/// Coordinator processes may call `leave()` only when they are already the
+/// sole remaining known process.
+bool leave();
 
 ///\brief Shutdown with options (e.g. a coordinator-side shutdown hook).
 ///

@@ -665,6 +665,9 @@ inline void Coordinator::collect_known_process_candidates_unlocked(
         for (const auto& entry : m_transceiver_registry) {
             candidates.push_back(entry.first);
         }
+        for (const auto& entry : m_inflight_joins) {
+            candidates.push_back(entry.second);
+        }
     }
 
     {
@@ -718,6 +721,29 @@ inline bool Coordinator::all_known_processes_draining_unlocked(instance_id_type 
     }
 
     return true;
+}
+
+inline bool Coordinator::is_sole_known_process_unlocked(instance_id_type self_process)
+{
+    std::vector<instance_id_type> candidates;
+    collect_known_process_candidates_unlocked(candidates);
+
+    candidates.erase(
+        std::remove(candidates.begin(), candidates.end(), invalid_instance_id),
+        candidates.end());
+
+    if (candidates.empty()) {
+        return true;
+    }
+
+    std::sort(candidates.begin(), candidates.end());
+    candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
+    return candidates.size() == 1 && candidates.front() == self_process;
+}
+
+inline bool Coordinator::is_sole_known_process(instance_id_type self_process)
+{
+    return is_sole_known_process_unlocked(self_process);
 }
 
 
@@ -833,6 +859,16 @@ instance_id_type Coordinator::join_swarm(
         return invalid_instance_id;
     }
 
+    std::lock_guard<mutex> admission_lock(detail::s_teardown_admission_mutex);
+
+    if (s_shutdown_state.load(std::memory_order_acquire) != shutdown_protocol_state::idle) {
+        return invalid_instance_id;
+    }
+
+    if (branch_index < 1 || branch_index >= max_process_index) {
+        return invalid_instance_id;
+    }
+
     instance_id_type new_instance_id = invalid_instance_id;
     {
         lock_guard<mutex> guard(m_publish_mutex);
@@ -854,10 +890,6 @@ instance_id_type Coordinator::join_swarm(
         new_instance_id = make_process_instance_id();
         m_inflight_joins.emplace(branch_index, new_instance_id);
         m_joined_process_branch.emplace(new_instance_id, branch_index);
-    }
-
-    if (branch_index < 1 || branch_index >= max_process_index) {
-        return invalid_instance_id;
     }
 
     // Add to groups BEFORE spawning so the process is already a group member
@@ -937,6 +969,10 @@ void Coordinator::recover_if_required(const Crash_info& info)
 {
     assert(is_process(info.process_iid));
 
+    if (s_shutdown_state.load(std::memory_order_acquire) != shutdown_protocol_state::idle) {
+        return;
+    }
+
     if (!m_requested_recovery.count(info.process_iid)) {
         return;
     }
@@ -969,11 +1005,13 @@ void Coordinator::recover_if_required(const Crash_info& info)
     }
 
     auto should_cancel = [this]() {
-        return m_shutdown.load(std::memory_order_acquire);
+        return m_shutdown.load(std::memory_order_acquire) ||
+               s_shutdown_state.load(std::memory_order_acquire) != shutdown_protocol_state::idle;
     };
 
     auto spawned = std::make_shared<std::atomic<bool>>(false);
     auto spawn_now = [this, info, should_cancel, spawned]() {
+        std::lock_guard<mutex> admission_lock(detail::s_teardown_admission_mutex);
         if (should_cancel()) {
             return;
         }

@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <mutex>
 
 
 namespace sintra {
@@ -25,9 +26,10 @@ namespace detail {
 enum class shutdown_protocol_state : int {
     idle = 0,
     collective_shutdown_entered = 1,
-    coordinator_hook_running    = 2,
-    coordinator_hook_completed  = 3,
-    finalizing                  = 4
+    local_departure_entered     = 2,
+    coordinator_hook_running    = 3,
+    coordinator_hook_completed  = 4,
+    finalizing                  = 5
 };
 
 } // namespace detail
@@ -61,6 +63,7 @@ public:
 
     // Internal: runtime code accesses this through detail::s_shutdown_state.
     std::atomic<detail::shutdown_protocol_state>& shutdown_state_ref() noexcept { return m_shutdown_state; }
+    std::mutex& teardown_admission_mutex_ref() noexcept { return m_teardown_admission_mutex; }
 
     Managed_process* managed_process()    const noexcept { return m_managed_process;    }
     Coordinator* coordinator()            const noexcept { return m_coordinator;        }
@@ -73,6 +76,7 @@ private:
     instance_id_type   m_managed_process_id   = 0;
     instance_id_type   m_coordinator_id       = 0;
     std::atomic<detail::shutdown_protocol_state> m_shutdown_state{detail::shutdown_protocol_state::idle};
+    std::mutex m_teardown_admission_mutex;
 };
 
 inline auto& s_mproc    = runtime_state::instance().managed_process_ref();
@@ -82,6 +86,7 @@ inline auto& s_coord_id = runtime_state::instance().coordinator_id_ref();
 
 namespace detail {
 inline auto& s_shutdown_state = runtime_state::instance().shutdown_state_ref();
+inline auto& s_teardown_admission_mutex = runtime_state::instance().teardown_admission_mutex_ref();
 } // namespace detail
 
 }

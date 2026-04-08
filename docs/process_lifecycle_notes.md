@@ -26,9 +26,10 @@ The coordinator emits lifecycle events in these paths:
      duplicate normal-exit/unpublished event.
 
 2. **Normal exit**
-   - `sintra::shutdown()` (the standard terminal API) or a direct
-     `detail::finalize()` call triggers `Coordinator::begin_process_draining`,
-     which sets the draining bit for the process slot.
+   - `sintra::shutdown()` (the standard terminal API), `sintra::leave()` (the
+     public unilateral-departure API), or a direct `detail::finalize()` call
+     triggers `Coordinator::begin_process_draining`, which sets the draining
+     bit for the process slot.
    - When the process later unpublishes, the coordinator sees the draining bit
      and emits `process_lifecycle_event{reason::normal_exit}`.
 
@@ -59,6 +60,11 @@ unpublished event occurs, the coordinator executes:
 
 `Coordinator::begin_shutdown()` flips the shutdown flag so `should_cancel()`
 becomes true and recovery threads can exit early.
+
+For `leave()`, the same cancellation and normal-exit flow applies only when the
+process is in a supported unilateral-departure case. Coordinator-initiated
+`leave()` is intentionally restricted to the point where no other known
+processes remain.
 
 ## Lifeline ownership and shutdown
 

@@ -300,7 +300,6 @@ public:
     std::array<std::atomic<uint8_t>, max_process_index + 1> m_draining_process_states{};
 
     unordered_set<instance_id_type>             m_processes_in_initialization;
-
     struct Pending_instance_publication
     {
         type_id_type     type_id = not_defined_type_id;
@@ -349,6 +348,7 @@ public:
     // initialization tracking (caller holds lock).
     void collect_known_process_candidates_unlocked(std::vector<instance_id_type>& candidates);
     bool all_known_processes_draining_unlocked(instance_id_type self_process);
+    bool is_sole_known_process_unlocked(instance_id_type self_process);
     // Block until all known processes are draining (or have been scavenged).
     // Returns true if all processes reached draining state, false if timed out.
     // A timeout of 0 (set via set_drain_timeout) means wait indefinitely.
@@ -369,6 +369,7 @@ public:
 
     // Read the draining bit for a process slot; does not validate liveness.
     bool is_process_draining(instance_id_type process_iid) const;
+    bool is_sole_known_process(instance_id_type self_process);
 
     SINTRA_MESSAGE_RESERVED(instance_published,
         type_id_type type_id, instance_id_type instance_id, message_string assigned_name)

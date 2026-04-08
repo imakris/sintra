@@ -30,9 +30,9 @@ inline void validate_user_barrier_name(const std::string& barrier_name)
     }
 }
 
-/// Reject user-facing barrier calls on the all-processes group while a standard
-/// shutdown protocol is active.  This catches the common footgun of layering
-/// extra final barriers on top of shutdown().
+/// Reject user-facing barrier calls on the all-processes group while any
+/// lifecycle teardown protocol is active. This catches the common footgun of
+/// layering extra final barriers on top of shutdown(), leave(), or finalize().
 inline void validate_no_barrier_during_shutdown(const std::string& group_name)
 {
     if (group_name != "_sintra_all_processes") {
@@ -41,9 +41,9 @@ inline void validate_no_barrier_during_shutdown(const std::string& group_name)
     const auto state = s_shutdown_state.load(std::memory_order_acquire);
     if (state != shutdown_protocol_state::idle) {
         throw std::logic_error(
-            "User barrier on '_sintra_all_processes' called while a standard shutdown "
-            "protocol is active (state=" + std::to_string(static_cast<int>(state)) + "). "
-            "Do not layer extra barriers on top of shutdown().");
+            "User barrier on '_sintra_all_processes' called while a lifecycle "
+            "teardown protocol is active (state=" + std::to_string(static_cast<int>(state)) + "). "
+            "Do not layer extra barriers on top of shutdown(), leave(), or finalize().");
     }
 }
 

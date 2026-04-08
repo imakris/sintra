@@ -43,6 +43,28 @@ inside the standard shutdown path. The runtime owns the necessary internal
 synchronization. The hook is coordinator-local and must not initiate new peer
 coordination, extra barriers, or additional custom protocol steps.
 
+## `sintra::leave()`
+
+`leave()` is the public API for a clean local departure when this process is
+exiting but peers may continue running.
+
+```cpp
+sintra::leave();
+```
+
+Use `leave()` when:
+
+- one participant exits intentionally
+- the rest of the topology should continue
+- the process is a leaf-like participant that is not relying on owned
+  descendants to outlive it
+
+On healthy coordinator connectivity, `leave()` follows the same local drain,
+pause, unpublish, and teardown choreography as the internal finalize path, but
+it does not enter the collective `_sintra_all_processes` shutdown protocol.
+The coordinator may call `leave()` only when it is already the sole remaining
+known process from the runtime's point of view.
+
 ### Extension rule
 
 Supported non-happy-path shutdowns should be expressed through additional
@@ -52,21 +74,23 @@ semantically just shutdown.
 
 ### Protocol state and fail-fast guardrails
 
-The runtime tracks the active shutdown protocol state (in
+The runtime tracks the active lifecycle teardown state (in
 `detail::shutdown_protocol_state`, not part of the public API):
 
-- `idle` — no shutdown in progress
-- `collective_shutdown_entered` — `shutdown()` has been called
-- `coordinator_hook_running` — coordinator hook is executing
-- `coordinator_hook_completed` — hook finished, awaiting peer synchronization
-- `finalizing` — raw teardown in progress
+- `idle` - no teardown in progress
+- `collective_shutdown_entered` - `shutdown()` has been called
+- `local_departure_entered` - `leave()` has been called
+- `coordinator_hook_running` - coordinator hook is executing
+- `coordinator_hook_completed` - hook finished, awaiting peer synchronization
+- `finalizing` - raw teardown in progress
 
 Illegal compositions are rejected immediately:
 
 - Calling `shutdown()` while another shutdown is already in progress
-- Calling `detail::finalize()` while a standard shutdown is active
-- Calling a user-facing barrier on `_sintra_all_processes` while a standard
-  shutdown is active
+- Calling `leave()` while another lifecycle teardown is already in progress
+- Calling `detail::finalize()` while a lifecycle teardown is active
+- Calling a user-facing barrier on `_sintra_all_processes` while a lifecycle
+  teardown is active
 
 ### Notes
 
@@ -85,7 +109,8 @@ programs, exceptional/error paths, or test code that cannot participate in a
 symmetric shutdown. It lives in the `sintra::detail` namespace — ordinary
 multi-process callers should use `shutdown()` instead. The internal
 implementation (`detail::finalize_impl()`) is also available for deliberate
-low-level work in tests and experiments.
+low-level work in tests and experiments. Ordinary code that needs a clean
+unilateral departure should use `leave()` instead of `detail::finalize()`.
 
 Calling `detail::finalize()` performs the following steps:
 
@@ -160,9 +185,9 @@ Calling `detail::finalize()` performs the following steps:
   *(Coordinator::begin_process_draining and Coordinator::drop_from_inflight_barriers in coordinator_impl.h)*
 
 These rules eliminate shutdown deadlocks during teardown, but they do not turn
-`detail::finalize()` into a collective "safe to shut down now" handshake by itself.
-For ordinary multi-process completion, use `sintra::shutdown()` or
-`sintra::shutdown(sintra::shutdown_options{...})`.  If an algorithm needs
-stronger guarantees about group membership than the default shutdown helper
-provides, it should layer an explicit membership protocol on top of these
-barrier semantics.
+`detail::finalize()` into a collective "safe to shut down now" handshake by
+itself. For ordinary multi-process completion, use `sintra::shutdown()` or
+`sintra::shutdown(sintra::shutdown_options{...})`. For unilateral participant
+departure, use `sintra::leave()`. If an algorithm needs stronger guarantees
+about group membership than the default lifecycle helpers provide, it should
+layer an explicit membership protocol on top of these barrier semantics.
