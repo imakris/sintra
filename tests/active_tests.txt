@@ -74,6 +74,7 @@ tls_post_handler_test                     20
 spawn_wait_test                           10
 lifecycle_handler_test                    20
 leave_lifecycle_test                       5
+leave_coordinator_guardrails_test          5
 receive_test                              20
 lifeline_basic_test                        5
 locality_messaging_test                    1
