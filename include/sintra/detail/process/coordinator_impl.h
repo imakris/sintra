@@ -453,7 +453,7 @@ instance_id_type Coordinator::publish_transceiver(type_id_type tid, instance_id_
 inline
 bool Coordinator::unpublish_transceiver(instance_id_type iid)
 {
-    lock_guard<mutex> lock(m_publish_mutex);
+    std::unique_lock<mutex> publish_lock(m_publish_mutex);
 
     // the process of the transceiver must have been registered
     auto process_iid = process_of(iid);
@@ -484,6 +484,11 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
     auto tn = it->second;
 
     std::vector<Pending_instance_publication> ready_notifications;
+    bool should_note_draining_state_change = false;
+    bool crash_seen = false;
+    int crash_status = 0;
+    uint64_t draining_index = 0;
+    bool was_draining = false;
 
     // if it is a Managed_process is being unpublished, more cleanup is required
     if (iid == process_iid) {
@@ -528,8 +533,7 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
         // CRITICAL: Mark as draining BEFORE removing from groups to prevent barriers
         // from including this process. This handles both graceful shutdown (where
         // begin_process_draining was already called) and crash scenarios (where it wasn't).
-        const auto draining_index = get_process_index(process_iid);
-        bool was_draining = false;
+        draining_index = get_process_index(process_iid);
         size_t draining_slot = 0;
         if (draining_slot_of_index(draining_index, draining_slot)) {
             was_draining = (m_draining_process_states[draining_slot].load() != 0);
@@ -555,16 +559,7 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
             }
         }
 
-        // If a caller is waiting for all processes to reach the draining state,
-        // notify so it can re-evaluate the aggregate draining predicate. The
-        // predicate itself is computed inside wait_for_all_draining() to avoid
-        // re-entrancy and lock ordering issues here.
-        if (m_waiting_for_all_draining.load(std::memory_order_acquire)) {
-            m_all_draining_cv.notify_all();
-        }
-
-        bool crash_seen = false;
-        int crash_status = 0;
+        should_note_draining_state_change = true;
         {
             std::lock_guard<mutex> crash_lock(m_crash_mutex);
             auto crash_it = m_recent_crash_status.find(process_iid);
@@ -574,24 +569,30 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
                 m_recent_crash_status.erase(crash_it);
             }
         }
+    }
 
-        if (!crash_seen) {
-            process_lifecycle_event event;
-            event.process_iid = process_iid;
-            event.process_slot = static_cast<uint32_t>(draining_index);
-            event.status = 0;
-            event.why = was_draining
-                ? process_lifecycle_event::reason::normal_exit
-                : process_lifecycle_event::reason::unpublished;
-            emit_lifecycle_event(event);
+    publish_lock.unlock();
 
-            if (!was_draining) {
-                Crash_info info;
-                info.process_iid = process_iid;
-                info.process_slot = static_cast<uint32_t>(draining_index);
-                info.status = 0;
-                recover_if_required(info);
-            }
+    if (should_note_draining_state_change) {
+        note_draining_state_change();
+    }
+
+    if (iid == process_iid && !crash_seen) {
+        process_lifecycle_event event;
+        event.process_iid = process_iid;
+        event.process_slot = static_cast<uint32_t>(draining_index);
+        event.status = 0;
+        event.why = was_draining
+            ? process_lifecycle_event::reason::normal_exit
+            : process_lifecycle_event::reason::unpublished;
+        emit_lifecycle_event(event);
+
+        if (!was_draining) {
+            Crash_info info;
+            info.process_iid = process_iid;
+            info.process_slot = static_cast<uint32_t>(draining_index);
+            info.status = crash_status;
+            recover_if_required(info);
         }
     }
 
@@ -630,13 +631,7 @@ inline sequence_counter_type Coordinator::begin_process_draining(instance_id_typ
     // are sent on the reply channel. Get it at return time for the draining process.
     auto watermark = s_mproc->m_out_rep_c->get_leading_sequence();
 
-    // If a caller (typically the coordinator during shutdown) is waiting for all
-    // processes to enter the draining state, notify so it can re-evaluate the
-    // aggregate draining predicate. The predicate itself is computed inside
-    // wait_for_all_draining() to avoid lock layering here.
-    if (m_waiting_for_all_draining.load(std::memory_order_acquire)) {
-        m_all_draining_cv.notify_all();
-    }
+    note_draining_state_change();
 
     return watermark;
 }
@@ -751,8 +746,8 @@ inline bool Coordinator::wait_for_all_draining(instance_id_type self_process)
 {
     (void)self_process; // currently unused; kept for potential future refinements.
 
-    m_waiting_for_all_draining.store(true, std::memory_order_release);
     std::unique_lock<std::mutex> lk(m_draining_state_mutex);
+    m_waiting_for_all_draining.store(true, std::memory_order_release);
 
     const auto timeout = m_drain_timeout;
     const bool has_timeout = (timeout.count() > 0);
@@ -762,17 +757,35 @@ inline bool Coordinator::wait_for_all_draining(instance_id_type self_process)
 
     bool all_drained = true;
 
-    while (!all_known_processes_draining_unlocked(self_process)) {
-        std::cv_status status;
-        if (has_timeout) {
-            status = m_all_draining_cv.wait_until(lk, deadline);
-        }
-        else {
-            m_all_draining_cv.wait(lk);
-            status = std::cv_status::no_timeout;
+    while (true) {
+        const uint64_t observed_generation = m_draining_state_generation;
+        lk.unlock();
+        const bool drained_now = all_known_processes_draining_unlocked(self_process);
+        lk.lock();
+
+        if (drained_now) {
+            break;
         }
 
-        if (status == std::cv_status::timeout) {
+        const auto generation_advanced = [&]() {
+            return m_draining_state_generation != observed_generation;
+        };
+
+        bool woke_for_state_change = true;
+        if (!generation_advanced()) {
+            if (has_timeout) {
+                woke_for_state_change =
+                    m_all_draining_cv.wait_until(lk, deadline, generation_advanced);
+            }
+            else {
+                m_all_draining_cv.wait(lk, generation_advanced);
+            }
+        }
+
+        if (has_timeout && !woke_for_state_change) {
+            m_waiting_for_all_draining.store(false, std::memory_order_release);
+            lk.unlock();
+
             std::vector<instance_id_type> candidates;
             collect_known_process_candidates_unlocked(candidates);
             if (!candidates.empty()) {
@@ -800,12 +813,22 @@ inline bool Coordinator::wait_for_all_draining(instance_id_type self_process)
                 ls << "\n";
             }
             all_drained = false;
-            break;
+            return all_drained;
         }
     }
 
     m_waiting_for_all_draining.store(false, std::memory_order_release);
     return all_drained;
+}
+
+
+inline void Coordinator::note_draining_state_change()
+{
+    std::lock_guard<std::mutex> lk(m_draining_state_mutex);
+    ++m_draining_state_generation;
+    if (m_waiting_for_all_draining.load(std::memory_order_relaxed)) {
+        m_all_draining_cv.notify_all();
+    }
 }
 
 

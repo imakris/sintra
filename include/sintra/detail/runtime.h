@@ -450,13 +450,34 @@ inline void shutdown_coordinator_drain_wait(const std::string& group_name)
     };
 
     bool group_drained = false;
+    std::unique_lock<std::mutex> wait_lock(s_coord->m_draining_state_mutex);
     s_coord->m_waiting_for_all_draining.store(true, std::memory_order_release);
-    {
-        std::unique_lock<std::mutex> wait_lock(s_coord->m_draining_state_mutex);
-        group_drained = s_coord->m_all_draining_cv.wait_until(
-            wait_lock,
-            deadline,
-            only_self_remains);
+    while (true) {
+        const uint64_t observed_generation = s_coord->m_draining_state_generation;
+        wait_lock.unlock();
+        const bool drained_now = only_self_remains();
+        wait_lock.lock();
+
+        if (drained_now) {
+            group_drained = true;
+            break;
+        }
+
+        const auto generation_advanced = [&]() {
+            return s_coord->m_draining_state_generation != observed_generation;
+        };
+
+        if (generation_advanced()) {
+            continue;
+        }
+
+        if (!s_coord->m_all_draining_cv.wait_until(
+                wait_lock,
+                deadline,
+                generation_advanced))
+        {
+            break;
+        }
     }
     s_coord->m_waiting_for_all_draining.store(false, std::memory_order_release);
 

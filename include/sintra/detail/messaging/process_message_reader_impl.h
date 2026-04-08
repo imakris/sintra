@@ -356,11 +356,10 @@ void Process_message_reader::end_reading_session(
     s_mproc->m_num_active_readers--;
     s_mproc->m_num_active_readers_mutex.unlock();
     s_mproc->m_num_active_readers_condition.notify_all();
-    if (s_coord &&
-        s_coord->m_waiting_for_all_draining.load(std::memory_order_acquire))
-    {
-        // Coordinator shutdown drain-wait also tracks external reader exit.
-        s_coord->m_all_draining_cv.notify_all();
+    if (s_coord) {
+        // Reader exit can satisfy the coordinator drain predicate; route it
+        // through the coordinator drain-state gate so waiters cannot miss it.
+        s_coord->note_draining_state_change();
     }
 
     std::lock_guard<std::mutex> lk(m_stop_mutex);
@@ -466,10 +465,22 @@ void Process_message_reader::request_reader_function()
 
                 // A targeted local request normally requires a live receiver. During
                 // teardown, though, a queued request can outlive the receiver entry
-                // after shutdown/finalize has already started. Drop that request
-                // instead of asserting on a stale pre-fetch reader_state snapshot.
+                // after shutdown/finalize has already started. Fail the call
+                // immediately instead of asserting on a stale pre-fetch reader_state
+                // snapshot or silently dropping the request and orphaning the caller.
                 assert(!strict_receiver_invariant || receiver_exists);
                 if (!receiver_exists) {
+                    const std::string reason = "RPC target is no longer available.";
+                    auto* placed_msg =
+                        s_mproc->m_out_rep_c->write<Transceiver::exception>(
+                            vb_size<Transceiver::exception>(reason),
+                            reason);
+                    placed_msg->sender_instance_id = m->receiver_instance_id;
+                    placed_msg->receiver_instance_id = m->sender_instance_id;
+                    placed_msg->function_instance_id = m->function_instance_id;
+                    placed_msg->exception_type_id =
+                        (type_id_type)detail::reserved_id::std_runtime_error;
+                    s_mproc->m_out_rep_c->done_writing();
                     publish_request_progress(m_in_req_c->get_message_reading_sequence());
                     continue;
                 }

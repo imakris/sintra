@@ -336,9 +336,14 @@ public:
     // wait_for_all_draining(), which blocks the caller until the condition
     // holds. The flag is_process_draining() remains the canonical per-slot
     // predicate; these helpers simply aggregate it over all known processes.
+    // m_draining_state_generation is bumped after any state transition that can
+    // satisfy a drain predicate. Waiters snapshot it before re-checking the
+    // predicate and sleep only until the next generation change, preventing
+    // missed wakeups without polling.
     mutable std::mutex                         m_draining_state_mutex;
     std::condition_variable                    m_all_draining_cv;
     std::atomic<bool>                          m_waiting_for_all_draining{false};
+    uint64_t                                   m_draining_state_generation = 0;
 
     // Configurable timeout for wait_for_all_draining(). A value of 0 means
     // wait indefinitely (no timeout). Default is 20 seconds.
@@ -349,6 +354,7 @@ public:
     void collect_known_process_candidates_unlocked(std::vector<instance_id_type>& candidates);
     bool all_known_processes_draining_unlocked(instance_id_type self_process);
     bool is_sole_known_process_unlocked(instance_id_type self_process);
+    void note_draining_state_change();
     // Block until all known processes are draining (or have been scavenged).
     // Returns true if all processes reached draining state, false if timed out.
     // A timeout of 0 (set via set_drain_timeout) means wait indefinitely.
