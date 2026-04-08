@@ -58,6 +58,8 @@ Use `leave()` when:
 - the rest of the topology should continue
 - the process is a leaf-like participant that is not relying on owned
   descendants to outlive it
+- the call is made from a top-level control thread rather than a message
+  handler or post-handler callback
 
 On healthy coordinator connectivity, `leave()` follows the same local drain,
 pause, unpublish, and teardown choreography as the internal finalize path, but

@@ -9,8 +9,9 @@
 // 6. leave() without an active runtime returns false and resets state.
 // 7. finalize() without an active runtime returns false.
 // 8. Protocol state returns to idle after successful finalize/leave.
-// 9. Double init() without teardown is rejected.
-// 10. init()/finalize() cycles work correctly (state resets between cycles).
+// 9. leave() rejects when called from handler dispatch context.
+// 10. Double init() without teardown is rejected.
+// 11. init()/finalize() cycles work correctly (state resets between cycles).
 
 #include <sintra/sintra.h>
 
@@ -246,6 +247,30 @@ bool test_leave_after_init_returns_true_and_resets_state(int argc, char* argv[])
         "leave() after init() should return true and leave state idle");
 }
 
+bool test_leave_rejects_in_handler_context(int argc, char* argv[])
+{
+    sintra::init(argc, argv);
+
+    bool caught = false;
+    tl_in_handler_dispatch = true;
+    try {
+        (void)sintra::leave();
+    }
+    catch (const std::logic_error&) {
+        caught = true;
+    }
+    tl_in_handler_dispatch = false;
+
+    sintra::detail::finalize();
+
+    const auto after = sintra::detail::s_shutdown_state.load(std::memory_order_acquire);
+    return sintra::test::assert_true(
+        caught &&
+            after == sintra::detail::shutdown_protocol_state::idle,
+        k_prefix,
+        "leave() should reject handler-dispatch context and leave state idle");
+}
+
 bool test_double_init_rejected(int argc, char* argv[])
 {
     sintra::init(argc, argv);
@@ -307,6 +332,7 @@ int main(int argc, char* argv[])
     ok &= test_leave_without_runtime_returns_false();
     ok &= test_finalize_without_init_returns_false();
     ok &= test_leave_after_init_returns_true_and_resets_state(argc, argv);
+    ok &= test_leave_rejects_in_handler_context(argc, argv);
     ok &= test_state_idle_after_finalize(argc, argv);
     ok &= test_double_init_rejected(argc, argv);
     ok &= test_init_finalize_cycle(argc, argv);

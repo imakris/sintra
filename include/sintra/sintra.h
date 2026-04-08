@@ -213,6 +213,8 @@ bool shutdown();
 ///
 /// Coordinator processes may call `leave()` only when they are already the
 /// sole remaining known process.
+/// `leave()` must be initiated from a top-level control thread, not from a
+/// message handler or post-handler callback.
 bool leave();
 
 ///\brief Shutdown with options (e.g. a coordinator-side shutdown hook).

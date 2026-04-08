@@ -6,8 +6,10 @@
 #include "debug_pause.h"
 #include "globals.h"
 #include "logging.h"
+#include "tls_post_handler.h"
 #include "process/coordinator.h"
 #include "process/managed_process.h"
+#include "transceiver_impl.h"
 #include "utility.h"
 
 #include <atomic>
@@ -326,7 +328,11 @@ inline bool finalize_impl()
 
     // Reset flags to allow another init()/finalize() cycle.
     s_init_once = false;
-    s_shutdown_state.store(shutdown_protocol_state::idle, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> admission_lock(s_teardown_admission_mutex);
+        s_shutdown_state.store(shutdown_protocol_state::idle, std::memory_order_release);
+        s_teardown_admission_closed.store(false, std::memory_order_release);
+    }
 
     trace("end");
 
@@ -351,17 +357,33 @@ inline void claim_lifecycle_teardown_state(
 
 inline bool lifecycle_teardown_requested()
 {
-    return s_shutdown_state.load(std::memory_order_acquire) !=
-           shutdown_protocol_state::idle;
+    return s_teardown_admission_closed.load(std::memory_order_acquire) ||
+           s_shutdown_state.load(std::memory_order_acquire) !=
+               shutdown_protocol_state::idle;
 }
 
-inline std::unique_lock<std::mutex> lock_coordinator_teardown_admission()
+inline void close_teardown_admission_and_claim_state(
+    shutdown_protocol_state desired_state,
+    const char* api_name)
 {
-    if (!s_coord) {
-        return std::unique_lock<std::mutex>{};
-    }
+    std::lock_guard<std::mutex> admission_lock(s_teardown_admission_mutex);
+    s_teardown_admission_closed.store(true, std::memory_order_release);
+    claim_lifecycle_teardown_state(desired_state, api_name);
+}
 
-    return std::unique_lock<std::mutex>{detail::s_teardown_admission_mutex};
+inline void reset_lifecycle_teardown_to_idle()
+{
+    std::lock_guard<std::mutex> admission_lock(s_teardown_admission_mutex);
+    s_shutdown_state.store(shutdown_protocol_state::idle, std::memory_order_release);
+    s_teardown_admission_closed.store(false, std::memory_order_release);
+}
+
+inline void validate_leave_context()
+{
+    if (tl_in_handler_dispatch || tl_in_post_handler()) {
+        throw std::logic_error(
+            "sintra::leave() must not be called from a message handler or post-handler callback.");
+    }
 }
 
 /// Low-level teardown for single-process programs, exceptional/error
@@ -373,13 +395,12 @@ inline std::unique_lock<std::mutex> lock_coordinator_teardown_admission()
 /// path is an illegal composition.
 inline bool finalize()
 {
-    auto admission_lock = lock_coordinator_teardown_admission();
-    claim_lifecycle_teardown_state(
+    close_teardown_admission_and_claim_state(
         shutdown_protocol_state::finalizing,
         "sintra::detail::finalize()");
 
     if (!s_mproc) {
-        s_shutdown_state.store(shutdown_protocol_state::idle, std::memory_order_release);
+        reset_lifecycle_teardown_to_idle();
         return false;
     }
 
@@ -387,7 +408,7 @@ inline bool finalize()
         return finalize_impl();
     }
     catch (...) {
-        s_shutdown_state.store(shutdown_protocol_state::idle, std::memory_order_release);
+        reset_lifecycle_teardown_to_idle();
         throw;
     }
 }
@@ -469,23 +490,12 @@ inline bool shutdown()
 
 inline bool shutdown(const shutdown_options& options)
 {
-    auto admission_lock = detail::lock_coordinator_teardown_admission();
-
-    // Fail fast: reject if another shutdown or finalize is already in progress.
-    auto expected = detail::shutdown_protocol_state::idle;
-    if (!detail::s_shutdown_state.compare_exchange_strong(
-            expected,
-            detail::shutdown_protocol_state::collective_shutdown_entered,
-            std::memory_order_acq_rel))
-    {
-        throw std::logic_error(
-            "sintra::shutdown() called while another lifecycle teardown is already in progress "
-            "(state=" + std::to_string(static_cast<int>(expected)) + ").");
-    }
+    detail::close_teardown_admission_and_claim_state(
+        detail::shutdown_protocol_state::collective_shutdown_entered,
+        "sintra::shutdown()");
 
     if (!s_mproc) {
-        detail::s_shutdown_state.store(
-            detail::shutdown_protocol_state::idle, std::memory_order_release);
+        detail::reset_lifecycle_teardown_to_idle();
         return false;
     }
 
@@ -580,15 +590,13 @@ inline bool shutdown(const shutdown_options& options)
 
 inline bool leave()
 {
-    auto admission_lock = detail::lock_coordinator_teardown_admission();
-
-    detail::claim_lifecycle_teardown_state(
+    detail::validate_leave_context();
+    detail::close_teardown_admission_and_claim_state(
         detail::shutdown_protocol_state::local_departure_entered,
         "sintra::leave()");
 
     if (!s_mproc) {
-        detail::s_shutdown_state.store(
-            detail::shutdown_protocol_state::idle, std::memory_order_release);
+        detail::reset_lifecycle_teardown_to_idle();
         return false;
     }
 
@@ -602,8 +610,7 @@ inline bool leave()
         return detail::finalize_impl();
     }
     catch (...) {
-        detail::s_shutdown_state.store(
-            detail::shutdown_protocol_state::idle, std::memory_order_release);
+        detail::reset_lifecycle_teardown_to_idle();
         throw;
     }
 }
@@ -638,12 +645,7 @@ inline size_t spawn_swarm_process(const Spawn_options& options)
 
     const bool wait_requested = !options.wait_for_instance_name.empty();
     const auto wait_timeout = options.wait_timeout;
-    const auto coord_id = s_coord_id;
-    if (wait_requested && coord_id == invalid_instance_id) {
-        Log_stream(log_level::error)
-            << "spawn_swarm_process: wait requires a valid coordinator\n";
-        return 0;
-    }
+    instance_id_type coord_id = invalid_instance_id;
 
     size_t spawned = 0;
     const auto piid = (options.process_instance_id != invalid_instance_id)
@@ -651,42 +653,58 @@ inline size_t spawn_swarm_process(const Spawn_options& options)
         : make_process_instance_id();
 
     // Ensure argv[0] is the program name (required on Windows); avoid duplicates.
-    auto args = options.args;
-    auto argv0_matches = [&]() {
-        if (args.empty()) {
-            return false;
+    {
+        std::lock_guard<std::mutex> admission_lock(detail::s_teardown_admission_mutex);
+        if (detail::s_teardown_admission_closed.load(std::memory_order_acquire) || !s_mproc) {
+            Log_stream(log_level::warning)
+                << "spawn_swarm_process: rejected because lifecycle teardown is in progress\n";
+            return 0;
         }
-        if (args.front() == options.binary_path) {
-            return true;
+
+        coord_id = s_coord_id;
+        if (wait_requested && coord_id == invalid_instance_id) {
+            Log_stream(log_level::error)
+                << "spawn_swarm_process: wait requires a valid coordinator\n";
+            return 0;
         }
-        const auto front_name = std::filesystem::path(args.front()).filename().string();
-        const auto bin_name = std::filesystem::path(options.binary_path).filename().string();
+
+        auto args = options.args;
+        auto argv0_matches = [&]() {
+            if (args.empty()) {
+                return false;
+            }
+            if (args.front() == options.binary_path) {
+                return true;
+            }
+            const auto front_name = std::filesystem::path(args.front()).filename().string();
+            const auto bin_name = std::filesystem::path(options.binary_path).filename().string();
 #ifdef _WIN32
-        return _stricmp(front_name.c_str(), bin_name.c_str()) == 0;
+            return _stricmp(front_name.c_str(), bin_name.c_str()) == 0;
 #else
-        return front_name == bin_name;
+            return front_name == bin_name;
 #endif
-    };
-    if (!argv0_matches()) {
-        args.insert(args.begin(), options.binary_path);
-    }
+        };
+        if (!argv0_matches()) {
+            args.insert(args.begin(), options.binary_path);
+        }
 
-    args.insert(args.end(), {
-        "--swarm_id",       std::to_string(s_mproc->m_swarm_id),
-        "--instance_id",    std::to_string(piid),
-        "--coordinator_id", std::to_string(coord_id)
-    });
+        args.insert(args.end(), {
+            "--swarm_id",       std::to_string(s_mproc->m_swarm_id),
+            "--instance_id",    std::to_string(piid),
+            "--coordinator_id", std::to_string(coord_id)
+        });
 
-    Managed_process::Spawn_swarm_process_args spawn_args;
-    spawn_args.binary_name = options.binary_path;
-    spawn_args.args = args;
-    spawn_args.lifetime = options.lifetime;
+        Managed_process::Spawn_swarm_process_args spawn_args;
+        spawn_args.binary_name = options.binary_path;
+        spawn_args.args = args;
+        spawn_args.lifetime = options.lifetime;
 
-    for (size_t i = 0; i < options.count; ++i) {
-        spawn_args.piid = piid;
-        auto result = s_mproc->spawn_swarm_process(spawn_args);
-        if (result.success) {
-            ++spawned;
+        for (size_t i = 0; i < options.count; ++i) {
+            spawn_args.piid = piid;
+            auto result = s_mproc->spawn_swarm_process(spawn_args);
+            if (result.success) {
+                ++spawned;
+            }
         }
     }
 
@@ -768,21 +786,28 @@ inline instance_id_type join_swarm(
     int branch_index,
     std::string binary_name = std::string())
 {
-    if (!s_mproc || s_coord_id == invalid_instance_id || branch_index < 1) {
+    if (branch_index < 1) {
         return invalid_instance_id;
     }
 
-    if (detail::lifecycle_teardown_requested()) {
-        return invalid_instance_id;
-    }
+    instance_id_type coord_id = invalid_instance_id;
+    {
+        std::lock_guard<std::mutex> admission_lock(detail::s_teardown_admission_mutex);
+        if (detail::s_teardown_admission_closed.load(std::memory_order_acquire) ||
+            !s_mproc ||
+            s_coord_id == invalid_instance_id) {
+            return invalid_instance_id;
+        }
 
-    if (binary_name.empty()) {
-        binary_name = s_mproc->m_binary_name;
+        coord_id = s_coord_id;
+        if (binary_name.empty()) {
+            binary_name = s_mproc->m_binary_name;
+        }
     }
 
     try {
         return Coordinator::rpc_join_swarm(
-            s_coord_id,
+            coord_id,
             binary_name,
             branch_index);
     }

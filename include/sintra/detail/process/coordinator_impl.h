@@ -861,7 +861,7 @@ instance_id_type Coordinator::join_swarm(
 
     std::lock_guard<mutex> admission_lock(detail::s_teardown_admission_mutex);
 
-    if (s_shutdown_state.load(std::memory_order_acquire) != shutdown_protocol_state::idle) {
+    if (detail::s_teardown_admission_closed.load(std::memory_order_acquire)) {
         return invalid_instance_id;
     }
 
@@ -969,7 +969,7 @@ void Coordinator::recover_if_required(const Crash_info& info)
 {
     assert(is_process(info.process_iid));
 
-    if (s_shutdown_state.load(std::memory_order_acquire) != shutdown_protocol_state::idle) {
+    if (detail::s_teardown_admission_closed.load(std::memory_order_acquire)) {
         return;
     }
 
@@ -1006,7 +1006,7 @@ void Coordinator::recover_if_required(const Crash_info& info)
 
     auto should_cancel = [this]() {
         return m_shutdown.load(std::memory_order_acquire) ||
-               s_shutdown_state.load(std::memory_order_acquire) != shutdown_protocol_state::idle;
+               detail::s_teardown_admission_closed.load(std::memory_order_acquire);
     };
 
     auto spawned = std::make_shared<std::atomic<bool>>(false);
