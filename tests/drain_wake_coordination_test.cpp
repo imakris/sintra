@@ -102,6 +102,11 @@ bool test_wait_for_all_draining_wakes_after_state_change()
     const auto probe = make_probe_process();
     add_initializing_probe(probe);
     sintra::s_coord->set_drain_timeout(std::chrono::seconds(2));
+    const auto self_index =
+        static_cast<size_t>(sintra::get_process_index(sintra::s_mproc_id));
+    const auto previous_self_draining =
+        sintra::s_coord->m_draining_process_states[self_index].load(std::memory_order_acquire);
+    sintra::s_coord->m_draining_process_states[self_index] = 1;
 
     Wait_result result;
     std::thread waiter([&]() {
@@ -138,6 +143,7 @@ bool test_wait_for_all_draining_wakes_after_state_change()
     }
 
     waiter.join();
+    sintra::s_coord->m_draining_process_states[self_index] = previous_self_draining;
     remove_initializing_probe(probe);
     sintra::s_coord->set_drain_timeout(std::chrono::seconds(20));
 
@@ -157,6 +163,16 @@ bool test_shutdown_drain_wait_wakes_after_group_change()
     const auto probe = make_probe_process();
     const std::string group_name = "_sintra_all_processes";
     add_group_probe(group_name, probe);
+    {
+        std::lock_guard<std::mutex> readers_lock(sintra::s_mproc->m_num_active_readers_mutex);
+        if (!sintra::test::assert_true(
+                sintra::s_mproc->m_num_active_readers == 2,
+                k_prefix,
+                "shutdown_coordinator_drain_wait() precondition violated: coordinator should have exactly two local readers")) {
+            remove_group_probe(group_name, probe);
+            return false;
+        }
+    }
 
     Wait_result result;
     std::thread waiter([&]() {
