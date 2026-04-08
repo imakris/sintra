@@ -959,6 +959,9 @@ void Transceiver::rpc_handler(Message_prefix& untyped_msg)
 
     auto send_unavailable_response = [&](const std::string& reason)
     {
+        if (msg.function_instance_id == invalid_instance_id) {
+            return;
+        }
         auto* placed_msg = s_mproc->m_out_rep_c->write<exception>(vb_size<exception>(reason), reason);
         placed_msg->sender_instance_id = untyped_msg.receiver_instance_id;
         placed_msg->receiver_instance_id = msg.sender_instance_id;
