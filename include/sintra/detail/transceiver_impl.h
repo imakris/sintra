@@ -9,9 +9,8 @@
 #include "logging.h"
 #include "transceiver.h"
 
-// Defined in process_message_reader_impl.h; repeated here so the deactivator
-// lambda (below) can skip the dispatch-depth wait when called from within a
-// handler on the same thread.
+// Shared handler-dispatch TLS flag. The deactivator lambda below uses this to
+// skip the dispatch-depth wait during self-deactivation on the same thread.
 inline bool thread_local tl_in_handler_dispatch = false;
 
 #include <cassert>

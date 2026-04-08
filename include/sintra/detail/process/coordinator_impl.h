@@ -958,6 +958,10 @@ void Coordinator::recover_if_required(const Crash_info& info)
             Log_stream(log_level::warning)
                 << "[sintra] Exception in recovery policy: " << e.what() << "\n";
         }
+        catch (...) {
+            Log_stream(log_level::warning)
+                << "[sintra] Unknown exception in recovery policy.\n";
+        }
     }
 
     if (!should_recover) {

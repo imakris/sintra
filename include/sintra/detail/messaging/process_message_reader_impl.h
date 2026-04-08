@@ -33,7 +33,6 @@ void install_signal_handler();
 
 
 inline bool thread_local tl_is_req_thread = false;
-inline bool thread_local tl_in_handler_dispatch = false;
 
 inline bool validate_relay_sender(
     Message_prefix& message,
