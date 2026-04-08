@@ -1931,8 +1931,16 @@ struct Ring_R : Ring<T, true>
             // signal stop and return immediately instead of parking on the
             // semaphore forever.  Setting m_stopping causes fetch_message()
             // to return nullptr, which cleanly exits the reader loop.
-            if (sequences_equal() &&
-                c.writer_closed.load(std::memory_order_acquire))
+            //
+            // Check writer_closed FIRST (with acquire) so that the acquire
+            // barrier makes all prior writer stores visible — including the
+            // final leading_sequence update from done_writing().  Only then
+            // check sequences_equal(), which now sees the latest data.
+            // Reversing the order would create a TOCTOU race: the reader
+            // could see stale leading_sequence, conclude there's no data,
+            // then see writer_closed and exit — losing the last message.
+            if (c.writer_closed.load(std::memory_order_acquire) &&
+                sequences_equal())
             {
                 m_stopping = true;
                 return Range<T>{};
