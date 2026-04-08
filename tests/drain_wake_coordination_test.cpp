@@ -46,11 +46,12 @@ bool wait_for_completion(
 
 sintra::instance_id_type make_probe_process()
 {
-    auto probe = sintra::make_process_instance_id();
-    if (probe == sintra::s_mproc_id) {
-        probe = sintra::make_process_instance_id();
+    const auto self_index = static_cast<uint32_t>(sintra::get_process_index(sintra::s_mproc_id));
+    uint32_t probe_index = self_index + 1;
+    if (probe_index > sintra::max_process_index) {
+        probe_index = self_index - 1;
     }
-    return probe;
+    return sintra::make_process_instance_id(probe_index);
 }
 
 void add_initializing_probe(sintra::instance_id_type process_iid)
