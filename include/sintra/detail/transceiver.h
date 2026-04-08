@@ -412,6 +412,9 @@ public:
     inline
     static auto& get_rpc_handler_map();
 
+    inline
+    static auto& get_rpc_reply_expected_map();
+
 
     template <typename RPCTC>
     static auto& get_instance_to_object_map();

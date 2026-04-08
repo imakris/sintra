@@ -643,6 +643,13 @@ auto& Transceiver::get_rpc_handler_map()
     return message_id_to_handler;
 }
 
+inline
+auto& Transceiver::get_rpc_reply_expected_map()
+{
+    static spinlocked_umap<type_id_type, bool> message_id_to_reply_expected;
+    return message_id_to_reply_expected;
+}
+
 
 
 template <typename RPCTC>
@@ -1383,6 +1390,7 @@ Transceiver::export_rpc_impl()
     using RPCTC_o_type = typename RPCTC::o_type;
     [[maybe_unused]] static auto once = [&] {
         get_rpc_handler_map().set_value(test, &RPCTC_o_type::template rpc_handler<RPCTC, MT>);
+        get_rpc_reply_expected_map().set_value(test, !RPCTC::is_fire_and_forget);
         return test;
     }();
 
