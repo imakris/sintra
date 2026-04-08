@@ -356,6 +356,12 @@ void Process_message_reader::end_reading_session(
     s_mproc->m_num_active_readers--;
     s_mproc->m_num_active_readers_mutex.unlock();
     s_mproc->m_num_active_readers_condition.notify_all();
+    if (s_coord &&
+        s_coord->m_waiting_for_all_draining.load(std::memory_order_acquire))
+    {
+        // Coordinator shutdown drain-wait also tracks external reader exit.
+        s_coord->m_all_draining_cv.notify_all();
+    }
 
     std::lock_guard<std::mutex> lk(m_stop_mutex);
     running_flag = false;
@@ -451,14 +457,22 @@ void Process_message_reader::request_reader_function()
                     continue;
                 }
 
-                // If addressed to a specified local receiver, this may only be an RPC call,
-                // thus the receiver must exist.
-                assert(
-                    reader_state == READER_NORMAL ?
-                        s_mproc->m_local_pointer_of_instance_id.contains_key(m->receiver_instance_id)
-                    :
-                        true
-                );
+                const bool receiver_exists =
+                    s_mproc->m_local_pointer_of_instance_id.contains_key(m->receiver_instance_id);
+                const bool strict_receiver_invariant =
+                    (reader_state == READER_NORMAL) &&
+                    (detail::s_shutdown_state.load(std::memory_order_acquire) ==
+                        detail::shutdown_protocol_state::idle);
+
+                // A targeted local request normally requires a live receiver. During
+                // teardown, though, a queued request can outlive the receiver entry
+                // after shutdown/finalize has already started. Drop that request
+                // instead of asserting on a stale pre-fetch reader_state snapshot.
+                assert(!strict_receiver_invariant || receiver_exists);
+                if (!receiver_exists) {
+                    publish_request_progress(m_in_req_c->get_message_reading_sequence());
+                    continue;
+                }
 
                 if ((reader_state == READER_NORMAL) ||
                     (is_service_instance(m->receiver_instance_id) && s_coord) ||

@@ -423,17 +423,30 @@ inline void shutdown_coordinator_drain_wait(const std::string& group_name)
     }
 
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    auto external_readers_drained = [&]() {
+        if (!s_mproc) {
+            return true;
+        }
+
+        std::lock_guard<std::mutex> readers_lock(s_mproc->m_num_active_readers_mutex);
+        // The coordinator always has exactly two local readers of its own.
+        // Drain completion must not race ahead while remote-reader threads are
+        // still alive, or finalize can immediately block in reader teardown.
+        return s_mproc->m_num_active_readers <= 2;
+    };
     auto only_self_remains = [&]() {
         std::lock_guard<std::mutex> groups_lock(s_coord->m_groups_mutex);
         auto group_it = s_coord->m_groups.find(group_name);
         if (group_it == s_coord->m_groups.end()) {
-            return true;
+            return external_readers_drained();
         }
 
         auto& group = group_it->second;
         std::lock_guard<std::mutex> group_lock(group.m_call_mutex);
-        return (group.m_process_ids.size() == 1) &&
-               (group.m_process_ids.find(s_mproc_id) != group.m_process_ids.end());
+        const bool group_drained =
+            (group.m_process_ids.size() == 1) &&
+            (group.m_process_ids.find(s_mproc_id) != group.m_process_ids.end());
+        return group_drained && external_readers_drained();
     };
 
     bool group_drained = false;
