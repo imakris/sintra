@@ -48,7 +48,7 @@ This example demonstrates advanced Sintra features using Qt:
   5. When cursor updates resume, windows show a "recovered" message
 
 ### Normal Exit Handling
-- If you close a window normally (click X), it calls `sintra::shutdown()` on exit
+- If you close a window normally (click X), it calls `sintra::detail::finalize()` on exit
 - The coordinator detects the draining state and broadcasts the normal exit
 - Other windows display "Window N exited" in the notifications area
 - The closed window is NOT restarted (unlike crash recovery)
@@ -114,7 +114,7 @@ Window A (mouse move) -> emit_remote<cursor_position>(x, y, window_id)
 
 ### Normal Exit
 ```
-Window A (close button) -> sintra::shutdown() marks the process draining
+Window A (close button) -> sintra::detail::finalize() marks the process draining
                         -> Coordinator broadcasts normal_exit_notification
                         -> All other windows receive
                         -> Displayed as "Window N exited"

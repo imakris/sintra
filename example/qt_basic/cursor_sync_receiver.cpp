@@ -146,7 +146,7 @@ int main(int argc, char* argv[])
     receiver.show();
 
     int result = app.exec();
-    sintra::shutdown();
+    sintra::detail::finalize();
     return result;
 }
 

@@ -2222,16 +2222,21 @@ void Managed_process::go()
         m_entry_function();
     }
     catch (const rpc_cancelled&) {
-        // Expected during shutdown cascades — a peer exited and our RPC
-        // or barrier was cancelled.  Swallow so the worker exits cleanly
-        // instead of hitting std::terminate, which would cascade-kill
-        // remaining processes and destroy diagnostics.
+        // During shutdown cascades, a peer exiting cancels our RPCs and
+        // barriers.  Swallow so the worker exits cleanly instead of
+        // hitting std::terminate (which would cascade-kill remaining
+        // processes and destroy diagnostics).
+        // Outside of shutdown, rpc_cancelled indicates a real
+        // infrastructure failure — let it propagate.
+        if (detail::s_shutdown_state.load(std::memory_order_acquire) ==
+            detail::shutdown_protocol_state::idle &&
+            !m_must_stop.load(std::memory_order_acquire))
+        {
+            throw;
+        }
         Log_stream(log_level::warning)
-            << "Worker entry function exited with rpc_cancelled.\n";
+            << "Worker entry function exited with rpc_cancelled during shutdown.\n";
     }
-    // Other exceptions (real bugs) propagate — they should be visible
-    // to the coordinator via crash/lifecycle detection, not silently
-    // swallowed.
 }
 
  //////////////////////////////////////////////////////////////////////////

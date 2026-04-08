@@ -459,7 +459,7 @@ int main(int argc, char* argv[])
     sintra::Log_stream(sintra::log_level::info)
         << "[Coordinator] All windows have exited, shutting down\n";
 
-    sintra::shutdown();
+    sintra::detail::finalize();
 
     return 0;
 }

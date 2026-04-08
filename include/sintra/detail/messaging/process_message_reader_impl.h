@@ -33,6 +33,7 @@ void install_signal_handler();
 
 
 inline bool thread_local tl_is_req_thread = false;
+inline bool thread_local tl_in_handler_dispatch = false;
 
 inline bool validate_relay_sender(
     Message_prefix& message,
@@ -141,15 +142,18 @@ inline void dispatch_event_handlers(
             << " handlers=" << collected.size() << "\n";
     }
 
+    tl_in_handler_dispatch = true;
     try {
         for (auto& handler : collected) {
             handler(message);
         }
     }
     catch (...) {
+        tl_in_handler_dispatch = false;
         s_mproc->m_handlers_dispatch_depth.fetch_sub(1, std::memory_order_acq_rel);
         throw;
     }
+    tl_in_handler_dispatch = false;
 
     s_mproc->m_handlers_dispatch_depth.fetch_sub(1, std::memory_order_acq_rel);
 }

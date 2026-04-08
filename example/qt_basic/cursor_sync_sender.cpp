@@ -119,7 +119,7 @@ int main(int argc, char* argv[])
     if (sintra::spawn_swarm_process(spawn_options) == 0) {
         sintra::Log_stream(sintra::log_level::error)
             << "Failed to spawn receiver process: " << receiver_path << "\n";
-        sintra::shutdown();
+        sintra::detail::finalize();
         return 1;
     }
 
@@ -128,7 +128,7 @@ int main(int argc, char* argv[])
     sender.show();
 
     int result = app.exec();
-    sintra::shutdown();
+    sintra::detail::finalize();
     return result;
 }
 

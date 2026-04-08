@@ -9,6 +9,11 @@
 #include "logging.h"
 #include "transceiver.h"
 
+// Defined in process_message_reader_impl.h; repeated here so the deactivator
+// lambda (below) can skip the dispatch-depth wait when called from within a
+// handler on the same thread.
+inline bool thread_local tl_in_handler_dispatch = false;
+
 #include <cassert>
 #include <cstring>
 #include <iterator>
@@ -394,8 +399,13 @@ Transceiver::activate_impl(
         // Wait for any in-flight dispatch_event_handlers invocation to
         // finish before returning, so the caller can safely destroy
         // state captured by the handler (e.g. receive()'s stack locals).
-        while (s_mproc->m_handlers_dispatch_depth.load(std::memory_order_acquire) > 0) {
-            std::this_thread::yield();
+        // Skip the wait if called from within a handler (self-deactivation),
+        // because the depth counter won't reach zero until the handler
+        // returns — waiting would deadlock.
+        if (!tl_in_handler_dispatch) {
+            while (s_mproc->m_handlers_dispatch_depth.load(std::memory_order_acquire) > 0) {
+                std::this_thread::yield();
+            }
         }
     };
 
