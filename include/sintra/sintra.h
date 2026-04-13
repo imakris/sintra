@@ -9,7 +9,7 @@
 ///  Sintra is a header-only message-passing library built around transceivers
 ///  and a coordinator that supervises managed processes.  This header is the
 ///  single entry point that applications should include.  It gathers the pieces
-///  that make up the faÃ§ade API and documents the major components so that
+///  that make up the facade API and documents the major components so that
 ///  nothing is "secret" from consumers of the library.
 ///
 ///  The library is composed of four broad areas:
@@ -21,7 +21,7 @@
 ///
 ///  The includes below are intentionally explicit: each block exposes one of
 ///  the areas above and is followed by a short description so that readers of
-///  this faÃ§ade understand which features they are pulling in.
+///  this facade understand which features they are pulling in.
 
 
 #include <functional>
@@ -41,9 +41,17 @@
 #endif // _MSC_VER
 
 
-#ifndef __cpp_inline_variables
-#error Inline variables are not supported. Sintra requires this and other C++17 features.
+// Detect the effective language standard. MSVC reports __cplusplus as 199711L
+// unless /Zc:__cplusplus is passed, so prefer _MSVC_LANG when it is defined.
+#if defined(_MSVC_LANG)
+#  define SINTRA_DETAIL_CPLUSPLUS _MSVC_LANG
+#else
+#  define SINTRA_DETAIL_CPLUSPLUS __cplusplus
 #endif
+#if SINTRA_DETAIL_CPLUSPLUS < 202002L
+#  error Sintra requires C++20. Please configure your compiler with -std=c++20 (or /std:c++20 on MSVC).
+#endif
+#undef SINTRA_DETAIL_CPLUSPLUS
 
 // RTTI is not required; Sintra uses compile-time type names for type ids.
 
@@ -63,7 +71,7 @@
 // Messages are the communication primitive in Sintra.  They travel over
 // transceivers, and the process message reader consumes them on behalf of a
 // managed process.  These includes wire up the request/reply rings, message
-// envelopes, and the transceiver faÃ§ade that user code interacts with.
+// envelopes, and the transceiver facade that user code interacts with.
 //
 // RPC is part of this surface as well:
 // - `rpc_<method>(...)` remains the blocking call/return API
