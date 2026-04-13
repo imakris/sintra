@@ -12,7 +12,47 @@
           "checksum": "wVa86FgEkvdCTVp1/nxvrkaemJc="
         }
       }
+    },
+    {
+      "name": "dev",
+      "displayName": "Dev (Debug, tests and examples)",
+      "description": "Default developer build: Debug, tests and examples enabled.",
+      "binaryDir": "${sourceDir}/build/dev",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "SINTRA_BUILD_TESTS": "ON",
+        "SINTRA_BUILD_EXAMPLES": "ON"
+      }
+    },
+    {
+      "name": "release",
+      "displayName": "Release (with debug symbols)",
+      "description": "Optimized release build with debug symbols, tests and examples enabled.",
+      "binaryDir": "${sourceDir}/build/release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "SINTRA_BUILD_TESTS": "ON",
+        "SINTRA_BUILD_EXAMPLES": "ON",
+        "SINTRA_RELEASE_WITH_DEBUG_SYMBOLS": "ON"
+      }
+    },
+    {
+      "name": "coverage",
+      "displayName": "Coverage (Debug + gcov)",
+      "description": "Debug build with coverage instrumentation enabled.",
+      "binaryDir": "${sourceDir}/build/coverage",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "SINTRA_BUILD_TESTS": "ON",
+        "SINTRA_BUILD_EXAMPLES": "ON",
+        "SINTRA_ENABLE_COVERAGE": "ON"
+      }
     }
+  ],
+  "buildPresets": [
+    { "name": "dev",      "configurePreset": "dev" },
+    { "name": "release",  "configurePreset": "release" },
+    { "name": "coverage", "configurePreset": "coverage" }
   ],
   "vendor": {
     "qt-project.org/Presets": {
