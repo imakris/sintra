@@ -25,6 +25,13 @@ if(CMAKE_CONFIGURATION_TYPES)
 endif()
 
 add_library(sintra INTERFACE)
+# Provide a namespaced alias so consumers can write `target_link_libraries(app
+# PRIVATE sintra::sintra)` and so that a missing dependency fails at configure
+# time rather than producing a confusing link error about an unknown target.
+# The alias also matches what an installed find_package(sintra) export would
+# expose, keeping the in-tree (add_subdirectory / FetchContent) and installed
+# usages symmetrical.
+add_library(sintra::sintra ALIAS sintra)
 target_include_directories(sintra INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(sintra INTERFACE cxx_std_20)
 target_link_libraries(sintra INTERFACE Threads::Threads)
