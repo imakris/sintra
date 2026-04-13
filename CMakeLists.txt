@@ -16,6 +16,10 @@ find_package(Threads REQUIRED)
 option(SINTRA_RELEASE_WITH_DEBUG_SYMBOLS "Emit debug symbols when building Release configuration" ON)
 option(SINTRA_ENABLE_COVERAGE "Build with coverage instrumentation" OFF)
 
+if(SINTRA_ENABLE_COVERAGE AND MSVC)
+    message(FATAL_ERROR "SINTRA_ENABLE_COVERAGE requires a compiler/toolchain that supports --coverage; MSVC is not supported.")
+endif()
+
 # Force Debug build by default
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Debug CACHE STRING "Choose the type of build." FORCE)

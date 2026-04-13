@@ -50,9 +50,9 @@
     }
   ],
   "buildPresets": [
-    { "name": "dev",      "configurePreset": "dev" },
-    { "name": "release",  "configurePreset": "release" },
-    { "name": "coverage", "configurePreset": "coverage" }
+    { "name": "dev",      "configurePreset": "dev",      "configuration": "Debug" },
+    { "name": "release",  "configurePreset": "release",  "configuration": "Release" },
+    { "name": "coverage", "configurePreset": "coverage", "configuration": "Debug" }
   ],
   "vendor": {
     "qt-project.org/Presets": {
