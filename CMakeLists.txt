@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(sintra LANGUAGES CXX)
+project(sintra
+    VERSION 0.1.0
+    LANGUAGES CXX
+)
 
 # Default to the newest macOS SDK available on GitHub runners when building on Apple
 # platforms, but allow callers to override the deployment target explicitly.
@@ -32,7 +35,14 @@ add_library(sintra INTERFACE)
 # expose, keeping the in-tree (add_subdirectory / FetchContent) and installed
 # usages symmetrical.
 add_library(sintra::sintra ALIAS sintra)
-target_include_directories(sintra INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+# Use BUILD_INTERFACE / INSTALL_INTERFACE so the same target works both when
+# consumed from the build tree (in-tree tests, examples, add_subdirectory or
+# FetchContent users) and when consumed from an installed prefix via
+# find_package(sintra).
+target_include_directories(sintra INTERFACE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+)
 target_compile_features(sintra INTERFACE cxx_std_20)
 target_link_libraries(sintra INTERFACE Threads::Threads)
 # Link winmm on Windows for timeBeginPeriod/timeEndPeriod (ADAPTIVE_SPIN policy)
@@ -77,4 +87,53 @@ endif()
 if(SINTRA_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
+endif()
+
+# --- Installation & export -------------------------------------------------
+# Make sintra discoverable by consumers via find_package(sintra). When sintra
+# is consumed as a subproject (add_subdirectory / FetchContent / git submodule)
+# we default SINTRA_INSTALL to OFF so the inner project does not unexpectedly
+# add install rules to the outer project's install step. The top-level build
+# keeps install rules on by default so `cmake --install build` works.
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    set(SINTRA_INSTALL_DEFAULT ON)
+else()
+    set(SINTRA_INSTALL_DEFAULT OFF)
+endif()
+option(SINTRA_INSTALL "Generate install rules for sintra" ${SINTRA_INSTALL_DEFAULT})
+
+if(SINTRA_INSTALL)
+    include(GNUInstallDirs)
+    include(CMakePackageConfigHelpers)
+
+    install(TARGETS sintra EXPORT sintraTargets)
+
+    install(
+        DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/include/sintra
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    )
+
+    install(EXPORT sintraTargets
+        FILE sintraTargets.cmake
+        NAMESPACE sintra::
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/sintra
+    )
+
+    configure_package_config_file(
+        ${CMAKE_CURRENT_SOURCE_DIR}/cmake/sintraConfig.cmake.in
+        ${CMAKE_CURRENT_BINARY_DIR}/sintraConfig.cmake
+        INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/sintra
+    )
+
+    write_basic_package_version_file(
+        ${CMAKE_CURRENT_BINARY_DIR}/sintraConfigVersion.cmake
+        VERSION ${PROJECT_VERSION}
+        COMPATIBILITY SameMajorVersion
+    )
+
+    install(FILES
+        ${CMAKE_CURRENT_BINARY_DIR}/sintraConfig.cmake
+        ${CMAKE_CURRENT_BINARY_DIR}/sintraConfigVersion.cmake
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/sintra
+    )
 endif()
