@@ -58,7 +58,8 @@ Sintra is a C++20 library for type-safe interprocess communication on a single h
 It lets independent processes exchange typed messages, broadcast events, and invoke
 RPC-style calls with a compile-time-checked API, avoiding string-based protocols and
 external brokers. It also provides coordination primitives such as named barriers,
-as well as typed publish/subscribe, synchronous RPC, crash detection, and opt-in worker respawning.
+as well as typed publish/subscribe, synchronous and asynchronous RPC, crash detection,
+and opt-in worker respawning.
 
 Sintra targets low-latency, crash-resilient local IPC where shared-memory transport and
 coordination need to be integrated rather than assembled from multiple layers. Common
@@ -84,9 +85,9 @@ suitable for latency-sensitive workloads.
 * **Type-safe APIs across processes** - interfaces are expressed as C++ types, so
   mismatched payloads are detected at compile time instead of surfacing as runtime
   protocol errors.
-* **Signal bus and RPC in one package** - publish/subscribe message dispatch and
-  synchronous remote procedure calls share the same primitives, allowing programs to mix
-  patterns as the architecture requires.
+* **Signal bus and RPC in one package** - publish/subscribe dispatch, targeted
+  fire-and-forget messages, and blocking or async remote procedure calls share the same
+  primitives, allowing programs to mix patterns as the architecture requires.
 * **Header-only distribution** - integrate the library by adding the headers to a
   project; no separate build step or binaries are necessary.
 * **No RTTI required** - type ids are derived from compile-time signatures (or
@@ -117,10 +118,34 @@ sintra::activate_slot([](const Ping&) {
 
 1. The `include/` directory must be on the project's include path.
 2. A C++20 compliant compiler is required (GCC, Clang, or MSVC are supported).
-3. The `example/` directory contains signal bus, channel, and remote call samples.
+3. Start with `example/sintra/` for focused samples covering publish/subscribe,
+   ping-pong, RPC, recovery, barriers, and targeted messaging.
 
 Because everything ships as headers, Sintra works well in monorepos or projects that
 prefer vendoring dependencies as git submodules or fetching them during configuration.
+
+### CMake integration
+
+If Sintra is already available to your build, link the interface target:
+
+```cmake
+target_link_libraries(my_app PRIVATE sintra::sintra)
+```
+
+For an in-tree dependency, make the target available first:
+
+```cmake
+add_subdirectory(external/sintra)
+target_link_libraries(my_app PRIVATE sintra::sintra)
+```
+
+For installed consumers, top-level builds export CMake package metadata. After
+`cmake --install`, use:
+
+```cmake
+find_package(sintra CONFIG REQUIRED)
+target_link_libraries(my_app PRIVATE sintra::sintra)
+```
 
 ## Supported platforms and architectures
 
@@ -209,6 +234,11 @@ ra.assign_name("instance name");
 auto value = Remotely_accessible::rpc_append("instance name", "Hi", 43);
 sintra::console() << value << '\n';
 ```
+
+Async RPC variants (`rpc_async_<method>(...)`) are also available when a caller
+needs to start a request and collect the result later. For the async-handle API
+and same-process export details, see the RPC overview comments in
+`include/sintra/sintra.h` and `tests/rpc_async_lifecycle_test.cpp`.
 
 ### Handle a Remote Exception
 
@@ -314,16 +344,18 @@ expected to finish together. It first performs the library's standard
 all-process shutdown handoff, making sure earlier interprocess work has been
 fully processed, and then tears down the local runtime.
 
-Call `finalize()` directly only when there is no collective shutdown handoff to
-perform, for example in a single-process program, an abnormal-exit path, or a
-workflow that uses its own explicit final rendezvous before teardown.
+If one process is intentionally departing while peers continue running, use
+`sintra::leave()`. If the coordinator must run a bounded final local action before
+raw teardown, use `sintra::shutdown(options)`.
 
 In other words:
 
 * Use `shutdown()` for the ordinary "all processes are done, now exit cleanly"
   case.
-* Use `finalize()` when the program cannot participate in that symmetric
-  shutdown step.
+* Use `leave()` for intentional unilateral departure.
+
+Low-level lifecycle escape hatches and shutdown internals are documented in
+`docs/barriers_and_shutdown.md` and `docs/process_lifecycle_notes.md`.
 
 ### Optional explicit type ids
 
