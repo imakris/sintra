@@ -588,5 +588,4 @@ for (auto recipient : completion.recipients) {
 
 ---
 
-**Version**: 2024-05-01 (Barrier flush + recovery documentation refresh)
 **Maintainer**: Ioannis Makris
