@@ -5,8 +5,10 @@
 
 #include "process/coordinator.h"
 #include "globals.h"
+#include "logging.h"
 
 #include <cstddef>
+#include <exception>
 #include <sstream>
 
 namespace sintra {
@@ -23,7 +25,15 @@ public:
         try {
             Coordinator::rpc_print(s_coord_id, m_stream.str());
         }
+        catch (const std::exception& e) {
+            Log_stream(log_level::warning)
+                << "sintra::console: rpc_print failed (" << e.what() << "); "
+                   "message dropped: " << m_stream.str() << "\n";
+        }
         catch (...) {
+            Log_stream(log_level::warning)
+                << "sintra::console: rpc_print failed (unknown exception); "
+                   "message dropped: " << m_stream.str() << "\n";
         }
     }
 
