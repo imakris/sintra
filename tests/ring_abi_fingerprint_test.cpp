@@ -100,6 +100,27 @@ void test_attach_rejects_mismatched_fingerprint()
                                k_failure_prefix,
                                "attach should not fall back to a generic exception on fingerprint mismatch");
 
+    // The failed Ring_R constructor must not leak its mapped control region.
+    // Repeat the failed attach a few times; a leak would balloon virtual
+    // memory or, on Windows, eventually exhaust mapping handles. We can't
+    // assert the leak directly in a portable way, but the explicit retry
+    // makes the failure mode (e.g. address-space exhaustion in ASan or
+    // mapping-handle accumulation on Windows) reproducible if the leak
+    // ever returns.
+    for (int i = 0; i < 64; ++i) {
+        bool retry_threw_typed = false;
+        try {
+            sintra::Ring_R<element_t> reader(directory, ring_name, capacity, 2);
+            (void)reader;
+        }
+        catch (const sintra::ring_abi_mismatch_exception&) {
+            retry_threw_typed = true;
+        }
+        sintra::test::require_true(retry_threw_typed,
+                                   k_failure_prefix,
+                                   "repeated mismatched attach should keep throwing the typed exception");
+    }
+
     // Restore the correct fingerprint so the writer's destructor doesn't see
     // a corrupted control block during teardown.
     poke_fingerprint(control_file, sintra::detail::k_ring_abi_fingerprint);

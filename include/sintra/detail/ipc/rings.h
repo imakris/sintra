@@ -119,6 +119,7 @@
 #include <filesystem>
 #include <functional>
 #include <fstream>
+#include <initializer_list>
 #include <limits>
 #include <memory>
 #include <mutex>         // std::once_flag, std::call_once
@@ -1446,7 +1447,20 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         const bool already_exists = fs::exists(pc) && fs::is_regular_file(pc) && fs::file_size(pc);
         const bool created_or_ok  = already_exists || create();
 
+        // The base class destructor runs if a Ring constructor body throws,
+        // but Ring's own m_control_region/m_control members do not get cleaned
+        // up — ~Ring() never executes for a partially-constructed object.
+        // Explicitly release them on every throwing path below to avoid
+        // leaking the mapped region (which on Windows would also pin the
+        // control file open).
+        auto release_control_mapping = [this]() noexcept {
+            delete m_control_region;
+            m_control_region = nullptr;
+            m_control = nullptr;
+        };
+
         if (!created_or_ok || !attach()) {
+            release_control_mapping();
             throw ring_acquisition_failure_exception();
         }
 
@@ -1456,6 +1470,7 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
                 new (m_control) Control;
             }
             catch (...) {
+                release_control_mapping();
                 throw ring_acquisition_failure_exception();
             }
         }
@@ -1466,8 +1481,12 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
             // where sizeof(Control) coincidentally matches.
             const auto observed = m_control->abi_fingerprint.load(std::memory_order_acquire);
             if (observed != detail::k_ring_abi_fingerprint) {
-                throw ring_abi_mismatch_exception(
+                // Construct the exception object before tearing the mapping
+                // down so the diagnostic captures the observed value.
+                ring_abi_mismatch_exception abi_ex(
                     detail::k_ring_abi_fingerprint, observed);
+                release_control_mapping();
+                throw abi_ex;
             }
         }
 
