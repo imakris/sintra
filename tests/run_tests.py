@@ -16,11 +16,13 @@ Options:
     --config CONFIG                 Build configuration Debug/Release (default: Debug)
     --verbose                       Show detailed output for each test run
     --preserve-stalled-processes    Keep stalled processes running for debugging (default: terminate)
+    --iteration-multiplier VALUE    Scale active_tests.txt repetition counts (default: 1)
 """
 
 import argparse
 import contextlib
 from functools import partial
+import math
 import os
 import re
 import shutil
@@ -57,6 +59,8 @@ from tests.runner.utils import (
 )
 
 print = partial(__import__("builtins").print, file=sys.stderr, flush=True)
+
+_ITERATION_MULTIPLIER_ENV = "SINTRA_TEST_ITERATION_MULTIPLIER"
 
 
 def _instrumentation_print(message: str) -> None:
@@ -213,6 +217,12 @@ def _lookup_test_weight(name: str, active_tests: Dict[str, int]) -> int:
         return active_tests.get(base_test, 1)
 
     return active_tests.get(canonical, 1)
+
+
+def _scale_test_weight(iterations: int, multiplier: float) -> int:
+    """Scale a positive repetition count while preserving at least one run."""
+
+    return max(1, int(math.ceil(iterations * multiplier)))
 
 
 def _lookup_test_timeout(name: str, default: float) -> float:
@@ -2350,9 +2360,35 @@ def main():
                         help='Total time budget in seconds for the test run. When '
                              'exceeded, the runner stops early. Exit code is 0 if every '
                              'test passed at least once with no failures, 1 otherwise.')
+    parser.add_argument('--iteration-multiplier', type=float, default=None,
+                        help=f'Scale active_tests.txt repetition counts. Values must be '
+                             f'positive; each active test still runs at least once. '
+                             f'Defaults to {_ITERATION_MULTIPLIER_ENV} or 1.')
 
     args = parser.parse_args()
     time_budget = args.time_budget
+    if args.iteration_multiplier is not None:
+        iteration_multiplier = args.iteration_multiplier
+    else:
+        multiplier_text = os.environ.get(_ITERATION_MULTIPLIER_ENV, "").strip()
+        if multiplier_text:
+            try:
+                iteration_multiplier = float(multiplier_text)
+            except ValueError:
+                print(
+                    f"{Color.RED}Error: {_ITERATION_MULTIPLIER_ENV} must be a "
+                    f"positive number, got '{multiplier_text}'{Color.RESET}"
+                )
+                return 1
+        else:
+            iteration_multiplier = 1.0
+
+    if not math.isfinite(iteration_multiplier) or iteration_multiplier <= 0.0:
+        print(
+            f"{Color.RED}Error: iteration multiplier must be a positive finite "
+            f"number, got {iteration_multiplier}{Color.RESET}"
+        )
+        return 1
 
     # Resolve build directory
     script_dir = Path(__file__).parent
@@ -2387,6 +2423,7 @@ def main():
         print(f"CMake generator: {compiler_metadata['generator']}")
     print(f"Timeout per test: {args.timeout}s")
     print(f"Active tests: {len(active_tests)} tests from active_tests.txt")
+    print(f"Iteration multiplier: {iteration_multiplier:g}")
     if time_budget is not None:
         print(f"Time budget: {format_duration(time_budget)}")
     print("=" * 70)
@@ -2431,7 +2468,13 @@ def main():
                 }
                 for invocation in tests
             }
-            target_repetitions = {invocation.name: _lookup_test_weight(invocation.name, active_tests) for invocation in tests}
+            target_repetitions = {
+                invocation.name: _scale_test_weight(
+                    _lookup_test_weight(invocation.name, active_tests),
+                    iteration_multiplier,
+                )
+                for invocation in tests
+            }
             remaining_repetitions = target_repetitions.copy()
             suite_all_passed = True
             batch_size = 1

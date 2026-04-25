@@ -162,6 +162,19 @@ ping_pong_test 5000   # Increase from default
 python3 run_tests.py --build-dir ../build --config Release
 ```
 
+### Scale Iteration Counts
+
+Use an iteration multiplier to scale the whole suite without editing
+`active_tests.txt`. A multiplier of `1` preserves the checked-in counts. Values
+below `1` reduce repetitions, with every active test still running at least
+once.
+
+```bash
+python3 run_tests.py --iteration-multiplier 0.5 --build-dir ../build --config Release
+```
+
+The same setting can be supplied through `SINTRA_TEST_ITERATION_MULTIPLIER`.
+
 ### Extended Timeout
 
 Some tests (like `recovery_test`) need more time:
@@ -324,6 +337,9 @@ Options:
   --verbose             Show detailed output for each test run
   --preserve-stalled-processes
                         Keep stalled processes for debugging instead of killing them
+  --iteration-multiplier VALUE
+                        Scale active_tests.txt repetition counts; every active
+                        test still runs at least once
 ```
 
 ### Configuration
@@ -387,7 +403,7 @@ The test infrastructure is used by CI workflows on multiple platforms.
 ```yaml
 test_script:
   - cd tests
-  - python3 run_tests.py --timeout 30 --build-dir ../build --config Release
+  - SINTRA_TEST_ITERATION_MULTIPLIER=0.5 python3 run_tests.py --timeout 30 --build-dir ../build --config Release
 ```
 
 ### Test Matrix Control
