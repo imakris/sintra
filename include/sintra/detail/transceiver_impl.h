@@ -966,7 +966,7 @@ void Transceiver::rpc_handler(Message_prefix& untyped_msg)
         placed_msg->sender_instance_id = untyped_msg.receiver_instance_id;
         placed_msg->receiver_instance_id = msg.sender_instance_id;
         placed_msg->function_instance_id = msg.function_instance_id;
-        placed_msg->exception_type_id = (type_id_type)detail::reserved_id::std_runtime_error;
+        placed_msg->exception_type_id = (type_id_type)detail::reserved_id::sintra_rpc_unavailable;
         s_mproc->m_out_rep_c->done_writing();
     };
 
@@ -1277,13 +1277,13 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
                 auto scoped_map = get_instance_to_object_map<RPCTC>().scoped();
                 auto it = scoped_map.get().find(instance_id);
                 if (it == scoped_map.get().end()) {
-                    throw std::runtime_error("Local RPC target no longer available - it may have been shut down.");
+                    throw rpc_unavailable("Local RPC target no longer available - it may have been shut down.");
                 }
                 object = it->second;
             }
             auto guard = object->try_acquire_rpc_execution();
             if (!guard) {
-                throw std::runtime_error("Attempted to call an RPC on a target that is shutting down.");
+                throw rpc_unavailable("Attempted to call an RPC on a target that is shutting down.");
             }
             return (object->*RPCTC::mf())(args...);
         }

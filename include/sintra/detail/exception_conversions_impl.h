@@ -5,6 +5,7 @@
 
 #include "exception_conversions.h"
 #include "messaging/message.h"
+#include "transceiver.h"
 #include "type_utils.h"
 
 #include <filesystem>
@@ -107,6 +108,8 @@ void string_to_exception(type_id_type exception_type, const std::string& str)
             throw_typed_exception<std::logic_error>(str);
         case detail::reserved_id::std_runtime_error:
             throw_typed_exception<std::runtime_error>(str);
+        case detail::reserved_id::sintra_rpc_unavailable:
+            throw_typed_exception<rpc_unavailable>(str);
         case detail::reserved_id::std_exception:
         case detail::reserved_id::unknown_exception:
             throw_generic_exception(str);

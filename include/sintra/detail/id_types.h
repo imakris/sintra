@@ -74,6 +74,11 @@ namespace detail {
         std_runtime_error,
         std_exception,
         unknown_exception,
+        // Sintra-specific: RPC target was unreachable (target unpublished, shutting
+        // down, or process gone). Distinct from other runtime_error reasons so the
+        // runtime can disambiguate teardown-induced failures without inspecting
+        // exception messages.
+        sintra_rpc_unavailable,
 
         // EXPLICITLY DEFINED SIGNALS HANDLED BY COORDINATOR
         base_of_messages_handled_by_coordinator = 0x80000000,
