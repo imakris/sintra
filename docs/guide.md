@@ -801,6 +801,7 @@ Primary names:
 | `sintra::Ring_R_snapshot_error` | `none`, `evicted`, or `exception`. |
 | `sintra::Ring_diagnostics` | Counters and last-seen values for lag, overflow, eviction, and guard accounting. |
 | `sintra::ring_acquisition_failure_exception` | Thrown when a ring buffer cannot be acquired. |
+| `sintra::ring_abi_mismatch_exception` | Thrown when an existing ring control file was created by an incompatible Sintra ABI. |
 | `sintra::ring_reader_evicted_exception` | Thrown when a reader has been evicted by writer progress. |
 | `sintra::ring_payload_traits<T>` | Advanced extension point for allowing non-trivial payload semantics. |
 | `sintra::aligned_capacity<T>(requested)` | Capacity adjusted for ring alignment constraints. |
@@ -855,6 +856,11 @@ exception path.
 
 `sintra::rpc_cancelled` is thrown when an outstanding RPC is unblocked by
 teardown or coordinator/process loss.
+
+`sintra::rpc_unavailable` is thrown when an RPC target has been unpublished,
+destroyed, is shutting down, or its process is gone. It derives from
+`std::runtime_error`, but can be caught directly when caller code needs to
+distinguish target-side unavailability from caller-side cancellation.
 
 ### Logging and Console
 
@@ -1090,9 +1096,11 @@ sources.
 | `sintra::remote` | [Publish/Subscribe](#publishsubscribe) |
 | `sintra::rendezvous_t` | [Barriers and Fences](#barriers-and-fences) |
 | `sintra::ring_acquisition_failure_exception` | [Direct Ring Helpers](#direct-ring-helpers) |
+| `sintra::ring_abi_mismatch_exception` | [Direct Ring Helpers](#direct-ring-helpers) |
 | `sintra::ring_payload_traits<T>` | [Direct Ring Helpers](#direct-ring-helpers) |
 | `sintra::ring_reader_evicted_exception` | [Direct Ring Helpers](#direct-ring-helpers) |
 | `sintra::rpc_cancelled` | [RPC](#rpc), [Errors and Diagnostics](#errors-and-diagnostics) |
+| `sintra::rpc_unavailable` | [RPC](#rpc), [Errors and Diagnostics](#errors-and-diagnostics) |
 | `sintra::sequence_counter_type` | [Targeting and IDs](#targeting-and-ids), [Barriers and Fences](#barriers-and-fences) |
 | `sintra::set_lifecycle_handler` | [Recovery and Lifecycle Hooks](#recovery-and-lifecycle-hooks) |
 | `sintra::set_log_callback` | [Errors and Diagnostics](#errors-and-diagnostics) |

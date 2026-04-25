@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="dark" />
-    <title>sintra::shutdown_options - Sintra Reference</title>
+    <title>rpc_unavailable - Sintra Reference</title>
     <link rel="stylesheet" href="../assets/style.css" />
   </head>
   <body>
@@ -60,7 +60,7 @@
 <li><a href="rpc_wait_status.html">sintra::Rpc_wait_status</a></li>
 <li><a href="rpc_completion_state.html">sintra::Rpc_completion_state</a></li>
 <li><a href="rpc_cancelled.html">sintra::rpc_cancelled</a></li>
-<li><a href="rpc_unavailable.html">sintra::rpc_unavailable</a></li>
+<li><a class="active" href="rpc_unavailable.html">sintra::rpc_unavailable</a></li>
 <li><a href="resolvable_instance_id.html">sintra::Resolvable_instance_id</a></li>
 <li><a href="typed_instance_id.html">sintra::Typed_instance_id</a></li>
 <li><a href="named_instance.html">sintra::Named_instance</a></li>
@@ -75,7 +75,7 @@
 <li><a href="barrier_modes.html">sintra::delivery_fence_t</a></li>
 <li><a href="barrier_modes.html">sintra::processing_fence_t</a></li>
 <li><a href="shutdown.html">sintra::shutdown</a></li>
-<li><a class="active" href="shutdown_options.html">sintra::shutdown_options</a></li>
+<li><a href="shutdown_options.html">sintra::shutdown_options</a></li>
 <li><a href="leave.html">sintra::leave</a></li>
 <li><a href="recovery.html">Recovery</a></li>
 <li><a href="lifecycle_hooks.html">Lifecycle hooks</a></li>
@@ -112,48 +112,48 @@
 </ul></section>
 </nav>
       <article class="content-prose">
-        <h1 id="sintrashutdown_options">sintra::shutdown_options</h1>
+        <h1 id="rpc_unavailable">rpc_unavailable</h1>
 <p>Include:</p>
 <pre><code class="language-cpp">#include &lt;sintra/sintra.h&gt;</code></pre>
-<p>Summary:</p>
-<p><code>shutdown_options</code> configures the standard <code>shutdown()</code> protocol. It currently exposes one field: a coordinator-side hook that runs at a defined point inside the shutdown phase, after the collective processing fence and before raw teardown begins.</p>
+<p>Summary: <code>sintra::rpc_unavailable</code> is the exception type thrown when an RPC cannot be delivered to its target. It distinguishes target-side unavailability from caller-side cancellation.</p>
 <p>Signature:</p>
-<pre><code class="language-cpp">struct shutdown_options {
-    std::function&lt;void()&gt; coordinator_shutdown_hook;
-};</code></pre>
+<pre><code class="language-cpp">namespace sintra {
+
+struct rpc_unavailable : std::runtime_error
+{
+    using std::runtime_error::runtime_error;
+};
+
+} // namespace sintra</code></pre>
 <p>Use when:</p>
 <ul>
-<li>The coordinator must perform a bounded final action: write a summary file, flush a metric, close an external connection, or persist collected state.</li>
-<li>All participants need to wait inside the standard shutdown protocol while that action runs, without inventing a parallel termination helper.</li>
+<li>Catching the failure mode where the requested target is gone or unavailable.</li>
+<li>Distinguishing target teardown from <code>sintra::rpc_cancelled</code>, which represents runtime cancellation of the caller&#x27;s outstanding wait.</li>
 </ul>
 <p>Contract:</p>
 <ul>
-<li>The hook is invoked only on the coordinator process. Non-coordinator participants pass the same options object but their hook is never called locally.</li>
-<li>The hook runs after the collective processing-fence barrier and before the coordinator&#x27;s drain-wait. By the time it runs, all participants have entered the protocol and message dispatching is in service mode.</li>
-<li>The hook must be coordinator-local. It must not initiate new peer coordination, additional barriers, or extra custom protocol steps; the runtime owns the surrounding synchronisation.</li>
-<li>If the hook throws, <code>shutdown(options)</code> still finalises local state and then rethrows the exception to the caller. Workers complete the hook-done rendezvous via the catch-all path so the protocol does not hang.</li>
-<li>An empty <code>coordinator_shutdown_hook</code> (default-constructed) means no coordinator-side action runs; workers still enter the same hook-done rendezvous so cardinality stays consistent.</li>
-<li>Every supported non-happy-path shutdown should be expressed by adding fields to this struct rather than introducing a parallel public helper.</li>
+<li><code>rpc_unavailable</code> derives from <code>std::runtime_error</code>, so a generic <code>catch (const std::runtime_error&amp;)</code> clause matches it.</li>
+<li>The runtime uses this type when the target instance has been unpublished, destroyed, is shutting down, or its process is gone before the RPC can be delivered.</li>
+<li>The type identity is preserved across the RPC exception-serialization path, so remote unavailability can be caught as <code>sintra::rpc_unavailable</code> by the caller.</li>
 </ul>
 <p>Threading and lifecycle:</p>
 <ul>
-<li>The hook runs on the coordinator thread inside the shutdown protocol. Treat it like any other coordinator-thread callback: keep work bounded, do not reenter Sintra protocol APIs, and avoid blocking on peer responses.</li>
-<li>The shutdown protocol state visible through <code>detail::s_shutdown_state</code> advances to <code>coordinator_hook_running</code> while the hook is active and to <code>coordinator_hook_completed</code> when it returns or throws.</li>
+<li>The exception is constructed on the calling thread when the RPC result is consumed. It is not thrown from a Sintra reader thread directly into user code.</li>
 </ul>
 <p>Failures:</p>
 <ul>
-<li>Exceptions thrown by the hook are surfaced to the caller of <code>shutdown(options)</code> after local finalisation.</li>
+<li>N/A. The type itself is the failure signal.</li>
 </ul>
 <p>Example source:</p>
 <ul>
-<li><a href="../../../tests/shutdown_options_test.cpp">tests/shutdown_options_test.cpp</a></li>
-<li><a href="../../../tests/shutdown_options_throwing_hook_test.cpp">tests/shutdown_options_throwing_hook_test.cpp</a></li>
-<li><a href="../../../tests/shutdown_options_mixed_modes_test.cpp">tests/shutdown_options_mixed_modes_test.cpp</a></li>
+<li><a href="../../../tests/rpc_unavailable_typed_test.cpp">tests/rpc_unavailable_typed_test.cpp</a></li>
+<li><a href="../../../tests/teardown_targeted_rpc_exception_test.cpp">tests/teardown_targeted_rpc_exception_test.cpp</a></li>
 </ul>
 <p>See also:</p>
 <ul>
-<li><a href="shutdown.html">sintra::shutdown</a></li>
-<li><a href="../../barriers_and_shutdown.md">docs/barriers_and_shutdown.md</a></li>
+<li><a href="rpc.html">SINTRA_RPC / SINTRA_RPC_STRICT / SINTRA_UNICAST</a></li>
+<li><a href="rpc_cancelled.html">rpc_cancelled</a></li>
+<li><a href="rpc_handle.html">Rpc_handle</a></li>
 </ul>
       </article>
     </main>

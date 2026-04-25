@@ -90,8 +90,9 @@ Failures:
   when the target id is `invalid_instance_id`, or when same-process
   `rpc_async_<method>` is attempted against a `SINTRA_RPC` (non-strict)
   export.
-- `std::runtime_error` when the target instance has been destroyed or is
-  shutting down (the synthesised reply carries a runtime-error type id).
+- `sintra::rpc_unavailable` when the target instance has been unpublished,
+  destroyed, is shutting down, or its process is gone. The type derives from
+  `std::runtime_error`.
 - `sintra::rpc_cancelled` when the wait is unblocked by coordinator loss or
   shutdown drain logic before a reply arrives.
 - The remote-side exception (any of the recognised `std::` types) when the
@@ -107,4 +108,5 @@ See also:
 - [Rpc_wait_status](rpc_wait_status.md)
 - [Rpc_completion_state](rpc_completion_state.md)
 - [rpc_cancelled](rpc_cancelled.md)
+- [rpc_unavailable](rpc_unavailable.md)
 - [Resolvable_instance_id](resolvable_instance_id.md)

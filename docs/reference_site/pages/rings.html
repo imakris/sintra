@@ -60,6 +60,7 @@
 <li><a href="rpc_wait_status.html">sintra::Rpc_wait_status</a></li>
 <li><a href="rpc_completion_state.html">sintra::Rpc_completion_state</a></li>
 <li><a href="rpc_cancelled.html">sintra::rpc_cancelled</a></li>
+<li><a href="rpc_unavailable.html">sintra::rpc_unavailable</a></li>
 <li><a href="resolvable_instance_id.html">sintra::Resolvable_instance_id</a></li>
 <li><a href="typed_instance_id.html">sintra::Typed_instance_id</a></li>
 <li><a href="named_instance.html">sintra::Named_instance</a></li>
@@ -106,6 +107,7 @@
 <li><a class="active" href="rings.html#try_snapshot_e">sintra::try_snapshot_e</a></li>
 <li><a class="active" href="rings.html#ring_payload_traits">sintra::ring_payload_traits</a></li>
 <li><a class="active" href="rings.html#ring_acquisition_failure_exception">sintra::ring_acquisition_failure_exception</a></li>
+<li><a class="active" href="rings.html#ring_abi_mismatch_exception">sintra::ring_abi_mismatch_exception</a></li>
 <li><a class="active" href="rings.html#ring_reader_evicted_exception">sintra::ring_reader_evicted_exception</a></li>
 </ul></section>
 </nav>
@@ -228,6 +230,7 @@ template &lt;class Reader, class... Args&gt;
 try_snapshot_e(Reader&amp; reader, Args&amp;&amp;... args) noexcept;
 
 struct ring_acquisition_failure_exception : public std::runtime_error;
+struct ring_abi_mismatch_exception        : public std::runtime_error;
 struct ring_reader_evicted_exception      : public std::runtime_error;
 
 } // namespace sintra</code></pre>
@@ -256,6 +259,8 @@ struct ring_reader_evicted_exception      : public std::runtime_error;
 <p>Creates a non-throwing <code>Ring_R_snapshot</code> and returns a status enum beside it.</p>
 <h3 id="ring_acquisition_failure_exception">ring_acquisition_failure_exception</h3>
 <p>Thrown when ring construction cannot acquire files, mappings, or writer ownership.</p>
+<h3 id="ring_abi_mismatch_exception">ring_abi_mismatch_exception</h3>
+<p>Thrown when a ring control file exists but was created by a binary whose ring-control ABI fingerprint does not match the current build. The exception message includes the expected and observed fingerprints.</p>
 <h3 id="ring_reader_evicted_exception">ring_reader_evicted_exception</h3>
 <p>Thrown when a reader has fallen too far behind and must be reconstructed.</p>
 <p>Use when:</p>
@@ -288,6 +293,7 @@ struct ring_reader_evicted_exception      : public std::runtime_error;
 <p>Failures:</p>
 <ul>
 <li><code>ring_acquisition_failure_exception</code> from the constructors when the data file or control file cannot be mapped, when the size does not match, or when an exclusive writer slot cannot be obtained.</li>
+<li><code>ring_abi_mismatch_exception</code> from the constructors when an existing control file belongs to an incompatible Sintra ring ABI. Rebuild every process that shares the ring against the same Sintra version and configuration.</li>
 <li><code>ring_reader_evicted_exception</code> from <code>start_reading</code> or <code>make_snapshot</code> when the writer evicted the reader for being too far behind.</li>
 <li><code>std::logic_error</code> from <code>start_reading</code> when called twice without an intervening <code>done_reading</code>.</li>
 <li><code>std::invalid_argument</code> from a writer attempting to commit more than <code>num_elements / 8</code> elements in a single write (the single-octile limit).</li>

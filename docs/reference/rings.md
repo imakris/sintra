@@ -132,6 +132,7 @@ template <class Reader, class... Args>
 try_snapshot_e(Reader& reader, Args&&... args) noexcept;
 
 struct ring_acquisition_failure_exception : public std::runtime_error;
+struct ring_abi_mismatch_exception        : public std::runtime_error;
 struct ring_reader_evicted_exception      : public std::runtime_error;
 
 } // namespace sintra
@@ -193,6 +194,12 @@ Creates a non-throwing `Ring_R_snapshot` and returns a status enum beside it.
 
 Thrown when ring construction cannot acquire files, mappings, or writer
 ownership.
+
+### ring_abi_mismatch_exception
+
+Thrown when a ring control file exists but was created by a binary whose
+ring-control ABI fingerprint does not match the current build. The exception
+message includes the expected and observed fingerprints.
 
 ### ring_reader_evicted_exception
 
@@ -277,6 +284,10 @@ Failures:
 - `ring_acquisition_failure_exception` from the constructors when the
   data file or control file cannot be mapped, when the size does not
   match, or when an exclusive writer slot cannot be obtained.
+- `ring_abi_mismatch_exception` from the constructors when an existing
+  control file belongs to an incompatible Sintra ring ABI. Rebuild every
+  process that shares the ring against the same Sintra version and
+  configuration.
 - `ring_reader_evicted_exception` from `start_reading` or
   `make_snapshot` when the writer evicted the reader for being too far
   behind.
