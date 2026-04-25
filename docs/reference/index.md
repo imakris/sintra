@@ -48,6 +48,7 @@
 | [`sintra::Rpc_wait_status`](rpc_wait_status.md) | enum | `<sintra/sintra.h>` | Result of bounded async RPC waits. |
 | [`sintra::Rpc_completion_state`](rpc_completion_state.md) | enum | `<sintra/sintra.h>` | Final async RPC completion state. |
 | [`sintra::rpc_cancelled`](rpc_cancelled.md) | exception | `<sintra/sintra.h>` | Exception for RPC cancellation/drain paths. |
+| [`sintra::rpc_unavailable`](rpc_unavailable.md) | exception | `<sintra/sintra.h>` | Exception for target-side RPC unavailability. |
 | [`sintra::Resolvable_instance_id`](resolvable_instance_id.md) | type | `<sintra/sintra.h>` | Generated RPC target parameter accepting raw ids or names. |
 | [`sintra::Typed_instance_id`](typed_instance_id.md) | type template | `<sintra/sintra.h>` | Type-tagged instance id wrapper. |
 | [`sintra::Named_instance`](named_instance.md) | type template | `<sintra/sintra.h>` | Type-tagged named target wrapper. |
@@ -103,6 +104,7 @@
 | [`sintra::try_snapshot_e`](rings.md#try_snapshot_e) | function template | `<sintra/rings.h>` | Create a non-throwing RAII read snapshot with status. |
 | [`sintra::ring_payload_traits`](rings.md#ring_payload_traits) | type template | `<sintra/rings.h>` | Opt a specific non-trivial payload type into ring writes. |
 | [`sintra::ring_acquisition_failure_exception`](rings.md#ring_acquisition_failure_exception) | exception | `<sintra/rings.h>` | Ring file, mapping, or ownership acquisition failure. |
+| [`sintra::ring_abi_mismatch_exception`](rings.md#ring_abi_mismatch_exception) | exception | `<sintra/rings.h>` | Ring control file was created by an incompatible Sintra ABI. |
 | [`sintra::ring_reader_evicted_exception`](rings.md#ring_reader_evicted_exception) | exception | `<sintra/rings.h>` | Reader fell too far behind and was evicted. |
 
 ## Headers
