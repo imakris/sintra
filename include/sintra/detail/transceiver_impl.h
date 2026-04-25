@@ -1013,6 +1013,9 @@ void Transceiver::rpc_handler(Message_prefix& untyped_msg)
     SINTRA_CATCH_STD_EX_(std::underflow_error,   std_underflow_error)
     SINTRA_CATCH_STD_EX_(std::ios_base::failure, std_ios_base_failure)
     SINTRA_CATCH_STD_EX_(std::logic_error,       std_logic_error)
+    // rpc_unavailable must precede std::runtime_error (its base) so a handler
+    // that propagates it preserves its typed identity across the wire.
+    SINTRA_CATCH_STD_EX_(rpc_unavailable,        sintra_rpc_unavailable)
     SINTRA_CATCH_STD_EX_(std::runtime_error,     std_runtime_error)
     SINTRA_CATCH_STD_EX_(std::exception,         std_exception)
     catch (...) {
