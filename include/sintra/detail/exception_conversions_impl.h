@@ -131,6 +131,13 @@ void string_to_exception(type_id_type exception_type, const std::string& str)
         {get_type_id<std::system_error        >(), throw_typed_exception<std::runtime_error    >},
         {get_type_id<std::ios_base::failure   >(), throw_typed_exception<std::ios_base::failure>},
 
+        // The dynamic id of rpc_unavailable is needed here because
+        // exception_to_string<T>() emits get_type_id<T>() for any
+        // std::exception-derived type. Without this entry, a round-trip
+        // through exception_to_string -> string_to_exception would downgrade
+        // rpc_unavailable to std::runtime_error via the fallback path.
+        {get_type_id<rpc_unavailable          >(), throw_typed_exception<rpc_unavailable       >},
+
         // For the following exceptions, due to non-trivial constructor, their parent type is thrown
         {get_type_id<std::future_error        >(), throw_typed_exception<std::logic_error      >},
         {get_type_id<std::regex_error         >(), throw_typed_exception<std::runtime_error    >},

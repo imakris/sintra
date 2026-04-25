@@ -437,6 +437,11 @@ int test_round_trip()
     TEST_ROUND_TRIP(std::overflow_error, "round-trip overflow_error");
     TEST_ROUND_TRIP(std::underflow_error, "round-trip underflow_error");
 
+    // Sintra-specific: ensure rpc_unavailable preserves its typed identity
+    // even through the generic exception_to_string path (which emits
+    // get_type_id<rpc_unavailable>() rather than the reserved id).
+    TEST_ROUND_TRIP(sintra::rpc_unavailable, "round-trip rpc_unavailable");
+
     return 0;
 }
 
