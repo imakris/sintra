@@ -97,17 +97,29 @@ bool expect_runtime_error_reply(
             k_prefix,
             std::string(context) + " unexpectedly returned a value");
     }
-    catch (const std::runtime_error& ex) {
+    catch (const sintra::rpc_unavailable& ex) {
         ok &= sintra::test::assert_true(
             std::string(ex.what()) == k_expected_message,
             k_prefix,
-            std::string(context) + " returned the wrong runtime_error message");
+            std::string(context) + " returned the wrong rpc_unavailable message");
     }
     catch (const sintra::rpc_cancelled&) {
         ok &= sintra::test::assert_true(
             false,
             k_prefix,
             std::string(context) + " should not be cancelled");
+    }
+    catch (const std::runtime_error& ex) {
+        // Reaching this arm means the typed rpc_unavailable was downgraded
+        // to a plain runtime_error somewhere on the wire, which is a
+        // regression. Capture the message in the diagnostic to make the
+        // failure self-explanatory.
+        ok &= sintra::test::assert_true(
+            false,
+            k_prefix,
+            std::string(context) +
+                " caught std::runtime_error instead of rpc_unavailable: " +
+                ex.what());
     }
     catch (const std::exception& ex) {
         std::fprintf(stderr,

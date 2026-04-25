@@ -170,11 +170,19 @@ The Markdown sources remain available for symbol lookup in
   architectures still succeed, but they emit a warning and fall back to a simple no-op
   spin pause for the interprocess primitives, so those primitives may run with a very
   basic implementation and performance is not guaranteed.
-* **macOS requirement** - Sintra always uses `os_sync_wait_on_address` for its interprocess
-  semaphore implementation. The build fails if `<os/os_sync_wait_on_address.h>` or
-  `<os/clock.h>` is missing, so runners should use macOS 15.0 or newer with the Command
-  Line Tools for Xcode 15 (or newer) installed (the full Xcode IDE is not required). Older
-  macOS versions are not supported.
+* **macOS requirement** - Sintra requires macOS 15.0 or newer with the Command Line Tools
+  for Xcode 15 (or newer) installed (the full Xcode IDE is not required). The build fails
+  if `<os/os_sync_wait_on_address.h>` or `<os/clock.h>` is missing.
+
+  Older macOS versions are not supported because Sintra's adaptive reader policy relies on
+  `os_sync_wait_on_address` to wait on a specific atomic with timeouts and ordered/unordered
+  wakeup semantics. The pre-15 alternatives all force compromises that hurt the whole
+  library: `dispatch_semaphore_t` loses fine-grained timeouts and the wakeup-coalescing
+  hooks; `pthread_cond_t` requires a kernel transition per wake even on the fast path,
+  defeating the spin/precision-sleep/block phases in `config.h`; Mach `semaphore_t` is
+  per-task rather than per-address and would force rebuilding the wakeup layer on top.
+  After evaluating these options, requiring `os_sync_wait_on_address` is the cleanest
+  trade-off.
 
 
 ## Interprocess Communication Patterns

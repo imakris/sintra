@@ -477,7 +477,7 @@ void Process_message_reader::request_reader_function()
                     placed_msg->receiver_instance_id = m->sender_instance_id;
                     placed_msg->function_instance_id = m->function_instance_id;
                     placed_msg->exception_type_id =
-                        (type_id_type)detail::reserved_id::std_runtime_error;
+                        (type_id_type)detail::reserved_id::sintra_rpc_unavailable;
                     s_mproc->m_out_rep_c->done_writing();
                     publish_request_progress(m_in_req_c->get_message_reading_sequence());
                     continue;

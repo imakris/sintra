@@ -74,6 +74,11 @@ namespace detail {
         std_runtime_error,
         std_exception,
         unknown_exception,
+        // Sintra-specific: RPC target was unreachable (target unpublished, shutting
+        // down, or process gone). Distinct from other runtime_error reasons so the
+        // runtime can disambiguate teardown-induced failures without inspecting
+        // exception messages.
+        sintra_rpc_unavailable,
 
         // EXPLICITLY DEFINED SIGNALS HANDLED BY COORDINATOR
         base_of_messages_handled_by_coordinator = 0x80000000,
@@ -222,9 +227,11 @@ inline
 instance_id_type make_instance_id()
 {
     static atomic<uint64_t> instance_index_counter(2 + num_reserved_service_instances);
-    assert(instance_index_counter.load() < max_instance_index);
-    auto d = decompose_instance(s_mproc_id);
     const auto index = static_cast<uint64_t>(instance_index_counter++);
+    if (index >= max_instance_index) {
+        throw std::runtime_error("Sintra transceiver instance index space exhausted");
+    }
+    auto d = decompose_instance(s_mproc_id);
     return compose_instance(d.process, index);
 }
 
@@ -235,10 +242,11 @@ instance_id_type make_service_instance_id()
     // 1 is always the transceiver index of the local Managed_process,
     // thus other transceivers start from 2
     static atomic<uint64_t> instance_index_counter(2);
-    assert(instance_index_counter.load() <
-           2 + num_reserved_service_instances);
-    auto d = decompose_instance(s_mproc_id);
     const auto index = static_cast<uint64_t>(instance_index_counter++);
+    if (index >= 2 + num_reserved_service_instances) {
+        throw std::runtime_error("Sintra service instance index space exhausted");
+    }
+    auto d = decompose_instance(s_mproc_id);
     return compose_instance(d.process, index);
 }
 

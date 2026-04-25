@@ -20,15 +20,20 @@ if(SINTRA_ENABLE_COVERAGE AND MSVC)
     message(FATAL_ERROR "SINTRA_ENABLE_COVERAGE requires a compiler/toolchain that supports --coverage; MSVC is not supported.")
 endif()
 
-# Force Debug build by default
-if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
-    set(CMAKE_BUILD_TYPE Debug CACHE STRING "Choose the type of build." FORCE)
-    set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release" "MinSizeRel" "RelWithDebInfo")
-endif()
+# Default to a Debug build when sintra is the top-level project. Avoid touching
+# CMAKE_BUILD_TYPE / CMAKE_CONFIGURATION_TYPES when sintra is consumed via
+# add_subdirectory or FetchContent: a release-only outer project should not be
+# silently flipped to Debug just by pulling sintra in.
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+        set(CMAKE_BUILD_TYPE Debug CACHE STRING "Choose the type of build." FORCE)
+        set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release" "MinSizeRel" "RelWithDebInfo")
+    endif()
 
-# For MSVC multi-config generators, set debug as default
-if(CMAKE_CONFIGURATION_TYPES)
-    set(CMAKE_CONFIGURATION_TYPES "Debug;Release" CACHE STRING "" FORCE)
+    # For MSVC multi-config generators, set debug as default
+    if(CMAKE_CONFIGURATION_TYPES)
+        set(CMAKE_CONFIGURATION_TYPES "Debug;Release" CACHE STRING "" FORCE)
+    endif()
 endif()
 
 add_library(sintra INTERFACE)

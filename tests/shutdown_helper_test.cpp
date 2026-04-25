@@ -46,8 +46,18 @@ int main(int argc, char* argv[])
         "shutdown_helper",
         {worker0_process, worker1_process},
         [](const std::filesystem::path&) {
-            std::lock_guard<std::mutex> lock(g_seen_markers_mutex);
-            g_seen_markers.clear();
+            // Reset shared state under the mutex, then release it before
+            // entering the barrier. Holding g_seen_markers_mutex across the
+            // delivery-fence barrier would deadlock: the barrier waits for
+            // the local request reader to drain pre-barrier messages, but
+            // the slot handler activated below also takes this mutex, so
+            // a worker broadcast that races ahead of the barrier completion
+            // would pin the reader on the held mutex while the main thread
+            // pins the mutex waiting on the reader.
+            {
+                std::lock_guard<std::mutex> lock(g_seen_markers_mutex);
+                g_seen_markers.clear();
+            }
             g_started_handlers.store(0, std::memory_order_release);
             g_finished_handlers.store(0, std::memory_order_release);
             sintra::activate_slot([](int worker_index) {

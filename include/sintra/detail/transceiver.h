@@ -790,6 +790,15 @@ struct rpc_cancelled : std::runtime_error {
     explicit rpc_cancelled(const char* what_arg) : std::runtime_error(what_arg) {}
 };
 
+// Typed exception: thrown when an RPC cannot be delivered because the target
+// is unpublished, shutting down, or its process is gone. Distinct from
+// rpc_cancelled (which signals teardown of the *caller's* runtime). Inherits
+// from std::runtime_error, so a catch (const std::runtime_error&) handler
+// also matches.
+struct rpc_unavailable : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+
 struct Outstanding_rpc_control
 {
     mutex               keep_waiting_mutex;

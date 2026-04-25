@@ -89,22 +89,19 @@ inline sequence_counter_type rendezvous_barrier(const std::string& barrier_name,
         }
         throw;
     }
-    catch (const std::runtime_error& e) {
-        const std::string message = e.what();
-        const bool rpc_unavailable =
-            (message == "RPC failed") ||
-            (message.find("no longer available") != std::string::npos) ||
-            (message.find("shutting down") != std::string::npos);
-        if (rpc_unavailable && should_treat_rpc_failure_as_satisfied()) {
-            log_barrier_bypass(barrier_name, group_name, message.c_str());
+    catch (const rpc_unavailable& e) {
+        // Target was unpublished, gone, or shutting down. During teardown
+        // this is the expected outcome; surface it to non-teardown callers.
+        if (should_treat_rpc_failure_as_satisfied()) {
+            log_barrier_bypass(barrier_name, group_name, e.what());
             return invalid_sequence;
         }
         throw;
     }
     catch (const std::exception& e) {
-        // Catches exceptions not derived from std::runtime_error (e.g.
-        // std::logic_error from Process_group::barrier() when the caller
-        // has been removed from the group during draining/shutdown).
+        // Catches other exceptions (e.g. std::logic_error from
+        // Process_group::barrier() when the caller has been removed from the
+        // group during draining/shutdown).
         if (should_treat_rpc_failure_as_satisfied()) {
             log_barrier_bypass(barrier_name, group_name, e.what());
             return invalid_sequence;
