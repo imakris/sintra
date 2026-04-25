@@ -947,13 +947,30 @@ void Transceiver::rpc_handler(Message_prefix& untyped_msg)
 
     MESSAGE_T& msg = (MESSAGE_T&)untyped_msg;
     typename RPCTC::o_type* obj = nullptr;
+    Rpc_execution_guard execution_guard;
 
-    // Hold spinlock while accessing the iterator to prevent use-after-invalidation
+    // Hold the spinlock across both the lookup AND try_acquire_rpc_execution.
+    //
+    // Without this, a reader could copy obj, drop the spinlock, and then race
+    // the owner thread's destructor: ~Instantiator (member of the derived
+    // Transceiver) erases the same map entry under this spinlock, then
+    // ~Transceiver runs ensure_rpc_shutdown which observes m_active_rpc_calls
+    // == 0 (we have not yet incremented it) and proceeds; m_rpc_lifecycle_mutex
+    // is then destroyed before our try_acquire would lock it. UAF.
+    //
+    // Holding the spinlock here forces ~Instantiator to wait, so by the time
+    // our try_acquire returns we have either (a) incremented
+    // m_active_rpc_calls, blocking ensure_rpc_shutdown until release, or
+    // (b) observed m_accepting_rpc_calls=false and bailed before any
+    // dereference of mutable Transceiver state. Lock order is
+    // spinlock -> m_rpc_lifecycle_mutex; ensure_rpc_shutdown and
+    // release_rpc_execution never take the spinlock, so this cannot deadlock.
     {
         auto scoped_map = get_instance_to_object_map<RPCTC>().scoped();
         auto it = scoped_map.get().find(untyped_msg.receiver_instance_id);
         if (it != scoped_map.get().end()) {
             obj = it->second;
+            execution_guard = obj->try_acquire_rpc_execution();
         }
     }
 
@@ -975,7 +992,6 @@ void Transceiver::rpc_handler(Message_prefix& untyped_msg)
         return;
     }
 
-    auto execution_guard = obj->try_acquire_rpc_execution();
     if (!execution_guard) {
         send_unavailable_response("RPC target is shutting down.");
         return;
@@ -1274,8 +1290,14 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
         if (is_local_instance(instance_id)) {
             // if the instance is local, then it has already been registered in the instance_map
             // of this particular type. this will only find the object and call it.
-            // Hold spinlock while accessing the iterator to prevent use-after-invalidation
+            //
+            // Hold the spinlock across both the lookup AND try_acquire_rpc_execution
+            // so the owner thread's ~Instantiator (which erases the same map entry
+            // under this spinlock) cannot race ahead and let ~Transceiver tear down
+            // m_rpc_lifecycle_mutex before we lock it. See the matching note in
+            // rpc_handler() above for the lock-order argument.
             typename RPCTC::o_type* object = nullptr;
+            Rpc_execution_guard guard;
             {
                 auto scoped_map = get_instance_to_object_map<RPCTC>().scoped();
                 auto it = scoped_map.get().find(instance_id);
@@ -1283,8 +1305,8 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
                     throw rpc_unavailable("Local RPC target no longer available - it may have been shut down.");
                 }
                 object = it->second;
+                guard = object->try_acquire_rpc_execution();
             }
-            auto guard = object->try_acquire_rpc_execution();
             if (!guard) {
                 throw rpc_unavailable("Attempted to call an RPC on a target that is shutting down.");
             }

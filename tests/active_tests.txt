@@ -88,6 +88,7 @@ drain_wake_coordination_test               5
 teardown_targeted_rpc_exception_test       5
 rpc_unavailable_typed_test                10
 ring_abi_fingerprint_test                  5
+rpc_destruction_race_test                  3
 
 # Manual/reproduction tests (commented out by default)
 # Uncomment to enable these tests (they may fail by design)
