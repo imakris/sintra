@@ -72,6 +72,7 @@ console_test                               1
 log_stream_move_test                      10
 tls_post_handler_test                     20
 spawn_wait_test                           10
+parent_child_targeted_rpc_test            10
 lifecycle_handler_test                    20
 leave_lifecycle_test                       5
 leave_coordinator_guardrails_test          5
