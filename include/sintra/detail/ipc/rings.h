@@ -388,6 +388,74 @@ struct ring_reader_evicted_exception : public std::runtime_error {
               "Ring reader was evicted by the writer due to being too slow.") {}
 };
 
+// Thrown by Ring::attach() when an existing control file's ABI fingerprint
+// does not match this binary. Distinct from ring_acquisition_failure_exception
+// so callers can give a clearer diagnostic when the failure mode is "another
+// participant in this swarm was built against a different sintra ABI."
+struct ring_abi_mismatch_exception : public std::runtime_error {
+    ring_abi_mismatch_exception(uint64_t expected, uint64_t observed)
+    : std::runtime_error(format_message(expected, observed))
+    , m_expected(expected)
+    , m_observed(observed)
+    {}
+
+    uint64_t expected_fingerprint() const noexcept { return m_expected; }
+    uint64_t observed_fingerprint() const noexcept { return m_observed; }
+
+private:
+    static std::string format_message(uint64_t expected, uint64_t observed)
+    {
+        char buf[256];
+        std::snprintf(
+            buf, sizeof(buf),
+            "Ring control block ABI fingerprint mismatch (this build expects "
+            "0x%016llx, control file holds 0x%016llx). Rebuild every "
+            "participant in the swarm against the same sintra version and "
+            "configuration.",
+            static_cast<unsigned long long>(expected),
+            static_cast<unsigned long long>(observed));
+        return buf;
+    }
+
+    uint64_t m_expected;
+    uint64_t m_observed;
+};
+
+namespace detail {
+
+// Compile-time FNV-1a 64-bit over a fixed sequence of 64-bit words.
+// Used to fingerprint the ring control block's ABI-relevant configuration so
+// that two binaries compiled against incompatible sintra configurations cannot
+// silently share a ring control file (sizeof(Control) coincidentally matching).
+inline constexpr uint64_t k_fnv1a_64_offset = 0xcbf29ce484222325ull;
+inline constexpr uint64_t k_fnv1a_64_prime  = 0x100000001b3ull;
+
+inline constexpr uint64_t fnv1a_64(std::initializer_list<uint64_t> words) noexcept
+{
+    uint64_t hash = k_fnv1a_64_offset;
+    for (uint64_t w : words) {
+        hash = (hash ^ w) * k_fnv1a_64_prime;
+    }
+    return hash;
+}
+
+// Bump SINTRA_RING_ABI_VERSION whenever Control's layout, sentinel values, or
+// the on-the-wire framing change in a way that would make two builds
+// incompatible at the ring level. The version is one input among several to
+// the fingerprint below.
+inline constexpr uint64_t k_ring_abi_version = 1;
+
+inline constexpr uint64_t k_ring_abi_fingerprint = fnv1a_64({
+    k_ring_abi_version,
+    static_cast<uint64_t>(num_process_index_bits),
+    static_cast<uint64_t>(max_process_index),
+    static_cast<uint64_t>(max_message_length),
+    static_cast<uint64_t>(assumed_cache_line_size),
+    static_cast<uint64_t>(num_reserved_service_instances),
+});
+
+} // namespace detail
+
 inline bool create_ring_backing_file(
     const std::string& path,
     size_t size,
@@ -1157,6 +1225,14 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
      */
     struct Control
     {
+        // ABI fingerprint. Placed first so it sits at a fixed offset (zero)
+        // regardless of how the rest of Control is laid out for the rest of
+        // the swarm. attach() reads this before trusting any other field.
+        // Constructed with this build's compile-time fingerprint; if the
+        // control file already exists, the placement-new is skipped and
+        // attach() validates the value the creator wrote.
+        std::atomic<uint64_t>                abi_fingerprint{detail::k_ring_abi_fingerprint};
+
         // This struct is always instantiated in a memory region which is shared among processes.
         // The atomics below are used for *cross-process* communication, including in a
         // double-mapped ("magic ring") region. See the detailed note & lock-free checks
@@ -1361,7 +1437,7 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
     Ring(const std::string& directory,
          const std::string& data_filename,
          size_t             num_elements)
-    : 
+    :
         Ring_data<T, READ_ONLY_DATA>(directory, data_filename, num_elements)
     {
         m_control_filename = this->m_data_filename + "_control";
@@ -1381,6 +1457,17 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
             }
             catch (...) {
                 throw ring_acquisition_failure_exception();
+            }
+        }
+        else {
+            // Validate that the existing control file was written by a binary
+            // with a compatible ABI. The size check inside attach() catches
+            // most layout drift; the fingerprint catches the residual case
+            // where sizeof(Control) coincidentally matches.
+            const auto observed = m_control->abi_fingerprint.load(std::memory_order_acquire);
+            if (observed != detail::k_ring_abi_fingerprint) {
+                throw ring_abi_mismatch_exception(
+                    detail::k_ring_abi_fingerprint, observed);
             }
         }
 
