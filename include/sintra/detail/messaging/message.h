@@ -517,9 +517,9 @@ struct ring_payload_traits<Message<T, RT, ID, EXPORTER>> {
 
 // Variadic macro overloading helper: dispatches SINTRA_MESSAGE_BASE to a
 // VA_DEFINE_STRUCT_N variant based on argument count. The double-glue
-// indirection is the standard workaround for legacy MSVC preprocessors that
-// treat __VA_ARGS__ as a single token; it remains in use because it stays
-// portable across compilers without forcing /Zc:preprocessor on MSVC.
+// indirection is the standard workaround for MSVC preprocessors that treat
+// __VA_ARGS__ as a single token, and stays portable across compilers without
+// requiring /Zc:preprocessor on MSVC.
 //
 // Cap is 16 message fields; widen the VA_DEFINE_STRUCT_N family below if more
 // are ever needed.
