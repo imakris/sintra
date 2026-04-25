@@ -515,11 +515,14 @@ struct ring_payload_traits<Message<T, RT, ID, EXPORTER>> {
   //       \//       \//       \//       \//       \//       \//       \//
 
 
-// [imak]: the "internal helpers" are due to a bug of MSVC's implementation of variadic macros.
-// At the time of writing, MSVC2013 update 5 is still exhibiting the problem.
-// I stole the original workaround from here:
-// http://stackoverflow.com/questions/24836793/varargs-elem-macro-for-use-with-c/24837037#24837037
-
+// Variadic macro overloading helper: dispatches SINTRA_MESSAGE_BASE to a
+// VA_DEFINE_STRUCT_N variant based on argument count. The double-glue
+// indirection is the standard workaround for legacy MSVC preprocessors that
+// treat __VA_ARGS__ as a single token; it remains in use because it stays
+// portable across compilers without forcing /Zc:preprocessor on MSVC.
+//
+// Cap is 16 message fields; widen the VA_DEFINE_STRUCT_N family below if more
+// are ever needed.
 
 /* internal helpers */
 #define VA_NARGS_GLUE_(x, y) x y
