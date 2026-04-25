@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>sintra::Derived_transceiver - Sintra Reference</title>
+    <link rel="stylesheet" href="../assets/style.css" />
+  </head>
+  <body>
+    <a class="skip-nav" href="#main-content">Skip to content</a>
+    <header class="site-header">
+      <div class="header-inner">
+        <a class="brand" href="../index.html" aria-label="Sintra reference home">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <span>Sintra Reference</span>
+        </a>
+        <nav class="top-nav" aria-label="Top navigation">
+          <a href="../index.html">Reference</a>
+          <a href="guide.html">Guide</a>
+          <a href="../../../README.md">README</a>
+        </nav>
+      </div>
+    </header>
+    <main id="main-content" class="page-shell reference-page">
+      <nav class="sidebar" aria-label="Reference navigation">
+<section><h2>Core</h2><ul>
+<li><a href="init.html">sintra::init</a></li>
+<li><a href="make_branches.html">sintra::make_branches</a></li>
+<li><a href="process_index.html">sintra::process_index</a></li>
+<li><a href="process_descriptor.html">sintra::Process_descriptor</a></li>
+<li><a href="spawn_swarm_process.html">sintra::spawn_swarm_process</a></li>
+<li><a href="join_swarm.html">sintra::join_swarm</a></li>
+<li><a href="init.html#sintradisable_debug_pause_for_current_process">sintra::disable_debug_pause_for_current_process</a></li>
+</ul></section>
+<section><h2>Publish/Subscribe</h2><ul>
+<li><a href="world.html">sintra::world</a></li>
+<li><a href="local.html">sintra::local</a></li>
+<li><a href="remote.html">sintra::remote</a></li>
+<li><a href="maildrop.html">sintra::Maildrop</a></li>
+<li><a href="activate_slot.html">sintra::activate_slot</a></li>
+<li><a href="deactivate_all_slots.html">sintra::deactivate_all_slots</a></li>
+<li><a href="receive.html">sintra::receive</a></li>
+</ul></section>
+<section><h2>Transceivers and Messages</h2><ul>
+<li><a href="transceiver.html">sintra::Transceiver</a></li>
+<li><a class="active" href="derived_transceiver.html">sintra::Derived_transceiver</a></li>
+<li><a href="transceiver_macros.html">SINTRA_MESSAGE</a></li>
+<li><a href="explicit_type_ids.html">SINTRA_MESSAGE_EXPLICIT</a></li>
+<li><a href="explicit_type_ids.html">SINTRA_TYPE_ID</a></li>
+<li><a href="transceiver_messages.html">Transceiver messages</a></li>
+<li><a href="message_payloads.html">Message payloads</a></li>
+<li><a href="transceiver_macros.html">Transceiver macros</a></li>
+</ul></section>
+<section><h2>RPC and Targeting</h2><ul>
+<li><a href="rpc.html">SINTRA_RPC</a></li>
+<li><a href="rpc.html">SINTRA_RPC_STRICT</a></li>
+<li><a href="rpc.html">SINTRA_UNICAST</a></li>
+<li><a href="rpc_handle.html">sintra::Rpc_handle</a></li>
+<li><a href="rpc_wait_status.html">sintra::Rpc_wait_status</a></li>
+<li><a href="rpc_completion_state.html">sintra::Rpc_completion_state</a></li>
+<li><a href="rpc_cancelled.html">sintra::rpc_cancelled</a></li>
+<li><a href="resolvable_instance_id.html">sintra::Resolvable_instance_id</a></li>
+<li><a href="typed_instance_id.html">sintra::Typed_instance_id</a></li>
+<li><a href="named_instance.html">sintra::Named_instance</a></li>
+<li><a href="instance_ids.html">Instance IDs</a></li>
+<li><a href="type_ids.html">Type IDs</a></li>
+<li><a href="explicit_type_ids.html">Explicit type IDs</a></li>
+</ul></section>
+<section><h2>Barriers and Lifecycle</h2><ul>
+<li><a href="barrier.html">sintra::barrier</a></li>
+<li><a href="barrier.html">sintra::barrier_completed</a></li>
+<li><a href="barrier_modes.html">sintra::rendezvous_t</a></li>
+<li><a href="barrier_modes.html">sintra::delivery_fence_t</a></li>
+<li><a href="barrier_modes.html">sintra::processing_fence_t</a></li>
+<li><a href="shutdown.html">sintra::shutdown</a></li>
+<li><a href="shutdown_options.html">sintra::shutdown_options</a></li>
+<li><a href="leave.html">sintra::leave</a></li>
+<li><a href="recovery.html">Recovery</a></li>
+<li><a href="lifecycle_hooks.html">Lifecycle hooks</a></li>
+</ul></section>
+<section><h2>Diagnostics</h2><ul>
+<li><a href="init_error.html">sintra::init_error</a></li>
+<li><a href="logging.html">sintra::Log_stream</a></li>
+<li><a href="logging.html">sintra::log_level</a></li>
+<li><a href="logging.html">sintra::set_log_callback</a></li>
+<li><a href="logging.html">sintra::get_log_callback</a></li>
+<li><a href="logging.html">sintra::log_raw</a></li>
+<li><a href="logging.html">sintra::ls_info</a></li>
+<li><a href="logging.html">sintra::ls_warning</a></li>
+<li><a href="logging.html">sintra::ls_error</a></li>
+<li><a href="logging.html">sintra::ls_debug</a></li>
+<li><a href="console.html">sintra::Console</a></li>
+<li><a href="console.html">sintra::console</a></li>
+</ul></section>
+<section><h2>Direct Rings</h2><ul>
+<li><a href="rings.html#ring_w">sintra::Ring_W</a></li>
+<li><a href="rings.html#ring_r">sintra::Ring_R</a></li>
+<li><a href="rings.html#ring_r_snapshot">sintra::Ring_R_snapshot</a></li>
+<li><a href="rings.html#ring_r_snapshot_error">sintra::Ring_R_snapshot_error</a></li>
+<li><a href="rings.html#range">sintra::Range</a></li>
+<li><a href="rings.html#ring_diagnostics">sintra::Ring_diagnostics</a></li>
+<li><a href="rings.html#aligned_capacity">sintra::aligned_capacity</a></li>
+<li><a href="rings.html#get_ring_configurations">sintra::get_ring_configurations</a></li>
+<li><a href="rings.html#make_snapshot">sintra::make_snapshot</a></li>
+<li><a href="rings.html#try_snapshot_e">sintra::try_snapshot_e</a></li>
+<li><a href="rings.html#ring_payload_traits">sintra::ring_payload_traits</a></li>
+<li><a href="rings.html#ring_acquisition_failure_exception">sintra::ring_acquisition_failure_exception</a></li>
+<li><a href="rings.html#ring_reader_evicted_exception">sintra::ring_reader_evicted_exception</a></li>
+</ul></section>
+</nav>
+      <article class="content-prose">
+        <h1 id="sintraderived_transceiver">sintra::Derived_transceiver</h1>
+<p>Include:</p>
+<pre><code class="language-cpp">#include &lt;sintra/sintra.h&gt;</code></pre>
+<p>Summary:</p>
+<p><code>Derived_transceiver&lt;Derived_T, Parent&gt;</code> is the CRTP base for user transceivers. It composes the <a href="transceiver.html"><code>sintra::Transceiver</code></a> runtime state with typed emission helpers (<code>emit_local</code>, <code>emit_remote</code>, <code>emit_global</code>) and the plumbing required by <a href="transceiver_macros.html">transceiver macros</a> that declare messages or export RPC endpoints.</p>
+<p>Signature:</p>
+<pre><code class="language-cpp">template &lt;typename Derived_T, typename Parent = void&gt;
+struct Derived_transceiver : Parent
+{
+    using Transceiver_type = Derived_T;
+
+    template &lt;typename MESSAGE_T,
+              typename SENDER_T = Transceiver_type,
+              typename... Args&gt;
+    void emit_local(Args&amp;&amp;... args);
+
+    template &lt;typename MESSAGE_T,
+              typename SENDER_T = Transceiver_type,
+              typename... Args&gt;
+    void emit_remote(Args&amp;&amp;... args);
+
+    template &lt;typename MESSAGE_T,
+              typename SENDER_T = Transceiver_type,
+              typename... Args&gt;
+    void emit_global(Args&amp;&amp;... args);
+
+    static sintra::Named_instance&lt;Transceiver_type&gt;
+        named_instance(const std::string&amp; name);
+};
+
+// First-level CRTP: Derived_transceiver&lt;T&gt; derives from sintra::Transceiver.
+// Higher-level inheritance: Derived_transceiver&lt;Child, Parent&gt; derives from Parent,
+// which itself must already derive from sintra::Transceiver.</code></pre>
+<p>Use when:</p>
+<ul>
+<li>Defining a user transceiver type <code>T</code> that exposes typed messages or RPC endpoints (<code>struct T : sintra::Derived_transceiver&lt;T&gt; { ... };</code>).</li>
+<li>Layering a child transceiver type on top of an existing transceiver (<code>struct Child : sintra::Derived_transceiver&lt;Child, Parent&gt; { ... };</code>).</li>
+<li>Sending typed messages whose sender identity must be the transceiver itself rather than the managed-process transceiver.</li>
+<li>Looking up a peer instance by name through <code>T::named_instance(&quot;...&quot;)</code>.</li>
+</ul>
+<p>Contract:</p>
+<ul>
+<li><code>Transceiver_type</code> aliases the deriving type, which the transceiver macros use in their internal assertions and exports.</li>
+<li><code>emit_local</code> sends to handlers in the current process, <code>emit_remote</code> to handlers in other processes, and <code>emit_global</code> to both. The sender carried in the message is the transceiver instance.</li>
+<li>The default <code>SENDER_T</code> template parameter is the deriving transceiver type. Override it explicitly when the message must be reported as originating from a different transceiver type.</li>
+<li><code>MESSAGE_T</code> is normally a message type produced by <code>SINTRA_MESSAGE</code> or <code>SINTRA_MESSAGE_EXPLICIT</code> nested in the transceiver. Plain <code>Message&lt;Enclosure&lt;T&gt;&gt;</code> types declared elsewhere are also accepted.</li>
+<li><code>named_instance(name)</code> returns a <code>sintra::Named_instance&lt;T&gt;</code> that can be passed where typed instance lookup is expected (for example as a slot filter that resolves the sender by name).</li>
+</ul>
+<p>Threading and lifecycle:</p>
+<ul>
+<li>Each <code>emit_*</code> call drops the message into the current process&#x27;s request ring and returns. Delivery and dispatch are asynchronous.</li>
+<li>The standard transceiver lifecycle rules apply: the transceiver instance must outlive any handler it owns, and <code>destroy()</code> should be called for long-lived transceivers before teardown if the application wants to unpublish them deterministically.</li>
+</ul>
+<p>Failures:</p>
+<ul>
+<li>Compile-time error if the message type is not derived from <code>Message_prefix</code>.</li>
+<li>Compile-time error if the sender type does not match the message&#x27;s declared exporter.</li>
+<li>Sending requires a successfully initialized Sintra runtime. Call <code>sintra::init()</code> before emitting messages, and stop emitting before runtime teardown.</li>
+</ul>
+<p>Example source:</p>
+<ul>
+<li><a href="../../../example/sintra/sintra_example_2_rpc_append.cpp">example/sintra/sintra_example_2_rpc_append.cpp</a></li>
+<li><a href="../../../example/sintra/sintra_example_6_unicast_send_to.cpp">example/sintra/sintra_example_6_unicast_send_to.cpp</a></li>
+<li><a href="../../../example/sintra/sintra_example_7_explicit_type_ids.cpp">example/sintra/sintra_example_7_explicit_type_ids.cpp</a></li>
+</ul>
+<p>Reduced example (from <code>sintra_example_7_explicit_type_ids.cpp</code>):</p>
+<pre><code class="language-cpp">#include &lt;sintra/sintra.h&gt;
+
+struct Explicit_bus : sintra::Derived_transceiver&lt;Explicit_bus&gt;
+{
+    SINTRA_TYPE_ID(k_bus_id)
+    SINTRA_MESSAGE_EXPLICIT(ping, k_ping_id, int value)
+};
+
+void demo()
+{
+    Explicit_bus bus;
+    sintra::activate_slot([](const Explicit_bus::ping&amp; msg) {
+        sintra::console() &lt;&lt; &quot;ping value=&quot; &lt;&lt; msg.value &lt;&lt; &#x27;\n&#x27;;
+    });
+    bus.emit_global&lt;Explicit_bus::ping&gt;(7);
+}</code></pre>
+<p>See also:</p>
+<ul>
+<li><a href="transceiver.html">sintra::Transceiver</a></li>
+<li><a href="transceiver_messages.html">Transceiver messages</a></li>
+<li><a href="transceiver_macros.html">Transceiver macros</a></li>
+<li><a href="activate_slot.html">sintra::activate_slot</a></li>
+<li><a href="world.html">sintra::world</a></li>
+</ul>
+      </article>
+    </main>
+  </body>
+</html>

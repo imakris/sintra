@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>SINTRA_RPC / SINTRA_RPC_STRICT / SINTRA_UNICAST - Sintra Reference</title>
+    <link rel="stylesheet" href="../assets/style.css" />
+  </head>
+  <body>
+    <a class="skip-nav" href="#main-content">Skip to content</a>
+    <header class="site-header">
+      <div class="header-inner">
+        <a class="brand" href="../index.html" aria-label="Sintra reference home">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <span>Sintra Reference</span>
+        </a>
+        <nav class="top-nav" aria-label="Top navigation">
+          <a href="../index.html">Reference</a>
+          <a href="guide.html">Guide</a>
+          <a href="../../../README.md">README</a>
+        </nav>
+      </div>
+    </header>
+    <main id="main-content" class="page-shell reference-page">
+      <nav class="sidebar" aria-label="Reference navigation">
+<section><h2>Core</h2><ul>
+<li><a href="init.html">sintra::init</a></li>
+<li><a href="make_branches.html">sintra::make_branches</a></li>
+<li><a href="process_index.html">sintra::process_index</a></li>
+<li><a href="process_descriptor.html">sintra::Process_descriptor</a></li>
+<li><a href="spawn_swarm_process.html">sintra::spawn_swarm_process</a></li>
+<li><a href="join_swarm.html">sintra::join_swarm</a></li>
+<li><a href="init.html#sintradisable_debug_pause_for_current_process">sintra::disable_debug_pause_for_current_process</a></li>
+</ul></section>
+<section><h2>Publish/Subscribe</h2><ul>
+<li><a href="world.html">sintra::world</a></li>
+<li><a href="local.html">sintra::local</a></li>
+<li><a href="remote.html">sintra::remote</a></li>
+<li><a href="maildrop.html">sintra::Maildrop</a></li>
+<li><a href="activate_slot.html">sintra::activate_slot</a></li>
+<li><a href="deactivate_all_slots.html">sintra::deactivate_all_slots</a></li>
+<li><a href="receive.html">sintra::receive</a></li>
+</ul></section>
+<section><h2>Transceivers and Messages</h2><ul>
+<li><a href="transceiver.html">sintra::Transceiver</a></li>
+<li><a href="derived_transceiver.html">sintra::Derived_transceiver</a></li>
+<li><a href="transceiver_macros.html">SINTRA_MESSAGE</a></li>
+<li><a href="explicit_type_ids.html">SINTRA_MESSAGE_EXPLICIT</a></li>
+<li><a href="explicit_type_ids.html">SINTRA_TYPE_ID</a></li>
+<li><a href="transceiver_messages.html">Transceiver messages</a></li>
+<li><a href="message_payloads.html">Message payloads</a></li>
+<li><a href="transceiver_macros.html">Transceiver macros</a></li>
+</ul></section>
+<section><h2>RPC and Targeting</h2><ul>
+<li><a class="active" href="rpc.html">SINTRA_RPC</a></li>
+<li><a class="active" href="rpc.html">SINTRA_RPC_STRICT</a></li>
+<li><a class="active" href="rpc.html">SINTRA_UNICAST</a></li>
+<li><a href="rpc_handle.html">sintra::Rpc_handle</a></li>
+<li><a href="rpc_wait_status.html">sintra::Rpc_wait_status</a></li>
+<li><a href="rpc_completion_state.html">sintra::Rpc_completion_state</a></li>
+<li><a href="rpc_cancelled.html">sintra::rpc_cancelled</a></li>
+<li><a href="resolvable_instance_id.html">sintra::Resolvable_instance_id</a></li>
+<li><a href="typed_instance_id.html">sintra::Typed_instance_id</a></li>
+<li><a href="named_instance.html">sintra::Named_instance</a></li>
+<li><a href="instance_ids.html">Instance IDs</a></li>
+<li><a href="type_ids.html">Type IDs</a></li>
+<li><a href="explicit_type_ids.html">Explicit type IDs</a></li>
+</ul></section>
+<section><h2>Barriers and Lifecycle</h2><ul>
+<li><a href="barrier.html">sintra::barrier</a></li>
+<li><a href="barrier.html">sintra::barrier_completed</a></li>
+<li><a href="barrier_modes.html">sintra::rendezvous_t</a></li>
+<li><a href="barrier_modes.html">sintra::delivery_fence_t</a></li>
+<li><a href="barrier_modes.html">sintra::processing_fence_t</a></li>
+<li><a href="shutdown.html">sintra::shutdown</a></li>
+<li><a href="shutdown_options.html">sintra::shutdown_options</a></li>
+<li><a href="leave.html">sintra::leave</a></li>
+<li><a href="recovery.html">Recovery</a></li>
+<li><a href="lifecycle_hooks.html">Lifecycle hooks</a></li>
+</ul></section>
+<section><h2>Diagnostics</h2><ul>
+<li><a href="init_error.html">sintra::init_error</a></li>
+<li><a href="logging.html">sintra::Log_stream</a></li>
+<li><a href="logging.html">sintra::log_level</a></li>
+<li><a href="logging.html">sintra::set_log_callback</a></li>
+<li><a href="logging.html">sintra::get_log_callback</a></li>
+<li><a href="logging.html">sintra::log_raw</a></li>
+<li><a href="logging.html">sintra::ls_info</a></li>
+<li><a href="logging.html">sintra::ls_warning</a></li>
+<li><a href="logging.html">sintra::ls_error</a></li>
+<li><a href="logging.html">sintra::ls_debug</a></li>
+<li><a href="console.html">sintra::Console</a></li>
+<li><a href="console.html">sintra::console</a></li>
+</ul></section>
+<section><h2>Direct Rings</h2><ul>
+<li><a href="rings.html#ring_w">sintra::Ring_W</a></li>
+<li><a href="rings.html#ring_r">sintra::Ring_R</a></li>
+<li><a href="rings.html#ring_r_snapshot">sintra::Ring_R_snapshot</a></li>
+<li><a href="rings.html#ring_r_snapshot_error">sintra::Ring_R_snapshot_error</a></li>
+<li><a href="rings.html#range">sintra::Range</a></li>
+<li><a href="rings.html#ring_diagnostics">sintra::Ring_diagnostics</a></li>
+<li><a href="rings.html#aligned_capacity">sintra::aligned_capacity</a></li>
+<li><a href="rings.html#get_ring_configurations">sintra::get_ring_configurations</a></li>
+<li><a href="rings.html#make_snapshot">sintra::make_snapshot</a></li>
+<li><a href="rings.html#try_snapshot_e">sintra::try_snapshot_e</a></li>
+<li><a href="rings.html#ring_payload_traits">sintra::ring_payload_traits</a></li>
+<li><a href="rings.html#ring_acquisition_failure_exception">sintra::ring_acquisition_failure_exception</a></li>
+<li><a href="rings.html#ring_reader_evicted_exception">sintra::ring_reader_evicted_exception</a></li>
+</ul></section>
+</nav>
+      <article class="content-prose">
+        <h1 id="sintra_rpc-sintra_rpc_strict-sintra_unicast">SINTRA_RPC / SINTRA_RPC_STRICT / SINTRA_UNICAST</h1>
+<p>Include:</p>
+<pre><code class="language-cpp">#include &lt;sintra/sintra.h&gt;</code></pre>
+<p>Summary: The RPC export macros are placed inside the body of a transceiver type that derives from <code>sintra::Derived_transceiver&lt;T&gt;</code>. Each macro takes the name of an existing member function and generates two static call wrappers as siblings of the exported method:</p>
+<ul>
+<li><code>rpc_&lt;method&gt;(target, args...)</code> is the blocking call form.</li>
+<li><code>rpc_async_&lt;method&gt;(target, args...)</code> returns an <code>Rpc_handle&lt;R&gt;</code> for the asynchronous waiting form, where <code>R</code> is the return type of the exported method.</li>
+</ul>
+<p>The macros differ only in whether a same-process call is allowed to take a direct in-process shortcut and whether a reply is produced.</p>
+<p>Signature:</p>
+<pre><code class="language-cpp">// All three macros are placed inside the transceiver class body.
+SINTRA_RPC(method)         // direct shortcut allowed for same-process targets
+SINTRA_RPC_STRICT(method)  // always uses the transported RPC path
+SINTRA_UNICAST(method)     // void only, fire-and-forget, no reply produced
+
+// The generated free functions, parameterised on the exported member function:
+template &lt;typename... Args&gt;
+static auto rpc_&lt;method&gt;(sintra::Resolvable_instance_id target, Args&amp;&amp;... args)
+    -&gt; R;
+
+template &lt;typename... Args&gt;
+static auto rpc_async_&lt;method&gt;(sintra::Resolvable_instance_id target, Args&amp;&amp;... args)
+    -&gt; sintra::Rpc_handle&lt;R&gt;;</code></pre>
+<p>Use when:</p>
+<ul>
+<li>A transceiver wants to expose member functions to peers in the same swarm.</li>
+<li>Local code wants a single call site that works whether the target lives in the current process or another process.</li>
+<li>The async-handle surface (deadline waits, abandonment, deferred result inspection) must work for a same-process target. In that case use <code>SINTRA_RPC_STRICT</code>, since <code>SINTRA_RPC</code> may pick a non-transported shortcut for which <code>rpc_async_&lt;method&gt;</code> is not supported.</li>
+<li>One-way notifications without a reply round-trip are needed. Use <code>SINTRA_UNICAST</code> for <code>void</code>-returning functions.</li>
+</ul>
+<p>Contract:</p>
+<ul>
+<li><code>target</code> is a <code>Resolvable_instance_id</code>. It accepts a raw <code>instance_id_type</code> (including <code>Typed_instance_id&lt;T&gt;::id</code> and the local form returned by <code>instance_id()</code>), a <code>std::string</code>, or a <code>const char*</code>. String forms resolve through the coordinator on first use.</li>
+<li><code>SINTRA_RPC</code> may take a direct in-process call shortcut for blocking <code>rpc_&lt;method&gt;</code> invocations whose target resolves to the same process.</li>
+<li><code>SINTRA_RPC_STRICT</code> always sends the request over the transport, even when the target is local. This is the export to use when local async behaviour must match the remote async behaviour.</li>
+<li><code>SINTRA_UNICAST</code> exports a fire-and-forget message: the body must return <code>void</code>, no reply is generated, and <code>rpc_async_&lt;method&gt;</code> is rejected at compile time. Exceptions thrown by the handler are not visible to the caller.</li>
+<li>Same-process <code>rpc_async_&lt;method&gt;</code> is rejected at runtime when the export is <code>SINTRA_RPC</code> (the non-strict path); use <code>SINTRA_RPC_STRICT</code> for transported same-process async RPC, or call <code>rpc_&lt;method&gt;</code> for the blocking non-strict path.</li>
+<li>Member functions exported through any of these macros may not return a reference type and may not take non-<code>const</code> reference parameters; both are rejected at compile time.</li>
+<li>Calling <code>rpc_&lt;method&gt;</code> with <code>invalid_instance_id</code> throws <code>std::runtime_error</code>.</li>
+<li>A remote handler that throws a recognised <code>std::exception</code> subclass causes the matching exception to be rethrown locally inside <code>rpc_&lt;method&gt;</code> (or in <code>Rpc_handle&lt;R&gt;::get()</code> for the async form).</li>
+</ul>
+<p>Threading and lifecycle:</p>
+<ul>
+<li>Call sites can be on any user thread that is not currently inside a Sintra message handler dispatch. The transceiver runtime must be initialised (<code>sintra::init</code> has succeeded) and the local managed process must still be live.</li>
+<li>The remote side runs the handler on a Sintra reader thread. RPC handlers observe the calling object&#x27;s lifetime; an instance that is being destroyed will refuse new RPCs and reply with an unavailability exception to in-flight callers.</li>
+<li>A <code>SINTRA_UNICAST</code> send completes locally as soon as the message has been written to the request ring; there is no reply or cross-process synchronisation.</li>
+</ul>
+<p>Failures:</p>
+<ul>
+<li><code>std::runtime_error</code> when called before <code>sintra::init</code> or after teardown, when the target id is <code>invalid_instance_id</code>, or when same-process <code>rpc_async_&lt;method&gt;</code> is attempted against a <code>SINTRA_RPC</code> (non-strict) export.</li>
+<li><code>std::runtime_error</code> when the target instance has been destroyed or is shutting down (the synthesised reply carries a runtime-error type id).</li>
+<li><code>sintra::rpc_cancelled</code> when the wait is unblocked by coordinator loss or shutdown drain logic before a reply arrives.</li>
+<li>The remote-side exception (any of the recognised <code>std::</code> types) when the exported function throws.</li>
+</ul>
+<p>Example source:</p>
+<ul>
+<li><a href="../../../example/sintra/sintra_example_2_rpc_append.cpp">example/sintra/sintra_example_2_rpc_append.cpp</a></li>
+<li><a href="../../../example/sintra/sintra_example_6_unicast_send_to.cpp">example/sintra/sintra_example_6_unicast_send_to.cpp</a></li>
+<li><a href="../../../tests/rpc_async_lifecycle_test.cpp">tests/rpc_async_lifecycle_test.cpp</a></li>
+</ul>
+<p>See also:</p>
+<ul>
+<li><a href="rpc_handle.html">Rpc_handle</a></li>
+<li><a href="rpc_wait_status.html">Rpc_wait_status</a></li>
+<li><a href="rpc_completion_state.html">Rpc_completion_state</a></li>
+<li><a href="rpc_cancelled.html">rpc_cancelled</a></li>
+<li><a href="resolvable_instance_id.html">Resolvable_instance_id</a></li>
+</ul>
+      </article>
+    </main>
+  </body>
+</html>

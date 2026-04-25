@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>Rpc_completion_state - Sintra Reference</title>
+    <link rel="stylesheet" href="../assets/style.css" />
+  </head>
+  <body>
+    <a class="skip-nav" href="#main-content">Skip to content</a>
+    <header class="site-header">
+      <div class="header-inner">
+        <a class="brand" href="../index.html" aria-label="Sintra reference home">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <span>Sintra Reference</span>
+        </a>
+        <nav class="top-nav" aria-label="Top navigation">
+          <a href="../index.html">Reference</a>
+          <a href="guide.html">Guide</a>
+          <a href="../../../README.md">README</a>
+        </nav>
+      </div>
+    </header>
+    <main id="main-content" class="page-shell reference-page">
+      <nav class="sidebar" aria-label="Reference navigation">
+<section><h2>Core</h2><ul>
+<li><a href="init.html">sintra::init</a></li>
+<li><a href="make_branches.html">sintra::make_branches</a></li>
+<li><a href="process_index.html">sintra::process_index</a></li>
+<li><a href="process_descriptor.html">sintra::Process_descriptor</a></li>
+<li><a href="spawn_swarm_process.html">sintra::spawn_swarm_process</a></li>
+<li><a href="join_swarm.html">sintra::join_swarm</a></li>
+<li><a href="init.html#sintradisable_debug_pause_for_current_process">sintra::disable_debug_pause_for_current_process</a></li>
+</ul></section>
+<section><h2>Publish/Subscribe</h2><ul>
+<li><a href="world.html">sintra::world</a></li>
+<li><a href="local.html">sintra::local</a></li>
+<li><a href="remote.html">sintra::remote</a></li>
+<li><a href="maildrop.html">sintra::Maildrop</a></li>
+<li><a href="activate_slot.html">sintra::activate_slot</a></li>
+<li><a href="deactivate_all_slots.html">sintra::deactivate_all_slots</a></li>
+<li><a href="receive.html">sintra::receive</a></li>
+</ul></section>
+<section><h2>Transceivers and Messages</h2><ul>
+<li><a href="transceiver.html">sintra::Transceiver</a></li>
+<li><a href="derived_transceiver.html">sintra::Derived_transceiver</a></li>
+<li><a href="transceiver_macros.html">SINTRA_MESSAGE</a></li>
+<li><a href="explicit_type_ids.html">SINTRA_MESSAGE_EXPLICIT</a></li>
+<li><a href="explicit_type_ids.html">SINTRA_TYPE_ID</a></li>
+<li><a href="transceiver_messages.html">Transceiver messages</a></li>
+<li><a href="message_payloads.html">Message payloads</a></li>
+<li><a href="transceiver_macros.html">Transceiver macros</a></li>
+</ul></section>
+<section><h2>RPC and Targeting</h2><ul>
+<li><a href="rpc.html">SINTRA_RPC</a></li>
+<li><a href="rpc.html">SINTRA_RPC_STRICT</a></li>
+<li><a href="rpc.html">SINTRA_UNICAST</a></li>
+<li><a href="rpc_handle.html">sintra::Rpc_handle</a></li>
+<li><a href="rpc_wait_status.html">sintra::Rpc_wait_status</a></li>
+<li><a class="active" href="rpc_completion_state.html">sintra::Rpc_completion_state</a></li>
+<li><a href="rpc_cancelled.html">sintra::rpc_cancelled</a></li>
+<li><a href="resolvable_instance_id.html">sintra::Resolvable_instance_id</a></li>
+<li><a href="typed_instance_id.html">sintra::Typed_instance_id</a></li>
+<li><a href="named_instance.html">sintra::Named_instance</a></li>
+<li><a href="instance_ids.html">Instance IDs</a></li>
+<li><a href="type_ids.html">Type IDs</a></li>
+<li><a href="explicit_type_ids.html">Explicit type IDs</a></li>
+</ul></section>
+<section><h2>Barriers and Lifecycle</h2><ul>
+<li><a href="barrier.html">sintra::barrier</a></li>
+<li><a href="barrier.html">sintra::barrier_completed</a></li>
+<li><a href="barrier_modes.html">sintra::rendezvous_t</a></li>
+<li><a href="barrier_modes.html">sintra::delivery_fence_t</a></li>
+<li><a href="barrier_modes.html">sintra::processing_fence_t</a></li>
+<li><a href="shutdown.html">sintra::shutdown</a></li>
+<li><a href="shutdown_options.html">sintra::shutdown_options</a></li>
+<li><a href="leave.html">sintra::leave</a></li>
+<li><a href="recovery.html">Recovery</a></li>
+<li><a href="lifecycle_hooks.html">Lifecycle hooks</a></li>
+</ul></section>
+<section><h2>Diagnostics</h2><ul>
+<li><a href="init_error.html">sintra::init_error</a></li>
+<li><a href="logging.html">sintra::Log_stream</a></li>
+<li><a href="logging.html">sintra::log_level</a></li>
+<li><a href="logging.html">sintra::set_log_callback</a></li>
+<li><a href="logging.html">sintra::get_log_callback</a></li>
+<li><a href="logging.html">sintra::log_raw</a></li>
+<li><a href="logging.html">sintra::ls_info</a></li>
+<li><a href="logging.html">sintra::ls_warning</a></li>
+<li><a href="logging.html">sintra::ls_error</a></li>
+<li><a href="logging.html">sintra::ls_debug</a></li>
+<li><a href="console.html">sintra::Console</a></li>
+<li><a href="console.html">sintra::console</a></li>
+</ul></section>
+<section><h2>Direct Rings</h2><ul>
+<li><a href="rings.html#ring_w">sintra::Ring_W</a></li>
+<li><a href="rings.html#ring_r">sintra::Ring_R</a></li>
+<li><a href="rings.html#ring_r_snapshot">sintra::Ring_R_snapshot</a></li>
+<li><a href="rings.html#ring_r_snapshot_error">sintra::Ring_R_snapshot_error</a></li>
+<li><a href="rings.html#range">sintra::Range</a></li>
+<li><a href="rings.html#ring_diagnostics">sintra::Ring_diagnostics</a></li>
+<li><a href="rings.html#aligned_capacity">sintra::aligned_capacity</a></li>
+<li><a href="rings.html#get_ring_configurations">sintra::get_ring_configurations</a></li>
+<li><a href="rings.html#make_snapshot">sintra::make_snapshot</a></li>
+<li><a href="rings.html#try_snapshot_e">sintra::try_snapshot_e</a></li>
+<li><a href="rings.html#ring_payload_traits">sintra::ring_payload_traits</a></li>
+<li><a href="rings.html#ring_acquisition_failure_exception">sintra::ring_acquisition_failure_exception</a></li>
+<li><a href="rings.html#ring_reader_evicted_exception">sintra::ring_reader_evicted_exception</a></li>
+</ul></section>
+</nav>
+      <article class="content-prose">
+        <h1 id="rpc_completion_state">Rpc_completion_state</h1>
+<p>Include:</p>
+<pre><code class="language-cpp">#include &lt;sintra/sintra.h&gt;</code></pre>
+<p>Summary: <code>Rpc_completion_state</code> is the lifecycle state of an <code>Rpc_handle&lt;R&gt;</code> returned by <code>rpc_async_&lt;method&gt;(...)</code>. It captures whether the call is still in flight, returned a value, observed a remote exception, was cancelled by the runtime, or was abandoned by the caller.</p>
+<p>Signature:</p>
+<pre><code class="language-cpp">namespace sintra {
+
+enum class Rpc_completion_state
+{
+    pending,
+    returned,
+    remote_exception,
+    cancelled,
+    abandoned,
+};
+
+} // namespace sintra</code></pre>
+<p>Use when:</p>
+<ul>
+<li>Inspecting an <code>Rpc_handle&lt;R&gt;</code> after a wait to decide how to consume the result.</li>
+</ul>
+<p>Contract:</p>
+<ul>
+<li><code>pending</code> means a final outcome has not yet been observed locally. The handle is still registered with the runtime.</li>
+<li><code>returned</code> means a normal reply was received and <code>Rpc_handle&lt;R&gt;::get()</code> will yield the value.</li>
+<li><code>remote_exception</code> means the remote handler threw a recognised exception. <code>Rpc_handle&lt;R&gt;::get()</code> rethrows the matching exception locally.</li>
+<li><code>cancelled</code> means the wait ended because the runtime unblocked outstanding RPCs (typically during teardown or coordinator-loss handling). <code>Rpc_handle&lt;R&gt;::get()</code> throws <code>sintra::rpc_cancelled</code>.</li>
+<li><code>abandoned</code> means the caller relinquished interest via <code>Rpc_handle&lt;R&gt;::abandon()</code> or by destroying a still-pending handle. <code>Rpc_handle&lt;R&gt;::get()</code> throws <code>std::runtime_error</code>.</li>
+</ul>
+<p>Threading and lifecycle:</p>
+<ul>
+<li>The state is observed at the moment of inspection; once the handle leaves <code>pending</code> it does not transition further. Late-arriving remote results for abandoned or cancelled calls are discarded by the runtime.</li>
+</ul>
+<p>Failures:</p>
+<ul>
+<li>None directly. The exceptions described above belong to <code>Rpc_handle&lt;R&gt;::get()</code>, not to inspecting the state.</li>
+</ul>
+<p>Example source:</p>
+<ul>
+<li><a href="../../../tests/rpc_async_lifecycle_test.cpp">tests/rpc_async_lifecycle_test.cpp</a></li>
+<li><a href="../../../tests/finalize_async_rpc_lifecycle_test.cpp">tests/finalize_async_rpc_lifecycle_test.cpp</a></li>
+</ul>
+<p>See also:</p>
+<ul>
+<li><a href="rpc_handle.html">Rpc_handle</a></li>
+<li><a href="rpc_wait_status.html">Rpc_wait_status</a></li>
+<li><a href="rpc_cancelled.html">rpc_cancelled</a></li>
+</ul>
+      </article>
+    </main>
+  </body>
+</html>

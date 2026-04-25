@@ -5,7 +5,7 @@
 #include <sstream>
 #include <string>
 
-#include "sintra/detail/ipc/rings.h"
+#include <sintra/rings.h>
 
 int main()
 {

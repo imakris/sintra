@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>Message payloads - Sintra Reference</title>
+    <link rel="stylesheet" href="../assets/style.css" />
+  </head>
+  <body>
+    <a class="skip-nav" href="#main-content">Skip to content</a>
+    <header class="site-header">
+      <div class="header-inner">
+        <a class="brand" href="../index.html" aria-label="Sintra reference home">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <span>Sintra Reference</span>
+        </a>
+        <nav class="top-nav" aria-label="Top navigation">
+          <a href="../index.html">Reference</a>
+          <a href="guide.html">Guide</a>
+          <a href="../../../README.md">README</a>
+        </nav>
+      </div>
+    </header>
+    <main id="main-content" class="page-shell reference-page">
+      <nav class="sidebar" aria-label="Reference navigation">
+<section><h2>Core</h2><ul>
+<li><a href="init.html">sintra::init</a></li>
+<li><a href="make_branches.html">sintra::make_branches</a></li>
+<li><a href="process_index.html">sintra::process_index</a></li>
+<li><a href="process_descriptor.html">sintra::Process_descriptor</a></li>
+<li><a href="spawn_swarm_process.html">sintra::spawn_swarm_process</a></li>
+<li><a href="join_swarm.html">sintra::join_swarm</a></li>
+<li><a href="init.html#sintradisable_debug_pause_for_current_process">sintra::disable_debug_pause_for_current_process</a></li>
+</ul></section>
+<section><h2>Publish/Subscribe</h2><ul>
+<li><a href="world.html">sintra::world</a></li>
+<li><a href="local.html">sintra::local</a></li>
+<li><a href="remote.html">sintra::remote</a></li>
+<li><a href="maildrop.html">sintra::Maildrop</a></li>
+<li><a href="activate_slot.html">sintra::activate_slot</a></li>
+<li><a href="deactivate_all_slots.html">sintra::deactivate_all_slots</a></li>
+<li><a href="receive.html">sintra::receive</a></li>
+</ul></section>
+<section><h2>Transceivers and Messages</h2><ul>
+<li><a href="transceiver.html">sintra::Transceiver</a></li>
+<li><a href="derived_transceiver.html">sintra::Derived_transceiver</a></li>
+<li><a href="transceiver_macros.html">SINTRA_MESSAGE</a></li>
+<li><a href="explicit_type_ids.html">SINTRA_MESSAGE_EXPLICIT</a></li>
+<li><a href="explicit_type_ids.html">SINTRA_TYPE_ID</a></li>
+<li><a href="transceiver_messages.html">Transceiver messages</a></li>
+<li><a class="active" href="message_payloads.html">Message payloads</a></li>
+<li><a href="transceiver_macros.html">Transceiver macros</a></li>
+</ul></section>
+<section><h2>RPC and Targeting</h2><ul>
+<li><a href="rpc.html">SINTRA_RPC</a></li>
+<li><a href="rpc.html">SINTRA_RPC_STRICT</a></li>
+<li><a href="rpc.html">SINTRA_UNICAST</a></li>
+<li><a href="rpc_handle.html">sintra::Rpc_handle</a></li>
+<li><a href="rpc_wait_status.html">sintra::Rpc_wait_status</a></li>
+<li><a href="rpc_completion_state.html">sintra::Rpc_completion_state</a></li>
+<li><a href="rpc_cancelled.html">sintra::rpc_cancelled</a></li>
+<li><a href="resolvable_instance_id.html">sintra::Resolvable_instance_id</a></li>
+<li><a href="typed_instance_id.html">sintra::Typed_instance_id</a></li>
+<li><a href="named_instance.html">sintra::Named_instance</a></li>
+<li><a href="instance_ids.html">Instance IDs</a></li>
+<li><a href="type_ids.html">Type IDs</a></li>
+<li><a href="explicit_type_ids.html">Explicit type IDs</a></li>
+</ul></section>
+<section><h2>Barriers and Lifecycle</h2><ul>
+<li><a href="barrier.html">sintra::barrier</a></li>
+<li><a href="barrier.html">sintra::barrier_completed</a></li>
+<li><a href="barrier_modes.html">sintra::rendezvous_t</a></li>
+<li><a href="barrier_modes.html">sintra::delivery_fence_t</a></li>
+<li><a href="barrier_modes.html">sintra::processing_fence_t</a></li>
+<li><a href="shutdown.html">sintra::shutdown</a></li>
+<li><a href="shutdown_options.html">sintra::shutdown_options</a></li>
+<li><a href="leave.html">sintra::leave</a></li>
+<li><a href="recovery.html">Recovery</a></li>
+<li><a href="lifecycle_hooks.html">Lifecycle hooks</a></li>
+</ul></section>
+<section><h2>Diagnostics</h2><ul>
+<li><a href="init_error.html">sintra::init_error</a></li>
+<li><a href="logging.html">sintra::Log_stream</a></li>
+<li><a href="logging.html">sintra::log_level</a></li>
+<li><a href="logging.html">sintra::set_log_callback</a></li>
+<li><a href="logging.html">sintra::get_log_callback</a></li>
+<li><a href="logging.html">sintra::log_raw</a></li>
+<li><a href="logging.html">sintra::ls_info</a></li>
+<li><a href="logging.html">sintra::ls_warning</a></li>
+<li><a href="logging.html">sintra::ls_error</a></li>
+<li><a href="logging.html">sintra::ls_debug</a></li>
+<li><a href="console.html">sintra::Console</a></li>
+<li><a href="console.html">sintra::console</a></li>
+</ul></section>
+<section><h2>Direct Rings</h2><ul>
+<li><a href="rings.html#ring_w">sintra::Ring_W</a></li>
+<li><a href="rings.html#ring_r">sintra::Ring_R</a></li>
+<li><a href="rings.html#ring_r_snapshot">sintra::Ring_R_snapshot</a></li>
+<li><a href="rings.html#ring_r_snapshot_error">sintra::Ring_R_snapshot_error</a></li>
+<li><a href="rings.html#range">sintra::Range</a></li>
+<li><a href="rings.html#ring_diagnostics">sintra::Ring_diagnostics</a></li>
+<li><a href="rings.html#aligned_capacity">sintra::aligned_capacity</a></li>
+<li><a href="rings.html#get_ring_configurations">sintra::get_ring_configurations</a></li>
+<li><a href="rings.html#make_snapshot">sintra::make_snapshot</a></li>
+<li><a href="rings.html#try_snapshot_e">sintra::try_snapshot_e</a></li>
+<li><a href="rings.html#ring_payload_traits">sintra::ring_payload_traits</a></li>
+<li><a href="rings.html#ring_acquisition_failure_exception">sintra::ring_acquisition_failure_exception</a></li>
+<li><a href="rings.html#ring_reader_evicted_exception">sintra::ring_reader_evicted_exception</a></li>
+</ul></section>
+</nav>
+      <article class="content-prose">
+        <h1 id="message-payloads">Message payloads</h1>
+<p>Include:</p>
+<pre><code class="language-cpp">#include &lt;sintra/sintra.h&gt;</code></pre>
+<p>Summary:</p>
+<p>A Sintra message has two parts: a fixed <code>sintra::Message_prefix</code> carrying addressing metadata and a body composed of user-supplied fields. Body fields are subject to a serialiser contract: they must be either trivial standard-layout types, types deriving from <code>sintra::Sintra_message_element</code>, or types convertible to <code>sintra::variable_buffer</code>. This page documents the variable-buffer payload helpers available to application code.</p>
+<p>Signature (relevant types):</p>
+<pre><code class="language-cpp">namespace sintra {
+
+using message_string = sintra::typed_variable_buffer&lt;std::string&gt;;
+
+struct variable_buffer
+{
+    size_t num_bytes        = 0;
+    size_t offset_in_bytes  = 0;
+
+    bool empty() const;
+
+    template &lt;typename TC, typename T = typename TC::iterator::value_type&gt;
+    variable_buffer(const TC&amp; container);
+};
+
+template &lt;typename T&gt;
+struct typed_variable_buffer : protected variable_buffer
+{
+    typed_variable_buffer();
+    typed_variable_buffer(const T&amp; v);
+
+    operator T() const;                  // materialises a copy of the contents
+    size_t      size_bytes() const;
+    size_t      data_offset_bytes() const;
+    const void* data_address() const;
+};
+
+} // namespace sintra</code></pre>
+<p>Use when:</p>
+<ul>
+<li>A message carries variable-length data such as a string, a vector of trivially-copyable elements, or a typed binary blob.</li>
+<li>The payload must travel inside a single message frame without external heap allocation.</li>
+<li>A typed wrapper is desired so that handlers can write a clear field type (<code>message_string</code>, <code>typed_variable_buffer&lt;std::vector&lt;int&gt;&gt;</code>).</li>
+</ul>
+<p>Contract:</p>
+<ul>
+<li><code>variable_buffer</code> only lives inside ring buffers. Application code generally interacts with <code>typed_variable_buffer&lt;T&gt;</code> or one of the declared aliases such as <code>message_string</code>.</li>
+<li><code>typed_variable_buffer&lt;T&gt;::operator T()</code> copies the trailing bytes of the message into a freshly constructed <code>T</code>. It requires that the element type <code>T::value_type</code> is trivially copyable.</li>
+<li>The data referenced by a variable-buffer field is stored inline at the end of the message, immediately after the body. Lifetime is bounded by the surrounding message; once the handler returns or the <a href="receive.html"><code>sintra::receive</code></a> scope ends, the data may be reused by the ring writer.</li>
+<li>Copy variable-buffer fields out before any subsequent message processing if they must outlive the current handler or <code>receive</code> scope. Conversion to <code>T</code> (for example <code>std::string s = msg.text;</code>) is the standard way to do this.</li>
+<li>Element alignment is enforced by <code>typed_variable_buffer&lt;T&gt;</code> so that <code>data_address()</code> is suitable for direct access.</li>
+</ul>
+<p>Threading and lifecycle:</p>
+<ul>
+<li>Construction happens on the sending thread, in place inside the request ring. Reader threads observe the message after the writer publishes it.</li>
+<li>Variable-buffer fields share their lifetime with the enclosing message buffer; do not retain raw pointers from <code>data_address()</code> past the handler scope.</li>
+</ul>
+<p>Failures:</p>
+<ul>
+<li>Compile-time error if a body field uses a type that does not satisfy the serialiser contract.</li>
+<li>Run-time assertion in debug builds when <code>typed_variable_buffer&lt;T&gt;</code> is read with a misaligned underlying buffer.</li>
+</ul>
+<p>Example source:</p>
+<ul>
+<li><a href="../../../tests/variable_buffer_alignment_test.cpp">tests/variable_buffer_alignment_test.cpp</a></li>
+<li><a href="../../../tests/message_args_traits_test.cpp">tests/message_args_traits_test.cpp</a></li>
+</ul>
+<p>Internal helpers (not for user code):</p>
+<ul>
+<li><code>sintra::detail::message_args</code> is the storage type used internally for message argument packs. It may appear in template diagnostics but application code should not name it.</li>
+</ul>
+<p>See also:</p>
+<ul>
+<li><a href="transceiver_messages.html">Transceiver messages</a></li>
+<li><a href="transceiver_macros.html">Transceiver macros</a></li>
+<li><a href="maildrop.html">sintra::Maildrop</a></li>
+<li><a href="receive.html">sintra::receive</a></li>
+</ul>
+      </article>
+    </main>
+  </body>
+</html>

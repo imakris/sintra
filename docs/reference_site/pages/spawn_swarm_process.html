@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>sintra::spawn_swarm_process - Sintra Reference</title>
+    <link rel="stylesheet" href="../assets/style.css" />
+  </head>
+  <body>
+    <a class="skip-nav" href="#main-content">Skip to content</a>
+    <header class="site-header">
+      <div class="header-inner">
+        <a class="brand" href="../index.html" aria-label="Sintra reference home">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <span>Sintra Reference</span>
+        </a>
+        <nav class="top-nav" aria-label="Top navigation">
+          <a href="../index.html">Reference</a>
+          <a href="guide.html">Guide</a>
+          <a href="../../../README.md">README</a>
+        </nav>
+      </div>
+    </header>
+    <main id="main-content" class="page-shell reference-page">
+      <nav class="sidebar" aria-label="Reference navigation">
+<section><h2>Core</h2><ul>
+<li><a href="init.html">sintra::init</a></li>
+<li><a href="make_branches.html">sintra::make_branches</a></li>
+<li><a href="process_index.html">sintra::process_index</a></li>
+<li><a href="process_descriptor.html">sintra::Process_descriptor</a></li>
+<li><a class="active" href="spawn_swarm_process.html">sintra::spawn_swarm_process</a></li>
+<li><a href="join_swarm.html">sintra::join_swarm</a></li>
+<li><a href="init.html#sintradisable_debug_pause_for_current_process">sintra::disable_debug_pause_for_current_process</a></li>
+</ul></section>
+<section><h2>Publish/Subscribe</h2><ul>
+<li><a href="world.html">sintra::world</a></li>
+<li><a href="local.html">sintra::local</a></li>
+<li><a href="remote.html">sintra::remote</a></li>
+<li><a href="maildrop.html">sintra::Maildrop</a></li>
+<li><a href="activate_slot.html">sintra::activate_slot</a></li>
+<li><a href="deactivate_all_slots.html">sintra::deactivate_all_slots</a></li>
+<li><a href="receive.html">sintra::receive</a></li>
+</ul></section>
+<section><h2>Transceivers and Messages</h2><ul>
+<li><a href="transceiver.html">sintra::Transceiver</a></li>
+<li><a href="derived_transceiver.html">sintra::Derived_transceiver</a></li>
+<li><a href="transceiver_macros.html">SINTRA_MESSAGE</a></li>
+<li><a href="explicit_type_ids.html">SINTRA_MESSAGE_EXPLICIT</a></li>
+<li><a href="explicit_type_ids.html">SINTRA_TYPE_ID</a></li>
+<li><a href="transceiver_messages.html">Transceiver messages</a></li>
+<li><a href="message_payloads.html">Message payloads</a></li>
+<li><a href="transceiver_macros.html">Transceiver macros</a></li>
+</ul></section>
+<section><h2>RPC and Targeting</h2><ul>
+<li><a href="rpc.html">SINTRA_RPC</a></li>
+<li><a href="rpc.html">SINTRA_RPC_STRICT</a></li>
+<li><a href="rpc.html">SINTRA_UNICAST</a></li>
+<li><a href="rpc_handle.html">sintra::Rpc_handle</a></li>
+<li><a href="rpc_wait_status.html">sintra::Rpc_wait_status</a></li>
+<li><a href="rpc_completion_state.html">sintra::Rpc_completion_state</a></li>
+<li><a href="rpc_cancelled.html">sintra::rpc_cancelled</a></li>
+<li><a href="resolvable_instance_id.html">sintra::Resolvable_instance_id</a></li>
+<li><a href="typed_instance_id.html">sintra::Typed_instance_id</a></li>
+<li><a href="named_instance.html">sintra::Named_instance</a></li>
+<li><a href="instance_ids.html">Instance IDs</a></li>
+<li><a href="type_ids.html">Type IDs</a></li>
+<li><a href="explicit_type_ids.html">Explicit type IDs</a></li>
+</ul></section>
+<section><h2>Barriers and Lifecycle</h2><ul>
+<li><a href="barrier.html">sintra::barrier</a></li>
+<li><a href="barrier.html">sintra::barrier_completed</a></li>
+<li><a href="barrier_modes.html">sintra::rendezvous_t</a></li>
+<li><a href="barrier_modes.html">sintra::delivery_fence_t</a></li>
+<li><a href="barrier_modes.html">sintra::processing_fence_t</a></li>
+<li><a href="shutdown.html">sintra::shutdown</a></li>
+<li><a href="shutdown_options.html">sintra::shutdown_options</a></li>
+<li><a href="leave.html">sintra::leave</a></li>
+<li><a href="recovery.html">Recovery</a></li>
+<li><a href="lifecycle_hooks.html">Lifecycle hooks</a></li>
+</ul></section>
+<section><h2>Diagnostics</h2><ul>
+<li><a href="init_error.html">sintra::init_error</a></li>
+<li><a href="logging.html">sintra::Log_stream</a></li>
+<li><a href="logging.html">sintra::log_level</a></li>
+<li><a href="logging.html">sintra::set_log_callback</a></li>
+<li><a href="logging.html">sintra::get_log_callback</a></li>
+<li><a href="logging.html">sintra::log_raw</a></li>
+<li><a href="logging.html">sintra::ls_info</a></li>
+<li><a href="logging.html">sintra::ls_warning</a></li>
+<li><a href="logging.html">sintra::ls_error</a></li>
+<li><a href="logging.html">sintra::ls_debug</a></li>
+<li><a href="console.html">sintra::Console</a></li>
+<li><a href="console.html">sintra::console</a></li>
+</ul></section>
+<section><h2>Direct Rings</h2><ul>
+<li><a href="rings.html#ring_w">sintra::Ring_W</a></li>
+<li><a href="rings.html#ring_r">sintra::Ring_R</a></li>
+<li><a href="rings.html#ring_r_snapshot">sintra::Ring_R_snapshot</a></li>
+<li><a href="rings.html#ring_r_snapshot_error">sintra::Ring_R_snapshot_error</a></li>
+<li><a href="rings.html#range">sintra::Range</a></li>
+<li><a href="rings.html#ring_diagnostics">sintra::Ring_diagnostics</a></li>
+<li><a href="rings.html#aligned_capacity">sintra::aligned_capacity</a></li>
+<li><a href="rings.html#get_ring_configurations">sintra::get_ring_configurations</a></li>
+<li><a href="rings.html#make_snapshot">sintra::make_snapshot</a></li>
+<li><a href="rings.html#try_snapshot_e">sintra::try_snapshot_e</a></li>
+<li><a href="rings.html#ring_payload_traits">sintra::ring_payload_traits</a></li>
+<li><a href="rings.html#ring_acquisition_failure_exception">sintra::ring_acquisition_failure_exception</a></li>
+<li><a href="rings.html#ring_reader_evicted_exception">sintra::ring_reader_evicted_exception</a></li>
+</ul></section>
+</nav>
+      <article class="content-prose">
+        <h1 id="sintraspawn_swarm_process">sintra::spawn_swarm_process</h1>
+<p>Include:</p>
+<pre><code class="language-cpp">#include &lt;sintra/sintra.h&gt;</code></pre>
+<p>Summary:</p>
+<p><code>spawn_swarm_process</code> adds one or more managed processes to a running swarm after <code>init</code> has completed. It launches the requested binary with the required Sintra arguments, optionally waits for a named instance to appear, and applies the configured lifeline policy. The starter process or any running participant may call it; child processes inherit the swarm and coordinator id from the parent.</p>
+<p>Signature:</p>
+<pre><code class="language-cpp">struct Spawn_options
+{
+    std::string                binary_path;
+    std::vector&lt;std::string&gt;   args;
+    size_t                     count = 1;
+    instance_id_type           process_instance_id = invalid_instance_id;
+    std::string                wait_for_instance_name;
+    std::chrono::milliseconds  wait_timeout{0};
+    Lifetime_policy            lifetime;
+};
+
+size_t spawn_swarm_process(const Spawn_options&amp; options);</code></pre>
+<p>Use when:</p>
+<ul>
+<li>A new participant must join a running swarm dynamically (a worker pool scaling out, a late-arriving subscriber, a tool launching a helper).</li>
+<li>The caller needs to block until the new participant publishes a known instance name (<code>wait_for_instance_name</code>), with an optional bounded wait (<code>wait_timeout</code>).</li>
+</ul>
+<p>Contract:</p>
+<ul>
+<li><code>binary_path</code> must be non-empty. The spawned program runs that binary, receives <code>args</code> as positional arguments (Sintra inserts the binary name as <code>argv[0]</code> if not already present), and gets <code>--swarm_id</code>, <code>--instance_id</code>, and <code>--coordinator_id</code> appended automatically.</li>
+<li><code>count</code> must be at least one. Counts greater than one are not allowed when <code>process_instance_id</code> is set or when <code>wait_for_instance_name</code> is non-empty; in those cases the call is rejected and returns zero.</li>
+<li><code>process_instance_id</code> defaults to a fresh process instance id. Setting it pins the new process to a specific id; the caller must guarantee the id is not already in use.</li>
+<li><code>wait_for_instance_name</code> is optional. When set, the call blocks until the coordinator resolves that name. With <code>wait_timeout</code> zero, the wait blocks indefinitely on the coordinator&#x27;s <code>rpc_wait_for_instance</code>. With a positive <code>wait_timeout</code>, the call polls <code>rpc_resolve_instance</code> with exponential backoff up to the deadline.</li>
+<li><code>lifetime</code> controls the lifeline policy applied to the child (see <code>Lifetime_policy</code>).</li>
+<li>The return value is the count of successful spawns. When the wait phase fails (timeout, exception, or the resolved id remained invalid), the function returns zero even when the OS spawn itself succeeded.</li>
+<li>Calls made while a lifecycle teardown protocol is active are rejected and return zero with a warning logged.</li>
+</ul>
+<p>Threading and lifecycle:</p>
+<ul>
+<li>Call from a top-level user thread, not from a message handler or post-handler callback. The implementation takes the teardown admission lock and issues coordinator RPCs, both of which require a normal control context.</li>
+<li>Successful spawns participate in subsequent barriers and coordinator membership immediately. The wait variant is the way to gate later code on the participant having published its name.</li>
+<li>A successful return with <code>wait_for_instance_name</code> set means the coordinator has observed the name; it does not guarantee the child has finished its own slot activations beyond that publication step.</li>
+</ul>
+<p>Failures:</p>
+<ul>
+<li>Returns zero (with a logged error) when <code>binary_path</code> is empty, <code>count</code> is zero, or when an invalid combination of options is passed.</li>
+<li>Returns zero when wait fails: the coordinator returned <code>invalid_instance_id</code>, <code>wait_timeout</code> elapsed, or the wait RPC threw.</li>
+</ul>
+<p>Example source:</p>
+<ul>
+<li><a href="../../../tests/spawn_wait_test.cpp">tests/spawn_wait_test.cpp</a></li>
+<li><a href="../../../tests/spawn_detached_test.cpp">tests/spawn_detached_test.cpp</a></li>
+<li><a href="../../../tests/lifeline_basic_test.cpp">tests/lifeline_basic_test.cpp</a></li>
+</ul>
+<p>See also:</p>
+<ul>
+<li><a href="join_swarm.html">sintra::join_swarm</a></li>
+<li><a href="process_descriptor.html">sintra::Process_descriptor</a></li>
+<li><a href="init.html">sintra::init</a></li>
+</ul>
+      </article>
+    </main>
+  </body>
+</html>

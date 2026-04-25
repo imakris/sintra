@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>sintra::enable_recovery / set_recovery_policy / set_recovery_runner - Sintra Reference</title>
+    <link rel="stylesheet" href="../assets/style.css" />
+  </head>
+  <body>
+    <a class="skip-nav" href="#main-content">Skip to content</a>
+    <header class="site-header">
+      <div class="header-inner">
+        <a class="brand" href="../index.html" aria-label="Sintra reference home">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <span>Sintra Reference</span>
+        </a>
+        <nav class="top-nav" aria-label="Top navigation">
+          <a href="../index.html">Reference</a>
+          <a href="guide.html">Guide</a>
+          <a href="../../../README.md">README</a>
+        </nav>
+      </div>
+    </header>
+    <main id="main-content" class="page-shell reference-page">
+      <nav class="sidebar" aria-label="Reference navigation">
+<section><h2>Core</h2><ul>
+<li><a href="init.html">sintra::init</a></li>
+<li><a href="make_branches.html">sintra::make_branches</a></li>
+<li><a href="process_index.html">sintra::process_index</a></li>
+<li><a href="process_descriptor.html">sintra::Process_descriptor</a></li>
+<li><a href="spawn_swarm_process.html">sintra::spawn_swarm_process</a></li>
+<li><a href="join_swarm.html">sintra::join_swarm</a></li>
+<li><a href="init.html#sintradisable_debug_pause_for_current_process">sintra::disable_debug_pause_for_current_process</a></li>
+</ul></section>
+<section><h2>Publish/Subscribe</h2><ul>
+<li><a href="world.html">sintra::world</a></li>
+<li><a href="local.html">sintra::local</a></li>
+<li><a href="remote.html">sintra::remote</a></li>
+<li><a href="maildrop.html">sintra::Maildrop</a></li>
+<li><a href="activate_slot.html">sintra::activate_slot</a></li>
+<li><a href="deactivate_all_slots.html">sintra::deactivate_all_slots</a></li>
+<li><a href="receive.html">sintra::receive</a></li>
+</ul></section>
+<section><h2>Transceivers and Messages</h2><ul>
+<li><a href="transceiver.html">sintra::Transceiver</a></li>
+<li><a href="derived_transceiver.html">sintra::Derived_transceiver</a></li>
+<li><a href="transceiver_macros.html">SINTRA_MESSAGE</a></li>
+<li><a href="explicit_type_ids.html">SINTRA_MESSAGE_EXPLICIT</a></li>
+<li><a href="explicit_type_ids.html">SINTRA_TYPE_ID</a></li>
+<li><a href="transceiver_messages.html">Transceiver messages</a></li>
+<li><a href="message_payloads.html">Message payloads</a></li>
+<li><a href="transceiver_macros.html">Transceiver macros</a></li>
+</ul></section>
+<section><h2>RPC and Targeting</h2><ul>
+<li><a href="rpc.html">SINTRA_RPC</a></li>
+<li><a href="rpc.html">SINTRA_RPC_STRICT</a></li>
+<li><a href="rpc.html">SINTRA_UNICAST</a></li>
+<li><a href="rpc_handle.html">sintra::Rpc_handle</a></li>
+<li><a href="rpc_wait_status.html">sintra::Rpc_wait_status</a></li>
+<li><a href="rpc_completion_state.html">sintra::Rpc_completion_state</a></li>
+<li><a href="rpc_cancelled.html">sintra::rpc_cancelled</a></li>
+<li><a href="resolvable_instance_id.html">sintra::Resolvable_instance_id</a></li>
+<li><a href="typed_instance_id.html">sintra::Typed_instance_id</a></li>
+<li><a href="named_instance.html">sintra::Named_instance</a></li>
+<li><a href="instance_ids.html">Instance IDs</a></li>
+<li><a href="type_ids.html">Type IDs</a></li>
+<li><a href="explicit_type_ids.html">Explicit type IDs</a></li>
+</ul></section>
+<section><h2>Barriers and Lifecycle</h2><ul>
+<li><a href="barrier.html">sintra::barrier</a></li>
+<li><a href="barrier.html">sintra::barrier_completed</a></li>
+<li><a href="barrier_modes.html">sintra::rendezvous_t</a></li>
+<li><a href="barrier_modes.html">sintra::delivery_fence_t</a></li>
+<li><a href="barrier_modes.html">sintra::processing_fence_t</a></li>
+<li><a href="shutdown.html">sintra::shutdown</a></li>
+<li><a href="shutdown_options.html">sintra::shutdown_options</a></li>
+<li><a href="leave.html">sintra::leave</a></li>
+<li><a class="active" href="recovery.html">Recovery</a></li>
+<li><a href="lifecycle_hooks.html">Lifecycle hooks</a></li>
+</ul></section>
+<section><h2>Diagnostics</h2><ul>
+<li><a href="init_error.html">sintra::init_error</a></li>
+<li><a href="logging.html">sintra::Log_stream</a></li>
+<li><a href="logging.html">sintra::log_level</a></li>
+<li><a href="logging.html">sintra::set_log_callback</a></li>
+<li><a href="logging.html">sintra::get_log_callback</a></li>
+<li><a href="logging.html">sintra::log_raw</a></li>
+<li><a href="logging.html">sintra::ls_info</a></li>
+<li><a href="logging.html">sintra::ls_warning</a></li>
+<li><a href="logging.html">sintra::ls_error</a></li>
+<li><a href="logging.html">sintra::ls_debug</a></li>
+<li><a href="console.html">sintra::Console</a></li>
+<li><a href="console.html">sintra::console</a></li>
+</ul></section>
+<section><h2>Direct Rings</h2><ul>
+<li><a href="rings.html#ring_w">sintra::Ring_W</a></li>
+<li><a href="rings.html#ring_r">sintra::Ring_R</a></li>
+<li><a href="rings.html#ring_r_snapshot">sintra::Ring_R_snapshot</a></li>
+<li><a href="rings.html#ring_r_snapshot_error">sintra::Ring_R_snapshot_error</a></li>
+<li><a href="rings.html#range">sintra::Range</a></li>
+<li><a href="rings.html#ring_diagnostics">sintra::Ring_diagnostics</a></li>
+<li><a href="rings.html#aligned_capacity">sintra::aligned_capacity</a></li>
+<li><a href="rings.html#get_ring_configurations">sintra::get_ring_configurations</a></li>
+<li><a href="rings.html#make_snapshot">sintra::make_snapshot</a></li>
+<li><a href="rings.html#try_snapshot_e">sintra::try_snapshot_e</a></li>
+<li><a href="rings.html#ring_payload_traits">sintra::ring_payload_traits</a></li>
+<li><a href="rings.html#ring_acquisition_failure_exception">sintra::ring_acquisition_failure_exception</a></li>
+<li><a href="rings.html#ring_reader_evicted_exception">sintra::ring_reader_evicted_exception</a></li>
+</ul></section>
+</nav>
+      <article class="content-prose">
+        <h1 id="sintraenable_recovery-set_recovery_policy-set_recovery_runner">sintra::enable_recovery / set_recovery_policy / set_recovery_runner</h1>
+<p>Include:</p>
+<pre><code class="language-cpp">#include &lt;sintra/sintra.h&gt;</code></pre>
+<p>Summary:</p>
+<p>The recovery API opts a process into automatic respawn on abnormal exit and configures the coordinator-side decision and execution callbacks. <code>enable_recovery()</code> is called by the candidate process; the coordinator then decides whether to respawn through <code>set_recovery_policy(...)</code> and performs any custom delay or gating in a <code>set_recovery_runner(...)</code> callback. The detected recovery occurrence count is exposed through the process-local global <code>s_recovery_occurrence</code>.</p>
+<p>Signature:</p>
+<pre><code class="language-cpp">void enable_recovery();
+
+void set_recovery_policy(Recovery_policy policy);
+void set_recovery_runner(Recovery_runner runner);
+
+using Recovery_policy = std::function&lt;bool(const Crash_info&amp;)&gt;;
+using Recovery_runner =
+    std::function&lt;void(const Crash_info&amp;, const Recovery_control&amp;)&gt;;
+
+struct Crash_info
+{
+    instance_id_type process_iid = invalid_instance_id;
+    uint32_t         process_slot = 0;
+    int              status = 0;
+};
+
+struct Recovery_control
+{
+    std::function&lt;bool()&gt; should_cancel;
+    std::function&lt;void()&gt; spawn;
+};
+
+extern uint32_t s_recovery_occurrence; // process-local</code></pre>
+<p>Use when:</p>
+<ul>
+<li>A worker should restart automatically on crash. Call <code>enable_recovery()</code> from inside that worker&#x27;s entry function. Branch on <code>s_recovery_occurrence</code> to distinguish the original run (<code>0</code>) from later recoveries (<code>1</code>, <code>2</code>, ...).</li>
+<li>A coordinator wants to filter recovery decisions through a policy that inspects <code>Crash_info::status</code>, the process slot, or external state. Configure the policy before the swarm reaches a state where crashes matter.</li>
+<li>The recovery action should not be immediate respawn. Configure a runner; the runner runs on a background thread, can sleep, broadcast countdown messages, and call <code>Recovery_control::spawn()</code> exactly once to trigger the actual respawn.</li>
+</ul>
+<p>Contract:</p>
+<ul>
+<li><code>enable_recovery()</code> operates on the local managed process. It marks the process as recoverable and records the command line used to launch it, so the coordinator can respawn it later.</li>
+<li><code>set_recovery_policy</code> and <code>set_recovery_runner</code> only take effect inside the coordinator process. Calls from non-coordinator processes are no-ops.</li>
+<li>The default behaviour, when no policy is configured, is to recover the process. A policy that returns <code>false</code> from a crash-info inspection skips the recovery for that event.</li>
+<li>The default runner, when none is configured, invokes the spawn immediately on the coordinator path. A custom runner runs on its own thread and decides when to call <code>Recovery_control::spawn()</code>. Calling <code>spawn()</code> more than once is ignored.</li>
+<li><code>Recovery_control::should_cancel()</code> becomes <code>true</code> when the coordinator has begun shutting down. Runners must check it and return promptly to let teardown progress.</li>
+<li><code>s_recovery_occurrence</code> is set in the recovered process at startup before the entry function runs. It is <code>0</code> for the first run, <code>1</code> for the first recovery, and so on. Reading it from a non-recoverable or non-spawned context is meaningful only after <code>init</code> has set the local managed process up.</li>
+<li>A recovery event is also surfaced through <code>set_lifecycle_handler</code> as a <code>process_lifecycle_event::reason::crash</code> when the process crashed.</li>
+</ul>
+<p>Threading and lifecycle:</p>
+<ul>
+<li>The recovery policy is invoked on the coordinator thread that handles the crash event. Keep the work cheap and side-effect-free; defer expensive logic to the runner.</li>
+<li>The runner runs on a dedicated coordinator-owned thread for the duration of one recovery decision. It must be thread-safe relative to other coordinator state it touches.</li>
+<li>Recovery is opt-in per process. Processes that did not call <code>enable_recovery()</code> are not respawned even when a policy or runner is configured.</li>
+</ul>
+<p>Failures:</p>
+<ul>
+<li>None of these functions throw. Misconfiguration shows up as a missed recovery (policy returned <code>false</code>, runner did not call <code>spawn</code>, recovery-disabled process exited).</li>
+</ul>
+<p>Example source:</p>
+<ul>
+<li><a href="../../../example/sintra/sintra_example_4_recovery.cpp">example/sintra/sintra_example_4_recovery.cpp</a></li>
+<li><a href="../../../tests/recovery_policy_test.cpp">tests/recovery_policy_test.cpp</a></li>
+<li><a href="../../../tests/recovery_runner_thread_test.cpp">tests/recovery_runner_thread_test.cpp</a></li>
+<li><a href="../../../tests/recovery_test.cpp">tests/recovery_test.cpp</a></li>
+</ul>
+<p>See also:</p>
+<ul>
+<li><a href="lifecycle_hooks.html">sintra::lifecycle_hooks</a></li>
+<li><a href="../../process_lifecycle_notes.md">docs/process_lifecycle_notes.md</a></li>
+<li><a href="#">sintra::Managed_process</a> (terminated_abnormally is described in <a href="lifecycle_hooks.html">sintra::lifecycle_hooks</a>)</li>
+</ul>
+      </article>
+    </main>
+  </body>
+</html>

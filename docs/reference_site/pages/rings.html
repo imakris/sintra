@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>sintra direct rings - Sintra Reference</title>
+    <link rel="stylesheet" href="../assets/style.css" />
+  </head>
+  <body>
+    <a class="skip-nav" href="#main-content">Skip to content</a>
+    <header class="site-header">
+      <div class="header-inner">
+        <a class="brand" href="../index.html" aria-label="Sintra reference home">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <span>Sintra Reference</span>
+        </a>
+        <nav class="top-nav" aria-label="Top navigation">
+          <a href="../index.html">Reference</a>
+          <a href="guide.html">Guide</a>
+          <a href="../../../README.md">README</a>
+        </nav>
+      </div>
+    </header>
+    <main id="main-content" class="page-shell reference-page">
+      <nav class="sidebar" aria-label="Reference navigation">
+<section><h2>Core</h2><ul>
+<li><a href="init.html">sintra::init</a></li>
+<li><a href="make_branches.html">sintra::make_branches</a></li>
+<li><a href="process_index.html">sintra::process_index</a></li>
+<li><a href="process_descriptor.html">sintra::Process_descriptor</a></li>
+<li><a href="spawn_swarm_process.html">sintra::spawn_swarm_process</a></li>
+<li><a href="join_swarm.html">sintra::join_swarm</a></li>
+<li><a href="init.html#sintradisable_debug_pause_for_current_process">sintra::disable_debug_pause_for_current_process</a></li>
+</ul></section>
+<section><h2>Publish/Subscribe</h2><ul>
+<li><a href="world.html">sintra::world</a></li>
+<li><a href="local.html">sintra::local</a></li>
+<li><a href="remote.html">sintra::remote</a></li>
+<li><a href="maildrop.html">sintra::Maildrop</a></li>
+<li><a href="activate_slot.html">sintra::activate_slot</a></li>
+<li><a href="deactivate_all_slots.html">sintra::deactivate_all_slots</a></li>
+<li><a href="receive.html">sintra::receive</a></li>
+</ul></section>
+<section><h2>Transceivers and Messages</h2><ul>
+<li><a href="transceiver.html">sintra::Transceiver</a></li>
+<li><a href="derived_transceiver.html">sintra::Derived_transceiver</a></li>
+<li><a href="transceiver_macros.html">SINTRA_MESSAGE</a></li>
+<li><a href="explicit_type_ids.html">SINTRA_MESSAGE_EXPLICIT</a></li>
+<li><a href="explicit_type_ids.html">SINTRA_TYPE_ID</a></li>
+<li><a href="transceiver_messages.html">Transceiver messages</a></li>
+<li><a href="message_payloads.html">Message payloads</a></li>
+<li><a href="transceiver_macros.html">Transceiver macros</a></li>
+</ul></section>
+<section><h2>RPC and Targeting</h2><ul>
+<li><a href="rpc.html">SINTRA_RPC</a></li>
+<li><a href="rpc.html">SINTRA_RPC_STRICT</a></li>
+<li><a href="rpc.html">SINTRA_UNICAST</a></li>
+<li><a href="rpc_handle.html">sintra::Rpc_handle</a></li>
+<li><a href="rpc_wait_status.html">sintra::Rpc_wait_status</a></li>
+<li><a href="rpc_completion_state.html">sintra::Rpc_completion_state</a></li>
+<li><a href="rpc_cancelled.html">sintra::rpc_cancelled</a></li>
+<li><a href="resolvable_instance_id.html">sintra::Resolvable_instance_id</a></li>
+<li><a href="typed_instance_id.html">sintra::Typed_instance_id</a></li>
+<li><a href="named_instance.html">sintra::Named_instance</a></li>
+<li><a href="instance_ids.html">Instance IDs</a></li>
+<li><a href="type_ids.html">Type IDs</a></li>
+<li><a href="explicit_type_ids.html">Explicit type IDs</a></li>
+</ul></section>
+<section><h2>Barriers and Lifecycle</h2><ul>
+<li><a href="barrier.html">sintra::barrier</a></li>
+<li><a href="barrier.html">sintra::barrier_completed</a></li>
+<li><a href="barrier_modes.html">sintra::rendezvous_t</a></li>
+<li><a href="barrier_modes.html">sintra::delivery_fence_t</a></li>
+<li><a href="barrier_modes.html">sintra::processing_fence_t</a></li>
+<li><a href="shutdown.html">sintra::shutdown</a></li>
+<li><a href="shutdown_options.html">sintra::shutdown_options</a></li>
+<li><a href="leave.html">sintra::leave</a></li>
+<li><a href="recovery.html">Recovery</a></li>
+<li><a href="lifecycle_hooks.html">Lifecycle hooks</a></li>
+</ul></section>
+<section><h2>Diagnostics</h2><ul>
+<li><a href="init_error.html">sintra::init_error</a></li>
+<li><a href="logging.html">sintra::Log_stream</a></li>
+<li><a href="logging.html">sintra::log_level</a></li>
+<li><a href="logging.html">sintra::set_log_callback</a></li>
+<li><a href="logging.html">sintra::get_log_callback</a></li>
+<li><a href="logging.html">sintra::log_raw</a></li>
+<li><a href="logging.html">sintra::ls_info</a></li>
+<li><a href="logging.html">sintra::ls_warning</a></li>
+<li><a href="logging.html">sintra::ls_error</a></li>
+<li><a href="logging.html">sintra::ls_debug</a></li>
+<li><a href="console.html">sintra::Console</a></li>
+<li><a href="console.html">sintra::console</a></li>
+</ul></section>
+<section><h2>Direct Rings</h2><ul>
+<li><a class="active" href="rings.html#ring_w">sintra::Ring_W</a></li>
+<li><a class="active" href="rings.html#ring_r">sintra::Ring_R</a></li>
+<li><a class="active" href="rings.html#ring_r_snapshot">sintra::Ring_R_snapshot</a></li>
+<li><a class="active" href="rings.html#ring_r_snapshot_error">sintra::Ring_R_snapshot_error</a></li>
+<li><a class="active" href="rings.html#range">sintra::Range</a></li>
+<li><a class="active" href="rings.html#ring_diagnostics">sintra::Ring_diagnostics</a></li>
+<li><a class="active" href="rings.html#aligned_capacity">sintra::aligned_capacity</a></li>
+<li><a class="active" href="rings.html#get_ring_configurations">sintra::get_ring_configurations</a></li>
+<li><a class="active" href="rings.html#make_snapshot">sintra::make_snapshot</a></li>
+<li><a class="active" href="rings.html#try_snapshot_e">sintra::try_snapshot_e</a></li>
+<li><a class="active" href="rings.html#ring_payload_traits">sintra::ring_payload_traits</a></li>
+<li><a class="active" href="rings.html#ring_acquisition_failure_exception">sintra::ring_acquisition_failure_exception</a></li>
+<li><a class="active" href="rings.html#ring_reader_evicted_exception">sintra::ring_reader_evicted_exception</a></li>
+</ul></section>
+</nav>
+      <article class="content-prose">
+        <h1 id="sintra-direct-rings">sintra direct rings</h1>
+<p>Include:</p>
+<pre><code class="language-cpp">#include &lt;sintra/rings.h&gt;</code></pre>
+<p>Summary:</p>
+<p><code>&lt;sintra/rings.h&gt;</code> exposes Sintra&#x27;s single-producer / multiple-consumer shared-memory ring primitives directly, without the managed-process IPC layer. The header gives access to the writer (<code>Ring_W</code>), reader (<code>Ring_R</code>), the snapshot RAII helpers (<code>Ring_R_snapshot</code>, <code>make_snapshot</code>, <code>try_snapshot_e</code>), the lightweight <code>Range&lt;T&gt;</code> view, the <code>Ring_diagnostics</code> snapshot, capacity helpers (<code>aligned_capacity</code>, <code>get_ring_configurations</code>), the ring exception types, and the opt-in trait <code>ring_payload_traits</code> for non-trivially-copyable payloads.</p>
+<p>Signature:</p>
+<pre><code class="language-cpp">namespace sintra {
+
+template &lt;typename T&gt;
+struct Range {
+    T* begin = nullptr;
+    T* end   = nullptr;
+};
+
+constexpr auto invalid_sequence = ~sequence_counter_type(0);
+
+template &lt;typename T&gt;
+struct ring_payload_traits {
+    static constexpr bool allow_nontrivial = false;
+};
+
+struct Ring_diagnostics {
+    sequence_counter_type max_reader_lag                  = 0;
+    sequence_counter_type worst_overflow_lag              = 0;
+    uint64_t              reader_lag_overflow_count       = 0;
+    uint64_t              reader_sequence_regressions     = 0;
+    uint64_t              reader_eviction_count           = 0;
+    uint32_t              last_evicted_reader_index;
+    sequence_counter_type last_evicted_reader_sequence    = 0;
+    sequence_counter_type last_evicted_writer_sequence    = 0;
+    uint32_t              last_evicted_reader_octile;
+    uint32_t              last_overflow_reader_index;
+    sequence_counter_type last_overflow_reader_sequence   = 0;
+    sequence_counter_type last_overflow_leading_sequence  = 0;
+    sequence_counter_type last_overflow_last_consumed     = 0;
+    uint64_t              stale_guard_clear_count         = 0;
+    uint64_t              guard_rollback_attempt_count    = 0;
+    uint64_t              guard_rollback_success_count    = 0;
+    uint64_t              guard_accounting_mismatch_count = 0;
+};
+
+template &lt;typename T&gt;
+std::vector&lt;size_t&gt; get_ring_configurations(
+    size_t min_elements, size_t max_size, size_t max_subdivisions);
+
+inline size_t aligned_capacity(size_t requested, size_t element_size);
+template &lt;typename T&gt; inline size_t aligned_capacity(size_t requested);
+
+template &lt;typename T&gt;
+struct Ring_W {
+    Ring_W(const std::string&amp; directory,
+           const std::string&amp; data_filename,
+           size_t             num_elements);
+
+    T*  write(const T* src_buffer, size_t num_src_elements);
+
+    template &lt;typename T2, typename... Args&gt;
+    T2* write(size_t num_extra_elements, Args&amp;&amp;... args);
+
+    sequence_counter_type write_commit(const T&amp; value);
+    sequence_counter_type write_commit(const T* src_buffer, size_t num_src_elements);
+
+    sequence_counter_type done_writing();
+    void                  unblock_global();
+    Range&lt;T&gt;              get_readable_range();
+
+    Ring_diagnostics get_diagnostics() const noexcept;
+};
+
+template &lt;typename T&gt;
+struct Ring_R {
+    Ring_R(const std::string&amp; directory,
+           const std::string&amp; data_filename,
+           size_t             num_elements,
+           size_t             max_trailing_elements = 0);
+
+    Range&lt;T&gt; start_reading();
+    Range&lt;T&gt; start_reading(size_t num_trailing_elements);
+    void     done_reading();
+    sequence_counter_type reading_sequence() const;
+    const Range&lt;T&gt; wait_for_new_data();
+    void done_reading_new_data();
+
+    Ring_diagnostics get_diagnostics() const noexcept;
+};
+
+template &lt;class Reader&gt;
+class [[nodiscard]] Ring_R_snapshot {
+public:
+    using element_t = typename Reader::element_t;
+
+    Ring_R_snapshot() = default;
+    Ring_R_snapshot(Reader&amp; reader, Range&lt;element_t&gt; rg) noexcept;
+
+    Ring_R_snapshot(Ring_R_snapshot&amp;&amp;) noexcept;
+    Ring_R_snapshot&amp; operator=(Ring_R_snapshot&amp;&amp;) noexcept;
+    ~Ring_R_snapshot() noexcept;
+
+    explicit operator bool() const noexcept;
+    Range&lt;element_t&gt; range() const noexcept;
+    element_t*       begin() const noexcept;
+    element_t*       end()   const noexcept;
+    void             dismiss() noexcept;
+};
+
+template &lt;class Reader, class... Args&gt;
+[[nodiscard]] Ring_R_snapshot&lt;Reader&gt;
+make_snapshot(Reader&amp; reader, Args&amp;&amp;... args);
+
+enum class Ring_R_snapshot_error : uint8_t {
+    none, evicted, exception
+};
+
+template &lt;class Reader, class... Args&gt;
+[[nodiscard]] std::pair&lt;Ring_R_snapshot&lt;Reader&gt;, Ring_R_snapshot_error&gt;
+try_snapshot_e(Reader&amp; reader, Args&amp;&amp;... args) noexcept;
+
+struct ring_acquisition_failure_exception : public std::runtime_error;
+struct ring_reader_evicted_exception      : public std::runtime_error;
+
+} // namespace sintra</code></pre>
+<h2 id="symbol-notes">Symbol Notes</h2>
+<h3 id="range">Range</h3>
+<p>Pointer pair returned by ring read operations.</p>
+<h3 id="ring_diagnostics">Ring_diagnostics</h3>
+<p>Counters captured from a writer or reader with <code>get_diagnostics()</code>.</p>
+<h3 id="ring_payload_traits">ring_payload_traits</h3>
+<p>Opt-in trait for a specific non-trivial payload type used with <code>Ring_W::write&lt;T2&gt;</code>.</p>
+<h3 id="ring_w">Ring_W</h3>
+<p>The single writer for a ring. It reserves storage with <code>write</code>, publishes with <code>done_writing</code>, or uses <code>write_commit</code> for the combined write-and-publish path.</p>
+<h3 id="ring_r">Ring_R</h3>
+<p>Reader for a ring. It reads snapshots through <code>start_reading</code> / <code>done_reading</code>, or waits for new data through <code>wait_for_new_data</code> / <code>done_reading_new_data</code>.</p>
+<h3 id="ring_r_snapshot">Ring_R_snapshot</h3>
+<p>Move-only RAII object that calls <code>done_reading</code> when a read snapshot leaves scope.</p>
+<h3 id="ring_r_snapshot_error">Ring_R_snapshot_error</h3>
+<p>Status enum returned by <code>try_snapshot_e</code>.</p>
+<h3 id="aligned_capacity">aligned_capacity</h3>
+<p>Rounds a requested element count up to a legal ring capacity.</p>
+<h3 id="get_ring_configurations">get_ring_configurations</h3>
+<p>Returns candidate capacities for a requested element range and maximum mapped size.</p>
+<h3 id="make_snapshot">make_snapshot</h3>
+<p>Creates a throwing <code>Ring_R_snapshot</code>.</p>
+<h3 id="try_snapshot_e">try_snapshot_e</h3>
+<p>Creates a non-throwing <code>Ring_R_snapshot</code> and returns a status enum beside it.</p>
+<h3 id="ring_acquisition_failure_exception">ring_acquisition_failure_exception</h3>
+<p>Thrown when ring construction cannot acquire files, mappings, or writer ownership.</p>
+<h3 id="ring_reader_evicted_exception">ring_reader_evicted_exception</h3>
+<p>Thrown when a reader has fallen too far behind and must be reconstructed.</p>
+<p>Use when:</p>
+<ul>
+<li>A producer/consumer pipeline needs the same shared-memory ring that Sintra uses internally, but without the managed-process layer (telemetry sinks, log streams, fan-out diagnostics).</li>
+<li>The application controls the creation order and lifetime of the backing files explicitly and does not need transceivers, RPC, or group barriers.</li>
+<li>A thin RAII wrapper over <code>start_reading()</code>/<code>done_reading()</code> is wanted: use <code>make_snapshot</code> (throws on failure) or <code>try_snapshot_e</code> (returns a status enum) instead of pairing the calls by hand.</li>
+</ul>
+<p>Contract:</p>
+<ul>
+<li>Construction signatures: <code>Ring_W&lt;T&gt;</code> and <code>Ring_R&lt;T&gt;</code> take a directory path, a data filename, the element count, and (for the reader) an optional <code>max_trailing_elements</code> cap that bounds how far a snapshot may look back.</li>
+<li><code>num_elements</code> must be a multiple of 8 (octiles). Use <code>aligned_capacity&lt;T&gt;(requested)</code> to round a desired element count up to the nearest legal value, or <code>get_ring_configurations&lt;T&gt;(min, max, count)</code> to enumerate page-aligned candidate sizes.</li>
+<li><code>Ring_W::write(buffer, n)</code> reserves space for <code>n</code> elements and copies them in. It does not publish; the producer must call <code>done_writing()</code> to advance the leading sequence. Use the convenience <code>write_commit(value)</code> or <code>write_commit(buffer, n)</code> for the common write-and-publish pattern.</li>
+<li>The templated overload <code>Ring_W::write&lt;T2&gt;(num_extra_elements, args...)</code> in-place constructs a <code>T2</code> whose footprint is a multiple of <code>T</code>. By default <code>T2</code> must be both trivially copyable and trivially destructible. Specialise <code>ring_payload_traits&lt;T2&gt;::allow_nontrivial = true</code> to opt a specific payload type into non-trivial semantics.</li>
+<li><code>Ring_R::start_reading(n)</code> returns a <code>Range&lt;T&gt;</code> view of up to <code>n</code> trailing elements behind the current leading sequence. <code>n</code> must not exceed <code>max_trailing_elements</code>. Each <code>start_reading</code> must be paired with <code>done_reading</code> before the next call.</li>
+<li><code>Ring_R::wait_for_new_data()</code> blocks until the leading sequence advances and returns the newly readable range. Pair every non-empty result with <code>done_reading_new_data()</code> before the next wait or read operation so the reader guard can migrate across octiles.</li>
+<li><code>Ring_R_snapshot</code> enforces that pairing by RAII. <code>make_snapshot(reader, args...)</code> throws on failure (typically <code>ring_reader_evicted_exception</code>); <code>try_snapshot_e(reader, args...)</code> is <code>noexcept</code> and returns the snapshot together with a <code>Ring_R_snapshot_error</code> (<code>none</code>, <code>evicted</code>, <code>exception</code>). Dismiss before destruction with <code>Ring_R_snapshot::dismiss()</code> if the consumer released the data through some other path.</li>
+<li><code>invalid_sequence</code> is the sentinel returned by ring-aware APIs to mean &quot;no sequence&quot;. Compare against it instead of any literal.</li>
+<li><code>Ring_diagnostics</code> is a snapshot of counters maintained by the ring (max reader lag, eviction counters, stale-guard clears, accounting mismatches). Read with <code>get_diagnostics()</code> on either the writer or any reader.</li>
+<li>A reader that falls too far behind may be evicted by the writer when <code>SINTRA_ENABLE_SLOW_READER_EVICTION</code> is defined (the default). Any subsequent <code>start_reading</code> or <code>make_snapshot</code> throws <code>ring_reader_evicted_exception</code>; <code>try_snapshot_e</code> returns <code>Ring_R_snapshot_error::evicted</code>. The reader must be reconstructed.</li>
+</ul>
+<p>Threading and lifecycle:</p>
+<ul>
+<li>Exactly one writer is permitted across processes. <code>Ring_W</code>&#x27;s constructor takes the cross-process ownership mutex and throws <code>ring_acquisition_failure_exception</code> if it is already held.</li>
+<li>Multiple readers are supported. Each <code>Ring_R</code> acquires a unique reader slot in its constructor and releases it in the destructor.</li>
+<li>The active snapshot count per <code>Ring_R</code> is one. Reentrant <code>start_reading</code> against the same reader throws <code>std::logic_error</code>. Use a separate <code>Ring_R&lt;T&gt;</code> instance for concurrent snapshots.</li>
+<li><code>Ring_W</code> should be destroyed on the same thread that constructed it. If destroyed elsewhere, the destructor logs an error and continues.</li>
+<li>The last process to detach removes both the data file and the control file from the chosen directory.</li>
+</ul>
+<p>Failures:</p>
+<ul>
+<li><code>ring_acquisition_failure_exception</code> from the constructors when the data file or control file cannot be mapped, when the size does not match, or when an exclusive writer slot cannot be obtained.</li>
+<li><code>ring_reader_evicted_exception</code> from <code>start_reading</code> or <code>make_snapshot</code> when the writer evicted the reader for being too far behind.</li>
+<li><code>std::logic_error</code> from <code>start_reading</code> when called twice without an intervening <code>done_reading</code>.</li>
+<li><code>std::invalid_argument</code> from a writer attempting to commit more than <code>num_elements / 8</code> elements in a single write (the single-octile limit).</li>
+<li><code>static_assert</code> from <code>Ring_W::write&lt;T2&gt;</code> when <code>T2</code> is not trivially copyable or destructible and <code>ring_payload_traits&lt;T2&gt;::allow_nontrivial</code> is <code>false</code>.</li>
+</ul>
+<p>Internal: <code>SINTRA_ENABLE_SLOW_READER_EVICTION</code>, <code>SINTRA_EVICTION_SPIN_BUDGET_US</code>, <code>SINTRA_EVICTION_LAG_RINGS</code>, and <code>SINTRA_STALE_GUARD_DELAY_MS</code> are tuning macros for the ring implementation. They are not part of the user-facing API and should only be overridden when explicitly tuning the ring for a deployment.</p>
+<p>Example source:</p>
+<ul>
+<li><a href="../../../example/sintra/sintra_example_8_ring_helpers.cpp">example/sintra/sintra_example_8_ring_helpers.cpp</a></li>
+<li><a href="../../../tests/ring_helpers_test.cpp">tests/ring_helpers_test.cpp</a></li>
+<li><a href="../../../tests/ipc_rings_tests.cpp">tests/ipc_rings_tests.cpp</a></li>
+</ul>
+<p>See also:</p>
+<ul>
+<li><a href="guide.html#direct-ring-helpers">docs/guide.md (Direct Ring Helpers)</a></li>
+</ul>
+      </article>
+    </main>
+  </body>
+</html>

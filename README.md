@@ -73,6 +73,7 @@ suitable for latency-sensitive workloads.
 - [Key features](#key-features)
 - [Quick example](#quick-example)
 - [Getting started](#getting-started)
+- [Reference and guide](#reference-and-guide)
 - [Supported platforms and architectures](#supported-platforms-and-architectures)
 - [Interprocess communication patterns](#interprocess-communication-patterns)
 - [Advanced topics](#advanced-topics)
@@ -146,6 +147,21 @@ For installed consumers, top-level builds export CMake package metadata. After
 find_package(sintra CONFIG REQUIRED)
 target_link_libraries(my_app PRIVATE sintra::sintra)
 ```
+
+## Reference and guide
+
+For a browser view, build the static reference site and serve it locally:
+
+```sh
+python scripts/build_reference_site.py
+python -m http.server 8000 --directory docs/reference_site
+```
+
+Then open `http://localhost:8000/`.
+
+The Markdown sources remain available for symbol lookup in
+[docs/reference/index.md](docs/reference/index.md), and the narrative guide is
+[docs/guide.md](docs/guide.md).
 
 ## Supported platforms and architectures
 
@@ -375,7 +391,7 @@ Explicit_bus bus;
 sintra::activate_slot([](const Explicit_bus::ping& msg) {
     sintra::console() << "ping value=" << msg.value << '\n';
 });
-bus.emit_global<Explicit_bus::ping>(42);
+bus.emit_global<Explicit_bus::ping>(73);
 ```
 
 See `example/sintra/sintra_example_7_explicit_type_ids.cpp` for a full example.
