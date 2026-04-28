@@ -1,6 +1,6 @@
 # Release Notes
 
-## v1.2.0 (unreleased)
+## v1.2.0 (2026-04-28)
 
 ### Highlights
 - Added install/export support for CMake consumers, including the
