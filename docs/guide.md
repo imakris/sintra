@@ -291,7 +291,7 @@ Returns the branch index for the current process. The starter process is index
 Signature:
 
 ```cpp
-void disable_debug_pause_for_current_process();
+void disable_debug_pause_for_current_process() noexcept;
 ```
 
 Disables Sintra's debug pause behavior in the current process.
@@ -598,7 +598,7 @@ Barrier modes:
 | --- | --- |
 | `rendezvous_t` | Every participant reaches the point. Pre-barrier messages may still be in flight. |
 | `delivery_fence_t` | Default. Pre-barrier messages have been fetched by local readers and queued for handling. Handlers may still be running. |
-| `processing_fence_t` | Pre-barrier handlers and continuations have completed. Use this when later code observes handler side effects. |
+| `processing_fence_t` | Control-thread fence for completed handler side effects. See handler-context caveat below. |
 
 `barrier()` returns a reply-ring watermark. `barrier_completed(seq)` is true
 unless `seq == invalid_sequence`. `invalid_sequence` can be returned when the
@@ -614,7 +614,10 @@ pending/arrived sets and the barrier completes when no pending participants
 remain. Barrier completions carry per-recipient reply-ring flush tokens.
 
 Processing fences are designed to keep reader threads draining while a handler
-waits. For the full protocol details, see
+waits, but a handler-context fence skips the currently executing reader and
+does not wait for work queued behind it on that same request-reader stream. Use
+a control-thread fence when the next phase must include all pre-barrier handler
+work. For the full protocol details, see
 [`docs/barriers_and_shutdown.md`](barriers_and_shutdown.md).
 
 Compiled examples/tests:
@@ -704,7 +707,8 @@ void enable_recovery();
 ```
 
 Marks the current process for coordinator-managed respawn after an unexpected
-exit. Recovery is opt-in per process.
+exit. Recovery is opt-in per process, and the call requires an active local
+Sintra runtime.
 
 Compiled examples/tests:
 - [`example/sintra/sintra_example_4_recovery.cpp`](../example/sintra/sintra_example_4_recovery.cpp)
@@ -904,7 +908,8 @@ threading rules.
 | Context | Do | Do not |
 | --- | --- | --- |
 | Slot or RPC handler | Protect shared state with mutexes/atomics; emit messages deliberately. | Assume handlers are serialized with application threads. |
-| Slot or RPC handler | Use a processing fence when later code must observe handler side effects. | Call `receive<T>()`. |
+| Slot or RPC handler | Use slots, RPC continuations, or control-thread receives for blocking waits. | Call `receive<T>()` from the handler. |
+| Slot or RPC handler | Use fences only when handler-context exclusions are OK. | Assume the current handler was fenced. |
 | Slot or RPC handler | Keep shutdown decisions on a control thread. | Call `leave()` from handler or post-handler callbacks. |
 | Async RPC caller | Use `wait_until` for bounded waits and call `abandon()` when giving up. | Treat deadline expiry as remote cancellation. |
 | Collective shutdown | Have every live finishing participant call `shutdown()`. | Call `shutdown()` in only one participant while peers continue. |

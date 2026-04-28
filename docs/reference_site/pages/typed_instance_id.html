@@ -7,7 +7,7 @@
     <title>Typed_instance_id - Sintra Reference</title>
     <link rel="stylesheet" href="../assets/style.css" />
   </head>
-  <body>
+  <body class="reference-page no-toc">
     <a class="skip-nav" href="#main-content">Skip to content</a>
     <header class="site-header">
       <div class="header-inner">
@@ -18,155 +18,71 @@
         <nav class="top-nav" aria-label="Top navigation">
           <a href="../index.html">Reference</a>
           <a href="guide.html">Guide</a>
-          <a href="../../../README.md">README</a>
+          <a href="readme.html">README</a>
         </nav>
       </div>
     </header>
-    <main id="main-content" class="page-shell reference-page">
-      <nav class="sidebar" aria-label="Reference navigation">
-<section><h2>Core</h2><ul>
-<li><a href="init.html">sintra::init</a></li>
-<li><a href="make_branches.html">sintra::make_branches</a></li>
-<li><a href="process_index.html">sintra::process_index</a></li>
-<li><a href="process_descriptor.html">sintra::Process_descriptor</a></li>
-<li><a href="spawn_swarm_process.html">sintra::spawn_swarm_process</a></li>
-<li><a href="join_swarm.html">sintra::join_swarm</a></li>
-<li><a href="init.html#sintradisable_debug_pause_for_current_process">sintra::disable_debug_pause_for_current_process</a></li>
-</ul></section>
-<section><h2>Publish/Subscribe</h2><ul>
-<li><a href="world.html">sintra::world</a></li>
-<li><a href="local.html">sintra::local</a></li>
-<li><a href="remote.html">sintra::remote</a></li>
-<li><a href="maildrop.html">sintra::Maildrop</a></li>
-<li><a href="activate_slot.html">sintra::activate_slot</a></li>
-<li><a href="deactivate_all_slots.html">sintra::deactivate_all_slots</a></li>
-<li><a href="receive.html">sintra::receive</a></li>
-</ul></section>
-<section><h2>Transceivers and Messages</h2><ul>
-<li><a href="transceiver.html">sintra::Transceiver</a></li>
-<li><a href="derived_transceiver.html">sintra::Derived_transceiver</a></li>
-<li><a href="transceiver_macros.html">SINTRA_MESSAGE</a></li>
-<li><a href="explicit_type_ids.html">SINTRA_MESSAGE_EXPLICIT</a></li>
-<li><a href="explicit_type_ids.html">SINTRA_TYPE_ID</a></li>
-<li><a href="transceiver_messages.html">Transceiver messages</a></li>
-<li><a href="message_payloads.html">Message payloads</a></li>
-<li><a href="transceiver_macros.html">Transceiver macros</a></li>
-</ul></section>
-<section><h2>RPC and Targeting</h2><ul>
-<li><a href="rpc.html">SINTRA_RPC</a></li>
-<li><a href="rpc.html">SINTRA_RPC_STRICT</a></li>
-<li><a href="rpc.html">SINTRA_UNICAST</a></li>
-<li><a href="rpc_handle.html">sintra::Rpc_handle</a></li>
-<li><a href="rpc_wait_status.html">sintra::Rpc_wait_status</a></li>
-<li><a href="rpc_completion_state.html">sintra::Rpc_completion_state</a></li>
-<li><a href="rpc_cancelled.html">sintra::rpc_cancelled</a></li>
-<li><a href="rpc_unavailable.html">sintra::rpc_unavailable</a></li>
-<li><a href="resolvable_instance_id.html">sintra::Resolvable_instance_id</a></li>
-<li><a class="active" href="typed_instance_id.html">sintra::Typed_instance_id</a></li>
-<li><a href="named_instance.html">sintra::Named_instance</a></li>
-<li><a href="instance_ids.html">Instance IDs</a></li>
-<li><a href="type_ids.html">Type IDs</a></li>
-<li><a href="explicit_type_ids.html">Explicit type IDs</a></li>
-</ul></section>
-<section><h2>Barriers and Lifecycle</h2><ul>
-<li><a href="barrier.html">sintra::barrier</a></li>
-<li><a href="barrier.html">sintra::barrier_completed</a></li>
-<li><a href="barrier_modes.html">sintra::rendezvous_t</a></li>
-<li><a href="barrier_modes.html">sintra::delivery_fence_t</a></li>
-<li><a href="barrier_modes.html">sintra::processing_fence_t</a></li>
-<li><a href="shutdown.html">sintra::shutdown</a></li>
-<li><a href="shutdown_options.html">sintra::shutdown_options</a></li>
-<li><a href="leave.html">sintra::leave</a></li>
-<li><a href="recovery.html">Recovery</a></li>
-<li><a href="lifecycle_hooks.html">Lifecycle hooks</a></li>
-</ul></section>
-<section><h2>Diagnostics</h2><ul>
-<li><a href="init_error.html">sintra::init_error</a></li>
-<li><a href="logging.html">sintra::Log_stream</a></li>
-<li><a href="logging.html">sintra::log_level</a></li>
-<li><a href="logging.html">sintra::set_log_callback</a></li>
-<li><a href="logging.html">sintra::get_log_callback</a></li>
-<li><a href="logging.html">sintra::log_raw</a></li>
-<li><a href="logging.html">sintra::ls_info</a></li>
-<li><a href="logging.html">sintra::ls_warning</a></li>
-<li><a href="logging.html">sintra::ls_error</a></li>
-<li><a href="logging.html">sintra::ls_debug</a></li>
-<li><a href="console.html">sintra::Console</a></li>
-<li><a href="console.html">sintra::console</a></li>
-</ul></section>
-<section><h2>Direct Rings</h2><ul>
-<li><a href="rings.html#ring_w">sintra::Ring_W</a></li>
-<li><a href="rings.html#ring_r">sintra::Ring_R</a></li>
-<li><a href="rings.html#ring_r_snapshot">sintra::Ring_R_snapshot</a></li>
-<li><a href="rings.html#ring_r_snapshot_error">sintra::Ring_R_snapshot_error</a></li>
-<li><a href="rings.html#range">sintra::Range</a></li>
-<li><a href="rings.html#ring_diagnostics">sintra::Ring_diagnostics</a></li>
-<li><a href="rings.html#aligned_capacity">sintra::aligned_capacity</a></li>
-<li><a href="rings.html#get_ring_configurations">sintra::get_ring_configurations</a></li>
-<li><a href="rings.html#make_snapshot">sintra::make_snapshot</a></li>
-<li><a href="rings.html#try_snapshot_e">sintra::try_snapshot_e</a></li>
-<li><a href="rings.html#ring_payload_traits">sintra::ring_payload_traits</a></li>
-<li><a href="rings.html#ring_acquisition_failure_exception">sintra::ring_acquisition_failure_exception</a></li>
-<li><a href="rings.html#ring_abi_mismatch_exception">sintra::ring_abi_mismatch_exception</a></li>
-<li><a href="rings.html#ring_reader_evicted_exception">sintra::ring_reader_evicted_exception</a></li>
-</ul></section>
-</nav>
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <ol><li><a href="../index.html">Reference</a></li><li><a href="../index.html#rpc-and-targeting">RPC and Targeting</a></li><li aria-current="page">sintra::Typed_instance_id</li></ol>
+    </nav>
+    <main id="main-content" class="page-shell">
       <article class="content-prose">
         <h1 id="typed_instance_id">Typed_instance_id</h1>
-<p>Include:</p>
-<pre><code class="language-cpp">#include &lt;sintra/sintra.h&gt;</code></pre>
-<p>Summary: <code>Typed_instance_id&lt;T&gt;</code> is a typed wrapper around a raw <code>instance_id_type</code> used when activating slots and calling <code>sintra::receive</code>. The type parameter constrains the kind of sender that the runtime accepts, and the <code>Typed_instance_id&lt;void&gt;</code> specialisation carries non-typed group ids such as <code>any_local</code>, <code>any_remote</code>, and <code>any_local_or_remote</code>.</p>
-<p>Signature:</p>
-<pre><code class="language-cpp">namespace sintra {
+        <p>Include:</p>
+        <pre><code class="language-cpp">#include &lt;sintra/sintra.h&gt;</code></pre>
+        <p>Summary: <code>Typed_instance_id&lt;T&gt;</code> is a typed wrapper around a raw <code>instance_id_type</code> used when activating slots and calling <code>sintra::receive</code>. The type parameter constrains the kind of sender that the runtime accepts, and the <code>Typed_instance_id&lt;void&gt;</code> specialisation carries non-typed group ids such as <code>any_local</code>, <code>any_remote</code>, and <code>any_local_or_remote</code>.</p>
+        <p>Signature:</p>
+        <pre><code class="language-cpp">namespace sintra {
 
-template &lt;typename T&gt;
-struct Typed_instance_id
-{
-    instance_id_type id;
-    Typed_instance_id(const T&amp; transceiver);
-    Typed_instance_id(instance_id_type id_);
-};
+        template &lt;typename T&gt;
+        struct Typed_instance_id
+        {
+            instance_id_type id;
+            Typed_instance_id(const T&amp; transceiver);
+            Typed_instance_id(instance_id_type id_);
+        };
 
-template &lt;&gt;
-struct Typed_instance_id&lt;void&gt;
-{
-    instance_id_type id;
-    Typed_instance_id(instance_id_type id_);
-};
+        template &lt;&gt;
+        struct Typed_instance_id&lt;void&gt;
+        {
+            instance_id_type id;
+            Typed_instance_id(instance_id_type id_);
+        };
 
-} // namespace sintra</code></pre>
-<p>Use when:</p>
-<ul>
-<li>Calling <code>activate_slot(handler, sender_id)</code> and you have a transceiver reference or a known instance id.</li>
-<li>Calling <code>receive&lt;MESSAGE_T&gt;(sender_id)</code> to wait for a message from a specific sender.</li>
-<li>Filtering on a wildcard group such as &quot;all local senders&quot; or &quot;all remote senders&quot;.</li>
-</ul>
-<p>Contract:</p>
-<ul>
-<li><code>Typed_instance_id&lt;T&gt;</code> constructed from a <code>T&amp;</code> reads the transceiver&#x27;s <code>m_instance_id</code>, which makes it usable as a sender filter for any handler whose declared sender base is <code>T</code> or a base of <code>T</code>.</li>
-<li>The constructor that takes a raw <code>instance_id_type</code> stores the value directly, without type checking. Pass it the result of <code>instance_id()</code> for a typed sender, or one of the wildcard sentinels for the <code>void</code> specialisation.</li>
-<li>The default sender used by <code>activate_slot</code> when no explicit sender is given is <code>Typed_instance_id&lt;void&gt;(any_local_or_remote)</code>.</li>
-<li><code>Typed_instance_id&lt;T&gt;::id</code> is a public field; consumers read it directly.</li>
-</ul>
-<p>Threading and lifecycle:</p>
-<ul>
-<li>The wrapper holds only the id. Constructing it from a transceiver does not take ownership of, or reference-count, the transceiver. The caller is responsible for ensuring the referenced transceiver is alive at the moment of construction.</li>
-</ul>
-<p>Failures:</p>
-<ul>
-<li>Construction does not validate the id; an <code>invalid_instance_id</code> value is accepted and produces a sender filter that matches no live sender.</li>
-</ul>
-<p>Example source:</p>
-<ul>
-<li><a href="../../../example/sintra/sintra_example_2_rpc_append.cpp">example/sintra/sintra_example_2_rpc_append.cpp</a></li>
-<li><a href="../../../example/sintra/sintra_example_6_unicast_send_to.cpp">example/sintra/sintra_example_6_unicast_send_to.cpp</a></li>
-</ul>
-<p>See also:</p>
-<ul>
-<li><a href="resolvable_instance_id.html">Resolvable_instance_id</a></li>
-<li><a href="named_instance.html">Named_instance</a></li>
-<li><a href="instance_ids.html">instance ids</a></li>
-</ul>
+        } // namespace sintra</code></pre>
+        <p>Use when:</p>
+        <ul>
+        <li>Calling <code>activate_slot(handler, sender_id)</code> and you have a transceiver reference or a known instance id.</li>
+        <li>Calling <code>receive&lt;MESSAGE_T&gt;(sender_id)</code> to wait for a message from a specific sender.</li>
+        <li>Filtering on a wildcard group such as &quot;all local senders&quot; or &quot;all remote senders&quot;.</li>
+        </ul>
+        <p>Contract:</p>
+        <ul>
+        <li><code>Typed_instance_id&lt;T&gt;</code> constructed from a <code>T&amp;</code> reads the transceiver&#x27;s <code>m_instance_id</code>, which makes it usable as a sender filter for any handler whose declared sender base is <code>T</code> or a base of <code>T</code>.</li>
+        <li>The constructor that takes a raw <code>instance_id_type</code> stores the value directly, without type checking. Pass it the result of <code>instance_id()</code> for a typed sender, or one of the wildcard sentinels for the <code>void</code> specialisation.</li>
+        <li>The default sender used by <code>activate_slot</code> when no explicit sender is given is <code>Typed_instance_id&lt;void&gt;(any_local_or_remote)</code>.</li>
+        <li><code>Typed_instance_id&lt;T&gt;::id</code> is a public field; consumers read it directly.</li>
+        </ul>
+        <p>Threading and lifecycle:</p>
+        <ul>
+        <li>The wrapper holds only the id. Constructing it from a transceiver does not take ownership of, or reference-count, the transceiver. The caller is responsible for ensuring the referenced transceiver is alive at the moment of construction.</li>
+        </ul>
+        <p>Failures:</p>
+        <ul>
+        <li>Construction does not validate the id; an <code>invalid_instance_id</code> value is accepted and produces a sender filter that matches no live sender.</li>
+        </ul>
+        <p>Example source:</p>
+        <ul>
+        <li><a href="https://github.com/imakris/sintra/blob/master/example/sintra/sintra_example_2_rpc_append.cpp">example/sintra/sintra_example_2_rpc_append.cpp</a></li>
+        <li><a href="https://github.com/imakris/sintra/blob/master/example/sintra/sintra_example_6_unicast_send_to.cpp">example/sintra/sintra_example_6_unicast_send_to.cpp</a></li>
+        </ul>
+        <p>See also:</p>
+        <ul>
+        <li><a href="resolvable_instance_id.html">Resolvable_instance_id</a></li>
+        <li><a href="named_instance.html">Named_instance</a></li>
+        <li><a href="instance_ids.html">instance ids</a></li>
+        </ul>
+        <nav class="page-nav" aria-label="Reference navigation"><a class="page-nav-prev" href="resolvable_instance_id.html"><span class="label">&larr; Previous</span><span class="title">sintra::Resolvable_instance_id</span></a><a class="page-nav-next" href="named_instance.html"><span class="label">Next &rarr;</span><span class="title">sintra::Named_instance</span></a></nav>
       </article>
     </main>
   </body>

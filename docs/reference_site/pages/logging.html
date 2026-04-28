@@ -7,7 +7,7 @@
     <title>sintra::Log_stream / set_log_callback - Sintra Reference</title>
     <link rel="stylesheet" href="../assets/style.css" />
   </head>
-  <body>
+  <body class="reference-page no-toc">
     <a class="skip-nav" href="#main-content">Skip to content</a>
     <header class="site-header">
       <div class="header-inner">
@@ -18,169 +18,85 @@
         <nav class="top-nav" aria-label="Top navigation">
           <a href="../index.html">Reference</a>
           <a href="guide.html">Guide</a>
-          <a href="../../../README.md">README</a>
+          <a href="readme.html">README</a>
         </nav>
       </div>
     </header>
-    <main id="main-content" class="page-shell reference-page">
-      <nav class="sidebar" aria-label="Reference navigation">
-<section><h2>Core</h2><ul>
-<li><a href="init.html">sintra::init</a></li>
-<li><a href="make_branches.html">sintra::make_branches</a></li>
-<li><a href="process_index.html">sintra::process_index</a></li>
-<li><a href="process_descriptor.html">sintra::Process_descriptor</a></li>
-<li><a href="spawn_swarm_process.html">sintra::spawn_swarm_process</a></li>
-<li><a href="join_swarm.html">sintra::join_swarm</a></li>
-<li><a href="init.html#sintradisable_debug_pause_for_current_process">sintra::disable_debug_pause_for_current_process</a></li>
-</ul></section>
-<section><h2>Publish/Subscribe</h2><ul>
-<li><a href="world.html">sintra::world</a></li>
-<li><a href="local.html">sintra::local</a></li>
-<li><a href="remote.html">sintra::remote</a></li>
-<li><a href="maildrop.html">sintra::Maildrop</a></li>
-<li><a href="activate_slot.html">sintra::activate_slot</a></li>
-<li><a href="deactivate_all_slots.html">sintra::deactivate_all_slots</a></li>
-<li><a href="receive.html">sintra::receive</a></li>
-</ul></section>
-<section><h2>Transceivers and Messages</h2><ul>
-<li><a href="transceiver.html">sintra::Transceiver</a></li>
-<li><a href="derived_transceiver.html">sintra::Derived_transceiver</a></li>
-<li><a href="transceiver_macros.html">SINTRA_MESSAGE</a></li>
-<li><a href="explicit_type_ids.html">SINTRA_MESSAGE_EXPLICIT</a></li>
-<li><a href="explicit_type_ids.html">SINTRA_TYPE_ID</a></li>
-<li><a href="transceiver_messages.html">Transceiver messages</a></li>
-<li><a href="message_payloads.html">Message payloads</a></li>
-<li><a href="transceiver_macros.html">Transceiver macros</a></li>
-</ul></section>
-<section><h2>RPC and Targeting</h2><ul>
-<li><a href="rpc.html">SINTRA_RPC</a></li>
-<li><a href="rpc.html">SINTRA_RPC_STRICT</a></li>
-<li><a href="rpc.html">SINTRA_UNICAST</a></li>
-<li><a href="rpc_handle.html">sintra::Rpc_handle</a></li>
-<li><a href="rpc_wait_status.html">sintra::Rpc_wait_status</a></li>
-<li><a href="rpc_completion_state.html">sintra::Rpc_completion_state</a></li>
-<li><a href="rpc_cancelled.html">sintra::rpc_cancelled</a></li>
-<li><a href="rpc_unavailable.html">sintra::rpc_unavailable</a></li>
-<li><a href="resolvable_instance_id.html">sintra::Resolvable_instance_id</a></li>
-<li><a href="typed_instance_id.html">sintra::Typed_instance_id</a></li>
-<li><a href="named_instance.html">sintra::Named_instance</a></li>
-<li><a href="instance_ids.html">Instance IDs</a></li>
-<li><a href="type_ids.html">Type IDs</a></li>
-<li><a href="explicit_type_ids.html">Explicit type IDs</a></li>
-</ul></section>
-<section><h2>Barriers and Lifecycle</h2><ul>
-<li><a href="barrier.html">sintra::barrier</a></li>
-<li><a href="barrier.html">sintra::barrier_completed</a></li>
-<li><a href="barrier_modes.html">sintra::rendezvous_t</a></li>
-<li><a href="barrier_modes.html">sintra::delivery_fence_t</a></li>
-<li><a href="barrier_modes.html">sintra::processing_fence_t</a></li>
-<li><a href="shutdown.html">sintra::shutdown</a></li>
-<li><a href="shutdown_options.html">sintra::shutdown_options</a></li>
-<li><a href="leave.html">sintra::leave</a></li>
-<li><a href="recovery.html">Recovery</a></li>
-<li><a href="lifecycle_hooks.html">Lifecycle hooks</a></li>
-</ul></section>
-<section><h2>Diagnostics</h2><ul>
-<li><a href="init_error.html">sintra::init_error</a></li>
-<li><a class="active" href="logging.html">sintra::Log_stream</a></li>
-<li><a class="active" href="logging.html">sintra::log_level</a></li>
-<li><a class="active" href="logging.html">sintra::set_log_callback</a></li>
-<li><a class="active" href="logging.html">sintra::get_log_callback</a></li>
-<li><a class="active" href="logging.html">sintra::log_raw</a></li>
-<li><a class="active" href="logging.html">sintra::ls_info</a></li>
-<li><a class="active" href="logging.html">sintra::ls_warning</a></li>
-<li><a class="active" href="logging.html">sintra::ls_error</a></li>
-<li><a class="active" href="logging.html">sintra::ls_debug</a></li>
-<li><a href="console.html">sintra::Console</a></li>
-<li><a href="console.html">sintra::console</a></li>
-</ul></section>
-<section><h2>Direct Rings</h2><ul>
-<li><a href="rings.html#ring_w">sintra::Ring_W</a></li>
-<li><a href="rings.html#ring_r">sintra::Ring_R</a></li>
-<li><a href="rings.html#ring_r_snapshot">sintra::Ring_R_snapshot</a></li>
-<li><a href="rings.html#ring_r_snapshot_error">sintra::Ring_R_snapshot_error</a></li>
-<li><a href="rings.html#range">sintra::Range</a></li>
-<li><a href="rings.html#ring_diagnostics">sintra::Ring_diagnostics</a></li>
-<li><a href="rings.html#aligned_capacity">sintra::aligned_capacity</a></li>
-<li><a href="rings.html#get_ring_configurations">sintra::get_ring_configurations</a></li>
-<li><a href="rings.html#make_snapshot">sintra::make_snapshot</a></li>
-<li><a href="rings.html#try_snapshot_e">sintra::try_snapshot_e</a></li>
-<li><a href="rings.html#ring_payload_traits">sintra::ring_payload_traits</a></li>
-<li><a href="rings.html#ring_acquisition_failure_exception">sintra::ring_acquisition_failure_exception</a></li>
-<li><a href="rings.html#ring_abi_mismatch_exception">sintra::ring_abi_mismatch_exception</a></li>
-<li><a href="rings.html#ring_reader_evicted_exception">sintra::ring_reader_evicted_exception</a></li>
-</ul></section>
-</nav>
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <ol><li><a href="../index.html">Reference</a></li><li><a href="../index.html#diagnostics">Diagnostics</a></li><li aria-current="page">sintra::Log_stream</li></ol>
+    </nav>
+    <main id="main-content" class="page-shell">
       <article class="content-prose">
         <h1 id="sintralog_stream-set_log_callback">sintra::Log_stream / set_log_callback</h1>
-<p>Include:</p>
-<pre><code class="language-cpp">#include &lt;sintra/sintra.h&gt;</code></pre>
-<p>Summary:</p>
-<p>The Sintra logging surface is a small redirectable sink. <code>Log_stream</code> collects formatted output through <code>operator&lt;&lt;</code> and dispatches the accumulated text to the active log callback when destroyed. <code>set_log_callback</code> installs a process-wide sink (or restores the default, which writes to <code>stdout</code>/<code>stderr</code>). <code>log_raw</code> lets non-stream callers push a precomposed message at a level. The four <code>ls_*</code> factories return <code>Log_stream</code> instances at the matching level.</p>
-<p>Signature:</p>
-<pre><code class="language-cpp">enum class log_level { error, warning, info, debug };
+        <p>Include:</p>
+        <pre><code class="language-cpp">#include &lt;sintra/sintra.h&gt;</code></pre>
+        <p>Summary:</p>
+        <p>The Sintra logging surface is a small redirectable sink. <code>Log_stream</code> collects formatted output through <code>operator&lt;&lt;</code> and dispatches the accumulated text to the active log callback when destroyed. <code>set_log_callback</code> installs a process-wide sink (or restores the default, which writes to <code>stdout</code>/<code>stderr</code>). <code>log_raw</code> lets non-stream callers push a precomposed message at a level. The four <code>ls_*</code> factories return <code>Log_stream</code> instances at the matching level.</p>
+        <p>Signature:</p>
+        <pre><code class="language-cpp">enum class log_level { error, warning, info, debug };
 
-using log_callback_fn =
-    void(*)(log_level level, const char* message, void* user_data);
+        using log_callback_fn =
+            void(*)(log_level level, const char* message, void* user_data);
 
-void set_log_callback(log_callback_fn callback, void* user_data = nullptr);
-log_callback_fn get_log_callback(void** user_data = nullptr);
-void log_raw(log_level level, const char* message);
+        void set_log_callback(log_callback_fn callback, void* user_data = nullptr);
+        log_callback_fn get_log_callback(void** user_data = nullptr);
+        void log_raw(log_level level, const char* message);
 
-class Log_stream
-{
-public:
-    explicit Log_stream(
-        log_level level,
-        bool enabled = true,
-        std::string postfix = {});
+        class Log_stream
+        {
+        public:
+            explicit Log_stream(
+                log_level level,
+                bool enabled = true,
+                std::string postfix = {});
 
-    template &lt;typename T&gt;
-    Log_stream&amp; operator&lt;&lt;(const T&amp; value);
+            template &lt;typename T&gt;
+            Log_stream&amp; operator&lt;&lt;(const T&amp; value);
 
-    Log_stream(Log_stream&amp;&amp;) noexcept;
-    Log_stream&amp; operator=(Log_stream&amp;&amp;) noexcept;
-};
+            Log_stream(Log_stream&amp;&amp;) noexcept;
+            Log_stream&amp; operator=(Log_stream&amp;&amp;) noexcept;
+        };
 
-Log_stream ls_info();
-Log_stream ls_warning();
-Log_stream ls_error();
-Log_stream ls_debug();</code></pre>
-<p>Use when:</p>
-<ul>
-<li>Emitting structured warnings, errors, or debug traces from inside Sintra-aware code without taking a hard dependency on a specific output stream.</li>
-<li>Routing Sintra&#x27;s own diagnostics into an existing application log (file, syslog, sink that fans out to multiple consumers) by installing a callback at startup.</li>
-<li>Composing a message piecemeal with <code>operator&lt;&lt;</code> while keeping the final flush atomic; the callback is invoked once when the <code>Log_stream</code> destructor runs.</li>
-<li>Adding a fixed suffix (for example, a trailing newline) by passing the <code>postfix</code> argument to the <code>Log_stream</code> constructor.</li>
-</ul>
-<p>Contract:</p>
-<ul>
-<li><code>set_log_callback(nullptr)</code> restores the built-in default callback, which writes errors and warnings to <code>stderr</code> and other levels to <code>stdout</code>, both flushed after each message.</li>
-<li><code>set_log_callback</code> and <code>get_log_callback</code> serialise on an internal mutex; either may be called from any thread.</li>
-<li><code>log_raw(level, message)</code> snapshots the current callback under the same mutex, then invokes the callback outside the lock. Exceptions thrown by the callback are swallowed.</li>
-<li><code>Log_stream</code> owns its accumulation buffer. The destructor invokes the callback only when the stream is enabled and has non-empty content.</li>
-<li><code>Log_stream</code> is move-constructible and move-assignable; the source becomes disabled and produces no output. It is not copyable.</li>
-<li><code>enabled = false</code> produces no output and discards inserted values cheaply; useful for level-gated paths.</li>
-<li>The optional <code>postfix</code> is appended to the buffer just before invocation. After a move, the postfix transfers with the buffer; the source loses both its content and its postfix.</li>
-</ul>
-<p>Threading and lifecycle:</p>
-<ul>
-<li>The callback may be invoked from any thread, including Sintra reader threads. Implementations must be thread-safe.</li>
-<li><code>log_raw</code> is reentrant: the callback runs outside the registry lock.</li>
-<li>Replacing the callback while another thread is mid-call is safe in the sense that the old callback is invoked with the user-data it was registered with; the new callback takes over for subsequent calls.</li>
-</ul>
-<p>Failures:</p>
-<ul>
-<li>Exceptions from the callback are caught by <code>log_raw</code> and discarded, so logging never propagates errors back into the caller.</li>
-</ul>
-<p>Example source:</p>
-<ul>
-<li><a href="../../../tests/log_stream_move_test.cpp">tests/log_stream_move_test.cpp</a></li>
-</ul>
-<p>See also:</p>
-<ul>
-<li><a href="console.html">sintra::console</a></li>
-</ul>
+        Log_stream ls_info();
+        Log_stream ls_warning();
+        Log_stream ls_error();
+        Log_stream ls_debug();</code></pre>
+        <p>Use when:</p>
+        <ul>
+        <li>Emitting structured warnings, errors, or debug traces from inside Sintra-aware code without taking a hard dependency on a specific output stream.</li>
+        <li>Routing Sintra&#x27;s own diagnostics into an existing application log (file, syslog, sink that fans out to multiple consumers) by installing a callback at startup.</li>
+        <li>Composing a message piecemeal with <code>operator&lt;&lt;</code> while keeping the final flush atomic; the callback is invoked once when the <code>Log_stream</code> destructor runs.</li>
+        <li>Adding a fixed suffix (for example, a trailing newline) by passing the <code>postfix</code> argument to the <code>Log_stream</code> constructor.</li>
+        </ul>
+        <p>Contract:</p>
+        <ul>
+        <li><code>set_log_callback(nullptr)</code> restores the built-in default callback, which writes errors and warnings to <code>stderr</code> and other levels to <code>stdout</code>, both flushed after each message.</li>
+        <li><code>set_log_callback</code> and <code>get_log_callback</code> serialise on an internal mutex; either may be called from any thread.</li>
+        <li><code>log_raw(level, message)</code> snapshots the current callback under the same mutex, then invokes the callback outside the lock. Exceptions thrown by the callback are swallowed.</li>
+        <li><code>Log_stream</code> owns its accumulation buffer. The destructor invokes the callback only when the stream is enabled and has non-empty content.</li>
+        <li><code>Log_stream</code> is move-constructible and move-assignable; the source becomes disabled and produces no output. It is not copyable.</li>
+        <li><code>enabled = false</code> produces no output and discards inserted values cheaply; useful for level-gated paths.</li>
+        <li>The optional <code>postfix</code> is appended to the buffer just before invocation. After a move, the postfix transfers with the buffer; the source loses both its content and its postfix.</li>
+        </ul>
+        <p>Threading and lifecycle:</p>
+        <ul>
+        <li>The callback may be invoked from any thread, including Sintra reader threads. Implementations must be thread-safe.</li>
+        <li><code>log_raw</code> is reentrant: the callback runs outside the registry lock.</li>
+        <li>Replacing the callback while another thread is mid-call is safe in the sense that the old callback is invoked with the user-data it was registered with; the new callback takes over for subsequent calls.</li>
+        </ul>
+        <p>Failures:</p>
+        <ul>
+        <li>Exceptions from the callback are caught by <code>log_raw</code> and discarded, so logging never propagates errors back into the caller.</li>
+        </ul>
+        <p>Example source:</p>
+        <ul>
+        <li><a href="https://github.com/imakris/sintra/blob/master/tests/log_stream_move_test.cpp">tests/log_stream_move_test.cpp</a></li>
+        </ul>
+        <p>See also:</p>
+        <ul>
+        <li><a href="console.html">sintra::console</a></li>
+        </ul>
+        <nav class="page-nav" aria-label="Reference navigation"><a class="page-nav-prev" href="init_error.html"><span class="label">&larr; Previous</span><span class="title">sintra::init_error</span></a><a class="page-nav-next" href="console.html"><span class="label">Next &rarr;</span><span class="title">sintra::Console</span></a></nav>
       </article>
     </main>
   </body>

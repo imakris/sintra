@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>Barriers and shutdown semantics - Sintra Reference</title>
+    <link rel="stylesheet" href="../assets/style.css" />
+  </head>
+  <body class="reference-guide">
+    <a class="skip-nav" href="#main-content">Skip to content</a>
+    <header class="site-header">
+      <div class="header-inner">
+        <a class="brand" href="../index.html" aria-label="Sintra reference home">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <span>Sintra Reference</span>
+        </a>
+        <nav class="top-nav" aria-label="Top navigation">
+          <a href="../index.html">Reference</a>
+          <a href="guide.html">Guide</a>
+          <a href="readme.html">README</a>
+        </nav>
+      </div>
+    </header>
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <ol><li><a href="../index.html">Reference</a></li><li aria-current="page">Barriers and shutdown semantics</li></ol>
+    </nav>
+    <main id="main-content" class="page-shell">
+      <article class="content-prose">
+        <h1 id="barriers-and-shutdown-semantics">Barriers and shutdown semantics</h1>
+        <p>Sintra distinguishes three lifecycle states for processes that participate in coordinated execution:</p>
+        <ul>
+        <li><strong>ACTIVE</strong> - the process contributes to barriers and other group-wide RPCs.</li>
+        <li><strong>DRAINING</strong> - the process is shutting down. It is excluded from future barriers and automatically released from any barrier that is already in progress.</li>
+        <li><strong>TERMINATED</strong> - the process has exited and its resources have been scavenged.</li>
+        </ul>
+        <h2 id="sintrashutdown"><code>sintra::shutdown()</code></h2>
+        <p><code>shutdown()</code> is the standard terminal API for the multi-process lifecycle. All live participants call <code>shutdown()</code> and the runtime owns the collective handoff and internal synchronization.</p>
+        <h3 id="shape-1-simple-collective-shutdown">Shape 1: simple collective shutdown</h3>
+        <pre><code class="language-cpp">sintra::shutdown();</code></pre>
+        <p>This performs a <code>processing_fence_t</code> barrier on <code>&quot;_sintra_all_processes&quot;</code> and then tears down the local Sintra runtime. On the coordinator, the helper waits for the rest of the shutdown group to unpublish itself before finalizing locally, so peers do not lose their lifeline owner mid-teardown.</p>
+        <h3 id="shape-2-coordinator-side-shutdown-hook">Shape 2: coordinator-side shutdown hook</h3>
+        <pre><code class="language-cpp">sintra::shutdown(
+            sintra::shutdown_options{
+                .coordinator_shutdown_hook = [&amp;] {
+                    write_summary_file(path);
+                }
+            });</code></pre>
+        <p>All participants call <code>shutdown(options)</code>. After the collective processing fence, the coordinator runs the hook while non-coordinator processes wait inside the standard shutdown path. The runtime owns the necessary internal synchronization. The hook is coordinator-local and must not initiate new peer coordination, extra barriers, or additional custom protocol steps.</p>
+        <h2 id="sintraleave"><code>sintra::leave()</code></h2>
+        <p><code>leave()</code> is the public API for a clean local departure when this process is exiting but peers may continue running.</p>
+        <pre><code class="language-cpp">sintra::leave();</code></pre>
+        <p>Use <code>leave()</code> when:</p>
+        <ul>
+        <li>one participant exits intentionally</li>
+        <li>the rest of the topology should continue</li>
+        <li>the process is a leaf-like participant that is not relying on owned descendants to outlive it</li>
+        <li>the call is made from a top-level control thread rather than a message handler or post-handler callback</li>
+        </ul>
+        <p>On healthy coordinator connectivity, <code>leave()</code> follows the same local drain, pause, unpublish, and teardown choreography as the internal finalize path, but it does not enter the collective <code>_sintra_all_processes</code> shutdown protocol. The coordinator may call <code>leave()</code> only when it is already the sole remaining known process from the runtime&#x27;s point of view.</p>
+        <h3 id="extension-rule">Extension rule</h3>
+        <p>Supported non-happy-path shutdowns should be expressed through additional fields in <code>shutdown_options</code>, rather than a parallel family of helper names. Introduce a separate public helper only if the operation is no longer semantically just shutdown.</p>
+        <h3 id="protocol-state-and-fail-fast-guardrails">Protocol state and fail-fast guardrails</h3>
+        <p>The runtime tracks the active lifecycle teardown state (in <code>detail::shutdown_protocol_state</code>, not part of the public API):</p>
+        <ul>
+        <li><code>idle</code> - no teardown in progress</li>
+        <li><code>collective_shutdown_entered</code> - <code>shutdown()</code> has been called</li>
+        <li><code>local_departure_entered</code> - <code>leave()</code> has been called</li>
+        <li><code>coordinator_hook_running</code> - coordinator hook is executing</li>
+        <li><code>coordinator_hook_completed</code> - hook finished, awaiting peer synchronization</li>
+        <li><code>finalizing</code> - raw teardown in progress</li>
+        </ul>
+        <p>Illegal compositions are rejected immediately:</p>
+        <ul>
+        <li>Calling <code>shutdown()</code> while another shutdown is already in progress</li>
+        <li>Calling <code>leave()</code> while another lifecycle teardown is already in progress</li>
+        <li>Calling <code>detail::finalize()</code> while a lifecycle teardown is active</li>
+        <li>Calling a user-facing barrier on <code>_sintra_all_processes</code> while a lifecycle teardown is active</li>
+        </ul>
+        <h3 id="notes">Notes</h3>
+        <p>Barrier names beginning with <code>&quot;_sintra_&quot;</code> are reserved for internal runtime protocols. User code should not reuse them.</p>
+        <p><code>shutdown()</code> is not meant to replace every explicit final barrier pattern. When a workflow needs a stronger algorithm-specific handoff, such as an application-defined final rendezvous or a staged ownership transfer, keep that protocol explicit and only enter <code>shutdown()</code> after it completes.</p>
+        <h2 id="detailfinalize-low-level-teardown"><code>detail::finalize()</code> (low-level teardown)</h2>
+        <p><code>detail::finalize()</code> is the low-level teardown path for single-process programs, exceptional/error paths, or test code that cannot participate in a symmetric shutdown. It lives in the <code>sintra::detail</code> namespace — ordinary multi-process callers should use <code>shutdown()</code> instead. The internal implementation (<code>detail::finalize_impl()</code>) is also available for deliberate low-level work in tests and experiments. Ordinary code that needs a clean unilateral departure should use <code>leave()</code> instead of <code>detail::finalize()</code>.</p>
+        <p>Calling <code>detail::finalize()</code> performs the following steps:</p>
+        <ol>
+        <li><strong>Announce draining and quiesce.</strong> The process issues <code>Coordinator::begin_process_draining</code> (or the RPC equivalent) while normal communication is still available. The coordinator records the new state, removes the caller from in-flight barriers, and returns a **reply-ring watermark** (<code>m_out_rep_c</code>) for the caller that covers all messages accepted so far. The coordinator separately computes per-recipient tokens when emitting completions; the return value is a single marker for the caller to flush. Remote processes flush that sequence before proceeding, guaranteeing that all outstanding traffic is visible before teardown continues, while the coordinator path additionally blocks in <code>wait_for_all_draining()</code> until every known process has entered the draining state (or been scavenged). *(Coordinator::begin_process_draining and Coordinator::wait_for_all_draining in coordinator_impl.h)*</li>
+        <li><strong>Pause, then unpublish under service-mode communication.</strong> With the coordinator aware of the shutdown and remote callers flushed, the process first switches its readers to service mode via <code>pause()</code>. In this mode only coordinator/service messages are processed. While paused, the process deactivates handlers and unpublishes its transceivers (via <code>deactivate_all()</code> / <code>unpublish_all_transceivers()</code>), keeping the synchronous unpublish path free of shutdown races while still allowing coordinator RPCs to flow.</li>
+        <li><strong>Destroy the managed process.</strong> After transceivers are unpublished, the runtime destroys the <code>Managed_process</code> singleton. Its destructor stops the reader threads and releases all Sintra resources owned by the process.</li>
+        </ol>
+        <h2 id="barrier-behaviour-during-shutdown">Barrier behaviour during shutdown</h2>
+        <ul>
+        <li><strong>Atomic barrier start with draining filter:</strong> Barrier membership is captured atomically at the moment the coordinator starts the barrier. The membership snapshot and draining-state filtering occur under the same <code>m_call_mutex</code> lock, ensuring no process can be added/removed or change draining state during this critical window. Any process that has already begun draining is skipped. *(Process_group::barrier in coordinator_impl.h)*</li>
+        <li><strong>Process removal during barrier:</strong> If a process enters the draining state while a barrier is in progress, the coordinator removes it from the pending set via <code>drop_from_inflight_barriers()</code> and immediately completes the barrier if no other participants remain. *(Coordinator::drop_from_inflight_barriers in coordinator_impl.h)*</li>
+        <li><strong>Barrier completion with per-recipient flush tokens:</strong> Processes that already reached the barrier continue to wait for their return value. When the barrier resolves-either because the last active participant arrives or because every remaining pending member began draining-the coordinator sends the result to each waiting caller. **Critically, each recipient receives a flush token computed at the moment their message is written** (not a global token), preventing hangs where a global watermark might be ahead of a recipient&#x27;s channel. *(Process_group::barrier in coordinator_impl.h)*</li>
+        </ul>
+        <h2 id="barrier-mode-guardrails">Barrier mode guardrails</h2>
+        <ul>
+        <li><strong>Delivery fences are local-only:</strong> <code>barrier()</code> / <code>barrier&lt;delivery_fence_t&gt;()</code> proves that this process drained its readers up to the barrier point. It does not add a second rendezvous proving that peers also finished draining.</li>
+        <li><strong>Processing-fence phase names are internal:</strong> the runtime now keeps the second <code>processing_fence_t</code> rendezvous out of the user barrier namespace.</li>
+        <li><strong>Mixed barrier modes fail fast:</strong> all participants in a given barrier round must use the same barrier mode. Mixing <code>rendezvous_t</code>, <code>delivery_fence_t</code>, and <code>processing_fence_t</code> on the same barrier name is rejected immediately instead of hanging in the hidden processing phase.</li>
+        </ul>
+        <h3 id="draining-state-lifecycle">Draining state lifecycle</h3>
+        <ul>
+        <li><strong>Setting the draining bit:</strong> The draining bit is set in two scenarios:
+        <ol>
+        <li>When <code>begin_process_draining()</code> is explicitly called during graceful shutdown</li>
+        <li>When <code>unpublish_transceiver()</code> is called for a <code>Managed_process</code> and no prior draining call was made (crash/ungraceful shutdown scenario)</li>
+        </ol></li>
+        <li><strong>Draining bit lifetime:</strong> Once set, the draining bit is **never cleared during teardown**. It persists until a new process is published into the same slot, at which point it is reset to ACTIVE. This prevents races where resetting too early allows concurrent barriers to include a dying process. *(Coordinator::begin_process_draining and Coordinator::drop_from_inflight_barriers in coordinator_impl.h)*</li>
+        </ul>
+        <p>These rules eliminate shutdown deadlocks during teardown, but they do not turn <code>detail::finalize()</code> into a collective &quot;safe to shut down now&quot; handshake by itself. For ordinary multi-process completion, use <code>sintra::shutdown()</code> or <code>sintra::shutdown(sintra::shutdown_options{...})</code>. For unilateral participant departure, use <code>sintra::leave()</code>. If an algorithm needs stronger guarantees about group membership than the default lifecycle helpers provide, it should layer an explicit membership protocol on top of these barrier semantics.</p>
+        <nav class="page-nav" aria-label="Reference navigation"><a class="page-nav-prev" href="architecture.html"><span class="label">&larr; Previous</span><span class="title">Architecture notes</span></a><a class="page-nav-next" href="process_lifecycle_notes.html"><span class="label">Next &rarr;</span><span class="title">Process lifecycle notes</span></a></nav>
+      </article>
+      <aside class="page-toc" aria-label="On this page">
+        <h2>On this page</h2>
+        <ul>
+          <li class="level-2"><a href="#sintrashutdown"><code>sintra::shutdown()</code></a></li>
+          <li class="level-3"><a href="#shape-1-simple-collective-shutdown">Shape 1: simple collective shutdown</a></li>
+          <li class="level-3"><a href="#shape-2-coordinator-side-shutdown-hook">Shape 2: coordinator-side shutdown hook</a></li>
+          <li class="level-2"><a href="#sintraleave"><code>sintra::leave()</code></a></li>
+          <li class="level-3"><a href="#extension-rule">Extension rule</a></li>
+          <li class="level-3"><a href="#protocol-state-and-fail-fast-guardrails">Protocol state and fail-fast guardrails</a></li>
+          <li class="level-3"><a href="#notes">Notes</a></li>
+          <li class="level-2"><a href="#detailfinalize-low-level-teardown"><code>detail::finalize()</code> (low-level teardown)</a></li>
+          <li class="level-2"><a href="#barrier-behaviour-during-shutdown">Barrier behaviour during shutdown</a></li>
+          <li class="level-2"><a href="#barrier-mode-guardrails">Barrier mode guardrails</a></li>
+          <li class="level-3"><a href="#draining-state-lifecycle">Draining state lifecycle</a></li>
+        </ul>
+      </aside>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>sintra::disable_debug_pause_for_current_process - Sintra Reference</title>
+    <link rel="stylesheet" href="../assets/style.css" />
+  </head>
+  <body class="reference-page">
+    <a class="skip-nav" href="#main-content">Skip to content</a>
+    <header class="site-header">
+      <div class="header-inner">
+        <a class="brand" href="../index.html" aria-label="Sintra reference home">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <span>Sintra Reference</span>
+        </a>
+        <nav class="top-nav" aria-label="Top navigation">
+          <a href="../index.html">Reference</a>
+          <a href="guide.html">Guide</a>
+          <a href="readme.html">README</a>
+        </nav>
+      </div>
+    </header>
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <ol><li><a href="../index.html">Reference</a></li><li><a href="../index.html#core">Core</a></li><li aria-current="page">sintra::disable_debug_pause_for_current_process</li></ol>
+    </nav>
+    <main id="main-content" class="page-shell">
+      <article class="content-prose">
+        <h1 id="sintradisable_debug_pause_for_current_process">sintra::disable_debug_pause_for_current_process</h1>
+        <p>Defined in: <code>&lt;sintra/sintra.h&gt;</code></p>
+        <p>Synopsis:</p>
+        <pre><code class="language-cpp">void disable_debug_pause_for_current_process() noexcept;</code></pre>
+        <p>Description: Disable the debug pause-on-exit behaviour for the current process. When Sintra is built with <code>SINTRA_DEBUG_PAUSE_ON_EXIT</code>, processes hold at exit so a debugger can be attached. Call this from a process that should opt out — typically a long-running headless worker or a test that must terminate cleanly.</p>
+        <h2 id="returns">Returns</h2>
+        <ul>
+        <li><code>void</code>.</li>
+        </ul>
+        <h2 id="throws">Throws</h2>
+        <ul>
+        <li>Does not throw.</li>
+        </ul>
+        <h2 id="use-when">Use when</h2>
+        <ul>
+        <li>A specific process in the swarm should not pause at exit even though the build was configured with debug pause-on-exit.</li>
+        </ul>
+        <h2 id="contract">Contract</h2>
+        <ul>
+        <li>Must be called from inside the process that is opting out. The opt-out applies to the calling process only and does not propagate to peers.</li>
+        <li>May be called before or after <a href="init.html"><code>sintra::init</code></a> in the current process.</li>
+        </ul>
+        <h2 id="threading-and-lifecycle">Threading and lifecycle</h2>
+        <ul>
+        <li>The opt-out lasts for the lifetime of the current process. There is no paired re-enable call.</li>
+        </ul>
+        <h2 id="notes">Notes</h2>
+        <ul>
+        <li>The pause behaviour is a debug-build feature controlled by <code>SINTRA_DEBUG_PAUSE_ON_EXIT</code>. In a release build the call is a no-op.</li>
+        </ul>
+        <h2 id="example-source">Example source</h2>
+        <ul>
+        <li><a href="https://github.com/imakris/sintra/blob/master/tests/recovery_test.cpp">tests/recovery_test.cpp</a></li>
+        <li><a href="https://github.com/imakris/sintra/blob/master/tests/recovery_policy_test.cpp">tests/recovery_policy_test.cpp</a></li>
+        <li><a href="https://github.com/imakris/sintra/blob/master/tests/lifecycle_handler_test.cpp">tests/lifecycle_handler_test.cpp</a></li>
+        </ul>
+        <h2 id="see-also">See also</h2>
+        <ul>
+        <li><a href="init.html"><code>sintra::init</code></a></li>
+        <li><a href="shutdown.html"><code>sintra::shutdown</code></a></li>
+        <li><a href="leave.html"><code>sintra::leave</code></a></li>
+        </ul>
+        <nav class="page-nav" aria-label="Reference navigation"><a class="page-nav-prev" href="join_swarm.html"><span class="label">&larr; Previous</span><span class="title">sintra::join_swarm</span></a><a class="page-nav-next" href="world.html"><span class="label">Next &rarr;</span><span class="title">sintra::world</span></a></nav>
+      </article>
+      <aside class="page-toc" aria-label="On this page">
+        <h2>On this page</h2>
+        <ul>
+          <li class="level-2"><a href="#returns">Returns</a></li>
+          <li class="level-2"><a href="#throws">Throws</a></li>
+          <li class="level-2"><a href="#use-when">Use when</a></li>
+          <li class="level-2"><a href="#contract">Contract</a></li>
+          <li class="level-2"><a href="#threading-and-lifecycle">Threading and lifecycle</a></li>
+          <li class="level-2"><a href="#notes">Notes</a></li>
+          <li class="level-2"><a href="#example-source">Example source</a></li>
+          <li class="level-2"><a href="#see-also">See also</a></li>
+        </ul>
+      </aside>
+    </main>
+  </body>
+</html>

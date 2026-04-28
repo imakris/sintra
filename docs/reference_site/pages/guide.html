@@ -7,7 +7,7 @@
     <title>Sintra Guide - Sintra Reference</title>
     <link rel="stylesheet" href="../assets/style.css" />
   </head>
-  <body>
+  <body class="reference-guide">
     <a class="skip-nav" href="#main-content">Skip to content</a>
     <header class="site-header">
       <div class="header-inner">
@@ -17,613 +17,589 @@
         </a>
         <nav class="top-nav" aria-label="Top navigation">
           <a href="../index.html">Reference</a>
-          <a href="guide.html">Guide</a>
-          <a href="../../../README.md">README</a>
+          <a href="guide.html" aria-current="page">Guide</a>
+          <a href="readme.html">README</a>
         </nav>
       </div>
     </header>
-    <main id="main-content" class="page-shell reference-page">
-      <nav class="sidebar" aria-label="Reference navigation">
-<section><h2>Core</h2><ul>
-<li><a href="init.html">sintra::init</a></li>
-<li><a href="make_branches.html">sintra::make_branches</a></li>
-<li><a href="process_index.html">sintra::process_index</a></li>
-<li><a href="process_descriptor.html">sintra::Process_descriptor</a></li>
-<li><a href="spawn_swarm_process.html">sintra::spawn_swarm_process</a></li>
-<li><a href="join_swarm.html">sintra::join_swarm</a></li>
-<li><a href="init.html#sintradisable_debug_pause_for_current_process">sintra::disable_debug_pause_for_current_process</a></li>
-</ul></section>
-<section><h2>Publish/Subscribe</h2><ul>
-<li><a href="world.html">sintra::world</a></li>
-<li><a href="local.html">sintra::local</a></li>
-<li><a href="remote.html">sintra::remote</a></li>
-<li><a href="maildrop.html">sintra::Maildrop</a></li>
-<li><a href="activate_slot.html">sintra::activate_slot</a></li>
-<li><a href="deactivate_all_slots.html">sintra::deactivate_all_slots</a></li>
-<li><a href="receive.html">sintra::receive</a></li>
-</ul></section>
-<section><h2>Transceivers and Messages</h2><ul>
-<li><a href="transceiver.html">sintra::Transceiver</a></li>
-<li><a href="derived_transceiver.html">sintra::Derived_transceiver</a></li>
-<li><a href="transceiver_macros.html">SINTRA_MESSAGE</a></li>
-<li><a href="explicit_type_ids.html">SINTRA_MESSAGE_EXPLICIT</a></li>
-<li><a href="explicit_type_ids.html">SINTRA_TYPE_ID</a></li>
-<li><a href="transceiver_messages.html">Transceiver messages</a></li>
-<li><a href="message_payloads.html">Message payloads</a></li>
-<li><a href="transceiver_macros.html">Transceiver macros</a></li>
-</ul></section>
-<section><h2>RPC and Targeting</h2><ul>
-<li><a href="rpc.html">SINTRA_RPC</a></li>
-<li><a href="rpc.html">SINTRA_RPC_STRICT</a></li>
-<li><a href="rpc.html">SINTRA_UNICAST</a></li>
-<li><a href="rpc_handle.html">sintra::Rpc_handle</a></li>
-<li><a href="rpc_wait_status.html">sintra::Rpc_wait_status</a></li>
-<li><a href="rpc_completion_state.html">sintra::Rpc_completion_state</a></li>
-<li><a href="rpc_cancelled.html">sintra::rpc_cancelled</a></li>
-<li><a href="rpc_unavailable.html">sintra::rpc_unavailable</a></li>
-<li><a href="resolvable_instance_id.html">sintra::Resolvable_instance_id</a></li>
-<li><a href="typed_instance_id.html">sintra::Typed_instance_id</a></li>
-<li><a href="named_instance.html">sintra::Named_instance</a></li>
-<li><a href="instance_ids.html">Instance IDs</a></li>
-<li><a href="type_ids.html">Type IDs</a></li>
-<li><a href="explicit_type_ids.html">Explicit type IDs</a></li>
-</ul></section>
-<section><h2>Barriers and Lifecycle</h2><ul>
-<li><a href="barrier.html">sintra::barrier</a></li>
-<li><a href="barrier.html">sintra::barrier_completed</a></li>
-<li><a href="barrier_modes.html">sintra::rendezvous_t</a></li>
-<li><a href="barrier_modes.html">sintra::delivery_fence_t</a></li>
-<li><a href="barrier_modes.html">sintra::processing_fence_t</a></li>
-<li><a href="shutdown.html">sintra::shutdown</a></li>
-<li><a href="shutdown_options.html">sintra::shutdown_options</a></li>
-<li><a href="leave.html">sintra::leave</a></li>
-<li><a href="recovery.html">Recovery</a></li>
-<li><a href="lifecycle_hooks.html">Lifecycle hooks</a></li>
-</ul></section>
-<section><h2>Diagnostics</h2><ul>
-<li><a href="init_error.html">sintra::init_error</a></li>
-<li><a href="logging.html">sintra::Log_stream</a></li>
-<li><a href="logging.html">sintra::log_level</a></li>
-<li><a href="logging.html">sintra::set_log_callback</a></li>
-<li><a href="logging.html">sintra::get_log_callback</a></li>
-<li><a href="logging.html">sintra::log_raw</a></li>
-<li><a href="logging.html">sintra::ls_info</a></li>
-<li><a href="logging.html">sintra::ls_warning</a></li>
-<li><a href="logging.html">sintra::ls_error</a></li>
-<li><a href="logging.html">sintra::ls_debug</a></li>
-<li><a href="console.html">sintra::Console</a></li>
-<li><a href="console.html">sintra::console</a></li>
-</ul></section>
-<section><h2>Direct Rings</h2><ul>
-<li><a href="rings.html#ring_w">sintra::Ring_W</a></li>
-<li><a href="rings.html#ring_r">sintra::Ring_R</a></li>
-<li><a href="rings.html#ring_r_snapshot">sintra::Ring_R_snapshot</a></li>
-<li><a href="rings.html#ring_r_snapshot_error">sintra::Ring_R_snapshot_error</a></li>
-<li><a href="rings.html#range">sintra::Range</a></li>
-<li><a href="rings.html#ring_diagnostics">sintra::Ring_diagnostics</a></li>
-<li><a href="rings.html#aligned_capacity">sintra::aligned_capacity</a></li>
-<li><a href="rings.html#get_ring_configurations">sintra::get_ring_configurations</a></li>
-<li><a href="rings.html#make_snapshot">sintra::make_snapshot</a></li>
-<li><a href="rings.html#try_snapshot_e">sintra::try_snapshot_e</a></li>
-<li><a href="rings.html#ring_payload_traits">sintra::ring_payload_traits</a></li>
-<li><a href="rings.html#ring_acquisition_failure_exception">sintra::ring_acquisition_failure_exception</a></li>
-<li><a href="rings.html#ring_abi_mismatch_exception">sintra::ring_abi_mismatch_exception</a></li>
-<li><a href="rings.html#ring_reader_evicted_exception">sintra::ring_reader_evicted_exception</a></li>
-</ul></section>
-</nav>
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <ol><li><a href="../index.html">Reference</a></li><li aria-current="page">Sintra Guide</li></ol>
+    </nav>
+    <main id="main-content" class="page-shell">
       <article class="content-prose">
         <h1 id="sintra-guide">Sintra Guide</h1>
-<p>This guide explains Sintra&#x27;s mental model, cross-cutting lifecycle and threading rules, and the compiled examples or tests that demonstrate common usage patterns. The per-symbol API reference lives in <code>docs/reference/</code>.</p>
-<p>Use these public includes:</p>
-<pre><code class="language-cpp">#include &lt;sintra/sintra.h&gt;  // managed processes, pub/sub, RPC, barriers, lifecycle
-#include &lt;sintra/rings.h&gt;   // direct ring helpers</code></pre>
-<p>Do not include <code>sintra/detail/...</code> headers from application code.</p>
-<p>For one-page-per-API lookup, start with the <a href="../index.html">API Reference</a>. This document stays guide-shaped: it explains concepts, recipes, and relationships between APIs.</p>
-<p>To view the reference as a local website:</p>
-<pre><code class="language-sh">python scripts/build_reference_site.py
-python -m http.server 8000 --directory docs/reference_site</code></pre>
-<p>Then open <code>http://localhost:8000/</code>.</p>
-<h2 id="contents">Contents</h2>
-<ol>
-<li><a href="#overview">Overview</a></li>
-<li><a href="#terminology">Terminology</a></li>
-<li><a href="#initialization-and-process-topology">Initialization and Process Topology</a></li>
-<li><a href="#transceivers">Transceivers</a></li>
-<li><a href="#messages-and-payloads">Messages and Payloads</a></li>
-<li><a href="#publishsubscribe">Publish/Subscribe</a></li>
-<li><a href="#rpc">RPC</a></li>
-<li><a href="#targeting-and-ids">Targeting and IDs</a></li>
-<li><a href="#barriers-and-fences">Barriers and Fences</a></li>
-<li><a href="#lifecycle-and-shutdown">Lifecycle and Shutdown</a></li>
-<li><a href="#recovery-and-lifecycle-hooks">Recovery and Lifecycle Hooks</a></li>
-<li><a href="#direct-ring-helpers">Direct Ring Helpers</a></li>
-<li><a href="#errors-and-diagnostics">Errors and Diagnostics</a></li>
-<li><a href="#threading-and-reentrancy">Threading and Reentrancy</a></li>
-<li><a href="#type-ids">Type IDs</a></li>
-<li><a href="#cmake-integration">CMake Integration</a></li>
-<li><a href="#recipes">Recipes</a></li>
-<li><a href="#common-mistakes">Common Mistakes</a></li>
-<li><a href="#api-index">API Index</a></li>
-</ol>
-<h2 id="overview">Overview</h2>
-<p>Sintra is a C++20 header-only library for single-host interprocess communication. The high-level API creates a swarm of managed processes that can exchange typed messages, register slots, call typed RPC methods, coordinate with barriers, and shut down as a group. The low-level ring API exposes the shared-memory ring primitives directly for code that wants rings without the managed-process layer.</p>
-<p>Typical high-level shape:</p>
-<ol>
-<li>Declare message and transceiver types.</li>
-<li>Call <code>sintra::init(argc, argv, branches...)</code>.</li>
-<li>Run branch-specific logic selected by <code>sintra::process_index()</code>.</li>
-<li>Use <code>world()</code>, <code>local()</code>, <code>remote()</code>, slots, RPC, and barriers for communication.</li>
-<li>Call <code>sintra::shutdown()</code> when all live participants finish together, or <code>sintra::leave()</code> when this process intentionally departs while peers continue.</li>
-</ol>
-<p>Compiled examples live in <a href="../../../example/sintra"><code>example/sintra/</code></a>. Tests in <a href="../../../tests"><code>tests/</code></a> cover edge cases and guardrails.</p>
-<h2 id="terminology">Terminology</h2>
-<p><strong>Swarm</strong>: The set of Sintra-managed processes participating in one runtime.</p>
-<p><strong>Coordinator</strong>: The starter process that tracks process membership, type resolution, instance naming, lifecycle state, and barriers.</p>
-<p><strong>Managed process</strong>: A process initialized by Sintra. Every managed process has request/reply channels and participates in the runtime lifecycle.</p>
-<p><strong>Transceiver</strong>: A typed object that can publish messages and export member functions as RPC endpoints. User transceivers derive from <code>sintra::Derived_transceiver&lt;T&gt;</code>.</p>
-<p><strong>Instance ID</strong>: A <code>sintra::instance_id_type</code> that identifies a transceiver or a wildcard target. Its high bits identify a process slot and its low bits identify a transceiver within that process.</p>
-<p><strong>Typed instance ID</strong>: <code>sintra::Typed_instance_id&lt;T&gt;</code>, a typed wrapper around an instance id used for sender filtering and target clarity.</p>
-<p><strong>Named instance</strong>: <code>sintra::Named_instance&lt;T&gt;</code>, a string wrapper used when a transceiver is addressed by name.</p>
-<p><strong>Resolvable instance ID</strong>: <code>sintra::Resolvable_instance_id</code>, the generated RPC target parameter. It accepts a raw <code>instance_id_type</code>, <code>std::string</code>, or <code>const char*</code>.</p>
-<p><strong>Message type ID</strong>: A <code>sintra::type_id_type</code> assigned automatically or pinned with explicit type-id macros.</p>
-<p><strong>Local delivery</strong>: Delivery to handlers in the same process.</p>
-<p><strong>Remote delivery</strong>: Delivery to handlers in other processes.</p>
-<p><strong>World delivery</strong>: Delivery to local and remote handlers.</p>
-<p><strong>Request channel</strong>: A process&#x27;s outgoing channel for broadcasts and RPC requests.</p>
-<p><strong>Reply channel</strong>: A process&#x27;s outgoing channel for RPC replies and barrier completions.</p>
-<p><strong>Reader thread</strong>: A Sintra-owned thread that reads incoming messages and invokes handlers.</p>
-<p><strong>Handler / slot</strong>: User callback registered to consume a message.</p>
-<p><strong>Barrier</strong>: A named synchronization point coordinated through the swarm.</p>
-<p><strong>Lifecycle</strong>: Initialization, normal shutdown, unilateral departure, crash observation, recovery, and teardown state.</p>
-<p><strong><code>sintra::detail</code></strong>: Implementation namespace. Application code should not depend on it.</p>
-<h2 id="initialization-and-process-topology">Initialization and Process Topology</h2>
-<h3 id="sintrainit"><code>sintra::init</code></h3>
-<p>Signatures:</p>
-<pre><code class="language-cpp">void init(
-    int argc,
-    const char* const* argv,
-    std::vector&lt;Process_descriptor&gt; branches = {});
+        <p>This guide explains Sintra&#x27;s mental model, cross-cutting lifecycle and threading rules, and the compiled examples or tests that demonstrate common usage patterns. The per-symbol API reference lives in <code>docs/reference/</code>.</p>
+        <p>Use these public includes:</p>
+        <pre><code class="language-cpp">#include &lt;sintra/sintra.h&gt;  // managed processes, pub/sub, RPC, barriers, lifecycle
+        #include &lt;sintra/rings.h&gt;   // direct ring helpers</code></pre>
+        <p>Do not include <code>sintra/detail/...</code> headers from application code.</p>
+        <p>For one-page-per-API lookup, start with the <a href="../index.html">API Reference</a>. This document stays guide-shaped: it explains concepts, recipes, and relationships between APIs.</p>
+        <p>To view the reference as a local website:</p>
+        <pre><code class="language-sh">python scripts/build_reference_site.py
+        python -m http.server 8000 --directory docs/reference_site</code></pre>
+        <p>Then open <code>http://localhost:8000/</code>.</p>
+        <h2 id="contents">Contents</h2>
+        <ol>
+        <li><a href="#overview">Overview</a></li>
+        <li><a href="#terminology">Terminology</a></li>
+        <li><a href="#initialization-and-process-topology">Initialization and Process Topology</a></li>
+        <li><a href="#transceivers">Transceivers</a></li>
+        <li><a href="#messages-and-payloads">Messages and Payloads</a></li>
+        <li><a href="#publishsubscribe">Publish/Subscribe</a></li>
+        <li><a href="#rpc">RPC</a></li>
+        <li><a href="#targeting-and-ids">Targeting and IDs</a></li>
+        <li><a href="#barriers-and-fences">Barriers and Fences</a></li>
+        <li><a href="#lifecycle-and-shutdown">Lifecycle and Shutdown</a></li>
+        <li><a href="#recovery-and-lifecycle-hooks">Recovery and Lifecycle Hooks</a></li>
+        <li><a href="#direct-ring-helpers">Direct Ring Helpers</a></li>
+        <li><a href="#errors-and-diagnostics">Errors and Diagnostics</a></li>
+        <li><a href="#threading-and-reentrancy">Threading and Reentrancy</a></li>
+        <li><a href="#type-ids">Type IDs</a></li>
+        <li><a href="#cmake-integration">CMake Integration</a></li>
+        <li><a href="#recipes">Recipes</a></li>
+        <li><a href="#common-mistakes">Common Mistakes</a></li>
+        <li><a href="#api-index">API Index</a></li>
+        </ol>
+        <h2 id="overview">Overview</h2>
+        <p>Sintra is a C++20 header-only library for single-host interprocess communication. The high-level API creates a swarm of managed processes that can exchange typed messages, register slots, call typed RPC methods, coordinate with barriers, and shut down as a group. The low-level ring API exposes the shared-memory ring primitives directly for code that wants rings without the managed-process layer.</p>
+        <p>Typical high-level shape:</p>
+        <ol>
+        <li>Declare message and transceiver types.</li>
+        <li>Call <code>sintra::init(argc, argv, branches...)</code>.</li>
+        <li>Run branch-specific logic selected by <code>sintra::process_index()</code>.</li>
+        <li>Use <code>world()</code>, <code>local()</code>, <code>remote()</code>, slots, RPC, and barriers for communication.</li>
+        <li>Call <code>sintra::shutdown()</code> when all live participants finish together, or <code>sintra::leave()</code> when this process intentionally departs while peers continue.</li>
+        </ol>
+        <p>Compiled examples live in <a href="https://github.com/imakris/sintra/blob/master/example/sintra"><code>example/sintra/</code></a>. Tests in <a href="https://github.com/imakris/sintra/blob/master/tests"><code>tests/</code></a> cover edge cases and guardrails.</p>
+        <h2 id="terminology">Terminology</h2>
+        <p><strong>Swarm</strong>: The set of Sintra-managed processes participating in one runtime.</p>
+        <p><strong>Coordinator</strong>: The starter process that tracks process membership, type resolution, instance naming, lifecycle state, and barriers.</p>
+        <p><strong>Managed process</strong>: A process initialized by Sintra. Every managed process has request/reply channels and participates in the runtime lifecycle.</p>
+        <p><strong>Transceiver</strong>: A typed object that can publish messages and export member functions as RPC endpoints. User transceivers derive from <code>sintra::Derived_transceiver&lt;T&gt;</code>.</p>
+        <p><strong>Instance ID</strong>: A <code>sintra::instance_id_type</code> that identifies a transceiver or a wildcard target. Its high bits identify a process slot and its low bits identify a transceiver within that process.</p>
+        <p><strong>Typed instance ID</strong>: <code>sintra::Typed_instance_id&lt;T&gt;</code>, a typed wrapper around an instance id used for sender filtering and target clarity.</p>
+        <p><strong>Named instance</strong>: <code>sintra::Named_instance&lt;T&gt;</code>, a string wrapper used when a transceiver is addressed by name.</p>
+        <p><strong>Resolvable instance ID</strong>: <code>sintra::Resolvable_instance_id</code>, the generated RPC target parameter. It accepts a raw <code>instance_id_type</code>, <code>std::string</code>, or <code>const char*</code>.</p>
+        <p><strong>Message type ID</strong>: A <code>sintra::type_id_type</code> assigned automatically or pinned with explicit type-id macros.</p>
+        <p><strong>Local delivery</strong>: Delivery to handlers in the same process.</p>
+        <p><strong>Remote delivery</strong>: Delivery to handlers in other processes.</p>
+        <p><strong>World delivery</strong>: Delivery to local and remote handlers.</p>
+        <p><strong>Request channel</strong>: A process&#x27;s outgoing channel for broadcasts and RPC requests.</p>
+        <p><strong>Reply channel</strong>: A process&#x27;s outgoing channel for RPC replies and barrier completions.</p>
+        <p><strong>Reader thread</strong>: A Sintra-owned thread that reads incoming messages and invokes handlers.</p>
+        <p><strong>Handler / slot</strong>: User callback registered to consume a message.</p>
+        <p><strong>Barrier</strong>: A named synchronization point coordinated through the swarm.</p>
+        <p><strong>Lifecycle</strong>: Initialization, normal shutdown, unilateral departure, crash observation, recovery, and teardown state.</p>
+        <p><strong><code>sintra::detail</code></strong>: Implementation namespace. Application code should not depend on it.</p>
+        <h2 id="initialization-and-process-topology">Initialization and Process Topology</h2>
+        <h3 id="sintrainit"><code>sintra::init</code></h3>
+        <p>Signatures:</p>
+        <pre><code class="language-cpp">void init(
+            int argc,
+            const char* const* argv,
+            std::vector&lt;Process_descriptor&gt; branches = {});
 
-template &lt;typename... Args&gt;
-void init(int argc, const char* const* argv, Args&amp;&amp;... args);</code></pre>
-<p><code>init</code> initializes the current process as part of a Sintra swarm. The vector-based overload accepts a prepared branch list. The variadic overload forwards through <code>make_branches(...)</code>.</p>
-<p>Preconditions:</p>
-<ul>
-<li>Call once before using high-level Sintra IPC.</li>
-<li>Pass the original process arguments.</li>
-<li>Use <code>shutdown()</code>, <code>leave()</code>, or deliberate low-level teardown before starting another init/teardown cycle in the same process.</li>
-</ul>
-<p>Failures:</p>
-<ul>
-<li>Throws <code>sintra::init_error</code> when child process initialization fails.</li>
-<li>Throws <code>std::runtime_error</code> on invalid lifecycle composition.</li>
-</ul>
-<p>Compiled examples:</p>
-<ul>
-<li><a href="../../../example/sintra/sintra_example_0_basic_pubsub.cpp"><code>example/sintra/sintra_example_0_basic_pubsub.cpp</code></a></li>
-<li><a href="../../../example/sintra/sintra_example_2_rpc_append.cpp"><code>example/sintra/sintra_example_2_rpc_append.cpp</code></a></li>
-</ul>
-<h3 id="sintramake_branches"><code>sintra::make_branches</code></h3>
-<p>Signatures:</p>
-<pre><code class="language-cpp">std::vector&lt;Process_descriptor&gt; make_branches();
-std::vector&lt;Process_descriptor&gt; make_branches(std::vector&lt;Process_descriptor&gt;&amp; branches);
+        template &lt;typename... Args&gt;
+        void init(int argc, const char* const* argv, Args&amp;&amp;... args);</code></pre>
+        <p><code>init</code> initializes the current process as part of a Sintra swarm. The vector-based overload accepts a prepared branch list. The variadic overload forwards through <code>make_branches(...)</code>.</p>
+        <p>Preconditions:</p>
+        <ul>
+        <li>Call once before using high-level Sintra IPC.</li>
+        <li>Pass the original process arguments.</li>
+        <li>Use <code>shutdown()</code>, <code>leave()</code>, or deliberate low-level teardown before starting another init/teardown cycle in the same process.</li>
+        </ul>
+        <p>Failures:</p>
+        <ul>
+        <li>Throws <code>sintra::init_error</code> when child process initialization fails.</li>
+        <li>Throws <code>std::runtime_error</code> on invalid lifecycle composition.</li>
+        </ul>
+        <p>Compiled examples:</p>
+        <ul>
+        <li><a href="https://github.com/imakris/sintra/blob/master/example/sintra/sintra_example_0_basic_pubsub.cpp"><code>example/sintra/sintra_example_0_basic_pubsub.cpp</code></a></li>
+        <li><a href="https://github.com/imakris/sintra/blob/master/example/sintra/sintra_example_2_rpc_append.cpp"><code>example/sintra/sintra_example_2_rpc_append.cpp</code></a></li>
+        </ul>
+        <h3 id="sintramake_branches"><code>sintra::make_branches</code></h3>
+        <p>Signatures:</p>
+        <pre><code class="language-cpp">std::vector&lt;Process_descriptor&gt; make_branches();
+        std::vector&lt;Process_descriptor&gt; make_branches(std::vector&lt;Process_descriptor&gt;&amp; branches);
 
-template &lt;typename... Args&gt;
-std::vector&lt;Process_descriptor&gt; make_branches(const Process_descriptor&amp; descriptor, Args&amp;&amp;... rest);
+        template &lt;typename... Args&gt;
+        std::vector&lt;Process_descriptor&gt; make_branches(const Process_descriptor&amp; descriptor, Args&amp;&amp;... rest);
 
-template &lt;typename... Args&gt;
-std::vector&lt;Process_descriptor&gt; make_branches(int multiplicity, const Process_descriptor&amp; descriptor, Args&amp;&amp;... rest);</code></pre>
-<p><code>make_branches</code> builds the branch vector consumed by <code>init</code>. The multiplicity form repeats a process descriptor.</p>
-<h3 id="sintraentry_descriptor"><code>sintra::Entry_descriptor</code></h3>
-<p>Constructors:</p>
-<pre><code class="language-cpp">Entry_descriptor(const std::string&amp; binary_name);
-Entry_descriptor(int (*entry_function)());</code></pre>
-<p><code>Entry_descriptor</code> selects how a branch starts: from a binary path or an in-process entry function.</p>
-<h3 id="sintraprocess_descriptor"><code>sintra::Process_descriptor</code></h3>
-<p>Relevant shape:</p>
-<pre><code class="language-cpp">struct Process_descriptor
-{
-    Entry_descriptor entry;
-    std::vector&lt;std::string&gt; sintra_options;
-    std::vector&lt;std::string&gt; user_options;
-    instance_id_type assigned_instance_id = invalid_instance_id;
-};</code></pre>
-<p><code>Process_descriptor</code> owns the <code>Entry_descriptor</code> entry and optional user arguments. It is the normal unit passed to <code>init</code> and <code>make_branches</code>.</p>
-<h3 id="sintraspawn_options"><code>sintra::Spawn_options</code></h3>
-<p>Relevant shape:</p>
-<pre><code class="language-cpp">struct Spawn_options
-{
-    std::string binary_path;
-    std::vector&lt;std::string&gt; args;
-    size_t count = 1;
-    instance_id_type process_instance_id = invalid_instance_id;
-    std::string wait_for_instance_name;
-    std::chrono::milliseconds wait_timeout{0};
-    Lifetime_policy lifetime;
-};</code></pre>
-<p><code>Spawn_options</code> configures dynamic process spawning through <code>spawn_swarm_process</code>.</p>
-<h3 id="sintralifetime_policy"><code>sintra::Lifetime_policy</code></h3>
-<p>Relevant shape:</p>
-<pre><code class="language-cpp">struct Lifetime_policy
-{
-    bool enable_lifeline = true;
-    int hard_exit_code = 99;
-    int hard_exit_timeout_ms = 100;
-};</code></pre>
-<p>Spawned processes receive a lifeline by default. When the owner disappears, the child initiates shutdown and hard-exits after the configured timeout.</p>
-<h3 id="sintraspawn_swarm_process"><code>sintra::spawn_swarm_process</code></h3>
-<p>Signature:</p>
-<pre><code class="language-cpp">size_t spawn_swarm_process(const Spawn_options&amp; options);</code></pre>
-<p>Spawns one or more additional managed processes. Use <code>Spawn_options</code> to select the binary, arguments, count, optional expected instance name, wait timeout, and lifeline policy.</p>
-<p>Compiled examples/tests:</p>
-<ul>
-<li><a href="../../../tests/spawn_wait_test.cpp"><code>tests/spawn_wait_test.cpp</code></a></li>
-<li><a href="../../../tests/lifeline_basic_test.cpp"><code>tests/lifeline_basic_test.cpp</code></a></li>
-</ul>
-<h3 id="sintrajoin_swarm"><code>sintra::join_swarm</code></h3>
-<p>Signature:</p>
-<pre><code class="language-cpp">instance_id_type join_swarm(int32_t branch_index, const std::string&amp; binary_name = {});</code></pre>
-<p>Requests an additional process for an existing branch index. The coordinator serializes join requests for the same branch index.</p>
-<p>Compiled tests:</p>
-<ul>
-<li><a href="../../../tests/join_swarm_midflight_test.cpp"><code>tests/join_swarm_midflight_test.cpp</code></a></li>
-<li><a href="../../../tests/join_swarm_failure_test.cpp"><code>tests/join_swarm_failure_test.cpp</code></a></li>
-</ul>
-<h3 id="sintraprocess_index"><code>sintra::process_index</code></h3>
-<p>Signature:</p>
-<pre><code class="language-cpp">int process_index();</code></pre>
-<p>Returns the branch index for the current process. The starter process is index <code>0</code>; spawned branches are positive.</p>
-<h3 id="sintradisable_debug_pause_for_current_process"><code>sintra::disable_debug_pause_for_current_process</code></h3>
-<p>Signature:</p>
-<pre><code class="language-cpp">void disable_debug_pause_for_current_process();</code></pre>
-<p>Disables Sintra&#x27;s debug pause behavior in the current process.</p>
-<h2 id="transceivers">Transceivers</h2>
-<h3 id="sintratransceiver"><code>sintra::Transceiver</code></h3>
-<p><code>Transceiver</code> is the base runtime object that owns instance identity, handler registrations, message emission, and RPC export plumbing. User code normally derives through <code>Derived_transceiver</code>.</p>
-<p>Important public members:</p>
-<pre><code class="language-cpp">instance_id_type instance_id();
-bool assign_name(const std::string&amp; name);
-void destroy();
-void deactivate_all();</code></pre>
-<h3 id="sintraderived_transceiver"><code>sintra::Derived_transceiver</code></h3>
-<p>Signatures:</p>
-<pre><code class="language-cpp">template &lt;typename Derived_T, typename Parent = void&gt;
-struct Derived_transceiver;</code></pre>
-<p>Use <code>Derived_transceiver&lt;T&gt;</code> as the base for a user transceiver. It provides typed message emission and generated RPC support.</p>
-<p>Typed message emission:</p>
-<pre><code class="language-cpp">template &lt;typename MESSAGE_T, typename SENDER_T = Transceiver_type, typename... Args&gt;
-void emit_local(Args&amp;&amp;... args);
+        template &lt;typename... Args&gt;
+        std::vector&lt;Process_descriptor&gt; make_branches(int multiplicity, const Process_descriptor&amp; descriptor, Args&amp;&amp;... rest);</code></pre>
+        <p><code>make_branches</code> builds the branch vector consumed by <code>init</code>. The multiplicity form repeats a process descriptor.</p>
+        <h3 id="sintraentry_descriptor"><code>sintra::Entry_descriptor</code></h3>
+        <p>Constructors:</p>
+        <pre><code class="language-cpp">Entry_descriptor(const std::string&amp; binary_name);
+        Entry_descriptor(int (*entry_function)());</code></pre>
+        <p><code>Entry_descriptor</code> selects how a branch starts: from a binary path or an in-process entry function.</p>
+        <h3 id="sintraprocess_descriptor"><code>sintra::Process_descriptor</code></h3>
+        <p>Relevant shape:</p>
+        <pre><code class="language-cpp">struct Process_descriptor
+        {
+            Entry_descriptor entry;
+            std::vector&lt;std::string&gt; sintra_options;
+            std::vector&lt;std::string&gt; user_options;
+            instance_id_type assigned_instance_id = invalid_instance_id;
+        };</code></pre>
+        <p><code>Process_descriptor</code> owns the <code>Entry_descriptor</code> entry and optional user arguments. It is the normal unit passed to <code>init</code> and <code>make_branches</code>.</p>
+        <h3 id="sintraspawn_options"><code>sintra::Spawn_options</code></h3>
+        <p>Relevant shape:</p>
+        <pre><code class="language-cpp">struct Spawn_options
+        {
+            std::string binary_path;
+            std::vector&lt;std::string&gt; args;
+            size_t count = 1;
+            instance_id_type process_instance_id = invalid_instance_id;
+            std::string wait_for_instance_name;
+            std::chrono::milliseconds wait_timeout{0};
+            Lifetime_policy lifetime;
+        };</code></pre>
+        <p><code>Spawn_options</code> configures dynamic process spawning through <code>spawn_swarm_process</code>.</p>
+        <h3 id="sintralifetime_policy"><code>sintra::Lifetime_policy</code></h3>
+        <p>Relevant shape:</p>
+        <pre><code class="language-cpp">struct Lifetime_policy
+        {
+            bool enable_lifeline = true;
+            int hard_exit_code = 99;
+            int hard_exit_timeout_ms = 100;
+        };</code></pre>
+        <p>Spawned processes receive a lifeline by default. When the owner disappears, the child initiates shutdown and hard-exits after the configured timeout.</p>
+        <h3 id="sintraspawn_swarm_process"><code>sintra::spawn_swarm_process</code></h3>
+        <p>Signature:</p>
+        <pre><code class="language-cpp">size_t spawn_swarm_process(const Spawn_options&amp; options);</code></pre>
+        <p>Spawns one or more additional managed processes. Use <code>Spawn_options</code> to select the binary, arguments, count, optional expected instance name, wait timeout, and lifeline policy.</p>
+        <p>Compiled examples/tests:</p>
+        <ul>
+        <li><a href="https://github.com/imakris/sintra/blob/master/tests/spawn_wait_test.cpp"><code>tests/spawn_wait_test.cpp</code></a></li>
+        <li><a href="https://github.com/imakris/sintra/blob/master/tests/lifeline_basic_test.cpp"><code>tests/lifeline_basic_test.cpp</code></a></li>
+        </ul>
+        <h3 id="sintrajoin_swarm"><code>sintra::join_swarm</code></h3>
+        <p>Signature:</p>
+        <pre><code class="language-cpp">instance_id_type join_swarm(int32_t branch_index, const std::string&amp; binary_name = {});</code></pre>
+        <p>Requests an additional process for an existing branch index. The coordinator serializes join requests for the same branch index.</p>
+        <p>Compiled tests:</p>
+        <ul>
+        <li><a href="https://github.com/imakris/sintra/blob/master/tests/join_swarm_midflight_test.cpp"><code>tests/join_swarm_midflight_test.cpp</code></a></li>
+        <li><a href="https://github.com/imakris/sintra/blob/master/tests/join_swarm_failure_test.cpp"><code>tests/join_swarm_failure_test.cpp</code></a></li>
+        </ul>
+        <h3 id="sintraprocess_index"><code>sintra::process_index</code></h3>
+        <p>Signature:</p>
+        <pre><code class="language-cpp">int process_index();</code></pre>
+        <p>Returns the branch index for the current process. The starter process is index <code>0</code>; spawned branches are positive.</p>
+        <h3 id="sintradisable_debug_pause_for_current_process"><code>sintra::disable_debug_pause_for_current_process</code></h3>
+        <p>Signature:</p>
+        <pre><code class="language-cpp">void disable_debug_pause_for_current_process() noexcept;</code></pre>
+        <p>Disables Sintra&#x27;s debug pause behavior in the current process.</p>
+        <h2 id="transceivers">Transceivers</h2>
+        <h3 id="sintratransceiver"><code>sintra::Transceiver</code></h3>
+        <p><code>Transceiver</code> is the base runtime object that owns instance identity, handler registrations, message emission, and RPC export plumbing. User code normally derives through <code>Derived_transceiver</code>.</p>
+        <p>Important public members:</p>
+        <pre><code class="language-cpp">instance_id_type instance_id();
+        bool assign_name(const std::string&amp; name);
+        void destroy();
+        void deactivate_all();</code></pre>
+        <h3 id="sintraderived_transceiver"><code>sintra::Derived_transceiver</code></h3>
+        <p>Signatures:</p>
+        <pre><code class="language-cpp">template &lt;typename Derived_T, typename Parent = void&gt;
+        struct Derived_transceiver;</code></pre>
+        <p>Use <code>Derived_transceiver&lt;T&gt;</code> as the base for a user transceiver. It provides typed message emission and generated RPC support.</p>
+        <p>Typed message emission:</p>
+        <pre><code class="language-cpp">template &lt;typename MESSAGE_T, typename SENDER_T = Transceiver_type, typename... Args&gt;
+        void emit_local(Args&amp;&amp;... args);
 
-template &lt;typename MESSAGE_T, typename SENDER_T = Transceiver_type, typename... Args&gt;
-void emit_remote(Args&amp;&amp;... args);
+        template &lt;typename MESSAGE_T, typename SENDER_T = Transceiver_type, typename... Args&gt;
+        void emit_remote(Args&amp;&amp;... args);
 
-template &lt;typename MESSAGE_T, typename SENDER_T = Transceiver_type, typename... Args&gt;
-void emit_global(Args&amp;&amp;... args);</code></pre>
-<p>Use the maildrop helpers (<code>world()</code>, <code>local()</code>, <code>remote()</code>) for simple value broadcasts where the wrapper message type is not important.</p>
-<h3 id="transceiver-macros">Transceiver Macros</h3>
-<p>User-facing macros:</p>
-<div class="table-wrap"><table><thead><tr><th>Macro</th><th>Purpose</th></tr></thead><tbody><tr><td><code>SINTRA_TYPE_ID(idv)</code></td><td>Pins the transceiver type id.</td></tr><tr><td><code>SINTRA_MESSAGE(name, ...)</code></td><td>Declares a typed message under a transceiver.</td></tr><tr><td><code>SINTRA_MESSAGE_EXPLICIT(name, idv, ...)</code></td><td>Declares a typed message with a pinned user id.</td></tr><tr><td><code>SINTRA_RPC(method)</code></td><td>Exports a member function for blocking and async RPC. Same-process blocking calls may use a direct shortcut.</td></tr><tr><td><code>SINTRA_RPC_STRICT(method)</code></td><td>Exports a member function through the transported RPC path for local and remote targets.</td></tr><tr><td><code>SINTRA_UNICAST(method)</code></td><td>Exports a void fire-and-forget targeted message.</td></tr></tbody></table></div>
-<p>Internal macros that application code should not use:</p>
-<div class="table-wrap"><table><thead><tr><th>Macro</th><th>Reason</th></tr></thead><tbody><tr><td><code>SINTRA_RPC_EXPLICIT</code></td><td>Uses reserved internal ids.</td></tr><tr><td><code>SINTRA_RPC_STRICT_EXPLICIT</code></td><td>Uses reserved internal ids.</td></tr><tr><td><code>SINTRA_MESSAGE_BASE</code></td><td>Macro implementation detail.</td></tr><tr><td><code>SINTRA_MESSAGE_RESERVED</code></td><td>Reserved internal messages.</td></tr></tbody></table></div>
-<p>RPC exported functions must not return references. Non-const reference arguments are rejected. Return values and mutable results should be represented as values or explicit messages.</p>
-<p>Compiled examples:</p>
-<ul>
-<li><a href="../../../example/sintra/sintra_example_2_rpc_append.cpp"><code>example/sintra/sintra_example_2_rpc_append.cpp</code></a></li>
-<li><a href="../../../example/sintra/sintra_example_6_unicast_send_to.cpp"><code>example/sintra/sintra_example_6_unicast_send_to.cpp</code></a></li>
-<li><a href="../../../example/sintra/sintra_example_7_explicit_type_ids.cpp"><code>example/sintra/sintra_example_7_explicit_type_ids.cpp</code></a></li>
-</ul>
-<h2 id="messages-and-payloads">Messages and Payloads</h2>
-<p>Sintra accepts plain C++ values through the maildrop helpers and transceiver message types declared by <code>SINTRA_MESSAGE</code> or <code>SINTRA_MESSAGE_EXPLICIT</code>.</p>
-<h3 id="plain-values">Plain Values</h3>
-<p><code>world() &lt;&lt; value</code>, <code>local() &lt;&lt; value</code>, and <code>remote() &lt;&lt; value</code> wrap values in Sintra message envelopes automatically.</p>
-<h3 id="transceiver-message-types">Transceiver Message Types</h3>
-<p><code>SINTRA_MESSAGE(name, fields...)</code> creates a message type nested in the transceiver. Send it with <code>emit_local</code>, <code>emit_remote</code>, or <code>emit_global</code>.</p>
-<h3 id="variable-size-fields">Variable-Size Fields</h3>
-<p>Advanced message payload types:</p>
-<div class="table-wrap"><table><thead><tr><th>Type</th><th>Use</th></tr></thead><tbody><tr><td><code>sintra::variable_buffer</code></td><td>Ring-buffer resident variable bytes.</td></tr><tr><td><code>sintra::typed_variable_buffer&lt;T&gt;</code></td><td>Typed variable-size payload with alignment checks.</td></tr><tr><td><code>sintra::message_string</code></td><td>String payload carried through the message layer.</td></tr></tbody></table></div>
-<p>Variable-buffer backed data is tied to message storage. Copy the data out before the handler or receive scope ends if it must outlive that message.</p>
-<p><code>sintra::detail::message_args</code> is an internal implementation detail. It may appear in template diagnostics, but application code should not name it.</p>
-<h2 id="publishsubscribe">Publish/Subscribe</h2>
-<h3 id="maildrop-helpers">Maildrop Helpers</h3>
-<p>Signatures:</p>
-<pre><code class="language-cpp">Maildrop&lt;any_local&gt;&amp; local();
-Maildrop&lt;any_remote&gt;&amp; remote();
-Maildrop&lt;any_local_or_remote&gt;&amp; world();</code></pre>
-<p>Use:</p>
-<ul>
-<li><code>local()</code> to deliver in the current process.</li>
-<li><code>remote()</code> to deliver to other processes.</li>
-<li><code>world()</code> to deliver to local and remote recipients.</li>
-</ul>
-<h3 id="sintraactivate_slot"><code>sintra::activate_slot</code></h3>
-<p>Signature:</p>
-<pre><code class="language-cpp">template &lt;typename FT, typename SENDER_T = void&gt;
-auto activate_slot(
-    const FT&amp; slot_function,
-    Typed_instance_id&lt;SENDER_T&gt; sender_id = Typed_instance_id&lt;void&gt;(any_local_or_remote));</code></pre>
-<p>Registers a handler for the message type accepted by <code>slot_function</code>. The optional sender id filters which sender may trigger the slot.</p>
-<p>Slot handlers run on Sintra reader threads. Protect shared state with normal C++ synchronization. See <a href="#threading-and-reentrancy">Threading and Reentrancy</a>.</p>
-<h3 id="sintradeactivate_all_slots"><code>sintra::deactivate_all_slots</code></h3>
-<p>Signature:</p>
-<pre><code class="language-cpp">void deactivate_all_slots();</code></pre>
-<p>Deactivates all slots owned by the current managed process.</p>
-<h3 id="sintrareceive"><code>sintra::receive</code></h3>
-<p>Signatures:</p>
-<pre><code class="language-cpp">template &lt;typename MESSAGE_T&gt;
-MESSAGE_T receive();
+        template &lt;typename MESSAGE_T, typename SENDER_T = Transceiver_type, typename... Args&gt;
+        void emit_global(Args&amp;&amp;... args);</code></pre>
+        <p>Use the maildrop helpers (<code>world()</code>, <code>local()</code>, <code>remote()</code>) for simple value broadcasts where the wrapper message type is not important.</p>
+        <h3 id="transceiver-macros">Transceiver Macros</h3>
+        <p>User-facing macros:</p>
+        <div class="table-wrap"><table><thead><tr><th>Macro</th><th>Purpose</th></tr></thead><tbody><tr><td><code>SINTRA_TYPE_ID(idv)</code></td><td>Pins the transceiver type id.</td></tr><tr><td><code>SINTRA_MESSAGE(name, ...)</code></td><td>Declares a typed message under a transceiver.</td></tr><tr><td><code>SINTRA_MESSAGE_EXPLICIT(name, idv, ...)</code></td><td>Declares a typed message with a pinned user id.</td></tr><tr><td><code>SINTRA_RPC(method)</code></td><td>Exports a member function for blocking and async RPC. Same-process blocking calls may use a direct shortcut.</td></tr><tr><td><code>SINTRA_RPC_STRICT(method)</code></td><td>Exports a member function through the transported RPC path for local and remote targets.</td></tr><tr><td><code>SINTRA_UNICAST(method)</code></td><td>Exports a void fire-and-forget targeted message.</td></tr></tbody></table></div>
+        <p>Internal macros that application code should not use:</p>
+        <div class="table-wrap"><table><thead><tr><th>Macro</th><th>Reason</th></tr></thead><tbody><tr><td><code>SINTRA_RPC_EXPLICIT</code></td><td>Uses reserved internal ids.</td></tr><tr><td><code>SINTRA_RPC_STRICT_EXPLICIT</code></td><td>Uses reserved internal ids.</td></tr><tr><td><code>SINTRA_MESSAGE_BASE</code></td><td>Macro implementation detail.</td></tr><tr><td><code>SINTRA_MESSAGE_RESERVED</code></td><td>Reserved internal messages.</td></tr></tbody></table></div>
+        <p>RPC exported functions must not return references. Non-const reference arguments are rejected. Return values and mutable results should be represented as values or explicit messages.</p>
+        <p>Compiled examples:</p>
+        <ul>
+        <li><a href="https://github.com/imakris/sintra/blob/master/example/sintra/sintra_example_2_rpc_append.cpp"><code>example/sintra/sintra_example_2_rpc_append.cpp</code></a></li>
+        <li><a href="https://github.com/imakris/sintra/blob/master/example/sintra/sintra_example_6_unicast_send_to.cpp"><code>example/sintra/sintra_example_6_unicast_send_to.cpp</code></a></li>
+        <li><a href="https://github.com/imakris/sintra/blob/master/example/sintra/sintra_example_7_explicit_type_ids.cpp"><code>example/sintra/sintra_example_7_explicit_type_ids.cpp</code></a></li>
+        </ul>
+        <h2 id="messages-and-payloads">Messages and Payloads</h2>
+        <p>Sintra accepts plain C++ values through the maildrop helpers and transceiver message types declared by <code>SINTRA_MESSAGE</code> or <code>SINTRA_MESSAGE_EXPLICIT</code>.</p>
+        <h3 id="plain-values">Plain Values</h3>
+        <p><code>world() &lt;&lt; value</code>, <code>local() &lt;&lt; value</code>, and <code>remote() &lt;&lt; value</code> wrap values in Sintra message envelopes automatically.</p>
+        <h3 id="transceiver-message-types">Transceiver Message Types</h3>
+        <p><code>SINTRA_MESSAGE(name, fields...)</code> creates a message type nested in the transceiver. Send it with <code>emit_local</code>, <code>emit_remote</code>, or <code>emit_global</code>.</p>
+        <h3 id="variable-size-fields">Variable-Size Fields</h3>
+        <p>Advanced message payload types:</p>
+        <div class="table-wrap"><table><thead><tr><th>Type</th><th>Use</th></tr></thead><tbody><tr><td><code>sintra::variable_buffer</code></td><td>Ring-buffer resident variable bytes.</td></tr><tr><td><code>sintra::typed_variable_buffer&lt;T&gt;</code></td><td>Typed variable-size payload with alignment checks.</td></tr><tr><td><code>sintra::message_string</code></td><td>String payload carried through the message layer.</td></tr></tbody></table></div>
+        <p>Variable-buffer backed data is tied to message storage. Copy the data out before the handler or receive scope ends if it must outlive that message.</p>
+        <p><code>sintra::detail::message_args</code> is an internal implementation detail. It may appear in template diagnostics, but application code should not name it.</p>
+        <h2 id="publishsubscribe">Publish/Subscribe</h2>
+        <h3 id="maildrop-helpers">Maildrop Helpers</h3>
+        <p>Signatures:</p>
+        <pre><code class="language-cpp">Maildrop&lt;any_local&gt;&amp; local();
+        Maildrop&lt;any_remote&gt;&amp; remote();
+        Maildrop&lt;any_local_or_remote&gt;&amp; world();</code></pre>
+        <p>Use:</p>
+        <ul>
+        <li><code>local()</code> to deliver in the current process.</li>
+        <li><code>remote()</code> to deliver to other processes.</li>
+        <li><code>world()</code> to deliver to local and remote recipients.</li>
+        </ul>
+        <h3 id="sintraactivate_slot"><code>sintra::activate_slot</code></h3>
+        <p>Signature:</p>
+        <pre><code class="language-cpp">template &lt;typename FT, typename SENDER_T = void&gt;
+        auto activate_slot(
+            const FT&amp; slot_function,
+            Typed_instance_id&lt;SENDER_T&gt; sender_id = Typed_instance_id&lt;void&gt;(any_local_or_remote));</code></pre>
+        <p>Registers a handler for the message type accepted by <code>slot_function</code>. The optional sender id filters which sender may trigger the slot.</p>
+        <p>Slot handlers run on Sintra reader threads. Protect shared state with normal C++ synchronization. See <a href="#threading-and-reentrancy">Threading and Reentrancy</a>.</p>
+        <h3 id="sintradeactivate_all_slots"><code>sintra::deactivate_all_slots</code></h3>
+        <p>Signature:</p>
+        <pre><code class="language-cpp">void deactivate_all_slots();</code></pre>
+        <p>Deactivates all slots owned by the current managed process.</p>
+        <h3 id="sintrareceive"><code>sintra::receive</code></h3>
+        <p>Signatures:</p>
+        <pre><code class="language-cpp">template &lt;typename MESSAGE_T&gt;
+        MESSAGE_T receive();
 
-template &lt;typename MESSAGE_T, typename SENDER_T&gt;
-MESSAGE_T receive(Typed_instance_id&lt;SENDER_T&gt; sender_id);</code></pre>
-<p>Blocks a control thread until a matching message arrives. Do not call <code>receive&lt;T&gt;()</code> from a message handler or post-handler callback.</p>
-<p>Compiled examples/tests:</p>
-<ul>
-<li><a href="../../../example/sintra/sintra_example_0_basic_pubsub.cpp"><code>example/sintra/sintra_example_0_basic_pubsub.cpp</code></a></li>
-<li><a href="../../../tests/receive_test.cpp"><code>tests/receive_test.cpp</code></a></li>
-</ul>
-<h2 id="rpc">RPC</h2>
-<p><code>SINTRA_RPC(method)</code> and <code>SINTRA_RPC_STRICT(method)</code> generate:</p>
-<pre><code class="language-cpp">template &lt;typename... Args&gt;
-static auto rpc_method(sintra::Resolvable_instance_id instance_id, Args&amp;&amp;... args);
+        template &lt;typename MESSAGE_T, typename SENDER_T&gt;
+        MESSAGE_T receive(Typed_instance_id&lt;SENDER_T&gt; sender_id);</code></pre>
+        <p>Blocks a control thread until a matching message arrives. Do not call <code>receive&lt;T&gt;()</code> from a message handler or post-handler callback.</p>
+        <p>Compiled examples/tests:</p>
+        <ul>
+        <li><a href="https://github.com/imakris/sintra/blob/master/example/sintra/sintra_example_0_basic_pubsub.cpp"><code>example/sintra/sintra_example_0_basic_pubsub.cpp</code></a></li>
+        <li><a href="https://github.com/imakris/sintra/blob/master/tests/receive_test.cpp"><code>tests/receive_test.cpp</code></a></li>
+        </ul>
+        <h2 id="rpc">RPC</h2>
+        <p><code>SINTRA_RPC(method)</code> and <code>SINTRA_RPC_STRICT(method)</code> generate:</p>
+        <pre><code class="language-cpp">template &lt;typename... Args&gt;
+        static auto rpc_method(sintra::Resolvable_instance_id instance_id, Args&amp;&amp;... args);
 
-template &lt;typename... Args&gt;
-static auto rpc_async_method(sintra::Resolvable_instance_id instance_id, Args&amp;&amp;... args);</code></pre>
-<p><code>SINTRA_UNICAST(method)</code> generates the same <code>rpc_method</code> form, but it is fire-and-forget and available only for void-returning functions. It does not generate a usable async API.</p>
-<h3 id="targets">Targets</h3>
-<p>Generated RPC target parameters use <code>sintra::Resolvable_instance_id</code>, which accepts:</p>
-<ul>
-<li>a raw <code>sintra::instance_id_type</code></li>
-<li>a <code>std::string</code></li>
-<li>a <code>const char*</code></li>
-</ul>
-<p>Names resolve through the coordinator. Raw ids are appropriate after a process has exchanged ids explicitly.</p>
-<h3 id="blocking-rpc">Blocking RPC</h3>
-<p><code>rpc_&lt;method&gt;(...)</code> blocks until the reply, remote exception, cancellation, or teardown outcome is known.</p>
-<p>Remote exceptions are propagated back to the caller. Exception conversion covers standard exception families and unknown exceptions.</p>
-<h3 id="async-rpc">Async RPC</h3>
-<p><code>rpc_async_&lt;method&gt;(...)</code> returns <code>sintra::Rpc_handle&lt;T&gt;</code>.</p>
-<p>Relevant API:</p>
-<pre><code class="language-cpp">enum class Rpc_wait_status { completed, deadline_exceeded };
-enum class Rpc_completion_state { pending, returned, remote_exception, cancelled, abandoned };
+        template &lt;typename... Args&gt;
+        static auto rpc_async_method(sintra::Resolvable_instance_id instance_id, Args&amp;&amp;... args);</code></pre>
+        <p><code>SINTRA_UNICAST(method)</code> generates the same <code>rpc_method</code> form, but it is fire-and-forget and available only for void-returning functions. It does not generate a usable async API.</p>
+        <h3 id="targets">Targets</h3>
+        <p>Generated RPC target parameters use <code>sintra::Resolvable_instance_id</code>, which accepts:</p>
+        <ul>
+        <li>a raw <code>sintra::instance_id_type</code></li>
+        <li>a <code>std::string</code></li>
+        <li>a <code>const char*</code></li>
+        </ul>
+        <p>Names resolve through the coordinator. Raw ids are appropriate after a process has exchanged ids explicitly.</p>
+        <h3 id="blocking-rpc">Blocking RPC</h3>
+        <p><code>rpc_&lt;method&gt;(...)</code> blocks until the reply, remote exception, cancellation, or teardown outcome is known.</p>
+        <p>Remote exceptions are propagated back to the caller. Exception conversion covers standard exception families and unknown exceptions.</p>
+        <h3 id="async-rpc">Async RPC</h3>
+        <p><code>rpc_async_&lt;method&gt;(...)</code> returns <code>sintra::Rpc_handle&lt;T&gt;</code>.</p>
+        <p>Relevant API:</p>
+        <pre><code class="language-cpp">enum class Rpc_wait_status { completed, deadline_exceeded };
+        enum class Rpc_completion_state { pending, returned, remote_exception, cancelled, abandoned };
 
-void Rpc_handle&lt;T&gt;::wait() const;
-template&lt;typename Clock, typename Duration&gt;
-Rpc_wait_status Rpc_handle&lt;T&gt;::wait_until(
-    const std::chrono::time_point&lt;Clock, Duration&gt;&amp; deadline) const;
-bool Rpc_handle&lt;T&gt;::ready() const;
-Rpc_completion_state Rpc_handle&lt;T&gt;::state() const;
-bool Rpc_handle&lt;T&gt;::abandon();
-T Rpc_handle&lt;T&gt;::get() const;</code></pre>
-<p>Deadline expiry does not cancel remote execution. Call <code>abandon()</code> when the caller no longer wants the result. Destroying a pending handle is equivalent to non-blocking abandon. <code>get()</code> throws on abandoned and cancelled handles, and rethrows remote exceptions.</p>
-<p>Use <code>SINTRA_RPC_STRICT</code> when the local target must use the same transported path as remote targets. This matters for local async-handle behavior.</p>
-<p>Compiled examples/tests:</p>
-<ul>
-<li><a href="../../../example/sintra/sintra_example_2_rpc_append.cpp"><code>example/sintra/sintra_example_2_rpc_append.cpp</code></a></li>
-<li><a href="../../../tests/rpc_async_lifecycle_test.cpp"><code>tests/rpc_async_lifecycle_test.cpp</code></a></li>
-<li><a href="../../../tests/finalize_async_rpc_lifecycle_test.cpp"><code>tests/finalize_async_rpc_lifecycle_test.cpp</code></a></li>
-</ul>
-<h2 id="targeting-and-ids">Targeting and IDs</h2>
-<h3 id="core-id-types">Core ID Types</h3>
-<div class="table-wrap"><table><thead><tr><th>Name</th><th>Meaning</th></tr></thead><tbody><tr><td><code>sintra::instance_id_type</code></td><td>Raw transceiver/process target id.</td></tr><tr><td><code>sintra::type_id_type</code></td><td>Message or transceiver type id.</td></tr><tr><td><code>sintra::sequence_counter_type</code></td><td>Ring/barrier sequence watermark type.</td></tr><tr><td><code>sintra::Typed_instance_id&lt;T&gt;</code></td><td>Type-tagged instance id wrapper.</td></tr><tr><td><code>sintra::Named_instance&lt;T&gt;</code></td><td>Name wrapper for typed transceiver lookup.</td></tr><tr><td><code>sintra::Resolvable_instance_id</code></td><td>Generated RPC target conversion type.</td></tr></tbody></table></div>
-<h3 id="wildcards-and-sentinels">Wildcards and Sentinels</h3>
-<div class="table-wrap"><table><thead><tr><th>Name</th><th>Meaning</th></tr></thead><tbody><tr><td><code>sintra::any_local</code></td><td>Local recipients.</td></tr><tr><td><code>sintra::any_remote</code></td><td>Remote recipients.</td></tr><tr><td><code>sintra::any_local_or_remote</code></td><td>Local and remote recipients.</td></tr><tr><td><code>sintra::invalid_instance_id</code></td><td>No valid instance.</td></tr><tr><td><code>sintra::invalid_sequence</code></td><td>No valid sequence; also used when a barrier is treated as satisfied during shutdown/drain handling.</td></tr></tbody></table></div>
-<h3 id="helpers">Helpers</h3>
-<pre><code class="language-cpp">decomposed_instance_id decompose_instance(instance_id_type instance) noexcept;
-instance_id_type compose_instance(uint32_t process, uint64_t transceiver) noexcept;
-uint64_t get_process_index(instance_id_type instance_id);
-instance_id_type process_of(instance_id_type iid);</code></pre>
-<p>Use typed wrappers and named instances where they make the target contract clear. Use raw ids when ids have been exchanged as data. <code>process_of(iid)</code> returns the managed-process sentinel instance for the process that owns <code>iid</code>.</p>
-<h2 id="barriers-and-fences">Barriers and Fences</h2>
-<p>Tags:</p>
-<pre><code class="language-cpp">struct rendezvous_t {};
-struct delivery_fence_t {};
-struct processing_fence_t {};</code></pre>
-<p>API:</p>
-<pre><code class="language-cpp">template&lt;typename BarrierMode = delivery_fence_t&gt;
-sequence_counter_type barrier(
-    const std::string&amp; barrier_name,
-    const std::string&amp; group_name = &quot;_sintra_external_processes&quot;);
+        void Rpc_handle&lt;T&gt;::wait() const;
+        template&lt;typename Clock, typename Duration&gt;
+        Rpc_wait_status Rpc_handle&lt;T&gt;::wait_until(
+            const std::chrono::time_point&lt;Clock, Duration&gt;&amp; deadline) const;
+        bool Rpc_handle&lt;T&gt;::ready() const;
+        Rpc_completion_state Rpc_handle&lt;T&gt;::state() const;
+        bool Rpc_handle&lt;T&gt;::abandon();
+        T Rpc_handle&lt;T&gt;::get() const;</code></pre>
+        <p>Deadline expiry does not cancel remote execution. Call <code>abandon()</code> when the caller no longer wants the result. Destroying a pending handle is equivalent to non-blocking abandon. <code>get()</code> throws on abandoned and cancelled handles, and rethrows remote exceptions.</p>
+        <p>Use <code>SINTRA_RPC_STRICT</code> when the local target must use the same transported path as remote targets. This matters for local async-handle behavior.</p>
+        <p>Compiled examples/tests:</p>
+        <ul>
+        <li><a href="https://github.com/imakris/sintra/blob/master/example/sintra/sintra_example_2_rpc_append.cpp"><code>example/sintra/sintra_example_2_rpc_append.cpp</code></a></li>
+        <li><a href="https://github.com/imakris/sintra/blob/master/tests/rpc_async_lifecycle_test.cpp"><code>tests/rpc_async_lifecycle_test.cpp</code></a></li>
+        <li><a href="https://github.com/imakris/sintra/blob/master/tests/finalize_async_rpc_lifecycle_test.cpp"><code>tests/finalize_async_rpc_lifecycle_test.cpp</code></a></li>
+        </ul>
+        <h2 id="targeting-and-ids">Targeting and IDs</h2>
+        <h3 id="core-id-types">Core ID Types</h3>
+        <div class="table-wrap"><table><thead><tr><th>Name</th><th>Meaning</th></tr></thead><tbody><tr><td><code>sintra::instance_id_type</code></td><td>Raw transceiver/process target id.</td></tr><tr><td><code>sintra::type_id_type</code></td><td>Message or transceiver type id.</td></tr><tr><td><code>sintra::sequence_counter_type</code></td><td>Ring/barrier sequence watermark type.</td></tr><tr><td><code>sintra::Typed_instance_id&lt;T&gt;</code></td><td>Type-tagged instance id wrapper.</td></tr><tr><td><code>sintra::Named_instance&lt;T&gt;</code></td><td>Name wrapper for typed transceiver lookup.</td></tr><tr><td><code>sintra::Resolvable_instance_id</code></td><td>Generated RPC target conversion type.</td></tr></tbody></table></div>
+        <h3 id="wildcards-and-sentinels">Wildcards and Sentinels</h3>
+        <div class="table-wrap"><table><thead><tr><th>Name</th><th>Meaning</th></tr></thead><tbody><tr><td><code>sintra::any_local</code></td><td>Local recipients.</td></tr><tr><td><code>sintra::any_remote</code></td><td>Remote recipients.</td></tr><tr><td><code>sintra::any_local_or_remote</code></td><td>Local and remote recipients.</td></tr><tr><td><code>sintra::invalid_instance_id</code></td><td>No valid instance.</td></tr><tr><td><code>sintra::invalid_sequence</code></td><td>No valid sequence; also used when a barrier is treated as satisfied during shutdown/drain handling.</td></tr></tbody></table></div>
+        <h3 id="helpers">Helpers</h3>
+        <pre><code class="language-cpp">decomposed_instance_id decompose_instance(instance_id_type instance) noexcept;
+        instance_id_type compose_instance(uint32_t process, uint64_t transceiver) noexcept;
+        uint64_t get_process_index(instance_id_type instance_id);
+        instance_id_type process_of(instance_id_type iid);</code></pre>
+        <p>Use typed wrappers and named instances where they make the target contract clear. Use raw ids when ids have been exchanged as data. <code>process_of(iid)</code> returns the managed-process sentinel instance for the process that owns <code>iid</code>.</p>
+        <h2 id="barriers-and-fences">Barriers and Fences</h2>
+        <p>Tags:</p>
+        <pre><code class="language-cpp">struct rendezvous_t {};
+        struct delivery_fence_t {};
+        struct processing_fence_t {};</code></pre>
+        <p>API:</p>
+        <pre><code class="language-cpp">template&lt;typename BarrierMode = delivery_fence_t&gt;
+        sequence_counter_type barrier(
+            const std::string&amp; barrier_name,
+            const std::string&amp; group_name = &quot;_sintra_external_processes&quot;);
 
-bool barrier_completed(sequence_counter_type barrier_sequence);</code></pre>
-<p>Barrier modes:</p>
-<div class="table-wrap"><table><thead><tr><th>Mode</th><th>Contract</th></tr></thead><tbody><tr><td><code>rendezvous_t</code></td><td>Every participant reaches the point. Pre-barrier messages may still be in flight.</td></tr><tr><td><code>delivery_fence_t</code></td><td>Default. Pre-barrier messages have been fetched by local readers and queued for handling. Handlers may still be running.</td></tr><tr><td><code>processing_fence_t</code></td><td>Pre-barrier handlers and continuations have completed. Use this when later code observes handler side effects.</td></tr></tbody></table></div>
-<p><code>barrier()</code> returns a reply-ring watermark. <code>barrier_completed(seq)</code> is true unless <code>seq == invalid_sequence</code>. <code>invalid_sequence</code> can be returned when the barrier is treated as satisfied during shutdown or draining.</p>
-<p>Barrier names beginning with <code>_sintra_</code> are reserved. Mixed barrier modes for the same barrier round fail fast.</p>
-<p>Barrier membership is snapshotted atomically at the coordinator when the barrier round starts. Draining processes are filtered from that snapshot. If a process becomes draining while a barrier is in flight, it is removed from the pending/arrived sets and the barrier completes when no pending participants remain. Barrier completions carry per-recipient reply-ring flush tokens.</p>
-<p>Processing fences are designed to keep reader threads draining while a handler waits. For the full protocol details, see <a href="../../barriers_and_shutdown.md"><code>docs/barriers_and_shutdown.md</code></a>.</p>
-<p>Compiled examples/tests:</p>
-<ul>
-<li><a href="../../../example/sintra/sintra_example_5_barrier_flush.cpp"><code>example/sintra/sintra_example_5_barrier_flush.cpp</code></a></li>
-<li><a href="../../../tests/processing_fence_test.cpp"><code>tests/processing_fence_test.cpp</code></a></li>
-<li><a href="../../../tests/barrier_guardrails_test.cpp"><code>tests/barrier_guardrails_test.cpp</code></a></li>
-</ul>
-<h2 id="lifecycle-and-shutdown">Lifecycle and Shutdown</h2>
-<h3 id="sintrashutdown"><code>sintra::shutdown</code></h3>
-<p>Signatures:</p>
-<pre><code class="language-cpp">bool shutdown();
-bool shutdown(const shutdown_options&amp; options);</code></pre>
-<p><code>shutdown()</code> is the standard terminal API for the collective lifecycle. All live participants that are finishing together should call it. The runtime performs an internal <code>processing_fence_t</code> handoff on <code>_sintra_all_processes</code> and then tears down the local runtime.</p>
-<h3 id="sintrashutdown_options"><code>sintra::shutdown_options</code></h3>
-<p>Relevant shape:</p>
-<pre><code class="language-cpp">struct shutdown_options
-{
-    std::function&lt;void()&gt; coordinator_shutdown_hook;
-};</code></pre>
-<p>The coordinator hook runs on the coordinator after the collective processing fence and before raw teardown. Non-coordinator processes wait inside the standard shutdown path. The hook must not start new peer coordination, extra barriers, or custom protocol steps.</p>
-<p>If the hook throws, the runtime still enters the hook-done/finalize path and then rethrows to the caller.</p>
-<p>Compiled tests:</p>
-<ul>
-<li><a href="../../../tests/shutdown_options_test.cpp"><code>tests/shutdown_options_test.cpp</code></a></li>
-<li><a href="../../../tests/shutdown_options_throwing_hook_test.cpp"><code>tests/shutdown_options_throwing_hook_test.cpp</code></a></li>
-</ul>
-<h3 id="sintraleave"><code>sintra::leave</code></h3>
-<p>Signature:</p>
-<pre><code class="language-cpp">bool leave();</code></pre>
-<p>Use <code>leave()</code> when this process intentionally departs while peers may continue. Call it from a top-level control thread, not from a message handler. A coordinator may call <code>leave()</code> only when it is already the sole remaining known process.</p>
-<p>Compiled tests:</p>
-<ul>
-<li><a href="../../../tests/leave_lifecycle_test.cpp"><code>tests/leave_lifecycle_test.cpp</code></a></li>
-<li><a href="../../../tests/leave_coordinator_guardrails_test.cpp"><code>tests/leave_coordinator_guardrails_test.cpp</code></a></li>
-</ul>
-<h3 id="low-level-teardown">Low-Level Teardown</h3>
-<p><code>sintra::detail::finalize()</code> is for tests, single-process exceptional paths, or deliberate primitive-level work. Ordinary multi-process code should use <code>shutdown()</code> or <code>leave()</code>.</p>
-<p>The raw teardown path announces draining, flushes coordinator reply-ring visibility when possible, pauses into service mode, unblocks RPC waiters, deactivates handlers, unpublishes transceivers, and destroys the managed process.</p>
-<p>For deeper lifecycle details, see <a href="../../barriers_and_shutdown.md"><code>docs/barriers_and_shutdown.md</code></a> and <a href="../../process_lifecycle_notes.md"><code>docs/process_lifecycle_notes.md</code></a>.</p>
-<h2 id="recovery-and-lifecycle-hooks">Recovery and Lifecycle Hooks</h2>
-<h3 id="sintraenable_recovery"><code>sintra::enable_recovery</code></h3>
-<p>Signature:</p>
-<pre><code class="language-cpp">void enable_recovery();</code></pre>
-<p>Marks the current process for coordinator-managed respawn after an unexpected exit. Recovery is opt-in per process.</p>
-<p>Compiled examples/tests:</p>
-<ul>
-<li><a href="../../../example/sintra/sintra_example_4_recovery.cpp"><code>example/sintra/sintra_example_4_recovery.cpp</code></a></li>
-<li><a href="../../../tests/recovery_test.cpp"><code>tests/recovery_test.cpp</code></a></li>
-</ul>
-<h3 id="coordinator-hooks">Coordinator Hooks</h3>
-<p>Signatures:</p>
-<pre><code class="language-cpp">void set_recovery_policy(Recovery_policy policy);
-void set_recovery_runner(Recovery_runner runner);
-void set_lifecycle_handler(Lifecycle_handler handler);</code></pre>
-<p>These calls are effective only in the coordinator process. Non-coordinator calls are no-ops.</p>
-<p>Types:</p>
-<pre><code class="language-cpp">struct Crash_info
-{
-    instance_id_type process_iid = invalid_instance_id;
-    uint32_t process_slot = 0;
-    int status = 0;
-};
+        bool barrier_completed(sequence_counter_type barrier_sequence);</code></pre>
+        <p>Barrier modes:</p>
+        <div class="table-wrap"><table><thead><tr><th>Mode</th><th>Contract</th></tr></thead><tbody><tr><td><code>rendezvous_t</code></td><td>Every participant reaches the point. Pre-barrier messages may still be in flight.</td></tr><tr><td><code>delivery_fence_t</code></td><td>Default. Pre-barrier messages have been fetched by local readers and queued for handling. Handlers may still be running.</td></tr><tr><td><code>processing_fence_t</code></td><td>Control-thread fence for completed handler side effects. See handler-context caveat below.</td></tr></tbody></table></div>
+        <p><code>barrier()</code> returns a reply-ring watermark. <code>barrier_completed(seq)</code> is true unless <code>seq == invalid_sequence</code>. <code>invalid_sequence</code> can be returned when the barrier is treated as satisfied during shutdown or draining.</p>
+        <p>Barrier names beginning with <code>_sintra_</code> are reserved. Mixed barrier modes for the same barrier round fail fast.</p>
+        <p>Barrier membership is snapshotted atomically at the coordinator when the barrier round starts. Draining processes are filtered from that snapshot. If a process becomes draining while a barrier is in flight, it is removed from the pending/arrived sets and the barrier completes when no pending participants remain. Barrier completions carry per-recipient reply-ring flush tokens.</p>
+        <p>Processing fences are designed to keep reader threads draining while a handler waits, but a handler-context fence skips the currently executing reader and does not wait for work queued behind it on that same request-reader stream. Use a control-thread fence when the next phase must include all pre-barrier handler work. For the full protocol details, see <a href="barriers_and_shutdown.html"><code>docs/barriers_and_shutdown.md</code></a>.</p>
+        <p>Compiled examples/tests:</p>
+        <ul>
+        <li><a href="https://github.com/imakris/sintra/blob/master/example/sintra/sintra_example_5_barrier_flush.cpp"><code>example/sintra/sintra_example_5_barrier_flush.cpp</code></a></li>
+        <li><a href="https://github.com/imakris/sintra/blob/master/tests/processing_fence_test.cpp"><code>tests/processing_fence_test.cpp</code></a></li>
+        <li><a href="https://github.com/imakris/sintra/blob/master/tests/barrier_guardrails_test.cpp"><code>tests/barrier_guardrails_test.cpp</code></a></li>
+        </ul>
+        <h2 id="lifecycle-and-shutdown">Lifecycle and Shutdown</h2>
+        <h3 id="sintrashutdown"><code>sintra::shutdown</code></h3>
+        <p>Signatures:</p>
+        <pre><code class="language-cpp">bool shutdown();
+        bool shutdown(const shutdown_options&amp; options);</code></pre>
+        <p><code>shutdown()</code> is the standard terminal API for the collective lifecycle. All live participants that are finishing together should call it. The runtime performs an internal <code>processing_fence_t</code> handoff on <code>_sintra_all_processes</code> and then tears down the local runtime.</p>
+        <h3 id="sintrashutdown_options"><code>sintra::shutdown_options</code></h3>
+        <p>Relevant shape:</p>
+        <pre><code class="language-cpp">struct shutdown_options
+        {
+            std::function&lt;void()&gt; coordinator_shutdown_hook;
+        };</code></pre>
+        <p>The coordinator hook runs on the coordinator after the collective processing fence and before raw teardown. Non-coordinator processes wait inside the standard shutdown path. The hook must not start new peer coordination, extra barriers, or custom protocol steps.</p>
+        <p>If the hook throws, the runtime still enters the hook-done/finalize path and then rethrows to the caller.</p>
+        <p>Compiled tests:</p>
+        <ul>
+        <li><a href="https://github.com/imakris/sintra/blob/master/tests/shutdown_options_test.cpp"><code>tests/shutdown_options_test.cpp</code></a></li>
+        <li><a href="https://github.com/imakris/sintra/blob/master/tests/shutdown_options_throwing_hook_test.cpp"><code>tests/shutdown_options_throwing_hook_test.cpp</code></a></li>
+        </ul>
+        <h3 id="sintraleave"><code>sintra::leave</code></h3>
+        <p>Signature:</p>
+        <pre><code class="language-cpp">bool leave();</code></pre>
+        <p>Use <code>leave()</code> when this process intentionally departs while peers may continue. Call it from a top-level control thread, not from a message handler. A coordinator may call <code>leave()</code> only when it is already the sole remaining known process.</p>
+        <p>Compiled tests:</p>
+        <ul>
+        <li><a href="https://github.com/imakris/sintra/blob/master/tests/leave_lifecycle_test.cpp"><code>tests/leave_lifecycle_test.cpp</code></a></li>
+        <li><a href="https://github.com/imakris/sintra/blob/master/tests/leave_coordinator_guardrails_test.cpp"><code>tests/leave_coordinator_guardrails_test.cpp</code></a></li>
+        </ul>
+        <h3 id="low-level-teardown">Low-Level Teardown</h3>
+        <p><code>sintra::detail::finalize()</code> is for tests, single-process exceptional paths, or deliberate primitive-level work. Ordinary multi-process code should use <code>shutdown()</code> or <code>leave()</code>.</p>
+        <p>The raw teardown path announces draining, flushes coordinator reply-ring visibility when possible, pauses into service mode, unblocks RPC waiters, deactivates handlers, unpublishes transceivers, and destroys the managed process.</p>
+        <p>For deeper lifecycle details, see <a href="barriers_and_shutdown.html"><code>docs/barriers_and_shutdown.md</code></a> and <a href="process_lifecycle_notes.html"><code>docs/process_lifecycle_notes.md</code></a>.</p>
+        <h2 id="recovery-and-lifecycle-hooks">Recovery and Lifecycle Hooks</h2>
+        <h3 id="sintraenable_recovery"><code>sintra::enable_recovery</code></h3>
+        <p>Signature:</p>
+        <pre><code class="language-cpp">void enable_recovery();</code></pre>
+        <p>Marks the current process for coordinator-managed respawn after an unexpected exit. Recovery is opt-in per process, and the call requires an active local Sintra runtime.</p>
+        <p>Compiled examples/tests:</p>
+        <ul>
+        <li><a href="https://github.com/imakris/sintra/blob/master/example/sintra/sintra_example_4_recovery.cpp"><code>example/sintra/sintra_example_4_recovery.cpp</code></a></li>
+        <li><a href="https://github.com/imakris/sintra/blob/master/tests/recovery_test.cpp"><code>tests/recovery_test.cpp</code></a></li>
+        </ul>
+        <h3 id="coordinator-hooks">Coordinator Hooks</h3>
+        <p>Signatures:</p>
+        <pre><code class="language-cpp">void set_recovery_policy(Recovery_policy policy);
+        void set_recovery_runner(Recovery_runner runner);
+        void set_lifecycle_handler(Lifecycle_handler handler);</code></pre>
+        <p>These calls are effective only in the coordinator process. Non-coordinator calls are no-ops.</p>
+        <p>Types:</p>
+        <pre><code class="language-cpp">struct Crash_info
+        {
+            instance_id_type process_iid = invalid_instance_id;
+            uint32_t process_slot = 0;
+            int status = 0;
+        };
 
-struct Recovery_control
-{
-    std::function&lt;bool()&gt; should_cancel;
-    std::function&lt;void()&gt; spawn;
-};
+        struct Recovery_control
+        {
+            std::function&lt;bool()&gt; should_cancel;
+            std::function&lt;void()&gt; spawn;
+        };
 
-using Recovery_policy = std::function&lt;bool(const Crash_info&amp;)&gt;;
-using Recovery_runner = std::function&lt;void(const Crash_info&amp;, const Recovery_control&amp;)&gt;;
-using Lifecycle_handler = std::function&lt;void(const process_lifecycle_event&amp;)&gt;;</code></pre>
-<p>Lifecycle events:</p>
-<pre><code class="language-cpp">struct process_lifecycle_event
-{
-    enum class reason { crash, normal_exit, unpublished };
-    instance_id_type process_iid = invalid_instance_id;
-    uint32_t process_slot = 0;
-    reason why = reason::unpublished;
-    int status = 0;
-};</code></pre>
-<p>Crash notification message:</p>
-<pre><code class="language-cpp">sintra::Managed_process::terminated_abnormally</code></pre>
-<p>This message reports abnormal termination of a managed peer. It is useful for observation, while recovery policy and runner hooks control respawn behavior.</p>
-<p>Threading:</p>
-<ul>
-<li><code>Recovery_policy</code> and <code>Lifecycle_handler</code> run on the coordinator thread.</li>
-<li><code>Recovery_runner</code> runs on a recovery thread.</li>
-<li><code>Recovery_control::should_cancel()</code> becomes true when shutdown begins.</li>
-<li>Callback code must be thread-safe.</li>
-</ul>
-<p>Compiled tests:</p>
-<ul>
-<li><a href="../../../tests/recovery_policy_test.cpp"><code>tests/recovery_policy_test.cpp</code></a></li>
-<li><a href="../../../tests/recovery_runner_thread_test.cpp"><code>tests/recovery_runner_thread_test.cpp</code></a></li>
-<li><a href="../../../tests/lifecycle_handler_test.cpp"><code>tests/lifecycle_handler_test.cpp</code></a></li>
-</ul>
-<h2 id="direct-ring-helpers">Direct Ring Helpers</h2>
-<p>Direct rings are advanced public API exposed by:</p>
-<pre><code class="language-cpp">#include &lt;sintra/rings.h&gt;</code></pre>
-<p>Use direct rings when code needs Sintra&#x27;s shared-memory ring primitives without managed processes, pub/sub, or RPC.</p>
-<p>Primary names:</p>
-<div class="table-wrap"><table><thead><tr><th>Name</th><th>Meaning</th></tr></thead><tbody><tr><td><code>sintra::Ring_W&lt;T&gt;</code></td><td>Writer side of a single-producer ring.</td></tr><tr><td><code>sintra::Ring_R&lt;T&gt;</code></td><td>Reader side of a ring.</td></tr><tr><td><code>sintra::Range&lt;T&gt;</code></td><td>Lightweight <code>{begin, end}</code> range view returned by reads.</td></tr><tr><td><code>sintra::Ring_R_snapshot&lt;Reader&gt;</code></td><td>RAII snapshot for a reader range.</td></tr><tr><td><code>sintra::make_snapshot(reader, args...)</code></td><td>Creates a throwing snapshot helper.</td></tr><tr><td><code>sintra::try_snapshot_e(reader, args...)</code></td><td>Creates a snapshot result with explicit error status.</td></tr><tr><td><code>sintra::Ring_R_snapshot_error</code></td><td><code>none</code>, <code>evicted</code>, or <code>exception</code>.</td></tr><tr><td><code>sintra::Ring_diagnostics</code></td><td>Counters and last-seen values for lag, overflow, eviction, and guard accounting.</td></tr><tr><td><code>sintra::ring_acquisition_failure_exception</code></td><td>Thrown when a ring buffer cannot be acquired.</td></tr><tr><td><code>sintra::ring_abi_mismatch_exception</code></td><td>Thrown when an existing ring control file was created by an incompatible Sintra ABI.</td></tr><tr><td><code>sintra::ring_reader_evicted_exception</code></td><td>Thrown when a reader has been evicted by writer progress.</td></tr><tr><td><code>sintra::ring_payload_traits&lt;T&gt;</code></td><td>Advanced extension point for allowing non-trivial payload semantics.</td></tr><tr><td><code>sintra::aligned_capacity&lt;T&gt;(requested)</code></td><td>Capacity adjusted for ring alignment constraints.</td></tr><tr><td><code>sintra::get_ring_configurations&lt;T&gt;(...)</code></td><td>Candidate capacities for a requested shape.</td></tr></tbody></table></div>
-<p>Reader snapshots pair <code>start_reading()</code> and <code>done_reading()</code> so callers do not leak read guards. <code>Ring_R_snapshot_error::evicted</code> indicates the reader lost its place because the writer advanced too far for that reader.</p>
-<p>Compiled examples/tests:</p>
-<ul>
-<li><a href="../../../example/sintra/sintra_example_8_ring_helpers.cpp"><code>example/sintra/sintra_example_8_ring_helpers.cpp</code></a></li>
-<li><a href="../../../tests/ring_helpers_test.cpp"><code>tests/ring_helpers_test.cpp</code></a></li>
-<li><a href="../../../tests/ipc_rings_tests.cpp"><code>tests/ipc_rings_tests.cpp</code></a></li>
-</ul>
-<h2 id="errors-and-diagnostics">Errors and Diagnostics</h2>
-<h3 id="sintrainit_error"><code>sintra::init_error</code></h3>
-<p>Thrown by <code>sintra::init()</code> when process swarm initialization fails.</p>
-<p>Relevant API:</p>
-<pre><code class="language-cpp">class init_error : public std::runtime_error
-{
-public:
-    enum class cause { spawn_failed, barrier_timeout, ipc_setup_failed };
+        using Recovery_policy = std::function&lt;bool(const Crash_info&amp;)&gt;;
+        using Recovery_runner = std::function&lt;void(const Crash_info&amp;, const Recovery_control&amp;)&gt;;
+        using Lifecycle_handler = std::function&lt;void(const process_lifecycle_event&amp;)&gt;;</code></pre>
+        <p>Lifecycle events:</p>
+        <pre><code class="language-cpp">struct process_lifecycle_event
+        {
+            enum class reason { crash, normal_exit, unpublished };
+            instance_id_type process_iid = invalid_instance_id;
+            uint32_t process_slot = 0;
+            reason why = reason::unpublished;
+            int status = 0;
+        };</code></pre>
+        <p>Crash notification message:</p>
+        <pre><code class="language-cpp">sintra::Managed_process::terminated_abnormally</code></pre>
+        <p>This message reports abnormal termination of a managed peer. It is useful for observation, while recovery policy and runner hooks control respawn behavior.</p>
+        <p>Threading:</p>
+        <ul>
+        <li><code>Recovery_policy</code> and <code>Lifecycle_handler</code> run on the coordinator thread.</li>
+        <li><code>Recovery_runner</code> runs on a recovery thread.</li>
+        <li><code>Recovery_control::should_cancel()</code> becomes true when shutdown begins.</li>
+        <li>Callback code must be thread-safe.</li>
+        </ul>
+        <p>Compiled tests:</p>
+        <ul>
+        <li><a href="https://github.com/imakris/sintra/blob/master/tests/recovery_policy_test.cpp"><code>tests/recovery_policy_test.cpp</code></a></li>
+        <li><a href="https://github.com/imakris/sintra/blob/master/tests/recovery_runner_thread_test.cpp"><code>tests/recovery_runner_thread_test.cpp</code></a></li>
+        <li><a href="https://github.com/imakris/sintra/blob/master/tests/lifecycle_handler_test.cpp"><code>tests/lifecycle_handler_test.cpp</code></a></li>
+        </ul>
+        <h2 id="direct-ring-helpers">Direct Ring Helpers</h2>
+        <p>Direct rings are advanced public API exposed by:</p>
+        <pre><code class="language-cpp">#include &lt;sintra/rings.h&gt;</code></pre>
+        <p>Use direct rings when code needs Sintra&#x27;s shared-memory ring primitives without managed processes, pub/sub, or RPC.</p>
+        <p>Primary names:</p>
+        <div class="table-wrap"><table><thead><tr><th>Name</th><th>Meaning</th></tr></thead><tbody><tr><td><code>sintra::Ring_W&lt;T&gt;</code></td><td>Writer side of a single-producer ring.</td></tr><tr><td><code>sintra::Ring_R&lt;T&gt;</code></td><td>Reader side of a ring.</td></tr><tr><td><code>sintra::Range&lt;T&gt;</code></td><td>Lightweight <code>{begin, end}</code> range view returned by reads.</td></tr><tr><td><code>sintra::Ring_R_snapshot&lt;Reader&gt;</code></td><td>RAII snapshot for a reader range.</td></tr><tr><td><code>sintra::make_snapshot(reader, args...)</code></td><td>Creates a throwing snapshot helper.</td></tr><tr><td><code>sintra::try_snapshot_e(reader, args...)</code></td><td>Creates a snapshot result with explicit error status.</td></tr><tr><td><code>sintra::Ring_R_snapshot_error</code></td><td><code>none</code>, <code>evicted</code>, or <code>exception</code>.</td></tr><tr><td><code>sintra::Ring_diagnostics</code></td><td>Counters and last-seen values for lag, overflow, eviction, and guard accounting.</td></tr><tr><td><code>sintra::ring_acquisition_failure_exception</code></td><td>Thrown when a ring buffer cannot be acquired.</td></tr><tr><td><code>sintra::ring_abi_mismatch_exception</code></td><td>Thrown when an existing ring control file was created by an incompatible Sintra ABI.</td></tr><tr><td><code>sintra::ring_reader_evicted_exception</code></td><td>Thrown when a reader has been evicted by writer progress.</td></tr><tr><td><code>sintra::ring_payload_traits&lt;T&gt;</code></td><td>Advanced extension point for allowing non-trivial payload semantics.</td></tr><tr><td><code>sintra::aligned_capacity&lt;T&gt;(requested)</code></td><td>Capacity adjusted for ring alignment constraints.</td></tr><tr><td><code>sintra::get_ring_configurations&lt;T&gt;(...)</code></td><td>Candidate capacities for a requested shape.</td></tr></tbody></table></div>
+        <p>Reader snapshots pair <code>start_reading()</code> and <code>done_reading()</code> so callers do not leak read guards. <code>Ring_R_snapshot_error::evicted</code> indicates the reader lost its place because the writer advanced too far for that reader.</p>
+        <p>Compiled examples/tests:</p>
+        <ul>
+        <li><a href="https://github.com/imakris/sintra/blob/master/example/sintra/sintra_example_8_ring_helpers.cpp"><code>example/sintra/sintra_example_8_ring_helpers.cpp</code></a></li>
+        <li><a href="https://github.com/imakris/sintra/blob/master/tests/ring_helpers_test.cpp"><code>tests/ring_helpers_test.cpp</code></a></li>
+        <li><a href="https://github.com/imakris/sintra/blob/master/tests/ipc_rings_tests.cpp"><code>tests/ipc_rings_tests.cpp</code></a></li>
+        </ul>
+        <h2 id="errors-and-diagnostics">Errors and Diagnostics</h2>
+        <h3 id="sintrainit_error"><code>sintra::init_error</code></h3>
+        <p>Thrown by <code>sintra::init()</code> when process swarm initialization fails.</p>
+        <p>Relevant API:</p>
+        <pre><code class="language-cpp">class init_error : public std::runtime_error
+        {
+        public:
+            enum class cause { spawn_failed, barrier_timeout, ipc_setup_failed };
 
-    struct failed_process
-    {
-        std::string binary_name;
-        instance_id_type instance_id;
-        cause failure_cause;
-        int errno_value;
-        std::string error_message;
-    };
+            struct failed_process
+            {
+                std::string binary_name;
+                instance_id_type instance_id;
+                cause failure_cause;
+                int errno_value;
+                std::string error_message;
+            };
 
-    const std::vector&lt;failed_process&gt;&amp; failures() const;
-    const std::vector&lt;instance_id_type&gt;&amp; successful_spawns() const;
-    const std::string&amp; diagnostic_report() const;
-};</code></pre>
-<p>Compiled test:</p>
-<ul>
-<li><a href="../../../tests/init_error_spawn_failure_test.cpp"><code>tests/init_error_spawn_failure_test.cpp</code></a></li>
-</ul>
-<h3 id="rpc-exceptions">RPC Exceptions</h3>
-<p>Exceptions thrown by a remote RPC handler are converted and rethrown in the caller when possible. Unknown exceptions are surfaced through Sintra&#x27;s remote exception path.</p>
-<p><code>sintra::rpc_cancelled</code> is thrown when an outstanding RPC is unblocked by teardown or coordinator/process loss.</p>
-<p><code>sintra::rpc_unavailable</code> is thrown when an RPC target has been unpublished, destroyed, is shutting down, or its process is gone. It derives from <code>std::runtime_error</code>, but can be caught directly when caller code needs to distinguish target-side unavailability from caller-side cancellation.</p>
-<h3 id="logging-and-console">Logging and Console</h3>
-<p><code>sintra::Console</code>/<code>sintra::console</code> is the coordinator-routed interprocess console channel. Code commonly writes <code>sintra::console() &lt;&lt; text;</code>; that syntax constructs the <code>console</code> alias type, not a free function.</p>
-<p><code>sintra::Log_stream</code> is an RAII line builder routed through the configurable log callback.</p>
-<p>The default log callback writes <code>error</code> and <code>warning</code> messages to <code>stderr</code>, writes <code>info</code> and <code>debug</code> messages to <code>stdout</code>, and flushes each message. <code>set_log_callback(nullptr)</code> restores that default sink. <code>log_raw</code> copies the current callback and user data under a mutex, invokes the callback outside the mutex, and swallows exceptions from the callback.</p>
-<p>Logging API:</p>
-<pre><code class="language-cpp">enum class log_level { error, warning, info, debug };
-using log_callback_fn = void(*)(log_level level, const char* message, void* user_data);
+            const std::vector&lt;failed_process&gt;&amp; failures() const;
+            const std::vector&lt;instance_id_type&gt;&amp; successful_spawns() const;
+            const std::string&amp; diagnostic_report() const;
+        };</code></pre>
+        <p>Compiled test:</p>
+        <ul>
+        <li><a href="https://github.com/imakris/sintra/blob/master/tests/init_error_spawn_failure_test.cpp"><code>tests/init_error_spawn_failure_test.cpp</code></a></li>
+        </ul>
+        <h3 id="rpc-exceptions">RPC Exceptions</h3>
+        <p>Exceptions thrown by a remote RPC handler are converted and rethrown in the caller when possible. Unknown exceptions are surfaced through Sintra&#x27;s remote exception path.</p>
+        <p><code>sintra::rpc_cancelled</code> is thrown when an outstanding RPC is unblocked by teardown or coordinator/process loss.</p>
+        <p><code>sintra::rpc_unavailable</code> is thrown when an RPC target has been unpublished, destroyed, is shutting down, or its process is gone. It derives from <code>std::runtime_error</code>, but can be caught directly when caller code needs to distinguish target-side unavailability from caller-side cancellation.</p>
+        <h3 id="logging-and-console">Logging and Console</h3>
+        <p><code>sintra::Console</code>/<code>sintra::console</code> is the coordinator-routed interprocess console channel. Code commonly writes <code>sintra::console() &lt;&lt; text;</code>; that syntax constructs the <code>console</code> alias type, not a free function.</p>
+        <p><code>sintra::Log_stream</code> is an RAII line builder routed through the configurable log callback.</p>
+        <p>The default log callback writes <code>error</code> and <code>warning</code> messages to <code>stderr</code>, writes <code>info</code> and <code>debug</code> messages to <code>stdout</code>, and flushes each message. <code>set_log_callback(nullptr)</code> restores that default sink. <code>log_raw</code> copies the current callback and user data under a mutex, invokes the callback outside the mutex, and swallows exceptions from the callback.</p>
+        <p>Logging API:</p>
+        <pre><code class="language-cpp">enum class log_level { error, warning, info, debug };
+        using log_callback_fn = void(*)(log_level level, const char* message, void* user_data);
 
-void set_log_callback(log_callback_fn callback, void* user_data = nullptr);
-log_callback_fn get_log_callback(void** user_data = nullptr);
-void log_raw(log_level level, const char* message);
+        void set_log_callback(log_callback_fn callback, void* user_data = nullptr);
+        log_callback_fn get_log_callback(void** user_data = nullptr);
+        void log_raw(log_level level, const char* message);
 
-Log_stream ls_info();
-Log_stream ls_warning();
-Log_stream ls_error();
-Log_stream ls_debug();</code></pre>
-<p>Compiled test:</p>
-<ul>
-<li><a href="../../../tests/log_stream_move_test.cpp"><code>tests/log_stream_move_test.cpp</code></a></li>
-</ul>
-<h2 id="threading-and-reentrancy">Threading and Reentrancy</h2>
-<p>This table is the authority for handler-context, blocking-call, and lifecycle threading rules.</p>
-<div class="table-wrap"><table><thead><tr><th>Context</th><th>Do</th><th>Do not</th></tr></thead><tbody><tr><td>Slot or RPC handler</td><td>Protect shared state with mutexes/atomics; emit messages deliberately.</td><td>Assume handlers are serialized with application threads.</td></tr><tr><td>Slot or RPC handler</td><td>Use a processing fence when later code must observe handler side effects.</td><td>Call <code>receive&lt;T&gt;()</code>.</td></tr><tr><td>Slot or RPC handler</td><td>Keep shutdown decisions on a control thread.</td><td>Call <code>leave()</code> from handler or post-handler callbacks.</td></tr><tr><td>Async RPC caller</td><td>Use <code>wait_until</code> for bounded waits and call <code>abandon()</code> when giving up.</td><td>Treat deadline expiry as remote cancellation.</td></tr><tr><td>Collective shutdown</td><td>Have every live finishing participant call <code>shutdown()</code>.</td><td>Call <code>shutdown()</code> in only one participant while peers continue.</td></tr><tr><td>Unilateral departure</td><td>Use <code>leave()</code> from a top-level control thread.</td><td>Use <code>leave()</code> from a coordinator that still owns known peers.</td></tr><tr><td>Shared payload buffers</td><td>Copy data out before the valid message scope ends.</td><td>Keep variable-buffer backed data past the handler/receive scope.</td></tr></tbody></table></div>
-<p>Reader threads invoke slots and transported RPC handlers asynchronously. A barrier coordinates interprocess progress, not in-process data races.</p>
-<p><code>init()</code> cannot be called twice without teardown. <code>shutdown()</code>, <code>leave()</code>, and <code>detail::finalize()</code> are mutually exclusive terminal paths. Concurrent or nested lifecycle teardown throws.</p>
-<p>Non-strict same-process blocking RPC may call the target object directly in the caller thread. Strict RPC always uses the transported RPC path. Async RPC rejects same-process non-strict targets; use <code>SINTRA_RPC_STRICT</code> when a local async call must use transport.</p>
-<p><code>Rpc_handle&lt;T&gt;</code> is move-only. Destroying a pending handle abandons caller-side interest but does not cancel remote execution.</p>
-<h2 id="type-ids">Type IDs</h2>
-<p>Automatic type ids are sufficient when all processes are built with the same toolchain and relevant flags. Use explicit ids when ids must be pinned across build boundaries.</p>
-<p>User-facing explicit-id macros:</p>
-<div class="table-wrap"><table><thead><tr><th>Macro</th><th>Contract</th></tr></thead><tbody><tr><td><code>SINTRA_TYPE_ID(idv)</code></td><td>Pins a transceiver type id. <code>idv</code> must be non-zero and fit in <code>max_user_type_id</code>.</td></tr><tr><td><code>SINTRA_MESSAGE_EXPLICIT(name, idv, ...)</code></td><td>Pins a message type id. <code>idv</code> must be non-zero and fit in <code>max_user_type_id</code>.</td></tr></tbody></table></div>
-<p>Support names:</p>
-<div class="table-wrap"><table><thead><tr><th>Name</th><th>Meaning</th></tr></thead><tbody><tr><td><code>sintra::max_user_type_id</code></td><td>Largest user id value accepted by explicit-id macros.</td></tr><tr><td><code>sintra::make_user_type_id(v)</code></td><td>Tags a user id into Sintra&#x27;s user-id range.</td></tr><tr><td><code>sintra::is_user_type_id(v)</code></td><td>Tests whether a type id is tagged as user-provided.</td></tr><tr><td><code>sintra::invalid_type_id</code></td><td>No valid type id.</td></tr></tbody></table></div>
-<p>Explicit ids must be unique and consistent across every process in the swarm. Duplicate explicit ids cause type/message confusion at runtime or fail during resolution; diagnose them by checking every pinned id in transceiver and message declarations.</p>
-<p>Compiled example:</p>
-<ul>
-<li><a href="../../../example/sintra/sintra_example_7_explicit_type_ids.cpp"><code>example/sintra/sintra_example_7_explicit_type_ids.cpp</code></a></li>
-</ul>
-<h2 id="cmake-integration">CMake Integration</h2>
-<p>Sintra provides an interface target.</p>
-<p>For an in-tree dependency:</p>
-<pre><code class="language-cmake">add_subdirectory(external/sintra)
-target_link_libraries(my_app PRIVATE sintra::sintra)</code></pre>
-<p>For an installed package:</p>
-<pre><code class="language-cmake">find_package(sintra CONFIG REQUIRED)
-target_link_libraries(my_app PRIVATE sintra::sintra)</code></pre>
-<p>The target requires C++20 and links platform support libraries through the interface target.</p>
-<h2 id="recipes">Recipes</h2>
-<p>Recipes point to compiled examples or tests so copied code starts from checked sources.</p>
-<div class="table-wrap"><table><thead><tr><th>Task</th><th>Use</th></tr></thead><tbody><tr><td>Basic broadcast and slot</td><td><a href="../../../example/sintra/sintra_example_0_basic_pubsub.cpp"><code>example/sintra/sintra_example_0_basic_pubsub.cpp</code></a></td></tr><tr><td>Blocking receive on a control thread</td><td><a href="../../../tests/receive_test.cpp"><code>tests/receive_test.cpp</code></a></td></tr><tr><td>Named transceiver RPC</td><td><a href="../../../example/sintra/sintra_example_2_rpc_append.cpp"><code>example/sintra/sintra_example_2_rpc_append.cpp</code></a></td></tr><tr><td>Async RPC with completed/timeout branches and <code>abandon()</code></td><td><a href="../../../tests/rpc_async_lifecycle_test.cpp"><code>tests/rpc_async_lifecycle_test.cpp</code></a></td></tr><tr><td>Fire-and-forget unicast</td><td><a href="../../../example/sintra/sintra_example_6_unicast_send_to.cpp"><code>example/sintra/sintra_example_6_unicast_send_to.cpp</code></a></td></tr><tr><td>Spawn and wait for a process</td><td><a href="../../../tests/spawn_wait_test.cpp"><code>tests/spawn_wait_test.cpp</code></a></td></tr><tr><td>Collective shutdown</td><td><a href="../../../example/sintra/sintra_example_1_ping_pong_multi.cpp"><code>example/sintra/sintra_example_1_ping_pong_multi.cpp</code></a></td></tr><tr><td>Coordinator shutdown hook</td><td><a href="../../../tests/shutdown_options_test.cpp"><code>tests/shutdown_options_test.cpp</code></a></td></tr><tr><td>One process leaves while peers continue</td><td><a href="../../../tests/leave_lifecycle_test.cpp"><code>tests/leave_lifecycle_test.cpp</code></a></td></tr><tr><td>Processing fence for handler side effects</td><td><a href="../../../tests/processing_fence_test.cpp"><code>tests/processing_fence_test.cpp</code></a></td></tr><tr><td>Crash recovery</td><td><a href="../../../example/sintra/sintra_example_4_recovery.cpp"><code>example/sintra/sintra_example_4_recovery.cpp</code></a></td></tr><tr><td>Explicit type ids</td><td><a href="../../../example/sintra/sintra_example_7_explicit_type_ids.cpp"><code>example/sintra/sintra_example_7_explicit_type_ids.cpp</code></a></td></tr><tr><td>Direct ring snapshot</td><td><a href="../../../example/sintra/sintra_example_8_ring_helpers.cpp"><code>example/sintra/sintra_example_8_ring_helpers.cpp</code></a></td></tr></tbody></table></div>
-<h2 id="common-mistakes">Common Mistakes</h2>
-<div class="table-wrap"><table><thead><tr><th>Mistake</th><th>Correct pattern</th></tr></thead><tbody><tr><td>Including <code>sintra/detail/...</code> for pub/sub, RPC, barriers, or lifecycle.</td><td>Include <code>&lt;sintra/sintra.h&gt;</code>.</td></tr><tr><td>Including <code>sintra/detail/ipc/rings.h</code> for direct rings.</td><td>Include <code>&lt;sintra/rings.h&gt;</code>.</td></tr><tr><td>Calling <code>receive&lt;T&gt;()</code> inside a handler.</td><td>Use a slot, RPC continuation, or control-thread receive.</td></tr><tr><td>Updating shared state from handlers without synchronization.</td><td>Protect shared state with normal C++ synchronization.</td></tr><tr><td>Calling <code>shutdown()</code> in only one participant while peers continue.</td><td>Use <code>leave()</code> for unilateral departure, or have all finishing participants call <code>shutdown()</code>.</td></tr><tr><td>Using <code>leave()</code> from a process that owns descendants expected to continue.</td><td>Perform an application-level ownership handoff before departure.</td></tr><tr><td>Reusing <code>_sintra_</code> barrier names.</td><td>Use application-owned barrier names.</td></tr><tr><td>Mixing barrier modes on one barrier round.</td><td>Make every participant use the same mode.</td></tr><tr><td>Assuming a delivery fence means peer handlers finished.</td><td>Use <code>processing_fence_t</code> when side effects must be complete.</td></tr><tr><td>Using <code>SINTRA_RPC</code> when local async behavior must use transport.</td><td>Use <code>SINTRA_RPC_STRICT</code>.</td></tr><tr><td>Returning references or using non-const reference RPC parameters.</td><td>Return by value and model mutable results explicitly.</td></tr><tr><td>Keeping variable-buffer backed data after the handler/receive scope.</td><td>Copy the data out before the scope ends.</td></tr><tr><td>Adding polling around Sintra state.</td><td>Use slots, barriers, lifecycle hooks, or event messages.</td></tr></tbody></table></div>
-<h2 id="api-index">API Index</h2>
-<div class="table-wrap"><table><thead><tr><th>Name</th><th>Section</th></tr></thead><tbody><tr><td><code>SINTRA_MESSAGE</code></td><td><a href="#transceivers">Transceivers</a></td></tr><tr><td><code>SINTRA_MESSAGE_EXPLICIT</code></td><td><a href="#transceivers">Transceivers</a>, <a href="#type-ids">Type IDs</a></td></tr><tr><td><code>SINTRA_RPC</code></td><td><a href="#transceivers">Transceivers</a>, <a href="#rpc">RPC</a></td></tr><tr><td><code>SINTRA_RPC_STRICT</code></td><td><a href="#transceivers">Transceivers</a>, <a href="#rpc">RPC</a></td></tr><tr><td><code>SINTRA_TYPE_ID</code></td><td><a href="#transceivers">Transceivers</a>, <a href="#type-ids">Type IDs</a></td></tr><tr><td><code>SINTRA_UNICAST</code></td><td><a href="#transceivers">Transceivers</a>, <a href="#rpc">RPC</a></td></tr><tr><td><code>sintra::Crash_info</code></td><td><a href="#recovery-and-lifecycle-hooks">Recovery and Lifecycle Hooks</a></td></tr><tr><td><code>sintra::Entry_descriptor</code></td><td><a href="#initialization-and-process-topology">Initialization and Process Topology</a></td></tr><tr><td><code>sintra::Lifecycle_handler</code></td><td><a href="#recovery-and-lifecycle-hooks">Recovery and Lifecycle Hooks</a></td></tr><tr><td><code>sintra::Lifetime_policy</code></td><td><a href="#initialization-and-process-topology">Initialization and Process Topology</a></td></tr><tr><td><code>sintra::Log_stream</code></td><td><a href="#errors-and-diagnostics">Errors and Diagnostics</a></td></tr><tr><td><code>sintra::Managed_process::terminated_abnormally</code></td><td><a href="#recovery-and-lifecycle-hooks">Recovery and Lifecycle Hooks</a></td></tr><tr><td><code>sintra::Named_instance&lt;T&gt;</code></td><td><a href="#targeting-and-ids">Targeting and IDs</a></td></tr><tr><td><code>sintra::Process_descriptor</code></td><td><a href="#initialization-and-process-topology">Initialization and Process Topology</a></td></tr><tr><td><code>sintra::Recovery_control</code></td><td><a href="#recovery-and-lifecycle-hooks">Recovery and Lifecycle Hooks</a></td></tr><tr><td><code>sintra::Recovery_policy</code></td><td><a href="#recovery-and-lifecycle-hooks">Recovery and Lifecycle Hooks</a></td></tr><tr><td><code>sintra::Recovery_runner</code></td><td><a href="#recovery-and-lifecycle-hooks">Recovery and Lifecycle Hooks</a></td></tr><tr><td><code>sintra::Resolvable_instance_id</code></td><td><a href="#rpc">RPC</a>, <a href="#targeting-and-ids">Targeting and IDs</a></td></tr><tr><td><code>sintra::Ring_R&lt;T&gt;</code></td><td><a href="#direct-ring-helpers">Direct Ring Helpers</a></td></tr><tr><td><code>sintra::Ring_R_snapshot&lt;Reader&gt;</code></td><td><a href="#direct-ring-helpers">Direct Ring Helpers</a></td></tr><tr><td><code>sintra::Ring_R_snapshot_error</code></td><td><a href="#direct-ring-helpers">Direct Ring Helpers</a></td></tr><tr><td><code>sintra::Ring_W&lt;T&gt;</code></td><td><a href="#direct-ring-helpers">Direct Ring Helpers</a></td></tr><tr><td><code>sintra::Ring_diagnostics</code></td><td><a href="#direct-ring-helpers">Direct Ring Helpers</a></td></tr><tr><td><code>sintra::Rpc_completion_state</code></td><td><a href="#rpc">RPC</a></td></tr><tr><td><code>sintra::Rpc_handle&lt;T&gt;</code></td><td><a href="#rpc">RPC</a></td></tr><tr><td><code>sintra::Rpc_wait_status</code></td><td><a href="#rpc">RPC</a></td></tr><tr><td><code>sintra::Spawn_options</code></td><td><a href="#initialization-and-process-topology">Initialization and Process Topology</a></td></tr><tr><td><code>sintra::Transceiver</code></td><td><a href="#transceivers">Transceivers</a></td></tr><tr><td><code>sintra::Typed_instance_id&lt;T&gt;</code></td><td><a href="#targeting-and-ids">Targeting and IDs</a></td></tr><tr><td><code>sintra::activate_slot</code></td><td><a href="#publishsubscribe">Publish/Subscribe</a></td></tr><tr><td><code>sintra::aligned_capacity</code></td><td><a href="#direct-ring-helpers">Direct Ring Helpers</a></td></tr><tr><td><code>sintra::any_local</code></td><td><a href="#targeting-and-ids">Targeting and IDs</a></td></tr><tr><td><code>sintra::any_local_or_remote</code></td><td><a href="#targeting-and-ids">Targeting and IDs</a></td></tr><tr><td><code>sintra::any_remote</code></td><td><a href="#targeting-and-ids">Targeting and IDs</a></td></tr><tr><td><code>sintra::barrier</code></td><td><a href="#barriers-and-fences">Barriers and Fences</a></td></tr><tr><td><code>sintra::barrier_completed</code></td><td><a href="#barriers-and-fences">Barriers and Fences</a></td></tr><tr><td><code>sintra::compose_instance</code></td><td><a href="#targeting-and-ids">Targeting and IDs</a></td></tr><tr><td><code>sintra::console</code></td><td><a href="#errors-and-diagnostics">Errors and Diagnostics</a></td></tr><tr><td><code>sintra::deactivate_all_slots</code></td><td><a href="#publishsubscribe">Publish/Subscribe</a></td></tr><tr><td><code>sintra::decompose_instance</code></td><td><a href="#targeting-and-ids">Targeting and IDs</a></td></tr><tr><td><code>sintra::delivery_fence_t</code></td><td><a href="#barriers-and-fences">Barriers and Fences</a></td></tr><tr><td><code>sintra::disable_debug_pause_for_current_process</code></td><td><a href="#initialization-and-process-topology">Initialization and Process Topology</a></td></tr><tr><td><code>sintra::enable_recovery</code></td><td><a href="#recovery-and-lifecycle-hooks">Recovery and Lifecycle Hooks</a></td></tr><tr><td><code>sintra::get_process_index</code></td><td><a href="#targeting-and-ids">Targeting and IDs</a></td></tr><tr><td><code>sintra::get_ring_configurations</code></td><td><a href="#direct-ring-helpers">Direct Ring Helpers</a></td></tr><tr><td><code>sintra::get_log_callback</code></td><td><a href="#errors-and-diagnostics">Errors and Diagnostics</a></td></tr><tr><td><code>sintra::init</code></td><td><a href="#initialization-and-process-topology">Initialization and Process Topology</a></td></tr><tr><td><code>sintra::init_error</code></td><td><a href="#errors-and-diagnostics">Errors and Diagnostics</a></td></tr><tr><td><code>sintra::invalid_instance_id</code></td><td><a href="#targeting-and-ids">Targeting and IDs</a></td></tr><tr><td><code>sintra::invalid_sequence</code></td><td><a href="#targeting-and-ids">Targeting and IDs</a>, <a href="#barriers-and-fences">Barriers and Fences</a></td></tr><tr><td><code>sintra::invalid_type_id</code></td><td><a href="#type-ids">Type IDs</a></td></tr><tr><td><code>sintra::is_user_type_id</code></td><td><a href="#type-ids">Type IDs</a></td></tr><tr><td><code>sintra::join_swarm</code></td><td><a href="#initialization-and-process-topology">Initialization and Process Topology</a></td></tr><tr><td><code>sintra::leave</code></td><td><a href="#lifecycle-and-shutdown">Lifecycle and Shutdown</a></td></tr><tr><td><code>sintra::local</code></td><td><a href="#publishsubscribe">Publish/Subscribe</a></td></tr><tr><td><code>sintra::log_callback_fn</code></td><td><a href="#errors-and-diagnostics">Errors and Diagnostics</a></td></tr><tr><td><code>sintra::log_level</code></td><td><a href="#errors-and-diagnostics">Errors and Diagnostics</a></td></tr><tr><td><code>sintra::log_raw</code></td><td><a href="#errors-and-diagnostics">Errors and Diagnostics</a></td></tr><tr><td><code>sintra::ls_debug</code></td><td><a href="#errors-and-diagnostics">Errors and Diagnostics</a></td></tr><tr><td><code>sintra::ls_error</code></td><td><a href="#errors-and-diagnostics">Errors and Diagnostics</a></td></tr><tr><td><code>sintra::ls_info</code></td><td><a href="#errors-and-diagnostics">Errors and Diagnostics</a></td></tr><tr><td><code>sintra::ls_warning</code></td><td><a href="#errors-and-diagnostics">Errors and Diagnostics</a></td></tr><tr><td><code>sintra::make_branches</code></td><td><a href="#initialization-and-process-topology">Initialization and Process Topology</a></td></tr><tr><td><code>sintra::make_snapshot</code></td><td><a href="#direct-ring-helpers">Direct Ring Helpers</a></td></tr><tr><td><code>sintra::make_user_type_id</code></td><td><a href="#type-ids">Type IDs</a></td></tr><tr><td><code>sintra::max_user_type_id</code></td><td><a href="#type-ids">Type IDs</a></td></tr><tr><td><code>sintra::message_string</code></td><td><a href="#messages-and-payloads">Messages and Payloads</a></td></tr><tr><td><code>sintra::processing_fence_t</code></td><td><a href="#barriers-and-fences">Barriers and Fences</a></td></tr><tr><td><code>sintra::process_of</code></td><td><a href="#targeting-and-ids">Targeting and IDs</a></td></tr><tr><td><code>sintra::process_index</code></td><td><a href="#initialization-and-process-topology">Initialization and Process Topology</a></td></tr><tr><td><code>sintra::process_lifecycle_event</code></td><td><a href="#recovery-and-lifecycle-hooks">Recovery and Lifecycle Hooks</a></td></tr><tr><td><code>sintra::Range&lt;T&gt;</code></td><td><a href="#direct-ring-helpers">Direct Ring Helpers</a></td></tr><tr><td><code>sintra::receive</code></td><td><a href="#publishsubscribe">Publish/Subscribe</a></td></tr><tr><td><code>sintra::remote</code></td><td><a href="#publishsubscribe">Publish/Subscribe</a></td></tr><tr><td><code>sintra::rendezvous_t</code></td><td><a href="#barriers-and-fences">Barriers and Fences</a></td></tr><tr><td><code>sintra::ring_acquisition_failure_exception</code></td><td><a href="#direct-ring-helpers">Direct Ring Helpers</a></td></tr><tr><td><code>sintra::ring_abi_mismatch_exception</code></td><td><a href="#direct-ring-helpers">Direct Ring Helpers</a></td></tr><tr><td><code>sintra::ring_payload_traits&lt;T&gt;</code></td><td><a href="#direct-ring-helpers">Direct Ring Helpers</a></td></tr><tr><td><code>sintra::ring_reader_evicted_exception</code></td><td><a href="#direct-ring-helpers">Direct Ring Helpers</a></td></tr><tr><td><code>sintra::rpc_cancelled</code></td><td><a href="#rpc">RPC</a>, <a href="#errors-and-diagnostics">Errors and Diagnostics</a></td></tr><tr><td><code>sintra::rpc_unavailable</code></td><td><a href="#rpc">RPC</a>, <a href="#errors-and-diagnostics">Errors and Diagnostics</a></td></tr><tr><td><code>sintra::sequence_counter_type</code></td><td><a href="#targeting-and-ids">Targeting and IDs</a>, <a href="#barriers-and-fences">Barriers and Fences</a></td></tr><tr><td><code>sintra::set_lifecycle_handler</code></td><td><a href="#recovery-and-lifecycle-hooks">Recovery and Lifecycle Hooks</a></td></tr><tr><td><code>sintra::set_log_callback</code></td><td><a href="#errors-and-diagnostics">Errors and Diagnostics</a></td></tr><tr><td><code>sintra::set_recovery_policy</code></td><td><a href="#recovery-and-lifecycle-hooks">Recovery and Lifecycle Hooks</a></td></tr><tr><td><code>sintra::set_recovery_runner</code></td><td><a href="#recovery-and-lifecycle-hooks">Recovery and Lifecycle Hooks</a></td></tr><tr><td><code>sintra::shutdown</code></td><td><a href="#lifecycle-and-shutdown">Lifecycle and Shutdown</a></td></tr><tr><td><code>sintra::shutdown_options</code></td><td><a href="#lifecycle-and-shutdown">Lifecycle and Shutdown</a></td></tr><tr><td><code>sintra::spawn_swarm_process</code></td><td><a href="#initialization-and-process-topology">Initialization and Process Topology</a></td></tr><tr><td><code>sintra::try_snapshot_e</code></td><td><a href="#direct-ring-helpers">Direct Ring Helpers</a></td></tr><tr><td><code>sintra::typed_variable_buffer&lt;T&gt;</code></td><td><a href="#messages-and-payloads">Messages and Payloads</a></td></tr><tr><td><code>sintra::world</code></td><td><a href="#publishsubscribe">Publish/Subscribe</a></td></tr></tbody></table></div>
+        Log_stream ls_info();
+        Log_stream ls_warning();
+        Log_stream ls_error();
+        Log_stream ls_debug();</code></pre>
+        <p>Compiled test:</p>
+        <ul>
+        <li><a href="https://github.com/imakris/sintra/blob/master/tests/log_stream_move_test.cpp"><code>tests/log_stream_move_test.cpp</code></a></li>
+        </ul>
+        <h2 id="threading-and-reentrancy">Threading and Reentrancy</h2>
+        <p>This table is the authority for handler-context, blocking-call, and lifecycle threading rules.</p>
+        <div class="table-wrap"><table><thead><tr><th>Context</th><th>Do</th><th>Do not</th></tr></thead><tbody><tr><td>Slot or RPC handler</td><td>Protect shared state with mutexes/atomics; emit messages deliberately.</td><td>Assume handlers are serialized with application threads.</td></tr><tr><td>Slot or RPC handler</td><td>Use slots, RPC continuations, or control-thread receives for blocking waits.</td><td>Call <code>receive&lt;T&gt;()</code> from the handler.</td></tr><tr><td>Slot or RPC handler</td><td>Use fences only when handler-context exclusions are OK.</td><td>Assume the current handler was fenced.</td></tr><tr><td>Slot or RPC handler</td><td>Keep shutdown decisions on a control thread.</td><td>Call <code>leave()</code> from handler or post-handler callbacks.</td></tr><tr><td>Async RPC caller</td><td>Use <code>wait_until</code> for bounded waits and call <code>abandon()</code> when giving up.</td><td>Treat deadline expiry as remote cancellation.</td></tr><tr><td>Collective shutdown</td><td>Have every live finishing participant call <code>shutdown()</code>.</td><td>Call <code>shutdown()</code> in only one participant while peers continue.</td></tr><tr><td>Unilateral departure</td><td>Use <code>leave()</code> from a top-level control thread.</td><td>Use <code>leave()</code> from a coordinator that still owns known peers.</td></tr><tr><td>Shared payload buffers</td><td>Copy data out before the valid message scope ends.</td><td>Keep variable-buffer backed data past the handler/receive scope.</td></tr></tbody></table></div>
+        <p>Reader threads invoke slots and transported RPC handlers asynchronously. A barrier coordinates interprocess progress, not in-process data races.</p>
+        <p><code>init()</code> cannot be called twice without teardown. <code>shutdown()</code>, <code>leave()</code>, and <code>detail::finalize()</code> are mutually exclusive terminal paths. Concurrent or nested lifecycle teardown throws.</p>
+        <p>Non-strict same-process blocking RPC may call the target object directly in the caller thread. Strict RPC always uses the transported RPC path. Async RPC rejects same-process non-strict targets; use <code>SINTRA_RPC_STRICT</code> when a local async call must use transport.</p>
+        <p><code>Rpc_handle&lt;T&gt;</code> is move-only. Destroying a pending handle abandons caller-side interest but does not cancel remote execution.</p>
+        <h2 id="type-ids">Type IDs</h2>
+        <p>Automatic type ids are sufficient when all processes are built with the same toolchain and relevant flags. Use explicit ids when ids must be pinned across build boundaries.</p>
+        <p>User-facing explicit-id macros:</p>
+        <div class="table-wrap"><table><thead><tr><th>Macro</th><th>Contract</th></tr></thead><tbody><tr><td><code>SINTRA_TYPE_ID(idv)</code></td><td>Pins a transceiver type id. <code>idv</code> must be non-zero and fit in <code>max_user_type_id</code>.</td></tr><tr><td><code>SINTRA_MESSAGE_EXPLICIT(name, idv, ...)</code></td><td>Pins a message type id. <code>idv</code> must be non-zero and fit in <code>max_user_type_id</code>.</td></tr></tbody></table></div>
+        <p>Support names:</p>
+        <div class="table-wrap"><table><thead><tr><th>Name</th><th>Meaning</th></tr></thead><tbody><tr><td><code>sintra::max_user_type_id</code></td><td>Largest user id value accepted by explicit-id macros.</td></tr><tr><td><code>sintra::make_user_type_id(v)</code></td><td>Tags a user id into Sintra&#x27;s user-id range.</td></tr><tr><td><code>sintra::is_user_type_id(v)</code></td><td>Tests whether a type id is tagged as user-provided.</td></tr><tr><td><code>sintra::invalid_type_id</code></td><td>No valid type id.</td></tr></tbody></table></div>
+        <p>Explicit ids must be unique and consistent across every process in the swarm. Duplicate explicit ids cause type/message confusion at runtime or fail during resolution; diagnose them by checking every pinned id in transceiver and message declarations.</p>
+        <p>Compiled example:</p>
+        <ul>
+        <li><a href="https://github.com/imakris/sintra/blob/master/example/sintra/sintra_example_7_explicit_type_ids.cpp"><code>example/sintra/sintra_example_7_explicit_type_ids.cpp</code></a></li>
+        </ul>
+        <h2 id="cmake-integration">CMake Integration</h2>
+        <p>Sintra provides an interface target.</p>
+        <p>For an in-tree dependency:</p>
+        <pre><code class="language-cmake">add_subdirectory(external/sintra)
+        target_link_libraries(my_app PRIVATE sintra::sintra)</code></pre>
+        <p>For an installed package:</p>
+        <pre><code class="language-cmake">find_package(sintra CONFIG REQUIRED)
+        target_link_libraries(my_app PRIVATE sintra::sintra)</code></pre>
+        <p>The target requires C++20 and links platform support libraries through the interface target.</p>
+        <h2 id="recipes">Recipes</h2>
+        <p>Recipes point to compiled examples or tests so copied code starts from checked sources.</p>
+        <div class="table-wrap"><table><thead><tr><th>Task</th><th>Use</th></tr></thead><tbody><tr><td>Basic broadcast and slot</td><td><a href="https://github.com/imakris/sintra/blob/master/example/sintra/sintra_example_0_basic_pubsub.cpp"><code>example/sintra/sintra_example_0_basic_pubsub.cpp</code></a></td></tr><tr><td>Blocking receive on a control thread</td><td><a href="https://github.com/imakris/sintra/blob/master/tests/receive_test.cpp"><code>tests/receive_test.cpp</code></a></td></tr><tr><td>Named transceiver RPC</td><td><a href="https://github.com/imakris/sintra/blob/master/example/sintra/sintra_example_2_rpc_append.cpp"><code>example/sintra/sintra_example_2_rpc_append.cpp</code></a></td></tr><tr><td>Async RPC with completed/timeout branches and <code>abandon()</code></td><td><a href="https://github.com/imakris/sintra/blob/master/tests/rpc_async_lifecycle_test.cpp"><code>tests/rpc_async_lifecycle_test.cpp</code></a></td></tr><tr><td>Fire-and-forget unicast</td><td><a href="https://github.com/imakris/sintra/blob/master/example/sintra/sintra_example_6_unicast_send_to.cpp"><code>example/sintra/sintra_example_6_unicast_send_to.cpp</code></a></td></tr><tr><td>Spawn and wait for a process</td><td><a href="https://github.com/imakris/sintra/blob/master/tests/spawn_wait_test.cpp"><code>tests/spawn_wait_test.cpp</code></a></td></tr><tr><td>Collective shutdown</td><td><a href="https://github.com/imakris/sintra/blob/master/example/sintra/sintra_example_1_ping_pong_multi.cpp"><code>example/sintra/sintra_example_1_ping_pong_multi.cpp</code></a></td></tr><tr><td>Coordinator shutdown hook</td><td><a href="https://github.com/imakris/sintra/blob/master/tests/shutdown_options_test.cpp"><code>tests/shutdown_options_test.cpp</code></a></td></tr><tr><td>One process leaves while peers continue</td><td><a href="https://github.com/imakris/sintra/blob/master/tests/leave_lifecycle_test.cpp"><code>tests/leave_lifecycle_test.cpp</code></a></td></tr><tr><td>Processing fence for handler side effects</td><td><a href="https://github.com/imakris/sintra/blob/master/tests/processing_fence_test.cpp"><code>tests/processing_fence_test.cpp</code></a></td></tr><tr><td>Crash recovery</td><td><a href="https://github.com/imakris/sintra/blob/master/example/sintra/sintra_example_4_recovery.cpp"><code>example/sintra/sintra_example_4_recovery.cpp</code></a></td></tr><tr><td>Explicit type ids</td><td><a href="https://github.com/imakris/sintra/blob/master/example/sintra/sintra_example_7_explicit_type_ids.cpp"><code>example/sintra/sintra_example_7_explicit_type_ids.cpp</code></a></td></tr><tr><td>Direct ring snapshot</td><td><a href="https://github.com/imakris/sintra/blob/master/example/sintra/sintra_example_8_ring_helpers.cpp"><code>example/sintra/sintra_example_8_ring_helpers.cpp</code></a></td></tr></tbody></table></div>
+        <h2 id="common-mistakes">Common Mistakes</h2>
+        <div class="table-wrap"><table><thead><tr><th>Mistake</th><th>Correct pattern</th></tr></thead><tbody><tr><td>Including <code>sintra/detail/...</code> for pub/sub, RPC, barriers, or lifecycle.</td><td>Include <code>&lt;sintra/sintra.h&gt;</code>.</td></tr><tr><td>Including <code>sintra/detail/ipc/rings.h</code> for direct rings.</td><td>Include <code>&lt;sintra/rings.h&gt;</code>.</td></tr><tr><td>Calling <code>receive&lt;T&gt;()</code> inside a handler.</td><td>Use a slot, RPC continuation, or control-thread receive.</td></tr><tr><td>Updating shared state from handlers without synchronization.</td><td>Protect shared state with normal C++ synchronization.</td></tr><tr><td>Calling <code>shutdown()</code> in only one participant while peers continue.</td><td>Use <code>leave()</code> for unilateral departure, or have all finishing participants call <code>shutdown()</code>.</td></tr><tr><td>Using <code>leave()</code> from a process that owns descendants expected to continue.</td><td>Perform an application-level ownership handoff before departure.</td></tr><tr><td>Reusing <code>_sintra_</code> barrier names.</td><td>Use application-owned barrier names.</td></tr><tr><td>Mixing barrier modes on one barrier round.</td><td>Make every participant use the same mode.</td></tr><tr><td>Assuming a delivery fence means peer handlers finished.</td><td>Use <code>processing_fence_t</code> when side effects must be complete.</td></tr><tr><td>Using <code>SINTRA_RPC</code> when local async behavior must use transport.</td><td>Use <code>SINTRA_RPC_STRICT</code>.</td></tr><tr><td>Returning references or using non-const reference RPC parameters.</td><td>Return by value and model mutable results explicitly.</td></tr><tr><td>Keeping variable-buffer backed data after the handler/receive scope.</td><td>Copy the data out before the scope ends.</td></tr><tr><td>Adding polling around Sintra state.</td><td>Use slots, barriers, lifecycle hooks, or event messages.</td></tr></tbody></table></div>
+        <h2 id="api-index">API Index</h2>
+        <div class="table-wrap"><table><thead><tr><th>Name</th><th>Section</th></tr></thead><tbody><tr><td><code>SINTRA_MESSAGE</code></td><td><a href="#transceivers">Transceivers</a></td></tr><tr><td><code>SINTRA_MESSAGE_EXPLICIT</code></td><td><a href="#transceivers">Transceivers</a>, <a href="#type-ids">Type IDs</a></td></tr><tr><td><code>SINTRA_RPC</code></td><td><a href="#transceivers">Transceivers</a>, <a href="#rpc">RPC</a></td></tr><tr><td><code>SINTRA_RPC_STRICT</code></td><td><a href="#transceivers">Transceivers</a>, <a href="#rpc">RPC</a></td></tr><tr><td><code>SINTRA_TYPE_ID</code></td><td><a href="#transceivers">Transceivers</a>, <a href="#type-ids">Type IDs</a></td></tr><tr><td><code>SINTRA_UNICAST</code></td><td><a href="#transceivers">Transceivers</a>, <a href="#rpc">RPC</a></td></tr><tr><td><code>sintra::Crash_info</code></td><td><a href="#recovery-and-lifecycle-hooks">Recovery and Lifecycle Hooks</a></td></tr><tr><td><code>sintra::Entry_descriptor</code></td><td><a href="#initialization-and-process-topology">Initialization and Process Topology</a></td></tr><tr><td><code>sintra::Lifecycle_handler</code></td><td><a href="#recovery-and-lifecycle-hooks">Recovery and Lifecycle Hooks</a></td></tr><tr><td><code>sintra::Lifetime_policy</code></td><td><a href="#initialization-and-process-topology">Initialization and Process Topology</a></td></tr><tr><td><code>sintra::Log_stream</code></td><td><a href="#errors-and-diagnostics">Errors and Diagnostics</a></td></tr><tr><td><code>sintra::Managed_process::terminated_abnormally</code></td><td><a href="#recovery-and-lifecycle-hooks">Recovery and Lifecycle Hooks</a></td></tr><tr><td><code>sintra::Named_instance&lt;T&gt;</code></td><td><a href="#targeting-and-ids">Targeting and IDs</a></td></tr><tr><td><code>sintra::Process_descriptor</code></td><td><a href="#initialization-and-process-topology">Initialization and Process Topology</a></td></tr><tr><td><code>sintra::Recovery_control</code></td><td><a href="#recovery-and-lifecycle-hooks">Recovery and Lifecycle Hooks</a></td></tr><tr><td><code>sintra::Recovery_policy</code></td><td><a href="#recovery-and-lifecycle-hooks">Recovery and Lifecycle Hooks</a></td></tr><tr><td><code>sintra::Recovery_runner</code></td><td><a href="#recovery-and-lifecycle-hooks">Recovery and Lifecycle Hooks</a></td></tr><tr><td><code>sintra::Resolvable_instance_id</code></td><td><a href="#rpc">RPC</a>, <a href="#targeting-and-ids">Targeting and IDs</a></td></tr><tr><td><code>sintra::Ring_R&lt;T&gt;</code></td><td><a href="#direct-ring-helpers">Direct Ring Helpers</a></td></tr><tr><td><code>sintra::Ring_R_snapshot&lt;Reader&gt;</code></td><td><a href="#direct-ring-helpers">Direct Ring Helpers</a></td></tr><tr><td><code>sintra::Ring_R_snapshot_error</code></td><td><a href="#direct-ring-helpers">Direct Ring Helpers</a></td></tr><tr><td><code>sintra::Ring_W&lt;T&gt;</code></td><td><a href="#direct-ring-helpers">Direct Ring Helpers</a></td></tr><tr><td><code>sintra::Ring_diagnostics</code></td><td><a href="#direct-ring-helpers">Direct Ring Helpers</a></td></tr><tr><td><code>sintra::Rpc_completion_state</code></td><td><a href="#rpc">RPC</a></td></tr><tr><td><code>sintra::Rpc_handle&lt;T&gt;</code></td><td><a href="#rpc">RPC</a></td></tr><tr><td><code>sintra::Rpc_wait_status</code></td><td><a href="#rpc">RPC</a></td></tr><tr><td><code>sintra::Spawn_options</code></td><td><a href="#initialization-and-process-topology">Initialization and Process Topology</a></td></tr><tr><td><code>sintra::Transceiver</code></td><td><a href="#transceivers">Transceivers</a></td></tr><tr><td><code>sintra::Typed_instance_id&lt;T&gt;</code></td><td><a href="#targeting-and-ids">Targeting and IDs</a></td></tr><tr><td><code>sintra::activate_slot</code></td><td><a href="#publishsubscribe">Publish/Subscribe</a></td></tr><tr><td><code>sintra::aligned_capacity</code></td><td><a href="#direct-ring-helpers">Direct Ring Helpers</a></td></tr><tr><td><code>sintra::any_local</code></td><td><a href="#targeting-and-ids">Targeting and IDs</a></td></tr><tr><td><code>sintra::any_local_or_remote</code></td><td><a href="#targeting-and-ids">Targeting and IDs</a></td></tr><tr><td><code>sintra::any_remote</code></td><td><a href="#targeting-and-ids">Targeting and IDs</a></td></tr><tr><td><code>sintra::barrier</code></td><td><a href="#barriers-and-fences">Barriers and Fences</a></td></tr><tr><td><code>sintra::barrier_completed</code></td><td><a href="#barriers-and-fences">Barriers and Fences</a></td></tr><tr><td><code>sintra::compose_instance</code></td><td><a href="#targeting-and-ids">Targeting and IDs</a></td></tr><tr><td><code>sintra::console</code></td><td><a href="#errors-and-diagnostics">Errors and Diagnostics</a></td></tr><tr><td><code>sintra::deactivate_all_slots</code></td><td><a href="#publishsubscribe">Publish/Subscribe</a></td></tr><tr><td><code>sintra::decompose_instance</code></td><td><a href="#targeting-and-ids">Targeting and IDs</a></td></tr><tr><td><code>sintra::delivery_fence_t</code></td><td><a href="#barriers-and-fences">Barriers and Fences</a></td></tr><tr><td><code>sintra::disable_debug_pause_for_current_process</code></td><td><a href="#initialization-and-process-topology">Initialization and Process Topology</a></td></tr><tr><td><code>sintra::enable_recovery</code></td><td><a href="#recovery-and-lifecycle-hooks">Recovery and Lifecycle Hooks</a></td></tr><tr><td><code>sintra::get_process_index</code></td><td><a href="#targeting-and-ids">Targeting and IDs</a></td></tr><tr><td><code>sintra::get_ring_configurations</code></td><td><a href="#direct-ring-helpers">Direct Ring Helpers</a></td></tr><tr><td><code>sintra::get_log_callback</code></td><td><a href="#errors-and-diagnostics">Errors and Diagnostics</a></td></tr><tr><td><code>sintra::init</code></td><td><a href="#initialization-and-process-topology">Initialization and Process Topology</a></td></tr><tr><td><code>sintra::init_error</code></td><td><a href="#errors-and-diagnostics">Errors and Diagnostics</a></td></tr><tr><td><code>sintra::invalid_instance_id</code></td><td><a href="#targeting-and-ids">Targeting and IDs</a></td></tr><tr><td><code>sintra::invalid_sequence</code></td><td><a href="#targeting-and-ids">Targeting and IDs</a>, <a href="#barriers-and-fences">Barriers and Fences</a></td></tr><tr><td><code>sintra::invalid_type_id</code></td><td><a href="#type-ids">Type IDs</a></td></tr><tr><td><code>sintra::is_user_type_id</code></td><td><a href="#type-ids">Type IDs</a></td></tr><tr><td><code>sintra::join_swarm</code></td><td><a href="#initialization-and-process-topology">Initialization and Process Topology</a></td></tr><tr><td><code>sintra::leave</code></td><td><a href="#lifecycle-and-shutdown">Lifecycle and Shutdown</a></td></tr><tr><td><code>sintra::local</code></td><td><a href="#publishsubscribe">Publish/Subscribe</a></td></tr><tr><td><code>sintra::log_callback_fn</code></td><td><a href="#errors-and-diagnostics">Errors and Diagnostics</a></td></tr><tr><td><code>sintra::log_level</code></td><td><a href="#errors-and-diagnostics">Errors and Diagnostics</a></td></tr><tr><td><code>sintra::log_raw</code></td><td><a href="#errors-and-diagnostics">Errors and Diagnostics</a></td></tr><tr><td><code>sintra::ls_debug</code></td><td><a href="#errors-and-diagnostics">Errors and Diagnostics</a></td></tr><tr><td><code>sintra::ls_error</code></td><td><a href="#errors-and-diagnostics">Errors and Diagnostics</a></td></tr><tr><td><code>sintra::ls_info</code></td><td><a href="#errors-and-diagnostics">Errors and Diagnostics</a></td></tr><tr><td><code>sintra::ls_warning</code></td><td><a href="#errors-and-diagnostics">Errors and Diagnostics</a></td></tr><tr><td><code>sintra::make_branches</code></td><td><a href="#initialization-and-process-topology">Initialization and Process Topology</a></td></tr><tr><td><code>sintra::make_snapshot</code></td><td><a href="#direct-ring-helpers">Direct Ring Helpers</a></td></tr><tr><td><code>sintra::make_user_type_id</code></td><td><a href="#type-ids">Type IDs</a></td></tr><tr><td><code>sintra::max_user_type_id</code></td><td><a href="#type-ids">Type IDs</a></td></tr><tr><td><code>sintra::message_string</code></td><td><a href="#messages-and-payloads">Messages and Payloads</a></td></tr><tr><td><code>sintra::processing_fence_t</code></td><td><a href="#barriers-and-fences">Barriers and Fences</a></td></tr><tr><td><code>sintra::process_of</code></td><td><a href="#targeting-and-ids">Targeting and IDs</a></td></tr><tr><td><code>sintra::process_index</code></td><td><a href="#initialization-and-process-topology">Initialization and Process Topology</a></td></tr><tr><td><code>sintra::process_lifecycle_event</code></td><td><a href="#recovery-and-lifecycle-hooks">Recovery and Lifecycle Hooks</a></td></tr><tr><td><code>sintra::Range&lt;T&gt;</code></td><td><a href="#direct-ring-helpers">Direct Ring Helpers</a></td></tr><tr><td><code>sintra::receive</code></td><td><a href="#publishsubscribe">Publish/Subscribe</a></td></tr><tr><td><code>sintra::remote</code></td><td><a href="#publishsubscribe">Publish/Subscribe</a></td></tr><tr><td><code>sintra::rendezvous_t</code></td><td><a href="#barriers-and-fences">Barriers and Fences</a></td></tr><tr><td><code>sintra::ring_acquisition_failure_exception</code></td><td><a href="#direct-ring-helpers">Direct Ring Helpers</a></td></tr><tr><td><code>sintra::ring_abi_mismatch_exception</code></td><td><a href="#direct-ring-helpers">Direct Ring Helpers</a></td></tr><tr><td><code>sintra::ring_payload_traits&lt;T&gt;</code></td><td><a href="#direct-ring-helpers">Direct Ring Helpers</a></td></tr><tr><td><code>sintra::ring_reader_evicted_exception</code></td><td><a href="#direct-ring-helpers">Direct Ring Helpers</a></td></tr><tr><td><code>sintra::rpc_cancelled</code></td><td><a href="#rpc">RPC</a>, <a href="#errors-and-diagnostics">Errors and Diagnostics</a></td></tr><tr><td><code>sintra::rpc_unavailable</code></td><td><a href="#rpc">RPC</a>, <a href="#errors-and-diagnostics">Errors and Diagnostics</a></td></tr><tr><td><code>sintra::sequence_counter_type</code></td><td><a href="#targeting-and-ids">Targeting and IDs</a>, <a href="#barriers-and-fences">Barriers and Fences</a></td></tr><tr><td><code>sintra::set_lifecycle_handler</code></td><td><a href="#recovery-and-lifecycle-hooks">Recovery and Lifecycle Hooks</a></td></tr><tr><td><code>sintra::set_log_callback</code></td><td><a href="#errors-and-diagnostics">Errors and Diagnostics</a></td></tr><tr><td><code>sintra::set_recovery_policy</code></td><td><a href="#recovery-and-lifecycle-hooks">Recovery and Lifecycle Hooks</a></td></tr><tr><td><code>sintra::set_recovery_runner</code></td><td><a href="#recovery-and-lifecycle-hooks">Recovery and Lifecycle Hooks</a></td></tr><tr><td><code>sintra::shutdown</code></td><td><a href="#lifecycle-and-shutdown">Lifecycle and Shutdown</a></td></tr><tr><td><code>sintra::shutdown_options</code></td><td><a href="#lifecycle-and-shutdown">Lifecycle and Shutdown</a></td></tr><tr><td><code>sintra::spawn_swarm_process</code></td><td><a href="#initialization-and-process-topology">Initialization and Process Topology</a></td></tr><tr><td><code>sintra::try_snapshot_e</code></td><td><a href="#direct-ring-helpers">Direct Ring Helpers</a></td></tr><tr><td><code>sintra::typed_variable_buffer&lt;T&gt;</code></td><td><a href="#messages-and-payloads">Messages and Payloads</a></td></tr><tr><td><code>sintra::world</code></td><td><a href="#publishsubscribe">Publish/Subscribe</a></td></tr></tbody></table></div>
+        <nav class="page-nav" aria-label="Reference navigation"><a class="page-nav-prev" href="rings.html"><span class="label">&larr; Previous</span><span class="title">sintra::Ring_W</span></a><a class="page-nav-next" href="readme.html"><span class="label">Next &rarr;</span><span class="title">README</span></a></nav>
       </article>
+      <aside class="page-toc" aria-label="On this page">
+        <h2>On this page</h2>
+        <ul>
+          <li class="level-2"><a href="#contents">Contents</a></li>
+          <li class="level-2"><a href="#overview">Overview</a></li>
+          <li class="level-2"><a href="#terminology">Terminology</a></li>
+          <li class="level-2"><a href="#initialization-and-process-topology">Initialization and Process Topology</a></li>
+          <li class="level-3"><a href="#sintrainit"><code>sintra::init</code></a></li>
+          <li class="level-3"><a href="#sintramake_branches"><code>sintra::make_branches</code></a></li>
+          <li class="level-3"><a href="#sintraentry_descriptor"><code>sintra::Entry_descriptor</code></a></li>
+          <li class="level-3"><a href="#sintraprocess_descriptor"><code>sintra::Process_descriptor</code></a></li>
+          <li class="level-3"><a href="#sintraspawn_options"><code>sintra::Spawn_options</code></a></li>
+          <li class="level-3"><a href="#sintralifetime_policy"><code>sintra::Lifetime_policy</code></a></li>
+          <li class="level-3"><a href="#sintraspawn_swarm_process"><code>sintra::spawn_swarm_process</code></a></li>
+          <li class="level-3"><a href="#sintrajoin_swarm"><code>sintra::join_swarm</code></a></li>
+          <li class="level-3"><a href="#sintraprocess_index"><code>sintra::process_index</code></a></li>
+          <li class="level-3"><a href="#sintradisable_debug_pause_for_current_process"><code>sintra::disable_debug_pause_for_current_process</code></a></li>
+          <li class="level-2"><a href="#transceivers">Transceivers</a></li>
+          <li class="level-3"><a href="#sintratransceiver"><code>sintra::Transceiver</code></a></li>
+          <li class="level-3"><a href="#sintraderived_transceiver"><code>sintra::Derived_transceiver</code></a></li>
+          <li class="level-3"><a href="#transceiver-macros">Transceiver Macros</a></li>
+          <li class="level-2"><a href="#messages-and-payloads">Messages and Payloads</a></li>
+          <li class="level-3"><a href="#plain-values">Plain Values</a></li>
+          <li class="level-3"><a href="#transceiver-message-types">Transceiver Message Types</a></li>
+          <li class="level-3"><a href="#variable-size-fields">Variable-Size Fields</a></li>
+          <li class="level-2"><a href="#publishsubscribe">Publish/Subscribe</a></li>
+          <li class="level-3"><a href="#maildrop-helpers">Maildrop Helpers</a></li>
+          <li class="level-3"><a href="#sintraactivate_slot"><code>sintra::activate_slot</code></a></li>
+          <li class="level-3"><a href="#sintradeactivate_all_slots"><code>sintra::deactivate_all_slots</code></a></li>
+          <li class="level-3"><a href="#sintrareceive"><code>sintra::receive</code></a></li>
+          <li class="level-2"><a href="#rpc">RPC</a></li>
+          <li class="level-3"><a href="#targets">Targets</a></li>
+          <li class="level-3"><a href="#blocking-rpc">Blocking RPC</a></li>
+          <li class="level-3"><a href="#async-rpc">Async RPC</a></li>
+          <li class="level-2"><a href="#targeting-and-ids">Targeting and IDs</a></li>
+          <li class="level-3"><a href="#core-id-types">Core ID Types</a></li>
+          <li class="level-3"><a href="#wildcards-and-sentinels">Wildcards and Sentinels</a></li>
+          <li class="level-3"><a href="#helpers">Helpers</a></li>
+          <li class="level-2"><a href="#barriers-and-fences">Barriers and Fences</a></li>
+          <li class="level-2"><a href="#lifecycle-and-shutdown">Lifecycle and Shutdown</a></li>
+          <li class="level-3"><a href="#sintrashutdown"><code>sintra::shutdown</code></a></li>
+          <li class="level-3"><a href="#sintrashutdown_options"><code>sintra::shutdown_options</code></a></li>
+          <li class="level-3"><a href="#sintraleave"><code>sintra::leave</code></a></li>
+          <li class="level-3"><a href="#low-level-teardown">Low-Level Teardown</a></li>
+          <li class="level-2"><a href="#recovery-and-lifecycle-hooks">Recovery and Lifecycle Hooks</a></li>
+          <li class="level-3"><a href="#sintraenable_recovery"><code>sintra::enable_recovery</code></a></li>
+          <li class="level-3"><a href="#coordinator-hooks">Coordinator Hooks</a></li>
+          <li class="level-2"><a href="#direct-ring-helpers">Direct Ring Helpers</a></li>
+          <li class="level-2"><a href="#errors-and-diagnostics">Errors and Diagnostics</a></li>
+          <li class="level-3"><a href="#sintrainit_error"><code>sintra::init_error</code></a></li>
+          <li class="level-3"><a href="#rpc-exceptions">RPC Exceptions</a></li>
+          <li class="level-3"><a href="#logging-and-console">Logging and Console</a></li>
+          <li class="level-2"><a href="#threading-and-reentrancy">Threading and Reentrancy</a></li>
+          <li class="level-2"><a href="#type-ids">Type IDs</a></li>
+          <li class="level-2"><a href="#cmake-integration">CMake Integration</a></li>
+          <li class="level-2"><a href="#recipes">Recipes</a></li>
+          <li class="level-2"><a href="#common-mistakes">Common Mistakes</a></li>
+          <li class="level-2"><a href="#api-index">API Index</a></li>
+        </ul>
+      </aside>
     </main>
   </body>
 </html>

@@ -11,7 +11,8 @@
 // 8. Protocol state returns to idle after successful finalize/leave.
 // 9. leave() rejects when called from handler dispatch context.
 // 10. Double init() without teardown is rejected.
-// 11. init()/finalize() cycles work correctly (state resets between cycles).
+// 11. Runtime-owned public APIs reject missing runtime cleanly.
+// 12. init()/finalize() cycles work correctly (state resets between cycles).
 
 #include <sintra/sintra.h>
 
@@ -233,6 +234,41 @@ bool test_finalize_without_init_returns_false()
         "finalize() without init() should return false");
 }
 
+bool test_runtime_required_apis_without_runtime_throw()
+{
+    reset_shutdown_state();
+
+    bool activate_caught = false;
+    try {
+        (void)sintra::activate_slot([](int) {});
+    }
+    catch (const std::runtime_error&) {
+        activate_caught = true;
+    }
+
+    bool deactivate_caught = false;
+    try {
+        sintra::deactivate_all_slots();
+    }
+    catch (const std::runtime_error&) {
+        deactivate_caught = true;
+    }
+
+    bool recovery_caught = false;
+    try {
+        sintra::enable_recovery();
+    }
+    catch (const std::runtime_error&) {
+        recovery_caught = true;
+    }
+
+    return sintra::test::assert_true(
+        activate_caught && deactivate_caught && recovery_caught,
+        k_prefix,
+        "runtime-owned APIs without init() should throw runtime_error instead of "
+        "dereferencing runtime state");
+}
+
 bool test_leave_after_init_returns_true_and_resets_state(int argc, char* argv[])
 {
     sintra::init(argc, argv);
@@ -331,6 +367,7 @@ int main(int argc, char* argv[])
     ok &= test_shutdown_without_runtime_returns_false();
     ok &= test_leave_without_runtime_returns_false();
     ok &= test_finalize_without_init_returns_false();
+    ok &= test_runtime_required_apis_without_runtime_throw();
     ok &= test_leave_after_init_returns_true_and_resets_state(argc, argv);
     ok &= test_leave_rejects_in_handler_context(argc, argv);
     ok &= test_state_idle_after_finalize(argc, argv);

@@ -132,23 +132,24 @@ namespace sintra {
 //   - delivery_fence_t (default): additionally ensure all pre-barrier messages
 //     have been fetched by local request readers in this process. It does not
 //     perform a second rendezvous to prove that peers have also drained.
-//   - processing_fence_t: the strongest guarantee - all pre-barrier message
-//     handlers have run to completion everywhere.
+//   - processing_fence_t: rendezvous, local delivery/processing catch-up, then
+//     an internal second rendezvous to confirm the catch-up across the group.
 struct rendezvous_t {};
 struct delivery_fence_t {};
 struct processing_fence_t {};
 
 ///\brief Synchronise processes participating in a named barrier.
 ///
-/// Blocks the calling thread until at least one thread of every process in
-/// `group_name` has reached the barrier.  The template parameter selects the
-/// strength of the synchronisation fence (see the tag descriptions above).
+/// Blocks the calling thread until every live process in `group_name` has
+/// reached the barrier.  The template parameter selects the strength of the
+/// synchronisation fence (see the tag descriptions above).
 ///
-/// When multiple threads in a single process enter the same barrier they will
-/// match with the corresponding threads of the other participants in an
-/// unspecified order.  Barrier is an inter-process synchronisation mechanism -
-/// combine it with traditional threading primitives if you also need
-/// thread-level coordination within a process.
+/// Barrier rounds track processes, not calling threads.  For a single
+/// `(barrier_name, group_name, BarrierMode)` round, each process should have at
+/// most one in-flight caller.  If multiple threads in a process must wait for
+/// the same phase, coordinate them with normal threading primitives and have one
+/// representative enter `sintra::barrier`, or use distinct barrier names for
+/// independent rounds.
 /// Barrier names beginning with `_sintra_` are reserved for internal runtime
 /// protocols and will fail fast.
 /// Returns the reply-ring watermark for the completed barrier, or

@@ -1,0 +1,507 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>Sintra Architecture Overview - Sintra Reference</title>
+    <link rel="stylesheet" href="../assets/style.css" />
+  </head>
+  <body class="reference-guide">
+    <a class="skip-nav" href="#main-content">Skip to content</a>
+    <header class="site-header">
+      <div class="header-inner">
+        <a class="brand" href="../index.html" aria-label="Sintra reference home">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <span>Sintra Reference</span>
+        </a>
+        <nav class="top-nav" aria-label="Top navigation">
+          <a href="../index.html">Reference</a>
+          <a href="guide.html">Guide</a>
+          <a href="readme.html">README</a>
+        </nav>
+      </div>
+    </header>
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <ol><li><a href="../index.html">Reference</a></li><li aria-current="page">Sintra Architecture Overview</li></ol>
+    </nav>
+    <main id="main-content" class="page-shell">
+      <article class="content-prose">
+        <h1 id="sintra-architecture-overview">Sintra Architecture Overview</h1>
+        <p>This document provides a comprehensive architectural overview of Sintra&#x27;s internals, targeting developers and LLMs who need to understand, maintain, or extend the system.</p>
+        <h2 id="table-of-contents">Table of Contents</h2>
+        <ol>
+        <li><a href="#system-overview">System Overview</a></li>
+        <li><a href="#ring-based-ipc-layer">Ring-Based IPC Layer</a></li>
+        <li><a href="#process-management">Process Management</a></li>
+        <li><a href="#coordinator-and-barriers">Coordinator and Barriers</a></li>
+        <li><a href="#draining-and-shutdown">Draining and Shutdown</a></li>
+        <li><a href="#message-flow">Message Flow</a></li>
+        <li><a href="#key-data-structures">Key Data Structures</a></li>
+        <li><a href="#process-recovery">Process Recovery</a></li>
+        <li><a href="#per-recipient-flush-tokens-critical-for-correctness">Per-Recipient Flush Tokens</a></li>
+        <li><a href="#references">References</a></li>
+        </ol>
+        <hr>
+        <h2 id="system-overview">System Overview</h2>
+        <p>Sintra is a header-only C++ library for type-safe inter-process communication (IPC) using shared memory. It provides:</p>
+        <ul>
+        <li><strong>Signal/broadcast bus</strong>: Pub/sub messaging across processes</li>
+        <li><strong>Remote Procedure Calls (RPC)</strong>: Synchronous cross-process function invocation</li>
+        <li><strong>Barrier synchronization</strong>: Coordinating process groups</li>
+        <li><strong>Process lifecycle management</strong>: Spawning, monitoring, and recovering processes</li>
+        </ul>
+        <h3 id="core-design-principles">Core Design Principles</h3>
+        <ol>
+        <li><strong>Shared-memory communication</strong>: Memory-mapped files for cross-process data exchange</li>
+        <li><strong>Single-producer/multi-consumer (SPMC) rings</strong>: Lock-free data structures for low-latency messaging</li>
+        <li><strong>Type-safe APIs</strong>: Compile-time type checking prevents protocol errors</li>
+        <li><strong>Header-only</strong>: No separate compilation required</li>
+        </ol>
+        <hr>
+        <h2 id="ring-based-ipc-layer">Ring-Based IPC Layer</h2>
+        <h3 id="the-magic-ring-architecture">The Magic Ring Architecture</h3>
+        <p>Sintra&#x27;s IPC foundation is a <strong>double-mapped circular buffer</strong> (&quot;magic ring&quot;), which allows:</p>
+        <ul>
+        <li>Linear memory access even at buffer wrap-around points</li>
+        <li>Lock-free single-producer/multiple-consumer communication</li>
+        <li>Variable-sized messages with minimal overhead</li>
+        </ul>
+        <h4 id="ring-components">Ring Components</h4>
+        <pre><code>┌────────────────────────────────────────────────────────────┐
+        │ Ring_data&lt;T, READ_ONLY&gt;                                    │
+        │ ┌────────────────────────────────────────────────────────┐ │
+        │ │ File: &lt;name&gt;_data                                      │ │
+        │ │ - Double-mapped shared memory region (2× mapping)      │ │
+        │ │ - Elements stored contiguously                         │ │
+        │ │ - Mapping trick: Same physical memory appears twice    │ │
+        │ │   at consecutive virtual addresses                     │ │
+        │ └────────────────────────────────────────────────────────┘ │
+        │                                                            │
+        │ Ring&lt;T, READ_ONLY&gt; : Ring_data&lt;T, READ_ONLY&gt;               │
+        │ ┌────────────────────────────────────────────────────────┐ │
+        │ │ File: &lt;name&gt;_data_control                              │ │
+        │ │ - Control block with atomics                           │ │
+        │ │ - leading_sequence: Published write head               │ │
+        │ │ - read_access: 8-byte octile guard bitmap              │ │
+        │ │ - reading_sequences[max_process_index]: Per-reader     │ │
+        │ │   sequence tracking and status                         │ │
+        │ │ - Semaphores for reader wakeup (hybrid policy)         │ │
+        │ └────────────────────────────────────────────────────────┘ │
+        └────────────────────────────────────────────────────────────┘
+
+        Ring_R&lt;T&gt; : Ring&lt;T, true&gt;    // Reader API
+        Ring_W&lt;T&gt; : Ring&lt;T, false&gt;   // Writer API</code></pre>
+        <h4 id="key-ring-concepts">Key Ring Concepts</h4>
+        <p><strong>Octiles</strong>: The ring is divided into 8 equal sections. Readers hold guards on specific octiles to prevent the writer from overwriting data they&#x27;re currently reading. Each octile has an 8-bit counter (part of the 64-bit <code>read_access</code> field), limiting concurrent readers per octile to 255.</p>
+        <p><strong>Sequence Numbers</strong>: Each element written to the ring has a monotonically increasing sequence number. The <code>leading_sequence</code> atomic indicates the next element to be written (last published = <code>leading_sequence - 1</code>).</p>
+        <p><strong>Reader Slots</strong>: Each Ring_R acquires a slot (index into <code>reading_sequences[]</code>) at construction, sized by <code>max_process_index</code>. Orphaned slots (from crashed processes) are reclaimed via <code>scavenge_orphans()</code>.</p>
+        <p><strong>Guard Protocol</strong>:</p>
+        <ol>
+        <li>Reader takes snapshot: Increments octile guard</li>
+        <li>Reader reads data from the snapshot</li>
+        <li>Reader calls <code>done_reading()</code>: Decrements octile guard</li>
+        <li>Writer blocks when entering a guarded octile</li>
+        </ol>
+        <p><strong>Eviction</strong> (when enabled): If a reader lags by more than one full ring behind the writer, the writer can forcefully evict it, clearing its guard and marking its slot as EVICTED.</p>
+        <h4 id="ring-helper-utilities">Ring Helper Utilities</h4>
+        <p>Sintra exposes small helpers to make ring usage less error-prone:</p>
+        <ul>
+        <li><code>aligned_capacity()</code> and <code>get_ring_configurations()</code> compute element counts that satisfy the ring&#x27;s alignment and mapping constraints.</li>
+        <li><code>Ring_R_snapshot</code> is an RAII wrapper for a single reader snapshot. Use <code>make_snapshot(reader, ...)</code> or <code>try_snapshot_e(reader, ...)</code> to pair <code>start_reading()</code> with <code>done_reading()</code> automatically.</li>
+        </ul>
+        <h3 id="double-mapping-details">Double-Mapping Details</h3>
+        <h4 id="windows">Windows</h4>
+        <ul>
+        <li>Reserve 2x + granularity address space via <code>VirtualAlloc(MEM_RESERVE)</code></li>
+        <li>Round to granularity boundary (historical layout parity)</li>
+        <li>Release reservation</li>
+        <li>Map file twice back-to-back at the rounded address</li>
+        </ul>
+        <h4 id="linuxposix">Linux/POSIX</h4>
+        <ul>
+        <li>Reserve 2x span with <code>mmap(PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS)</code></li>
+        <li>Map file twice using <code>MAP_FIXED</code> to <strong>replace</strong> the reservation</li>
+        <li><strong>Critical</strong>: Use <code>MAP_FIXED</code>, <strong>not</strong> <code>MAP_FIXED_NOREPLACE</code> (the goal is to replace)</li>
+        </ul>
+        <hr>
+        <h2 id="process-management">Process Management</h2>
+        <h3 id="managed_process">Managed_process</h3>
+        <p>The <code>Managed_process</code> class represents a single process in the Sintra system. Each process has:</p>
+        <h4 id="rings-per-process">Rings (Per-Process)</h4>
+        <pre><code class="language-cpp">Message_ring_W*  m_out_req_c;  // Outgoing request channel
+        Message_ring_W*  m_out_rep_c;  // Outgoing reply channel</code></pre>
+        <p><strong>Important</strong>: Each process has <strong>two outgoing rings</strong>:</p>
+        <ul>
+        <li><strong>Request ring</strong> (<code>m_out_req_c</code>): For broadcast signals and initiating RPCs</li>
+        <li><strong>Reply ring</strong> (<code>m_out_rep_c</code>): For RPC responses and barrier completions</li>
+        </ul>
+        <p>Other processes read from these rings via <code>Process_message_reader</code> instances.</p>
+        <h4 id="ring-topology">Ring Topology</h4>
+        <pre><code>Process A (pid=1)                    Process B (pid=2)
+        ┌─────────────────┐                 ┌─────────────────┐
+        │ m_out_req_c  ────────────────────&gt;│  reader[A].req  │
+        │ m_out_rep_c  ────────────────────&gt;│  reader[A].rep  │
+        │                 │                 │                 │
+        │ reader[B].req &lt;─────────────────────  m_out_req_c   │
+        │ reader[B].rep &lt;─────────────────────  m_out_rep_c   │
+        └─────────────────┘                 └─────────────────┘</code></pre>
+        <p>Each process:</p>
+        <ul>
+        <li><strong>Writes</strong> to its own <code>m_out_req_c</code> and <code>m_out_rep_c</code></li>
+        <li><strong>Reads</strong> from all other processes via <code>m_readers</code> collection</li>
+        </ul>
+        <h4 id="communication-states">Communication States</h4>
+        <pre><code class="language-cpp">enum Communication_state {
+            COMMUNICATION_STOPPED,  // Ring threads are stopped
+            COMMUNICATION_PAUSED,   // Rings answer only SERVICE_MODE messages
+            COMMUNICATION_RUNNING   // Rings in NORMAL_MODE
+        };</code></pre>
+        <p><strong>PAUSED</strong> mode is critical for shutdown: readers continue processing, but only handle coordinator messages (enables graceful unpublish without deadlocks).</p>
+        <h4 id="key-methods">Key Methods</h4>
+        <ul>
+        <li><code>init()</code>: Initialize process from command-line arguments</li>
+        <li><code>branch()</code>: Spawn child processes</li>
+        <li><code>go()</code>: Start reader threads</li>
+        <li><code>pause()</code>: Switch to SERVICE_MODE (coordinator-only messages)</li>
+        <li><code>stop()</code>: Stop and join all reader threads</li>
+        <li><code>flush()</code>: Wait for a specific sequence to be visible</li>
+        <li><code>run_after_current_handler()</code>: Queue deferred task execution (avoids re-entrancy)</li>
+        </ul>
+        <h4 id="lifeline-ownership">Lifeline ownership</h4>
+        <p>Spawned processes receive a lifeline pipe/handle from the coordinator process. The child reads from the lifeline in a dedicated thread; when the owner exits or unpublishes, the pipe closes and the child:</p>
+        <ul>
+        <li>schedules shutdown (stop reader threads, unblock RPC),</li>
+        <li>then hard-exits after a timeout (configurable via args or policy).</li>
+        </ul>
+        <p>The handle value and timeout/exit code are passed via command-line arguments (<code>--lifeline_handle</code>, <code>--lifeline_timeout_ms</code>, and <code>--lifeline_exit_code</code>).</p>
+        <p>The coordinator closes lifeline handles on unpublish and in the destructor so stale children still terminate. Respawn creates a new lifeline per instance.</p>
+        <hr>
+        <h2 id="coordinator-and-barriers">Coordinator and Barriers</h2>
+        <h3 id="coordinator-structure">Coordinator Structure</h3>
+        <p>The <code>Coordinator</code> is a <strong>special transceiver</strong> that runs in process index 0 (the &quot;starter&quot; process). It provides:</p>
+        <ul>
+        <li>Type resolution (string -&gt; type_id)</li>
+        <li>Instance resolution (name -&gt; instance_id)</li>
+        <li>Transceiver registry</li>
+        <li><strong>Process groups and barriers</strong></li>
+        <li><strong>Draining state tracking</strong></li>
+        </ul>
+        <h3 id="barrier-mechanism">Barrier Mechanism</h3>
+        <h4 id="process_group-structure">Process_group Structure</h4>
+        <pre><code class="language-cpp">struct Process_group : Derived_transceiver&lt;Process_group&gt; {
+            unordered_map&lt;string, Barrier&gt;      m_barriers;
+            unordered_set&lt;instance_id_type&gt;     m_process_ids;
+            mutex                               m_call_mutex;
+
+            struct Barrier {
+                mutex                           m;
+                condition_variable              cv;
+                unordered_set&lt;instance_id_type&gt; processes_pending;
+                unordered_set&lt;instance_id_type&gt; processes_arrived;
+                instance_id_type                common_function_iid;
+            };
+        };</code></pre>
+        <h4 id="barrier-protocol">Barrier Protocol</h4>
+        <ol>
+        <li><strong>Barrier Start</strong> (first arrival):</li>
+        </ol>
+        <pre><code class="language-cpp">   // ATOMICALLY (while holding m_call_mutex):
+           b.processes_pending = m_process_ids;
+           // Filter out draining processes
+           for (auto it = b.processes_pending.begin(); ...) {
+               if (coord-&gt;is_process_draining(*it)) {
+                   it = b.processes_pending.erase(it);
+               }
+           }
+           // Now unlock m_call_mutex</code></pre>
+        <ol>
+        <li><strong>Subsequent Arrivals</strong>:
+        <ul>
+        <li>Mark caller as arrived</li>
+        <li>Remove caller from pending</li>
+        <li>If pending is empty -&gt; barrier completes</li>
+        <li>Else -&gt; defer (throw deferral with cleanup lambda)</li>
+        </ul></li>
+        <li><strong>Barrier Completion</strong>:
+        <ul>
+        <li>Last arrival emits completion messages to all waiters</li>
+        <li>Returns flush sequence (watermark)</li>
+        </ul></li>
+        </ol>
+        <p><strong>Return vs. Per-Recipient Tokens:</strong> The barrier RPC returns a <strong>single</strong> watermark from the coordinator&#x27;s <strong>reply ring</strong> for the <strong>caller</strong>. Per-recipient tokens are computed <strong>inside</strong> the coordinator&#x27;s emit loop-one token <strong>per completion message</strong>, at write time. Don&#x27;t confuse the RPC&#x27;s return value (the single marker the caller must flush) with the per-recipient tokens (embedded in each completion message).</p>
+        <h4 id="draining-and-barriers">Draining and Barriers</h4>
+        <p><strong>CRITICAL INVARIANT</strong>: A process marked as DRAINING must <strong>never</strong> be included in a barrier&#x27;s <code>processes_pending</code> set, even if the barrier was already in progress.</p>
+        <pre><code class="language-cpp">// Atomic draining state (lock-free reads)
+        std::array&lt;std::atomic&lt;uint8_t&gt;, max_process_index + 1&gt; m_draining_process_states;
+
+        bool is_process_draining(instance_id_type process_iid) const {
+            const auto draining_index = get_process_index(process_iid);
+            // ... bounds check ...
+            return m_draining_process_states[slot].load(std::memory_order_acquire) != 0;
+        }</code></pre>
+        <p><strong>Lock Hierarchy</strong>: To prevent deadlocks:</p>
+        <pre><code>m_publish_mutex -&gt; m_groups_mutex -&gt; m_call_mutex -&gt; b.m -&gt; atomics</code></pre>
+        <hr>
+        <h2 id="draining-and-shutdown">Draining and Shutdown</h2>
+        <h3 id="lifecycle-states">Lifecycle States</h3>
+        <ol>
+        <li><strong>ACTIVE</strong>: Process participates in barriers and normal communication</li>
+        <li><strong>DRAINING</strong>: Process is shutting down; excluded from new barriers and dropped from in-flight barriers</li>
+        <li><strong>TERMINATED</strong>: Process exited; resources scavenged</li>
+        </ol>
+        <h3 id="shutdown-sequence-detailfinalize">Shutdown Sequence (detail::finalize)</h3>
+        <pre><code>┌────────────────────────────────────────────────────────────┐
+        │ 1. Announce Draining                                       │
+        │    ┌─────────────────────────────────────────────────────┐ │
+        │    │ Coordinator::begin_process_draining(my_pid)         │ │
+        │    │ -&gt; Sets m_draining_process_states[my_slot] = 1      │ │
+        │    │ -&gt; Drops process from in-flight barriers            │ │
+        │    │ -&gt; Returns flush sequence (reply ring watermark)    │ │
+        │    └─────────────────────────────────────────────────────┘ │
+        ├────────────────────────────────────────────────────────────┤
+        │ 2. Flush Coordinator Channel                               │
+        │    ┌─────────────────────────────────────────────────────┐ │
+        │    │ flush(flush_sequence)                               │ │
+        │    │ -&gt; Waits until coordinator&#x27;s reply ring             │ │
+        │    │   sequence &gt;= flush_sequence                        │ │
+        │    │ -&gt; Guarantees all barrier completions are visible   │ │
+        │    └─────────────────────────────────────────────────────┘ │
+        ├────────────────────────────────────────────────────────────┤
+        │ 3. Pause (SERVICE_MODE)                                    │
+        │    ┌─────────────────────────────────────────────────────┐ │
+        │    │ pause()                                             │ │
+        │    │ -&gt; Switches readers to SERVICE_MODE                 │ │
+        │    │ -&gt; Only coordinator/service messages processed      │ │
+        │    │ -&gt; User-level handlers no longer run concurrently   │ │
+        │    └─────────────────────────────────────────────────────┘ │
+        ├────────────────────────────────────────────────────────────┤
+        │ 4. Deactivate and Unpublish                                │
+        │    ┌─────────────────────────────────────────────────────┐ │
+        │    │ unblock_rpc()                                       │ │
+        │    │ deactivate_all()                                    │ │
+        │    │ unpublish_all_transceivers()                        │ │
+        │    │ -&gt; Handlers deactivated and transceivers unpublished│ │
+        │    │    while service-mode communication still flows     │ │
+        │    └─────────────────────────────────────────────────────┘ │
+        ├────────────────────────────────────────────────────────────┤
+        │ 5. Destroy and Cleanup                                     │
+        │    ┌─────────────────────────────────────────────────────┐ │
+        │    │ delete s_mproc                                      │ │
+        │    │ -&gt; Stops reader threads and releases resources      │ │
+        │    └─────────────────────────────────────────────────────┘ │
+        └────────────────────────────────────────────────────────────┘</code></pre>
+        <p>&gt; Implementation note: &gt; The coordinator path additionally waits for all known processes to enter &gt; the draining state via <code>wait_for_all_draining()</code> before proceeding to &gt; step 3.</p>
+        <h3 id="draining-state-management">Draining State Management</h3>
+        <p><strong>CRITICAL</strong>: Draining bit is <strong>persistent across unpublish</strong>:</p>
+        <pre><code class="language-cpp">// In unpublish_transceiver (for Managed_process):
+        // 1. Mark as draining BEFORE removing from groups
+        m_draining_process_states[slot].store(1, std::memory_order_release);
+
+        // 2. Remove from all process groups
+        for (auto&amp; group : m_groups) {
+            group.second.remove_process(process_iid);
+        }
+
+        // 3. Do NOT reset draining bit here!
+        // It stays = 1 through teardown and is reset to 0 only when
+        // a NEW Managed_process is published into this slot (recovery).</code></pre>
+        <p><strong>Rationale</strong>: Resetting the bit too early re-opens a race where a dying process could be re-included in barriers between the reset and actual termination.</p>
+        <h3 id="barrier-completion-during-draining">Barrier Completion During Draining</h3>
+        <p>When a process drains while a barrier is in-flight:</p>
+        <pre><code class="language-cpp">// drop_from_inflight_barriers()
+        1. Lock m_call_mutex
+        2. For each barrier:
+           - Remove draining process from both pending and arrived sets
+           - If pending is now empty -&gt; barrier completes immediately
+        3. Emit completions to remaining waiters</code></pre>
+        <p>Completions are emitted via <code>run_after_current_handler</code> to avoid re-entrancy.</p>
+        <hr>
+        <h2 id="message-flow">Message Flow</h2>
+        <h3 id="rpc-call-flow">RPC Call Flow</h3>
+        <pre><code>Caller (Process A)                Coordinator           Callee (Process B)
+             │                                   │                      │
+             │ 1. rpc_foo(target, args)          │                      │
+             ├─────────────────────────────────&gt; │                      │
+             │   Write to m_out_req_c            │                      │
+             │   Common fiid = make_instance_id()│                      │
+             │                                   │                      │
+             │                                   │  2. Reader sees msg  │
+             │                                   │ &lt;────────────────────┤
+             │                                   │   Dispatch to target │
+             │                                   │                      │
+             │                                   │ 3. Execute foo()     │
+             │                                   │  &lt;───────────────────┤
+             │                                   │   Return value       │
+             │                                   │                      │
+             │ 4. Reply arrives                  │                      │
+             │&lt;─────────────────────────────────────────────────────────┤
+             │   Reads from B&#x27;s m_out_rep_c      │   Write to m_out_rep_c
+             │   Match common_fiid               │                      │
+             │                                   │                      │
+             │ 5. Return to caller               │                      │
+             └───                                │                      │</code></pre>
+        <h3 id="barrier-flow">Barrier Flow</h3>
+        <pre><code>Process A          Process B          Process C (Coordinator with group)
+             │                   │                       │
+             │ barrier(&quot;sync&quot;)   │                       │
+             ├─────────────────────────────────────────&gt; │
+             │  RPC call         │                       │ First arrival:
+             │                   │                       │ - Snapshot membership
+             │                   │                       │ - Filter draining
+             │                  barrier(&quot;sync&quot;)          │ - Create pending set
+             │                   ├─────────────────────&gt; │
+             │                   │                       │ Subsequent arrival:
+             │                   │                       │ - Add to arrived
+             │                   │                       │ - Remove from pending
+             │                   │                       │
+             │                   │                       │ Last arrival:
+             │                   │                       │ - Emit completions
+             │   &lt;completion msg&gt;                        │   to all waiters
+             │&lt;──────────────────────────────────────────┤
+             │                  &lt;completion msg&gt;         │
+             │                   │&lt;──────────────────────┤
+             │                   │                       │
+             │ Returns with      │ Returns with          │
+             │ flush_seq         │ flush_seq             │
+             └──                 └──                     └──</code></pre>
+        <p><strong>Flush Sequence</strong>: The watermark returned from a barrier tells the caller which sequence to wait for before proceeding. This ensures all messages (including the barrier completion itself) are visible.</p>
+        <hr>
+        <h2 id="key-data-structures">Key Data Structures</h2>
+        <h3 id="instance-ids">Instance IDs</h3>
+        <pre><code class="language-cpp">using instance_id_type = uint64_t;
+        constexpr int  num_process_index_bits     = sintra::num_process_index_bits;     // 8 by default
+        constexpr int  num_transceiver_index_bits = sizeof(instance_id_type) * 8 - num_process_index_bits;
+        constexpr int  max_process_index          = sintra::max_process_index;          // 127 with defaults
+        constexpr auto max_instance_index         = sintra::max_instance_index;
+
+        inline instance_id_type make_instance_id() {
+            static std::atomic&lt;uint64_t&gt; instance_index_counter(2 + sintra::num_reserved_service_instances);
+            assert(instance_index_counter.load(std::memory_order_relaxed) &lt; max_instance_index);
+            auto d = sintra::decompose_instance(s_mproc_id);
+            const auto index = static_cast&lt;uint64_t&gt;(instance_index_counter++);
+            return sintra::compose_instance(d.process, index);
+        }</code></pre>
+        <ul>
+        <li>The <strong>upper</strong> <code>num_process_index_bits</code> encode the process slot together with complement/wildcard flags. The top bit is reserved for the complement encoding, which is why <code>max_process_index</code> is smaller than <code>2^(num_process_index_bits)</code>.</li>
+        <li>The <strong>lower</strong> <code>num_transceiver_index_bits</code> track the transceiver within that process slot. Index <code>1</code> is reserved for the <code>Managed_process</code> itself; other transceivers start at <code>2</code>.</li>
+        <li>Convenience constants (e.g. <code>any_local</code>, <code>any_remote</code>, <code>any_local_or_remote</code>) and helpers such as <code>compose_instance()</code> and <code>decompose_instance()</code> provide ergonomic access to this bit layout.</li>
+        <li><code>s_mproc_id</code> expands to the current process&#x27;s sentinel instance ID via the runtime state helpers in <code>detail/globals.h</code>, ensuring per-process counters stay anchored to the right slot.</li>
+        </ul>
+        <p><strong>Special IDs</strong>:</p>
+        <ul>
+        <li><code>invalid_instance_id = 0</code></li>
+        <li><code>make_service_instance_id()</code> - allocates service IDs from the reserved range attached to the local process slot</li>
+        <li><code>make_process_instance_id()</code> - produces the per-process sentinel (<code>transceiver == 1</code>) used for membership tracking</li>
+        </ul>
+        <h3 id="type-ids">Type IDs</h3>
+        <pre><code class="language-cpp">using type_id_type = uint64_t;
+
+        // Resolved at runtime via coordinator
+        type_id_type resolve_type(const string&amp; pretty_name);</code></pre>
+        <h3 id="deferred-functions-barriers">Deferred Functions (Barriers)</h3>
+        <p>Barriers use C++ exceptions to implement &quot;deferred returns&quot;:</p>
+        <pre><code class="language-cpp">struct deferral {
+            instance_id_type new_fiid;  // Common function ID for this deferral
+        };
+
+        // Throw a pair: deferral + cleanup lambda
+        throw std::pair&lt;deferral, function&lt;void()&gt;&gt;{
+            {.new_fiid = barrier_fiid},
+            [&amp;](){ /* unlock barrier.m */ }
+        };</code></pre>
+        <p>The RPC dispatcher catches these, stores the caller&#x27;s continuation, and resumes when the barrier completes.</p>
+        <h3 id="handler-registry">Handler Registry</h3>
+        <pre><code class="language-cpp">using handler_registry_type = /* complex nested maps */;</code></pre>
+        <p>Maps <code>(type_id, handler_type)</code> -&gt; handler functions. Handlers are activated with <code>activate_slot&lt;T&gt;(lambda)</code>.</p>
+        <hr>
+        <h2 id="process-recovery">Process Recovery</h2>
+        <ol>
+        <li>A worker opts into crash recovery by calling <code>sintra::enable_recovery()</code>, which forwards the request to the coordinator (<code>Managed_process::enable_recovery</code>). The coordinator records the process slot in <code>Coordinator::m_requested_recovery</code>, so a later abnormal termination routes through <code>Coordinator::recover_if_required()</code> instead of being treated as a permanent shutdown.</li>
+        <li><code>Managed_process::spawn_swarm_process()</code> caches the executable + argument vector for each spawned child in <code>m_cached_spawns</code> and increments a per-process occurrence counter. The counter is appended to the <code>req</code>/<code>rep</code> ring filenames (<code>Message_ring_{R,W}::get_base_filename</code>) so every recovery attempt attaches to a fresh pair of shared-memory files while previous rings remain available for post-mortem inspection.</li>
+        <li>Before launching the replacement child the coordinator spins up new <code>Process_message_reader</code> instances for the target process, ensuring its request/reply channels are mapped and ready the moment the binary starts executing.</li>
+        <li>We dismantle the previous occurrence&#x27;s plumbing before a respawn. <code>spawn_swarm_process()</code> explicitly erases any existing <code>Process_message_reader</code> for the crashing slot, which drops the shared_ptr references and unmaps the old occurrence&#x27;s rings before new readers are created. Only the currently active occurrence consumes address space; there is no &quot;bank&quot; of pre-reserved mappings for future recoveries.</li>
+        <li>Each IPC ring is double-mapped (<code>Ring_data::attach</code>) by reserving a 2 x span and mapping the 2 MiB data file twice. The contiguous view is what makes zero-copy wrap-around reads work; it is unrelated to recovery itself but explains the large &quot;guard&quot;/reserved ranges seen in macOS cores. Every request/reply channel therefore claims ~4 MiB of virtual address space. Prior to 2025-03 we saw ~4.24 GiB logical cores in CI because those spans appeared alongside the platform&#x27;s 4 GiB <code>__PAGEZERO</code> reservation. On Linux we call <code>madvise(..., MADV_DONTDUMP)</code> on both the data and control mappings so the rings are excluded from future cores by default; stack/code/heap pages still participate, so stack traces remain intact while the dumps shrink to the tens-of-megabytes range. macOS does not expose <code>MADV_DONTDUMP</code>, so the recovery test itself sets <code>RLIMIT_CORE</code> to zero just before its intentional <code>std::abort()</code> to keep GitHub Actions runners from filling their disks with multi-gigabyte Mach-O cores.</li>
+        </ol>
+        <p><strong>What &quot;safe respawn&quot; means</strong>: by pre-mapping the request/reply readers before <code>spawn_detached()</code> the coordinator guarantees that the recovering child sees ready-to-use channels as soon as it reaches user code. No address-space layout promises are required beyond the double-mapped rings themselves, and the respawned process inherits only the fresh occurrence&#x27;s mappings.</p>
+        <p><strong>How many rings stay mapped during <code>recovery_test</code>?</strong> The watchdog, coordinator, and crasher each hold two outgoing rings (<code>Message_ring_W</code>) plus request/reply readers for every other live process. At the point where the crasher aborts that amounts to a few dozen 4 MiB spans in total-on the order of 250 MiB of virtual address space. Those ranges used to inflate macOS cores to ~4.24 GiB (4 GiB <code>__PAGEZERO</code> + ~0.25 GiB of double-mapped rings + stacks/segments). Linux skips the ring spans thanks to <code>MADV_DONTDUMP</code>; macOS still records them, which is why the recovery test suppresses its intentional core file entirely.</p>
+        <hr>
+        <h2 id="per-recipient-flush-tokens-critical-for-correctness">Per-Recipient Flush Tokens (CRITICAL for Correctness)</h2>
+        <h3 id="the-problem">The Problem</h3>
+        <p><strong>Before Fix</strong>: The coordinator used a single global watermark:</p>
+        <pre><code class="language-cpp">// WRONG: Same token for all recipients
+        const auto flush_seq = s_mproc-&gt;m_out_rep_c-&gt;get_leading_sequence();
+        for (auto recipient : recipients) {
+            // Embed flush_seq in message to recipient
+        }</code></pre>
+        <p><strong>Issue</strong>: <code>m_out_rep_c-&gt;get_leading_sequence()</code> is the watermark of the <strong>coordinator&#x27;s</strong> reply ring. But each <strong>recipient</strong> reads from their <strong>own</strong> ring, not the coordinator&#x27;s. Using a global token can cause:</p>
+        <ul>
+        <li>Tokens ahead of a recipient&#x27;s channel -&gt; indefinite wait (hang)</li>
+        <li>Tokens from wrong channel -&gt; delivery guarantee violations</li>
+        </ul>
+        <h3 id="the-solution">The Solution</h3>
+        <p><strong>Per-Recipient Watermarks at Write Time</strong>: Compute a flush token <strong>per recipient</strong> at message write time:</p>
+        <pre><code class="language-cpp">// CORRECT: Token per recipient computed at write time
+        for (auto recipient : completion.recipients) {
+            // Get watermark JUST BEFORE writing this recipient&#x27;s message
+            const auto flush_seq = s_mproc-&gt;m_out_rep_c-&gt;get_leading_sequence();
+
+            auto* placed_msg = s_mproc-&gt;m_out_rep_c-&gt;write&lt;return_message_type&gt;(
+                vb_size&lt;return_message_type&gt;(flush_seq), flush_seq);
+
+            Transceiver::finalize_rpc_write(
+                placed_msg, recipient, completion.common_function_iid, this, ...);
+        }</code></pre>
+        <p><strong>Key Insight</strong>: Even though all messages go through <code>m_out_rep_c</code>, each call to <code>write()</code> advances the <code>leading_sequence</code>, so taking the watermark <strong>inside</strong> the loop gives each recipient a token that&#x27;s valid for <strong>their specific message write time</strong>.</p>
+        <p><strong>Note on Return Value</strong>: The barrier RPC itself returns a <strong>single flush token</strong> (the one embedded in the completion message sent to the caller). The &quot;per-recipient&quot; aspect applies to the <strong>completion messages sent to all waiters</strong>, not to the return value. Each waiter receives a token computed specifically for their message write time.</p>
+        <p><strong>Future Enhancement</strong>: If Sintra evolves to have per-recipient egress rings (instead of a single shared reply ring), the fix would need <code>s_mproc-&gt;rep_watermark_to(recipient)</code> to query the specific ring for that recipient.</p>
+        <hr>
+        <h2 id="references">References</h2>
+        <ul>
+        <li><strong>Ring Implementation</strong>: <code>include/sintra/detail/ipc_rings.h</code></li>
+        <li><strong>Process Management</strong>: <code>include/sintra/detail/managed_process.h</code></li>
+        <li><strong>Coordinator</strong>: <code>include/sintra/detail/coordinator.h</code>, <code>coordinator_impl.h</code></li>
+        <li><strong>Shutdown Semantics</strong>: <code>docs/barriers_and_shutdown.md</code></li>
+        <li><strong>Stress/Timeout Harness</strong>: <code>tests/run_tests.py</code></li>
+        </ul>
+        <hr>
+        <p><strong>Maintainer</strong>: Ioannis Makris</p>
+        <nav class="page-nav" aria-label="Reference navigation"><a class="page-nav-prev" href="readme.html"><span class="label">&larr; Previous</span><span class="title">README</span></a><a class="page-nav-next" href="barriers_and_shutdown.html"><span class="label">Next &rarr;</span><span class="title">Barriers and shutdown</span></a></nav>
+      </article>
+      <aside class="page-toc" aria-label="On this page">
+        <h2>On this page</h2>
+        <ul>
+          <li class="level-2"><a href="#table-of-contents">Table of Contents</a></li>
+          <li class="level-2"><a href="#system-overview">System Overview</a></li>
+          <li class="level-3"><a href="#core-design-principles">Core Design Principles</a></li>
+          <li class="level-2"><a href="#ring-based-ipc-layer">Ring-Based IPC Layer</a></li>
+          <li class="level-3"><a href="#the-magic-ring-architecture">The Magic Ring Architecture</a></li>
+          <li class="level-3"><a href="#double-mapping-details">Double-Mapping Details</a></li>
+          <li class="level-2"><a href="#process-management">Process Management</a></li>
+          <li class="level-3"><a href="#managed_process">Managed_process</a></li>
+          <li class="level-2"><a href="#coordinator-and-barriers">Coordinator and Barriers</a></li>
+          <li class="level-3"><a href="#coordinator-structure">Coordinator Structure</a></li>
+          <li class="level-3"><a href="#barrier-mechanism">Barrier Mechanism</a></li>
+          <li class="level-2"><a href="#draining-and-shutdown">Draining and Shutdown</a></li>
+          <li class="level-3"><a href="#lifecycle-states">Lifecycle States</a></li>
+          <li class="level-3"><a href="#shutdown-sequence-detailfinalize">Shutdown Sequence (detail::finalize)</a></li>
+          <li class="level-3"><a href="#draining-state-management">Draining State Management</a></li>
+          <li class="level-3"><a href="#barrier-completion-during-draining">Barrier Completion During Draining</a></li>
+          <li class="level-2"><a href="#message-flow">Message Flow</a></li>
+          <li class="level-3"><a href="#rpc-call-flow">RPC Call Flow</a></li>
+          <li class="level-3"><a href="#barrier-flow">Barrier Flow</a></li>
+          <li class="level-2"><a href="#key-data-structures">Key Data Structures</a></li>
+          <li class="level-3"><a href="#instance-ids">Instance IDs</a></li>
+          <li class="level-3"><a href="#type-ids">Type IDs</a></li>
+          <li class="level-3"><a href="#deferred-functions-barriers">Deferred Functions (Barriers)</a></li>
+          <li class="level-3"><a href="#handler-registry">Handler Registry</a></li>
+          <li class="level-2"><a href="#process-recovery">Process Recovery</a></li>
+          <li class="level-2"><a href="#per-recipient-flush-tokens-critical-for-correctness">Per-Recipient Flush Tokens (CRITICAL for Correctness)</a></li>
+          <li class="level-3"><a href="#the-problem">The Problem</a></li>
+          <li class="level-3"><a href="#the-solution">The Solution</a></li>
+          <li class="level-2"><a href="#references">References</a></li>
+        </ul>
+      </aside>
+    </main>
+  </body>
+</html>

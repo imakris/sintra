@@ -24,6 +24,7 @@
 #include <functional>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
@@ -83,7 +84,7 @@ void collect_branches(
 
 } // namespace detail
 
-inline void disable_debug_pause_for_current_process()
+inline void disable_debug_pause_for_current_process() noexcept
 {
     detail::set_debug_pause_active(false);
 }
@@ -859,11 +860,19 @@ inline int process_index()
 template <typename FT, typename SENDER_T>
 auto activate_slot(const FT& slot_function, Typed_instance_id<SENDER_T> sender_id)
 {
+    if (!s_mproc) {
+        throw std::runtime_error("activate_slot() requires an active Sintra runtime.");
+    }
+
     return s_mproc->activate(slot_function, sender_id);
 }
 
 inline void deactivate_all_slots()
 {
+    if (!s_mproc) {
+        throw std::runtime_error("deactivate_all_slots() requires an active Sintra runtime.");
+    }
+
     s_mproc->deactivate_all();
 }
 
@@ -909,6 +918,9 @@ MESSAGE_T receive()
 
 inline void enable_recovery()
 {
+    if (!s_mproc) {
+        throw std::runtime_error("enable_recovery() requires an active Sintra runtime.");
+    }
     s_mproc->enable_recovery();
 }
 

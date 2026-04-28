@@ -10,7 +10,7 @@
 | [`sintra::Process_descriptor`](process_descriptor.md) | type | `<sintra/sintra.h>` | Describe a process branch or spawn target. |
 | [`sintra::spawn_swarm_process`](spawn_swarm_process.md) | function | `<sintra/sintra.h>` | Add managed processes to a running swarm. |
 | [`sintra::join_swarm`](join_swarm.md) | function | `<sintra/sintra.h>` | Join an existing branch at runtime. |
-| [`sintra::disable_debug_pause_for_current_process`](init.md#sintradisable_debug_pause_for_current_process) | function | `<sintra/sintra.h>` | Opt the current process out of debug pause-on-exit behavior. |
+| [`sintra::disable_debug_pause_for_current_process`](disable_debug_pause_for_current_process.md) | function | `<sintra/sintra.h>` | Opt the current process out of debug pause-on-exit behavior. |
 
 ## Publish/Subscribe
 
@@ -117,3 +117,13 @@
 Implementation headers under `sintra/detail/` are not part of the public
 header set. For guide-style explanations and recipe links, see
 [Sintra Guide](../guide.md).
+
+## Guides and Notes
+
+| Document | Purpose |
+| --- | --- |
+| [Sintra Guide](../guide.md) | Narrative guide and recipes for the public API. |
+| [README](../../README.md) | Project overview, integration notes, and examples. |
+| [Architecture notes](../architecture.md) | Internal runtime architecture and process model notes. |
+| [Barriers and shutdown](../barriers_and_shutdown.md) | Lifecycle, shutdown, and barrier coordination details. |
+| [Process lifecycle notes](../process_lifecycle_notes.md) | Recovery hooks, lifecycle events, and lifeline ownership notes. |

@@ -1,5 +1,20 @@
 #!/usr/bin/env python3
-"""Build the Sintra reference Markdown into a static HTML site."""
+"""Build the Sintra reference Markdown into a static HTML site.
+
+The site has three page kinds:
+  - Index (`docs/reference/index.md`)        -> single-column landing page.
+  - Reference page (every other `*.md`)      -> article + right-rail "On this page" TOC.
+  - Top-level docs (`docs/*.md`, `README.md`) -> rendered as guide-style pages.
+
+Layout features (driven from the markdown sources, no JS):
+  - Breadcrumb row under the header on every non-index page.
+  - Right-rail on-page TOC built from H2/H3 of the rendered article.
+  - Prev / Next links derived from the order of entries in `index.md`.
+  - Build-time link checker that fails on broken cross-references.
+
+CSS lives in `scripts/site_assets/style.css` and is copied into the output
+on every build. There is no inlined CSS in this script.
+"""
 
 from __future__ import annotations
 
@@ -7,26 +22,66 @@ import html
 import os
 import re
 import shutil
+import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from urllib.parse import quote
 
 
 ROOT = Path(__file__).resolve().parents[1]
-REFERENCE_DIR = ROOT / "docs" / "reference"
-GUIDE = ROOT / "docs" / "guide.md"
-OUT_DIR = ROOT / "docs" / "reference_site"
+DOCS_DIR = ROOT / "docs"
+REFERENCE_DIR = DOCS_DIR / "reference"
+README = ROOT / "README.md"
+OUT_DIR = DOCS_DIR / "reference_site"
 ASSET_DIR = OUT_DIR / "assets"
 PAGE_DIR = OUT_DIR / "pages"
+SITE_ASSETS_SRC = Path(__file__).resolve().parent / "site_assets"
+GITHUB_BLOB_BASE = "https://github.com/imakris/sintra/blob/master"
+
+
+# ============================================================================
+# Data types
+# ============================================================================
 
 
 @dataclass(frozen=True)
+class Heading:
+    level: int
+    anchor: str
+    text_html: str
+
+
+@dataclass(frozen=True)
+class CollectedLink:
+    source: Path           # source markdown file the link was written in
+    output: Path           # generated HTML the rewritten href is relative to
+    raw_target: str        # the link target exactly as it appears in markdown
+
+
+@dataclass
 class Page:
     source: Path
     output: Path
     title: str
     body: str
+    headings: list[Heading]
+    links: list[CollectedLink]
+    page_class: str
+    section: str | None        # H2 group from index.md, or None for top-level pages
+    label: str | None          # display label used in breadcrumbs and prev/next
     is_index: bool = False
+
+
+@dataclass(frozen=True)
+class IndexLink:
+    label: str             # plain-text label (no markdown markup)
+    output: Path           # absolute output path
+    fragment: str          # anchor inside that page, may be ""
+
+
+# ============================================================================
+# Generic helpers
+# ============================================================================
 
 
 def slugify(text: str) -> str:
@@ -52,28 +107,61 @@ def is_table_separator(line: str) -> bool:
     return bool(cells) and all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells)
 
 
+def is_thematic_break(line: str) -> bool:
+    return bool(re.fullmatch(r"\s{0,3}(?:-{3,}|\*{3,}|_{3,})\s*", line))
+
+
 def is_external_url(target: str) -> bool:
-    return target.startswith(("http://", "https://", "mailto:"))
+    return target.startswith(("http://", "https://", "mailto:", "tel:", "ftp://"))
 
 
 def output_for_markdown(path: Path) -> Path | None:
+    """Map a markdown source path to its generated HTML, or None if not in the site."""
     resolved = path.resolve()
-    if resolved == GUIDE.resolve():
-        return PAGE_DIR / "guide.html"
+    if resolved == README.resolve():
+        return PAGE_DIR / "readme.html"
+    # Reference pages: docs/reference/<stem>.md -> docs/reference_site/{index|pages/<stem>}.html
     try:
         resolved.relative_to(REFERENCE_DIR.resolve())
     except ValueError:
+        pass
+    else:
+        if resolved.name == "index.md":
+            return OUT_DIR / "index.html"
+        return PAGE_DIR / f"{resolved.stem}.html"
+    # Top-level docs: docs/<stem>.md -> docs/reference_site/pages/<stem>.html
+    try:
+        rel = resolved.relative_to(DOCS_DIR.resolve())
+    except ValueError:
         return None
-    if resolved.name == "index.md":
-        return OUT_DIR / "index.html"
-    return PAGE_DIR / f"{resolved.stem}.html"
+    if len(rel.parts) == 1 and rel.suffix == ".md":
+        return PAGE_DIR / f"{resolved.stem}.html"
+    return None
+
+
+def relpath(target: Path, start: Path) -> str:
+    return os.path.relpath(target, start).replace(os.sep, "/")
+
+
+def repo_blob_url(target: Path, fragment: str = "") -> str | None:
+    try:
+        rel = target.resolve().relative_to(ROOT.resolve())
+    except ValueError:
+        return None
+    suffix = f"#{fragment}" if fragment else ""
+    return f"{GITHUB_BLOB_BASE}/{quote(rel.as_posix(), safe='/')}{suffix}"
+
+
+# ============================================================================
+# Markdown rendering
+# ============================================================================
 
 
 def rewrite_link(source: Path, output: Path, target: str) -> str:
+    target = target.strip()
     if is_external_url(target) or target.startswith("#"):
         return target
 
-    target = target.strip()
     url, hash_mark, fragment = target.partition("#")
     if not url:
         return target
@@ -81,14 +169,23 @@ def rewrite_link(source: Path, output: Path, target: str) -> str:
     resolved = (source.parent / url).resolve()
     generated = output_for_markdown(resolved)
     if generated is not None:
-        rel = os.path.relpath(generated, output.parent).replace(os.sep, "/")
+        rel = relpath(generated, output.parent)
         return f"{rel}{hash_mark}{fragment}"
 
-    rel = os.path.relpath(resolved, output.parent).replace(os.sep, "/")
+    blob_url = repo_blob_url(resolved, fragment)
+    if blob_url is not None:
+        return blob_url
+
+    rel = relpath(resolved, output.parent)
     return f"{rel}{hash_mark}{fragment}"
 
 
-def render_inline(text: str, source: Path, output: Path) -> str:
+def render_inline(
+    text: str,
+    source: Path,
+    output: Path,
+    links: list[CollectedLink] | None = None,
+) -> str:
     placeholders: list[str] = []
 
     def stash(value: str) -> str:
@@ -107,53 +204,124 @@ def render_inline(text: str, source: Path, output: Path) -> str:
 
     def link_repl(match: re.Match[str]) -> str:
         raw_label = match.group(1)
+        raw_target = match.group(2).strip()
         label = (
             restore_placeholders(raw_label)
             if "\x00" in raw_label
-            else render_inline(raw_label, source, output)
+            else render_inline(raw_label, source, output, links)
         )
-        href = html.escape(rewrite_link(source, output, match.group(2)), quote=True)
+        if links is not None:
+            links.append(CollectedLink(source=source, output=output, raw_target=raw_target))
+        href = html.escape(rewrite_link(source, output, raw_target), quote=True)
         return stash(f'<a href="{href}">{label}</a>')
 
+    def image_repl(match: re.Match[str]) -> str:
+        alt = match.group(1)
+        raw_target = match.group(2).strip()
+        if is_external_url(raw_target) or raw_target.startswith("#"):
+            src = raw_target
+        else:
+            src = rewrite_link(source, output, raw_target)
+        src_attr = html.escape(src, quote=True)
+        alt_attr = html.escape(alt, quote=True)
+        return stash(f'<img src="{src_attr}" alt="{alt_attr}" />')
+
     text = re.sub(r"`([^`]*)`", code_repl, text)
-    text = re.sub(r"(?<!!)\[([^\]]+)\]\(([^)]+)\)", link_repl, text)
+    text = re.sub(r"!\[([^\]]*)\]\(([^)]+)\)", image_repl, text)
+    text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", link_repl, text)
     text = html.escape(text)
     text = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", text)
 
     return restore_placeholders(text)
 
 
-def render_list(lines: list[str], source: Path, output: Path, ordered: bool) -> str:
-    tag = "ol" if ordered else "ul"
-    items: list[list[str]] = []
-    current: list[str] | None = None
-    marker = re.compile(r"^\s*(?:[-*]\s+|\d+\.\s+)")
+def render_list(
+    lines: list[str],
+    source: Path,
+    output: Path,
+    ordered: bool,
+    links: list[CollectedLink],
+) -> str:
+    marker = re.compile(r"^(\s*)([-*]|\d+\.)\s+(.*)$")
 
-    for line in lines:
-        if marker.match(line):
+    def line_indent(value: str) -> int:
+        expanded = value.expandtabs(4)
+        return len(expanded) - len(expanded.lstrip(" "))
+
+    def marker_info(value: str) -> tuple[int, bool, str] | None:
+        match = marker.match(value)
+        if not match:
+            return None
+        token = match.group(2)
+        return line_indent(match.group(1)), token.endswith("."), match.group(3).strip()
+
+    def render_item(parts: list[str]) -> str:
+        inline_parts = [p for p in parts if not p.startswith(("<ul", "<ol"))]
+        nested_parts = [p for p in parts if p.startswith(("<ul", "<ol"))]
+        content = " ".join(p for p in inline_parts if p)
+        if nested_parts:
+            content = "\n".join([content, *nested_parts]) if content else "\n".join(nested_parts)
+        return f"<li>{content}</li>"
+
+    def parse_level(index: int, indent: int, level_ordered: bool) -> tuple[str, int]:
+        items: list[list[str]] = []
+        current: list[str] | None = None
+
+        while index < len(lines):
+            if not lines[index].strip():
+                index += 1
+                continue
+
+            info = marker_info(lines[index])
+            if info is None:
+                if current is not None:
+                    current.append(render_inline(lines[index].strip(), source, output, links))
+                index += 1
+                continue
+
+            item_indent, item_ordered, item_text = info
+            if item_indent < indent:
+                break
+            if item_indent > indent:
+                if current is None:
+                    current = []
+                nested_html, index = parse_level(index, item_indent, item_ordered)
+                current.append(nested_html)
+                continue
+
             if current is not None:
                 items.append(current)
-            current = [marker.sub("", line).strip()]
-        elif current is not None:
-            current.append(line.strip())
+            current = [render_inline(item_text, source, output, links)]
+            index += 1
 
-    if current is not None:
-        items.append(current)
+        if current is not None:
+            items.append(current)
 
-    rendered = []
-    for item in items:
-        text = " ".join(part for part in item if part)
-        rendered.append(f"<li>{render_inline(text, source, output)}</li>")
+        tag = "ol" if level_ordered else "ul"
+        body = "\n".join(render_item(item) for item in items)
+        return f"<{tag}>\n{body}\n</{tag}>", index
 
-    return f"<{tag}>\n" + "\n".join(rendered) + f"\n</{tag}>"
+    first = marker_info(lines[0])
+    start_indent = first[0] if first is not None else 0
+    rendered, _ = parse_level(0, start_indent, ordered)
+    return rendered
 
 
-def render_markdown(source: Path, output: Path) -> tuple[str, str]:
-    lines = source.read_text(encoding="utf-8").splitlines()
+def render_markdown(
+    source: Path, output: Path
+) -> tuple[str, str, list[Heading], list[CollectedLink]]:
+    # `utf-8-sig` strips a leading BOM if present (the repo README has one).
+    lines = source.read_text(encoding="utf-8-sig").splitlines()
     html_blocks: list[str] = []
-    headings: dict[str, int] = {}
+    headings: list[Heading] = []
+    links: list[CollectedLink] = []
+    seen_anchors: dict[str, int] = {}
     title = source.stem
     i = 0
+
+    # CommonMark Type 6 HTML block: line begins with `<` or `</` followed by a
+    # block-level tag; the block runs until the next blank line.
+    html_block_open = re.compile(r"^\s{0,3}</?[a-zA-Z][a-zA-Z0-9-]*(\s|/?>|$)")
 
     while i < len(lines):
         line = lines[i]
@@ -176,18 +344,33 @@ def render_markdown(source: Path, output: Path) -> tuple[str, str]:
             html_blocks.append(f"<pre><code{class_attr}>{code}</code></pre>")
             continue
 
+        if html_block_open.match(line):
+            raw_lines: list[str] = [line]
+            i += 1
+            while i < len(lines) and lines[i].strip():
+                raw_lines.append(lines[i])
+                i += 1
+            html_blocks.append("\n".join(raw_lines))
+            continue
+
+        if is_thematic_break(line):
+            html_blocks.append("<hr>")
+            i += 1
+            continue
+
         heading_match = re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
         if heading_match:
             level = len(heading_match.group(1))
             raw_text = heading_match.group(2).strip()
             base = slugify(raw_text)
-            count = headings.get(base, 0)
-            headings[base] = count + 1
+            count = seen_anchors.get(base, 0)
+            seen_anchors[base] = count + 1
             anchor = base if count == 0 else f"{base}-{count}"
             if level == 1:
                 title = re.sub(r"`([^`]*)`", r"\1", raw_text)
-            rendered = render_inline(raw_text, source, output)
+            rendered = render_inline(raw_text, source, output, links)
             html_blocks.append(f'<h{level} id="{anchor}">{rendered}</h{level}>')
+            headings.append(Heading(level=level, anchor=anchor, text_html=rendered))
             i += 1
             continue
 
@@ -204,7 +387,7 @@ def render_markdown(source: Path, output: Path) -> tuple[str, str]:
                 rows.append(split_table_row(lines[i]))
                 i += 1
             header_html = "".join(
-                f"<th>{render_inline(cell, source, output)}</th>" for cell in headers
+                f"<th>{render_inline(cell, source, output, links)}</th>" for cell in headers
             )
             row_html = []
             for row in rows:
@@ -212,7 +395,7 @@ def render_markdown(source: Path, output: Path) -> tuple[str, str]:
                 row_html.append(
                     "<tr>"
                     + "".join(
-                        f"<td>{render_inline(cell, source, output)}</td>"
+                        f"<td>{render_inline(cell, source, output, links)}</td>"
                         for cell in cells[: len(headers)]
                     )
                     + "</tr>"
@@ -233,12 +416,25 @@ def render_markdown(source: Path, output: Path) -> tuple[str, str]:
             while i < len(lines):
                 next_line = lines[i]
                 if not next_line.strip():
+                    lookahead = i + 1
+                    while lookahead < len(lines) and not lines[lookahead].strip():
+                        lookahead += 1
+                    if lookahead < len(lines) and (
+                        re.match(r"^\s*[-*]\s+", lines[lookahead])
+                        or re.match(r"^\s*\d+\.\s+", lines[lookahead])
+                        or lines[lookahead].startswith(("  ", "   ", "    "))
+                    ):
+                        list_lines.append("")
+                        i = lookahead
+                        continue
                     break
                 if re.match(r"^\s{0,3}#{1,6}\s+", next_line):
                     break
                 if "|" in next_line and i + 1 < len(lines) and is_table_separator(lines[i + 1]):
                     break
                 if next_line.strip().startswith("```"):
+                    break
+                if is_thematic_break(next_line):
                     break
                 if (
                     re.match(r"^\s*[-*]\s+", next_line)
@@ -249,7 +445,7 @@ def render_markdown(source: Path, output: Path) -> tuple[str, str]:
                     i += 1
                     continue
                 break
-            html_blocks.append(render_list(list_lines, source, output, ordered))
+            html_blocks.append(render_list(list_lines, source, output, ordered, links))
             continue
 
         paragraph = [line.strip()]
@@ -266,77 +462,83 @@ def render_markdown(source: Path, output: Path) -> tuple[str, str]:
                 break
             if "|" in next_line and i + 1 < len(lines) and is_table_separator(lines[i + 1]):
                 break
+            if is_thematic_break(next_line):
+                break
             paragraph.append(next_line.strip())
             i += 1
-        html_blocks.append(f"<p>{render_inline(' '.join(paragraph), source, output)}</p>")
+        html_blocks.append(
+            f"<p>{render_inline(' '.join(paragraph), source, output, links)}</p>"
+        )
 
-    return title, "\n".join(html_blocks)
+    return title, "\n".join(html_blocks), headings, links
 
 
-def collect_reference_links() -> list[tuple[str, list[tuple[str, Path, str]]]]:
-    index = REFERENCE_DIR / "index.md"
-    groups: list[tuple[str, list[tuple[str, Path, str]]]] = []
-    current: tuple[str, list[tuple[str, Path, str]]] | None = None
+# ============================================================================
+# Index ordering: parse index.md to drive breadcrumbs and prev/next
+# ============================================================================
+
+
+def parse_index_order() -> tuple[list[IndexLink], dict[Path, IndexLink], dict[Path, str]]:
+    """Return the linear page order (deduped by output path), a per-page lookup,
+    and a per-page section name."""
+    index_md = REFERENCE_DIR / "index.md"
+    sequence: list[IndexLink] = []
+    seen: set[Path] = set()
+    by_output: dict[Path, IndexLink] = {}
+    section_for: dict[Path, str] = {}
+    current_section: str | None = None
     link_re = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
 
-    for line in index.read_text(encoding="utf-8").splitlines():
+    for line in index_md.read_text(encoding="utf-8").splitlines():
         heading = re.match(r"^##\s+(.+)$", line)
         if heading:
-            current = (heading.group(1), [])
-            groups.append(current)
+            current_section = heading.group(1).strip()
             continue
-        if current is None or not line.startswith("|"):
+        if current_section is None or not line.startswith("|") or current_section == "Headers":
             continue
         for label, target in link_re.findall(line):
             url, _, fragment = target.partition("#")
-            if url.endswith(".md"):
-                generated = output_for_markdown((index.parent / url).resolve())
-                if generated is not None:
-                    current[1].append((re.sub(r"`", "", label), generated, fragment))
-                break
-
-    return [(name, links) for name, links in groups if links and name != "Headers"]
-
-
-def render_sidebar(active_output: Path) -> str:
-    groups = collect_reference_links()
-    parts = ['<nav class="sidebar" aria-label="Reference navigation">']
-    for group_name, links in groups:
-        parts.append(f"<section><h2>{html.escape(group_name)}</h2><ul>")
-        for label, target, fragment in links:
-            href = os.path.relpath(target, active_output.parent).replace(os.sep, "/")
-            if fragment:
-                href = f"{href}#{fragment}"
-            active = target.resolve() == active_output.resolve()
-            class_attr = ' class="active"' if active else ""
-            parts.append(
-                f'<li><a{class_attr} href="{html.escape(href, quote=True)}">'
-                f"{html.escape(label)}</a></li>"
+            if not url.endswith(".md"):
+                continue
+            generated = output_for_markdown((index_md.parent / url).resolve())
+            if generated is None:
+                continue
+            entry = IndexLink(
+                label=re.sub(r"`", "", label).strip(),
+                output=generated.resolve(),
+                fragment=fragment,
             )
-        parts.append("</ul></section>")
-    parts.append("</nav>")
-    return "\n".join(parts)
+            section_for.setdefault(entry.output, current_section)
+            if entry.output in seen:
+                break
+            seen.add(entry.output)
+            if not entry.fragment:
+                sequence.append(entry)
+                by_output[entry.output] = entry
+            else:
+                synthetic = IndexLink(label=entry.label, output=entry.output, fragment="")
+                sequence.append(synthetic)
+                by_output[entry.output] = synthetic
+            break
+
+    return sequence, by_output, section_for
 
 
-def page_template(page: Page) -> str:
-    css = os.path.relpath(ASSET_DIR / "style.css", page.output.parent).replace(os.sep, "/")
-    index_href = os.path.relpath(OUT_DIR / "index.html", page.output.parent).replace(os.sep, "/")
-    guide_href = os.path.relpath(PAGE_DIR / "guide.html", page.output.parent).replace(os.sep, "/")
-    readme_href = os.path.relpath(ROOT / "README.md", page.output.parent).replace(os.sep, "/")
-    sidebar = render_sidebar(page.output)
-    page_class = "reference-index" if page.is_index else "reference-page"
-    title = html.escape(page.title)
-    return f"""<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="color-scheme" content="dark" />
-    <title>{title} - Sintra Reference</title>
-    <link rel="stylesheet" href="{css}" />
-  </head>
-  <body>
-    <a class="skip-nav" href="#main-content">Skip to content</a>
+# ============================================================================
+# HTML fragments: header, breadcrumb, on-page TOC, prev/next
+# ============================================================================
+
+
+def render_header(page: Page) -> str:
+    output_dir = page.output.parent
+    index_href = relpath(OUT_DIR / "index.html", output_dir)
+    guide_href = relpath(PAGE_DIR / "guide.html", output_dir)
+    readme_href = relpath(PAGE_DIR / "readme.html", output_dir)
+
+    def nav_attr(target: Path) -> str:
+        return ' aria-current="page"' if target.resolve() == page.output.resolve() else ""
+
+    return f"""\
     <header class="site-header">
       <div class="header-inner">
         <a class="brand" href="{index_href}" aria-label="Sintra reference home">
@@ -344,372 +546,339 @@ def page_template(page: Page) -> str:
           <span>Sintra Reference</span>
         </a>
         <nav class="top-nav" aria-label="Top navigation">
-          <a href="{index_href}">Reference</a>
-          <a href="{guide_href}">Guide</a>
-          <a href="{readme_href}">README</a>
+          <a href="{index_href}"{nav_attr(OUT_DIR / "index.html")}>Reference</a>
+          <a href="{guide_href}"{nav_attr(PAGE_DIR / "guide.html")}>Guide</a>
+          <a href="{readme_href}"{nav_attr(PAGE_DIR / "readme.html")}>README</a>
         </nav>
       </div>
-    </header>
-    <main id="main-content" class="page-shell {page_class}">
-      {sidebar}
-      <article class="content-prose">
-        {page.body}
-      </article>
-    </main>
-  </body>
-</html>
-"""
+    </header>"""
 
 
-STYLE = """
-:root {
-  --color-bg: #111;
-  --color-bg-alt: #1f1f1f;
-  --color-text: #e0e0e0;
-  --color-text-muted: #999;
-  --color-border: #3a3a3a;
-  --color-link: #6fa8c7;
-  --color-link-hover: #8ec4df;
-  --color-accent: #8ab4c7;
-  --color-code-bg: #1e1e1e;
-  --font-body: 'IBM Plex Sans', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  --font-mono: 'JetBrains Mono', ui-monospace, 'Cascadia Code', 'SFMono-Regular', Consolas, monospace;
-  --size-xs: 0.75rem;
-  --size-sm: 0.875rem;
-  --size-base: 1rem;
-  --size-lg: 1.125rem;
-  --size-xl: 1.5rem;
-  --size-2xl: 2rem;
-  --space-xs: 0.25rem;
-  --space-sm: 0.5rem;
-  --space-md: 1rem;
-  --space-lg: 2rem;
-  --space-xl: 3rem;
-  --max-width: 92rem;
-  --header-height: 3.5rem;
-}
-
-* { box-sizing: border-box; }
-
-html {
-  background: var(--color-bg);
-  color: var(--color-text);
-}
-
-body {
-  margin: 0;
-  font-family: var(--font-body);
-  font-size: var(--size-base);
-  line-height: 1.6;
-  color: var(--color-text);
-  background: rgba(17, 17, 17, 0.85);
-}
-
-a {
-  color: var(--color-link);
-  text-decoration: underline;
-  text-underline-offset: 0.15em;
-}
-
-a:hover { color: var(--color-link-hover); }
-
-:focus-visible {
-  outline: 2px solid var(--color-link);
-  outline-offset: 2px;
-}
-
-.skip-nav {
-  position: absolute;
-  left: -9999px;
-  top: auto;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  z-index: 100;
-  padding: var(--space-sm) var(--space-md);
-  background: var(--color-bg);
-  border: 2px solid var(--color-link);
-}
-
-.skip-nav:focus {
-  position: fixed;
-  left: var(--space-md);
-  top: var(--space-md);
-  width: auto;
-  height: auto;
-}
-
-.site-header {
-  position: sticky;
-  top: 0;
-  z-index: 10;
-  min-height: var(--header-height);
-  background: var(--color-bg);
-  border-bottom: 1px solid var(--color-border);
-}
-
-.header-inner {
-  max-width: var(--max-width);
-  min-height: var(--header-height);
-  margin: 0 auto;
-  padding: 0 var(--space-md);
-  display: flex;
-  align-items: center;
-  gap: var(--space-lg);
-}
-
-.brand {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-sm);
-  color: var(--color-text);
-  text-decoration: none;
-  font-weight: 600;
-}
-
-.brand-mark {
-  width: 0.85rem;
-  height: 0.85rem;
-  display: inline-block;
-  background: rgb(196, 77, 40);
-}
-
-.top-nav {
-  display: flex;
-  gap: var(--space-md);
-  margin-left: auto;
-}
-
-.top-nav a {
-  color: var(--color-text-muted);
-  font-size: var(--size-sm);
-  text-decoration: none;
-}
-
-.top-nav a:hover { color: var(--color-text); }
-
-.page-shell {
-  width: 100%;
-  max-width: var(--max-width);
-  margin: 0 auto;
-  padding: var(--space-lg) var(--space-md);
-  display: grid;
-  grid-template-columns: minmax(12rem, 16rem) minmax(0, 1fr);
-  gap: var(--space-xl);
-}
-
-.sidebar {
-  position: sticky;
-  top: calc(var(--header-height) + var(--space-lg));
-  align-self: start;
-  max-height: calc(100vh - var(--header-height) - var(--space-xl));
-  overflow: auto;
-  padding-right: var(--space-md);
-  border-right: 1px solid var(--color-border);
-}
-
-.sidebar section + section { margin-top: var(--space-lg); }
-
-.sidebar h2 {
-  margin: 0 0 var(--space-xs);
-  font-family: var(--font-mono);
-  font-size: var(--size-xs);
-  font-weight: 400;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--color-text-muted);
-}
-
-.sidebar ul {
-  list-style: none;
-  padding: 0;
-  margin: 0;
-}
-
-.sidebar li { margin: 0; }
-
-.sidebar a {
-  display: block;
-  padding: 0.18rem 0;
-  color: var(--color-text-muted);
-  font-size: var(--size-sm);
-  text-decoration: none;
-}
-
-.sidebar a:hover,
-.sidebar a.active {
-  color: var(--color-link-hover);
-}
-
-.content-prose {
-  max-width: 56rem;
-  line-height: 1.7;
-}
-
-.reference-index .content-prose {
-  max-width: none;
-}
-
-h1, h2, h3, h4 {
-  line-height: 1.3;
-  color: var(--color-text);
-  margin-top: var(--space-lg);
-  margin-bottom: var(--space-sm);
-}
-
-h1 {
-  font-size: var(--size-2xl);
-  margin-top: 0;
-}
-
-h2 {
-  font-size: var(--size-xl);
-  font-weight: 500;
-  margin-top: var(--space-xl);
-  padding-top: var(--space-md);
-  border-top: 1px solid var(--color-border);
-}
-
-h1 + h2,
-h2:first-child {
-  border-top: none;
-  padding-top: 0;
-}
-
-h3 {
-  font-size: var(--size-lg);
-  font-weight: 500;
-}
-
-h4 {
-  font-size: var(--size-base);
-  font-weight: 500;
-  color: var(--color-text-muted);
-}
-
-p { margin: 0 0 var(--space-md); }
-
-ul, ol {
-  padding-left: var(--space-lg);
-  margin: 0 0 var(--space-md);
-}
-
-li { margin-bottom: var(--space-xs); }
-
-code {
-  font-family: var(--font-mono);
-  font-size: var(--size-sm);
-  background: var(--color-code-bg);
-  padding: 0.15em 0.35em;
-  border-radius: 3px;
-}
-
-pre {
-  background: var(--color-code-bg);
-  padding: var(--space-md);
-  border-radius: 4px;
-  overflow-x: auto;
-  margin: 0 0 var(--space-md);
-  border: 1px solid var(--color-border);
-}
-
-pre code {
-  background: none;
-  padding: 0;
-}
-
-.table-wrap {
-  overflow-x: auto;
-  margin: var(--space-md) 0;
-}
-
-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: var(--size-sm);
-}
-
-th, td {
-  border: 1px solid var(--color-border);
-  padding: var(--space-sm) var(--space-md);
-  text-align: left;
-  vertical-align: top;
-}
-
-th {
-  background: var(--color-bg-alt);
-  font-weight: 600;
-}
-
-blockquote {
-  border-left: 3px solid var(--color-accent);
-  padding: var(--space-sm) var(--space-md);
-  background: color-mix(in srgb, var(--color-accent) 6%, transparent);
-  color: var(--color-text-muted);
-  border-radius: 0 4px 4px 0;
-  font-size: var(--size-sm);
-  line-height: 1.6;
-  margin: var(--space-md) 0;
-}
-
-@media (max-width: 54rem) {
-  .header-inner {
-    flex-wrap: wrap;
-    padding-top: var(--space-sm);
-    padding-bottom: var(--space-sm);
-  }
-
-  .top-nav {
-    width: 100%;
-    margin-left: 0;
-  }
-
-  .page-shell {
-    grid-template-columns: 1fr;
-    gap: var(--space-lg);
-  }
-
-  .sidebar {
-    position: static;
-    max-height: none;
-    border-right: none;
-    border-bottom: 1px solid var(--color-border);
-    padding-right: 0;
-    padding-bottom: var(--space-md);
-  }
-
-  .sidebar section {
-    margin-top: var(--space-md);
-  }
-}
-"""
+def render_breadcrumb(page: Page) -> str:
+    if page.is_index:
+        return ""
+    output_dir = page.output.parent
+    index_href = relpath(OUT_DIR / "index.html", output_dir)
+    crumbs: list[str] = [
+        f'<li><a href="{index_href}">Reference</a></li>'
+    ]
+    if page.section:
+        section_anchor = slugify(page.section)
+        crumbs.append(
+            f'<li><a href="{index_href}#{section_anchor}">{html.escape(page.section)}</a></li>'
+        )
+    label = page.label or page.title
+    crumbs.append(f'<li aria-current="page">{html.escape(label)}</li>')
+    return (
+        '    <nav class="breadcrumb" aria-label="Breadcrumb">\n'
+        f'      <ol>{"".join(crumbs)}</ol>\n'
+        '    </nav>'
+    )
 
 
-def build_pages() -> Iterable[Page]:
-    sources = [REFERENCE_DIR / "index.md"]
-    sources.extend(path for path in sorted(REFERENCE_DIR.glob("*.md")) if path.name != "index.md")
-    sources.append(GUIDE)
+def render_on_page_toc(page: Page) -> str:
+    if page.is_index:
+        return ""
+    items = [h for h in page.headings if h.level in (2, 3)]
+    if not items:
+        return ""
+    parts = [
+        '<aside class="page-toc" aria-label="On this page">',
+        '  <h2>On this page</h2>',
+        '  <ul>',
+    ]
+    for h in items:
+        parts.append(
+            f'    <li class="level-{h.level}">'
+            f'<a href="#{h.anchor}">{h.text_html}</a></li>'
+        )
+    parts.append('  </ul>')
+    parts.append('</aside>')
+    return "\n".join(parts)
 
-    for source in sources:
+
+def render_page_nav(page: Page, sequence: list[IndexLink]) -> str:
+    if page.is_index or not sequence:
+        return ""
+    target_resolved = page.output.resolve()
+    pos = next(
+        (i for i, e in enumerate(sequence) if e.output == target_resolved),
+        None,
+    )
+    if pos is None:
+        return ""
+    output_dir = page.output.parent
+
+    def link_block(entry: IndexLink, kind: str, label: str) -> str:
+        href = relpath(entry.output, output_dir)
+        return (
+            f'<a class="page-nav-{kind}" href="{href}">'
+            f'<span class="label">{label}</span>'
+            f'<span class="title">{html.escape(entry.label)}</span>'
+            f'</a>'
+        )
+
+    prev = sequence[pos - 1] if pos > 0 else None
+    nxt = sequence[pos + 1] if pos + 1 < len(sequence) else None
+
+    if prev is None and nxt is None:
+        return ""
+
+    cells = []
+    if prev is not None:
+        cells.append(link_block(prev, "prev", "&larr; Previous"))
+    else:
+        cells.append('<span class="page-nav-spacer" aria-hidden="true"></span>')
+    if nxt is not None:
+        cells.append(link_block(nxt, "next", "Next &rarr;"))
+    else:
+        cells.append('<span class="page-nav-spacer" aria-hidden="true"></span>')
+
+    return f'<nav class="page-nav" aria-label="Reference navigation">{"".join(cells)}</nav>'
+
+
+def page_template(page: Page, sequence: list[IndexLink]) -> str:
+    css = relpath(ASSET_DIR / "style.css", page.output.parent)
+    title = html.escape(page.title)
+    header = render_header(page)
+    breadcrumb = render_breadcrumb(page)
+    toc = render_on_page_toc(page)
+    nav_bottom = render_page_nav(page, sequence)
+    body_class = page.page_class
+    if not page.is_index and not toc:
+        # No H2/H3 in the article -> collapse the right rail and use the
+        # full content width.
+        body_class = f"{body_class} no-toc"
+
+    def indent_block(value: str, spaces: int) -> str:
+        prefix = " " * spaces
+        return "\n".join(f"{prefix}{line}" if line else "" for line in value.splitlines())
+
+    article_parts = [page.body] if page.is_index else [
+        part for part in (page.body, nav_bottom) if part
+    ]
+    article = "\n".join(article_parts)
+    main_lines = [
+        '    <main id="main-content" class="page-shell">',
+        '      <article class="content-prose">',
+        indent_block(article, 8),
+        '      </article>',
+    ]
+    if not page.is_index and toc:
+        main_lines.append(indent_block(toc, 6))
+    main_lines.append('    </main>')
+    main = "\n".join(main_lines)
+
+    pieces = [
+        '<!doctype html>',
+        '<html lang="en">',
+        '  <head>',
+        '    <meta charset="utf-8" />',
+        '    <meta name="viewport" content="width=device-width, initial-scale=1" />',
+        '    <meta name="color-scheme" content="dark" />',
+        f'    <title>{title} - Sintra Reference</title>',
+        f'    <link rel="stylesheet" href="{css}" />',
+        '  </head>',
+        f'  <body class="{body_class}">',
+        '    <a class="skip-nav" href="#main-content">Skip to content</a>',
+        header,
+        breadcrumb,
+        main,
+        '  </body>',
+        '</html>',
+        '',
+    ]
+    return "\n".join(p for p in pieces if p is not None)
+
+
+# ============================================================================
+# Build pipeline
+# ============================================================================
+
+
+def discover_sources() -> list[Path]:
+    sources: list[Path] = [REFERENCE_DIR / "index.md"]
+    sources.extend(p for p in sorted(REFERENCE_DIR.glob("*.md")) if p.name != "index.md")
+    sources.extend(sorted(DOCS_DIR.glob("*.md")))
+    if README.is_file():
+        sources.append(README)
+    return sources
+
+
+def build_pages() -> list[Page]:
+    sequence, by_output, section_for = parse_index_order()
+    pages: list[Page] = []
+    for source in discover_sources():
         output = output_for_markdown(source)
         if output is None:
             continue
-        title, body = render_markdown(source, output)
-        yield Page(source=source, output=output, title=title, body=body, is_index=source.name == "index.md")
+        title, body, headings, links = render_markdown(source, output)
+        is_index = source.name == "index.md"
+        if is_index:
+            page_class = "reference-index"
+            section = None
+            label = title
+        elif source.parent == DOCS_DIR or source == README:
+            # Top-level docs (guide, architecture, barriers_and_shutdown,
+            # process_lifecycle_notes) and the repo README sit directly
+            # under the Reference root in the breadcrumb hierarchy; they
+            # are not nested under any index H2.
+            page_class = "reference-guide"
+            section = None
+            label = title
+        else:
+            page_class = "reference-page"
+            entry = by_output.get(output.resolve())
+            section = section_for.get(output.resolve())
+            label = entry.label if entry else title
+        pages.append(
+            Page(
+                source=source,
+                output=output,
+                title=title,
+                body=body,
+                headings=headings,
+                links=links,
+                is_index=is_index,
+                page_class=page_class,
+                section=section,
+                label=label,
+            )
+        )
+    return pages
 
 
-def main() -> None:
+# ============================================================================
+# Link checker
+# ============================================================================
+
+
+@dataclass
+class LinkProblem:
+    source: Path
+    target: str
+    reason: str
+
+
+def check_links(pages: list[Page]) -> list[LinkProblem]:
+    """Return a list of broken or dangling links across all rendered pages."""
+    anchors_by_output: dict[Path, set[str]] = {}
+    for page in pages:
+        anchors_by_output[page.output.resolve()] = {h.anchor for h in page.headings}
+
+    problems: list[LinkProblem] = []
+    for page in pages:
+        for link in page.links:
+            target = link.raw_target.strip()
+            if not target:
+                problems.append(
+                    LinkProblem(link.source, link.raw_target, "empty link target")
+                )
+                continue
+            if is_external_url(target):
+                continue
+            url, _, fragment = target.partition("#")
+
+            # Same-page fragment (`#anchor`).
+            if not url:
+                if not fragment:
+                    problems.append(
+                        LinkProblem(
+                            link.source,
+                            link.raw_target,
+                            "dead in-page anchor `#` with no fragment",
+                        )
+                    )
+                    continue
+                anchors = anchors_by_output.get(page.output.resolve(), set())
+                if fragment not in anchors:
+                    problems.append(
+                        LinkProblem(
+                            link.source,
+                            link.raw_target,
+                            f"anchor `#{fragment}` not found in {page.source.name}",
+                        )
+                    )
+                continue
+
+            resolved = (link.source.parent / url).resolve()
+            generated = output_for_markdown(resolved)
+            if generated is not None:
+                if not generated.exists():
+                    problems.append(
+                        LinkProblem(
+                            link.source,
+                            link.raw_target,
+                            f"links to markdown {url!r} but no generated page exists",
+                        )
+                    )
+                    continue
+                if fragment:
+                    anchors = anchors_by_output.get(generated.resolve(), set())
+                    if fragment not in anchors:
+                        problems.append(
+                            LinkProblem(
+                                link.source,
+                                link.raw_target,
+                                f"anchor `#{fragment}` not found in {resolved.name}",
+                            )
+                        )
+                continue
+
+            # Out-of-tree relative target (e.g. ../../example/foo.cpp). Just
+            # check the file exists.
+            if not resolved.exists():
+                problems.append(
+                    LinkProblem(
+                        link.source,
+                        link.raw_target,
+                        f"relative path does not exist on disk: {resolved}",
+                    )
+                )
+    return problems
+
+
+# ============================================================================
+# Site assembly
+# ============================================================================
+
+
+def copy_static_assets() -> None:
+    if not SITE_ASSETS_SRC.is_dir():
+        raise SystemExit(
+            f"Static asset directory not found: {SITE_ASSETS_SRC}.\n"
+            "Expected `scripts/site_assets/style.css` to exist."
+        )
+    for entry in SITE_ASSETS_SRC.iterdir():
+        if entry.is_file():
+            shutil.copy2(entry, ASSET_DIR / entry.name)
+
+
+def main() -> int:
     if OUT_DIR.exists():
         shutil.rmtree(OUT_DIR)
     ASSET_DIR.mkdir(parents=True)
     PAGE_DIR.mkdir(parents=True)
-    (ASSET_DIR / "style.css").write_text(STYLE.strip() + "\n", encoding="utf-8")
+    copy_static_assets()
 
-    for page in build_pages():
-        page.output.write_text(page_template(page), encoding="utf-8")
+    pages = build_pages()
+    sequence, _by_output, _section_for = parse_index_order()
+
+    for page in pages:
+        page.output.write_text(page_template(page, sequence), encoding="utf-8")
+
+    problems = check_links(pages)
+    if problems:
+        sys.stderr.write("Broken or dangling links:\n")
+        for p in problems:
+            rel = p.source.relative_to(ROOT)
+            sys.stderr.write(f"  {rel}: {p.target!r} -> {p.reason}\n")
+        sys.stderr.write(f"\n{len(problems)} link problem(s).\n")
+        return 1
 
     print(f"Built reference site at {OUT_DIR}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

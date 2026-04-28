@@ -1,22 +1,8 @@
 # sintra::enable_recovery / set_recovery_policy / set_recovery_runner
 
-Include:
+Defined in: `<sintra/sintra.h>`
 
-```cpp
-#include <sintra/sintra.h>
-```
-
-Summary:
-
-The recovery API opts a process into automatic respawn on abnormal exit and
-configures the coordinator-side decision and execution callbacks.
-`enable_recovery()` is called by the candidate process; the coordinator
-then decides whether to respawn through `set_recovery_policy(...)` and
-performs any custom delay or gating in a `set_recovery_runner(...)`
-callback. The detected recovery occurrence count is exposed through the
-process-local global `s_recovery_occurrence`.
-
-Signature:
+Synopsis:
 
 ```cpp
 void enable_recovery();
@@ -44,75 +30,103 @@ struct Recovery_control
 extern uint32_t s_recovery_occurrence; // process-local
 ```
 
-Use when:
+Description: The recovery API opts a process into automatic respawn on
+abnormal exit and configures the coordinator-side decision and execution
+callbacks. `enable_recovery()` is called by the candidate process. The
+coordinator then decides whether to respawn through
+`set_recovery_policy(...)` and performs any custom delay or gating in a
+`set_recovery_runner(...)` callback. The detected recovery occurrence
+count is exposed through the process-local global
+`s_recovery_occurrence`.
+
+## Parameters
+
+- `policy` - coordinator-side predicate that decides whether a crash event
+  should be recovered.
+- `runner` - coordinator-side callback that controls when the respawn is
+  performed.
+
+## Returns
+
+- `void`.
+
+## Throws
+
+- `enable_recovery()` throws `std::runtime_error` when called before the
+  local managed process has been created by [`sintra::init`](init.md), or
+  after it has been torn down.
+- `set_recovery_policy` and `set_recovery_runner` do not throw
+  Sintra-defined exceptions. Calls from non-coordinator processes are
+  no-ops.
+
+## Use when
 
 - A worker should restart automatically on crash. Call
-  `enable_recovery()` from inside that worker's entry function. Branch
-  on `s_recovery_occurrence` to distinguish the original run (`0`) from
-  later recoveries (`1`, `2`, ...).
+  `enable_recovery()` from inside that worker's entry function. Branch on
+  `s_recovery_occurrence` to distinguish the original run (`0`) from later
+  recoveries (`1`, `2`, ...).
 - A coordinator wants to filter recovery decisions through a policy that
   inspects `Crash_info::status`, the process slot, or external state.
   Configure the policy before the swarm reaches a state where crashes
   matter.
-- The recovery action should not be immediate respawn. Configure a
-  runner; the runner runs on a background thread, can sleep, broadcast
-  countdown messages, and call `Recovery_control::spawn()` exactly once
-  to trigger the actual respawn.
+- The recovery action should not be immediate respawn. Configure a runner;
+  the runner runs on a background thread, can sleep, broadcast countdown
+  messages, and call `Recovery_control::spawn()` exactly once to trigger
+  the actual respawn.
 
-Contract:
+## Contract
 
 - `enable_recovery()` operates on the local managed process. It marks the
-  process as recoverable and records the command line used to launch it,
-  so the coordinator can respawn it later.
+  process as recoverable and records the command line used to launch it, so
+  the coordinator can respawn it later.
 - `set_recovery_policy` and `set_recovery_runner` only take effect inside
-  the coordinator process. Calls from non-coordinator processes are
-  no-ops.
+  the coordinator process. Calls from non-coordinator processes are no-ops.
 - The default behaviour, when no policy is configured, is to recover the
-  process. A policy that returns `false` from a crash-info inspection
-  skips the recovery for that event.
+  process. A policy that returns `false` from a crash-info inspection skips
+  the recovery for that event.
 - The default runner, when none is configured, invokes the spawn
   immediately on the coordinator path. A custom runner runs on its own
   thread and decides when to call `Recovery_control::spawn()`. Calling
   `spawn()` more than once is ignored.
 - `Recovery_control::should_cancel()` becomes `true` when the coordinator
-  has begun shutting down. Runners must check it and return promptly to
-  let teardown progress.
-- `s_recovery_occurrence` is set in the recovered process at startup
-  before the entry function runs. It is `0` for the first run, `1` for
-  the first recovery, and so on. Reading it from a non-recoverable or
-  non-spawned context is meaningful only after `init` has set the local
-  managed process up.
-- A recovery event is also surfaced through `set_lifecycle_handler` as a
+  has begun shutting down. Runners must check it and return promptly to let
+  teardown progress.
+- `s_recovery_occurrence` is set in the recovered process at startup before
+  the entry function runs. It is `0` for the first run, `1` for the first
+  recovery, and so on. Reading it from a non-recoverable or non-spawned
+  context is meaningful only after `init` has set the local managed process
+  up.
+- A recovery event is also surfaced through
+  [`sintra::set_lifecycle_handler`](lifecycle_hooks.md) as a
   `process_lifecycle_event::reason::crash` when the process crashed.
 
-Threading and lifecycle:
+## Threading and lifecycle
 
-- The recovery policy is invoked on the coordinator thread that handles
-  the crash event. Keep the work cheap and side-effect-free; defer
-  expensive logic to the runner.
-- The runner runs on a dedicated coordinator-owned thread for the
-  duration of one recovery decision. It must be thread-safe relative to
-  other coordinator state it touches.
+- The recovery policy is invoked on the coordinator thread that handles the
+  crash event. Keep the work cheap and side-effect-free; defer expensive
+  logic to the runner.
+- The runner runs on a dedicated coordinator-owned thread for the duration
+  of one recovery decision. It must be thread-safe relative to other
+  coordinator state it touches.
 - Recovery is opt-in per process. Processes that did not call
   `enable_recovery()` are not respawned even when a policy or runner is
   configured.
 
-Failures:
+## Failure modes
 
-- None of these functions throw. Misconfiguration shows up as a missed
-  recovery (policy returned `false`, runner did not call `spawn`,
-  recovery-disabled process exited).
+- Misconfiguration shows up as a missed recovery: the policy returned
+  `false`, the runner did not call `spawn`, or the process exited without
+  enabling recovery.
 
-Example source:
+## Example source
 
 - [example/sintra/sintra_example_4_recovery.cpp](../../example/sintra/sintra_example_4_recovery.cpp)
 - [tests/recovery_policy_test.cpp](../../tests/recovery_policy_test.cpp)
 - [tests/recovery_runner_thread_test.cpp](../../tests/recovery_runner_thread_test.cpp)
 - [tests/recovery_test.cpp](../../tests/recovery_test.cpp)
 
-See also:
+## See also
 
-- [sintra::lifecycle_hooks](lifecycle_hooks.md)
+- [`sintra::set_lifecycle_handler`](lifecycle_hooks.md), which surfaces
+  crash recovery observations through lifecycle events.
 - [docs/process_lifecycle_notes.md](../process_lifecycle_notes.md)
-- [sintra::Managed_process](#) (terminated_abnormally is described in
-  [sintra::lifecycle_hooks](lifecycle_hooks.md))

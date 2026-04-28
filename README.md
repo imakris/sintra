@@ -307,11 +307,14 @@ sintra::spawn_swarm_process(options);
 
 Note: spawned processes require a lifeline by default. If you launch a process
 manually (outside `spawn_swarm_process`), you must pass lifeline arguments or
-disable the check. See `docs/process_lifecycle_notes.md` for details.
+disable the check. See
+[`docs/process_lifecycle_notes.md`](docs/process_lifecycle_notes.md) for
+details.
 
 ### Qt cursor sync example
 
-For a Qt widget example that forwards Qt signals through sintra, see `example/qt_basic/README.md`.
+For a Qt widget example that forwards Qt signals through sintra, see
+[`example/qt_basic/README.md`](example/qt_basic/README.md).
 
 ## Advanced topics
 
@@ -330,11 +333,11 @@ Sintra uses **dedicated reader threads** to process incoming messages from share
 
 `sintra::barrier()` coordinates progress across processes and comes in three flavors that trade off strength for cost. The template defaults to `delivery_fence_t`, so a plain `barrier("name")` is already stronger than a bare rendezvous. The lightest-weight barrier whose guarantees match the code's requirements is preferred:
 
-* **Rendezvous barriers** (`barrier<sintra::rendezvous_t>(name)`) simply ensure that every participant has reached the synchronization point. Messages published before the barrier might still be in flight or waiting to be handled, so this mode is appropriate when only aligned phase progression is needed-for example, coordinating the simultaneous start of a workload whose logic does not depend on the effects of earlier messages.
+* **Rendezvous barriers** (`barrier<sintra::rendezvous_t>(name)`) simply ensure that every participant has reached the synchronization point. Messages published before the barrier might still be in flight or waiting to be handled, so this mode is appropriate when only aligned phase progression is needed - for example, coordinating the simultaneous start of a workload whose logic does not depend on the effects of earlier messages.
 
-  *Warning: Two peers can both reach the rendezvous while still missing each other's prior messages (A sends x, B sends y, both call rendezvous, neither is guaranteed to have received the other). Prefer delivery or processing fences when correctness depends on pre-barrier messages being observed.*
+  **Warning:** Two peers can both reach the rendezvous while still missing each other's prior messages (A sends x, B sends y, both call rendezvous, neither is guaranteed to have received the other). Prefer delivery or processing fences when correctness depends on pre-barrier messages being observed.
 * **Delivery-fence barriers** (`barrier(name)` or `barrier<sintra::delivery_fence_t>(name)`) guarantee that all pre-barrier messages have been pulled off the shared-memory rings by each process's reader thread and are queued locally for handling, though the handlers may still be running. This is a local guarantee for the caller; it does not add a second rendezvous proving that peers have also drained their readers. The default delivery fence is suitable when the next step requires the complete set of incoming work to be staged locally, such as inspecting an inbox before taking action.
-* **Processing-fence barriers** (`barrier<sintra::processing_fence_t>(name)`) wait until every handler (and any continuations) for messages published before the barrier has finished executing. This mode is appropriate when subsequent logic must observe the completed side effects-for instance, reading shared state that earlier handlers updated or applying a configuration change only after all peers processed preparatory updates.
+* **Processing-fence barriers** (`barrier<sintra::processing_fence_t>(name)`) wait until every handler (and any continuations) for messages published before the barrier has finished executing. This mode is appropriate when subsequent logic must observe the completed side effects - for instance, reading shared state that earlier handlers updated or applying a configuration change only after all peers processed preparatory updates.
 
 Delivery fences cost the same as rendezvous plus a short wait for readers to catch up. Processing fences add a single control message per process and an extra rendezvous to allow deterministic observation of handler side effects.
 
@@ -348,7 +351,18 @@ sintra::barrier("phase-1"); // delivery fence
 sintra::barrier<sintra::processing_fence_t>("apply-updates");
 ```
 
-Processing fences are safe to call from any thread, including handlers themselves: reader threads continue draining queued work and post-handlers while the fence waits, so invoking a fence from within a handler keeps the system making progress. When coordination between threads inside the same process is also required, Sintra barriers typically pair with standard threading primitives.
+Barrier rounds track processes, not calling threads. For a single
+`(barrier_name, group_name, BarrierMode)` round, each process should have one
+in-flight caller; when several threads in the same process must wait for the same
+phase, coordinate them with normal threading primitives and have one
+representative enter `sintra::barrier`.
+
+Processing fences are best issued from control threads when the fence must
+include all pre-barrier handler work. A processing fence called from a
+request-reader handler or post-handler is reentrancy-aware: it skips the
+currently executing reader and may run queued post-handlers while waiting, so it
+does not wait for the current handler/post-handler or for messages queued behind
+it on that same request-reader stream.
 
 ### Coordinated shutdown
 
@@ -379,7 +393,8 @@ In other words:
 * Use `leave()` for intentional unilateral departure.
 
 Low-level lifecycle escape hatches and shutdown internals are documented in
-`docs/barriers_and_shutdown.md` and `docs/process_lifecycle_notes.md`.
+[`docs/barriers_and_shutdown.md`](docs/barriers_and_shutdown.md) and
+[`docs/process_lifecycle_notes.md`](docs/process_lifecycle_notes.md).
 
 ### Optional explicit type ids
 

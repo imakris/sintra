@@ -59,7 +59,8 @@ Threading and lifecycle:
 
 Failures:
 - Construction does not throw on resolution failure. An unknown name yields a
-  stored `invalid_instance_id`; the receiving RPC call then fails with
+  stored `invalid_instance_id`; validating RPC paths such as
+  `SINTRA_RPC_STRICT` and `rpc_async_<method>` then fail with
   `std::runtime_error("Attempted to make an RPC call using an invalid instance ID.")`.
 - Coordinator-side errors propagate as exceptions raised by the underlying
   RPC call.
