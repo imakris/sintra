@@ -33,6 +33,32 @@ function(read_active_tests OUT_VAR)
     set(${OUT_VAR} ${TEST_PATHS} PARENT_SCOPE)
 endfunction()
 
+function(assign_test_suite_configuration TARGET_NAME SUITE_CONFIG)
+    if(NOT CMAKE_CONFIGURATION_TYPES)
+        return()
+    endif()
+
+    string(TOUPPER "${SUITE_CONFIG}" SUITE_CONFIG_UPPER)
+
+    if(CMAKE_GENERATOR STREQUAL "Ninja Multi-Config")
+        set_property(TARGET ${TARGET_NAME} PROPERTY
+            EXCLUDE_FROM_ALL "$<NOT:$<CONFIG:${SUITE_CONFIG}>>")
+    endif()
+
+    foreach(CONFIG IN LISTS CMAKE_CONFIGURATION_TYPES)
+        string(TOUPPER "${CONFIG}" CONFIG_UPPER)
+
+        if(CONFIG_UPPER STREQUAL SUITE_CONFIG_UPPER)
+            set(EXCLUDE_FROM_DEFAULT_BUILD FALSE)
+        else()
+            set(EXCLUDE_FROM_DEFAULT_BUILD TRUE)
+        endif()
+
+        set_property(TARGET ${TARGET_NAME} PROPERTY
+            EXCLUDE_FROM_DEFAULT_BUILD_${CONFIG_UPPER} ${EXCLUDE_FROM_DEFAULT_BUILD})
+    endforeach()
+endfunction()
+
 # Helper function to create all test executables for a specific configuration
 # Parameters:
 #   SUFFIX: e.g., "release", "debug"
@@ -69,18 +95,26 @@ function(add_test_suite SUFFIX IS_DEBUG)
         target_link_options(${LIB_TARGET} INTERFACE --coverage)
     endif()
 
+    if(IS_DEBUG)
+        set(SUITE_CONFIG Debug)
+    else()
+        set(SUITE_CONFIG Release)
+    endif()
+
+    assign_test_suite_configuration(${LIB_TARGET} ${SUITE_CONFIG})
+
     # Set optimization flags based on the suite, independent of CMAKE_BUILD_TYPE.
     if(IS_DEBUG)
         if(MSVC)
             if(CMAKE_CONFIGURATION_TYPES)
                 target_compile_options(${LIB_TARGET} INTERFACE
-                    $<$<CONFIG:Debug>:/Od>
-                    $<$<CONFIG:Debug>:/Zi>
-                    $<$<CONFIG:Debug>:/RTC1>
-                    $<$<CONFIG:Debug>:/UNDEBUG>
+                    $<$<CONFIG:${SUITE_CONFIG}>:/Od>
+                    $<$<CONFIG:${SUITE_CONFIG}>:/Zi>
+                    $<$<CONFIG:${SUITE_CONFIG}>:/RTC1>
+                    $<$<CONFIG:${SUITE_CONFIG}>:/UNDEBUG>
                 )
                 target_link_options(${LIB_TARGET} INTERFACE
-                    $<$<CONFIG:Debug>:/DEBUG:FULL>)
+                    $<$<CONFIG:${SUITE_CONFIG}>:/DEBUG:FULL>)
             else()
                 target_compile_options(${LIB_TARGET} INTERFACE
                     /Od
@@ -102,12 +136,12 @@ function(add_test_suite SUFFIX IS_DEBUG)
             if(SINTRA_RELEASE_WITH_DEBUG_SYMBOLS)
                 if(CMAKE_CONFIGURATION_TYPES)
                     target_compile_options(${LIB_TARGET} INTERFACE
-                        $<$<CONFIG:Release>:/O1>
-                        $<$<CONFIG:Release>:/Zi>
-                        $<$<CONFIG:Release>:/DNDEBUG>
+                        $<$<CONFIG:${SUITE_CONFIG}>:/O1>
+                        $<$<CONFIG:${SUITE_CONFIG}>:/Zi>
+                        $<$<CONFIG:${SUITE_CONFIG}>:/DNDEBUG>
                     )
                     target_link_options(${LIB_TARGET} INTERFACE
-                        $<$<CONFIG:Release>:/DEBUG:FULL>)
+                        $<$<CONFIG:${SUITE_CONFIG}>:/DEBUG:FULL>)
                 else()
                     target_compile_options(${LIB_TARGET} INTERFACE
                         /O1
@@ -119,8 +153,8 @@ function(add_test_suite SUFFIX IS_DEBUG)
             else()
                 if(CMAKE_CONFIGURATION_TYPES)
                     target_compile_options(${LIB_TARGET} INTERFACE
-                        $<$<CONFIG:Release>:/O2>
-                        $<$<CONFIG:Release>:/DNDEBUG>
+                        $<$<CONFIG:${SUITE_CONFIG}>:/O2>
+                        $<$<CONFIG:${SUITE_CONFIG}>:/DNDEBUG>
                     )
                 else()
                     target_compile_options(${LIB_TARGET} INTERFACE
@@ -204,16 +238,7 @@ function(add_test_suite SUFFIX IS_DEBUG)
         # Create executable
         add_executable(sintra_${TEST_NAME}_${SUFFIX} ${TEST_FILE})
         target_link_libraries(sintra_${TEST_NAME}_${SUFFIX} PRIVATE ${LIB_TARGET})
-
-        if(MSVC AND CMAKE_CONFIGURATION_TYPES)
-            if(IS_DEBUG)
-                set_property(TARGET sintra_${TEST_NAME}_${SUFFIX}
-                             PROPERTY EXCLUDE_FROM_DEFAULT_BUILD_RELEASE TRUE)
-            else()
-                set_property(TARGET sintra_${TEST_NAME}_${SUFFIX}
-                             PROPERTY EXCLUDE_FROM_DEFAULT_BUILD_DEBUG TRUE)
-            endif()
-        endif()
+        assign_test_suite_configuration(sintra_${TEST_NAME}_${SUFFIX} ${SUITE_CONFIG})
 
         # Include parent directory for manual tests that need test utilities
         if(SUBDIR)
