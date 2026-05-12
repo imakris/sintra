@@ -41,8 +41,8 @@ struct Stress_target : sintra::Derived_transceiver<Stress_target>
     SINTRA_RPC(noop)
 };
 
-constexpr int k_iterations       = 400;
-constexpr int k_caller_threads   = 4;
+constexpr int  k_iterations      = 400;
+constexpr int  k_caller_threads  = 4;
 constexpr auto k_target_lifetime = std::chrono::microseconds(50);
 
 } // namespace

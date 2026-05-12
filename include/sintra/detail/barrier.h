@@ -16,11 +16,11 @@
 namespace sintra {
 namespace detail {
 
-constexpr std::string_view k_reserved_barrier_prefix = "_sintra_";
-constexpr int32_t k_barrier_mode_rendezvous = 0;
-constexpr int32_t k_barrier_mode_delivery = 1;
-constexpr int32_t k_barrier_mode_processing = 2;
-constexpr int32_t k_barrier_mode_processing_phase = 3;
+constexpr std::string_view k_reserved_barrier_prefix       = "_sintra_";
+constexpr int32_t          k_barrier_mode_rendezvous       = 0;
+constexpr int32_t          k_barrier_mode_delivery         = 1;
+constexpr int32_t          k_barrier_mode_processing       = 2;
+constexpr int32_t          k_barrier_mode_processing_phase = 3;
 
 inline void validate_user_barrier_name(const std::string& barrier_name)
 {

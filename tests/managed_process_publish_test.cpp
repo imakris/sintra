@@ -34,20 +34,20 @@ using sintra::s_coord_id;
 namespace {
 
 constexpr std::string_view k_worker_flag = "--managed_process_publish_worker";
-constexpr std::string_view k_dir_flag = "--managed_process_publish_dir";
+constexpr std::string_view k_dir_flag    = "--managed_process_publish_dir";
 
 constexpr std::string_view k_delayed_worker_flag = "--managed_process_publish_delayed_worker";
-constexpr std::string_view k_delayed_dir_flag = "--managed_process_publish_delayed_dir";
-constexpr std::string_view k_delayed_role_flag = "--managed_process_publish_role";
+constexpr std::string_view k_delayed_dir_flag    = "--managed_process_publish_delayed_dir";
+constexpr std::string_view k_delayed_role_flag   = "--managed_process_publish_role";
 
 constexpr std::string_view k_info_file = "managed_process_publish_info.txt";
 constexpr std::string_view k_done_file = "managed_process_publish_done.txt";
 constexpr std::string_view k_exit_file = "managed_process_publish_exit.txt";
 
-constexpr std::string_view k_delayed_b_name_file = "managed_process_publish_delayed_b_name.txt";
+constexpr std::string_view k_delayed_b_name_file   = "managed_process_publish_delayed_b_name.txt";
 constexpr std::string_view k_delayed_b_marked_file = "managed_process_publish_delayed_b_marked.txt";
-constexpr std::string_view k_delayed_done_file = "managed_process_publish_delayed_done.txt";
-constexpr std::string_view k_delayed_exit_file = "managed_process_publish_delayed_exit.txt";
+constexpr std::string_view k_delayed_done_file     = "managed_process_publish_delayed_done.txt";
+constexpr std::string_view k_delayed_exit_file     = "managed_process_publish_delayed_exit.txt";
 
 struct Worker_info
 {

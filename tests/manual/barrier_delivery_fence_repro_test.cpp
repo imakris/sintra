@@ -32,9 +32,9 @@
 namespace {
 
 constexpr std::size_t k_worker_count  = 2;
-constexpr std::size_t k_iterations   = 64;
+constexpr std::size_t k_iterations    = 64;
 constexpr std::size_t k_burst_count   = 8;
-constexpr auto k_handler_delay        = std::chrono::milliseconds(12);
+constexpr auto        k_handler_delay = std::chrono::milliseconds(12);
 
 struct iteration_marker_t
 {

@@ -40,14 +40,14 @@ using sintra::s_coord_id;
 namespace {
 
 // Worker IDs for correlation
-constexpr int k_normal_worker_id = 1;
-constexpr int k_crash_worker_id = 2;
+constexpr int k_normal_worker_id      = 1;
+constexpr int k_crash_worker_id       = 2;
 constexpr int k_unpublished_worker_id = 3;
 
-constexpr auto k_ready_timeout = std::chrono::seconds(10);
+constexpr auto k_ready_timeout  = std::chrono::seconds(10);
 constexpr auto k_signal_timeout = std::chrono::seconds(10);
-constexpr auto k_event_timeout = std::chrono::seconds(15);
-constexpr auto k_poll_interval = std::chrono::milliseconds(50);
+constexpr auto k_event_timeout  = std::chrono::seconds(15);
+constexpr auto k_poll_interval  = std::chrono::milliseconds(50);
 
 std::filesystem::path worker_ready_path(const std::filesystem::path& dir, int worker_id)
 {

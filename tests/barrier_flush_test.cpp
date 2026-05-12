@@ -34,8 +34,8 @@
 
 namespace {
 
-constexpr std::size_t k_worker_count = 2;
-constexpr std::size_t k_iterations   = 128;
+constexpr std::size_t k_worker_count         = 2;
+constexpr std::size_t k_iterations           = 128;
 constexpr const char* k_result_ready_barrier = "barrier-flush-result-ready";
 
 struct iteration_marker_t

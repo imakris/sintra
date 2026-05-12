@@ -36,11 +36,11 @@ namespace {
 
 constexpr const char* k_shutdown_barrier = "complex-choreography-test-done";
 
-constexpr std::size_t k_stage_a_workers = 3;
-constexpr std::size_t k_stage_b_workers = 3;
-constexpr std::size_t k_iterations     = 64;
+constexpr std::size_t                k_stage_a_workers    = 3;
+constexpr std::size_t                k_stage_b_workers    = 3;
+constexpr std::size_t                k_iterations         = 64;
 constexpr std::array<std::size_t, 2> k_expected_per_stage = {k_stage_a_workers, k_stage_b_workers};
-constexpr std::uint32_t k_max_extra_rounds = 4;
+constexpr std::uint32_t              k_max_extra_rounds   = 4;
 
 struct stage_report_t
 {

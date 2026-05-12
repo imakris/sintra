@@ -15,8 +15,8 @@
 
 namespace {
 
-constexpr const char* k_service_name = "async lifecycle service";
-constexpr const char* k_ready_barrier = "async-lifecycle-service-ready";
+constexpr const char* k_service_name     = "async lifecycle service";
+constexpr const char* k_ready_barrier    = "async-lifecycle-service-ready";
 constexpr const char* k_finished_barrier = "async-lifecycle-test-finished";
 std::filesystem::path owner_events_path(const std::filesystem::path& shared_dir)
 {

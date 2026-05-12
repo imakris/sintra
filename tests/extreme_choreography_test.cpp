@@ -45,7 +45,7 @@ namespace {
 
 constexpr std::size_t k_producer_count = 2;
 constexpr std::size_t k_consumer_count = 2;
-constexpr std::size_t k_phase_count = 4;
+constexpr std::size_t k_phase_count    = 4;
 
 // payload_t choreography plan: each producer emits a specific number of payloads
 // per phase.  The sequence indices start at zero for every phase and producer.

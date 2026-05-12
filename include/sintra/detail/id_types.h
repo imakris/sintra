@@ -20,8 +20,8 @@ using std::atomic;
 //========
 
 
-constexpr type_id_type        invalid_type_id = 0;
-constexpr type_id_type        not_defined_type_id = ~0ull;
+constexpr type_id_type invalid_type_id     = 0;
+constexpr type_id_type not_defined_type_id = ~0ull;
 // User-defined type ids are tagged with the high bit to avoid collisions with
 // reserved and auto-assigned ids.
 constexpr type_id_type        user_type_id_flag = (type_id_type{1} << 63);
@@ -161,12 +161,12 @@ constexpr uint64_t pid_mask =
 static_assert(num_process_index_bits < 16);
 constexpr int max_process_index =       (1u   << (num_process_index_bits     - 1)) - 1;
 
-constexpr uint64_t max_instance_index = (1ull << (num_transceiver_index_bits - 1)) - 1;
-constexpr uint64_t num_reserved_service_instances = 0x1000;
-constexpr uint64_t all_remote_processess_wildcard = (max_process_index << 1);
-constexpr uint64_t all_processes_wildcard = all_remote_processess_wildcard | 1;
+constexpr uint64_t max_instance_index                     = (1ull << (num_transceiver_index_bits - 1)) - 1;
+constexpr uint64_t num_reserved_service_instances         = 0x1000;
+constexpr uint64_t all_remote_processess_wildcard         = (max_process_index << 1);
+constexpr uint64_t all_processes_wildcard                 = all_remote_processess_wildcard | 1;
 constexpr uint64_t all_transceivers_except_mproc_wildcard = (max_instance_index << 1);
-constexpr uint64_t all_transceivers_wildcard = all_transceivers_except_mproc_wildcard | 1;
+constexpr uint64_t all_transceivers_wildcard              = all_transceivers_except_mproc_wildcard | 1;
 
 struct decomposed_instance_id
 {

@@ -32,9 +32,9 @@ using sintra::s_coord_id;
 
 namespace {
 
-constexpr std::string_view k_env_worker_mode = "SPAWN_WAIT_TEST_WORKER";
-constexpr const char* k_worker_instance_name = "spawn_wait_dynamic_worker";
-constexpr const char* k_nonexistent_instance_name = "nonexistent_instance_will_timeout";
+constexpr std::string_view k_env_worker_mode           = "SPAWN_WAIT_TEST_WORKER";
+constexpr const char*      k_worker_instance_name      = "spawn_wait_dynamic_worker";
+constexpr const char*      k_nonexistent_instance_name = "nonexistent_instance_will_timeout";
 // Name registered by the "dummy" child in Test 1 to prove it actually launched
 constexpr const char* k_timeout_child_instance_name = "spawn_wait_timeout_child";
 

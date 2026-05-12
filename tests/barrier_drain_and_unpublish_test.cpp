@@ -17,7 +17,7 @@ namespace {
 
 using namespace std::chrono_literals;
 
-constexpr std::string_view k_env_barrier_wait_ms = "SINTRA_BARRIER_DRAIN_TIMEOUT_MS";
+constexpr std::string_view k_env_barrier_wait_ms   = "SINTRA_BARRIER_DRAIN_TIMEOUT_MS";
 constexpr std::string_view k_env_worker_timeout_ms = "SINTRA_BARRIER_WORKER_TIMEOUT_MS";
 constexpr std::string_view k_env_coord_watchdog_ms = "SINTRA_BARRIER_COORDINATOR_WATCHDOG_MS";
 

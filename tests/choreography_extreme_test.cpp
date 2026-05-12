@@ -53,7 +53,7 @@
 namespace {
 
 constexpr int k_producer_count = 3;
-constexpr int k_phase_count = 4;
+constexpr int k_phase_count    = 4;
 
 struct phase_plan_t
 {
@@ -69,8 +69,8 @@ constexpr std::array<phase_plan_t, k_phase_count> k_phase_plans{{
 }};
 
 constexpr int k_participant_slot_aggregator = k_producer_count;
-constexpr int k_participant_slot_chaos = k_producer_count + 1;
-constexpr int k_participant_slot_count = k_producer_count + 2;
+constexpr int k_participant_slot_chaos      = k_producer_count + 1;
+constexpr int k_participant_slot_count      = k_producer_count + 2;
 
 struct phase_announcement_t
 {

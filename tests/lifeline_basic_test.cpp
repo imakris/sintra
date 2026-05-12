@@ -408,7 +408,7 @@ bool is_running(process_handle_t& process)
 bool wait_for_child_completion(
     const std::filesystem::path&   dir,
     const std::string&             test_case,
-    process_handle_t&                child,
+    process_handle_t&              child,
     int                            timeout_ms,
     int&                           child_exit)
 {

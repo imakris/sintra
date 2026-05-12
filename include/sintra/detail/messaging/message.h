@@ -59,8 +59,8 @@ inline void spin_pause() noexcept
 } // namespace detail
 
 
-constexpr uint64_t  message_magic        = 0xc18a1aca1ebac17a;
-constexpr int       message_ring_size    = 0x200000;
+constexpr uint64_t message_magic     = 0xc18a1aca1ebac17a;
+constexpr int      message_ring_size = 0x200000;
 
 
  //////////////////////////////////////////////////////////////////////////

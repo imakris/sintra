@@ -15,10 +15,10 @@ namespace {
 
 using namespace std::chrono_literals;
 
-constexpr std::string_view k_prefix = "teardown_targeted_rpc_exception_test: ";
-constexpr const char* k_expected_message = "RPC target is no longer available.";
-constexpr auto k_ready_timeout = std::chrono::seconds(10);
-constexpr auto k_poll_interval = std::chrono::milliseconds(50);
+constexpr std::string_view k_prefix           = "teardown_targeted_rpc_exception_test: ";
+constexpr const char*      k_expected_message = "RPC target is no longer available.";
+constexpr auto             k_ready_timeout    = std::chrono::seconds(10);
+constexpr auto             k_poll_interval    = std::chrono::milliseconds(50);
 
 struct Teardown_service : sintra::Derived_transceiver<Teardown_service>
 {

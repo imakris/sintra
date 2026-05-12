@@ -89,8 +89,8 @@ inline auto& s_mproc_id = runtime_state::instance().managed_process_id_ref();
 inline auto& s_coord_id = runtime_state::instance().coordinator_id_ref();
 
 namespace detail {
-inline auto& s_shutdown_state = runtime_state::instance().shutdown_state_ref();
-inline auto& s_teardown_admission_mutex = runtime_state::instance().teardown_admission_mutex_ref();
+inline auto& s_shutdown_state            = runtime_state::instance().shutdown_state_ref();
+inline auto& s_teardown_admission_mutex  = runtime_state::instance().teardown_admission_mutex_ref();
 inline auto& s_teardown_admission_closed = runtime_state::instance().teardown_admission_closed_ref();
 } // namespace detail
 

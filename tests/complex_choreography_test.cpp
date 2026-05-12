@@ -52,9 +52,9 @@ namespace {
 
 constexpr std::string_view k_final_barrier = "complex-choreography-finish";
 
-constexpr std::size_t k_worker_count = 3;
+constexpr std::size_t k_worker_count     = 3;
 constexpr std::size_t k_tasks_per_worker = 6;
-constexpr int k_rounds = 7;
+constexpr int         k_rounds           = 7;
 constexpr std::chrono::seconds k_wait_timeout{20};
 constexpr std::chrono::milliseconds k_min_worker_delay{1};
 constexpr std::chrono::milliseconds k_max_worker_delay{6};

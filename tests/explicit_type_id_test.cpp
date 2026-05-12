@@ -2,7 +2,7 @@
 
 namespace {
 
-constexpr sintra::type_id_type k_bus_id = 0x120;
+constexpr sintra::type_id_type k_bus_id     = 0x120;
 constexpr sintra::type_id_type k_message_id = 0x121;
 
 struct Explicit_bus : sintra::Derived_transceiver<Explicit_bus>

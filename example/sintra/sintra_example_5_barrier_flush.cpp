@@ -19,7 +19,7 @@ before joining the barrier itself.
 namespace {
 
 constexpr std::size_t k_worker_count = 2;
-constexpr std::size_t k_iterations  = 64;
+constexpr std::size_t k_iterations   = 64;
 
 struct iteration_marker_t
 {

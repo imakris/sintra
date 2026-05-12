@@ -54,8 +54,8 @@
 
 namespace {
 
-constexpr const char* k_group_name = "_sintra_external_processes";
-constexpr int k_worker_count = 4;
+constexpr const char*        k_group_name       = "_sintra_external_processes";
+constexpr int                k_worker_count     = 4;
 constexpr std::array<int, 4> k_rounds_per_phase = {3, 5, 4, 6};
 
 struct phase_plan_t
@@ -147,31 +147,31 @@ std::uint64_t expected_round_checksum(int phase, int round)
 
 struct round_result_t
 {
-    int                        phase                = 0;
-    int                        round                = 0;
-    std::uint64_t              token                = 0;
-    int                        count                = 0;
-    std::uint64_t              checksum             = 0;
+    int                            phase                = 0;
+    int                            round                = 0;
+    std::uint64_t                  token                = 0;
+    int                            count                = 0;
+    std::uint64_t                  checksum             = 0;
 };
 
 struct Aggregator_state
 {
-    std::mutex                 mutex;
-    std::condition_variable    cv;
+    std::mutex                     mutex;
+    std::condition_variable        cv;
 
-    phase_command_t              active_command{};
-    bool                       command_active       = false;
-    bool                       round_complete       = false;
-    bool                       shutdown_received    = false;
+    phase_command_t                active_command{};
+    bool                           command_active       = false;
+    bool                           round_complete       = false;
+    bool                           shutdown_received    = false;
 
     std::array<bool, k_worker_count>
-                               worker_seen{};
-    int                        current_count        = 0;
-    std::uint64_t              checksum_accumulator = 0;
-    std::uint64_t              last_completed_token = std::numeric_limits<std::uint64_t>::max();
+                                   worker_seen{};
+    int                            current_count        = 0;
+    std::uint64_t                  checksum_accumulator = 0;
+    std::uint64_t                  last_completed_token = std::numeric_limits<std::uint64_t>::max();
 
-    int                        errors               = 0;
-    std::vector<round_result_t>  completed_rounds;
+    int                            errors               = 0;
+    std::vector<round_result_t>    completed_rounds;
 };
 
 Aggregator_state& aggregator_state()
@@ -487,7 +487,7 @@ struct Worker_local_state
 {
     std::mutex                 mutex;
     std::condition_variable    cv;
-    phase_command_t              pending_command{};
+    phase_command_t            pending_command{};
     bool                       has_command        = false;
     bool                       shutdown_requested = false;
     std::uint64_t              last_token         = 0;

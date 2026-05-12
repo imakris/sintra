@@ -30,12 +30,12 @@
 
 namespace {
 
-constexpr int k_worker_count = 4;
-constexpr int k_iterations = 6;
-constexpr int k_stage_steps = 5;
-constexpr int k_final_steps = 4;
+constexpr int         k_worker_count           = 4;
+constexpr int         k_iterations             = 6;
+constexpr int         k_stage_steps            = 5;
+constexpr int         k_final_steps            = 4;
 constexpr const char* k_done_processed_barrier = "pathological-done-processed";
-constexpr const char* k_summary_ready_barrier = "pathological-summary-ready";
+constexpr const char* k_summary_ready_barrier  = "pathological-summary-ready";
 
 struct stage_report_t
 {
@@ -111,7 +111,7 @@ std::string stage_report_to_string(const stage_report_t& report)
 struct Controller_state
 {
     std::mutex                     mutex;
-    std::vector<stage_report_t>      stage_reports;
+    std::vector<stage_report_t>    stage_reports;
     std::array<int, k_iterations>  controller_noise_counts{};
     int                            total_controller_noise = 0;
 };
@@ -266,7 +266,7 @@ int controller_process()
 
 void log_stage_event(
     const std::filesystem::path&   log_path,
-    const stage_report_t&            report,
+    const stage_report_t&          report,
     std::string_view               phase)
 {
     std::ostringstream oss;

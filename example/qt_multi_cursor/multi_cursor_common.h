@@ -15,7 +15,7 @@
 namespace sintra_example {
 
 // Window IDs and colors
-constexpr int k_num_windows = 4;
+constexpr int k_num_windows            = 4;
 constexpr int k_recovery_delay_seconds = 5;
 
 // Window colors (R, G, B)

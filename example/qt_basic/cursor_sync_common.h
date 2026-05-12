@@ -7,7 +7,7 @@
 
 namespace sintra_example {
 
-constexpr const char* k_sender_name = "cursor_sender";
+constexpr const char* k_sender_name   = "cursor_sender";
 constexpr const char* k_receiver_name = "cursor_receiver";
 
 struct Cursor_sender_bus : sintra::Derived_transceiver<Cursor_sender_bus>

@@ -38,7 +38,7 @@ bool wait_for_flag(
 }
 
 bool wait_for_completion(
-    const wait_result_t&         result,
+    const wait_result_t&       result,
     std::chrono::milliseconds  timeout)
 {
     return wait_for_flag(result.done, timeout);

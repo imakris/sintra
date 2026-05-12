@@ -65,8 +65,8 @@ struct Test_transceiver : sintra::Derived_transceiver<Test_transceiver>
     }
 };
 
-constexpr std::string_view k_env_trace = "SINTRA_LOCALITY_TEST_TRACE";
-constexpr int k_num_messages = 5;
+constexpr std::string_view k_env_trace    = "SINTRA_LOCALITY_TEST_TRACE";
+constexpr int              k_num_messages = 5;
 
 bool trace_enabled()
 {

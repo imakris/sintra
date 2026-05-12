@@ -15,9 +15,9 @@ namespace {
 
 using namespace std::chrono_literals;
 
-constexpr std::string_view k_env_ready_timeout_ms = "SINTRA_RECOVERY_READY_TIMEOUT_MS";
-constexpr std::string_view k_env_runner_timeout_ms = "SINTRA_RECOVERY_RUNNER_TIMEOUT_MS";
-constexpr std::string_view k_env_go_timeout_ms = "SINTRA_RECOVERY_GO_TIMEOUT_MS";
+constexpr std::string_view k_env_ready_timeout_ms    = "SINTRA_RECOVERY_READY_TIMEOUT_MS";
+constexpr std::string_view k_env_runner_timeout_ms   = "SINTRA_RECOVERY_RUNNER_TIMEOUT_MS";
+constexpr std::string_view k_env_go_timeout_ms       = "SINTRA_RECOVERY_GO_TIMEOUT_MS";
 constexpr std::string_view k_env_watchdog_timeout_ms = "SINTRA_RECOVERY_WATCHDOG_MS";
 
 void write_marker(const std::filesystem::path& path)
