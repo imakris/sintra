@@ -34,14 +34,14 @@ class Dispatch_lock_guard
 {
 public:
     template <typename MutexT>
-    explicit Dispatch_lock_guard(MutexT& mutex) : depth_guard_(), lock_(mutex) {}
+    explicit Dispatch_lock_guard(MutexT& mutex) : m_depth_guard(), m_lock(mutex) {}
 
     Dispatch_lock_guard(const Dispatch_lock_guard&) = delete;
     Dispatch_lock_guard& operator=(const Dispatch_lock_guard&) = delete;
 
 private:
-    Dispatch_wait_depth_guard  depth_guard_;
-    LockT                      lock_;
+    Dispatch_wait_depth_guard  m_depth_guard;
+    LockT                      m_lock;
 };
 
 using Dispatch_shared_lock = Dispatch_lock_guard<std::shared_lock<std::shared_mutex>>;

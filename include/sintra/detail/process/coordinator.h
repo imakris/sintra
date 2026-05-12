@@ -257,7 +257,7 @@ public:
         instance_id_type,                       // process instance id
         map<
             instance_id_type,                   // transceiver instance id (within the process)
-            tn_type                             // type id and assigned name
+            Tn_type                             // type id and assigned name
         >
     >                                              m_transceiver_registry;
 
@@ -394,5 +394,4 @@ public:
 };
 
 }
-
 

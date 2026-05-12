@@ -68,7 +68,7 @@ int parse_window_id(int argc, char* argv[])
 }
 
 // Ghost cursor data from another window
-struct Ghost_cursor
+struct ghost_cursor_t
 {
     QPoint position;
     int    source_window_id = -1;
@@ -76,7 +76,7 @@ struct Ghost_cursor
 };
 
 // State for tracking other windows
-struct Window_state
+struct window_state_t
 {
     bool   received_normal_exit = false;
     bool   recovering           = false;
@@ -487,8 +487,8 @@ private:
     QVBoxLayout* m_recovery_layout     = nullptr;
     std::array<QLabel*, sintra_example::k_num_windows> m_recovery_labels{};
 
-    std::array<Ghost_cursor, sintra_example::k_num_windows> m_ghost_cursors;
-    std::array<Window_state, sintra_example::k_num_windows> m_window_states;
+    std::array<ghost_cursor_t, sintra_example::k_num_windows> m_ghost_cursors;
+    std::array<window_state_t, sintra_example::k_num_windows> m_window_states;
     bool m_sent_goodbye = false;
 };
 

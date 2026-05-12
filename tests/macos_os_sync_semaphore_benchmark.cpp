@@ -22,10 +22,10 @@
 #endif
 
 #if HAS_OS_SYNC
-class os_sync_not_supported : public std::runtime_error
+class Os_sync_not_supported : public std::runtime_error
 {
 public:
-    explicit os_sync_not_supported(const char* function_name)
+    explicit Os_sync_not_supported(const char* function_name)
         : std::runtime_error(std::string(function_name) + " not supported on this macOS version")
     {
     }
@@ -35,16 +35,16 @@ public:
 {
     const int error = errno;
     if (error == ENOTSUP || error == ENOSYS) {
-        throw os_sync_not_supported(function_name);
+        throw Os_sync_not_supported(function_name);
     }
     throw std::runtime_error(std::string(function_name) + " failed: " + std::strerror(error));
 }
 
 // os_sync implementation
-class os_sync_semaphore
+class Os_sync_semaphore
 {
 public:
-    explicit os_sync_semaphore(unsigned int initial_count = 0) {
+    explicit Os_sync_semaphore(unsigned int initial_count = 0) {
         m_count = static_cast<int32_t>(initial_count);
     }
 
@@ -196,7 +196,7 @@ int main() {
     std::cout << std::endl;
 
     try {
-        double time = benchmark_producer_consumer<os_sync_semaphore>(
+        double time = benchmark_producer_consumer<Os_sync_semaphore>(
             num_producers, num_consumers, items_per_producer);
 
         std::cout << "=== RESULT ===" << std::endl;
@@ -206,7 +206,7 @@ int main() {
         std::cout << "Benchmark completed successfully." << std::endl;
         return 0;
     }
-    catch (const os_sync_not_supported&) {
+    catch (const Os_sync_not_supported&) {
         std::cout << "[SINTRA_DID_NOT_RUN] os_sync_wait_on_address is not available on this macOS version." << std::endl;
         return 0;
     }

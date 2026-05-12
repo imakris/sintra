@@ -36,7 +36,7 @@ constexpr std::size_t k_iterations   = 64;
 constexpr std::size_t k_burst_count   = 8;
 constexpr auto k_handler_delay        = std::chrono::milliseconds(12);
 
-struct Iteration_marker
+struct iteration_marker_t
 {
     std::uint32_t              worker;
     std::uint32_t              iteration;
@@ -70,7 +70,7 @@ int coordinator_process()
     std::size_t iterations_completed = 0;
     bool        aborted              = false;
 
-    activate_slot([&](const Iteration_marker& marker) {
+    activate_slot([&](const iteration_marker_t& marker) {
         std::unique_lock<std::mutex> lock(state.mutex);
 
         auto mark_failure = [&](const std::string& reason) {
@@ -272,7 +272,7 @@ int worker_process(std::uint32_t worker_index)
     for (std::uint32_t iteration = 0; iteration < k_iterations; ++iteration) {
 
         for (std::uint32_t burst = 0; burst < k_burst_count; ++burst) {
-            world() << Iteration_marker{worker_index, iteration, sequence};
+            world() << iteration_marker_t{worker_index, iteration, sequence};
             ++sequence;
 
             if ((burst + worker_index + iteration) % 3 == 0) {

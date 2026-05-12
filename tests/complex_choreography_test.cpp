@@ -7,21 +7,21 @@
 //   * Multiple barrier phases per round (setup + processing fence completion)
 //   * Randomised worker delays while dispatching many per-round micro tasks
 //   * Aggregator/validator handshake that must observe every contribution
-//   * Failure propagation through explicit Round_advance status messages
+//   * Failure propagation through explicit round_advance_t status messages
 //
 // The scenario involves the following actors:
-//   - Conductor: drives the rounds, emits Kickoff messages with per-round seeds,
-//                validates Round_advance reports, and writes the final result.
-//   - Workers (3): respond to Kickoff by sending a burst of Micro_task messages
-//                  and announcing completion with Worker_done.
-//   - Aggregator: collects Micro_task traffic, verifies per-worker totals, and
-//                  forwards summary Validation results.
-//   - Verifier: consumes Validation reports, cross-checks payload integrity, and
-//               emits Round_advance broadcasts containing per-worker checksums.
+//   - Conductor: drives the rounds, emits kickoff_t messages with per-round seeds,
+//                validates round_advance_t reports, and writes the final result.
+//   - Workers (3): respond to kickoff_t by sending a burst of micro_task_t messages
+//                  and announcing completion with worker_done_t.
+//   - Aggregator: collects micro_task_t traffic, verifies per-worker totals, and
+//                  forwards summary validation_t results.
+//   - Verifier: consumes validation_t reports, cross-checks payload integrity, and
+//               emits round_advance_t broadcasts containing per-worker checksums.
 //
 // Each round requires successful completion of all stages; any discrepancy is
-// propagated as a failed Round_advance.  The conductor records the first failure
-// and terminates the choreography with a Stop broadcast so that processes exit
+// propagated as a failed round_advance_t.  The conductor records the first failure
+// and terminates the choreography with a stop_t broadcast so that processes exit
 // without deadlocking on barriers.
 //
 #include <sintra/sintra.h>
@@ -59,13 +59,13 @@ constexpr std::chrono::seconds k_wait_timeout{20};
 constexpr std::chrono::milliseconds k_min_worker_delay{1};
 constexpr std::chrono::milliseconds k_max_worker_delay{6};
 constexpr std::string_view k_barrier_group = "_sintra_external_processes";
-struct Kickoff
+struct kickoff_t
 {
     int            round;
     std::uint64_t  seed;
 };
 
-struct Micro_task
+struct micro_task_t
 {
     int            round;
     int            worker_id;
@@ -73,14 +73,14 @@ struct Micro_task
     std::uint64_t  payload;
 };
 
-struct Worker_done
+struct worker_done_t
 {
     int            round;
     int            worker_id;
     int            contributions;
 };
 
-struct Validation
+struct validation_t
 {
     int            round;
     int            worker_id;
@@ -89,7 +89,7 @@ struct Validation
     std::uint64_t  sum_checksum;
 };
 
-struct Round_advance
+struct round_advance_t
 {
     int            round;
     bool           success;
@@ -97,7 +97,7 @@ struct Round_advance
                    checksums;
 };
 
-struct Stop
+struct stop_t
 {
     bool           due_to_failure;
 };
@@ -140,7 +140,7 @@ std::uint64_t expected_worker_sum(int round, int worker_id, std::uint64_t seed)
     return result;
 }
 
-struct Aggregator_worker_state
+struct aggregator_worker_state_t
 {
     int            contributions     = 0;
     std::uint64_t  xor_checksum      = 0;
@@ -148,17 +148,17 @@ struct Aggregator_worker_state
     bool           done              = false;
 };
 
-struct Aggregator_state
+struct aggregator_state_t
 {
     int            round             = -1;
     bool           seed_ready        = false;
     std::uint64_t  seed              = 0;
     bool           ready_to_validate = false;
-    std::array<Aggregator_worker_state, k_worker_count>
+    std::array<aggregator_worker_state_t, k_worker_count>
                    workers{};
 };
 
-struct Verifier_worker_state
+struct verifier_worker_state_t
 {
     bool           received          = false;
     int            contributions     = 0;
@@ -197,7 +197,7 @@ int conductor_process()
     bool failure_observed = false;
     bool stop_requested   = false;
 
-    auto advance_slot = [&](const Round_advance& advance) {
+    auto advance_slot = [&](const round_advance_t& advance) {
         if (advance.round < 0 || advance.round >= k_rounds) {
             return;
         }
@@ -214,7 +214,7 @@ int conductor_process()
         advance_cv.notify_all();
     };
 
-    auto stop_slot = [&](const Stop& stop) {
+    auto stop_slot = [&](const stop_t& stop) {
         std::lock_guard<std::mutex> lk(advance_mutex);
         stop_requested = true;
         failure_observed = failure_observed || stop.due_to_failure;
@@ -232,7 +232,7 @@ int conductor_process()
         const std::uint64_t seed = make_round_seed(round);
         sintra::barrier(sintra::test::make_barrier_name("complex-round", round, "start"), group);
 
-        sintra::world() << Kickoff{round, seed};
+        sintra::world() << kickoff_t{round, seed};
 
         std::unique_lock<std::mutex> lk(advance_mutex);
         const bool completed = advance_cv.wait_for(
@@ -251,12 +251,12 @@ int conductor_process()
         }
         lk.unlock();
 
-        // Broadcast Stop immediately when failure is detected, BEFORE entering
+        // Broadcast stop_t immediately when failure is detected, BEFORE entering
         // the processing fence barrier. This ensures all processes see the stop
         // signal while still in the current round and won't proceed to the next
         // round's start barrier, which would cause a deadlock.
         if (!stop_broadcasted && (local_failure || failure_observed)) {
-            sintra::world() << Stop{true};
+            sintra::world() << stop_t{true};
             stop_broadcasted = true;
         }
 
@@ -270,10 +270,10 @@ int conductor_process()
     }
 
     const bool due_to_failure = local_failure || failure_observed;
-    // Broadcast Stop again if not already sent (for the success case) or to ensure
+    // Broadcast stop_t again if not already sent (for the success case) or to ensure
     // all processes have received it
     if (!stop_broadcasted) {
-        sintra::world() << Stop{due_to_failure};
+        sintra::world() << stop_t{due_to_failure};
     }
 
     std::vector<std::string> lines;
@@ -307,7 +307,7 @@ int worker_process_impl(int worker_index)
         k_min_worker_delay.count(),
         k_max_worker_delay.count());
 
-    auto kickoff_slot = [&](const Kickoff& kickoff) {
+    auto kickoff_slot = [&](const kickoff_t& kickoff) {
         if (stop_requested.load(std::memory_order_acquire)) {
             return;
         }
@@ -320,7 +320,7 @@ int worker_process_impl(int worker_index)
         for (int step = 0; step < static_cast<int>(k_tasks_per_worker); ++step) {
             const auto payload = compute_payload(kickoff.round, worker_index, step, kickoff.seed);
             payloads[step] = payload;
-            sintra::world() << Micro_task{kickoff.round, worker_index, step, payload};
+            sintra::world() << micro_task_t{kickoff.round, worker_index, step, payload};
             if ((step + worker_index) % 2 == 0) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(delay_dist(rng)));
             }
@@ -329,7 +329,7 @@ int worker_process_impl(int worker_index)
             }
         }
 
-        sintra::world() << Worker_done{kickoff.round, worker_index, static_cast<int>(k_tasks_per_worker)};
+        sintra::world() << worker_done_t{kickoff.round, worker_index, static_cast<int>(k_tasks_per_worker)};
 
         {
             std::lock_guard<std::mutex> lk(state_mutex);
@@ -338,7 +338,7 @@ int worker_process_impl(int worker_index)
         kickoff_cv.notify_all();
     };
 
-    auto advance_slot = [&](const Round_advance& advance) {
+    auto advance_slot = [&](const round_advance_t& advance) {
         if (advance.round != active_round.load(std::memory_order_acquire)) {
             return;
         }
@@ -352,7 +352,7 @@ int worker_process_impl(int worker_index)
         completion_cv.notify_all();
     };
 
-    auto stop_slot = [&](const Stop&) {
+    auto stop_slot = [&](const stop_t&) {
         stop_requested.store(true);
         {
             std::lock_guard<std::mutex> lk(state_mutex);
@@ -430,13 +430,13 @@ int worker_process2() { return worker_process_impl(2); }
 
 int aggregator_process()
 {
-    Aggregator_state state;
+    aggregator_state_t state;
     std::mutex state_mutex;
     std::condition_variable state_cv;
     std::atomic<bool> stop_requested{false};
     std::atomic<bool> failure{false};
 
-    auto kickoff_slot = [&](const Kickoff& kickoff) {
+    auto kickoff_slot = [&](const kickoff_t& kickoff) {
         std::lock_guard<std::mutex> lk(state_mutex);
         if (kickoff.round == state.round) {
             state.seed = kickoff.seed;
@@ -444,7 +444,7 @@ int aggregator_process()
         }
     };
 
-    auto micro_slot = [&](const Micro_task& task) {
+    auto micro_slot = [&](const micro_task_t& task) {
         std::lock_guard<std::mutex> lk(state_mutex);
         if (task.round     != state.round || task.worker_id < 0 ||
             task.worker_id >= static_cast<int>(k_worker_count))
@@ -458,7 +458,7 @@ int aggregator_process()
         worker.sum_checksum += task.payload;
     };
 
-    auto done_slot = [&](const Worker_done& done) {
+    auto done_slot = [&](const worker_done_t& done) {
         std::lock_guard<std::mutex> lk(state_mutex);
         if (done.round     != state.round || done.worker_id < 0 ||
             done.worker_id >= static_cast<int>(k_worker_count))
@@ -470,14 +470,14 @@ int aggregator_process()
         worker.done = true;
         worker.contributions = std::max(worker.contributions, done.contributions);
         const bool all_done = std::all_of(state.workers.begin(), state.workers.end(),
-            [](const Aggregator_worker_state& w) { return w.done; });
+            [](const aggregator_worker_state_t& w) { return w.done; });
         if (all_done) {
             state.ready_to_validate = true;
             state_cv.notify_one();
         }
     };
 
-    auto stop_slot = [&](const Stop& stop) {
+    auto stop_slot = [&](const stop_t& stop) {
         stop_requested.store(true);
         failure.store(failure.load() || stop.due_to_failure);
         state_cv.notify_all();
@@ -497,13 +497,13 @@ int aggregator_process()
             state.seed_ready        = false;
             state.ready_to_validate = false;
             for (auto& worker : state.workers) {
-                worker = Aggregator_worker_state{};
+                worker = aggregator_worker_state_t{};
             }
         }
 
         sintra::barrier(sintra::test::make_barrier_name("complex-round", round, "start"), group);
 
-        std::array<Aggregator_worker_state, k_worker_count> snapshot{};
+        std::array<aggregator_worker_state_t, k_worker_count> snapshot{};
         bool          local_failure = false;
         std::uint64_t seed          = 0;
 
@@ -537,7 +537,7 @@ int aggregator_process()
 
         for (std::size_t idx = 0; idx < k_worker_count; ++idx) {
             const auto& worker = snapshot[idx];
-            sintra::world() << Validation{round, static_cast<int>(idx), worker.contributions,
+            sintra::world() << validation_t{round, static_cast<int>(idx), worker.contributions,
                                           worker.xor_checksum, worker.sum_checksum};
         }
 
@@ -563,11 +563,11 @@ int verifier_process()
     int current_round = -1;
     std::array<std::uint64_t, k_rounds> seeds{};
     std::array<bool, k_rounds> seed_ready{};
-    std::array<Verifier_worker_state, k_worker_count> worker_state{};
+    std::array<verifier_worker_state_t, k_worker_count> worker_state{};
     int  validations_received = 0;
     bool ready_to_advance     = false;
 
-    auto kickoff_slot = [&](const Kickoff& kickoff) {
+    auto kickoff_slot = [&](const kickoff_t& kickoff) {
         std::lock_guard<std::mutex> lk(state_mutex);
         if (kickoff.round >= 0 && kickoff.round < k_rounds) {
             seeds[static_cast<std::size_t>(kickoff.round)] = kickoff.seed;
@@ -576,7 +576,7 @@ int verifier_process()
         }
     };
 
-    auto validation_slot = [&](const Validation& validation) {
+    auto validation_slot = [&](const validation_t& validation) {
         std::lock_guard<std::mutex> lk(state_mutex);
         if (validation.round     != current_round || validation.worker_id < 0 ||
             validation.worker_id >= static_cast<int>(k_worker_count))
@@ -596,7 +596,7 @@ int verifier_process()
         }
     };
 
-    auto stop_slot = [&](const Stop& stop) {
+    auto stop_slot = [&](const stop_t& stop) {
         stop_requested.store(true);
         failure.store(failure.load() || stop.due_to_failure);
         state_cv.notify_all();
@@ -615,7 +615,7 @@ int verifier_process()
             validations_received = 0;
             ready_to_advance     = false;
             for (auto& worker : worker_state) {
-                worker = Verifier_worker_state{};
+                worker = verifier_worker_state_t{};
             }
         }
 
@@ -662,7 +662,7 @@ int verifier_process()
 
         success = success && !failure.load(std::memory_order_acquire);
 
-        sintra::world() << Round_advance{round, success, checksums};
+        sintra::world() << round_advance_t{round, success, checksums};
         if (!success) {
             stop_requested.store(true);
         }

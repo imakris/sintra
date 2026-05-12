@@ -27,7 +27,7 @@
 
 namespace {
 
-struct Process_handle
+struct process_handle_t
 {
 #ifdef _WIN32
     HANDLE handle = nullptr;
@@ -147,7 +147,7 @@ std::wstring build_command_line(const std::string& exe, const std::vector<std::s
 bool spawn_process(
     const std::string&                 exe,
     const std::vector<std::string>&    args,
-    Process_handle&                    out)
+    process_handle_t&                  out)
 {
 #ifdef _WIN32
     const std::wstring exe_wide = to_wide(exe);
@@ -224,7 +224,7 @@ bool spawn_process(
 #endif
 }
 
-bool wait_for_exit(Process_handle& process, int timeout_ms)
+bool wait_for_exit(process_handle_t& process, int timeout_ms)
 {
     if (process.exited) {
         return true;
@@ -282,7 +282,7 @@ bool wait_for_exit(Process_handle& process, int timeout_ms)
     return false;
 }
 
-void close_process(Process_handle& process)
+void close_process(process_handle_t& process)
 {
 #ifdef _WIN32
     if (process.handle) {
@@ -334,7 +334,7 @@ int main(int argc, char** argv)
     args.emplace_back("--delay_ms");
     args.emplace_back(std::to_string(child_delay));
 
-    Process_handle child;
+    process_handle_t child;
     const std::string exe = argv[0];
     if (!spawn_process(exe, args, child)) {
         std::fprintf(stderr, "[crash_capture_parent] failed to spawn child\n");

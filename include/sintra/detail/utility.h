@@ -140,24 +140,24 @@ size_t get_cache_line_size()
 
 // C++ vector of strings to C style null terminated array of pointers
 // conversion utility
-struct cstring_vector
+struct C_string_vector
 {
-    explicit cstring_vector(const std::vector<std::string>& v_in)
+    explicit C_string_vector(const std::vector<std::string>& v_in)
         : m_storage(v_in)
     {
         initialize();
     }
 
-    explicit cstring_vector(std::vector<std::string>&& v_in)
+    explicit C_string_vector(std::vector<std::string>&& v_in)
         : m_storage(std::move(v_in))
     {
         initialize();
     }
 
-    cstring_vector(const cstring_vector&) = delete;
-    cstring_vector& operator=(const cstring_vector&) = delete;
-    cstring_vector(cstring_vector&&) = delete;
-    cstring_vector& operator=(cstring_vector&&) = delete;
+    C_string_vector(const C_string_vector&) = delete;
+    C_string_vector& operator=(const C_string_vector&) = delete;
+    C_string_vector(C_string_vector&&) = delete;
+    C_string_vector& operator=(C_string_vector&&) = delete;
 
     const char* const* v()    const { return m_v.data();       }
     size_t             size() const { return m_storage.size(); }
@@ -200,20 +200,20 @@ using pipe2_fn                = int(*)(int[2], int);
 using write_fn                = ssize_t(*)(int, const void*, size_t);
 using read_fn                 = ssize_t(*)(int, void*, size_t);
 using waitpid_fn              = pid_t(*)(pid_t, int*, int);
-using spawn_detached_debug_fn = void(*)(const struct spawn_detached_debug_info&);
+using spawn_detached_debug_fn = void(*)(const struct spawn_detached_debug_info_t&);
 
-struct spawn_detached_debug_info
+struct spawn_detached_debug_info_t
 {
     enum class Stage {
-        PipeCreation,
-        Fork,
-        ChildReadyPipeWrite,
-        ParentReadReadyStatus,
-        ParentReadExecStatus,
-        ParentWaitpid,
+        PIPE_CREATION,
+        FORK,
+        CHILD_READY_PIPE_WRITE,
+        PARENT_READ_READY_STATUS,
+        PARENT_READ_EXEC_STATUS,
+        PARENT_WAITPID,
     };
 
-    Stage  stage{Stage::PipeCreation};
+    Stage  stage{Stage::PIPE_CREATION};
     int    errno_value{0};
     int    exec_errno{0};
 };
@@ -248,7 +248,7 @@ inline std::atomic<spawn_detached_debug_fn>& spawn_detached_debug_override()
     return fn;
 }
 
-inline void emit_spawn_detached_debug(const spawn_detached_debug_info& info)
+inline void emit_spawn_detached_debug(const spawn_detached_debug_info_t& info)
 {
     if (auto fn = spawn_detached_debug_override().load()) {
         fn(info);
@@ -702,14 +702,14 @@ bool spawn_detached_win32(const Spawn_detached_options& options)
             inherited_handles.end());
     }
 
-    struct Handle_inherit_guard
+    struct handle_inherit_guard_t
     {
         HANDLE handle = nullptr;
         DWORD  flags  = 0;
         bool   active = false;
     };
 
-    std::vector<Handle_inherit_guard> handle_guards;
+    std::vector<handle_inherit_guard_t> handle_guards;
     if (!inherited_handles.empty()) {
         handle_guards.reserve(inherited_handles.size());
         for (HANDLE handle : inherited_handles) {
@@ -965,8 +965,8 @@ bool spawn_detached_posix(const Spawn_detached_options& options)
         exec_envp = envp.data();
     }
 
-    auto report_failure = [&](spawn_detached_debug_info::Stage stage, int error, int exec_error) {
-        spawn_detached_debug_info info;
+    auto report_failure = [&](spawn_detached_debug_info_t::Stage stage, int error, int exec_error) {
+        spawn_detached_debug_info_t info;
         info.stage       = stage;
         info.errno_value = error;
         info.exec_errno  = exec_error;
@@ -988,7 +988,7 @@ bool spawn_detached_posix(const Spawn_detached_options& options)
             ready_pipe[1] = -1;
         }
         if (saved_errno != EINTR) {
-            report_failure(spawn_detached_debug_info::Stage::PipeCreation, saved_errno, saved_errno);
+            report_failure(spawn_detached_debug_info_t::Stage::PIPE_CREATION, saved_errno, saved_errno);
             errno = saved_errno;
             return false;
         }
@@ -1002,7 +1002,7 @@ bool spawn_detached_posix(const Spawn_detached_options& options)
     if (child_pid == -1) {
         if (ready_pipe[0] >= 0) { close(ready_pipe[0]); }
         if (ready_pipe[1] >= 0) { close(ready_pipe[1]); }
-        report_failure(spawn_detached_debug_info::Stage::Fork, errno, errno);
+        report_failure(spawn_detached_debug_info_t::Stage::FORK, errno, errno);
         return false;
     }
 
@@ -1023,7 +1023,7 @@ bool spawn_detached_posix(const Spawn_detached_options& options)
 
         int ready_status = 0;
         if (!write_fully(ready_pipe[1], &ready_status, sizeof(ready_status))) {
-            report_failure(spawn_detached_debug_info::Stage::ChildReadyPipeWrite, errno, 0);
+            report_failure(spawn_detached_debug_info_t::Stage::CHILD_READY_PIPE_WRITE, errno, 0);
             if (ready_pipe[1] >= 0) {
                 close(ready_pipe[1]);
             }
@@ -1082,7 +1082,7 @@ bool spawn_detached_posix(const Spawn_detached_options& options)
     int  exec_errno     = 0;
     bool spawn_failed   = false;
     int  observed_errno = 0;
-    auto failure_stage  = spawn_detached_debug_info::Stage::ParentReadReadyStatus;
+    auto failure_stage  = spawn_detached_debug_info_t::Stage::PARENT_READ_READY_STATUS;
 
     int ready_status = 0;
     switch (read_int(&ready_status, &exec_errno)) {
@@ -1092,12 +1092,12 @@ bool spawn_detached_posix(const Spawn_detached_options& options)
             spawn_failed   = true;
             exec_errno     = exec_errno ? exec_errno : EPIPE;
             observed_errno = exec_errno;
-            failure_stage  = spawn_detached_debug_info::Stage::ParentReadReadyStatus;
+            failure_stage  = spawn_detached_debug_info_t::Stage::PARENT_READ_READY_STATUS;
             break;
         case Read_result::Error:
             spawn_failed   = true;
             observed_errno = exec_errno;
-            failure_stage  = spawn_detached_debug_info::Stage::ParentReadReadyStatus;
+            failure_stage  = spawn_detached_debug_info_t::Stage::PARENT_READ_READY_STATUS;
             break;
     }
 
@@ -1108,14 +1108,14 @@ bool spawn_detached_posix(const Spawn_detached_options& options)
                 exec_errno     = exec_status > 0 ? exec_status : -exec_status;
                 spawn_failed   = true;
                 observed_errno = exec_errno;
-                failure_stage  = spawn_detached_debug_info::Stage::ParentReadExecStatus;
+                failure_stage  = spawn_detached_debug_info_t::Stage::PARENT_READ_EXEC_STATUS;
                 break;
             case Read_result::Eof:
                 break;
             case Read_result::Error:
                 spawn_failed   = true;
                 observed_errno = exec_errno;
-                failure_stage  = spawn_detached_debug_info::Stage::ParentReadExecStatus;
+                failure_stage  = spawn_detached_debug_info_t::Stage::PARENT_READ_EXEC_STATUS;
                 break;
         }
     }
@@ -1151,7 +1151,7 @@ bool spawn_detached_posix(const Spawn_detached_options& options)
 
     if (wait_result == child_pid) {
         if (!(WIFEXITED(wait_status) && WEXITSTATUS(wait_status) == 0)) {
-            report_failure(spawn_detached_debug_info::Stage::ParentWaitpid,
+            report_failure(spawn_detached_debug_info_t::Stage::PARENT_WAITPID,
                 exec_errno ? exec_errno : ECHILD,
                 exec_errno);
             errno = exec_errno ? exec_errno : ECHILD;
@@ -1171,7 +1171,7 @@ bool spawn_detached_posix(const Spawn_detached_options& options)
             errno = 0;
             return true;
         }
-        report_failure(spawn_detached_debug_info::Stage::ParentWaitpid, errno, exec_errno);
+        report_failure(spawn_detached_debug_info_t::Stage::PARENT_WAITPID, errno, exec_errno);
         return false;
     }
 #endif
@@ -1224,6 +1224,3 @@ struct Instantiator
 
 
 }
-
-
-

@@ -250,7 +250,7 @@ inline std::optional<uint64_t> current_process_start_stamp()
     return query_process_start_stamp(get_current_pid());
 }
 
-struct run_marker_record
+struct run_marker_record_t
 {
     uint32_t   pid                  = 0;
     uint64_t   start_stamp          = 0;
@@ -280,7 +280,7 @@ inline std::filesystem::path run_marker_cleanup_path(const std::filesystem::path
 
 inline bool write_run_marker(
     const std::filesystem::path&   directory,
-    const run_marker_record&       record)
+    const run_marker_record_t&     record)
 {
     std::error_code ec;
     if (!std::filesystem::exists(directory, ec)) {
@@ -300,14 +300,14 @@ inline bool write_run_marker(
     return static_cast<bool>(marker);
 }
 
-inline std::optional<run_marker_record> read_run_marker(const std::filesystem::path& marker_path)
+inline std::optional<run_marker_record_t> read_run_marker(const std::filesystem::path& marker_path)
 {
     std::ifstream marker(marker_path);
     if (!marker.is_open()) {
         return std::nullopt;
     }
 
-    run_marker_record record;
+    run_marker_record_t record;
     std::string line;
     while (std::getline(marker, line)) {
         auto pos = line.find('=');

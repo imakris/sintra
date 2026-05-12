@@ -42,7 +42,7 @@ constexpr std::size_t k_iterations     = 64;
 constexpr std::array<std::size_t, 2> k_expected_per_stage = {k_stage_a_workers, k_stage_b_workers};
 constexpr std::uint32_t k_max_extra_rounds = 4;
 
-struct Stage_report
+struct stage_report_t
 {
     std::uint32_t  stage;
     std::uint32_t  worker;
@@ -50,7 +50,7 @@ struct Stage_report
     std::uint32_t  payload;
 };
 
-struct Stage_directive
+struct stage_directive_t
 {
     std::uint32_t  stage;
     std::uint32_t  iteration;
@@ -112,7 +112,7 @@ int coordinator_process()
         return oss.str();
     };
 
-    activate_slot([&](const Stage_report& report) {
+    activate_slot([&](const stage_report_t& report) {
         if (report.stage >= state.stage_counts.size()) {
             std::lock_guard<std::mutex> lock(state.mutex);
             if (!state.failure) {
@@ -210,7 +210,7 @@ int coordinator_process()
 
         const std::uint32_t extra_rounds = extra_rounds_for_iteration(iteration);
         const auto          stage0_token = directive_token(0, iteration);
-        world() << Stage_directive{0u, iteration, extra_rounds, stage0_token};
+        world() << stage_directive_t{0u, iteration, extra_rounds, stage0_token};
 
         const auto phase_a_barrier =
             sintra::test::make_barrier_name("complex-phase-a", iteration);
@@ -222,7 +222,7 @@ int coordinator_process()
         }
 
         const auto stage1_token = directive_token(1, iteration);
-        world() << Stage_directive{1u, iteration, extra_rounds, stage1_token};
+        world() << stage_directive_t{1u, iteration, extra_rounds, stage1_token};
 
         {
             std::unique_lock<std::mutex> lock(state.mutex);
@@ -299,7 +299,7 @@ int stage_process(std::uint32_t stage, std::uint32_t worker_index)
     std::vector<std::uint32_t> extra_rounds_cache(k_iterations, 0);
     std::vector<std::uint32_t> release_tokens(k_iterations, 0);
 
-    activate_slot([&](const Stage_directive& directive) {
+    activate_slot([&](const stage_directive_t& directive) {
         if (directive.stage != stage) {
             return;
         }
@@ -353,7 +353,7 @@ int stage_process(std::uint32_t stage, std::uint32_t worker_index)
             if (delay > 0) {
                 std::this_thread::sleep_for(std::chrono::microseconds(delay));
             }
-            world() << Stage_report{stage,
+            world() << stage_report_t{stage,
                                    worker_index,
                                    iteration,
                                    expected_payload(stage, iteration, worker_index)};
@@ -390,7 +390,7 @@ int stage_process(std::uint32_t stage, std::uint32_t worker_index)
             if (delay > 0) {
                 std::this_thread::sleep_for(std::chrono::microseconds(delay));
             }
-            world() << Stage_report{stage,
+            world() << stage_report_t{stage,
                                    worker_index,
                                    iteration,
                                    expected_payload(stage, iteration, worker_index)};

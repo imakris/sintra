@@ -38,7 +38,7 @@ constexpr const char* k_nonexistent_instance_name = "nonexistent_instance_will_t
 // Name registered by the "dummy" child in Test 1 to prove it actually launched
 constexpr const char* k_timeout_child_instance_name = "spawn_wait_timeout_child";
 
-struct Done_signal {};
+struct done_signal_t {};
 
 bool is_worker_mode()
 {
@@ -110,7 +110,7 @@ int run_worker()
     std::mutex done_mutex;
     bool done = false;
 
-    sintra::activate_slot([&](const Done_signal&) {
+    sintra::activate_slot([&](const done_signal_t&) {
         std::fprintf(stderr, "[WORKER] Received Done signal\n");
         std::lock_guard<std::mutex> lk(done_mutex);
         done = true;
@@ -141,7 +141,7 @@ int run_worker()
 }
 
 // "Dummy" child process for Test 1 - registers a name to prove it launched,
-// then waits for Done_signal before exiting
+// then waits for done_signal_t before exiting
 int run_timeout_child()
 {
     std::fprintf(stderr, "[TIMEOUT_CHILD] Starting\n");
@@ -151,12 +151,12 @@ int run_timeout_child()
         Timeout_transceiver() : Derived_transceiver<Timeout_transceiver>() {}
     };
 
-    // Set up Done_signal handler so coordinator can clean us up
+    // Set up done_signal_t handler so coordinator can clean us up
     std::condition_variable done_cv;
     std::mutex done_mutex;
     bool done = false;
 
-    sintra::activate_slot([&](const Done_signal&) {
+    sintra::activate_slot([&](const done_signal_t&) {
         std::fprintf(stderr, "[TIMEOUT_CHILD] Received Done signal\n");
         std::lock_guard<std::mutex> lk(done_mutex);
         done = true;
@@ -173,7 +173,7 @@ int run_timeout_child()
 
     std::fprintf(stderr, "[TIMEOUT_CHILD] Registered as '%s'\n", k_timeout_child_instance_name);
 
-    // Wait for Done_signal or timeout after 30s
+    // Wait for done_signal_t or timeout after 30s
     std::unique_lock<std::mutex> lk(done_mutex);
     const bool signaled = done_cv.wait_for(lk, std::chrono::seconds(30), [&] { return done; });
 
@@ -284,7 +284,7 @@ int run_coordinator(const std::string& binary_path)
                     (unsigned long long)timeout_child_resolved);
 
                 // Signal the timeout child to exit cleanly
-                sintra::world() << Done_signal{};
+                sintra::world() << done_signal_t{};
 
                 // Brief pause to allow cleanup
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -340,7 +340,7 @@ int run_coordinator(const std::string& binary_path)
             }
 
             // Signal the worker to finish
-            sintra::world() << Done_signal{};
+            sintra::world() << done_signal_t{};
         }
 
         // Clear worker mode env
@@ -389,7 +389,7 @@ int main(int argc, char* argv[])
     }
 
     // If spawned but SPAWN_WAIT_TEST_WORKER env var is not set, this is the "timeout" child
-    // from Test 1. Register a name to prove we launched, then wait for Done_signal.
+    // from Test 1. Register a name to prove we launched, then wait for done_signal_t.
     if (is_spawned && !is_worker) {
         sintra::init(argc, argv);
         int result = run_timeout_child();

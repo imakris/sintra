@@ -16,7 +16,7 @@ using namespace std::chrono_literals;
 
 constexpr std::string_view k_prefix = "drain_wake_coordination_test: ";
 
-struct Wait_result
+struct wait_result_t
 {
     std::atomic<bool>          done{false};
     bool                       success = false;
@@ -38,7 +38,7 @@ bool wait_for_flag(
 }
 
 bool wait_for_completion(
-    const Wait_result&         result,
+    const wait_result_t&         result,
     std::chrono::milliseconds  timeout)
 {
     return wait_for_flag(result.done, timeout);
@@ -108,7 +108,7 @@ bool test_wait_for_all_draining_wakes_after_state_change()
         sintra::s_coord->m_draining_process_states[self_index].load(std::memory_order_acquire);
     sintra::s_coord->m_draining_process_states[self_index] = 1;
 
-    Wait_result result;
+    wait_result_t result;
     std::thread waiter([&]() {
         const auto start = std::chrono::steady_clock::now();
         result.success = sintra::s_coord->wait_for_all_draining(sintra::s_mproc_id);
@@ -174,7 +174,7 @@ bool test_shutdown_drain_wait_wakes_after_group_change()
         }
     }
 
-    Wait_result result;
+    wait_result_t result;
     std::thread waiter([&]() {
         const auto start = std::chrono::steady_clock::now();
         sintra::detail::shutdown_coordinator_drain_wait(group_name);

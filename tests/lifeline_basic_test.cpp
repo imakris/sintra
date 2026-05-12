@@ -63,7 +63,7 @@ constexpr int k_leak_owner_timeout_ms         = 10000;
 constexpr int k_respawn_owner_timeout_ms      = 10000;
 constexpr int k_respawn_child_exit_timeout_ms = 2000;
 
-struct Process_handle
+struct process_handle_t
 {
 #ifdef _WIN32
     HANDLE handle = nullptr;
@@ -241,7 +241,7 @@ std::wstring build_command_line(const std::string& exe, const std::vector<std::s
 bool spawn_process(
     const std::string&                 exe,
     const std::vector<std::string>&    args,
-    Process_handle&                    out)
+    process_handle_t&                  out)
 {
     const std::wstring exe_wide = to_wide(exe);
     std::wstring       cmdline  = build_command_line(exe, args);
@@ -278,7 +278,7 @@ bool spawn_process(
     return true;
 }
 
-bool poll_exit(Process_handle& process)
+bool poll_exit(process_handle_t& process)
 {
     if (process.exited || !process.handle) {
         return process.exited;
@@ -300,7 +300,7 @@ bool poll_exit(Process_handle& process)
     return true;
 }
 
-void close_process(Process_handle& process)
+void close_process(process_handle_t& process)
 {
     if (process.handle) {
         CloseHandle(process.handle);
@@ -311,7 +311,7 @@ void close_process(Process_handle& process)
 bool spawn_process(
     const std::string&                 exe,
     const std::vector<std::string>&    args,
-    Process_handle&                    out)
+    process_handle_t&                  out)
 {
     pid_t pid = ::fork();
     if (pid < 0) {
@@ -334,7 +334,7 @@ bool spawn_process(
     return true;
 }
 
-bool poll_exit(Process_handle& process)
+bool poll_exit(process_handle_t& process)
 {
     if (process.exited || process.pid <= 0) {
         return process.exited;
@@ -378,10 +378,10 @@ bool poll_exit(Process_handle& process)
     return true;
 }
 
-void close_process(Process_handle& /*process*/) {}
+void close_process(process_handle_t& /*process*/) {}
 #endif
 
-bool wait_for_exit(Process_handle& process, int timeout_ms, int& exit_code_out)
+bool wait_for_exit(process_handle_t& process, int timeout_ms, int& exit_code_out)
 {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     while (std::chrono::steady_clock::now() < deadline) {
@@ -400,7 +400,7 @@ bool wait_for_exit(Process_handle& process, int timeout_ms, int& exit_code_out)
     return false;
 }
 
-bool is_running(Process_handle& process)
+bool is_running(process_handle_t& process)
 {
     return !poll_exit(process);
 }
@@ -408,7 +408,7 @@ bool is_running(Process_handle& process)
 bool wait_for_child_completion(
     const std::filesystem::path&   dir,
     const std::string&             test_case,
-    Process_handle&                child,
+    process_handle_t&                child,
     int                            timeout_ms,
     int&                           child_exit)
 {
@@ -763,7 +763,7 @@ bool run_respawn_test(const std::string& binary_path, const std::filesystem::pat
         k_dir_arg, dir.string()
     };
 
-    Process_handle owner{};
+    process_handle_t owner{};
     if (!spawn_process(binary_path, args, owner)) {
         std::fprintf(stderr, "[test] failed to spawn respawn owner\n");
         close_process(owner);
@@ -784,7 +784,7 @@ bool run_respawn_test(const std::string& binary_path, const std::filesystem::pat
         return false;
     }
 
-    Process_handle respawned_child{};
+    process_handle_t respawned_child{};
 #ifdef _WIN32
     respawned_child.pid = static_cast<DWORD>(respawned_pid);
     respawned_child.handle = OpenProcess(
@@ -862,7 +862,7 @@ bool run_owner_case(
         k_dir_arg, dir.string()
     };
 
-    Process_handle owner{};
+    process_handle_t owner{};
     if (!spawn_process(binary_path, args, owner)) {
         std::fprintf(stderr, "[test] failed to spawn owner\n");
         close_process(owner);
@@ -876,7 +876,7 @@ bool run_owner_case(
         return false;
     }
 
-    Process_handle child{};
+    process_handle_t child{};
 #ifdef _WIN32
     child.pid = static_cast<DWORD>(child_pid_value_raw);
     child.handle = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, child.pid);
@@ -939,7 +939,7 @@ bool run_missing_lifeline_case(const std::string& binary_path)
         "--coordinator_id", "1"
     };
 
-    Process_handle proc{};
+    process_handle_t proc{};
     if (!spawn_process(binary_path, args, proc)) {
         std::fprintf(stderr, "[test] failed to spawn missing lifeline process\n");
         close_process(proc);
@@ -971,7 +971,7 @@ bool run_leak_test(const std::string& binary_path, const std::filesystem::path& 
         k_dir_arg, dir.string()
     };
 
-    Process_handle owner{};
+    process_handle_t owner{};
     if (!spawn_process(binary_path, args, owner)) {
         std::fprintf(stderr, "[test] failed to spawn leak test owner\n");
         close_process(owner);
@@ -1008,7 +1008,7 @@ bool run_manual_disable_case(const std::string& binary_path)
         "--lifeline_disable"  // Manual lifeline disable
     };
 
-    Process_handle proc{};
+    process_handle_t proc{};
     if (!spawn_process(binary_path, args, proc)) {
         std::fprintf(stderr, "[test] failed to spawn manual_disable process\n");
         close_process(proc);
@@ -1052,7 +1052,7 @@ bool run_short_option_case(const std::string& binary_path)
         "-f", "12345"  // Short option that should be ignored, not interpreted as lifeline handle
     };
 
-    Process_handle proc{};
+    process_handle_t proc{};
     if (!spawn_process(binary_path, args, proc)) {
         std::fprintf(stderr, "[test] failed to spawn short_option process\n");
         close_process(proc);

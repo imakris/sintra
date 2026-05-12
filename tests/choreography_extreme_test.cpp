@@ -55,13 +55,13 @@ namespace {
 constexpr int k_producer_count = 3;
 constexpr int k_phase_count = 4;
 
-struct Phase_plan
+struct phase_plan_t
 {
     int    rounds;
     int    chaos_tokens;
 };
 
-constexpr std::array<Phase_plan, k_phase_count> k_phase_plans{{
+constexpr std::array<phase_plan_t, k_phase_count> k_phase_plans{{
     {3, 4},   // Phase 0
     {5, 6},   // Phase 1
     {4, 5},   // Phase 2
@@ -72,25 +72,25 @@ constexpr int k_participant_slot_aggregator = k_producer_count;
 constexpr int k_participant_slot_chaos = k_producer_count + 1;
 constexpr int k_participant_slot_count = k_producer_count + 2;
 
-struct Phase_announcement
+struct phase_announcement_t
 {
     int    phase;
     int    rounds;
     int    chaos_tokens;
 };
 
-struct Phase_ready
+struct phase_ready_t
 {
     int    phase;
     int    participant_slot;
 };
 
-struct Start_phase
+struct start_phase_t
 {
     int    phase;
 };
 
-struct Work_result
+struct work_result_t
 {
     int    phase;
     int    producer;
@@ -98,44 +98,44 @@ struct Work_result
     int    value;
 };
 
-struct Round_checkpoint
+struct round_checkpoint_t
 {
     int    phase;
     int    round;
     int    total;
 };
 
-struct Audit_outcome
+struct audit_outcome_t
 {
     int    phase;
     bool   ok;
     int    observed_total;
 };
 
-struct Phase_complete
+struct phase_complete_t
 {
     int    phase;
 };
 
-struct Chaos_probe
+struct chaos_probe_t
 {
     int    phase;
     int    token;
 };
 
-struct Chaos_reply
+struct chaos_reply_t
 {
     int    phase;
     int    token;
     int    producer;
 };
 
-struct Chaos_complete
+struct chaos_complete_t
 {
     int    phase;
 };
 
-struct Terminate {};
+struct terminate_t {};
 
 int compute_value(int phase, int producer, int round)
 {
@@ -169,7 +169,7 @@ struct Phase_summary
     std::vector<int>   partial_totals;
 };
 
-struct Phase_observation
+struct phase_observation_t
 {
     int                phase                = -1;
     int                expected_total       = 0;
@@ -210,7 +210,7 @@ int process_conductor()
 
     std::mutex summary_mutex;
 
-    sintra::activate_slot([&](const Phase_ready& msg) {
+    sintra::activate_slot([&](const phase_ready_t& msg) {
         std::lock_guard<std::mutex> lk(ready_mutex);
         if (msg.phase            == ready_phase && msg.participant_slot >= 0 &&
             msg.participant_slot <  static_cast<int>(ready_flags.size()))
@@ -222,7 +222,7 @@ int process_conductor()
         }
     });
 
-    sintra::activate_slot([&](const Round_checkpoint& msg) {
+    sintra::activate_slot([&](const round_checkpoint_t& msg) {
         if (msg.phase < 0 || msg.phase >= k_phase_count) {
             return;
         }
@@ -240,7 +240,7 @@ int process_conductor()
         summary.partial_totals.push_back(msg.total);
     });
 
-    sintra::activate_slot([&](const Audit_outcome& msg) {
+    sintra::activate_slot([&](const audit_outcome_t& msg) {
         std::lock_guard<std::mutex> lk1(summary_mutex);
         if (msg.phase >= 0 && msg.phase < k_phase_count) {
             auto& summary = summaries[msg.phase];
@@ -275,7 +275,7 @@ int process_conductor()
             ready_flags.fill(false);
         }
 
-        sintra::world() << Phase_announcement{phase, plan.rounds, plan.chaos_tokens};
+        sintra::world() << phase_announcement_t{phase, plan.rounds, plan.chaos_tokens};
 
         {
             std::unique_lock<std::mutex> lk(ready_mutex);
@@ -292,7 +292,7 @@ int process_conductor()
             audit_total    = 0;
         }
 
-        sintra::world() << Start_phase{phase};
+        sintra::world() << start_phase_t{phase};
 
         {
             std::unique_lock<std::mutex> lk(audit_mutex);
@@ -305,10 +305,10 @@ int process_conductor()
             summaries[phase].audit_ok = false;
         }
 
-        sintra::world() << Phase_complete{phase};
+        sintra::world() << phase_complete_t{phase};
     }
 
-    sintra::world() << Terminate{};
+    sintra::world() << terminate_t{};
 
     sintra::deactivate_all_slots();
 
@@ -348,7 +348,7 @@ int process_aggregator()
     sintra::test::Shared_directory shared("SINTRA_TEST_SHARED_DIR", "choreography_extreme");
     const auto shared_dir = shared.path();
 
-    std::array<Phase_observation, k_phase_count> observations{};
+    std::array<phase_observation_t, k_phase_count> observations{};
     for (int phase = 0; phase < k_phase_count; ++phase) {
         observations[phase].phase            = phase;
         observations[phase].expected_total   = expected_total_for_phase(phase);
@@ -368,20 +368,20 @@ int process_aggregator()
     int  current_rounds = 0;
     bool active         = false;
 
-    struct Round_data
+    struct round_data_t
     {
         std::array<bool, k_producer_count> received{};
         bool checkpoint_sent = false;
     };
 
-    std::vector<Round_data> round_state;
+    std::vector<round_data_t> round_state;
     int  contributions_count = 0;
     int  total_sum           = 0;
     bool chaos_done          = false;
     bool audit_sent          = false;
     bool phase_ok            = true;
 
-    auto prepare_audit_locked = [&]() -> std::optional<Audit_outcome> {
+    auto prepare_audit_locked = [&]() -> std::optional<audit_outcome_t> {
         if (!active)                                             { return std::nullopt; }
         if (current_phase < 0 || current_phase >= k_phase_count) { return std::nullopt; }
         const int expected_contributions = current_rounds * k_producer_count;
@@ -392,12 +392,12 @@ int process_aggregator()
             observations[current_phase].ok             = ok;
             observations[current_phase].audit_emitted  = true;
             audit_sent                                 = true;
-            return Audit_outcome{current_phase, ok, total_sum};
+            return audit_outcome_t{current_phase, ok, total_sum};
         }
         return std::nullopt;
     };
 
-    sintra::activate_slot([&](const Phase_announcement& msg) {
+    sintra::activate_slot([&](const phase_announcement_t& msg) {
         bool send_ready = false;
         if (msg.phase < 0 || msg.phase >= k_phase_count) {
             return;
@@ -422,21 +422,21 @@ int process_aggregator()
             send_ready                               = true;
         }
         if (send_ready) {
-            sintra::world() << Phase_ready{msg.phase, k_participant_slot_aggregator};
+            sintra::world() << phase_ready_t{msg.phase, k_participant_slot_aggregator};
         }
     });
 
-    sintra::activate_slot([&](const Start_phase& msg) {
+    sintra::activate_slot([&](const start_phase_t& msg) {
         std::lock_guard<std::mutex> lk(state_mutex);
         if (msg.phase == current_phase) {
             active = true;
         }
     });
 
-    sintra::activate_slot([&](const Work_result& msg) {
+    sintra::activate_slot([&](const work_result_t& msg) {
         bool emit_checkpoint = false;
-        Round_checkpoint checkpoint{};
-        std::optional<Audit_outcome> audit;
+        round_checkpoint_t checkpoint{};
+        std::optional<audit_outcome_t> audit;
         {
             std::lock_guard<std::mutex> lk(state_mutex);
             if (msg.phase != current_phase) { return;           }
@@ -452,7 +452,7 @@ int process_aggregator()
             if (msg.value != compute_value(msg.phase, msg.producer, msg.round)) {
                 phase_ok = false;
             }
-            Round_data& data = round_state[msg.round];
+            round_data_t& data = round_state[msg.round];
             if (data.received[msg.producer]) {
                 phase_ok = false;
                 return;
@@ -465,7 +465,7 @@ int process_aggregator()
             if (round_complete && !data.checkpoint_sent) {
                 data.checkpoint_sent = true;
                 emit_checkpoint      = true;
-                checkpoint           = Round_checkpoint{current_phase, msg.round, total_sum};
+                checkpoint           = round_checkpoint_t{current_phase, msg.round, total_sum};
             }
 
             audit = prepare_audit_locked();
@@ -478,8 +478,8 @@ int process_aggregator()
         }
     });
 
-    sintra::activate_slot([&](const Chaos_complete& msg) {
-        std::optional<Audit_outcome> audit;
+    sintra::activate_slot([&](const chaos_complete_t& msg) {
+        std::optional<audit_outcome_t> audit;
         {
             std::lock_guard<std::mutex> lk(state_mutex);
             if (msg.phase == current_phase) {
@@ -493,14 +493,14 @@ int process_aggregator()
         }
     });
 
-    sintra::activate_slot([&](const Phase_complete& msg) {
+    sintra::activate_slot([&](const phase_complete_t& msg) {
         std::lock_guard<std::mutex> lk(state_mutex);
         if (msg.phase == current_phase) {
             active = false;
         }
     });
 
-    sintra::activate_slot([&](const Terminate&) {
+    sintra::activate_slot([&](const terminate_t&) {
         std::lock_guard<std::mutex> lk(state_mutex);
         terminate_requested = true;
         exit_cv.notify_all();
@@ -552,7 +552,7 @@ int run_producer(int producer_index)
     int  announced_rounds     = 0;
     int  completed_phase      = -1;
 
-    sintra::activate_slot([&](const Phase_announcement& msg) {
+    sintra::activate_slot([&](const phase_announcement_t& msg) {
         if (msg.phase < 0 || msg.phase >= k_phase_count) {
             return;
         }
@@ -566,11 +566,11 @@ int run_producer(int producer_index)
             send_ready          = true;
         }
         if (send_ready) {
-            sintra::world() << Phase_ready{msg.phase, producer_index};
+            sintra::world() << phase_ready_t{msg.phase, producer_index};
         }
     });
 
-    sintra::activate_slot([&](const Start_phase& msg) {
+    sintra::activate_slot([&](const start_phase_t& msg) {
         std::lock_guard<std::mutex> lk(state_mutex);
         if (msg.phase == current_phase) {
             start_ready = true;
@@ -578,7 +578,7 @@ int run_producer(int producer_index)
         }
     });
 
-    sintra::activate_slot([&](const Round_checkpoint& msg) {
+    sintra::activate_slot([&](const round_checkpoint_t& msg) {
         std::lock_guard<std::mutex> lk(state_mutex);
         if (msg.phase == current_phase && msg.round > last_confirmed_round) {
             last_confirmed_round = msg.round;
@@ -586,24 +586,24 @@ int run_producer(int producer_index)
         }
     });
 
-    sintra::activate_slot([&](const Phase_complete& msg) {
+    sintra::activate_slot([&](const phase_complete_t& msg) {
         std::lock_guard<std::mutex> lk(state_mutex);
         completed_phase = std::max(completed_phase, msg.phase);
         complete_cv.notify_all();
     });
 
-    sintra::activate_slot([&](const Chaos_probe& msg) {
+    sintra::activate_slot([&](const chaos_probe_t& msg) {
         bool reply = false;
         {
             std::lock_guard<std::mutex> lk(state_mutex);
             reply = (!terminate_requested && msg.phase >= 0 && msg.phase <= current_phase);
         }
         if (reply) {
-            sintra::world() << Chaos_reply{msg.phase, msg.token, producer_index};
+            sintra::world() << chaos_reply_t{msg.phase, msg.token, producer_index};
         }
     });
 
-    sintra::activate_slot([&](const Terminate&) {
+    sintra::activate_slot([&](const terminate_t&) {
         std::lock_guard<std::mutex> lk(state_mutex);
         terminate_requested = true;
         start_cv.notify_all();
@@ -625,7 +625,7 @@ int run_producer(int producer_index)
 
         const int rounds = k_phase_plans[phase].rounds;
         for (int round = 0; round < rounds; ++round) {
-            sintra::world() << Work_result{phase, producer_index, round, compute_value(phase, producer_index, round)};
+            sintra::world() << work_result_t{phase, producer_index, round, compute_value(phase, producer_index, round)};
 
             std::unique_lock<std::mutex> lk(state_mutex);
             checkpoint_cv.wait(lk, [&] {
@@ -677,7 +677,7 @@ int process_chaos()
     bool terminate_requested = false;
     int  completed_phase     = -1;
 
-    sintra::activate_slot([&](const Phase_announcement& msg) {
+    sintra::activate_slot([&](const phase_announcement_t& msg) {
         if (msg.phase < 0 || msg.phase >= k_phase_count) {
             return;
         }
@@ -693,11 +693,11 @@ int process_chaos()
             send_ready          = true;
         }
         if (send_ready) {
-            sintra::world() << Phase_ready{msg.phase, k_participant_slot_chaos};
+            sintra::world() << phase_ready_t{msg.phase, k_participant_slot_chaos};
         }
     });
 
-    sintra::activate_slot([&](const Start_phase& msg) {
+    sintra::activate_slot([&](const start_phase_t& msg) {
         std::unique_lock<std::mutex> lk(state_mutex);
         if (msg.phase == current_phase) {
             phase_ready = true;
@@ -705,7 +705,7 @@ int process_chaos()
         }
     });
 
-    sintra::activate_slot([&](const Chaos_reply& msg) {
+    sintra::activate_slot([&](const chaos_reply_t& msg) {
         std::lock_guard<std::mutex> lk(state_mutex);
         if (msg.phase == current_phase && !terminate_requested) {
             ++received_acks;
@@ -713,13 +713,13 @@ int process_chaos()
         }
     });
 
-    sintra::activate_slot([&](const Phase_complete& msg) {
+    sintra::activate_slot([&](const phase_complete_t& msg) {
         std::lock_guard<std::mutex> lk(state_mutex);
         completed_phase = std::max(completed_phase, msg.phase);
         complete_cv.notify_all();
     });
 
-    sintra::activate_slot([&](const Terminate&) {
+    sintra::activate_slot([&](const terminate_t&) {
         std::lock_guard<std::mutex> lk(state_mutex);
         terminate_requested = true;
         ready_cv.notify_all();
@@ -739,7 +739,7 @@ int process_chaos()
         }
 
         for (int token = 0; token < k_phase_plans[phase].chaos_tokens; ++token) {
-            sintra::world() << Chaos_probe{phase, token};
+            sintra::world() << chaos_probe_t{phase, token};
             std::this_thread::sleep_for(std::chrono::microseconds(50 + (phase + token) % 7));
         }
 
@@ -753,7 +753,7 @@ int process_chaos()
             }
         }
 
-        sintra::world() << Chaos_complete{phase};
+        sintra::world() << chaos_complete_t{phase};
 
         {
             std::unique_lock<std::mutex> lk(state_mutex);

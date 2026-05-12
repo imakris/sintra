@@ -36,14 +36,14 @@ namespace {
 constexpr const char* k_messages_processed_barrier = "messages-processed";
 
 // Message types for the Maildrop API tests (uses Enclosure<T>)
-struct LocalMsg { int value; };
-struct RemoteMsg { int value; };
-struct WorldMsg { int value; };
+struct local_msg_t { int value; };
+struct remote_msg_t { int value; };
+struct world_msg_t { int value; };
 
 // Transceiver with typed messages for emit_* API tests
-struct TestTransceiver : sintra::Derived_transceiver<TestTransceiver>
+struct Test_transceiver : sintra::Derived_transceiver<Test_transceiver>
 {
-    TestTransceiver(const std::string& name = "") : sintra::Derived_transceiver<TestTransceiver>(name) {}
+    Test_transceiver(const std::string& name = "") : sintra::Derived_transceiver<Test_transceiver>(name) {}
 
     SINTRA_MESSAGE(TypedLocalMsg, int value);
     SINTRA_MESSAGE(TypedRemoteMsg, int value);
@@ -143,33 +143,33 @@ std::atomic<int> g_child_typed_global_count{0};
 int child_process()
 {
     // Set up slots for Maildrop API messages
-    sintra::activate_slot([](const LocalMsg& msg) {
+    sintra::activate_slot([](const local_msg_t& msg) {
         (void)msg;
         g_child_local_count.fetch_add(1, std::memory_order_relaxed);
     });
 
-    sintra::activate_slot([](const RemoteMsg& msg) {
+    sintra::activate_slot([](const remote_msg_t& msg) {
         (void)msg;
         g_child_remote_count.fetch_add(1, std::memory_order_relaxed);
     });
 
-    sintra::activate_slot([](const WorldMsg& msg) {
+    sintra::activate_slot([](const world_msg_t& msg) {
         (void)msg;
         g_child_world_count.fetch_add(1, std::memory_order_relaxed);
     });
 
-    // Set up slots for emit_* API messages (using the typed messages from TestTransceiver)
-    sintra::activate_slot([](const TestTransceiver::TypedLocalMsg& msg) {
+    // Set up slots for emit_* API messages (using the typed messages from Test_transceiver)
+    sintra::activate_slot([](const Test_transceiver::TypedLocalMsg& msg) {
         (void)msg;
         g_child_typed_local_count.fetch_add(1, std::memory_order_relaxed);
     });
 
-    sintra::activate_slot([](const TestTransceiver::TypedRemoteMsg& msg) {
+    sintra::activate_slot([](const Test_transceiver::TypedRemoteMsg& msg) {
         (void)msg;
         g_child_typed_remote_count.fetch_add(1, std::memory_order_relaxed);
     });
 
-    sintra::activate_slot([](const TestTransceiver::TypedGlobalMsg& msg) {
+    sintra::activate_slot([](const Test_transceiver::TypedGlobalMsg& msg) {
         (void)msg;
         g_child_typed_global_count.fetch_add(1, std::memory_order_relaxed);
     });
@@ -216,32 +216,32 @@ int main(int argc, char* argv[])
 
     if (!is_spawned) {
         // Coordinator process - set up local slots
-        sintra::activate_slot([](const LocalMsg& msg) {
+        sintra::activate_slot([](const local_msg_t& msg) {
             (void)msg;
             g_coord_local_count.fetch_add(1, std::memory_order_relaxed);
         });
 
-        sintra::activate_slot([](const RemoteMsg& msg) {
+        sintra::activate_slot([](const remote_msg_t& msg) {
             (void)msg;
             g_coord_remote_count.fetch_add(1, std::memory_order_relaxed);
         });
 
-        sintra::activate_slot([](const WorldMsg& msg) {
+        sintra::activate_slot([](const world_msg_t& msg) {
             (void)msg;
             g_coord_world_count.fetch_add(1, std::memory_order_relaxed);
         });
 
-        sintra::activate_slot([](const TestTransceiver::TypedLocalMsg& msg) {
+        sintra::activate_slot([](const Test_transceiver::TypedLocalMsg& msg) {
             (void)msg;
             g_coord_typed_local_count.fetch_add(1, std::memory_order_relaxed);
         });
 
-        sintra::activate_slot([](const TestTransceiver::TypedRemoteMsg& msg) {
+        sintra::activate_slot([](const Test_transceiver::TypedRemoteMsg& msg) {
             (void)msg;
             g_coord_typed_remote_count.fetch_add(1, std::memory_order_relaxed);
         });
 
-        sintra::activate_slot([](const TestTransceiver::TypedGlobalMsg& msg) {
+        sintra::activate_slot([](const Test_transceiver::TypedGlobalMsg& msg) {
             (void)msg;
             g_coord_typed_global_count.fetch_add(1, std::memory_order_relaxed);
         });
@@ -251,13 +251,13 @@ int main(int argc, char* argv[])
         trace("coord: slots-ready barrier exit");
 
         // Create a transceiver for emit_* tests
-        TestTransceiver test_transceiver("test_sender");
+        Test_transceiver test_transceiver("test_sender");
 
         // Send messages using Maildrop API
         for (int i = 0; i < k_num_messages; ++i) {
-            sintra::local() << LocalMsg{i};    // Should only reach coordinator
-            sintra::remote() << RemoteMsg{i};  // Should only reach child
-            sintra::world() << WorldMsg{i};    // Should reach both
+            sintra::local() << local_msg_t{i};    // Should only reach coordinator
+            sintra::remote() << remote_msg_t{i};  // Should only reach child
+            sintra::world() << world_msg_t{i};    // Should reach both
         }
 
         // Send messages using emit_* API

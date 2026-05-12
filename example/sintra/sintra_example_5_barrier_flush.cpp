@@ -21,7 +21,7 @@ namespace {
 constexpr std::size_t k_worker_count = 2;
 constexpr std::size_t k_iterations  = 64;
 
-struct Iteration_marker
+struct iteration_marker_t
 {
     std::uint32_t  worker;
     std::uint32_t  iteration;
@@ -36,7 +36,7 @@ int coordinator_process()
     std::size_t   messages_in_iteration = 0;
     std::uint32_t current_iteration     = 0;
 
-    activate_slot([&](const Iteration_marker& marker) {
+    activate_slot([&](const iteration_marker_t& marker) {
         std::lock_guard<std::mutex> lock(mutex);
         // Workers never advance to the next iteration before the coordinator
         // joins the barrier, therefore every marker must belong to the
@@ -73,7 +73,7 @@ int worker_process(std::uint32_t worker_index)
     barrier("barrier-flush-ready");
 
     for (std::uint32_t iteration = 0; iteration < k_iterations; ++iteration) {
-        world() << Iteration_marker{worker_index, iteration};
+        world() << iteration_marker_t{worker_index, iteration};
         barrier("barrier-flush-iteration");
     }
 

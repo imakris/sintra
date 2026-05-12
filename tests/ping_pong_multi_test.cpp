@@ -1,18 +1,18 @@
 //
-// Sintra Multi-Process Ping-Pong Test
+// Sintra Multi-Process ping_t-pong_t Test
 //
 // This test validates multi-process ping-pong messaging.
 // It corresponds to example_1 and tests the following features:
 // - Message passing between separate processes
 // - Slot activation in different processes
 // - Barriers for synchronization
-// - Stop signal to coordinate shutdown
+// - stop_t signal to coordinate shutdown
 // - Message throughput measurement
 //
 // Test structure:
-// - Process 1 (ping responder): Responds to Ping with Pong
-// - Process 2 (pong responder): Responds to Pong with Ping (initiates cycle)
-// - Process 3 (monitor): Counts Ping messages and sends Stop after target count
+// - Process 1 (ping responder): Responds to ping_t with pong_t
+// - Process 2 (pong responder): Responds to pong_t with ping_t (initiates cycle)
+// - Process 3 (monitor): Counts ping_t messages and sends stop_t after target count
 //
 // The test verifies that 500 ping-pong exchanges occur correctly across processes.
 //
@@ -32,9 +32,9 @@
 
 namespace {
 
-struct Ping {};
-struct Pong {};
-struct Stop {};
+struct ping_t {};
+struct pong_t {};
+struct stop_t {};
 constexpr const char* k_finished_barrier = "ping-pong-finished";
 
 void write_count(const std::filesystem::path& file, int value)
@@ -59,7 +59,7 @@ int read_count(const std::filesystem::path& file)
 
 void wait_for_stop()
 {
-    sintra::receive<Stop>();
+    sintra::receive<stop_t>();
     sintra::deactivate_all_slots();
 }
 
@@ -67,8 +67,8 @@ constexpr int k_target_ping_count = 150;
 
 int process_ping_responder()
 {
-    sintra::activate_slot([](Ping) {
-        sintra::world() << Pong();
+    sintra::activate_slot([](ping_t) {
+        sintra::world() << pong_t();
     });
     sintra::barrier("ping-pong-slot-activation");
 
@@ -79,12 +79,12 @@ int process_ping_responder()
 
 int process_pong_responder()
 {
-    sintra::activate_slot([](Pong) {
-        sintra::world() << Ping();
+    sintra::activate_slot([](pong_t) {
+        sintra::world() << ping_t();
     });
     sintra::barrier("ping-pong-slot-activation");
 
-    sintra::world() << Ping();
+    sintra::world() << ping_t();
 
     wait_for_stop();
     sintra::barrier(k_finished_barrier, "_sintra_all_processes");
@@ -96,7 +96,7 @@ int process_monitor()
     static std::atomic<int> counter{0};
     static std::atomic<bool> stop_sent{false};
 
-    auto monitor_slot = [](Ping) {
+    auto monitor_slot = [](ping_t) {
         if (stop_sent.load(std::memory_order_acquire)) {
             return;
         }
@@ -104,7 +104,7 @@ int process_monitor()
         if (count >= k_target_ping_count) {
             bool expected = false;
             if (stop_sent.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
-                sintra::world() << Stop();
+                sintra::world() << stop_t();
             }
         }
     };

@@ -184,10 +184,10 @@ namespace detail {
 /// an uncaught exception would be fatal.
 ///
 /// Usage:
-///   std::thread(exception_boundary("signal_dispatch", signal_dispatch_loop)).detach();
-///   exception_boundary("lifecycle_handler", [&]{ handler(event); })();
+///   std::thread(Exception_boundary("signal_dispatch", signal_dispatch_loop)).detach();
+///   Exception_boundary("lifecycle_handler", [&]{ handler(event); })();
 ///
-struct exception_boundary
+struct Exception_boundary
 {
     const char* context;
 
@@ -233,5 +233,4 @@ struct exception_boundary
 } // namespace detail
 
 } // namespace sintra
-
 

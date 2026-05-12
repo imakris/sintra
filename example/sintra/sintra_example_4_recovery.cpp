@@ -31,14 +31,14 @@ using namespace std;
 using namespace sintra;
 
 
-struct Done {};
+struct done_t {};
 
 
 int process_observer()
 {
-    console() << "[Observer] Starting - waiting for Done signal\n";
-    receive<Done>();
-    console() << "[Observer] Received Done signal!\n";
+    console() << "[Observer] Starting - waiting for done signal\n";
+    receive<done_t>();
+    console() << "[Observer] Received done signal!\n";
 
     deactivate_all_slots();
     console() << "[Observer] Exiting normally\n";
@@ -73,7 +73,7 @@ int process_worker()
         console() << "[Worker] Recovered run (occurrence " << occurrence << ") - completing successfully\n";
 
         // Signal completion
-        world() << Done();
+        world() << done_t();
 
         console() << "[Worker] Done signal sent, exiting normally\n";
         return 0;

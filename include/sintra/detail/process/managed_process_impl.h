@@ -83,7 +83,7 @@ namespace {
     }
 
 #ifdef _WIN32
-    struct signal_slot
+    struct signal_slot_t
     {
         int sig;
 
@@ -97,9 +97,9 @@ namespace {
     constexpr std::size_t k_signal_slot_count = 6;
 #endif
 
-    inline std::array<signal_slot, k_signal_slot_count>& signal_slots()
+    inline std::array<signal_slot_t, k_signal_slot_count>& signal_slots()
     {
-        static std::array<signal_slot, k_signal_slot_count> slot_table {{
+        static std::array<signal_slot_t, k_signal_slot_count> slot_table {{
             {SIGABRT}, {SIGFPE}, {SIGILL}, {SIGINT}, {SIGSEGV}, {SIGTERM}
 #ifdef SIGTRAP
             , {SIGTRAP}
@@ -209,7 +209,7 @@ namespace {
             if (signal_event() == NULL) {
                 return;
             }
-            std::thread(detail::exception_boundary{"signal_dispatch_win"}.wrap(signal_dispatch_loop_win)).detach();
+            std::thread(detail::Exception_boundary{"signal_dispatch_win"}.wrap(signal_dispatch_loop_win)).detach();
         });
     }
 
@@ -225,7 +225,7 @@ namespace {
         }
     }
 #else
-    struct signal_slot
+    struct signal_slot_t
     {
         int                sig;
         struct sigaction   previous{};
@@ -238,9 +238,9 @@ namespace {
     constexpr std::size_t k_signal_slot_count = 7;
 #endif
 
-    inline std::array<signal_slot, k_signal_slot_count>& signal_slots()
+    inline std::array<signal_slot_t, k_signal_slot_count>& signal_slots()
     {
-        static std::array<signal_slot, k_signal_slot_count> slot_table {{
+        static std::array<signal_slot_t, k_signal_slot_count> slot_table {{
             {SIGABRT}, {SIGFPE}, {SIGILL}, {SIGINT}, {SIGSEGV}, {SIGTERM},
 #ifdef SIGTRAP
             {SIGTRAP},
@@ -380,7 +380,7 @@ namespace {
             pipefd[0] = pipefd_local[0];
             pipefd[1] = pipefd_local[1];
 
-            std::thread(detail::exception_boundary{"signal_dispatch"}.wrap(signal_dispatch_loop)).detach();
+            std::thread(detail::Exception_boundary{"signal_dispatch"}.wrap(signal_dispatch_loop)).detach();
         });
     }
 #endif
@@ -441,7 +441,7 @@ namespace {
     }
 
     template <std::size_t N>
-    inline signal_slot* find_slot(std::array<signal_slot, N>& slot_table, int sig)
+    inline signal_slot_t* find_slot(std::array<signal_slot_t, N>& slot_table, int sig)
     {
         for (auto& candidate : slot_table) {
             if (candidate.sig == sig) {
@@ -607,11 +607,11 @@ namespace {
         }
 #ifdef _WIN32
         const auto handle = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(parsed));
-        std::thread(detail::exception_boundary{"lifeline_watch"}.wrap(
+        std::thread(detail::Exception_boundary{"lifeline_watch"}.wrap(
             [=]{ lifeline_watch_loop(handle, timeout_ms, exit_code); })).detach();
 #else
         const int fd = static_cast<int>(parsed);
-        std::thread(detail::exception_boundary{"lifeline_watch"}.wrap(
+        std::thread(detail::Exception_boundary{"lifeline_watch"}.wrap(
             [=]{ lifeline_watch_loop(fd, timeout_ms, exit_code); })).detach();
 #endif
     }
@@ -1271,7 +1271,7 @@ std::vector<std::string> argc_argv_to_vector(int argc, const char* const* argv)
     return ret;
 }
 
-struct Filtered_args
+struct filtered_args_t
 {
     vector<string> remained;
     vector<string> extracted;
@@ -1301,12 +1301,12 @@ inline std::string join_strings(const std::vector<std::string>& parts, const std
 }
 
 inline
-Filtered_args filter_option(
+filtered_args_t filter_option(
     std::vector<std::string>   in_args,
     std::string                in_option,
     unsigned int               num_args)
 {
-    Filtered_args ret;
+    filtered_args_t ret;
     for (size_t i = 0; i < in_args.size(); ++i) {
         const auto& e = in_args[i];
         if (e == in_option) {
@@ -1584,7 +1584,7 @@ void Managed_process::init(int argc, const char* const* argv)
     const std::string current_abi = detail::abi_token();
 
     if (coordinator_is_local) {
-        run_marker_record run_marker{};
+        run_marker_record_t run_marker{};
         run_marker.pid                  = static_cast<uint32_t>(m_pid);
         run_marker.start_stamp          = m_process_start_stamp;
         run_marker.created_monotonic_ns = monotonic_now_ns();
@@ -1661,7 +1661,7 @@ void Managed_process::init(int argc, const char* const* argv)
 
     auto published_handler = [this](const Coordinator::instance_published& msg)
     {
-        tn_type tn = {msg.type_id, msg.assigned_name};
+        Tn_type tn = {msg.type_id, msg.assigned_name};
 
         while (true) {
             function<void()> next_call;
@@ -1903,7 +1903,7 @@ Managed_process::Spawn_result Managed_process::spawn_swarm_process(
     }
 
     // Build argv after all internal arguments are appended
-    cstring_vector cargs(std::move(args));
+    C_string_vector cargs(std::move(args));
     spawn_options.argv = cargs.v();
 
     if (s_coord) {
@@ -2356,7 +2356,7 @@ function<void()> Managed_process::call_on_availability(Named_instance<T> transce
         return []() {};
     }
 
-    tn_type tn = { get_type_id<T>(), std::move(transceiver_name) };
+    Tn_type tn = { get_type_id<T>(), std::move(transceiver_name) };
 
     // insert an empty function, in order to be able to capture the iterator within it
     using Call_list_iterator = list<function<void()>>::iterator;
@@ -2694,4 +2694,3 @@ size_t Managed_process::unblock_rpc(instance_id_type process_instance_id)
 }
 
 } // sintra
-

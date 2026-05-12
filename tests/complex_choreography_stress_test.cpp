@@ -58,20 +58,20 @@ constexpr const char* k_group_name = "_sintra_external_processes";
 constexpr int k_worker_count = 4;
 constexpr std::array<int, 4> k_rounds_per_phase = {3, 5, 4, 6};
 
-struct Phase_plan
+struct phase_plan_t
 {
     int    phase  = 0;
     int    rounds = 0;
 };
 
-constexpr std::array<Phase_plan, 4> k_plan = {
-    Phase_plan{0, k_rounds_per_phase[0]},
-    Phase_plan{1, k_rounds_per_phase[1]},
-    Phase_plan{2, k_rounds_per_phase[2]},
-    Phase_plan{3, k_rounds_per_phase[3]}
+constexpr std::array<phase_plan_t, 4> k_plan = {
+    phase_plan_t{0, k_rounds_per_phase[0]},
+    phase_plan_t{1, k_rounds_per_phase[1]},
+    phase_plan_t{2, k_rounds_per_phase[2]},
+    phase_plan_t{3, k_rounds_per_phase[3]}
 };
 
-struct Phase_command
+struct phase_command_t
 {
     int            phase;
     int            round;
@@ -79,7 +79,7 @@ struct Phase_command
     int            expected_workers;
 };
 
-struct Worker_status
+struct worker_status_t
 {
     int            worker_id;
     int            phase;
@@ -89,7 +89,7 @@ struct Worker_status
     std::uint64_t  checksum;
 };
 
-struct Phase_summary
+struct phase_summary_t
 {
     int            phase;
     int            round;
@@ -99,8 +99,8 @@ struct Phase_summary
     int            aggregator_errors;
 };
 
-struct Shutdown {};
-struct Shutdown_complete {};
+struct shutdown_t {};
+struct shutdown_complete_t {};
 
 std::uint64_t make_token(int phase, int round)
 {
@@ -145,7 +145,7 @@ std::uint64_t expected_round_checksum(int phase, int round)
 // Aggregator
 // -----------------------------------------------------------------------------
 
-struct Round_result
+struct round_result_t
 {
     int                        phase                = 0;
     int                        round                = 0;
@@ -159,7 +159,7 @@ struct Aggregator_state
     std::mutex                 mutex;
     std::condition_variable    cv;
 
-    Phase_command              active_command{};
+    phase_command_t              active_command{};
     bool                       command_active       = false;
     bool                       round_complete       = false;
     bool                       shutdown_received    = false;
@@ -171,7 +171,7 @@ struct Aggregator_state
     std::uint64_t              last_completed_token = std::numeric_limits<std::uint64_t>::max();
 
     int                        errors               = 0;
-    std::vector<Round_result>  completed_rounds;
+    std::vector<round_result_t>  completed_rounds;
 };
 
 Aggregator_state& aggregator_state()
@@ -180,7 +180,7 @@ Aggregator_state& aggregator_state()
     return state;
 }
 
-void aggregator_phase_command_slot(const Phase_command& cmd)
+void aggregator_phase_command_slot(const phase_command_t& cmd)
 {
     auto& state = aggregator_state();
     std::lock_guard<std::mutex> lk(state.mutex);
@@ -200,10 +200,10 @@ void aggregator_phase_command_slot(const Phase_command& cmd)
     state.cv.notify_all();
 }
 
-void aggregator_worker_status_slot(const Worker_status& status)
+void aggregator_worker_status_slot(const worker_status_t& status)
 {
     auto& state = aggregator_state();
-    Phase_summary summary{};
+    phase_summary_t summary{};
     bool should_emit_summary = false;
 
     {
@@ -252,7 +252,7 @@ void aggregator_worker_status_slot(const Worker_status& status)
 
             state.round_complete = true;
             state.last_completed_token = active.token;
-            Round_result result;
+            round_result_t result;
             result.phase    = active.phase;
             result.round    = active.round;
             result.token    = active.token;
@@ -261,7 +261,7 @@ void aggregator_worker_status_slot(const Worker_status& status)
             state.completed_rounds.push_back(result);
 
             state.command_active = false;
-            state.active_command = Phase_command{};
+            state.active_command = phase_command_t{};
 
             summary.phase             = active.phase;
             summary.round             = active.round;
@@ -279,7 +279,7 @@ void aggregator_worker_status_slot(const Worker_status& status)
     }
 }
 
-void aggregator_shutdown_slot(const Shutdown&)
+void aggregator_shutdown_slot(const shutdown_t&)
 {
     auto& state = aggregator_state();
     std::lock_guard<std::mutex> lk(state.mutex);
@@ -343,13 +343,13 @@ int process_aggregator()
 {
     using namespace sintra;
 
-    sintra::activate_slot([](const Phase_command& cmd) {
+    sintra::activate_slot([](const phase_command_t& cmd) {
         aggregator_phase_command_slot(cmd);
     });
-    sintra::activate_slot([](const Worker_status& status) {
+    sintra::activate_slot([](const worker_status_t& status) {
         aggregator_worker_status_slot(status);
     });
-    sintra::activate_slot([](const Shutdown& msg) {
+    sintra::activate_slot([](const shutdown_t& msg) {
         aggregator_shutdown_slot(msg);
     });
 
@@ -371,7 +371,7 @@ int process_aggregator()
     wait_for_shutdown();
     write_aggregator_report();
 
-    sintra::world() << Shutdown_complete{};
+    sintra::world() << shutdown_complete_t{};
 
     auto& state = aggregator_state();
     std::lock_guard<std::mutex> lk(state.mutex);
@@ -399,7 +399,7 @@ Inspector_state& inspector_state()
     return state;
 }
 
-void inspector_worker_status_slot(const Worker_status& status)
+void inspector_worker_status_slot(const worker_status_t& status)
 {
     auto& state = inspector_state();
     std::lock_guard<std::mutex> lk(state.mutex);
@@ -411,7 +411,7 @@ void inspector_worker_status_slot(const Worker_status& status)
         status.phase, status.round, status.worker_id, status.sequence_id);
 }
 
-void inspector_shutdown_slot(const Shutdown&)
+void inspector_shutdown_slot(const shutdown_t&)
 {
     auto& state = inspector_state();
     std::lock_guard<std::mutex> lk(state.mutex);
@@ -453,10 +453,10 @@ int process_inspector()
 {
     using namespace sintra;
 
-    sintra::activate_slot([](const Worker_status& status) {
+    sintra::activate_slot([](const worker_status_t& status) {
         inspector_worker_status_slot(status);
     });
-    sintra::activate_slot([](const Shutdown& msg) {
+    sintra::activate_slot([](const shutdown_t& msg) {
         inspector_shutdown_slot(msg);
     });
 
@@ -487,14 +487,14 @@ struct Worker_local_state
 {
     std::mutex                 mutex;
     std::condition_variable    cv;
-    Phase_command              pending_command{};
+    phase_command_t              pending_command{};
     bool                       has_command        = false;
     bool                       shutdown_requested = false;
     std::uint64_t              last_token         = 0;
     int                        errors             = 0;
 };
 
-void worker_command_slot(Worker_local_state& state, const Phase_command& cmd)
+void worker_command_slot(Worker_local_state& state, const phase_command_t& cmd)
 {
     std::lock_guard<std::mutex> lk(state.mutex);
     state.pending_command = cmd;
@@ -502,7 +502,7 @@ void worker_command_slot(Worker_local_state& state, const Phase_command& cmd)
     state.cv.notify_all();
 }
 
-void worker_shutdown_slot(Worker_local_state& state, const Shutdown&)
+void worker_shutdown_slot(Worker_local_state& state, const shutdown_t&)
 {
     std::lock_guard<std::mutex> lk(state.mutex);
     state.shutdown_requested = true;
@@ -515,10 +515,10 @@ int worker_process_impl(int worker_id)
 
     Worker_local_state state;
 
-    auto command_slot = [&state](const Phase_command& cmd) {
+    auto command_slot = [&state](const phase_command_t& cmd) {
         worker_command_slot(state, cmd);
     };
-    auto shutdown_slot = [&state](const Shutdown& msg) {
+    auto shutdown_slot = [&state](const shutdown_t& msg) {
         worker_shutdown_slot(state, msg);
     };
 
@@ -541,7 +541,7 @@ int worker_process_impl(int worker_id)
 
             barrier(pre, k_group_name);
 
-            Phase_command cmd;
+            phase_command_t cmd;
             {
                 std::unique_lock<std::mutex> lk(state.mutex);
                 const bool got_command = state.cv.wait_for(
@@ -580,7 +580,7 @@ int worker_process_impl(int worker_id)
             std::this_thread::sleep_for(
                 std::chrono::milliseconds(5 + delay_ms));
 
-            Worker_status status;
+            worker_status_t status;
             status.worker_id   = worker_id;
             status.phase       = cmd.phase;
             status.round       = cmd.round;
@@ -634,7 +634,7 @@ Conductor_state& conductor_state()
     return state;
 }
 
-void conductor_summary_slot(const Phase_summary& summary)
+void conductor_summary_slot(const phase_summary_t& summary)
 {
     auto& state = conductor_state();
     std::unique_lock<std::mutex> lk(state.mutex);
@@ -659,7 +659,7 @@ void conductor_summary_slot(const Phase_summary& summary)
     state.cv.notify_all();
 }
 
-void conductor_shutdown_complete_slot(const Shutdown_complete&)
+void conductor_shutdown_complete_slot(const shutdown_complete_t&)
 {
     auto& state = conductor_state();
     std::lock_guard<std::mutex> lk(state.mutex);
@@ -698,10 +698,10 @@ int process_conductor()
 {
     using namespace sintra;
 
-    sintra::activate_slot([](const Phase_summary& summary) {
+    sintra::activate_slot([](const phase_summary_t& summary) {
         conductor_summary_slot(summary);
     });
-    sintra::activate_slot([](const Shutdown_complete& msg) {
+    sintra::activate_slot([](const shutdown_complete_t& msg) {
         conductor_shutdown_complete_slot(msg);
     });
 
@@ -721,7 +721,7 @@ int process_conductor()
                 conductor_state().awaiting_summary = true;
             }
 
-            Phase_command cmd;
+            phase_command_t cmd;
             cmd.phase            = phase.phase;
             cmd.round            = round;
             cmd.token            = token;
@@ -733,7 +733,7 @@ int process_conductor()
         }
     }
 
-    sintra::world() << Shutdown{};
+    sintra::world() << shutdown_t{};
     wait_for_shutdown_confirmation();
 
     auto& state = conductor_state();
@@ -745,7 +745,7 @@ int process_conductor()
 // Starter (main) process utilities
 // -----------------------------------------------------------------------------
 
-std::vector<Round_result> read_aggregator_results(
+std::vector<round_result_t> read_aggregator_results(
     const std::filesystem::path&   path,
     bool&                          ok,
     int&                           errors)
@@ -762,11 +762,11 @@ std::vector<Round_result> read_aggregator_results(
     std::size_t rounds = 0;
     in >> rounds;
 
-    std::vector<Round_result> results;
+    std::vector<round_result_t> results;
     results.reserve(rounds);
 
     for (std::size_t i = 0; i < rounds; ++i) {
-        Round_result r;
+        round_result_t r;
         in >> r.phase >> r.round >> r.count >> r.checksum;
         r.token = make_token(r.phase, r.round);
         results.push_back(r);
@@ -775,7 +775,7 @@ std::vector<Round_result> read_aggregator_results(
     return results;
 }
 
-struct Inspector_entry
+struct inspector_entry_t
 {
     int            phase    = 0;
     int            round    = 0;
@@ -783,7 +783,7 @@ struct Inspector_entry
     std::uint32_t  sequence = 0;
 };
 
-std::vector<Inspector_entry> read_inspector_entries(const std::filesystem::path& path)
+std::vector<inspector_entry_t> read_inspector_entries(const std::filesystem::path& path)
 {
     std::ifstream in(path, std::ios::binary);
     if (!in) {
@@ -792,10 +792,10 @@ std::vector<Inspector_entry> read_inspector_entries(const std::filesystem::path&
 
     std::size_t entries = 0;
     in >> entries;
-    std::vector<Inspector_entry> result;
+    std::vector<inspector_entry_t> result;
     result.reserve(entries);
     for (std::size_t i = 0; i < entries; ++i) {
-        Inspector_entry entry;
+        inspector_entry_t entry;
         in >> entry.phase >> entry.round >> entry.worker >> entry.sequence;
         result.push_back(entry);
     }
@@ -816,7 +816,7 @@ bool validate_reports(const std::filesystem::path& dir)
         return false;
     }
 
-    std::vector<Inspector_entry> inspector_entries =
+    std::vector<inspector_entry_t> inspector_entries =
         read_inspector_entries(inspector_path);
 
     const std::size_t expected_rounds = [] {

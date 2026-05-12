@@ -349,10 +349,10 @@ int test_unknown_type_exception()
 {
     // Use a type_id that is not in the reserved_id range and not in the ex_map
     // This should trigger the else branch that calls throw_generic_exception
-    struct UnknownType {};
+    struct unknown_type_t {};
 
     TEST_THROWS(
-        sintra::get_type_id<UnknownType>(),
+        sintra::get_type_id<unknown_type_t>(),
         std::runtime_error,
         "test unknown type via type_id"
     );

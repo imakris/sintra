@@ -17,10 +17,10 @@
 #include <cstdio>
 
 // Named semaphore implementation
-class named_semaphore
+class Named_semaphore
 {
 public:
-    explicit named_semaphore(unsigned int initial_count = 0) {
+    explicit Named_semaphore(unsigned int initial_count = 0) {
         // Generate unique name
         static std::atomic<uint64_t> counter{0};
         uint64_t id = (static_cast<uint64_t>(sintra::test::get_pid()) << 32) | counter++;
@@ -35,7 +35,7 @@ public:
         }
     }
 
-    ~named_semaphore() {
+    ~Named_semaphore() {
         if (m_sem != SEM_FAILED) {
             sem_close(m_sem);
             sem_unlink(m_name);
@@ -132,7 +132,7 @@ int main() {
     std::cout << "  Total items: " << total_items << std::endl;
     std::cout << std::endl;
 
-    double time = benchmark_producer_consumer<named_semaphore>(
+    double time = benchmark_producer_consumer<Named_semaphore>(
         num_producers, num_consumers, items_per_producer);
 
     std::cout << "=== RESULT ===" << std::endl;

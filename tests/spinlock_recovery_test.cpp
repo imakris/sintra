@@ -30,18 +30,18 @@ namespace {
 
 constexpr std::string_view k_failure_prefix = "spinlock_recovery_test failure: ";
 
-struct spinlock_layout
+struct spinlock_layout_t
 {
     std::atomic_flag       m_locked;
     std::atomic<uint32_t>  m_owner_pid;
     std::atomic<uint64_t>  m_last_progress_ns;
 };
 
-spinlock_layout& access_layout(sintra::spinlock& lock)
+spinlock_layout_t& access_layout(sintra::spinlock& lock)
 {
     static_assert(std::is_standard_layout_v<sintra::spinlock>, "spinlock must be standard layout");
-    static_assert(sizeof(spinlock_layout) == sizeof(sintra::spinlock), "spinlock layout mismatch");
-    return *reinterpret_cast<spinlock_layout*>(&lock);
+    static_assert(sizeof(spinlock_layout_t) == sizeof(sintra::spinlock), "spinlock layout mismatch");
+    return *reinterpret_cast<spinlock_layout_t*>(&lock);
 }
 
 uint32_t find_dead_pid(uint32_t self_pid)

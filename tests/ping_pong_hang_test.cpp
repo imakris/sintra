@@ -1,13 +1,13 @@
 //
-// Sintra Multi-Process Ping-Pong Hang Test
+// Sintra Multi-Process ping_t-pong_t Hang Test
 //
 // This test validates that the test harness properly captures stack traces
 // from all threads of all processes when a test hangs.
 //
 // Test structure:
-// - Process 1 (ping_responder): Responds to Ping with Pong
-// - Process 2 (pong_responder): Responds to Pong with Ping, but HANGS after a few iterations
-// - Process 3 (monitor): Counts Ping messages (will hang waiting for completion)
+// - Process 1 (ping_responder): Responds to ping_t with pong_t
+// - Process 2 (pong_responder): Responds to pong_t with ping_t, but HANGS after a few iterations
+// - Process 3 (monitor): Counts ping_t messages (will hang waiting for completion)
 //
 // The test intentionally hangs to trigger the test harness timeout and lldb stack capture.
 //
@@ -30,9 +30,9 @@
 
 namespace {
 
-struct Ping {};
-struct Pong {};
-struct Stop {};
+struct ping_t {};
+struct pong_t {};
+struct stop_t {};
 
 void write_count(const std::filesystem::path& file, int value)
 {
@@ -43,7 +43,7 @@ void write_count(const std::filesystem::path& file, int value)
     out << value << '\n';
 }
 
-// Process 1: Ping responder - has some local state to make stack traces interesting
+// Process 1: ping_t responder - has some local state to make stack traces interesting
 int process_ping_responder()
 {
     // Create some local variables with interesting values
@@ -64,15 +64,15 @@ int process_ping_responder()
         }
     });
 
-    sintra::activate_slot([&](Ping) {
+    sintra::activate_slot([&](ping_t) {
         response_count++;
-        message_history.push_back("Ping-" + std::to_string(response_count));
-        sintra::world() << Pong();
+        message_history.push_back("ping_t-" + std::to_string(response_count));
+        sintra::world() << pong_t();
     });
 
     sintra::barrier("ping-pong-slot-activation");
 
-    // This will hang indefinitely waiting for Stop that never comes
+    // This will hang indefinitely waiting for stop_t that never comes
     std::mutex hang_mutex;
     std::condition_variable hang_cv;
     std::unique_lock<std::mutex> lk(hang_mutex);
@@ -85,7 +85,7 @@ int process_ping_responder()
     return 0;
 }
 
-// Process 2: Pong responder - hangs after a few iterations
+// Process 2: pong_t responder - hangs after a few iterations
 int process_pong_responder()
 {
     // Create some local variables with interesting values
@@ -111,7 +111,7 @@ int process_pong_responder()
         });
     }
 
-    sintra::activate_slot([&](Pong) {
+    sintra::activate_slot([&](pong_t) {
         int current_count = pong_count++;
         response_times.push_back(current_count * 10);
 
@@ -129,14 +129,14 @@ int process_pong_responder()
             }
         }
         else {
-            sintra::world() << Ping();
+            sintra::world() << ping_t();
         }
     });
 
     sintra::barrier("ping-pong-slot-activation");
 
     // Start the ping-pong
-    sintra::world() << Ping();
+    sintra::world() << ping_t();
 
     // This will hang waiting for a condition that never becomes true
     std::mutex hang_mutex;
@@ -178,7 +178,7 @@ int process_monitor()
         }
     });
 
-    auto monitor_slot = [&](Ping) {
+    auto monitor_slot = [&](ping_t) {
         int count = ping_counter++ + 1;
         ping_timestamps.push_back(std::chrono::steady_clock::now());
 

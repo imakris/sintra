@@ -24,12 +24,12 @@ using sintra::s_mproc_id;
 
 namespace {
 
-struct Hello
+struct hello_t
 {
     int    sender;
     int    seq;
 };
-struct Ping { int token; };
+struct ping_t { int token; };
 
 struct Ping_receiver : sintra::Derived_transceiver<Ping_receiver>
 {
@@ -77,7 +77,7 @@ int worker()
     const auto               process_iid      = sintra::process_of(s_mproc_id);
     sintra::instance_id_type joined_process   = sintra::invalid_instance_id;
 
-    auto hello_slot = [log_path](Hello h) {
+    auto hello_slot = [log_path](hello_t h) {
         std::ostringstream oss;
         oss << "recv=" << sintra::process_of(s_mproc_id)
             << " sender=" << h.sender
@@ -148,12 +148,12 @@ int worker()
 
     // Both processes broadcast after the barrier to help diagnose group membership/broadcast coverage.
     if (initiator) {
-        trace_event(trace_path, "broadcast", "coordinator broadcasting Hello");
-        sintra::world() << Hello{static_cast<int>(process_iid), 1};
+        trace_event(trace_path, "broadcast", "coordinator broadcasting hello_t");
+        sintra::world() << hello_t{static_cast<int>(process_iid), 1};
     }
     else {
-        trace_event(trace_path, "broadcast", "follower broadcasting Hello");
-        sintra::world() << Hello{static_cast<int>(process_iid), 2};
+        trace_event(trace_path, "broadcast", "follower broadcasting hello_t");
+        sintra::world() << hello_t{static_cast<int>(process_iid), 2};
     }
 
     // Wait until both workers have handled the broadcast.

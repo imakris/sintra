@@ -1,18 +1,18 @@
 //
-// Sintra Coordinator Crash Ping-Pong Test
+// Sintra Coordinator Crash ping_t-pong_t Test
 //
 // This test intentionally crashes the coordinator process after receiving
-// a Pong message from a worker process. The crash allows the infrastructure
+// a pong_t message from a worker process. The crash allows the infrastructure
 // to exercise stack collection for all participating processes.
 //
 // Test structure:
 // - Coordinator (branch index 0):
-//     * Activates a Pong handler that logs a failure message, waits briefly
+//     * Activates a pong_t handler that logs a failure message, waits briefly
 //       to give the stack collector time to attach, and then calls std::abort().
 //     * Starts a background thread so that multi-threaded stack traces are
 //       available when the crash occurs.
 // - Worker process (branch index 1):
-//     * Responds to Ping messages with Pong messages and then blocks
+//     * Responds to ping_t messages with pong_t messages and then blocks
 //       indefinitely so that its stack can also be sampled.
 //
 // Expected outcome:
@@ -37,16 +37,16 @@
 
 namespace {
 
-struct Ping {};
-struct Pong {};
+struct ping_t {};
+struct pong_t {};
 
 int worker_process()
 {
     std::mutex wait_mutex;
     std::condition_variable wait_cv;
 
-    sintra::activate_slot([](Ping) {
-        sintra::world() << Pong();
+    sintra::activate_slot([](ping_t) {
+        sintra::world() << pong_t();
     });
 
     sintra::barrier("coordinator-crash-ready", "_sintra_all_processes");
@@ -79,9 +79,9 @@ int main(int argc, char* argv[])
         });
         background_thread.detach();
 
-        sintra::activate_slot([keep_running](Pong) {
+        sintra::activate_slot([keep_running](pong_t) {
             keep_running->store(false, std::memory_order_release);
-            std::fprintf(stderr, "[FAIL] Coordinator crashing after receiving Pong\n");
+            std::fprintf(stderr, "[FAIL] Coordinator crashing after receiving pong_t\n");
             std::fflush(stderr);
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
             sintra::detail::debug_aware_abort();
@@ -89,7 +89,7 @@ int main(int argc, char* argv[])
 
         sintra::barrier("coordinator-crash-ready", "_sintra_all_processes");
 
-        sintra::world() << Ping();
+        sintra::world() << ping_t();
 
         std::this_thread::sleep_for(std::chrono::seconds(5));
     }

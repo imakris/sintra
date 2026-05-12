@@ -51,7 +51,7 @@
 //   6. Child's mark() handler invokes Parent_ack::rpc_mark_seen back on the
 //      parent.  Parent waits (with a bounded timeout) for the recorded value
 //      to match.
-//   7. Parent emits Done_signal so the child exits cleanly, then both
+//   7. Parent emits done_signal_t so the child exits cleanly, then both
 //      processes finalize.
 //
 
@@ -80,9 +80,9 @@ constexpr const char* k_parent_ack_name    = "parent_ack";
 constexpr int k_ping_value = 123;
 constexpr int k_mark_value = 456;
 
-// Done_signal is broadcast by the parent to ask the child to exit (matches the
+// done_signal_t is broadcast by the parent to ask the child to exit (matches the
 // helper used in tests/spawn_wait_test.cpp).
-struct Done_signal {};
+struct done_signal_t {};
 
 // Parent-side state populated by Parent_ack::mark_seen so the coordinator can
 // wait for the ack with a bounded timeout instead of polling a side channel.
@@ -194,8 +194,8 @@ int run_child()
     std::condition_variable done_cv;
     bool done = false;
 
-    sintra::activate_slot([&](const Done_signal&) {
-        std::fprintf(stderr, "[CHILD] received Done_signal\n");
+    sintra::activate_slot([&](const done_signal_t&) {
+        std::fprintf(stderr, "[CHILD] received done_signal_t\n");
         std::lock_guard<std::mutex> lk(done_mutex);
         done = true;
         done_cv.notify_all();
@@ -204,7 +204,7 @@ int run_child()
     {
         std::unique_lock<std::mutex> lk(done_mutex);
         if (!done_cv.wait_for(lk, std::chrono::seconds(30), [&] { return done; })) {
-            std::fprintf(stderr, "[CHILD] timed out waiting for Done_signal\n");
+            std::fprintf(stderr, "[CHILD] timed out waiting for done_signal_t\n");
             sintra::deactivate_all_slots();
             return 1;
         }
@@ -257,7 +257,7 @@ int run_coordinator(const std::string& binary_path)
         static_cast<unsigned long long>(child_proc_iid));
 
     auto teardown_and_return = [&](int rv) {
-        sintra::world() << Done_signal{};
+        sintra::world() << done_signal_t{};
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
         return rv;
     };
@@ -346,9 +346,9 @@ int run_coordinator(const std::string& binary_path)
             "child mark() must observe the value sent by the parent");
     }
 
-    sintra::world() << Done_signal{};
+    sintra::world() << done_signal_t{};
 
-    // Best-effort: give the child a moment to drain the Done_signal so
+    // Best-effort: give the child a moment to drain the done_signal_t so
     // shutdown does not race against an in-flight handler.
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
 

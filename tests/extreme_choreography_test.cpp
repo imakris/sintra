@@ -15,7 +15,7 @@
 // payloads based on sequence parity, an aggregator counting acknowledgements and
 // orchestrating a processing-fence rendezvous, and a monitor validating that
 // every heartbeat arrived in-order.  Each participant reports anomalies via a
-// Failure_notice message which the aggregator records before the root process
+// failure_notice_t message which the aggregator records before the root process
 // inspects the final summary written to disk.
 
 #include <sintra/sintra.h>
@@ -47,7 +47,7 @@ constexpr std::size_t k_producer_count = 2;
 constexpr std::size_t k_consumer_count = 2;
 constexpr std::size_t k_phase_count = 4;
 
-// Payload choreography plan: each producer emits a specific number of payloads
+// payload_t choreography plan: each producer emits a specific number of payloads
 // per phase.  The sequence indices start at zero for every phase and producer.
 constexpr std::array<std::array<int, k_phase_count>, k_producer_count> k_producer_payload_plan{{
     {9, 6, 11, 8},
@@ -108,38 +108,38 @@ constexpr Actor operator+(Actor base, int offset) noexcept
 }
 
 enum class Failure_code : int {
-    UnexpectedPhase_start = 1,
-    SequenceOutOfRange,
-    DuplicatePayload,
-    AckBeforeStart,
-    AckOverflow,
-    FenceResent,
-    HeartbeatOutOfOrder,
-    HeartbeatMissing,
-    CompletionMismatch,
-    CoordinatorTimeout,
+    UNEXPECTED_PHASE_START = 1,
+    SEQUENCE_OUT_OF_RANGE,
+    DUPLICATE_PAYLOAD,
+    ACK_BEFORE_START,
+    ACK_OVERFLOW,
+    FENCE_RESENT,
+    HEARTBEAT_OUT_OF_ORDER,
+    HEARTBEAT_MISSING,
+    COMPLETION_MISMATCH,
+    COORDINATOR_TIMEOUT,
 };
 
-struct Phase_start
+struct phase_start_t
 {
     int    phase;
 };
 
-struct Payload
+struct payload_t
 {
     int    phase;
     int    producer;
     int    sequence;
 };
 
-struct Heartbeat
+struct heartbeat_t
 {
     int    phase;
     int    producer;
     int    tick;
 };
 
-struct Ack
+struct ack_t
 {
     int    phase;
     int    producer;
@@ -147,18 +147,18 @@ struct Ack
     int    consumer;
 };
 
-struct Phase_fence
+struct phase_fence_t
 {
     int    phase;
 };
 
-struct Phase_complete
+struct phase_complete_t
 {
     int    phase;
     int    ack_count;
 };
 
-struct Failure_notice
+struct failure_notice_t
 {
     int    actor;
     int    phase;
@@ -166,7 +166,7 @@ struct Failure_notice
     char   message[96];
 };
 
-struct Stop
+struct stop_t
 {
 };
 
@@ -198,7 +198,7 @@ Sequence_tracker make_sequence_tracker()
 
 void send_failure_notice(Actor actor, int phase, Failure_code code, const std::string& text)
 {
-    Failure_notice notice{};
+    failure_notice_t notice{};
     notice.actor = static_cast<int>(actor);
     notice.phase = phase;
     notice.code  = static_cast<int>(code);
@@ -230,15 +230,15 @@ int coordinator_process()
     bool stop_requested   = false;
     bool failure_observed = false;
 
-    auto phase_complete_slot = [&](const Phase_complete& msg) {
+    auto phase_complete_slot = [&](const phase_complete_t& msg) {
         if (msg.phase < 0 || static_cast<std::size_t>(msg.phase) >= k_phase_count) {
-            send_failure_notice(Actor::Coordinator, msg.phase, Failure_code::CompletionMismatch,
+            send_failure_notice(Actor::Coordinator, msg.phase, Failure_code::COMPLETION_MISMATCH,
                 "phase complete outside range");
             return;
         }
         const auto expected = k_phase_totals[msg.phase];
         if (msg.ack_count != expected) {
-            send_failure_notice(Actor::Coordinator, msg.phase, Failure_code::CompletionMismatch,
+            send_failure_notice(Actor::Coordinator, msg.phase, Failure_code::COMPLETION_MISMATCH,
                 "ack total mismatch");
             failure_observed = true;
         }
@@ -250,18 +250,18 @@ int coordinator_process()
         cv.notify_all();
     };
 
-    auto fence_slot = [&](const Phase_fence& fence) {
+    auto fence_slot = [&](const phase_fence_t& fence) {
         if (fence.phase >= 0 && static_cast<std::size_t>(fence.phase) < k_phase_count) {
             const auto& name = fence_names()[fence.phase];
             sintra::barrier<processing_fence_t>(name);
         }
         else {
-            send_failure_notice(Actor::Coordinator, fence.phase, Failure_code::FenceResent,
+            send_failure_notice(Actor::Coordinator, fence.phase, Failure_code::FENCE_RESENT,
                 "received fence outside configured phases");
         }
     };
 
-    auto stop_slot = [&](Stop) {
+    auto stop_slot = [&](stop_t) {
         std::lock_guard<std::mutex> lk(mutex);
         stop_requested = true;
         cv.notify_one();
@@ -275,7 +275,7 @@ int coordinator_process()
     barrier("extreme-choreography-ready", group);
 
     for (std::size_t phase = 0; phase < k_phase_count; ++phase) {
-        world() << Phase_start{static_cast<int>(phase)};
+        world() << phase_start_t{static_cast<int>(phase)};
 
         std::unique_lock<std::mutex> lk(mutex);
         const bool completed_phase = cv.wait_for(
@@ -283,11 +283,11 @@ int coordinator_process()
         if (!completed_phase) {
             failure_observed = true;
             send_failure_notice(Actor::Coordinator, static_cast<int>(phase),
-                Failure_code::CoordinatorTimeout, "phase completion timed out");
+                Failure_code::COORDINATOR_TIMEOUT, "phase completion timed out");
         }
     }
 
-    world() << Stop{};
+    world() << stop_t{};
 
     {
         std::unique_lock<std::mutex> lk(mutex);
@@ -303,7 +303,7 @@ int coordinator_process()
 // Producer processes
 // ---------------------------------------------------------------------------
 
-template<int ProducerId>
+template<int producer_id>
 int producer_process()
 {
     using namespace sintra;
@@ -315,54 +315,54 @@ int producer_process()
     const auto seed = static_cast<unsigned>(
         std::chrono::steady_clock::now().time_since_epoch().count());
     const auto pid_component = static_cast<unsigned>(sintra::test::get_pid());
-    std::seed_seq seed_seq{seed, pid_component, static_cast<unsigned>(ProducerId)};
+    std::seed_seq seed_seq{seed, pid_component, static_cast<unsigned>(producer_id)};
     std::mt19937 rng(seed_seq);
     std::uniform_int_distribution<int> jitter_us(0, 120);
 
-    auto phase_start_slot = [&](const Phase_start& start) {
+    auto phase_start_slot = [&](const phase_start_t& start) {
         if (start.phase < 0 || static_cast<std::size_t>(start.phase) >= k_phase_count) {
-            send_failure_notice(static_cast<Actor>(Actor::Producer0 + ProducerId), start.phase,
-                Failure_code::UnexpectedPhase_start, "phase index out of range");
+            send_failure_notice(static_cast<Actor>(Actor::Producer0 + producer_id), start.phase,
+                Failure_code::UNEXPECTED_PHASE_START, "phase index out of range");
             return;
         }
 
-        const int payloads = k_producer_payload_plan[ProducerId][start.phase];
+        const int payloads = k_producer_payload_plan[producer_id][start.phase];
         for (int seq = 0; seq < payloads; ++seq) {
-            world() << Heartbeat{start.phase, ProducerId, seq};
+            world() << heartbeat_t{start.phase, producer_id, seq};
             if (jitter_us(rng) % 3 == 0) {
                 std::this_thread::sleep_for(std::chrono::microseconds(jitter_us(rng)));
             }
-            world() << Payload{start.phase, ProducerId, seq};
+            world() << payload_t{start.phase, producer_id, seq};
             if (jitter_us(rng) % 2 == 0) {
                 std::this_thread::sleep_for(std::chrono::microseconds(jitter_us(rng)));
             }
         }
     };
 
-    auto fence_slot = [&](const Phase_fence& fence) {
+    auto fence_slot = [&](const phase_fence_t& fence) {
         if (fence.phase < 0 || static_cast<std::size_t>(fence.phase) >= k_phase_count) {
-            send_failure_notice(static_cast<Actor>(Actor::Producer0 + ProducerId), fence.phase,
-                Failure_code::FenceResent, "fence outside valid phase range");
+            send_failure_notice(static_cast<Actor>(Actor::Producer0 + producer_id), fence.phase,
+                Failure_code::FENCE_RESENT, "fence outside valid phase range");
             return;
         }
         const auto& name = fence_names()[fence.phase];
         barrier<processing_fence_t>(name);
     };
 
-    auto completion_slot = [&](const Phase_complete& complete) {
+    auto completion_slot = [&](const phase_complete_t& complete) {
         if (complete.phase < 0 || static_cast<std::size_t>(complete.phase) >= k_phase_count) {
-            send_failure_notice(static_cast<Actor>(Actor::Producer0 + ProducerId), complete.phase,
-                Failure_code::CompletionMismatch, "completion outside valid range");
+            send_failure_notice(static_cast<Actor>(Actor::Producer0 + producer_id), complete.phase,
+                Failure_code::COMPLETION_MISMATCH, "completion outside valid range");
             return;
         }
         const int expected = k_phase_totals[complete.phase];
         if (complete.ack_count != expected) {
-            send_failure_notice(static_cast<Actor>(Actor::Producer0 + ProducerId), complete.phase,
-                Failure_code::CompletionMismatch, "unexpected ack total from aggregator");
+            send_failure_notice(static_cast<Actor>(Actor::Producer0 + producer_id), complete.phase,
+                Failure_code::COMPLETION_MISMATCH, "unexpected ack total from aggregator");
         }
     };
 
-    auto stop_slot = [&](Stop) {
+    auto stop_slot = [&](stop_t) {
         std::lock_guard<std::mutex> lk(mutex);
         stop_requested = true;
         cv.notify_one();
@@ -387,7 +387,7 @@ int producer_process()
 // Consumer processes
 // ---------------------------------------------------------------------------
 
-template<int ConsumerId>
+template<int consumer_id>
 int consumer_process()
 {
     using namespace sintra;
@@ -402,23 +402,23 @@ int consumer_process()
     const auto seed = static_cast<unsigned>(
         std::chrono::steady_clock::now().time_since_epoch().count());
     const auto pid_component = static_cast<unsigned>(sintra::test::get_pid());
-    std::seed_seq seed_seq{seed, pid_component, static_cast<unsigned>(ConsumerId + 10)};
+    std::seed_seq seed_seq{seed, pid_component, static_cast<unsigned>(consumer_id + 10)};
     std::mt19937 rng(seed_seq);
     std::uniform_int_distribution<int> jitter_us(10, 200);
 
-    auto payload_slot = [&](const Payload& payload) {
+    auto payload_slot = [&](const payload_t& payload) {
         if (payload.phase < 0 || static_cast<std::size_t>(payload.phase) >= k_phase_count) {
-            send_failure_notice(static_cast<Actor>(Actor::Consumer0 + ConsumerId), payload.phase,
-                Failure_code::SequenceOutOfRange, "payload phase out of range");
+            send_failure_notice(static_cast<Actor>(Actor::Consumer0 + consumer_id), payload.phase,
+                Failure_code::SEQUENCE_OUT_OF_RANGE, "payload phase out of range");
             return;
         }
         if (payload.producer < 0 || static_cast<std::size_t>(payload.producer) >= k_producer_count) {
-            send_failure_notice(static_cast<Actor>(Actor::Consumer0 + ConsumerId), payload.phase,
-                Failure_code::SequenceOutOfRange, "payload producer invalid");
+            send_failure_notice(static_cast<Actor>(Actor::Consumer0 + consumer_id), payload.phase,
+                Failure_code::SEQUENCE_OUT_OF_RANGE, "payload producer invalid");
             return;
         }
 
-        const bool handles_even  = (ConsumerId == 0);
+        const bool handles_even  = (consumer_id == 0);
         const bool should_handle = ((payload.sequence % 2) == 0) == handles_even;
         if (!should_handle) {
             return;
@@ -444,53 +444,53 @@ int consumer_process()
         }
 
         if (range_error) {
-            send_failure_notice(static_cast<Actor>(Actor::Consumer0 + ConsumerId), payload.phase,
-                Failure_code::SequenceOutOfRange, "payload sequence outside configured range");
+            send_failure_notice(static_cast<Actor>(Actor::Consumer0 + consumer_id), payload.phase,
+                Failure_code::SEQUENCE_OUT_OF_RANGE, "payload sequence outside configured range");
             return;
         }
         if (duplicate) {
-            send_failure_notice(static_cast<Actor>(Actor::Consumer0 + ConsumerId), payload.phase,
-                Failure_code::DuplicatePayload, "duplicate payload detected");
+            send_failure_notice(static_cast<Actor>(Actor::Consumer0 + consumer_id), payload.phase,
+                Failure_code::DUPLICATE_PAYLOAD, "duplicate payload detected");
             return;
         }
 
         if (jitter_us(rng) % 5 == 0) {
             std::this_thread::sleep_for(std::chrono::microseconds(jitter_us(rng)));
         }
-        world() << Ack{payload.phase, payload.producer, payload.sequence, ConsumerId};
+        world() << ack_t{payload.phase, payload.producer, payload.sequence, consumer_id};
     };
 
-    auto fence_slot = [&](const Phase_fence& fence) {
+    auto fence_slot = [&](const phase_fence_t& fence) {
         if (fence.phase < 0 || static_cast<std::size_t>(fence.phase) >= k_phase_count) {
-            send_failure_notice(static_cast<Actor>(Actor::Consumer0 + ConsumerId), fence.phase,
-                Failure_code::FenceResent, "invalid fence phase");
+            send_failure_notice(static_cast<Actor>(Actor::Consumer0 + consumer_id), fence.phase,
+                Failure_code::FENCE_RESENT, "invalid fence phase");
             return;
         }
         const auto& name = fence_names()[fence.phase];
         barrier<processing_fence_t>(name);
     };
 
-    auto completion_slot = [&](const Phase_complete& complete) {
+    auto completion_slot = [&](const phase_complete_t& complete) {
         if (complete.phase < 0 || static_cast<std::size_t>(complete.phase) >= k_phase_count) {
-            send_failure_notice(static_cast<Actor>(Actor::Consumer0 + ConsumerId), complete.phase,
-                Failure_code::CompletionMismatch, "completion outside range");
+            send_failure_notice(static_cast<Actor>(Actor::Consumer0 + consumer_id), complete.phase,
+                Failure_code::COMPLETION_MISMATCH, "completion outside range");
             return;
         }
-        const int expected = k_consumer_expectations[ConsumerId][complete.phase];
+        const int expected = k_consumer_expectations[consumer_id][complete.phase];
         const int observed = processed[complete.phase];
         if (observed != expected) {
             std::ostringstream oss;
             oss << "consumer processed=" << observed << " expected=" << expected;
-            send_failure_notice(static_cast<Actor>(Actor::Consumer0 + ConsumerId), complete.phase,
-                Failure_code::CompletionMismatch, oss.str());
+            send_failure_notice(static_cast<Actor>(Actor::Consumer0 + consumer_id), complete.phase,
+                Failure_code::COMPLETION_MISMATCH, oss.str());
         }
         if (complete.ack_count != k_phase_totals[complete.phase]) {
-            send_failure_notice(static_cast<Actor>(Actor::Consumer0 + ConsumerId), complete.phase,
-                Failure_code::CompletionMismatch, "aggregator ack mismatch reported");
+            send_failure_notice(static_cast<Actor>(Actor::Consumer0 + consumer_id), complete.phase,
+                Failure_code::COMPLETION_MISMATCH, "aggregator ack mismatch reported");
         }
     };
 
-    auto stop_slot = [&](Stop) {
+    auto stop_slot = [&](stop_t) {
         std::lock_guard<std::mutex> lk(mutex);
         stop_requested = true;
         cv.notify_one();
@@ -525,14 +525,14 @@ int monitor_process()
     std::condition_variable cv;
     bool stop_requested = false;
 
-    auto heartbeat_slot = [&](const Heartbeat& heartbeat) {
+    auto heartbeat_slot = [&](const heartbeat_t& heartbeat) {
         if (heartbeat.phase < 0 || static_cast<std::size_t>(heartbeat.phase) >= k_phase_count) {
-            send_failure_notice(Actor::Monitor, heartbeat.phase, Failure_code::SequenceOutOfRange,
+            send_failure_notice(Actor::Monitor, heartbeat.phase, Failure_code::SEQUENCE_OUT_OF_RANGE,
                 "heartbeat phase out of range");
             return;
         }
         if (heartbeat.producer < 0 || static_cast<std::size_t>(heartbeat.producer) >= k_producer_count) {
-            send_failure_notice(Actor::Monitor, heartbeat.phase, Failure_code::SequenceOutOfRange,
+            send_failure_notice(Actor::Monitor, heartbeat.phase, Failure_code::SEQUENCE_OUT_OF_RANGE,
                 "heartbeat producer invalid");
             return;
         }
@@ -542,7 +542,7 @@ int monitor_process()
         if (heartbeat.tick != counter) {
             std::ostringstream oss;
             oss << "tick=" << heartbeat.tick << " expected=" << counter;
-            send_failure_notice(Actor::Monitor, heartbeat.phase, Failure_code::HeartbeatOutOfOrder,
+            send_failure_notice(Actor::Monitor, heartbeat.phase, Failure_code::HEARTBEAT_OUT_OF_ORDER,
                 oss.str());
             counter = heartbeat.tick + 1; // resynchronise to avoid cascading failures
         }
@@ -551,9 +551,9 @@ int monitor_process()
         }
     };
 
-    auto fence_slot = [&](const Phase_fence& fence) {
+    auto fence_slot = [&](const phase_fence_t& fence) {
         if (fence.phase < 0 || static_cast<std::size_t>(fence.phase) >= k_phase_count) {
-            send_failure_notice(Actor::Monitor, fence.phase, Failure_code::FenceResent,
+            send_failure_notice(Actor::Monitor, fence.phase, Failure_code::FENCE_RESENT,
                 "monitor received fence outside range");
             return;
         }
@@ -561,9 +561,9 @@ int monitor_process()
         barrier<processing_fence_t>(name);
     };
 
-    auto completion_slot = [&](const Phase_complete& complete) {
+    auto completion_slot = [&](const phase_complete_t& complete) {
         if (complete.phase < 0 || static_cast<std::size_t>(complete.phase) >= k_phase_count) {
-            send_failure_notice(Actor::Monitor, complete.phase, Failure_code::CompletionMismatch,
+            send_failure_notice(Actor::Monitor, complete.phase, Failure_code::COMPLETION_MISMATCH,
                 "monitor completion outside range");
             return;
         }
@@ -575,13 +575,13 @@ int monitor_process()
             if (observed != expected) {
                 std::ostringstream oss;
                 oss << "producer=" << producer << " observed=" << observed << " expected=" << expected;
-                send_failure_notice(Actor::Monitor, complete.phase, Failure_code::HeartbeatMissing,
+                send_failure_notice(Actor::Monitor, complete.phase, Failure_code::HEARTBEAT_MISSING,
                     oss.str());
             }
         }
     };
 
-    auto stop_slot = [&](Stop) {
+    auto stop_slot = [&](stop_t) {
         std::lock_guard<std::mutex> lk(mutex);
         stop_requested = true;
         cv.notify_one();
@@ -638,16 +638,16 @@ int aggregator_process()
         failure_messages.push_back(describe_failure(actor, phase, code, message));
     };
 
-    auto phase_start_slot = [&](const Phase_start& start) {
+    auto phase_start_slot = [&](const phase_start_t& start) {
         if (start.phase < 0 || static_cast<std::size_t>(start.phase) >= k_phase_count) {
-            send_failure_notice(Actor::Aggregator, start.phase, Failure_code::UnexpectedPhase_start,
+            send_failure_notice(Actor::Aggregator, start.phase, Failure_code::UNEXPECTED_PHASE_START,
                 "aggregator received invalid phase start");
             return;
         }
 
         std::lock_guard<std::mutex> lk(mutex);
         if (phase_started[start.phase]) {
-            record_failure_locked(Actor::Aggregator, start.phase, Failure_code::UnexpectedPhase_start,
+            record_failure_locked(Actor::Aggregator, start.phase, Failure_code::UNEXPECTED_PHASE_START,
                 "duplicate phase start");
         }
         else {
@@ -660,7 +660,7 @@ int aggregator_process()
         }
     };
 
-    auto ack_slot = [&](const Ack& ack) {
+    auto ack_slot = [&](const ack_t& ack) {
         bool trigger_completion = false;
         int  completion_phase   = -1;
         int  completion_count   = 0;
@@ -668,34 +668,34 @@ int aggregator_process()
         {
             std::lock_guard<std::mutex> lk(mutex);
             if (ack.phase < 0 || static_cast<std::size_t>(ack.phase) >= k_phase_count) {
-                record_failure_locked(Actor::Aggregator, ack.phase, Failure_code::AckBeforeStart,
+                record_failure_locked(Actor::Aggregator, ack.phase, Failure_code::ACK_BEFORE_START,
                     "ack phase outside range");
                 return;
             }
             if (!phase_started[ack.phase]) {
-                record_failure_locked(Actor::Aggregator, ack.phase, Failure_code::AckBeforeStart,
+                record_failure_locked(Actor::Aggregator, ack.phase, Failure_code::ACK_BEFORE_START,
                     "ack received before phase start");
                 return;
             }
             if (phase_finalised[ack.phase]) {
-                record_failure_locked(Actor::Aggregator, ack.phase, Failure_code::AckOverflow,
+                record_failure_locked(Actor::Aggregator, ack.phase, Failure_code::ACK_OVERFLOW,
                     "ack received after phase finalised");
                 return;
             }
             if (ack.producer < 0 || static_cast<std::size_t>(ack.producer) >= k_producer_count) {
-                record_failure_locked(Actor::Aggregator, ack.phase, Failure_code::AckBeforeStart,
+                record_failure_locked(Actor::Aggregator, ack.phase, Failure_code::ACK_BEFORE_START,
                     "ack producer invalid");
                 return;
             }
 
             auto& flags = tracker[ack.phase][ack.producer];
             if (ack.sequence < 0 || ack.sequence >= static_cast<int>(flags.size())) {
-                record_failure_locked(Actor::Aggregator, ack.phase, Failure_code::SequenceOutOfRange,
+                record_failure_locked(Actor::Aggregator, ack.phase, Failure_code::SEQUENCE_OUT_OF_RANGE,
                     "ack sequence out of range");
                 return;
             }
             if (flags[ack.sequence]) {
-                record_failure_locked(Actor::Aggregator, ack.phase, Failure_code::DuplicatePayload,
+                record_failure_locked(Actor::Aggregator, ack.phase, Failure_code::DUPLICATE_PAYLOAD,
                     "duplicate ack received");
                 return;
             }
@@ -713,20 +713,20 @@ int aggregator_process()
             }
             else
             if (ack_counts[ack.phase] > expected) {
-                record_failure_locked(Actor::Aggregator, ack.phase, Failure_code::AckOverflow,
+                record_failure_locked(Actor::Aggregator, ack.phase, Failure_code::ACK_OVERFLOW,
                     "ack count exceeded expected total");
             }
         }
 
         if (trigger_completion) {
-            world() << Phase_fence{completion_phase};
+            world() << phase_fence_t{completion_phase};
             const auto& name = fence_names()[completion_phase];
             barrier<processing_fence_t>(name);
-            world() << Phase_complete{completion_phase, completion_count};
+            world() << phase_complete_t{completion_phase, completion_count};
         }
     };
 
-    auto failure_slot = [&](const Failure_notice& notice) {
+    auto failure_slot = [&](const failure_notice_t& notice) {
         std::lock_guard<std::mutex> lk(mutex);
         failure_flag = true;
         failure_messages.emplace_back(describe_failure(static_cast<Actor>(notice.actor),
@@ -735,15 +735,15 @@ int aggregator_process()
             notice.message));
     };
 
-    auto fence_slot = [&](const Phase_fence& fence) {
+    auto fence_slot = [&](const phase_fence_t& fence) {
         if (fence.phase < 0 || static_cast<std::size_t>(fence.phase) >= k_phase_count) {
             std::lock_guard<std::mutex> lk(mutex);
-            record_failure_locked(Actor::Aggregator, fence.phase, Failure_code::FenceResent,
+            record_failure_locked(Actor::Aggregator, fence.phase, Failure_code::FENCE_RESENT,
                 "aggregator unexpectedly received fence broadcast");
         }
     };
 
-    auto stop_slot = [&](Stop) {
+    auto stop_slot = [&](stop_t) {
         std::lock_guard<std::mutex> lk(mutex);
         stop_requested = true;
         cv.notify_one();

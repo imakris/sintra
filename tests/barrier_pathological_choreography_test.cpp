@@ -37,7 +37,7 @@ constexpr int k_final_steps = 4;
 constexpr const char* k_done_processed_barrier = "pathological-done-processed";
 constexpr const char* k_summary_ready_barrier = "pathological-summary-ready";
 
-struct Stage_report
+struct stage_report_t
 {
     int    worker;
     int    iteration;
@@ -46,7 +46,7 @@ struct Stage_report
     int    moment;
 };
 
-struct Noise_message
+struct noise_message_t
 {
     int    from;
     int    to;
@@ -99,7 +99,7 @@ int compute_noise_target(int worker, int iteration, int step)
     return (worker + step + iteration) % (k_worker_count + 1);
 }
 
-std::string stage_report_to_string(const Stage_report& report)
+std::string stage_report_to_string(const stage_report_t& report)
 {
     std::ostringstream oss;
     oss << "worker=" << report.worker << ",iter=" << report.iteration
@@ -111,18 +111,18 @@ std::string stage_report_to_string(const Stage_report& report)
 struct Controller_state
 {
     std::mutex                     mutex;
-    std::vector<Stage_report>      stage_reports;
+    std::vector<stage_report_t>      stage_reports;
     std::array<int, k_iterations>  controller_noise_counts{};
     int                            total_controller_noise = 0;
 };
 
-void record_stage_report(Controller_state& state, const Stage_report& report)
+void record_stage_report(Controller_state& state, const stage_report_t& report)
 {
     std::lock_guard<std::mutex> lock(state.mutex);
     state.stage_reports.push_back(report);
 }
 
-void record_controller_noise(Controller_state& state, const Noise_message& msg)
+void record_controller_noise(Controller_state& state, const noise_message_t& msg)
 {
     std::lock_guard<std::mutex> lock(state.mutex);
     state.controller_noise_counts[static_cast<std::size_t>(msg.iteration)] += 1;
@@ -211,12 +211,12 @@ int controller_process()
     const auto shared_dir     = shared.path();
     const auto controller_log = shared_dir / "controller_stage.log";
 
-    auto stage_slot = [&state, controller_log](const Stage_report& report) {
+    auto stage_slot = [&state, controller_log](const stage_report_t& report) {
         record_stage_report(state, report);
         sintra::test::append_line(controller_log, stage_report_to_string(report));
     };
 
-    auto noise_slot = [&state](const Noise_message& msg) {
+    auto noise_slot = [&state](const noise_message_t& msg) {
         if (msg.to == k_worker_count) {
             record_controller_noise(state, msg);
         }
@@ -266,7 +266,7 @@ int controller_process()
 
 void log_stage_event(
     const std::filesystem::path&   log_path,
-    const Stage_report&            report,
+    const stage_report_t&            report,
     std::string_view               phase)
 {
     std::ostringstream oss;
@@ -274,7 +274,7 @@ void log_stage_event(
     sintra::test::append_line(log_path, oss.str());
 }
 
-void log_noise_event(const std::filesystem::path& log_path, const Noise_message& msg)
+void log_noise_event(const std::filesystem::path& log_path, const noise_message_t& msg)
 {
     std::ostringstream oss;
     oss << "from=" << msg.from << ",iter=" << msg.iteration << ",step=" << msg.step
@@ -291,7 +291,7 @@ int worker_process(int worker_index)
     const auto stage_log  = shared_dir / make_stage_log_name(worker_index);
     const auto noise_log  = shared_dir / make_worker_noise_log(worker_index);
 
-    auto stage_slot = [stage_log, worker_index](const Stage_report& report) {
+    auto stage_slot = [stage_log, worker_index](const stage_report_t& report) {
         // All workers observe every report but only write detailed entries for
         // their own messages to avoid pathological log sizes.
         if (report.worker == worker_index) {
@@ -299,7 +299,7 @@ int worker_process(int worker_index)
         }
     };
 
-    auto noise_slot = [noise_log, worker_index](const Noise_message& msg) {
+    auto noise_slot = [noise_log, worker_index](const noise_message_t& msg) {
         if (msg.to != worker_index) {
             return;
         }
@@ -322,7 +322,7 @@ int worker_process(int worker_index)
     for (int iteration = 0; iteration < k_iterations; ++iteration) {
         const auto pre_name = sintra::test::make_barrier_name("pathological-pre", iteration);
 
-        Stage_report pre_before{worker_index, iteration, 0, -1, 0};
+        stage_report_t pre_before{worker_index, iteration, 0, -1, 0};
         sintra::world() << pre_before;
         log_stage_event(stage_log, pre_before, "emit");
         if (jitter(rng) == 0) {
@@ -331,17 +331,17 @@ int worker_process(int worker_index)
 
         sintra::barrier(pre_name);
 
-        Stage_report pre_after{worker_index, iteration, 0, -1, 1};
+        stage_report_t pre_after{worker_index, iteration, 0, -1, 1};
         sintra::world() << pre_after;
         log_stage_event(stage_log, pre_after, "emit");
 
         for (int step = 0; step < k_stage_steps; ++step) {
-            Stage_report step_before{worker_index, iteration, 1, step, 0};
+            stage_report_t step_before{worker_index, iteration, 1, step, 0};
             sintra::world() << step_before;
             log_stage_event(stage_log, step_before, "emit");
 
             const int noise_target = compute_noise_target(worker_index, iteration, step);
-            Noise_message noise{worker_index, noise_target, iteration, step,
+            noise_message_t noise{worker_index, noise_target, iteration, step,
                                worker_index * 100 + iteration * 10 + step};
             sintra::world() << noise;
 
@@ -352,12 +352,12 @@ int worker_process(int worker_index)
             }
             sintra::barrier(stage_name);
 
-            Stage_report step_after{worker_index, iteration, 1, step, 1};
+            stage_report_t step_after{worker_index, iteration, 1, step, 1};
             sintra::world() << step_after;
             log_stage_event(stage_log, step_after, "emit");
         }
 
-        Stage_report process_pending{worker_index, iteration, 2, -1, 0};
+        stage_report_t process_pending{worker_index, iteration, 2, -1, 0};
         sintra::world() << process_pending;
         log_stage_event(stage_log, process_pending, "emit");
 
@@ -365,7 +365,7 @@ int worker_process(int worker_index)
             sintra::test::make_barrier_name("pathological-stage", iteration, "processed");
         sintra::barrier<processing_fence_t>(processing_name);
 
-        Stage_report process_done{worker_index, iteration, 2, -1, 1};
+        stage_report_t process_done{worker_index, iteration, 2, -1, 1};
         sintra::world() << process_done;
         log_stage_event(stage_log, process_done, "emit");
 
@@ -376,7 +376,7 @@ int worker_process(int worker_index)
         }
 
         for (int index : final_order) {
-            Stage_report final_before{worker_index, iteration, 3, index, 0};
+            stage_report_t final_before{worker_index, iteration, 3, index, 0};
             sintra::world() << final_before;
             log_stage_event(stage_log, final_before, "emit");
 
@@ -387,12 +387,12 @@ int worker_process(int worker_index)
             }
             sintra::barrier(final_name);
 
-            Stage_report final_after{worker_index, iteration, 3, index, 1};
+            stage_report_t final_after{worker_index, iteration, 3, index, 1};
             sintra::world() << final_after;
             log_stage_event(stage_log, final_after, "emit");
         }
 
-        Stage_report final_pending{worker_index, iteration, 4, -1, 0};
+        stage_report_t final_pending{worker_index, iteration, 4, -1, 0};
         sintra::world() << final_pending;
         log_stage_event(stage_log, final_pending, "emit");
 
@@ -400,7 +400,7 @@ int worker_process(int worker_index)
             sintra::test::make_barrier_name("pathological-final", iteration, "processed");
         sintra::barrier<processing_fence_t>(final_processing);
 
-        Stage_report final_done{worker_index, iteration, 4, -1, 1};
+        stage_report_t final_done{worker_index, iteration, 4, -1, 1};
         sintra::world() << final_done;
         log_stage_event(stage_log, final_done, "emit");
     }

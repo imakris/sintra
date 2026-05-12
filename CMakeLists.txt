@@ -1,5 +1,32 @@
 cmake_minimum_required(VERSION 3.16)
 
+if(CMAKE_HOST_WIN32)
+    find_program(SINTRA_POWERSHELL_PATH NAMES pwsh powershell)
+    if(NOT SINTRA_POWERSHELL_PATH AND DEFINED ENV{SystemRoot})
+        set(_sintra_windows_powershell
+            "$ENV{SystemRoot}/System32/WindowsPowerShell/v1.0/powershell.exe")
+        if(EXISTS "${_sintra_windows_powershell}")
+            set(SINTRA_POWERSHELL_PATH "${_sintra_windows_powershell}")
+        endif()
+    endif()
+    if(SINTRA_POWERSHELL_PATH)
+        set(Z_VCPKG_POWERSHELL_PATH "${SINTRA_POWERSHELL_PATH}" CACHE INTERNAL
+            "PowerShell executable used by vcpkg app-local deployment.")
+    endif()
+    if(CMAKE_GENERATOR MATCHES "Visual Studio")
+        set(_sintra_vs_vcpkg_globals
+            "VcpkgXUseBuiltInApplocalDeps=true")
+        foreach(_sintra_vs_vcpkg_global ${_sintra_vs_vcpkg_globals})
+            if(NOT "${_sintra_vs_vcpkg_global}" IN_LIST CMAKE_VS_GLOBALS)
+                list(APPEND CMAKE_VS_GLOBALS "${_sintra_vs_vcpkg_global}")
+            endif()
+        endforeach()
+        if(NOT "CMAKE_VS_GLOBALS" IN_LIST CMAKE_TRY_COMPILE_PLATFORM_VARIABLES)
+            list(APPEND CMAKE_TRY_COMPILE_PLATFORM_VARIABLES CMAKE_VS_GLOBALS)
+        endif()
+    endif()
+endif()
+
 project(sintra
     VERSION 1.2.0
     LANGUAGES CXX

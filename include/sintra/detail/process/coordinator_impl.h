@@ -358,7 +358,7 @@ instance_id_type Coordinator::publish_transceiver(
 
     auto process_iid = process_of(iid);
     auto pr_it       = m_transceiver_registry.find(process_iid);
-    auto entry       = tn_type{ tid, assigned_name };
+    auto entry       = Tn_type{ tid, assigned_name };
 
     auto true_sequence = [&](bool allow_notification_delay) {
         bool queued_notification = false;
@@ -1050,7 +1050,7 @@ void Coordinator::recover_if_required(const Crash_info& info)
     control.spawn = spawn_now;
     {
         std::lock_guard<mutex> lock(m_recovery_threads_mutex);
-        m_recovery_threads.emplace_back(detail::exception_boundary{"recovery_runner"}.wrap(
+        m_recovery_threads.emplace_back(detail::Exception_boundary{"recovery_runner"}.wrap(
             [info, runner, control]() mutable { runner(info, control); }));
     }
 }
@@ -1106,7 +1106,7 @@ void Coordinator::emit_lifecycle_event(const process_lifecycle_event& event)
         handler = m_lifecycle_handler;
     }
     if (handler) {
-        detail::exception_boundary{"lifecycle_handler"}([&]{ handler(event); });
+        detail::Exception_boundary{"lifecycle_handler"}([&]{ handler(event); });
     }
 }
 

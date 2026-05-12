@@ -72,13 +72,24 @@ function(add_test_suite SUFFIX IS_DEBUG)
     # Set optimization flags based on the suite, independent of CMAKE_BUILD_TYPE.
     if(IS_DEBUG)
         if(MSVC)
-            target_compile_options(${LIB_TARGET} INTERFACE
-                /Od
-                /Zi
-                /RTC1
-                /UNDEBUG
-            )
-            target_link_options(${LIB_TARGET} INTERFACE /DEBUG:FULL)
+            if(CMAKE_CONFIGURATION_TYPES)
+                target_compile_options(${LIB_TARGET} INTERFACE
+                    $<$<CONFIG:Debug>:/Od>
+                    $<$<CONFIG:Debug>:/Zi>
+                    $<$<CONFIG:Debug>:/RTC1>
+                    $<$<CONFIG:Debug>:/UNDEBUG>
+                )
+                target_link_options(${LIB_TARGET} INTERFACE
+                    $<$<CONFIG:Debug>:/DEBUG:FULL>)
+            else()
+                target_compile_options(${LIB_TARGET} INTERFACE
+                    /Od
+                    /Zi
+                    /RTC1
+                    /UNDEBUG
+                )
+                target_link_options(${LIB_TARGET} INTERFACE /DEBUG:FULL)
+            endif()
         else()
             target_compile_options(${LIB_TARGET} INTERFACE
                 -g
@@ -89,17 +100,34 @@ function(add_test_suite SUFFIX IS_DEBUG)
     else()
         if(MSVC)
             if(SINTRA_RELEASE_WITH_DEBUG_SYMBOLS)
-                target_compile_options(${LIB_TARGET} INTERFACE
-                    /O1
-                    /Zi
-                    /DNDEBUG
-                )
-                target_link_options(${LIB_TARGET} INTERFACE /DEBUG:FULL)
+                if(CMAKE_CONFIGURATION_TYPES)
+                    target_compile_options(${LIB_TARGET} INTERFACE
+                        $<$<CONFIG:Release>:/O1>
+                        $<$<CONFIG:Release>:/Zi>
+                        $<$<CONFIG:Release>:/DNDEBUG>
+                    )
+                    target_link_options(${LIB_TARGET} INTERFACE
+                        $<$<CONFIG:Release>:/DEBUG:FULL>)
+                else()
+                    target_compile_options(${LIB_TARGET} INTERFACE
+                        /O1
+                        /Zi
+                        /DNDEBUG
+                    )
+                    target_link_options(${LIB_TARGET} INTERFACE /DEBUG:FULL)
+                endif()
             else()
-                target_compile_options(${LIB_TARGET} INTERFACE
-                    /O2
-                    /DNDEBUG
-                )
+                if(CMAKE_CONFIGURATION_TYPES)
+                    target_compile_options(${LIB_TARGET} INTERFACE
+                        $<$<CONFIG:Release>:/O2>
+                        $<$<CONFIG:Release>:/DNDEBUG>
+                    )
+                else()
+                    target_compile_options(${LIB_TARGET} INTERFACE
+                        /O2
+                        /DNDEBUG
+                    )
+                endif()
             endif()
         else()
             if(SINTRA_RELEASE_WITH_DEBUG_SYMBOLS)

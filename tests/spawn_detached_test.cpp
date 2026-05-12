@@ -74,9 +74,9 @@ constexpr std::string_view k_failure_prefix = "spawn_detached_test: ";
 namespace {
 
 bool debug_captured = false;
-sintra::detail::spawn_detached_debug_info last_debug_info{};
+sintra::detail::spawn_detached_debug_info_t last_debug_info{};
 
-void capture_spawn_debug(const sintra::detail::spawn_detached_debug_info& info)
+void capture_spawn_debug(const sintra::detail::spawn_detached_debug_info_t& info)
 {
     debug_captured = true;
     last_debug_info = info;
@@ -88,16 +88,16 @@ void reset_spawn_debug_capture()
     last_debug_info = {};
 }
 
-const char* stage_to_string(sintra::detail::spawn_detached_debug_info::Stage stage)
+const char* stage_to_string(sintra::detail::spawn_detached_debug_info_t::Stage stage)
 {
-    using Stage = sintra::detail::spawn_detached_debug_info::Stage;
+    using Stage = sintra::detail::spawn_detached_debug_info_t::Stage;
     switch (stage) {
-        case Stage::PipeCreation:          return "PipeCreation";
-        case Stage::Fork:                  return "Fork";
-        case Stage::ChildReadyPipeWrite:   return "ChildReadyPipeWrite";
-        case Stage::ParentReadReadyStatus: return "ParentReadReadyStatus";
-        case Stage::ParentReadExecStatus:  return "ParentReadExecStatus";
-        case Stage::ParentWaitpid:         return "ParentWaitpid";
+        case Stage::PIPE_CREATION:            return "PIPE_CREATION";
+        case Stage::FORK:                     return "FORK";
+        case Stage::CHILD_READY_PIPE_WRITE:   return "CHILD_READY_PIPE_WRITE";
+        case Stage::PARENT_READ_READY_STATUS: return "PARENT_READ_READY_STATUS";
+        case Stage::PARENT_READ_EXEC_STATUS:  return "PARENT_READ_EXEC_STATUS";
+        case Stage::PARENT_WAITPID:           return "PARENT_WAITPID";
     }
     return "Unknown";
 }

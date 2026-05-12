@@ -109,9 +109,9 @@ struct Typed_instance_id
     }
 
 
-    Typed_instance_id(instance_id_type id_)
+    Typed_instance_id(instance_id_type instance_id)
     {
-        id = id_;
+        id = instance_id;
     }
 };
 
@@ -121,9 +121,9 @@ template<>
 struct Typed_instance_id<void>
 {
     instance_id_type    id;
-    Typed_instance_id(instance_id_type id_)
+    Typed_instance_id(instance_id_type instance_id)
     {
-        id = id_;
+        id = instance_id;
     }
 };
 
@@ -137,12 +137,12 @@ struct Typed_instance_id<void>
 
 
 
-struct tn_type
+struct Tn_type
 {
     type_id_type   type_id = 0;
     string         name;
 
-    bool operator==(const tn_type&) const = default;
+    bool operator==(const Tn_type&) const = default;
 };
 
 
@@ -151,9 +151,9 @@ struct tn_type
 namespace std
 {
     template <>
-    struct hash<sintra::tn_type>
+    struct hash<sintra::Tn_type>
     {
-        uint64_t operator()(const sintra::tn_type& k) const
+        uint64_t operator()(const sintra::Tn_type& k) const
         {
             uint64_t res = 17;
             res = res * 31 + hash<sintra::type_id_type>()(k.type_id);
@@ -691,7 +691,7 @@ protected:
 
 
 
-struct Empty_struct{};
+struct empty_struct_t {};
 
 
 // Second or higher level inheritance (i.e. inherits from a parent
@@ -772,7 +772,7 @@ private:
 
 // First level inheritance, after Transceiver (thus has to inherit from Transceiver)
 template<typename Derived_T>
-struct Derived_transceiver<Derived_T, void>: Transceiver, Derived_transceiver<Derived_T, Empty_struct>
+struct Derived_transceiver<Derived_T, void>: Transceiver, Derived_transceiver<Derived_T, empty_struct_t>
 {
     using Transceiver::Transceiver;
     using Transceiver_type = Derived_T;
@@ -880,5 +880,3 @@ private:
 
 
 } // sintra
-
-

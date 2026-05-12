@@ -10,17 +10,17 @@ namespace {
 
 bool run_tn_type_hash_test()
 {
-    sintra::tn_type a{42, "alpha"};
-    sintra::tn_type b{42, "alpha"};
-    sintra::tn_type c{7, "beta"};
+    sintra::Tn_type a{42, "alpha"};
+    sintra::Tn_type b{42, "alpha"};
+    sintra::Tn_type c{7, "beta"};
 
-    std::unordered_map<sintra::tn_type, int> map;
+    std::unordered_map<sintra::Tn_type, int> map;
     map.emplace(a, 1);
     map.emplace(c, 2);
 
     const auto it = map.find(b);
     if (it == map.end()) {
-        std::fprintf(stderr, "FAIL: lookup for matching tn_type failed\n");
+        std::fprintf(stderr, "FAIL: lookup for matching Tn_type failed\n");
         return false;
     }
     if (it->second != 1) {

@@ -19,15 +19,15 @@ using namespace std;
 using namespace sintra;
 
 
-struct Ping {};
-struct Pong {};
-struct Stop {};
+struct ping_t {};
+struct pong_t {};
+struct stop_t {};
 
 
 void wait_for_stop()
 {
     barrier("stop slot activation barrier");
-    receive<Stop>();
+    receive<stop_t>();
     deactivate_all_slots();
 }
 
@@ -35,8 +35,8 @@ void wait_for_stop()
 
 int process_1()
 {
-    activate_slot([=] (Ping) {
-        world() << Pong();
+    activate_slot([=] (ping_t) {
+        world() << pong_t();
     });
     barrier("ping-pong slot activation barrier");
 
@@ -47,13 +47,13 @@ int process_1()
 
 int process_2()
 {
-    activate_slot([=] (Pong) {
-        world() << Ping();
+    activate_slot([=] (pong_t) {
+        world() << ping_t();
     });
     barrier("ping-pong slot activation barrier");
 
     // the spark
-    world() << Ping();
+    world() << ping_t();
 
     wait_for_stop();
     return 0;
@@ -66,7 +66,7 @@ int process_3()
     double   next_ts  = ref_time + 1.;
     uint64_t counter  = 0;
 
-    activate_slot([&] (Ping) {
+    activate_slot([&] (ping_t) {
         double ts = get_wtime();
         if (ts > next_ts) {
             next_ts = ts + 1.;
@@ -90,7 +90,7 @@ int main(int argc, char* argv[])
         using namespace std::chrono_literals;
         std::this_thread::sleep_for(3s);
         console() << "Stopping ping-pong after a short demonstration\n";
-        world() << Stop();
+        world() << stop_t();
     }
 
     // shutdown() performs the final all-process processing fence and then

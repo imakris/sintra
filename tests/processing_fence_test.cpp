@@ -18,9 +18,9 @@
 
 namespace {
 
-struct Work_message {};
+struct work_message_t {};
 
-struct Handler_done {};
+struct handler_done_t {};
 
 constexpr auto k_handler_delay = std::chrono::milliseconds(300);
 int controller_process()
@@ -41,7 +41,7 @@ int controller_process()
     auto handler_done_deactivator = activate_slot(
         [
             handler_done_promise, handler_done_recorded
-        ](const Handler_done&)
+        ](const handler_done_t&)
         {
             bool expected = false;
             if (handler_done_recorded->compare_exchange_strong(expected, true)) {
@@ -49,7 +49,7 @@ int controller_process()
             }
         });
 
-    world() << Work_message{};
+    world() << work_message_t{};
 
     const auto start = std::chrono::steady_clock::now();
     const bool barrier_result = barrier<processing_fence_t>(
@@ -82,9 +82,9 @@ int worker_process()
 {
     using namespace sintra;
 
-    auto slot = [](const Work_message&) {
+    auto slot = [](const work_message_t&) {
         std::this_thread::sleep_for(k_handler_delay);
-        world() << Handler_done{};
+        world() << handler_done_t{};
     };
     activate_slot(slot);
 

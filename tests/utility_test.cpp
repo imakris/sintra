@@ -77,16 +77,16 @@ void test_adaptive_function_copy_assignment()
 void test_cstring_vector_from_lvalue()
 {
     std::vector<std::string> strings = {"hello", "world", "test"};
-    sintra::cstring_vector csv(strings);
+    sintra::C_string_vector csv(strings);
 
     sintra::test::require_true(csv.size() == 3,
         k_failure_prefix,
-        "cstring_vector size should match input");
+        "C_string_vector size should match input");
 
     const char* const* data = csv.v();
     sintra::test::require_true(data != nullptr,
         k_failure_prefix,
-        "cstring_vector data should not be null");
+        "C_string_vector data should not be null");
     sintra::test::require_true(std::string(data[0]) == "hello",
         k_failure_prefix,
         "First element should match");
@@ -101,16 +101,16 @@ void test_cstring_vector_from_lvalue()
 void test_cstring_vector_from_rvalue()
 {
     std::vector<std::string> strings = {"foo", "bar"};
-    sintra::cstring_vector csv(std::move(strings));
+    sintra::C_string_vector csv(std::move(strings));
 
     sintra::test::require_true(csv.size() == 2,
         k_failure_prefix,
-        "cstring_vector size should match input");
+        "C_string_vector size should match input");
 
     const char* const* data = csv.v();
     sintra::test::require_true(data != nullptr,
         k_failure_prefix,
-        "cstring_vector data should not be null");
+        "C_string_vector data should not be null");
     sintra::test::require_true(std::string(data[0]) == "foo",
         k_failure_prefix,
         "First element should match");
@@ -122,11 +122,11 @@ void test_cstring_vector_from_rvalue()
 void test_cstring_vector_empty()
 {
     std::vector<std::string> empty;
-    sintra::cstring_vector csv(empty);
+    sintra::C_string_vector csv(empty);
 
     sintra::test::require_true(csv.size() == 0,
         k_failure_prefix,
-        "Empty cstring_vector should have size 0");
+        "Empty C_string_vector should have size 0");
 }
 
 #ifndef _WIN32

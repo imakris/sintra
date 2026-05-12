@@ -46,15 +46,15 @@ std::filesystem::path make_unique_path()
     return {};
 }
 
-struct temporary_file
+struct Temporary_file
 {
-    explicit temporary_file(const std::vector<std::uint8_t>& contents)
+    explicit Temporary_file(const std::vector<std::uint8_t>& contents)
         : path(make_unique_path())
     {
         write(contents);
     }
 
-    ~temporary_file()
+    ~Temporary_file()
     {
         std::error_code ec;
         std::filesystem::remove(path, ec);
@@ -114,7 +114,7 @@ int main()
     const std::size_t page_size     = sintra::system_page_size();
     const std::size_t data_size     = page_size * 2 + 128;
     const auto        original_data = make_test_data(data_size);
-    temporary_file temp(original_data);
+    Temporary_file temp(original_data);
 
     // Mapping the full file in read-only mode should expose the exact contents.
     {

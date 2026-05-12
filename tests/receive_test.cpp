@@ -22,10 +22,10 @@
 
 namespace {
 
-struct Ack_a {};
-struct Ack_b {};
+struct ack_a_t {};
+struct ack_b_t {};
 
-struct DataMessage
+struct data_message_t
 {
     int    value;
     double score;
@@ -56,7 +56,7 @@ int sender_a_process()
     write_sender_id(shared_dir / "sender_a_id.txt", sintra::process_of(sintra::s_mproc_id));
 
     std::atomic<bool> got_ack{false};
-    sintra::activate_slot([&](const Ack_a&) {
+    sintra::activate_slot([&](const ack_a_t&) {
         got_ack.store(true, std::memory_order_release);
     });
 
@@ -68,7 +68,7 @@ int sender_a_process()
     const int    expected_value = 57;
     const double expected_score = 2.718;
 
-    sintra::world() << DataMessage{expected_value, expected_score};
+    sintra::world() << data_message_t{expected_value, expected_score};
 
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     while (std::chrono::steady_clock::now() < deadline && !got_ack.load(std::memory_order_acquire)) {
@@ -76,7 +76,7 @@ int sender_a_process()
     }
 
     if (!got_ack.load(std::memory_order_acquire)) {
-        std::fprintf(stderr, "FAIL: timed out waiting for Ack_a\n");
+        std::fprintf(stderr, "FAIL: timed out waiting for ack_a_t\n");
         std::abort();
     }
 
@@ -88,7 +88,7 @@ int sender_b_process()
 {
     std::atomic<bool> got_ack{false};
 
-    sintra::activate_slot([&](const Ack_b&) {
+    sintra::activate_slot([&](const ack_b_t&) {
         got_ack.store(true, std::memory_order_release);
     });
 
@@ -100,7 +100,7 @@ int sender_b_process()
     const int    expected_value = 91;
     const double expected_score = 1.414;
 
-    sintra::world() << DataMessage{expected_value, expected_score};
+    sintra::world() << data_message_t{expected_value, expected_score};
 
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     while (std::chrono::steady_clock::now() < deadline && !got_ack.load(std::memory_order_acquire)) {
@@ -108,7 +108,7 @@ int sender_b_process()
     }
 
     if (!got_ack.load(std::memory_order_acquire)) {
-        std::fprintf(stderr, "FAIL: timed out waiting for Ack_b\n");
+        std::fprintf(stderr, "FAIL: timed out waiting for ack_b_t\n");
         std::abort();
     }
 
@@ -125,7 +125,7 @@ int receiver_process()
 
     const auto sender_a_id = read_sender_id(shared_dir / "sender_a_id.txt");
 
-    auto msg = sintra::receive<DataMessage>(
+    auto msg = sintra::receive<data_message_t>(
         sintra::Typed_instance_id<sintra::Managed_process>(sender_a_id));
     if (msg.value != 57) {
         std::fprintf(stderr, "FAIL: expected filtered value 57, got %d\n", msg.value);
@@ -135,12 +135,12 @@ int receiver_process()
         std::fprintf(stderr, "FAIL: expected filtered score near 2.718, got %f\n", msg.score);
         std::abort();
     }
-    sintra::world() << Ack_a{};
+    sintra::world() << ack_a_t{};
 
     std::condition_variable second_cv;
     std::mutex second_mtx;
-    std::optional<DataMessage> second_message;
-    auto second_message_slot = sintra::activate_slot([&](DataMessage msg) {
+    std::optional<data_message_t> second_message;
+    auto second_message_slot = sintra::activate_slot([&](data_message_t msg) {
         std::lock_guard<std::mutex> lock(second_mtx);
         if (!second_message.has_value()) {
             second_message.emplace(std::move(msg));
@@ -150,7 +150,7 @@ int receiver_process()
 
     sintra::barrier("phase-two");
 
-    DataMessage other_msg{};
+    data_message_t other_msg{};
     {
         std::unique_lock<std::mutex> lock(second_mtx);
         second_cv.wait(lock, [&] { return second_message.has_value(); });
@@ -166,7 +166,7 @@ int receiver_process()
         std::fprintf(stderr, "FAIL: expected second score near 1.414, got %f\n", other_msg.score);
         std::abort();
     }
-    sintra::world() << Ack_b{};
+    sintra::world() << ack_b_t{};
 
     return 0;
 }

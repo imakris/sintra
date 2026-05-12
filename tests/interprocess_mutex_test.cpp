@@ -28,7 +28,7 @@ void expect_error_code(
     }
 }
 
-class test_mutex : public sintra::detail::interprocess_mutex
+class Test_mutex : public sintra::detail::interprocess_mutex
 {
 public:
     using owner_token = std::uint64_t;
@@ -85,7 +85,7 @@ private:
 
 int main()
 {
-    test_mutex mtx;
+    Test_mutex mtx;
 
     // Fresh mutex should be acquirable via try_lock.
     sintra::test::expect(mtx.try_lock(), k_failure_prefix,
@@ -185,7 +185,7 @@ int main()
 
     // Test try_lock_for with immediate success.
     {
-        test_mutex timed_mtx;
+        Test_mutex timed_mtx;
         bool acquired = timed_mtx.try_lock_for(100ms);
         sintra::test::expect(acquired, k_failure_prefix,
             "try_lock_for should succeed on unlocked mutex");
@@ -194,7 +194,7 @@ int main()
 
     // Test try_lock_for with timeout (mutex held by another thread).
     {
-        test_mutex timed_mtx;
+        Test_mutex timed_mtx;
         std::atomic<bool> holding{false};
         std::atomic<bool> release{false};
 
@@ -224,7 +224,7 @@ int main()
 
     // Test try_lock_until with immediate success.
     {
-        test_mutex timed_mtx;
+        Test_mutex timed_mtx;
         auto deadline = std::chrono::steady_clock::now() + 100ms;
         bool acquired = timed_mtx.try_lock_until(deadline);
         sintra::test::expect(acquired, k_failure_prefix,
@@ -234,7 +234,7 @@ int main()
 
     // Test try_lock_until with past deadline (mutex held by another thread).
     {
-        test_mutex timed_mtx;
+        Test_mutex timed_mtx;
         std::atomic<bool> holding{false};
         std::atomic<bool> release{false};
 
@@ -264,18 +264,18 @@ int main()
     }
 
     // Recovery from a dead owner should succeed.
-    test_mutex recovery;
+    Test_mutex recovery;
     const auto dead_pid = static_cast<uint32_t>(0);
     // PID 0 is reserved on all supported platforms and treated as always-dead by
     // is_process_alive, guaranteeing deterministic recovery behaviour.
-    const test_mutex::owner_token dead_owner =
-        (static_cast<test_mutex::owner_token>(dead_pid) << 32u) | 0x12345678ull;
+    const Test_mutex::owner_token dead_owner =
+        (static_cast<Test_mutex::owner_token>(dead_pid) << 32u) | 0x12345678ull;
 
     recovery.set_raw_owner(dead_owner);
     recovery.set_recovering(0);
 
     recovery.lock();
-    const auto expected_owner = test_mutex::make_current_owner_token();
+    const auto expected_owner = Test_mutex::make_current_owner_token();
     sintra::test::expect(recovery.raw_owner() == expected_owner,
         k_failure_prefix,
         "lock should recover ownership from a dead process");

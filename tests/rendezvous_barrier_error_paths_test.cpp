@@ -55,7 +55,7 @@ bool write_ready_file(const std::filesystem::path& path)
     return static_cast<bool>(out);
 }
 
-struct Child_process
+struct child_process_t
 {
 #ifdef _WIN32
     HANDLE handle = nullptr;
@@ -65,7 +65,7 @@ struct Child_process
 #endif
 };
 
-bool wait_for_child_exit(Child_process& child, std::chrono::milliseconds timeout, int& exit_code)
+bool wait_for_child_exit(child_process_t& child, std::chrono::milliseconds timeout, int& exit_code)
 {
 #ifdef _WIN32
     const DWORD wait_ms     = static_cast<DWORD>(timeout.count());
@@ -115,7 +115,7 @@ bool wait_for_child_exit(Child_process& child, std::chrono::milliseconds timeout
 #endif
 }
 
-void terminate_child(Child_process& child)
+void terminate_child(child_process_t& child)
 {
 #ifdef _WIN32
     HANDLE handle = child.handle;
@@ -432,7 +432,7 @@ int main(int argc, char* argv[])
                 ok = false;
             }
 
-            Child_process child;
+            child_process_t child;
 #ifdef _WIN32
             child.pid = static_cast<DWORD>(child_pid);
             child.handle = OpenProcess(

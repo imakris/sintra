@@ -24,18 +24,18 @@ using namespace std;
 using namespace sintra;
 
 
-struct Unicast_message
+struct unicast_message_t
 {
     uint64_t           counter;
 };
 
-struct Id_exchange
+struct id_exchange_t
 {
     instance_id_type   sender_id;
     uint64_t           process_index;
 };
 
-struct Stop {};
+struct stop_t {};
 
 
 instance_id_type g_process_1_id = 0;
@@ -43,7 +43,7 @@ instance_id_type g_process_2_id = 0;
 
 void wait_for_stop()
 {
-    receive<Stop>();
+    receive<stop_t>();
 }
 
 
@@ -56,7 +56,7 @@ struct Message_receiver : Derived_transceiver<Message_receiver>
     Message_receiver(atomic<uint64_t>* counter_ptr)
         : received_count_ptr(counter_ptr) {}
 
-    void handle_unicast(const Unicast_message& msg)
+    void handle_unicast(const unicast_message_t& msg)
     {
         (*received_count_ptr)++;
         console() << instance_name() << ": Received unicast message #" << msg.counter << "\n";
@@ -80,7 +80,7 @@ int process_1()
     g_process_1_id = receiver1.instance_id();
 
     // Receive ID exchange messages
-    activate_slot([](Id_exchange msg) {
+    activate_slot([](id_exchange_t msg) {
         if (msg.process_index == 2) {
             g_process_2_id = msg.sender_id;
             console() << "Process 1: Received Process 2 ID: " << g_process_2_id << "\n";
@@ -90,7 +90,7 @@ int process_1()
     barrier("transceiver creation barrier");
 
     // Broadcast our ID
-    world() << Id_exchange{g_process_1_id, 1};
+    world() << id_exchange_t{g_process_1_id, 1};
 
     barrier("id exchange barrier");
 
@@ -99,7 +99,7 @@ int process_1()
 
     // Send 5 fire-and-forget unicast messages to Process 2
     for (uint64_t i = 0; i < 5; i++) {
-        Message_receiver::rpc_handle_unicast(g_process_2_id, Unicast_message{i});
+        Message_receiver::rpc_handle_unicast(g_process_2_id, unicast_message_t{i});
         console() << "Process 1: Sent unicast message #" << i << " to Process 2\n";
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
@@ -127,7 +127,7 @@ int process_2()
     g_process_2_id = receiver2.instance_id();
 
     // Receive ID exchange messages
-    activate_slot([](Id_exchange msg) {
+    activate_slot([](id_exchange_t msg) {
         if (msg.process_index == 1) {
             g_process_1_id = msg.sender_id;
             console() << "Process 2: Received Process 1 ID: " << g_process_1_id << "\n";
@@ -137,7 +137,7 @@ int process_2()
     barrier("transceiver creation barrier");
 
     // Broadcast our ID
-    world() << Id_exchange{g_process_2_id, 2};
+    world() << id_exchange_t{g_process_2_id, 2};
 
     barrier("id exchange barrier");
 
@@ -160,7 +160,7 @@ int process_3()
     Message_receiver receiver3(&unicast_received);
     receiver3.instance_name_str = "Process 3";
 
-    activate_slot([](Id_exchange msg) {
+    activate_slot([](id_exchange_t msg) {
         console() << "Process 3: Observed ID exchange from process " << msg.process_index << "\n";
     });
 
@@ -190,7 +190,7 @@ int main(int argc, char* argv[])
         using namespace std::chrono_literals;
         std::this_thread::sleep_for(2s);
         console() << "Main: Sending stop signal\n";
-        world() << Stop();
+        world() << stop_t();
     }
 
     // shutdown() performs the final all-process processing fence and then

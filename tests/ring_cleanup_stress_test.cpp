@@ -42,7 +42,7 @@ void emit_stale_run_directory(
     auto dir = base / ("stale_run_" + std::to_string(index));
     std::filesystem::create_directories(dir);
 
-    sintra::run_marker_record record{};
+    sintra::run_marker_record_t record{};
     record.pid                  = 100000u + index; // Very unlikely to collide with a real PID
     record.start_stamp          = static_cast<std::uint64_t>(index + 1);
     record.created_monotonic_ns = sintra::monotonic_now_ns();
@@ -138,4 +138,3 @@ int main(int argc, char* argv[])
 
     return 0;
 }
-

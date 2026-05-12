@@ -10,7 +10,7 @@
 // - Mutex recovery after process crash
 //
 // Test structure:
-// - Process 1 (watchdog): Waits for a Stop signal and validates recovery occurred
+// - Process 1 (watchdog): Waits for a stop_t signal and validates recovery occurred
 // - Process 2 (crasher): Deliberately crashes on first run, completes on second run
 //
 // The test verifies that:
@@ -41,7 +41,7 @@
 
 namespace {
 
-struct Stop {};
+struct stop_t {};
 
 std::string g_shared_dir;
 
@@ -128,14 +128,14 @@ int process_watchdog()
     std::mutex stop_mutex;
     bool stop_received = false;
 
-    sintra::activate_slot([&](const Stop&) {
-        std::fprintf(stderr, "[WATCHDOG] Received Stop message!\n");
+    sintra::activate_slot([&](const stop_t&) {
+        std::fprintf(stderr, "[WATCHDOG] Received stop_t message!\n");
         std::lock_guard<std::mutex> lk(stop_mutex);
         stop_received = true;
         stop_cv.notify_one();
     });
 
-    std::fprintf(stderr, "[WATCHDOG] Waiting for Stop message...\n");
+    std::fprintf(stderr, "[WATCHDOG] Waiting for stop_t message...\n");
     std::unique_lock<std::mutex> lk(stop_mutex);
     // Wait up to 60 seconds - recovery can take 45+ seconds
     const bool signalled = stop_cv.wait_for(
@@ -261,13 +261,13 @@ int process_crasher()
         std::abort();
     }
 
-    log << "Second+ run - sending Stop" << std::endl;
+    log << "Second+ run - sending stop_t" << std::endl;
     log.close();
     append_shared_line(
         runs_path,
         "stop occurrence=" + std::to_string(occurrence) +
         " pid=" + std::to_string(sintra::test::get_pid()));
-    sintra::world() << Stop{};
+    sintra::world() << stop_t{};
     return 0;
 }
 

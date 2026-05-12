@@ -38,7 +38,7 @@ constexpr std::size_t k_worker_count = 2;
 constexpr std::size_t k_iterations   = 128;
 constexpr const char* k_result_ready_barrier = "barrier-flush-result-ready";
 
-struct Iteration_marker
+struct iteration_marker_t
 {
     std::uint32_t              worker;
     std::uint32_t              iteration;
@@ -66,7 +66,7 @@ int coordinator_process()
     bool success = true;
     std::string failure_reason;
 
-    activate_slot([&](const Iteration_marker& marker) {
+    activate_slot([&](const iteration_marker_t& marker) {
         std::lock_guard<std::mutex> lock(state.mutex);
 
         if (state.abort_requested) {
@@ -217,7 +217,7 @@ int worker_process(std::uint32_t worker_index)
 
     for (std::uint32_t iteration = 0; iteration < k_iterations; ++iteration) {
 
-        world() << Iteration_marker{worker_index, iteration};
+        world() << iteration_marker_t{worker_index, iteration};
 
         barrier("barrier-flush-iteration");
 

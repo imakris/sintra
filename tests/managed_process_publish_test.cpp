@@ -249,7 +249,7 @@ bool spawn_worker_process(
     args.push_back(std::to_string(coordinator_id));
     args.push_back("--lifeline_disable");
 
-    sintra::cstring_vector cargs(std::move(args));
+    sintra::C_string_vector cargs(std::move(args));
 
     sintra::Spawn_detached_options options;
     options.prog = binary_path.c_str();
@@ -305,7 +305,7 @@ bool spawn_delayed_worker(
     args.push_back(std::to_string(coordinator_id));
     args.push_back("--lifeline_disable");
 
-    sintra::cstring_vector cargs(std::move(args));
+    sintra::C_string_vector cargs(std::move(args));
 
     sintra::Spawn_detached_options options;
     options.prog = binary_path.c_str();

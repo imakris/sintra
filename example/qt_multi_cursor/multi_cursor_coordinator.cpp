@@ -23,7 +23,7 @@
 namespace {
 
 // Coordinator state
-struct Window_state
+struct window_state_t
 {
     bool   exited_normally = false;
     bool   recovering      = false;
@@ -32,7 +32,7 @@ struct Window_state
 
 std::mutex g_state_mutex;
 std::condition_variable g_state_cv;
-std::array<Window_state, sintra_example::k_num_windows> g_window_states;
+std::array<window_state_t, sintra_example::k_num_windows> g_window_states;
 std::unordered_map<uint64_t, int> g_process_index_to_window;
 std::unordered_map<int, uint64_t> g_window_to_process_index;
 std::unordered_map<uint64_t, sintra::process_lifecycle_event> g_pending_lifecycle_events;
@@ -128,7 +128,7 @@ void mark_inactive(int window_id)
     }
 }
 
-struct Lifecycle_actions
+struct lifecycle_actions_t
 {
     int    window_id          = -1;
     int    status             = 0;
@@ -139,11 +139,11 @@ struct Lifecycle_actions
     bool   log_normal_exit    = false;
 };
 
-Lifecycle_actions apply_lifecycle_event_locked(
+lifecycle_actions_t apply_lifecycle_event_locked(
     int                                    window_id,
     const sintra::process_lifecycle_event& event)
 {
-    Lifecycle_actions actions;
+    lifecycle_actions_t actions;
     actions.window_id = window_id;
     actions.status = event.status;
 
@@ -178,7 +178,7 @@ Lifecycle_actions apply_lifecycle_event_locked(
     return actions;
 }
 
-void dispatch_lifecycle_actions(const Lifecycle_actions& actions)
+void dispatch_lifecycle_actions(const lifecycle_actions_t& actions)
 {
     if (actions.window_id < 0) {
         return;
@@ -271,7 +271,7 @@ private:
             return;
         }
 
-        Lifecycle_actions actions;
+        lifecycle_actions_t actions;
         {
             std::lock_guard<std::mutex> lock(g_state_mutex);
             update_window_mapping(msg.window_id, process_index);
@@ -396,7 +396,7 @@ int main(int argc, char* argv[])
     });
 
     sintra::set_lifecycle_handler([](const sintra::process_lifecycle_event& event) {
-        Lifecycle_actions actions;
+        lifecycle_actions_t actions;
         bool has_actions = false;
         {
             std::lock_guard<std::mutex> lock(g_state_mutex);
@@ -426,7 +426,7 @@ int main(int argc, char* argv[])
                 << "[Coordinator] Failed to spawn window " << i << "\n";
         }
         else {
-            Lifecycle_actions pending_actions;
+            lifecycle_actions_t pending_actions;
             bool       has_pending_actions = false;
             const auto process_index       = sintra::get_process_index(piid);
             {
