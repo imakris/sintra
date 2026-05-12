@@ -26,13 +26,13 @@ using namespace sintra;
 
 struct Unicast_message
 {
-    uint64_t counter;
+    uint64_t           counter;
 };
 
 struct Id_exchange
 {
-    instance_id_type sender_id;
-    uint64_t process_index;
+    instance_id_type   sender_id;
+    uint64_t           process_index;
 };
 
 struct Stop {};
@@ -50,8 +50,8 @@ void wait_for_stop()
 // Transceiver type that can receive unicast messages
 struct Message_receiver : Derived_transceiver<Message_receiver>
 {
-    atomic<uint64_t>* received_count_ptr;
-    string instance_name_str;
+    atomic<uint64_t>*  received_count_ptr;
+    string             instance_name_str;
 
     Message_receiver(atomic<uint64_t>* counter_ptr)
         : received_count_ptr(counter_ptr) {}
@@ -95,7 +95,7 @@ int process_1()
     barrier("id exchange barrier");
 
     console() << "Process 1: Sending unicast messages to Process 2 (ID: "
-              << g_process_2_id << ")\n";
+        << g_process_2_id << ")\n";
 
     // Send 5 fire-and-forget unicast messages to Process 2
     for (uint64_t i = 0; i < 5; i++) {
@@ -144,7 +144,7 @@ int process_2()
     wait_for_stop();
 
     console() << "Process 2: Received " << received_count.load()
-              << " total unicast messages (expected 5)\n";
+        << " total unicast messages (expected 5)\n";
 
     deactivate_all_slots();
     return 0;
@@ -174,7 +174,7 @@ int process_3()
     }
     else {
         console() << "Process 3: FAILURE - Received " << unicast_received.load()
-                  << " unicast messages (should be 0)\n";
+            << " unicast messages (should be 0)\n";
     }
 
     deactivate_all_slots();

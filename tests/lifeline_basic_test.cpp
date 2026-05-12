@@ -33,47 +33,47 @@ namespace {
 
 constexpr const char* k_role_arg = "--lifeline_role";
 constexpr const char* k_case_arg = "--lifeline_case";
-constexpr const char* k_dir_arg = "--lifeline_dir";
+constexpr const char* k_dir_arg  = "--lifeline_dir";
 
-constexpr const char* k_role_owner = "owner";
-constexpr const char* k_role_child = "child";
-constexpr const char* k_role_missing = "missing";
-constexpr const char* k_role_leak_owner = "leak_owner";
-constexpr const char* k_role_respawn_owner = "respawn_owner";
-constexpr const char* k_role_respawn_child = "respawn_child";
+constexpr const char* k_role_owner          = "owner";
+constexpr const char* k_role_child          = "child";
+constexpr const char* k_role_missing        = "missing";
+constexpr const char* k_role_leak_owner     = "leak_owner";
+constexpr const char* k_role_respawn_owner  = "respawn_owner";
+constexpr const char* k_role_respawn_child  = "respawn_child";
 constexpr const char* k_role_manual_disable = "manual_disable";
-constexpr const char* k_role_short_option = "short_option";
+constexpr const char* k_role_short_option   = "short_option";
 
-constexpr const char* k_case_normal = "normal";
+constexpr const char* k_case_normal   = "normal";
 constexpr const char* k_case_disabled = "disabled";
-constexpr const char* k_case_crash = "crash";
-constexpr const char* k_case_hung = "hung";
-constexpr const char* k_case_leak = "leak";
-constexpr const char* k_case_respawn = "respawn";
+constexpr const char* k_case_crash    = "crash";
+constexpr const char* k_case_hung     = "hung";
+constexpr const char* k_case_leak     = "leak";
+constexpr const char* k_case_respawn  = "respawn";
 
-constexpr int k_owner_exit_timeout_ms = 4000;
-constexpr int k_child_exit_timeout_ms = 2000;
-constexpr int k_child_disable_check_ms = 300;
-constexpr int k_hung_hard_exit_timeout_ms = 300;
-constexpr int k_hung_child_exit_timeout_ms = 3000;
-constexpr int k_rapid_spawn_iterations = 5;
-constexpr int k_leak_iterations = 5;
-constexpr int k_leak_child_lifetime_ms = 50;
-constexpr int k_leak_owner_timeout_ms = 10000;
-constexpr int k_respawn_owner_timeout_ms = 10000;
+constexpr int k_owner_exit_timeout_ms         = 4000;
+constexpr int k_child_exit_timeout_ms         = 2000;
+constexpr int k_child_disable_check_ms        = 300;
+constexpr int k_hung_hard_exit_timeout_ms     = 300;
+constexpr int k_hung_child_exit_timeout_ms    = 3000;
+constexpr int k_rapid_spawn_iterations        = 5;
+constexpr int k_leak_iterations               = 5;
+constexpr int k_leak_child_lifetime_ms        = 50;
+constexpr int k_leak_owner_timeout_ms         = 10000;
+constexpr int k_respawn_owner_timeout_ms      = 10000;
 constexpr int k_respawn_child_exit_timeout_ms = 2000;
 
 struct Process_handle
 {
 #ifdef _WIN32
     HANDLE handle = nullptr;
-    DWORD pid = 0;
+    DWORD  pid    = 0;
 #else
-    pid_t pid = -1;
+    pid_t  pid = -1;
 #endif
-    bool waitable = true;
-    bool exited = false;
-    int exit_code = 0;
+    bool   waitable  = true;
+    bool   exited    = false;
+    int    exit_code = 0;
 };
 
 void disable_debug_pause_env()
@@ -90,12 +90,16 @@ std::filesystem::path child_pid_path(const std::filesystem::path& dir, const std
     return dir / ("child_pid_" + test_case + ".txt");
 }
 
-std::filesystem::path child_ready_path(const std::filesystem::path& dir, const std::string& test_case)
+std::filesystem::path child_ready_path(
+    const std::filesystem::path&   dir,
+    const std::string&             test_case)
 {
     return dir / ("child_ready_" + test_case + ".txt");
 }
 
-std::filesystem::path child_done_path(const std::filesystem::path& dir, const std::string& test_case)
+std::filesystem::path child_done_path(
+    const std::filesystem::path&   dir,
+    const std::string&             test_case)
 {
     return dir / ("child_done_" + test_case + ".txt");
 }
@@ -196,8 +200,8 @@ std::wstring build_command_line(const std::string& exe, const std::vector<std::s
         }
         first = false;
 
-        const std::wstring wide_arg = to_wide(arg);
-        const bool needs_quoting = wide_arg.find(L' ') != std::wstring::npos || wide_arg.empty();
+        const std::wstring wide_arg      = to_wide(arg);
+        const bool         needs_quoting = wide_arg.find(L' ') != std::wstring::npos || wide_arg.empty();
 
         if (needs_quoting) {
             cmdline += L'"';
@@ -208,11 +212,13 @@ std::wstring build_command_line(const std::string& exe, const std::vector<std::s
             if (ch == L'"') {
                 cmdline += L"\\\"";
             }
-            else if (ch == L'\\') {
+            else
+            if (ch == L'\\') {
                 if (i + 1 < wide_arg.length() && wide_arg[i + 1] == L'"') {
                     cmdline += L"\\\\";
                 }
-                else if (i + 1 == wide_arg.length() && needs_quoting) {
+                else
+                if (i + 1 == wide_arg.length() && needs_quoting) {
                     cmdline += L"\\\\";
                 }
                 else {
@@ -232,10 +238,13 @@ std::wstring build_command_line(const std::string& exe, const std::vector<std::s
     return cmdline;
 }
 
-bool spawn_process(const std::string& exe, const std::vector<std::string>& args, Process_handle& out)
+bool spawn_process(
+    const std::string&                 exe,
+    const std::vector<std::string>&    args,
+    Process_handle&                    out)
 {
     const std::wstring exe_wide = to_wide(exe);
-    std::wstring cmdline = build_command_line(exe, args);
+    std::wstring       cmdline  = build_command_line(exe, args);
     if (exe_wide.empty() || cmdline.empty()) {
         return false;
     }
@@ -299,7 +308,10 @@ void close_process(Process_handle& process)
     }
 }
 #else
-bool spawn_process(const std::string& exe, const std::vector<std::string>& args, Process_handle& out)
+bool spawn_process(
+    const std::string&                 exe,
+    const std::vector<std::string>&    args,
+    Process_handle&                    out)
 {
     pid_t pid = ::fork();
     if (pid < 0) {
@@ -329,12 +341,8 @@ bool poll_exit(Process_handle& process)
     }
 
     if (!process.waitable) {
-        if (::kill(process.pid, 0) == 0) {
-            return false;
-        }
-        if (errno == EPERM) {
-            return false;
-        }
+        if (::kill(process.pid, 0) == 0) { return false; }
+        if (errno == EPERM)              { return false; }
         if (errno == ESRCH) {
             process.exit_code = 0;
             process.exited = true;
@@ -345,7 +353,7 @@ bool poll_exit(Process_handle& process)
         return true;
     }
 
-    int status = 0;
+    int   status = 0;
     pid_t result = ::waitpid(process.pid, &status, WNOHANG);
     if (result == 0) {
         return false;
@@ -359,7 +367,8 @@ bool poll_exit(Process_handle& process)
     if (WIFEXITED(status)) {
         process.exit_code = WEXITSTATUS(status);
     }
-    else if (WIFSIGNALED(status)) {
+    else
+    if (WIFSIGNALED(status)) {
         process.exit_code = 128 + WTERMSIG(status);
     }
     else {
@@ -397,11 +406,11 @@ bool is_running(Process_handle& process)
 }
 
 bool wait_for_child_completion(
-    const std::filesystem::path& dir,
-    const std::string& test_case,
-    Process_handle& child,
-    int timeout_ms,
-    int& child_exit)
+    const std::filesystem::path&   dir,
+    const std::string&             test_case,
+    Process_handle&                child,
+    int                            timeout_ms,
+    int&                           child_exit)
 {
     if (test_case == k_case_disabled) {
         if (!sintra::test::wait_for_file(child_done_path(dir, test_case), std::chrono::milliseconds(timeout_ms))) {
@@ -436,7 +445,7 @@ bool process_exists(long long pid)
     }
 
     DWORD exit_code = 0;
-    bool alive = true;
+    bool  alive     = true;
     if (GetExitCodeProcess(h, &exit_code)) {
         alive = (exit_code == STILL_ACTIVE);
     }
@@ -452,11 +461,15 @@ int child_pid_value()
     return static_cast<int>(sintra::test::get_pid());
 }
 
-int run_child(const std::filesystem::path& dir, const std::string& test_case, int argc, char* argv[])
+int run_child(
+    const std::filesystem::path&   dir,
+    const std::string&             test_case,
+    int                            argc,
+    char* argv[])
 {
     sintra::init(argc, argv);
 
-    const auto pid_file = child_pid_path(dir, test_case);
+    const auto pid_file   = child_pid_path(dir, test_case);
     const auto ready_file = child_ready_path(dir, test_case);
 
     if (!write_text_file(pid_file, std::to_string(child_pid_value()))) {
@@ -503,7 +516,11 @@ int run_child(const std::filesystem::path& dir, const std::string& test_case, in
     std::_Exit(0);
 }
 
-int run_owner(const std::filesystem::path& dir, const std::string& test_case, int argc, char* argv[])
+int run_owner(
+    const std::filesystem::path&   dir,
+    const std::string&             test_case,
+    int                            argc,
+    char* argv[])
 {
     sintra::init(argc, argv);
 
@@ -553,9 +570,9 @@ int run_leak_owner(const std::filesystem::path& dir, int argc, char* argv[])
     sintra::init(argc, argv);
 
     const std::string binary_path = sintra::test::get_binary_path(argc, argv);
-    const auto ready_file = child_ready_path(dir, k_case_leak);
-    const auto pid_file = child_pid_path(dir, k_case_leak);
-    const auto done_file = child_done_path(dir, k_case_leak);
+    const auto        ready_file  = child_ready_path(dir, k_case_leak);
+    const auto        pid_file    = child_pid_path(dir, k_case_leak);
+    const auto        done_file   = child_done_path(dir, k_case_leak);
 
     for (int i = 0; i < k_leak_iterations; ++i) {
         // Remove marker files from previous iteration
@@ -592,8 +609,9 @@ int run_leak_owner(const std::filesystem::path& dir, int argc, char* argv[])
 
         // Wait for child to signal done (more reliable than process_exists on Windows,
         // since sintra may hold process handles even after child exits)
-        if (!sintra::test::wait_for_file(done_file,
-                                          std::chrono::milliseconds(k_leak_child_lifetime_ms + 3000))) {
+        if (!sintra::test::wait_for_file(
+                done_file, std::chrono::milliseconds(k_leak_child_lifetime_ms + 3000)))
+        {
             std::fprintf(stderr, "[leak_owner] child %d did not signal done\n", i);
             std::_Exit(4);
         }
@@ -625,9 +643,9 @@ int run_respawn_child(const std::filesystem::path& dir, int argc, char* argv[])
     // On second run (after respawn), it writes marker and waits for lifeline to break.
     sintra::init(argc, argv);
 
-    const uint32_t occurrence = sintra::s_recovery_occurrence;
-    const auto occurrence_file = respawn_occurrence_path(dir, occurrence);
-    const auto pid_file = child_pid_path(dir, k_case_respawn);
+    const uint32_t occurrence      = sintra::s_recovery_occurrence;
+    const auto     occurrence_file = respawn_occurrence_path(dir, occurrence);
+    const auto     pid_file        = child_pid_path(dir, k_case_respawn);
 
     // Write occurrence marker with pid
     if (!write_text_file(occurrence_file, std::to_string(child_pid_value()))) {
@@ -756,10 +774,11 @@ bool run_respawn_test(const std::string& binary_path, const std::filesystem::pat
         std::chrono::milliseconds(k_respawn_owner_timeout_ms);
 
     const auto second_occurrence_file = respawn_occurrence_path(dir, 1);
-    long long respawned_pid = 0;
-    const int pid_wait_ms = remaining_ms(deadline);
+    long long  respawned_pid          = 0;
+    const int  pid_wait_ms            = remaining_ms(deadline);
     if (pid_wait_ms <= 0 ||
-        !wait_for_pid_value(second_occurrence_file, pid_wait_ms, respawned_pid)) {
+        !wait_for_pid_value(second_occurrence_file, pid_wait_ms, respawned_pid))
+    {
         std::fprintf(stderr, "[test] failed to read respawned child pid\n");
         close_process(owner);
         return false;
@@ -788,7 +807,7 @@ bool run_respawn_test(const std::string& binary_path, const std::filesystem::pat
         return false;
     }
 
-    int owner_exit = 0;
+    int       owner_exit    = 0;
     const int owner_wait_ms = remaining_ms(deadline);
     if (owner_wait_ms <= 0 || !wait_for_exit(owner, owner_wait_ms, owner_exit)) {
         std::fprintf(stderr, "[test] respawn owner did not exit in time\n");
@@ -829,13 +848,13 @@ bool run_respawn_test(const std::string& binary_path, const std::filesystem::pat
 }
 
 bool run_owner_case(
-    const std::string& binary_path,
-    const std::filesystem::path& dir,
-    const std::string& test_case,
-    int expected_child_exit,
-    bool expect_child_alive_after_owner,
-    bool allow_any_owner_exit = false,
-    int child_exit_timeout_ms = k_child_exit_timeout_ms)
+    const std::string&             binary_path,
+    const std::filesystem::path&   dir,
+    const std::string&             test_case,
+    int                            expected_child_exit,
+    bool                           expect_child_alive_after_owner,
+    bool                           allow_any_owner_exit = false,
+    int                            child_exit_timeout_ms = k_child_exit_timeout_ms)
 {
     std::vector<std::string> args = {
         k_role_arg, k_role_owner,
@@ -1063,7 +1082,7 @@ bool run_short_option_case(const std::string& binary_path)
 
 int main(int argc, char* argv[])
 {
-    const std::string role = sintra::test::get_argv_value(argc, argv, k_role_arg);
+    const std::string role      = sintra::test::get_argv_value(argc, argv, k_role_arg);
     const std::string test_case = sintra::test::get_argv_value(argc, argv, k_case_arg);
     const std::string dir_value = sintra::test::get_argv_value(argc, argv, k_dir_arg);
 
@@ -1161,13 +1180,13 @@ int main(int argc, char* argv[])
     // Test 4: Owner crash (abnormal termination) - child should still exit with code 99
     const auto crash_dir = sintra::test::unique_scratch_directory("lifeline_crash");
     ok &= run_owner_case(binary_path, crash_dir, k_case_crash, 99, false,
-                         /*allow_any_owner_exit=*/true);
+        /*allow_any_owner_exit=*/true);
 
     // Test 5: Hung child - should be forcefully terminated after hard_exit_timeout
     const auto hung_dir = sintra::test::unique_scratch_directory("lifeline_hung");
     ok &= run_owner_case(binary_path, hung_dir, k_case_hung, 99, false,
-                         /*allow_any_owner_exit=*/false,
-                         /*child_exit_timeout_ms=*/k_hung_child_exit_timeout_ms);
+        /*allow_any_owner_exit=*/false,
+        /*child_exit_timeout_ms=*/k_hung_child_exit_timeout_ms);
 
     // Test 6: Rapid spawn/kill cycles - detect handle/fd leaks (different owners)
     for (int i = 0; i < k_rapid_spawn_iterations && ok; ++i) {

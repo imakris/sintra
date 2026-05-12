@@ -23,8 +23,8 @@ constexpr std::size_t k_iterations  = 64;
 
 struct Iteration_marker
 {
-    std::uint32_t worker;
-    std::uint32_t iteration;
+    std::uint32_t  worker;
+    std::uint32_t  iteration;
 };
 
 int coordinator_process()
@@ -33,8 +33,8 @@ int coordinator_process()
 
     std::mutex mutex;
     std::condition_variable cv;
-    std::size_t messages_in_iteration = 0;
-    std::uint32_t current_iteration   = 0;
+    std::size_t   messages_in_iteration = 0;
+    std::uint32_t current_iteration     = 0;
 
     activate_slot([&](const Iteration_marker& marker) {
         std::lock_guard<std::mutex> lock(mutex);

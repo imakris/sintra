@@ -91,11 +91,11 @@ struct Process_message_reader
     {
         std::atomic<sequence_counter_type> request_sequence{invalid_sequence};
         std::atomic<sequence_counter_type> reply_sequence{invalid_sequence};
-        std::atomic<bool> request_stopped{false};
-        std::atomic<bool> reply_stopped{false};
+        std::atomic<bool>                  request_stopped{false};
+        std::atomic<bool>                  reply_stopped{false};
     };
 
-    using Delivery_progress_ptr = std::shared_ptr<Delivery_progress>;
+    using Delivery_progress_ptr      = std::shared_ptr<Delivery_progress>;
     using Delivery_progress_weak_ptr = std::weak_ptr<Delivery_progress>;
 
     enum class Delivery_stream
@@ -107,9 +107,9 @@ struct Process_message_reader
     struct Delivery_target
     {
         Delivery_progress_weak_ptr progress;
-        Delivery_stream stream = Delivery_stream::Request;
-        sequence_counter_type target = invalid_sequence;
-        bool wait_needed = false;
+        Delivery_stream            stream      = Delivery_stream::Request;
+        sequence_counter_type      target      = invalid_sequence;
+        bool                       wait_needed = false;
     };
 
     inline
@@ -180,7 +180,9 @@ struct Process_message_reader
         return m_in_rep_c->get_message_reading_sequence();
     }
 
-    Delivery_target prepare_delivery_target(Delivery_stream stream, sequence_counter_type target_sequence) const;
+    Delivery_target prepare_delivery_target(
+        Delivery_stream        stream,
+        sequence_counter_type  target_sequence) const;
 
     Delivery_progress_ptr delivery_progress() const { return m_delivery_progress; }
 
@@ -190,10 +192,11 @@ private:
 
     void begin_reading_session(
         const std::shared_ptr<Message_ring_R>& ring,
-        std::atomic<bool>& running_flag);
+        std::atomic<bool>&                     running_flag);
+
     void end_reading_session(
         const std::shared_ptr<Message_ring_R>& ring,
-        std::atomic<bool>& running_flag);
+        std::atomic<bool>&                     running_flag);
 
     atomic<State>                       m_reader_state              = READER_NORMAL;
 

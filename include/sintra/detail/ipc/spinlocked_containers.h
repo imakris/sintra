@@ -42,18 +42,19 @@ namespace detail {
 template <template <typename...> typename CT, typename... Args>
 struct spinlocked
 {
-    using iterator          = typename CT<Args...>::iterator;
-    using const_iterator    = typename CT<Args...>::const_iterator;
-    using reference         = typename CT<Args...>::reference;
-    using const_reference   = typename CT<Args...>::const_reference;
-    using size_type         = typename CT<Args...>::size_type;
-    using locker            = spinlock::locker;
+    using iterator        = typename CT<Args...>::iterator;
+    using const_iterator  = typename CT<Args...>::const_iterator;
+    using reference       = typename CT<Args...>::reference;
+    using const_reference = typename CT<Args...>::const_reference;
+    using size_type       = typename CT<Args...>::size_type;
+    using locker          = spinlock::locker;
 
     struct scoped_access
     {
         scoped_access(spinlock& sl, CT<Args...>& c)
-            : m_lock(sl)
-            , m_c(c)
+        :
+            m_lock(sl),
+            m_c(c)
         {}
 
         scoped_access(const scoped_access&) = delete;
@@ -63,7 +64,7 @@ struct spinlocked
         scoped_access& operator=(scoped_access&&) = delete;
 
         iterator begin() noexcept { return m_c.begin(); }
-        iterator end() noexcept { return m_c.end(); }
+        iterator end()   noexcept { return m_c.end();   }
 
         auto erase(iterator it) { return m_c.erase(it); }
 
@@ -77,8 +78,9 @@ struct spinlocked
     struct const_scoped_access
     {
         const_scoped_access(spinlock& sl, const CT<Args...>& c)
-            : m_lock(sl)
-            , m_c(c)
+        :
+            m_lock(sl),
+            m_c(c)
         {}
 
         const_scoped_access(const const_scoped_access&) = delete;
@@ -88,13 +90,13 @@ struct spinlocked
         const_scoped_access& operator=(const_scoped_access&&) = delete;
 
         const_iterator begin() const noexcept { return m_c.begin(); }
-        const_iterator end() const noexcept { return m_c.end(); }
+        const_iterator end()   const noexcept { return m_c.end();   }
 
         const CT<Args...>& get() const noexcept { return m_c; }
 
     private:
-        locker               m_lock;
-        const CT<Args...>&   m_c;
+        locker             m_lock;
+        const CT<Args...>& m_c;
     };
 
     template <typename Fn>
@@ -105,9 +107,7 @@ struct spinlocked
     }
 
     void clear() noexcept                          {locker l(m_sl); m_c.clear();                  }
-
     bool empty() const noexcept                    {locker l(m_sl); return m_c.empty();           }
-
     auto pop_front()                               {locker l(m_sl); m_c.pop_front();              }
 
     template <typename... FArgs>
@@ -123,8 +123,8 @@ struct spinlocked
     const_scoped_access scoped() const noexcept    {return const_scoped_access(m_sl, m_c);        }
 
 protected:
-    CT<Args...>         m_c;
-    mutable spinlock    m_sl;
+    CT<Args...>        m_c;
+    mutable spinlock   m_sl;
 };
 
 

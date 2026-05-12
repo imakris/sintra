@@ -28,25 +28,26 @@ int controller_process()
     using namespace sintra;
 
     sintra::test::Shared_directory shared("SINTRA_PROCESSING_FENCE_DIR", "processing_fence");
-    const auto shared_dir = shared.path();
+    const auto shared_dir  = shared.path();
     const auto result_path = shared_dir / "result.txt";
 
     const std::string group = "_sintra_external_processes";
     barrier("processing-fence-setup", group);
 
-    auto handler_done_promise = std::make_shared<std::promise<void>>();
-    auto handler_done_future = handler_done_promise->get_future();
+    auto handler_done_promise  = std::make_shared<std::promise<void>>();
+    auto handler_done_future   = handler_done_promise->get_future();
     auto handler_done_recorded = std::make_shared<std::atomic<bool>>(false);
 
-    auto handler_done_deactivator = activate_slot([
-        handler_done_promise,
-        handler_done_recorded
-    ](const Handler_done&) {
-        bool expected = false;
-        if (handler_done_recorded->compare_exchange_strong(expected, true)) {
-            handler_done_promise->set_value();
-        }
-    });
+    auto handler_done_deactivator = activate_slot(
+        [
+            handler_done_promise, handler_done_recorded
+        ](const Handler_done&)
+        {
+            bool expected = false;
+            if (handler_done_recorded->compare_exchange_strong(expected, true)) {
+                handler_done_promise->set_value();
+            }
+        });
 
     world() << Work_message{};
 
@@ -126,9 +127,9 @@ int main(int argc, char* argv[])
             std::getline(in >> std::ws, done_state);
 
             const long long expected_ms = k_handler_delay.count();
-            const bool elapsed_ok = elapsed_ms >= expected_ms;
-            const bool done_ok = (done_state == "done");
-            const bool success = (status == "ok") && elapsed_ok && done_ok;
+            const bool      elapsed_ok  = elapsed_ms >= expected_ms;
+            const bool      done_ok     = (done_state == "done");
+            const bool      success     = (status == "ok") && elapsed_ok && done_ok;
 
             return success ? 0 : 1;
         });

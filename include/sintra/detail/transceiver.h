@@ -139,8 +139,8 @@ struct Typed_instance_id<void>
 
 struct tn_type
 {
-    type_id_type                            type_id = 0;
-    string                                  name;
+    type_id_type   type_id = 0;
+    string         name;
 
     bool operator==(const tn_type&) const = default;
 };
@@ -237,9 +237,9 @@ public:
 
     template<typename MESSAGE_T, typename HT>
     handler_deactivator activate_impl(
-        HT&& handler,
-        instance_id_type sender_id,
-        decltype(m_deactivators)::iterator* deactivator_it_ptr = nullptr);
+        HT&&                                   handler,
+        instance_id_type                       sender_id,
+        decltype(m_deactivators)::iterator*    deactivator_it_ptr = nullptr);
 
 
     // A functor with an arbitrary non-message argument
@@ -255,9 +255,9 @@ public:
         >
     >
     handler_deactivator activate(
-        const FT& internal_slot,
-        Typed_instance_id<SENDER_T> sender_id,
-        decltype(m_deactivators)::iterator* deactivator_it_ptr = nullptr);
+        const FT&                              internal_slot,
+        Typed_instance_id<SENDER_T>            sender_id,
+        decltype(m_deactivators)::iterator*    deactivator_it_ptr = nullptr);
 
 
     // A functor with a message argument
@@ -274,9 +274,9 @@ public:
         >
     >
     handler_deactivator activate(
-        const FT& internal_slot,
-        Typed_instance_id<SENDER_T> sender_id,
-        decltype(m_deactivators)::iterator* deactivator_it_ptr = nullptr);
+        const FT&                              internal_slot,
+        Typed_instance_id<SENDER_T>            sender_id,
+        decltype(m_deactivators)::iterator*    deactivator_it_ptr = nullptr);
 
 
     // A Transceiver member function with a message argument. The sender has to exist.
@@ -287,9 +287,9 @@ public:
         typename RT = typename MESSAGE_T::return_type
     >
     handler_deactivator activate(
-        RT(OBJECT_T::*v)(const MESSAGE_T&), 
-        Typed_instance_id<SENDER_T> sender_id,
-        decltype(m_deactivators)::iterator* deactivator_it_ptr = nullptr);
+        RT(OBJECT_T::*v)(const MESSAGE_T&),
+        Typed_instance_id<SENDER_T>            sender_id,
+        decltype(m_deactivators)::iterator*    deactivator_it_ptr = nullptr);
 
 
     // Any kind of slot (member or function) will be accepted here.
@@ -347,12 +347,12 @@ public:
     struct RPCTC_d // remote process call type container
     {
         using mf_type = MF;
-        using r_type = RT;
-        using o_type = OBJECT_T;
+        using r_type  = RT;
+        using o_type  = OBJECT_T;
         const static MF mf() { return m; };
-        static constexpr type_id_type id = ID;
-        static constexpr bool may_be_called_directly = MAY_BE_CALLED_DIRECTLY;
-        static constexpr bool is_fire_and_forget = IS_FIRE_AND_FORGET;
+        static constexpr type_id_type  id                     = ID;
+        static constexpr bool          may_be_called_directly = MAY_BE_CALLED_DIRECTLY;
+        static constexpr bool          is_fire_and_forget     = IS_FIRE_AND_FORGET;
     };
 
 
@@ -383,7 +383,8 @@ public:
 
 
     template <typename SEQ_T, int I, int J>
-    struct warn_about_reference_args_impl {
+    struct warn_about_reference_args_impl
+    {
 
         using arg_type = typename detail::message_args_nth_type<SEQ_T, I>::type;
 
@@ -418,11 +419,11 @@ public:
 
     template <typename R_MESSAGE_T, typename MESSAGE_T, typename OBJECT_T>
     static void finalize_rpc_write(
-        R_MESSAGE_T* placed_rep_msg,
-        const MESSAGE_T& req_msg,
-        const OBJECT_T* ref_obj,
-        type_id_type ex_tid,
-        instance_id_type fallback_sender_iid = invalid_instance_id);
+        R_MESSAGE_T*       placed_rep_msg,
+        const MESSAGE_T&   req_msg,
+        const OBJECT_T*    ref_obj,
+        type_id_type       ex_tid,
+        instance_id_type   fallback_sender_iid = invalid_instance_id);
 
 
     // This overload is meant to be directly used in special cases,
@@ -432,12 +433,12 @@ public:
     // specified in the message.
     template <typename R_MESSAGE_T, typename OBJECT_T>
     static void finalize_rpc_write(
-        R_MESSAGE_T* placed_rep_msg,
-        instance_id_type receiver_iid,
-        instance_id_type function_iid,
-        const OBJECT_T* ref_obj,
-        type_id_type ex_tid,
-        instance_id_type fallback_sender_iid = invalid_instance_id);
+        R_MESSAGE_T*       placed_rep_msg,
+        instance_id_type   receiver_iid,
+        instance_id_type   function_iid,
+        const OBJECT_T*    ref_obj,
+        type_id_type       ex_tid,
+        instance_id_type   fallback_sender_iid = invalid_instance_id);
 
     template <
         typename RPCTC,
@@ -455,8 +456,8 @@ public:
     >
     static RT rpc(
         RT(OBJECT_T::* /*resolution dummy arg*/)(FArgs...),
-        instance_id_type instance_id,
-        RArgs&&... args);
+        instance_id_type   instance_id,
+        RArgs&&...         args);
 
 
     template <
@@ -468,8 +469,8 @@ public:
     >
     static RT rpc(
         RT(OBJECT_T::* /*resolution dummy arg*/)(FArgs...) const,
-        instance_id_type instance_id,
-        RArgs&&... args);
+        instance_id_type   instance_id,
+        RArgs&&...         args);
 
     template <
         typename RPCTC,
@@ -482,8 +483,8 @@ public:
     // reuses the same transported machinery internally without exposing a handle.
     static Rpc_handle<RT> rpc_async(
         RT(OBJECT_T::* /*resolution dummy arg*/)(FArgs...),
-        instance_id_type instance_id,
-        RArgs&&... args);
+        instance_id_type   instance_id,
+        RArgs&&...         args);
 
     template <
         typename RPCTC,
@@ -496,8 +497,8 @@ public:
     // reuses the same transported machinery internally without exposing a handle.
     static Rpc_handle<RT> rpc_async(
         RT(OBJECT_T::* /*resolution dummy arg*/)(FArgs...) const,
-        instance_id_type instance_id,
-        RArgs&&... args);
+        instance_id_type   instance_id,
+        RArgs&&...         args);
 
 
     template <
@@ -512,7 +513,9 @@ public:
         typename MESSAGE_T,
         typename... Args
     >
-    static auto rpc_async_impl(instance_id_type instance_id, Args... args) -> Rpc_handle<typename RPCTC::r_type>;
+    static auto rpc_async_impl(
+        instance_id_type instance_id,
+        Args... args) -> Rpc_handle<typename RPCTC::r_type>;
 
 
 
@@ -546,31 +549,31 @@ public:
 
 
 
-#define SINTRA_RPC_IMPL(m, mfp, id, mbcd, fire_and_forget)                                      \
-    void rpc_assertion_##m() {                                                                  \
-        static_assert(std::is_same_v<                                                           \
-            std::remove_pointer_t<decltype(this)>,                                              \
-            Transceiver_type>,                                                                  \
-            "This Transceiver is not derived correctly."                                        \
-        );                                                                                      \
-    }                                                                                           \
-    using m ## _mftc = RPCTC_d<decltype(mfp), mfp, id, mbcd, fire_and_forget>;                  \
-    static_assert(!fire_and_forget || std::is_void_v<typename m ## _mftc::r_type>,              \
-        "Fire-and-forget functions (SINTRA_UNICAST) must return void");\
-    sintra::Instantiator m ## _itt = export_rpc<m ## _mftc>(mfp);                               \
-                                                                                                \
-    template<typename... Args>                                                                  \
-    static auto rpc_ ## m (sintra::Resolvable_instance_id instance_id, Args&&... args)          \
-    {                                                                                           \
-        return rpc<m ## _mftc>(mfp, instance_id, args...);                                      \
-    }                                                                                           \
-                                                                                                \
-    template<typename... Args>                                                                  \
-    static auto rpc_async_ ## m (sintra::Resolvable_instance_id instance_id, Args&&... args)    \
-    {                                                                                           \
-        static_assert(!m ## _mftc::is_fire_and_forget,                                           \
-            "rpc_async_<method>() is not available for fire-and-forget exports.");              \
-        return rpc_async<m ## _mftc>(mfp, instance_id, args...);                                \
+#define SINTRA_RPC_IMPL(m, mfp, id, mbcd, fire_and_forget)                                   \
+    void rpc_assertion_##m() {                                                               \
+        static_assert(std::is_same_v<                                                        \
+            std::remove_pointer_t<decltype(this)>,                                           \
+            Transceiver_type>,                                                               \
+            "This Transceiver is not derived correctly."                                     \
+        );                                                                                   \
+    }                                                                                        \
+    using m ## _mftc = RPCTC_d<decltype(mfp), mfp, id, mbcd, fire_and_forget>;               \
+    static_assert(!fire_and_forget || std::is_void_v<typename m ## _mftc::r_type>,           \
+        "Fire-and-forget functions (SINTRA_UNICAST) must return void");                      \
+    sintra::Instantiator m ## _itt = export_rpc<m ## _mftc>(mfp);                            \
+                                                                                             \
+    template<typename... Args>                                                               \
+    static auto rpc_ ## m (sintra::Resolvable_instance_id instance_id, Args&&... args)       \
+    {                                                                                        \
+        return rpc<m ## _mftc>(mfp, instance_id, args...);                                   \
+    }                                                                                        \
+                                                                                             \
+    template<typename... Args>                                                               \
+    static auto rpc_async_ ## m (sintra::Resolvable_instance_id instance_id, Args&&... args) \
+    {                                                                                        \
+        static_assert(!m ## _mftc::is_fire_and_forget,                                       \
+            "rpc_async_<method>() is not available for fire-and-forget exports.");           \
+        return rpc_async<m ## _mftc>(mfp, instance_id, args...);                             \
     }
 
     
@@ -642,22 +645,24 @@ private:
     // Those message handlers identify with particular function message invocations, and their
     // lifetime ends with the end of the call.
     // They are assigned in pairs, to handle successful and failed calls.
-    mutex m_return_handlers_mutex;
-    unordered_map<instance_id_type, Return_handler> m_active_return_handlers;
-    deque<instance_id_type> m_retired_return_handler_fifo;
-    unordered_set<instance_id_type> m_retired_return_handler_ids;
-    static constexpr size_t max_retired_return_handlers = 1024;
+    mutex                       m_return_handlers_mutex;
+    unordered_map<instance_id_type, Return_handler>
+                                m_active_return_handlers;
+    deque<instance_id_type>     m_retired_return_handler_fifo;
+    unordered_set<instance_id_type>
+                                m_retired_return_handler_ids;
+    static constexpr size_t     max_retired_return_handlers = 1024;
 
-    mutex               m_rpc_lifecycle_mutex;
-    condition_variable  m_rpc_lifecycle_condition;
-    size_t              m_active_rpc_calls = 0;
-    bool                m_accepting_rpc_calls = true;
-    bool                m_rpc_shutdown_requested = false;
-    bool                m_rpc_shutdown_complete = false;
+    mutex                       m_rpc_lifecycle_mutex;
+    condition_variable          m_rpc_lifecycle_condition;
+    size_t                      m_active_rpc_calls          = 0;
+    bool                        m_accepting_rpc_calls       = true;
+    bool                        m_rpc_shutdown_requested    = false;
+    bool                        m_rpc_shutdown_complete     = false;
 
 
-    instance_id_type            m_instance_id       = invalid_instance_id;
-    bool                        m_published         = false;
+    instance_id_type            m_instance_id               = invalid_instance_id;
+    bool                        m_published                 = false;
 
     string                      m_cache_name;
 
@@ -666,8 +671,8 @@ protected:
 
     // WARNING: this will be set when the Transceiver is published.
     // If it is not published, it will remain invalid.
-    type_id_type                m_type_id           = invalid_type_id;
-    function<void()>            initialize_type_id  = [this]()
+    type_id_type                m_type_id                   = invalid_type_id;
+    function<void()>            initialize_type_id          = [this]()
     {
         m_type_id = get_type_id<Transceiver_type>();
     };
@@ -697,7 +702,7 @@ struct Derived_transceiver: Parent
     //using Transceiver::Transceiver;
 
     Derived_transceiver():
-        base( *static_cast<Transceiver*>(static_cast<Derived_T*>(this)) )
+        base( *static_cast<Transceiver*>(static_cast<Derived_T*>(this)))
     {
     }
 
@@ -786,7 +791,8 @@ private:
 
 
 // Typed exception: thrown when an RPC is unblocked/cancelled (e.g., coordinator loss)
-struct rpc_cancelled : std::runtime_error {
+struct rpc_cancelled : std::runtime_error
+{
     explicit rpc_cancelled(const char* what_arg) : std::runtime_error(what_arg) {}
 };
 
@@ -795,7 +801,8 @@ struct rpc_cancelled : std::runtime_error {
 // rpc_cancelled (which signals teardown of the *caller's* runtime). Inherits
 // from std::runtime_error, so a catch (const std::runtime_error&) handler
 // also matches.
-struct rpc_unavailable : std::runtime_error {
+struct rpc_unavailable : std::runtime_error
+{
     using std::runtime_error::runtime_error;
 };
 
@@ -861,7 +868,7 @@ public:
 
 private:
     using storage_type = typename rpc_storage_type<RT>::type;
-    using state_type = Rpc_state<storage_type>;
+    using state_type   = Rpc_state<storage_type>;
 
     explicit Rpc_handle(std::shared_ptr<state_type> state);
 

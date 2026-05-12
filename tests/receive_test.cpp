@@ -25,8 +25,9 @@ namespace {
 struct Ack_a {};
 struct Ack_b {};
 
-struct DataMessage {
-    int value;
+struct DataMessage
+{
+    int    value;
     double score;
 };
 
@@ -64,7 +65,7 @@ int sender_a_process()
 
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
-    const int expected_value = 57;
+    const int    expected_value = 57;
     const double expected_score = 2.718;
 
     sintra::world() << DataMessage{expected_value, expected_score};
@@ -96,7 +97,7 @@ int sender_b_process()
 
     sintra::barrier("phase-two");
 
-    const int expected_value = 91;
+    const int    expected_value = 91;
     const double expected_score = 1.414;
 
     sintra::world() << DataMessage{expected_value, expected_score};
@@ -181,7 +182,7 @@ int main(int argc, char* argv[])
     sintra::test::Shared_directory shared_dir_raii("SINTRA_TEST_SHARED_DIR", "receive_test");
 
     sintra::init(argc, const_cast<const char* const*>(argv),
-                 sender_a_process, sender_b_process, receiver_process);
+        sender_a_process, sender_b_process, receiver_process);
 
     sintra::shutdown();
 

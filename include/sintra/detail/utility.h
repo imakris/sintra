@@ -52,9 +52,10 @@ struct Adaptive_function
     // Single shared state struct instead of two separate shared_ptrs.
     // Preserves the same semantics: copies share state, all operations are
     // mutex-protected, and set() replaces the function for all copies.
-    struct State {
-        function<void()> func;
-        mutex m;
+    struct State
+    {
+        function<void()>   func;
+        mutex              m;
     };
 
     Adaptive_function(function<void()> f) :
@@ -106,10 +107,10 @@ size_t get_cache_line_size()
 {
 #ifdef _WIN32
 
-    size_t line_size = 0;
-    DWORD buffer_size = 0;
-    DWORD i = 0;
-    SYSTEM_LOGICAL_PROCESSOR_INFORMATION * buffer = 0;
+    size_t                                 line_size   = 0;
+    DWORD                                  buffer_size = 0;
+    DWORD                                  i           = 0;
+    SYSTEM_LOGICAL_PROCESSOR_INFORMATION * buffer      = 0;
 
     GetLogicalProcessorInformation(0, &buffer_size);
     buffer = (SYSTEM_LOGICAL_PROCESSOR_INFORMATION *)malloc(buffer_size);
@@ -158,8 +159,8 @@ struct cstring_vector
     cstring_vector(cstring_vector&&) = delete;
     cstring_vector& operator=(cstring_vector&&) = delete;
 
-    const char* const* v() const { return m_v.data(); }
-    size_t size() const { return m_storage.size(); }
+    const char* const* v()    const { return m_v.data();       }
+    size_t             size() const { return m_storage.size(); }
 
 private:
     void initialize()
@@ -171,21 +172,21 @@ private:
         m_v.push_back(nullptr);
     }
 
-    std::vector<std::string> m_storage;
-    std::vector<const char*> m_v;
+    std::vector<std::string>   m_storage;
+    std::vector<const char*>   m_v;
 };
 
 
 
 struct Spawn_detached_options
 {
-    const char* prog = nullptr;
-    const char* const* argv = nullptr;
-    int* child_pid_out = nullptr;
-    std::vector<std::string> env_overrides;
+    const char*                prog                     = nullptr;
+    const char* const*         argv                     = nullptr;
+    int*                       child_pid_out            = nullptr;
+    std::vector<std::string>   env_overrides;
 #ifdef _WIN32
-    bool inherit_standard_handles = true;
-    std::vector<HANDLE> inherit_handles;
+    bool                       inherit_standard_handles = true;
+    std::vector<HANDLE>        inherit_handles;
 #endif
 };
 
@@ -195,10 +196,10 @@ namespace detail {
 
 #ifndef _WIN32
 
-using pipe2_fn = int(*)(int[2], int);
-using write_fn = ssize_t(*)(int, const void*, size_t);
-using read_fn = ssize_t(*)(int, void*, size_t);
-using waitpid_fn = pid_t(*)(pid_t, int*, int);
+using pipe2_fn                = int(*)(int[2], int);
+using write_fn                = ssize_t(*)(int, const void*, size_t);
+using read_fn                 = ssize_t(*)(int, void*, size_t);
+using waitpid_fn              = pid_t(*)(pid_t, int*, int);
 using spawn_detached_debug_fn = void(*)(const struct spawn_detached_debug_info&);
 
 struct spawn_detached_debug_info
@@ -212,9 +213,9 @@ struct spawn_detached_debug_info
         ParentWaitpid,
     };
 
-    Stage stage{Stage::PipeCreation};
-    int errno_value{0};
-    int exec_errno{0};
+    Stage  stage{Stage::PipeCreation};
+    int    errno_value{0};
+    int    exec_errno{0};
 };
 
 inline std::atomic<pipe2_fn>& pipe2_override()
@@ -308,7 +309,8 @@ inline int system_pipe2(int pipefd[2], int flags)
 
     if (flags & O_CLOEXEC) {
         if (set_flag(pipefd[0], F_GETFD, F_SETFD, FD_CLOEXEC) == -1 ||
-            set_flag(pipefd[1], F_GETFD, F_SETFD, FD_CLOEXEC) == -1) {
+            set_flag(pipefd[1], F_GETFD, F_SETFD, FD_CLOEXEC) == -1)
+        {
             int saved_errno = errno;
             ::close(pipefd[0]);
             ::close(pipefd[1]);
@@ -319,7 +321,8 @@ inline int system_pipe2(int pipefd[2], int flags)
 
     if (flags & O_NONBLOCK) {
         if (set_flag(pipefd[0], F_GETFL, F_SETFL, O_NONBLOCK) == -1 ||
-            set_flag(pipefd[1], F_GETFL, F_SETFL, O_NONBLOCK) == -1) {
+            set_flag(pipefd[1], F_GETFL, F_SETFL, O_NONBLOCK) == -1)
+        {
             int saved_errno = errno;
             ::close(pipefd[0]);
             ::close(pipefd[1]);
@@ -366,8 +369,8 @@ inline pid_t call_waitpid(pid_t pid, int* status, int options)
 
 inline bool write_fully(int fd, const void* buf, size_t count)
 {
-    const char* ptr = static_cast<const char*>(buf);
-    size_t total_written = 0;
+    const char* ptr           = static_cast<const char*>(buf);
+    size_t      total_written = 0;
     while (total_written < count) {
         ssize_t rv = call_write(fd, ptr + total_written, count - total_written);
         if (rv < 0) {
@@ -423,8 +426,8 @@ inline bool env_key_equal(const std::wstring& lhs, const std::wstring& rhs)
 
 template <typename StringT>
 inline void merge_env_overrides(
-    std::vector<StringT>& env,
-    const std::vector<StringT>& overrides)
+    std::vector<StringT>&          env,
+    const std::vector<StringT>&    overrides)
 {
     for (const auto& override_entry : overrides) {
         const auto override_key = env_key_of(override_entry);
@@ -593,18 +596,23 @@ inline std::wstring build_command_line(const char* const* argv)
             wchar_t c = ws[i];
             if (c == L'"') {
                 cmdline += L"\\\"";
-            } else if (c == L'\\') {
+            }
+            else
+            if (c == L'\\') {
                 // Check if backslash is before quote
                 if (i + 1 < ws.length() && ws[i + 1] == L'"') {
                     cmdline += L"\\\\";
                 }
                 // Check if trailing backslash in quoted argument
-                else if (i + 1 == ws.length() && needs_quoting) {
+                else
+                if (i + 1 == ws.length() && needs_quoting) {
                     cmdline += L"\\\\";
-                } else {
+                }
+                else {
                     cmdline += L'\\';
                 }
-            } else {
+            }
+            else {
                 cmdline += c;
             }
         }
@@ -620,9 +628,9 @@ inline
 bool spawn_detached_win32(const Spawn_detached_options& options)
 {
 
-    const char* prog = options.prog;
-    const char* const* argv = options.argv;
-    int* child_pid_out = options.child_pid_out;
+    const char*        prog          = options.prog;
+    const char* const* argv          = options.argv;
+    int*               child_pid_out = options.child_pid_out;
 
     if (prog == nullptr || argv == nullptr) {
         return false;
@@ -660,9 +668,9 @@ bool spawn_detached_win32(const Spawn_detached_options& options)
     cmdline_buf.push_back(L'\0'); // Null-terminate
 
     constexpr unsigned k_max_attempts = 5;
-    const auto retry_delay = std::chrono::milliseconds(50);
+    const auto         retry_delay    = std::chrono::milliseconds(50);
 
-    const auto env_block = build_environment_block(options.env_overrides);
+    const auto env_block        = build_environment_block(options.env_overrides);
     const bool has_env_override = !env_block.empty();
 
     std::vector<HANDLE> inherited_handles;
@@ -697,8 +705,8 @@ bool spawn_detached_win32(const Spawn_detached_options& options)
     struct Handle_inherit_guard
     {
         HANDLE handle = nullptr;
-        DWORD flags = 0;
-        bool active = false;
+        DWORD  flags  = 0;
+        bool   active = false;
     };
 
     std::vector<Handle_inherit_guard> handle_guards;
@@ -716,10 +724,10 @@ bool spawn_detached_win32(const Spawn_detached_options& options)
         }
     }
 
-    int last_errno = 0;
+    int           last_errno    = 0;
     unsigned long last_doserrno = 0;
 
-    using init_proc_thread_attribute_list_fn = BOOL (WINAPI*)(
+    using init_proc_thread_attribute_list_fn   = BOOL (WINAPI*)(
         LPPROC_THREAD_ATTRIBUTE_LIST,
         DWORD,
         DWORD,
@@ -789,11 +797,11 @@ bool spawn_detached_win32(const Spawn_detached_options& options)
 
     auto init_startup_info = [](STARTUPINFOW& si_ref, DWORD cb_size) {
         ZeroMemory(&si_ref, cb_size);
-        si_ref.cb = cb_size;
-        si_ref.dwFlags = STARTF_USESTDHANDLES;
-        si_ref.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+        si_ref.cb         = cb_size;
+        si_ref.dwFlags    = STARTF_USESTDHANDLES;
+        si_ref.hStdInput  = GetStdHandle(STD_INPUT_HANDLE);
         si_ref.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
-        si_ref.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+        si_ref.hStdError  = GetStdHandle(STD_ERROR_HANDLE);
     };
 
     auto restore_handle_flags = [&handle_guards]() {
@@ -865,14 +873,17 @@ bool spawn_detached_win32(const Spawn_detached_options& options)
         // Map Windows error to errno
         if (last_doserrno == ERROR_ACCESS_DENIED) {
             last_errno = EACCES;
-        } else if (last_doserrno == ERROR_FILE_NOT_FOUND || last_doserrno == ERROR_PATH_NOT_FOUND) {
+        }
+        else
+        if (last_doserrno == ERROR_FILE_NOT_FOUND || last_doserrno == ERROR_PATH_NOT_FOUND) {
             last_errno = ENOENT;
-        } else {
+        }
+        else {
             last_errno = EAGAIN; // Generic transient error
         }
 
         const bool access_denied = (last_errno == EACCES) &&
-            (last_doserrno == ERROR_ACCESS_DENIED ||
+            (last_doserrno == ERROR_ACCESS_DENIED    ||
              last_doserrno == ERROR_SHARING_VIOLATION ||
              last_doserrno == ERROR_LOCK_VIOLATION);
         const bool transient = (last_errno == EAGAIN) || access_denied;
@@ -884,18 +895,11 @@ bool spawn_detached_win32(const Spawn_detached_options& options)
         break;
     }
 
-    if (child_pid_out) {
-        *child_pid_out = -1;
-    }
-    if (last_errno != 0) {
-        _set_errno(last_errno);
-    }
-    if (last_doserrno != 0) {
-        _set_doserrno(last_doserrno);
-    }
-    if (use_handle_list && si_ex.lpAttributeList) {
-        delete_proc_thread_attribute_list(si_ex.lpAttributeList);
-    }
+    if (child_pid_out)   { *child_pid_out = -1;    }
+    if (last_errno != 0) { _set_errno(last_errno); }
+
+    if (last_doserrno != 0)                       { _set_doserrno(last_doserrno);                             }
+    if (use_handle_list && si_ex.lpAttributeList) { delete_proc_thread_attribute_list(si_ex.lpAttributeList); }
     restore_handle_flags();
     return false;
 }
@@ -924,9 +928,9 @@ bool spawn_detached_posix(const Spawn_detached_options& options)
         ::sigaction(SIGPIPE, &signal_ignored, 0);
     };
 
-    const char* prog = options.prog;
-    const char* const* argv = options.argv;
-    int* child_pid_out = options.child_pid_out;
+    const char*        prog          = options.prog;
+    const char* const* argv          = options.argv;
+    int*               child_pid_out = options.child_pid_out;
 
     if (prog == nullptr || argv == nullptr) {
         return false;
@@ -963,9 +967,9 @@ bool spawn_detached_posix(const Spawn_detached_options& options)
 
     auto report_failure = [&](spawn_detached_debug_info::Stage stage, int error, int exec_error) {
         spawn_detached_debug_info info;
-        info.stage = stage;
+        info.stage       = stage;
         info.errno_value = error;
-        info.exec_errno = exec_error;
+        info.exec_errno  = exec_error;
         emit_spawn_detached_debug(info);
     };
 
@@ -996,12 +1000,8 @@ bool spawn_detached_posix(const Spawn_detached_options& options)
     }
     while (child_pid == -1 && errno == EINTR);
     if (child_pid == -1) {
-        if (ready_pipe[0] >= 0) {
-            close(ready_pipe[0]);
-        }
-        if (ready_pipe[1] >= 0) {
-            close(ready_pipe[1]);
-        }
+        if (ready_pipe[0] >= 0) { close(ready_pipe[0]); }
+        if (ready_pipe[1] >= 0) { close(ready_pipe[1]); }
         report_failure(spawn_detached_debug_info::Stage::Fork, errno, errno);
         return false;
     }
@@ -1062,21 +1062,13 @@ bool spawn_detached_posix(const Spawn_detached_options& options)
         while (offset < buffer.size()) {
             ssize_t rv = call_read(ready_pipe[0], buffer.data() + offset, buffer.size() - offset);
             if (rv < 0) {
-                if (errno == EINTR) {
-                    continue;
-                }
-                if (error_out) {
-                    *error_out = errno;
-                }
+                if (errno == EINTR) { continue;           }
+                if (error_out)      { *error_out = errno; }
                 return Read_result::Error;
             }
             if (rv == 0) {
-                if (offset == 0) {
-                    return Read_result::Eof;
-                }
-                if (error_out) {
-                    *error_out = EPIPE;
-                }
+                if (offset == 0) { return Read_result::Eof; }
+                if (error_out)   { *error_out = EPIPE;      }
                 return Read_result::Error;
             }
 
@@ -1087,25 +1079,25 @@ bool spawn_detached_posix(const Spawn_detached_options& options)
         return Read_result::Value;
     };
 
-    int exec_errno = 0;
-    bool spawn_failed = false;
-    int observed_errno = 0;
-    auto failure_stage = spawn_detached_debug_info::Stage::ParentReadReadyStatus;
+    int  exec_errno     = 0;
+    bool spawn_failed   = false;
+    int  observed_errno = 0;
+    auto failure_stage  = spawn_detached_debug_info::Stage::ParentReadReadyStatus;
 
     int ready_status = 0;
     switch (read_int(&ready_status, &exec_errno)) {
         case Read_result::Value:
             break;
         case Read_result::Eof:
-            spawn_failed = true;
-            exec_errno = exec_errno ? exec_errno : EPIPE;
+            spawn_failed   = true;
+            exec_errno     = exec_errno ? exec_errno : EPIPE;
             observed_errno = exec_errno;
-            failure_stage = spawn_detached_debug_info::Stage::ParentReadReadyStatus;
+            failure_stage  = spawn_detached_debug_info::Stage::ParentReadReadyStatus;
             break;
         case Read_result::Error:
-            spawn_failed = true;
+            spawn_failed   = true;
             observed_errno = exec_errno;
-            failure_stage = spawn_detached_debug_info::Stage::ParentReadReadyStatus;
+            failure_stage  = spawn_detached_debug_info::Stage::ParentReadReadyStatus;
             break;
     }
 
@@ -1113,17 +1105,17 @@ bool spawn_detached_posix(const Spawn_detached_options& options)
         int exec_status = 0;
         switch (read_int(&exec_status, &exec_errno)) {
             case Read_result::Value:
-                exec_errno = exec_status > 0 ? exec_status : -exec_status;
-                spawn_failed = true;
+                exec_errno     = exec_status > 0 ? exec_status : -exec_status;
+                spawn_failed   = true;
                 observed_errno = exec_errno;
-                failure_stage = spawn_detached_debug_info::Stage::ParentReadExecStatus;
+                failure_stage  = spawn_detached_debug_info::Stage::ParentReadExecStatus;
                 break;
             case Read_result::Eof:
                 break;
             case Read_result::Error:
-                spawn_failed = true;
+                spawn_failed   = true;
                 observed_errno = exec_errno;
-                failure_stage = spawn_detached_debug_info::Stage::ParentReadExecStatus;
+                failure_stage  = spawn_detached_debug_info::Stage::ParentReadExecStatus;
                 break;
         }
     }
@@ -1150,7 +1142,7 @@ bool spawn_detached_posix(const Spawn_detached_options& options)
     }
 
 #ifndef _WIN32
-    int wait_status = 0;
+    int   wait_status = 0;
     pid_t wait_result = 0;
     do {
         wait_result = call_waitpid(child_pid, &wait_status, WNOHANG);
@@ -1160,8 +1152,8 @@ bool spawn_detached_posix(const Spawn_detached_options& options)
     if (wait_result == child_pid) {
         if (!(WIFEXITED(wait_status) && WEXITSTATUS(wait_status) == 0)) {
             report_failure(spawn_detached_debug_info::Stage::ParentWaitpid,
-                           exec_errno ? exec_errno : ECHILD,
-                           exec_errno);
+                exec_errno ? exec_errno : ECHILD,
+                exec_errno);
             errno = exec_errno ? exec_errno : ECHILD;
             return false;
         }

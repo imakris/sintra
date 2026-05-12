@@ -35,11 +35,11 @@ void install_signal_handler();
 inline bool thread_local tl_is_req_thread = false;
 
 inline bool validate_relay_sender(
-    Message_prefix& message,
-    instance_id_type ring_owner,
-    const char* ring_name)
+    Message_prefix&    message,
+    instance_id_type   ring_owner,
+    const char*        ring_name)
 {
-    const instance_id_type sender_process = process_of(message.sender_instance_id);
+    const instance_id_type sender_process      = process_of(message.sender_instance_id);
     const instance_id_type coordinator_process = process_of(s_coord_id);
     if (ring_owner == sender_process || ring_owner == coordinator_process) {
         return true;
@@ -89,9 +89,9 @@ inline bool validate_reply_message(Message_prefix& message, instance_id_type rin
 }
 
 inline void dispatch_event_handlers(
-    Message_prefix& message,
-    std::initializer_list<instance_id_type> scope_ids,
-    bool trace_world)
+    Message_prefix&                            message,
+    std::initializer_list<instance_id_type>    scope_ids,
+    bool                                       trace_world)
 {
     // Collect matching handlers under the lock, then invoke them after releasing
     // it.  On Windows, CRITICAL_SECTION (backing std::recursive_mutex) has unfair
@@ -173,10 +173,16 @@ Process_message_reader::Process_message_reader(
         m_delivery_progress = std::make_shared<Delivery_progress>();
     }
 
-    m_in_req_c = std::make_shared<Message_ring_R>(
-        s_mproc->m_directory, "req", m_process_instance_id, occurrence);
-    m_in_rep_c = std::make_shared<Message_ring_R>(
-        s_mproc->m_directory, "rep", m_process_instance_id, occurrence);
+    m_in_req_c              = std::make_shared<Message_ring_R>(
+        s_mproc->m_directory,
+        "req",
+        m_process_instance_id,
+        occurrence);
+    m_in_rep_c              = std::make_shared<Message_ring_R>(
+        s_mproc->m_directory,
+        "rep",
+        m_process_instance_id,
+        occurrence);
     m_request_reader_thread = std::make_unique<thread>([&] () { request_reader_function(); });
     m_request_reader_thread->detach();
     m_reply_reader_thread   = std::make_unique<thread>([&] () { reply_reader_function();   });
@@ -191,7 +197,7 @@ void Process_message_reader::wait_until_ready()
     m_ready_condition.wait(lk, [&]() {
         const bool req_started = m_req_running.load();
         const bool rep_started = m_rep_running.load();
-        const bool stopping = m_reader_state.load() == READER_STOPPING;
+        const bool stopping    = m_reader_state.load() == READER_STOPPING;
         return (req_started && rep_started) || stopping;
     });
 }
@@ -331,7 +337,7 @@ Process_message_reader::~Process_message_reader()
 inline
 void Process_message_reader::begin_reading_session(
     const std::shared_ptr<Message_ring_R>& ring,
-    std::atomic<bool>& running_flag)
+    std::atomic<bool>&                     running_flag)
 {
     s_mproc->m_num_active_readers_mutex.lock();
     s_mproc->m_num_active_readers++;
@@ -348,7 +354,7 @@ void Process_message_reader::begin_reading_session(
 inline
 void Process_message_reader::end_reading_session(
     const std::shared_ptr<Message_ring_R>& ring,
-    std::atomic<bool>& running_flag)
+    std::atomic<bool>&                     running_flag)
 {
     ring->done_reading();
 
@@ -473,7 +479,7 @@ void Process_message_reader::request_reader_function()
                         s_mproc->m_out_rep_c->write<Transceiver::exception>(
                             vb_size<Transceiver::exception>(reason),
                             reason);
-                    placed_msg->sender_instance_id = m->receiver_instance_id;
+                    placed_msg->sender_instance_id   = m->receiver_instance_id;
                     placed_msg->receiver_instance_id = m->sender_instance_id;
                     placed_msg->function_instance_id = m->function_instance_id;
                     placed_msg->exception_type_id =
@@ -485,7 +491,7 @@ void Process_message_reader::request_reader_function()
 
                 if ((reader_state == READER_NORMAL) ||
                     (is_service_instance(m->receiver_instance_id) && s_coord) ||
-                    (m->sender_instance_id == s_coord_id) )
+                    (m->sender_instance_id == s_coord_id))
                 {
                     // If addressed to a specified local receiver, this may only be an RPC call,
                     // thus the named receiver must exist.
@@ -495,7 +501,7 @@ void Process_message_reader::request_reader_function()
                     void (*handler_fn)(Message_prefix&);
                     {
                         auto scoped_map = Transceiver::get_rpc_handler_map().scoped();
-                        auto it = scoped_map.get().find(m->message_type_id);
+                        auto it         = scoped_map.get().find(m->message_type_id);
                         assert(it != scoped_map.get().end()); // this would be a library error
 
                         // Copy the function pointer while holding the lock
@@ -532,9 +538,9 @@ void Process_message_reader::request_reader_function()
                         Log_stream(log_level::debug)
                             << "[sintra_trace_world] pid=" << static_cast<int>(detail::get_current_process_id())
                             << " reader_state=" << static_cast<int>(reader_state)
-                            << " msg_type=" << static_cast<unsigned long long>(m->message_type_id)
-                            << " sender_iid=" << static_cast<unsigned long long>(m->sender_instance_id)
-                            << " recv_iid=" << static_cast<unsigned long long>(m->receiver_instance_id)
+                            << " msg_type="     << static_cast<unsigned long long>(m->message_type_id)
+                            << " sender_iid="   << static_cast<unsigned long long>(m->sender_instance_id)
+                            << " recv_iid="     << static_cast<unsigned long long>(m->receiver_instance_id)
                             << " proc_iid="
                             << static_cast<unsigned long long>(s_mproc ? s_mproc->m_instance_id : 0ULL) << "\n";
                     }
@@ -600,8 +606,8 @@ void Process_message_reader::request_reader_function()
 
 inline
 Process_message_reader::Delivery_target Process_message_reader::prepare_delivery_target(
-    Delivery_stream stream,
-    sequence_counter_type target_sequence) const
+    Delivery_stream        stream,
+    sequence_counter_type  target_sequence) const
 {
     Delivery_target target;
     target.stream = stream;
@@ -677,12 +683,13 @@ void Process_message_reader::reply_reader_function()
         // Barrier completions are RPC responses sent on the reply ring, so
         // flush tokens for barriers refer to reply ring sequences.
         {
-            auto reading_sequence = m_in_rep_c->get_message_reading_sequence();
-            size_t notifications = 0;
+            auto   reading_sequence = m_in_rep_c->get_message_reading_sequence();
+            size_t notifications    = 0;
             {
                 std::unique_lock<std::mutex> flush_lock(s_mproc->m_flush_sequence_mutex);
                 while (!s_mproc->m_flush_sequence.empty() &&
-                       reading_sequence >= s_mproc->m_flush_sequence.front()) {
+                    reading_sequence >= s_mproc->m_flush_sequence.front())
+                {
                     s_mproc->m_flush_sequence.pop_front();
                     ++notifications;
                 }
@@ -709,18 +716,18 @@ void Process_message_reader::reply_reader_function()
 
             if ((reader_state == READER_NORMAL) ||
                 (m->receiver_instance_id == s_coord_id && s_coord) ||
-                (m->sender_instance_id   == s_coord_id) )
+                (m->sender_instance_id   == s_coord_id))
             {
                 // Hold the spinlock for the entire critical section to prevent use-after-free.
                 // The Transceiver destructor erases from this map, so holding the lock ensures
                 // the pointer remains valid while we access it.
                 Transceiver::Return_handler handler_copy;
-                bool have_handler = false;
-                bool object_found = false;
+                bool have_handler        = false;
+                bool object_found        = false;
                 bool handler_was_retired = false;
                 {
                     auto scoped_map = s_mproc->m_local_pointer_of_instance_id.scoped();
-                    auto it = scoped_map.get().find(m->receiver_instance_id);
+                    auto it         = scoped_map.get().find(m->receiver_instance_id);
 
                     if (it != scoped_map.get().end()) {
                         object_found = true;

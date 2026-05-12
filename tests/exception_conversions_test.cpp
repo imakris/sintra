@@ -20,59 +20,59 @@
 namespace {
 
 // Helper macro to test that string_to_exception throws the expected exception type
-#define TEST_THROWS(exception_type_id, expected_exception_type, test_message)        \
-    do {                                                                              \
-        bool caught_expected = false;                                                 \
-        try {                                                                         \
-            sintra::string_to_exception(exception_type_id, test_message);             \
-        }                                                                             \
-        catch (const expected_exception_type& e) {                                    \
-            caught_expected = true;                                                   \
-            if (std::string(e.what()) != test_message) {                              \
+#define TEST_THROWS(exception_type_id, expected_exception_type, test_message)           \
+    do {                                                                                \
+        bool caught_expected = false;                                                   \
+        try {                                                                           \
+            sintra::string_to_exception(exception_type_id, test_message);               \
+        }                                                                               \
+        catch (const expected_exception_type& e) {                                      \
+            caught_expected = true;                                                     \
+            if (std::string(e.what()) != test_message) {                                \
                 std::cerr << "Exception message mismatch for " #expected_exception_type \
-                          << ": expected '" << test_message << "', got '" << e.what() \
-                          << "'" << std::endl;                                        \
-                return 1;                                                             \
-            }                                                                         \
-        }                                                                             \
-        catch (...) {                                                                 \
-            std::cerr << "Unexpected exception type for " #expected_exception_type    \
-                      << std::endl;                                                   \
-            return 1;                                                                 \
-        }                                                                             \
-        if (!caught_expected) {                                                       \
-            std::cerr << "No exception thrown for " #expected_exception_type          \
-                      << std::endl;                                                   \
-            return 1;                                                                 \
-        }                                                                             \
+                    << ": expected '" << test_message << "', got '" << e.what()         \
+                    << "'" << std::endl;                                                \
+                return 1;                                                               \
+            }                                                                           \
+        }                                                                               \
+        catch (...) {                                                                   \
+            std::cerr << "Unexpected exception type for " #expected_exception_type      \
+                << std::endl;                                                           \
+            return 1;                                                                   \
+        }                                                                               \
+        if (!caught_expected) {                                                         \
+            std::cerr << "No exception thrown for " #expected_exception_type            \
+                << std::endl;                                                           \
+            return 1;                                                                   \
+        }                                                                               \
     } while (0)
 
 // Helper macro to test that string_to_exception throws expected type and message contains test_message
-#define TEST_THROWS_CONTAINS(exception_type_id, expected_exception_type, test_message) \
-    do {                                                                               \
-        bool caught_expected = false;                                                  \
-        try {                                                                          \
-            sintra::string_to_exception(exception_type_id, test_message);              \
-        }                                                                              \
-        catch (const expected_exception_type& e) {                                     \
-            caught_expected = true;                                                    \
-            if (std::string(e.what()).find(test_message) == std::string::npos) {       \
+#define TEST_THROWS_CONTAINS(exception_type_id, expected_exception_type, test_message)  \
+    do {                                                                                \
+        bool caught_expected = false;                                                   \
+        try {                                                                           \
+            sintra::string_to_exception(exception_type_id, test_message);               \
+        }                                                                               \
+        catch (const expected_exception_type& e) {                                      \
+            caught_expected = true;                                                     \
+            if (std::string(e.what()).find(test_message) == std::string::npos) {        \
                 std::cerr << "Exception message mismatch for " #expected_exception_type \
-                          << ": expected message to contain '" << test_message         \
-                          << "', got '" << e.what() << "'" << std::endl;               \
-                return 1;                                                              \
-            }                                                                          \
-        }                                                                              \
-        catch (...) {                                                                  \
-            std::cerr << "Unexpected exception type for " #expected_exception_type     \
-                      << std::endl;                                                    \
-            return 1;                                                                  \
-        }                                                                              \
-        if (!caught_expected) {                                                        \
-            std::cerr << "No exception thrown for " #expected_exception_type           \
-                      << std::endl;                                                    \
-            return 1;                                                                  \
-        }                                                                              \
+                    << ": expected message to contain '" << test_message                \
+                    << "', got '" << e.what() << "'" << std::endl;                      \
+                return 1;                                                               \
+            }                                                                           \
+        }                                                                               \
+        catch (...) {                                                                   \
+            std::cerr << "Unexpected exception type for " #expected_exception_type      \
+                << std::endl;                                                           \
+            return 1;                                                                   \
+        }                                                                               \
+        if (!caught_expected) {                                                         \
+            std::cerr << "No exception thrown for " #expected_exception_type            \
+                << std::endl;                                                           \
+            return 1;                                                                   \
+        }                                                                               \
     } while (0)
 
 // Test exceptions via the reserved_id switch statement path
@@ -361,22 +361,22 @@ int test_unknown_type_exception()
 }
 
 // Helper macro to test exception_to_string
-#define TEST_EXCEPTION_TO_STRING(exception_type, test_message)                    \
-    do {                                                                          \
-        exception_type ex(test_message);                                          \
-        auto [type_id, msg] = sintra::exception_to_string(ex);                    \
-        if (type_id != sintra::get_type_id<exception_type>()) {                   \
-            std::cerr << "Type ID mismatch for " #exception_type                  \
-                      << ": expected " << sintra::get_type_id<exception_type>()   \
-                      << ", got " << type_id << std::endl;                        \
-            return 1;                                                             \
-        }                                                                         \
-        if (msg != test_message) {                                                \
-            std::cerr << "Message mismatch for " #exception_type                  \
-                      << ": expected '" << test_message << "', got '"             \
-                      << msg << "'" << std::endl;                                 \
-            return 1;                                                             \
-        }                                                                         \
+#define TEST_EXCEPTION_TO_STRING(exception_type, test_message)            \
+    do {                                                                  \
+        exception_type ex(test_message);                                  \
+        auto [type_id, msg] = sintra::exception_to_string(ex);            \
+        if (type_id != sintra::get_type_id<exception_type>()) {           \
+            std::cerr << "Type ID mismatch for " #exception_type          \
+                << ": expected " << sintra::get_type_id<exception_type>() \
+                << ", got " << type_id << std::endl;                      \
+            return 1;                                                     \
+        }                                                                 \
+        if (msg != test_message) {                                        \
+            std::cerr << "Message mismatch for " #exception_type          \
+                << ": expected '" << test_message << "', got '"           \
+                << msg << "'" << std::endl;                               \
+            return 1;                                                     \
+        }                                                                 \
     } while (0)
 
 // Test exception_to_string for std::exception-derived types
@@ -396,33 +396,33 @@ int test_exception_to_string()
 }
 
 // Test round-trip: exception_to_string -> string_to_exception
-#define TEST_ROUND_TRIP(exception_type, test_message)                             \
-    do {                                                                          \
-        exception_type original_ex(test_message);                                 \
-        auto [type_id, msg] = sintra::exception_to_string(original_ex);           \
-        bool caught_expected = false;                                             \
-        try {                                                                     \
-            sintra::string_to_exception(type_id, msg);                            \
-        }                                                                         \
-        catch (const exception_type& e) {                                         \
-            caught_expected = true;                                               \
-            if (std::string(e.what()) != test_message) {                          \
-                std::cerr << "Round-trip message mismatch for " #exception_type   \
-                          << ": expected '" << test_message << "', got '"         \
-                          << e.what() << "'" << std::endl;                        \
-                return 1;                                                         \
-            }                                                                     \
-        }                                                                         \
-        catch (...) {                                                             \
-            std::cerr << "Round-trip: unexpected exception type for "             \
-                      << #exception_type << std::endl;                            \
-            return 1;                                                             \
-        }                                                                         \
-        if (!caught_expected) {                                                   \
-            std::cerr << "Round-trip: no exception thrown for " #exception_type   \
-                      << std::endl;                                               \
-            return 1;                                                             \
-        }                                                                         \
+#define TEST_ROUND_TRIP(exception_type, test_message)                           \
+    do {                                                                        \
+        exception_type original_ex(test_message);                               \
+        auto [type_id, msg] = sintra::exception_to_string(original_ex);         \
+        bool caught_expected = false;                                           \
+        try {                                                                   \
+            sintra::string_to_exception(type_id, msg);                          \
+        }                                                                       \
+        catch (const exception_type& e) {                                       \
+            caught_expected = true;                                             \
+            if (std::string(e.what()) != test_message) {                        \
+                std::cerr << "Round-trip message mismatch for " #exception_type \
+                    << ": expected '" << test_message << "', got '"             \
+                    << e.what() << "'" << std::endl;                            \
+                return 1;                                                       \
+            }                                                                   \
+        }                                                                       \
+        catch (...) {                                                           \
+            std::cerr << "Round-trip: unexpected exception type for "           \
+                << #exception_type << std::endl;                                \
+            return 1;                                                           \
+        }                                                                       \
+        if (!caught_expected) {                                                 \
+            std::cerr << "Round-trip: no exception thrown for " #exception_type \
+                << std::endl;                                                   \
+            return 1;                                                           \
+        }                                                                       \
     } while (0)
 
 int test_round_trip()

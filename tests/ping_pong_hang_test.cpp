@@ -47,8 +47,8 @@ void write_count(const std::filesystem::path& file, int value)
 int process_ping_responder()
 {
     // Create some local variables with interesting values
-    int response_count = 0;
-    std::string process_name = "ping_responder";
+    int         response_count = 0;
+    std::string process_name   = "ping_responder";
     std::vector<std::string> message_history;
     double start_time = std::chrono::duration<double>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -56,8 +56,8 @@ int process_ping_responder()
     // Create a worker thread to show multi-threading in stack traces
     std::atomic<bool> keep_running{true};
     std::thread worker_thread([&]() {
-        int worker_iteration = 0;
-        std::string worker_name = "ping_worker_thread";
+        int         worker_iteration = 0;
+        std::string worker_name      = "ping_worker_thread";
         while (keep_running) {
             worker_iteration++;
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -92,8 +92,8 @@ int process_pong_responder()
     std::atomic<int> pong_count{0};
     std::string process_name = "pong_responder";
     std::vector<int> response_times;
-    const int max_responses = 5; // Will hang after this many
-    bool intentionally_hung = false;
+    const int max_responses      = 5; // Will hang after this many
+    bool      intentionally_hung = false;
 
     // Create multiple worker threads to show multi-threading
     std::atomic<bool> keep_running{true};
@@ -101,9 +101,9 @@ int process_pong_responder()
 
     for (int i = 0; i < 3; i++) {
         worker_threads.emplace_back([i, &keep_running]() {
-            int thread_id = i;
+            int         thread_id   = i;
             std::string thread_name = "pong_worker_" + std::to_string(i);
-            int work_count = 0;
+            int         work_count  = 0;
             while (keep_running) {
                 work_count++;
                 std::this_thread::sleep_for(std::chrono::milliseconds(30 + i * 10));
@@ -119,7 +119,7 @@ int process_pong_responder()
             // HANG HERE - this is the intentional hang
             intentionally_hung = true;
             std::fprintf(stderr, "[HANG] Process pong_responder hanging after %d responses\n",
-                        current_count);
+                current_count);
             std::fflush(stderr);
 
             // Infinite loop to simulate a hang
@@ -160,14 +160,14 @@ int process_monitor()
     static std::atomic<int> ping_counter{0};
     std::string process_name = "monitor";
     std::vector<std::chrono::steady_clock::time_point> ping_timestamps;
-    double average_rate = 0.0;
-    int max_pings_seen = 0;
+    double average_rate   = 0.0;
+    int    max_pings_seen = 0;
 
     // Create a monitoring thread
     std::atomic<bool> keep_monitoring{true};
     std::thread monitor_thread([&]() {
         std::string monitor_thread_name = "monitor_thread";
-        int monitor_iteration = 0;
+        int         monitor_iteration   = 0;
         while (keep_monitoring) {
             monitor_iteration++;
             int current_count = ping_counter;
@@ -184,7 +184,8 @@ int process_monitor()
 
         if (ping_timestamps.size() >= 2) {
             auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
-                ping_timestamps.back() - ping_timestamps.front()).count();
+                ping_timestamps.back() - ping_timestamps.front()
+            ).count();
             if (duration > 0) {
                 average_rate = static_cast<double>(ping_timestamps.size()) /
                               (duration / 1000.0);

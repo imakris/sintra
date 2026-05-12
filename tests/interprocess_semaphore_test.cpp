@@ -54,11 +54,13 @@
 
 #if defined(_WIN32)
 namespace sintra::detail {
-void test_get_win_semaphore_info(const interprocess_semaphore& sem,
-                                  std::uint64_t& id, std::wstring& name)
+void test_get_win_semaphore_info(
+    const interprocess_semaphore&  sem,
+    std::uint64_t&                 id,
+    std::wstring&                  name)
 {
-    auto& backend = sem.m_impl;
-    const auto& state = *reinterpret_cast<const ips_backend_win_state*>(backend.storage);
+    auto&       backend = sem.m_impl;
+    const auto& state   = *reinterpret_cast<const ips_backend_win_state*>(backend.storage);
 
     id = (static_cast<std::uint64_t>(state.init_flag) & 0xFFFFFFFF) |
          (static_cast<std::uint64_t>(state.initial) << 32);
@@ -85,7 +87,11 @@ public:
     }
 
 private:
-    static std::string format(const std::string& expr, const char* file, int line, const std::string& message)
+    static std::string format(
+        const std::string& expr,
+        const char*        file,
+        int                line,
+        const std::string& message)
     {
         std::string out = file;
         out.append(":" + std::to_string(line) + " - assertion failed: " + expr);
@@ -136,9 +142,9 @@ private:
 
 struct Test_case
 {
-    const char* name;
-    std::function<void()> fn;
-    bool is_stress = false;
+    const char*            name;
+    std::function<void()>  fn;
+    bool                   is_stress = false;
 };
 
 void test_basic_semantics()
@@ -169,7 +175,7 @@ void test_basic_semantics()
     REQUIRE_TRUE(wait_completed.load(std::memory_order_acquire));
 
     const auto timeout_start = std::chrono::steady_clock::now();
-    const bool timed_out = sem.timed_wait(timeout_start + std::chrono::milliseconds(80));
+    const bool timed_out     = sem.timed_wait(timeout_start + std::chrono::milliseconds(80));
     REQUIRE_FALSE(timed_out);
 
     std::atomic<bool> signal_wait_entered{false};
@@ -196,7 +202,7 @@ void test_threaded_producer_consumer()
 {
     constexpr int k_producer_count = 3;
     constexpr int k_consumer_count = 4;
-    constexpr int k_total_items = 2000;
+    constexpr int k_total_items    = 2000;
 
     interprocess_semaphore sem(0);
     std::atomic<int> next_item{0};
@@ -306,7 +312,7 @@ void test_release_local_handle_idempotent()
 
 void test_multithreaded_contention()
 {
-    constexpr int k_threads = 8;
+    constexpr int k_threads               = 8;
     constexpr int k_iterations_per_thread = 1500;
 
     interprocess_semaphore sem(0);
@@ -354,12 +360,12 @@ void test_multithreaded_contention()
 
 struct Shared_state
 {
-    std::atomic<int> ready{0};
-    std::atomic<int> start{0};
-    std::atomic<int> processed{0};
+    std::atomic<int>       ready{0};
+    std::atomic<int>       start{0};
+    std::atomic<int>       processed{0};
 
-    static constexpr int k_resources = 3;
-    std::atomic<int> resource_owner[k_resources];
+    static constexpr int   k_resources = 3;
+    std::atomic<int>       resource_owner[k_resources];
 
     typename std::aligned_storage<sizeof(interprocess_semaphore), alignof(interprocess_semaphore)>::type sem_storage;
 
@@ -435,12 +441,12 @@ void run_child(Shared_state* shared, int iterations)
 
 void test_cross_process_coordination()
 {
-    constexpr int k_children = 4;
-    constexpr int k_iterations_per_child = 120;
-    constexpr auto k_overall_timeout = std::chrono::seconds(20);
+    constexpr int  k_children             = 4;
+    constexpr int  k_iterations_per_child = 120;
+    constexpr auto k_overall_timeout      = std::chrono::seconds(20);
 
     void* mapping = ::mmap(nullptr, sizeof(Shared_state), PROT_READ | PROT_WRITE,
-                            MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+        MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     if (mapping == MAP_FAILED) {
         throw std::system_error(errno, std::generic_category(), "mmap");
     }
@@ -453,12 +459,8 @@ void test_cross_process_coordination()
     try {
         for (int i = 0; i < k_children; ++i) {
             pid_t pid = ::fork();
-            if (pid == -1) {
-                throw std::system_error(errno, std::generic_category(), "fork");
-            }
-            if (pid == 0) {
-                run_child(shared, k_iterations_per_child);
-            }
+            if (pid == -1) { throw std::system_error(errno, std::generic_category(), "fork"); }
+            if (pid == 0)  { run_child(shared, k_iterations_per_child);                       }
             children.push_back(pid);
         }
 
@@ -472,7 +474,7 @@ void test_cross_process_coordination()
 
         shared->start.store(1);
 
-        const int expected = k_children * k_iterations_per_child;
+        const int  expected        = k_children * k_iterations_per_child;
         const auto finish_deadline = std::chrono::steady_clock::now() + k_overall_timeout;
         while (shared->processed.load(std::memory_order_acquire) < expected) {
             if (std::chrono::steady_clock::now() > finish_deadline) {
@@ -482,7 +484,7 @@ void test_cross_process_coordination()
         }
 
         for (pid_t pid : children) {
-            int status = 0;
+            int   status = 0;
             pid_t waited = ::waitpid(pid, &status, 0);
             if (waited != pid) {
                 throw Test_failure("waitpid returned unexpected pid", __FILE__, __LINE__);
@@ -533,9 +535,10 @@ std::string current_executable_path()
     return std::string(buffer, length);
 }
 
-void attach_existing_semaphore(sintra::detail::interprocess_semaphore& sem,
-                               const std::string& name_ascii,
-                               std::uint64_t /*id*/)
+void attach_existing_semaphore(
+    sintra::detail::interprocess_semaphore&    sem,
+    const std::string&                         name_ascii,
+    std::uint64_t /*id*/)
 {
 #if defined(_WIN32)
     using sem_t = sintra::detail::interprocess_semaphore;
@@ -548,11 +551,12 @@ void attach_existing_semaphore(sintra::detail::interprocess_semaphore& sem,
 #endif
 }
 
-int run_interprocess_child(const std::string& work_name,
-                           std::uint64_t work_id,
-                           const std::string& ack_name,
-                           std::uint64_t ack_id,
-                           int iterations)
+int run_interprocess_child(
+    const std::string& work_name,
+    std::uint64_t      work_id,
+    const std::string& ack_name,
+    std::uint64_t      ack_id,
+    int                iterations)
 {
     try {
         interprocess_semaphore work_sem(0);
@@ -564,8 +568,8 @@ int run_interprocess_child(const std::string& work_name,
             const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(4);
             if (!work_sem.timed_wait(deadline)) {
                 std::fprintf(stderr,
-                             "[cross-process child] timed_wait timeout at iteration %d\n",
-                             i);
+                    "[cross-process child] timed_wait timeout at iteration %d\n",
+                    i);
                 return 2;
             }
 
@@ -585,16 +589,17 @@ int run_interprocess_child(const std::string& work_name,
 
 void test_cross_process_coordination()
 {
-    constexpr int k_children = 3;
+    constexpr int k_children             = 3;
     constexpr int k_iterations_per_child = 400;
-    constexpr int k_burst = 3;
+    constexpr int k_burst                = 3;
 
     interprocess_semaphore work_sem(0);
     interprocess_semaphore ack_sem(0);
 
-    struct Windows_descriptor {
-        std::uint64_t id;
-        std::wstring name;
+    struct Windows_descriptor
+    {
+        std::uint64_t  id;
+        std::wstring   name;
     };
 
     auto describe = [](const interprocess_semaphore& sem) {
@@ -604,17 +609,17 @@ void test_cross_process_coordination()
     };
 
     const Windows_descriptor work_desc = describe(work_sem);
-    const Windows_descriptor ack_desc = describe(ack_sem);
+    const Windows_descriptor ack_desc  = describe(ack_sem);
 
-    const std::string work_name = narrow_from_wide(work_desc.name.c_str());
-    const std::string ack_name = narrow_from_wide(ack_desc.name.c_str());
-    const std::uint64_t work_id = work_desc.id;
-    const std::uint64_t ack_id = ack_desc.id;
+    const std::string   work_name = narrow_from_wide(work_desc.name.c_str());
+    const std::string   ack_name  = narrow_from_wide(ack_desc.name.c_str());
+    const std::uint64_t work_id   = work_desc.id;
+    const std::uint64_t ack_id    = ack_desc.id;
 
-    const std::string executable = current_executable_path();
+    const std::string executable     = current_executable_path();
     const std::string iterations_arg = std::to_string(k_iterations_per_child);
-    const std::string work_id_arg = std::to_string(static_cast<unsigned long long>(work_id));
-    const std::string ack_id_arg = std::to_string(static_cast<unsigned long long>(ack_id));
+    const std::string work_id_arg    = std::to_string(static_cast<unsigned long long>(work_id));
+    const std::string ack_id_arg     = std::to_string(static_cast<unsigned long long>(ack_id));
 
     std::vector<intptr_t> children;
     children.reserve(k_children);
@@ -661,8 +666,8 @@ void test_cross_process_coordination()
     }
 
     for (intptr_t child : children) {
-        int status = 0;
-        intptr_t rc = _cwait(&status, child, WAIT_CHILD);
+        int      status = 0;
+        intptr_t rc     = _cwait(&status, child, WAIT_CHILD);
         if (rc == -1) {
             throw std::system_error(errno, std::generic_category(), "_cwait");
         }
@@ -688,11 +693,11 @@ int main(int argc, char* argv[])
 {
 #ifdef _WIN32
     if (argc == 7 && std::string_view(argv[1]) == "--interprocess-semaphore-child") {
-        const std::string work_name = argv[2];
-        const std::uint64_t work_id = std::strtoull(argv[3], nullptr, 10);
-        const std::string ack_name = argv[4];
-        const std::uint64_t ack_id = std::strtoull(argv[5], nullptr, 10);
-        const int iterations = std::atoi(argv[6]);
+        const std::string   work_name  = argv[2];
+        const std::uint64_t work_id    = std::strtoull(argv[3], nullptr, 10);
+        const std::string   ack_name   = argv[4];
+        const std::uint64_t ack_id     = std::strtoull(argv[5], nullptr, 10);
+        const int           iterations = std::atoi(argv[6]);
         return run_interprocess_child(work_name, work_id, ack_name, ack_id, iterations);
     }
 #else

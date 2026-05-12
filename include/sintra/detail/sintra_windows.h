@@ -36,18 +36,18 @@ Usage:
   extern "C" {
   WINBASEAPI BOOL WINAPI InitializeProcThreadAttributeList(
       LPPROC_THREAD_ATTRIBUTE_LIST lpAttributeList,
-      DWORD dwAttributeCount,
-      DWORD dwFlags,
-      PSIZE_T lpSize);
+      DWORD                        dwAttributeCount,
+      DWORD                        dwFlags,
+      PSIZE_T                      lpSize);
 
   WINBASEAPI BOOL WINAPI UpdateProcThreadAttributeList(
       LPPROC_THREAD_ATTRIBUTE_LIST lpAttributeList,
-      DWORD dwFlags,
-      DWORD_PTR Attribute,
-      PVOID lpValue,
-      SIZE_T cbSize,
-      PVOID lpPreviousValue,
-      PSIZE_T lpReturnSize);
+      DWORD                        dwFlags,
+      DWORD_PTR                    Attribute,
+      PVOID                        lpValue,
+      SIZE_T                       cbSize,
+      PVOID                        lpPreviousValue,
+      PSIZE_T                      lpReturnSize);
 
   WINBASEAPI VOID WINAPI DeleteProcThreadAttributeList(
       LPPROC_THREAD_ATTRIBUTE_LIST lpAttributeList);

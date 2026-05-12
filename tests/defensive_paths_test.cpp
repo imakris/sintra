@@ -26,8 +26,8 @@ bool test_null_barrier_cleanup()
     group.drop_from_inflight_barriers(s_mproc_id, completions);
 
     return sintra::test::assert_true(group.m_barriers.empty(),
-                                     k_prefix,
-                                     "null barrier entry should be erased");
+        k_prefix,
+        "null barrier entry should be erased");
 }
 
 } // namespace

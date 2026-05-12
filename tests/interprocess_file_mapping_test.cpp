@@ -18,13 +18,14 @@ namespace
 
 constexpr std::string_view k_failure_prefix = "interprocess_file_mapping_test failure: ";
 
-void expect_error_code(const std::system_error& error,
-                       std::errc expected,
-                       const std::string& context)
+void expect_error_code(
+    const std::system_error&   error,
+    std::errc                  expected,
+    const std::string&         context)
 {
     if (error.code() != std::make_error_code(expected)) {
         std::cerr << context << " threw unexpected error: "
-                  << error.code().message() << std::endl;
+            << error.code().message() << std::endl;
         std::exit(1);
     }
 }
@@ -66,7 +67,7 @@ struct temporary_file
             sintra::test::fail(k_failure_prefix, "failed to open temporary file for writing");
         }
         file.write(reinterpret_cast<const char*>(contents.data()),
-                   static_cast<std::streamsize>(contents.size()));
+            static_cast<std::streamsize>(contents.size()));
         if (!file) {
             sintra::test::fail(k_failure_prefix, "failed to write temporary file contents");
         }
@@ -87,12 +88,8 @@ struct temporary_file
         file.seekg(0, std::ios::beg);
 
         std::vector<std::uint8_t> buffer(static_cast<std::size_t>(size));
-        if (size > 0) {
-            file.read(reinterpret_cast<char*>(buffer.data()), size);
-        }
-        if (!file) {
-            sintra::test::fail(k_failure_prefix, "failed to read temporary file contents");
-        }
+        if (size > 0) { file.read(reinterpret_cast<char*>(buffer.data()), size);                        }
+        if (!file)    { sintra::test::fail(k_failure_prefix, "failed to read temporary file contents"); }
         return buffer;
     }
 
@@ -114,9 +111,9 @@ int main()
 {
     namespace ipc = sintra::detail::ipc;
 
-    const std::size_t page_size = sintra::system_page_size();
-    const std::size_t data_size = page_size * 2 + 128;
-    const auto          original_data = make_test_data(data_size);
+    const std::size_t page_size     = sintra::system_page_size();
+    const std::size_t data_size     = page_size * 2 + 128;
+    const auto        original_data = make_test_data(data_size);
     temporary_file temp(original_data);
 
     // Mapping the full file in read-only mode should expose the exact contents.
@@ -124,11 +121,11 @@ int main()
         ipc::file_mapping mapping(temp.path, ipc::read_only);
         ipc::mapped_region region(mapping, ipc::read_only, 0, 0);
         sintra::test::expect(region.size() == original_data.size(),
-                             k_failure_prefix,
-                             "read-only mapping should cover the full file when size is zero");
+            k_failure_prefix,
+            "read-only mapping should cover the full file when size is zero");
         auto* bytes = static_cast<const std::uint8_t*>(region.data());
         sintra::test::expect(bytes != nullptr, k_failure_prefix,
-                             "read-only mapping returned null address");
+            "read-only mapping returned null address");
         for (std::size_t i = 0; i < original_data.size(); ++i) {
             if (bytes[i] != original_data[i]) {
                 sintra::test::fail(k_failure_prefix, "read-only mapping contents mismatch");
@@ -143,11 +140,11 @@ int main()
         ipc::file_mapping mapping(temp.path, ipc::read_only);
         ipc::mapped_region region(mapping, ipc::read_only, offset, length);
         sintra::test::expect(region.size() == length,
-                             k_failure_prefix,
-                             "partial mapping reported unexpected size");
+            k_failure_prefix,
+            "partial mapping reported unexpected size");
         auto* bytes = static_cast<const std::uint8_t*>(region.data());
         sintra::test::expect(bytes != nullptr, k_failure_prefix,
-                             "partial mapping returned null address");
+            "partial mapping returned null address");
         for (std::size_t i = 0; i < length; ++i) {
             if (bytes[i] != original_data[offset + i]) {
                 sintra::test::fail(k_failure_prefix, "partial mapping contents mismatch");
@@ -160,18 +157,20 @@ int main()
         ipc::file_mapping mapping(temp.path, ipc::read_only);
         bool threw = false;
         try {
-            ipc::mapped_region region(mapping, ipc::read_only,
-                                      static_cast<std::uint64_t>(original_data.size()) + 1,
-                                      0);
+            ipc::mapped_region region(
+                mapping,
+                ipc::read_only,
+                static_cast<std::uint64_t>(original_data.size()) + 1,
+                0);
             (void)region;
         }
         catch (const std::system_error& error) {
             threw = true;
             expect_error_code(error, std::errc::invalid_argument,
-                              "offset beyond end of file");
+                "offset beyond end of file");
         }
         sintra::test::expect(threw, k_failure_prefix,
-                             "mapping beyond end of file should throw");
+            "mapping beyond end of file should throw");
     }
 
     // Zero-length mappings are rejected even when the offset equals the file size.
@@ -179,8 +178,11 @@ int main()
         ipc::file_mapping mapping(temp.path, ipc::read_only);
         bool threw = false;
         try {
-            ipc::mapped_region region(mapping, ipc::read_only,
-                                      static_cast<std::uint64_t>(original_data.size()), 0);
+            ipc::mapped_region region(
+                mapping,
+                ipc::read_only,
+                static_cast<std::uint64_t>(original_data.size()),
+                0);
             (void)region;
         }
         catch (const std::system_error& error) {
@@ -188,7 +190,7 @@ int main()
             expect_error_code(error, std::errc::invalid_argument, "zero-length mapping");
         }
         sintra::test::expect(threw, k_failure_prefix,
-                             "zero-length mapping should throw");
+            "zero-length mapping should throw");
     }
 
     // Copy-on-write mappings should see local modifications without altering the file.
@@ -197,11 +199,11 @@ int main()
         ipc::file_mapping mapping(temp.path, ipc::read_write);
         ipc::mapped_region region(mapping, ipc::copy_on_write, 0, 0);
         sintra::test::expect(region.size() == original_data.size(),
-                             k_failure_prefix,
-                             "copy-on-write mapping should cover the entire file");
+            k_failure_prefix,
+            "copy-on-write mapping should cover the entire file");
         auto* bytes = static_cast<std::uint8_t*>(region.data());
         sintra::test::expect(bytes != nullptr, k_failure_prefix,
-                             "copy-on-write mapping returned null address");
+            "copy-on-write mapping returned null address");
         for (std::size_t i = 0; i < region.size(); ++i) {
             bytes[i] = static_cast<std::uint8_t>(bytes[i] ^ 0xFFu);
         }
@@ -228,11 +230,11 @@ int main()
         ipc::file_mapping mapping(temp.path, ipc::read_write);
         ipc::mapped_region region(mapping, ipc::read_write, 0, 0);
         sintra::test::expect(region.size() == expected.size(),
-                             k_failure_prefix,
-                             "read-write mapping should cover the entire file");
+            k_failure_prefix,
+            "read-write mapping should cover the entire file");
         auto* bytes = static_cast<std::uint8_t*>(region.data());
         sintra::test::expect(bytes != nullptr, k_failure_prefix,
-                             "read-write mapping returned null address");
+            "read-write mapping returned null address");
         for (std::size_t i = 0; i < expected.size(); ++i) {
             bytes[i] = expected[i];
         }
@@ -251,11 +253,11 @@ int main()
         ipc::file_mapping mapping2(std::move(mapping1));
         ipc::mapped_region region(mapping2, ipc::read_only, 0, 0);
         sintra::test::expect(region.size() == original_data.size(),
-                             k_failure_prefix,
-                             "move-constructed file_mapping should work");
+            k_failure_prefix,
+            "move-constructed file_mapping should work");
         auto* bytes = static_cast<const std::uint8_t*>(region.data());
         sintra::test::expect(bytes != nullptr, k_failure_prefix,
-                             "move-constructed mapping returned null");
+            "move-constructed mapping returned null");
     }
 
     // Test move assignment for file_mapping.
@@ -265,8 +267,8 @@ int main()
         mapping2 = std::move(mapping1);
         ipc::mapped_region region(mapping2, ipc::read_only, 0, 0);
         sintra::test::expect(region.size() == original_data.size(),
-                             k_failure_prefix,
-                             "move-assigned file_mapping should work");
+            k_failure_prefix,
+            "move-assigned file_mapping should work");
     }
 
     // Test move constructor for mapped_region.
@@ -275,11 +277,11 @@ int main()
         ipc::mapped_region region1(mapping, ipc::read_only, 0, 0);
         ipc::mapped_region region2(std::move(region1));
         sintra::test::expect(region2.size() == original_data.size(),
-                             k_failure_prefix,
-                             "move-constructed mapped_region should work");
+            k_failure_prefix,
+            "move-constructed mapped_region should work");
         auto* bytes = static_cast<const std::uint8_t*>(region2.data());
         sintra::test::expect(bytes != nullptr, k_failure_prefix,
-                             "move-constructed region returned null");
+            "move-constructed region returned null");
     }
 
     // Test move assignment for mapped_region.
@@ -289,8 +291,8 @@ int main()
         ipc::mapped_region region2(mapping, ipc::read_only, 0, 0);
         region2 = std::move(region1);
         sintra::test::expect(region2.size() == original_data.size(),
-                             k_failure_prefix,
-                             "move-assigned mapped_region should work");
+            k_failure_prefix,
+            "move-assigned mapped_region should work");
     }
 
     // Test const data() accessor.
@@ -298,11 +300,11 @@ int main()
         ipc::file_mapping mapping(temp.path, ipc::read_only);
         ipc::mapped_region region(mapping, ipc::read_only, 0, 0);
         const ipc::mapped_region& const_region = region;
-        const void* const_data = const_region.data();
+        const void*               const_data   = const_region.data();
         sintra::test::expect(const_data != nullptr, k_failure_prefix,
-                             "const data() should return non-null");
+            "const data() should return non-null");
         sintra::test::expect(const_data == region.data(), k_failure_prefix,
-                             "const data() should match non-const");
+            "const data() should match non-const");
     }
 
     // Test flush() on read-write mapping.

@@ -45,9 +45,9 @@ namespace sintra {
 namespace detail {
 
 inline void append_branch(
-    std::vector<Process_descriptor>& branches,
-    const Process_descriptor& descriptor,
-    int multiplicity)
+    std::vector<Process_descriptor>&   branches,
+    const Process_descriptor&          descriptor,
+    int                                multiplicity)
 {
     if (multiplicity <= 0) {
         return;
@@ -63,9 +63,9 @@ inline void collect_branches(std::vector<Process_descriptor>&) {}
 
 template <typename... Args>
 void collect_branches(
-    std::vector<Process_descriptor>& branches,
-    const Process_descriptor& descriptor,
-    Args&&... rest)
+    std::vector<Process_descriptor>&   branches,
+    const Process_descriptor&          descriptor,
+    Args&&...                          rest)
 {
     append_branch(branches, descriptor, 1);
     collect_branches(branches, std::forward<Args>(rest)...);
@@ -73,10 +73,10 @@ void collect_branches(
 
 template <typename... Args>
 void collect_branches(
-    std::vector<Process_descriptor>& branches,
-    int multiplicity,
-    const Process_descriptor& descriptor,
-    Args&&... rest)
+    std::vector<Process_descriptor>&   branches,
+    int                                multiplicity,
+    const Process_descriptor&          descriptor,
+    Args&&...                          rest)
 {
     append_branch(branches, descriptor, multiplicity);
     collect_branches(branches, std::forward<Args>(rest)...);
@@ -101,9 +101,9 @@ inline std::vector<Process_descriptor> make_branches(std::vector<Process_descrip
 
 template <typename... Args>
 std::vector<Process_descriptor> make_branches(
-    std::vector<Process_descriptor>& branches,
-    const Process_descriptor& descriptor,
-    Args&&... rest)
+    std::vector<Process_descriptor>&   branches,
+    const Process_descriptor&          descriptor,
+    Args&&...                          rest)
 {
     detail::collect_branches(branches, descriptor, std::forward<Args>(rest)...);
     return branches;
@@ -111,10 +111,10 @@ std::vector<Process_descriptor> make_branches(
 
 template <typename... Args>
 std::vector<Process_descriptor> make_branches(
-    std::vector<Process_descriptor>& branches,
-    int multiplicity,
-    const Process_descriptor& descriptor,
-    Args&&... rest)
+    std::vector<Process_descriptor>&   branches,
+    int                                multiplicity,
+    const Process_descriptor&          descriptor,
+    Args&&...                          rest)
 {
     detail::collect_branches(branches, multiplicity, descriptor, std::forward<Args>(rest)...);
     return branches;
@@ -122,8 +122,8 @@ std::vector<Process_descriptor> make_branches(
 
 template <typename... Args>
 std::vector<Process_descriptor> make_branches(
-    const Process_descriptor& descriptor,
-    Args&&... rest)
+    const Process_descriptor&  descriptor,
+    Args&&...                  rest)
 {
     std::vector<Process_descriptor> branches;
     detail::collect_branches(branches, descriptor, std::forward<Args>(rest)...);
@@ -132,9 +132,9 @@ std::vector<Process_descriptor> make_branches(
 
 template <typename... Args>
 std::vector<Process_descriptor> make_branches(
-    int multiplicity,
-    const Process_descriptor& descriptor,
-    Args&&... rest)
+    int                        multiplicity,
+    const Process_descriptor&  descriptor,
+    Args&&...                  rest)
 {
     std::vector<Process_descriptor> branches;
     detail::collect_branches(branches, multiplicity, descriptor, std::forward<Args>(rest)...);
@@ -148,13 +148,13 @@ inline bool finalize();
 
 struct Spawn_options
 {
-    std::string binary_path;
-    std::vector<std::string> args;
-    size_t count = 1;
-    instance_id_type process_instance_id = invalid_instance_id;
-    std::string wait_for_instance_name;
-    std::chrono::milliseconds wait_timeout{0};
-    Lifetime_policy lifetime;
+    std::string                binary_path;
+    std::vector<std::string>   args;
+    size_t                     count               = 1;
+    instance_id_type           process_instance_id = invalid_instance_id;
+    std::string                wait_for_instance_name;
+    std::chrono::milliseconds  wait_timeout{0};
+    Lifetime_policy            lifetime;
 };
 
 // Tracks whether init() has been called without a corresponding teardown.
@@ -163,9 +163,9 @@ struct Spawn_options
 inline bool s_init_once = false;
 
 inline void init(
-    int argc,
-    const char* const* argv,
-    std::vector<Process_descriptor> branches = std::vector<Process_descriptor>())
+    int                                argc,
+    const char* const*                 argv,
+    std::vector<Process_descriptor>    branches = std::vector<Process_descriptor>())
 {
 #ifndef _WIN32
     struct sigaction noaction;
@@ -239,7 +239,7 @@ inline bool finalize_impl()
         if (trace_finalize) {
             Log_stream(log_level::debug)
                 << "[sintra_finalize] stage=" << stage
-                << " coord=" << (s_coord ? 1 : 0)
+                << " coord="    << (s_coord ? 1 : 0)
                 << " mproc_id=" << static_cast<unsigned long long>(s_mproc_id)
                 << "\n";
         }
@@ -265,7 +265,7 @@ inline bool finalize_impl()
     else {
         trace("begin_process_draining_remote.start");
         try {
-            auto handle = Coordinator::rpc_async_begin_process_draining(s_coord_id, s_mproc_id);
+            auto       handle   = Coordinator::rpc_async_begin_process_draining(s_coord_id, s_mproc_id);
             const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
             if (handle.wait_until(deadline) == Rpc_wait_status::completed) {
                 flush_seq = handle.get();
@@ -341,14 +341,12 @@ inline bool finalize_impl()
 }
 
 inline void claim_lifecycle_teardown_state(
-    shutdown_protocol_state desired_state,
-    const char* api_name)
+    shutdown_protocol_state    desired_state,
+    const char*                api_name)
 {
     auto expected = shutdown_protocol_state::idle;
     if (!s_shutdown_state.compare_exchange_strong(
-            expected,
-            desired_state,
-            std::memory_order_acq_rel))
+            expected, desired_state, std::memory_order_acq_rel))
     {
         throw std::logic_error(
             std::string(api_name) + " called while another lifecycle teardown is already in progress "
@@ -358,14 +356,14 @@ inline void claim_lifecycle_teardown_state(
 
 inline bool lifecycle_teardown_requested()
 {
-    return s_teardown_admission_closed.load(std::memory_order_acquire) ||
-           s_shutdown_state.load(std::memory_order_acquire) !=
-               shutdown_protocol_state::idle;
+    return
+        s_teardown_admission_closed.load(std::memory_order_acquire) ||
+        s_shutdown_state.load(std::memory_order_acquire) != shutdown_protocol_state::idle;
 }
 
 inline void close_teardown_admission_and_claim_state(
-    shutdown_protocol_state desired_state,
-    const char* api_name)
+    shutdown_protocol_state    desired_state,
+    const char*                api_name)
 {
     std::lock_guard<std::mutex> admission_lock(s_teardown_admission_mutex);
     s_teardown_admission_closed.store(true, std::memory_order_release);
@@ -474,9 +472,7 @@ inline void shutdown_coordinator_drain_wait(const std::string& group_name)
         }
 
         if (!s_coord->m_all_draining_cv.wait_until(
-                wait_lock,
-                deadline,
-                generation_advanced))
+                wait_lock, deadline, generation_advanced))
         {
             break;
         }
@@ -509,7 +505,7 @@ inline bool shutdown_group_is_trivial(const std::string& group_name)
     auto& group = group_it->second;
     std::lock_guard<std::mutex> group_lock(group.m_call_mutex);
     return (group.m_process_ids.size() == 1) &&
-           (group.m_process_ids.find(s_mproc_id) != group.m_process_ids.end());
+        (group.m_process_ids.find(s_mproc_id) != group.m_process_ids.end());
 }
 
 inline bool coordinator_can_leave_now()
@@ -543,8 +539,8 @@ inline bool shutdown(const shutdown_options& options)
         return detail::finalize_impl();
     }
 
-    const std::string group_name = "_sintra_all_processes";
-    constexpr const char* shutdown_barrier_name = "_sintra_shutdown";
+    const std::string     group_name             = "_sintra_all_processes";
+    constexpr const char* shutdown_barrier_name  = "_sintra_shutdown";
     constexpr const char* hook_done_barrier_name = "_sintra_shutdown_hook_done";
 
     if (detail::shutdown_group_is_trivial(group_name)) {
@@ -671,7 +667,7 @@ inline size_t spawn_swarm_process(const Spawn_options& options)
     }
 
     if ((options.process_instance_id != invalid_instance_id ||
-         !options.wait_for_instance_name.empty()) &&
+        !options.wait_for_instance_name.empty()) &&
         options.count != 1)
     {
         Log_stream(log_level::error)
@@ -679,9 +675,9 @@ inline size_t spawn_swarm_process(const Spawn_options& options)
         return 0;
     }
 
-    const bool wait_requested = !options.wait_for_instance_name.empty();
-    const auto wait_timeout = options.wait_timeout;
-    instance_id_type coord_id = invalid_instance_id;
+    const bool       wait_requested = !options.wait_for_instance_name.empty();
+    const auto       wait_timeout   = options.wait_timeout;
+    instance_id_type coord_id       = invalid_instance_id;
 
     size_t spawned = 0;
     const auto piid = (options.process_instance_id != invalid_instance_id)
@@ -713,7 +709,7 @@ inline size_t spawn_swarm_process(const Spawn_options& options)
                 return true;
             }
             const auto front_name = std::filesystem::path(args.front()).filename().string();
-            const auto bin_name = std::filesystem::path(options.binary_path).filename().string();
+            const auto bin_name   = std::filesystem::path(options.binary_path).filename().string();
 #ifdef _WIN32
             return _stricmp(front_name.c_str(), bin_name.c_str()) == 0;
 #else
@@ -732,8 +728,8 @@ inline size_t spawn_swarm_process(const Spawn_options& options)
 
         Managed_process::Spawn_swarm_process_args spawn_args;
         spawn_args.binary_name = options.binary_path;
-        spawn_args.args = args;
-        spawn_args.lifetime = options.lifetime;
+        spawn_args.args        = args;
+        spawn_args.lifetime    = options.lifetime;
 
         for (size_t i = 0; i < options.count; ++i) {
             spawn_args.piid = piid;
@@ -748,7 +744,7 @@ inline size_t spawn_swarm_process(const Spawn_options& options)
         return spawned;
     }
 
-    bool wait_succeeded = false;
+    bool        wait_succeeded      = false;
     const char* wait_failure_reason = nullptr;
     try {
         if (wait_timeout.count() <= 0) {
@@ -761,8 +757,8 @@ inline size_t spawn_swarm_process(const Spawn_options& options)
             }
         }
         else {
-            const auto deadline = std::chrono::steady_clock::now() + wait_timeout;
-            auto poll_delay = std::chrono::milliseconds(5);
+            const auto deadline       = std::chrono::steady_clock::now() + wait_timeout;
+            auto       poll_delay     = std::chrono::milliseconds(5);
             const auto max_poll_delay = std::chrono::milliseconds(200);
             while (std::chrono::steady_clock::now() < deadline) {
                 const auto resolved = Coordinator::rpc_resolve_instance(
@@ -778,7 +774,7 @@ inline size_t spawn_swarm_process(const Spawn_options& options)
                     break;
                 }
 
-                auto sleep_for = poll_delay;
+                auto       sleep_for = poll_delay;
                 const auto remaining = deadline - now;
                 if (sleep_for > remaining) {
                     sleep_for = std::chrono::duration_cast<std::chrono::milliseconds>(remaining);
@@ -819,8 +815,8 @@ inline size_t spawn_swarm_process(const Spawn_options& options)
 }
 
 inline instance_id_type join_swarm(
-    int branch_index,
-    std::string binary_name = std::string())
+    int            branch_index,
+    std::string    binary_name = std::string())
 {
     if (branch_index < 1) {
         return invalid_instance_id;
@@ -831,7 +827,8 @@ inline instance_id_type join_swarm(
         std::lock_guard<std::mutex> admission_lock(detail::s_teardown_admission_mutex);
         if (detail::s_teardown_admission_closed.load(std::memory_order_acquire) ||
             !s_mproc ||
-            s_coord_id == invalid_instance_id) {
+            s_coord_id == invalid_instance_id)
+        {
             return invalid_instance_id;
         }
 

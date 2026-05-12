@@ -84,23 +84,23 @@ void worker_process(int worker_id, int num_workers, int num_barriers)
 int main(int argc, char* argv[])
 {
     if (argc == 4 && std::string(argv[1]) == "--worker") {
-        const int worker_id = std::atoi(argv[2]);
+        const int worker_id    = std::atoi(argv[2]);
         const int num_barriers = std::atoi(argv[3]);
 
         // Let parent know we're starting
         std::cout << "Worker " << worker_id << " process started, PID="
-                  << sintra::test::get_pid()
-                  << "\n" << std::flush;
+            << sintra::test::get_pid()
+            << "\n" << std::flush;
 
         const int num_workers = 3; // hardcoded for now
         worker_process(worker_id, num_workers, num_barriers);
         return 0;
     }
 
-    constexpr int NUM_ITERATIONS = 20;
-    constexpr int NUM_WORKERS = 3;
+    constexpr int NUM_ITERATIONS             = 20;
+    constexpr int NUM_WORKERS                = 3;
     constexpr int NUM_BARRIERS_PER_ITERATION = 5;
-    constexpr int TIMEOUT_SECONDS = 30;
+    constexpr int TIMEOUT_SECONDS            = 30;
 
     std::cout << "Barrier Deadlock Reproduction Test\n";
     std::cout << "===================================\n";
@@ -110,7 +110,7 @@ int main(int argc, char* argv[])
     std::cout << "Timeout: " << TIMEOUT_SECONDS << "s\n\n";
 
     int successes = 0;
-    int timeouts = 0;
+    int timeouts  = 0;
 
     sintra::test::Shared_directory shared("SINTRA_DEADLOCK_REPRO_DIR", "deadlock_repro");
     const auto shared_dir = shared.path();
@@ -154,7 +154,7 @@ int main(int argc, char* argv[])
         // Wait for workers to be ready
         std::cout << "Waiting for workers to be ready..." << std::flush;
         const auto ready_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-        int ready_count = 0;
+        int        ready_count    = 0;
 
         while (ready_count < NUM_WORKERS) {
             if (std::chrono::steady_clock::now() > ready_deadline) {
@@ -182,22 +182,22 @@ int main(int argc, char* argv[])
 
         // Wait for completion with timeout
         const auto test_start = std::chrono::steady_clock::now();
-        const auto deadline = test_start + std::chrono::seconds(TIMEOUT_SECONDS);
-        int done_count = 0;
-        bool timed_out = false;
+        const auto deadline   = test_start + std::chrono::seconds(TIMEOUT_SECONDS);
+        int        done_count = 0;
+        bool       timed_out  = false;
 
         while (done_count < NUM_WORKERS) {
             const auto now = std::chrono::steady_clock::now();
             if (now > deadline) {
                 const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - test_start);
                 std::cout << "\n*** DEADLOCK DETECTED at iteration " << (iter + 1)
-                          << " after " << elapsed.count() << "s ***\n";
+                    << " after " << elapsed.count() << "s ***\n";
                 std::cout << "This is likely the deadlock we're looking for!\n";
                 std::cout << "\nWorker completion status:\n";
                 for (int w = 0; w < NUM_WORKERS; ++w) {
                     const auto done_file = shared_dir / ("worker_" + std::to_string(w) + "_done.txt");
                     std::cout << "  Worker " << w << ": "
-                              << (fs::exists(done_file) ? "DONE" : "STUCK") << "\n";
+                        << (fs::exists(done_file) ? "DONE" : "STUCK") << "\n";
                 }
                 timed_out = true;
                 timeouts++;

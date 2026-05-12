@@ -23,10 +23,11 @@
 namespace {
 
 // Coordinator state
-struct Window_state {
-    bool exited_normally = false;
-    bool recovering = false;
-    bool active = false;
+struct Window_state
+{
+    bool   exited_normally = false;
+    bool   recovering      = false;
+    bool   active          = false;
 };
 
 std::mutex g_state_mutex;
@@ -127,18 +128,19 @@ void mark_inactive(int window_id)
     }
 }
 
-struct Lifecycle_actions {
-    int window_id = -1;
-    int status = 0;
-    bool notify_cursor_left = false;
-    bool notify_normal_exit = false;
-    bool log_crash = false;
-    bool log_unpublished = false;
-    bool log_normal_exit = false;
+struct Lifecycle_actions
+{
+    int    window_id          = -1;
+    int    status             = 0;
+    bool   notify_cursor_left = false;
+    bool   notify_normal_exit = false;
+    bool   log_crash          = false;
+    bool   log_unpublished    = false;
+    bool   log_normal_exit    = false;
 };
 
 Lifecycle_actions apply_lifecycle_event_locked(
-    int window_id,
+    int                                    window_id,
     const sintra::process_lifecycle_event& event)
 {
     Lifecycle_actions actions;
@@ -148,29 +150,29 @@ Lifecycle_actions apply_lifecycle_event_locked(
     auto& state = g_window_states[window_id];
 
     switch (event.why) {
-    case sintra::process_lifecycle_event::reason::crash:
-        state.recovering = false;
-        mark_inactive(window_id);
-        actions.notify_cursor_left = true;
-        actions.log_crash = true;
-        break;
-    case sintra::process_lifecycle_event::reason::normal_exit:
-        if (!state.exited_normally) {
-            state.exited_normally = true;
-            actions.notify_normal_exit = true;
-            actions.log_normal_exit = true;
-        }
-        state.recovering = false;
-        mark_inactive(window_id);
-        break;
-    case sintra::process_lifecycle_event::reason::unpublished:
-        state.recovering = false;
-        mark_inactive(window_id);
-        if (!state.exited_normally) {
+        case sintra::process_lifecycle_event::reason::crash:
+            state.recovering = false;
+            mark_inactive(window_id);
             actions.notify_cursor_left = true;
-            actions.log_unpublished = true;
-        }
-        break;
+            actions.log_crash = true;
+            break;
+        case sintra::process_lifecycle_event::reason::normal_exit:
+            if (!state.exited_normally) {
+                state.exited_normally = true;
+                actions.notify_normal_exit = true;
+                actions.log_normal_exit = true;
+            }
+            state.recovering = false;
+            mark_inactive(window_id);
+            break;
+        case sintra::process_lifecycle_event::reason::unpublished:
+            state.recovering = false;
+            mark_inactive(window_id);
+            if (!state.exited_normally) {
+                actions.notify_cursor_left = true;
+                actions.log_unpublished = true;
+            }
+            break;
     }
 
     return actions;
@@ -209,8 +211,8 @@ void dispatch_lifecycle_actions(const Lifecycle_actions& actions)
 }
 
 bool take_pending_lifecycle_locked(
-    uint64_t process_index,
-    sintra::process_lifecycle_event& event_out)
+    uint64_t                           process_index,
+    sintra::process_lifecycle_event&   event_out)
 {
     auto it = g_pending_lifecycle_events.find(process_index);
     if (it == g_pending_lifecycle_events.end()) {
@@ -229,9 +231,9 @@ public:
         : sintra_example::Cursor_bus("coordinator")
     {
         activate(&Coordinator_handler::on_window_hello,
-                 sintra::Typed_instance_id<sintra_example::Cursor_bus>(sintra::any_remote));
+            sintra::Typed_instance_id<sintra_example::Cursor_bus>(sintra::any_remote));
         activate(&Coordinator_handler::on_window_goodbye,
-                 sintra::Typed_instance_id<sintra_example::Cursor_bus>(sintra::any_remote));
+            sintra::Typed_instance_id<sintra_example::Cursor_bus>(sintra::any_remote));
     }
 
 private:
@@ -248,8 +250,8 @@ private:
             update_window_mapping(msg.window_id, process_index);
             auto& state = g_window_states[msg.window_id];
             should_broadcast_spawned = state.recovering;
-            state.recovering = false;
-            state.exited_normally = false;
+            state.recovering         = false;
+            state.exited_normally    = false;
             mark_active(msg.window_id);
         }
 
@@ -274,11 +276,11 @@ private:
             std::lock_guard<std::mutex> lock(g_state_mutex);
             update_window_mapping(msg.window_id, process_index);
             sintra::process_lifecycle_event event;
-            event.process_iid = msg.sender_instance_id;
+            event.process_iid  = msg.sender_instance_id;
             event.process_slot = static_cast<uint32_t>(process_index);
-            event.status = 0;
-            event.why = sintra::process_lifecycle_event::reason::normal_exit;
-            actions = apply_lifecycle_event_locked(msg.window_id, event);
+            event.status       = 0;
+            event.why          = sintra::process_lifecycle_event::reason::normal_exit;
+            actions            = apply_lifecycle_event_locked(msg.window_id, event);
         }
 
         dispatch_lifecycle_actions(actions);
@@ -331,7 +333,7 @@ int main(int argc, char* argv[])
         }
 
         const int window_id = it->second;
-        auto& state = g_window_states[window_id];
+        auto&     state     = g_window_states[window_id];
         if (state.exited_normally) {
             state.recovering = false;
             return false;
@@ -342,7 +344,7 @@ int main(int argc, char* argv[])
     });
 
     sintra::set_recovery_runner([](const sintra::Crash_info& info,
-                                   const sintra::Recovery_control& control) {
+        const sintra::Recovery_control& control) {
         int window_id = -1;
         {
             std::lock_guard<std::mutex> lock(g_state_mutex);
@@ -425,8 +427,8 @@ int main(int argc, char* argv[])
         }
         else {
             Lifecycle_actions pending_actions;
-            bool has_pending_actions = false;
-            const auto process_index = sintra::get_process_index(piid);
+            bool       has_pending_actions = false;
+            const auto process_index       = sintra::get_process_index(piid);
             {
                 std::lock_guard<std::mutex> lock(g_state_mutex);
                 mark_spawned(i);

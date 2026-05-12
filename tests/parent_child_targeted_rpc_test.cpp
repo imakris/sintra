@@ -88,10 +88,10 @@ struct Done_signal {};
 // wait for the ack with a bounded timeout instead of polling a side channel.
 struct Ack_state
 {
-    std::mutex mutex;
-    std::condition_variable cv;
-    bool seen  = false;
-    int  value = 0;
+    std::mutex                 mutex;
+    std::condition_variable    cv;
+    bool                       seen  = false;
+    int                        value = 0;
 };
 
 inline Ack_state& parent_ack_state()
@@ -157,8 +157,8 @@ struct Child_service : sintra::Derived_transceiver<Child_service>
 
         if (ack_iid == sintra::invalid_instance_id) {
             std::fprintf(stderr,
-                         "[CHILD] mark(): could not resolve '%s' to ack the parent\n",
-                         k_parent_ack_name);
+                "[CHILD] mark(): could not resolve '%s' to ack the parent\n",
+                k_parent_ack_name);
             return;
         }
 
@@ -185,10 +185,10 @@ int run_child()
         return 1;
     }
     std::fprintf(stderr,
-                 "[CHILD] published '%s' iid=%llu (mproc_iid=%llu)\n",
-                 k_child_service_name,
-                 static_cast<unsigned long long>(service.instance_id()),
-                 static_cast<unsigned long long>(s_mproc_id));
+        "[CHILD] published '%s' iid=%llu (mproc_iid=%llu)\n",
+        k_child_service_name,
+        static_cast<unsigned long long>(service.instance_id()),
+        static_cast<unsigned long long>(s_mproc_id));
 
     std::mutex done_mutex;
     std::condition_variable done_cv;
@@ -218,8 +218,8 @@ int run_child()
 int run_coordinator(const std::string& binary_path)
 {
     std::fprintf(stderr, "[COORD] starting (mproc_id=%llu, coord_id=%llu)\n",
-                 static_cast<unsigned long long>(s_mproc_id),
-                 static_cast<unsigned long long>(s_coord_id));
+        static_cast<unsigned long long>(s_mproc_id),
+        static_cast<unsigned long long>(s_coord_id));
 
     // Construct and publish the parent's ack receiver before spawning so the
     // child can resolve it as soon as it needs to ack.
@@ -229,20 +229,19 @@ int run_coordinator(const std::string& binary_path)
         return 1;
     }
     std::fprintf(stderr,
-                 "[COORD] published '%s' iid=%llu\n",
-                 k_parent_ack_name,
-                 static_cast<unsigned long long>(ack_receiver.instance_id()));
+        "[COORD] published '%s' iid=%llu\n",
+        k_parent_ack_name,
+        static_cast<unsigned long long>(ack_receiver.instance_id()));
 
     // ---- 1. spawn the child and wait for its named transceiver ------------
     sintra::Spawn_options spawn_options;
-    spawn_options.binary_path           = binary_path;
+    spawn_options.binary_path            = binary_path;
     spawn_options.wait_for_instance_name = k_child_service_name;
     spawn_options.wait_timeout           = std::chrono::milliseconds(15000);
 
     const size_t spawned = sintra::spawn_swarm_process(spawn_options);
-    if (!sintra::test::assert_true(spawned == 1,
-                                   "[COORD] ",
-                                   "spawn_swarm_process should report a single child"))
+    if (!sintra::test::assert_true(
+            spawned == 1, "[COORD] ", "spawn_swarm_process should report a single child"))
     {
         return 1;
     }
@@ -252,10 +251,10 @@ int run_coordinator(const std::string& binary_path)
         s_coord_id, k_child_service_name);
     const auto child_proc_iid = sintra::process_of(child_iid);
     std::fprintf(stderr,
-                 "[COORD] resolved '%s' -> %llu (process_iid=%llu)\n",
-                 k_child_service_name,
-                 static_cast<unsigned long long>(child_iid),
-                 static_cast<unsigned long long>(child_proc_iid));
+        "[COORD] resolved '%s' -> %llu (process_iid=%llu)\n",
+        k_child_service_name,
+        static_cast<unsigned long long>(child_iid),
+        static_cast<unsigned long long>(child_proc_iid));
 
     auto teardown_and_return = [&](int rv) {
         sintra::world() << Done_signal{};
@@ -263,15 +262,14 @@ int run_coordinator(const std::string& binary_path)
         return rv;
     };
 
-    if (!sintra::test::assert_true(child_iid != sintra::invalid_instance_id,
-                                   "[COORD] ",
-                                   "resolved child_iid must be valid"))
+    if (!sintra::test::assert_true(
+            child_iid != sintra::invalid_instance_id, "[COORD] ", "resolved child_iid must be valid"))
     {
         return teardown_and_return(1);
     }
     if (!sintra::test::assert_true(child_proc_iid != sintra::process_of(s_mproc_id),
-                                   "[COORD] ",
-                                   "resolved child_iid must belong to a different process than the parent"))
+            "[COORD] ",
+            "resolved child_iid must belong to a different process than the parent"))
     {
         return teardown_and_return(1);
     }
@@ -281,16 +279,16 @@ int run_coordinator(const std::string& binary_path)
     // process; the named transceiver must have a different (non-process)
     // sub-id within the same process.
     if (!sintra::test::assert_true(child_iid != child_proc_iid,
-                                   "[COORD] ",
-                                   "resolved child_iid must be the named Child_service transceiver, "
-                                   "not the child's Managed_process instance"))
+            "[COORD] ",
+            "resolved child_iid must be the named Child_service transceiver, "
+            "not the child's Managed_process instance"))
     {
         return teardown_and_return(1);
     }
 
     // ---- 3. blocking RPC: parent calls child handler, expects reply -------
     std::fprintf(stderr, "[COORD] calling Child_service::rpc_ping(%llu, %d)\n",
-                 static_cast<unsigned long long>(child_iid), k_ping_value);
+        static_cast<unsigned long long>(child_iid), k_ping_value);
     int ping_reply = 0;
     try {
         ping_reply = Child_service::rpc_ping(child_iid, k_ping_value);
@@ -301,15 +299,15 @@ int run_coordinator(const std::string& binary_path)
     }
     std::fprintf(stderr, "[COORD] rpc_ping returned %d\n", ping_reply);
     if (!sintra::test::assert_true(ping_reply == k_ping_value + 1,
-                                   "[COORD] ",
-                                   "rpc_ping reply must equal value+1 produced by the child handler"))
+            "[COORD] ",
+            "rpc_ping reply must equal value+1 produced by the child handler"))
     {
         return teardown_and_return(1);
     }
 
     // ---- 4. fire-and-forget unicast to a specific remote instance ---------
     std::fprintf(stderr, "[COORD] calling Child_service::rpc_mark(%llu, %d)\n",
-                 static_cast<unsigned long long>(child_iid), k_mark_value);
+        static_cast<unsigned long long>(child_iid), k_mark_value);
     const auto mark_start = std::chrono::steady_clock::now();
     try {
         Child_service::rpc_mark(child_iid, k_mark_value);
@@ -319,17 +317,17 @@ int run_coordinator(const std::string& binary_path)
         return teardown_and_return(1);
     }
     const auto mark_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - mark_start).count();
+        std::chrono::steady_clock::now() - mark_start
+    ).count();
     // Fire-and-forget must not block on a remote round-trip.
-    if (!sintra::test::assert_true(mark_elapsed < 500,
-                                   "[COORD] ",
-                                   "fire-and-forget rpc_mark must return quickly (no remote wait)"))
+    if (!sintra::test::assert_true(
+            mark_elapsed < 500, "[COORD] ", "fire-and-forget rpc_mark must return quickly (no remote wait)"))
     {
         return teardown_and_return(1);
     }
 
     // ---- 5. wait for the child's targeted Sintra ack ----------------------
-    bool got_ack = false;
+    bool got_ack        = false;
     int  observed_value = 0;
     {
         Ack_state& st = parent_ack_state();
@@ -340,12 +338,12 @@ int run_coordinator(const std::string& binary_path)
 
     bool ok = true;
     ok &= sintra::test::assert_true(got_ack,
-                                    "[COORD] ",
-                                    "child mark() must report execution back via Parent_ack::rpc_mark_seen");
+        "[COORD] ",
+        "child mark() must report execution back via Parent_ack::rpc_mark_seen");
     if (got_ack) {
         ok &= sintra::test::assert_true(observed_value == k_mark_value,
-                                        "[COORD] ",
-                                        "child mark() must observe the value sent by the parent");
+            "[COORD] ",
+            "child mark() must observe the value sent by the parent");
     }
 
     sintra::world() << Done_signal{};

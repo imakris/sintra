@@ -22,7 +22,8 @@
 #endif
 
 #if HAS_OS_SYNC
-class os_sync_not_supported : public std::runtime_error {
+class os_sync_not_supported : public std::runtime_error
+{
 public:
     explicit os_sync_not_supported(const char* function_name)
         : std::runtime_error(std::string(function_name) + " not supported on this macOS version")
@@ -40,7 +41,8 @@ public:
 }
 
 // os_sync implementation
-class os_sync_semaphore {
+class os_sync_semaphore
+{
 public:
     explicit os_sync_semaphore(unsigned int initial_count = 0) {
         m_count = static_cast<int32_t>(initial_count);
@@ -91,12 +93,8 @@ private:
                 sizeof(int32_t),
                 OS_SYNC_WAKE_BY_ADDRESS_SHARED);
 
-            if (rc == 0 || (rc == -1 && errno == ENOENT)) {
-                return;
-            }
-            if (errno == EINTR) {
-                continue;
-            }
+            if (rc == 0 || (rc == -1 && errno == ENOENT)) { return;   }
+            if (errno == EINTR)                           { continue; }
             handle_os_sync_error("os_sync_wake_by_address_any");
         }
     }
@@ -144,9 +142,9 @@ double benchmark_producer_consumer(int num_producers, int num_consumers, int ite
 
     // Launch consumers
     std::vector<std::thread> consumers;
-    int total_items = num_producers * items_per_producer;
+    int total_items        = num_producers * items_per_producer;
     int items_per_consumer = total_items / num_consumers;
-    int extra = total_items % num_consumers;
+    int extra              = total_items % num_consumers;
 
     for (int c = 0; c < num_consumers; ++c) {
         int my_items = items_per_consumer + (c < extra ? 1 : 0);
@@ -165,8 +163,12 @@ double benchmark_producer_consumer(int num_producers, int num_consumers, int ite
     }
 
     // Wait for completion
-    for (auto& t : producers) t.join();
-    for (auto& t : consumers) t.join();
+    for (auto& t : producers) {
+        t.join();
+    }
+    for (auto& t : consumers) {
+        t.join();
+    }
 
     if (first_exception) {
         std::rethrow_exception(first_exception);
@@ -181,10 +183,10 @@ int main() {
     std::cout << "Primitive: os_sync_wait_on_address/os_sync_wake_by_address_any" << std::endl;
     std::cout << std::endl;
 
-    const int num_producers = 3;
-    const int num_consumers = 4;
+    const int num_producers      = 3;
+    const int num_consumers      = 4;
     const int items_per_producer = 5000;
-    const int total_items = num_producers * items_per_producer;
+    const int total_items        = num_producers * items_per_producer;
 
     std::cout << "Configuration:" << std::endl;
     std::cout << "  Producers: " << num_producers << std::endl;

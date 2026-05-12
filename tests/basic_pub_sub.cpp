@@ -137,8 +137,8 @@ int process_sender()
 
     sintra::test::Shared_directory shared("SINTRA_TEST_SHARED_DIR", "basic_pub_sub");
     const auto shared_dir = shared.path();
-    const auto strings = read_strings(shared_dir / "strings.txt");
-    const auto ints = read_ints(shared_dir / "ints.txt");
+    const auto strings    = read_strings(shared_dir / "strings.txt");
+    const auto ints       = read_ints(shared_dir / "ints.txt");
 
     std::vector<std::string> expected_strings;
     expected_strings.reserve(k_message_rounds * k_base_string_messages.size());
@@ -249,8 +249,8 @@ int main(int argc, char* argv[])
             std::ifstream in(result_path, std::ios::binary);
             if (!in) {
                 std::fprintf(stderr,
-                             "Error: failed to open result file at %s\n",
-                             result_path.string().c_str());
+                    "Error: failed to open result file at %s\n",
+                    result_path.string().c_str());
                 return 1;
             }
             std::string status;

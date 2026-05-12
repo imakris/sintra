@@ -32,9 +32,10 @@ struct Test_bus : sintra::Derived_transceiver<Test_bus>
     SINTRA_RPC(get_value)
 };
 
-bool verify_resolve(const char* name,
-                    sintra::instance_id_type expected,
-                    const char* context)
+bool verify_resolve(
+    const char*                name,
+    sintra::instance_id_type   expected,
+    const char*                context)
 {
     const auto resolved = sintra::Coordinator::rpc_resolve_instance(
         s_coord_id,
@@ -42,15 +43,15 @@ bool verify_resolve(const char* name,
 
     if (resolved == sintra::invalid_instance_id) {
         std::fprintf(stderr, "%s: failed to resolve instance by name '%s'\n",
-                     context, name);
+            context, name);
         return false;
     }
 
     if (resolved != expected) {
         std::fprintf(stderr, "%s: resolved ID %llu does not match expected %llu\n",
-                     context,
-                     (unsigned long long)resolved,
-                     (unsigned long long)expected);
+            context,
+            (unsigned long long)resolved,
+            (unsigned long long)expected);
         return false;
     }
 
@@ -109,7 +110,7 @@ int test_nullptr_constructor()
         "");
     if (resolved != sintra::invalid_instance_id) {
         std::fprintf(stderr,
-                     "nullptr constructor: empty name should not be resolvable\n");
+            "nullptr constructor: empty name should not be resolvable\n");
         return 1;
     }
 
@@ -166,13 +167,13 @@ int test_named_transceiver_publish_and_resolve()
     // Verify the resolved ID matches the bus's instance ID
     if (resolved != bus.instance_id()) {
         std::fprintf(stderr, "Resolved ID %llu does not match bus instance ID %llu\n",
-                     (unsigned long long)resolved,
-                     (unsigned long long)bus.instance_id());
+            (unsigned long long)resolved,
+            (unsigned long long)bus.instance_id());
         return 1;
     }
 
     std::fprintf(stderr, "Successfully resolved '%s' to instance ID %llu\n",
-                 bus_name, (unsigned long long)resolved);
+        bus_name, (unsigned long long)resolved);
 
     return 0;
 }

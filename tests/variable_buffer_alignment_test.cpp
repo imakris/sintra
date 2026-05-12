@@ -19,9 +19,9 @@ static_assert(std::is_trivially_copyable_v<Aligned16>, "Aligned16 must be trivia
 
 struct Alignment_payload
 {
-    sintra::typed_variable_buffer<std::vector<char>> chars;
-    sintra::typed_variable_buffer<std::vector<Aligned16>> aligned_values;
-    sintra::typed_variable_buffer<std::vector<double>> doubles;
+    sintra::typed_variable_buffer<std::vector<char>>       chars;
+    sintra::typed_variable_buffer<std::vector<Aligned16>>  aligned_values;
+    sintra::typed_variable_buffer<std::vector<double>>     doubles;
 };
 
 bool is_aligned(const void* ptr, std::size_t alignment)
@@ -40,13 +40,13 @@ int main()
     std::vector<double> doubles = {1.0, 2.0, 3.0, 4.0};
 
     const std::size_t expected_extra = sintra::vb_size<Alignment_message>(chars, aligned_values, doubles);
-    const std::size_t total_size = sizeof(Alignment_message) + expected_extra;
+    const std::size_t total_size     = sizeof(Alignment_message) + expected_extra;
 
-    void* raw = ::operator new(total_size, std::align_val_t(alignof(Alignment_message)));
+    void*              raw     = ::operator new(total_size, std::align_val_t(alignof(Alignment_message)));
     Alignment_message* message = new (raw) Alignment_message(chars, aligned_values, doubles);
 
-    const auto* base = reinterpret_cast<const char*>(message);
-    const auto* chars_ptr = static_cast<const char*>(message->chars.data_address());
+    const auto* base        = reinterpret_cast<const char*>(message);
+    const auto* chars_ptr   = static_cast<const char*>(message->chars.data_address());
     const auto* aligned_ptr = static_cast<const Aligned16*>(message->aligned_values.data_address());
     const auto* doubles_ptr = static_cast<const double*>(message->doubles.data_address());
 

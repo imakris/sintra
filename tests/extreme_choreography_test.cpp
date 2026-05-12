@@ -122,48 +122,48 @@ enum class Failure_code : int {
 
 struct Phase_start
 {
-    int phase;
+    int    phase;
 };
 
 struct Payload
 {
-    int phase;
-    int producer;
-    int sequence;
+    int    phase;
+    int    producer;
+    int    sequence;
 };
 
 struct Heartbeat
 {
-    int phase;
-    int producer;
-    int tick;
+    int    phase;
+    int    producer;
+    int    tick;
 };
 
 struct Ack
 {
-    int phase;
-    int producer;
-    int sequence;
-    int consumer;
+    int    phase;
+    int    producer;
+    int    sequence;
+    int    consumer;
 };
 
 struct Phase_fence
 {
-    int phase;
+    int    phase;
 };
 
 struct Phase_complete
 {
-    int phase;
-    int ack_count;
+    int    phase;
+    int    ack_count;
 };
 
 struct Failure_notice
 {
-    int actor;
-    int phase;
-    int code;
-    char message[96];
+    int    actor;
+    int    phase;
+    int    code;
+    char   message[96];
 };
 
 struct Stop
@@ -201,7 +201,7 @@ void send_failure_notice(Actor actor, int phase, Failure_code code, const std::s
     Failure_notice notice{};
     notice.actor = static_cast<int>(actor);
     notice.phase = phase;
-    notice.code = static_cast<int>(code);
+    notice.code  = static_cast<int>(code);
     std::snprintf(notice.message, sizeof(notice.message), "%s", text.c_str());
     sintra::world() << notice;
 }
@@ -210,8 +210,8 @@ std::string describe_failure(Actor actor, int phase, Failure_code code, const ch
 {
     std::ostringstream oss;
     oss << "actor=" << static_cast<int>(actor)
-        << " phase=" << phase
-        << " code=" << static_cast<int>(code)
+        << " phase="   << phase
+        << " code="    << static_cast<int>(code)
         << " message=" << message;
     return oss.str();
 }
@@ -227,19 +227,19 @@ int coordinator_process()
     std::mutex mutex;
     std::condition_variable cv;
     std::array<bool, k_phase_count> completed{};
-    bool stop_requested = false;
+    bool stop_requested   = false;
     bool failure_observed = false;
 
     auto phase_complete_slot = [&](const Phase_complete& msg) {
         if (msg.phase < 0 || static_cast<std::size_t>(msg.phase) >= k_phase_count) {
             send_failure_notice(Actor::Coordinator, msg.phase, Failure_code::CompletionMismatch,
-                                "phase complete outside range");
+                "phase complete outside range");
             return;
         }
         const auto expected = k_phase_totals[msg.phase];
         if (msg.ack_count != expected) {
             send_failure_notice(Actor::Coordinator, msg.phase, Failure_code::CompletionMismatch,
-                                "ack total mismatch");
+                "ack total mismatch");
             failure_observed = true;
         }
 
@@ -257,7 +257,7 @@ int coordinator_process()
         }
         else {
             send_failure_notice(Actor::Coordinator, fence.phase, Failure_code::FenceResent,
-                                "received fence outside configured phases");
+                "received fence outside configured phases");
         }
     };
 
@@ -283,7 +283,7 @@ int coordinator_process()
         if (!completed_phase) {
             failure_observed = true;
             send_failure_notice(Actor::Coordinator, static_cast<int>(phase),
-                                Failure_code::CoordinatorTimeout, "phase completion timed out");
+                Failure_code::CoordinatorTimeout, "phase completion timed out");
         }
     }
 
@@ -322,7 +322,7 @@ int producer_process()
     auto phase_start_slot = [&](const Phase_start& start) {
         if (start.phase < 0 || static_cast<std::size_t>(start.phase) >= k_phase_count) {
             send_failure_notice(static_cast<Actor>(Actor::Producer0 + ProducerId), start.phase,
-                                Failure_code::UnexpectedPhase_start, "phase index out of range");
+                Failure_code::UnexpectedPhase_start, "phase index out of range");
             return;
         }
 
@@ -342,7 +342,7 @@ int producer_process()
     auto fence_slot = [&](const Phase_fence& fence) {
         if (fence.phase < 0 || static_cast<std::size_t>(fence.phase) >= k_phase_count) {
             send_failure_notice(static_cast<Actor>(Actor::Producer0 + ProducerId), fence.phase,
-                                Failure_code::FenceResent, "fence outside valid phase range");
+                Failure_code::FenceResent, "fence outside valid phase range");
             return;
         }
         const auto& name = fence_names()[fence.phase];
@@ -352,13 +352,13 @@ int producer_process()
     auto completion_slot = [&](const Phase_complete& complete) {
         if (complete.phase < 0 || static_cast<std::size_t>(complete.phase) >= k_phase_count) {
             send_failure_notice(static_cast<Actor>(Actor::Producer0 + ProducerId), complete.phase,
-                                Failure_code::CompletionMismatch, "completion outside valid range");
+                Failure_code::CompletionMismatch, "completion outside valid range");
             return;
         }
         const int expected = k_phase_totals[complete.phase];
         if (complete.ack_count != expected) {
             send_failure_notice(static_cast<Actor>(Actor::Producer0 + ProducerId), complete.phase,
-                                Failure_code::CompletionMismatch, "unexpected ack total from aggregator");
+                Failure_code::CompletionMismatch, "unexpected ack total from aggregator");
         }
     };
 
@@ -409,22 +409,22 @@ int consumer_process()
     auto payload_slot = [&](const Payload& payload) {
         if (payload.phase < 0 || static_cast<std::size_t>(payload.phase) >= k_phase_count) {
             send_failure_notice(static_cast<Actor>(Actor::Consumer0 + ConsumerId), payload.phase,
-                                Failure_code::SequenceOutOfRange, "payload phase out of range");
+                Failure_code::SequenceOutOfRange, "payload phase out of range");
             return;
         }
         if (payload.producer < 0 || static_cast<std::size_t>(payload.producer) >= k_producer_count) {
             send_failure_notice(static_cast<Actor>(Actor::Consumer0 + ConsumerId), payload.phase,
-                                Failure_code::SequenceOutOfRange, "payload producer invalid");
+                Failure_code::SequenceOutOfRange, "payload producer invalid");
             return;
         }
 
-        const bool handles_even = (ConsumerId == 0);
+        const bool handles_even  = (ConsumerId == 0);
         const bool should_handle = ((payload.sequence % 2) == 0) == handles_even;
         if (!should_handle) {
             return;
         }
 
-        bool duplicate = false;
+        bool duplicate   = false;
         bool range_error = false;
 
         {
@@ -445,12 +445,12 @@ int consumer_process()
 
         if (range_error) {
             send_failure_notice(static_cast<Actor>(Actor::Consumer0 + ConsumerId), payload.phase,
-                                Failure_code::SequenceOutOfRange, "payload sequence outside configured range");
+                Failure_code::SequenceOutOfRange, "payload sequence outside configured range");
             return;
         }
         if (duplicate) {
             send_failure_notice(static_cast<Actor>(Actor::Consumer0 + ConsumerId), payload.phase,
-                                Failure_code::DuplicatePayload, "duplicate payload detected");
+                Failure_code::DuplicatePayload, "duplicate payload detected");
             return;
         }
 
@@ -463,7 +463,7 @@ int consumer_process()
     auto fence_slot = [&](const Phase_fence& fence) {
         if (fence.phase < 0 || static_cast<std::size_t>(fence.phase) >= k_phase_count) {
             send_failure_notice(static_cast<Actor>(Actor::Consumer0 + ConsumerId), fence.phase,
-                                Failure_code::FenceResent, "invalid fence phase");
+                Failure_code::FenceResent, "invalid fence phase");
             return;
         }
         const auto& name = fence_names()[fence.phase];
@@ -473,7 +473,7 @@ int consumer_process()
     auto completion_slot = [&](const Phase_complete& complete) {
         if (complete.phase < 0 || static_cast<std::size_t>(complete.phase) >= k_phase_count) {
             send_failure_notice(static_cast<Actor>(Actor::Consumer0 + ConsumerId), complete.phase,
-                                Failure_code::CompletionMismatch, "completion outside range");
+                Failure_code::CompletionMismatch, "completion outside range");
             return;
         }
         const int expected = k_consumer_expectations[ConsumerId][complete.phase];
@@ -482,11 +482,11 @@ int consumer_process()
             std::ostringstream oss;
             oss << "consumer processed=" << observed << " expected=" << expected;
             send_failure_notice(static_cast<Actor>(Actor::Consumer0 + ConsumerId), complete.phase,
-                                Failure_code::CompletionMismatch, oss.str());
+                Failure_code::CompletionMismatch, oss.str());
         }
         if (complete.ack_count != k_phase_totals[complete.phase]) {
             send_failure_notice(static_cast<Actor>(Actor::Consumer0 + ConsumerId), complete.phase,
-                                Failure_code::CompletionMismatch, "aggregator ack mismatch reported");
+                Failure_code::CompletionMismatch, "aggregator ack mismatch reported");
         }
     };
 
@@ -528,12 +528,12 @@ int monitor_process()
     auto heartbeat_slot = [&](const Heartbeat& heartbeat) {
         if (heartbeat.phase < 0 || static_cast<std::size_t>(heartbeat.phase) >= k_phase_count) {
             send_failure_notice(Actor::Monitor, heartbeat.phase, Failure_code::SequenceOutOfRange,
-                                "heartbeat phase out of range");
+                "heartbeat phase out of range");
             return;
         }
         if (heartbeat.producer < 0 || static_cast<std::size_t>(heartbeat.producer) >= k_producer_count) {
             send_failure_notice(Actor::Monitor, heartbeat.phase, Failure_code::SequenceOutOfRange,
-                                "heartbeat producer invalid");
+                "heartbeat producer invalid");
             return;
         }
 
@@ -543,7 +543,7 @@ int monitor_process()
             std::ostringstream oss;
             oss << "tick=" << heartbeat.tick << " expected=" << counter;
             send_failure_notice(Actor::Monitor, heartbeat.phase, Failure_code::HeartbeatOutOfOrder,
-                                oss.str());
+                oss.str());
             counter = heartbeat.tick + 1; // resynchronise to avoid cascading failures
         }
         else {
@@ -554,7 +554,7 @@ int monitor_process()
     auto fence_slot = [&](const Phase_fence& fence) {
         if (fence.phase < 0 || static_cast<std::size_t>(fence.phase) >= k_phase_count) {
             send_failure_notice(Actor::Monitor, fence.phase, Failure_code::FenceResent,
-                                "monitor received fence outside range");
+                "monitor received fence outside range");
             return;
         }
         const auto& name = fence_names()[fence.phase];
@@ -564,7 +564,7 @@ int monitor_process()
     auto completion_slot = [&](const Phase_complete& complete) {
         if (complete.phase < 0 || static_cast<std::size_t>(complete.phase) >= k_phase_count) {
             send_failure_notice(Actor::Monitor, complete.phase, Failure_code::CompletionMismatch,
-                                "monitor completion outside range");
+                "monitor completion outside range");
             return;
         }
 
@@ -576,7 +576,7 @@ int monitor_process()
                 std::ostringstream oss;
                 oss << "producer=" << producer << " observed=" << observed << " expected=" << expected;
                 send_failure_notice(Actor::Monitor, complete.phase, Failure_code::HeartbeatMissing,
-                                    oss.str());
+                    oss.str());
             }
         }
     };
@@ -610,8 +610,10 @@ int aggregator_process()
 {
     using namespace sintra;
 
-    sintra::test::Shared_directory shared("SINTRA_EXTREME_CHOREOGRAPHY_DIR", "extreme_choreography");
-    const auto shared_dir = shared.path();
+    sintra::test::Shared_directory shared(
+        "SINTRA_EXTREME_CHOREOGRAPHY_DIR",
+        "extreme_choreography");
+    const auto shared_dir   = shared.path();
     const auto summary_path = shared_dir / "extreme_summary.txt";
 
     Sequence_tracker tracker = make_sequence_tracker();
@@ -623,10 +625,15 @@ int aggregator_process()
     std::mutex mutex;
     std::condition_variable cv;
     bool stop_requested = false;
-    bool failure_flag = false;
+    bool failure_flag   = false;
     std::vector<std::string> failure_messages;
 
-    auto record_failure_locked = [&](Actor actor, int phase, Failure_code code, const char* message) {
+    auto record_failure_locked = [&](
+        Actor          actor,
+        int            phase,
+        Failure_code   code,
+        const char*    message)
+    {
         failure_flag = true;
         failure_messages.push_back(describe_failure(actor, phase, code, message));
     };
@@ -634,14 +641,14 @@ int aggregator_process()
     auto phase_start_slot = [&](const Phase_start& start) {
         if (start.phase < 0 || static_cast<std::size_t>(start.phase) >= k_phase_count) {
             send_failure_notice(Actor::Aggregator, start.phase, Failure_code::UnexpectedPhase_start,
-                                "aggregator received invalid phase start");
+                "aggregator received invalid phase start");
             return;
         }
 
         std::lock_guard<std::mutex> lk(mutex);
         if (phase_started[start.phase]) {
             record_failure_locked(Actor::Aggregator, start.phase, Failure_code::UnexpectedPhase_start,
-                                  "duplicate phase start");
+                "duplicate phase start");
         }
         else {
             phase_started[start.phase] = true;
@@ -655,41 +662,41 @@ int aggregator_process()
 
     auto ack_slot = [&](const Ack& ack) {
         bool trigger_completion = false;
-        int completion_phase = -1;
-        int completion_count = 0;
+        int  completion_phase   = -1;
+        int  completion_count   = 0;
 
         {
             std::lock_guard<std::mutex> lk(mutex);
             if (ack.phase < 0 || static_cast<std::size_t>(ack.phase) >= k_phase_count) {
                 record_failure_locked(Actor::Aggregator, ack.phase, Failure_code::AckBeforeStart,
-                                      "ack phase outside range");
+                    "ack phase outside range");
                 return;
             }
             if (!phase_started[ack.phase]) {
                 record_failure_locked(Actor::Aggregator, ack.phase, Failure_code::AckBeforeStart,
-                                      "ack received before phase start");
+                    "ack received before phase start");
                 return;
             }
             if (phase_finalised[ack.phase]) {
                 record_failure_locked(Actor::Aggregator, ack.phase, Failure_code::AckOverflow,
-                                      "ack received after phase finalised");
+                    "ack received after phase finalised");
                 return;
             }
             if (ack.producer < 0 || static_cast<std::size_t>(ack.producer) >= k_producer_count) {
                 record_failure_locked(Actor::Aggregator, ack.phase, Failure_code::AckBeforeStart,
-                                      "ack producer invalid");
+                    "ack producer invalid");
                 return;
             }
 
             auto& flags = tracker[ack.phase][ack.producer];
             if (ack.sequence < 0 || ack.sequence >= static_cast<int>(flags.size())) {
                 record_failure_locked(Actor::Aggregator, ack.phase, Failure_code::SequenceOutOfRange,
-                                      "ack sequence out of range");
+                    "ack sequence out of range");
                 return;
             }
             if (flags[ack.sequence]) {
                 record_failure_locked(Actor::Aggregator, ack.phase, Failure_code::DuplicatePayload,
-                                      "duplicate ack received");
+                    "duplicate ack received");
                 return;
             }
 
@@ -707,7 +714,7 @@ int aggregator_process()
             else
             if (ack_counts[ack.phase] > expected) {
                 record_failure_locked(Actor::Aggregator, ack.phase, Failure_code::AckOverflow,
-                                      "ack count exceeded expected total");
+                    "ack count exceeded expected total");
             }
         }
 
@@ -723,16 +730,16 @@ int aggregator_process()
         std::lock_guard<std::mutex> lk(mutex);
         failure_flag = true;
         failure_messages.emplace_back(describe_failure(static_cast<Actor>(notice.actor),
-                                                       notice.phase,
-                                                       static_cast<Failure_code>(notice.code),
-                                                       notice.message));
+            notice.phase,
+            static_cast<Failure_code>(notice.code),
+            notice.message));
     };
 
     auto fence_slot = [&](const Phase_fence& fence) {
         if (fence.phase < 0 || static_cast<std::size_t>(fence.phase) >= k_phase_count) {
             std::lock_guard<std::mutex> lk(mutex);
             record_failure_locked(Actor::Aggregator, fence.phase, Failure_code::FenceResent,
-                                  "aggregator unexpectedly received fence broadcast");
+                "aggregator unexpectedly received fence broadcast");
         }
     };
 
@@ -790,8 +797,10 @@ int aggregator_process()
 int main(int argc, char* argv[])
 {
     const bool is_spawned = sintra::test::has_branch_flag(argc, argv);
-    sintra::test::Shared_directory shared("SINTRA_EXTREME_CHOREOGRAPHY_DIR", "extreme_choreography");
-    const auto shared_dir = shared.path();
+    sintra::test::Shared_directory shared(
+        "SINTRA_EXTREME_CHOREOGRAPHY_DIR",
+        "extreme_choreography");
+    const auto shared_dir   = shared.path();
     const auto summary_path = shared_dir / "extreme_summary.txt";
 
     if (!is_spawned) {
@@ -876,4 +885,3 @@ int main(int argc, char* argv[])
 
     return 0;
 }
-

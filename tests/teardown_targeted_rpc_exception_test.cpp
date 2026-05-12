@@ -60,8 +60,8 @@ std::string read_text(const std::filesystem::path& path)
 }
 
 std::string wait_for_nonempty_text(
-    const std::filesystem::path& path,
-    std::chrono::milliseconds timeout)
+    const std::filesystem::path&   path,
+    std::chrono::milliseconds      timeout)
 {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
@@ -76,10 +76,10 @@ std::string wait_for_nonempty_text(
 
 template <typename Handle>
 bool expect_runtime_error_reply(
-    Handle& handle,
-    std::string_view context)
+    Handle&            handle,
+    std::string_view   context)
 {
-    bool ok = true;
+    bool       ok          = true;
     const auto wait_status = handle.wait_until(std::chrono::steady_clock::now() + 2s);
     ok &= sintra::test::assert_true(
         wait_status == sintra::Rpc_wait_status::completed,
@@ -123,12 +123,12 @@ bool expect_runtime_error_reply(
     }
     catch (const std::exception& ex) {
         std::fprintf(stderr,
-                     "%.*s%.*s threw unexpected std::exception: %s\n",
-                     static_cast<int>(k_prefix.size()),
-                     k_prefix.data(),
-                     static_cast<int>(context.size()),
-                     context.data(),
-                     ex.what());
+            "%.*s%.*s threw unexpected std::exception: %s\n",
+            static_cast<int>(k_prefix.size()),
+            k_prefix.data(),
+            static_cast<int>(context.size()),
+            context.data(),
+            ex.what());
         ok = false;
     }
     catch (...) {
@@ -143,7 +143,7 @@ bool expect_runtime_error_reply(
 
 bool test_local_targeted_rpc_exception()
 {
-    auto service = std::make_unique<Teardown_service>();
+    auto       service    = std::make_unique<Teardown_service>();
     const auto target_iid = service->instance_id();
 
     {
@@ -213,7 +213,7 @@ int coordinator_action(const std::filesystem::path& shared_dir)
         return 1;
     }
 
-    auto service = std::make_unique<Teardown_service>();
+    auto       service    = std::make_unique<Teardown_service>();
     const auto target_iid = service->instance_id();
     write_text(
         target_path(shared_dir),
@@ -221,8 +221,8 @@ int coordinator_action(const std::filesystem::path& shared_dir)
 
     if (wait_for_nonempty_text(worker_ready_path(shared_dir), k_ready_timeout).empty()) {
         std::fprintf(stderr, "%.*sworker did not become ready\n",
-                     static_cast<int>(k_prefix.size()),
-                     k_prefix.data());
+            static_cast<int>(k_prefix.size()),
+            k_prefix.data());
         return 1;
     }
 
@@ -235,15 +235,15 @@ int coordinator_action(const std::filesystem::path& shared_dir)
         const auto worker_result = wait_for_nonempty_text(worker_result_path(shared_dir), k_ready_timeout);
         if (worker_result.empty()) {
             std::fprintf(stderr, "%.*sworker result missing\n",
-                         static_cast<int>(k_prefix.size()),
-                         k_prefix.data());
+                static_cast<int>(k_prefix.size()),
+                k_prefix.data());
             return 1;
         }
         if (worker_result != "ok") {
             std::fprintf(stderr, "%.*s%s\n",
-                         static_cast<int>(k_prefix.size()),
-                         k_prefix.data(),
-                         worker_result.c_str());
+                static_cast<int>(k_prefix.size()),
+                k_prefix.data(),
+                worker_result.c_str());
             return 1;
         }
     }

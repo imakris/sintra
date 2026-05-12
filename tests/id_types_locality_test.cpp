@@ -20,7 +20,7 @@ void run_cases_for_local_process(std::uint32_t local_process_index)
 {
     sintra::s_mproc_id = sintra::make_process_instance_id(local_process_index);
 
-    const auto local_instance = sintra::compose_instance(local_process_index, 7);
+    const auto local_instance  = sintra::compose_instance(local_process_index, 7);
     const auto remote_instance = sintra::compose_instance(local_process_index + 1, 7);
     const auto all_except_process_2 =
         sintra::compose_instance(static_cast<std::uint32_t>(~std::uint32_t{2}), 7);

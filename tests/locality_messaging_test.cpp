@@ -84,9 +84,14 @@ void trace(const char* label)
     std::fflush(stderr);
 }
 
-void write_counts(const std::filesystem::path& file,
-                  int local_count, int remote_count, int world_count,
-                  int typed_local_count, int typed_remote_count, int typed_global_count)
+void write_counts(
+    const std::filesystem::path&   file,
+    int                            local_count,
+    int                            remote_count,
+    int                            world_count,
+    int                            typed_local_count,
+    int                            typed_remote_count,
+    int                            typed_global_count)
 {
     std::ofstream out(file, std::ios::binary | std::ios::trunc);
     if (!out) {
@@ -100,9 +105,14 @@ void write_counts(const std::filesystem::path& file,
         << typed_global_count << '\n';
 }
 
-bool read_counts(const std::filesystem::path& file,
-                 int& local_count, int& remote_count, int& world_count,
-                 int& typed_local_count, int& typed_remote_count, int& typed_global_count)
+bool read_counts(
+    const std::filesystem::path&   file,
+    int&                           local_count,
+    int&                           remote_count,
+    int&                           world_count,
+    int&                           typed_local_count,
+    int&                           typed_remote_count,
+    int&                           typed_global_count)
 {
     std::ifstream in(file, std::ios::binary);
     if (!in) {
@@ -181,12 +191,12 @@ int child_process()
     sintra::test::Shared_directory shared("SINTRA_LOCALITY_TEST_DIR", "locality_messaging");
     const auto shared_dir = shared.path();
     write_counts(shared_dir / "child_counts.txt",
-                 g_child_local_count.load(),
-                 g_child_remote_count.load(),
-                 g_child_world_count.load(),
-                 g_child_typed_local_count.load(),
-                 g_child_typed_remote_count.load(),
-                 g_child_typed_global_count.load());
+        g_child_local_count.load(),
+        g_child_remote_count.load(),
+        g_child_world_count.load(),
+        g_child_typed_local_count.load(),
+        g_child_typed_remote_count.load(),
+        g_child_typed_global_count.load());
 
     return 0;
 }
@@ -267,12 +277,12 @@ int main(int argc, char* argv[])
 
         // Write coordinator results
         write_counts(shared_dir / "coord_counts.txt",
-                     g_coord_local_count.load(),
-                     g_coord_remote_count.load(),
-                     g_coord_world_count.load(),
-                     g_coord_typed_local_count.load(),
-                     g_coord_typed_remote_count.load(),
-                     g_coord_typed_global_count.load());
+            g_coord_local_count.load(),
+            g_coord_remote_count.load(),
+            g_coord_world_count.load(),
+            g_coord_typed_local_count.load(),
+            g_coord_typed_remote_count.load(),
+            g_coord_typed_global_count.load());
 
     }
 
@@ -285,12 +295,17 @@ int main(int argc, char* argv[])
         int child_local, child_remote, child_world;
         int child_typed_local, child_typed_remote, child_typed_global;
 
-        bool read_ok = read_counts(shared_dir / "coord_counts.txt",
-                                   coord_local, coord_remote, coord_world,
-                                   coord_typed_local, coord_typed_remote, coord_typed_global);
+        bool read_ok = read_counts(
+            shared_dir / "coord_counts.txt",
+            coord_local,
+            coord_remote,
+            coord_world,
+            coord_typed_local,
+            coord_typed_remote,
+            coord_typed_global);
         read_ok = read_ok && read_counts(shared_dir / "child_counts.txt",
-                                          child_local, child_remote, child_world,
-                                          child_typed_local, child_typed_remote, child_typed_global);
+            child_local, child_remote, child_world,
+            child_typed_local, child_typed_remote, child_typed_global);
 
         if (!read_ok) {
             std::fprintf(stderr, "FAIL: Could not read result files\n");
@@ -303,7 +318,7 @@ int main(int argc, char* argv[])
         // local() should only reach coordinator
         if (coord_local != k_num_messages) {
             std::fprintf(stderr, "FAIL: local() coordinator expected %d, got %d\n",
-                         k_num_messages, coord_local);
+                k_num_messages, coord_local);
             passed = false;
         }
         if (child_local != 0) {
@@ -318,19 +333,19 @@ int main(int argc, char* argv[])
         }
         if (child_remote != k_num_messages) {
             std::fprintf(stderr, "FAIL: remote() child expected %d, got %d\n",
-                         k_num_messages, child_remote);
+                k_num_messages, child_remote);
             passed = false;
         }
 
         // world() should reach both
         if (coord_world != k_num_messages) {
             std::fprintf(stderr, "FAIL: world() coordinator expected %d, got %d\n",
-                         k_num_messages, coord_world);
+                k_num_messages, coord_world);
             passed = false;
         }
         if (child_world != k_num_messages) {
             std::fprintf(stderr, "FAIL: world() child expected %d, got %d\n",
-                         k_num_messages, child_world);
+                k_num_messages, child_world);
             passed = false;
         }
 
@@ -338,7 +353,7 @@ int main(int argc, char* argv[])
         // emit_local should only reach coordinator
         if (coord_typed_local != k_num_messages) {
             std::fprintf(stderr, "FAIL: emit_local() coordinator expected %d, got %d\n",
-                         k_num_messages, coord_typed_local);
+                k_num_messages, coord_typed_local);
             passed = false;
         }
         if (child_typed_local != 0) {
@@ -353,19 +368,19 @@ int main(int argc, char* argv[])
         }
         if (child_typed_remote != k_num_messages) {
             std::fprintf(stderr, "FAIL: emit_remote() child expected %d, got %d\n",
-                         k_num_messages, child_typed_remote);
+                k_num_messages, child_typed_remote);
             passed = false;
         }
 
         // emit_global should reach both
         if (coord_typed_global != k_num_messages) {
             std::fprintf(stderr, "FAIL: emit_global() coordinator expected %d, got %d\n",
-                         k_num_messages, coord_typed_global);
+                k_num_messages, coord_typed_global);
             passed = false;
         }
         if (child_typed_global != k_num_messages) {
             std::fprintf(stderr, "FAIL: emit_global() child expected %d, got %d\n",
-                         k_num_messages, child_typed_global);
+                k_num_messages, child_typed_global);
             passed = false;
         }
 

@@ -87,8 +87,8 @@ inline void log_raw(log_level level, const char* message)
     if (!message) {
         return;
     }
-    log_callback_fn callback = nullptr;
-    void* user_data = nullptr;
+    log_callback_fn callback  = nullptr;
+    void*           user_data = nullptr;
     {
         std::lock_guard<std::mutex> guard(detail::log_mutex());
         callback = detail::log_callback_storage();
@@ -108,9 +108,10 @@ class Log_stream
 {
 public:
     explicit Log_stream(log_level level, bool enabled = true, std::string postfix = {})
-        : m_level(level)
-        , m_enabled(enabled)
-        , m_postfix(std::move(postfix))
+    :
+        m_level(level),
+        m_enabled(enabled),
+        m_postfix(std::move(postfix))
     {}
 
     ~Log_stream() noexcept
@@ -130,10 +131,11 @@ public:
     Log_stream(const Log_stream&) = delete;
     Log_stream& operator=(const Log_stream&) = delete;
     Log_stream(Log_stream&& other) noexcept
-        : m_stream(std::move(other.m_stream))
-        , m_level(other.m_level)
-        , m_enabled(other.m_enabled)
-        , m_postfix(std::move(other.m_postfix))
+    :
+        m_stream(std::move(other.m_stream)),
+        m_level(other.m_level),
+        m_enabled(other.m_enabled),
+        m_postfix(std::move(other.m_postfix))
     {
         other.m_enabled = false;
         other.m_postfix.clear();
@@ -141,10 +143,10 @@ public:
     Log_stream& operator=(Log_stream&& other) noexcept
     {
         if (this != &other) {
-            m_stream = std::move(other.m_stream);
-            m_level = other.m_level;
-            m_enabled = other.m_enabled;
-            m_postfix = std::move(other.m_postfix);
+            m_stream        = std::move(other.m_stream);
+            m_level         = other.m_level;
+            m_enabled       = other.m_enabled;
+            m_postfix       = std::move(other.m_postfix);
             other.m_enabled = false;
             other.m_postfix.clear();
         }
@@ -162,15 +164,15 @@ public:
 
 private:
     std::ostringstream m_stream;
-    log_level m_level;
-    bool m_enabled{true};
-    std::string m_postfix;
+    log_level          m_level;
+    bool               m_enabled{true};
+    std::string        m_postfix;
 };
 
-inline Log_stream ls_info()    { return Log_stream(log_level::info); }
+inline Log_stream ls_info()    { return Log_stream(log_level::info);    }
 inline Log_stream ls_warning() { return Log_stream(log_level::warning); }
-inline Log_stream ls_error()   { return Log_stream(log_level::error); }
-inline Log_stream ls_debug()   { return Log_stream(log_level::debug); }
+inline Log_stream ls_error()   { return Log_stream(log_level::error);   }
+inline Log_stream ls_debug()   { return Log_stream(log_level::debug);   }
 
 namespace detail {
 
@@ -185,7 +187,8 @@ namespace detail {
 ///   std::thread(exception_boundary("signal_dispatch", signal_dispatch_loop)).detach();
 ///   exception_boundary("lifecycle_handler", [&]{ handler(event); })();
 ///
-struct exception_boundary {
+struct exception_boundary
+{
     const char* context;
 
     template <typename F>

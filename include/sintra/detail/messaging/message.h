@@ -75,13 +75,13 @@ constexpr int       message_ring_size    = 0x200000;
 struct variable_buffer
 {
     // this is set in the constructor of the derived type
-    size_t num_bytes = 0;
+    size_t                                 num_bytes                 = 0;
 
     // this is set by the message constructor
-    size_t offset_in_bytes = 0;
+    size_t                                 offset_in_bytes           = 0;
 
-    inline static thread_local char*     tl_message_start_address = nullptr;
-    inline static thread_local uint32_t* tl_pbytes_to_next_message = nullptr;
+    inline static thread_local char*       tl_message_start_address  = nullptr;
+    inline static thread_local uint32_t*   tl_pbytes_to_next_message = nullptr;
 
     bool empty() const { return num_bytes == 0; }
 
@@ -144,7 +144,7 @@ public:
         return T(typed_data, typed_data + num_elements);
     }
 
-    size_t size_bytes() const { return num_bytes; }
+    size_t size_bytes()        const { return num_bytes;       }
     size_t data_offset_bytes() const { return offset_in_bytes; }
     const void* data_address() const
     {
@@ -295,7 +295,7 @@ template <typename T>
 struct transformer<T, false, true>
 {
     using bare_type = std::remove_cvref_t<T>;
-    using type = std::conditional_t<
+    using type      = std::conditional_t<
         is_base_of<variable_buffer, bare_type>::value,
         std::remove_reference_t<T>,
         typed_variable_buffer<bare_type>
@@ -318,12 +318,12 @@ struct serializable_type_impl<SEQ_T, I, I, Args...>
 template <typename SEQ_T, int I, int J, typename... Args>
 struct serializable_type_impl
 {
-    using arg_type = typename detail::message_args_nth_type<SEQ_T, I>::type;
+    using arg_type         = typename detail::message_args_nth_type<SEQ_T, I>::type;
     using transformed_type =
         typename transformer<std::remove_reference_t<arg_type>>::type;
-    using aggregate_type =
+    using aggregate_type   =
         serializable_type_impl<SEQ_T, I + 1, J, Args..., transformed_type>;
-    using type = typename aggregate_type::type;
+    using type             = typename aggregate_type::type;
     static constexpr bool has_variable_buffers = aggregate_type::has_variable_buffers ||
         !is_same<
             std::remove_reference_t<arg_type>,
@@ -376,12 +376,13 @@ constexpr bool args_require_varbuffer =
 struct Message_prefix
 {
     // used by the serializer as a basic corruption check
-    const uint64_t magic                    = message_magic;
+    const uint64_t     magic = message_magic;
 
     // used by the serializer, set in constructor
-    uint32_t bytes_to_next_message          = 0;
+    uint32_t           bytes_to_next_message = 0;
 
-    union {
+    union
+    {
         // This is a cross-process type id. It is set in message constructor.
         type_id_type message_type_id        = invalid_type_id;
 
@@ -391,13 +392,13 @@ struct Message_prefix
 
     // Only instantiated in RPC messages, to associate the return messages with the original.
     // When this is set, the message_type_id becomes irrelevant.
-    instance_id_type function_instance_id   = invalid_instance_id;
+    instance_id_type   function_instance_id = invalid_instance_id;
 
     // used by the serializer, set in communicators
-    instance_id_type sender_instance_id     = invalid_instance_id;
+    instance_id_type   sender_instance_id   = invalid_instance_id;
 
     // used by the serializer, set in communicators
-    instance_id_type receiver_instance_id   = invalid_instance_id;
+    instance_id_type   receiver_instance_id = invalid_instance_id;
 };
 
 template <typename T>
@@ -413,9 +414,9 @@ template <
 >
 struct Message: public Message_prefix, public T
 {
-    using body_type = T;
+    using body_type   = T;
     using return_type = RT;
-    using exporter = EXPORTER;
+    using exporter    = EXPORTER;
 
     static constexpr type_id_type sintra_type_id()
     {
@@ -494,7 +495,8 @@ struct Message: public Message_prefix, public T
 // are controlled by the messaging layer and do not own heap memory beyond the
 // ring mapping itself.
 template <typename T, typename RT, type_id_type ID, typename EXPORTER>
-struct ring_payload_traits<Message<T, RT, ID, EXPORTER>> {
+struct ring_payload_traits<Message<T, RT, ID, EXPORTER>>
+{
     static constexpr bool allow_nontrivial = true;
 };
 
@@ -789,10 +791,10 @@ struct Message_ring_R: Ring_R<char>
     }
 
 public:
-    const uint64_t  m_id;
+    const uint64_t m_id;
 
 protected:
-    Range<char>     m_range;
+    Range<char>    m_range;
 };
 
 

@@ -35,22 +35,23 @@ void configure_temp_directory(const std::filesystem::path& path)
 #endif
 }
 
-void emit_stale_run_directory(const std::filesystem::path& base,
-                              std::uint32_t index)
+void emit_stale_run_directory(
+    const std::filesystem::path&   base,
+    std::uint32_t                  index)
 {
     auto dir = base / ("stale_run_" + std::to_string(index));
     std::filesystem::create_directories(dir);
 
     sintra::run_marker_record record{};
-    record.pid = 100000u + index; // Very unlikely to collide with a real PID
-    record.start_stamp = static_cast<std::uint64_t>(index + 1);
+    record.pid                  = 100000u + index; // Very unlikely to collide with a real PID
+    record.start_stamp          = static_cast<std::uint64_t>(index + 1);
     record.created_monotonic_ns = sintra::monotonic_now_ns();
-    record.recovery_occurrence = index;
+    record.recovery_occurrence  = index;
 
     if (!sintra::write_run_marker(dir, record)) {
         std::fprintf(stderr,
-                     "ring_cleanup_stress: failed to create run marker %u\n",
-                     index);
+            "ring_cleanup_stress: failed to create run marker %u\n",
+            index);
     }
 
     if ((index & 1u) != 0u) {
@@ -63,7 +64,8 @@ std::uint32_t count_subdirectories(const std::filesystem::path& base)
     std::uint32_t count = 0;
     std::error_code ec;
     for (std::filesystem::directory_iterator it(base, ec);
-         !ec && it != std::filesystem::directory_iterator(); ++it) {
+        !ec && it != std::filesystem::directory_iterator(); ++it)
+    {
         std::error_code status_ec;
         if (it->is_directory(status_ec) && !status_ec) {
             ++count;
@@ -76,7 +78,7 @@ std::uint32_t count_subdirectories(const std::filesystem::path& base)
 
 int main(int argc, char* argv[])
 {
-    const auto scratch = sintra::test::unique_scratch_directory("ring_cleanup_stress");
+    const auto scratch   = sintra::test::unique_scratch_directory("ring_cleanup_stress");
     const auto temp_root = scratch / "temp_root";
     std::filesystem::create_directories(temp_root);
 
@@ -93,14 +95,14 @@ int main(int argc, char* argv[])
     std::uint32_t initial = count_subdirectories(sintra_base);
     if (initial < k_initial_stale_runs) {
         std::fprintf(stderr,
-                     "ring_cleanup_stress: expected %u initial directories, saw %u\n",
-                     k_initial_stale_runs,
-                     initial);
+            "ring_cleanup_stress: expected %u initial directories, saw %u\n",
+            k_initial_stale_runs,
+            initial);
         return 1;
     }
 
     constexpr std::uint32_t k_iterations = 24;
-    std::uint32_t leftover = initial;
+    std::uint32_t           leftover     = initial;
 
     for (std::uint32_t iter = 0; iter < k_iterations; ++iter) {
         sintra::init(argc, argv);
@@ -117,8 +119,8 @@ int main(int argc, char* argv[])
 
     if (leftover != 0) {
         std::fprintf(stderr,
-                     "ring_cleanup_stress: leftover directories after cleanup: %u\n",
-                     leftover);
+            "ring_cleanup_stress: leftover directories after cleanup: %u\n",
+            leftover);
         return 1;
     }
 
@@ -128,8 +130,8 @@ int main(int argc, char* argv[])
         sintra::detail::finalize();
         if (count_subdirectories(sintra_base) != 0) {
             std::fprintf(stderr,
-                         "ring_cleanup_stress: directories reappeared on cycle %u\n",
-                         iter);
+                "ring_cleanup_stress: directories reappeared on cycle %u\n",
+                iter);
             return 1;
         }
     }

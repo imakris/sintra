@@ -24,9 +24,10 @@ using sintra::s_mproc_id;
 
 namespace {
 
-struct Hello {
-    int sender;
-    int seq;
+struct Hello
+{
+    int    sender;
+    int    seq;
 };
 struct Ping { int token; };
 
@@ -52,7 +53,10 @@ int process_id()
     return sintra::test::get_pid();
 }
 
-void trace_event(const std::filesystem::path& trace_path, const char* stage, const std::string& detail)
+void trace_event(
+    const std::filesystem::path&   trace_path,
+    const char*                    stage,
+    const std::string&             detail)
 {
     std::ostringstream oss;
     oss << "[" << monotonic_millis() << " ms]"
@@ -66,18 +70,18 @@ void trace_event(const std::filesystem::path& trace_path, const char* stage, con
 int worker()
 {
     const sintra::test::Shared_directory shared("SINTRA_JOIN_SWARM_DIR", "join_swarm_midflight");
-    const auto dir = shared.path();
-    const auto log_path = dir / "hello.log";
-    const auto trace_path = dir / "trace.log";
-    const auto initiator_marker = dir / "initiator_claimed";
-    const auto process_iid = sintra::process_of(s_mproc_id);
-    sintra::instance_id_type joined_process = sintra::invalid_instance_id;
+    const auto               dir              = shared.path();
+    const auto               log_path         = dir / "hello.log";
+    const auto               trace_path       = dir / "trace.log";
+    const auto               initiator_marker = dir / "initiator_claimed";
+    const auto               process_iid      = sintra::process_of(s_mproc_id);
+    sintra::instance_id_type joined_process   = sintra::invalid_instance_id;
 
     auto hello_slot = [log_path](Hello h) {
         std::ostringstream oss;
         oss << "recv=" << sintra::process_of(s_mproc_id)
             << " sender=" << h.sender
-            << " seq=" << h.seq;
+            << " seq="    << h.seq;
         sintra::test::append_line_best_effort(log_path, oss.str());
     };
     sintra::activate_slot(hello_slot);
@@ -89,7 +93,7 @@ int worker()
     // Publish a direct-call target so other processes can reach us by name.
     Ping_receiver ping_receiver;
     const auto ping_name = std::string("ping_") + std::to_string(process_iid);
-    const bool named = ping_receiver.assign_name(ping_name);
+    const bool named     = ping_receiver.assign_name(ping_name);
     trace_event(trace_path, "ping_setup",
         "name=" + ping_name +
         " ping_iid=" + std::to_string(ping_receiver.instance_id()) +
@@ -117,9 +121,9 @@ int worker()
     if (initiator && joined_process != sintra::invalid_instance_id) {
         // Probe the newly joined process via direct RPC (not world broadcast) after the barrier.
         const auto target_name = std::string("ping_") + std::to_string(joined_process);
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-        int attempts = 0;
-        bool success = false;
+        const auto deadline    = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        int        attempts    = 0;
+        bool       success     = false;
         std::string last_error;
         while (std::chrono::steady_clock::now() < deadline && !success) {
             ++attempts;
@@ -129,7 +133,8 @@ int worker()
                     "target=" + target_name + " result=" + std::to_string(result) +
                     " attempts=" + std::to_string(attempts));
                 success = true;
-            } catch (const std::exception& e) {
+            }
+            catch (const std::exception& e) {
                 last_error = e.what();
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
             }
@@ -145,15 +150,16 @@ int worker()
     if (initiator) {
         trace_event(trace_path, "broadcast", "coordinator broadcasting Hello");
         sintra::world() << Hello{static_cast<int>(process_iid), 1};
-    } else {
+    }
+    else {
         trace_event(trace_path, "broadcast", "follower broadcasting Hello");
         sintra::world() << Hello{static_cast<int>(process_iid), 2};
     }
 
     // Wait until both workers have handled the broadcast.
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-    size_t seen = 0;
-    size_t last_reported = 0;
+    const auto deadline      = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    size_t     seen          = 0;
+    size_t     last_reported = 0;
     while (std::chrono::steady_clock::now() < deadline) {
         seen = sintra::test::read_lines(log_path).size();
         if (seen != last_reported) {
@@ -180,7 +186,8 @@ int worker()
         }
         oss << "]";
         trace_event(trace_path, "worker_exit", oss.str());
-    } else {
+    }
+    else {
         trace_event(trace_path, "worker_exit", "seen=" + std::to_string(seen));
     }
 
@@ -192,8 +199,8 @@ int worker()
 int main(int argc, char* argv[])
 {
     sintra::test::Shared_directory shared("SINTRA_JOIN_SWARM_DIR", "join_swarm_midflight");
-    const auto dir = shared.path();
-    const auto log_path = dir / "hello.log";
+    const auto dir        = shared.path();
+    const auto log_path   = dir / "hello.log";
     const auto trace_path = dir / "trace.log";
 
     trace_event(trace_path, "coordinator_start",
@@ -211,9 +218,9 @@ int main(int argc, char* argv[])
     trace_event(trace_path, "init.end", "runtime initialized");
 
     // Wait for both workers to log receipt of the broadcast.
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-    size_t seen = 0;
-    size_t last_reported = 0;
+    const auto deadline      = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    size_t     seen          = 0;
+    size_t     last_reported = 0;
     while (std::chrono::steady_clock::now() < deadline) {
         seen = sintra::test::read_lines(log_path).size();
         if (seen != last_reported) {
@@ -238,7 +245,8 @@ int main(int argc, char* argv[])
         }
         oss << "]";
         trace_event(trace_path, "coordinator_exit", oss.str());
-    } else {
+    }
+    else {
         trace_event(trace_path, "coordinator_exit", "seen=" + std::to_string(seen));
     }
 

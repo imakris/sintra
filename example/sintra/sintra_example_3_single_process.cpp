@@ -46,8 +46,8 @@ int main(int argc, char* argv[])
     };
 
     // Set up benchmarking to measure message throughput
-    double ts = get_wtime();
-    double next_ts = ts + 1.;
+    double   ts      = get_wtime();
+    double   next_ts = ts + 1.;
     uint64_t counter = 0;
 
     // Define a slot that counts Ping messages and reports throughput

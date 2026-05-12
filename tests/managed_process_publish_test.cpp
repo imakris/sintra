@@ -51,8 +51,8 @@ constexpr std::string_view k_delayed_exit_file = "managed_process_publish_delaye
 
 struct Worker_info
 {
-    sintra::instance_id_type instance_id = sintra::invalid_instance_id;
-    std::string assigned_name;
+    sintra::instance_id_type   instance_id = sintra::invalid_instance_id;
+    std::string                assigned_name;
 };
 
 bool write_worker_info(const std::filesystem::path& dir, const Worker_info& info)
@@ -93,11 +93,11 @@ std::optional<Worker_info> read_worker_info(const std::filesystem::path& dir)
 
 struct Publication_waiter
 {
-    std::mutex mutex;
-    std::condition_variable cv;
-    sintra::instance_id_type expected_instance_id = sintra::invalid_instance_id;
-    bool expected_ready = false;
-    bool seen = false;
+    std::mutex                 mutex;
+    std::condition_variable    cv;
+    sintra::instance_id_type   expected_instance_id = sintra::invalid_instance_id;
+    bool                       expected_ready       = false;
+    bool                       seen                 = false;
 };
 
 bool run_drain_timeout_probe()
@@ -132,8 +132,8 @@ int run_worker(int argc, char* argv[])
 
     Worker_info info{};
     info.instance_id = s_mproc_id;
-    info.assigned_name = std::string("sintra_process_") + std::to_string(
-        static_cast<unsigned long long>(s_mproc->m_pid));
+    info.assigned_name = std::string(
+        "sintra_process_") + std::to_string(static_cast<unsigned long long>(s_mproc->m_pid));
 
     if (!write_worker_info(shared_dir, info)) {
         std::fprintf(stderr, "managed_process_publish_test: failed to write worker info\n");
@@ -142,7 +142,7 @@ int run_worker(int argc, char* argv[])
     }
 
     const auto done_path = shared_dir / std::string(k_done_file);
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    const auto deadline  = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     while (std::chrono::steady_clock::now() < deadline && !std::filesystem::exists(done_path)) {
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
@@ -154,7 +154,9 @@ int run_worker(int argc, char* argv[])
         return 1;
     }
 
-    std::ofstream exit_marker(shared_dir / std::string(k_exit_file), std::ios::binary | std::ios::trunc);
+    std::ofstream exit_marker(
+        shared_dir / std::string(k_exit_file),
+        std::ios::binary | std::ios::trunc);
     exit_marker << "exit\n";
 
     sintra::detail::finalize();
@@ -179,14 +181,15 @@ int run_delayed_publication_worker(int argc, char* argv[])
     sintra::init(argc, argv);
 
     const auto marked_path = shared_dir / std::string(k_delayed_b_marked_file);
-    const auto done_path = shared_dir / std::string(k_delayed_done_file);
+    const auto done_path   = shared_dir / std::string(k_delayed_done_file);
 
     if (role == "b") {
-        const std::string assigned_name = std::string("sintra_process_") + std::to_string(
-            static_cast<unsigned long long>(s_mproc->m_pid));
+        const std::string assigned_name = std::string(
+            "sintra_process_") + std::to_string(static_cast<unsigned long long>(s_mproc->m_pid));
 
-        std::ofstream name_file(shared_dir / std::string(k_delayed_b_name_file),
-                                std::ios::binary | std::ios::trunc);
+        std::ofstream name_file(
+            shared_dir / std::string(k_delayed_b_name_file),
+            std::ios::binary | std::ios::trunc);
         name_file << assigned_name << '\n';
         name_file.close();
 
@@ -202,12 +205,14 @@ int run_delayed_publication_worker(int argc, char* argv[])
             return 1;
         }
 
-        std::ofstream exit_file(shared_dir / std::string(k_delayed_exit_file),
-                                std::ios::binary | std::ios::trunc);
+        std::ofstream exit_file(
+            shared_dir / std::string(k_delayed_exit_file),
+            std::ios::binary | std::ios::trunc);
         exit_file << "exit\n";
         exit_file.close();
     }
-    else if (role == "a") {
+    else
+    if (role == "a") {
         if (!sintra::test::wait_for_path(marked_path, std::chrono::seconds(10))) {
             std::fprintf(stderr, "managed_process_publish_test: delayed worker missing mark\n");
             sintra::detail::finalize();
@@ -225,11 +230,11 @@ int run_delayed_publication_worker(int argc, char* argv[])
 }
 
 bool spawn_worker_process(
-    const std::string& binary_path,
-    const std::filesystem::path& shared_dir,
-    uint64_t swarm_id,
-    sintra::instance_id_type instance_id,
-    sintra::instance_id_type coordinator_id)
+    const std::string&             binary_path,
+    const std::filesystem::path&   shared_dir,
+    uint64_t                       swarm_id,
+    sintra::instance_id_type       instance_id,
+    sintra::instance_id_type       coordinator_id)
 {
     std::vector<std::string> args;
     args.push_back(binary_path);
@@ -267,7 +272,7 @@ bool ensure_reader_for_process(sintra::instance_id_type process_iid)
     }
 
     auto progress = std::make_shared<sintra::Process_message_reader::Delivery_progress>();
-    auto reader = std::make_shared<sintra::Process_message_reader>(process_iid, progress, 0u);
+    auto reader   = std::make_shared<sintra::Process_message_reader>(process_iid, progress, 0u);
     auto [it, inserted] = s_mproc->m_readers.emplace(process_iid, reader);
     if (!inserted) {
         return false;
@@ -278,12 +283,12 @@ bool ensure_reader_for_process(sintra::instance_id_type process_iid)
 }
 
 bool spawn_delayed_worker(
-    const std::string& binary_path,
-    const std::filesystem::path& shared_dir,
-    const char* role,
-    uint64_t swarm_id,
-    sintra::instance_id_type process_instance_id,
-    sintra::instance_id_type coordinator_id)
+    const std::string&             binary_path,
+    const std::filesystem::path&   shared_dir,
+    const char*                    role,
+    uint64_t                       swarm_id,
+    sintra::instance_id_type       process_instance_id,
+    sintra::instance_id_type       coordinator_id)
 {
     std::vector<std::string> args;
     args.push_back(binary_path);
@@ -309,12 +314,12 @@ bool spawn_delayed_worker(
 }
 
 bool run_manual_publish_scenario(
-    const std::string& binary_path,
-    const std::filesystem::path& shared_dir)
+    const std::string&             binary_path,
+    const std::filesystem::path&   shared_dir)
 {
     const auto worker_instance_id = sintra::make_process_instance_id();
-    const auto swarm_id = s_mproc->m_swarm_id;
-    const auto coord_id = s_coord_id;
+    const auto swarm_id           = s_mproc->m_swarm_id;
+    const auto coord_id           = s_coord_id;
 
     if (!ensure_reader_for_process(worker_instance_id)) {
         std::fprintf(stderr, "managed_process_publish_test: failed to create reader for worker\n");
@@ -338,7 +343,7 @@ bool run_manual_publish_scenario(
         return false;
     }
 
-    bool resolved_ok = false;
+    bool       resolved_ok      = false;
     const auto resolve_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
     while (std::chrono::steady_clock::now() < resolve_deadline) {
         const auto resolved = sintra::Coordinator::rpc_resolve_instance(coord_id, info->assigned_name);
@@ -351,9 +356,9 @@ bool run_manual_publish_scenario(
 
     if (!resolved_ok) {
         std::fprintf(stderr,
-                     "managed_process_publish_test: name '%s' did not resolve to %llu\n",
-                     info->assigned_name.c_str(),
-                     static_cast<unsigned long long>(info->instance_id));
+            "managed_process_publish_test: name '%s' did not resolve to %llu\n",
+            info->assigned_name.c_str(),
+            static_cast<unsigned long long>(info->instance_id));
     }
 
     std::ofstream done(shared_dir / std::string(k_done_file), std::ios::binary | std::ios::trunc);
@@ -448,8 +453,9 @@ bool run_delayed_publication_scenario(const std::string& binary_path)
         std::fprintf(stderr, "managed_process_publish_test: delayed publication not observed\n");
     }
 
-    std::ofstream done(shared_dir / std::string(k_delayed_done_file),
-                       std::ios::binary | std::ios::trunc);
+    std::ofstream done(
+        shared_dir / std::string(k_delayed_done_file),
+        std::ios::binary | std::ios::trunc);
     done << "done\n";
     done.close();
 

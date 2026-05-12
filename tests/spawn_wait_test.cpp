@@ -55,8 +55,8 @@ bool run_preinit_spawn_swarm_validation()
         options.binary_path = "";
         const size_t spawned = sintra::spawn_swarm_process(options);
         ok &= sintra::test::assert_true(spawned == 0,
-                                        "[PREINIT] ",
-                                        "spawn_swarm_process should return 0 when binary_path is empty");
+            "[PREINIT] ",
+            "spawn_swarm_process should return 0 when binary_path is empty");
     }
 
     {
@@ -65,14 +65,14 @@ bool run_preinit_spawn_swarm_validation()
         options.count = 0;
         const size_t spawned = sintra::spawn_swarm_process(options);
         ok &= sintra::test::assert_true(spawned == 0,
-                                        "[PREINIT] ",
-                                        "spawn_swarm_process should return 0 when count == 0");
+            "[PREINIT] ",
+            "spawn_swarm_process should return 0 when count == 0");
     }
 
     {
         sintra::Spawn_options options;
-        options.binary_path = "dummy_binary";
-        options.count = 2;
+        options.binary_path            = "dummy_binary";
+        options.count                  = 2;
         options.wait_for_instance_name = "dummy_instance";
         const size_t spawned = sintra::spawn_swarm_process(options);
         ok &= sintra::test::assert_true(
@@ -215,17 +215,17 @@ int run_coordinator(const std::string& binary_path)
         const auto start = std::chrono::steady_clock::now();
 
         sintra::Spawn_options spawn_options;
-        spawn_options.binary_path = binary_path;
+        spawn_options.binary_path            = binary_path;
         spawn_options.wait_for_instance_name = k_nonexistent_instance_name;
-        spawn_options.wait_timeout = std::chrono::milliseconds(500); // Short timeout to exercise backoff
+        spawn_options.wait_timeout           = std::chrono::milliseconds(500); // Short timeout to exercise backoff
 
         const size_t spawned = sintra::spawn_swarm_process(spawn_options);
 
-        const auto elapsed = std::chrono::steady_clock::now() - start;
+        const auto elapsed    = std::chrono::steady_clock::now() - start;
         const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
 
         std::fprintf(stderr, "[COORDINATOR] Test 1: spawn returned %zu after %lldms\n",
-                     spawned, (long long)elapsed_ms);
+            spawned, (long long)elapsed_ms);
 
         // The spawn itself may succeed (process started) but wait should fail and return 0
         // because the instance name never appears.
@@ -239,15 +239,16 @@ int run_coordinator(const std::string& binary_path)
         // Verify the timeout was respected (should not return immediately).
         if (all_tests_passed && elapsed_ms < 200) {
             std::fprintf(stderr,
-                         "[COORDINATOR] Test 1: Timeout returned too quickly: %lldms\n",
-                         (long long)elapsed_ms);
+                "[COORDINATOR] Test 1: Timeout returned too quickly: %lldms\n",
+                (long long)elapsed_ms);
             all_tests_passed = false;
             failure_reason = "Test 1: wait_timeout returned too quickly";
         }
-        else if (elapsed_ms > 2000) {
+        else
+        if (elapsed_ms > 2000) {
             std::fprintf(stderr,
-                         "[COORDINATOR] Test 1: Timeout duration unusually long: %lldms\n",
-                         (long long)elapsed_ms);
+                "[COORDINATOR] Test 1: Timeout duration unusually long: %lldms\n",
+                (long long)elapsed_ms);
         }
 
         // Verify the child actually launched by checking if we can resolve its name.
@@ -269,18 +270,18 @@ int run_coordinator(const std::string& binary_path)
 
             if (timeout_child_resolved == sintra::invalid_instance_id) {
                 std::fprintf(stderr,
-                             "[COORDINATOR] Test 1: ERROR - timeout child never launched "
-                             "(could not resolve '%s')\n",
-                             k_timeout_child_instance_name);
+                    "[COORDINATOR] Test 1: ERROR - timeout child never launched "
+                    "(could not resolve '%s')\n",
+                    k_timeout_child_instance_name);
                 all_tests_passed = false;
                 failure_reason = "Test 1: spawn_swarm_process failed - child never launched";
             }
             else {
                 std::fprintf(stderr,
-                             "[COORDINATOR] Test 1: Confirmed child launched "
-                             "(resolved '%s' as %llu)\n",
-                             k_timeout_child_instance_name,
-                             (unsigned long long)timeout_child_resolved);
+                    "[COORDINATOR] Test 1: Confirmed child launched "
+                    "(resolved '%s' as %llu)\n",
+                    k_timeout_child_instance_name,
+                    (unsigned long long)timeout_child_resolved);
 
                 // Signal the timeout child to exit cleanly
                 sintra::world() << Done_signal{};
@@ -305,17 +306,17 @@ int run_coordinator(const std::string& binary_path)
         const auto start = std::chrono::steady_clock::now();
 
         sintra::Spawn_options spawn_options;
-        spawn_options.binary_path = binary_path;
+        spawn_options.binary_path            = binary_path;
         spawn_options.wait_for_instance_name = k_worker_instance_name;
-        spawn_options.wait_timeout = std::chrono::milliseconds(10000);
+        spawn_options.wait_timeout           = std::chrono::milliseconds(10000);
 
         const size_t spawned = sintra::spawn_swarm_process(spawn_options);
 
-        const auto elapsed = std::chrono::steady_clock::now() - start;
+        const auto elapsed    = std::chrono::steady_clock::now() - start;
         const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
 
         std::fprintf(stderr, "[COORDINATOR] Test 2: spawn returned %zu after %lldms\n",
-                     spawned, (long long)elapsed_ms);
+            spawned, (long long)elapsed_ms);
 
         if (spawned != 1) {
             std::fprintf(stderr, "[COORDINATOR] Test 2: Expected return 1 on success, got %zu\n", spawned);
@@ -335,7 +336,7 @@ int run_coordinator(const std::string& binary_path)
             }
             else {
                 std::fprintf(stderr, "[COORDINATOR] Test 2: Instance resolved successfully: %llu\n",
-                             (unsigned long long)resolved);
+                    (unsigned long long)resolved);
             }
 
             // Signal the worker to finish
@@ -369,7 +370,7 @@ int run_coordinator(const std::string& binary_path)
 int main(int argc, char* argv[])
 {
     const bool is_spawned = sintra::test::has_argv_flag(argc, argv, "--instance_id");
-    const bool is_worker = is_worker_mode();
+    const bool is_worker  = is_worker_mode();
     sintra::test::Shared_directory shared("SINTRA_TEST_SHARED_DIR", "spawn_wait_test");
     const std::string binary_path = sintra::test::get_binary_path(argc, argv);
 

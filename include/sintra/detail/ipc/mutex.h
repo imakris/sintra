@@ -110,12 +110,8 @@ public:
         const owner_token self = make_owner_token();
 
         // Fast attempt
-        if (try_acquire(self, /*throw_on_recursive=*/false)) {
-            return true;
-        }
-        if (rel <= std::chrono::steady_clock::duration::zero()) {
-            return false;
-        }
+        if (try_acquire(self, /*throw_on_recursive=*/false))    { return true;  }
+        if (rel <= std::chrono::steady_clock::duration::zero()) { return false; }
 
         const auto deadline = std::chrono::steady_clock::now() + rel;
 
@@ -162,7 +158,9 @@ public:
     bool try_lock_until(const std::chrono::time_point<std::chrono::steady_clock>& abs_time) noexcept
     {
         const auto now = std::chrono::steady_clock::now();
-        if (abs_time <= now) return try_lock_for(std::chrono::steady_clock::duration::zero());
+        if (abs_time <= now) {
+            return try_lock_for(std::chrono::steady_clock::duration::zero());
+        }
         return try_lock_for(abs_time - now);
     }
 
@@ -175,25 +173,25 @@ public:
         if (!m_owner.compare_exchange_strong(expected, k_unowned)) {
             // Either unlocked by someone else (after recovery) or not owned by us.
             throw std::system_error(std::make_error_code(std::errc::operation_not_permitted),
-                                    "interprocess_mutex unlock by non-owner");
+                "interprocess_mutex unlock by non-owner");
         }
     }
 
 private:
     // === Types & constants ===
     using owner_token = std::uint64_t; // upper 32 bits: pid, lower 32 bits: tid
-    static constexpr owner_token k_unowned = 0;
+    static constexpr owner_token   k_unowned = 0;
 
     // Recovery coordination token packs {recoverer_pid (hi32), ticks_ms (lo32)}
     using recover_token = std::uint64_t;
 
     // We require a lock-free 64-bit atomic for interprocess usage.
     static_assert(std::atomic<owner_token>::is_always_lock_free,
-                  "interprocess_mutex requires lock-free 64-bit atomics");
+        "interprocess_mutex requires lock-free 64-bit atomics");
     static_assert(std::atomic<recover_token>::is_always_lock_free,
-                  "interprocess_mutex requires lock-free 64-bit atomics for recovery");
+        "interprocess_mutex requires lock-free 64-bit atomics for recovery");
     static_assert(std::atomic<std::uint32_t>::is_always_lock_free,
-                  "interprocess_mutex requires lock-free 32-bit atomics for flags");
+        "interprocess_mutex requires lock-free 32-bit atomics for flags");
 
     // If a recoverer stalls while still "alive", let others preempt after this many ms.
     static constexpr std::uint32_t k_recovery_stale_ms = 10000; // 10s; conservative

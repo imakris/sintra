@@ -60,8 +60,8 @@ constexpr std::array<int, 4> k_rounds_per_phase = {3, 5, 4, 6};
 
 struct Phase_plan
 {
-    int phase = 0;
-    int rounds = 0;
+    int    phase  = 0;
+    int    rounds = 0;
 };
 
 constexpr std::array<Phase_plan, 4> k_plan = {
@@ -73,30 +73,30 @@ constexpr std::array<Phase_plan, 4> k_plan = {
 
 struct Phase_command
 {
-    int phase;
-    int round;
-    std::uint64_t token;
-    int expected_workers;
+    int            phase;
+    int            round;
+    std::uint64_t  token;
+    int            expected_workers;
 };
 
 struct Worker_status
 {
-    int worker_id;
-    int phase;
-    int round;
-    std::uint64_t token;
-    std::uint32_t sequence_id;
-    std::uint64_t checksum;
+    int            worker_id;
+    int            phase;
+    int            round;
+    std::uint64_t  token;
+    std::uint32_t  sequence_id;
+    std::uint64_t  checksum;
 };
 
 struct Phase_summary
 {
-    int phase;
-    int round;
-    std::uint64_t token;
-    int worker_count;
-    std::uint64_t checksum;
-    int aggregator_errors;
+    int            phase;
+    int            round;
+    std::uint64_t  token;
+    int            worker_count;
+    std::uint64_t  checksum;
+    int            aggregator_errors;
 };
 
 struct Shutdown {};
@@ -147,30 +147,31 @@ std::uint64_t expected_round_checksum(int phase, int round)
 
 struct Round_result
 {
-    int phase = 0;
-    int round = 0;
-    std::uint64_t token = 0;
-    int count = 0;
-    std::uint64_t checksum = 0;
+    int                        phase                = 0;
+    int                        round                = 0;
+    std::uint64_t              token                = 0;
+    int                        count                = 0;
+    std::uint64_t              checksum             = 0;
 };
 
 struct Aggregator_state
 {
-    std::mutex mutex;
-    std::condition_variable cv;
+    std::mutex                 mutex;
+    std::condition_variable    cv;
 
-    Phase_command active_command{};
-    bool command_active = false;
-    bool round_complete = false;
-    bool shutdown_received = false;
+    Phase_command              active_command{};
+    bool                       command_active       = false;
+    bool                       round_complete       = false;
+    bool                       shutdown_received    = false;
 
-    std::array<bool, k_worker_count> worker_seen{};
-    int current_count = 0;
-    std::uint64_t checksum_accumulator = 0;
-    std::uint64_t last_completed_token = std::numeric_limits<std::uint64_t>::max();
+    std::array<bool, k_worker_count>
+                               worker_seen{};
+    int                        current_count        = 0;
+    std::uint64_t              checksum_accumulator = 0;
+    std::uint64_t              last_completed_token = std::numeric_limits<std::uint64_t>::max();
 
-    int errors = 0;
-    std::vector<Round_result> completed_rounds;
+    int                        errors               = 0;
+    std::vector<Round_result>  completed_rounds;
 };
 
 Aggregator_state& aggregator_state()
@@ -208,13 +209,15 @@ void aggregator_worker_status_slot(const Worker_status& status)
     {
         std::lock_guard<std::mutex> lk(state.mutex);
         if (!state.command_active ||
-            status.token != state.active_command.token) {
+            status.token != state.active_command.token)
+        {
             ++state.errors;
             return;
         }
 
         if (status.phase != state.active_command.phase ||
-            status.round != state.active_command.round) {
+            status.round != state.active_command.round)
+        {
             ++state.errors;
         }
 
@@ -250,23 +253,23 @@ void aggregator_worker_status_slot(const Worker_status& status)
             state.round_complete = true;
             state.last_completed_token = active.token;
             Round_result result;
-            result.phase = active.phase;
-            result.round = active.round;
-            result.token = active.token;
-            result.count = state.current_count;
+            result.phase    = active.phase;
+            result.round    = active.round;
+            result.token    = active.token;
+            result.count    = state.current_count;
             result.checksum = state.checksum_accumulator;
             state.completed_rounds.push_back(result);
 
             state.command_active = false;
             state.active_command = Phase_command{};
 
-            summary.phase = active.phase;
-            summary.round = active.round;
-            summary.token = active.token;
-            summary.worker_count = state.current_count;
-            summary.checksum = state.checksum_accumulator;
+            summary.phase             = active.phase;
+            summary.round             = active.round;
+            summary.token             = active.token;
+            summary.worker_count      = state.current_count;
+            summary.checksum          = state.checksum_accumulator;
             summary.aggregator_errors = state.errors;
-            should_emit_summary = true;
+            should_emit_summary       = true;
         }
     }
 
@@ -290,7 +293,7 @@ void wait_for_round_activation(std::uint64_t token)
     std::unique_lock<std::mutex> lk(state.mutex);
     state.cv.wait(lk, [&] {
         return (state.command_active && state.active_command.token == token) ||
-               state.errors > 0;
+            state.errors > 0;
     });
 }
 
@@ -312,8 +315,10 @@ void wait_for_shutdown()
 
 void write_aggregator_report()
 {
-    sintra::test::Shared_directory shared("SINTRA_COMPLEX_CHOREO_DIR", "complex_choreography_stress");
-    const auto dir = shared.path();
+    sintra::test::Shared_directory shared(
+        "SINTRA_COMPLEX_CHOREO_DIR",
+        "complex_choreography_stress");
+    const auto dir  = shared.path();
     const auto path = dir / "aggregator_report.txt";
 
     auto& state = aggregator_state();
@@ -353,8 +358,8 @@ int process_aggregator()
     for (const auto& phase : k_plan) {
         for (int round = 0; round < phase.rounds; ++round) {
             const auto token = make_token(phase.phase, round);
-            const auto pre = barrier_name("pre", token);
-            const auto post = barrier_name("post", token);
+            const auto pre   = barrier_name("pre",  token);
+            const auto post  = barrier_name("post", token);
 
             barrier(pre, k_group_name);
             wait_for_round_activation(token);
@@ -379,8 +384,8 @@ int process_aggregator()
 
 struct Inspector_state
 {
-    std::mutex mutex;
-    std::condition_variable cv;
+    std::mutex                 mutex;
+    std::condition_variable    cv;
 
     std::vector<std::tuple<int, int, int, std::uint32_t>> arrival_order;
     std::map<std::uint64_t, int> counts;
@@ -423,8 +428,10 @@ void wait_for_inspector_shutdown()
 
 void write_inspector_report()
 {
-    sintra::test::Shared_directory shared("SINTRA_COMPLEX_CHOREO_DIR", "complex_choreography_stress");
-    const auto dir = shared.path();
+    sintra::test::Shared_directory shared(
+        "SINTRA_COMPLEX_CHOREO_DIR",
+        "complex_choreography_stress");
+    const auto dir  = shared.path();
     const auto path = dir / "inspector_report.txt";
 
     auto& state = inspector_state();
@@ -458,8 +465,8 @@ int process_inspector()
     for (const auto& phase : k_plan) {
         for (int round = 0; round < phase.rounds; ++round) {
             const auto token = make_token(phase.phase, round);
-            const auto pre = barrier_name("pre", token);
-            const auto post = barrier_name("post", token);
+            const auto pre   = barrier_name("pre",  token);
+            const auto post  = barrier_name("post", token);
             (void)token;
             barrier(pre, k_group_name);
             barrier(post, k_group_name);
@@ -478,13 +485,13 @@ int process_inspector()
 
 struct Worker_local_state
 {
-    std::mutex mutex;
-    std::condition_variable cv;
-    Phase_command pending_command{};
-    bool has_command = false;
-    bool shutdown_requested = false;
-    std::uint64_t last_token = 0;
-    int errors = 0;
+    std::mutex                 mutex;
+    std::condition_variable    cv;
+    Phase_command              pending_command{};
+    bool                       has_command        = false;
+    bool                       shutdown_requested = false;
+    std::uint64_t              last_token         = 0;
+    int                        errors             = 0;
 };
 
 void worker_command_slot(Worker_local_state& state, const Phase_command& cmd)
@@ -529,8 +536,8 @@ int worker_process_impl(int worker_id)
             }
 
             const auto token = make_token(phase.phase, round);
-            const auto pre = barrier_name("pre", token);
-            const auto post = barrier_name("post", token);
+            const auto pre   = barrier_name("pre",  token);
+            const auto post  = barrier_name("post", token);
 
             barrier(pre, k_group_name);
 
@@ -539,8 +546,9 @@ int worker_process_impl(int worker_id)
                 std::unique_lock<std::mutex> lk(state.mutex);
                 const bool got_command = state.cv.wait_for(
                     lk, std::chrono::seconds(5), [&] {
-                        return state.has_command &&
-                               state.pending_command.token == token;
+                        return
+                            state.has_command &&
+                            state.pending_command.token == token;
                     });
                 if (!got_command) {
                     ++state.errors;
@@ -573,12 +581,12 @@ int worker_process_impl(int worker_id)
                 std::chrono::milliseconds(5 + delay_ms));
 
             Worker_status status;
-            status.worker_id = worker_id;
-            status.phase = cmd.phase;
-            status.round = cmd.round;
-            status.token = cmd.token;
+            status.worker_id   = worker_id;
+            status.phase       = cmd.phase;
+            status.round       = cmd.round;
+            status.token       = cmd.token;
             status.sequence_id = sequence_id;
-            status.checksum = checksum;
+            status.checksum    = checksum;
             sintra::world() << status;
 
             barrier(post, k_group_name);
@@ -611,12 +619,12 @@ int process_worker3() { return worker_process_impl(3); }
 
 struct Conductor_state
 {
-    std::mutex mutex;
-    std::condition_variable cv;
-    std::uint64_t expected_token = 0;
-    bool awaiting_summary = false;
-    bool shutdown_confirmed = false;
-    int errors = 0;
+    std::mutex                 mutex;
+    std::condition_variable    cv;
+    std::uint64_t              expected_token     = 0;
+    bool                       awaiting_summary   = false;
+    bool                       shutdown_confirmed = false;
+    int                        errors             = 0;
     std::vector<std::uint64_t> summaries_received;
 };
 
@@ -640,12 +648,8 @@ void conductor_summary_slot(const Phase_summary& summary)
         }
         const auto expected_checksum = expected_round_checksum(
             summary.phase, summary.round);
-        if (summary.checksum != expected_checksum) {
-            ++state.errors;
-        }
-        if (summary.aggregator_errors != 0) {
-            state.errors += summary.aggregator_errors;
-        }
+        if (summary.checksum          != expected_checksum) { ++state.errors;                            }
+        if (summary.aggregator_errors != 0)                 { state.errors += summary.aggregator_errors; }
 
         state.awaiting_summary = false;
         state.summaries_received.push_back(summary.token);
@@ -706,8 +710,8 @@ int process_conductor()
     for (const auto& phase : k_plan) {
         for (int round = 0; round < phase.rounds; ++round) {
             const auto token = make_token(phase.phase, round);
-            const auto pre = barrier_name("pre", token);
-            const auto post = barrier_name("post", token);
+            const auto pre   = barrier_name("pre",  token);
+            const auto post  = barrier_name("post", token);
 
             barrier(pre, k_group_name);
 
@@ -718,9 +722,9 @@ int process_conductor()
             }
 
             Phase_command cmd;
-            cmd.phase = phase.phase;
-            cmd.round = round;
-            cmd.token = token;
+            cmd.phase            = phase.phase;
+            cmd.round            = round;
+            cmd.token            = token;
             cmd.expected_workers = k_worker_count;
             sintra::world() << cmd;
 
@@ -741,9 +745,10 @@ int process_conductor()
 // Starter (main) process utilities
 // -----------------------------------------------------------------------------
 
-std::vector<Round_result> read_aggregator_results(const std::filesystem::path& path,
-                                                 bool& ok,
-                                                 int& errors)
+std::vector<Round_result> read_aggregator_results(
+    const std::filesystem::path&   path,
+    bool&                          ok,
+    int&                           errors)
 {
     std::ifstream in(path, std::ios::binary);
     if (!in) {
@@ -772,10 +777,10 @@ std::vector<Round_result> read_aggregator_results(const std::filesystem::path& p
 
 struct Inspector_entry
 {
-    int phase = 0;
-    int round = 0;
-    int worker = 0;
-    std::uint32_t sequence = 0;
+    int            phase    = 0;
+    int            round    = 0;
+    int            worker   = 0;
+    std::uint32_t  sequence = 0;
 };
 
 std::vector<Inspector_entry> read_inspector_entries(const std::filesystem::path& path)
@@ -800,10 +805,10 @@ std::vector<Inspector_entry> read_inspector_entries(const std::filesystem::path&
 bool validate_reports(const std::filesystem::path& dir)
 {
     const auto aggregator_path = dir / "aggregator_report.txt";
-    const auto inspector_path = dir / "inspector_report.txt";
+    const auto inspector_path  = dir / "inspector_report.txt";
 
-    bool aggregator_ok = false;
-    int aggregator_errors = 0;
+    bool aggregator_ok     = false;
+    int  aggregator_errors = 0;
     const auto aggregator_results =
         read_aggregator_results(aggregator_path, aggregator_ok, aggregator_errors);
 
@@ -831,32 +836,27 @@ bool validate_reports(const std::filesystem::path& dir)
         return false;
     }
 
-    std::size_t inspector_index = 0;
+    std::size_t inspector_index  = 0;
     std::size_t aggregator_index = 0;
     for (const auto& phase : k_plan) {
         for (int round = 0; round < phase.rounds; ++round) {
             const auto expected_checksum = expected_round_checksum(phase.phase, round);
 
             const auto& aggregator_round = aggregator_results[aggregator_index++];
-            if (aggregator_round.phase != phase.phase ||
-                aggregator_round.round != round ||
-                aggregator_round.count != k_worker_count ||
-                aggregator_round.checksum != expected_checksum) {
+            if (aggregator_round.phase    != phase.phase    ||
+                aggregator_round.round    != round          ||
+                aggregator_round.count    != k_worker_count ||
+                aggregator_round.checksum != expected_checksum)
+            {
                 return false;
             }
 
             std::array<bool, k_worker_count> worker_seen{};
             for (int worker = 0; worker < k_worker_count; ++worker) {
                 const auto& entry = inspector_entries[inspector_index++];
-                if (entry.phase != phase.phase || entry.round != round) {
-                    return false;
-                }
-                if (entry.worker < 0 || entry.worker >= k_worker_count) {
-                    return false;
-                }
-                if (worker_seen[entry.worker]) {
-                    return false;
-                }
+                if (entry.phase != phase.phase || entry.round != round) { return false; }
+                if (entry.worker < 0 || entry.worker >= k_worker_count) { return false; }
+                if (worker_seen[entry.worker])                          { return false; }
                 worker_seen[entry.worker] = true;
                 const auto expected_seq = compute_sequence_id(
                     entry.worker, entry.phase, entry.round);
@@ -875,7 +875,9 @@ bool validate_reports(const std::filesystem::path& dir)
 int main(int argc, char* argv[])
 {
     const bool is_spawned = sintra::test::has_branch_flag(argc, argv);
-    sintra::test::Shared_directory shared("SINTRA_COMPLEX_CHOREO_DIR", "complex_choreography_stress");
+    sintra::test::Shared_directory shared(
+        "SINTRA_COMPLEX_CHOREO_DIR",
+        "complex_choreography_stress");
     const auto shared_dir = shared.path();
 
     std::vector<sintra::Process_descriptor> processes;

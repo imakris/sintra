@@ -88,8 +88,8 @@ public:
     // Remove a draining process from pending barriers and collect completions
     // for any barriers that become satisfied as a result.
     void drop_from_inflight_barriers(
-        instance_id_type process_iid,
-        std::vector<Barrier_completion>& completions);
+        instance_id_type                   process_iid,
+        std::vector<Barrier_completion>&   completions);
     // Emit barrier completion messages for the recorded recipients (per-recipient
     // reply tokens are computed at write time).
     void emit_barrier_completions(
@@ -163,7 +163,9 @@ private:
     // queues it during startup), and unblocks waiters. For Managed_process,
     // resets the draining bit for the process slot.
     instance_id_type publish_transceiver(
-        type_id_type type_id, instance_id_type instance_id, const string& assigned_name);
+        type_id_type       type_id,
+        instance_id_type   instance_id,
+        const string&      assigned_name);
 
     // Unpublish a transceiver, erase name mappings, and emit instance_unpublished.
     // If the unpublished instance is a Managed_process, this also drops it from
@@ -187,7 +189,7 @@ private:
     // Create a process group transceiver with explicit membership (used for
     // built-in groups like _sintra_all_processes).
     instance_id_type make_process_group(
-        const string& name,
+        const string&                          name,
         const unordered_set<instance_id_type>& member_process_ids);
  
     // Record that a process opted into crash recovery; recover_if_required()
@@ -245,10 +247,10 @@ public:
 
     void print(const string& str);
 
-    mutex                                       m_type_resolution_mutex;
-    mutex                                       m_publish_mutex;
-    mutex                                       m_groups_mutex;
-    mutex                                       m_init_tracking_mutex;
+    mutex                                          m_type_resolution_mutex;
+    mutex                                          m_publish_mutex;
+    mutex                                          m_groups_mutex;
+    mutex                                          m_init_tracking_mutex;
 
     // access only after acquiring m_publish_mutex
     map<
@@ -257,14 +259,14 @@ public:
             instance_id_type,                   // transceiver instance id (within the process)
             tn_type                             // type id and assigned name
         >
-    >                                           m_transceiver_registry;
+    >                                              m_transceiver_registry;
 
     // access only after acquiring m_groups_mutex
     map<
         instance_id_type,
         unordered_set< instance_id_type >
-    >                                           m_groups_of_process;
-    map<string, Process_group>                  m_groups;
+    >                                              m_groups_of_process;
+    map<string, Process_group>                     m_groups;
 
 
     // access only after acquiring m_publish_mutex
@@ -278,54 +280,57 @@ public:
     map<
         string,
         waited_instance_info
-    >                                           m_instances_waited;
+    >                                              m_instances_waited;
 
-    set<instance_id_type>                       m_requested_recovery;
-    mutable std::mutex                          m_lifecycle_mutex;
-    Recovery_policy                             m_recovery_policy;
-    Recovery_runner                             m_recovery_runner;
-    Lifecycle_handler                           m_lifecycle_handler;
-    mutable std::mutex                          m_crash_mutex;
-    std::unordered_map<instance_id_type, int>   m_recent_crash_status;
-    std::mutex                                  m_recovery_threads_mutex;
-    std::vector<std::thread>                    m_recovery_threads;
-    std::atomic<bool>                           m_shutdown{false};
+    set<instance_id_type>                          m_requested_recovery;
+    mutable std::mutex                             m_lifecycle_mutex;
+    Recovery_policy                                m_recovery_policy;
+    Recovery_runner                                m_recovery_runner;
+    Lifecycle_handler                              m_lifecycle_handler;
+    mutable std::mutex                             m_crash_mutex;
+    std::unordered_map<instance_id_type, int>      m_recent_crash_status;
+    std::mutex                                     m_recovery_threads_mutex;
+    std::vector<std::thread>                       m_recovery_threads;
+    std::atomic<bool>                              m_shutdown{false};
 
     // Track in-flight join_swarm requests keyed by branch_index to avoid
     // spawning multiple processes when callers retry the RPC. Cleared once
     // the corresponding process completes initialization.
-    std::unordered_map<int32_t, instance_id_type> m_inflight_joins;
-    std::unordered_map<instance_id_type, int32_t> m_joined_process_branch;
+    std::unordered_map<int32_t, instance_id_type>  m_inflight_joins;
+    std::unordered_map<instance_id_type, int32_t>  m_joined_process_branch;
 
-    std::array<std::atomic<uint8_t>, max_process_index + 1> m_draining_process_states{};
+    std::array<std::atomic<uint8_t>, max_process_index + 1>
+                                                   m_draining_process_states{};
 
-    unordered_set<instance_id_type>             m_processes_in_initialization;
+    unordered_set<instance_id_type>                m_processes_in_initialization;
     struct Pending_instance_publication
     {
-        type_id_type     type_id = not_defined_type_id;
-        instance_id_type instance_id = invalid_instance_id;
-        string           assigned_name;
+        type_id_type       type_id     = not_defined_type_id;
+        instance_id_type   instance_id = invalid_instance_id;
+        string             assigned_name;
     };
 
-    std::vector<Pending_instance_publication>   m_delayed_instance_publications;
+    std::vector<Pending_instance_publication>      m_delayed_instance_publications;
 
     // Remove a process from init tracking; return delayed publications now ready
     // to emit once startup coordination has finished.
     std::vector<Pending_instance_publication> finalize_initialization_tracking(
-        instance_id_type process_iid);
+        instance_id_type                       process_iid);
 
     std::vector<Pending_completion> collect_pending_barrier_completions(
-        instance_id_type process_iid,
-        bool remove_process);
+        instance_id_type                       process_iid,
+        bool                                   remove_process);
 
     void emit_pending_barrier_completions(
         const std::vector<Pending_completion>& pending_completions);
 
     void collect_and_schedule_barrier_completions(
-        instance_id_type process_iid,
-        bool remove_process);
+        instance_id_type                       process_iid,
+        bool                                   remove_process);
 
-    bool draining_slot_of_index(uint64_t draining_index, size_t& slot) const;
+    bool draining_slot_of_index(
+        uint64_t                               draining_index,
+        size_t&                                slot) const;
 
     // Draining coordination -------------------------------------------------
     //
@@ -340,14 +345,14 @@ public:
     // satisfy a drain predicate. Waiters snapshot it before re-checking the
     // predicate and sleep only until the next generation change, preventing
     // missed wakeups without polling.
-    mutable std::mutex                         m_draining_state_mutex;
-    std::condition_variable                    m_all_draining_cv;
-    std::atomic<bool>                          m_waiting_for_all_draining{false};
-    uint64_t                                   m_draining_state_generation = 0;
+    mutable std::mutex                             m_draining_state_mutex;
+    std::condition_variable                        m_all_draining_cv;
+    std::atomic<bool>                              m_waiting_for_all_draining{false};
+    uint64_t                                       m_draining_state_generation = 0;
 
     // Configurable timeout for wait_for_all_draining(). A value of 0 means
     // wait indefinitely (no timeout). Default is 20 seconds.
-    std::chrono::seconds                       m_drain_timeout{20};
+    std::chrono::seconds                           m_drain_timeout{20};
 
     // Aggregate draining state for all known processes based on the registry and
     // initialization tracking (caller holds lock).

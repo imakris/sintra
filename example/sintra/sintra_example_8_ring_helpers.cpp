@@ -13,13 +13,13 @@ int main()
         using element_t = std::uint32_t;
 
         const std::size_t requested = 1000;
-        const std::size_t capacity = sintra::aligned_capacity<element_t>(requested);
+        const std::size_t capacity  = sintra::aligned_capacity<element_t>(requested);
         if (capacity == 0) {
             std::cerr << "aligned_capacity failed for request " << requested << std::endl;
             return 1;
         }
 
-        const auto now = std::chrono::steady_clock::now().time_since_epoch();
+        const auto now   = std::chrono::steady_clock::now().time_since_epoch();
         const auto ticks = std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
         std::ostringstream dir_name;
         dir_name << "sintra_ring_helpers_example_" << ticks;

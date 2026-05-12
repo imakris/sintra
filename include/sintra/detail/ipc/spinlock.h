@@ -89,9 +89,9 @@ struct spinlock
     }
 
 private:
-    static constexpr size_t k_spin_yield_mask = 0x3FF; // yield every 1024 spins
-    static constexpr auto k_owner_liveness_poll = std::chrono::milliseconds(5);
-    static constexpr auto k_live_owner_timeout  = std::chrono::milliseconds(2000);
+    static constexpr size_t    k_spin_yield_mask     = 0x3FF; // yield every 1024 spins
+    static constexpr auto      k_owner_liveness_poll = std::chrono::milliseconds(5);
+    static constexpr auto      k_live_owner_timeout  = std::chrono::milliseconds(2000);
 
     bool try_recover_dead_owner(uint32_t self_pid)
     {
@@ -139,9 +139,9 @@ private:
         m_last_progress_ns.store(monotonic_now_ns(), std::memory_order_relaxed);
     }
 
-    std::atomic_flag    m_locked{};
-    std::atomic<uint32_t> m_owner_pid{0};
-    std::atomic<uint64_t> m_last_progress_ns{0};
+    std::atomic_flag           m_locked{};
+    std::atomic<uint32_t>      m_owner_pid{0};
+    std::atomic<uint64_t>      m_last_progress_ns{0};
 };
 
 } // namespace sintra

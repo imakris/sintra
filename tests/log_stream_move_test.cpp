@@ -99,7 +99,7 @@ int test_move_constructor()
     // Should only have one message (source was disabled by move)
     if (count_logs_containing("move_ctor_test") != 1) {
         std::fprintf(stderr, "Move constructor: expected exactly 1 log entry, got %d\n",
-                     count_logs_containing("move_ctor_test"));
+            count_logs_containing("move_ctor_test"));
         return 1;
     }
 
@@ -136,7 +136,7 @@ int test_move_assignment()
 
     if (count_logs_containing("move_assign_source") != 1) {
         std::fprintf(stderr, "Move assignment: expected exactly 1 log entry, got %d\n",
-                     count_logs_containing("move_assign_source"));
+            count_logs_containing("move_assign_source"));
         return 1;
     }
 
@@ -204,7 +204,7 @@ int test_self_move_assignment()
     // The key test is that we didn't crash
     // The content may or may not be logged depending on implementation
     std::fprintf(stderr, "Self-move assignment: completed without crash, log count=%d\n",
-                 get_log_count());
+        get_log_count());
 
     return 0;
 }

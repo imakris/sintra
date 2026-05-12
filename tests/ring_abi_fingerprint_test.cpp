@@ -26,14 +26,14 @@ void poke_fingerprint(const std::filesystem::path& control_file, std::uint64_t v
 {
     std::fstream f(control_file, std::ios::binary | std::ios::in | std::ios::out);
     sintra::test::require_true(static_cast<bool>(f),
-                               k_failure_prefix,
-                               "could not open control file for fingerprint poke");
+        k_failure_prefix,
+        "could not open control file for fingerprint poke");
     // abi_fingerprint is the first member of Control, so it sits at offset 0.
     f.seekp(0);
     f.write(reinterpret_cast<const char*>(&value), sizeof(value));
     sintra::test::require_true(static_cast<bool>(f),
-                               k_failure_prefix,
-                               "fingerprint poke write failed");
+        k_failure_prefix,
+        "fingerprint poke write failed");
     f.flush();
 }
 
@@ -43,12 +43,12 @@ void test_attach_rejects_mismatched_fingerprint()
 
     const std::size_t capacity = sintra::aligned_capacity<element_t>(128);
     sintra::test::require_true(capacity != 0,
-                               k_failure_prefix,
-                               "aligned_capacity returned 0 for a valid request");
+        k_failure_prefix,
+        "aligned_capacity returned 0 for a valid request");
 
-    const auto scratch_dir = sintra::test::unique_scratch_directory("ring_abi_fingerprint");
-    const std::string directory = scratch_dir.string();
-    const std::string ring_name = "abi_fingerprint_ring";
+    const auto        scratch_dir = sintra::test::unique_scratch_directory("ring_abi_fingerprint");
+    const std::string directory   = scratch_dir.string();
+    const std::string ring_name   = "abi_fingerprint_ring";
 
     // First: a writer creates the control file with the correct fingerprint.
     // We keep this writer alive while we poke a wrong fingerprint into the
@@ -58,8 +58,8 @@ void test_attach_rejects_mismatched_fingerprint()
 
     const auto control_file = scratch_dir / (ring_name + "_control");
     sintra::test::require_true(std::filesystem::exists(control_file),
-                               k_failure_prefix,
-                               "control file should exist after writer construction");
+        k_failure_prefix,
+        "control file should exist after writer construction");
 
     // Sanity: a second attach against the same name must succeed while the
     // fingerprint is intact, otherwise the test is ill-formed.
@@ -72,7 +72,7 @@ void test_attach_rejects_mismatched_fingerprint()
     constexpr std::uint64_t k_wrong_fingerprint = 0xdeadbeefcafef00dull;
     poke_fingerprint(control_file, k_wrong_fingerprint);
 
-    bool threw_typed = false;
+    bool threw_typed   = false;
     bool threw_generic = false;
     try {
         sintra::Ring_R<element_t> reader(directory, ring_name, capacity, 2);
@@ -94,11 +94,11 @@ void test_attach_rejects_mismatched_fingerprint()
     }
 
     sintra::test::require_true(threw_typed,
-                               k_failure_prefix,
-                               "attach should throw ring_abi_mismatch_exception on fingerprint mismatch");
+        k_failure_prefix,
+        "attach should throw ring_abi_mismatch_exception on fingerprint mismatch");
     sintra::test::require_true(!threw_generic,
-                               k_failure_prefix,
-                               "attach should not fall back to a generic exception on fingerprint mismatch");
+        k_failure_prefix,
+        "attach should not fall back to a generic exception on fingerprint mismatch");
 
     // The failed Ring_R constructor must not leak its mapped control region.
     // Repeat the failed attach a few times; a leak would balloon virtual
@@ -117,8 +117,8 @@ void test_attach_rejects_mismatched_fingerprint()
             retry_threw_typed = true;
         }
         sintra::test::require_true(retry_threw_typed,
-                                   k_failure_prefix,
-                                   "repeated mismatched attach should keep throwing the typed exception");
+            k_failure_prefix,
+            "repeated mismatched attach should keep throwing the typed exception");
     }
 
     // Restore the correct fingerprint so the writer's destructor doesn't see

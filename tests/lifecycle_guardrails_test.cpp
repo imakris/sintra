@@ -28,7 +28,8 @@ namespace {
 
 constexpr std::string_view k_prefix = "lifecycle_guardrails_test: ";
 
-struct state_case_t {
+struct state_case_t
+{
     sintra::detail::shutdown_protocol_state state;
     const char* name;
 };
@@ -178,11 +179,12 @@ bool test_leave_without_runtime_returns_false()
     const auto state_after =
         sintra::detail::s_shutdown_state.load(std::memory_order_acquire);
 
-    return sintra::test::assert_true(
-        !result &&
-            state_after == sintra::detail::shutdown_protocol_state::idle,
-        k_prefix,
-        "leave() without init() should return false and leave state idle");
+    return
+        sintra::test::assert_true(
+            !result && state_after == sintra::detail::shutdown_protocol_state::idle,
+            k_prefix,
+            "leave() without init() should return false and leave state idle"
+        );
 }
 
 bool test_shutdown_without_runtime_returns_false()
@@ -193,11 +195,12 @@ bool test_shutdown_without_runtime_returns_false()
     const auto state_after =
         sintra::detail::s_shutdown_state.load(std::memory_order_acquire);
 
-    return sintra::test::assert_true(
-        !result &&
-            state_after == sintra::detail::shutdown_protocol_state::idle,
-        k_prefix,
-        "shutdown() without init() should return false and leave state idle");
+    return
+        sintra::test::assert_true(
+            !result && state_after == sintra::detail::shutdown_protocol_state::idle,
+            k_prefix,
+            "shutdown() without init() should return false and leave state idle"
+        );
 }
 
 bool test_state_idle_after_finalize(int argc, char* argv[])
@@ -216,10 +219,12 @@ bool test_state_idle_after_finalize(int argc, char* argv[])
     sintra::detail::finalize();
 
     const auto after = sintra::detail::s_shutdown_state.load(std::memory_order_acquire);
-    return sintra::test::assert_true(
-        after == sintra::detail::shutdown_protocol_state::idle,
-        k_prefix,
-        "state should be idle after finalize");
+    return
+        sintra::test::assert_true(
+            after == sintra::detail::shutdown_protocol_state::idle,
+            k_prefix,
+            "state should be idle after finalize"
+        );
 }
 
 bool test_finalize_without_init_returns_false()
@@ -262,11 +267,12 @@ bool test_runtime_required_apis_without_runtime_throw()
         recovery_caught = true;
     }
 
-    return sintra::test::assert_true(
-        activate_caught && deactivate_caught && recovery_caught,
-        k_prefix,
-        "runtime-owned APIs without init() should throw runtime_error instead of "
-        "dereferencing runtime state");
+    return
+        sintra::test::assert_true(
+            activate_caught && deactivate_caught && recovery_caught,
+            k_prefix,
+            "runtime-owned APIs without init() should throw runtime_error instead of " "dereferencing runtime state"
+        );
 }
 
 bool test_leave_after_init_returns_true_and_resets_state(int argc, char* argv[])
@@ -274,13 +280,14 @@ bool test_leave_after_init_returns_true_and_resets_state(int argc, char* argv[])
     sintra::init(argc, argv);
 
     const bool result = sintra::leave();
-    const auto after = sintra::detail::s_shutdown_state.load(std::memory_order_acquire);
+    const auto after  = sintra::detail::s_shutdown_state.load(std::memory_order_acquire);
 
-    return sintra::test::assert_true(
-        result &&
-            after == sintra::detail::shutdown_protocol_state::idle,
-        k_prefix,
-        "leave() after init() should return true and leave state idle");
+    return
+        sintra::test::assert_true(
+            result && after == sintra::detail::shutdown_protocol_state::idle,
+            k_prefix,
+            "leave() after init() should return true and leave state idle"
+        );
 }
 
 bool test_leave_rejects_in_handler_context(int argc, char* argv[])
@@ -300,11 +307,12 @@ bool test_leave_rejects_in_handler_context(int argc, char* argv[])
     sintra::detail::finalize();
 
     const auto after = sintra::detail::s_shutdown_state.load(std::memory_order_acquire);
-    return sintra::test::assert_true(
-        caught &&
-            after == sintra::detail::shutdown_protocol_state::idle,
-        k_prefix,
-        "leave() should reject handler-dispatch context and leave state idle");
+    return
+        sintra::test::assert_true(
+            caught && after == sintra::detail::shutdown_protocol_state::idle,
+            k_prefix,
+            "leave() should reject handler-dispatch context and leave state idle"
+        );
 }
 
 bool test_double_init_rejected(int argc, char* argv[])
@@ -346,10 +354,12 @@ bool test_init_finalize_cycle(int argc, char* argv[])
 
     const auto end_state =
         sintra::detail::s_shutdown_state.load(std::memory_order_acquire);
-    return sintra::test::assert_true(
-        end_state == sintra::detail::shutdown_protocol_state::idle,
-        k_prefix,
-        "state should be idle after second init/finalize cycle");
+    return
+        sintra::test::assert_true(
+            end_state == sintra::detail::shutdown_protocol_state::idle,
+            k_prefix,
+            "state should be idle after second init/finalize cycle"
+        );
 }
 
 } // namespace

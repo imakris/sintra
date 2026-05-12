@@ -19,22 +19,14 @@ static_assert(
 int run_checks()
 {
     const auto expected_message_id = sintra::make_user_type_id(k_message_id);
-    const auto actual_message_id = Explicit_bus::ping::id();
-    if (actual_message_id != expected_message_id) {
-        return 1;
-    }
-    if (!sintra::is_user_type_id(actual_message_id)) {
-        return 2;
-    }
+    const auto actual_message_id   = Explicit_bus::ping::id();
+    if (actual_message_id != expected_message_id)    { return 1; }
+    if (!sintra::is_user_type_id(actual_message_id)) { return 2; }
 
     const auto expected_bus_id = sintra::make_user_type_id(k_bus_id);
-    const auto actual_bus_id = sintra::get_type_id<Explicit_bus>();
-    if (actual_bus_id != expected_bus_id) {
-        return 3;
-    }
-    if (!sintra::is_user_type_id(actual_bus_id)) {
-        return 4;
-    }
+    const auto actual_bus_id   = sintra::get_type_id<Explicit_bus>();
+    if (actual_bus_id != expected_bus_id)        { return 3; }
+    if (!sintra::is_user_type_id(actual_bus_id)) { return 4; }
 
     return 0;
 }

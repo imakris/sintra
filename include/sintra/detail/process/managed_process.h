@@ -77,7 +77,7 @@ struct Entry_descriptor
     }
 private:
     int (*m_entry_function)() = nullptr;
-    string m_binary_name;
+    string             m_binary_name;
 
     friend struct Managed_process;
 };
@@ -85,30 +85,30 @@ private:
 
 struct Process_descriptor
 {
-    Entry_descriptor entry;
-    vector<string> sintra_options;
-    vector<string> user_options;
-    instance_id_type assigned_instance_id = invalid_instance_id;
+    Entry_descriptor   entry;
+    vector<string>     sintra_options;
+    vector<string>     user_options;
+    instance_id_type   assigned_instance_id = invalid_instance_id;
 
     Process_descriptor(
-        const Entry_descriptor& aentry,
-        const vector<string>& auser_options = vector<string>())
+        const Entry_descriptor&    aentry,
+        const vector<string>&      auser_options = vector<string>())
     :
         entry(aentry),
         user_options(auser_options)
     {
     }
     Process_descriptor(
-        const string& binary_path,
-        const vector<string>& auser_options = vector<string>())
+        const string&              binary_path,
+        const vector<string>&      auser_options = vector<string>())
     :
         entry(binary_path),
         user_options(auser_options)
     {
     }
     Process_descriptor(
-        const char* binary_path,
-        const vector<string>& auser_options = vector<string>())
+        const char*                binary_path,
+        const vector<string>&      auser_options = vector<string>())
     :
         entry(binary_path),
         user_options(auser_options)
@@ -126,9 +126,9 @@ struct Process_descriptor
 
 struct Lifetime_policy
 {
-    bool enable_lifeline = true;
-    int hard_exit_code = 99;
-    int hard_exit_timeout_ms = 100;
+    bool               enable_lifeline      = true;
+    int                hard_exit_code       = 99;
+    int                hard_exit_timeout_ms = 100;
 };
 
 
@@ -230,7 +230,7 @@ struct Managed_process: Derived_transceiver<Managed_process>
     inline
     string obtain_swarm_directory();
 
-    function<int()> m_entry_function = [] { return 0; };
+    function<int()>                     m_entry_function = [] { return 0; };
 
     sequence_counter_type               m_last_message_sequence;
 
@@ -256,6 +256,7 @@ struct Managed_process: Derived_transceiver<Managed_process>
     int                                 m_num_active_readers = 0;
     mutex                               m_num_active_readers_mutex;
     condition_variable                  m_num_active_readers_condition;
+
     void wait_until_all_external_readers_are_done(int extra_allowed_readers = 0);
 
     void flush(instance_id_type process_id, sequence_counter_type flush_sequence);
@@ -319,38 +320,42 @@ struct Managed_process: Derived_transceiver<Managed_process>
 
     struct Spawn_swarm_process_args
     {
-        std::string                     binary_name;
-        std::vector<std::string>        args;
-        instance_id_type                piid;
-        uint32_t                        occurrence = 0;
-        Lifetime_policy                 lifetime;
+        std::string                binary_name;
+        std::vector<std::string>   args;
+        instance_id_type           piid;
+        uint32_t                   occurrence = 0;
+        Lifetime_policy            lifetime;
     };
 
     struct Spawn_result
     {
-        bool                            success;
-        std::string                     binary_name;
-        instance_id_type                instance_id;
-        int                             errno_value;
-        std::string                     error_message;
+        bool                       success;
+        std::string                binary_name;
+        instance_id_type           instance_id;
+        int                        errno_value;
+        std::string                error_message;
     };
 
 #ifndef _WIN32
     std::vector<pid_t>                  m_spawned_child_pids;
     mutable std::mutex                  m_spawned_child_pids_mutex;
-    void                                reap_finished_children();
+
+    void reap_finished_children();
 #endif
 
     using lifeline_handle_type = uintptr_t;
-    map<instance_id_type, lifeline_handle_type> m_lifeline_writes;
+    map<instance_id_type, lifeline_handle_type>
+                                        m_lifeline_writes;
     mutable std::mutex                  m_lifeline_mutex;
-    void                                release_lifeline(instance_id_type process_instance_id);
-    void                                release_all_lifelines();
+
+    void release_lifeline(instance_id_type process_instance_id);
+    void release_all_lifelines();
 
 
-    Spawn_result spawn_swarm_process( const Spawn_swarm_process_args& ssp_args );
+    Spawn_result spawn_swarm_process( const Spawn_swarm_process_args& ssp_args);
 
-    map<instance_id_type, Spawn_swarm_process_args> m_cached_spawns;
+    map<instance_id_type, Spawn_swarm_process_args>
+                                        m_cached_spawns;
 };
 
 

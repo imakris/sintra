@@ -109,9 +109,9 @@ int main(int argc, char* argv[])
     // contention actually happened (i.e. that some calls reached the
     // unavailable path and were rejected cleanly).
     std::cerr << "rpc_destruction_race_test:"
-              << " returned=" << rpc_returned.load()
-              << " unavailable=" << rpc_unavailable.load()
-              << " other=" << rpc_other.load() << "\n";
+        << " returned="    << rpc_returned.load()
+        << " unavailable=" << rpc_unavailable.load()
+        << " other="       << rpc_other.load() << "\n";
 
     if (rpc_other.load() != 0) {
         return 1;

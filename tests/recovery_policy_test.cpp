@@ -36,10 +36,10 @@ void write_marker(const std::filesystem::path& path)
 int crash_worker()
 {
     const sintra::test::Shared_directory shared("SINTRA_RECOVERY_POLICY_DIR", "recovery_policy");
-    const auto& dir = shared.path();
-    const auto occurrence = sintra::s_recovery_occurrence;
-    const auto ready_path = dir / ("ready_" + std::to_string(occurrence) + ".txt");
-    const auto go_path = dir / "crash_go.txt";
+    const auto& dir        = shared.path();
+    const auto  occurrence = sintra::s_recovery_occurrence;
+    const auto  ready_path = dir / ("ready_" + std::to_string(occurrence) + ".txt");
+    const auto  go_path    = dir / "crash_go.txt";
 
     sintra::enable_recovery();
     write_marker(ready_path);
@@ -74,10 +74,10 @@ int main(int argc, char* argv[])
     const auto watchdog_timeout_ms =
         sintra::test::read_env_int(k_env_watchdog_timeout_ms.data(), 60000);
 
-    const auto ready_path = dir / "ready_0.txt";
-    const auto respawned_path = dir / "respawned.txt";
+    const auto ready_path      = dir / "ready_0.txt";
+    const auto respawned_path  = dir / "respawned.txt";
     const auto crash_seen_path = dir / "crash_seen.txt";
-    const auto go_path = dir / "crash_go.txt";
+    const auto go_path         = dir / "crash_go.txt";
 
     std::atomic<bool> watchdog_done{false};
     std::thread watchdog([&]() {

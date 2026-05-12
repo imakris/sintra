@@ -82,7 +82,7 @@
 // \code
 // struct Calculator : sintra::Derived_transceiver<Calculator>
 // {
-//     int add(int a, int b) { return a + b; }
+//     int add(int a, int b)      { return a + b; }
 //     int slow_add(int a, int b) { return a + b; }
 //
 //     SINTRA_RPC(add)
@@ -156,7 +156,9 @@ struct processing_fence_t {};
 /// `invalid_sequence` when the barrier is treated as satisfied during
 /// shutdown/drain handling.
 template<typename BarrierMode = delivery_fence_t>
-sequence_counter_type barrier(const std::string& barrier_name, const std::string& group_name = "_sintra_external_processes");
+sequence_counter_type barrier(
+    const std::string& barrier_name,
+    const std::string& group_name = "_sintra_external_processes");
 
 /// Returns true only when a barrier completed normally.
 inline bool barrier_completed(sequence_counter_type barrier_sequence)
@@ -179,7 +181,8 @@ inline bool barrier_completed(sequence_counter_type barrier_sequence)
 /// fields here, rather than through a parallel family of helper names.
 /// Introduce a separate public helper only if the operation is no longer
 /// semantically just shutdown.
-struct shutdown_options {
+struct shutdown_options
+{
     /// Optional callback that runs on the coordinator during shutdown, after
     /// the collective processing fence completes and before raw teardown
     /// begins.  The hook is coordinator-local and must not initiate new peer
@@ -247,8 +250,8 @@ template <typename FT, typename SENDER_T = void>
 /// slot to messages from a specific originator; by default slots listen to any
 /// sender (local or remote).
 auto activate_slot(
-    const FT& slot_function,
-    Typed_instance_id<SENDER_T> sender_id = Typed_instance_id<void>(any_local_or_remote) );
+    const FT&                      slot_function,
+    Typed_instance_id<SENDER_T>    sender_id = Typed_instance_id<void>(any_local_or_remote));
 
 
 ///\brief Deactivate all slots owned by the current managed process.

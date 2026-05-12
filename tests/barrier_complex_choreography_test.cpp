@@ -44,18 +44,18 @@ constexpr std::uint32_t k_max_extra_rounds = 4;
 
 struct Stage_report
 {
-    std::uint32_t stage;
-    std::uint32_t worker;
-    std::uint32_t iteration;
-    std::uint32_t payload;
+    std::uint32_t  stage;
+    std::uint32_t  worker;
+    std::uint32_t  iteration;
+    std::uint32_t  payload;
 };
 
 struct Stage_directive
 {
-    std::uint32_t stage;
-    std::uint32_t iteration;
-    std::uint32_t extra_rounds;
-    std::uint32_t token;
+    std::uint32_t  stage;
+    std::uint32_t  iteration;
+    std::uint32_t  extra_rounds;
+    std::uint32_t  token;
 };
 
 std::uint32_t directive_token(std::uint32_t stage, std::uint32_t iteration)
@@ -79,13 +79,15 @@ std::uint32_t extra_rounds_for_iteration(std::uint32_t iteration)
 
 struct Coordinator_state
 {
-    std::mutex mutex;
-    std::condition_variable cv;
-    std::array<std::vector<std::size_t>, 2> stage_counts;
-    std::array<std::vector<std::vector<bool>>, 2> worker_seen;
-    std::vector<bool> stage_b_release_sent;
-    bool failure = false;
-    std::string failure_reason;
+    std::mutex                 mutex;
+    std::condition_variable    cv;
+    std::array<std::vector<std::size_t>, 2>
+                               stage_counts;
+    std::array<std::vector<std::vector<bool>>, 2>
+                               worker_seen;
+    std::vector<bool>          stage_b_release_sent;
+    bool                       failure = false;
+    std::string                failure_reason;
 
     Coordinator_state()
     {
@@ -207,7 +209,7 @@ int coordinator_process()
         }
 
         const std::uint32_t extra_rounds = extra_rounds_for_iteration(iteration);
-        const auto stage0_token = directive_token(0, iteration);
+        const auto          stage0_token = directive_token(0, iteration);
         world() << Stage_directive{0u, iteration, extra_rounds, stage0_token};
 
         const auto phase_a_barrier =
@@ -263,7 +265,9 @@ int coordinator_process()
     }
 
     try {
-        sintra::test::Shared_directory shared("SINTRA_TEST_SHARED_DIR", "barrier_complex_choreography");
+        sintra::test::Shared_directory shared(
+            "SINTRA_TEST_SHARED_DIR",
+            "barrier_complex_choreography");
         const auto shared_dir = shared.path();
         std::vector<std::string> lines;
         lines.reserve(success ? 4 : 5);
@@ -445,23 +449,23 @@ int main(int argc, char* argv[])
             const auto result_path = shared_dir / "complex_choreography_result.txt";
             if (!std::filesystem::exists(result_path)) {
                 std::fprintf(stderr,
-                             "Error: result file not found at %s\n",
-                             result_path.string().c_str());
+                    "Error: result file not found at %s\n",
+                    result_path.string().c_str());
                 return 1;
             }
 
             std::ifstream in(result_path, std::ios::binary);
             if (!in) {
                 std::fprintf(stderr,
-                             "Error: failed to open result file %s\n",
-                             result_path.string().c_str());
+                    "Error: failed to open result file %s\n",
+                    result_path.string().c_str());
                 return 1;
             }
 
             std::string status;
             std::size_t iterations_completed = 0;
-            std::size_t stage_a_total = 0;
-            std::size_t stage_b_total = 0;
+            std::size_t stage_a_total        = 0;
+            std::size_t stage_b_total        = 0;
             std::string reason;
 
             std::getline(in, status);
@@ -475,23 +479,23 @@ int main(int argc, char* argv[])
 
             if (status != "ok") {
                 std::fprintf(stderr,
-                             "Complex choreography test reported failure: %s\n",
-                             reason.c_str());
+                    "Complex choreography test reported failure: %s\n",
+                    reason.c_str());
                 return 1;
             }
             if (iterations_completed != k_iterations) {
                 std::fprintf(stderr, "Expected %zu iterations, got %zu\n",
-                             k_iterations, iterations_completed);
+                    k_iterations, iterations_completed);
                 return 1;
             }
             if (stage_a_total != expected_stage_a) {
                 std::fprintf(stderr, "Expected %zu stage A reports, got %zu\n",
-                             expected_stage_a, stage_a_total);
+                    expected_stage_a, stage_a_total);
                 return 1;
             }
             if (stage_b_total != expected_stage_b) {
                 std::fprintf(stderr, "Expected %zu stage B reports, got %zu\n",
-                             expected_stage_b, stage_b_total);
+                    expected_stage_b, stage_b_total);
                 return 1;
             }
             return 0;

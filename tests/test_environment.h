@@ -58,12 +58,12 @@ inline void emit_self_stack_trace()
 #pragma comment(lib, "Dbghelp.lib")
 #endif
     void* stack[64] = {};
-    const USHORT frames = CaptureStackBackTrace(0, 64, stack, nullptr);
-    HANDLE process = GetCurrentProcess();
+    const USHORT frames  = CaptureStackBackTrace(0, 64, stack, nullptr);
+    HANDLE       process = GetCurrentProcess();
     SymInitialize(process, nullptr, TRUE);
 
     const std::size_t symbol_size = sizeof(SYMBOL_INFO) + 256;
-    auto* symbol = static_cast<SYMBOL_INFO*>(std::calloc(1, symbol_size));
+    auto*             symbol      = static_cast<SYMBOL_INFO*>(std::calloc(1, symbol_size));
     if (symbol) {
         symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
         symbol->MaxNameLen = 255;
@@ -123,7 +123,7 @@ inline void emit_self_stack_trace()
 #endif
 
     std::fprintf(stderr,
-                 "[SINTRA_STACK_CAPTURE] ERROR: crash did not terminate process\n");
+        "[SINTRA_STACK_CAPTURE] ERROR: crash did not terminate process\n");
     std::fflush(stderr);
     std::_Exit(127);
 }
@@ -135,17 +135,11 @@ inline int read_env_int(const char* name, int default_value)
         return default_value;
     }
 
-    char* end = nullptr;
-    long parsed = std::strtol(value, &end, 10);
-    if (!end || end == value) {
-        return default_value;
-    }
-    if (parsed > static_cast<long>(std::numeric_limits<int>::max())) {
-        return default_value;
-    }
-    if (parsed < static_cast<long>(std::numeric_limits<int>::min())) {
-        return default_value;
-    }
+    char* end    = nullptr;
+    long  parsed = std::strtol(value, &end, 10);
+    if (!end || end == value)                                        { return default_value; }
+    if (parsed > static_cast<long>(std::numeric_limits<int>::max())) { return default_value; }
+    if (parsed < static_cast<long>(std::numeric_limits<int>::min())) { return default_value; }
     return static_cast<int>(parsed);
 }
 
@@ -168,9 +162,9 @@ inline void prepare_for_intentional_crash(const char* context = nullptr)
     if (getrlimit(RLIMIT_CORE, &current) != 0) {
         if (context) {
             std::fprintf(stderr,
-                         "[%s] getrlimit(RLIMIT_CORE) failed: %d\n",
-                         context,
-                         errno);
+                "[%s] getrlimit(RLIMIT_CORE) failed: %d\n",
+                context,
+                errno);
         }
         return;
     }
@@ -184,9 +178,9 @@ inline void prepare_for_intentional_crash(const char* context = nullptr)
     if (setrlimit(RLIMIT_CORE, &updated) != 0) {
         if (context) {
             std::fprintf(stderr,
-                         "[%s] setrlimit(RLIMIT_CORE) failed: %d\n",
-                         context,
-                         errno);
+                "[%s] setrlimit(RLIMIT_CORE) failed: %d\n",
+                context,
+                errno);
         }
     }
 #endif
@@ -202,12 +196,12 @@ inline void precrash_pause(const char* reason)
     const auto pid = static_cast<unsigned long long>(get_pid());
 
     std::fprintf(stderr,
-                 "[SINTRA_DEBUG_PAUSE] Process %llu paused: %s\n",
-                 pid,
-                 reason ? reason : "precrash");
+        "[SINTRA_DEBUG_PAUSE] Process %llu paused: %s\n",
+        pid,
+        reason ? reason : "precrash");
     std::fprintf(stderr,
-                 "[SINTRA_DEBUG_PAUSE] Attach debugger to PID %llu to capture stacks\n",
-                 pid);
+        "[SINTRA_DEBUG_PAUSE] Attach debugger to PID %llu to capture stacks\n",
+        pid);
     std::fflush(stderr);
 
     std::this_thread::sleep_for(std::chrono::milliseconds(pause_ms));
@@ -242,8 +236,8 @@ inline std::filesystem::path unique_scratch_directory(std::string_view prefix)
 {
     static std::atomic<std::uint64_t> counter{0};
 
-    auto now = std::chrono::steady_clock::now().time_since_epoch();
-    auto ticks = std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
+    auto now      = std::chrono::steady_clock::now().time_since_epoch();
+    auto ticks    = std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
     auto sequence = counter.fetch_add(1);
 
     std::ostringstream oss;

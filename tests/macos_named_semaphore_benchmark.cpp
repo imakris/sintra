@@ -17,7 +17,8 @@
 #include <cstdio>
 
 // Named semaphore implementation
-class named_semaphore {
+class named_semaphore
+{
 public:
     explicit named_semaphore(unsigned int initial_count = 0) {
         // Generate unique name
@@ -25,7 +26,7 @@ public:
         uint64_t id = (static_cast<uint64_t>(sintra::test::get_pid()) << 32) | counter++;
 
         std::snprintf(m_name, sizeof(m_name), "/sintra_bench_%016llx",
-                     static_cast<unsigned long long>(id));
+            static_cast<unsigned long long>(id));
 
         sem_unlink(m_name);
         m_sem = sem_open(m_name, O_CREAT | O_EXCL, 0600, initial_count);
@@ -43,21 +44,25 @@ public:
 
     void post() {
         while (sem_post(m_sem) == -1) {
-            if (errno == EINTR) continue;
+            if (errno == EINTR) {
+                continue;
+            }
             throw std::runtime_error("sem_post failed");
         }
     }
 
     void wait() {
         while (sem_wait(m_sem) == -1) {
-            if (errno == EINTR) continue;
+            if (errno == EINTR) {
+                continue;
+            }
             throw std::runtime_error("sem_wait failed");
         }
     }
 
 private:
     sem_t* m_sem = SEM_FAILED;
-    char m_name[32]{};
+    char   m_name[32]{};
 };
 
 template<typename SemaphoreT>
@@ -83,9 +88,9 @@ double benchmark_producer_consumer(int num_producers, int num_consumers, int ite
 
     // Launch consumers
     std::vector<std::thread> consumers;
-    int total_items = num_producers * items_per_producer;
+    int total_items        = num_producers * items_per_producer;
     int items_per_consumer = total_items / num_consumers;
-    int extra = total_items % num_consumers;
+    int extra              = total_items % num_consumers;
 
     for (int c = 0; c < num_consumers; ++c) {
         int my_items = items_per_consumer + (c < extra ? 1 : 0);
@@ -99,8 +104,12 @@ double benchmark_producer_consumer(int num_producers, int num_consumers, int ite
     }
 
     // Wait for completion
-    for (auto& t : producers) t.join();
-    for (auto& t : consumers) t.join();
+    for (auto& t : producers) {
+        t.join();
+    }
+    for (auto& t : consumers) {
+        t.join();
+    }
 
     auto end = std::chrono::steady_clock::now();
     return std::chrono::duration<double>(end - start).count();
@@ -111,10 +120,10 @@ int main() {
     std::cout << "Primitive: sem_open/sem_post/sem_wait" << std::endl;
     std::cout << std::endl;
 
-    const int num_producers = 3;
-    const int num_consumers = 4;
+    const int num_producers      = 3;
+    const int num_consumers      = 4;
     const int items_per_producer = 5000;
-    const int total_items = num_producers * items_per_producer;
+    const int total_items        = num_producers * items_per_producer;
 
     std::cout << "Configuration:" << std::endl;
     std::cout << "  Producers: " << num_producers << std::endl;

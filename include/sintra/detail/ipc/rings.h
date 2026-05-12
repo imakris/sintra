@@ -179,11 +179,11 @@ using sequence_counter_type = uint64_t;
 inline void debug_read_access_fetch_sub(
     std::atomic<uint64_t>& read_access,
     std::atomic<uint64_t>& mismatch_counter,
-    uint8_t octile,
-    uint64_t mask,
-    const char* file,
-    int line,
-    const char* func)
+    uint8_t                octile,
+    uint64_t               mask,
+    const char*            file,
+    int                    line,
+    const char*            func)
 {
     uint64_t prev = read_access.load();
     while (true) {
@@ -215,13 +215,13 @@ inline void debug_read_access_fetch_sub(
 
 #ifndef NDEBUG
 #define SINTRA_READ_ACCESS_FETCH_SUB(control, octile, mask) \
-    debug_read_access_fetch_sub( \
-        (control).read_access, \
-        (control).guard_accounting_mismatch_count, \
-        static_cast<uint8_t>(octile), \
-        (mask), \
-        __FILE__, \
-        __LINE__, \
+    debug_read_access_fetch_sub(                            \
+        (control).read_access,                              \
+        (control).guard_accounting_mismatch_count,          \
+        static_cast<uint8_t>(octile),                       \
+        (mask),                                             \
+        __FILE__,                                           \
+        __LINE__,                                           \
         __func__)
 #else
 #define SINTRA_READ_ACCESS_FETCH_SUB(control, octile, mask) \
@@ -233,29 +233,30 @@ inline void debug_read_access_fetch_sub(
 // Specific higher-level types (e.g., sintra::Message) can opt-in to allow
 // non-trivial semantics via explicit specializations in their own headers.
 template <typename T>
-struct ring_payload_traits {
-    static constexpr bool allow_nontrivial = false;
+struct ring_payload_traits
+{
+    static constexpr bool  allow_nontrivial                = false;
 };
 
 struct Ring_diagnostics
 {
-    sequence_counter_type max_reader_lag                  = 0;
-    sequence_counter_type worst_overflow_lag              = 0;
-    uint64_t              reader_lag_overflow_count       = 0;
-    uint64_t              reader_sequence_regressions     = 0;
-    uint64_t              reader_eviction_count           = 0;
-    uint32_t              last_evicted_reader_index       = std::numeric_limits<uint32_t>::max();
-    sequence_counter_type last_evicted_reader_sequence    = 0;
-    sequence_counter_type last_evicted_writer_sequence    = 0;
-    uint32_t              last_evicted_reader_octile      = std::numeric_limits<uint32_t>::max();
-    uint32_t              last_overflow_reader_index      = std::numeric_limits<uint32_t>::max();
-    sequence_counter_type last_overflow_reader_sequence   = 0;
-    sequence_counter_type last_overflow_leading_sequence  = 0;
-    sequence_counter_type last_overflow_last_consumed     = 0;
-    uint64_t              stale_guard_clear_count         = 0;
-    uint64_t              guard_rollback_attempt_count    = 0;
-    uint64_t              guard_rollback_success_count    = 0;
-    uint64_t              guard_accounting_mismatch_count = 0;
+    sequence_counter_type  max_reader_lag                  = 0;
+    sequence_counter_type  worst_overflow_lag              = 0;
+    uint64_t               reader_lag_overflow_count       = 0;
+    uint64_t               reader_sequence_regressions     = 0;
+    uint64_t               reader_eviction_count           = 0;
+    uint32_t               last_evicted_reader_index       = std::numeric_limits<uint32_t>::max();
+    sequence_counter_type  last_evicted_reader_sequence    = 0;
+    sequence_counter_type  last_evicted_writer_sequence    = 0;
+    uint32_t               last_evicted_reader_octile      = std::numeric_limits<uint32_t>::max();
+    uint32_t               last_overflow_reader_index      = std::numeric_limits<uint32_t>::max();
+    sequence_counter_type  last_overflow_reader_sequence   = 0;
+    sequence_counter_type  last_overflow_leading_sequence  = 0;
+    sequence_counter_type  last_overflow_last_consumed     = 0;
+    uint64_t               stale_guard_clear_count         = 0;
+    uint64_t               guard_rollback_attempt_count    = 0;
+    uint64_t               guard_rollback_success_count    = 0;
+    uint64_t               guard_accounting_mismatch_count = 0;
 };
 constexpr auto invalid_sequence = ~sequence_counter_type(0);
 
@@ -277,7 +278,9 @@ constexpr auto invalid_sequence = ~sequence_counter_type(0);
  */
 template <typename T>
 std::vector<size_t> get_ring_configurations(
-    size_t min_elements, size_t max_size, size_t max_subdivisions)
+    size_t min_elements,
+    size_t max_size,
+    size_t max_subdivisions)
 {
     size_t page_size = system_page_size();
     // Round up to a page-size multiple that is also a multiple of sizeof(T)
@@ -326,11 +329,11 @@ inline size_t aligned_capacity(size_t requested, size_t element_size)
         return 0;
     }
 
-    size_t alignment = 8;
+    size_t       alignment = 8;
     const size_t page_size = system_page_size();
     if (page_size != 0) {
-        const size_t page_step = page_size / std::gcd(page_size, element_size);
-        const size_t step_gcd = std::gcd(page_step, size_t(8));
+        const size_t page_step    = page_size / std::gcd(page_size, element_size);
+        const size_t step_gcd     = std::gcd(page_step, size_t(8));
         const size_t step_div_gcd = page_step / step_gcd;
         if (step_div_gcd > (std::numeric_limits<size_t>::max() / 8)) {
             return 0;
@@ -361,7 +364,8 @@ inline size_t aligned_capacity(size_t requested)
 //==============================================================================
 
 template <typename T>
-struct Range {
+struct Range
+{
     T* begin = nullptr;
     T* end   = nullptr;
 };
@@ -380,11 +384,13 @@ inline uint8_t octile_of_index(size_t idx, size_t ring) noexcept
 // Small helper types
 //==============================================================================
 
-struct ring_acquisition_failure_exception : public std::runtime_error {
+struct ring_acquisition_failure_exception : public std::runtime_error
+{
     ring_acquisition_failure_exception() : std::runtime_error("Failed to acquire ring buffer.") {}
 };
 
-struct ring_reader_evicted_exception : public std::runtime_error {
+struct ring_reader_evicted_exception : public std::runtime_error
+{
     ring_reader_evicted_exception() : std::runtime_error(
               "Ring reader was evicted by the writer due to being too slow.") {}
 };
@@ -393,11 +399,13 @@ struct ring_reader_evicted_exception : public std::runtime_error {
 // does not match this binary. Distinct from ring_acquisition_failure_exception
 // so callers can give a clearer diagnostic when the failure mode is "another
 // participant in this swarm was built against a different sintra ABI."
-struct ring_abi_mismatch_exception : public std::runtime_error {
+struct ring_abi_mismatch_exception : public std::runtime_error
+{
     ring_abi_mismatch_exception(uint64_t expected, uint64_t observed)
-    : std::runtime_error(format_message(expected, observed))
-    , m_expected(expected)
-    , m_observed(observed)
+    :
+        std::runtime_error(format_message(expected, observed)),
+        m_expected(expected),
+        m_observed(observed)
     {}
 
     uint64_t expected_fingerprint() const noexcept { return m_expected; }
@@ -418,8 +426,8 @@ private:
         return buf;
     }
 
-    uint64_t m_expected;
-    uint64_t m_observed;
+    uint64_t   m_expected;
+    uint64_t   m_observed;
 };
 
 namespace detail {
@@ -459,7 +467,7 @@ inline constexpr uint64_t k_ring_abi_fingerprint = fnv1a_64({
 
 inline bool create_ring_backing_file(
     const std::string& path,
-    size_t size,
+    size_t             size,
     const std::string* directory)
 {
     try {
@@ -479,8 +487,8 @@ inline bool create_ring_backing_file(
         }
 #else
         // Fill with a recognizable pattern to aid debugging
-        const char* ustr = "UNINITIALIZED";
-        const size_t dv = std::strlen(ustr); // std::strlen: see header notes
+        const char*  ustr = "UNINITIALIZED";
+        const size_t dv   = std::strlen(ustr); // std::strlen: see header notes
         std::unique_ptr<char[]> tmp(new char[size]);
         for (size_t i = 0; i < size; ++i) {
             tmp[i] = ustr[i % dv];
@@ -584,13 +592,13 @@ private:
             return unordered.exchange(false) ? wait_result::unordered : wait_result::ordered;
         }
 
-        std::atomic_flag posted = ATOMIC_FLAG_INIT;
-        std::atomic<bool> unordered{false};
+        std::atomic_flag   posted = ATOMIC_FLAG_INIT;
+        std::atomic<bool>  unordered{false};
     };
 
-    static constexpr uint8_t state_uninitialized = 0;
-    static constexpr uint8_t state_initializing  = 1;
-    static constexpr uint8_t state_initialized   = 2;
+    static constexpr uint8_t   state_uninitialized = 0;
+    static constexpr uint8_t   state_initializing  = 1;
+    static constexpr uint8_t   state_initialized   = 2;
 
     bool is_initialized() const noexcept
     {
@@ -616,8 +624,9 @@ private:
             }
             if (current == state_uninitialized) {
                 uint8_t expected = state_uninitialized;
-                if (m_state.compare_exchange_strong(expected, state_initializing,
-                                                    std::memory_order_acq_rel)) {
+                if (m_state.compare_exchange_strong(
+                        expected, state_initializing, std::memory_order_acq_rel))
+                {
                     try {
                         new (&m_storage) impl();
                         m_state.store(state_initialized, std::memory_order_release);
@@ -667,9 +676,10 @@ struct Ring_data
     using element_t = T;
     static constexpr bool read_only_data = READ_ONLY_DATA;
 
-    Ring_data(const std::string& directory,
-              const std::string& data_filename,
-              const size_t       num_elements)
+    Ring_data(
+        const std::string& directory,
+        const std::string& data_filename,
+        const size_t       num_elements)
     :
         m_num_elements(num_elements),
         m_data_region_size(num_elements * sizeof(T))
@@ -702,7 +712,7 @@ struct Ring_data
     }
 
     size_t   get_num_elements() const { return m_num_elements; }
-    const T* get_base_address() const { return m_data; }
+    const T* get_base_address() const { return m_data;         }
 
 private:
 
@@ -742,7 +752,7 @@ private:
 
             // Enforce the "multiple of page/granularity" constraint explicitly.
             assert((m_data_region_size % page_size) == 0 &&
-                   "Ring size (bytes) must be multiple of mapping granularity");
+                "Ring size (bytes) must be multiple of mapping granularity");
 
             auto data_rights = READ_ONLY_DATA ? ipc::read_only : ipc::read_write;
             ipc::file_mapping file(m_data_filename.c_str(), data_rights);
@@ -760,7 +770,7 @@ private:
 #ifdef _WIN32
                 // -- Windows: VirtualAlloc -> round -> VirtualFree -> map --------------
                 void* mem = ::VirtualAlloc(nullptr, m_data_region_size * 2 + page_size,
-                                           MEM_RESERVE, PAGE_READWRITE);
+                    MEM_RESERVE, PAGE_READWRITE);
                 if (!mem) {
                     return false;
                 }
@@ -815,7 +825,7 @@ private:
                     // Success! MAP_FIXED has replaced the PROT_NONE reservation.
                     m_data_region_0 = std::move(region0);
                     m_data_region_1 = std::move(region1);
-                    m_data = (T*)m_data_region_0->data();
+                    m_data          = (T*)m_data_region_0->data();
 
 #if defined(MADV_DONTDUMP)
                     // Keep crash dumps compact (especially on macOS where Mach
@@ -867,19 +877,19 @@ private:
         }
     }
 
-    std::unique_ptr<ipc::mapped_region> m_data_region_0;
-    std::unique_ptr<ipc::mapped_region> m_data_region_1;
-    std::string                         m_directory;
+    std::unique_ptr<ipc::mapped_region>    m_data_region_0;
+    std::unique_ptr<ipc::mapped_region>    m_data_region_1;
+    std::string                            m_directory;
 
 protected:
 
-    const size_t                        m_num_elements;
-    const size_t                        m_data_region_size;
+    const size_t                           m_num_elements;
+    const size_t                           m_data_region_size;
 
-    T*                                  m_data                          = nullptr;
-    std::string                         m_data_filename;
-    size_t                              m_data_filename_hash            = 0;
-    bool                                m_remove_files_on_destruction   = false;
+    T*                                     m_data                        = nullptr;
+    std::string                            m_data_filename;
+    size_t                                 m_data_filename_hash          = 0;
+    bool                                   m_remove_files_on_destruction = false;
 
     template <typename RingT1, typename RingT2>
     friend bool has_same_mapping(const RingT1& r1, const RingT2& r2);
@@ -934,12 +944,14 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
     };
 
     // Union-based reader state: eliminates bit shifts/masks, uses direct field access
-    union Reader_state_union {
-        struct Fields {
-            uint8_t octile;          // Octile number (0-7)
-            uint8_t guard_present;   // 0 = no guard, 1 = guard present
-            uint8_t status;          // Reader_status enum value
-            uint8_t pending_octile;  // 0xff = no pending update, else octile
+    union Reader_state_union
+    {
+        struct Fields
+        {
+            uint8_t    octile;         // Octile number (0-7)
+            uint8_t    guard_present;  // 0 = no guard, 1 = guard present
+            uint8_t    status;         // Reader_status enum value
+            uint8_t    pending_octile; // 0xff = no pending update, else octile
         } fields;
         uint32_t word;
 
@@ -950,16 +962,19 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         constexpr Reader_state_union(Reader_status s, uint8_t o, bool g)
             : fields{o, g ? uint8_t(1) : uint8_t(0), static_cast<uint8_t>(s), k_no_pending_octile} {}
 
-        static constexpr Reader_state_union make(Reader_status status, uint8_t octile, bool guard_present)
+        static constexpr Reader_state_union make(
+            Reader_status  status,
+            uint8_t        octile,
+            bool           guard_present)
         {
             return Reader_state_union(status, octile, guard_present);
         }
 
-        uint8_t status()        const { return fields.status; }
-        bool    guard_present() const { return fields.guard_present != 0; }
-        uint8_t guard_octile()  const { return fields.octile; }
-        bool    guard_pending() const { return fields.pending_octile != k_no_pending_octile; }
-        uint8_t pending_octile() const { return fields.pending_octile; }
+        uint8_t status()         const { return fields.status;                                }
+        bool    guard_present()  const { return fields.guard_present != 0;                    }
+        uint8_t guard_octile()   const { return fields.octile;                                }
+        bool    guard_pending()  const { return fields.pending_octile != k_no_pending_octile; }
+        uint8_t pending_octile() const { return fields.pending_octile;                        }
 
         Reader_state_union with_status(uint8_t status_value) const
         {
@@ -1003,7 +1018,10 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         }
 
         template <typename F>
-        static Reader_state_union cas_update_if(std::atomic<uint32_t>& state, F&& transform, bool& updated)
+        static Reader_state_union cas_update_if(
+            std::atomic<uint32_t>& state,
+            F&&                    transform,
+            bool&                  updated)
         {
             Reader_state_union current(state);
             while (true) {
@@ -1038,9 +1056,14 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
     // the correctness guarantee is invaluable for a lock-free concurrent data structure.
 
     // Helper: pad to a cache line to reduce false sharing in Control arrays.
-    struct cache_line_sized_t {
-        struct Packed_reader_state {
-            std::atomic<uint32_t> word{Reader_state_union::make(READER_STATE_INACTIVE, 0, false).word};
+    struct cache_line_sized_t
+    {
+        struct Packed_reader_state
+        {
+            std::atomic<uint32_t> word{Reader_state_union::make(
+                READER_STATE_INACTIVE,
+                0,
+                false).word};
 
             // Status field access
             uint8_t status() const
@@ -1085,7 +1108,8 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
             uint8_t exchange_guard_token(uint8_t value)
             {
                 Reader_state_union previous = Reader_state_union::cas_update(
-                    word, [value](Reader_state_union current) {
+                    word,
+                    [value](Reader_state_union current) {
                         return current.with_guard(value & 0x07, (value & 0x08) != 0);
                     });
                 return previous.guard_present() ? (0x08 | previous.guard_octile()) : 0;
@@ -1095,7 +1119,9 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
             uint8_t fetch_update_guard_token_if(F&& transform, bool& updated)
             {
                 Reader_state_union previous = Reader_state_union::cas_update_if(
-                    word, std::forward<F>(transform), updated);
+                    word,
+                    std::forward<F>(transform),
+                    updated);
                 return previous.guard_present() ? (0x08 | previous.guard_octile()) : 0;
             }
 
@@ -1119,7 +1145,8 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
             }
         };
 
-        struct Payload : Packed_reader_state {
+        struct Payload : Packed_reader_state
+        {
             std::atomic<sequence_counter_type> v;
             std::atomic<uint32_t> owner_pid{0};
         };
@@ -1128,7 +1155,7 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         std::array<uint8_t, (assumed_cache_line_size - sizeof(Payload))> padding{};
 
         static_assert(sizeof(Payload) <= assumed_cache_line_size,
-                      "The payload of cache_line_sized_t exceeds the assumed cache line size.");
+            "The payload of cache_line_sized_t exceeds the assumed cache line size.");
     };
 
     /**
@@ -1138,13 +1165,14 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
      * heap-backed containers that are not trivially relocation-safe across processes.
      */
     template <int N>
-    struct Index_stack {
-        int arr[N]{};
-        int count = 0;
+    struct Index_stack
+    {
+        int    arr[N]{};
+        int    count = 0;
 
         void clear() { count = 0; }
         bool empty() const { return count == 0; }
-        int size() const { return count; }
+        int  size()  const { return count;      }
 
         void push(int value)
         {
@@ -1435,9 +1463,10 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
             "max_process_index must be <= 255 because read_access uses 8-bit octile counters.");
     };
 
-    Ring(const std::string& directory,
-         const std::string& data_filename,
-         size_t             num_elements)
+    Ring(
+        const std::string& directory,
+        const std::string& data_filename,
+        size_t             num_elements)
     :
         Ring_data<T, READ_ONLY_DATA>(directory, data_filename, num_elements)
     {
@@ -1533,7 +1562,9 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
     T* get_element_from_sequence(sequence_counter_type seq) const
     {
         const auto leading = m_control->leading_sequence.load();
-        if (leading == 0) return nullptr; // nothing published yet
+        if (leading == 0) {
+            return nullptr; // nothing published yet
+        }
 
         const auto last_published = leading - 1;
         const auto ring = this->m_num_elements;
@@ -1579,10 +1610,10 @@ private:
     }
 
 private:
-    ipc::mapped_region*  m_control_region = nullptr;
-    std::string          m_control_filename;
+    ipc::mapped_region*    m_control_region = nullptr;
+    std::string            m_control_filename;
 protected:
-    Control*             m_control        = nullptr;
+    Control*               m_control        = nullptr;
 
 public:
     Ring_diagnostics get_diagnostics() const noexcept
@@ -1592,22 +1623,22 @@ public:
             return diag;
         }
 
-        diag.max_reader_lag                 = m_control->max_reader_lag;
-        diag.worst_overflow_lag             = m_control->worst_overflow_lag;
-        diag.reader_lag_overflow_count      = m_control->reader_lag_overflow_count;
-        diag.reader_sequence_regressions    = m_control->reader_sequence_regressions;
-        diag.reader_eviction_count          = m_control->reader_eviction_count;
-        diag.last_evicted_reader_index      = m_control->last_evicted_reader_index;
-        diag.last_evicted_reader_sequence   = m_control->last_evicted_reader_sequence;
-        diag.last_evicted_writer_sequence   = m_control->last_evicted_writer_sequence;
-        diag.last_evicted_reader_octile     = m_control->last_evicted_reader_octile;
-        diag.last_overflow_reader_index     = m_control->last_overflow_reader_index;
-        diag.last_overflow_reader_sequence  = m_control->last_overflow_reader_sequence;
-        diag.last_overflow_leading_sequence = m_control->last_overflow_leading_sequence;
-        diag.last_overflow_last_consumed    = m_control->last_overflow_last_consumed;
-        diag.stale_guard_clear_count        = m_control->stale_guard_clear_count;
-        diag.guard_rollback_attempt_count   = m_control->guard_rollback_attempt_count;
-        diag.guard_rollback_success_count   = m_control->guard_rollback_success_count;
+        diag.max_reader_lag                  = m_control->max_reader_lag;
+        diag.worst_overflow_lag              = m_control->worst_overflow_lag;
+        diag.reader_lag_overflow_count       = m_control->reader_lag_overflow_count;
+        diag.reader_sequence_regressions     = m_control->reader_sequence_regressions;
+        diag.reader_eviction_count           = m_control->reader_eviction_count;
+        diag.last_evicted_reader_index       = m_control->last_evicted_reader_index;
+        diag.last_evicted_reader_sequence    = m_control->last_evicted_reader_sequence;
+        diag.last_evicted_writer_sequence    = m_control->last_evicted_writer_sequence;
+        diag.last_evicted_reader_octile      = m_control->last_evicted_reader_octile;
+        diag.last_overflow_reader_index      = m_control->last_overflow_reader_index;
+        diag.last_overflow_reader_sequence   = m_control->last_overflow_reader_sequence;
+        diag.last_overflow_leading_sequence  = m_control->last_overflow_leading_sequence;
+        diag.last_overflow_last_consumed     = m_control->last_overflow_last_consumed;
+        diag.stale_guard_clear_count         = m_control->stale_guard_clear_count;
+        diag.guard_rollback_attempt_count    = m_control->guard_rollback_attempt_count;
+        diag.guard_rollback_success_count    = m_control->guard_rollback_success_count;
         diag.guard_accounting_mismatch_count = m_control->guard_accounting_mismatch_count;
         return diag;
     }
@@ -1638,7 +1669,8 @@ struct Ring_R : Ring<T, true>
     // =========================================================================
     // MODIFIED CONSTRUCTOR: Acquires a reader slot for the object's lifetime.
     // =========================================================================
-    Ring_R(const std::string& directory,
+    Ring_R(
+        const std::string& directory,
         const std::string& data_filename,
         size_t             num_elements,
         size_t             max_trailing_elements = 0)
@@ -1750,11 +1782,13 @@ struct Ring_R : Ring<T, true>
         while (true) {
             auto leading_sequence = c.leading_sequence.load();
 
-            auto range_first_sequence =
-                std::max<int64_t>(0, int64_t(leading_sequence) - int64_t(num_trailing_elements));
+            auto range_first_sequence = std::max<int64_t>(
+                0,
+                int64_t(leading_sequence) - int64_t(num_trailing_elements));
 
             size_t trailing_idx = mod_pos_i64(
-                int64_t(range_first_sequence) - int64_t(m_max_trailing_elements), this->m_num_elements);
+                int64_t(range_first_sequence) - int64_t(m_max_trailing_elements),
+                this->m_num_elements);
 
             uint8_t trailing_octile = octile_of_index(trailing_idx, this->m_num_elements);
             uint64_t guard_mask     = octile_mask(trailing_octile);
@@ -1814,10 +1848,12 @@ struct Ring_R : Ring<T, true>
 
             auto confirmed_leading_sequence = c.leading_sequence.load();
             auto confirmed_range_first_sequence = std::max<int64_t>(
-                0, int64_t(confirmed_leading_sequence) - int64_t(num_trailing_elements));
+                0,
+                int64_t(confirmed_leading_sequence) - int64_t(num_trailing_elements));
 
             size_t confirmed_trailing_idx = mod_pos_i64(
-                int64_t(confirmed_range_first_sequence) - int64_t(m_max_trailing_elements), this->m_num_elements);
+                int64_t(confirmed_range_first_sequence) - int64_t(m_max_trailing_elements),
+                this->m_num_elements);
             uint8_t confirmed_trailing_octile =
                 octile_of_index(confirmed_trailing_idx, this->m_num_elements);
 
@@ -2001,7 +2037,7 @@ struct Ring_R : Ring<T, true>
                 c.last_overflow_reader_sequence  = start_sequence;
                 c.last_overflow_leading_sequence = leading_sequence;
                 c.last_overflow_last_consumed    = last_consumed_before;
-                clamped_lag = sequence_counter_type(this->m_num_elements);
+                clamped_lag                      = sequence_counter_type(this->m_num_elements);
             }
 
             if (start_sequence < m_last_consumed_sequence) {
@@ -2318,7 +2354,8 @@ struct Ring_R : Ring<T, true>
 
             // Recalculate trailing octile to match the new jumped-forward position
             const size_t trailing_idx = mod_pos_i64(
-                int64_t(new_seq) - int64_t(m_max_trailing_elements), this->m_num_elements);
+                int64_t(new_seq) - int64_t(m_max_trailing_elements),
+                this->m_num_elements);
             m_trailing_octile = octile_of_index(trailing_idx, this->m_num_elements);
 
             reattach_after_eviction();
@@ -2455,12 +2492,8 @@ public:
 
         access_snapshot = c.read_access.load();
         count = static_cast<uint32_t>((access_snapshot >> (8 * octile)) & 0xffu);
-        if (count == 0) {
-            return false;
-        }
-        if (c.count_guards_for_octile(octile) != 0) {
-            return false;
-        }
+        if (count == 0)                             { return false; }
+        if (c.count_guards_for_octile(octile) != 0) { return false; }
 
         const uint64_t decrement = (uint64_t(1) << (8 * octile));
         uint64_t expected = access_snapshot;
@@ -2483,21 +2516,21 @@ public:
     }
 
 private:
-    const size_t                        m_max_trailing_elements;
-    std::atomic<sequence_counter_type>* m_reading_sequence       = &s_zero_rs;
-    size_t                              m_trailing_octile        = 0;
-    uint64_t                            m_seen_unblock_sequence  = 0;
-    sequence_counter_type               m_last_consumed_sequence = 0;
-    std::atomic<bool>                   m_evicted_since_last_wait{false};
+    const size_t                           m_max_trailing_elements;
+    std::atomic<sequence_counter_type>*    m_reading_sequence       = &s_zero_rs;
+    size_t                                 m_trailing_octile        = 0;
+    uint64_t                               m_seen_unblock_sequence  = 0;
+    sequence_counter_type                  m_last_consumed_sequence = 0;
+    std::atomic<bool>                      m_evicted_since_last_wait{false};
 
 protected:
-    std::atomic<bool>                   m_reading                = false;
-    std::atomic<bool>                   m_reading_lock           = false;
+    std::atomic<bool>                      m_reading                = false;
+    std::atomic<bool>                      m_reading_lock           = false;
 
 private:
-    std::atomic<int>                    m_sleepy_index           = -1;
-    int                                 m_rs_index               = -1;
-    std::atomic<bool>                   m_stopping               = false;
+    std::atomic<int>                       m_sleepy_index           = -1;
+    int                                    m_rs_index               = -1;
+    std::atomic<bool>                      m_stopping               = false;
 
     inline static std::atomic<sequence_counter_type> s_zero_rs{0};
 
@@ -2534,10 +2567,12 @@ inline uint32_t thread_index()
 template <typename T>
 struct Ring_W : Ring<T, false>
 {
-    Ring_W(const std::string& directory,
-           const std::string& data_filename,
-           size_t             num_elements)
-    :   Ring<T, false>::Ring(directory, data_filename, num_elements),
+    Ring_W(
+        const std::string& directory,
+        const std::string& data_filename,
+        size_t             num_elements)
+    :
+        Ring<T, false>::Ring(directory, data_filename, num_elements),
         c(*this->m_control)
     {
         ensure_writer_mutex_consistency();
@@ -2549,8 +2584,8 @@ struct Ring_W : Ring<T, false>
 
         c.writer_closed.store(0, std::memory_order_release);
         c.writer_pid = get_current_pid();
-        m_owner_pid = c.writer_pid;
-        m_owner_tid = get_current_tid();
+        m_owner_pid  = c.writer_pid;
+        m_owner_tid  = get_current_tid();
     }
 
     ~Ring_W()
@@ -2793,8 +2828,9 @@ struct Ring_W : Ring<T, false>
 
             if (!has_blocking_reader) {
                 uint64_t access_snapshot = c.read_access.load();
-                if (blocked_start == std::chrono::steady_clock::time_point{} ||
-                    access_snapshot != last_access_snapshot) {
+                if (blocked_start   == std::chrono::steady_clock::time_point{} ||
+                    access_snapshot != last_access_snapshot)
+                {
                     blocked_start = std::chrono::steady_clock::now();
                     last_access_snapshot = access_snapshot;
                 }
@@ -2805,12 +2841,14 @@ struct Ring_W : Ring<T, false>
 
                 if (!confirmed_blocking_reader) {
                     const auto now = std::chrono::steady_clock::now();
-                    if ((access_snapshot & range_mask) != 0 &&
-                        c.count_guards_for_octile(new_octile) == 0) {
+                    if ((access_snapshot & range_mask)        != 0 &&
+                        c.count_guards_for_octile(new_octile) == 0)
+                    {
                         std::this_thread::yield();
                         uint64_t confirm_snapshot = c.read_access.load();
-                        if ((confirm_snapshot & range_mask) != 0 &&
-                            c.count_guards_for_octile(new_octile) == 0) {
+                        if ((confirm_snapshot & range_mask)       != 0 &&
+                            c.count_guards_for_octile(new_octile) == 0)
+                        {
                             uint64_t expected = confirm_snapshot;
                             uint64_t desired = expected & ~range_mask;
                             if (c.read_access.compare_exchange_strong(expected, desired)) {
@@ -2822,7 +2860,7 @@ struct Ring_W : Ring<T, false>
                         }
                     }
                     if ((access_snapshot & range_mask) != 0 &&
-                        (now - blocked_start) >= k_stale_guard_delay)
+                        (now - blocked_start)          >= k_stale_guard_delay)
                     {
                         uint64_t expected_access = access_snapshot;
                         uint64_t desired_access = expected_access & ~range_mask;
@@ -2834,7 +2872,7 @@ struct Ring_W : Ring<T, false>
                             const uint32_t cleared_count = static_cast<uint32_t>(
                                 (expected_access >> (8 * new_octile)) & 0xffu);
                             assert(cleared_count > 0 && cleared_count < 255 &&
-                                   "Stale guard clear with suspicious count");
+                                "Stale guard clear with suspicious count");
 #endif
                             blocked_start = now;
                             last_access_snapshot = desired_access;
@@ -2922,12 +2960,8 @@ private:
 
         for (;;) {
             uint32_t observed = c.writer_pid;
-            if (observed == 0) {
-                return;
-            }
-            if (is_process_alive(observed)) {
-                return;
-            }
+            if (observed == 0)              { return; }
+            if (is_process_alive(observed)) { return; }
             if ((observed & recovery_flag) != 0) {
                 uint32_t recovering_pid = extract_recovering_pid(observed);
                 if (recovering_pid == self_pid) {
@@ -2994,11 +3028,11 @@ private:
 private:
     // Use uint32_t (trivial type) instead of std::thread::id for reliable atomic operations
     // std::atomic<std::thread::id> has platform-specific issues (broken on macOS)
-    std::atomic<uint32_t>           m_writing_thread_index   = {0};
-    size_t                          m_octile                 = 0;
-    sequence_counter_type           m_pending_new_sequence   = 0;
-    uint32_t                        m_owner_tid              = 0;
-    uint32_t                        m_owner_pid              = 0;
+    std::atomic<uint32_t>  m_writing_thread_index            = {0};
+    size_t                 m_octile                          = 0;
+    sequence_counter_type  m_pending_new_sequence            = 0;
+    uint32_t               m_owner_tid                       = 0;
+    uint32_t               m_owner_pid                       = 0;
 
     typename Ring<T, false>::Control& c;
 };
@@ -3022,7 +3056,8 @@ private:
 // done_reading() will throw (use a separate Ring_R<T> instance if you need concurrent snapshots).
 
 template <class Reader>
-class [[nodiscard]] Ring_R_snapshot {
+class [[nodiscard]] Ring_R_snapshot
+{
 public:
     using element_t = typename Reader::element_t;
 
@@ -3059,9 +3094,9 @@ public:
         return m_active && m_range.begin && m_range.end && (m_range.end > m_range.begin);
     }
 
-    [[nodiscard]] Range<element_t> range() const noexcept { return m_range; }
+    [[nodiscard]] Range<element_t> range() const noexcept { return m_range;       }
     [[nodiscard]] element_t*       begin() const noexcept { return m_range.begin; }
-    [[nodiscard]] element_t*       end()   const noexcept { return m_range.end; }
+    [[nodiscard]] element_t*       end()   const noexcept { return m_range.end;   }
 
     // If caller finished early, prevent done_reading() in dtor.
     void dismiss() noexcept { m_active = false; }
@@ -3090,8 +3125,11 @@ try_snapshot_e(Reader& reader, Args&&... args) noexcept
 {
     try {
         auto rg = reader.start_reading(std::forward<Args>(args)...);
-        return std::pair<Ring_R_snapshot<Reader>, Ring_R_snapshot_error>(
-            Ring_R_snapshot<Reader>(reader, rg), Ring_R_snapshot_error::none);
+        return
+            std::pair<Ring_R_snapshot<Reader>, Ring_R_snapshot_error>(
+                Ring_R_snapshot<Reader>(reader, rg),
+                Ring_R_snapshot_error::none
+            );
     }
     catch (const ring_reader_evicted_exception&) {
         return std::pair<Ring_R_snapshot<Reader>, Ring_R_snapshot_error>(

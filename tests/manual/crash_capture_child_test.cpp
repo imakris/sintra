@@ -27,25 +27,22 @@
 
 namespace {
 
-struct Process_handle {
+struct Process_handle
+{
 #ifdef _WIN32
     HANDLE handle = nullptr;
-    DWORD pid = 0;
+    DWORD  pid    = 0;
 #else
-    pid_t pid = -1;
+    pid_t  pid = -1;
 #endif
-    bool exited = false;
-    int exit_code = 0;
+    bool   exited    = false;
+    int    exit_code = 0;
 };
 
 int clamp_int(int value, int lo, int hi)
 {
-    if (value < lo) {
-        return lo;
-    }
-    if (value > hi) {
-        return hi;
-    }
+    if (value < lo) { return lo; }
+    if (value > hi) { return hi; }
     return value;
 }
 
@@ -112,11 +109,13 @@ void append_quoted_argument(std::wstring& cmdline, const std::string& arg)
         if (ch == L'"') {
             cmdline += L"\\\"";
         }
-        else if (ch == L'\\') {
+        else
+        if (ch == L'\\') {
             if (i + 1 < wide_arg.length() && wide_arg[i + 1] == L'"') {
                 cmdline += L"\\\\";
             }
-            else if (i + 1 == wide_arg.length() && needs_quoting) {
+            else
+            if (i + 1 == wide_arg.length() && needs_quoting) {
                 cmdline += L"\\\\";
             }
             else {
@@ -145,11 +144,14 @@ std::wstring build_command_line(const std::string& exe, const std::vector<std::s
 }
 #endif
 
-bool spawn_process(const std::string& exe, const std::vector<std::string>& args, Process_handle& out)
+bool spawn_process(
+    const std::string&                 exe,
+    const std::vector<std::string>&    args,
+    Process_handle&                    out)
 {
 #ifdef _WIN32
     const std::wstring exe_wide = to_wide(exe);
-    std::wstring cmdline = build_command_line(exe, args);
+    std::wstring       cmdline  = build_command_line(exe, args);
     if (exe_wide.empty() || cmdline.empty()) {
         return false;
     }
@@ -159,21 +161,22 @@ bool spawn_process(const std::string& exe, const std::vector<std::string>& args,
 
     STARTUPINFOW si {};
     si.cb = sizeof(si);
-    HANDLE std_in = GetStdHandle(STD_INPUT_HANDLE);
-    HANDLE std_out = GetStdHandle(STD_OUTPUT_HANDLE);
-    HANDLE std_err = GetStdHandle(STD_ERROR_HANDLE);
-    bool inherit_handles = false;
+    HANDLE std_in          = GetStdHandle(STD_INPUT_HANDLE);
+    HANDLE std_out         = GetStdHandle(STD_OUTPUT_HANDLE);
+    HANDLE std_err         = GetStdHandle(STD_ERROR_HANDLE);
+    bool   inherit_handles = false;
     if (std_in && std_in != INVALID_HANDLE_VALUE
-        && std_out && std_out != INVALID_HANDLE_VALUE
-        && std_err && std_err != INVALID_HANDLE_VALUE) {
+        && std_out && std_out != INVALID_HANDLE_VALUE &&
+            std_err && std_err != INVALID_HANDLE_VALUE)
+    {
         // Ensure child stdout/stderr propagate so stack-capture pauses are visible.
         SetHandleInformation(std_in, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
         SetHandleInformation(std_out, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
         SetHandleInformation(std_err, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
         si.dwFlags |= STARTF_USESTDHANDLES;
-        si.hStdInput = std_in;
-        si.hStdOutput = std_out;
-        si.hStdError = std_err;
+        si.hStdInput    = std_in;
+        si.hStdOutput   = std_out;
+        si.hStdError    = std_err;
         inherit_handles = true;
     }
     PROCESS_INFORMATION pi {};
@@ -249,7 +252,7 @@ bool wait_for_exit(Process_handle& process, int timeout_ms)
         process.exited = true;
         return true;
 #else
-        int status = 0;
+        int   status = 0;
         pid_t result = ::waitpid(process.pid, &status, WNOHANG);
         if (result == 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -264,7 +267,8 @@ bool wait_for_exit(Process_handle& process, int timeout_ms)
         if (WIFSIGNALED(status)) {
             process.exit_code = 128 + WTERMSIG(status);
         }
-        else if (WIFEXITED(status)) {
+        else
+        if (WIFEXITED(status)) {
             process.exit_code = WEXITSTATUS(status);
         }
         else {
@@ -339,9 +343,9 @@ int main(int argc, char** argv)
     }
 
     std::fprintf(stderr,
-                 "[crash_capture_parent] child_delay=%dms parent_delay=%dms\n",
-                 child_delay,
-                 parent_delay);
+        "[crash_capture_parent] child_delay=%dms parent_delay=%dms\n",
+        child_delay,
+        parent_delay);
     std::fflush(stderr);
 
     const bool exited = wait_for_exit(child, 4000);

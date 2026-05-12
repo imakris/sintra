@@ -40,20 +40,21 @@ constexpr const char* k_result_ready_barrier = "barrier-flush-result-ready";
 
 struct Iteration_marker
 {
-    std::uint32_t worker;
-    std::uint32_t iteration;
+    std::uint32_t              worker;
+    std::uint32_t              iteration;
 };
 
 struct Coordinator_state
 {
-    std::mutex mutex;
-    std::condition_variable cv;
-    std::array<std::uint32_t, k_worker_count> next_expected_iteration{};
-    std::size_t messages_in_iteration = 0;
-    std::size_t total_messages        = 0;
-    bool iteration_failed             = false;
-    bool abort_requested              = false;
-    std::size_t current_iteration     = 0;
+    std::mutex                 mutex;
+    std::condition_variable    cv;
+    std::array<std::uint32_t, k_worker_count>
+                               next_expected_iteration{};
+    std::size_t                messages_in_iteration = 0;
+    std::size_t                total_messages        = 0;
+    bool                       iteration_failed      = false;
+    bool                       abort_requested       = false;
+    std::size_t                current_iteration     = 0;
 };
 
 
@@ -119,7 +120,7 @@ int coordinator_process()
 
     barrier("barrier-flush-ready");
 
-    bool aborted = false;
+    bool           aborted           = false;
     constexpr auto iteration_timeout = std::chrono::seconds(10);
 
     for (std::size_t iteration = 0; iteration < k_iterations; ++iteration) {
@@ -257,22 +258,22 @@ int main(int argc, char* argv[])
             const auto result_path = shared_dir / "barrier_flush_result.txt";
             if (!std::filesystem::exists(result_path)) {
                 std::fprintf(stderr,
-                             "Error: result file not found at %s\n",
-                             result_path.string().c_str());
+                    "Error: result file not found at %s\n",
+                    result_path.string().c_str());
                 return 1;
             }
 
             std::ifstream in(result_path, std::ios::binary);
             if (!in) {
                 std::fprintf(stderr,
-                             "Error: failed to open result file %s\n",
-                             result_path.string().c_str());
+                    "Error: failed to open result file %s\n",
+                    result_path.string().c_str());
                 return 1;
             }
 
             std::string status;
             std::size_t iterations_completed = 0;
-            std::size_t total_messages = 0;
+            std::size_t total_messages       = 0;
             std::string reason;
 
             std::getline(in, status);
@@ -286,13 +287,13 @@ int main(int argc, char* argv[])
             }
             if (iterations_completed != k_iterations) {
                 std::fprintf(stderr, "Expected %zu iterations, got %zu\n",
-                             k_iterations, iterations_completed);
+                    k_iterations, iterations_completed);
                 return 1;
             }
             const std::size_t expected_messages = k_worker_count * k_iterations;
             if (total_messages != expected_messages) {
                 std::fprintf(stderr, "Expected %zu total messages, got %zu\n",
-                             expected_messages, total_messages);
+                    expected_messages, total_messages);
                 return 1;
             }
             return 0;

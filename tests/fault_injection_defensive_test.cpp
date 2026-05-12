@@ -19,14 +19,15 @@ namespace {
 constexpr std::string_view k_prefix = "fault_injection_defensive_test: ";
 
 template <typename T>
-struct Fake_container {
+struct Fake_container
+{
     using iterator = typename std::vector<T>::const_iterator;
 
-    size_t size() const { return count; }
+    size_t   size()  const { return count;           }
     iterator begin() const { return backing.begin(); }
-    iterator end() const { return backing.end(); }
+    iterator end()   const { return backing.end();   }
 
-    size_t count = 0;
+    size_t         count = 0;
     std::vector<T> backing;
 };
 
@@ -84,7 +85,7 @@ bool test_align_up_size_overflow()
 
 bool test_process_index_exhaustion()
 {
-    bool threw = false;
+    bool      threw    = false;
     const int attempts = sintra::max_process_index + 4;
     for (int i = 0; i < attempts; ++i) {
         try {
@@ -96,10 +97,12 @@ bool test_process_index_exhaustion()
         }
     }
 
-    return sintra::test::assert_true(
-        threw,
-        k_prefix,
-        "make_process_instance_id should throw when process index space is exhausted");
+    return
+        sintra::test::assert_true(
+            threw,
+            k_prefix,
+            "make_process_instance_id should throw when process index space is exhausted"
+        );
 }
 
 } // namespace

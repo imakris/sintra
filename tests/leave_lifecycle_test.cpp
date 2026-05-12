@@ -47,8 +47,8 @@ void lifecycle_handler(const sintra::process_lifecycle_event& event)
 int leave_worker()
 {
     sintra::test::Shared_directory shared("SINTRA_TEST_SHARED_DIR", "leave_lifecycle");
-    const auto shared_dir = shared.path();
-    const auto ready_path = shared_dir / "worker_ready.txt";
+    const auto shared_dir  = shared.path();
+    const auto ready_path  = shared_dir / "worker_ready.txt";
     const auto signal_path = shared_dir / "leave_signal.txt";
     const auto result_path = shared_dir / "worker_result.txt";
 
@@ -64,7 +64,8 @@ int leave_worker()
         const auto state_after =
             sintra::detail::s_shutdown_state.load(std::memory_order_acquire);
         if (leave_result &&
-            state_after == sintra::detail::shutdown_protocol_state::idle) {
+            state_after == sintra::detail::shutdown_protocol_state::idle)
+        {
             write_text(result_path, "ok");
             return 0;
         }
@@ -81,14 +82,14 @@ int leave_worker()
 int coordinator_action()
 {
     sintra::test::Shared_directory shared("SINTRA_TEST_SHARED_DIR", "leave_lifecycle");
-    const auto shared_dir = shared.path();
-    const auto ready_path = shared_dir / "worker_ready.txt";
+    const auto shared_dir  = shared.path();
+    const auto ready_path  = shared_dir / "worker_ready.txt";
     const auto signal_path = shared_dir / "leave_signal.txt";
     const auto result_path = shared_dir / "worker_result.txt";
 
     sintra::set_lifecycle_handler(lifecycle_handler);
 
-    const auto ready_deadline = std::chrono::steady_clock::now() + k_ready_timeout;
+    const auto               ready_deadline     = std::chrono::steady_clock::now() + k_ready_timeout;
     sintra::instance_id_type worker_process_iid = sintra::invalid_instance_id;
     while (std::chrono::steady_clock::now() < ready_deadline) {
         const auto raw = read_text(ready_path);
@@ -115,7 +116,7 @@ int coordinator_action()
     const auto worker_result = read_text(result_path);
     if (worker_result != "ok") {
         std::fprintf(stderr, "[leave_lifecycle] worker leave() failed: %s\n",
-                     worker_result.c_str());
+            worker_result.c_str());
         return 1;
     }
 
@@ -124,7 +125,8 @@ int coordinator_action()
     const bool got_normal_exit = g_events_cv.wait_until(lock, deadline, [&] {
         for (const auto& event : g_events) {
             if (event.process_iid == worker_process_iid &&
-                event.why == sintra::process_lifecycle_event::reason::normal_exit) {
+                event.why         == sintra::process_lifecycle_event::reason::normal_exit)
+            {
                 return true;
             }
         }
@@ -142,7 +144,7 @@ int coordinator_action()
         }
         if (event.why != sintra::process_lifecycle_event::reason::normal_exit) {
             std::fprintf(stderr, "[leave_lifecycle] unexpected lifecycle reason %d\n",
-                         static_cast<int>(event.why));
+                static_cast<int>(event.why));
             return 1;
         }
     }

@@ -137,8 +137,8 @@ int main(int argc, char* argv[])
             return 0;
         },
         [](const std::filesystem::path& shared_dir) {
-            const auto path = shared_dir / "ping_count.txt";
-            const int count = read_count(path);
+            const auto path  = shared_dir / "ping_count.txt";
+            const int  count = read_count(path);
             return (count == k_target_ping_count) ? 0 : 1;
         });
 }

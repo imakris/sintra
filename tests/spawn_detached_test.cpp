@@ -22,27 +22,27 @@
 
 namespace {
 
-struct Override_guard {
-    enum class Kind { Pipe2, Write, Read, Waitpid, SpawnDebug };
+struct Override_guard
+{
+    enum class Kind{ Pipe2, Write, Read, Waitpid, SpawnDebug };
 
     Override_guard(Kind k, void* fn) : kind(k)
     {
         switch (kind) {
-            case Kind::Pipe2:
-                previous.pipe2 = sintra::testing::set_pipe2_override(reinterpret_cast<sintra::detail::pipe2_fn>(fn));
+            case Kind::Pipe2: previous.pipe2 = sintra::testing::set_pipe2_override(
+                reinterpret_cast<sintra::detail::pipe2_fn>(fn));
                 break;
-            case Kind::Write:
-                previous.write = sintra::testing::set_write_override(reinterpret_cast<sintra::detail::write_fn>(fn));
+            case Kind::Write: previous.write = sintra::testing::set_write_override(
+                reinterpret_cast<sintra::detail::write_fn>(fn));
                 break;
-            case Kind::Read:
-                previous.read = sintra::testing::set_read_override(reinterpret_cast<sintra::detail::read_fn>(fn));
+            case Kind::Read: previous.read = sintra::testing::set_read_override(
+                reinterpret_cast<sintra::detail::read_fn>(fn));
                 break;
-            case Kind::Waitpid:
-                previous.waitpid = sintra::testing::set_waitpid_override(
-                    reinterpret_cast<sintra::detail::waitpid_fn>(fn));
+            case Kind::Waitpid: previous.waitpid = sintra::testing::set_waitpid_override(
+                reinterpret_cast<sintra::detail::waitpid_fn>(fn));
                 break;
-            case Kind::SpawnDebug:
-                previous.spawn_debug = sintra::testing::set_spawn_detached_debug(reinterpret_cast<sintra::detail::spawn_detached_debug_fn>(fn));
+            case Kind::SpawnDebug: previous.spawn_debug = sintra::testing::set_spawn_detached_debug(
+                reinterpret_cast<sintra::detail::spawn_detached_debug_fn>(fn));
                 break;
         }
     }
@@ -50,26 +50,17 @@ struct Override_guard {
     ~Override_guard()
     {
         switch (kind) {
-            case Kind::Pipe2:
-                sintra::testing::set_pipe2_override(previous.pipe2);
-                break;
-            case Kind::Write:
-                sintra::testing::set_write_override(previous.write);
-                break;
-            case Kind::Read:
-                sintra::testing::set_read_override(previous.read);
-                break;
-            case Kind::Waitpid:
-                sintra::testing::set_waitpid_override(previous.waitpid);
-                break;
-            case Kind::SpawnDebug:
-                sintra::testing::set_spawn_detached_debug(previous.spawn_debug);
-                break;
+            case Kind::Pipe2:      sintra::testing::set_pipe2_override(previous.pipe2);             break;
+            case Kind::Write:      sintra::testing::set_write_override(previous.write);             break;
+            case Kind::Read:       sintra::testing::set_read_override(previous.read);               break;
+            case Kind::Waitpid:    sintra::testing::set_waitpid_override(previous.waitpid);         break;
+            case Kind::SpawnDebug: sintra::testing::set_spawn_detached_debug(previous.spawn_debug); break;
         }
     }
 
     Kind kind;
-    union {
+    union
+    {
         sintra::detail::pipe2_fn pipe2;
         sintra::detail::write_fn write;
         sintra::detail::read_fn read;
@@ -101,18 +92,12 @@ const char* stage_to_string(sintra::detail::spawn_detached_debug_info::Stage sta
 {
     using Stage = sintra::detail::spawn_detached_debug_info::Stage;
     switch (stage) {
-        case Stage::PipeCreation:
-            return "PipeCreation";
-        case Stage::Fork:
-            return "Fork";
-        case Stage::ChildReadyPipeWrite:
-            return "ChildReadyPipeWrite";
-        case Stage::ParentReadReadyStatus:
-            return "ParentReadReadyStatus";
-        case Stage::ParentReadExecStatus:
-            return "ParentReadExecStatus";
-        case Stage::ParentWaitpid:
-            return "ParentWaitpid";
+        case Stage::PipeCreation:          return "PipeCreation";
+        case Stage::Fork:                  return "Fork";
+        case Stage::ChildReadyPipeWrite:   return "ChildReadyPipeWrite";
+        case Stage::ParentReadReadyStatus: return "ParentReadReadyStatus";
+        case Stage::ParentReadExecStatus:  return "ParentReadExecStatus";
+        case Stage::ParentWaitpid:         return "ParentWaitpid";
     }
     return "Unknown";
 }
@@ -127,12 +112,8 @@ const char* locate_true_binary()
         };
 
         for (const char* candidate : candidates) {
-            if (candidate == nullptr) {
-                break;
-            }
-            if (::access(candidate, X_OK) == 0) {
-                return candidate;
-            }
+            if (candidate == nullptr)           { break;            }
+            if (::access(candidate, X_OK) == 0) { return candidate; }
         }
         return nullptr;
     }();
@@ -149,12 +130,8 @@ const char* locate_shell_binary()
         };
 
         for (const char* candidate : candidates) {
-            if (candidate == nullptr) {
-                break;
-            }
-            if (::access(candidate, X_OK) == 0) {
-                return candidate;
-            }
+            if (candidate == nullptr)           { break;            }
+            if (::access(candidate, X_OK) == 0) { return candidate; }
         }
         return nullptr;
     }();
@@ -206,9 +183,15 @@ bool spawn_should_fail_due_to_fd_exhaustion()
     }
     ::close(sentinel);
 
-    return sintra::test::assert_true_errno(exhausted, k_failure_prefix, "failed to exhaust file descriptors for test") &&
-           sintra::test::assert_true_errno(!result, k_failure_prefix, "spawn_detached should fail when the pipe cannot be created") &&
-           sintra::test::assert_true_errno(sentinel_ok, k_failure_prefix, "existing descriptors must remain untouched");
+    return
+        sintra::test::assert_true_errno(exhausted,   k_failure_prefix,
+            "failed to exhaust file descriptors for test")
+        &&
+        sintra::test::assert_true_errno(!result,     k_failure_prefix,
+            "spawn_detached should fail when the pipe cannot be created")
+        &&
+        sintra::test::assert_true_errno(sentinel_ok, k_failure_prefix,
+            "existing descriptors must remain untouched");
 }
 
 int failing_pipe2(int[2], int)
@@ -227,7 +210,12 @@ bool spawn_should_fail_when_pipe2_injected_failure()
     Override_guard guard(Override_guard::Kind::Pipe2, reinterpret_cast<void*>(&failing_pipe2));
     const char* const args[] = {true_prog, nullptr};
     bool result = spawn_detached_with_args(true_prog, args);
-    return sintra::test::assert_true_errno(!result, k_failure_prefix, "spawn_detached must report failure when pipe2 fails");
+    return
+        sintra::test::assert_true_errno(
+            !result,
+            k_failure_prefix,
+            "spawn_detached must report failure when pipe2 fails"
+        );
 }
 
 ssize_t flaky_write(int fd, const void* buf, size_t count)
@@ -260,17 +248,24 @@ bool spawn_succeeds_under_eintr_pressure()
     Override_guard write_guard(Override_guard::Kind::Write, reinterpret_cast<void*>(&flaky_write));
     Override_guard read_guard(Override_guard::Kind::Read, reinterpret_cast<void*>(&flaky_read));
     reset_spawn_debug_capture();
-    Override_guard debug_guard(Override_guard::Kind::SpawnDebug, reinterpret_cast<void*>(&capture_spawn_debug));
+    Override_guard debug_guard(
+        Override_guard::Kind::SpawnDebug,
+        reinterpret_cast<void*>(&capture_spawn_debug));
 
     const char* const args[] = {true_prog, nullptr};
     bool result = spawn_detached_with_args(true_prog, args);
     if (!result && debug_captured) {
         std::cerr << "spawn_detached_test: debug stage=" << stage_to_string(last_debug_info.stage)
-                  << ", errno=" << last_debug_info.errno_value
-                  << ", exec_errno=" << last_debug_info.exec_errno
-                  << std::endl;
+            << ", errno=" << last_debug_info.errno_value
+            << ", exec_errno=" << last_debug_info.exec_errno
+            << std::endl;
     }
-    return sintra::test::assert_true_errno(result, k_failure_prefix, "spawn_detached must retry on EINTR and eventually succeed");
+    return
+        sintra::test::assert_true_errno(
+            result,
+            k_failure_prefix,
+            "spawn_detached must retry on EINTR and eventually succeed"
+        );
 }
 
 pid_t waitpid_returns_echild(pid_t, int*, int)
@@ -286,15 +281,19 @@ bool spawn_succeeds_when_waitpid_reports_echild()
         return false;
     }
 
-    Override_guard guard(Override_guard::Kind::Waitpid, reinterpret_cast<void*>(&waitpid_returns_echild));
+    Override_guard guard(
+        Override_guard::Kind::Waitpid,
+        reinterpret_cast<void*>(&waitpid_returns_echild));
     const char* const args[] = {true_prog, nullptr};
     errno = 0;
-    bool result = spawn_detached_with_args(true_prog, args);
-    int saved_errno = errno;
-    return sintra::test::assert_true_errno(result, k_failure_prefix,
-                       "spawn_detached must tolerate waitpid reporting ECHILD after a successful exec") &&
-           sintra::test::assert_true_errno(saved_errno == 0, k_failure_prefix,
-                       "spawn_detached must clear errno when waitpid reports ECHILD after success");
+    bool result      = spawn_detached_with_args(true_prog, args);
+    int  saved_errno = errno;
+    return
+        sintra::test::assert_true_errno(result,           k_failure_prefix,
+            "spawn_detached must tolerate waitpid reporting ECHILD after a successful exec")
+        &&
+        sintra::test::assert_true_errno(saved_errno == 0, k_failure_prefix,
+            "spawn_detached must clear errno when waitpid reports ECHILD after success");
 }
 
 ssize_t broken_write(int, const void*, size_t)
@@ -313,17 +312,26 @@ bool spawn_fails_when_grandchild_cannot_report_readiness()
     Override_guard guard(Override_guard::Kind::Write, reinterpret_cast<void*>(&broken_write));
     const char* const args[] = {true_prog, nullptr};
     bool result = spawn_detached_with_args(true_prog, args);
-    return sintra::test::assert_true_errno(!result, k_failure_prefix, "write failures must be reported as spawn failures");
+    return
+        sintra::test::assert_true_errno(
+            !result,
+            k_failure_prefix,
+            "write failures must be reported as spawn failures"
+        );
 }
 
 bool spawn_reports_exec_failure()
 {
     const char* const args[] = {"/definitely/not/a/program", nullptr};
     errno = 0;
-    bool result = spawn_detached_with_args("/definitely/not/a/program", args);
-    int saved_errno = errno;
-    return sintra::test::assert_true_errno(!result, k_failure_prefix, "spawn_detached must fail when execv cannot launch the target") &&
-           sintra::test::assert_true_errno(saved_errno == ENOENT, k_failure_prefix, "spawn_detached must surface the exec errno");
+    bool result      = spawn_detached_with_args("/definitely/not/a/program", args);
+    int  saved_errno = errno;
+    return
+        sintra::test::assert_true_errno(!result,               k_failure_prefix,
+            "spawn_detached must fail when execv cannot launch the target")
+        &&
+        sintra::test::assert_true_errno(saved_errno == ENOENT, k_failure_prefix,
+            "spawn_detached must surface the exec errno");
 }
 
 bool spawn_detached_sets_env_overrides()
@@ -333,9 +341,9 @@ bool spawn_detached_sets_env_overrides()
         return false;
     }
 
-    auto dir = sintra::test::unique_scratch_directory("spawn_detached_env");
-    auto output_path = dir / "env_override_output.txt";
-    std::string command = "printf \"%s\" \"$SINTRA_ENV_OVERRIDE_TEST\" > \"" + output_path.string() + "\"";
+    auto        dir         = sintra::test::unique_scratch_directory("spawn_detached_env");
+    auto        output_path = dir / "env_override_output.txt";
+    std::string command     = "printf \"%s\" \"$SINTRA_ENV_OVERRIDE_TEST\" > \"" + output_path.string() + "\"";
     const char* const args[] = {shell, "-c", command.c_str(), nullptr};
 
     sintra::Spawn_detached_options options;
@@ -348,7 +356,7 @@ bool spawn_detached_sets_env_overrides()
         return false;
     }
 
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    const auto        deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     const std::string expected = "spawn_detached_env_value";
     std::string content;
     bool matched = false;

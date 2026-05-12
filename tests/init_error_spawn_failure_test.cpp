@@ -27,7 +27,7 @@ std::vector<sintra::Process_descriptor> build_processes()
 int main(int argc, char* argv[])
 {
     const bool is_spawned = sintra::test::has_branch_flag(argc, argv);
-    auto processes = build_processes();
+    auto       processes  = build_processes();
 
     if (is_spawned) {
         sintra::init(argc, argv, processes);

@@ -38,23 +38,26 @@ constexpr auto k_handler_delay        = std::chrono::milliseconds(12);
 
 struct Iteration_marker
 {
-    std::uint32_t worker;
-    std::uint32_t iteration;
-    std::uint32_t sequence;
+    std::uint32_t              worker;
+    std::uint32_t              iteration;
+    std::uint32_t              sequence;
 };
 
 struct Coordinator_state
 {
-    std::mutex mutex;
-    std::condition_variable cv;
-    std::array<std::uint32_t, k_worker_count> next_expected_sequence{};
-    std::array<std::uint32_t, k_worker_count> next_expected_iteration{};
-    std::array<std::uint32_t, k_worker_count> messages_seen_in_iteration{};
-    std::size_t messages_in_iteration = 0;
-    std::size_t total_messages        = 0;
-    bool first_message_arrived        = false;
-    bool iteration_failed             = false;
-    std::string failure_detail;
+    std::mutex                 mutex;
+    std::condition_variable    cv;
+    std::array<std::uint32_t, k_worker_count>
+                               next_expected_sequence{};
+    std::array<std::uint32_t, k_worker_count>
+                               next_expected_iteration{};
+    std::array<std::uint32_t, k_worker_count>
+                               messages_seen_in_iteration{};
+    std::size_t                messages_in_iteration = 0;
+    std::size_t                total_messages        = 0;
+    bool                       first_message_arrived = false;
+    bool                       iteration_failed      = false;
+    std::string                failure_detail;
 };
 
 int coordinator_process()
@@ -65,7 +68,7 @@ int coordinator_process()
     bool success = true;
     std::string failure_reason;
     std::size_t iterations_completed = 0;
-    bool aborted = false;
+    bool        aborted              = false;
 
     activate_slot([&](const Iteration_marker& marker) {
         std::unique_lock<std::mutex> lock(state.mutex);
@@ -86,8 +89,8 @@ int coordinator_process()
         }
 
         auto& expected_iteration = state.next_expected_iteration[marker.worker];
-        auto& expected_sequence = state.next_expected_sequence[marker.worker];
-        auto& messages_seen = state.messages_seen_in_iteration[marker.worker];
+        auto& expected_sequence  = state.next_expected_sequence[marker.worker];
+        auto& messages_seen      = state.messages_seen_in_iteration[marker.worker];
 
         if (marker.iteration != expected_iteration) {
             std::ostringstream oss;
@@ -142,7 +145,7 @@ int coordinator_process()
             std::lock_guard<std::mutex> guard(state.mutex);
             state.messages_in_iteration = 0;
             state.first_message_arrived = false;
-            state.iteration_failed = false;
+            state.iteration_failed      = false;
             state.failure_detail.clear();
         }
 
@@ -253,7 +256,9 @@ int coordinator_process()
 
     deactivate_all_slots();
 
-    const sintra::test::Shared_directory shared("SINTRA_DELIVERY_FENCE_DIR", "barrier_delivery_fence");
+    const sintra::test::Shared_directory shared(
+        "SINTRA_DELIVERY_FENCE_DIR",
+        "barrier_delivery_fence");
     std::vector<std::string> lines;
     lines.reserve(success ? 3 : 4);
     lines.push_back(success ? "ok" : "fail");
@@ -336,7 +341,7 @@ int main(int argc, char* argv[])
 
         std::string status;
         std::size_t iterations_completed = 0;
-        std::size_t total_messages = 0;
+        std::size_t total_messages       = 0;
         std::string reason;
 
         std::getline(in, status);
@@ -353,13 +358,13 @@ int main(int argc, char* argv[])
         }
         if (iterations_completed != k_iterations) {
             std::fprintf(stderr, "Expected %zu iterations, got %zu\n",
-                         k_iterations, iterations_completed);
+                k_iterations, iterations_completed);
             return 1;
         }
         const std::size_t expected_messages = k_worker_count * k_iterations * k_burst_count;
         if (total_messages != expected_messages) {
             std::fprintf(stderr, "Expected %zu total messages, got %zu\n",
-                         expected_messages, total_messages);
+                expected_messages, total_messages);
             return 1;
         }
     }

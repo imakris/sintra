@@ -30,10 +30,11 @@ namespace {
 
 constexpr std::string_view k_failure_prefix = "spinlock_recovery_test failure: ";
 
-struct spinlock_layout {
-    std::atomic_flag m_locked;
-    std::atomic<uint32_t> m_owner_pid;
-    std::atomic<uint64_t> m_last_progress_ns;
+struct spinlock_layout
+{
+    std::atomic_flag       m_locked;
+    std::atomic<uint32_t>  m_owner_pid;
+    std::atomic<uint64_t>  m_last_progress_ns;
 };
 
 spinlock_layout& access_layout(sintra::spinlock& lock)
@@ -46,12 +47,8 @@ spinlock_layout& access_layout(sintra::spinlock& lock)
 uint32_t find_dead_pid(uint32_t self_pid)
 {
     for (uint32_t candidate = 500000; candidate < 510000; ++candidate) {
-        if (candidate == self_pid) {
-            continue;
-        }
-        if (!sintra::is_process_alive(candidate)) {
-            return candidate;
-        }
+        if (candidate == self_pid)                { continue;         }
+        if (!sintra::is_process_alive(candidate)) { return candidate; }
     }
 
     for (uint32_t candidate = self_pid + 1; candidate < self_pid + 10000; ++candidate) {
@@ -75,8 +72,8 @@ int spawn_sleep_child(const char* program, int sleep_ms)
 
     int child_pid = -1;
     sintra::Spawn_detached_options options;
-    options.prog = program;
-    options.argv = args.data();
+    options.prog          = program;
+    options.argv          = args.data();
     options.child_pid_out = &child_pid;
 
     if (!sintra::spawn_detached(options)) {
@@ -98,8 +95,8 @@ int spawn_stall_child(const char* program, uint32_t owner_pid)
 
     int child_pid = -1;
     sintra::Spawn_detached_options options;
-    options.prog = program;
-    options.argv = args.data();
+    options.prog          = program;
+    options.argv          = args.data();
     options.child_pid_out = &child_pid;
 
     if (!sintra::spawn_detached(options)) {
@@ -116,19 +113,19 @@ bool wait_for_process_exit(int pid, std::chrono::milliseconds timeout)
     }
 #ifdef _WIN32
     HANDLE handle = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
-                                FALSE,
-                                static_cast<DWORD>(pid));
+        FALSE,
+        static_cast<DWORD>(pid));
     if (!handle) {
         return true;
     }
     DWORD wait_ms = static_cast<DWORD>(timeout.count());
-    DWORD result = WaitForSingleObject(handle, wait_ms);
+    DWORD result  = WaitForSingleObject(handle, wait_ms);
     CloseHandle(handle);
     return result != WAIT_TIMEOUT;
 #else
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
-        int status = 0;
+        int         status = 0;
         const pid_t result = ::waitpid(static_cast<pid_t>(pid), &status, WNOHANG);
         if (result == static_cast<pid_t>(pid)) {
             return true;
@@ -152,9 +149,10 @@ void terminate_child(int pid)
         return;
     }
 #ifdef _WIN32
-    HANDLE handle = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
-                                FALSE,
-                                static_cast<DWORD>(pid));
+    HANDLE handle = OpenProcess(
+        PROCESS_TERMINATE | SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+        FALSE,
+        static_cast<DWORD>(pid));
     if (handle) {
         TerminateProcess(handle, 0);
         WaitForSingleObject(handle, 2000);
@@ -166,7 +164,7 @@ void terminate_child(int pid)
     // Use a timeout to avoid blocking indefinitely in case of unexpected behavior.
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
     while (std::chrono::steady_clock::now() < deadline) {
-        int status = 0;
+        int         status = 0;
         const pid_t result = ::waitpid(static_cast<pid_t>(pid), &status, WNOHANG);
         if (result == static_cast<pid_t>(pid) || (result == -1 && errno != EINTR)) {
             break;
@@ -211,9 +209,9 @@ int main(int argc, char* argv[])
     // Case 1: recover from a dead owner.
     const uint32_t dead_pid = find_dead_pid(self_pid);
     sintra::test::require_true(dead_pid != 0 && dead_pid != self_pid, k_failure_prefix,
-                               "failed to locate a dead pid");
+        "failed to locate a dead pid");
     sintra::test::require_true(!sintra::is_process_alive(dead_pid), k_failure_prefix,
-                               "dead pid should not be alive");
+        "dead pid should not be alive");
 
     layout.m_locked.clear(std::memory_order_release);
     layout.m_locked.test_and_set(std::memory_order_acquire);
@@ -226,7 +224,7 @@ int main(int argc, char* argv[])
     // Case 2: live owner with debug pause active should force unlock.
     int child_pid = spawn_sleep_child(argv[0], 5000);
     sintra::test::require_true(child_pid > 0, k_failure_prefix,
-                               "failed to spawn live-owner child");
+        "failed to spawn live-owner child");
 
     layout.m_locked.clear(std::memory_order_release);
     layout.m_locked.test_and_set(std::memory_order_acquire);
@@ -243,14 +241,15 @@ int main(int argc, char* argv[])
     // Case 3: live owner with debug pause inactive should abort (report_live_owner_stall).
     const int stall_pid = spawn_stall_child(argv[0], self_pid);
     sintra::test::require_true(stall_pid > 0, k_failure_prefix,
-                               "failed to spawn stall child");
+        "failed to spawn stall child");
 #ifdef __APPLE__
     const int stall_timeout_default_ms = 12000;
 #else
     const int stall_timeout_default_ms = 6000;
 #endif
-    const auto stall_timeout_ms =
-        sintra::test::read_env_int("SINTRA_SPINLOCK_STALL_TIMEOUT_MS", stall_timeout_default_ms);
+    const auto stall_timeout_ms = sintra::test::read_env_int(
+        "SINTRA_SPINLOCK_STALL_TIMEOUT_MS",
+        stall_timeout_default_ms);
     if (!wait_for_process_exit(stall_pid, std::chrono::milliseconds(stall_timeout_ms))) {
         terminate_child(stall_pid);
         sintra::test::fail(k_failure_prefix, "stall child did not terminate as expected");

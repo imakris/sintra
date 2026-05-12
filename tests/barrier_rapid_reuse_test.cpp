@@ -36,11 +36,11 @@ int worker_process(std::uint32_t worker_index)
             const std::uint64_t seq1 = barrier("reuse");
             if (seq1 == 0 || seq1 <= last_reuse_seq) {
                 std::fprintf(stderr,
-                             "Worker %u iter %u: unexpected reuse seq %llu after %llu\n",
-                             worker_index,
-                             iter,
-                             static_cast<unsigned long long>(seq1),
-                             static_cast<unsigned long long>(last_reuse_seq));
+                    "Worker %u iter %u: unexpected reuse seq %llu after %llu\n",
+                    worker_index,
+                    iter,
+                    static_cast<unsigned long long>(seq1),
+                    static_cast<unsigned long long>(last_reuse_seq));
                 failures++;
             }
             last_reuse_seq = seq1;
@@ -50,11 +50,11 @@ int worker_process(std::uint32_t worker_index)
             const std::uint64_t seq2 = barrier("other");
             if (seq2 == 0 || seq2 <= last_other_seq) {
                 std::fprintf(stderr,
-                             "Worker %u iter %u: unexpected other seq %llu after %llu\n",
-                             worker_index,
-                             iter,
-                             static_cast<unsigned long long>(seq2),
-                             static_cast<unsigned long long>(last_other_seq));
+                    "Worker %u iter %u: unexpected other seq %llu after %llu\n",
+                    worker_index,
+                    iter,
+                    static_cast<unsigned long long>(seq2),
+                    static_cast<unsigned long long>(last_other_seq));
                 failures++;
             }
             last_other_seq = seq2;
@@ -63,11 +63,11 @@ int worker_process(std::uint32_t worker_index)
             const std::uint64_t seq3 = barrier("reuse");
             if (seq3 == 0 || seq3 <= last_reuse_seq) {
                 std::fprintf(stderr,
-                             "Worker %u iter %u: reuse tail seq %llu after %llu\n",
-                             worker_index,
-                             iter,
-                             static_cast<unsigned long long>(seq3),
-                             static_cast<unsigned long long>(last_reuse_seq));
+                    "Worker %u iter %u: reuse tail seq %llu after %llu\n",
+                    worker_index,
+                    iter,
+                    static_cast<unsigned long long>(seq3),
+                    static_cast<unsigned long long>(last_reuse_seq));
                 failures++;
             }
             last_reuse_seq = seq3;
@@ -76,11 +76,11 @@ int worker_process(std::uint32_t worker_index)
                 const std::uint64_t seq4 = barrier("reuse");
                 if (seq4 == 0 || seq4 <= last_reuse_seq) {
                     std::fprintf(stderr,
-                                 "Worker %u iter %u: reuse bonus seq %llu after %llu\n",
-                                 worker_index,
-                                 iter,
-                                 static_cast<unsigned long long>(seq4),
-                                 static_cast<unsigned long long>(last_reuse_seq));
+                        "Worker %u iter %u: reuse bonus seq %llu after %llu\n",
+                        worker_index,
+                        iter,
+                        static_cast<unsigned long long>(seq4),
+                        static_cast<unsigned long long>(last_reuse_seq));
                     failures++;
                 }
                 last_reuse_seq = seq4;
@@ -90,11 +90,11 @@ int worker_process(std::uint32_t worker_index)
                 const std::uint64_t seq5 = barrier("other");
                 if (seq5 == 0 || seq5 <= last_other_seq) {
                     std::fprintf(stderr,
-                                 "Worker %u iter %u: other bonus seq %llu after %llu\n",
-                                 worker_index,
-                                 iter,
-                                 static_cast<unsigned long long>(seq5),
-                                 static_cast<unsigned long long>(last_other_seq));
+                        "Worker %u iter %u: other bonus seq %llu after %llu\n",
+                        worker_index,
+                        iter,
+                        static_cast<unsigned long long>(seq5),
+                        static_cast<unsigned long long>(last_other_seq));
                     failures++;
                 }
                 last_other_seq = seq5;

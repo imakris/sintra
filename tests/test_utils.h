@@ -57,19 +57,21 @@ inline bool has_argv_flag(int argc, char* argv[], std::string_view flag)
         if (view == flag) {
             return true;
         }
-        if (view.size() > flag.size() + 1 &&
-            view.rfind(flag, 0) == 0 &&
-            view[flag.size()] == '=') {
+        if (view.size()         >  flag.size() + 1 &&
+            view.rfind(flag, 0) == 0               &&
+            view[flag.size()]   == '=')
+        {
             return true;
         }
     }
     return false;
 }
 
-inline std::string get_argv_value(int argc,
-                                  char* argv[],
-                                  std::string_view flag,
-                                  std::string_view default_value = {})
+inline std::string get_argv_value(
+    int                argc,
+    char* argv[],
+    std::string_view   flag,
+    std::string_view   default_value = {})
 {
     if (flag.empty()) {
         return std::string(default_value);
@@ -86,9 +88,10 @@ inline std::string get_argv_value(int argc,
             }
             break;
         }
-        if (view.size() > flag.size() + 1 &&
-            view.rfind(flag, 0) == 0 &&
-            view[flag.size()] == '=') {
+        if (view.size()         >  flag.size() + 1 &&
+            view.rfind(flag, 0) == 0               &&
+            view[flag.size()]   == '=')
+        {
             return std::string(view.substr(flag.size() + 1));
         }
     }
@@ -137,8 +140,8 @@ public:
         auto base = sintra::test::scratch_subdirectory(test_name);
 
         auto unique_suffix = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                 std::chrono::steady_clock::now().time_since_epoch())
-                                 .count();
+            std::chrono::steady_clock::now().time_since_epoch()
+        ).count();
         unique_suffix ^= static_cast<long long>(get_pid());
         static std::atomic<long long> counter{0};
         unique_suffix ^= counter.fetch_add(1);
@@ -173,8 +176,8 @@ public:
                 }
                 else {
                     std::fprintf(stderr,
-                                 "Warning: failed to remove temp directory %s after 3 attempts: %s\n",
-                                 m_path.string().c_str(), e.what());
+                        "Warning: failed to remove temp directory %s after 3 attempts: %s\n",
+                        m_path.string().c_str(), e.what());
                 }
             }
         }
@@ -189,9 +192,10 @@ public:
     Shared_directory(const Shared_directory&) = delete;
     Shared_directory& operator=(const Shared_directory&) = delete;
     Shared_directory(Shared_directory&& other) noexcept
-        : m_env_var(std::move(other.m_env_var))
-        , m_path(std::move(other.m_path))
-        , m_is_owner(other.m_is_owner)
+    :
+        m_env_var(std::move(other.m_env_var)),
+        m_path(std::move(other.m_path)),
+        m_is_owner(other.m_is_owner)
     {
         other.m_is_owner = false;
     }
@@ -206,9 +210,9 @@ private:
 #endif
     }
 
-    std::string             m_env_var;
-    std::filesystem::path   m_path;
-    bool                    m_is_owner = false;
+    std::string            m_env_var;
+    std::filesystem::path  m_path;
+    bool                   m_is_owner = false;
 };
 
 
@@ -216,8 +220,9 @@ private:
 // Multi-process test runner
 // ---------------------------------------------------------------------------
 
-inline int report_deferred_exception_and_fail(std::exception_ptr deferred_exception,
-                                              std::string_view context)
+inline int report_deferred_exception_and_fail(
+    std::exception_ptr deferred_exception,
+    std::string_view   context)
 {
     if (!deferred_exception) {
         return 1;
@@ -228,11 +233,11 @@ inline int report_deferred_exception_and_fail(std::exception_ptr deferred_except
     }
     catch (const std::exception& e) {
         std::fprintf(stderr, "%.*s: uncaught exception: %s\n",
-                     static_cast<int>(context.size()), context.data(), e.what());
+            static_cast<int>(context.size()), context.data(), e.what());
     }
     catch (...) {
         std::fprintf(stderr, "%.*s: uncaught exception of unknown type\n",
-                     static_cast<int>(context.size()), context.data());
+            static_cast<int>(context.size()), context.data());
     }
 
     return 1;
@@ -247,14 +252,15 @@ inline int report_deferred_exception_and_fail(std::exception_ptr deferred_except
 template <typename Setup,
           typename Coordinator_action,
           typename Verifier>
-int run_multi_process_test_raw(int argc,
-                               char* argv[],
-                               const char* env_var,
-                               const char* test_name,
-                               std::vector<sintra::Process_descriptor> processes,
-                               Setup&& setup,
-                               Coordinator_action&& coordinator_action,
-                               Verifier&& verify)
+int run_multi_process_test_raw(
+    int                                        argc,
+    char* argv[],
+    const char*                                env_var,
+    const char*                                test_name,
+    std::vector<sintra::Process_descriptor>    processes,
+    Setup&&                                    setup,
+    Coordinator_action&&                       coordinator_action,
+    Verifier&&                                 verify)
 {
     const bool is_spawned = sintra::test::has_branch_flag(argc, argv);
     sintra::test::Shared_directory shared(env_var, test_name);
@@ -304,14 +310,15 @@ int run_multi_process_test_raw(int argc,
 template <typename Setup,
           typename Coordinator_action,
           typename Verifier>
-int run_multi_process_shutdown_test(int argc,
-                                    char* argv[],
-                                    const char* env_var,
-                                    const char* test_name,
-                                    std::vector<sintra::Process_descriptor> processes,
-                                    Setup&& setup,
-                                    Coordinator_action&& coordinator_action,
-                                    Verifier&& verify)
+int run_multi_process_shutdown_test(
+    int                                        argc,
+    char* argv[],
+    const char*                                env_var,
+    const char*                                test_name,
+    std::vector<sintra::Process_descriptor>    processes,
+    Setup&&                                    setup,
+    Coordinator_action&&                       coordinator_action,
+    Verifier&&                                 verify)
 {
     const bool is_spawned = sintra::test::has_branch_flag(argc, argv);
     sintra::test::Shared_directory shared(env_var, test_name);
@@ -360,39 +367,41 @@ int run_multi_process_shutdown_test(int argc,
 
 template <typename Coordinator_action,
           typename Verifier>
-int run_multi_process_shutdown_test(int argc,
-                                    char* argv[],
-                                    const char* env_var,
-                                    const char* test_name,
-                                    std::vector<sintra::Process_descriptor> processes,
-                                    Coordinator_action&& coordinator_action,
-                                    Verifier&& verify)
+int run_multi_process_shutdown_test(
+    int                                        argc,
+    char* argv[],
+    const char*                                env_var,
+    const char*                                test_name,
+    std::vector<sintra::Process_descriptor>    processes,
+    Coordinator_action&&                       coordinator_action,
+    Verifier&&                                 verify)
 {
     return run_multi_process_shutdown_test(argc,
-                                           argv,
-                                           env_var,
-                                           test_name,
-                                           std::move(processes),
-                                           [](const std::filesystem::path&) {},
-                                           std::forward<Coordinator_action>(coordinator_action),
-                                           std::forward<Verifier>(verify));
+        argv,
+        env_var,
+        test_name,
+        std::move(processes),
+        [](const std::filesystem::path&) {},
+        std::forward<Coordinator_action>(coordinator_action),
+        std::forward<Verifier>(verify));
 }
 
 template <typename Verifier>
-int run_multi_process_shutdown_test(int argc,
-                                    char* argv[],
-                                    const char* env_var,
-                                    const char* test_name,
-                                    std::vector<sintra::Process_descriptor> processes,
-                                    Verifier&& verify)
+int run_multi_process_shutdown_test(
+    int                                        argc,
+    char* argv[],
+    const char*                                env_var,
+    const char*                                test_name,
+    std::vector<sintra::Process_descriptor>    processes,
+    Verifier&&                                 verify)
 {
     return run_multi_process_shutdown_test(argc,
-                                           argv,
-                                           env_var,
-                                           test_name,
-                                           std::move(processes),
-                                           [](const std::filesystem::path&) { return 0; },
-                                           std::forward<Verifier>(verify));
+        argv,
+        env_var,
+        test_name,
+        std::move(processes),
+        [](const std::filesystem::path&) { return 0; },
+        std::forward<Verifier>(verify));
 }
 
 // ---------------------------------------------------------------------------
@@ -404,15 +413,16 @@ int run_multi_process_shutdown_test(int argc,
 template <typename Setup,
           typename Coordinator_action,
           typename Verifier>
-int run_multi_process_shutdown_test(int argc,
-                                    char* argv[],
-                                    const char* env_var,
-                                    const char* test_name,
-                                    std::vector<sintra::Process_descriptor> processes,
-                                    const sintra::shutdown_options& options,
-                                    Setup&& setup,
-                                    Coordinator_action&& coordinator_action,
-                                    Verifier&& verify)
+int run_multi_process_shutdown_test(
+    int                                        argc,
+    char* argv[],
+    const char*                                env_var,
+    const char*                                test_name,
+    std::vector<sintra::Process_descriptor>    processes,
+    const sintra::shutdown_options&            options,
+    Setup&&                                    setup,
+    Coordinator_action&&                       coordinator_action,
+    Verifier&&                                 verify)
 {
     const bool is_spawned = sintra::test::has_branch_flag(argc, argv);
     sintra::test::Shared_directory shared(env_var, test_name);
@@ -461,24 +471,25 @@ int run_multi_process_shutdown_test(int argc,
 
 template <typename Coordinator_action,
           typename Verifier>
-int run_multi_process_shutdown_test(int argc,
-                                    char* argv[],
-                                    const char* env_var,
-                                    const char* test_name,
-                                    std::vector<sintra::Process_descriptor> processes,
-                                    const sintra::shutdown_options& options,
-                                    Coordinator_action&& coordinator_action,
-                                    Verifier&& verify)
+int run_multi_process_shutdown_test(
+    int                                        argc,
+    char* argv[],
+    const char*                                env_var,
+    const char*                                test_name,
+    std::vector<sintra::Process_descriptor>    processes,
+    const sintra::shutdown_options&            options,
+    Coordinator_action&&                       coordinator_action,
+    Verifier&&                                 verify)
 {
     return run_multi_process_shutdown_test(argc,
-                                           argv,
-                                           env_var,
-                                           test_name,
-                                           std::move(processes),
-                                           options,
-                                           [](const std::filesystem::path&) {},
-                                           std::forward<Coordinator_action>(coordinator_action),
-                                           std::forward<Verifier>(verify));
+        argv,
+        env_var,
+        test_name,
+        std::move(processes),
+        options,
+        [](const std::filesystem::path&) {},
+        std::forward<Coordinator_action>(coordinator_action),
+        std::forward<Verifier>(verify));
 }
 
 
@@ -491,58 +502,70 @@ int run_multi_process_shutdown_test(int argc,
 template <typename Setup,
           typename Coordinator_action,
           typename Verifier>
-int run_multi_process_test(int argc,
-                           char* argv[],
-                           const char* env_var,
-                           const char* test_name,
-                           std::vector<sintra::Process_descriptor> processes,
-                           Setup&& setup,
-                           Coordinator_action&& coordinator_action,
-                           Verifier&& verify)
+int run_multi_process_test(
+    int                                        argc,
+    char* argv[],
+    const char*                                env_var,
+    const char*                                test_name,
+    std::vector<sintra::Process_descriptor>    processes,
+    Setup&&                                    setup,
+    Coordinator_action&&                       coordinator_action,
+    Verifier&&                                 verify)
 {
-    return run_multi_process_shutdown_test(argc,
-                                           argv,
-                                           env_var,
-                                           test_name,
-                                           std::move(processes),
-                                           std::forward<Setup>(setup),
-                                           std::forward<Coordinator_action>(coordinator_action),
-                                           std::forward<Verifier>(verify));
+    return
+        run_multi_process_shutdown_test(
+            argc,
+            argv,
+            env_var,
+            test_name,
+            std::move(processes),
+            std::forward<Setup>(setup),
+            std::forward<Coordinator_action>(coordinator_action),
+            std::forward<Verifier>(verify)
+        );
 }
 
 template <typename Coordinator_action,
           typename Verifier>
-int run_multi_process_test(int argc,
-                           char* argv[],
-                           const char* env_var,
-                           const char* test_name,
-                           std::vector<sintra::Process_descriptor> processes,
-                           Coordinator_action&& coordinator_action,
-                           Verifier&& verify)
+int run_multi_process_test(
+    int                                        argc,
+    char* argv[],
+    const char*                                env_var,
+    const char*                                test_name,
+    std::vector<sintra::Process_descriptor>    processes,
+    Coordinator_action&&                       coordinator_action,
+    Verifier&&                                 verify)
 {
-    return run_multi_process_shutdown_test(argc,
-                                           argv,
-                                           env_var,
-                                           test_name,
-                                           std::move(processes),
-                                           std::forward<Coordinator_action>(coordinator_action),
-                                           std::forward<Verifier>(verify));
+    return
+        run_multi_process_shutdown_test(
+            argc,
+            argv,
+            env_var,
+            test_name,
+            std::move(processes),
+            std::forward<Coordinator_action>(coordinator_action),
+            std::forward<Verifier>(verify)
+        );
 }
 
 template <typename Verifier>
-int run_multi_process_test(int argc,
-                           char* argv[],
-                           const char* env_var,
-                           const char* test_name,
-                           std::vector<sintra::Process_descriptor> processes,
-                           Verifier&& verify)
+int run_multi_process_test(
+    int                                        argc,
+    char* argv[],
+    const char*                                env_var,
+    const char*                                test_name,
+    std::vector<sintra::Process_descriptor>    processes,
+    Verifier&&                                 verify)
 {
-    return run_multi_process_shutdown_test(argc,
-                                           argv,
-                                           env_var,
-                                           test_name,
-                                           std::move(processes),
-                                           std::forward<Verifier>(verify));
+    return
+        run_multi_process_shutdown_test(
+            argc,
+            argv,
+            env_var,
+            test_name,
+            std::move(processes),
+            std::forward<Verifier>(verify)
+        );
 }
 
 
@@ -583,11 +606,11 @@ int run_multi_process_test(int argc,
 inline void print_test_message(std::string_view prefix, std::string_view message)
 {
     std::fprintf(stderr,
-                 "%.*s%.*s\n",
-                 static_cast<int>(prefix.size()),
-                 prefix.data(),
-                 static_cast<int>(message.size()),
-                 message.data());
+        "%.*s%.*s\n",
+        static_cast<int>(prefix.size()),
+        prefix.data(),
+        static_cast<int>(message.size()),
+        message.data());
 }
 
 [[noreturn]] inline void fail(std::string_view prefix, std::string_view message)
@@ -621,11 +644,11 @@ inline bool assert_true_errno(bool condition, std::string_view prefix, std::stri
     if (!condition) {
         const int saved_errno = errno;
         std::fprintf(stderr,
-                     "%.*s%.*s",
-                     static_cast<int>(prefix.size()),
-                     prefix.data(),
-                     static_cast<int>(message.size()),
-                     message.data());
+            "%.*s%.*s",
+            static_cast<int>(prefix.size()),
+            prefix.data(),
+            static_cast<int>(message.size()),
+            message.data());
         if (saved_errno != 0) {
             std::fprintf(stderr, " (errno=%d %s)", saved_errno, std::strerror(saved_errno));
         }
@@ -703,9 +726,10 @@ inline void append_line_best_effort(const std::filesystem::path& file, std::stri
     }
 }
 
-inline bool wait_for_file_until(const std::filesystem::path& path,
-                                std::chrono::steady_clock::time_point deadline,
-                                std::chrono::milliseconds poll = std::chrono::milliseconds(10))
+inline bool wait_for_file_until(
+    const std::filesystem::path&           path,
+    std::chrono::steady_clock::time_point  deadline,
+    std::chrono::milliseconds              poll = std::chrono::milliseconds(10))
 {
     while (!std::filesystem::exists(path)) {
         if (std::chrono::steady_clock::now() >= deadline) {
@@ -716,17 +740,19 @@ inline bool wait_for_file_until(const std::filesystem::path& path,
     return true;
 }
 
-inline bool wait_for_file(const std::filesystem::path& path,
-                          std::chrono::milliseconds timeout = std::chrono::milliseconds(30000),
-                          std::chrono::milliseconds poll = std::chrono::milliseconds(10))
+inline bool wait_for_file(
+    const std::filesystem::path&           path,
+    std::chrono::milliseconds              timeout = std::chrono::milliseconds(30000),
+    std::chrono::milliseconds              poll = std::chrono::milliseconds(10))
 {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     return wait_for_file_until(path, deadline, poll);
 }
 
-inline bool wait_for_path(const std::filesystem::path& path,
-                          std::chrono::milliseconds timeout = std::chrono::milliseconds(30000),
-                          std::chrono::milliseconds poll = std::chrono::milliseconds(10))
+inline bool wait_for_path(
+    const std::filesystem::path&           path,
+    std::chrono::milliseconds              timeout = std::chrono::milliseconds(30000),
+    std::chrono::milliseconds              poll = std::chrono::milliseconds(10))
 {
     return wait_for_file(path, timeout, poll);
 }

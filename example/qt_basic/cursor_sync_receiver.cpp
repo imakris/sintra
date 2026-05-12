@@ -63,8 +63,8 @@ public:
         });
 
         activate(&Cursor_receiver::on_cursor_message,
-                 sintra_example::Cursor_sender_bus::named_instance(
-                     sintra_example::k_sender_name));
+            sintra_example::Cursor_sender_bus::named_instance(
+                sintra_example::k_sender_name));
     }
 
 protected:
@@ -80,9 +80,9 @@ protected:
         if (m_has_data) {
             painter.setPen(QPen(m_blink_state ? Qt::red : Qt::darkRed, 2));
             painter.drawLine(m_ghost_cursor.x() - 10, m_ghost_cursor.y(),
-                             m_ghost_cursor.x() + 10, m_ghost_cursor.y());
+                m_ghost_cursor.x() + 10, m_ghost_cursor.y());
             painter.drawLine(m_ghost_cursor.x(), m_ghost_cursor.y() - 10,
-                             m_ghost_cursor.x(), m_ghost_cursor.y() + 10);
+                m_ghost_cursor.x(), m_ghost_cursor.y() + 10);
 
             painter.setBrush(Qt::NoBrush);
             painter.drawEllipse(m_ghost_cursor, 8, 8);
@@ -108,9 +108,9 @@ private slots:
         ++m_recv_count;
 
         m_status->setText(QString("Received: (%1, %2)  count=%3")
-                              .arg(x)
-                              .arg(y)
-                              .arg(m_recv_count));
+            .arg(x)
+            .arg(y)
+            .arg(m_recv_count));
 
         m_blink_state = true;
         m_blink_timer->start(100);
@@ -118,14 +118,14 @@ private slots:
     }
 
 private:
-    QLabel* m_label = nullptr;
-    QLabel* m_status = nullptr;
+    QLabel* m_label       = nullptr;
+    QLabel* m_status      = nullptr;
     QTimer* m_blink_timer = nullptr;
 
     QPoint m_ghost_cursor;
-    bool m_has_data = false;
+    bool m_has_data    = false;
     bool m_blink_state = false;
-    int m_recv_count = 0;
+    int  m_recv_count  = 0;
 };
 
 } // namespace

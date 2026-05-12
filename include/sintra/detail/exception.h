@@ -11,7 +11,8 @@ namespace sintra {
 
 // Exception thrown when sintra::init() fails to initialize the process swarm.
 // Provides detailed information about which processes failed and why.
-class init_error : public std::runtime_error {
+class init_error : public std::runtime_error
+{
 public:
     enum class cause {
         spawn_failed,      // Operating system failed to spawn the process
@@ -19,31 +20,33 @@ public:
         ipc_setup_failed   // IPC communication setup failed
     };
 
-    struct failed_process {
-        std::string binary_name;
-        instance_id_type instance_id;
-        cause failure_cause;
-        int errno_value;           // For spawn_failed: errno from spawn attempt
-        std::string error_message; // Human-readable error description
+    struct failed_process
+    {
+        std::string        binary_name;
+        instance_id_type   instance_id;
+        cause              failure_cause;
+        int                errno_value;   // For spawn_failed: errno from spawn attempt
+        std::string        error_message; // Human-readable error description
 
         failed_process(
-            std::string bin_name,
-            instance_id_type inst_id,
-            cause c,
-            int err_val = 0,
-            std::string err_msg = "")
-            : binary_name(std::move(bin_name))
-            , instance_id(inst_id)
-            , failure_cause(c)
-            , errno_value(err_val)
-            , error_message(std::move(err_msg))
+            std::string        bin_name,
+            instance_id_type   inst_id,
+            cause              c,
+            int                err_val = 0,
+            std::string        err_msg = "")
+        :
+            binary_name(std::move(bin_name)),
+            instance_id(inst_id),
+            failure_cause(c),
+            errno_value(err_val),
+            error_message(std::move(err_msg))
         {}
     };
 
 private:
-    std::vector<failed_process> m_failures;
-    std::vector<instance_id_type> m_successful_spawns;
-    std::string m_diagnostic;
+    std::vector<failed_process>    m_failures;
+    std::vector<instance_id_type>  m_successful_spawns;
+    std::string                    m_diagnostic;
 
     static std::string build_message(const std::vector<failed_process>& failures) {
         std::ostringstream oss;
@@ -53,8 +56,8 @@ private:
     }
 
     static std::string build_diagnostic(
-        const std::vector<failed_process>& failures,
-        const std::vector<instance_id_type>& successful)
+        const std::vector<failed_process>&     failures,
+        const std::vector<instance_id_type>&   successful)
     {
         std::ostringstream oss;
         oss << "======================================================================\n";
@@ -113,12 +116,13 @@ private:
 
 public:
     init_error(
-        std::vector<failed_process> failures,
-        std::vector<instance_id_type> successful = {})
-        : std::runtime_error(build_message(failures))
-        , m_failures(std::move(failures))
-        , m_successful_spawns(std::move(successful))
-        , m_diagnostic(build_diagnostic(m_failures, m_successful_spawns))
+        std::vector<failed_process>    failures,
+        std::vector<instance_id_type>  successful = {})
+    :
+        std::runtime_error(build_message(failures)),
+        m_failures(std::move(failures)),
+        m_successful_spawns(std::move(successful)),
+        m_diagnostic(build_diagnostic(m_failures, m_successful_spawns))
     {}
 
     // Get list of processes that failed to initialize

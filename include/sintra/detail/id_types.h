@@ -102,12 +102,8 @@ inline
 type_id_type make_type_id(uint64_t v)
 {
     assert(v > 0);
-    if (v == not_defined_type_id) {
-        return v;
-    }
-    if ((v & user_type_id_flag) != 0) {
-        return v;
-    }
+    if (v == not_defined_type_id)     { return v; }
+    if ((v & user_type_id_flag) != 0) { return v; }
     assert(v <= (type_id_type)detail::reserved_id::num_reserved_type_ids);
     return v;
 }
@@ -172,18 +168,19 @@ constexpr uint64_t all_processes_wildcard = all_remote_processess_wildcard | 1;
 constexpr uint64_t all_transceivers_except_mproc_wildcard = (max_instance_index << 1);
 constexpr uint64_t all_transceivers_wildcard = all_transceivers_except_mproc_wildcard | 1;
 
-struct decomposed_instance_id {
-    uint32_t process;
-    uint64_t transceiver;
-    uint32_t process_complement;
-    uint64_t transceiver_complement;
+struct decomposed_instance_id
+{
+    uint32_t   process;
+    uint64_t   transceiver;
+    uint32_t   process_complement;
+    uint64_t   transceiver_complement;
 };
 
 [[nodiscard]] constexpr decomposed_instance_id decompose_instance(instance_id_type instance) noexcept
 {
     constexpr uint64_t transceiver_mask = (uint64_t(1) << num_transceiver_index_bits) - 1;
-    const auto process = static_cast<uint32_t>(instance >> num_transceiver_index_bits);
-    const auto transceiver = static_cast<uint64_t>(instance & transceiver_mask);
+    const auto         process          = static_cast<uint32_t>(instance >> num_transceiver_index_bits);
+    const auto         transceiver      = static_cast<uint64_t>(instance & transceiver_mask);
     return {
         process,
         transceiver,
@@ -192,7 +189,9 @@ struct decomposed_instance_id {
     };
 }
 
-[[nodiscard]] constexpr instance_id_type compose_instance(uint32_t process, uint64_t transceiver) noexcept
+[[nodiscard]] constexpr instance_id_type compose_instance(
+    uint32_t   process,
+    uint64_t   transceiver) noexcept
 {
     return (instance_id_type(process) << num_transceiver_index_bits) | instance_id_type(transceiver);
 }
@@ -285,7 +284,7 @@ instance_id_type make_process_instance_id(uint32_t process_index)
 inline
 bool is_local_instance(instance_id_type iid)
 {
-    const auto di = decompose_instance(iid);
+    const auto di            = decompose_instance(iid);
     const auto process_index = di.process;
     return
         // local process wildcard, always matches
@@ -299,8 +298,8 @@ bool is_local_instance(instance_id_type iid)
 inline
 bool is_local(instance_id_type iid)
 {
-    const auto di = decompose_instance(iid);
-    const auto process_index = di.process;
+    const auto di                  = decompose_instance(iid);
+    const auto process_index       = di.process;
     const auto local_process_index = get_process_index(s_mproc_id);
 
     const auto excluded_process_index =
@@ -309,14 +308,14 @@ bool is_local(instance_id_type iid)
 
     const bool matches_implicit_process =
         // complement of explicitly specified process, matches this process implicitly
-        process_index > max_process_index &&
-        excluded_process_index != 1 &&
+        process_index          >  max_process_index &&
+        excluded_process_index != 1                 &&
         excluded_process_index != local_process_index;
 
     return
-	    is_local_instance(iid)   ||
-		matches_implicit_process ||
-		process_index == all_processes_wildcard; // all processes wildcard, always matches
+        is_local_instance(iid)   ||
+        matches_implicit_process ||
+        process_index == all_processes_wildcard; // all processes wildcard, always matches
 }
 
 

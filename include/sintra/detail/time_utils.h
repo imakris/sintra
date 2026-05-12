@@ -54,19 +54,20 @@ inline uint64_t monotonic_now_ns() noexcept
         return 0;
     }
 
-    const long double ticks = static_cast<long double>(counter.QuadPart);
+    const long double ticks      = static_cast<long double>(counter.QuadPart);
     const long double per_second = static_cast<long double>(freq.value.QuadPart);
     return static_cast<uint64_t>((ticks * 1000000000.0L) / per_second);
 #elif defined(__APPLE__)
-    const auto& timebase = mach_timebase_info_cached();
-    const uint64_t now = ::mach_absolute_time();
+    const auto&    timebase = mach_timebase_info_cached();
+    const uint64_t now      = ::mach_absolute_time();
     return (now * static_cast<uint64_t>(timebase.numer)) /
            static_cast<uint64_t>(timebase.denom);
 #elif defined(CLOCK_MONOTONIC)
     struct timespec ts;
     ::clock_gettime(CLOCK_MONOTONIC, &ts);
-    return static_cast<uint64_t>(ts.tv_sec) * 1000000000ull +
-           static_cast<uint64_t>(ts.tv_nsec);
+    return
+        static_cast<uint64_t>(ts.tv_sec) * 1000000000ull +
+        static_cast<uint64_t>(ts.tv_nsec);
 #else
     // As a last resort fall back to the steady clock.  This should only happen
     // on platforms that do not expose CLOCK_MONOTONIC.
@@ -120,7 +121,8 @@ inline void precision_sleep_for(std::chrono::duration<double> duration)
 #endif
 
 #ifdef _WIN32
-class Scoped_timer_resolution {
+class Scoped_timer_resolution
+{
 public:
     explicit Scoped_timer_resolution(UINT period)
         : m_period(period), m_active(::timeBeginPeriod(period) == TIMERR_NOERROR) {}
@@ -133,11 +135,12 @@ public:
     }
 
 private:
-    UINT m_period;
-    bool m_active;
+    UINT   m_period;
+    bool   m_active;
 };
 #else
-class Scoped_timer_resolution {
+class Scoped_timer_resolution
+{
 public:
     explicit Scoped_timer_resolution(unsigned int) {}
 };

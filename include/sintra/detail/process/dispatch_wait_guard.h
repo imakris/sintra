@@ -12,7 +12,8 @@ namespace sintra {
 // Global depth counter avoids TLS access from signal handlers.
 inline std::atomic<unsigned int> g_dispatch_critical_depth {0};
 
-class Dispatch_wait_depth_guard {
+class Dispatch_wait_depth_guard
+{
 public:
     Dispatch_wait_depth_guard()
     {
@@ -29,7 +30,8 @@ public:
 };
 
 template <typename LockT>
-class Dispatch_lock_guard {
+class Dispatch_lock_guard
+{
 public:
     template <typename MutexT>
     explicit Dispatch_lock_guard(MutexT& mutex) : depth_guard_(), lock_(mutex) {}
@@ -38,8 +40,8 @@ public:
     Dispatch_lock_guard& operator=(const Dispatch_lock_guard&) = delete;
 
 private:
-    Dispatch_wait_depth_guard depth_guard_;
-    LockT lock_;
+    Dispatch_wait_depth_guard  depth_guard_;
+    LockT                      lock_;
 };
 
 using Dispatch_shared_lock = Dispatch_lock_guard<std::shared_lock<std::shared_mutex>>;

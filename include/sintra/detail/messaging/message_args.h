@@ -16,7 +16,8 @@ using message_arg_storage_value_t = std::conditional_t<
     T>;
 
 template <std::size_t I, typename T>
-struct message_arg_storage {
+struct message_arg_storage
+{
     using storage_type = message_arg_storage_value_t<T>;
 
     storage_type value;

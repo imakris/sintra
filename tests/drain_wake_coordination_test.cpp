@@ -18,14 +18,14 @@ constexpr std::string_view k_prefix = "drain_wake_coordination_test: ";
 
 struct Wait_result
 {
-    std::atomic<bool> done{false};
-    bool success = false;
-    std::chrono::milliseconds elapsed{0};
+    std::atomic<bool>          done{false};
+    bool                       success = false;
+    std::chrono::milliseconds  elapsed{0};
 };
 
 bool wait_for_flag(
-    const std::atomic<bool>& flag,
-    std::chrono::milliseconds timeout)
+    const std::atomic<bool>&   flag,
+    std::chrono::milliseconds  timeout)
 {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
@@ -38,16 +38,16 @@ bool wait_for_flag(
 }
 
 bool wait_for_completion(
-    const Wait_result& result,
-    std::chrono::milliseconds timeout)
+    const Wait_result&         result,
+    std::chrono::milliseconds  timeout)
 {
     return wait_for_flag(result.done, timeout);
 }
 
 sintra::instance_id_type make_probe_process()
 {
-    const auto self_index = static_cast<uint32_t>(sintra::get_process_index(sintra::s_mproc_id));
-    uint32_t probe_index = self_index + 1;
+    const auto self_index  = static_cast<uint32_t>(sintra::get_process_index(sintra::s_mproc_id));
+    uint32_t   probe_index = self_index + 1;
     if (probe_index > sintra::max_process_index) {
         probe_index = self_index - 1;
     }
@@ -112,9 +112,8 @@ bool test_wait_for_all_draining_wakes_after_state_change()
     std::thread waiter([&]() {
         const auto start = std::chrono::steady_clock::now();
         result.success = sintra::s_coord->wait_for_all_draining(sintra::s_mproc_id);
-        result.elapsed =
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - start);
+        result.elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start);
         result.done.store(true, std::memory_order_release);
     });
 
@@ -160,7 +159,7 @@ bool test_wait_for_all_draining_wakes_after_state_change()
 
 bool test_shutdown_drain_wait_wakes_after_group_change()
 {
-    const auto probe = make_probe_process();
+    const auto        probe      = make_probe_process();
     const std::string group_name = "_sintra_all_processes";
     add_group_probe(group_name, probe);
     {
@@ -168,7 +167,8 @@ bool test_shutdown_drain_wait_wakes_after_group_change()
         if (!sintra::test::assert_true(
                 sintra::s_mproc->m_num_active_readers == 2,
                 k_prefix,
-                "shutdown_coordinator_drain_wait() precondition violated: coordinator should have exactly two local readers")) {
+                "shutdown_coordinator_drain_wait() precondition violated: coordinator should have exactly two local readers"))
+        {
             remove_group_probe(group_name, probe);
             return false;
         }
@@ -179,9 +179,8 @@ bool test_shutdown_drain_wait_wakes_after_group_change()
         const auto start = std::chrono::steady_clock::now();
         sintra::detail::shutdown_coordinator_drain_wait(group_name);
         result.success = true;
-        result.elapsed =
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - start);
+        result.elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start);
         result.done.store(true, std::memory_order_release);
     });
 

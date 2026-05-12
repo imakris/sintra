@@ -35,7 +35,8 @@
 
 namespace {
 
-struct Remotely_accessible : sintra::Derived_transceiver<Remotely_accessible> {
+struct Remotely_accessible : sintra::Derived_transceiver<Remotely_accessible>
+{
     std::string append(const std::string& s, int v)
     {
         if (s.size() > 10) {
@@ -61,10 +62,11 @@ int process_client()
 {
     sintra::barrier("object-ready");
 
-    struct Test_case {
-        std::string city;
-        int year;
-        bool expect_success;
+    struct Test_case
+    {
+        std::string    city;
+        int            year;
+        bool           expect_success;
     };
 
     const std::vector<Test_case> cases = {
@@ -114,7 +116,7 @@ int main(int argc, char* argv[])
             const auto failure_path = shared_dir / "rpc_failures.txt";
 
             const auto successes = sintra::test::read_lines(success_path);
-            const auto failures = sintra::test::read_lines(failure_path);
+            const auto failures  = sintra::test::read_lines(failure_path);
 
             const std::vector<std::string> expected_successes = {
                 "2000: Sydney",

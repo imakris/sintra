@@ -68,16 +68,18 @@ int parse_window_id(int argc, char* argv[])
 }
 
 // Ghost cursor data from another window
-struct Ghost_cursor {
+struct Ghost_cursor
+{
     QPoint position;
-    int source_window_id = -1;
-    bool visible = false;
+    int    source_window_id = -1;
+    bool   visible          = false;
 };
 
 // State for tracking other windows
-struct Window_state {
-    bool received_normal_exit = false;
-    bool recovering = false;
+struct Window_state
+{
+    bool   received_normal_exit = false;
+    bool   recovering           = false;
 };
 
 
@@ -91,8 +93,9 @@ signals:
 
 public:
     explicit Cursor_window(int window_id)
-        : sintra_example::Cursor_bus(sintra_example::window_name(window_id))
-        , m_window_id(window_id)
+    :
+        sintra_example::Cursor_bus(sintra_example::window_name(window_id)),
+        m_window_id(window_id)
     {
         // Window setup
         setWindowTitle(QString("Multi-Cursor Window %1").arg(window_id));
@@ -135,7 +138,9 @@ protected:
 
         // Draw ghost cursors from other windows
         for (int i = 0; i < sintra_example::k_num_windows; ++i) {
-            if (i == m_window_id) continue;
+            if (i == m_window_id) {
+                continue;
+            }
 
             const auto& ghost = m_ghost_cursors[i];
             if (ghost.visible) {
@@ -145,9 +150,9 @@ protected:
                 // Draw crosshair
                 painter.setPen(QPen(ghost_color, 2));
                 painter.drawLine(ghost.position.x() - 12, ghost.position.y(),
-                                 ghost.position.x() + 12, ghost.position.y());
+                    ghost.position.x() + 12, ghost.position.y());
                 painter.drawLine(ghost.position.x(), ghost.position.y() - 12,
-                                 ghost.position.x(), ghost.position.y() + 12);
+                    ghost.position.x(), ghost.position.y() + 12);
 
                 // Draw circle
                 painter.setBrush(Qt::NoBrush);
@@ -156,7 +161,7 @@ protected:
                 // Draw small label with window number
                 painter.setFont(QFont("Arial", 8, QFont::Bold));
                 painter.drawText(ghost.position.x() + 14, ghost.position.y() - 6,
-                                 QString::number(ghost.source_window_id));
+                    QString::number(ghost.source_window_id));
             }
         }
     }
@@ -259,7 +264,7 @@ private:
             "font-weight: bold; padding: 8px 16px; border-radius: 4px; }"
             "QPushButton:hover { background-color: #c9302c; }");
         connect(crash_button, &QPushButton::clicked,
-                this, &Cursor_window::on_crash_button_clicked);
+            this, &Cursor_window::on_crash_button_clicked);
         button_layout->addWidget(crash_button);
 
         button_layout->addStretch();
@@ -267,27 +272,27 @@ private:
 
         // Connect local cursor signal
         connect(this, &Cursor_window::cursor_moved,
-                this, &Cursor_window::on_cursor_sent);
+            this, &Cursor_window::on_cursor_sent);
     }
 
     void setup_sintra_handlers()
     {
         // Listen for cursor updates from any remote Cursor_bus instance        
         activate(&Cursor_window::on_cursor_message,
-                 sintra::Typed_instance_id<sintra_example::Cursor_bus>(sintra::any_remote));
+            sintra::Typed_instance_id<sintra_example::Cursor_bus>(sintra::any_remote));
 
         // Listen for normal exit notifications from any remote Cursor_bus instance
         activate(&Cursor_window::on_normal_exit_notification,
-                 sintra::Typed_instance_id<sintra_example::Cursor_bus>(sintra::any_remote));
+            sintra::Typed_instance_id<sintra_example::Cursor_bus>(sintra::any_remote));
 
         // Listen for recovery countdown and respawn notifications
         activate(&Cursor_window::on_recovery_countdown,
-                 sintra::Typed_instance_id<sintra_example::Cursor_bus>(sintra::any_remote));
+            sintra::Typed_instance_id<sintra_example::Cursor_bus>(sintra::any_remote));
         activate(&Cursor_window::on_recovery_spawned,
-                 sintra::Typed_instance_id<sintra_example::Cursor_bus>(sintra::any_remote));
+            sintra::Typed_instance_id<sintra_example::Cursor_bus>(sintra::any_remote));
 
         activate(&Cursor_window::on_cursor_left,
-                 sintra::Typed_instance_id<sintra_example::Cursor_bus>(sintra::any_remote));
+            sintra::Typed_instance_id<sintra_example::Cursor_bus>(sintra::any_remote));
     }
 
     void send_goodbye_once()
@@ -303,10 +308,12 @@ private:
     void on_cursor_message(const sintra_example::Cursor_bus::cursor_position& msg)
     {
         // Ignore our own messages
-        if (msg.window_id == m_window_id) return;
+        if (msg.window_id == m_window_id) {
+            return;
+        }
 
-        const int x = msg.x;
-        const int y = msg.y;
+        const int x         = msg.x;
+        const int y         = msg.y;
         const int source_id = msg.window_id;
 
         post_to_ui(this, [x, y, source_id](Cursor_window* self) {
@@ -314,9 +321,9 @@ private:
                 auto& ghost = self->m_ghost_cursors[source_id];
                 auto& state = self->m_window_states[source_id];
 
-                ghost.position = QPoint(x, y);
+                ghost.position         = QPoint(x, y);
                 ghost.source_window_id = source_id;
-                ghost.visible = true;
+                ghost.visible          = true;
 
                 if (state.recovering) {
                     state.recovering = false;
@@ -335,7 +342,9 @@ private:
         const int exited_id = msg.window_id;
 
         // Ignore our own exit notification
-        if (exited_id == m_window_id) return;
+        if (exited_id == m_window_id) {
+            return;
+        }
 
         post_to_ui(this, [exited_id](Cursor_window* self) {
             if (exited_id >= 0 && exited_id < sintra_example::k_num_windows) {
@@ -370,7 +379,7 @@ private:
     void on_recovery_countdown(const sintra_example::Cursor_bus::recovery_countdown& msg)
     {
         const int window_id = msg.window_id;
-        const int seconds = msg.seconds_remaining;
+        const int seconds   = msg.seconds_remaining;
 
         if (window_id == m_window_id) {
             return;
@@ -473,9 +482,9 @@ private:
 private:
     int m_window_id;
 
-    QLabel* m_status_label = nullptr;
-    QLabel* m_notifications_label = nullptr;
-    QVBoxLayout* m_recovery_layout = nullptr;
+    QLabel*      m_status_label        = nullptr;
+    QLabel*      m_notifications_label = nullptr;
+    QVBoxLayout* m_recovery_layout     = nullptr;
     std::array<QLabel*, sintra_example::k_num_windows> m_recovery_labels{};
 
     std::array<Ghost_cursor, sintra_example::k_num_windows> m_ghost_cursors;

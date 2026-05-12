@@ -28,7 +28,9 @@ std::filesystem::path client_events_path(const std::filesystem::path& shared_dir
     return shared_dir / "client_events.txt";
 }
 
-std::filesystem::path done_marker_path(const std::filesystem::path& shared_dir, const std::string& tag)
+std::filesystem::path done_marker_path(
+    const std::filesystem::path&   shared_dir,
+    const std::string&             tag)
 {
     return shared_dir / (tag + "_done.txt");
 }
@@ -97,9 +99,9 @@ bool get_throws_runtime_error_message(Handle& handle, const std::string& expecte
 }
 
 void print_event_mismatch(
-    const char* label,
-    const std::vector<std::string>& expected,
-    const std::vector<std::string>& actual)
+    const char*                        label,
+    const std::vector<std::string>&    expected,
+    const std::vector<std::string>&    actual)
 {
     std::fprintf(stderr, "%s mismatch\n", label);
     std::fprintf(stderr, "expected:\n");
@@ -115,8 +117,8 @@ void print_event_mismatch(
 struct Lifecycle_service : sintra::Derived_transceiver<Lifecycle_service>
 {
     void unicast_marker(
-        std::string tag,
-        std::string shared_dir_str)
+        std::string    tag,
+        std::string    shared_dir_str)
     {
         const auto shared_dir = std::filesystem::path(shared_dir_str);
         sintra::test::append_line_or_throw(owner_events_path(shared_dir), std::string("unicast:") + tag);
@@ -129,10 +131,10 @@ struct Lifecycle_service : sintra::Derived_transceiver<Lifecycle_service>
     }
 
     int delayed_reply(
-        int value,
-        int delay_ms,
-        std::string tag,
-        std::string shared_dir_str)
+        int            value,
+        int            delay_ms,
+        std::string    tag,
+        std::string    shared_dir_str)
     {
         const auto shared_dir = std::filesystem::path(shared_dir_str);
         sintra::test::append_line_or_throw(owner_events_path(shared_dir), std::string("start:") + tag);
@@ -143,9 +145,9 @@ struct Lifecycle_service : sintra::Derived_transceiver<Lifecycle_service>
     }
 
     int throwing_reply(
-        std::string message,
-        std::string tag,
-        std::string shared_dir_str)
+        std::string    message,
+        std::string    tag,
+        std::string    shared_dir_str)
     {
         const auto shared_dir = std::filesystem::path(shared_dir_str);
         sintra::test::append_line_or_throw(owner_events_path(shared_dir), std::string("throw:") + tag);
@@ -177,8 +179,8 @@ int process_client()
     static_assert(!std::is_copy_assignable_v<sintra::Rpc_handle<int>>);
 
     const sintra::test::Shared_directory shared("SINTRA_TEST_SHARED_DIR", "rpc_async_lifecycle");
-    const auto& shared_dir = shared.path();
-    const auto client_path = client_events_path(shared_dir);
+    const auto& shared_dir  = shared.path();
+    const auto  client_path = client_events_path(shared_dir);
 
     sintra::barrier(k_ready_barrier);
 
@@ -405,7 +407,7 @@ int process_client()
             "cancel",
             shared_dir.string());
 
-        size_t cancelled_count = 0;
+        size_t     cancelled_count = 0;
         const auto cancel_deadline = std::chrono::steady_clock::now() + 2s;
         while (std::chrono::steady_clock::now() < cancel_deadline) {
             cancelled_count = sintra::s_mproc->unblock_rpc();
@@ -473,7 +475,7 @@ int process_client()
 
 int verify_results(const std::filesystem::path& shared_dir)
 {
-    const auto owner_events = sintra::test::read_lines(owner_events_path(shared_dir));
+    const auto owner_events  = sintra::test::read_lines(owner_events_path(shared_dir));
     const auto client_events = sintra::test::read_lines(client_events_path(shared_dir));
 
     const std::vector<std::string> expected_owner_events = {

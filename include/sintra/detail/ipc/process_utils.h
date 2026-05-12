@@ -65,8 +65,8 @@ inline bool is_process_alive(uint32_t pid)
         return false;
     }
 
-    DWORD code = 0;
-    bool alive = false;
+    DWORD code  = 0;
+    bool  alive = false;
     if (::GetExitCodeProcess(h, &code)) {
         alive = (code == STILL_ACTIVE);
     }
@@ -179,7 +179,7 @@ inline std::optional<uint64_t> query_process_start_stamp(uint32_t pid)
     }
 
     const uint64_t seconds = static_cast<uint64_t>(bsd_info.pbi_start_tvsec);
-    const uint64_t usec = static_cast<uint64_t>(bsd_info.pbi_start_tvusec);
+    const uint64_t usec    = static_cast<uint64_t>(bsd_info.pbi_start_tvusec);
     return seconds * 1000000000ull + usec * 1000ull;
 #elif defined(__FreeBSD__)
     if (pid == 0) {
@@ -195,7 +195,7 @@ inline std::optional<uint64_t> query_process_start_stamp(uint32_t pid)
     }
 
     const uint64_t seconds = static_cast<uint64_t>(kip.ki_start.tv_sec);
-    const uint64_t usec = static_cast<uint64_t>(kip.ki_start.tv_usec);
+    const uint64_t usec    = static_cast<uint64_t>(kip.ki_start.tv_usec);
     return seconds * 1000000000ull + usec * 1000ull;
 #elif defined(__linux__)
     if (pid == 0) {
@@ -252,10 +252,10 @@ inline std::optional<uint64_t> current_process_start_stamp()
 
 struct run_marker_record
 {
-    uint32_t pid = 0;
-    uint64_t start_stamp = 0;
-    uint64_t created_monotonic_ns = 0;
-    uint32_t recovery_occurrence = 0;
+    uint32_t   pid                  = 0;
+    uint64_t   start_stamp          = 0;
+    uint64_t   created_monotonic_ns = 0;
+    uint32_t   recovery_occurrence  = 0;
 };
 
 inline const char* run_marker_filename()
@@ -278,7 +278,9 @@ inline std::filesystem::path run_marker_cleanup_path(const std::filesystem::path
     return directory / (std::string(run_marker_filename()) + run_marker_cleanup_suffix());
 }
 
-inline bool write_run_marker(const std::filesystem::path& directory, const run_marker_record& record)
+inline bool write_run_marker(
+    const std::filesystem::path&   directory,
+    const run_marker_record&       record)
 {
     std::error_code ec;
     if (!std::filesystem::exists(directory, ec)) {
@@ -313,7 +315,7 @@ inline std::optional<run_marker_record> read_run_marker(const std::filesystem::p
             continue;
         }
 
-        auto key = line.substr(0, pos);
+        auto key   = line.substr(0, pos);
         auto value = line.substr(pos + 1);
 
         try {
@@ -355,7 +357,7 @@ inline void remove_run_marker_files(const std::filesystem::path& directory)
 
 inline void mark_run_directory_for_cleanup(const std::filesystem::path& directory)
 {
-    const auto marker = run_marker_path(directory);
+    const auto marker  = run_marker_path(directory);
     const auto cleanup = run_marker_cleanup_path(directory);
 
     std::error_code exists_ec;
@@ -388,13 +390,14 @@ inline void mark_run_directory_for_cleanup(const std::filesystem::path& director
 }
 
 #ifdef _WIN32
-inline bool path_has_prefix_ci(const std::filesystem::path& path,
-                               const std::filesystem::path& prefix)
+inline bool path_has_prefix_ci(
+    const std::filesystem::path&   path,
+    const std::filesystem::path&   prefix)
 {
-    const auto normalized_path = path.lexically_normal();
-    const auto normalized_prefix = prefix.lexically_normal();
-    const auto& path_native = normalized_path.native();
-    const auto& prefix_native = normalized_prefix.native();
+    const auto  normalized_path   = path.lexically_normal();
+    const auto  normalized_prefix = prefix.lexically_normal();
+    const auto& path_native       = normalized_path.native();
+    const auto& prefix_native     = normalized_prefix.native();
 
     if (prefix_native.empty() || path_native.size() < prefix_native.size()) {
         return false;
@@ -413,9 +416,10 @@ inline bool path_has_prefix_ci(const std::filesystem::path& path,
 }
 #endif
 
-inline void cleanup_stale_swarm_directories(const std::filesystem::path& base_dir,
-                                            uint32_t current_pid,
-                                            uint64_t current_start_stamp)
+inline void cleanup_stale_swarm_directories(
+    const std::filesystem::path&   base_dir,
+    uint32_t                       current_pid,
+    uint64_t                       current_start_stamp)
 {
     std::error_code ec;
     if (!std::filesystem::exists(base_dir, ec) || !std::filesystem::is_directory(base_dir, ec)) {
@@ -456,9 +460,9 @@ inline void cleanup_stale_swarm_directories(const std::filesystem::path& base_di
             continue;
         }
 
-        const auto& dir_path = it->path();
-        const auto marker_path = run_marker_path(dir_path);
-        const auto cleanup_path = run_marker_cleanup_path(dir_path);
+        const auto& dir_path     = it->path();
+        const auto  marker_path  = run_marker_path(dir_path);
+        const auto  cleanup_path = run_marker_cleanup_path(dir_path);
 
         std::error_code exists_ec;
         const bool has_marker = std::filesystem::exists(marker_path, exists_ec);
@@ -470,7 +474,7 @@ inline void cleanup_stale_swarm_directories(const std::filesystem::path& base_di
         }
 
         auto record_opt = read_run_marker(has_marker ? marker_path : cleanup_path);
-        bool stale = has_cleanup;
+        bool stale      = has_cleanup;
 
         if (!record_opt) {
             stale = true;

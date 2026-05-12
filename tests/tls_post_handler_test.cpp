@@ -75,7 +75,7 @@ int test_handler_invocation()
 
     if (g_handler_call_count.load() != 1) {
         std::fprintf(stderr, "Handler invocation: expected 1 call, got %d\n",
-                     g_handler_call_count.load());
+            g_handler_call_count.load());
         return 1;
     }
 
@@ -84,7 +84,7 @@ int test_handler_invocation()
 
     if (g_handler_call_count.load() != 2) {
         std::fprintf(stderr, "Handler invocation: expected 2 calls, got %d\n",
-                     g_handler_call_count.load());
+            g_handler_call_count.load());
         return 1;
     }
 
@@ -222,13 +222,13 @@ int test_thread_local_isolation()
     // Verify total counts
     if (thread1_calls.load() != 2) {
         std::fprintf(stderr, "Thread isolation: expected thread1_calls=2, got %d\n",
-                     thread1_calls.load());
+            thread1_calls.load());
         return 1;
     }
 
     if (thread2_calls.load() != 1) {
         std::fprintf(stderr, "Thread isolation: expected thread2_calls=1, got %d\n",
-                     thread2_calls.load());
+            thread2_calls.load());
         return 1;
     }
 

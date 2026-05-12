@@ -28,8 +28,8 @@ using std::string;
 // EXPORTED EXCLUSIVELY FOR RPC
 inline
 sequence_counter_type Process_group::barrier(
-    const string& barrier_name,
-    int32_t barrier_mode_tag)
+    const string&  barrier_name,
+    int32_t        barrier_mode_tag)
 {
     std::unique_lock basic_lock(m_call_mutex);
     instance_id_type caller_piid = s_tl_current_message->sender_instance_id;
@@ -42,8 +42,8 @@ sequence_counter_type Process_group::barrier(
         barrier_entry = std::make_shared<Barrier>();
     }
 
-    auto barrier = barrier_entry; // keep the barrier alive even if the map rehashes
-    Barrier& b = *barrier;
+    auto     barrier = barrier_entry; // keep the barrier alive even if the map rehashes
+    Barrier& b       = *barrier;
     // Lock ordering: m_call_mutex before barrier->m to prevent deadlock.
     b.m.lock();
 
@@ -54,14 +54,14 @@ sequence_counter_type Process_group::barrier(
         // new or reused barrier (may have failed previously)
         b.processes_pending = m_process_ids;
         b.processes_arrived.clear();
-        b.failed = false;
-        b.mode_tag = barrier_mode_tag;
+        b.failed              = false;
+        b.mode_tag            = barrier_mode_tag;
         b.common_function_iid = make_instance_id();
 
         // Filter out draining processes while still holding m_call_mutex for atomicity
         if (auto* coord = s_coord) {
             for (auto it = b.processes_pending.begin();
-                 it != b.processes_pending.end(); )
+                it != b.processes_pending.end();)
             {
                 if (coord->is_process_draining(*it)) {
                     it = b.processes_pending.erase(it);
@@ -72,7 +72,8 @@ sequence_counter_type Process_group::barrier(
             }
         }
     }
-    else if (b.mode_tag != barrier_mode_tag) {
+    else
+    if (b.mode_tag != barrier_mode_tag) {
         b.m.unlock();
         throw std::logic_error(
             "Barrier mode mismatch for barrier '" + barrier_name +
@@ -106,9 +107,9 @@ sequence_counter_type Process_group::barrier(
         // Re-lock m_call_mutex to safely erase from m_barriers
         basic_lock.lock();
         auto it = m_barriers.find(barrier_name);
-        if (it != m_barriers.end() &&
-            it->second &&
-            it->second.get() == barrier.get() &&
+        if (it                              != m_barriers.end() &&
+            it->second                                          &&
+            it->second.get()                == barrier.get()    &&
             it->second->common_function_iid == current_common_fiid)
         {
             m_barriers.erase(it);
@@ -139,8 +140,8 @@ sequence_counter_type Process_group::barrier(
 
 
 inline void Process_group::drop_from_inflight_barriers(
-    instance_id_type process_iid,
-    std::vector<Barrier_completion>& completions)
+    instance_id_type                   process_iid,
+    std::vector<Barrier_completion>&   completions)
 {
     std::lock_guard basic_lock(m_call_mutex);
 
@@ -260,7 +261,7 @@ type_id_type Coordinator::resolve_type(const string& pretty_name)
     // Hold spinlock while accessing the iterator to prevent use-after-invalidation
     {
         auto scoped_map = s_mproc->m_type_id_of_type_name.scoped();
-        auto it = scoped_map.get().find(pretty_name);
+        auto it         = scoped_map.get().find(pretty_name);
         if (it != scoped_map.get().end()) {
             return it->second;
         }
@@ -268,8 +269,8 @@ type_id_type Coordinator::resolve_type(const string& pretty_name)
     }
 
     // a type is always assumed to exist
-    auto scoped_map = s_mproc->m_type_id_of_type_name.scoped();
-    const auto new_id = make_type_id();
+    auto       scoped_map = s_mproc->m_type_id_of_type_name.scoped();
+    const auto new_id     = make_type_id();
     scoped_map.get().emplace(pretty_name, new_id);
     return new_id;
 }
@@ -282,7 +283,7 @@ instance_id_type Coordinator::resolve_instance(const string& assigned_name)
 {
     // Hold spinlock while accessing the iterator to prevent use-after-invalidation
     auto scoped_map = s_mproc->m_instance_id_of_assigned_name.scoped();
-    auto it = scoped_map.get().find(assigned_name);
+    auto it         = scoped_map.get().find(assigned_name);
     if (it != scoped_map.get().end()) {
         return it->second;
     }
@@ -343,7 +344,10 @@ instance_id_type Coordinator::wait_for_instance(const string& assigned_name)
 
 // EXPORTED EXCLUSIVELY FOR RPC
 inline
-instance_id_type Coordinator::publish_transceiver(type_id_type tid, instance_id_type iid, const string& assigned_name)
+instance_id_type Coordinator::publish_transceiver(
+    type_id_type       tid,
+    instance_id_type   iid,
+    const string&      assigned_name)
 {
     lock_guard<mutex> lock(m_publish_mutex);
 
@@ -353,8 +357,8 @@ instance_id_type Coordinator::publish_transceiver(type_id_type tid, instance_id_
     }
 
     auto process_iid = process_of(iid);
-    auto pr_it = m_transceiver_registry.find(process_iid);
-    auto entry = tn_type{ tid, assigned_name };
+    auto pr_it       = m_transceiver_registry.find(process_iid);
+    auto entry       = tn_type{ tid, assigned_name };
 
     auto true_sequence = [&](bool allow_notification_delay) {
         bool queued_notification = false;
@@ -457,7 +461,7 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
 
     // the process of the transceiver must have been registered
     auto process_iid = process_of(iid);
-    auto pr_it = m_transceiver_registry.find(process_iid);
+    auto pr_it       = m_transceiver_registry.find(process_iid);
     if (pr_it == m_transceiver_registry.end()) {
         return false;
     }
@@ -484,10 +488,10 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
     auto tn = it->second;
 
     std::vector<Pending_instance_publication> ready_notifications;
-    bool crash_seen = false;
-    int crash_status = 0;
+    bool     crash_seen     = false;
+    int      crash_status   = 0;
     uint64_t draining_index = 0;
-    bool was_draining = false;
+    bool     was_draining   = false;
 
     // if it is a Managed_process is being unpublished, more cleanup is required
     if (iid == process_iid) {
@@ -512,7 +516,7 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
 
         // remove all name lookup entries resolving to the unpublished process
         auto name_map = s_mproc->m_instance_id_of_assigned_name.scoped();
-        for (auto name_it = name_map.begin(); name_it != name_map.end(); )
+        for (auto name_it = name_map.begin(); name_it != name_map.end();)
         {
             if (process_of(name_it->second) == process_iid) {
                 name_it = name_map.erase(name_it);
@@ -572,19 +576,19 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
 
     if (iid == process_iid && !crash_seen) {
         process_lifecycle_event event;
-        event.process_iid = process_iid;
+        event.process_iid  = process_iid;
         event.process_slot = static_cast<uint32_t>(draining_index);
-        event.status = 0;
-        event.why = was_draining
+        event.status       = 0;
+        event.why          = was_draining
             ? process_lifecycle_event::reason::normal_exit
             : process_lifecycle_event::reason::unpublished;
         emit_lifecycle_event(event);
 
         if (!was_draining) {
             Crash_info info;
-            info.process_iid = process_iid;
+            info.process_iid  = process_iid;
             info.process_slot = static_cast<uint32_t>(draining_index);
-            info.status = crash_status;
+            info.status       = crash_status;
             recover_if_required(info);
         }
     }
@@ -743,7 +747,7 @@ inline bool Coordinator::wait_for_all_draining(instance_id_type self_process)
     assert(!m_waiting_for_all_draining.load(std::memory_order_acquire));
     m_waiting_for_all_draining.store(true, std::memory_order_release);
 
-    const auto timeout = m_drain_timeout;
+    const auto timeout     = m_drain_timeout;
     const bool has_timeout = (timeout.count() > 0);
     const auto deadline = has_timeout
         ? std::chrono::steady_clock::now() + timeout
@@ -790,12 +794,8 @@ inline bool Coordinator::wait_for_all_draining(instance_id_type self_process)
             std::vector<instance_id_type> not_draining;
             not_draining.reserve(candidates.size());
             for (auto piid : candidates) {
-                if (piid == invalid_instance_id) {
-                    continue;
-                }
-                if (!is_process_draining(piid)) {
-                    not_draining.push_back(piid);
-                }
+                if (piid == invalid_instance_id) { continue;                     }
+                if (!is_process_draining(piid))  { not_draining.push_back(piid); }
             }
 
             if (!not_draining.empty()) {
@@ -843,7 +843,7 @@ inline void Coordinator::unpublish_transceiver_notify(instance_id_type transceiv
 // EXPORTED FOR RPC
 inline
 instance_id_type Coordinator::make_process_group(
-    const string& name,
+    const string&                          name,
     const unordered_set<instance_id_type>& member_process_ids)
 {
     lock_guard<mutex> lock(m_groups_mutex);
@@ -869,8 +869,8 @@ instance_id_type Coordinator::make_process_group(
 // EXPORTED FOR RPC
 inline
 instance_id_type Coordinator::join_swarm(
-    const string& binary_name,
-    int32_t branch_index)
+    const string&  binary_name,
+    int32_t        branch_index)
 {
     if (!s_mproc || !s_coord) {
         return invalid_instance_id;
@@ -893,7 +893,7 @@ instance_id_type Coordinator::join_swarm(
         // Safety: refuse joins when the process space is nearly exhausted to avoid
         // runaway spawning that would otherwise trip hard asserts.
         const auto current_processes = m_transceiver_registry.size();
-        const auto initializing = m_processes_in_initialization.size();
+        const auto initializing      = m_processes_in_initialization.size();
         if (current_processes + initializing >= static_cast<size_t>(max_process_index)) {
             return invalid_instance_id;
         }
@@ -928,9 +928,9 @@ instance_id_type Coordinator::join_swarm(
 
     Managed_process::Spawn_swarm_process_args spawn_args;
     spawn_args.binary_name = binary_name.empty() ? s_mproc->m_binary_name : binary_name;
-    spawn_args.piid = new_instance_id;
-    spawn_args.occurrence = 1; // mark as non-initial to skip startup barrier
-    spawn_args.args = {
+    spawn_args.piid        = new_instance_id;
+    spawn_args.occurrence  = 1; // mark as non-initial to skip startup barrier
+    spawn_args.args        = {
         spawn_args.binary_name,
         "--branch_index",   std::to_string(branch_index),
         "--swarm_id",       std::to_string(s_mproc->m_swarm_id),
@@ -1022,8 +1022,9 @@ void Coordinator::recover_if_required(const Crash_info& info)
     }
 
     auto should_cancel = [this]() {
-        return m_shutdown.load(std::memory_order_acquire) ||
-               detail::s_teardown_admission_closed.load(std::memory_order_acquire);
+        return
+            m_shutdown.load(std::memory_order_acquire) ||
+            detail::s_teardown_admission_closed.load(std::memory_order_acquire);
     };
 
     auto spawned = std::make_shared<std::atomic<bool>>(false);
@@ -1089,10 +1090,10 @@ void Coordinator::note_process_crash(const Crash_info& info)
         m_recent_crash_status[info.process_iid] = info.status;
     }
     process_lifecycle_event event;
-    event.process_iid = info.process_iid;
+    event.process_iid  = info.process_iid;
     event.process_slot = info.process_slot;
-    event.why = process_lifecycle_event::reason::crash;
-    event.status = info.status;
+    event.why          = process_lifecycle_event::reason::crash;
+    event.status       = info.status;
     emit_lifecycle_event(event);
 }
 
@@ -1129,8 +1130,8 @@ Coordinator::finalize_initialization_tracking(instance_id_type process_iid)
 inline
 std::vector<Coordinator::Pending_completion>
 Coordinator::collect_pending_barrier_completions(
-    instance_id_type process_iid,
-    bool remove_process)
+    instance_id_type   process_iid,
+    bool               remove_process)
 {
     std::vector<Pending_completion> pending_completions;
     {
@@ -1175,8 +1176,8 @@ void Coordinator::emit_pending_barrier_completions(
 
 inline
 void Coordinator::collect_and_schedule_barrier_completions(
-    instance_id_type process_iid,
-    bool remove_process)
+    instance_id_type   process_iid,
+    bool               remove_process)
 {
     auto pending_completions = collect_pending_barrier_completions(process_iid, remove_process);
     if (pending_completions.empty() || !s_mproc) {

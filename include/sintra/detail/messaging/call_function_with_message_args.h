@@ -50,7 +50,10 @@ inline decltype(auto) call_function_with_message_args(const TFunction& f, const 
 }
 
 template <typename TObj, typename TFunction, typename TVector>
-inline decltype(auto) call_function_with_message_args(TObj& obj, const TFunction& f, const TVector& t)
+inline decltype(auto) call_function_with_message_args(
+    TObj& obj,
+    const TFunction& f,
+    const TVector& t)
 {
     constexpr std::size_t arity = message_args_size<TVector>::value;
     return detail::call_with_msg_args_impl(

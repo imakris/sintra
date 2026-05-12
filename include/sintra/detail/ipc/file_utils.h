@@ -38,20 +38,21 @@ inline native_file_handle create_new_file(const char* path)
     SECURITY_ATTRIBUTES* psa = nullptr;
 
     if (::InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION) &&
-        ::SetSecurityDescriptorDacl(&sd, TRUE, nullptr, FALSE)) {
-        sa.nLength = sizeof(sa);
+        ::SetSecurityDescriptorDacl(&sd, TRUE, nullptr, FALSE))
+    {
+        sa.nLength              = sizeof(sa);
         sa.lpSecurityDescriptor = &sd;
-        sa.bInheritHandle = FALSE;
-        psa = &sa;
+        sa.bInheritHandle       = FALSE;
+        psa                     = &sa;
     }
 
     return ::CreateFileA(path,
-                         GENERIC_READ | GENERIC_WRITE,
-                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                         psa,
-                         CREATE_NEW,
-                         FILE_ATTRIBUTE_NORMAL,
-                         nullptr);
+        GENERIC_READ | GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        psa,
+        CREATE_NEW,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
 }
 
 inline bool truncate_file(native_file_handle handle, std::uint64_t size)
@@ -69,15 +70,11 @@ inline bool write_file(native_file_handle handle, const void* data, std::size_t 
     const auto* bytes = static_cast<const std::byte*>(data);
     while (size > 0) {
         const DWORD chunk = size > std::numeric_limits<DWORD>::max()
-                                ? std::numeric_limits<DWORD>::max()
-                                : static_cast<DWORD>(size);
+            ? std::numeric_limits<DWORD>::max()
+            : static_cast<DWORD>(size);
         DWORD written = 0;
-        if (!::WriteFile(handle, bytes, chunk, &written, nullptr)) {
-            return false;
-        }
-        if (written == 0) {
-            return false;
-        }
+        if (!::WriteFile(handle, bytes, chunk, &written, nullptr)) { return false; }
+        if (written == 0)                                          { return false; }
         bytes += written;
         size -= written;
     }

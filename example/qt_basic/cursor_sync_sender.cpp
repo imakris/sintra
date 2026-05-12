@@ -46,7 +46,7 @@ public:
         layout->addWidget(m_status);
 
         connect(this, &Cursor_sender::cursor_position,
-                this, &Cursor_sender::on_cursor_sent);
+            this, &Cursor_sender::on_cursor_sent);
     }
 
 protected:
@@ -74,15 +74,15 @@ private slots:
 
         ++m_send_count;
         m_status->setText(QString("Sent: (%1, %2)  count=%3")
-                              .arg(x)
-                              .arg(y)
-                              .arg(m_send_count));
+            .arg(x)
+            .arg(y)
+            .arg(m_send_count));
     }
 
 private:
-    QLabel* m_label = nullptr;
-    QLabel* m_status = nullptr;
-    int m_send_count = 0;
+    QLabel* m_label      = nullptr;
+    QLabel* m_status     = nullptr;
+    int     m_send_count = 0;
 };
 
 std::string get_receiver_path(const char* argv0)

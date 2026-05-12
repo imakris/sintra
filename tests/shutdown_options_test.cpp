@@ -88,12 +88,12 @@ int main(int argc, char* argv[])
                 return 1;
             }
 
-            const auto lines = sintra::test::read_lines(summary_path);
-            bool values_ok = false;
-            bool hook_ok = false;
+            const auto lines     = sintra::test::read_lines(summary_path);
+            bool       values_ok = false;
+            bool       hook_ok   = false;
             for (const auto& line : lines) {
-                if (line == "values=2") values_ok = true;
-                if (line == "hook_ran=1") hook_ok = true;
+                if (line == "values=2")   { values_ok = true; }
+                if (line == "hook_ran=1") { hook_ok   = true; }
             }
 
             if (!values_ok) {

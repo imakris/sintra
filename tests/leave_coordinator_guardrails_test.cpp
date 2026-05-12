@@ -32,10 +32,10 @@ std::string read_text(const std::filesystem::path& path)
 int worker_process()
 {
     sintra::test::Shared_directory shared("SINTRA_TEST_SHARED_DIR", "leave_coordinator_guardrails");
-    const auto shared_dir = shared.path();
-    const auto ready_path = shared_dir / "worker_ready.txt";
+    const auto shared_dir   = shared.path();
+    const auto ready_path   = shared_dir / "worker_ready.txt";
     const auto release_path = shared_dir / "worker_release.txt";
-    const auto result_path = shared_dir / "worker_result.txt";
+    const auto result_path  = shared_dir / "worker_result.txt";
 
     write_text(
         ready_path,
@@ -53,10 +53,10 @@ int worker_process()
 int coordinator_action()
 {
     sintra::test::Shared_directory shared("SINTRA_TEST_SHARED_DIR", "leave_coordinator_guardrails");
-    const auto shared_dir = shared.path();
-    const auto ready_path = shared_dir / "worker_ready.txt";
+    const auto shared_dir   = shared.path();
+    const auto ready_path   = shared_dir / "worker_ready.txt";
     const auto release_path = shared_dir / "worker_release.txt";
-    const auto result_path = shared_dir / "worker_result.txt";
+    const auto result_path  = shared_dir / "worker_result.txt";
 
     const auto ready_deadline = std::chrono::steady_clock::now() + k_ready_timeout;
     while (std::chrono::steady_clock::now() < ready_deadline) {
@@ -80,14 +80,14 @@ int coordinator_action()
     }
     catch (const std::exception& e) {
         std::fprintf(stderr,
-                     "[leave_coordinator_guardrails] unexpected exception: %s\n",
-                     e.what());
+            "[leave_coordinator_guardrails] unexpected exception: %s\n",
+            e.what());
         return 1;
     }
 
     if (!caught) {
         std::fprintf(stderr,
-                     "[leave_coordinator_guardrails] coordinator leave() unexpectedly succeeded\n");
+            "[leave_coordinator_guardrails] coordinator leave() unexpectedly succeeded\n");
         return 1;
     }
 
@@ -95,7 +95,7 @@ int coordinator_action()
         sintra::detail::s_shutdown_state.load(std::memory_order_acquire);
     if (state_after != sintra::detail::shutdown_protocol_state::idle) {
         std::fprintf(stderr,
-                     "[leave_coordinator_guardrails] shutdown state not reset after rejected leave()\n");
+            "[leave_coordinator_guardrails] shutdown state not reset after rejected leave()\n");
         return 1;
     }
 
@@ -108,8 +108,8 @@ int coordinator_action()
 
     if (read_text(result_path) != "ok") {
         std::fprintf(stderr,
-                     "[leave_coordinator_guardrails] worker did not exit cleanly: %s\n",
-                     read_text(result_path).c_str());
+            "[leave_coordinator_guardrails] worker did not exit cleanly: %s\n",
+            read_text(result_path).c_str());
         return 1;
     }
 

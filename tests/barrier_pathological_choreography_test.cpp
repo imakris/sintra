@@ -39,20 +39,20 @@ constexpr const char* k_summary_ready_barrier = "pathological-summary-ready";
 
 struct Stage_report
 {
-    int worker;
-    int iteration;
-    int stage;
-    int step;
-    int moment;
+    int    worker;
+    int    iteration;
+    int    stage;
+    int    step;
+    int    moment;
 };
 
 struct Noise_message
 {
-    int from;
-    int to;
-    int iteration;
-    int step;
-    int payload;
+    int    from;
+    int    to;
+    int    iteration;
+    int    step;
+    int    payload;
 };
 
 std::string make_worker_noise_log(int worker)
@@ -110,10 +110,10 @@ std::string stage_report_to_string(const Stage_report& report)
 
 struct Controller_state
 {
-    std::mutex mutex;
-    std::vector<Stage_report> stage_reports;
-    std::array<int, k_iterations> controller_noise_counts{};
-    int total_controller_noise = 0;
+    std::mutex                     mutex;
+    std::vector<Stage_report>      stage_reports;
+    std::array<int, k_iterations>  controller_noise_counts{};
+    int                            total_controller_noise = 0;
 };
 
 void record_stage_report(Controller_state& state, const Stage_report& report)
@@ -208,7 +208,7 @@ int controller_process()
 
     Controller_state state;
     sintra::test::Shared_directory shared("SINTRA_PATHOLOGICAL_DIR", "barrier_pathological");
-    const auto shared_dir = shared.path();
+    const auto shared_dir     = shared.path();
     const auto controller_log = shared_dir / "controller_stage.log";
 
     auto stage_slot = [&state, controller_log](const Stage_report& report) {
@@ -264,9 +264,10 @@ int controller_process()
     return 0;
 }
 
-void log_stage_event(const std::filesystem::path& log_path,
-                     const Stage_report& report,
-                     std::string_view phase)
+void log_stage_event(
+    const std::filesystem::path&   log_path,
+    const Stage_report&            report,
+    std::string_view               phase)
 {
     std::ostringstream oss;
     oss << phase << ':' << stage_report_to_string(report);
@@ -287,8 +288,8 @@ int worker_process(int worker_index)
 
     sintra::test::Shared_directory shared("SINTRA_PATHOLOGICAL_DIR", "barrier_pathological");
     const auto shared_dir = shared.path();
-    const auto stage_log = shared_dir / make_stage_log_name(worker_index);
-    const auto noise_log = shared_dir / make_worker_noise_log(worker_index);
+    const auto stage_log  = shared_dir / make_stage_log_name(worker_index);
+    const auto noise_log  = shared_dir / make_worker_noise_log(worker_index);
 
     auto stage_slot = [stage_log, worker_index](const Stage_report& report) {
         // All workers observe every report but only write detailed entries for

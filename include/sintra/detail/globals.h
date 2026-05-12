@@ -48,7 +48,8 @@ struct Coordinator;
 /// and their associated identifiers.  Having a single well-defined location for
 /// these pointers avoids global variables scattered across translation units
 /// and makes the façade headers easier to reason about.
-class runtime_state {
+class runtime_state
+{
 public:
     static runtime_state& instance() noexcept
     {
@@ -56,10 +57,10 @@ public:
         return state;
     }
 
-    Managed_process*& managed_process_ref()     noexcept { return m_managed_process;    }
-    Coordinator*& coordinator_ref()             noexcept { return m_coordinator;        }
-    instance_id_type& managed_process_id_ref()  noexcept { return m_managed_process_id; }
-    instance_id_type& coordinator_id_ref()      noexcept { return m_coordinator_id;     }
+    Managed_process*& managed_process_ref()    noexcept { return m_managed_process;    }
+    Coordinator*&     coordinator_ref()        noexcept { return m_coordinator;        }
+    instance_id_type& managed_process_id_ref() noexcept { return m_managed_process_id; }
+    instance_id_type& coordinator_id_ref()     noexcept { return m_coordinator_id;     }
 
     // Internal: runtime code accesses this through detail::s_shutdown_state.
     std::atomic<detail::shutdown_protocol_state>& shutdown_state_ref() noexcept { return m_shutdown_state; }
@@ -67,7 +68,7 @@ public:
     std::atomic<bool>& teardown_admission_closed_ref() noexcept { return m_teardown_admission_closed; }
 
     Managed_process* managed_process()    const noexcept { return m_managed_process;    }
-    Coordinator* coordinator()            const noexcept { return m_coordinator;        }
+    Coordinator*     coordinator()        const noexcept { return m_coordinator;        }
     instance_id_type managed_process_id() const noexcept { return m_managed_process_id; }
     instance_id_type coordinator_id()     const noexcept { return m_coordinator_id;     }
 
@@ -76,9 +77,10 @@ private:
     Coordinator*       m_coordinator          = nullptr;
     instance_id_type   m_managed_process_id   = 0;
     instance_id_type   m_coordinator_id       = 0;
-    std::atomic<detail::shutdown_protocol_state> m_shutdown_state{detail::shutdown_protocol_state::idle};
-    std::mutex m_teardown_admission_mutex;
-    std::atomic<bool> m_teardown_admission_closed{false};
+    std::atomic<detail::shutdown_protocol_state>
+                       m_shutdown_state{detail::shutdown_protocol_state::idle};
+    std::mutex         m_teardown_admission_mutex;
+    std::atomic<bool>  m_teardown_admission_closed{false};
 };
 
 inline auto& s_mproc    = runtime_state::instance().managed_process_ref();

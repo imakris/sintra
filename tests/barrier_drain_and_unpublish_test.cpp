@@ -43,10 +43,10 @@ void write_result(const std::filesystem::path& path, const std::string& result)
 int worker_a()
 {
     sintra::test::Shared_directory shared("SINTRA_BARRIER_DRAIN_DIR", "barrier_drain_unpublish");
-    const auto dir = shared.path();
+    const auto dir            = shared.path();
     const auto barrier1_ready = dir / "barrier1_ready.txt";
     const auto barrier2_ready = dir / "barrier2_ready.txt";
-    const auto result_path = dir / "worker_a_result.txt";
+    const auto result_path    = dir / "worker_a_result.txt";
 
     write_marker(barrier1_ready);
 
@@ -104,7 +104,7 @@ int worker_a()
 int worker_b()
 {
     sintra::test::Shared_directory shared("SINTRA_BARRIER_DRAIN_DIR", "barrier_drain_unpublish");
-    const auto dir = shared.path();
+    const auto dir            = shared.path();
     const auto barrier1_ready = dir / "barrier1_ready.txt";
 
     if (!sintra::test::wait_for_file(barrier1_ready, 5s, 5ms)) {
@@ -132,7 +132,7 @@ int main(int argc, char* argv[])
         sintra::test::read_env_int(k_env_coord_watchdog_ms.data(), 60000);
 
     const auto barrier2_ready = dir / "barrier2_ready.txt";
-    const auto result_path = dir / "worker_a_result.txt";
+    const auto result_path    = dir / "worker_a_result.txt";
 
     std::atomic<bool> watchdog_done{false};
     std::thread watchdog([&]() {

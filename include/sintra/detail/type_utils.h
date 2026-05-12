@@ -20,7 +20,7 @@ constexpr std::string_view ctti_name()
 #if defined(__clang__) || defined(__GNUC__)
     constexpr std::string_view pretty = __PRETTY_FUNCTION__;
     constexpr std::string_view needle = "T = ";
-    auto start = pretty.find(needle);
+    auto                       start  = pretty.find(needle);
     if (start == std::string_view::npos) {
         return pretty;
     }
@@ -33,13 +33,13 @@ constexpr std::string_view ctti_name()
 #elif defined(_MSC_VER)
     constexpr std::string_view pretty = __FUNCSIG__;
     constexpr std::string_view needle = "ctti_name<";
-    auto begin = pretty.find(needle);
+    auto                       begin  = pretty.find(needle);
     if (begin == std::string_view::npos) {
         return pretty;
     }
     begin += needle.size();
-    auto end = begin;
-    int depth = 0;
+    auto end   = begin;
+    int  depth = 0;
     for (; end < pretty.size(); ++end) {
         const auto ch = pretty[end];
         if (ch == '<') {
@@ -150,21 +150,13 @@ inline std::string describe_token_component(const std::string& component)
         return component;
     }
 
-    std::string name = component.substr(0, equals);
+    std::string name  = component.substr(0, equals);
     std::string value = component.substr(equals + 1);
 
-    if (name == "compiler") {
-        return "compiler " + value;
-    }
-    if (name == "stdlib") {
-        return "standard library " + value;
-    }
-    if (name == "platform") {
-        return "platform " + value;
-    }
-    if (name == "arch") {
-        return "architecture " + value;
-    }
+    if (name == "compiler") { return "compiler " + value;         }
+    if (name == "stdlib")   { return "standard library " + value; }
+    if (name == "platform") { return "platform " + value;         }
+    if (name == "arch")     { return "architecture " + value;     }
 
     return name + ' ' + value;
 }
@@ -205,9 +197,9 @@ inline std::string describe_abi_token(const std::string& token)
     std::string description;
     std::size_t start = 0;
     while (start < token.size()) {
-        auto next = token.find(';', start);
+        auto next      = token.find(';', start);
         auto component = token.substr(start, next == std::string::npos ? std::string::npos : next - start);
-        auto readable = detail_type_utils::describe_token_component(component);
+        auto readable  = detail_type_utils::describe_token_component(component);
         if (!readable.empty()) {
             if (!description.empty()) {
                 description += ", ";

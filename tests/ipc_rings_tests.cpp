@@ -37,13 +37,18 @@ using namespace std::chrono_literals;
 
 namespace {
 
-class Assertion_error : public std::runtime_error {
+class Assertion_error : public std::runtime_error
+{
 public:
     Assertion_error(const std::string& expr, const char* file, int line, const std::string& message = {})
         : std::runtime_error(make_message(expr, file, line, message)) {}
 
 private:
-    static std::string make_message(const std::string& expr, const char* file, int line, const std::string& message)
+    static std::string make_message(
+        const std::string& expr,
+        const char*        file,
+        int                line,
+        const std::string& message)
     {
         std::ostringstream oss;
         oss << file << ':' << line << " - assertion failed: " << expr;
@@ -54,83 +59,85 @@ private:
     }
 };
 
-#define ASSERT_TRUE(expr) do { \
-    if (!(expr)) { \
-        if (sintra::detail::is_debug_pause_active()) { \
-            std::cerr << __FILE__ << ':' << __LINE__ << " - assertion failed: " << #expr << std::endl; \
-            sintra::detail::debug_aware_abort(); \
-        } \
-        throw Assertion_error(#expr, __FILE__, __LINE__); \
-    } \
+#define ASSERT_TRUE(expr) do {                                                                                    \
+    if (!(expr)) {                                                                                                \
+        if (sintra::detail::is_debug_pause_active()) {                                                            \
+            std::cerr << __FILE__ << ':' << __LINE__ << " - assertion failed: " << #expr << std::endl;            \
+            sintra::detail::debug_aware_abort();                                                                  \
+        }                                                                                                         \
+        throw Assertion_error(#expr, __FILE__, __LINE__);                                                         \
+    }                                                                                                             \
 } while (false)
 #define ASSERT_FALSE(expr) ASSERT_TRUE(!(expr))
-#define ASSERT_EQ(expected, actual) do { \
-    auto _exp = (expected); \
-    auto _act = (actual); \
-    if (!(_exp == _act)) { \
-        if (sintra::detail::is_debug_pause_active()) { \
-            std::cerr << __FILE__ << ':' << __LINE__ << " - assertion failed: " << #expected " == " #actual \
-                      << " (expected " << _exp << ", got " << _act << ")" << std::endl; \
-            sintra::detail::debug_aware_abort(); \
-        } \
-        std::ostringstream _oss; \
-        _oss << "expected " << _exp << ", got " << _act; \
-        throw Assertion_error(#expected " == " #actual, __FILE__, __LINE__, _oss.str()); \
-    } \
+#define ASSERT_EQ(expected, actual) do {                                                                          \
+    auto _exp = (expected);                                                                                       \
+    auto _act = (actual);                                                                                         \
+    if (!(_exp == _act)) {                                                                                        \
+        if (sintra::detail::is_debug_pause_active()) {                                                            \
+            std::cerr << __FILE__ << ':' << __LINE__ << " - assertion failed: " << #expected " == " #actual       \
+                << " (expected " << _exp << ", got " << _act << ")" << std::endl;                                 \
+            sintra::detail::debug_aware_abort();                                                                  \
+        }                                                                                                         \
+        std::ostringstream _oss;                                                                                  \
+        _oss << "expected " << _exp << ", got " << _act;                                                          \
+        throw Assertion_error(#expected " == " #actual, __FILE__, __LINE__, _oss.str());                          \
+    }                                                                                                             \
 } while (false)
-#define ASSERT_NE(val1, val2) do { \
-    auto _v1 = (val1); \
-    auto _v2 = (val2); \
-    if (_v1 == _v2) { \
-        if (sintra::detail::is_debug_pause_active()) { \
-            std::cerr << __FILE__ << ':' << __LINE__ << " - assertion failed: " << #val1 " != " #val2 \
-                      << " (values both equal to " << _v1 << ")" << std::endl; \
-            sintra::detail::debug_aware_abort(); \
-        } \
-        std::ostringstream _oss; \
-        _oss << "values both equal to " << _v1; \
-        throw Assertion_error(#val1 " != " #val2, __FILE__, __LINE__, _oss.str()); \
-    } \
+#define ASSERT_NE(val1, val2) do {                                                                                \
+    auto _v1 = (val1);                                                                                            \
+    auto _v2 = (val2);                                                                                            \
+    if (_v1 == _v2) {                                                                                             \
+        if (sintra::detail::is_debug_pause_active()) {                                                            \
+            std::cerr << __FILE__ << ':' << __LINE__ << " - assertion failed: " << #val1 " != " #val2             \
+                << " (values both equal to " << _v1 << ")" << std::endl;                                          \
+            sintra::detail::debug_aware_abort();                                                                  \
+        }                                                                                                         \
+        std::ostringstream _oss;                                                                                  \
+        _oss << "values both equal to " << _v1;                                                                   \
+        throw Assertion_error(#val1 " != " #val2, __FILE__, __LINE__, _oss.str());                                \
+    }                                                                                                             \
 } while (false)
 #define ASSERT_GE(val, ref) ASSERT_TRUE((val) >= (ref))
 #define ASSERT_LE(val, ref) ASSERT_TRUE((val) <= (ref))
 #define ASSERT_GT(val, ref) ASSERT_TRUE((val) > (ref))
 #define ASSERT_LT(val, ref) ASSERT_TRUE((val) < (ref))
-#define ASSERT_THROW(statement, exception_type) do { \
-    bool _thrown = false; \
-    try { \
-        statement; \
-    } \
-    catch (const exception_type&) { \
-        _thrown = true; \
-    } \
-    catch (...) { \
-    } \
-    if (!_thrown) { \
-        if (sintra::detail::is_debug_pause_active()) { \
-            std::cerr << __FILE__ << ':' << __LINE__ << " - assertion failed: Expected exception " #exception_type << std::endl; \
-            sintra::detail::debug_aware_abort(); \
-        } \
-        throw Assertion_error("Expected exception " #exception_type, __FILE__, __LINE__); \
-    } \
+#define ASSERT_THROW(statement, exception_type) do {                                                              \
+    bool _thrown = false;                                                                                         \
+    try {                                                                                                         \
+        statement;                                                                                                \
+    }                                                                                                             \
+    catch (const exception_type&) {                                                                               \
+        _thrown = true;                                                                                           \
+    }                                                                                                             \
+    catch (...) {                                                                                                 \
+    }                                                                                                             \
+    if (!_thrown) {                                                                                               \
+        if (sintra::detail::is_debug_pause_active()) {                                                            \
+            std::cerr << __FILE__ << ':' << __LINE__                                                              \
+                << " - assertion failed: Expected exception " #exception_type << std::endl;                       \
+            sintra::detail::debug_aware_abort();                                                                  \
+        }                                                                                                         \
+        throw Assertion_error("Expected exception " #exception_type, __FILE__, __LINE__);                         \
+    }                                                                                                             \
 } while (false)
-#define ASSERT_NO_THROW(statement) do { \
-    try { \
-        statement; \
-    } \
-    catch (...) { \
-        if (sintra::detail::is_debug_pause_active()) { \
+#define ASSERT_NO_THROW(statement) do {                                                                           \
+    try {                                                                                                         \
+        statement;                                                                                                \
+    }                                                                                                             \
+    catch (...) {                                                                                                 \
+        if (sintra::detail::is_debug_pause_active()) {                                                            \
             std::cerr << __FILE__ << ':' << __LINE__ << " - assertion failed: Unexpected exception" << std::endl; \
-            sintra::detail::debug_aware_abort(); \
-        } \
-        throw Assertion_error("Unexpected exception", __FILE__, __LINE__); \
-    } \
+            sintra::detail::debug_aware_abort();                                                                  \
+        }                                                                                                         \
+        throw Assertion_error("Unexpected exception", __FILE__, __LINE__);                                        \
+    }                                                                                                             \
 } while (false)
 
-struct Test_case {
-    std::string name;
-    std::function<void()> fn;
-    bool is_stress = false;
+struct Test_case
+{
+    std::string            name;
+    std::function<void()>  fn;
+    bool                   is_stress = false;
 };
 
 inline std::vector<Test_case>& registry()
@@ -139,21 +146,22 @@ inline std::vector<Test_case>& registry()
     return tests;
 }
 
-struct Register_test {
+struct Register_test
+{
     Register_test(const std::string& name, std::function<void()> fn, bool is_stress)
     {
         registry().push_back({name, std::move(fn), is_stress});
     }
 };
 
-#define TEST_CASE(name) \
-    void name(); \
+#define TEST_CASE(name)                                        \
+    void name();                                               \
     static Register_test name##_registrar(#name, name, false); \
     void name()
 
-#define STRESS_TEST(name) \
-    void name(); \
-    static Register_test name##_registrar(#name, name, true); \
+#define STRESS_TEST(name)                                      \
+    void name();                                               \
+    static Register_test name##_registrar(#name, name, true);  \
     void name()
 
 // Use shared test utilities from test_ring_utils.h
@@ -163,8 +171,8 @@ using sintra::test::pick_ring_elements;
 TEST_CASE(test_get_ring_configurations_properties)
 {
     constexpr size_t min_elements = 64;
-    size_t page_size = sintra::system_page_size();
-    auto configs = sintra::get_ring_configurations<uint32_t>(min_elements, page_size * 8, 6);
+    size_t           page_size    = sintra::system_page_size();
+    auto             configs      = sintra::get_ring_configurations<uint32_t>(min_elements, page_size * 8, 6);
     ASSERT_FALSE(configs.empty());
     ASSERT_LE(configs.size(), 6u);
 
@@ -191,7 +199,7 @@ TEST_CASE(test_directory_helpers)
 {
     Temp_ring_dir tmp("dir_helpers");
     auto dir_to_create = tmp.path / "nested";
-    auto file_path = dir_to_create / "placeholder";
+    auto file_path     = dir_to_create / "placeholder";
 
     std::error_code ec;
     std::filesystem::remove_all(dir_to_create, ec);
@@ -229,7 +237,7 @@ TEST_CASE(test_ring_write_read_single_reader)
 
     {
         auto snapshot = sintra::make_snapshot(reader, payload.size());
-        auto range = snapshot.range();
+        auto range    = snapshot.range();
         ASSERT_EQ(static_cast<size_t>(range.end - range.begin), payload.size());
         for (size_t i = 0; i < payload.size(); ++i) {
             ASSERT_EQ(range.begin[i], payload[i]);
@@ -249,7 +257,8 @@ TEST_CASE(test_multiple_readers_see_same_data)
 
     std::vector<std::unique_ptr<sintra::Ring_R<int>>> readers;
     for (int i = 0; i < 3; ++i) {
-        readers.emplace_back(std::make_unique<sintra::Ring_R<int>>(tmp.str(), "ring_data", ring_elements, (ring_elements * 3) / 4));
+        readers.emplace_back(
+            std::make_unique<sintra::Ring_R<int>>(tmp.str(), "ring_data", ring_elements, (ring_elements * 3) / 4));
     }
 
     std::vector<int> payload(ring_elements / 16);
@@ -260,7 +269,7 @@ TEST_CASE(test_multiple_readers_see_same_data)
 
     for (auto& reader : readers) {
         auto snapshot = sintra::make_snapshot(*reader, payload.size());
-        auto range = snapshot.range();
+        auto range    = snapshot.range();
         ASSERT_EQ(static_cast<size_t>(range.end - range.begin), payload.size());
         for (size_t i = 0; i < payload.size(); ++i) {
             ASSERT_EQ(range.begin[i], payload[i]);
@@ -281,7 +290,7 @@ TEST_CASE(test_snapshot_raii)
 
     {
         auto snapshot = sintra::make_snapshot(reader, payload.size());
-        auto range = snapshot.range();
+        auto range    = snapshot.range();
         ASSERT_EQ(static_cast<size_t>(range.end - range.begin), payload.size());
         for (size_t i = 0; i < payload.size(); ++i) {
             ASSERT_EQ(range.begin[i], payload[i]);
@@ -302,8 +311,8 @@ TEST_CASE(test_wait_for_new_data)
     auto reader = std::make_shared<sintra::Ring_R<int>>(tmp.str(), "ring_data", ring_elements, (ring_elements * 3) / 4);
 
     std::vector<int> payload{11, 12, 13, 14};
-    constexpr int iterations = 16;
-    const size_t total_expected = payload.size() * iterations;
+    constexpr int iterations     = 16;
+    const size_t  total_expected = payload.size() * iterations;
 
     std::vector<int> observed;
     observed.reserve(total_expected);
@@ -389,9 +398,9 @@ TEST_CASE(test_unblock_local_returns_empty)
         try {
             auto initial = reader->start_reading();
             ASSERT_EQ(static_cast<size_t>(initial.end - initial.begin), size_t(0));
-            ready = true;
+            ready  = true;
             result = reader->wait_for_new_data();
-            done = true;
+            done   = true;
             reader->done_reading();
         }
         catch (...) {
@@ -424,9 +433,9 @@ TEST_CASE(test_unblock_local_returns_empty)
 TEST_CASE(test_reader_eviction_does_not_underflow_octile_counter)
 {
     Temp_ring_dir tmp("guard_underflow");
-    const std::string ring_name = "ring_data";
-    const size_t ring_elements = pick_ring_elements<uint32_t>(64);
-    const size_t trailing_cap = (ring_elements * 3) / 4;
+    const std::string ring_name     = "ring_data";
+    const size_t      ring_elements = pick_ring_elements<uint32_t>(64);
+    const size_t      trailing_cap  = (ring_elements * 3) / 4;
 
     sintra::Ring_W<uint32_t> writer(tmp.str(), ring_name, ring_elements);
     sintra::Ring_R<uint32_t> reader(tmp.str(), ring_name, ring_elements, trailing_cap);
@@ -447,7 +456,7 @@ TEST_CASE(test_reader_eviction_does_not_underflow_octile_counter)
     }
 
     const int slot_index = reader.m_rs_index;
-    auto& slot = reader.c.reading_sequences[slot_index].data;
+    auto&     slot       = reader.c.reading_sequences[slot_index].data;
 
     std::atomic<bool> guard_ready{false};
 
@@ -471,9 +480,9 @@ TEST_CASE(test_reader_eviction_does_not_underflow_octile_counter)
     };
 
     try {
-        uint8_t guarded_octile = 0;
-        auto guard_deadline = std::chrono::steady_clock::now() + 1s;
-        bool guard_observed = false;
+        uint8_t           guarded_octile     = 0;
+        auto              guard_deadline     = std::chrono::steady_clock::now() + 1s;
+        bool              guard_observed     = false;
         constexpr uint8_t guard_present_mask = 0x08;
         constexpr uint8_t guard_octile_mask  = 0x07;
 
@@ -514,7 +523,7 @@ TEST_CASE(test_reader_eviction_does_not_underflow_octile_counter)
         reader.done_reading();
 
         uint64_t read_access = reader.c.read_access;
-        uint8_t guard_count = static_cast<uint8_t>((read_access >> (guarded_octile * 8)) & 0xffu);
+        uint8_t  guard_count = static_cast<uint8_t>((read_access >> (guarded_octile * 8)) & 0xffu);
 
         ASSERT_EQ(0u, static_cast<unsigned>(guard_count));
     }
@@ -528,12 +537,12 @@ TEST_CASE(test_reader_eviction_does_not_underflow_octile_counter)
 TEST_CASE(test_stale_guard_clears_after_timeout)
 {
     Temp_ring_dir tmp("stale_guard_clear");
-    const std::string ring_name = "ring_data";
-    const size_t ring_elements = pick_ring_elements<uint32_t>(64);
+    const std::string ring_name     = "ring_data";
+    const size_t      ring_elements = pick_ring_elements<uint32_t>(64);
 
     sintra::Ring_W<uint32_t> writer(tmp.str(), ring_name, ring_elements);
 
-    const size_t head_index = ring_elements / 8;
+    const size_t  head_index = ring_elements / 8;
     const uint8_t new_octile = sintra::octile_of_index(head_index, ring_elements);
     writer.m_octile = static_cast<uint8_t>((new_octile + 7) % 8);
 
@@ -561,13 +570,13 @@ TEST_CASE(test_stale_guard_clears_after_timeout)
 TEST_CASE(test_guard_pending_prevents_underflow)
 {
     Temp_ring_dir tmp("stale_guard_pending");
-    const std::string ring_name = "ring_data";
-    const size_t ring_elements = pick_ring_elements<uint32_t>(64);
+    const std::string ring_name     = "ring_data";
+    const size_t      ring_elements = pick_ring_elements<uint32_t>(64);
 
     sintra::Ring_R<uint32_t> reader(tmp.str(), ring_name, ring_elements, ring_elements / 2);
 
-    const uint8_t target_octile = 3;
-    const uint64_t guard_mask = sintra::octile_mask(target_octile);
+    const uint8_t  target_octile = 3;
+    const uint64_t guard_mask    = sintra::octile_mask(target_octile);
 
     auto& slot = reader.c.reading_sequences[reader.m_rs_index].data;
     using Reader_state_union = sintra::Ring<uint32_t, true>::Reader_state_union;
@@ -594,7 +603,7 @@ TEST_CASE(test_guard_pending_prevents_underflow)
     ASSERT_TRUE(reader.try_rollback_unpaired_read_access(target_octile));
 
     uint64_t read_access = reader.c.read_access.load();
-    uint8_t guard_count = static_cast<uint8_t>((read_access >> (8 * target_octile)) & 0xffu);
+    uint8_t  guard_count = static_cast<uint8_t>((read_access >> (8 * target_octile)) & 0xffu);
 
     ASSERT_EQ(0u, static_cast<unsigned>(guard_count));
     ASSERT_EQ(uint64_t(0), read_access & guard_mask);
@@ -603,14 +612,14 @@ TEST_CASE(test_guard_pending_prevents_underflow)
 TEST_CASE(test_guard_rollback_success)
 {
     Temp_ring_dir tmp("guard_rollback");
-    const std::string ring_name = "ring_data";
-    const size_t ring_elements = pick_ring_elements<uint32_t>(64);
+    const std::string ring_name     = "ring_data";
+    const size_t      ring_elements = pick_ring_elements<uint32_t>(64);
 
     sintra::Ring_R<uint32_t> reader(tmp.str(), ring_name, ring_elements, ring_elements / 2);
 
     // Manually set up a stale guard scenario: increment read_access without a guard token
-    const uint8_t test_octile = 3;
-    const uint64_t increment = (uint64_t(1) << (8 * test_octile));
+    const uint8_t  test_octile = 3;
+    const uint64_t increment   = (uint64_t(1) << (8 * test_octile));
     reader.c.read_access.fetch_add(increment);
 
     // Ensure no guard token exists for this octile
@@ -620,7 +629,7 @@ TEST_CASE(test_guard_rollback_success)
 
     // Verify the mismatch exists
     uint64_t access_before = reader.c.read_access.load();
-    uint32_t count_before = static_cast<uint32_t>((access_before >> (8 * test_octile)) & 0xffu);
+    uint32_t count_before  = static_cast<uint32_t>((access_before >> (8 * test_octile)) & 0xffu);
     ASSERT_GT(count_before, uint32_t(0));
 
     // Attempt rollback
@@ -631,7 +640,7 @@ TEST_CASE(test_guard_rollback_success)
 
     // Verify read_access was decremented
     uint64_t access_after = reader.c.read_access.load();
-    uint32_t count_after = static_cast<uint32_t>((access_after >> (8 * test_octile)) & 0xffu);
+    uint32_t count_after  = static_cast<uint32_t>((access_after >> (8 * test_octile)) & 0xffu);
     ASSERT_EQ(count_before - 1, count_after);
 
     // Verify diagnostics
@@ -643,14 +652,14 @@ TEST_CASE(test_guard_rollback_success)
 TEST_CASE(test_guard_rollback_fails_with_active_guard)
 {
     Temp_ring_dir tmp("guard_rollback_fail");
-    const std::string ring_name = "ring_data";
-    const size_t ring_elements = pick_ring_elements<uint32_t>(64);
+    const std::string ring_name     = "ring_data";
+    const size_t      ring_elements = pick_ring_elements<uint32_t>(64);
 
     sintra::Ring_R<uint32_t> reader(tmp.str(), ring_name, ring_elements, ring_elements / 2);
 
     // Set up scenario: increment read_access AND set a guard token
-    const uint8_t test_octile = 2;
-    const uint64_t increment = (uint64_t(1) << (8 * test_octile));
+    const uint8_t  test_octile = 2;
+    const uint64_t increment   = (uint64_t(1) << (8 * test_octile));
     reader.c.read_access.fetch_add(increment);
 
     // Set a guard token for this octile
@@ -659,7 +668,7 @@ TEST_CASE(test_guard_rollback_fails_with_active_guard)
 
     // Verify the guard exists
     uint64_t access_before = reader.c.read_access.load();
-    uint32_t count_before = static_cast<uint32_t>((access_before >> (8 * test_octile)) & 0xffu);
+    uint32_t count_before  = static_cast<uint32_t>((access_before >> (8 * test_octile)) & 0xffu);
     ASSERT_GT(count_before, uint32_t(0));
 
     // Attempt rollback - should fail because guard exists
@@ -670,15 +679,15 @@ TEST_CASE(test_guard_rollback_fails_with_active_guard)
 
     // Verify read_access was NOT decremented
     uint64_t access_after = reader.c.read_access.load();
-    uint32_t count_after = static_cast<uint32_t>((access_after >> (8 * test_octile)) & 0xffu);
+    uint32_t count_after  = static_cast<uint32_t>((access_after >> (8 * test_octile)) & 0xffu);
     ASSERT_EQ(count_before, count_after);
 }
 
 TEST_CASE(test_guard_accounting_invariant)
 {
     Temp_ring_dir tmp("guard_invariant");
-    const std::string ring_name = "ring_data";
-    const size_t ring_elements = pick_ring_elements<uint64_t>(256);
+    const std::string ring_name     = "ring_data";
+    const size_t      ring_elements = pick_ring_elements<uint64_t>(256);
 
     sintra::Ring_W<uint64_t> writer(tmp.str(), ring_name, ring_elements);
     sintra::Ring_R<uint64_t> reader1(tmp.str(), ring_name, ring_elements, ring_elements / 2);
@@ -697,8 +706,8 @@ TEST_CASE(test_guard_accounting_invariant)
     // Check each octile
     for (uint8_t oct = 0; oct < 8; ++oct) {
         uint64_t access_snapshot = writer.m_control->read_access.load();
-        uint32_t access_count = static_cast<uint32_t>((access_snapshot >> (8 * oct)) & 0xffu);
-        uint32_t guard_count = writer.m_control->count_guards_for_octile(oct);
+        uint32_t access_count    = static_cast<uint32_t>((access_snapshot >> (8 * oct)) & 0xffu);
+        uint32_t guard_count     = writer.m_control->count_guards_for_octile(oct);
 
         // Invariant: access_count should equal guard_count
         ASSERT_EQ(guard_count, access_count);
@@ -711,8 +720,8 @@ TEST_CASE(test_guard_accounting_invariant)
 TEST_CASE(test_concurrent_guard_updates)
 {
     Temp_ring_dir tmp("concurrent_guards");
-    const std::string ring_name = "ring_data";
-    const size_t ring_elements = pick_ring_elements<uint32_t>(512);
+    const std::string ring_name     = "ring_data";
+    const size_t      ring_elements = pick_ring_elements<uint32_t>(512);
 
     sintra::Ring_W<uint32_t> writer(tmp.str(), ring_name, ring_elements);
 
@@ -754,14 +763,16 @@ TEST_CASE(test_concurrent_guard_updates)
     }
 
     const auto start_deadline = std::chrono::steady_clock::now() + 1s;
-    while (readers_started.load() < reader_count &&
-           std::chrono::steady_clock::now() < start_deadline) {
+    while (readers_started.load()           < reader_count &&
+        std::chrono::steady_clock::now() < start_deadline)
+    {
         std::this_thread::sleep_for(1ms);
     }
 
     const auto read_deadline = std::chrono::steady_clock::now() + 1s;
-    while (read_cycles.load() == 0 &&
-           std::chrono::steady_clock::now() < read_deadline) {
+    while (read_cycles.load()               == 0 &&
+        std::chrono::steady_clock::now() <  read_deadline)
+    {
         std::this_thread::sleep_for(1ms);
     }
 
@@ -786,8 +797,8 @@ TEST_CASE(test_concurrent_guard_updates)
 TEST_CASE(test_guard_cleanup_on_eviction)
 {
     Temp_ring_dir tmp("guard_eviction");
-    const std::string ring_name = "ring_data";
-    const size_t ring_elements = pick_ring_elements<uint64_t>(128);
+    const std::string ring_name     = "ring_data";
+    const size_t      ring_elements = pick_ring_elements<uint64_t>(128);
 
     sintra::Ring_W<uint64_t> writer(tmp.str(), ring_name, ring_elements);
     sintra::Ring_R<uint64_t> reader(tmp.str(), ring_name, ring_elements, ring_elements / 2);
@@ -807,7 +818,7 @@ TEST_CASE(test_guard_cleanup_on_eviction)
 
     // Verify guard is set
     uint64_t access_before = writer.m_control->read_access.load();
-    uint32_t count_before = static_cast<uint32_t>((access_before >> (8 * guarded_octile)) & 0xffu);
+    uint32_t count_before  = static_cast<uint32_t>((access_before >> (8 * guarded_octile)) & 0xffu);
     ASSERT_GT(count_before, uint32_t(0));
 
     // Force eviction by writing a full ring's worth of data
@@ -824,7 +835,7 @@ TEST_CASE(test_guard_cleanup_on_eviction)
 
     // Verify guard was cleaned up during eviction
     uint64_t access_after = writer.m_control->read_access.load();
-    uint32_t count_after = static_cast<uint32_t>((access_after >> (8 * guarded_octile)) & 0xffu);
+    uint32_t count_after  = static_cast<uint32_t>((access_after >> (8 * guarded_octile)) & 0xffu);
     ASSERT_LT(count_after, count_before);
 }
 
@@ -840,8 +851,7 @@ TEST_CASE(test_slow_reader_eviction_restores_status)
     auto& slot    = control.reading_sequences[reader.m_rs_index].data;
 
     const auto trailing_idx = sintra::mod_pos_i64(
-        static_cast<int64_t>(reader.m_reading_sequence->load()) -
-        static_cast<int64_t>(reader.m_max_trailing_elements),
+        static_cast<int64_t>(reader.m_reading_sequence->load()) - static_cast<int64_t>(reader.m_max_trailing_elements),
         reader.m_num_elements);
     const auto trailing_octile = (8 * trailing_idx) / reader.m_num_elements;
 
@@ -861,7 +871,7 @@ TEST_CASE(test_slow_reader_eviction_restores_status)
 
     reader.done_reading_new_data();
 
-    auto restored_status = slot.status();
+    auto       restored_status = slot.status();
     const auto expected_status = sintra::Ring<uint64_t, true>::READER_STATE_ACTIVE;
     ASSERT_EQ(expected_status, restored_status);
 }
@@ -896,7 +906,7 @@ TEST_CASE(test_streaming_reader_status_restored_after_eviction)
 
     constexpr uint8_t guard_present_mask_u32 = 0x08;
     constexpr uint8_t guard_octile_mask_u32  = 0x07;
-    uint8_t guard_snapshot = slot.exchange_guard_token(0);
+    uint8_t           guard_snapshot         = slot.exchange_guard_token(0);
     ASSERT_TRUE((guard_snapshot & guard_present_mask_u32) != 0);
     ASSERT_EQ(guarded_octile, guard_snapshot & guard_octile_mask_u32);
     control.read_access.fetch_sub(guard_mask);
@@ -922,10 +932,10 @@ TEST_CASE(test_streaming_reader_status_restored_after_eviction)
 STRESS_TEST(stress_multi_reader_throughput)
 {
     Temp_ring_dir tmp("stress_multi");
-    size_t ring_elements = pick_ring_elements<uint64_t>(512);
-    const size_t max_trailing = (ring_elements * 3) / 4;
-    const size_t reader_count = 3;
-    const size_t chunk = std::max<size_t>(1, ring_elements / 16);
+    size_t       ring_elements  = pick_ring_elements<uint64_t>(512);
+    const size_t max_trailing   = (ring_elements * 3) / 4;
+    const size_t reader_count   = 3;
+    const size_t chunk          = std::max<size_t>(1, ring_elements / 16);
     const size_t total_messages = chunk * 64;
 
     sintra::Ring_W<uint64_t> writer(tmp.str(), "ring_data", ring_elements);
@@ -943,7 +953,11 @@ STRESS_TEST(stress_multi_reader_throughput)
     for (size_t rid = 0; rid < reader_count; ++rid) {
         reader_threads.emplace_back([&, rid]() {
             try {
-                sintra::Ring_R<uint64_t> reader(tmp.str(), "ring_data", ring_elements, max_trailing);
+                sintra::Ring_R<uint64_t> reader(
+                    tmp.str(),
+                    "ring_data",
+                    ring_elements,
+                    max_trailing);
                 auto initial = reader.start_reading();
                 ASSERT_EQ(static_cast<size_t>(initial.end - initial.begin), size_t(0));
                 reader_ready[rid] = true;
@@ -1008,35 +1022,35 @@ STRESS_TEST(stress_multi_reader_throughput)
         reader_threads[rid].join();
     }
 
-    auto diagnostics = writer.get_diagnostics();
-    const bool has_overflow = diagnostics.reader_lag_overflow_count > 0;
-    const bool has_regressions = diagnostics.reader_sequence_regressions > 0;
-    const bool has_evictions = diagnostics.reader_eviction_count > 0;
+    auto       diagnostics        = writer.get_diagnostics();
+    const bool has_overflow       = diagnostics.reader_lag_overflow_count > 0;
+    const bool has_regressions    = diagnostics.reader_sequence_regressions > 0;
+    const bool has_evictions      = diagnostics.reader_eviction_count > 0;
     const bool has_guard_mismatch = diagnostics.guard_accounting_mismatch_count > 0;
     if (has_overflow || has_regressions || has_evictions || has_guard_mismatch) {
         std::cerr << "[sintra::ring] diagnostics: max_reader_lag="
-                  << diagnostics.max_reader_lag
-                  << ", overflow_count=" << diagnostics.reader_lag_overflow_count
-                  << ", worst_overflow_lag=" << diagnostics.worst_overflow_lag
-                  << ", sequence_regressions=" << diagnostics.reader_sequence_regressions
-                  << ", guard_mismatch_count=" << diagnostics.guard_accounting_mismatch_count
-                  << ", eviction_count=" << diagnostics.reader_eviction_count
-                  << std::endl;
+            << diagnostics.max_reader_lag
+            << ", overflow_count=" << diagnostics.reader_lag_overflow_count
+            << ", worst_overflow_lag=" << diagnostics.worst_overflow_lag
+            << ", sequence_regressions=" << diagnostics.reader_sequence_regressions
+            << ", guard_mismatch_count=" << diagnostics.guard_accounting_mismatch_count
+            << ", eviction_count=" << diagnostics.reader_eviction_count
+            << std::endl;
 
         if (diagnostics.last_evicted_reader_index != std::numeric_limits<uint32_t>::max()) {
             std::cerr << "    last_evicted_reader_index=" << diagnostics.last_evicted_reader_index
-                      << ", reader_sequence=" << diagnostics.last_evicted_reader_sequence
-                      << ", writer_sequence=" << diagnostics.last_evicted_writer_sequence
-                      << ", reader_octile=" << diagnostics.last_evicted_reader_octile
-                      << std::endl;
+                << ", reader_sequence=" << diagnostics.last_evicted_reader_sequence
+                << ", writer_sequence=" << diagnostics.last_evicted_writer_sequence
+                << ", reader_octile=" << diagnostics.last_evicted_reader_octile
+                << std::endl;
         }
 
         if (diagnostics.last_overflow_reader_index != std::numeric_limits<uint32_t>::max()) {
             std::cerr << "    last_overflow_reader_index=" << diagnostics.last_overflow_reader_index
-                      << ", reader_sequence=" << diagnostics.last_overflow_reader_sequence
-                      << ", leading_sequence=" << diagnostics.last_overflow_leading_sequence
-                      << ", last_consumed=" << diagnostics.last_overflow_last_consumed
-                      << std::endl;
+                << ", reader_sequence=" << diagnostics.last_overflow_reader_sequence
+                << ", leading_sequence=" << diagnostics.last_overflow_leading_sequence
+                << ", last_consumed=" << diagnostics.last_overflow_last_consumed
+                << std::endl;
         }
     }
 
@@ -1098,7 +1112,7 @@ STRESS_TEST(stress_attach_detach_readers)
     for (int i = 0; i < 64; ++i) {
         sintra::Ring_R<int> reader(tmp.str(), "ring_data", ring_elements, (ring_elements * 3) / 4);
         auto snapshot = sintra::make_snapshot(reader, payload.size());
-        auto range = snapshot.range();
+        auto range    = snapshot.range();
         ASSERT_EQ(static_cast<size_t>(range.end - range.begin), payload.size());
         for (auto ptr = range.begin; ptr != range.end; ++ptr) {
             ASSERT_EQ(*ptr, 42);
@@ -1107,19 +1121,15 @@ STRESS_TEST(stress_attach_detach_readers)
 }
 
 std::vector<const Test_case*> select_tests(
-    bool include_unit,
-    bool include_stress,
-    const std::vector<std::string>& selectors)
+    bool                               include_unit,
+    bool                               include_stress,
+    const std::vector<std::string>&    selectors)
 {
     std::vector<const Test_case*> tests_to_run;
 
     auto append_test = [&](const Test_case& test) {
-        if (!include_stress && test.is_stress) {
-            return;
-        }
-        if (!include_unit && !test.is_stress) {
-            return;
-        }
+        if (!include_stress && test.is_stress)  { return; }
+        if (!include_unit   && !test.is_stress) { return; }
         tests_to_run.push_back(&test);
     };
 
@@ -1134,18 +1144,18 @@ std::vector<const Test_case*> select_tests(
         auto pos = selector.find(':');
         if (pos == std::string::npos) {
             std::cerr << "Invalid test selector '" << selector
-                      << "'. Expected format <category>:<name>." << std::endl;
+                << "'. Expected format <category>:<name>." << std::endl;
             return {};
         }
 
         auto category = selector.substr(0, pos);
-        auto name = selector.substr(pos + 1);
+        auto name     = selector.substr(pos + 1);
         bool want_stress;
         if (category == "unit") {
             want_stress = false;
             if (!include_unit) {
                 std::cerr << "Requested unit test '" << name
-                          << "' but unit tests are disabled via command-line flags." << std::endl;
+                    << "' but unit tests are disabled via command-line flags." << std::endl;
                 return {};
             }
         }
@@ -1154,13 +1164,13 @@ std::vector<const Test_case*> select_tests(
             want_stress = true;
             if (!include_stress) {
                 std::cerr << "Requested stress test '" << name
-                          << "' but stress tests are disabled via command-line flags." << std::endl;
+                    << "' but stress tests are disabled via command-line flags." << std::endl;
                 return {};
             }
         }
         else {
             std::cerr << "Unknown test category '" << category
-                      << "' in selector '" << selector << "'." << std::endl;
+                << "' in selector '" << selector << "'." << std::endl;
             return {};
         }
 
@@ -1174,7 +1184,7 @@ std::vector<const Test_case*> select_tests(
 
         if (!match) {
             std::cerr << "No " << (want_stress ? "stress" : "unit")
-                      << " test named '" << name << "' found." << std::endl;
+                << " test named '" << name << "' found." << std::endl;
             return {};
         }
 
@@ -1186,9 +1196,9 @@ std::vector<const Test_case*> select_tests(
 
 int run_tests(bool include_unit, bool include_stress, const std::vector<std::string>& selectors)
 {
-    int failures = 0;
-    size_t executed = 0;
-    auto tests_to_run = select_tests(include_unit, include_stress, selectors);
+    int    failures     = 0;
+    size_t executed     = 0;
+    auto   tests_to_run = select_tests(include_unit, include_stress, selectors);
 
     if (tests_to_run.empty()) {
         if (!selectors.empty()) {
@@ -1232,9 +1242,9 @@ int main(int argc, char** argv)
     // Install debug pause handlers for CI debugging
     sintra::detail::install_debug_pause_handlers();
 
-    bool include_unit = true;
+    bool include_unit   = true;
     bool include_stress = true;
-    bool list_tests = false;
+    bool list_tests     = false;
     std::vector<std::string> selectors;
 
     for (int i = 1; i < argc; ++i) {

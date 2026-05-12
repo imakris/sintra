@@ -34,7 +34,7 @@ int worker_process(std::uint32_t worker_index)
     std::uniform_int_distribution<> delay_dist(0, 5);  // 0-5 microseconds
 
     try {
-        std::uint64_t last_seq = 0;
+        std::uint64_t last_seq     = 0;
         std::uint64_t last_alt_seq = 0;
         for (std::uint32_t iter = 0; iter < k_iterations; ++iter) {
             // Add random tiny delay to increase chance of race conditions
@@ -52,9 +52,9 @@ int worker_process(std::uint32_t worker_index)
             // Verify sequence is valid (non-zero)
             if (seq == 0 || seq <= last_seq) {
                 std::fprintf(stderr, "Worker %u iter %u: bad stress seq %llu after %llu!\n",
-                            worker_index, iter,
-                            static_cast<unsigned long long>(seq),
-                            static_cast<unsigned long long>(last_seq));
+                    worker_index, iter,
+                    static_cast<unsigned long long>(seq),
+                    static_cast<unsigned long long>(last_seq));
                 worker_failures++;
             }
             last_seq = seq;
@@ -63,11 +63,11 @@ int worker_process(std::uint32_t worker_index)
                 const std::uint64_t seq2 = barrier("stress-barrier");
                 if (seq2 == 0 || seq2 <= last_seq) {
                     std::fprintf(stderr,
-                                 "Worker %u iter %u: repeated stress seq %llu after %llu!\n",
-                                 worker_index,
-                                 iter,
-                                 static_cast<unsigned long long>(seq2),
-                                 static_cast<unsigned long long>(last_seq));
+                        "Worker %u iter %u: repeated stress seq %llu after %llu!\n",
+                        worker_index,
+                        iter,
+                        static_cast<unsigned long long>(seq2),
+                        static_cast<unsigned long long>(last_seq));
                     worker_failures++;
                 }
                 last_seq = seq2;
@@ -77,11 +77,11 @@ int worker_process(std::uint32_t worker_index)
                 const std::uint64_t alt_seq = barrier("stress-barrier-alt");
                 if (alt_seq == 0 || alt_seq <= last_alt_seq) {
                     std::fprintf(stderr,
-                                 "Worker %u iter %u: bad alt seq %llu after %llu!\n",
-                                 worker_index,
-                                 iter,
-                                 static_cast<unsigned long long>(alt_seq),
-                                 static_cast<unsigned long long>(last_alt_seq));
+                        "Worker %u iter %u: bad alt seq %llu after %llu!\n",
+                        worker_index,
+                        iter,
+                        static_cast<unsigned long long>(alt_seq),
+                        static_cast<unsigned long long>(last_alt_seq));
                     worker_failures++;
                 }
                 last_alt_seq = alt_seq;
@@ -117,7 +117,7 @@ int main(int argc, char* argv[])
 
     sintra::shutdown();
 
-    auto end = std::chrono::steady_clock::now();
+    auto end      = std::chrono::steady_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
 
     std::printf("Barrier stress test completed in %lld ms\n", static_cast<long long>(duration.count()));

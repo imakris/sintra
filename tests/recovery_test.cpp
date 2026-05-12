@@ -68,23 +68,23 @@ void append_shared_line(const std::filesystem::path& path, const std::string& li
 
 bool parse_occurrence_and_pid(
     const std::string& line,
-    const char* prefix,
-    uint32_t& occurrence,
-    int& pid)
+    const char*        prefix,
+    uint32_t&          occurrence,
+    int&               pid)
 {
     if (!line.starts_with(prefix)) {
         return false;
     }
 
     const auto occurrence_pos = line.find("occurrence=");
-    const auto pid_pos = line.find("pid=");
+    const auto pid_pos        = line.find("pid=");
     if (occurrence_pos == std::string::npos || pid_pos == std::string::npos || pid_pos <= occurrence_pos) {
         return false;
     }
 
     try {
         const auto occurrence_start = occurrence_pos + 11;
-        const auto occurrence_size = pid_pos - occurrence_start - 1;
+        const auto occurrence_size  = pid_pos - occurrence_start - 1;
         occurrence = static_cast<uint32_t>(std::stoul(line.substr(occurrence_start, occurrence_size)));
         pid = std::stoi(line.substr(pid_pos + 4));
     }
@@ -120,8 +120,8 @@ int process_watchdog()
 {
     std::fprintf(stderr, "[WATCHDOG] Starting watchdog process\n");
     const sintra::test::Shared_directory shared("SINTRA_TEST_SHARED_DIR", "recovery_test");
-    const auto& shared_dir = shared.path();
-    const auto result_path = shared_dir / "result.txt";
+    const auto& shared_dir  = shared.path();
+    const auto  result_path = shared_dir / "result.txt";
     write_ready_marker("watchdog");
 
     std::condition_variable stop_cv;
@@ -147,14 +147,14 @@ int process_watchdog()
     if (signalled) {
         const auto run_entries = sintra::test::read_lines(shared_dir / "runs.txt");
         std::fprintf(stderr, "[WATCHDOG] Run entries: %zu\n", run_entries.size());
-        bool saw_initial_run = false;
-        bool saw_recovered_run = false;
+        bool saw_initial_run         = false;
+        bool saw_recovered_run       = false;
         bool stop_from_recovered_run = false;
         std::vector<int> recovered_pids;
 
         for (const auto& entry : run_entries) {
             uint32_t occurrence = 0;
-            int pid = 0;
+            int      pid        = 0;
             if (parse_occurrence_and_pid(entry, "run ", occurrence, pid)) {
                 if (occurrence == 0) {
                     saw_initial_run = true;
@@ -195,12 +195,14 @@ int process_crasher()
     }
 
     {
-        std::ofstream diag(sintra::test::scratch_subdirectory("recovery_test") / "sintra_crasher_diag.log", std::ios::app);
+        std::ofstream diag(
+            sintra::test::scratch_subdirectory("recovery_test") / "sintra_crasher_diag.log",
+            std::ios::app);
         diag << "process_crasher pid="
-             << sintra::test::get_pid()
-             << " g_shared_dir=" << (g_shared_dir.empty() ? "<empty>" : g_shared_dir)
-             << " env=" << (std::getenv("SINTRA_TEST_SHARED_DIR") ? "set" : "unset")
-             << std::endl;
+            << sintra::test::get_pid()
+            << " g_shared_dir=" << (g_shared_dir.empty() ? "<empty>" : g_shared_dir)
+            << " env="          << (std::getenv("SINTRA_TEST_SHARED_DIR") ? "set" : "unset")
+            << std::endl;
     }
 
     // Log entry immediately
@@ -235,8 +237,8 @@ int process_crasher()
         sintra::test::Shared_directory shared_obj("SINTRA_TEST_SHARED_DIR", "recovery_test");
         shared_dir = shared_obj.path();
     }
-    const auto runs_path = shared_dir / "runs.txt";
-    const auto log_path = shared_dir / "crasher.log";
+    const auto     runs_path  = shared_dir / "runs.txt";
+    const auto     log_path   = shared_dir / "crasher.log";
     const uint32_t occurrence = sintra::s_recovery_occurrence;
     write_ready_marker("crasher", occurrence);
 
@@ -282,7 +284,7 @@ int main(int argc, char* argv[])
 
     // Log main() entry to file immediately
     {
-        const char* shared_dir_env = std::getenv("SINTRA_TEST_SHARED_DIR");
+        const char* shared_dir_env       = std::getenv("SINTRA_TEST_SHARED_DIR");
         std::string early_shared_dir_arg = sintra::test::get_argv_value(argc, argv, "--shared_dir");
 
         if (!early_shared_dir_arg.empty()) {
@@ -298,8 +300,8 @@ int main(int argc, char* argv[])
             std::filesystem::path log_path = std::filesystem::path(shared_dir_env) / "main.log";
             std::ofstream main_log(log_path, std::ios::app);
             main_log << "main() entered, pid="
-                     << sintra::test::get_pid()
-                     << ", argc=" << argc << std::endl;
+                << sintra::test::get_pid()
+                << ", argc=" << argc << std::endl;
             for (int i = 0; i < argc; ++i) {
                 main_log << "  argv[" << i << "]: " << argv[i] << std::endl;
             }
@@ -327,8 +329,8 @@ int main(int argc, char* argv[])
     {
         std::ofstream state_log(shared_dir / "state.log", std::ios::app);
         state_log << "main() set g_shared_dir to " << g_shared_dir
-                  << " pid=" << sintra::test::get_pid()
-                  << std::endl;
+            << " pid=" << sintra::test::get_pid()
+            << std::endl;
     }
 
     // Pass shared_dir to all spawned processes
@@ -341,8 +343,8 @@ int main(int argc, char* argv[])
     {
         std::ofstream state_log(shared_dir / "state.log", std::ios::app);
         state_log << "calling sintra::init, pid="
-                  << sintra::test::get_pid()
-                  << std::endl;
+            << sintra::test::get_pid()
+            << std::endl;
     }
 
     sintra::init(argc, argv, processes);
@@ -350,8 +352,8 @@ int main(int argc, char* argv[])
     {
         std::ofstream state_log(shared_dir / "state.log", std::ios::app);
         state_log << "sintra::init completed, pid="
-                  << sintra::test::get_pid()
-                  << std::endl;
+            << sintra::test::get_pid()
+            << std::endl;
     }
 
     // Coordinator waits for result file before finalizing

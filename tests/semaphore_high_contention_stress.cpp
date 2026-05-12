@@ -30,15 +30,15 @@ using sintra::detail::interprocess_semaphore;
 std::atomic<bool> g_test_failed{false};
 std::atomic<int> g_failure_line{0};
 
-#define CHECK(expr) \
-    do { \
-        if (!(expr)) { \
-            g_test_failed.store(true); \
-            g_failure_line.store(__LINE__); \
+#define CHECK(expr)                                                                 \
+    do {                                                                            \
+        if (!(expr)) {                                                              \
+            g_test_failed.store(true);                                              \
+            g_failure_line.store(__LINE__);                                         \
             std::fprintf(stderr, "[FAIL] %s:%d - " #expr "\n", __FILE__, __LINE__); \
-            return; \
-        } \
-    } \
+            return;                                                                 \
+        }                                                                           \
+    }                                                                               \
     while (false)
 
 int get_pid()
@@ -50,12 +50,12 @@ int get_pid()
 // This mimics the ring buffer usage: many readers competing for slots
 void test_many_readers_limited_slots()
 {
-    constexpr int k_readers = 8;
-    constexpr int k_slots = 3;
+    constexpr int k_readers               = 8;
+    constexpr int k_slots                 = 3;
     constexpr int k_iterations_per_reader = 50000;
 
     std::fprintf(stderr, "[TEST] Many readers, limited slots (%d readers, %d slots, %d iterations/reader)\n",
-                 k_readers, k_slots, k_iterations_per_reader);
+        k_readers, k_slots, k_iterations_per_reader);
 
     interprocess_semaphore sem(k_slots);
     std::atomic<int> slots_held{0};
@@ -113,18 +113,18 @@ void test_many_readers_limited_slots()
     CHECK(total_acquisitions == k_readers * k_iterations_per_reader);
 
     std::fprintf(stderr, "[PASS] Many readers test completed. Total acquisitions: %lld, Max concurrent: %d\n",
-                 total_acquisitions.load(), max_slots_held.load());
+        total_acquisitions.load(), max_slots_held.load());
 }
 
 // Test 2: Wake-all stress test
 // Many waiters, infrequent posts - stresses macOS wake-all behavior
 void test_wake_all_stress()
 {
-    constexpr int k_waiters = 16;
+    constexpr int k_waiters     = 16;
     constexpr int k_total_posts = 10000;
 
     std::fprintf(stderr, "[TEST] Wake-all stress (%d waiters, %d total posts)\n",
-                 k_waiters, k_total_posts);
+        k_waiters, k_total_posts);
 
     interprocess_semaphore sem(0);
     std::atomic<int> acquisitions{0};
@@ -168,7 +168,8 @@ void test_wake_all_stress()
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     while (acquisitions.load() < k_total_posts) {
         if (std::chrono::steady_clock::now() > deadline) {
-            std::fprintf(stderr, "[FAIL] Timeout waiting for acquisitions: %d/%d\n", acquisitions.load(), k_total_posts);
+            std::fprintf(
+                stderr, "[FAIL] Timeout waiting for acquisitions: %d/%d\n", acquisitions.load(), k_total_posts);
             CHECK(false);
             break;
         }
@@ -188,11 +189,11 @@ void test_wake_all_stress()
 // Test 3: Mixed operations under extreme contention
 void test_mixed_operations_extreme_contention()
 {
-    constexpr int k_threads = 12;
+    constexpr int k_threads               = 12;
     constexpr int k_iterations_per_thread = 3000;
 
     std::fprintf(stderr, "[TEST] Mixed operations extreme contention (%d threads, %d iterations/thread)\n",
-                 k_threads, k_iterations_per_thread);
+        k_threads, k_iterations_per_thread);
 
     interprocess_semaphore sem(0);
     std::atomic<long long> posts{0};
@@ -276,7 +277,7 @@ void test_mixed_operations_extreme_contention()
 // Tests for any lost wakeups or double-counting under rapid cycling
 void test_rapid_post_wait_cycling()
 {
-    constexpr int k_cyclers = 10;
+    constexpr int k_cyclers           = 10;
     constexpr int k_cycles_per_thread = 20000;
 
     std::fprintf(stderr, "[TEST] Rapid post/wait cycling (%d threads, %d cycles/thread)\n",

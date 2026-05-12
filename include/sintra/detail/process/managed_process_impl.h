@@ -83,8 +83,10 @@ namespace {
     }
 
 #ifdef _WIN32
-    struct signal_slot {
+    struct signal_slot
+    {
         int sig;
+
         void (__cdecl* previous)(int) = SIG_DFL;
         bool has_previous = false;
     };
@@ -124,10 +126,10 @@ namespace {
 
     inline void queue_signal_dispatch_win(int sig_number, bool wait_for_dispatch = true)
     {
-        auto* mproc = s_mproc;
+        auto*      mproc                    = s_mproc;
         const bool should_wait_for_dispatch = mproc && mproc->m_out_req_c;
-        const bool can_wait = can_wait_for_signal_dispatch();
-        uint32_t dispatched_before = 0;
+        const bool can_wait                 = can_wait_for_signal_dispatch();
+        uint32_t   dispatched_before        = 0;
         if (should_wait_for_dispatch && can_wait) {
             dispatched_before = dispatched_signal_counter().load();
         }
@@ -223,10 +225,11 @@ namespace {
         }
     }
 #else
-    struct signal_slot {
-        int sig;
-        struct sigaction previous {};
-        bool has_previous = false;
+    struct signal_slot
+    {
+        int                sig;
+        struct sigaction   previous{};
+        bool               has_previous = false;
     };
 
 #ifdef SIGTRAP
@@ -276,23 +279,24 @@ namespace {
         if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
             return 0;
         }
-        return static_cast<uint64_t>(ts.tv_sec) * 1'000'000'000ULL
-            + static_cast<uint64_t>(ts.tv_nsec);
+        return
+            static_cast<uint64_t>(ts.tv_sec) * 1'000'000'000ULL +
+            static_cast<uint64_t>(ts.tv_nsec);
     }
 
     inline void wait_for_signal_dispatch(uint32_t expected_count)
     {
         constexpr uint64_t k_wait_timeout_ns = 200'000'000ULL;
-        uint64_t start_ns = signal_dispatch_now_ns();
-        constexpr int k_fallback_rounds = 5000;
-        int fallback_rounds = (start_ns == 0) ? k_fallback_rounds : -1;
+        uint64_t           start_ns          = signal_dispatch_now_ns();
+        constexpr int      k_fallback_rounds = 5000;
+        int                fallback_rounds   = (start_ns == 0) ? k_fallback_rounds : -1;
 
         // Exponential backoff: start responsive (32 pauses), grow to max (1024).
         // This reduces CPU usage during longer waits while staying responsive
         // for the common case where dispatch completes quickly.
         constexpr int k_initial_pause_count = 32;
-        constexpr int k_max_pause_count = 1024;
-        int pause_count = k_initial_pause_count;
+        constexpr int k_max_pause_count     = 1024;
+        int           pause_count           = k_initial_pause_count;
 
         for (;;) {
             const uint32_t current = dispatched_signal_counter().load(std::memory_order_acquire);
@@ -306,7 +310,8 @@ namespace {
                     return;
                 }
             }
-            else if (fallback_rounds > 0) {
+            else
+            if (fallback_rounds > 0) {
                 if (--fallback_rounds == 0) {
                     return;
                 }
@@ -328,7 +333,7 @@ namespace {
         auto& pipefd = signal_pipe();
 
         while (true) {
-            int sig_number = 0;
+            int     sig_number = 0;
             ssize_t bytes_read = ::read(pipefd[0], &sig_number, sizeof(sig_number));
 
             if (bytes_read == sizeof(sig_number)) {
@@ -453,16 +458,16 @@ namespace {
     }
 
     // Argument names for lifeline configuration (internal, fixed)
-    constexpr const char* k_lifeline_handle_arg = "--lifeline_handle";
+    constexpr const char* k_lifeline_handle_arg    = "--lifeline_handle";
     constexpr const char* k_lifeline_exit_code_arg = "--lifeline_exit_code";
-    constexpr const char* k_lifeline_timeout_arg = "--lifeline_timeout_ms";
-    constexpr const char* k_lifeline_disable_arg = "--lifeline_disable";
+    constexpr const char* k_lifeline_timeout_arg   = "--lifeline_timeout_ms";
+    constexpr const char* k_lifeline_disable_arg   = "--lifeline_disable";
 
     // Storage for parsed lifeline values (set during init, read by start_lifeline_watcher)
     static inline std::string s_lifeline_handle_value;
-    static inline int s_lifeline_exit_code = 99;
-    static inline int s_lifeline_timeout_ms = 100;
-    static inline bool s_lifeline_disabled = false;
+    static inline int  s_lifeline_exit_code  = 99;
+    static inline int  s_lifeline_timeout_ms = 100;
+    static inline bool s_lifeline_disabled   = false;
 
     inline void log_lifeline_message(detail::log_level level, const std::string& message)
     {
@@ -520,16 +525,12 @@ namespace {
             return;
         }
 
-        char buffer = 0;
+        char  buffer     = 0;
         DWORD bytes_read = 0;
         while (true) {
             const BOOL ok = ReadFile(handle, &buffer, 1, &bytes_read, nullptr);
-            if (!ok) {
-                break;
-            }
-            if (bytes_read == 0) {
-                break;
-            }
+            if (!ok)             { break; }
+            if (bytes_read == 0) { break; }
         }
 
         CloseHandle(handle);
@@ -546,15 +547,9 @@ namespace {
         char buffer = 0;
         while (true) {
             const ssize_t bytes_read = ::read(fd, &buffer, 1);
-            if (bytes_read > 0) {
-                continue;
-            }
-            if (bytes_read == 0) {
-                break;
-            }
-            if (errno == EINTR) {
-                continue;
-            }
+            if (bytes_read > 0)  { continue; }
+            if (bytes_read == 0) { break;    }
+            if (errno == EINTR)  { continue; }
             break;
         }
 
@@ -592,7 +587,7 @@ namespace {
 
         // Parse the handle value
         errno = 0;
-        char* end = nullptr;
+        char*                    end    = nullptr;
         const unsigned long long parsed = std::strtoull(s_lifeline_handle_value.c_str(), &end, 10);
         if (!end || end == s_lifeline_handle_value.c_str() || errno != 0) {
             if (lifeline_required) {
@@ -605,8 +600,8 @@ namespace {
         }
 
         // Use parsed argument values
-        const int exit_code = s_lifeline_exit_code;
-        int timeout_ms = s_lifeline_timeout_ms;
+        const int exit_code  = s_lifeline_exit_code;
+        int       timeout_ms = s_lifeline_timeout_ms;
         if (timeout_ms < 0) {
             timeout_ms = 0;
         }
@@ -739,18 +734,18 @@ static void s_signal_handler(int sig, siginfo_t* info, void* ctx)
 
     auto* mproc = s_mproc;
     // Process-wide depth guard: conservative to avoid TLS access in signal handler.
-    const bool can_wait = can_wait_for_signal_dispatch();
+    const bool can_wait                 = can_wait_for_signal_dispatch();
     const bool should_wait_for_dispatch = mproc && mproc->m_out_req_c && sig != SIGCHLD;
-    uint32_t dispatched_before = 0;
+    uint32_t   dispatched_before        = 0;
     if (should_wait_for_dispatch && can_wait) {
         dispatched_before = dispatched_signal_counter().load(std::memory_order_acquire);
     }
 
     auto& pipefd = signal_pipe();
     if (pipefd[1] != -1) {
-        int sig_number = sig;
-        int last_errno = 0;
-        bool delivered = false;
+        int           sig_number   = sig;
+        int           last_errno   = 0;
+        bool          delivered    = false;
         constexpr int max_attempts = 4;
         for (int attempt = 0; attempt < max_attempts; ++attempt) {
             ssize_t result = ::write(pipefd[1], &sig_number, sizeof(sig_number));
@@ -876,12 +871,12 @@ void install_signal_handler()
             }
         }
 #else
-        auto& storage = alt_stack_storage();
+        auto& storage   = alt_stack_storage();
         auto& installed = alt_stack_installed();
         if (!installed) {
             stack_t ss {};
-            ss.ss_sp = storage.data();
-            ss.ss_size = storage.size();
+            ss.ss_sp    = storage.data();
+            ss.ss_size  = storage.size();
             ss.ss_flags = 0;
             if (sigaltstack(&ss, nullptr) == 0) {
                 installed = true;
@@ -933,8 +928,7 @@ type_id_type explicit_type_id()
     if constexpr (has_sintra_type_id<T>::value) {
         return T::sintra_type_id();
     }
-    else
-    {
+    else {
         return invalid_type_id;
     }
 }
@@ -946,7 +940,7 @@ auto cached_resolve(MapT& cache, const KeyT& key, RpcFn&& rpc, InvalidT invalid)
     // Hold spinlock while accessing the iterator to prevent use-after-invalidation.
     {
         auto scoped_map = cache.scoped();
-        auto it = scoped_map.get().find(key);
+        auto it         = scoped_map.get().find(key);
         if (it != scoped_map.get().end()) {
             return it->second;
         }
@@ -977,7 +971,7 @@ sintra::type_id_type get_type_id()
         const std::string type_name = detail::type_name<T>();
         {
             auto scoped_map = s_mproc->m_type_name_of_explicit_id.scoped();
-            auto it = scoped_map.get().find(explicit_id);
+            auto it         = scoped_map.get().find(explicit_id);
             if (it != scoped_map.get().end()) {
                 if (it->second != type_name) {
                     throw std::runtime_error(
@@ -1132,14 +1126,14 @@ Managed_process::~Managed_process()
             continue;
         }
 
-        const auto poll_delay = std::chrono::milliseconds(10);
-        auto graceful_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
-        auto forceful_deadline = graceful_deadline + std::chrono::seconds(1);
-        bool sent_sigterm = false;
-        bool sent_sigkill = false;
+        const auto poll_delay        = std::chrono::milliseconds(10);
+        auto       graceful_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        auto       forceful_deadline = graceful_deadline + std::chrono::seconds(1);
+        bool       sent_sigterm      = false;
+        bool       sent_sigkill      = false;
 
         while (true) {
-            int status = 0;
+            int   status = 0;
             pid_t result = ::waitpid(pid, &status, sent_sigkill ? 0 : WNOHANG);
 
             if (result == pid) {
@@ -1170,12 +1164,8 @@ Managed_process::~Managed_process()
             }
 
             if (result == -1) {
-                if (errno == EINTR) {
-                    continue;
-                }
-                if (errno == ECHILD || errno == ESRCH) {
-                    break;
-                }
+                if (errno == EINTR)                    { continue; }
+                if (errno == ECHILD || errno == ESRCH) { break;    }
 
                 // Unexpected error: escalate to SIGKILL once before aborting the loop.
                 if (!sent_sigkill) {
@@ -1249,7 +1239,7 @@ inline void Managed_process::reap_finished_children()
             continue;
         }
 
-        int status = 0;
+        int   status = 0;
         pid_t result = 0;
         do {
             result = ::waitpid(pid, &status, WNOHANG);
@@ -1312,8 +1302,9 @@ inline std::string join_strings(const std::vector<std::string>& parts, const std
 
 inline
 Filtered_args filter_option(
-    std::vector<std::string> in_args, std::string in_option, unsigned int num_args
-)
+    std::vector<std::string>   in_args,
+    std::string                in_option,
+    unsigned int               num_args)
 {
     Filtered_args ret;
     for (size_t i = 0; i < in_args.size(); ++i) {
@@ -1338,9 +1329,9 @@ void Managed_process::init(int argc, const char* const* argv)
 
     // Reset lifeline state to prevent stale values from a previous init() call
     s_lifeline_handle_value.clear();
-    s_lifeline_exit_code = Lifetime_policy{}.hard_exit_code;
+    s_lifeline_exit_code  = Lifetime_policy{}.hard_exit_code;
     s_lifeline_timeout_ms = Lifetime_policy{}.hard_exit_timeout_ms;
-    s_lifeline_disabled = false;
+    s_lifeline_disabled   = false;
 
     std::string branch_index_arg;
     std::string swarm_id_arg;
@@ -1362,15 +1353,21 @@ void Managed_process::init(int argc, const char* const* argv)
 
     // Filter out lifeline arguments from remained - they contain stale handle values
     // and will be freshly added by spawn_swarm_process during recovery
-    auto fa2 = filter_option(std::move(fa.remained), k_lifeline_handle_arg, 1);
+    auto fa2 = filter_option(std::move(fa.remained ), k_lifeline_handle_arg,    1);
     auto fa3 = filter_option(std::move(fa2.remained), k_lifeline_exit_code_arg, 1);
-    auto fa4 = filter_option(std::move(fa3.remained), k_lifeline_timeout_arg, 1);
-    auto fa5 = filter_option(std::move(fa4.remained), k_lifeline_disable_arg, 0);
+    auto fa4 = filter_option(std::move(fa3.remained), k_lifeline_timeout_arg,   1);
+    auto fa5 = filter_option(std::move(fa4.remained), k_lifeline_disable_arg,   0);
 
     m_recovery_cmd = join_strings(fa5.remained, " ") + " --recovery_occurrence " +
         std::to_string(recovery_occurrence_value+1);
 
-    auto option_value = [&](const std::string& arg, const char* long_name, char short_name, bool requires_value, int& index) -> std::optional<std::string> {
+    auto option_value = [&](
+        const std::string& arg,
+        const char*        long_name,
+        char               short_name,
+        bool               requires_value,
+        int&               index) -> std::optional<std::string>
+    {
         const std::string long_prefix = std::string(long_name) + "=";
 
         if (arg == long_name) {
@@ -1540,10 +1537,9 @@ void Managed_process::init(int argc, const char* const* argv)
     if (swarm_id_arg.empty()) {
         s_mproc_id = m_instance_id = make_process_instance_id();
 
-        m_swarm_id = 
-            std::chrono::duration_cast<std::chrono::nanoseconds>(
-                m_time_instantiated.time_since_epoch()
-            ).count();
+        m_swarm_id = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            m_time_instantiated.time_since_epoch()
+        ).count();
         coordinator_is_local = true;
 
         // NOTE: s_branch_index remains uninitialized here for the coordinator.
@@ -1584,15 +1580,15 @@ void Managed_process::init(int argc, const char* const* argv)
     }
     m_directory = obtain_swarm_directory();
 
-    const auto abi_path = std::filesystem::path(m_directory) / detail::abi_marker_filename();
+    const auto        abi_path    = std::filesystem::path(m_directory) / detail::abi_marker_filename();
     const std::string current_abi = detail::abi_token();
 
     if (coordinator_is_local) {
         run_marker_record run_marker{};
-        run_marker.pid = static_cast<uint32_t>(m_pid);
-        run_marker.start_stamp = m_process_start_stamp;
+        run_marker.pid                  = static_cast<uint32_t>(m_pid);
+        run_marker.start_stamp          = m_process_start_stamp;
         run_marker.created_monotonic_ns = monotonic_now_ns();
-        run_marker.recovery_occurrence = static_cast<uint32_t>(s_recovery_occurrence);
+        run_marker.recovery_occurrence  = static_cast<uint32_t>(s_recovery_occurrence);
 
         if (!write_run_marker(std::filesystem::path(m_directory), run_marker)) {
             throw std::runtime_error(
@@ -1692,7 +1688,7 @@ void Managed_process::init(int argc, const char* const* argv)
 
     auto unpublished_handler = [this](const Coordinator::instance_unpublished& msg)
     {
-        auto iid = msg.instance_id;
+        auto iid         = msg.instance_id;
         auto process_iid = process_of(iid);
         if (iid == process_iid) {
 
@@ -1743,7 +1739,8 @@ void Managed_process::init(int argc, const char* const* argv)
 
         auto cr_handler = [](const Managed_process::terminated_abnormally& msg)
         {
-            struct Crash_dedup_guard {
+            struct Crash_dedup_guard
+            {
                 std::atomic<uint8_t>* flag;
                 ~Crash_dedup_guard()
                 {
@@ -1754,16 +1751,16 @@ void Managed_process::init(int argc, const char* const* argv)
             const auto crash_index = get_process_index(msg.sender_instance_id);
             if (crash_index == 0 || crash_index > static_cast<uint64_t>(max_process_index)) {
                 Crash_info info;
-                info.process_iid = msg.sender_instance_id;
+                info.process_iid  = msg.sender_instance_id;
                 info.process_slot = static_cast<uint32_t>(crash_index);
-                info.status = msg.status;
+                info.status       = msg.status;
                 s_coord->note_process_crash(info);
                 s_coord->unpublish_transceiver(msg.sender_instance_id);
                 s_coord->recover_if_required(info);
                 return;
             }
 
-            auto& inflight = s_crash_inflight[static_cast<size_t>(crash_index)];
+            auto&   inflight = s_crash_inflight[static_cast<size_t>(crash_index)];
             uint8_t expected = 0;
             if (!inflight.compare_exchange_strong(expected, 1, std::memory_order_acq_rel)) {
                 // Duplicate crash notification - already being handled
@@ -1772,9 +1769,9 @@ void Managed_process::init(int argc, const char* const* argv)
 
             Crash_dedup_guard guard{&inflight};
             Crash_info info;
-            info.process_iid = msg.sender_instance_id;
+            info.process_iid  = msg.sender_instance_id;
             info.process_slot = static_cast<uint32_t>(crash_index);
-            info.status = msg.status;
+            info.status       = msg.status;
             s_coord->note_process_crash(info);
             s_coord->unpublish_transceiver(msg.sender_instance_id);
             s_coord->recover_if_required(info);
@@ -1807,7 +1804,7 @@ void Managed_process::init(int argc, const char* const* argv)
 
 inline
 Managed_process::Spawn_result Managed_process::spawn_swarm_process(
-    const Spawn_swarm_process_args& s )
+    const Spawn_swarm_process_args& s)
 {
     assert(s_coord);
     Spawn_result result;
@@ -1816,7 +1813,7 @@ Managed_process::Spawn_result Managed_process::spawn_swarm_process(
     result.errno_value = 0;
 
     auto args = s.args;
-    args.insert(args.end(), {"--recovery_occurrence", std::to_string(s.occurrence)} );
+    args.insert(args.end(), {"--recovery_occurrence", std::to_string(s.occurrence)});
 
     {
         Dispatch_unique_lock readers_lock(m_readers_mutex);
@@ -1842,15 +1839,15 @@ Managed_process::Spawn_result Managed_process::spawn_swarm_process(
     }
 
     bool spawn_ready = true;
-    int spawn_error = 0;
+    int  spawn_error = 0;
     std::string spawn_error_message;
-    Managed_process::lifeline_handle_type lifeline_write_handle =
-        static_cast<Managed_process::lifeline_handle_type>(-1);
+    Managed_process::lifeline_handle_type lifeline_write_handle = static_cast<Managed_process::lifeline_handle_type>(
+        -1);
 #ifdef _WIN32
-    HANDLE lifeline_read_handle = nullptr;
+    HANDLE lifeline_read_handle      = nullptr;
     HANDLE lifeline_write_handle_win = nullptr;
 #else
-    int lifeline_read_fd = -1;
+    int lifeline_read_fd  = -1;
     int lifeline_write_fd = -1;
 #endif
 
@@ -1866,9 +1863,8 @@ Managed_process::Spawn_result Managed_process::spawn_swarm_process(
             spawn_error_message = "Failed to create lifeline pipe";
         }
         else {
-            lifeline_write_handle =
-                static_cast<Managed_process::lifeline_handle_type>(
-                    reinterpret_cast<uintptr_t>(lifeline_write_handle_win));
+            lifeline_write_handle = static_cast<Managed_process::lifeline_handle_type>(
+                reinterpret_cast<uintptr_t>(lifeline_write_handle_win));
             spawn_options.inherit_handles.push_back(lifeline_read_handle);
             const std::string handle_value =
                 std::to_string(reinterpret_cast<uintptr_t>(lifeline_read_handle));
@@ -2004,7 +2000,8 @@ Managed_process::Spawn_result Managed_process::spawn_swarm_process(
         if (!spawn_ready && !result.error_message.empty()) {
             Log_stream(log_level::error) << result.error_message << "\n";
         }
-        else if (result.errno_value != 0) {
+        else
+        if (result.errno_value != 0) {
             std::error_code ec(result.errno_value, std::system_category());
             Log_stream(log_level::error)
                 << "failed to launch " << s.binary_name
@@ -2054,7 +2051,8 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
         if (s_coord) {
             s_coord->mark_initialization_complete(m_instance_id);
         }
-        else if (s_coord_id != invalid_instance_id) {
+        else
+        if (s_coord_id != invalid_instance_id) {
             Coordinator::rpc_mark_initialization_complete(s_coord_id, m_instance_id);
         }
     };
@@ -2119,7 +2117,7 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
         auto all_processes = successfully_spawned;
         all_processes.insert(m_instance_id);
 
-        m_group_all      = s_coord->make_process_group("_sintra_all_processes", all_processes);
+        m_group_all      = s_coord->make_process_group("_sintra_all_processes",      all_processes);
         m_group_external = s_coord->make_process_group("_sintra_external_processes", successfully_spawned);
         notify_init_complete();
 
@@ -2255,8 +2253,9 @@ void Managed_process::pause()
     // explicitly from one of the handlers, or from the entry function itself.
     // If called when the process is already paused, this should not have any
     // side effects.
-    if (m_communication_state <= COMMUNICATION_PAUSED)
+    if (m_communication_state <= COMMUNICATION_PAUSED) {
         return;
+    }
 
     {
         Dispatch_shared_lock readers_lock(m_readers_mutex);
@@ -2280,8 +2279,9 @@ void Managed_process::stop()
     // stop() might be called explicitly from one of the handlers, or from the
     // entry function. If called when the process is already stopped, this
     // should not have any side effects.
-    if (m_communication_state == COMMUNICATION_STOPPED)
+    if (m_communication_state == COMMUNICATION_STOPPED) {
         return;
+    }
 
     m_must_stop.store(true, std::memory_order_release);
 
@@ -2362,13 +2362,15 @@ function<void()> Managed_process::call_on_availability(Named_instance<T> transce
     using Call_list_iterator = list<function<void()>>::iterator;
     Call_list_iterator f_it;
     {
-        auto& call_list = m_queued_availability_calls[tn];
+        auto&              call_list = m_queued_availability_calls[tn];
+
         call_list.emplace_back();
         f_it = std::prev(call_list.end());
     }
 
-    struct availability_call_state {
-        bool active = true;
+    struct availability_call_state
+    {
+        bool               active = true;
         Call_list_iterator iterator;
     };
 
@@ -2446,7 +2448,7 @@ inline void Managed_process::unpublish_all_transceivers()
         to_destroy.reserve(scoped_map.get().size());
 
         for (auto& entry : scoped_map.get()) {
-            auto iid = entry.first;
+            auto  iid         = entry.first;
             auto* transceiver = entry.second;
             if (!transceiver || iid == m_instance_id) {
                 continue;
@@ -2463,7 +2465,9 @@ inline void Managed_process::unpublish_all_transceivers()
     }
 }
 
-inline void Managed_process::flush(instance_id_type process_id, sequence_counter_type flush_sequence)
+inline void Managed_process::flush(
+    instance_id_type       process_id,
+    sequence_counter_type  flush_sequence)
 {
     assert(is_process(process_id));
 
@@ -2496,8 +2500,8 @@ inline void Managed_process::flush(instance_id_type process_id, sequence_counter
     std::unique_lock<mutex> flush_lock(m_flush_sequence_mutex);
     m_flush_sequence.push_back(flush_sequence);
 
-    while (reader->get_reply_reading_sequence() < flush_sequence &&
-           m_communication_state == COMMUNICATION_RUNNING)
+    while (reader->get_reply_reading_sequence() <  flush_sequence &&
+        m_communication_state                == COMMUNICATION_RUNNING)
     {
         m_flush_sequence_condition.wait_for(
             flush_lock,
@@ -2505,7 +2509,7 @@ inline void Managed_process::flush(instance_id_type process_id, sequence_counter
     }
 
     while (!m_flush_sequence.empty() &&
-           m_flush_sequence.front() <= flush_sequence)
+        m_flush_sequence.front() <= flush_sequence)
     {
         m_flush_sequence.pop_front();
     }
@@ -2676,7 +2680,7 @@ size_t Managed_process::unblock_rpc(instance_id_type process_instance_id)
                 continue;
             }
 
-            if (process_instance_id == invalid_instance_id ||
+            if (process_instance_id            == invalid_instance_id ||
                 process_of(c->remote_instance) == process_instance_id)
             {
                 c->keep_waiting = false;
@@ -2690,5 +2694,4 @@ size_t Managed_process::unblock_rpc(instance_id_type process_instance_id)
 }
 
 } // sintra
-
 

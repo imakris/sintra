@@ -119,17 +119,23 @@ static inline size_t sintra_detect_cache_line_size()
 {
 #ifdef _SC_LEVEL1_DCACHE_LINESIZE
     long v = ::sysconf(_SC_LEVEL1_DCACHE_LINESIZE);
-    if (v > 0) return static_cast<size_t>(v);
+    if (v > 0) {
+        return static_cast<size_t>(v);
+    }
 #endif
     auto read_size = [](const char* path) -> size_t {
         std::FILE* f = std::fopen(path, "r");
-        if (!f) return 0;
+        if (!f) {
+            return 0;
+        }
         char buf[64] = {0};
         size_t n = std::fread(buf, 1, sizeof(buf)-1, f);
         std::fclose(f);
-        if (n == 0) return 0;
+        if (n == 0) {
+            return 0;
+        }
         char* endp = nullptr;
-        long val = std::strtol(buf, &endp, 10);
+        long  val  = std::strtol(buf, &endp, 10);
         return val > 0 ? static_cast<size_t>(val) : 0;
     };
 
@@ -141,7 +147,9 @@ static inline size_t sintra_detect_cache_line_size()
     };
     for (const char* p : paths) {
         size_t s = read_size(p);
-        if (s) return s;
+        if (s) {
+            return s;
+        }
     }
     return 64;
 }
@@ -150,19 +158,15 @@ static inline size_t sintra_detect_cache_line_size()
 {
     auto query_size = [](const char* name) -> size_t {
         size_t value = 0;
-        size_t len = sizeof(value);
+        size_t len   = sizeof(value);
         if (::sysctlbyname(name, &value, &len, nullptr, 0) == 0 && value > 0) {
             return value;
         }
         return 0;
     };
 
-    if (size_t s = query_size("hw.cachelinesize")) {
-        return s;
-    }
-    if (size_t s = query_size("machdep.cpu.cache.linesize")) {
-        return s;
-    }
+    if (size_t s = query_size("hw.cachelinesize"))           { return s; }
+    if (size_t s = query_size("machdep.cpu.cache.linesize")) { return s; }
 
     return 64;
 }
@@ -184,8 +188,10 @@ static inline void sintra_warn_if_cacheline_mismatch(size_t assumed_cache_line_s
 inline size_t mod_pos_i64(int64_t x, size_t m)
 {
     const int64_t mm = static_cast<int64_t>(m);
-    int64_t r = x % mm;
-    if (r < 0) r += mm;
+    int64_t       r  = x % mm;
+    if (r < 0) {
+        r += mm;
+    }
     return static_cast<size_t>(r);
 }
 

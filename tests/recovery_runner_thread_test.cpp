@@ -35,10 +35,12 @@ void write_marker(const std::filesystem::path& path)
 
 int crash_worker()
 {
-    const sintra::test::Shared_directory shared("SINTRA_RECOVERY_THREAD_DIR", "recovery_runner_thread");
-    const auto& dir = shared.path();
-    const auto ready_path = dir / "crash_ready.txt";
-    const auto go_path = dir / "crash_go.txt";
+    const sintra::test::Shared_directory shared(
+        "SINTRA_RECOVERY_THREAD_DIR",
+        "recovery_runner_thread");
+    const auto& dir        = shared.path();
+    const auto  ready_path = dir / "crash_ready.txt";
+    const auto  go_path    = dir / "crash_go.txt";
     const auto go_timeout_ms =
         sintra::test::read_env_int(k_env_go_timeout_ms.data(), 30000);
 
@@ -71,7 +73,7 @@ int main(int argc, char* argv[])
         sintra::test::read_env_int(k_env_watchdog_timeout_ms.data(), 60000);
 
     const auto ready_path = dir / "crash_ready.txt";
-    const auto go_path = dir / "crash_go.txt";
+    const auto go_path    = dir / "crash_go.txt";
 
     std::atomic<bool> runner_seen{false};
     std::atomic<bool> watchdog_done{false};

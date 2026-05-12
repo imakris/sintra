@@ -62,9 +62,9 @@ int process_2()
 
 int process_3()
 {
-    double ref_time = get_wtime();
-    double next_ts = ref_time + 1.;
-    uint64_t counter = 0;
+    double   ref_time = get_wtime();
+    double   next_ts  = ref_time + 1.;
+    uint64_t counter  = 0;
 
     activate_slot([&] (Ping) {
         double ts = get_wtime();

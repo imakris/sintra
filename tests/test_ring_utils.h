@@ -16,7 +16,8 @@
 namespace sintra::test {
 
 /// RAII wrapper for a temporary ring directory that cleans up on destruction.
-struct Temp_ring_dir {
+struct Temp_ring_dir
+{
     std::filesystem::path path;
 
     explicit Temp_ring_dir(const std::string& hint)
@@ -44,7 +45,7 @@ struct Temp_ring_dir {
 template <typename T>
 size_t pick_ring_elements(size_t min_elements = 8)
 {
-    size_t page_size = sintra::system_page_size();
+    size_t page_size  = sintra::system_page_size();
     size_t ring_bytes = page_size;
     while (true) {
         if (ring_bytes % sizeof(T) == 0) {

@@ -105,8 +105,8 @@ int main(int argc, char* argv[])
             }
         },
         [](const std::filesystem::path& shared_dir) {
-            const auto processing_result = read_text(shared_dir / "processing_worker.txt");
-            const auto rendezvous_result = read_text(shared_dir / "rendezvous_worker.txt");
+            const auto processing_result    = read_text(shared_dir / "processing_worker.txt");
+            const auto rendezvous_result    = read_text(shared_dir / "rendezvous_worker.txt");
             const auto reserved_name_result = read_text(shared_dir / "reserved_name_result.txt");
 
             const bool reserved_name_ok = (reserved_name_result == "ok");
