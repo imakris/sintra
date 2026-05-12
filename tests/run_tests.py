@@ -730,8 +730,10 @@ class TestRunner:
             print(f"{Color.YELLOW}No tests specified in active_tests.txt{Color.RESET}")
             return {}, active_tests
 
-        # 2 configurations: debug and release
-        configurations = ['debug', 'release']
+        # Test binaries are suffixed by suite configuration. The runner should
+        # execute only the suite requested by --config.
+        requested_config = self.config.lower()
+        configurations = [requested_config]
 
         # Map to store discovered test executables by base name
         # Key: base test name (e.g., "ping_pong_test")
