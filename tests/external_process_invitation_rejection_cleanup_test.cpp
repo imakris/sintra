@@ -936,8 +936,7 @@ int main(int argc, char* argv[])
     }
 
     const std::string binary_path = sintra::test::get_binary_path(argc, argv);
-    const auto dir = sintra::test::unique_scratch_directory(
-        "external_process_invitation_rejection_cleanup");
+    const auto dir = sintra::test::unique_scratch_directory("ext_attach_reject_clean");
 
     bool ok = true;
     ok &= run_wrong_token_cleanup_case(argc, argv, binary_path, dir);

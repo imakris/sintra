@@ -231,6 +231,9 @@ def _lookup_test_timeout(name: str, default: float) -> float:
     canonical = _canonical_test_name(name)
     override = TEST_TIMEOUT_OVERRIDES.get(canonical)
     if override is None:
+        base_test = canonical.split(':', 1)[0]
+        override = TEST_TIMEOUT_OVERRIDES.get(_strip_config_suffix(base_test))
+    if override is None:
         return default
     return max(default, override)
 

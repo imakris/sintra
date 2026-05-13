@@ -29,6 +29,40 @@ namespace {
 
 constexpr auto k_external_process_invitation_rejection_grace = std::chrono::seconds(2);
 
+inline void emit_direct_publish_waiters(
+    instance_id_type    instance_id,
+    const Coordinator*  coordinator)
+{
+    if (s_tl_common_function_iid == invalid_instance_id) {
+        return;
+    }
+
+    // publish_process_group() calls publish_transceiver() directly, outside an
+    // RPC handler return path. Complete wait_for_instance() deferrals here.
+    using return_message_type =
+        Message<Enclosure<instance_id_type>, void, not_defined_type_id>;
+
+    const auto common_function_iid = s_tl_common_function_iid;
+    std::vector<instance_id_type> waiters(
+        s_tl_additional_piids,
+        s_tl_additional_piids + s_tl_additional_piids_size);
+
+    s_tl_common_function_iid   = invalid_instance_id;
+    s_tl_additional_piids_size = 0;
+
+    for (const auto waiter : waiters) {
+        auto* placed_msg = s_mproc->m_out_rep_c->write<return_message_type>(
+            vb_size<return_message_type>(instance_id),
+            instance_id);
+        Transceiver::finalize_rpc_write(
+            placed_msg,
+            waiter,
+            common_function_iid,
+            coordinator,
+            not_defined_type_id);
+    }
+}
+
 } // namespace
 
 // EXPORTED EXCLUSIVELY FOR RPC
@@ -381,6 +415,7 @@ inline bool Coordinator::publish_process_group(Process_group& group, const strin
         return false;
     }
 
+    emit_direct_publish_waiters(group.m_instance_id, this);
     group.m_published = true;
     return true;
 }

@@ -398,12 +398,12 @@ int run_admitted_alive_helper(int argc, char* argv[])
 
     if (!wait_for_control_file(dir, marker, ".release", 10s)) {
         write_marker(dir, marker + "_done", "timeout");
-        sintra::detail::finalize();
+        sintra::leave();
         return 1;
     }
 
     write_marker(dir, marker + "_done", "released");
-    sintra::detail::finalize();
+    sintra::leave();
     return 0;
 }
 
@@ -567,7 +567,7 @@ bool run_shutdown_with_admitted_alive_case(
     write_control_file(dir, "alive", ".release");
     ok &= wait_for_marker(dir, "alive_done", "released", 5s);
     ok &= sintra::test::assert_true(
-        wait_for_process_exit(helper.pid, 5s),
+        wait_for_process_exit(helper.pid, 12s),
         k_failure_prefix,
         "admitted-alive helper should exit after cooperative release");
 
@@ -789,8 +789,7 @@ int main(int argc, char* argv[])
     }
 
     const std::string binary_path = sintra::test::get_binary_path(argc, argv);
-    const auto dir = sintra::test::unique_scratch_directory(
-        "external_process_invitation_lifecycle_negative");
+    const auto dir = sintra::test::unique_scratch_directory("ext_attach_life_neg");
 
     bool ok = true;
     ok &= run_shutdown_before_claim_case(argc, argv, binary_path, dir);

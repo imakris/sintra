@@ -398,38 +398,48 @@ inline bool finalize_impl()
     }
     else {
         trace("begin_process_draining_remote.start");
-        try {
-            auto       handle   = Coordinator::rpc_async_begin_process_draining(s_coord_id, s_mproc_id);
-            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-            if (handle.wait_until(deadline) == Rpc_wait_status::completed) {
-                flush_seq = handle.get();
+        if (s_mproc->m_must_stop.load(std::memory_order_acquire)) {
+            // The coordinator has already been unpublished or observed as gone.
+            // A drain RPC cannot complete in this state, so proceed with local
+            // teardown instead of spending the fallback timeout first.
+            flush_seq = invalid_sequence;
+        }
+        else {
+            try {
+                auto handle = Coordinator::rpc_async_begin_process_draining(
+                    s_coord_id,
+                    s_mproc_id);
+                const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+                if (handle.wait_until(deadline) == Rpc_wait_status::completed) {
+                    flush_seq = handle.get();
+                }
+                else {
+                    handle.abandon();
+                    s_mproc->unblock_rpc(process_of(s_coord_id));
+                    flush_seq = invalid_sequence;
+                    Log_stream(log_level::warning)
+                        << "finalize(): begin_process_draining timed out after 5 seconds for process "
+                        << static_cast<unsigned long long>(s_mproc_id)
+                        << " while waiting on coordinator "
+                        << static_cast<unsigned long long>(s_coord_id)
+                        << ". Proceeding with degraded shutdown semantics.\n";
+                }
             }
-            else {
-                handle.abandon();
-                s_mproc->unblock_rpc(process_of(s_coord_id));
+            catch (const std::exception& e) {
                 flush_seq = invalid_sequence;
                 Log_stream(log_level::warning)
-                    << "finalize(): begin_process_draining timed out after 5 seconds for process "
+                    << "finalize(): begin_process_draining failed for process "
                     << static_cast<unsigned long long>(s_mproc_id)
-                    << " while waiting on coordinator "
-                    << static_cast<unsigned long long>(s_coord_id)
+                    << " with: " << e.what()
                     << ". Proceeding with degraded shutdown semantics.\n";
             }
-        }
-        catch (const std::exception& e) {
-            flush_seq = invalid_sequence;
-            Log_stream(log_level::warning)
-                << "finalize(): begin_process_draining failed for process "
-                << static_cast<unsigned long long>(s_mproc_id)
-                << " with: " << e.what()
-                << ". Proceeding with degraded shutdown semantics.\n";
-        }
-        catch (...) {
-            flush_seq = invalid_sequence;
-            Log_stream(log_level::warning)
-                << "finalize(): begin_process_draining failed for process "
-                << static_cast<unsigned long long>(s_mproc_id)
-                << " with an unknown exception. Proceeding with degraded shutdown semantics.\n";
+            catch (...) {
+                flush_seq = invalid_sequence;
+                Log_stream(log_level::warning)
+                    << "finalize(): begin_process_draining failed for process "
+                    << static_cast<unsigned long long>(s_mproc_id)
+                    << " with an unknown exception. Proceeding with degraded shutdown semantics.\n";
+            }
         }
         trace("begin_process_draining_remote.done");
     }
