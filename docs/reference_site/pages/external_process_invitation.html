@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>sintra::create_external_process_invitation - Sintra Reference</title>
+    <link rel="stylesheet" href="../assets/style.css" />
+  </head>
+  <body class="reference-page no-toc">
+    <a class="skip-nav" href="#main-content">Skip to content</a>
+    <header class="site-header">
+      <div class="header-inner">
+        <a class="brand" href="../index.html" aria-label="Sintra reference home">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <span>Sintra Reference</span>
+        </a>
+        <nav class="top-nav" aria-label="Top navigation">
+          <a href="../index.html">Reference</a>
+          <a href="guide.html">Guide</a>
+          <a href="readme.html">README</a>
+        </nav>
+      </div>
+    </header>
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <ol><li><a href="../index.html">Reference</a></li><li><a href="../index.html#core">Core</a></li><li aria-current="page">sintra::create_external_process_invitation</li></ol>
+    </nav>
+    <main id="main-content" class="page-shell">
+      <article class="content-prose">
+        <h1 id="sintracreate_external_process_invitation">sintra::create_external_process_invitation</h1>
+        <p>Include:</p>
+        <pre><code class="language-cpp">#include &lt;sintra/sintra.h&gt;</code></pre>
+        <p>Summary:</p>
+        <p>External process invitations let a coordinator admit a manually launched process into an existing swarm. The coordinator reserves a process instance id, starts the reader state for that process, records a single-use token, and returns the Sintra command-line arguments the process must pass to <code>sintra::init(argc, argv)</code>.</p>
+        <p>Signature:</p>
+        <pre><code class="language-cpp">struct External_process_invitation_options
+        {
+            sintra::instance_id_type   process_instance_id = sintra::invalid_instance_id;
+            std::chrono::milliseconds  timeout{std::chrono::seconds(30)};
+        };
+
+        struct External_process_invitation
+        {
+            sintra::instance_id_type               process_instance_id;
+            uint64_t                               swarm_id;
+            sintra::instance_id_type               coordinator_id;
+            std::chrono::steady_clock::time_point  expires_at;
+            std::string                            token;
+
+            bool valid() const;
+            explicit operator bool() const;
+            std::vector&lt;std::string&gt; sintra_args() const;
+        };
+
+        External_process_invitation create_external_process_invitation(
+            const External_process_invitation_options&amp; options = {});
+
+        bool cancel_external_process_invitation(
+            sintra::instance_id_type process_instance_id);
+
+        bool cancel_external_process_invitation(
+            const External_process_invitation&amp; invitation);</code></pre>
+        <p>Use when:</p>
+        <ul>
+        <li>A CLI tool, plugin host, test helper, or user-launched executable must join an already running Sintra swarm.</li>
+        <li>The process is launched by application code, a shell, a debugger, or another supervisor instead of <code>spawn_swarm_process</code>.</li>
+        <li>The first publish, RPC, or named transceiver assignment from that process must be readable by the coordinator.</li>
+        </ul>
+        <p>Contract:</p>
+        <ul>
+        <li>Call <code>create_external_process_invitation</code> in the coordinator process after <code>sintra::init</code> has returned.</li>
+        <li>If <code>process_instance_id</code> is <code>invalid_instance_id</code>, Sintra allocates a fresh process instance id. If a specific id is supplied, it must be a process id and must not already be reserved, active, joining, or otherwise known.</li>
+        <li><code>timeout</code> must be positive. Pending invitations expire automatically and are cleaned up; shutdown also cancels pending invitations.</li>
+        <li><code>External_process_invitation::sintra_args()</code> returns the <code>--swarm_id</code>, <code>--instance_id</code>, <code>--coordinator_id</code>, and attach-token arguments for the external process. Append those arguments to the executable&#x27;s normal command line.</li>
+        <li>The external process calls normal <code>sintra::init(argc, argv)</code>. During init it claims the invitation with the token. The claim is accepted once; later attempts with the same arguments fail.</li>
+        <li>Wrong-token, canceled, expired, duplicate-id, and wrong-sender attempts are rejected.</li>
+        <li>Canceling by <code>External_process_invitation</code> checks the invitation token as well as the process id, so an older invitation object cannot cancel a newer pending invitation that reused the same explicit id. Canceling by process id cancels the pending invitation for that id.</li>
+        <li>The token is sensitive. Sintra does not log it. Application code should not print the invitation arguments or token to user-visible logs.</li>
+        <li>After admission, the process is a normal swarm participant and is added to the standard <code>_sintra_all_processes</code> and <code>_sintra_external_processes</code> groups.</li>
+        <li>The external process may call <code>sintra::leave()</code> to depart while the swarm keeps running.</li>
+        <li>External invitations do not create a lifeline pipe/handle and do not provide an automatic recovery launch command.</li>
+        </ul>
+        <p>Example:</p>
+        <pre><code class="language-cpp">auto invitation = sintra::create_external_process_invitation();
+        if (!invitation) {
+            throw std::runtime_error(&quot;could not reserve a Sintra external process&quot;);
+        }
+
+        std::vector&lt;std::string&gt; args = {&quot;--mode&quot;, &quot;worker&quot;};
+        auto sintra_args = invitation.sintra_args();
+        args.insert(args.end(), sintra_args.begin(), sintra_args.end());
+
+        // Launch the executable with args through your normal process launcher.</code></pre>
+        <p>The launched executable uses the ordinary init path:</p>
+        <pre><code class="language-cpp">int main(int argc, char* argv[])
+        {
+            sintra::init(argc, argv);
+
+            Worker_service service;
+            service.assign_name(&quot;worker.service&quot;);
+
+            // Participate in the swarm...
+
+            sintra::leave();
+        }</code></pre>
+        <p>Failures:</p>
+        <ul>
+        <li><code>create_external_process_invitation</code> returns an invalid invitation and logs an error when no active coordinator exists, the timeout is not positive, the supplied process id is not a process id, or secure token generation fails.</li>
+        <li>It returns an invalid invitation and logs a warning when lifecycle teardown is in progress or the requested process id is already in use.</li>
+        <li><code>cancel_external_process_invitation</code> returns <code>false</code> when the invitation is not pending. The object overload also returns <code>false</code> when its token no longer matches the pending invitation for that process id.</li>
+        <li>In the external process, <code>sintra::init</code> throws <code>std::runtime_error</code> when the invitation claim is rejected or cannot be completed within the bounded claim wait.</li>
+        </ul>
+        <p>Example source:</p>
+        <ul>
+        <li><a href="https://github.com/imakris/sintra/blob/master/tests/external_process_invitation_test.cpp">tests/external_process_invitation_test.cpp</a></li>
+        </ul>
+        <p>See also:</p>
+        <ul>
+        <li><a href="init.html"><code>sintra::init</code></a></li>
+        <li><a href="leave.html"><code>sintra::leave</code></a></li>
+        <li><a href="spawn_swarm_process.html"><code>sintra::spawn_swarm_process</code></a></li>
+        <li><a href="join_swarm.html"><code>sintra::join_swarm</code></a></li>
+        </ul>
+        <nav class="page-nav" aria-label="Reference navigation"><a class="page-nav-prev" href="join_swarm.html"><span class="label">&larr; Previous</span><span class="title">sintra::join_swarm</span></a><a class="page-nav-next" href="disable_debug_pause_for_current_process.html"><span class="label">Next &rarr;</span><span class="title">sintra::disable_debug_pause_for_current_process</span></a></nav>
+      </article>
+    </main>
+  </body>
+</html>

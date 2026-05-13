@@ -12,6 +12,7 @@
 #include "transceiver_impl.h"
 #include "utility.h"
 
+#include <array>
 #include <atomic>
 #include <cassert>
 #include <chrono>
@@ -21,10 +22,13 @@
 #include <cstring>
 #include <exception>
 #include <filesystem>
+#include <fstream>
 #include <functional>
+#include <iomanip>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <utility>
@@ -80,6 +84,48 @@ void collect_branches(
 {
     append_branch(branches, descriptor, multiplicity);
     collect_branches(branches, std::forward<Args>(rest)...);
+}
+
+inline bool fill_external_attach_random_bytes(unsigned char* data, size_t size)
+{
+#ifdef _WIN32
+    using RtlGenRandom_fn = BOOLEAN (APIENTRY*)(PVOID, ULONG);
+
+    HMODULE module = LoadLibraryA("advapi32.dll");
+    if (!module) {
+        return false;
+    }
+
+    auto fn = reinterpret_cast<RtlGenRandom_fn>(
+        GetProcAddress(module, "SystemFunction036"));
+    const bool ok = fn && fn(data, static_cast<ULONG>(size));
+    FreeLibrary(module);
+    return ok;
+#else
+    std::ifstream random_stream("/dev/urandom", std::ios::binary);
+    if (!random_stream) {
+        return false;
+    }
+
+    random_stream.read(reinterpret_cast<char*>(data), static_cast<std::streamsize>(size));
+    return random_stream.gcount() == static_cast<std::streamsize>(size);
+#endif
+}
+
+inline std::string make_external_attach_token()
+{
+    std::array<unsigned char, 32> bytes{};
+    if (!fill_external_attach_random_bytes(bytes.data(), bytes.size())) {
+        throw std::runtime_error(
+            "Sintra could not obtain secure random bytes for an external attach token.");
+    }
+
+    std::ostringstream out;
+    out << std::hex << std::setfill('0');
+    for (auto byte : bytes) {
+        out << std::setw(2) << static_cast<unsigned int>(byte);
+    }
+    return out.str();
 }
 
 } // namespace detail
@@ -157,10 +203,91 @@ struct Spawn_options
     Lifetime_policy            lifetime;
 };
 
+struct External_process_invitation_options
+{
+    instance_id_type           process_instance_id = invalid_instance_id;
+    std::chrono::milliseconds  timeout{std::chrono::seconds(30)};
+};
+
+struct External_process_invitation
+{
+    instance_id_type                          process_instance_id = invalid_instance_id;
+    uint64_t                                  swarm_id            = 0;
+    instance_id_type                          coordinator_id      = invalid_instance_id;
+    uint32_t                                  occurrence          = 0;
+    std::chrono::steady_clock::time_point     expires_at{};
+    std::string                               token;
+
+    bool valid() const
+    {
+        return
+            process_instance_id != invalid_instance_id &&
+            coordinator_id      != invalid_instance_id &&
+            swarm_id            != 0                   &&
+            !token.empty();
+    }
+
+    explicit operator bool() const { return valid(); }
+
+    std::vector<std::string> sintra_args() const
+    {
+        if (!valid()) {
+            return {};
+        }
+
+        return {
+            "--swarm_id",                 std::to_string(swarm_id),
+            "--instance_id",              std::to_string(process_instance_id),
+            "--coordinator_id",           std::to_string(coordinator_id),
+            detail::k_external_attach_occurrence_arg,
+            std::to_string(occurrence),
+            detail::k_external_attach_token_arg,
+            token,
+        };
+    }
+};
+
 // Tracks whether init() has been called without a corresponding teardown.
 // This flag is reset by detail::finalize_impl() to allow init/teardown cycles
 // (e.g., in tests that repeatedly initialize and tear down the library).
 inline bool s_init_once = false;
+
+namespace detail {
+
+inline void cleanup_failed_init_noexcept()
+{
+    auto* failed_mproc = s_mproc;
+    if (failed_mproc) {
+        try {
+            failed_mproc->stop();
+        }
+        catch (...) {
+        }
+
+        try {
+            failed_mproc->unblock_rpc();
+        }
+        catch (...) {
+        }
+
+        delete failed_mproc;
+        s_mproc = nullptr;
+    }
+
+    s_init_once           = false;
+    s_mproc_id            = invalid_instance_id;
+    s_coord_id            = invalid_instance_id;
+    s_branch_index        = -1;
+    s_recovery_occurrence = 0;
+
+    {
+        std::lock_guard<std::mutex> admission_lock(s_teardown_admission_mutex);
+        s_shutdown_state.store(shutdown_protocol_state::idle, std::memory_order_release);
+        s_teardown_admission_closed.store(false, std::memory_order_release);
+    }
+}
+
+} // namespace detail
 
 inline void init(
     int                                argc,
@@ -191,8 +318,15 @@ inline void init(
         }
     }));
 
-    s_mproc = new Managed_process;
-    s_mproc->init(argc, argv);
+    try {
+        s_mproc = new Managed_process;
+        s_mproc->init(argc, argv);
+    }
+    catch (...) {
+        detail::cleanup_failed_init_noexcept();
+        throw;
+    }
+
     if (!branches.empty()) {
         s_mproc->branch(branches);
     }
@@ -434,18 +568,9 @@ inline void shutdown_coordinator_drain_wait(const std::string& group_name)
         return s_mproc->m_num_active_readers <= 2;
     };
     auto only_self_remains = [&]() {
-        std::lock_guard<std::mutex> groups_lock(s_coord->m_groups_mutex);
-        auto group_it = s_coord->m_groups.find(group_name);
-        if (group_it == s_coord->m_groups.end()) {
-            return external_readers_drained();
-        }
-
-        auto& group = group_it->second;
-        std::lock_guard<std::mutex> group_lock(group.m_call_mutex);
-        const bool group_drained =
-            (group.m_process_ids.size() == 1) &&
-            (group.m_process_ids.find(s_mproc_id) != group.m_process_ids.end());
-        return group_drained && external_readers_drained();
+        return
+            !s_coord->group_has_non_external_peer(group_name, s_mproc_id) &&
+            external_readers_drained();
     };
 
     bool group_drained = false;
@@ -496,16 +621,7 @@ inline bool shutdown_group_is_trivial(const std::string& group_name)
         return s_coord_id == invalid_instance_id;
     }
 
-    std::lock_guard<std::mutex> groups_lock(s_coord->m_groups_mutex);
-    auto group_it = s_coord->m_groups.find(group_name);
-    if (group_it == s_coord->m_groups.end()) {
-        return true;
-    }
-
-    auto& group = group_it->second;
-    std::lock_guard<std::mutex> group_lock(group.m_call_mutex);
-    return (group.m_process_ids.size() == 1) &&
-        (group.m_process_ids.find(s_mproc_id) != group.m_process_ids.end());
+    return !s_coord->group_has_non_external_peer(group_name, s_mproc_id);
 }
 
 inline bool coordinator_can_leave_now()
@@ -647,6 +763,97 @@ inline bool leave()
     }
 }
 
+inline External_process_invitation create_external_process_invitation(
+    const External_process_invitation_options& options = {})
+{
+    if (!s_mproc || !s_coord) {
+        Log_stream(log_level::error)
+            << "create_external_process_invitation: an active coordinator is required\n";
+        return {};
+    }
+
+    if (options.timeout.count() <= 0) {
+        Log_stream(log_level::error)
+            << "create_external_process_invitation: timeout must be greater than zero\n";
+        return {};
+    }
+
+    std::lock_guard<std::mutex> admission_lock(detail::s_teardown_admission_mutex);
+    if (detail::s_teardown_admission_closed.load(std::memory_order_acquire)) {
+        Log_stream(log_level::warning)
+            << "create_external_process_invitation: rejected because lifecycle "
+            << "teardown is in progress\n";
+        return {};
+    }
+
+    instance_id_type process_iid = options.process_instance_id;
+    if (process_iid == invalid_instance_id) {
+        try {
+            process_iid = make_process_instance_id();
+        }
+        catch (const std::exception& e) {
+            Log_stream(log_level::error)
+                << "create_external_process_invitation: " << e.what() << "\n";
+            return {};
+        }
+    }
+
+    if (!detail::is_valid_process_instance_id(process_iid)) {
+        Log_stream(log_level::error)
+            << "create_external_process_invitation: process_instance_id must identify a process\n";
+        return {};
+    }
+
+    std::string token;
+    try {
+        token = detail::make_external_attach_token();
+    }
+    catch (const std::exception& e) {
+        Log_stream(log_level::error)
+            << "create_external_process_invitation: " << e.what() << "\n";
+        return {};
+    }
+
+    const auto expires_at = std::chrono::steady_clock::now() + options.timeout;
+    uint32_t occurrence = 0;
+    if (!s_coord->reserve_external_process_invitation(process_iid, token, expires_at, occurrence)) {
+        Log_stream(log_level::warning)
+            << "create_external_process_invitation: process instance id "
+            << static_cast<unsigned long long>(process_iid)
+            << " is already in use or cannot be reserved\n";
+        return {};
+    }
+
+    External_process_invitation invitation;
+    invitation.process_instance_id = process_iid;
+    invitation.swarm_id            = s_mproc->m_swarm_id;
+    invitation.coordinator_id      = s_coord_id;
+    invitation.occurrence          = occurrence;
+    invitation.expires_at          = expires_at;
+    invitation.token               = std::move(token);
+    return invitation;
+}
+
+inline bool cancel_external_process_invitation(instance_id_type process_instance_id)
+{
+    if (!s_coord || process_instance_id == invalid_instance_id) {
+        return false;
+    }
+
+    return s_coord->cancel_external_process_invitation(process_instance_id);
+}
+
+inline bool cancel_external_process_invitation(const External_process_invitation& invitation)
+{
+    if (!s_coord || !invitation) {
+        return false;
+    }
+
+    return s_coord->cancel_external_process_invitation(
+        invitation.process_instance_id,
+        invitation.token);
+}
+
 // Returns the number of processes spawned. When wait_for_instance_name is set in
 // options, this waits for the instance to appear and returns 0 on wait failure
 // even if spawning succeeded (the process may still be running). process_instance_id
@@ -697,6 +904,17 @@ inline size_t spawn_swarm_process(const Spawn_options& options)
         if (wait_requested && coord_id == invalid_instance_id) {
             Log_stream(log_level::error)
                 << "spawn_swarm_process: wait requires a valid coordinator\n";
+            return 0;
+        }
+
+        if (options.process_instance_id != invalid_instance_id &&
+            s_coord &&
+            s_coord->external_process_invitation_exists(piid))
+        {
+            Log_stream(log_level::warning)
+                << "spawn_swarm_process: process instance id "
+                << static_cast<unsigned long long>(piid)
+                << " is reserved by a pending external-process invitation\n";
             return 0;
         }
 

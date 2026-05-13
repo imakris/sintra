@@ -305,11 +305,12 @@ options.lifetime.hard_exit_timeout_ms = 100;
 sintra::spawn_swarm_process(options);
 ```
 
-Note: spawned processes require a lifeline by default. If you launch a process
-manually (outside `spawn_swarm_process`), you must pass lifeline arguments or
-disable the check. See
-[`docs/process_lifecycle_notes.md`](docs/process_lifecycle_notes.md) for
-details.
+Note: spawned processes require a lifeline by default. To launch a process
+manually into an existing swarm, create an external process invitation in the
+coordinator and pass `External_process_invitation::sintra_args()` to that
+process. See
+[`docs/reference/external_process_invitation.md`](docs/reference/external_process_invitation.md)
+and [`docs/process_lifecycle_notes.md`](docs/process_lifecycle_notes.md).
 
 ### Qt cursor sync example
 

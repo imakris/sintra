@@ -141,6 +141,21 @@ private:
         std::vector<Process_group::Barrier_completion> completions;
     };
 
+    enum class External_process_invitation_state
+    {
+        pending,
+        rejecting,
+        removing,
+    };
+
+    struct External_process_invitation_record
+    {
+        std::string                                  token;
+        std::chrono::steady_clock::time_point       expires_at;
+        External_process_invitation_state           state =
+            External_process_invitation_state::pending;
+    };
+
     Coordinator();
     ~Coordinator();
 
@@ -186,6 +201,13 @@ private:
     // core groups before spawn.
     instance_id_type join_swarm(const string& binary_name, int32_t branch_index);
 
+    // Claim a coordinator-created external-process invitation during init().
+    // Returns false when the invitation is absent, canceled, expired, or the
+    // caller does not present the recorded token.
+    bool claim_external_process_invitation(
+        instance_id_type   process_iid,
+        const string&      token);
+
     // Create a process group transceiver with explicit membership (used for
     // built-in groups like _sintra_all_processes).
     instance_id_type make_process_group(
@@ -215,6 +237,19 @@ private:
     // Dispatch lifecycle events to the configured handler (if any).
     void emit_lifecycle_event(const process_lifecycle_event& event);
 
+    void external_process_invitation_cleanup_loop();
+    void transition_expired_external_process_invitations(
+        std::vector<instance_id_type>&   readers_to_remove,
+        std::chrono::steady_clock::time_point& next_deadline);
+    void remove_external_process_invitation_readers(
+        const std::vector<instance_id_type>& process_ids);
+    void cancel_all_external_process_invitations();
+    bool process_id_is_known_for_external_invitation(instance_id_type process_iid);
+    bool external_process_invitation_exists_unlocked(instance_id_type process_iid) const;
+    bool publish_process_group(Process_group& group, const string& name);
+    void unpublish_process_group(Process_group& group);
+    bool add_external_process_to_standard_groups(instance_id_type process_iid);
+
 public:
     // Helpers (not exported for RPC).
     // ================================================
@@ -237,6 +272,20 @@ public:
     // Configure the drain timeout for wait_for_all_draining(). A value of 0
     // means wait indefinitely. Default is 20 seconds.
     void set_drain_timeout(std::chrono::seconds timeout);
+
+    bool reserve_external_process_invitation(
+        instance_id_type                       process_iid,
+        const string&                          token,
+        std::chrono::steady_clock::time_point  expires_at,
+        uint32_t&                              occurrence_out);
+    bool cancel_external_process_invitation(instance_id_type process_iid);
+    bool cancel_external_process_invitation(
+        instance_id_type   process_iid,
+        const string&      token);
+    bool external_process_invitation_exists(instance_id_type process_iid);
+    bool group_has_non_external_peer(
+        const string&      group_name,
+        instance_id_type   self_process_iid);
 
     // Blocks until all processes identified by process_group_id have called the function.
     // num_absences may be used by a caller to specify that it is aware that other callers will
@@ -283,6 +332,7 @@ public:
     >                                              m_instances_waited;
 
     set<instance_id_type>                          m_requested_recovery;
+    unordered_set<instance_id_type>                m_external_attached_processes;
     mutable std::mutex                             m_lifecycle_mutex;
     Recovery_policy                                m_recovery_policy;
     Recovery_runner                                m_recovery_runner;
@@ -292,6 +342,17 @@ public:
     std::mutex                                     m_recovery_threads_mutex;
     std::vector<std::thread>                       m_recovery_threads;
     std::atomic<bool>                              m_shutdown{false};
+
+    std::mutex                                     m_external_process_invitations_mutex;
+    std::condition_variable                        m_external_process_invitations_cv;
+    std::unordered_map<
+        instance_id_type,
+        External_process_invitation_record
+    >                                              m_external_process_invitations;
+    std::unordered_map<instance_id_type, uint32_t> m_external_process_invitation_next_occurrence;
+    std::thread                                    m_external_process_invitation_cleanup_thread;
+    bool                                           m_external_process_invitation_cleanup_stop =
+        false;
 
     // Track in-flight join_swarm requests keyed by branch_index to avoid
     // spawning multiple processes when callers retry the RPC. Cleared once
@@ -377,6 +438,7 @@ public:
     SINTRA_RPC_EXPLICIT(enable_recovery)
     SINTRA_RPC_EXPLICIT(mark_initialization_complete)
     SINTRA_RPC_STRICT_EXPLICIT(join_swarm)
+    SINTRA_RPC_STRICT_EXPLICIT(claim_external_process_invitation)
 
     // Read the draining bit for a process slot; does not validate liveness.
     bool is_process_draining(instance_id_type process_iid) const;
@@ -394,4 +456,3 @@ public:
 };
 
 }
-

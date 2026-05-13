@@ -502,7 +502,26 @@ void Process_message_reader::request_reader_function()
                     {
                         auto scoped_map = Transceiver::get_rpc_handler_map().scoped();
                         auto it         = scoped_map.get().find(m->message_type_id);
-                        assert(it != scoped_map.get().end()); // this would be a library error
+                        if (it == scoped_map.get().end()) {
+                            Log_stream(log_level::warning)
+                                << "Received RPC for unknown message type "
+                                << static_cast<unsigned long long>(m->message_type_id)
+                                << "; rejecting the request.\n";
+
+                            const std::string reason = "RPC function is not available.";
+                            auto* placed_msg =
+                                s_mproc->m_out_rep_c->write<Transceiver::exception>(
+                                    vb_size<Transceiver::exception>(reason),
+                                    reason);
+                            placed_msg->sender_instance_id   = m->receiver_instance_id;
+                            placed_msg->receiver_instance_id = m->sender_instance_id;
+                            placed_msg->function_instance_id = m->function_instance_id;
+                            placed_msg->exception_type_id =
+                                (type_id_type)detail::reserved_id::sintra_rpc_unavailable;
+                            s_mproc->m_out_rep_c->done_writing();
+                            publish_request_progress(m_in_req_c->get_message_reading_sequence());
+                            continue;
+                        }
 
                         // Copy the function pointer while holding the lock
                         handler_fn = it->second;
@@ -830,4 +849,3 @@ void Process_message_reader::reply_reader_function()
 
 
 } // namespace sintra
-

@@ -1307,6 +1307,7 @@ filtered_args_t filter_option(
     unsigned int               num_args)
 {
     filtered_args_t ret;
+    const std::string option_prefix = in_option + "=";
     for (size_t i = 0; i < in_args.size(); ++i) {
         const auto& e = in_args[i];
         if (e == in_option) {
@@ -1315,6 +1316,12 @@ filtered_args_t filter_option(
             for (unsigned int picked = 0; picked < num_args && i + 1 < in_args.size(); ++picked) {
                 ret.extracted.push_back(in_args[++i]);
             }
+            continue;
+        }
+        if (num_args == 1 && e.rfind(option_prefix, 0) == 0) {
+            ret.extracted.clear();
+            ret.extracted.push_back(in_option);
+            ret.extracted.push_back(e.substr(option_prefix.size()));
             continue;
         }
         ret.remained.push_back(e);
@@ -1337,6 +1344,8 @@ void Managed_process::init(int argc, const char* const* argv)
     std::string swarm_id_arg;
     std::string instance_id_arg;
     std::string coordinator_id_arg;
+    std::string external_attach_token_arg;
+    uint32_t    external_attach_occurrence = 0;
     std::string recovery_arg;
 
     size_t recovery_occurrence_value = 0;
@@ -1351,9 +1360,20 @@ void Managed_process::init(int argc, const char* const* argv)
         }
     }
 
-    // Filter out lifeline arguments from remained - they contain stale handle values
-    // and will be freshly added by spawn_swarm_process during recovery
-    auto fa2 = filter_option(std::move(fa.remained ), k_lifeline_handle_arg,    1);
+    // Filter out non-reusable runtime arguments from remained - lifeline values
+    // contain stale handles, and external attach tokens are single-use.
+    auto fa_external = filter_option(
+        std::move(fa.remained),
+        detail::k_external_attach_token_arg,
+        1);
+    auto fa_external_occurrence = filter_option(
+        std::move(fa_external.remained),
+        detail::k_external_attach_occurrence_arg,
+        1);
+    auto fa2 = filter_option(
+        std::move(fa_external_occurrence.remained),
+        k_lifeline_handle_arg,
+        1);
     auto fa3 = filter_option(std::move(fa2.remained), k_lifeline_exit_code_arg, 1);
     auto fa4 = filter_option(std::move(fa3.remained), k_lifeline_timeout_arg,   1);
     auto fa5 = filter_option(std::move(fa4.remained), k_lifeline_disable_arg,   0);
@@ -1462,6 +1482,33 @@ void Managed_process::init(int argc, const char* const* argv)
                 continue;
             }
 
+            if (auto value = option_value(
+                    arg,
+                    detail::k_external_attach_token_arg,
+                    '\0',
+                    true,
+                    i))
+            {
+                external_attach_token_arg = *value;
+                continue;
+            }
+
+            if (auto value = option_value(
+                    arg,
+                    detail::k_external_attach_occurrence_arg,
+                    '\0',
+                    true,
+                    i))
+            {
+                try {
+                    external_attach_occurrence = static_cast<uint32_t>(std::stoul(*value));
+                }
+                catch (...) {
+                    throw 1;
+                }
+                continue;
+            }
+
             if (auto value = option_value(arg, "--recovery_occurrence", 'e', true, i)) {
                 try {
                     recovery_arg = *value;
@@ -1528,6 +1575,8 @@ void Managed_process::init(int argc, const char* const* argv)
             << "  --instance_id arg        the instance id assigned to the new process\n"
             << "  --coordinator_id arg     the instance id of the coordinator that this\n"
             << "                           process should refer to\n"
+            << "  --external_attach_token arg token produced by an external-process\n"
+            << "                           invitation\n"
             << "  --recovery_occurrence arg (optional) number of times the process recovered an\n"
             << "                           abnormal termination.\n";
         exit(1);
@@ -1575,8 +1624,12 @@ void Managed_process::init(int argc, const char* const* argv)
         s_mproc_id = m_instance_id;
     }
 
+    if (!external_attach_token_arg.empty() && s_recovery_occurrence != 0) {
+        throw std::runtime_error("Sintra external process invitation was rejected.");
+    }
+
     if (!coordinator_is_local) {
-        start_lifeline_watcher(Lifetime_policy{}, true);
+        start_lifeline_watcher(Lifetime_policy{}, external_attach_token_arg.empty());
     }
     m_directory = obtain_swarm_directory();
 
@@ -1630,8 +1683,11 @@ void Managed_process::init(int argc, const char* const* argv)
         }
     }
 
-    m_out_req_c = new Message_ring_W(m_directory, "req", m_instance_id, s_recovery_occurrence);
-    m_out_rep_c = new Message_ring_W(m_directory, "rep", m_instance_id, s_recovery_occurrence);
+    const auto ring_occurrence = external_attach_token_arg.empty()
+        ? s_recovery_occurrence
+        : external_attach_occurrence;
+    m_out_req_c = new Message_ring_W(m_directory, "req", m_instance_id, ring_occurrence);
+    m_out_rep_c = new Message_ring_W(m_directory, "rep", m_instance_id, ring_occurrence);
 
     if (coordinator_is_local) {
         s_coord = new Coordinator;
@@ -1800,6 +1856,28 @@ void Managed_process::init(int argc, const char* const* argv)
 
     m_communication_state = COMMUNICATION_RUNNING;
     m_start_stop_mutex.unlock();
+
+    if (!external_attach_token_arg.empty()) {
+        auto handle = Coordinator::rpc_async_claim_external_process_invitation(
+            s_coord_id,
+            m_instance_id,
+            external_attach_token_arg);
+        const auto deadline = std::chrono::steady_clock::now() +
+            detail::k_external_attach_claim_timeout;
+
+        bool claim_accepted = false;
+        if (handle.wait_until(deadline) == Rpc_wait_status::completed) {
+            claim_accepted = handle.get();
+        }
+        else {
+            handle.abandon();
+            unblock_rpc(process_of(s_coord_id));
+        }
+
+        if (!claim_accepted) {
+            throw std::runtime_error("Sintra external process invitation was rejected.");
+        }
+    }
 }
 
 inline
@@ -1815,27 +1893,13 @@ Managed_process::Spawn_result Managed_process::spawn_swarm_process(
     auto args = s.args;
     args.insert(args.end(), {"--recovery_occurrence", std::to_string(s.occurrence)});
 
-    {
-        Dispatch_unique_lock readers_lock(m_readers_mutex);
-
-        // If a reader for this process id exists (from a previous crashed instance),
-        // stop it and remove it before creating a fresh one for recovery.
-        if (auto existing = m_readers.find(s.piid); existing != m_readers.end()) {
-            if (existing->second) {
-                existing->second->stop_and_wait(1.0);
-            }
-            m_readers.erase(existing);
-        }
-
-        auto progress = std::make_shared<Process_message_reader::Delivery_progress>();
-        auto reader = std::make_shared<Process_message_reader>(
-            s.piid, progress, s.occurrence);
-        auto [eit, inserted] = m_readers.emplace(s.piid, reader);
-        assert(inserted == true);
-
-        // Before spawning the new process, we have to assure that the
-        // corresponding reading threads are up and running.
-        reader->wait_until_ready();
+    // Before spawning the new process, we have to assure that the corresponding
+    // reading threads are up and running.
+    if (!prepare_process_reader(s.piid, s.occurrence, true)) {
+        result.success       = false;
+        result.errno_value   = 0;
+        result.error_message = "Failed to prepare process reader";
+        return result;
     }
 
     bool spawn_ready = true;
@@ -2435,6 +2499,62 @@ void Managed_process::wait_until_all_external_readers_are_done(int extra_allowed
     while (m_num_active_readers > 2 + extra_allowed_readers) {
         m_num_active_readers_condition.wait(lock);
     }
+}
+
+inline bool Managed_process::prepare_process_reader(
+    instance_id_type   process_instance_id,
+    uint32_t           occurrence,
+    bool               replace_existing)
+{
+    Dispatch_unique_lock readers_lock(m_readers_mutex);
+
+    if (auto existing = m_readers.find(process_instance_id); existing != m_readers.end()) {
+        if (!replace_existing) {
+            return false;
+        }
+        if (existing->second) {
+            existing->second->stop_and_wait(1.0);
+        }
+        m_readers.erase(existing);
+    }
+
+    auto progress = std::make_shared<Process_message_reader::Delivery_progress>();
+    auto reader = std::make_shared<Process_message_reader>(
+        process_instance_id,
+        progress,
+        occurrence);
+    auto [reader_it, inserted] = m_readers.emplace(process_instance_id, reader);
+    (void)reader_it;
+    assert(inserted == true);
+    reader->wait_until_ready();
+    return true;
+}
+
+inline void Managed_process::remove_process_reader(
+    instance_id_type   process_instance_id,
+    double             waiting_period)
+{
+    std::shared_ptr<Process_message_reader> reader;
+    {
+        Dispatch_unique_lock readers_lock(m_readers_mutex);
+        auto reader_it = m_readers.find(process_instance_id);
+        if (reader_it == m_readers.end()) {
+            return;
+        }
+
+        reader = std::move(reader_it->second);
+        m_readers.erase(reader_it);
+    }
+
+    if (reader) {
+        reader->stop_and_wait(waiting_period);
+    }
+}
+
+inline bool Managed_process::has_process_reader(instance_id_type process_instance_id) const
+{
+    Dispatch_shared_lock readers_lock(m_readers_mutex);
+    return m_readers.find(process_instance_id) != m_readers.end();
 }
 
 inline void Managed_process::unpublish_all_transceivers()

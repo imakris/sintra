@@ -25,7 +25,8 @@ slots, barriers, lifecycle helpers) is usable.
 
 - `argc`, `argv` — the original program arguments from `main`. Both must be
   passed unchanged. Sintra appends its own `--swarm_id`, `--instance_id`, and
-  `--coordinator_id` arguments for the children it spawns.
+  `--coordinator_id` arguments for children it spawns and for external
+  process invitations.
 - `branches` (vector overload) — the swarm topology declared by the starter.
   Each `Process_descriptor` becomes one spawned process; the index of the
   descriptor in the vector becomes the branch index of that process.
@@ -59,6 +60,9 @@ slots, barriers, lifecycle helpers) is usable.
 - A spawned child process attaches to the existing swarm. The variadic forms
   remain valid in the child; branch arguments whose role is only meaningful
   in the starter are ignored.
+- A manually launched process has received arguments from
+  `External_process_invitation::sintra_args()` and must claim that invitation
+  before user-level Sintra work begins.
 
 ## Contract
 
@@ -103,6 +107,7 @@ slots, barriers, lifecycle helpers) is usable.
 - [`sintra::make_branches`](make_branches.md)
 - [`sintra::Process_descriptor`](process_descriptor.md)
 - [`sintra::process_index`](process_index.md)
+- [`sintra::create_external_process_invitation`](external_process_invitation.md)
 - [`sintra::shutdown`](shutdown.md)
 - [`sintra::leave`](leave.md)
 - [`sintra::init_error`](init_error.md)

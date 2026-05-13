@@ -439,8 +439,7 @@ struct Message: public Message_prefix, public T
             return tid;
         }
         else {
-            static const type_id_type tid = get_type_id<Message>();
-            return tid;
+            return get_type_id<Message>();
         }
     }
 

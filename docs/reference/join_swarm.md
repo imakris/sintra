@@ -67,5 +67,6 @@ Example source:
 See also:
 
 - [sintra::spawn_swarm_process](spawn_swarm_process.md)
+- [sintra::create_external_process_invitation](external_process_invitation.md)
 - [sintra::init](init.md)
 - [sintra::process_index](process_index.md)

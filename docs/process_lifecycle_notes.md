@@ -77,8 +77,13 @@ Key points:
 - The coordinator closes lifeline handles on unpublish and in the destructor,
   so lingering children still terminate.
 - Respawn creates a fresh lifeline for the new instance.
-- Manual launches must pass `--lifeline_disable` or provide `--lifeline_handle`
-  with a valid pipe/handle, otherwise the process hard-exits immediately.
+- Externally attached processes admitted through
+  `create_external_process_invitation()` do not require a lifeline handle; the
+  attach token tells `init()` to use the bounded invitation claim path instead.
+- A non-invited manual launch is not a safe way to join an existing swarm. Use
+  an external process invitation when the process should become a participant.
+- Recovery is available only when the coordinator has a launch command for the
+  process. Externally attached processes do not opt into automatic recovery.
 
 ## Threading expectations
 

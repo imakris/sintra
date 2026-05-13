@@ -40,7 +40,7 @@
         <p>Description: Initialise the current process as a member of a Sintra swarm. <code>init</code> records the program arguments, creates the per-process <code>Managed_process</code> singleton, branches the requested child processes (when called from the starter), and connects the local process to the coordinator. After it returns successfully, the high-level facade (transceivers, RPC, slots, barriers, lifecycle helpers) is usable.</p>
         <h2 id="parameters">Parameters</h2>
         <ul>
-        <li><code>argc</code>, <code>argv</code> — the original program arguments from <code>main</code>. Both must be passed unchanged. Sintra appends its own <code>--swarm_id</code>, <code>--instance_id</code>, and <code>--coordinator_id</code> arguments for the children it spawns.</li>
+        <li><code>argc</code>, <code>argv</code> — the original program arguments from <code>main</code>. Both must be passed unchanged. Sintra appends its own <code>--swarm_id</code>, <code>--instance_id</code>, and <code>--coordinator_id</code> arguments for children it spawns and for external process invitations.</li>
         <li><code>branches</code> (vector overload) — the swarm topology declared by the starter. Each <code>Process_descriptor</code> becomes one spawned process; the index of the descriptor in the vector becomes the branch index of that process.</li>
         <li><code>Args&amp;&amp;... args</code> (variadic overload) — descriptors and per-descriptor multiplicities forwarded through <code>make_branches(...)</code> to the vector overload. An integer in the pack is read as a multiplicity that applies to the next descriptor.</li>
         </ul>
@@ -59,6 +59,7 @@
         <li>The current <code>main()</code> is the entry point of a Sintra-managed process.</li>
         <li>The starter process needs to declare the swarm topology by passing <code>Process_descriptor</code> values directly, an existing branch vector built with <code>make_branches</code>, or a mix of descriptors and per-descriptor multiplicities.</li>
         <li>A spawned child process attaches to the existing swarm. The variadic forms remain valid in the child; branch arguments whose role is only meaningful in the starter are ignored.</li>
+        <li>A manually launched process has received arguments from <code>External_process_invitation::sintra_args()</code> and must claim that invitation before user-level Sintra work begins.</li>
         </ul>
         <h2 id="contract">Contract</h2>
         <ul>
@@ -89,6 +90,7 @@
         <li><a href="make_branches.html"><code>sintra::make_branches</code></a></li>
         <li><a href="process_descriptor.html"><code>sintra::Process_descriptor</code></a></li>
         <li><a href="process_index.html"><code>sintra::process_index</code></a></li>
+        <li><a href="external_process_invitation.html"><code>sintra::create_external_process_invitation</code></a></li>
         <li><a href="shutdown.html"><code>sintra::shutdown</code></a></li>
         <li><a href="leave.html"><code>sintra::leave</code></a></li>
         <li><a href="init_error.html"><code>sintra::init_error</code></a></li>

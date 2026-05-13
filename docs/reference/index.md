@@ -10,6 +10,7 @@
 | [`sintra::Process_descriptor`](process_descriptor.md) | type | `<sintra/sintra.h>` | Describe a process branch or spawn target. |
 | [`sintra::spawn_swarm_process`](spawn_swarm_process.md) | function | `<sintra/sintra.h>` | Add managed processes to a running swarm. |
 | [`sintra::join_swarm`](join_swarm.md) | function | `<sintra/sintra.h>` | Join an existing branch at runtime. |
+| [`sintra::create_external_process_invitation`](external_process_invitation.md) | function | `<sintra/sintra.h>` | Pre-admit a manually launched process into an existing swarm. |
 | [`sintra::disable_debug_pause_for_current_process`](disable_debug_pause_for_current_process.md) | function | `<sintra/sintra.h>` | Opt the current process out of debug pause-on-exit behavior. |
 
 ## Publish/Subscribe

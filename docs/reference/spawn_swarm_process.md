@@ -94,5 +94,6 @@ Example source:
 See also:
 
 - [sintra::join_swarm](join_swarm.md)
+- [sintra::create_external_process_invitation](external_process_invitation.md)
 - [sintra::Process_descriptor](process_descriptor.md)
 - [sintra::init](init.md)

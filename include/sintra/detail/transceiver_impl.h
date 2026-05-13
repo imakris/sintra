@@ -614,7 +614,10 @@ void Transceiver::send(Args&&... args)
 
     static_assert(sender_capability, "This type of sender cannot send messages of this type.");
 
-    [[maybe_unused]] static auto once = MESSAGE_T::id();
+    // Dynamic type resolution may RPC through the same request ring; do it
+    // before reserving the outbound message slot.
+    const auto message_type_id = MESSAGE_T::id();
+    (void)message_type_id;
 
     MESSAGE_T* msg = s_mproc->m_out_req_c->write<MESSAGE_T>(vb_size<MESSAGE_T>(args...), args...);
     msg->sender_instance_id = m_instance_id;
@@ -1251,8 +1254,11 @@ Transceiver::rpc_async_impl(instance_id_type instance_id, Args... args)
         rpc_state->function_instance_id = s_mproc->activate_return_handler(rh);
 
         // write the message for the rpc call into the communication ring
-        static auto once = MESSAGE_T::id();
-        (void)(once); // suppress unused variable warning
+        // Dynamic type resolution may RPC through the same request ring; do it
+        // before reserving the outbound message slot.
+        const auto message_type_id = MESSAGE_T::id();
+        (void)message_type_id;
+
         MESSAGE_T* msg = s_mproc->m_out_req_c->write<MESSAGE_T>(vb_size<MESSAGE_T>(args...), args...);
         msg->sender_instance_id   = s_mproc->m_instance_id;
         msg->receiver_instance_id = instance_id;
@@ -1313,8 +1319,11 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
     }
 
     if constexpr (RPCTC::is_fire_and_forget) {
-        static auto once = MESSAGE_T::id();
-        (void)(once);
+        // Dynamic type resolution may RPC through the same request ring; do it
+        // before reserving the outbound message slot.
+        const auto message_type_id = MESSAGE_T::id();
+        (void)message_type_id;
+
         MESSAGE_T* msg = s_mproc->m_out_req_c->write<MESSAGE_T>(vb_size<MESSAGE_T>(args...), args...);
         msg->sender_instance_id   = s_mproc->m_instance_id;
         msg->receiver_instance_id = instance_id;
@@ -1401,14 +1410,14 @@ Transceiver::export_rpc_impl()
 
     get_instance_to_object_map<RPCTC>().set_value(instance_id, self);
 
-    uint64_t test = MT::id();
+    const auto message_type_id = MT::id();
 
-    // handler registration
+    // Handler registration is refreshed on each export because dynamic message
+    // ids are scoped to the active coordinator runtime.
     using RPCTC_o_type = typename RPCTC::o_type;
-    [[maybe_unused]] static auto once = [&] {
-        get_rpc_handler_map().set_value(test, &RPCTC_o_type::template rpc_handler<RPCTC, MT>);
-        return test;
-    }();
+    get_rpc_handler_map().set_value(
+        message_type_id,
+        &RPCTC_o_type::template rpc_handler<RPCTC, MT>);
 
     return [instance_id]() {
         // Note: do NOT call ensure_rpc_shutdown() here - the transceiver may already

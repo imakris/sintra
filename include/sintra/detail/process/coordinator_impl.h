@@ -11,6 +11,7 @@
 #include <cassert>
 #include <chrono>
 #include <functional>
+#include <limits>
 #include <mutex>
 #include <shared_mutex>
 #include <stdexcept>
@@ -24,6 +25,11 @@ using std::lock_guard;
 using std::mutex;
 using std::string;
 
+namespace {
+
+constexpr auto k_external_process_invitation_rejection_grace = std::chrono::seconds(2);
+
+} // namespace
 
 // EXPORTED EXCLUSIVELY FOR RPC
 inline
@@ -231,6 +237,9 @@ Coordinator::Coordinator():
     for (auto& draining_state : m_draining_process_states) {
         draining_state = 0;
     }
+
+    m_external_process_invitation_cleanup_thread = std::thread(
+        [this] { external_process_invitation_cleanup_loop(); });
 }
 
 
@@ -239,6 +248,15 @@ inline
 Coordinator::~Coordinator()
 {
     m_shutdown.store(true, std::memory_order_release);
+    {
+        std::lock_guard<mutex> lock(m_external_process_invitations_mutex);
+        m_external_process_invitation_cleanup_stop = true;
+    }
+    m_external_process_invitations_cv.notify_all();
+    if (m_external_process_invitation_cleanup_thread.joinable()) {
+        m_external_process_invitation_cleanup_thread.join();
+    }
+
     {
         std::lock_guard<mutex> lock(m_recovery_threads_mutex);
         for (auto& thread : m_recovery_threads) {
@@ -249,6 +267,507 @@ Coordinator::~Coordinator()
     }
     s_coord     = nullptr;
     s_coord_id  = 0;
+}
+
+namespace detail {
+
+inline bool external_attach_tokens_equal(const std::string& lhs, const std::string& rhs)
+{
+    if (lhs.size() != rhs.size()) {
+        return false;
+    }
+
+    unsigned char diff = 0;
+    for (size_t i = 0; i < lhs.size(); ++i) {
+        diff |= static_cast<unsigned char>(lhs[i] ^ rhs[i]);
+    }
+    return diff == 0;
+}
+
+} // namespace detail
+
+inline bool Coordinator::external_process_invitation_exists_unlocked(
+    instance_id_type process_iid) const
+{
+    return m_external_process_invitations.find(process_iid) !=
+        m_external_process_invitations.end();
+}
+
+inline bool Coordinator::external_process_invitation_exists(instance_id_type process_iid)
+{
+    std::lock_guard<mutex> lock(m_external_process_invitations_mutex);
+    return external_process_invitation_exists_unlocked(process_iid);
+}
+
+inline bool Coordinator::group_has_non_external_peer(
+    const string&      group_name,
+    instance_id_type   self_process_iid)
+{
+    std::vector<instance_id_type> members;
+    {
+        lock_guard<mutex> groups_lock(m_groups_mutex);
+        auto group_it = m_groups.find(group_name);
+        if (group_it == m_groups.end()) {
+            return false;
+        }
+
+        auto& group = group_it->second;
+        std::lock_guard<mutex> group_lock(group.m_call_mutex);
+        members.assign(group.m_process_ids.begin(), group.m_process_ids.end());
+    }
+
+    lock_guard<mutex> publish_lock(m_publish_mutex);
+    for (auto process_iid : members) {
+        if (process_iid != self_process_iid &&
+            m_external_attached_processes.count(process_iid) == 0)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+inline bool Coordinator::process_id_is_known_for_external_invitation(
+    instance_id_type process_iid)
+{
+    if (!detail::is_valid_process_instance_id(process_iid)) {
+        return true;
+    }
+
+    if (process_iid == s_mproc_id || process_iid == process_of(s_coord_id)) {
+        return true;
+    }
+
+    {
+        lock_guard<mutex> lock(m_publish_mutex);
+        if (m_transceiver_registry.count(process_iid) != 0) {
+            return true;
+        }
+        if (m_joined_process_branch.count(process_iid) != 0) {
+            return true;
+        }
+        for (const auto& entry : m_inflight_joins) {
+            if (entry.second == process_iid) {
+                return true;
+            }
+        }
+    }
+    if (s_mproc && s_mproc->m_cached_spawns.count(process_iid) != 0) {
+        return true;
+    }
+
+    {
+        lock_guard<mutex> lock(m_init_tracking_mutex);
+        if (m_processes_in_initialization.count(process_iid) != 0) {
+            return true;
+        }
+    }
+
+    {
+        lock_guard<mutex> lock(m_groups_mutex);
+        if (m_groups_of_process.count(process_iid) != 0) {
+            return true;
+        }
+    }
+
+    return s_mproc && s_mproc->has_process_reader(process_iid);
+}
+
+inline bool Coordinator::publish_process_group(Process_group& group, const string& name)
+{
+    group.initialize_type_id();
+    if (publish_transceiver(group.m_type_id, group.m_instance_id, name) != group.m_instance_id) {
+        return false;
+    }
+
+    group.m_published = true;
+    return true;
+}
+
+inline void Coordinator::unpublish_process_group(Process_group& group)
+{
+    if (!group.m_published) {
+        return;
+    }
+
+    (void)unpublish_transceiver(group.m_instance_id);
+    group.m_published = false;
+}
+
+inline bool Coordinator::reserve_external_process_invitation(
+    instance_id_type                       process_iid,
+    const string&                          token,
+    std::chrono::steady_clock::time_point  expires_at,
+    uint32_t&                              occurrence_out)
+{
+    if (!s_mproc || token.empty() || expires_at <= std::chrono::steady_clock::now()) {
+        return false;
+    }
+
+    std::lock_guard<mutex> lock(m_external_process_invitations_mutex);
+    if (external_process_invitation_exists_unlocked(process_iid)) {
+        return false;
+    }
+
+    if (process_id_is_known_for_external_invitation(process_iid)) {
+        return false;
+    }
+
+    auto& next_occurrence = m_external_process_invitation_next_occurrence[process_iid];
+    if (next_occurrence == std::numeric_limits<uint32_t>::max()) {
+        return false;
+    }
+    ++next_occurrence;
+
+    if (!s_mproc->prepare_process_reader(process_iid, next_occurrence, false)) {
+        return false;
+    }
+
+    External_process_invitation_record record;
+    record.token      = token;
+    record.expires_at = expires_at;
+    record.state      = External_process_invitation_state::pending;
+    m_external_process_invitations.emplace(process_iid, std::move(record));
+    occurrence_out = next_occurrence;
+    m_external_process_invitations_cv.notify_all();
+    return true;
+}
+
+inline bool Coordinator::cancel_external_process_invitation(instance_id_type process_iid)
+{
+    std::lock_guard<mutex> lock(m_external_process_invitations_mutex);
+    auto it = m_external_process_invitations.find(process_iid);
+    if (it == m_external_process_invitations.end()) {
+        return false;
+    }
+    if (it->second.state != External_process_invitation_state::pending) {
+        return false;
+    }
+
+    it->second.state      = External_process_invitation_state::rejecting;
+    it->second.expires_at =
+        std::chrono::steady_clock::now() + k_external_process_invitation_rejection_grace;
+    m_external_process_invitations_cv.notify_all();
+    return true;
+}
+
+inline bool Coordinator::cancel_external_process_invitation(
+    instance_id_type   process_iid,
+    const string&      token)
+{
+    std::lock_guard<mutex> lock(m_external_process_invitations_mutex);
+    auto it = m_external_process_invitations.find(process_iid);
+    if (it == m_external_process_invitations.end()) {
+        return false;
+    }
+    if (it->second.state != External_process_invitation_state::pending) {
+        return false;
+    }
+    if (token.empty() || !detail::external_attach_tokens_equal(it->second.token, token)) {
+        return false;
+    }
+
+    it->second.state      = External_process_invitation_state::rejecting;
+    it->second.expires_at =
+        std::chrono::steady_clock::now() + k_external_process_invitation_rejection_grace;
+    m_external_process_invitations_cv.notify_all();
+    return true;
+}
+
+inline void Coordinator::transition_expired_external_process_invitations(
+    std::vector<instance_id_type>&           readers_to_remove,
+    std::chrono::steady_clock::time_point&   next_deadline)
+{
+    const auto now = std::chrono::steady_clock::now();
+    next_deadline = std::chrono::steady_clock::time_point::max();
+
+    for (auto it = m_external_process_invitations.begin();
+        it != m_external_process_invitations.end();)
+    {
+        auto& record = it->second;
+        if (record.expires_at <= now) {
+            if (record.state == External_process_invitation_state::pending) {
+                record.state      = External_process_invitation_state::rejecting;
+                record.expires_at = now + k_external_process_invitation_rejection_grace;
+                next_deadline = std::min(next_deadline, record.expires_at);
+                ++it;
+                continue;
+            }
+
+            size_t draining_slot = 0;
+            if (draining_slot_of_index(get_process_index(it->first), draining_slot)) {
+                m_draining_process_states[draining_slot] = 1;
+            }
+            record.state = External_process_invitation_state::removing;
+            readers_to_remove.push_back(it->first);
+            ++it;
+            continue;
+        }
+
+        next_deadline = std::min(next_deadline, record.expires_at);
+        ++it;
+    }
+}
+
+inline void Coordinator::remove_external_process_invitation_readers(
+    const std::vector<instance_id_type>& process_ids)
+{
+    if (!s_mproc) {
+        return;
+    }
+
+    for (auto process_iid : process_ids) {
+        s_mproc->remove_process_reader(process_iid, 1.0);
+    }
+
+    if (!process_ids.empty()) {
+        note_draining_state_change();
+    }
+}
+
+inline void Coordinator::external_process_invitation_cleanup_loop()
+{
+    std::unique_lock<mutex> lock(m_external_process_invitations_mutex);
+
+    while (!m_external_process_invitation_cleanup_stop) {
+        std::vector<instance_id_type> readers_to_remove;
+        std::chrono::steady_clock::time_point next_deadline;
+        transition_expired_external_process_invitations(readers_to_remove, next_deadline);
+
+        if (!readers_to_remove.empty()) {
+            lock.unlock();
+            remove_external_process_invitation_readers(readers_to_remove);
+            lock.lock();
+            for (auto process_iid : readers_to_remove) {
+                auto it = m_external_process_invitations.find(process_iid);
+                if (it != m_external_process_invitations.end() &&
+                    it->second.state == External_process_invitation_state::removing)
+                {
+                    m_external_process_invitations.erase(it);
+                }
+            }
+            m_external_process_invitations_cv.notify_all();
+            continue;
+        }
+
+        if (m_external_process_invitation_cleanup_stop) {
+            break;
+        }
+
+        if (m_external_process_invitations.empty()) {
+            m_external_process_invitations_cv.wait(lock, [&] {
+                return m_external_process_invitation_cleanup_stop ||
+                    !m_external_process_invitations.empty();
+            });
+        }
+        else {
+            m_external_process_invitations_cv.wait_until(lock, next_deadline);
+        }
+    }
+}
+
+inline void Coordinator::cancel_all_external_process_invitations()
+{
+    std::vector<instance_id_type> readers_to_remove;
+    {
+        std::lock_guard<mutex> lock(m_external_process_invitations_mutex);
+        readers_to_remove.reserve(m_external_process_invitations.size());
+        for (const auto& entry : m_external_process_invitations) {
+            size_t draining_slot = 0;
+            if (draining_slot_of_index(get_process_index(entry.first), draining_slot)) {
+                m_draining_process_states[draining_slot] = 1;
+            }
+            readers_to_remove.push_back(entry.first);
+        }
+        m_external_process_invitations.clear();
+    }
+    m_external_process_invitations_cv.notify_all();
+    remove_external_process_invitation_readers(readers_to_remove);
+}
+
+inline bool Coordinator::add_external_process_to_standard_groups(instance_id_type process_iid)
+{
+    lock_guard<mutex> lock(m_groups_mutex);
+
+    struct group_update
+    {
+        string                          name;
+        instance_id_type                group_iid = invalid_instance_id;
+        unordered_set<instance_id_type> members;
+        bool                            created = false;
+    };
+
+    std::vector<group_update> updates;
+
+    auto erase_group_membership = [&](instance_id_type member_iid, instance_id_type group_iid) {
+        auto process_groups_it = m_groups_of_process.find(member_iid);
+        if (process_groups_it != m_groups_of_process.end()) {
+            process_groups_it->second.erase(group_iid);
+            if (process_groups_it->second.empty()) {
+                m_groups_of_process.erase(process_groups_it);
+            }
+        }
+    };
+
+    auto rollback_updates = [&]() {
+        for (auto update_it = updates.rbegin(); update_it != updates.rend(); ++update_it) {
+            auto group_it = m_groups.find(update_it->name);
+            if (group_it == m_groups.end()) {
+                continue;
+            }
+
+            if (update_it->created) {
+                unpublish_process_group(group_it->second);
+                for (auto member_iid : update_it->members) {
+                    erase_group_membership(member_iid, update_it->group_iid);
+                }
+                m_groups.erase(group_it);
+            }
+            else {
+                group_it->second.remove_process(process_iid);
+                erase_group_membership(process_iid, update_it->group_iid);
+            }
+        }
+    };
+
+    auto ensure_group = [&](const string& name, const unordered_set<instance_id_type>& members) {
+        auto group_it = m_groups.find(name);
+        if (group_it == m_groups.end()) {
+            auto [new_it, inserted] = m_groups.try_emplace(name);
+            (void)inserted;
+            group_it = new_it;
+            group_it->second.set(members);
+            for (auto member_iid : members) {
+                m_groups_of_process[member_iid].insert(group_it->second.m_instance_id);
+            }
+            updates.push_back({
+                name,
+                group_it->second.m_instance_id,
+                members,
+                true
+            });
+            if (!publish_process_group(group_it->second, name)) {
+                return false;
+            }
+            return true;
+        }
+
+        group_it->second.add_process(process_iid);
+        m_groups_of_process[process_iid].insert(group_it->second.m_instance_id);
+        updates.push_back({
+            name,
+            group_it->second.m_instance_id,
+            {process_iid},
+            false
+        });
+        return true;
+    };
+
+    if (!ensure_group("_sintra_all_processes", {s_mproc_id, process_iid}) ||
+        !ensure_group("_sintra_external_processes", {process_iid}))
+    {
+        rollback_updates();
+        return false;
+    }
+
+    return true;
+}
+
+inline bool Coordinator::claim_external_process_invitation(
+    instance_id_type   process_iid,
+    const string&      token)
+{
+    if (!detail::is_valid_process_instance_id(process_iid) || token.empty()) {
+        return false;
+    }
+
+    if (m_shutdown.load(std::memory_order_acquire)) {
+        return false;
+    }
+
+    if (!s_tl_current_message ||
+        process_of(s_tl_current_message->sender_instance_id) != process_iid)
+    {
+        return false;
+    }
+
+    {
+        std::lock_guard<mutex> lock(m_external_process_invitations_mutex);
+        auto it = m_external_process_invitations.find(process_iid);
+        if (it == m_external_process_invitations.end()) {
+            return false;
+        }
+
+        auto& record = it->second;
+        const auto now = std::chrono::steady_clock::now();
+        if (record.state != External_process_invitation_state::pending) {
+            return false;
+        }
+        if (record.expires_at <= now) {
+            record.state      = External_process_invitation_state::rejecting;
+            record.expires_at = now + k_external_process_invitation_rejection_grace;
+            m_external_process_invitations_cv.notify_all();
+            return false;
+        }
+        if (!detail::external_attach_tokens_equal(record.token, token)) {
+            record.state      = External_process_invitation_state::rejecting;
+            record.expires_at = now;
+            m_external_process_invitations_cv.notify_all();
+            return false;
+        }
+
+        m_external_process_invitations.erase(it);
+    }
+    m_external_process_invitations_cv.notify_all();
+
+    if (!s_mproc || !s_mproc->has_process_reader(process_iid)) {
+        return false;
+    }
+
+    {
+        lock_guard<mutex> publish_lock(m_publish_mutex);
+        if (m_transceiver_registry.count(process_iid) != 0 ||
+            m_joined_process_branch.count(process_iid) != 0)
+        {
+            return false;
+        }
+        for (const auto& entry : m_inflight_joins) {
+            if (entry.second == process_iid) {
+                return false;
+            }
+        }
+        if (s_mproc && s_mproc->m_cached_spawns.count(process_iid) != 0) {
+            return false;
+        }
+        m_transceiver_registry[process_iid];
+        m_external_attached_processes.insert(process_iid);
+    }
+
+    {
+        lock_guard<mutex> init_lock(m_init_tracking_mutex);
+        if (m_processes_in_initialization.count(process_iid) != 0) {
+            lock_guard<mutex> publish_lock(m_publish_mutex);
+            m_external_attached_processes.erase(process_iid);
+            m_transceiver_registry.erase(process_iid);
+            return false;
+        }
+    }
+
+    if (!add_external_process_to_standard_groups(process_iid)) {
+        lock_guard<mutex> publish_lock(m_publish_mutex);
+        m_external_attached_processes.erase(process_iid);
+        m_transceiver_registry.erase(process_iid);
+        return false;
+    }
+
+    size_t draining_slot = 0;
+    if (draining_slot_of_index(get_process_index(process_iid), draining_slot)) {
+        m_draining_process_states[draining_slot] = 0;
+        note_draining_state_change();
+    }
+
+    return true;
 }
 
 
@@ -528,6 +1047,7 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
 
         // remove the unpublished process's registry entry
         m_transceiver_registry.erase(pr_it);
+        m_external_attached_processes.erase(process_iid);
 
         if (s_mproc) {
             s_mproc->release_lifeline(process_iid);
@@ -649,6 +1169,15 @@ inline void Coordinator::collect_known_process_candidates_unlocked(
     std::vector<instance_id_type>& candidates)
 {
     candidates.clear();
+    std::unordered_set<instance_id_type> external_invitation_processes;
+    {
+        std::lock_guard<mutex> invitation_lock(m_external_process_invitations_mutex);
+        external_invitation_processes.reserve(m_external_process_invitations.size());
+        for (const auto& entry : m_external_process_invitations) {
+            external_invitation_processes.insert(entry.first);
+        }
+    }
+
     // Snapshot known processes from the registry and initialization tracking.
     // Processes that have never registered any transceivers are not represented
     // here and therefore do not participate in coordinated draining.
@@ -684,6 +1213,9 @@ inline void Coordinator::collect_known_process_candidates_unlocked(
     if (s_mproc) {
         Dispatch_shared_lock readers_lock(s_mproc->m_readers_mutex);
         for (const auto& entry : s_mproc->m_readers) {
+            if (external_invitation_processes.count(entry.first) != 0) {
+                continue;
+            }
             candidates.push_back(entry.first);
         }
     }
@@ -853,14 +1385,29 @@ instance_id_type Coordinator::make_process_group(
         return invalid_instance_id;
     }
 
-    m_groups[name].set(member_process_ids);
-    auto ret = m_groups[name].m_instance_id;
+    auto [group_it, inserted] = m_groups.try_emplace(name);
+    (void)inserted;
+    group_it->second.set(member_process_ids);
+    auto ret = group_it->second.m_instance_id;
 
     for (auto& e : member_process_ids) {
         m_groups_of_process[e].insert(ret);
     }
 
-    m_groups[name].assign_name(name);
+    if (!publish_process_group(group_it->second, name)) {
+        for (auto& e : member_process_ids) {
+            auto process_groups_it = m_groups_of_process.find(e);
+            if (process_groups_it != m_groups_of_process.end()) {
+                process_groups_it->second.erase(ret);
+                if (process_groups_it->second.empty()) {
+                    m_groups_of_process.erase(process_groups_it);
+                }
+            }
+        }
+        m_groups.erase(group_it);
+        return invalid_instance_id;
+    }
+
     return ret;
 }
 
@@ -978,6 +1525,13 @@ void Coordinator::enable_recovery(instance_id_type piid)
 {
     // enable crash recovery for the calling process
     assert(is_process(piid));
+    if (m_external_attached_processes.count(piid) != 0) {
+        Log_stream(log_level::warning)
+            << "Recovery is not available for externally attached process "
+            << static_cast<unsigned long long>(piid)
+            << " because Sintra does not have a recovery launch command for it.\n";
+        return;
+    }
     m_requested_recovery.insert(piid);
 }
 
@@ -1036,8 +1590,15 @@ void Coordinator::recover_if_required(const Crash_info& info)
         if (spawned->exchange(true)) {
             return;
         }
-        auto& s = s_mproc->m_cached_spawns[info.process_iid];
-        s_mproc->spawn_swarm_process(s);
+        auto spawn_it = s_mproc->m_cached_spawns.find(info.process_iid);
+        if (spawn_it == s_mproc->m_cached_spawns.end()) {
+            Log_stream(log_level::warning)
+                << "Recovery skipped for process "
+                << static_cast<unsigned long long>(info.process_iid)
+                << " because no recovery launch command is available.\n";
+            return;
+        }
+        s_mproc->spawn_swarm_process(spawn_it->second);
     };
 
     if (!runner) {
@@ -1080,6 +1641,23 @@ inline
 void Coordinator::begin_shutdown()
 {
     m_shutdown.store(true, std::memory_order_release);
+    cancel_all_external_process_invitations();
+
+    bool changed = false;
+    {
+        lock_guard<mutex> publish_lock(m_publish_mutex);
+        for (auto process_iid : m_external_attached_processes) {
+            size_t draining_slot = 0;
+            if (draining_slot_of_index(get_process_index(process_iid), draining_slot)) {
+                m_draining_process_states[draining_slot] = 1;
+                changed = true;
+            }
+        }
+    }
+
+    if (changed) {
+        note_draining_state_change();
+    }
 }
 
 inline

@@ -48,6 +48,7 @@ namespace detail {
         enable_recovery,
         begin_process_draining,
         join_swarm,
+        claim_external_process_invitation,
 
         // EXPLICITLY DEFINED SIGNALS
         //instance_invalidated, // sent by Transceiver on destruction
@@ -328,6 +329,20 @@ bool is_process(instance_id_type iid)
     return di.transceiver == 1;
 }
 
+namespace detail {
+
+constexpr
+bool is_valid_process_instance_id(instance_id_type iid)
+{
+    const auto di = decompose_instance(iid);
+    return
+        di.process     > 0 &&
+        di.process     <= max_process_index &&
+        di.transceiver == 1;
+}
+
+} // namespace detail
+
 
 inline
 instance_id_type process_of(instance_id_type iid)
@@ -340,5 +355,3 @@ instance_id_type process_of(instance_id_type iid)
 
 
 }
-
-

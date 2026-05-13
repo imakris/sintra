@@ -275,6 +275,50 @@ Compiled tests:
 - [`tests/join_swarm_midflight_test.cpp`](../tests/join_swarm_midflight_test.cpp)
 - [`tests/join_swarm_failure_test.cpp`](../tests/join_swarm_failure_test.cpp)
 
+### `sintra::create_external_process_invitation`
+
+Relevant shape:
+
+```cpp
+struct External_process_invitation_options
+{
+    instance_id_type           process_instance_id = invalid_instance_id;
+    std::chrono::milliseconds  timeout{std::chrono::seconds(30)};
+};
+
+struct External_process_invitation
+{
+    bool valid() const;
+    explicit operator bool() const;
+    std::vector<std::string> sintra_args() const;
+};
+
+External_process_invitation create_external_process_invitation(
+    const External_process_invitation_options& options = {});
+
+bool cancel_external_process_invitation(
+    instance_id_type process_instance_id);
+
+bool cancel_external_process_invitation(
+    const External_process_invitation& invitation);
+```
+
+External process invitations let the coordinator pre-admit a process that will
+be launched by application code, a shell, a debugger, or another supervisor.
+The coordinator reserves the process id, starts reader state, records a
+single-use token, and returns the Sintra arguments that the external process
+passes to normal `sintra::init(argc, argv)`.
+
+The token is sensitive and should not be logged. Pending invitations expire or
+can be canceled. Canceling with an `External_process_invitation` checks the
+token as well as the process id, so an older invitation object cannot cancel a
+newer pending invitation that reused the same explicit id. Accepted external
+processes can call `sintra::leave()` when they should depart while the swarm
+keeps running.
+
+Compiled test:
+- [`tests/external_process_invitation_test.cpp`](../tests/external_process_invitation_test.cpp)
+
 ### `sintra::process_index`
 
 Signature:
@@ -995,6 +1039,7 @@ sources.
 | Async RPC with completed/timeout branches and `abandon()` | [`tests/rpc_async_lifecycle_test.cpp`](../tests/rpc_async_lifecycle_test.cpp) |
 | Fire-and-forget unicast | [`example/sintra/sintra_example_6_unicast_send_to.cpp`](../example/sintra/sintra_example_6_unicast_send_to.cpp) |
 | Spawn and wait for a process | [`tests/spawn_wait_test.cpp`](../tests/spawn_wait_test.cpp) |
+| Admit a manually launched process | [`tests/external_process_invitation_test.cpp`](../tests/external_process_invitation_test.cpp) |
 | Collective shutdown | [`example/sintra/sintra_example_1_ping_pong_multi.cpp`](../example/sintra/sintra_example_1_ping_pong_multi.cpp) |
 | Coordinator shutdown hook | [`tests/shutdown_options_test.cpp`](../tests/shutdown_options_test.cpp) |
 | One process leaves while peers continue | [`tests/leave_lifecycle_test.cpp`](../tests/leave_lifecycle_test.cpp) |
@@ -1013,6 +1058,7 @@ sources.
 | Updating shared state from handlers without synchronization. | Protect shared state with normal C++ synchronization. |
 | Calling `shutdown()` in only one participant while peers continue. | Use `leave()` for unilateral departure, or have all finishing participants call `shutdown()`. |
 | Using `leave()` from a process that owns descendants expected to continue. | Perform an application-level ownership handoff before departure. |
+| Manually launching a process with only `--swarm_id`, `--instance_id`, and `--coordinator_id`. | Create an external process invitation and pass its `sintra_args()` output. |
 | Reusing `_sintra_` barrier names. | Use application-owned barrier names. |
 | Mixing barrier modes on one barrier round. | Make every participant use the same mode. |
 | Assuming a delivery fence means peer handlers finished. | Use `processing_fence_t` when side effects must be complete. |
@@ -1061,13 +1107,17 @@ sources.
 | `sintra::any_remote` | [Targeting and IDs](#targeting-and-ids) |
 | `sintra::barrier` | [Barriers and Fences](#barriers-and-fences) |
 | `sintra::barrier_completed` | [Barriers and Fences](#barriers-and-fences) |
+| `sintra::cancel_external_process_invitation` | [Initialization and Process Topology](#initialization-and-process-topology) |
 | `sintra::compose_instance` | [Targeting and IDs](#targeting-and-ids) |
 | `sintra::console` | [Errors and Diagnostics](#errors-and-diagnostics) |
+| `sintra::create_external_process_invitation` | [Initialization and Process Topology](#initialization-and-process-topology) |
 | `sintra::deactivate_all_slots` | [Publish/Subscribe](#publishsubscribe) |
 | `sintra::decompose_instance` | [Targeting and IDs](#targeting-and-ids) |
 | `sintra::delivery_fence_t` | [Barriers and Fences](#barriers-and-fences) |
 | `sintra::disable_debug_pause_for_current_process` | [Initialization and Process Topology](#initialization-and-process-topology) |
 | `sintra::enable_recovery` | [Recovery and Lifecycle Hooks](#recovery-and-lifecycle-hooks) |
+| `sintra::External_process_invitation` | [Initialization and Process Topology](#initialization-and-process-topology) |
+| `sintra::External_process_invitation_options` | [Initialization and Process Topology](#initialization-and-process-topology) |
 | `sintra::get_process_index` | [Targeting and IDs](#targeting-and-ids) |
 | `sintra::get_ring_configurations` | [Direct Ring Helpers](#direct-ring-helpers) |
 | `sintra::get_log_callback` | [Errors and Diagnostics](#errors-and-diagnostics) |

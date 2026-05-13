@@ -142,6 +142,15 @@ inline int32_t s_branch_index = -1;
 inline uint32_t s_recovery_occurrence = 0;
 
 
+namespace detail {
+
+inline constexpr const char* k_external_attach_token_arg      = "--external_attach_token";
+inline constexpr const char* k_external_attach_occurrence_arg = "--external_attach_occurrence";
+inline constexpr auto        k_external_attach_claim_timeout  = std::chrono::seconds(5);
+
+} // namespace detail
+
+
 
 template <typename T>
 sintra::type_id_type get_type_id();
@@ -259,6 +268,15 @@ struct Managed_process: Derived_transceiver<Managed_process>
 
     void wait_until_all_external_readers_are_done(int extra_allowed_readers = 0);
 
+    bool prepare_process_reader(
+        instance_id_type   process_instance_id,
+        uint32_t           occurrence,
+        bool               replace_existing);
+    void remove_process_reader(
+        instance_id_type   process_instance_id,
+        double             waiting_period = 1.0);
+    bool has_process_reader(instance_id_type process_instance_id) const;
+
     void flush(instance_id_type process_id, sequence_counter_type flush_sequence);
     void run_after_current_handler(function<void()> task);
 
@@ -360,4 +378,3 @@ struct Managed_process: Derived_transceiver<Managed_process>
 
 
 } // namespace sintra
-
