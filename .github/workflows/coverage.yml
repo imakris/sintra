@@ -81,7 +81,7 @@ jobs:
         working-directory: tests
         run: |
           # Continue even on test failure to collect coverage data
-          python3 run_tests.py --timeout 120 --build-dir ../${{ env.BUILD_DIR }} --config Debug || true
+          python3 run_tests.py --timeout 120 --build-dir ../${{ env.BUILD_DIR }} --config Debug,Release || true
 
       # GCC: capture executed lines, then keep only library headers
       - name: Coverage (lcov/gcc)

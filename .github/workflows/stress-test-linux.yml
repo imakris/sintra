@@ -211,7 +211,7 @@ jobs:
         shell: bash
         run: |
           cd tests
-          python run_tests.py --timeout 30 --build-dir ../build --config Release
+          python run_tests.py --timeout 30 --build-dir ../build --config Debug,Release
 
       - name: Mark status success
         if: success()

@@ -13,7 +13,7 @@ Usage:
 Options:
     --timeout SECONDS               Timeout per test run in seconds (default: 5)
     --build-dir PATH                Path to build directory (default: ../build-ninja2)
-    --config CONFIG                 Build configuration Debug/Release (default: Debug)
+    --config CONFIG                 Build configuration set (default: Debug,Release)
     --verbose                       Show detailed output for each test run
     --preserve-stalled-processes    Keep stalled processes running for debugging (default: terminate)
     --iteration-multiplier VALUE    Scale active_tests.txt repetition counts (default: 1)
@@ -61,6 +61,7 @@ from tests.runner.utils import (
 print = partial(__import__("builtins").print, file=sys.stderr, flush=True)
 
 _ITERATION_MULTIPLIER_ENV = "SINTRA_TEST_ITERATION_MULTIPLIER"
+_VALID_CONFIGURATIONS = ("debug", "release")
 
 
 def _instrumentation_print(message: str) -> None:
@@ -69,6 +70,31 @@ def _instrumentation_print(message: str) -> None:
     sys.stdout.write(f"{message}\n")
     sys.stdout.flush()
     time.sleep(0.001)
+
+
+def _parse_requested_configurations(config: str) -> List[str]:
+    normalized = config.strip()
+    if normalized.lower() in ("all", "both"):
+        return list(_VALID_CONFIGURATIONS)
+
+    requested: List[str] = []
+    for raw_part in normalized.split(","):
+        part = raw_part.strip().lower()
+        if not part:
+            continue
+        if part not in _VALID_CONFIGURATIONS:
+            valid = ", ".join(c.capitalize() for c in _VALID_CONFIGURATIONS)
+            raise ValueError(
+                f"invalid configuration '{raw_part.strip()}'; expected {valid}, "
+                "or a comma-separated list such as Debug,Release"
+            )
+        if part not in requested:
+            requested.append(part)
+
+    if not requested:
+        raise ValueError("at least one configuration must be requested")
+
+    return requested
 
 try:
     import signal as _signal_module
@@ -303,15 +329,19 @@ class TestInvocation:
 class TestRunner:
     """Manages test execution with timeout and repetition"""
 
-    def __init__(self, build_dir: Path, config: str, timeout: float, verbose: bool,
+    def __init__(self, build_dir: Path, config: Sequence[str] | str, timeout: float, verbose: bool,
                  preserve_on_timeout: bool = False):
         self.build_dir = build_dir
-        self.config = config
+        if isinstance(config, str):
+            self.configurations = _parse_requested_configurations(config)
+        else:
+            self.configurations = _parse_requested_configurations(",".join(config))
+        self.config = ",".join(c.capitalize() for c in self.configurations)
         self.timeout = timeout
         self.verbose = verbose
         self.preserve_on_timeout = preserve_on_timeout
         self.platform: PlatformSupport = get_platform_support(verbose=verbose)
-        sanitized_config = ''.join(c.lower() if c.isalnum() else '_' for c in config)
+        sanitized_config = ''.join(c.lower() if c.isalnum() else '_' for c in self.config)
         timestamp_ms = int(time.time() * 1000)
         scratch_dir_name = f".sintra-test-scratch-{sanitized_config}-{timestamp_ms}-{os.getpid()}"
         self._scratch_base = (self.build_dir / scratch_dir_name).resolve()
@@ -339,7 +369,8 @@ class TestRunner:
         if os.name == "nt":
             symbol_paths: List[str] = []
             # Per-configuration test binaries (e.g., build/tests/Release).
-            symbol_paths.append(str(self.build_dir / "tests" / self.config))
+            for config_name in self.configurations:
+                symbol_paths.append(str(self.build_dir / "tests" / config_name.capitalize()))
             # Flat tests/ directory for single-config generators.
             symbol_paths.append(str(self.build_dir / "tests"))
             # Root build directory as a fallback.
@@ -373,14 +404,19 @@ class TestRunner:
             collect_descendant_pids=self._collect_descendant_pids,
         )
 
-        # Determine test directory - check both with and without config subdirectory
-        test_dir_with_config = build_dir / 'tests' / config
+        # Determine test directories - check both multi-config subdirectories
+        # and the flat tests/ directory used by single-config generators.
+        test_dirs_with_config = [
+            build_dir / 'tests' / config_name.capitalize()
+            for config_name in self.configurations
+        ]
         test_dir_simple = build_dir / 'tests'
 
-        if test_dir_with_config.exists():
-            self.test_dir = test_dir_with_config
+        existing_config_dirs = [test_dir for test_dir in test_dirs_with_config if test_dir.exists()]
+        if existing_config_dirs:
+            self.test_dirs = existing_config_dirs
         else:
-            self.test_dir = test_dir_simple
+            self.test_dirs = [test_dir_simple]
 
         # Kill any existing sintra processes for a clean start
         self._kill_all_sintra_processes()
@@ -725,50 +761,52 @@ class TestRunner:
             - test_suites: Dict mapping config name to list of TestInvocations
             - active_tests: Dict mapping test paths to iteration counts
         """
-        if not self.test_dir.exists():
-            print(f"{Color.RED}Test directory not found: {self.test_dir}{Color.RESET}")
-            return {}, active_tests
-
         if not active_tests:
             print(f"{Color.YELLOW}No tests specified in active_tests.txt{Color.RESET}")
             return {}, active_tests
 
-        # Test binaries are suffixed by suite configuration. The runner should
-        # execute only the suite requested by --config.
-        requested_config = self.config.lower()
-        configurations = [requested_config]
+        # Test binaries are suffixed by suite configuration. The runner executes
+        # every suite requested by --config, e.g. Debug,Release.
+        configurations = self.configurations
 
         # Map to store discovered test executables by base name
         # Key: base test name (e.g., "ping_pong_test")
         # Value: dict of {config: Path}
         available_tests: Dict[str, Dict[str, Path]] = {}
 
-        try:
-            directory_entries = sorted(self.test_dir.iterdir())
-        except OSError as exc:
-            print(f"{Color.RED}Failed to inspect test directory {self.test_dir}: {exc}{Color.RESET}")
+        existing_test_dirs = [test_dir for test_dir in self.test_dirs if test_dir.exists()]
+        if not existing_test_dirs:
+            searched_dirs = ", ".join(str(test_dir) for test_dir in self.test_dirs)
+            print(f"{Color.RED}Test directory not found: {searched_dirs}{Color.RESET}")
             return {}, active_tests
 
         # Scan for available test binaries
-        for entry in directory_entries:
-            if not (entry.is_file() or entry.is_symlink()):
-                continue
+        for test_dir in existing_test_dirs:
+            try:
+                directory_entries = sorted(test_dir.iterdir())
+            except OSError as exc:
+                print(f"{Color.RED}Failed to inspect test directory {test_dir}: {exc}{Color.RESET}")
+                return {}, active_tests
 
-            normalized_name = self.platform.adjust_executable_name(entry.name)
+            for entry in directory_entries:
+                if not (entry.is_file() or entry.is_symlink()):
+                    continue
 
-            # Check if this matches a test with config suffix
-            for config in configurations:
-                suffix = f"_{config}"
-                if normalized_name.endswith(suffix):
-                    base_name = normalized_name[:-len(suffix)]
-                    # Remove "sintra_" prefix if present
-                    if base_name.startswith("sintra_"):
-                        base_name = base_name[len("sintra_"):]
+                normalized_name = self.platform.adjust_executable_name(entry.name)
 
-                    if base_name not in available_tests:
-                        available_tests[base_name] = {}
-                    available_tests[base_name][config] = entry
-                    break
+                # Check if this matches a test with config suffix
+                for config in configurations:
+                    suffix = f"_{config}"
+                    if normalized_name.endswith(suffix):
+                        base_name = normalized_name[:-len(suffix)]
+                        # Remove "sintra_" prefix if present
+                        if base_name.startswith("sintra_"):
+                            base_name = base_name[len("sintra_"):]
+
+                        if base_name not in available_tests:
+                            available_tests[base_name] = {}
+                        available_tests[base_name][config] = entry
+                        break
 
         # Now match active_tests entries with available binaries
         discovered_tests: Dict[str, List[TestInvocation]] = {
@@ -801,7 +839,11 @@ class TestRunner:
         test_suites = {}
         for config, tests in discovered_tests.items():
             if not tests:
-                continue
+                print(
+                    f"{Color.RED}No test binaries found for requested "
+                    f"configuration {config.capitalize()}{Color.RESET}"
+                )
+                return {}, active_tests
             ordered = sorted(
                 enumerate(tests),
                 key=lambda item: (
@@ -2354,9 +2396,9 @@ def main():
                         help='Timeout per test run in seconds (default: 5)')
     parser.add_argument('--build-dir', type=str, default='../build-ninja2',
                         help='Path to build directory (default: ../build-ninja2)')
-    parser.add_argument('--config', type=str, default='Debug',
-                        choices=['Debug', 'Release'],
-                        help='Build configuration (default: Debug)')
+    parser.add_argument('--config', type=str, default='Debug,Release',
+                        help='Build configuration set: Debug, Release, or '
+                             'Debug,Release (default: Debug,Release)')
     parser.add_argument('--verbose', action='store_true',
                         help='Show detailed output for each test run')
     parser.add_argument('--preserve-stalled-processes', action='store_true',
@@ -2371,6 +2413,12 @@ def main():
                              f'Defaults to {_ITERATION_MULTIPLIER_ENV} or 1.')
 
     args = parser.parse_args()
+    try:
+        requested_configurations = _parse_requested_configurations(args.config)
+    except ValueError as exc:
+        print(f"{Color.RED}Error: {exc}{Color.RESET}")
+        return 1
+
     time_budget = args.time_budget
     if args.iteration_multiplier is not None:
         iteration_multiplier = args.iteration_multiplier
@@ -2423,7 +2471,10 @@ def main():
     compiler_metadata = collect_compiler_metadata(build_dir)
 
     print(f"Build directory: {build_dir}")
-    print(f"Requested configuration root: {args.config}")
+    print(
+        "Requested configurations: "
+        + ", ".join(config.capitalize() for config in requested_configurations)
+    )
     if compiler_metadata and compiler_metadata.get("generator"):
         print(f"CMake generator: {compiler_metadata['generator']}")
     print(f"Timeout per test: {args.timeout}s")
@@ -2434,7 +2485,12 @@ def main():
     print("=" * 70)
 
     preserve_on_timeout = args.preserve_stalled_processes
-    runner = TestRunner(build_dir, args.config, args.timeout, args.verbose, preserve_on_timeout)
+    runner = TestRunner(
+        build_dir,
+        requested_configurations,
+        args.timeout,
+        args.verbose,
+        preserve_on_timeout)
     try:
         test_suites, active_tests = runner.find_test_suites(active_tests)
 

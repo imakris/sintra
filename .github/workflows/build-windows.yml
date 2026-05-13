@@ -164,7 +164,9 @@ jobs:
         run: cmake -B build -S . -DCMAKE_BUILD_TYPE=Release ${{ steps.flags.outputs.CMAKE_FLAGS }}
 
       - name: Build
-        run: cmake --build build --config Release --parallel ${{ env.BUILD_JOBS }}
+        run: |
+          cmake --build build --config Debug --parallel ${{ env.BUILD_JOBS }}
+          cmake --build build --config Release --parallel ${{ env.BUILD_JOBS }}
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4

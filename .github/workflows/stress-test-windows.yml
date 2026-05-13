@@ -232,7 +232,7 @@ jobs:
           SINTRA_PRESERVE_SCRATCH: "1"
         run: |
           cd tests
-          python run_tests.py --timeout 30 --build-dir ../build --config Release
+          python run_tests.py --timeout 30 --build-dir ../build --config Debug,Release
 
       - name: List preserved scratch (failure only)
         if: failure()
