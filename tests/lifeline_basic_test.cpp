@@ -465,7 +465,7 @@ int run_child(
     const std::filesystem::path&   dir,
     const std::string&             test_case,
     int                            argc,
-    char* argv[])
+    char*                          argv[])
 {
     sintra::init(argc, argv);
 
@@ -520,7 +520,7 @@ int run_owner(
     const std::filesystem::path&   dir,
     const std::string&             test_case,
     int                            argc,
-    char* argv[])
+    char*                          argv[])
 {
     sintra::init(argc, argv);
 

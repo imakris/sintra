@@ -68,7 +68,7 @@ int coordinator_process()
     bool success = true;
     std::string failure_reason;
     std::size_t iterations_completed = 0;
-    bool        aborted              = false;
+    bool aborted = false;
 
     activate_slot([&](const iteration_marker_t& marker) {
         std::unique_lock<std::mutex> lock(state.mutex);

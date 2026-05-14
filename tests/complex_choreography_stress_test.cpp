@@ -54,8 +54,9 @@
 
 namespace {
 
-constexpr const char*        k_group_name       = "_sintra_external_processes";
-constexpr int                k_worker_count     = 4;
+constexpr const char* k_group_name   = "_sintra_external_processes";
+constexpr int         k_worker_count = 4;
+
 constexpr std::array<int, 4> k_rounds_per_phase = {3, 5, 4, 6};
 
 struct phase_plan_t
@@ -804,11 +805,10 @@ std::vector<inspector_entry_t> read_inspector_entries(const std::filesystem::pat
 
 bool validate_reports(const std::filesystem::path& dir)
 {
-    const auto aggregator_path = dir / "aggregator_report.txt";
-    const auto inspector_path  = dir / "inspector_report.txt";
-
-    bool aggregator_ok     = false;
-    int  aggregator_errors = 0;
+    const auto aggregator_path   = dir / "aggregator_report.txt";
+    const auto inspector_path    = dir / "inspector_report.txt";
+    bool       aggregator_ok     = false;
+    int        aggregator_errors = 0;
     const auto aggregator_results =
         read_aggregator_results(aggregator_path, aggregator_ok, aggregator_errors);
 

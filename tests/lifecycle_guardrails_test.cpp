@@ -175,7 +175,7 @@ bool test_leave_without_runtime_returns_false()
 {
     reset_shutdown_state();
 
-    const bool result = sintra::leave();
+    const bool result      = sintra::leave();
     const auto state_after =
         sintra::detail::s_shutdown_state.load(std::memory_order_acquire);
 
@@ -191,7 +191,7 @@ bool test_shutdown_without_runtime_returns_false()
 {
     reset_shutdown_state();
 
-    const bool result = sintra::shutdown();
+    const bool result      = sintra::shutdown();
     const auto state_after =
         sintra::detail::s_shutdown_state.load(std::memory_order_acquire);
 

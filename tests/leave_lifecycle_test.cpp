@@ -61,7 +61,7 @@ int leave_worker()
 
     try {
         const bool leave_result = sintra::leave();
-        const auto state_after =
+        const auto state_after  =
             sintra::detail::s_shutdown_state.load(std::memory_order_acquire);
         if (leave_result &&
             state_after == sintra::detail::shutdown_protocol_state::idle)

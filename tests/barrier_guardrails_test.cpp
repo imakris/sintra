@@ -109,7 +109,7 @@ int main(int argc, char* argv[])
             const auto rendezvous_result    = read_text(shared_dir / "rendezvous_worker.txt");
             const auto reserved_name_result = read_text(shared_dir / "reserved_name_result.txt");
 
-            const bool reserved_name_ok = (reserved_name_result == "ok");
+            const bool reserved_name_ok   = (reserved_name_result == "ok");
             const bool mixed_mode_flagged =
                 (processing_result.rfind("logic_error:Barrier mode mismatch", 0) == 0) ||
                 (rendezvous_result.rfind("logic_error:Barrier mode mismatch", 0) == 0);

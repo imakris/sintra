@@ -32,6 +32,7 @@ constexpr const char* k_role_helper    = "helper";
 constexpr const char* k_role_reject    = "reject";
 constexpr const char* k_service_name   = "external_attach_service";
 constexpr const char* k_failure_prefix = "external_process_invitation_test: ";
+
 constexpr const char* k_external_attach_rejected_message =
     "Sintra external process invitation was rejected.";
 

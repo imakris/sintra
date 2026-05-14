@@ -57,9 +57,8 @@ inline bool has_argv_flag(int argc, char* argv[], std::string_view flag)
         if (view == flag) {
             return true;
         }
-        if (view.size()         >  flag.size() + 1 &&
-            view.rfind(flag, 0) == 0               &&
-            view[flag.size()]   == '=')
+        if (view.size() >  flag.size() + 1 && view.rfind(flag, 0) == 0 &&
+            view[flag.size()] == '=')
         {
             return true;
         }
@@ -69,7 +68,7 @@ inline bool has_argv_flag(int argc, char* argv[], std::string_view flag)
 
 inline std::string get_argv_value(
     int                argc,
-    char* argv[],
+    char*              argv[],
     std::string_view   flag,
     std::string_view   default_value = {})
 {
@@ -88,9 +87,8 @@ inline std::string get_argv_value(
             }
             break;
         }
-        if (view.size()         >  flag.size() + 1 &&
-            view.rfind(flag, 0) == 0               &&
-            view[flag.size()]   == '=')
+        if (view.size() >  flag.size() + 1 && view.rfind(flag, 0) == 0 &&
+            view[flag.size()] == '=')
         {
             return std::string(view.substr(flag.size() + 1));
         }
@@ -254,7 +252,7 @@ template <typename Setup,
           typename Verifier>
 int run_multi_process_test_raw(
     int                                        argc,
-    char* argv[],
+    char*                                      argv[],
     const char*                                env_var,
     const char*                                test_name,
     std::vector<sintra::Process_descriptor>    processes,
@@ -312,7 +310,7 @@ template <typename Setup,
           typename Verifier>
 int run_multi_process_shutdown_test(
     int                                        argc,
-    char* argv[],
+    char*                                      argv[],
     const char*                                env_var,
     const char*                                test_name,
     std::vector<sintra::Process_descriptor>    processes,
@@ -369,7 +367,7 @@ template <typename Coordinator_action,
           typename Verifier>
 int run_multi_process_shutdown_test(
     int                                        argc,
-    char* argv[],
+    char*                                      argv[],
     const char*                                env_var,
     const char*                                test_name,
     std::vector<sintra::Process_descriptor>    processes,
@@ -389,7 +387,7 @@ int run_multi_process_shutdown_test(
 template <typename Verifier>
 int run_multi_process_shutdown_test(
     int                                        argc,
-    char* argv[],
+    char*                                      argv[],
     const char*                                env_var,
     const char*                                test_name,
     std::vector<sintra::Process_descriptor>    processes,
@@ -415,7 +413,7 @@ template <typename Setup,
           typename Verifier>
 int run_multi_process_shutdown_test(
     int                                        argc,
-    char* argv[],
+    char*                                      argv[],
     const char*                                env_var,
     const char*                                test_name,
     std::vector<sintra::Process_descriptor>    processes,
@@ -473,7 +471,7 @@ template <typename Coordinator_action,
           typename Verifier>
 int run_multi_process_shutdown_test(
     int                                        argc,
-    char* argv[],
+    char*                                      argv[],
     const char*                                env_var,
     const char*                                test_name,
     std::vector<sintra::Process_descriptor>    processes,
@@ -504,7 +502,7 @@ template <typename Setup,
           typename Verifier>
 int run_multi_process_test(
     int                                        argc,
-    char* argv[],
+    char*                                      argv[],
     const char*                                env_var,
     const char*                                test_name,
     std::vector<sintra::Process_descriptor>    processes,
@@ -529,7 +527,7 @@ template <typename Coordinator_action,
           typename Verifier>
 int run_multi_process_test(
     int                                        argc,
-    char* argv[],
+    char*                                      argv[],
     const char*                                env_var,
     const char*                                test_name,
     std::vector<sintra::Process_descriptor>    processes,
@@ -551,7 +549,7 @@ int run_multi_process_test(
 template <typename Verifier>
 int run_multi_process_test(
     int                                        argc,
-    char* argv[],
+    char*                                      argv[],
     const char*                                env_var,
     const char*                                test_name,
     std::vector<sintra::Process_descriptor>    processes,

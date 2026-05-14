@@ -150,9 +150,9 @@ private:
 
     struct External_process_invitation_record
     {
-        std::string                           token;
-        std::chrono::steady_clock::time_point expires_at;
-        External_process_invitation_state     state = External_process_invitation_state::pending;
+        std::string                            token;
+        std::chrono::steady_clock::time_point  expires_at;
+        External_process_invitation_state      state = External_process_invitation_state::pending;
     };
 
     Coordinator();
@@ -272,7 +272,7 @@ public:
     // Configure the drain timeout for wait_for_all_draining(). A value of 0
     // means wait indefinitely. Default is 20 seconds.
     void set_drain_timeout(
-        std::chrono::seconds                   timeout);
+        std::chrono::seconds   timeout);
 
     bool reserve_external_process_invitation(
         instance_id_type                       process_iid,
@@ -281,18 +281,18 @@ public:
         uint32_t&                              occurrence_out);
 
     bool cancel_external_process_invitation(
-        instance_id_type                       process_iid);
+        instance_id_type       process_iid);
 
     bool cancel_external_process_invitation(
-        instance_id_type                       process_iid,
-        const string&                          token);
+        instance_id_type       process_iid,
+        const string&          token);
 
     bool external_process_invitation_exists(
-        instance_id_type                       process_iid);
+        instance_id_type       process_iid);
 
     bool group_has_non_external_peer(
-        const string&                          group_name,
-        instance_id_type                       self_process_iid);
+        const string&          group_name,
+        instance_id_type       self_process_iid);
 
     // Blocks until all processes identified by process_group_id have called the function.
     // num_absences may be used by a caller to specify that it is aware that other callers will
@@ -382,22 +382,22 @@ public:
     // Remove a process from init tracking; return delayed publications now ready
     // to emit once startup coordination has finished.
     std::vector<Pending_instance_publication> finalize_initialization_tracking(
-        instance_id_type                       process_iid);
+        instance_id_type   process_iid);
 
     std::vector<Pending_completion> collect_pending_barrier_completions(
-        instance_id_type                       process_iid,
-        bool                                   remove_process);
+        instance_id_type   process_iid,
+        bool               remove_process);
 
     void emit_pending_barrier_completions(
         const std::vector<Pending_completion>& pending_completions);
 
     void collect_and_schedule_barrier_completions(
-        instance_id_type                       process_iid,
-        bool                                   remove_process);
+        instance_id_type   process_iid,
+        bool               remove_process);
 
     bool draining_slot_of_index(
-        uint64_t                               draining_index,
-        size_t&                                slot) const;
+        uint64_t           draining_index,
+        size_t&            slot) const;
 
     // Draining coordination -------------------------------------------------
     //

@@ -32,7 +32,7 @@ int main(int argc, char* argv[])
 {
     std::set_terminate(sintra::test::custom_terminate_handler);
 
-    const bool is_spawned = sintra::test::has_branch_flag(argc, argv);
+    const bool        is_spawned       = sintra::test::has_branch_flag(argc, argv);
     const std::string branch_index_arg =
         sintra::test::get_argv_value(argc, argv, "--branch_index");
 

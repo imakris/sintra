@@ -17,8 +17,7 @@ void test_aligned_capacity()
 
     const std::size_t page_size = sintra::system_page_size();
     const std::size_t requested = 1;
-
-    const std::size_t aligned = sintra::aligned_capacity<element_t>(requested);
+    const std::size_t aligned   = sintra::aligned_capacity<element_t>(requested);
     sintra::test::require_true(aligned >= requested,
         k_failure_prefix,
         "aligned_capacity should not reduce the requested size");

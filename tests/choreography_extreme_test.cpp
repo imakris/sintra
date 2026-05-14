@@ -212,7 +212,7 @@ int process_conductor()
 
     sintra::activate_slot([&](const phase_ready_t& msg) {
         std::lock_guard<std::mutex> lk(ready_mutex);
-        if (msg.phase            == ready_phase && msg.participant_slot >= 0 &&
+        if (msg.phase == ready_phase && msg.participant_slot >= 0 &&
             msg.participant_slot <  static_cast<int>(ready_flags.size()))
         {
             if (!ready_flags[msg.participant_slot]) {
@@ -797,9 +797,9 @@ bool verify_aggregator_results(const std::filesystem::path& shared_dir)
         if (tokens.size() != 12) {
             return false;
         }
-        if (tokens[0] != "phase"     || tokens[2]  != "expected" ||
-            tokens[4] != "observed"  || tokens[6]  != "ok"       ||
-            tokens[8] != "chaos"     || tokens[10] != "rounds")
+        if (tokens[0] != "phase"    || tokens[ 2] != "expected" ||
+            tokens[4] != "observed" || tokens[ 6] != "ok"       ||
+            tokens[8] != "chaos"    || tokens[10] != "rounds")
         {
             return false;
         }
@@ -862,9 +862,9 @@ bool verify_conductor_summary(const std::filesystem::path& shared_dir)
             return false;
         }
 
-        if (tokens_phase[0] != "phase"       || tokens_phase[2]  != "expected" ||
-            tokens_phase[4] != "audit"       || tokens_phase[6]  != "ok"       ||
-            tokens_phase[8] != "sequential"  || tokens_phase[10] != "checkpoints")
+        if (tokens_phase[0] != "phase"      || tokens_phase[ 2] != "expected" ||
+            tokens_phase[4] != "audit"      || tokens_phase[ 6] != "ok"       ||
+            tokens_phase[8] != "sequential" || tokens_phase[10] != "checkpoints")
         {
             return false;
         }

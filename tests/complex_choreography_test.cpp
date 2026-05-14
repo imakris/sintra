@@ -446,7 +446,8 @@ int aggregator_process()
 
     auto micro_slot = [&](const micro_task_t& task) {
         std::lock_guard<std::mutex> lk(state_mutex);
-        if (task.round     != state.round || task.worker_id < 0 ||
+        if (task.round     != state.round ||
+            task.worker_id <  0           ||
             task.worker_id >= static_cast<int>(k_worker_count))
         {
             failure.store(true);
@@ -460,7 +461,8 @@ int aggregator_process()
 
     auto done_slot = [&](const worker_done_t& done) {
         std::lock_guard<std::mutex> lk(state_mutex);
-        if (done.round     != state.round || done.worker_id < 0 ||
+        if (done.round     != state.round ||
+            done.worker_id <  0           ||
             done.worker_id >= static_cast<int>(k_worker_count))
         {
             failure.store(true);
@@ -578,7 +580,8 @@ int verifier_process()
 
     auto validation_slot = [&](const validation_t& validation) {
         std::lock_guard<std::mutex> lk(state_mutex);
-        if (validation.round     != current_round || validation.worker_id < 0 ||
+        if (validation.round     != current_round ||
+            validation.worker_id <  0             ||
             validation.worker_id >= static_cast<int>(k_worker_count))
         {
             failure.store(true);

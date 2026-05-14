@@ -319,21 +319,10 @@ inline std::optional<run_marker_record_t> read_run_marker(const std::filesystem:
         auto value = line.substr(pos + 1);
 
         try {
-            if (key == "pid") {
-                record.pid = static_cast<uint32_t>(std::stoul(value));
-            }
-            else
-            if (key == "start_ns") {
-                record.start_stamp = std::stoull(value);
-            }
-            else
-            if (key == "created_ns") {
-                record.created_monotonic_ns = std::stoull(value);
-            }
-            else
-            if (key == "occurrence") {
-                record.recovery_occurrence = static_cast<uint32_t>(std::stoul(value));
-            }
+            if (key == "pid")        { record.pid = static_cast<uint32_t>(std::stoul(value)); } else
+            if (key == "start_ns")   { record.start_stamp = std::stoull(value);               } else
+            if (key == "created_ns") { record.created_monotonic_ns = std::stoull(value);      } else
+            if (key == "occurrence") { record.recovery_occurrence = static_cast<uint32_t>(std::stoul(value)); }
         }
         catch (...) {
             return std::nullopt;

@@ -30,10 +30,11 @@
 
 namespace {
 
-constexpr int         k_worker_count           = 4;
-constexpr int         k_iterations             = 6;
-constexpr int         k_stage_steps            = 5;
-constexpr int         k_final_steps            = 4;
+constexpr int k_worker_count = 4;
+constexpr int k_iterations   = 6;
+constexpr int k_stage_steps  = 5;
+constexpr int k_final_steps  = 4;
+
 constexpr const char* k_done_processed_barrier = "pathological-done-processed";
 constexpr const char* k_summary_ready_barrier  = "pathological-summary-ready";
 

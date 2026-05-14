@@ -474,8 +474,8 @@ void Process_message_reader::request_reader_function()
                         continue;
                     }
 
-                    const std::string reason = "RPC target is no longer available.";
-                    auto* placed_msg =
+                    const std::string reason     = "RPC target is no longer available.";
+                    auto*             placed_msg =
                         s_mproc->m_out_rep_c->write<Transceiver::exception>(
                             vb_size<Transceiver::exception>(reason),
                             reason);
@@ -508,8 +508,8 @@ void Process_message_reader::request_reader_function()
                                 << static_cast<unsigned long long>(m->message_type_id)
                                 << "; rejecting the request.\n";
 
-                            const std::string reason = "RPC function is not available.";
-                            auto* placed_msg =
+                            const std::string reason     = "RPC function is not available.";
+                            auto*             placed_msg =
                                 s_mproc->m_out_rep_c->write<Transceiver::exception>(
                                     vb_size<Transceiver::exception>(reason),
                                     reason);

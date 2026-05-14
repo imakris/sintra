@@ -268,8 +268,7 @@ int run_coordinator(const std::string& binary_path)
         return teardown_and_return(1);
     }
     if (!sintra::test::assert_true(child_proc_iid != sintra::process_of(s_mproc_id),
-            "[COORD] ",
-            "resolved child_iid must belong to a different process than the parent"))
+        "[COORD] ", "resolved child_iid must belong to a different process than the parent"))
     {
         return teardown_and_return(1);
     }
@@ -278,10 +277,8 @@ int run_coordinator(const std::string& binary_path)
     // process_of(iid) returns the Managed_process instance id for that
     // process; the named transceiver must have a different (non-process)
     // sub-id within the same process.
-    if (!sintra::test::assert_true(child_iid != child_proc_iid,
-            "[COORD] ",
-            "resolved child_iid must be the named Child_service transceiver, "
-            "not the child's Managed_process instance"))
+    if (!sintra::test::assert_true(child_iid != child_proc_iid, "[COORD] ",
+        "resolved child_iid must be the named Child_service transceiver, not the child's Managed_process instance"))
     {
         return teardown_and_return(1);
     }
@@ -298,9 +295,8 @@ int run_coordinator(const std::string& binary_path)
         return teardown_and_return(1);
     }
     std::fprintf(stderr, "[COORD] rpc_ping returned %d\n", ping_reply);
-    if (!sintra::test::assert_true(ping_reply == k_ping_value + 1,
-            "[COORD] ",
-            "rpc_ping reply must equal value+1 produced by the child handler"))
+    if (!sintra::test::assert_true(ping_reply == k_ping_value + 1, "[COORD] ",
+        "rpc_ping reply must equal value+1 produced by the child handler"))
     {
         return teardown_and_return(1);
     }

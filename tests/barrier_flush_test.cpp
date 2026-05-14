@@ -120,7 +120,7 @@ int coordinator_process()
 
     barrier("barrier-flush-ready");
 
-    bool           aborted           = false;
+    bool aborted = false;
     constexpr auto iteration_timeout = std::chrono::seconds(10);
 
     for (std::size_t iteration = 0; iteration < k_iterations; ++iteration) {

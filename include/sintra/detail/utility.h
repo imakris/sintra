@@ -107,10 +107,11 @@ size_t get_cache_line_size()
 {
 #ifdef _WIN32
 
-    size_t                                 line_size   = 0;
-    DWORD                                  buffer_size = 0;
-    DWORD                                  i           = 0;
-    SYSTEM_LOGICAL_PROCESSOR_INFORMATION * buffer      = 0;
+    size_t line_size   = 0;
+    DWORD  buffer_size = 0;
+    DWORD  i           = 0;
+
+    SYSTEM_LOGICAL_PROCESSOR_INFORMATION * buffer = 0;
 
     GetLogicalProcessorInformation(0, &buffer_size);
     buffer = (SYSTEM_LOGICAL_PROCESSOR_INFORMATION *)malloc(buffer_size);
@@ -776,13 +777,8 @@ bool spawn_detached_win32(const Spawn_detached_options& options)
             }
             if (si_ex.lpAttributeList) {
                 if (!update_proc_thread_attribute_list(
-                        si_ex.lpAttributeList,
-                        0,
-                        PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-                        inherited_handles.data(),
-                        inherited_handles.size() * sizeof(HANDLE),
-                        nullptr,
-                        nullptr))
+                        si_ex.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherited_handles.data(),
+                        inherited_handles.size() * sizeof(HANDLE), nullptr, nullptr))
                 {
                     delete_proc_thread_attribute_list(si_ex.lpAttributeList);
                     si_ex.lpAttributeList = nullptr;
@@ -883,7 +879,7 @@ bool spawn_detached_win32(const Spawn_detached_options& options)
         }
 
         const bool access_denied = (last_errno == EACCES) &&
-            (last_doserrno == ERROR_ACCESS_DENIED    ||
+            (last_doserrno == ERROR_ACCESS_DENIED     ||
              last_doserrno == ERROR_SHARING_VIOLATION ||
              last_doserrno == ERROR_LOCK_VIOLATION);
         const bool transient = (last_errno == EAGAIN) || access_denied;
@@ -1083,8 +1079,7 @@ bool spawn_detached_posix(const Spawn_detached_options& options)
     bool spawn_failed   = false;
     int  observed_errno = 0;
     auto failure_stage  = spawn_detached_debug_info_t::Stage::PARENT_READ_READY_STATUS;
-
-    int ready_status = 0;
+    int  ready_status   = 0;
     switch (read_int(&ready_status, &exec_errno)) {
         case Read_result::Value:
             break;

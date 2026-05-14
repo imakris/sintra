@@ -184,7 +184,8 @@ Transceiver::ensure_rpc_shutdown()
         m_accepting_rpc_calls = false;
         constexpr auto   shutdown_warning_interval  = std::chrono::seconds(5);
         constexpr size_t max_shutdown_warning_count = 6;
-        size_t           warning_count              = 0;
+
+        size_t warning_count = 0;
         while (m_active_rpc_calls != 0) {
             if (m_rpc_lifecycle_condition.wait_for(
                     lock, shutdown_warning_interval, [&]() { return m_active_rpc_calls == 0; }))
@@ -681,21 +682,10 @@ void Transceiver::finalize_rpc_write(
 {
     instance_id_type sender_iid = invalid_instance_id;
 
-    if (ref_obj) {
-        sender_iid = ref_obj->m_instance_id;
-    }
-    else
-    if (fallback_sender_iid != invalid_instance_id) {
-        sender_iid = fallback_sender_iid;
-    }
-    else
-    if (s_tl_current_message) {
-        sender_iid = s_tl_current_message->receiver_instance_id;
-    }
-    else
-    if (s_mproc) {
-        sender_iid = s_mproc->m_instance_id;
-    }
+    if (ref_obj)                                    { sender_iid = ref_obj->m_instance_id;                     } else
+    if (fallback_sender_iid != invalid_instance_id) { sender_iid = fallback_sender_iid;                        } else
+    if (s_tl_current_message)                       { sender_iid = s_tl_current_message->receiver_instance_id; } else
+    if (s_mproc)                                    { sender_iid = s_mproc->m_instance_id; }
 
     if (sender_iid == invalid_instance_id) {
         assert(s_mproc);
@@ -747,7 +737,7 @@ void cleanup_rpc_state_if_needed(const std::shared_ptr<Rpc_state<T>>& rpc_state)
     }
 
     instance_id_type function_instance_id = invalid_instance_id;
-    bool             needs_cleanup        = false;
+    bool needs_cleanup = false;
 
     {
         lock_guard<mutex> lock(rpc_state->control.keep_waiting_mutex);
