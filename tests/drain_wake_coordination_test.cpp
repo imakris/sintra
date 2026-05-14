@@ -167,7 +167,8 @@ bool test_shutdown_drain_wait_wakes_after_group_change()
         if (!sintra::test::assert_true(
                 sintra::s_mproc->m_num_active_readers == 2,
                 k_prefix,
-                "shutdown_coordinator_drain_wait() precondition violated: coordinator should have exactly two local readers"))
+                "shutdown_coordinator_drain_wait() precondition violated: "
+                "coordinator should have exactly two local readers"))
         {
             remove_group_probe(group_name, probe);
             return false;

@@ -825,7 +825,7 @@ inline External_process_invitation create_external_process_invitation(
     }
 
     const auto expires_at = std::chrono::steady_clock::now() + options.timeout;
-    uint32_t occurrence = 0;
+    uint32_t   occurrence = 0;
     if (!s_coord->reserve_external_process_invitation(process_iid, token, expires_at, occurrence)) {
         Log_stream(log_level::warning)
             << "create_external_process_invitation: process instance id "

@@ -278,7 +278,8 @@ struct transformer
 {
     static_assert(
         always_false<T>::value,
-        "Unsupported message argument type. Provide a trivial standard-layout type, Sintra_message_element, or variable_buffer-compatible type."
+        "Unsupported message argument type. Provide a trivial standard-layout "
+        "type, Sintra_message_element, or variable_buffer-compatible type."
     );
     using type = void;
 };

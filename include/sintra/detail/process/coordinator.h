@@ -150,10 +150,9 @@ private:
 
     struct External_process_invitation_record
     {
-        std::string                                  token;
-        std::chrono::steady_clock::time_point       expires_at;
-        External_process_invitation_state           state =
-            External_process_invitation_state::pending;
+        std::string                           token;
+        std::chrono::steady_clock::time_point expires_at;
+        External_process_invitation_state     state = External_process_invitation_state::pending;
     };
 
     Coordinator();
@@ -239,10 +238,11 @@ private:
 
     void external_process_invitation_cleanup_loop();
     void transition_expired_external_process_invitations(
-        std::vector<instance_id_type>&   readers_to_remove,
+        std::vector<instance_id_type>&         readers_to_remove,
         std::chrono::steady_clock::time_point& next_deadline);
+
     void remove_external_process_invitation_readers(
-        const std::vector<instance_id_type>& process_ids);
+        const std::vector<instance_id_type>&   process_ids);
     void cancel_all_external_process_invitations();
     bool process_id_is_known_for_external_invitation(instance_id_type process_iid);
     bool external_process_invitation_exists_unlocked(instance_id_type process_iid) const;
@@ -271,21 +271,28 @@ public:
 
     // Configure the drain timeout for wait_for_all_draining(). A value of 0
     // means wait indefinitely. Default is 20 seconds.
-    void set_drain_timeout(std::chrono::seconds timeout);
+    void set_drain_timeout(
+        std::chrono::seconds                   timeout);
 
     bool reserve_external_process_invitation(
         instance_id_type                       process_iid,
         const string&                          token,
         std::chrono::steady_clock::time_point  expires_at,
         uint32_t&                              occurrence_out);
-    bool cancel_external_process_invitation(instance_id_type process_iid);
+
     bool cancel_external_process_invitation(
-        instance_id_type   process_iid,
-        const string&      token);
-    bool external_process_invitation_exists(instance_id_type process_iid);
+        instance_id_type                       process_iid);
+
+    bool cancel_external_process_invitation(
+        instance_id_type                       process_iid,
+        const string&                          token);
+
+    bool external_process_invitation_exists(
+        instance_id_type                       process_iid);
+
     bool group_has_non_external_peer(
-        const string&      group_name,
-        instance_id_type   self_process_iid);
+        const string&                          group_name,
+        instance_id_type                       self_process_iid);
 
     // Blocks until all processes identified by process_group_id have called the function.
     // num_absences may be used by a caller to specify that it is aware that other callers will
@@ -351,8 +358,7 @@ public:
     >                                              m_external_process_invitations;
     std::unordered_map<instance_id_type, uint32_t> m_external_process_invitation_next_occurrence;
     std::thread                                    m_external_process_invitation_cleanup_thread;
-    bool                                           m_external_process_invitation_cleanup_stop =
-        false;
+    bool                                           m_external_process_invitation_cleanup_stop = false;
 
     // Track in-flight join_swarm requests keyed by branch_index to avoid
     // spawning multiple processes when callers retry the RPC. Cleared once

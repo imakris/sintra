@@ -30,8 +30,8 @@ namespace {
 constexpr auto k_external_process_invitation_rejection_grace = std::chrono::seconds(2);
 
 inline void emit_direct_publish_waiters(
-    instance_id_type    instance_id,
-    const Coordinator*  coordinator)
+    instance_id_type   instance_id,
+    const Coordinator* coordinator)
 {
     if (s_tl_common_function_iid == invalid_instance_id) {
         return;
@@ -352,7 +352,7 @@ inline bool Coordinator::group_has_non_external_peer(
 
     lock_guard<mutex> publish_lock(m_publish_mutex);
     for (auto process_iid : members) {
-        if (process_iid != self_process_iid &&
+        if (process_iid                                      != self_process_iid &&
             m_external_attached_processes.count(process_iid) == 0)
         {
             return true;
@@ -375,12 +375,8 @@ inline bool Coordinator::process_id_is_known_for_external_invitation(
 
     {
         lock_guard<mutex> lock(m_publish_mutex);
-        if (m_transceiver_registry.count(process_iid) != 0) {
-            return true;
-        }
-        if (m_joined_process_branch.count(process_iid) != 0) {
-            return true;
-        }
+        if (m_transceiver_registry.count(process_iid)  != 0) { return true; }
+        if (m_joined_process_branch.count(process_iid) != 0) { return true; }
         for (const auto& entry : m_inflight_joins) {
             if (entry.second == process_iid) {
                 return true;
@@ -473,12 +469,8 @@ inline bool Coordinator::cancel_external_process_invitation(instance_id_type pro
 {
     std::lock_guard<mutex> lock(m_external_process_invitations_mutex);
     auto it = m_external_process_invitations.find(process_iid);
-    if (it == m_external_process_invitations.end()) {
-        return false;
-    }
-    if (it->second.state != External_process_invitation_state::pending) {
-        return false;
-    }
+    if (it == m_external_process_invitations.end())                     { return false; }
+    if (it->second.state != External_process_invitation_state::pending) { return false; }
 
     it->second.state      = External_process_invitation_state::rejecting;
     it->second.expires_at =
@@ -493,15 +485,9 @@ inline bool Coordinator::cancel_external_process_invitation(
 {
     std::lock_guard<mutex> lock(m_external_process_invitations_mutex);
     auto it = m_external_process_invitations.find(process_iid);
-    if (it == m_external_process_invitations.end()) {
-        return false;
-    }
-    if (it->second.state != External_process_invitation_state::pending) {
-        return false;
-    }
-    if (token.empty() || !detail::external_attach_tokens_equal(it->second.token, token)) {
-        return false;
-    }
+    if (it == m_external_process_invitations.end())                                      { return false; }
+    if (it->second.state != External_process_invitation_state::pending)                  { return false; }
+    if (token.empty() || !detail::external_attach_tokens_equal(it->second.token, token)) { return false; }
 
     it->second.state      = External_process_invitation_state::rejecting;
     it->second.expires_at =
@@ -511,8 +497,8 @@ inline bool Coordinator::cancel_external_process_invitation(
 }
 
 inline void Coordinator::transition_expired_external_process_invitations(
-    std::vector<instance_id_type>&           readers_to_remove,
-    std::chrono::steady_clock::time_point&   next_deadline)
+    std::vector<instance_id_type>&         readers_to_remove,
+    std::chrono::steady_clock::time_point& next_deadline)
 {
     const auto now = std::chrono::steady_clock::now();
     next_deadline = std::chrono::steady_clock::time_point::max();
@@ -525,7 +511,7 @@ inline void Coordinator::transition_expired_external_process_invitations(
             if (record.state == External_process_invitation_state::pending) {
                 record.state      = External_process_invitation_state::rejecting;
                 record.expires_at = now + k_external_process_invitation_rejection_grace;
-                next_deadline = std::min(next_deadline, record.expires_at);
+                next_deadline     = std::min(next_deadline, record.expires_at);
                 ++it;
                 continue;
             }
@@ -576,7 +562,7 @@ inline void Coordinator::external_process_invitation_cleanup_loop()
             lock.lock();
             for (auto process_iid : readers_to_remove) {
                 auto it = m_external_process_invitations.find(process_iid);
-                if (it != m_external_process_invitations.end() &&
+                if (it               != m_external_process_invitations.end() &&
                     it->second.state == External_process_invitation_state::removing)
                 {
                     m_external_process_invitations.erase(it);
@@ -592,7 +578,8 @@ inline void Coordinator::external_process_invitation_cleanup_loop()
 
         if (m_external_process_invitations.empty()) {
             m_external_process_invitations_cv.wait(lock, [&] {
-                return m_external_process_invitation_cleanup_stop ||
+                return
+                    m_external_process_invitation_cleanup_stop ||
                     !m_external_process_invitations.empty();
             });
         }
@@ -699,7 +686,7 @@ inline bool Coordinator::add_external_process_to_standard_groups(instance_id_typ
         return true;
     };
 
-    if (!ensure_group("_sintra_all_processes", {s_mproc_id, process_iid}) ||
+    if (!ensure_group("_sintra_all_processes",      {s_mproc_id, process_iid}) ||
         !ensure_group("_sintra_external_processes", {process_iid}))
     {
         rollback_updates();
@@ -734,8 +721,8 @@ inline bool Coordinator::claim_external_process_invitation(
             return false;
         }
 
-        auto& record = it->second;
-        const auto now = std::chrono::steady_clock::now();
+        auto&      record = it->second;
+        const auto now    = std::chrono::steady_clock::now();
         if (record.state != External_process_invitation_state::pending) {
             return false;
         }
@@ -762,7 +749,7 @@ inline bool Coordinator::claim_external_process_invitation(
 
     {
         lock_guard<mutex> publish_lock(m_publish_mutex);
-        if (m_transceiver_registry.count(process_iid) != 0 ||
+        if (m_transceiver_registry.count(process_iid)  != 0 ||
             m_joined_process_branch.count(process_iid) != 0)
         {
             return false;

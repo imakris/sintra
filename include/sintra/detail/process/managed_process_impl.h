@@ -1483,22 +1483,14 @@ void Managed_process::init(int argc, const char* const* argv)
             }
 
             if (auto value = option_value(
-                    arg,
-                    detail::k_external_attach_token_arg,
-                    '\0',
-                    true,
-                    i))
+                    arg, detail::k_external_attach_token_arg, '\0', true, i))
             {
                 external_attach_token_arg = *value;
                 continue;
             }
 
             if (auto value = option_value(
-                    arg,
-                    detail::k_external_attach_occurrence_arg,
-                    '\0',
-                    true,
-                    i))
+                    arg, detail::k_external_attach_occurrence_arg, '\0', true, i))
             {
                 try {
                     external_attach_occurrence = static_cast<uint32_t>(std::stoul(*value));
@@ -2220,7 +2212,8 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
                         iid,
                         init_error::cause::barrier_timeout,
                         0,
-                        "Process spawned successfully but did not reach initialization barrier (may have crashed during startup)"
+                        "Process spawned successfully but did not reach "
+                        "initialization barrier (may have crashed during startup)"
                     );
                 }
             }

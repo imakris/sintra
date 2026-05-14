@@ -180,7 +180,8 @@ int run_timeout_child()
     sintra::deactivate_all_slots();
 
     if (!signaled) {
-        std::fprintf(stderr, "[TIMEOUT_CHILD] Timed out waiting for Done signal (this is expected if coordinator forgot to signal)\n");
+        std::fprintf(stderr, "[TIMEOUT_CHILD] Timed out waiting for Done signal "
+            "(this is expected if coordinator forgot to signal)\n");
     }
 
     std::fprintf(stderr, "[TIMEOUT_CHILD] Exiting normally\n");

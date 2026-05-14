@@ -34,6 +34,7 @@ constexpr const char* k_role_cleanup   = "cleanup";
 constexpr const char* k_role_attack    = "attack";
 constexpr const char* k_service_name   = "external_attach_cleanup_service";
 constexpr const char* k_failure_prefix = "external_process_invitation_rejection_cleanup_test: ";
+
 constexpr const char* k_external_attach_rejected_message =
     "Sintra external process invitation was rejected.";
 
@@ -41,15 +42,15 @@ struct done_signal_t {};
 
 struct launched_process_t
 {
-    bool launched = false;
-    int  pid      = -1;
+    bool   launched = false;
+    int    pid      = -1;
 };
 
 struct process_exit_t
 {
-    bool exited = false;
-    bool normal = false;
-    int  code   = -1;
+    bool   exited   = false;
+    bool   normal   = false;
+    int    code     = -1;
 };
 
 struct Cleanup_probe_service : sintra::Derived_transceiver<Cleanup_probe_service>
@@ -145,8 +146,8 @@ bool wait_for_marker(
 }
 
 launched_process_t launch_direct_process(
-    const std::string&                binary_path,
-    const std::vector<std::string>&   args)
+    const std::string&                 binary_path,
+    const std::vector<std::string>&    args)
 {
     std::vector<std::string> all_args;
     all_args.reserve(args.size() + 1);
@@ -179,7 +180,7 @@ process_exit_t wait_for_process_exit(int pid, std::chrono::milliseconds timeout)
     const DWORD wait_ms = static_cast<DWORD>(timeout.count());
     const DWORD result  = WaitForSingleObject(handle, wait_ms);
     if (result == WAIT_OBJECT_0) {
-        DWORD exit_code = 1;
+        DWORD      exit_code      = 1;
         const bool have_exit_code = GetExitCodeProcess(handle, &exit_code) != 0;
         CloseHandle(handle);
         return {true, have_exit_code && exit_code == 0, static_cast<int>(exit_code)};
@@ -243,9 +244,9 @@ process_exit_t wait_for_process_exit(int pid, std::chrono::milliseconds timeout)
 }
 
 bool assert_clean_exit(
-    const launched_process_t&    process,
-    std::chrono::milliseconds    timeout,
-    const char*                  message)
+    const launched_process_t&  process,
+    std::chrono::milliseconds  timeout,
+    const char*                message)
 {
     const auto exit = wait_for_process_exit(process.pid, timeout);
     return sintra::test::assert_true(
@@ -255,11 +256,11 @@ bool assert_clean_exit(
 }
 
 bool replace_external_attach_token(
-    std::vector<std::string>&   args,
-    const std::string&          replacement)
+    std::vector<std::string>&  args,
+    const std::string&         replacement)
 {
-    constexpr const char* token_arg = "--external_attach_token";
-    const std::string token_prefix = std::string(token_arg) + "=";
+    constexpr const char* token_arg    = "--external_attach_token";
+    const std::string     token_prefix = std::string(token_arg) + "=";
     for (size_t i = 0; i < args.size(); ++i) {
         if (args[i] == token_arg && i + 1 < args.size()) {
             args[i + 1] = replacement;
@@ -274,10 +275,10 @@ bool replace_external_attach_token(
 }
 
 std::vector<std::string> helper_args(
-    const std::filesystem::path&                dir,
-    const std::string&                          role,
-    const std::string&                          marker,
-    const sintra::External_process_invitation&  invitation)
+    const std::filesystem::path&               dir,
+    const std::string&                         role,
+    const std::string&                         marker,
+    const sintra::External_process_invitation& invitation)
 {
     std::vector<std::string> args = {
         k_role_arg,   role,
@@ -291,8 +292,8 @@ std::vector<std::string> helper_args(
 }
 
 sintra::External_process_invitation make_invitation(
-    sintra::instance_id_type      process_iid,
-    std::chrono::milliseconds     timeout)
+    sintra::instance_id_type   process_iid,
+    std::chrono::milliseconds  timeout)
 {
     sintra::External_process_invitation_options options;
     options.process_instance_id = process_iid;
@@ -301,9 +302,9 @@ sintra::External_process_invitation make_invitation(
 }
 
 sintra::External_process_invitation wait_for_invitation_reuse(
-    sintra::instance_id_type    process_iid,
-    std::chrono::milliseconds   invitation_timeout,
-    std::chrono::milliseconds   wait_timeout)
+    sintra::instance_id_type   process_iid,
+    std::chrono::milliseconds  invitation_timeout,
+    std::chrono::milliseconds  wait_timeout)
 {
     const auto deadline = std::chrono::steady_clock::now() + wait_timeout;
     while (std::chrono::steady_clock::now() < deadline) {
@@ -537,14 +538,14 @@ int run_cleanup_helper(int argc, char* argv[])
     catch (...) {
     }
 
-    const bool first_state_clean       = failed_init_state_is_clean();
-    const bool transceiver_blocked     = transceiver_construction_is_blocked();
-    const bool second_specific_reject  = second_init_gets_specific_rejection(argc, argv);
-    const bool final_state_clean       = failed_init_state_is_clean();
-    const bool clean_after_rejection   =
-        exact_rejection      &&
-        first_state_clean    &&
-        transceiver_blocked  &&
+    const bool first_state_clean      = failed_init_state_is_clean();
+    const bool transceiver_blocked    = transceiver_construction_is_blocked();
+    const bool second_specific_reject = second_init_gets_specific_rejection(argc, argv);
+    const bool final_state_clean      = failed_init_state_is_clean();
+    const bool clean_after_rejection  =
+        exact_rejection        &&
+        first_state_clean      &&
+        transceiver_blocked    &&
         second_specific_reject &&
         final_state_clean;
 
@@ -616,14 +617,16 @@ int run_attack_helper(int argc, char* argv[])
 }
 
 bool launch_rejected_status_helper(
-    const std::string&                       binary_path,
-    const std::filesystem::path&             dir,
-    const std::string&                       marker,
-    const sintra::External_process_invitation& invitation,
-    bool                                     corrupt_token)
+    const std::string&     binary_path,
+    const std::filesystem::path&
+                           dir,
+    const std::string&     marker,
+    const sintra::External_process_invitation&
+                           invitation,
+    bool                   corrupt_token)
 {
     auto args = helper_args(dir, k_role_status, marker, invitation);
-    bool ok = true;
+    bool ok   = true;
     if (corrupt_token) {
         ok &= sintra::test::assert_true(
             replace_external_attach_token(args, "wrong-token-for-rejection-cleanup-test"),
@@ -645,11 +648,12 @@ bool launch_rejected_status_helper(
 }
 
 bool admit_valid_helper(
-    const std::string&                       binary_path,
-    const std::filesystem::path&             dir,
+    const std::string&                         binary_path,
+    const std::filesystem::path&               dir,
     const sintra::External_process_invitation& invitation)
 {
     bool ok = true;
+
     const std::string marker = "valid_after_rejections";
     const auto helper_launch = launch_direct_process(
         binary_path,
@@ -684,10 +688,10 @@ bool admit_valid_helper(
 }
 
 bool run_wrong_token_cleanup_case(
-    int                              argc,
-    char*                            argv[],
-    const std::string&               binary_path,
-    const std::filesystem::path&     dir)
+    int                            argc,
+    char*                          argv[],
+    const std::string&             binary_path,
+    const std::filesystem::path&   dir)
 {
     sintra::init(argc, argv);
     Runtime_guard guard{true};
@@ -729,10 +733,10 @@ bool run_wrong_token_cleanup_case(
 }
 
 bool run_rejected_helpers_exit_with_specific_rejection_case(
-    int                              argc,
-    char*                            argv[],
-    const std::string&               binary_path,
-    const std::filesystem::path&     dir)
+    int                            argc,
+    char*                          argv[],
+    const std::string&             binary_path,
+    const std::filesystem::path&   dir)
 {
     sintra::init(argc, argv);
     Runtime_guard guard{true};
@@ -793,15 +797,16 @@ bool run_rejected_helpers_exit_with_specific_rejection_case(
 }
 
 bool run_same_explicit_id_recovery_case(
-    int                              argc,
-    char*                            argv[],
-    const std::string&               binary_path,
-    const std::filesystem::path&     dir)
+    int                            argc,
+    char*                          argv[],
+    const std::string&             binary_path,
+    const std::filesystem::path&   dir)
 {
     sintra::init(argc, argv);
     Runtime_guard guard{true};
 
     bool ok = true;
+
     const auto explicit_iid = sintra::make_process_instance_id();
 
     auto wrong_token_invitation = make_invitation(explicit_iid, std::chrono::seconds(8));
@@ -871,10 +876,10 @@ bool run_same_explicit_id_recovery_case(
 }
 
 bool run_rejected_helper_cannot_affect_coordinator_case(
-    int                              argc,
-    char*                            argv[],
-    const std::string&               binary_path,
-    const std::filesystem::path&     dir)
+    int                            argc,
+    char*                          argv[],
+    const std::string&             binary_path,
+    const std::filesystem::path&   dir)
 {
     sintra::init(argc, argv);
     Runtime_guard guard{true};
@@ -922,21 +927,13 @@ int main(int argc, char* argv[])
     std::set_terminate(sintra::test::custom_terminate_handler);
 
     const auto role = sintra::test::get_argv_value(argc, argv, k_role_arg);
-    if (role == k_role_valid) {
-        return run_valid_helper(argc, argv);
-    }
-    if (role == k_role_status) {
-        return run_status_helper(argc, argv);
-    }
-    if (role == k_role_cleanup) {
-        return run_cleanup_helper(argc, argv);
-    }
-    if (role == k_role_attack) {
-        return run_attack_helper(argc, argv);
-    }
+    if (role == k_role_valid)   { return run_valid_helper(  argc, argv); }
+    if (role == k_role_status)  { return run_status_helper( argc, argv); }
+    if (role == k_role_cleanup) { return run_cleanup_helper(argc, argv); }
+    if (role == k_role_attack)  { return run_attack_helper( argc, argv); }
 
     const std::string binary_path = sintra::test::get_binary_path(argc, argv);
-    const auto dir = sintra::test::unique_scratch_directory("ext_attach_reject_clean");
+    const auto        dir         = sintra::test::unique_scratch_directory("ext_attach_reject_clean");
 
     bool ok = true;
     ok &= run_wrong_token_cleanup_case(argc, argv, binary_path, dir);

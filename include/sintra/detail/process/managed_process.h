@@ -266,19 +266,27 @@ struct Managed_process: Derived_transceiver<Managed_process>
     mutex                               m_num_active_readers_mutex;
     condition_variable                  m_num_active_readers_condition;
 
-    void wait_until_all_external_readers_are_done(int extra_allowed_readers = 0);
+    void wait_until_all_external_readers_are_done(
+        int                    extra_allowed_readers = 0);
 
     bool prepare_process_reader(
-        instance_id_type   process_instance_id,
-        uint32_t           occurrence,
-        bool               replace_existing);
-    void remove_process_reader(
-        instance_id_type   process_instance_id,
-        double             waiting_period = 1.0);
-    bool has_process_reader(instance_id_type process_instance_id) const;
+        instance_id_type       process_instance_id,
+        uint32_t               occurrence,
+        bool                   replace_existing);
 
-    void flush(instance_id_type process_id, sequence_counter_type flush_sequence);
-    void run_after_current_handler(function<void()> task);
+    void remove_process_reader(
+        instance_id_type       process_instance_id,
+        double                 waiting_period = 1.0);
+
+    bool has_process_reader(
+        instance_id_type       process_instance_id) const;
+
+    void flush(
+        instance_id_type       process_id,
+        sequence_counter_type  flush_sequence);
+
+    void run_after_current_handler(
+        function<void()>       task);
 
     void wait_for_delivery_fence();
     void notify_delivery_progress();

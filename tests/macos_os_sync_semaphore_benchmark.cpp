@@ -207,7 +207,8 @@ int main() {
         return 0;
     }
     catch (const Os_sync_not_supported&) {
-        std::cout << "[SINTRA_DID_NOT_RUN] os_sync_wait_on_address is not available on this macOS version." << std::endl;
+        std::cout << "[SINTRA_DID_NOT_RUN] os_sync_wait_on_address "
+            "is not available on this macOS version." << std::endl;
         return 0;
     }
     catch (const std::exception& ex) {

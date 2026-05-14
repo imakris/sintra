@@ -151,7 +151,9 @@ bool spawn_detached_with_args(const char* prog, const char* const* args)
 bool spawn_should_fail_due_to_fd_exhaustion()
 {
     const char* true_prog = locate_true_binary();
-    if (!sintra::test::assert_true_errno(true_prog != nullptr, k_failure_prefix, "failed to locate executable for 'true'")) {
+    if (!sintra::test::assert_true_errno(true_prog != nullptr,
+        k_failure_prefix, "failed to locate executable for 'true'"))
+    {
         return false;
     }
 
@@ -203,7 +205,9 @@ int failing_pipe2(int[2], int)
 bool spawn_should_fail_when_pipe2_injected_failure()
 {
     const char* true_prog = locate_true_binary();
-    if (!sintra::test::assert_true_errno(true_prog != nullptr, k_failure_prefix, "failed to locate executable for 'true'")) {
+    if (!sintra::test::assert_true_errno(true_prog != nullptr,
+        k_failure_prefix, "failed to locate executable for 'true'"))
+    {
         return false;
     }
 
@@ -241,7 +245,9 @@ ssize_t flaky_read(int fd, void* buf, size_t count)
 bool spawn_succeeds_under_eintr_pressure()
 {
     const char* true_prog = locate_true_binary();
-    if (!sintra::test::assert_true_errno(true_prog != nullptr, k_failure_prefix, "failed to locate executable for 'true'")) {
+    if (!sintra::test::assert_true_errno(true_prog != nullptr,
+        k_failure_prefix, "failed to locate executable for 'true'"))
+    {
         return false;
     }
 
@@ -277,7 +283,9 @@ pid_t waitpid_returns_echild(pid_t, int*, int)
 bool spawn_succeeds_when_waitpid_reports_echild()
 {
     const char* true_prog = locate_true_binary();
-    if (!sintra::test::assert_true_errno(true_prog != nullptr, k_failure_prefix, "failed to locate executable for 'true'")) {
+    if (!sintra::test::assert_true_errno(true_prog != nullptr,
+        k_failure_prefix, "failed to locate executable for 'true'"))
+    {
         return false;
     }
 
@@ -305,7 +313,9 @@ ssize_t broken_write(int, const void*, size_t)
 bool spawn_fails_when_grandchild_cannot_report_readiness()
 {
     const char* true_prog = locate_true_binary();
-    if (!sintra::test::assert_true_errno(true_prog != nullptr, k_failure_prefix, "failed to locate executable for 'true'")) {
+    if (!sintra::test::assert_true_errno(true_prog != nullptr,
+        k_failure_prefix, "failed to locate executable for 'true'"))
+    {
         return false;
     }
 
@@ -337,7 +347,9 @@ bool spawn_reports_exec_failure()
 bool spawn_detached_sets_env_overrides()
 {
     const char* shell = locate_shell_binary();
-    if (!sintra::test::assert_true_errno(shell != nullptr, k_failure_prefix, "failed to locate /bin/sh for env override test")) {
+    if (!sintra::test::assert_true_errno(shell != nullptr,
+        k_failure_prefix, "failed to locate /bin/sh for env override test"))
+    {
         return false;
     }
 
@@ -352,7 +364,9 @@ bool spawn_detached_sets_env_overrides()
     options.env_overrides.push_back("SINTRA_ENV_OVERRIDE_TEST=spawn_detached_env_value");
 
     bool result = sintra::spawn_detached(options);
-    if (!sintra::test::assert_true_errno(result, k_failure_prefix, "spawn_detached failed to launch shell with env override")) {
+    if (!sintra::test::assert_true_errno(result, k_failure_prefix,
+        "spawn_detached failed to launch shell with env override"))
+    {
         return false;
     }
 
@@ -377,7 +391,9 @@ bool spawn_detached_sets_env_overrides()
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
-    if (!sintra::test::assert_true_errno(std::filesystem::exists(output_path), k_failure_prefix, "env override output file not created")) {
+    if (!sintra::test::assert_true_errno(std::filesystem::exists(output_path),
+        k_failure_prefix, "env override output file not created"))
+    {
         return false;
     }
 

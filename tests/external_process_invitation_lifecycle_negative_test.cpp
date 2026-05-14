@@ -40,8 +40,8 @@ constexpr const char* k_failure_prefix = "external_process_invitation_lifecycle_
 
 struct launched_process_t
 {
-    bool launched = false;
-    int  pid      = -1;
+    bool   launched = false;
+    int    pid      = -1;
 };
 
 struct Runtime_guard
@@ -103,40 +103,40 @@ private:
         }
     }
 
-    const char*       m_name = "";
-    std::atomic<bool> m_done{false};
-    std::thread       m_thread;
+    const char*        m_name = "";
+    std::atomic<bool>  m_done{false};
+    std::thread        m_thread;
 };
 
 std::filesystem::path marker_path(
-    const std::filesystem::path& dir,
-    const std::string&           marker)
+    const std::filesystem::path&   dir,
+    const std::string&             marker)
 {
     return dir / (marker + ".txt");
 }
 
 std::filesystem::path control_path(
-    const std::filesystem::path& dir,
-    const std::string&           marker,
-    const char*                  suffix)
+    const std::filesystem::path&   dir,
+    const std::string&             marker,
+    const char*                    suffix)
 {
     return dir / (marker + suffix);
 }
 
 void write_marker(
-    const std::filesystem::path& dir,
-    const std::string&           marker,
-    std::string_view             value)
+    const std::filesystem::path&   dir,
+    const std::string&             marker,
+    std::string_view               value)
 {
     std::ofstream out(marker_path(dir, marker), std::ios::binary | std::ios::trunc);
     out << value << '\n';
 }
 
 bool wait_for_marker(
-    const std::filesystem::path& dir,
-    const std::string&           marker,
-    std::string_view             expected,
-    std::chrono::milliseconds    timeout)
+    const std::filesystem::path&   dir,
+    const std::string&             marker,
+    std::string_view               expected,
+    std::chrono::milliseconds      timeout)
 {
     const auto path     = marker_path(dir, marker);
     const auto deadline = std::chrono::steady_clock::now() + timeout;
@@ -171,10 +171,10 @@ bool wait_for_marker(
 }
 
 bool wait_for_marker_in(
-    const std::filesystem::path&       dir,
-    const std::string&                 marker,
-    const std::vector<std::string_view>& expected_values,
-    std::chrono::milliseconds          timeout)
+    const std::filesystem::path&           dir,
+    const std::string&                     marker,
+    const std::vector<std::string_view>&   expected_values,
+    std::chrono::milliseconds              timeout)
 {
     const auto path     = marker_path(dir, marker);
     const auto deadline = std::chrono::steady_clock::now() + timeout;
@@ -204,26 +204,26 @@ bool wait_for_marker_in(
 }
 
 void write_control_file(
-    const std::filesystem::path& dir,
-    const std::string&           marker,
-    const char*                  suffix)
+    const std::filesystem::path&       dir,
+    const std::string&                 marker,
+    const char*                        suffix)
 {
     std::ofstream out(control_path(dir, marker, suffix), std::ios::binary | std::ios::trunc);
     out << "go\n";
 }
 
 bool wait_for_control_file(
-    const std::filesystem::path& dir,
-    const std::string&           marker,
-    const char*                  suffix,
-    std::chrono::milliseconds    timeout)
+    const std::filesystem::path&       dir,
+    const std::string&                 marker,
+    const char*                        suffix,
+    std::chrono::milliseconds          timeout)
 {
     return sintra::test::wait_for_file(control_path(dir, marker, suffix), timeout, 20ms);
 }
 
 launched_process_t launch_direct_process(
-    const std::string&              binary_path,
-    const std::vector<std::string>& args)
+    const std::string&                 binary_path,
+    const std::vector<std::string>&    args)
 {
     std::vector<std::string> all_args;
     all_args.reserve(args.size() + 1);
@@ -294,12 +294,8 @@ bool wait_for_process_exit(int pid, std::chrono::milliseconds timeout)
     while (std::chrono::steady_clock::now() < reap_deadline) {
         int         status = 0;
         const pid_t result = ::waitpid(child_pid, &status, WNOHANG);
-        if (result == child_pid) {
-            return false;
-        }
-        if (result == -1 && errno != EINTR) {
-            return false;
-        }
+        if (result == child_pid)            { return false; }
+        if (result == -1 && errno != EINTR) { return false; }
         std::this_thread::sleep_for(20ms);
     }
 
@@ -319,8 +315,8 @@ bool has_argv_flag_or_value(int argc, char* argv[], std::string_view flag)
 }
 
 sintra::External_process_invitation make_invitation(
-    sintra::instance_id_type  process_iid,
-    std::chrono::milliseconds timeout)
+    sintra::instance_id_type   process_iid,
+    std::chrono::milliseconds  timeout)
 {
     sintra::External_process_invitation_options options;
     options.process_instance_id = process_iid;
@@ -346,9 +342,9 @@ std::vector<std::string> helper_args(
 }
 
 bool shutdown_with_watchdog(
-    Runtime_guard&              guard,
-    const char*                 case_name,
-    std::chrono::milliseconds*  elapsed_out = nullptr)
+    Runtime_guard&             guard,
+    const char*                case_name,
+    std::chrono::milliseconds* elapsed_out = nullptr)
 {
     const auto start = std::chrono::steady_clock::now();
     Shutdown_watchdog watchdog(case_name, 6s);
@@ -697,8 +693,8 @@ bool attach_and_release_for_reuse(
 }
 
 bool wait_for_reusable_invitation(
-    sintra::instance_id_type                  process_iid,
-    sintra::External_process_invitation&      out_invitation)
+    sintra::instance_id_type               process_iid,
+    sintra::External_process_invitation&   out_invitation)
 {
     const auto deadline = std::chrono::steady_clock::now() + 6s;
     while (std::chrono::steady_clock::now() < deadline) {
@@ -722,7 +718,7 @@ bool run_cancel_expire_reuse_case(
     bool ok = true;
 
     const auto canceled_iid = sintra::make_process_instance_id();
-    auto canceled = make_invitation(canceled_iid, 30s);
+    auto       canceled     = make_invitation(canceled_iid, 30s);
     ok &= sintra::test::assert_true(
         static_cast<bool>(canceled),
         k_failure_prefix,
@@ -742,7 +738,7 @@ bool run_cancel_expire_reuse_case(
     }
 
     const auto expired_iid = sintra::make_process_instance_id();
-    auto expired = make_invitation(expired_iid, 100ms);
+    auto       expired     = make_invitation(expired_iid, 100ms);
     ok &= sintra::test::assert_true(
         static_cast<bool>(expired),
         k_failure_prefix,
@@ -772,24 +768,14 @@ int main(int argc, char* argv[])
     std::set_terminate(sintra::test::custom_terminate_handler);
 
     const auto role = sintra::test::get_argv_value(argc, argv, k_role_arg);
-    if (role == k_role_delayed) {
-        return run_delayed_init_helper(argc, argv);
-    }
-    if (role == k_role_alive) {
-        return run_admitted_alive_helper(argc, argv);
-    }
-    if (role == k_role_crash) {
-        return run_crash_after_init_helper(argc, argv);
-    }
-    if (role == k_role_recover) {
-        return run_enable_recovery_after_init_helper(argc, argv);
-    }
-    if (role == k_role_reuse) {
-        return run_reuse_attach_helper(argc, argv);
-    }
+    if (role == k_role_delayed) { return run_delayed_init_helper(              argc, argv); }
+    if (role == k_role_alive)   { return run_admitted_alive_helper(            argc, argv); }
+    if (role == k_role_crash)   { return run_crash_after_init_helper(          argc, argv); }
+    if (role == k_role_recover) { return run_enable_recovery_after_init_helper(argc, argv); }
+    if (role == k_role_reuse)   { return run_reuse_attach_helper(              argc, argv); }
 
     const std::string binary_path = sintra::test::get_binary_path(argc, argv);
-    const auto dir = sintra::test::unique_scratch_directory("ext_attach_life_neg");
+    const auto        dir         = sintra::test::unique_scratch_directory("ext_attach_life_neg");
 
     bool ok = true;
     ok &= run_shutdown_before_claim_case(argc, argv, binary_path, dir);

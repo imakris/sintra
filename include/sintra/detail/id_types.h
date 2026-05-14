@@ -336,7 +336,7 @@ bool is_valid_process_instance_id(instance_id_type iid)
 {
     const auto di = decompose_instance(iid);
     return
-        di.process     > 0 &&
+        di.process     >  0                 &&
         di.process     <= max_process_index &&
         di.transceiver == 1;
 }

@@ -37,8 +37,8 @@ constexpr const char* k_external_attach_rejected_message =
 
 struct launched_process_t
 {
-    bool launched = false;
-    int  pid      = -1;
+    bool   launched = false;
+    int    pid      = -1;
 };
 
 struct done_signal_t {};
@@ -104,7 +104,7 @@ bool wait_for_marker(
     const std::string&             expected,
     std::chrono::milliseconds      timeout)
 {
-    const auto path = marker_path(dir, marker);
+    const auto path     = marker_path(dir, marker);
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     std::string actual;
 
@@ -136,8 +136,8 @@ bool wait_for_marker(
 }
 
 launched_process_t launch_direct_process(
-    const std::string&                binary_path,
-    const std::vector<std::string>&   args)
+    const std::string&                 binary_path,
+    const std::vector<std::string>&    args)
 {
     std::vector<std::string> all_args;
     all_args.reserve(args.size() + 1);
@@ -147,8 +147,8 @@ launched_process_t launch_direct_process(
     sintra::C_string_vector cargs(all_args);
     sintra::Spawn_detached_options options;
     int child_pid = -1;
-    options.prog = binary_path.c_str();
-    options.argv = cargs.v();
+    options.prog          = binary_path.c_str();
+    options.argv          = cargs.v();
     options.child_pid_out = &child_pid;
     return {sintra::spawn_detached(options), child_pid};
 }
@@ -207,12 +207,8 @@ bool wait_for_process_exit(int pid, std::chrono::milliseconds timeout)
     while (std::chrono::steady_clock::now() < reap_deadline) {
         int         status = 0;
         const pid_t result = ::waitpid(child_pid, &status, WNOHANG);
-        if (result == child_pid) {
-            return false;
-        }
-        if (result == -1 && errno != EINTR) {
-            return false;
-        }
+        if (result == child_pid)            { return false; }
+        if (result == -1 && errno != EINTR) { return false; }
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
@@ -227,11 +223,11 @@ bool wait_for_process_exit(int pid, std::chrono::milliseconds timeout)
 }
 
 bool replace_external_attach_token(
-    std::vector<std::string>&   args,
-    const std::string&          replacement)
+    std::vector<std::string>&  args,
+    const std::string&         replacement)
 {
-    constexpr const char* token_arg = "--external_attach_token";
-    const std::string token_prefix = std::string(token_arg) + "=";
+    constexpr const char* token_arg    = "--external_attach_token";
+    const std::string     token_prefix = std::string(token_arg) + "=";
     for (size_t i = 0; i < args.size(); ++i) {
         if (args[i] == token_arg && i + 1 < args.size()) {
             args[i + 1] = replacement;
@@ -246,10 +242,10 @@ bool replace_external_attach_token(
 }
 
 std::vector<std::string> helper_args(
-    const std::filesystem::path&                dir,
-    const std::string&                          role,
-    const std::string&                          marker,
-    const sintra::External_process_invitation&  invitation)
+    const std::filesystem::path&               dir,
+    const std::string&                         role,
+    const std::string&                         marker,
+    const sintra::External_process_invitation& invitation)
 {
     std::vector<std::string> args = {
         k_role_arg,   role,
@@ -278,8 +274,8 @@ sintra::instance_id_type resolve_until(
 }
 
 sintra::External_process_invitation make_invitation(
-    sintra::instance_id_type      process_iid,
-    std::chrono::milliseconds     timeout)
+    sintra::instance_id_type   process_iid,
+    std::chrono::milliseconds  timeout)
 {
     sintra::External_process_invitation_options options;
     options.process_instance_id = process_iid;
@@ -288,9 +284,9 @@ sintra::External_process_invitation make_invitation(
 }
 
 sintra::External_process_invitation wait_for_invitation_reuse(
-    sintra::instance_id_type    process_iid,
-    std::chrono::milliseconds   invitation_timeout,
-    std::chrono::milliseconds   wait_timeout)
+    sintra::instance_id_type   process_iid,
+    std::chrono::milliseconds  invitation_timeout,
+    std::chrono::milliseconds  wait_timeout)
 {
     const auto deadline = std::chrono::steady_clock::now() + wait_timeout;
     while (std::chrono::steady_clock::now() < deadline) {
@@ -372,10 +368,10 @@ int run_reject_helper(int argc, char* argv[])
 }
 
 bool run_valid_attach_case(
-    int                              argc,
-    char*                            argv[],
-    const std::string&               binary_path,
-    const std::filesystem::path&     dir)
+    int                            argc,
+    char*                          argv[],
+    const std::string&             binary_path,
+    const std::filesystem::path&   dir)
 {
     sintra::init(argc, argv);
     Runtime_guard guard{true};
@@ -459,10 +455,10 @@ bool run_valid_attach_case(
 }
 
 bool run_wrong_token_case(
-    int                              argc,
-    char*                            argv[],
-    const std::string&               binary_path,
-    const std::filesystem::path&     dir)
+    int                            argc,
+    char*                          argv[],
+    const std::string&             binary_path,
+    const std::filesystem::path&   dir)
 {
     sintra::init(argc, argv);
     Runtime_guard guard{true};
@@ -514,10 +510,10 @@ bool run_wrong_token_case(
 }
 
 bool run_canceled_case(
-    int                              argc,
-    char*                            argv[],
-    const std::string&               binary_path,
-    const std::filesystem::path&     dir)
+    int                            argc,
+    char*                          argv[],
+    const std::string&             binary_path,
+    const std::filesystem::path&   dir)
 {
     sintra::init(argc, argv);
     Runtime_guard guard{true};
@@ -552,10 +548,10 @@ bool run_canceled_case(
 }
 
 bool run_expired_case(
-    int                              argc,
-    char*                            argv[],
-    const std::string&               binary_path,
-    const std::filesystem::path&     dir)
+    int                            argc,
+    char*                          argv[],
+    const std::string&             binary_path,
+    const std::filesystem::path&   dir)
 {
     sintra::init(argc, argv);
     Runtime_guard guard{true};
@@ -587,10 +583,10 @@ bool run_expired_case(
 }
 
 bool run_recovery_occurrence_rejected_case(
-    int                              argc,
-    char*                            argv[],
-    const std::string&               binary_path,
-    const std::filesystem::path&     dir)
+    int                            argc,
+    char*                          argv[],
+    const std::string&             binary_path,
+    const std::filesystem::path&   dir)
 {
     sintra::init(argc, argv);
     Runtime_guard guard{true};
@@ -717,9 +713,9 @@ bool run_pending_shutdown_case(int argc, char* argv[])
         k_failure_prefix,
         "pending-shutdown case should create an invitation");
 
-    const auto start = std::chrono::steady_clock::now();
+    const auto start       = std::chrono::steady_clock::now();
     const bool shutdown_ok = guard.shutdown();
-    const auto elapsed = std::chrono::steady_clock::now() - start;
+    const auto elapsed     = std::chrono::steady_clock::now() - start;
 
     ok &= sintra::test::assert_true(
         shutdown_ok,
@@ -739,15 +735,11 @@ int main(int argc, char* argv[])
     std::set_terminate(sintra::test::custom_terminate_handler);
 
     const auto role = sintra::test::get_argv_value(argc, argv, k_role_arg);
-    if (role == k_role_helper) {
-        return run_helper(argc, argv);
-    }
-    if (role == k_role_reject) {
-        return run_reject_helper(argc, argv);
-    }
+    if (role == k_role_helper) { return run_helper(       argc, argv); }
+    if (role == k_role_reject) { return run_reject_helper(argc, argv); }
 
     const std::string binary_path = sintra::test::get_binary_path(argc, argv);
-    const auto dir = sintra::test::unique_scratch_directory("external_process_invitation");
+    const auto        dir         = sintra::test::unique_scratch_directory("external_process_invitation");
 
     bool ok = true;
     ok &= run_valid_attach_case(argc, argv, binary_path, dir);
