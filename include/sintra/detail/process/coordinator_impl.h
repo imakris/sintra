@@ -516,10 +516,7 @@ inline void Coordinator::transition_expired_external_process_invitations(
                 continue;
             }
 
-            size_t draining_slot = 0;
-            if (draining_slot_of_index(get_process_index(it->first), draining_slot)) {
-                m_draining_process_states[draining_slot] = 1;
-            }
+            set_draining_state(it->first, 1);
             record.state = External_process_invitation_state::removing;
             readers_to_remove.push_back(it->first);
             ++it;
@@ -596,10 +593,7 @@ inline void Coordinator::cancel_all_external_process_invitations()
         std::lock_guard<mutex> lock(m_external_process_invitations_mutex);
         readers_to_remove.reserve(m_external_process_invitations.size());
         for (const auto& entry : m_external_process_invitations) {
-            size_t draining_slot = 0;
-            if (draining_slot_of_index(get_process_index(entry.first), draining_slot)) {
-                m_draining_process_states[draining_slot] = 1;
-            }
+            set_draining_state(entry.first, 1);
             readers_to_remove.push_back(entry.first);
         }
         m_external_process_invitations.clear();
@@ -783,9 +777,7 @@ inline bool Coordinator::claim_external_process_invitation(
         return false;
     }
 
-    size_t draining_slot = 0;
-    if (draining_slot_of_index(get_process_index(process_iid), draining_slot)) {
-        m_draining_process_states[draining_slot] = 0;
+    if (set_draining_state(process_iid, 0)) {
         note_draining_state_change();
     }
 
@@ -980,10 +972,7 @@ instance_id_type Coordinator::publish_transceiver(
 
         // Reset draining state to 0 (ACTIVE) when publishing a Managed_process.
         // This handles recovery/restart scenarios where the process slot might still be marked as draining.
-        size_t draining_slot = 0;
-        if (draining_slot_of_index(get_process_index(process_iid), draining_slot)) {
-            m_draining_process_states[draining_slot] = 0;
-        }
+        set_draining_state(process_iid, 0);
 
         return true_sequence(true);
     }
@@ -1079,11 +1068,7 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
         // from including this process. This handles both graceful shutdown (where
         // begin_process_draining was already called) and crash scenarios (where it wasn't).
         draining_index = get_process_index(process_iid);
-        size_t draining_slot = 0;
-        if (draining_slot_of_index(draining_index, draining_slot)) {
-            was_draining = (m_draining_process_states[draining_slot].load() != 0);
-            m_draining_process_states[draining_slot] = 1;
-        }
+        exchange_draining_state(process_iid, 1, was_draining);
 
         collect_and_schedule_barrier_completions(
             process_iid,
@@ -1152,10 +1137,7 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
 
 inline sequence_counter_type Coordinator::begin_process_draining(instance_id_type process_iid)
 {
-    size_t draining_slot = 0;
-    if (draining_slot_of_index(get_process_index(process_iid), draining_slot)) {
-        m_draining_process_states[draining_slot] = 1;
-    }
+    set_draining_state(process_iid, 1);
 
     auto pending_completions = collect_pending_barrier_completions(
         process_iid,
@@ -1669,9 +1651,7 @@ void Coordinator::begin_shutdown()
     {
         lock_guard<mutex> publish_lock(m_publish_mutex);
         for (auto process_iid : m_external_attached_processes) {
-            size_t draining_slot = 0;
-            if (draining_slot_of_index(get_process_index(process_iid), draining_slot)) {
-                m_draining_process_states[draining_slot] = 1;
+            if (set_draining_state(process_iid, 1)) {
                 changed = true;
             }
         }
@@ -1798,6 +1778,34 @@ bool Coordinator::draining_slot_of_index(uint64_t draining_index, size_t& slot) 
     }
 
     slot = static_cast<size_t>(draining_index);
+    return true;
+}
+
+
+inline
+bool Coordinator::set_draining_state(instance_id_type process_iid, int value)
+{
+    size_t draining_slot = 0;
+    if (!draining_slot_of_index(get_process_index(process_iid), draining_slot)) {
+        return false;
+    }
+    m_draining_process_states[draining_slot] = value;
+    return true;
+}
+
+
+inline
+bool Coordinator::exchange_draining_state(
+    instance_id_type   process_iid,
+    int                value,
+    bool&              was_draining)
+{
+    size_t draining_slot = 0;
+    if (!draining_slot_of_index(get_process_index(process_iid), draining_slot)) {
+        return false;
+    }
+    was_draining = (m_draining_process_states[draining_slot].load() != 0);
+    m_draining_process_states[draining_slot] = value;
     return true;
 }
 

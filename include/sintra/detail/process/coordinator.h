@@ -399,6 +399,16 @@ public:
         uint64_t           draining_index,
         size_t&            slot) const;
 
+    // Writes value into the draining-state slot for process_iid (if any).
+    // Returns true when a slot exists.
+    bool set_draining_state(instance_id_type process_iid, int value);
+
+    // Like set_draining_state, but also reports the prior value through was_draining.
+    bool exchange_draining_state(
+        instance_id_type   process_iid,
+        int                value,
+        bool&              was_draining);
+
     // Draining coordination -------------------------------------------------
     //
     // The draining state is tracked per-process via m_draining_process_states.
