@@ -35,13 +35,13 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
 
       - name: Detect changed areas
         id: changed
-        uses: dorny/paths-filter@v3
+        uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3
         with:
           filters: |
             core:
@@ -109,7 +109,7 @@ jobs:
           cmake --build build --config Release --parallel ${{ env.BUILD_JOBS }}
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: macos-build-${{ github.event.pull_request.head.sha || github.sha }}
           path: build/
@@ -117,7 +117,7 @@ jobs:
 
       - name: Update build badge
         if: always() && github.ref == 'refs/heads/master'
-        uses: schneegans/dynamic-badges-action@v1.7.0
+        uses: schneegans/dynamic-badges-action@e9a478b16159b4d31420099ba146cdc50f134483 # v1.7.0
         with:
           auth: ${{ secrets.GIST_SECRET }}
           gistID: 38c12e638eddbbfad6962730f6b10d20
