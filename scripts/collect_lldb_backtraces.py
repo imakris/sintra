@@ -12,6 +12,9 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Sequence, Tuple
 
 
+_CTEST_METADATA_TIMEOUT_SECONDS = 30.0
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -72,7 +75,7 @@ def collect_ctest_metadata(build_dir: Path, config: str) -> Dict[str, Tuple[Sequ
         config,
         "--show-only=json-v1",
     ]
-    info = subprocess.check_output(cmd, text=True)
+    info = subprocess.check_output(cmd, text=True, timeout=_CTEST_METADATA_TIMEOUT_SECONDS)
     data = json.loads(info)
 
     lookup: Dict[str, Tuple[Sequence[str], str | None]] = {}
@@ -113,8 +116,6 @@ def run_lldb_for_tests(
         return
 
     for name, command, workdir in reruns:
-        print("i am starting")
-        sys.stdout.flush()
         print(f"::group::LLDB backtrace for {name}")
         sys.stdout.flush()
         cwd = Path(workdir) if workdir else build_dir
@@ -126,8 +127,6 @@ def run_lldb_for_tests(
                 file=sys.stderr,
             )
         finally:
-            print("i am finished")
-            sys.stdout.flush()
             print("::endgroup::")
             sys.stdout.flush()
 
@@ -153,7 +152,7 @@ def main() -> int:
 
     try:
         metadata = collect_ctest_metadata(build_dir, args.config)
-    except subprocess.CalledProcessError as exc:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         print(
             f"::warning::Failed to query CTest metadata for LLDB rerun: {exc}",
             file=sys.stderr,
