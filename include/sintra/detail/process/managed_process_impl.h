@@ -1329,6 +1329,18 @@ filtered_args_t filter_option(
     return ret;
 }
 
+/// Strips a sequence of options from args, discarding their extracted values
+/// and returning only the leftover argv tokens. Each entry is {option_name, num_args}.
+inline std::vector<std::string> strip_options(
+    std::vector<std::string>                                          args,
+    std::initializer_list<std::pair<std::string_view, unsigned int>>  options)
+{
+    for (const auto& [name, n] : options) {
+        args = filter_option(std::move(args), std::string(name), n).remained;
+    }
+    return args;
+}
+
 inline
 void Managed_process::init(int argc, const char* const* argv)
 {
@@ -1362,23 +1374,16 @@ void Managed_process::init(int argc, const char* const* argv)
 
     // Filter out non-reusable runtime arguments from remained - lifeline values
     // contain stale handles, and external attach tokens are single-use.
-    auto fa_external = filter_option(
-        std::move(fa.remained),
-        detail::k_external_attach_token_arg,
-        1);
-    auto fa_external_occurrence = filter_option(
-        std::move(fa_external.remained),
-        detail::k_external_attach_occurrence_arg,
-        1);
-    auto fa2 = filter_option(
-        std::move(fa_external_occurrence.remained),
-        k_lifeline_handle_arg,
-        1);
-    auto fa3 = filter_option(std::move(fa2.remained), k_lifeline_exit_code_arg, 1);
-    auto fa4 = filter_option(std::move(fa3.remained), k_lifeline_timeout_arg,   1);
-    auto fa5 = filter_option(std::move(fa4.remained), k_lifeline_disable_arg,   0);
+    auto reusable_args = strip_options(std::move(fa.remained), {
+        {detail::k_external_attach_token_arg,      1},
+        {detail::k_external_attach_occurrence_arg, 1},
+        {k_lifeline_handle_arg,                    1},
+        {k_lifeline_exit_code_arg,                 1},
+        {k_lifeline_timeout_arg,                   1},
+        {k_lifeline_disable_arg,                   0},
+    });
 
-    m_recovery_cmd = join_strings(fa5.remained, " ") + " --recovery_occurrence " +
+    m_recovery_cmd = join_strings(reusable_args, " ") + " --recovery_occurrence " +
         std::to_string(recovery_occurrence_value+1);
 
     auto option_value = [&](

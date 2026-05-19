@@ -6,46 +6,51 @@
 namespace sintra {
 
 
-template<typename RT, typename OBJECT_T, typename... Args>
-constexpr static RT resolve_rt(RT(OBJECT_T::*)(Args...)) {  }
+// Member-function / free-function pointer introspection.
+//
+// Lets every const/non-const member-function-pointer overload pair in the
+// transceiver layer collapse to a single template that deduces F and pulls
+// the return type, class type, and argument pack from the trait.
+template <typename F>
+struct member_fn_traits;
+
+template <typename RT, typename OBJECT_T, typename... Args>
+struct member_fn_traits<RT(OBJECT_T::*)(Args...)>
+{
+    using return_type = RT;
+    using class_type  = OBJECT_T;
+
+    template <template<typename...> typename TYPE_CONTAINER>
+    using args_as = TYPE_CONTAINER<Args...>;
+};
+
+template <typename RT, typename OBJECT_T, typename... Args>
+struct member_fn_traits<RT(OBJECT_T::*)(Args...) const>
+    : member_fn_traits<RT(OBJECT_T::*)(Args...)>
+{};
+
+template <typename RT, typename... Args>
+struct member_fn_traits<RT(*)(Args...)>
+{
+    using return_type = RT;
+    using class_type  = void;
+
+    template <template<typename...> typename TYPE_CONTAINER>
+    using args_as = TYPE_CONTAINER<Args...>;
+};
 
 
-template<typename RT, typename OBJECT_T, typename... Args>
-constexpr static OBJECT_T resolve_object_type(RT(OBJECT_T::*)(Args...)) {  }
+template <typename F>
+constexpr static auto resolve_rt(F) -> typename member_fn_traits<F>::return_type {}
 
 
-template<typename RT, typename OBJECT_T, typename... Args>
-constexpr static RT resolve_rt(RT(OBJECT_T::*)(Args...) const) {  }
+template <typename F>
+constexpr static auto resolve_object_type(F) -> typename member_fn_traits<F>::class_type {}
 
 
-template<typename RT, typename OBJECT_T, typename... Args>
-constexpr static OBJECT_T resolve_object_type(RT(OBJECT_T::*)(Args...) const) {  }
-
-
-template<
-    template<typename...> typename TYPE_CONTAINER,
-    typename RT,
-    typename OBJECT_T,
-    typename... Args
->
-constexpr static TYPE_CONTAINER<Args...> resolve_args(RT(OBJECT_T::*)(Args...)) {  }
-
-
-template<
-    template<typename...> typename TYPE_CONTAINER,
-    typename RT,
-    typename OBJECT_T,
-    typename... Args
->
-constexpr static TYPE_CONTAINER<Args...> resolve_args(RT(OBJECT_T::*)(Args...) const) {  }
-
-
-template<
-    template<typename...> typename TYPE_CONTAINER,
-    typename RT,
-    typename... Args
->
-constexpr static TYPE_CONTAINER<Args...> resolve_args(RT(*)(Args...)) {  }
+template <template<typename...> typename TYPE_CONTAINER, typename F>
+constexpr static auto resolve_args(F)
+    -> typename member_fn_traits<F>::template args_as<TYPE_CONTAINER> {}
 
 
 template<typename RT, typename OBJECT_T, typename ARG_T>

@@ -47,6 +47,13 @@ inline void validate_no_barrier_during_shutdown(const std::string& group_name)
     }
 }
 
+/// Runs the validation preamble shared by every user-facing barrier dispatch.
+inline void validate_user_barrier(const std::string& barrier_name, const std::string& group_name)
+{
+    validate_user_barrier_name(barrier_name);
+    validate_no_barrier_during_shutdown(group_name);
+}
+
 inline std::string make_processing_phase_barrier_name(const std::string& barrier_name)
 {
     return "_sintra_processing_phase/" + barrier_name;
@@ -90,19 +97,12 @@ inline sequence_counter_type rendezvous_barrier(
         }
         throw;
     }
-    catch (const rpc_unavailable& e) {
-        // Target was unpublished, gone, or shutting down. During teardown
-        // this is the expected outcome; surface it to non-teardown callers.
-        if (should_treat_rpc_failure_as_satisfied()) {
-            log_barrier_bypass(barrier_name, group_name, e.what());
-            return invalid_sequence;
-        }
-        throw;
-    }
     catch (const std::exception& e) {
-        // Catches other exceptions (e.g. std::logic_error from
-        // Process_group::barrier() when the caller has been removed from the
-        // group during draining/shutdown).
+        // Catches rpc_unavailable (target unpublished/gone/shutting down) and
+        // other exceptions (e.g. std::logic_error from Process_group::barrier()
+        // when the caller has been removed from the group during draining or
+        // shutdown). During teardown these are expected; surface them to
+        // non-teardown callers.
         if (should_treat_rpc_failure_as_satisfied()) {
             log_barrier_bypass(barrier_name, group_name, e.what());
             return invalid_sequence;
@@ -126,8 +126,7 @@ inline sequence_counter_type barrier_dispatch(
     const std::string& barrier_name,
     const std::string& group_name)
 {
-    validate_user_barrier_name(barrier_name);
-    validate_no_barrier_during_shutdown(group_name);
+    validate_user_barrier(barrier_name, group_name);
     return rendezvous_barrier(barrier_name, group_name, k_barrier_mode_rendezvous);
 }
 
@@ -136,8 +135,7 @@ inline sequence_counter_type barrier_dispatch(
     const std::string& barrier_name,
     const std::string& group_name)
 {
-    validate_user_barrier_name(barrier_name);
-    validate_no_barrier_during_shutdown(group_name);
+    validate_user_barrier(barrier_name, group_name);
     const auto rendezvous_seq = rendezvous_barrier(barrier_name, group_name, k_barrier_mode_delivery);
     if (rendezvous_seq == invalid_sequence) {
         return invalid_sequence;
@@ -156,8 +154,7 @@ inline sequence_counter_type barrier_dispatch(
     const std::string& barrier_name,
     const std::string& group_name)
 {
-    validate_user_barrier_name(barrier_name);
-    validate_no_barrier_during_shutdown(group_name);
+    validate_user_barrier(barrier_name, group_name);
     const auto rendezvous_seq = rendezvous_barrier(barrier_name, group_name, k_barrier_mode_processing);
     if (rendezvous_seq == invalid_sequence) {
         return invalid_sequence;
