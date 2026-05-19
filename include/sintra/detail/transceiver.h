@@ -190,6 +190,15 @@ using handler_registry_type =
     >;
 
 
+// True when SenderT is "generic" (the any-sender placeholder void) or when
+// SenderT is in MessageT's exporter hierarchy. Used by activate() overloads to
+// reject handlers that filter on a sender unrelated to the message's exporter.
+template <typename MessageT, typename SenderT>
+inline constexpr bool can_handler_filter_on_sender_v =
+    std::is_same_v<SenderT, void> ||
+    std::is_base_of_v<typename MessageT::exporter, SenderT>;
+
+
 struct Transceiver
 {
     using Transceiver_type = Transceiver;
@@ -242,36 +251,16 @@ public:
         decltype(m_deactivators)::iterator*    deactivator_it_ptr = nullptr);
 
 
-    // A functor with an arbitrary non-message argument
+    // Functor handler activation. Accepts both functors that take a raw value
+    // (wrapped in Message<Enclosure<...>>) and functors that take a Message
+    // directly; the body picks the right path via if constexpr on the deduced
+    // argument type. SFINAE on &FT::operator() restricts this template to
+    // functor-typed callables so the member-function-pointer overloads below
+    // are not shadowed.
     template<
         typename SENDER_T,
         typename FT,
-        typename = decltype(&FT::operator()),  //must be functor
-        typename FUNCTOR_ARG_T = decltype(resolve_single_functor_arg(std::declval<const FT&>())),
-
-        // prevent functors with message arguments from matching the template
-        typename = enable_if_t<
-            !is_base_of<Message_prefix, std::remove_reference_t<FUNCTOR_ARG_T>>::value
-        >
-    >
-    handler_deactivator activate(
-        const FT&                              internal_slot,
-        Typed_instance_id<SENDER_T>            sender_id,
-        decltype(m_deactivators)::iterator*    deactivator_it_ptr = nullptr);
-
-
-    // A functor with a message argument
-    template<
-        typename SENDER_T,
-        typename FT,
-        typename = decltype(&FT::operator()),    //must be functor
-        typename = void, // differentiate from the previous template
-        typename FUNCTOR_ARG_T = decltype(resolve_single_functor_arg(std::declval<const FT&>())),
-
-        // only allow functors with message arguments to match the template
-        typename = enable_if_t<
-            is_base_of<Message_prefix, std::remove_reference_t<FUNCTOR_ARG_T>>::value
-        >
+        typename = decltype(&FT::operator())
     >
     handler_deactivator activate(
         const FT&                              internal_slot,
@@ -447,58 +436,58 @@ public:
     static void rpc_handler(Message_prefix& untyped_msg);
 
 
-    template <
-        typename RPCTC,
-        typename RT,
-        typename OBJECT_T,
-        typename... FArgs,      // The argument types of the exported member function
-        typename... RArgs        // The argument types used by the caller
-    >
-    static RT rpc(
-        RT(OBJECT_T::* /*resolution dummy arg*/)(FArgs...),
-        instance_id_type   instance_id,
-        RArgs&&...         args);
+    // Unified RPC dispatcher: partial specialization on the member-function
+    // pointer type carries the FArgs pack and the const/non-const-qualified
+    // variant in one place, so the public rpc / rpc_async / export_rpc surface
+    // does not need separate const overloads. Free-function pointers are not
+    // supported here because the public RPC API is keyed to member functions
+    // of a Transceiver-derived class.
+    template <typename RPCTC, typename F>
+    struct rpc_dispatcher
+    {
+        static_assert(std::is_member_function_pointer_v<F>,
+            "rpc/rpc_async/export_rpc require a pointer-to-member-function as the "
+            "resolution argument (e.g. &MyClass::my_method).");
+    };
+
+    template <typename RPCTC, typename RT, typename OBJECT_T, typename... FArgs>
+    struct rpc_dispatcher<RPCTC, RT(OBJECT_T::*)(FArgs...)>
+    {
+        using message_type = Message<unique_message_body<RPCTC, FArgs...>, RT, RPCTC::id>;
+
+        template <typename... RArgs>
+        static RT sync(instance_id_type instance_id, RArgs&&... args)
+        {
+            return Transceiver::rpc_impl<RPCTC, message_type, FArgs...>(instance_id, args...);
+        }
+
+        template <typename... RArgs>
+        static Rpc_handle<RT> async(instance_id_type instance_id, RArgs&&... args)
+        {
+            return Transceiver::rpc_async_impl<RPCTC, message_type, FArgs...>(instance_id, args...);
+        }
+    };
+
+    template <typename RPCTC, typename RT, typename OBJECT_T, typename... FArgs>
+    struct rpc_dispatcher<RPCTC, RT(OBJECT_T::*)(FArgs...) const>
+        : rpc_dispatcher<RPCTC, RT(OBJECT_T::*)(FArgs...)>
+    {};
 
 
-    template <
-        typename RPCTC,
-        typename RT,
-        typename OBJECT_T,
-        typename... FArgs,
-        typename... RArgs
-    >
-    static RT rpc(
-        RT(OBJECT_T::* /*resolution dummy arg*/)(FArgs...) const,
-        instance_id_type   instance_id,
-        RArgs&&...         args);
+    template <typename RPCTC, typename F, typename... RArgs>
+    static auto rpc(F /*resolution dummy arg*/, instance_id_type instance_id, RArgs&&... args)
+    {
+        return rpc_dispatcher<RPCTC, F>::sync(instance_id, std::forward<RArgs>(args)...);
+    }
 
-    template <
-        typename RPCTC,
-        typename RT,
-        typename OBJECT_T,
-        typename... FArgs,
-        typename... RArgs
-    >
+
     // Async-only public surface. Synchronous rpc_<method>() stays blocking and
     // reuses the same transported machinery internally without exposing a handle.
-    static Rpc_handle<RT> rpc_async(
-        RT(OBJECT_T::* /*resolution dummy arg*/)(FArgs...),
-        instance_id_type   instance_id,
-        RArgs&&...         args);
-
-    template <
-        typename RPCTC,
-        typename RT,
-        typename OBJECT_T,
-        typename... FArgs,
-        typename... RArgs
-    >
-    // Async-only public surface. Synchronous rpc_<method>() stays blocking and
-    // reuses the same transported machinery internally without exposing a handle.
-    static Rpc_handle<RT> rpc_async(
-        RT(OBJECT_T::* /*resolution dummy arg*/)(FArgs...) const,
-        instance_id_type   instance_id,
-        RArgs&&...         args);
+    template <typename RPCTC, typename F, typename... RArgs>
+    static auto rpc_async(F /*resolution dummy arg*/, instance_id_type instance_id, RArgs&&... args)
+    {
+        return rpc_dispatcher<RPCTC, F>::async(instance_id, std::forward<RArgs>(args)...);
+    }
 
 
     template <
@@ -541,11 +530,12 @@ public:
     template <typename RPCTC, typename MT>
     function<void()> export_rpc_impl();
 
-    template <typename RPCTC, typename RT, typename OBJECT_T, typename... Args>
-    function<void()> export_rpc(RT(OBJECT_T::* /*resolution dummy arg*/)(Args...) const);
-
-    template <typename RPCTC, typename RT, typename OBJECT_T, typename... Args>
-    function<void()> export_rpc(RT(OBJECT_T::* /*resolution dummy arg*/)(Args...));
+    template <typename RPCTC, typename F>
+    function<void()> export_rpc(F /*resolution dummy arg*/)
+    {
+        using message_type = typename rpc_dispatcher<RPCTC, F>::message_type;
+        return export_rpc_impl<RPCTC, message_type>();
+    }
 
 
 
@@ -639,6 +629,30 @@ private:
     Rpc_execution_guard try_acquire_rpc_execution();
     void release_rpc_execution();
     void ensure_rpc_shutdown();
+
+    // Atomic (under the per-RPCTC instance-map spinlock) lookup of the
+    // RPC target object plus an attempt to acquire its execution guard.
+    //
+    // Holding the spinlock across both lookup AND try_acquire_rpc_execution
+    // is the invariant that prevents the owner thread's ~Instantiator (which
+    // erases the same map entry under this spinlock) from racing ahead and
+    // letting ~Transceiver tear down m_rpc_lifecycle_mutex before we lock
+    // it. Lock order is spinlock -> m_rpc_lifecycle_mutex;
+    // ensure_rpc_shutdown and release_rpc_execution never take the spinlock,
+    // so this cannot deadlock.
+    //
+    // Callers distinguish two failure modes via the returned struct:
+    //   object == nullptr        -> instance_id not present in the map
+    //   !guard                   -> object exists but is shutting down
+    template <typename RPCTC>
+    struct Rpc_target_handle
+    {
+        typename RPCTC::o_type*  object = nullptr;
+        Rpc_execution_guard      guard;
+    };
+
+    template <typename RPCTC>
+    static Rpc_target_handle<RPCTC> acquire_rpc_target(instance_id_type instance_id);
 
     // Handlers of return messages (i.e. messages delivering the results of function messages).
     // Note that the key is an instance_id_type, rather than a type_id_type.

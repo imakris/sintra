@@ -412,17 +412,13 @@ Transceiver::activate_impl(
 
 
 
-// A functor with an arbitrary non-message argument
+// Functor handler activation. Branches at compile time on whether the functor
+// takes a Message_prefix-derived argument: if so, the functor is used as a
+// handler directly; otherwise the argument is wrapped in Message<Enclosure<>>.
 template<
     typename SENDER_T,
     typename FT,
-    typename  /* = decltype(&FT::operator())*/,  //must be functor
-    typename FUNCTOR_ARG_T /* = decltype(resolve_single_functor_arg(*((FT*)0)))*/,
-
-    // prevent functors with message arguments from matching the template
-    typename /* = typename enable_if_t<
-        !std::is_base_of<Message_prefix, std::remove_reference_t<FUNCTOR_ARG_T>>::value
-    >*/
+    typename  /* = decltype(&FT::operator()) */    // SFINAE: only matches functor-typed callables
 >
 typename Transceiver::handler_deactivator
 Transceiver::activate(
@@ -430,60 +426,29 @@ Transceiver::activate(
     Typed_instance_id<SENDER_T>            sender_id,
     decltype(m_deactivators)::iterator*    deactivator_it_ptr)
 {
-    // this is an arbitrary functor, quite possibly a lambda. The first and only argument
-    // should be matched here. If it fails, the function is incompatible to its purpose.
     using arg_type = decltype(resolve_single_functor_arg(internal_slot));
+    using bare_arg = std::remove_reference_t<arg_type>;
 
-    // Slots would only take messages of specific, cross-process identifiable type, thus the
-    // 'internal_slot' is not really a slot. We need to make a proper slot and enclose the
-    // functor call in it.
+    if constexpr (std::is_base_of_v<Message_prefix, bare_arg>) {
+        // Functor takes a Message directly; just convert to function<>.
+        using MT = bare_arg;
+        function<typename MT::return_type(const arg_type&)> handler = internal_slot;
 
-    using MT = Message<Enclosure<arg_type>>;
-    function<void(const MT &msg)> handler = [internal_slot](const MT &msg) -> auto
-    {
-        return internal_slot(msg.get_value());
-    };
+        static_assert(can_handler_filter_on_sender_v<MT, SENDER_T>,
+            "This type of sender cannot send the type of messages "
+            "handled by the specified handler.");
 
-    return activate_impl<MT>(handler, sender_id.id, deactivator_it_ptr);
-}
-
-
-
-// A functor with a message argument
-template<
-    typename SENDER_T,
-    typename FT,
-    typename  /* = decltype(&FT::operator())*/,    //must be functor
-    typename  /* = void*/, // differentiate from the previous template
-    typename FUNCTOR_ARG_T /* = decltype(resolve_single_functor_arg(*((FT*)0)))*/,
-
-    // only allow functors with message arguments to match the template
-    typename /* = typename enable_if_t<
-        is_base_of<Message_prefix, std::remove_reference_t<FUNCTOR_ARG_T>>::value
-    >*/
->
-typename Transceiver::handler_deactivator
-Transceiver::activate(
-    const FT&                              internal_slot,
-    Typed_instance_id<SENDER_T>            sender_id,
-    decltype(m_deactivators)::iterator*    deactivator_it_ptr)
-{
-    // the given slot is already a functor taking a message argument, thus there is no need for
-    // inclusion into a lambda. There is however the need to convert to function, since
-    // we don't know what kind of functor it is.
-
-    using arg_type = decltype(resolve_single_functor_arg(internal_slot));
-    using MT       = std::remove_reference_t<arg_type>;
-    function<typename MT::return_type(const arg_type&)> handler = internal_slot;
-
-    constexpr bool sender_capability =
-        is_same_v    < SENDER_T, void > ||                   // generic sender (e.g. any_local)
-        is_base_of_v < typename MT::exporter, SENDER_T >;    // the exporter is sender's base
-
-    static_assert(sender_capability, "This type of sender cannot send the type of messages "
-        "handled by the specified handler.");
-
-    return activate_impl<MT>(handler, sender_id.id, deactivator_it_ptr);
+        return activate_impl<MT>(handler, sender_id.id, deactivator_it_ptr);
+    }
+    else {
+        // Functor takes a plain value; wrap it in Message<Enclosure<arg_type>>.
+        using MT = Message<Enclosure<arg_type>>;
+        function<void(const MT &msg)> handler = [internal_slot](const MT &msg) -> auto
+        {
+            return internal_slot(msg.get_value());
+        };
+        return activate_impl<MT>(handler, sender_id.id, deactivator_it_ptr);
+    }
 }
 
 
@@ -506,11 +471,8 @@ Transceiver::activate(
             return (static_cast<OBJECT_T*>(this)->*v)(message);
         });
 
-    constexpr bool sender_capability =
-        is_same_v    < SENDER_T, void > ||                        // generic sender (e.g. any_local)
-        is_base_of_v < typename MESSAGE_T::exporter, SENDER_T >;  // the exporter is sender's base
-
-    static_assert(sender_capability, "This type of sender cannot send the type of messages "
+    static_assert(can_handler_filter_on_sender_v<MESSAGE_T, SENDER_T>,
+        "This type of sender cannot send the type of messages "
         "handled by the specified handler.");
 
     return activate_impl<MESSAGE_T>(handler, sender_id.id, deactivator_it_ptr);
@@ -589,6 +551,29 @@ void Transceiver::deactivate_all()
 
 
 
+// Places a fully-formed outbound request-ring message: pre-instantiates the
+// message-type id (which may itself RPC through the same ring), writes the
+// payload, stamps the routing IDs, and releases the slot. Shared by send(),
+// rpc_impl(), and rpc_async_impl() which differ only in the IID values.
+template <typename MESSAGE_T, typename... Args>
+inline void write_outbound_request(
+    instance_id_type   sender_iid,
+    instance_id_type   receiver_iid,
+    instance_id_type   function_iid,
+    Args&&...          args)
+{
+    // Dynamic type resolution may RPC through the same request ring; do it
+    // before reserving the outbound message slot.
+    (void)MESSAGE_T::id();
+    MESSAGE_T* msg = s_mproc->m_out_req_c->write<MESSAGE_T>(
+        vb_size<MESSAGE_T>(args...), args...);
+    msg->sender_instance_id   = sender_iid;
+    msg->receiver_instance_id = receiver_iid;
+    msg->function_instance_id = function_iid;
+    s_mproc->m_out_req_c->done_writing();
+}
+
+
 template <
     typename MESSAGE_T,
     instance_id_type LOCALITY,
@@ -615,15 +600,8 @@ void Transceiver::send(Args&&... args)
 
     static_assert(sender_capability, "This type of sender cannot send messages of this type.");
 
-    // Dynamic type resolution may RPC through the same request ring; do it
-    // before reserving the outbound message slot.
-    const auto message_type_id = MESSAGE_T::id();
-    (void)message_type_id;
-
-    MESSAGE_T* msg = s_mproc->m_out_req_c->write<MESSAGE_T>(vb_size<MESSAGE_T>(args...), args...);
-    msg->sender_instance_id = m_instance_id;
-    msg->receiver_instance_id = LOCALITY;
-    s_mproc->m_out_req_c->done_writing();
+    write_outbound_request<MESSAGE_T>(
+        m_instance_id, LOCALITY, invalid_instance_id, args...);
 }
 
 
@@ -651,6 +629,21 @@ auto& Transceiver::get_instance_to_object_map()
 {
     static spinlocked_umap<instance_id_type, typename RPCTC::o_type*> instance_to_object;
     return instance_to_object;
+}
+
+
+template <typename RPCTC>
+typename Transceiver::template Rpc_target_handle<RPCTC>
+Transceiver::acquire_rpc_target(instance_id_type instance_id)
+{
+    Rpc_target_handle<RPCTC> result;
+    auto scoped_map = get_instance_to_object_map<RPCTC>().scoped();
+    auto it         = scoped_map.get().find(instance_id);
+    if (it != scoped_map.get().end()) {
+        result.object = it->second;
+        result.guard  = result.object->try_acquire_rpc_execution();
+    }
+    return result;
 }
 
 
@@ -706,17 +699,18 @@ void Transceiver::finalize_rpc_write(
 template <typename T>
 struct Void_filter
 {
-    std::function<T()> f;
-    T result = {};
-    void call() { result = f(); }
-};
+    static constexpr bool is_void = std::is_same_v<T, void_placeholder_t>;
+    using callable_type = std::function<std::conditional_t<is_void, void, T>()>;
 
-template <>
-struct Void_filter<void_placeholder_t>
-{
-    std::function<void()>  f;
-    void_placeholder_t     result = {};
-    void call() { f(); }
+    callable_type f;
+    T result = {};
+    void call() {
+        if constexpr (is_void) {
+            f();
+        } else {
+            result = f();
+        }
+    }
 };
 
 template<typename T>
@@ -936,33 +930,13 @@ void Transceiver::rpc_handler(Message_prefix& untyped_msg)
     using r_type = typename rpc_storage_type<typename RPCTC::r_type>::type;
 
     MESSAGE_T&              msg = (MESSAGE_T&)untyped_msg;
-    typename RPCTC::o_type* obj = nullptr;
-    Rpc_execution_guard execution_guard;
-
-    // Hold the spinlock across both the lookup AND try_acquire_rpc_execution.
-    //
-    // Without this, a reader could copy obj, drop the spinlock, and then race
-    // the owner thread's destructor: ~Instantiator (member of the derived
-    // Transceiver) erases the same map entry under this spinlock, then
-    // ~Transceiver runs ensure_rpc_shutdown which observes m_active_rpc_calls
-    // == 0 (we have not yet incremented it) and proceeds; m_rpc_lifecycle_mutex
-    // is then destroyed before our try_acquire would lock it. UAF.
-    //
-    // Holding the spinlock here forces ~Instantiator to wait, so by the time
-    // our try_acquire returns we have either (a) incremented
-    // m_active_rpc_calls, blocking ensure_rpc_shutdown until release, or
-    // (b) observed m_accepting_rpc_calls=false and bailed before any
-    // dereference of mutable Transceiver state. Lock order is
-    // spinlock -> m_rpc_lifecycle_mutex; ensure_rpc_shutdown and
-    // release_rpc_execution never take the spinlock, so this cannot deadlock.
-    {
-        auto scoped_map = get_instance_to_object_map<RPCTC>().scoped();
-        auto it         = scoped_map.get().find(untyped_msg.receiver_instance_id);
-        if (it != scoped_map.get().end()) {
-            obj = it->second;
-            execution_guard = obj->try_acquire_rpc_execution();
-        }
-    }
+    // acquire_rpc_target() holds the per-RPCTC instance-map spinlock across
+    // both the lookup and the execution-guard acquisition, which is the
+    // invariant required to keep ~Instantiator/~Transceiver teardown from
+    // racing this dispatch (see Rpc_target_handle docs in transceiver.h).
+    auto handle = acquire_rpc_target<RPCTC>(untyped_msg.receiver_instance_id);
+    typename RPCTC::o_type* obj             = handle.object;
+    Rpc_execution_guard&    execution_guard = handle.guard;
 
     auto send_unavailable_response = [&](const std::string& reason)
     {
@@ -1078,71 +1052,9 @@ void Transceiver::rpc_handler(Message_prefix& untyped_msg)
 
 
 
-template <
-    typename RPCTC,
-    typename RT,
-    typename OBJECT_T,
-    typename... FArgs,      // The argument types of the exported member function
-    typename... RArgs       // The argument types used by the caller
->
-RT Transceiver::rpc(
-    RT(OBJECT_T::* /*resolution dummy arg*/)(FArgs...),
-    instance_id_type   instance_id,
-    RArgs&&...         args)
-{
-    using message_type = Message<unique_message_body<RPCTC, FArgs...>, RT, RPCTC::id>;
-    return rpc_impl<RPCTC, message_type, FArgs...>(instance_id, args...);
-}
-
-
-
-template <
-    typename RPCTC,
-    typename RT,
-    typename OBJECT_T,
-    typename... FArgs,
-    typename... RArgs
->
-RT Transceiver::rpc(
-    RT(OBJECT_T::* /*resolution_dummy arg*/)(FArgs...) const,
-    instance_id_type   instance_id,
-    RArgs&&...         args)
-{
-    using message_type = Message<unique_message_body<RPCTC, FArgs...>, RT, RPCTC::id>;
-    return rpc_impl<RPCTC, message_type, FArgs...>(instance_id, args...);
-}
-
-template <
-    typename RPCTC,
-    typename RT,
-    typename OBJECT_T,
-    typename... FArgs,
-    typename... RArgs
->
-Rpc_handle<RT> Transceiver::rpc_async(
-    RT(OBJECT_T::* /*resolution dummy arg*/)(FArgs...),
-    instance_id_type   instance_id,
-    RArgs&&...         args)
-{
-    using message_type = Message<unique_message_body<RPCTC, FArgs...>, RT, RPCTC::id>;
-    return rpc_async_impl<RPCTC, message_type, FArgs...>(instance_id, args...);
-}
-
-template <
-    typename RPCTC,
-    typename RT,
-    typename OBJECT_T,
-    typename... FArgs,
-    typename... RArgs
->
-Rpc_handle<RT> Transceiver::rpc_async(
-    RT(OBJECT_T::* /*resolution dummy arg*/)(FArgs...) const,
-    instance_id_type   instance_id,
-    RArgs&&...         args)
-{
-    using message_type = Message<unique_message_body<RPCTC, FArgs...>, RT, RPCTC::id>;
-    return rpc_async_impl<RPCTC, message_type, FArgs...>(instance_id, args...);
-}
+// rpc / rpc_async definitions live inline inside Transceiver via rpc_dispatcher;
+// the out-of-class const/non-const overload pairs were removed in favour of a
+// single template that deduces the member-function pointer type.
 
 
 
@@ -1244,16 +1156,11 @@ Transceiver::rpc_async_impl(instance_id_type instance_id, Args... args)
         rpc_state->function_instance_id = s_mproc->activate_return_handler(rh);
 
         // write the message for the rpc call into the communication ring
-        // Dynamic type resolution may RPC through the same request ring; do it
-        // before reserving the outbound message slot.
-        const auto message_type_id = MESSAGE_T::id();
-        (void)message_type_id;
-
-        MESSAGE_T* msg = s_mproc->m_out_req_c->write<MESSAGE_T>(vb_size<MESSAGE_T>(args...), args...);
-        msg->sender_instance_id   = s_mproc->m_instance_id;
-        msg->receiver_instance_id = instance_id;
-        msg->function_instance_id = rpc_state->function_instance_id;
-        s_mproc->m_out_req_c->done_writing();
+        write_outbound_request<MESSAGE_T>(
+            s_mproc->m_instance_id,
+            instance_id,
+            rpc_state->function_instance_id,
+            args...);
     }
     catch (...) {
         const auto function_instance_id = rpc_state->function_instance_id;
@@ -1282,43 +1189,27 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
 {
     if constexpr (RPCTC::may_be_called_directly) {
         if (is_local_instance(instance_id)) {
-            // if the instance is local, then it has already been registered in the instance_map
-            // of this particular type. this will only find the object and call it.
-            //
-            // Hold the spinlock across both the lookup AND try_acquire_rpc_execution
-            // so the owner thread's ~Instantiator (which erases the same map entry
-            // under this spinlock) cannot race ahead and let ~Transceiver tear down
-            // m_rpc_lifecycle_mutex before we lock it. See the matching note in
-            // rpc_handler() above for the lock-order argument.
-            typename RPCTC::o_type* object = nullptr;
-            Rpc_execution_guard guard;
-            {
-                auto scoped_map = get_instance_to_object_map<RPCTC>().scoped();
-                auto it         = scoped_map.get().find(instance_id);
-                if (it == scoped_map.get().end()) {
-                    throw rpc_unavailable("Local RPC target no longer available - it may have been shut down.");
-                }
-                object = it->second;
-                guard = object->try_acquire_rpc_execution();
+            // Local target shortcut: skip the request-ring round trip and call
+            // the member function directly. acquire_rpc_target() holds the
+            // per-RPCTC spinlock across both the map lookup and the execution
+            // guard acquisition (see Rpc_target_handle docs in transceiver.h).
+            auto handle = acquire_rpc_target<RPCTC>(instance_id);
+            if (!handle.object) {
+                throw rpc_unavailable("Local RPC target no longer available - it may have been shut down.");
             }
-            if (!guard) {
+            if (!handle.guard) {
                 throw rpc_unavailable("Attempted to call an RPC on a target that is shutting down.");
             }
-            return (object->*RPCTC::mf())(args...);
+            return (handle.object->*RPCTC::mf())(args...);
         }
     }
 
     if constexpr (RPCTC::is_fire_and_forget) {
-        // Dynamic type resolution may RPC through the same request ring; do it
-        // before reserving the outbound message slot.
-        const auto message_type_id = MESSAGE_T::id();
-        (void)message_type_id;
-
-        MESSAGE_T* msg = s_mproc->m_out_req_c->write<MESSAGE_T>(vb_size<MESSAGE_T>(args...), args...);
-        msg->sender_instance_id   = s_mproc->m_instance_id;
-        msg->receiver_instance_id = instance_id;
-        msg->function_instance_id = invalid_instance_id;
-        s_mproc->m_out_req_c->done_writing();
+        write_outbound_request<MESSAGE_T>(
+            s_mproc->m_instance_id,
+            instance_id,
+            invalid_instance_id,
+            args...);
         return;
     }
 
@@ -1420,23 +1311,7 @@ Transceiver::export_rpc_impl()
 
 
 
-template <typename RPCTC, typename RT, typename OBJECT_T, typename... Args>
-function<void()>
-Transceiver::export_rpc(RT(OBJECT_T::* /*resolution dummy arg*/)(Args...) const)
-{
-    using message_type = Message<unique_message_body<RPCTC, Args...>, RT, RPCTC::id>;
-    return export_rpc_impl<RPCTC, message_type>();
-}
-
-
-
-template <typename RPCTC, typename RT, typename OBJECT_T, typename... Args>
-function<void()>
-Transceiver::export_rpc(RT(OBJECT_T::* /*resolution dummy arg*/)(Args...))
-{
-    using message_type = Message<unique_message_body<RPCTC, Args...>, RT, RPCTC::id>;
-    return export_rpc_impl<RPCTC, message_type>();
-}
+// export_rpc lives inline inside Transceiver via rpc_dispatcher.
 
 
 
