@@ -1911,6 +1911,7 @@ Managed_process::Spawn_result Managed_process::spawn_swarm_process(
     Spawn_detached_options spawn_options;
     spawn_options.prog = s.binary_name.c_str();
     spawn_options.child_pid_out = &spawned_pid;
+    spawn_options.env_overrides = s.env_overrides;
 
     if (s.lifetime.enable_lifeline) {
 #ifdef _WIN32
@@ -2155,7 +2156,12 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
             all_args.insert(all_args.end(), it->sintra_options.begin(), it->sintra_options.end());
             all_args.insert(all_args.end(), it->user_options.begin(), it->user_options.end());
 
-            auto result = spawn_swarm_process({it->entry.m_binary_name, all_args, it->assigned_instance_id});
+            Spawn_swarm_process_args spawn_args;
+            spawn_args.binary_name = it->entry.m_binary_name;
+            spawn_args.args        = std::move(all_args);
+            spawn_args.piid        = it->assigned_instance_id;
+
+            auto result = spawn_swarm_process(spawn_args);
             if (result.success) {
                 successfully_spawned.insert(it->assigned_instance_id);
             }

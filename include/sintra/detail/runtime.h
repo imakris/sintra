@@ -196,6 +196,7 @@ struct Spawn_options
 {
     std::string                binary_path;
     std::vector<std::string>   args;
+    std::vector<std::string>   env_overrides;
     size_t                     count               = 1;
     instance_id_type           process_instance_id = invalid_instance_id;
     std::string                wait_for_instance_name;
@@ -955,9 +956,10 @@ inline size_t spawn_swarm_process(const Spawn_options& options)
         });
 
         Managed_process::Spawn_swarm_process_args spawn_args;
-        spawn_args.binary_name = options.binary_path;
-        spawn_args.args        = args;
-        spawn_args.lifetime    = options.lifetime;
+        spawn_args.binary_name   = options.binary_path;
+        spawn_args.args          = args;
+        spawn_args.env_overrides = options.env_overrides;
+        spawn_args.lifetime      = options.lifetime;
 
         for (size_t i = 0; i < options.count; ++i) {
             spawn_args.piid = piid;

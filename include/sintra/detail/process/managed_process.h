@@ -348,6 +348,7 @@ struct Managed_process: Derived_transceiver<Managed_process>
     {
         std::string                binary_name;
         std::vector<std::string>   args;
+        std::vector<std::string>   env_overrides;
         instance_id_type           piid;
         uint32_t                   occurrence = 0;
         Lifetime_policy            lifetime;
