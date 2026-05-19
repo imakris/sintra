@@ -7,6 +7,7 @@ Automatically commits and pushes the change.
 import subprocess
 import sys
 from pathlib import Path
+from typing import Sequence
 
 
 def pause():
@@ -17,17 +18,22 @@ def pause():
         print()
 
 
-def run_command(cmd, check=True):
-    """Run a shell command and return the result."""
+def format_command(cmd: Sequence[str]) -> str:
+    """Return a compact command string for diagnostics."""
+
+    return " ".join(cmd)
+
+
+def run_command(cmd: Sequence[str], check=True):
+    """Run a command and return the result."""
     result = subprocess.run(
         cmd,
-        shell=True,
         capture_output=True,
         text=True,
         check=False
     )
     if check and result.returncode != 0:
-        print(f"Error running command: {cmd}", file=sys.stderr)
+        print(f"Error running command: {format_command(cmd)}", file=sys.stderr)
         print(f"stdout: {result.stdout}", file=sys.stderr)
         print(f"stderr: {result.stderr}", file=sys.stderr)
         pause()
@@ -64,7 +70,13 @@ def main():
 
     # Git operations
     print("Adding files to git...")
-    run_command("git add flip_to_trigger_ci tests/.ci_trigger .github/workflows/.ci_trigger")
+    run_command([
+        "git",
+        "add",
+        "flip_to_trigger_ci",
+        "tests/.ci_trigger",
+        ".github/workflows/.ci_trigger",
+    ])
 
     print("Creating commit...")
     commit_message = f"""Trigger CI (flip: {current_value} -> {new_value})
@@ -95,7 +107,7 @@ Co-Authored-By: Claude <noreply@anthropic.com>"""
             sys.exit(1)
 
     print("Pushing to remote...")
-    run_command("git push")
+    run_command(["git", "push"])
 
     print("CI triggered successfully!")
     pause()
