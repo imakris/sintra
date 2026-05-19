@@ -32,54 +32,47 @@ struct Maildrop
 {
     using mp_type = Managed_process::Transceiver_type;
 
+    template <typename Payload>
+    Maildrop& send_payload(Payload&& payload)
+    {
+        using MT = Message<Enclosure<std::remove_cvref_t<Payload>>>;
+        s_mproc->send<MT, LOCALITY, mp_type>(std::forward<Payload>(payload));
+        return *this;
+    }
+
     template <std::size_t N>
     Maildrop& operator<<(const char (&value)[N])
     {
-        using MT = Message<Enclosure<std::string>>;
-        s_mproc->send<MT, LOCALITY, mp_type>(std::string(value));
-        return *this;
+        return send_payload(std::string(value));
     }
 
     Maildrop& operator<<(const char* value)
     {
-        using MT = Message<Enclosure<std::string>>;
-        s_mproc->send<MT, LOCALITY, mp_type>(std::string(value));
-        return *this;
+        return send_payload(std::string(value));
     }
 
     template <std::size_t N, typename T>
     Maildrop& operator<<(const T (&values)[N])
     {
-        using MT = Message<Enclosure<std::vector<T>>>;
-        s_mproc->send<MT, LOCALITY, mp_type>(std::vector<T>(values, values + N));
-        return *this;
+        return send_payload(std::vector<T>(values, values + N));
     }
 
     template <typename T>
     Maildrop& operator<<(const T& value)
     {
-        using MT = Message<Enclosure<T>>;
-        s_mproc->send<MT, LOCALITY, mp_type>(value);
-        return *this;
+        return send_payload(value);
     }
 };
 
-inline Maildrop<any_local>& local()
+template <instance_id_type Locality>
+inline Maildrop<Locality>& maildrop()
 {
-    static Maildrop<any_local> instance;
+    static Maildrop<Locality> instance;
     return instance;
 }
 
-inline Maildrop<any_remote>& remote()
-{
-    static Maildrop<any_remote> instance;
-    return instance;
-}
-
-inline Maildrop<any_local_or_remote>& world()
-{
-    static Maildrop<any_local_or_remote> instance;
-    return instance;
-}
+inline Maildrop<any_local>&            local()  { return maildrop<any_local>();            }
+inline Maildrop<any_remote>&           remote() { return maildrop<any_remote>();           }
+inline Maildrop<any_local_or_remote>&  world()  { return maildrop<any_local_or_remote>();  }
 
 } // namespace sintra

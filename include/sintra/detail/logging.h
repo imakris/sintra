@@ -192,20 +192,26 @@ struct Exception_boundary
     const char* context;
 
     template <typename F>
-    void operator()(F&& fn) const noexcept
+    static void run_protected(const char* ctx, F& fn) noexcept
     {
         try {
             fn();
         }
         catch (const std::exception& e) {
             Log_stream(log_level::warning)
-                << "[sintra] Exception at boundary '" << context
+                << "[sintra] Exception at boundary '" << ctx
                 << "': " << e.what() << "\n";
         }
         catch (...) {
             Log_stream(log_level::warning)
-                << "[sintra] Unknown exception at boundary '" << context << "'\n";
+                << "[sintra] Unknown exception at boundary '" << ctx << "'\n";
         }
+    }
+
+    template <typename F>
+    void operator()(F&& fn) const noexcept
+    {
+        run_protected(context, fn);
     }
 
     /// Returns a callable that wraps fn with exception protection.
@@ -214,18 +220,7 @@ struct Exception_boundary
     auto wrap(F&& fn) const
     {
         return [ctx = context, f = std::forward<F>(fn)]() mutable noexcept {
-            try {
-                f();
-            }
-            catch (const std::exception& e) {
-                Log_stream(log_level::warning)
-                    << "[sintra] Exception at boundary '" << ctx
-                    << "': " << e.what() << "\n";
-            }
-            catch (...) {
-                Log_stream(log_level::warning)
-                    << "[sintra] Unknown exception at boundary '" << ctx << "'\n";
-            }
+            run_protected(ctx, f);
         };
     }
 };
