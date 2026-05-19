@@ -29,24 +29,25 @@ Then open `http://localhost:8000/`.
 ## Contents
 
 1. [Overview](#overview)
-2. [Terminology](#terminology)
-3. [Initialization and Process Topology](#initialization-and-process-topology)
-4. [Transceivers](#transceivers)
-5. [Messages and Payloads](#messages-and-payloads)
-6. [Publish/Subscribe](#publishsubscribe)
-7. [RPC](#rpc)
-8. [Targeting and IDs](#targeting-and-ids)
-9. [Barriers and Fences](#barriers-and-fences)
-10. [Lifecycle and Shutdown](#lifecycle-and-shutdown)
-11. [Recovery and Lifecycle Hooks](#recovery-and-lifecycle-hooks)
-12. [Direct Ring Helpers](#direct-ring-helpers)
-13. [Errors and Diagnostics](#errors-and-diagnostics)
-14. [Threading and Reentrancy](#threading-and-reentrancy)
-15. [Type IDs](#type-ids)
-16. [CMake Integration](#cmake-integration)
-17. [Recipes](#recipes)
-18. [Common Mistakes](#common-mistakes)
-19. [API Index](#api-index)
+2. [Minimum Working Program](#minimum-working-program)
+3. [Terminology](#terminology)
+4. [Initialization and Process Topology](#initialization-and-process-topology)
+5. [Transceivers](#transceivers)
+6. [Messages and Payloads](#messages-and-payloads)
+7. [Publish/Subscribe](#publishsubscribe)
+8. [RPC](#rpc)
+9. [Targeting and IDs](#targeting-and-ids)
+10. [Barriers and Fences](#barriers-and-fences)
+11. [Lifecycle and Shutdown](#lifecycle-and-shutdown)
+12. [Recovery and Lifecycle Hooks](#recovery-and-lifecycle-hooks)
+13. [Direct Ring Helpers](#direct-ring-helpers)
+14. [Errors and Diagnostics](#errors-and-diagnostics)
+15. [Threading and Reentrancy](#threading-and-reentrancy)
+16. [Type IDs](#type-ids)
+17. [CMake Integration](#cmake-integration)
+18. [Recipes](#recipes)
+19. [Common Mistakes](#common-mistakes)
+20. [API Index](#api-index)
 
 ## Overview
 
@@ -70,6 +71,68 @@ Typical high-level shape:
 
 Compiled examples live in [`example/sintra/`](../example/sintra/). Tests in
 [`tests/`](../tests/) cover edge cases and guardrails.
+
+## Minimum Working Program
+
+Start from
+[`sintra_example_9_minimal_pubsub.cpp`](../example/sintra/sintra_example_9_minimal_pubsub.cpp)
+when you need the smallest complete publish/subscribe shape:
+
+```cpp
+#include <sintra/sintra.h>
+
+struct Market_tick
+{
+    int    instrument_id;
+    double last_price;
+};
+
+int sender_branch()
+{
+    sintra::barrier("market-tick-ready");
+    sintra::world() << Market_tick{17, 101.25};
+    sintra::barrier<sintra::processing_fence_t>("market-tick-processed");
+    return 0;
+}
+
+int receiver_branch()
+{
+    sintra::activate_slot([](const Market_tick& tick) {
+        sintra::console()
+            << "instrument " << tick.instrument_id
+            << " last price " << tick.last_price << '\n';
+    });
+
+    sintra::barrier("market-tick-ready");
+    sintra::barrier<sintra::processing_fence_t>("market-tick-processed");
+    return 0;
+}
+
+int main(int argc, char* argv[])
+{
+    sintra::init(argc, argv, sender_branch, receiver_branch);
+    sintra::shutdown();
+    return 0;
+}
+```
+
+The structural rules are:
+- The payload type is a plain message value; see
+  [Message payloads](reference/message_payloads.md) for allowed field types.
+- Every branch passed to `init` becomes one managed process.
+- Receivers activate slots before the sender publishes; the first barrier is
+  the ready handshake.
+- The `processing_fence_t` barrier is used when the sender must know that
+  receiver handler side effects have completed before shutdown.
+- Every live finishing participant reaches `shutdown()` through the return
+  from `init`.
+
+Minimal CMake target once the Sintra target is available:
+
+```cmake
+add_executable(my_sintra_app main.cpp)
+target_link_libraries(my_sintra_app PRIVATE sintra::sintra)
+```
 
 ## Terminology
 
@@ -420,16 +483,71 @@ Compiled examples:
 
 Sintra accepts plain C++ values through the maildrop helpers and transceiver
 message types declared by `SINTRA_MESSAGE` or `SINTRA_MESSAGE_EXPLICIT`.
+RPC arguments and return values use the same message serialiser. The full
+contract is in [Message payloads](reference/message_payloads.md).
+
+### Payload Contract
+
+For user-defined structs sent as plain values, keep the type trivial and
+standard-layout:
+
+```cpp
+#include <type_traits>
+
+struct Tick
+{
+    int    symbol;
+    double price;
+};
+
+static_assert(std::is_trivial_v<Tick>);
+static_assert(std::is_standard_layout_v<Tick>);
+```
+
+Top-level maildrop values and RPC arguments may also be variable-buffer
+compatible values such as `std::string` or `std::vector<T>` where `T` is
+trivially copyable. If variable-size data is stored as a field inside a
+`SINTRA_MESSAGE` declaration, use the Sintra field wrappers such as
+`sintra::message_string` or `sintra::typed_variable_buffer<std::vector<T>>`.
 
 ### Plain Values
 
 `world() << value`, `local() << value`, and `remote() << value` wrap values in
 Sintra message envelopes automatically.
 
+```cpp
+struct Tick
+{
+    int    symbol;
+    double price;
+};
+
+sintra::world() << Tick{1, 100.0};
+
+sintra::activate_slot([](const Tick& tick) {
+    sintra::console() << tick.symbol << " @ " << tick.price << '\n';
+});
+```
+
+Maildrop helpers also accept `std::string`, C strings, string literals,
+`std::vector<T>`, and fixed arrays through the conversion paths documented in
+[`sintra::Maildrop`](reference/maildrop.md).
+
 ### Transceiver Message Types
 
 `SINTRA_MESSAGE(name, fields...)` creates a message type nested in the
 transceiver. Send it with `emit_local`, `emit_remote`, or `emit_global`.
+
+```cpp
+struct Feed : sintra::Derived_transceiver<Feed>
+{
+    SINTRA_MESSAGE(
+        tick,
+        int instrument_id,
+        sintra::message_string venue
+    )
+};
+```
 
 ### Variable-Size Fields
 
@@ -610,10 +728,21 @@ uint64_t get_process_index(instance_id_type instance_id);
 instance_id_type process_of(instance_id_type iid);
 ```
 
-Use typed wrappers and named instances where they make the target contract
-clear. Use raw ids when ids have been exchanged as data.
+Use named instances where they make the target contract clear, and use typed
+wrappers where they make sender filters clear. Use raw ids when ids have been
+exchanged as data.
 `process_of(iid)` returns the managed-process sentinel instance for the process
 that owns `iid`.
+
+### When to Name an Instance
+
+- Name a transceiver with `assign_name(...)` when callers should reach it by a
+  stable string known from code or configuration. String RPC targets resolve
+  through the coordinator; an unknown name resolves to `invalid_instance_id`.
+- Use the raw `instance_id()` when the id can be exchanged at runtime, for
+  example through a broadcast, RPC return, or configuration message. This avoids
+  a coordinator name lookup at the call site.
+- Use `Typed_instance_id<T>` when filtering received messages by a typed sender.
 
 ## Barriers and Fences
 
@@ -866,6 +995,9 @@ Compiled examples/tests:
 
 ## Errors and Diagnostics
 
+For reverse lookup from an observed compiler error, exception, or symptom to
+the likely rule, see the [Diagnostics guide](diagnostics.md).
+
 ### `sintra::init_error`
 
 Thrown by `sintra::init()` when process swarm initialization fails.
@@ -1033,6 +1165,7 @@ sources.
 
 | Task | Use |
 | --- | --- |
+| Minimal compiled publish/subscribe program | [`example/sintra/sintra_example_9_minimal_pubsub.cpp`](../example/sintra/sintra_example_9_minimal_pubsub.cpp) |
 | Basic broadcast and slot | [`example/sintra/sintra_example_0_basic_pubsub.cpp`](../example/sintra/sintra_example_0_basic_pubsub.cpp) |
 | Blocking receive on a control thread | [`tests/receive_test.cpp`](../tests/receive_test.cpp) |
 | Named transceiver RPC | [`example/sintra/sintra_example_2_rpc_append.cpp`](../example/sintra/sintra_example_2_rpc_append.cpp) |
@@ -1047,6 +1180,7 @@ sources.
 | Crash recovery | [`example/sintra/sintra_example_4_recovery.cpp`](../example/sintra/sintra_example_4_recovery.cpp) |
 | Explicit type ids | [`example/sintra/sintra_example_7_explicit_type_ids.cpp`](../example/sintra/sintra_example_7_explicit_type_ids.cpp) |
 | Direct ring snapshot | [`example/sintra/sintra_example_8_ring_helpers.cpp`](../example/sintra/sintra_example_8_ring_helpers.cpp) |
+| Error-to-cause lookup | [`docs/diagnostics.md`](diagnostics.md) |
 
 ## Common Mistakes
 
@@ -1064,6 +1198,7 @@ sources.
 | Assuming a delivery fence means peer handlers finished. | Use `processing_fence_t` when side effects must be complete. |
 | Using `SINTRA_RPC` when local async behavior must use transport. | Use `SINTRA_RPC_STRICT`. |
 | Returning references or using non-const reference RPC parameters. | Return by value and model mutable results explicitly. |
+| Passing a string RPC target without first naming the transceiver. | Call `assign_name(...)` before the name is used, or exchange and use `instance_id()`. |
 | Keeping variable-buffer backed data after the handler/receive scope. | Copy the data out before the scope ends. |
 | Adding polling around Sintra state. | Use slots, barriers, lifecycle hooks, or event messages. |
 

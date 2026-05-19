@@ -27,3 +27,6 @@ target_link_libraries(sintra_example_7_explicit_type_ids PRIVATE sintra)
 
 add_executable(sintra_example_8_ring_helpers sintra_example_8_ring_helpers.cpp)
 target_link_libraries(sintra_example_8_ring_helpers PRIVATE sintra)
+
+add_executable(sintra_example_9_minimal_pubsub sintra_example_9_minimal_pubsub.cpp)
+target_link_libraries(sintra_example_9_minimal_pubsub PRIVATE sintra)

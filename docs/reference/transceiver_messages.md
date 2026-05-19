@@ -63,10 +63,13 @@ Contract:
   body. It must be used in a class that inherits through
   `Derived_transceiver<T>`; the inheritance assertion fails to compile
   otherwise.
-- Field types must satisfy the message serialiser contract: trivial
-  standard-layout types, types convertible to `sintra::variable_buffer`,
-  or types deriving from `Sintra_message_element`. See
-  [`message_payloads.md`](message_payloads.md).
+- Field declarations are stored exactly as written in the generated body.
+  Use trivial standard-layout fixed-size fields, Sintra message elements, or
+  explicit variable-buffer field wrappers such as `sintra::message_string` and
+  `sintra::typed_variable_buffer<T>`. Top-level maildrop values and RPC
+  arguments can transform `std::string`/`std::vector<T>` for you, but
+  `SINTRA_MESSAGE` fields should name the transported field type directly.
+  See [`message_payloads.md`](message_payloads.md).
 - The generated alias is named exactly as the macro argument (`Outer::name`).
   Both the body fields and the `Message_prefix` fields are reachable on the
   same object; field names declared by the macro must not clash with

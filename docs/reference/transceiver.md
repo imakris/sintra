@@ -80,9 +80,9 @@ Threading and lifecycle:
 
 Failures:
 
-- `assign_name` returns `false` when the coordinator already has a
-  publication for the given name or the type/id pair conflicts with an
-  existing one.
+- `assign_name` returns `false` when the name is empty, the coordinator
+  already has a publication for the given name, the transceiver was already
+  published, or the per-process publication limit has been reached.
 - `destroy` swallows RPC failures during shutdown so it can be invoked
   from teardown paths without throwing.
 

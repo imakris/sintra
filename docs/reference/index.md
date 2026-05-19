@@ -124,6 +124,7 @@ header set. For guide-style explanations and recipe links, see
 | Document | Purpose |
 | --- | --- |
 | [Sintra Guide](../guide.md) | Narrative guide and recipes for the public API. |
+| [Diagnostics guide](../diagnostics.md) | Error-to-cause lookup for compiler diagnostics, exceptions, and runtime symptoms. |
 | [README](../../README.md) | Project overview, integration notes, and examples. |
 | [Architecture notes](../architecture.md) | Internal runtime architecture and process model notes. |
 | [Barriers and shutdown](../barriers_and_shutdown.md) | Lifecycle, shutdown, and barrier coordination details. |

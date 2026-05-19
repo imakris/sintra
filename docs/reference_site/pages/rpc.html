@@ -77,7 +77,7 @@
         <ul>
         <li>The macro must be placed inside the body of a transceiver type that derives from <code>sintra::Derived_transceiver&lt;T&gt;</code>. The named member function must already exist.</li>
         <li>An exported member function must not return a reference type and must not take non-<code>const</code> reference parameters. Both are rejected at compile time.</li>
-        <li>RPC argument and return types must satisfy the same payload contract as typed messages. Unsupported payloads fail to compile when the generated request or reply message is instantiated.</li>
+        <li>RPC argument and return types must satisfy the <a href="message_payloads.html">message payload contract</a>. Unsupported payloads fail to compile when the generated request or reply message is instantiated.</li>
         <li><code>SINTRA_RPC</code> may take a direct in-process call shortcut for blocking <code>rpc_&lt;method&gt;</code> invocations whose target resolves to the same process.</li>
         <li><code>SINTRA_RPC_STRICT</code> always sends the request over the transport, even when the target is local. Use this when local async behaviour must match the remote async behaviour.</li>
         <li><code>SINTRA_UNICAST</code> requires a <code>void</code> return type. No reply is generated; calling its generated <code>rpc_async_&lt;method&gt;</code> wrapper is rejected at compile time. Exceptions thrown by the handler are not visible to the caller.</li>

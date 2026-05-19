@@ -121,6 +121,8 @@ sintra::activate_slot([](const Ping&) {
 2. A C++20 compliant compiler is required (GCC, Clang, or MSVC are supported).
 3. Start with `example/sintra/` for focused samples covering publish/subscribe,
    ping-pong, RPC, recovery, barriers, and targeted messaging.
+   [`sintra_example_9_minimal_pubsub.cpp`](example/sintra/sintra_example_9_minimal_pubsub.cpp)
+   is the smallest complete multi-process publish/subscribe program.
 
 Because everything ships as headers, Sintra works well in monorepos or projects that
 prefer vendoring dependencies as git submodules or fetching them during configuration.
@@ -161,7 +163,8 @@ Then open `http://localhost:8000/`.
 
 The Markdown sources remain available for symbol lookup in
 [docs/reference/index.md](docs/reference/index.md), and the narrative guide is
-[docs/guide.md](docs/guide.md).
+[docs/guide.md](docs/guide.md). For reverse lookup from compiler errors,
+exceptions, or runtime symptoms, use [docs/diagnostics.md](docs/diagnostics.md).
 
 ## Supported platforms and architectures
 

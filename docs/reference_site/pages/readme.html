@@ -113,7 +113,7 @@
         <ol>
         <li>The <code>include/</code> directory must be on the project&#x27;s include path.</li>
         <li>A C++20 compliant compiler is required (GCC, Clang, or MSVC are supported).</li>
-        <li>Start with <code>example/sintra/</code> for focused samples covering publish/subscribe, ping-pong, RPC, recovery, barriers, and targeted messaging.</li>
+        <li>Start with <code>example/sintra/</code> for focused samples covering publish/subscribe, ping-pong, RPC, recovery, barriers, and targeted messaging. <a href="https://github.com/imakris/sintra/blob/master/example/sintra/sintra_example_9_minimal_pubsub.cpp"><code>sintra_example_9_minimal_pubsub.cpp</code></a> is the smallest complete multi-process publish/subscribe program.</li>
         </ol>
         <p>Because everything ships as headers, Sintra works well in monorepos or projects that prefer vendoring dependencies as git submodules or fetching them during configuration.</p>
         <h3 id="cmake-integration">CMake integration</h3>
@@ -130,7 +130,7 @@
         <pre><code class="language-sh">python scripts/build_reference_site.py
         python -m http.server 8000 --directory docs/reference_site</code></pre>
         <p>Then open <code>http://localhost:8000/</code>.</p>
-        <p>The Markdown sources remain available for symbol lookup in <a href="../index.html">docs/reference/index.md</a>, and the narrative guide is <a href="guide.html">docs/guide.md</a>.</p>
+        <p>The Markdown sources remain available for symbol lookup in <a href="../index.html">docs/reference/index.md</a>, and the narrative guide is <a href="guide.html">docs/guide.md</a>. For reverse lookup from compiler errors, exceptions, or runtime symptoms, use <a href="diagnostics.html">docs/diagnostics.md</a>.</p>
         <h2 id="supported-platforms-and-architectures">Supported platforms and architectures</h2>
         <ul>
         <li><strong>Linux, macOS, Windows, FreeBSD</strong> - shared-memory transport is supported on all four.</li>
@@ -278,7 +278,7 @@
         <p>CI runs on Linux, macOS, Windows (GitHub Actions), and FreeBSD (Cirrus CI).</p>
         <h2 id="license">License</h2>
         <p>The source code is licensed under the Simplified BSD License.</p>
-        <nav class="page-nav" aria-label="Reference navigation"><a class="page-nav-prev" href="guide.html"><span class="label">&larr; Previous</span><span class="title">Sintra Guide</span></a><a class="page-nav-next" href="architecture.html"><span class="label">Next &rarr;</span><span class="title">Architecture notes</span></a></nav>
+        <nav class="page-nav" aria-label="Reference navigation"><a class="page-nav-prev" href="diagnostics.html"><span class="label">&larr; Previous</span><span class="title">Diagnostics guide</span></a><a class="page-nav-next" href="architecture.html"><span class="label">Next &rarr;</span><span class="title">Architecture notes</span></a></nav>
       </article>
       <aside class="page-toc" aria-label="On this page">
         <h2>On this page</h2>

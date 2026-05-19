@@ -93,9 +93,9 @@ to take a direct in-process shortcut and whether a reply is produced.
 - An exported member function must not return a reference type and must
   not take non-`const` reference parameters. Both are rejected at compile
   time.
-- RPC argument and return types must satisfy the same payload contract as
-  typed messages. Unsupported payloads fail to compile when the generated
-  request or reply message is instantiated.
+- RPC argument and return types must satisfy the
+  [message payload contract](message_payloads.md). Unsupported payloads fail
+  to compile when the generated request or reply message is instantiated.
 - `SINTRA_RPC` may take a direct in-process call shortcut for blocking
   `rpc_<method>` invocations whose target resolves to the same process.
 - `SINTRA_RPC_STRICT` always sends the request over the transport, even
