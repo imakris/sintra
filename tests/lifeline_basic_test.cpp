@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <thread>
@@ -44,12 +45,14 @@ constexpr const char* k_role_respawn_child  = "respawn_child";
 constexpr const char* k_role_manual_disable = "manual_disable";
 constexpr const char* k_role_short_option   = "short_option";
 
-constexpr const char* k_case_normal   = "normal";
-constexpr const char* k_case_disabled = "disabled";
-constexpr const char* k_case_crash    = "crash";
-constexpr const char* k_case_hung     = "hung";
-constexpr const char* k_case_leak     = "leak";
-constexpr const char* k_case_respawn  = "respawn";
+constexpr const char* k_case_normal          = "normal";
+constexpr const char* k_case_disabled        = "disabled";
+constexpr const char* k_case_crash           = "crash";
+constexpr const char* k_case_hung            = "hung";
+constexpr const char* k_case_leak            = "leak";
+constexpr const char* k_case_respawn         = "respawn";
+constexpr const char* k_case_wedged_handler  = "wedged_handler";
+constexpr const char* k_wedged_service_name  = "lifeline_wedged_service";
 
 constexpr int k_owner_exit_timeout_ms         = 4000;
 constexpr int k_child_exit_timeout_ms         = 2000;
@@ -102,6 +105,11 @@ std::filesystem::path child_done_path(
     const std::string&             test_case)
 {
     return dir / ("child_done_" + test_case + ".txt");
+}
+
+std::filesystem::path wedged_handler_started_path(const std::filesystem::path& dir)
+{
+    return dir / "wedged_handler_started.txt";
 }
 
 std::filesystem::path respawn_occurrence_path(const std::filesystem::path& dir, uint32_t occurrence)
@@ -456,6 +464,23 @@ bool process_exists(long long pid)
 #endif
 }
 
+struct Wedged_service : sintra::Derived_transceiver<Wedged_service>
+{
+    int block(std::string dir_value)
+    {
+        std::unique_lock<std::mutex> start_stop_lock(sintra::s_mproc->m_start_stop_mutex);
+        (void)write_text_file(
+            wedged_handler_started_path(std::filesystem::path(dir_value)),
+            "started");
+        while (true) {
+            std::this_thread::sleep_for(std::chrono::hours(1));
+        }
+        return 0;
+    }
+
+    SINTRA_RPC(block)
+};
+
 int child_pid_value()
 {
     return static_cast<int>(sintra::test::get_pid());
@@ -471,6 +496,24 @@ int run_child(
 
     const auto pid_file   = child_pid_path(dir, test_case);
     const auto ready_file = child_ready_path(dir, test_case);
+
+    if (test_case == k_case_wedged_handler) {
+        Wedged_service service;
+        if (!service.assign_name(k_wedged_service_name)) {
+            std::fprintf(stderr, "[child] failed to publish wedged service\n");
+            std::_Exit(1);
+        }
+        if (!write_text_file(pid_file, std::to_string(child_pid_value()))) {
+            std::fprintf(stderr, "[child] failed to write pid file\n");
+            std::_Exit(1);
+        }
+        if (!write_text_file(ready_file, "ready")) {
+            std::fprintf(stderr, "[child] failed to write ready file\n");
+            std::_Exit(1);
+        }
+        std::this_thread::sleep_for(std::chrono::seconds(60));
+        std::_Exit(0);
+    }
 
     if (!write_text_file(pid_file, std::to_string(child_pid_value()))) {
         std::fprintf(stderr, "[child] failed to write pid file\n");
@@ -539,6 +582,12 @@ int run_owner(
     if (test_case == k_case_hung) {
         spawn_options.lifetime.hard_exit_timeout_ms = k_hung_hard_exit_timeout_ms;
     }
+    else
+    if (test_case == k_case_wedged_handler) {
+        spawn_options.lifetime.hard_exit_timeout_ms = k_hung_hard_exit_timeout_ms;
+        spawn_options.wait_for_instance_name = k_wedged_service_name;
+        spawn_options.wait_timeout = std::chrono::milliseconds(3000);
+    }
 
     const size_t spawned = sintra::spawn_swarm_process(spawn_options);
     if (spawned != 1) {
@@ -549,6 +598,27 @@ int run_owner(
     if (!sintra::test::wait_for_file(child_ready_path(dir, test_case), std::chrono::milliseconds(3000))) {
         std::fprintf(stderr, "[owner] child did not signal ready\n");
         std::_Exit(3);
+    }
+
+    if (test_case == k_case_wedged_handler) {
+        const auto service_id = sintra::Coordinator::rpc_wait_for_instance(
+            sintra::s_coord_id,
+            k_wedged_service_name);
+        if (service_id == sintra::invalid_instance_id) {
+            std::fprintf(stderr, "[owner] failed to resolve wedged service\n");
+            std::_Exit(4);
+        }
+
+        auto rpc = Wedged_service::rpc_async_block(service_id, dir.string());
+        (void)rpc;
+        if (!sintra::test::wait_for_file(
+                wedged_handler_started_path(dir),
+                std::chrono::milliseconds(3000)))
+        {
+            std::fprintf(stderr, "[owner] wedged handler did not start\n");
+            std::_Exit(5);
+        }
+        std::_Exit(0);
     }
 
     if (test_case == k_case_crash) {
@@ -1188,28 +1258,34 @@ int main(int argc, char* argv[])
         /*allow_any_owner_exit=*/false,
         /*child_exit_timeout_ms=*/k_hung_child_exit_timeout_ms);
 
-    // Test 6: Rapid spawn/kill cycles - detect handle/fd leaks (different owners)
+    // Test 6: Wedged RPC handler - lifeline hard-exit must be armed before stop().
+    const auto wedged_dir = sintra::test::unique_scratch_directory("lifeline_wedged_handler");
+    ok &= run_owner_case(binary_path, wedged_dir, k_case_wedged_handler, 99, false,
+        /*allow_any_owner_exit=*/false,
+        /*child_exit_timeout_ms=*/k_hung_child_exit_timeout_ms);
+
+    // Test 7: Rapid spawn/kill cycles - detect handle/fd leaks (different owners)
     for (int i = 0; i < k_rapid_spawn_iterations && ok; ++i) {
         const auto rapid_dir = sintra::test::unique_scratch_directory(
             "lifeline_rapid_" + std::to_string(i));
         ok &= run_owner_case(binary_path, rapid_dir, k_case_normal, 99, false);
     }
 
-    // Test 7: Proper leak test - single owner spawns/kills many children
+    // Test 8: Proper leak test - single owner spawns/kills many children
     // This detects handle/fd leaks that accumulate in a long-running owner process.
     const auto leak_dir = sintra::test::unique_scratch_directory("lifeline_leak");
     ok &= run_leak_test(binary_path, leak_dir);
 
-    // Test 8: Auto-respawn test - respawned child gets new lifeline from coordinator
+    // Test 9: Auto-respawn test - respawned child gets new lifeline from coordinator
     // Verifies that the lifeline mechanism works correctly with sintra's recovery feature.
     const auto respawn_dir = sintra::test::unique_scratch_directory("lifeline_respawn");
     ok &= run_respawn_test(binary_path, respawn_dir);
 
-    // Test 9: Manual --lifeline_disable argument
+    // Test 10: Manual --lifeline_disable argument
     // Verifies that passing --lifeline_disable directly works correctly.
     ok &= run_manual_disable_case(binary_path);
 
-    // Test 10: Short option handling
+    // Test 11: Short option handling
     // Verifies that short options like -f don't accidentally trigger lifeline parsing.
     ok &= run_short_option_case(binary_path);
 

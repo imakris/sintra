@@ -508,13 +508,15 @@ namespace {
             std::string("[sintra] Lifeline broken - owner exited - terminating in ") +
                 std::to_string(timeout_ms) + "ms\n");
 
+        // Arm the hard-exit watchdog before local teardown; stop() can block
+        // behind lifecycle locks.
+        schedule_lifeline_hard_exit(timeout_ms, exit_code);
+
         if (s_mproc) {
             s_mproc->m_must_stop.store(true, std::memory_order_release);
             s_mproc->stop();
             s_mproc->unblock_rpc();
         }
-
-        schedule_lifeline_hard_exit(timeout_ms, exit_code);
     }
 
 #ifdef _WIN32
