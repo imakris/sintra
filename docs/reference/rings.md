@@ -198,9 +198,10 @@ ownership.
 
 ### ring_abi_mismatch_exception
 
-Thrown when a ring control file exists but was created by a binary whose
-ring-control ABI fingerprint does not match the current build. The exception
-message includes the expected and observed fingerprints.
+Thrown when a ring control file or lifecycle anchor exists but was created
+by a binary whose shared-file ABI fingerprint does not match the current
+build. The exception message includes the expected and observed
+fingerprints.
 
 ### ring_reader_evicted_exception
 
@@ -278,8 +279,16 @@ Threading and lifecycle:
   Use a separate `Ring_R<T>` instance for concurrent snapshots.
 - `Ring_W` should be destroyed on the same thread that constructed it.
   If destroyed elsewhere, the destructor logs an error and continues.
-- The last process to detach removes both the data file and the control
-  file from the chosen directory.
+- The last process to detach removes the data file and the control file
+  from the chosen directory. A `<data filename>_lifecycle` anchor file
+  may remain; it is the persistent synchronization object used to
+  serialize future attach/detach cleanup. Remove the whole ring directory,
+  or remove that anchor only when no process can still use the ring, if a
+  pristine directory is required.
+- The lifecycle anchor can recover cleanup that was interrupted after the
+  final detacher recorded deletion-in-progress. It does not make the
+  scalar attachment count crash-robust; a process that dies after a
+  successful attach may still require external scratch-directory cleanup.
 
 Failures:
 
@@ -287,9 +296,9 @@ Failures:
   data file or control file cannot be mapped, when the size does not
   match, or when an exclusive writer slot cannot be obtained.
 - `ring_abi_mismatch_exception` from the constructors when an existing
-  control file belongs to an incompatible Sintra ring ABI. Rebuild every
-  process that shares the ring against the same Sintra version and
-  configuration.
+  control file or lifecycle anchor belongs to an incompatible Sintra ring
+  ABI. Rebuild every process that shares the ring against the same Sintra
+  version and configuration.
 - `ring_reader_evicted_exception` from `start_reading` or
   `make_snapshot` when the writer evicted the reader for being too far
   behind.

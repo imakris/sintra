@@ -76,12 +76,19 @@
  *
  * LIFECYCLE & CLEANUP
  * -------------------
- *  * Two files exist: a data file (double-mapped) and a control file
- *    (atomics, semaphores, per-reader state).
+ *  * Three files may exist: a data file (double-mapped), a control file
+ *    (atomics, semaphores, per-reader state), and a persistent lifecycle
+ *    anchor file used to serialize attach/detach cleanup.
  *  * Any process may create; subsequent processes attach.
  *  * Each Ring_R object acquires a unique "reader slot" at construction and
  *    releases it on normal destruction.
- *  * The *last* detaching process removes BOTH files.
+ *  * The *last* detaching process removes the data/control files. The lifecycle
+ *    anchor is intentionally left behind so future attachers synchronize on the
+ *    same stable lock object.
+ *  * The lifecycle anchor can recover cleanup that was interrupted after the
+ *    final detacher recorded deletion-in-progress. It does not make the scalar
+ *    attachment count crash-robust; a process that dies after a successful
+ *    attach may still require external scratch-directory cleanup.
  *
  * PLATFORM MAPPING OVERVIEW
  * -------------------------
@@ -118,6 +125,7 @@
 #include <chrono>
 #include <cstddef>       // std::byte
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>       // std::strlen
 #include <cstdint>
 #include <filesystem>
@@ -399,15 +407,18 @@ struct ring_reader_evicted_exception : public std::runtime_error
               "Ring reader was evicted by the writer due to being too slow.") {}
 };
 
-// Thrown by Ring::attach() when an existing control file's ABI fingerprint
+// Thrown by Ring::attach() when an existing ring shared file's ABI fingerprint
 // does not match this binary. Distinct from ring_acquisition_failure_exception
 // so callers can give a clearer diagnostic when the failure mode is "another
 // participant in this swarm was built against a different sintra ABI."
 struct ring_abi_mismatch_exception : public std::runtime_error
 {
-    ring_abi_mismatch_exception(uint64_t expected, uint64_t observed)
+    ring_abi_mismatch_exception(
+        uint64_t    expected,
+        uint64_t    observed,
+        const char* component = "Ring control block")
     :
-        std::runtime_error(format_message(expected, observed)),
+        std::runtime_error(format_message(expected, observed, component)),
         m_expected(expected),
         m_observed(observed)
     {}
@@ -416,15 +427,19 @@ struct ring_abi_mismatch_exception : public std::runtime_error
     uint64_t observed_fingerprint() const noexcept { return m_observed; }
 
 private:
-    static std::string format_message(uint64_t expected, uint64_t observed)
+    static std::string format_message(
+        uint64_t    expected,
+        uint64_t    observed,
+        const char* component)
     {
         char buf[256];
         std::snprintf(
             buf, sizeof(buf),
-            "Ring control block ABI fingerprint mismatch (this build expects "
-            "0x%016llx, control file holds 0x%016llx). Rebuild every "
+            "%s ABI fingerprint mismatch (this build expects "
+            "0x%016llx, shared file holds 0x%016llx). Rebuild every "
             "participant in the swarm against the same sintra version and "
             "configuration.",
+            component ? component : "Ring shared file",
             static_cast<unsigned long long>(expected),
             static_cast<unsigned long long>(observed));
         return buf;
@@ -456,7 +471,7 @@ inline constexpr uint64_t fnv1a_64(std::initializer_list<uint64_t> words) noexce
 // control-file creation protocol, or the on-the-wire framing change in a way
 // that would make two builds incompatible at the ring level. The version is one
 // input among several to the fingerprint below.
-inline constexpr uint64_t k_ring_abi_version = 2;
+inline constexpr uint64_t k_ring_abi_version = 3;
 
 inline constexpr uint64_t k_ring_abi_fingerprint = fnv1a_64({
     k_ring_abi_version,
@@ -465,6 +480,28 @@ inline constexpr uint64_t k_ring_abi_fingerprint = fnv1a_64({
     static_cast<uint64_t>(max_message_length),
     static_cast<uint64_t>(assumed_cache_line_size),
     static_cast<uint64_t>(num_reserved_service_instances),
+});
+
+// The lifecycle anchor is intentionally persistent, so keep its fingerprint
+// independent from the ring/control ABI. Future control-block ABI bumps should
+// not force users to remove the anchor file from an otherwise clean ring dir.
+//
+// Bump k_ring_lifecycle_anchor_abi_version whenever the Anchor layout, field
+// order, alignment, interprocess_mutex representation, or mutex recovery
+// semantics change in a way that affects compatibility of an existing
+// <ring>_lifecycle file.
+inline constexpr uint64_t k_ring_lifecycle_anchor_abi_version = 1;
+
+inline constexpr uint64_t k_ring_lifecycle_anchor_fingerprint = fnv1a_64({
+    0x73696e7472615f6cull, // "sintra_l"
+    k_ring_lifecycle_anchor_abi_version,
+    3, // Anchor field count/order marker.
+    static_cast<uint64_t>(sizeof(std::atomic<uint64_t>)),
+    static_cast<uint64_t>(alignof(std::atomic<uint64_t>)),
+    static_cast<uint64_t>(sizeof(interprocess_mutex)),
+    static_cast<uint64_t>(alignof(interprocess_mutex)),
+    static_cast<uint64_t>(sizeof(std::atomic<uint32_t>)),
+    static_cast<uint64_t>(alignof(std::atomic<uint32_t>)),
 });
 
 } // namespace detail
@@ -508,6 +545,395 @@ inline bool create_ring_backing_file(
     }
     return false;
 }
+
+namespace detail {
+
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+inline std::string normalize_ring_test_path(const std::string& path)
+{
+    std::error_code ec;
+    fs::path normalized = fs::absolute(fs::path(path), ec);
+    if (ec) {
+        normalized = fs::path(path);
+        ec.clear();
+    }
+
+    const fs::path canonical = fs::weakly_canonical(normalized, ec);
+    if (!ec) {
+        normalized = canonical;
+    }
+
+    return normalized.lexically_normal().string();
+}
+
+inline bool ring_test_path_matches(
+    const std::string& actual,
+    const char*        expected)
+{
+    return expected &&
+           normalize_ring_test_path(actual) ==
+               normalize_ring_test_path(expected);
+}
+
+inline void write_ring_test_marker(const char* path)
+{
+    if (!path) {
+        return;
+    }
+
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (out) {
+        out << "ok\n";
+    }
+}
+#endif
+
+inline void maybe_pause_after_ring_data_attach_for_test(const std::string& data_filename)
+{
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    const char* expected_data_file = std::getenv("SINTRA_RING_LIFECYCLE_PAUSE_DATA_FILE");
+    const char* paused_file        = std::getenv("SINTRA_RING_LIFECYCLE_PAUSED_FILE");
+    const char* resume_file        = std::getenv("SINTRA_RING_LIFECYCLE_RESUME_FILE");
+
+    if (!ring_test_path_matches(data_filename, expected_data_file) ||
+        !paused_file ||
+        !resume_file)
+    {
+        return;
+    }
+
+    try {
+        write_ring_test_marker(paused_file);
+
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (!fs::exists(resume_file) && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    }
+    catch (...) {
+    }
+#else
+    (void)data_filename;
+#endif
+}
+
+inline void maybe_mark_before_ring_release_lock_for_test(const std::string& data_filename)
+{
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    const char* expected_data_file = std::getenv("SINTRA_RING_LIFECYCLE_RELEASE_DATA_FILE");
+    const char* waiting_file       = std::getenv("SINTRA_RING_LIFECYCLE_RELEASE_WAITING_FILE");
+
+    if (!ring_test_path_matches(data_filename, expected_data_file) || !waiting_file) {
+        return;
+    }
+
+    try {
+        write_ring_test_marker(waiting_file);
+    }
+    catch (...) {
+    }
+#else
+    (void)data_filename;
+#endif
+}
+
+inline void maybe_mark_after_ring_release_lock_for_test(const std::string& data_filename)
+{
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    const char* expected_data_file = std::getenv("SINTRA_RING_LIFECYCLE_RELEASE_DATA_FILE");
+    const char* locked_file        = std::getenv("SINTRA_RING_LIFECYCLE_RELEASE_LOCKED_FILE");
+
+    if (!ring_test_path_matches(data_filename, expected_data_file) || !locked_file) {
+        return;
+    }
+
+    try {
+        write_ring_test_marker(locked_file);
+    }
+    catch (...) {
+    }
+#else
+    (void)data_filename;
+#endif
+}
+
+} // namespace detail
+
+class Ring_lifecycle_guard_base
+{
+protected:
+    Ring_lifecycle_guard_base(
+        const std::string& directory,
+        const std::string& data_filename)
+    {
+        m_lifecycle_directory        = directory + "/";
+        m_lifecycle_data_filename    = m_lifecycle_directory + data_filename;
+        m_lifecycle_control_filename = m_lifecycle_data_filename + "_control";
+        m_lifecycle_anchor_filename  = m_lifecycle_data_filename + "_lifecycle";
+
+        detail::publish_file_result anchor_publish_result =
+            detail::publish_file_result::already_exists;
+        if (!fs::exists(m_lifecycle_anchor_filename)) {
+            anchor_publish_result = create_anchor();
+            if (anchor_publish_result == detail::publish_file_result::failed) {
+                throw ring_acquisition_failure_exception();
+            }
+        }
+
+        if (anchor_publish_result == detail::publish_file_result::already_exists &&
+            !fs::exists(m_lifecycle_anchor_filename))
+        {
+            throw ring_acquisition_failure_exception();
+        }
+
+        if (!attach_anchor()) {
+            throw ring_acquisition_failure_exception();
+        }
+
+        const auto observed = m_anchor->abi_fingerprint.load(std::memory_order_acquire);
+        if (observed != detail::k_ring_lifecycle_anchor_fingerprint) {
+            ring_abi_mismatch_exception abi_ex(
+                detail::k_ring_lifecycle_anchor_fingerprint,
+                observed,
+                "Ring lifecycle anchor");
+            release_anchor_mapping();
+            throw abi_ex;
+        }
+
+        lock_lifecycle();
+        if (!recover_interrupted_delete()) {
+            unlock_lifecycle();
+            release_anchor_mapping();
+            throw ring_acquisition_failure_exception();
+        }
+    }
+
+    ~Ring_lifecycle_guard_base()
+    {
+        if (m_lifecycle_delete_in_progress && m_anchor) {
+            if (remove_ring_files()) {
+                m_anchor->deleting.store(0, std::memory_order_release);
+            }
+            m_lifecycle_delete_in_progress = false;
+        }
+
+        unlock_lifecycle();
+        release_anchor_mapping();
+    }
+
+    Ring_lifecycle_guard_base(const Ring_lifecycle_guard_base&) = delete;
+    Ring_lifecycle_guard_base& operator=(const Ring_lifecycle_guard_base&) = delete;
+
+    void unlock_lifecycle_after_acquire()
+    {
+        unlock_lifecycle();
+    }
+
+    void lock_lifecycle_for_release()
+    {
+        lock_lifecycle();
+    }
+
+    void begin_lifecycle_delete()
+    {
+        if (!m_anchor) {
+            return;
+        }
+
+        m_anchor->deleting.store(1, std::memory_order_release);
+        m_lifecycle_delete_in_progress = true;
+    }
+
+private:
+    struct Anchor
+    {
+        std::atomic<uint64_t>      abi_fingerprint{detail::k_ring_lifecycle_anchor_fingerprint};
+        detail::interprocess_mutex mutex;
+        std::atomic<uint32_t>      deleting{0};
+    };
+
+    void lock_lifecycle()
+    {
+        if (!m_lifecycle_locked) {
+            m_anchor->mutex.lock();
+            m_lifecycle_locked = true;
+        }
+    }
+
+    void unlock_lifecycle() noexcept
+    {
+        if (!m_lifecycle_locked || !m_anchor) {
+            return;
+        }
+
+        try {
+            m_anchor->mutex.unlock();
+        }
+        catch (...) {
+        }
+        m_lifecycle_locked = false;
+    }
+
+    bool recover_interrupted_delete()
+    {
+        if (!m_anchor ||
+            m_anchor->deleting.load(std::memory_order_acquire) == 0)
+        {
+            return true;
+        }
+
+        if (!remove_ring_files()) {
+            return false;
+        }
+
+        m_anchor->deleting.store(0, std::memory_order_release);
+        return true;
+    }
+
+    static bool path_absent(const std::string& path) noexcept
+    {
+        std::error_code ec;
+        const bool exists = fs::exists(fs::path(path), ec);
+        return !ec && !exists;
+    }
+
+    bool ring_files_absent() const noexcept
+    {
+        return path_absent(m_lifecycle_control_filename) &&
+               path_absent(m_lifecycle_data_filename);
+    }
+
+    bool remove_ring_files() const noexcept
+    {
+        std::error_code ec;
+        (void)fs::remove(fs::path(m_lifecycle_control_filename), ec);
+        ec.clear();
+        (void)fs::remove(fs::path(m_lifecycle_data_filename), ec);
+        return ring_files_absent();
+    }
+
+    detail::publish_file_result create_anchor()
+    {
+        static std::atomic<uint64_t> next_temp_id{0};
+
+        const fs::path final_path(m_lifecycle_anchor_filename);
+        fs::path       temp_path;
+
+        for (int attempt = 0; attempt < 16; ++attempt) {
+            const auto temp_id = next_temp_id.fetch_add(1, std::memory_order_relaxed);
+            temp_path = final_path;
+            temp_path += ".tmp.";
+            temp_path += std::to_string(static_cast<unsigned long long>(get_current_pid()));
+            temp_path += ".";
+            temp_path += std::to_string(static_cast<unsigned long long>(get_current_tid()));
+            temp_path += ".";
+            temp_path += std::to_string(static_cast<unsigned long long>(temp_id));
+
+            std::error_code cleanup_ec;
+            (void)fs::remove(temp_path, cleanup_ec);
+
+            if (create_ring_backing_file(
+                    temp_path.string(),
+                    sizeof(Anchor),
+                    &m_lifecycle_directory))
+            {
+                break;
+            }
+            temp_path.clear();
+        }
+
+        if (temp_path.empty()) {
+            return detail::publish_file_result::failed;
+        }
+
+        auto remove_temp = [&]() noexcept {
+            std::error_code ec;
+            (void)fs::remove(temp_path, ec);
+        };
+
+        bool anchor_constructed = false;
+        auto destroy_temp_anchor = [&]() noexcept {
+            if (!anchor_constructed) {
+                return;
+            }
+
+            try {
+                ipc::file_mapping fm_anchor(temp_path, ipc::read_write);
+                ipc::mapped_region anchor_region(fm_anchor, ipc::read_write, 0, 0);
+                auto* anchor = static_cast<Anchor*>(anchor_region.data());
+                anchor->~Anchor();
+                anchor_constructed = false;
+            }
+            catch (...) {
+            }
+        };
+
+        try {
+            {
+                ipc::file_mapping fm_anchor(temp_path, ipc::read_write);
+                ipc::mapped_region anchor_region(fm_anchor, ipc::read_write, 0, 0);
+                auto* anchor = static_cast<Anchor*>(anchor_region.data());
+
+                new (anchor) Anchor;
+                anchor_constructed = true;
+                anchor->abi_fingerprint.store(
+                    detail::k_ring_lifecycle_anchor_fingerprint,
+                    std::memory_order_release);
+
+                anchor_region.flush();
+                fm_anchor.flush_file();
+            }
+
+            const auto published = detail::publish_file_if_absent(temp_path, final_path);
+            if (published != detail::publish_file_result::published) {
+                destroy_temp_anchor();
+            }
+            remove_temp();
+            return published;
+        }
+        catch (...) {
+            destroy_temp_anchor();
+            remove_temp();
+            return detail::publish_file_result::failed;
+        }
+    }
+
+    bool attach_anchor()
+    {
+        try {
+            if (fs::file_size(m_lifecycle_anchor_filename) != sizeof(Anchor)) {
+                return false;
+            }
+
+            ipc::file_mapping fm_anchor(m_lifecycle_anchor_filename.c_str(), ipc::read_write);
+            m_anchor_region = std::make_unique<ipc::mapped_region>(
+                fm_anchor,
+                ipc::read_write,
+                0,
+                0);
+            m_anchor = static_cast<Anchor*>(m_anchor_region->data());
+            return true;
+        }
+        catch (...) {
+            return false;
+        }
+    }
+
+    void release_anchor_mapping() noexcept
+    {
+        m_anchor_region.reset();
+        m_anchor = nullptr;
+    }
+
+    std::unique_ptr<ipc::mapped_region> m_anchor_region;
+    std::string                         m_lifecycle_directory;
+    std::string                         m_lifecycle_data_filename;
+    std::string                         m_lifecycle_control_filename;
+    std::string                         m_lifecycle_anchor_filename;
+    Anchor*                             m_anchor                       = nullptr;
+    bool                                m_lifecycle_locked             = false;
+    bool                                m_lifecycle_delete_in_progress = false;
+};
 
 // A binary semaphore tailored for the ring's reader wakeup policy.
 class sintra_ring_semaphore
@@ -708,6 +1134,8 @@ struct Ring_data
     ~Ring_data()
     {
         m_data = nullptr;
+        m_data_region_1.reset();
+        m_data_region_0.reset();
 
         if (m_remove_files_on_destruction) {
             std::error_code ec;
@@ -930,8 +1358,12 @@ bool has_same_mapping(const RingT1& r1, const RingT2& r2)
  * small stacks used by the hybrid sleeping policy.
  */
 template <typename T, bool READ_ONLY_DATA>
-struct Ring: Ring_data<T, READ_ONLY_DATA>
+struct Ring:
+    private Ring_lifecycle_guard_base,
+    Ring_data<T, READ_ONLY_DATA>
 {
+    using lifecycle_base = Ring_lifecycle_guard_base;
+
     static_assert(
         std::is_trivially_copyable_v<T>,
         "sintra::Ring element type T must be trivially copyable."
@@ -1505,8 +1937,11 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         const std::string& data_filename,
         size_t             num_elements)
     :
+        lifecycle_base(directory, data_filename),
         Ring_data<T, READ_ONLY_DATA>(directory, data_filename, num_elements)
     {
+        detail::maybe_pause_after_ring_data_attach_for_test(this->m_data_filename);
+
         m_control_filename = this->m_data_filename + "_control";
 
         fs::path pc(m_control_filename);
@@ -1561,22 +1996,34 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         // readers in parallel). num_attached is an interprocess atomic so we must use
         // a fetch_add here; a plain ++ loses updates under contention and the final
         // detacher would see an incorrect count and tear down the shared state while
-        // other processes still use it.
+        // other processes still use it. This is still a scalar count, not a
+        // crash-recoverable owner table.
         m_control->num_attached++;
+        this->unlock_lifecycle_after_acquire();
     }
 
     ~Ring()
     {
+        detail::maybe_mark_before_ring_release_lock_for_test(this->m_data_filename);
+        this->lock_lifecycle_for_release();
+        detail::maybe_mark_after_ring_release_lock_for_test(this->m_data_filename);
+
         if (m_control) {
             m_control->release_local_semaphores();
             // The *last* detaching process deletes both control and data files. On
             // platforms where Control wraps kernel semaphore handles (Windows/macOS)
             // we must explicitly run the destructor once the final reference drops.
-            if (m_control->num_attached.fetch_sub(1) == 1) {
+            const auto attached = m_control->num_attached.load(std::memory_order_acquire);
+            if (attached == 1) {
+                this->begin_lifecycle_delete();
+                m_control->num_attached.store(0, std::memory_order_release);
 #if defined(_WIN32) || defined(__APPLE__)
                 m_control->~Control();
 #endif
                 this->m_remove_files_on_destruction = true;
+            }
+            else if (attached > 1) {
+                m_control->num_attached.fetch_sub(1, std::memory_order_acq_rel);
             }
         }
 

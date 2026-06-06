@@ -73,6 +73,7 @@ function(add_test_suite SUFFIX IS_DEBUG)
         "SINTRA_DEBUG_PAUSE_ON_EXIT=(::std::getenv(\"SINTRA_DEBUG_PAUSE_ON_EXIT\") && ::std::getenv(\"SINTRA_DEBUG_PAUSE_ON_EXIT\")[0] != '0')"
         "SINTRA_PRESERVE_SCRATCH=(::std::getenv(\"SINTRA_PRESERVE_SCRATCH\") && ::std::getenv(\"SINTRA_PRESERVE_SCRATCH\")[0] != '0')"
         "SINTRA_TEST_ROOT=::std::getenv(\"SINTRA_TEST_ROOT\")"
+        "SINTRA_ENABLE_TEST_HOOKS=1"
     )
     target_link_libraries(${LIB_TARGET} INTERFACE Threads::Threads)
 

@@ -168,6 +168,19 @@ struct Register_test
 using sintra::test::Temp_ring_dir;
 using sintra::test::pick_ring_elements;
 
+bool has_ring_temp_publish_files(const std::filesystem::path& directory)
+{
+    for (const auto& entry : std::filesystem::directory_iterator(directory)) {
+        const auto filename = entry.path().filename().string();
+        if (filename.find("_control.tmp.") != std::string::npos ||
+            filename.find("_lifecycle.tmp.") != std::string::npos)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 TEST_CASE(test_get_ring_configurations_properties)
 {
     constexpr size_t min_elements = 64;
@@ -226,6 +239,8 @@ TEST_CASE(test_control_file_first_attach_is_published_initialized)
     const size_t      ring_elements = pick_ring_elements<uint32_t>(256);
     constexpr size_t  reader_count  = 12;
     const auto        data_file     = tmp.path / ring_name;
+    const auto        control_file  = tmp.path / (ring_name + "_control");
+    const auto        lifecycle_file = tmp.path / (ring_name + "_lifecycle");
 
     ASSERT_TRUE(sintra::create_ring_backing_file(
         data_file.string(),
@@ -274,8 +289,8 @@ TEST_CASE(test_control_file_first_attach_is_published_initialized)
         }
     }
 
-    const auto control_file = tmp.path / (ring_name + "_control");
     ASSERT_TRUE(std::filesystem::exists(control_file));
+    ASSERT_TRUE(std::filesystem::exists(lifecycle_file));
 
     std::ifstream input(control_file, std::ios::binary);
     ASSERT_TRUE(static_cast<bool>(input));
@@ -286,13 +301,60 @@ TEST_CASE(test_control_file_first_attach_is_published_initialized)
         sizeof(observed_fingerprint));
     ASSERT_TRUE(static_cast<bool>(input));
     ASSERT_EQ(sintra::detail::k_ring_abi_fingerprint, observed_fingerprint);
+    input.close();
 
-    for (const auto& entry : std::filesystem::directory_iterator(tmp.path)) {
-        const auto filename = entry.path().filename().string();
-        ASSERT_TRUE(filename.find("_control.tmp.") == std::string::npos);
-    }
+    std::ifstream lifecycle_input(lifecycle_file, std::ios::binary);
+    ASSERT_TRUE(static_cast<bool>(lifecycle_input));
+
+    uint64_t observed_anchor_fingerprint = 0;
+    lifecycle_input.read(
+        reinterpret_cast<char*>(&observed_anchor_fingerprint),
+        sizeof(observed_anchor_fingerprint));
+    ASSERT_TRUE(static_cast<bool>(lifecycle_input));
+    ASSERT_EQ(
+        sintra::detail::k_ring_lifecycle_anchor_fingerprint,
+        observed_anchor_fingerprint);
+    lifecycle_input.close();
+
+    ASSERT_FALSE(has_ring_temp_publish_files(tmp.path));
 
     readers.clear();
+
+    for (int retry = 0; retry < 20; ++retry) {
+        if (!std::filesystem::exists(control_file) &&
+            !std::filesystem::exists(data_file))
+        {
+            break;
+        }
+        std::this_thread::sleep_for(25ms);
+    }
+
+    ASSERT_FALSE(std::filesystem::exists(control_file));
+    ASSERT_FALSE(std::filesystem::exists(data_file));
+    ASSERT_TRUE(std::filesystem::exists(lifecycle_file));
+    ASSERT_FALSE(has_ring_temp_publish_files(tmp.path));
+
+    {
+        sintra::Ring_W<uint32_t> second_writer(tmp.str(), ring_name, ring_elements);
+        ASSERT_TRUE(std::filesystem::exists(control_file));
+        ASSERT_TRUE(std::filesystem::exists(data_file));
+        ASSERT_TRUE(std::filesystem::exists(lifecycle_file));
+        ASSERT_FALSE(has_ring_temp_publish_files(tmp.path));
+    }
+
+    for (int retry = 0; retry < 20; ++retry) {
+        if (!std::filesystem::exists(control_file) &&
+            !std::filesystem::exists(data_file))
+        {
+            break;
+        }
+        std::this_thread::sleep_for(25ms);
+    }
+
+    ASSERT_FALSE(std::filesystem::exists(control_file));
+    ASSERT_FALSE(std::filesystem::exists(data_file));
+    ASSERT_TRUE(std::filesystem::exists(lifecycle_file));
+    ASSERT_FALSE(has_ring_temp_publish_files(tmp.path));
 }
 
 TEST_CASE(test_ring_write_read_single_reader)

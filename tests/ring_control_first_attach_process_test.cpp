@@ -251,13 +251,28 @@ bool read_control_state(
     }
 }
 
-bool has_temp_control_files(const std::filesystem::path& directory)
+bool read_u64_prefix(
+    const std::filesystem::path& path,
+    std::uint64_t&               value)
+{
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+        return false;
+    }
+
+    input.read(reinterpret_cast<char*>(&value), sizeof(value));
+    return static_cast<bool>(input);
+}
+
+bool has_temp_ring_publish_files(const std::filesystem::path& directory)
 {
     for (const auto& entry : std::filesystem::directory_iterator(directory)) {
         const auto filename = entry.path().filename().string();
-        if (filename.find("_control.tmp.") != std::string::npos) {
+        if (filename.find("_control.tmp.") != std::string::npos ||
+            filename.find("_lifecycle.tmp.") != std::string::npos)
+        {
             std::fprintf(stderr,
-                "%stemporary control file remains: %s\n",
+                "%stemporary ring publish file remains: %s\n",
                 k_failure_prefix,
                 filename.c_str());
             return true;
@@ -352,6 +367,7 @@ int run_parent(const std::string& binary_path)
     }
 
     const auto control_file = temp.path / (std::string(k_ring_name) + "_control");
+    const auto lifecycle_file = temp.path / (std::string(k_ring_name) + "_lifecycle");
     if (ok) {
         std::uint64_t observed_fingerprint = 0;
         std::uint64_t observed_attached    = 0;
@@ -376,7 +392,25 @@ int run_parent(const std::string& binary_path)
             ok = false;
         }
 
-        if (has_temp_control_files(temp.path)) {
+        if (!std::filesystem::exists(lifecycle_file)) {
+            std::fprintf(stderr, "%slifecycle anchor missing after attach\n", k_failure_prefix);
+            ok = false;
+        }
+        else {
+            std::uint64_t observed_anchor_fingerprint = 0;
+            if (!read_u64_prefix(lifecycle_file, observed_anchor_fingerprint)) {
+                std::fprintf(stderr, "%sfailed to read lifecycle anchor fingerprint\n", k_failure_prefix);
+                ok = false;
+            }
+            else if (observed_anchor_fingerprint !=
+                     sintra::detail::k_ring_lifecycle_anchor_fingerprint)
+            {
+                std::fprintf(stderr, "%slifecycle anchor fingerprint mismatch\n", k_failure_prefix);
+                ok = false;
+            }
+        }
+
+        if (has_temp_ring_publish_files(temp.path)) {
             ok = false;
         }
     }
@@ -424,7 +458,24 @@ int run_parent(const std::string& binary_path)
         std::fprintf(stderr, "%sdata file remained after release\n", k_failure_prefix);
         ok = false;
     }
-    if (has_temp_control_files(temp.path)) {
+    if (!std::filesystem::exists(lifecycle_file)) {
+        std::fprintf(stderr, "%slifecycle anchor missing after release\n", k_failure_prefix);
+        ok = false;
+    }
+    else {
+        std::uint64_t observed_anchor_fingerprint = 0;
+        if (!read_u64_prefix(lifecycle_file, observed_anchor_fingerprint)) {
+            std::fprintf(stderr, "%sfailed to read lifecycle anchor fingerprint after release\n", k_failure_prefix);
+            ok = false;
+        }
+        else if (observed_anchor_fingerprint !=
+                 sintra::detail::k_ring_lifecycle_anchor_fingerprint)
+        {
+            std::fprintf(stderr, "%slifecycle anchor fingerprint mismatch after release\n", k_failure_prefix);
+            ok = false;
+        }
+    }
+    if (has_temp_ring_publish_files(temp.path)) {
         ok = false;
     }
 
