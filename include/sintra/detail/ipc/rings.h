@@ -548,6 +548,95 @@ inline bool create_ring_backing_file(
 
 namespace detail {
 
+inline fs::path make_ring_publish_temp_path(const fs::path& final_path)
+{
+    static std::atomic<uint64_t> next_temp_id{0};
+
+    fs::path temp_path = final_path;
+    temp_path += ".tmp.";
+    temp_path += std::to_string(static_cast<unsigned long long>(get_current_pid()));
+    temp_path += ".";
+    temp_path += std::to_string(static_cast<unsigned long long>(get_current_tid()));
+    temp_path += ".";
+    temp_path += std::to_string(
+        static_cast<unsigned long long>(
+            next_temp_id.fetch_add(1, std::memory_order_relaxed)));
+    return temp_path;
+}
+
+template <typename SharedObject, typename Initializer>
+publish_file_result publish_initialized_ring_file(
+    const fs::path&    final_path,
+    const std::string* directory,
+    Initializer&&      initialize)
+{
+    fs::path temp_path;
+    for (int attempt = 0; attempt < 16; ++attempt) {
+        temp_path = make_ring_publish_temp_path(final_path);
+
+        std::error_code cleanup_ec;
+        (void)fs::remove(temp_path, cleanup_ec);
+
+        if (create_ring_backing_file(temp_path.string(), sizeof(SharedObject), directory)) {
+            break;
+        }
+        temp_path.clear();
+    }
+
+    if (temp_path.empty()) {
+        return publish_file_result::failed;
+    }
+
+    auto remove_temp = [&]() noexcept {
+        std::error_code ec;
+        (void)fs::remove(temp_path, ec);
+    };
+
+    bool object_constructed = false;
+    auto destroy_temp_object = [&]() noexcept {
+        if (!object_constructed) {
+            return;
+        }
+
+        try {
+            ipc::file_mapping temp_file(temp_path, ipc::read_write);
+            ipc::mapped_region temp_region(temp_file, ipc::read_write, 0, 0);
+            auto* object = static_cast<SharedObject*>(temp_region.data());
+            object->~SharedObject();
+            object_constructed = false;
+        }
+        catch (...) {
+        }
+    };
+
+    try {
+        {
+            ipc::file_mapping temp_file(temp_path, ipc::read_write);
+            ipc::mapped_region temp_region(temp_file, ipc::read_write, 0, 0);
+            auto* object = static_cast<SharedObject*>(temp_region.data());
+
+            new (object) SharedObject;
+            object_constructed = true;
+            std::forward<Initializer>(initialize)(*object);
+
+            temp_region.flush();
+            temp_file.flush_file();
+        }
+
+        const auto published = publish_file_if_absent(temp_path, final_path);
+        if (published != publish_file_result::published) {
+            destroy_temp_object();
+        }
+        remove_temp();
+        return published;
+    }
+    catch (...) {
+        destroy_temp_object();
+        remove_temp();
+        return publish_file_result::failed;
+    }
+}
+
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
 inline std::string normalize_ring_test_path(const std::string& path)
 {
@@ -814,88 +903,14 @@ private:
 
     detail::publish_file_result create_anchor()
     {
-        static std::atomic<uint64_t> next_temp_id{0};
-
-        const fs::path final_path(m_lifecycle_anchor_filename);
-        fs::path       temp_path;
-
-        for (int attempt = 0; attempt < 16; ++attempt) {
-            const auto temp_id = next_temp_id.fetch_add(1, std::memory_order_relaxed);
-            temp_path = final_path;
-            temp_path += ".tmp.";
-            temp_path += std::to_string(static_cast<unsigned long long>(get_current_pid()));
-            temp_path += ".";
-            temp_path += std::to_string(static_cast<unsigned long long>(get_current_tid()));
-            temp_path += ".";
-            temp_path += std::to_string(static_cast<unsigned long long>(temp_id));
-
-            std::error_code cleanup_ec;
-            (void)fs::remove(temp_path, cleanup_ec);
-
-            if (create_ring_backing_file(
-                    temp_path.string(),
-                    sizeof(Anchor),
-                    &m_lifecycle_directory))
-            {
-                break;
-            }
-            temp_path.clear();
-        }
-
-        if (temp_path.empty()) {
-            return detail::publish_file_result::failed;
-        }
-
-        auto remove_temp = [&]() noexcept {
-            std::error_code ec;
-            (void)fs::remove(temp_path, ec);
-        };
-
-        bool anchor_constructed = false;
-        auto destroy_temp_anchor = [&]() noexcept {
-            if (!anchor_constructed) {
-                return;
-            }
-
-            try {
-                ipc::file_mapping fm_anchor(temp_path, ipc::read_write);
-                ipc::mapped_region anchor_region(fm_anchor, ipc::read_write, 0, 0);
-                auto* anchor = static_cast<Anchor*>(anchor_region.data());
-                anchor->~Anchor();
-                anchor_constructed = false;
-            }
-            catch (...) {
-            }
-        };
-
-        try {
-            {
-                ipc::file_mapping fm_anchor(temp_path, ipc::read_write);
-                ipc::mapped_region anchor_region(fm_anchor, ipc::read_write, 0, 0);
-                auto* anchor = static_cast<Anchor*>(anchor_region.data());
-
-                new (anchor) Anchor;
-                anchor_constructed = true;
-                anchor->abi_fingerprint.store(
+        return detail::publish_initialized_ring_file<Anchor>(
+            fs::path(m_lifecycle_anchor_filename),
+            &m_lifecycle_directory,
+            [](Anchor& anchor) {
+                anchor.abi_fingerprint.store(
                     detail::k_ring_lifecycle_anchor_fingerprint,
                     std::memory_order_release);
-
-                anchor_region.flush();
-                fm_anchor.flush_file();
-            }
-
-            const auto published = detail::publish_file_if_absent(temp_path, final_path);
-            if (published != detail::publish_file_result::published) {
-                destroy_temp_anchor();
-            }
-            remove_temp();
-            return published;
-        }
-        catch (...) {
-            destroy_temp_anchor();
-            remove_temp();
-            return detail::publish_file_result::failed;
-        }
+            });
     }
 
     bool attach_anchor()
@@ -2068,84 +2083,14 @@ private:
     // never map the final control file until Control's lifetime has begun.
     detail::publish_file_result create()
     {
-        static std::atomic<uint64_t> next_temp_id{0};
-
-        const fs::path final_path(m_control_filename);
-        fs::path       temp_path;
-
-        for (int attempt = 0; attempt < 16; ++attempt) {
-            const auto temp_id = next_temp_id.fetch_add(1, std::memory_order_relaxed);
-            temp_path = final_path;
-            temp_path += ".tmp.";
-            temp_path += std::to_string(static_cast<unsigned long long>(get_current_pid()));
-            temp_path += ".";
-            temp_path += std::to_string(static_cast<unsigned long long>(get_current_tid()));
-            temp_path += ".";
-            temp_path += std::to_string(static_cast<unsigned long long>(temp_id));
-
-            std::error_code cleanup_ec;
-            (void)fs::remove(temp_path, cleanup_ec);
-
-            if (create_ring_backing_file(temp_path.string(), sizeof(Control), nullptr)) {
-                break;
-            }
-            temp_path.clear();
-        }
-
-        if (temp_path.empty()) {
-            return detail::publish_file_result::failed;
-        }
-
-        auto remove_temp = [&]() noexcept {
-            std::error_code ec;
-            (void)fs::remove(temp_path, ec);
-        };
-
-        bool temp_control_constructed = false;
-        auto destroy_temp_control = [&]() noexcept {
-            if (!temp_control_constructed) {
-                return;
-            }
-
-            try {
-                ipc::file_mapping fm_control(temp_path, ipc::read_write);
-                ipc::mapped_region control_region(fm_control, ipc::read_write, 0, 0);
-                auto* control = static_cast<Control*>(control_region.data());
-                control->~Control();
-                temp_control_constructed = false;
-            }
-            catch (...) {
-            }
-        };
-
-        try {
-            {
-                ipc::file_mapping fm_control(temp_path, ipc::read_write);
-                ipc::mapped_region control_region(fm_control, ipc::read_write, 0, 0);
-                auto* control = static_cast<Control*>(control_region.data());
-
-                new (control) Control;
-                temp_control_constructed = true;
-                control->abi_fingerprint.store(
+        return detail::publish_initialized_ring_file<Control>(
+            fs::path(m_control_filename),
+            nullptr,
+            [](Control& control) {
+                control.abi_fingerprint.store(
                     detail::k_ring_abi_fingerprint,
                     std::memory_order_release);
-
-                control_region.flush();
-                fm_control.flush_file();
-            }
-
-            const auto published = detail::publish_file_if_absent(temp_path, final_path);
-            if (published != detail::publish_file_result::published) {
-                destroy_temp_control();
-            }
-            remove_temp();
-            return published;
-        }
-        catch (...) {
-            destroy_temp_control();
-            remove_temp();
-            return detail::publish_file_result::failed;
-        }
+            });
     }
 
     // Map the control file read-write.
