@@ -34,9 +34,13 @@
  * PUBLISH / MEMORY ORDERING SEMANTICS
  * -----------------------------------
  *  * The writer first writes elements into the mapped region (plain stores),
- *    then calls done_writing(), which atomically publishes the new
- *    leading_sequence (last published element is leading_sequence - 1).
+ *    then calls done_writing(), which publishes the new leading_sequence
+ *    (last published element is leading_sequence - 1) while holding the ring
+ *    spinlock.
  *  * Readers use the published leading_sequence to compute their readable range.
+ *  * Diagnostic counters use relaxed ordering where they do not participate in
+ *    correctness. Shutdown and initialization flags use explicit acquire/release
+ *    operations where readers must observe preceding writer-side stores.
  *
  * WRITE BOUNDS
  * ------------
@@ -943,65 +947,97 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         READER_STATE_EVICTED  = 2
     };
 
-    // Union-based reader state: eliminates bit shifts/masks, uses direct field access
-    union Reader_state_union
+    // Explicit 32-bit reader-state word. The byte layout is part of the shared
+    // control-block protocol and is encoded without union type-punning.
+    struct Reader_state_union
     {
-        struct Fields
-        {
-            uint8_t    octile;         // Octile number (0-7)
-            uint8_t    guard_present;  // 0 = no guard, 1 = guard present
-            uint8_t    status;         // Reader_status enum value
-            uint8_t    pending_octile; // 0xff = no pending update, else octile
-        } fields;
         uint32_t word;
 
         static constexpr uint8_t k_no_pending_octile = 0xff;
 
+        static constexpr uint32_t octile_mask         = 0x000000ffu;
+        static constexpr uint32_t guard_present_mask  = 0x0000ff00u;
+        static constexpr uint32_t status_mask         = 0x00ff0000u;
+        static constexpr uint32_t pending_octile_mask = 0xff000000u;
+
         constexpr Reader_state_union() : word(0) {}
         constexpr Reader_state_union(uint32_t w) : word(w) {}
         constexpr Reader_state_union(Reader_status s, uint8_t o, bool g)
-            : fields{o, g ? uint8_t(1) : uint8_t(0), static_cast<uint8_t>(s), k_no_pending_octile} {}
+            : word(make_word(s, o, g, k_no_pending_octile)) {}
+
+        static constexpr uint32_t make_word(
+            Reader_status status,
+            uint8_t       octile,
+            bool          guard_present,
+            uint8_t       pending_octile) noexcept
+        {
+            return uint32_t{octile}
+                | (uint32_t{guard_present ? 1u : 0u} << 8)
+                | (uint32_t{static_cast<uint8_t>(status)} << 16)
+                | (uint32_t{pending_octile} << 24);
+        }
 
         static constexpr Reader_state_union make(
             Reader_status  status,
             uint8_t        octile,
-            bool           guard_present)
+            bool           guard_present) noexcept
         {
             return Reader_state_union(status, octile, guard_present);
         }
 
-        uint8_t status()         const { return fields.status;                                }
-        bool    guard_present()  const { return fields.guard_present != 0;                    }
-        uint8_t guard_octile()   const { return fields.octile;                                }
-        bool    guard_pending()  const { return fields.pending_octile != k_no_pending_octile; }
-        uint8_t pending_octile() const { return fields.pending_octile;                        }
+        constexpr uint8_t status() const noexcept
+        {
+            return static_cast<uint8_t>((word & status_mask) >> 16);
+        }
 
-        Reader_state_union with_status(uint8_t status_value) const
+        constexpr bool guard_present() const noexcept
+        {
+            return ((word & guard_present_mask) >> 8) != 0;
+        }
+
+        constexpr uint8_t guard_octile() const noexcept
+        {
+            return static_cast<uint8_t>(word & octile_mask);
+        }
+
+        constexpr bool guard_pending() const noexcept
+        {
+            return pending_octile() != k_no_pending_octile;
+        }
+
+        constexpr uint8_t pending_octile() const noexcept
+        {
+            return static_cast<uint8_t>((word & pending_octile_mask) >> 24);
+        }
+
+        constexpr Reader_state_union with_status(uint8_t status_value) const noexcept
         {
             Reader_state_union copy(*this);
-            copy.fields.status = status_value;
+            copy.word = (copy.word & ~status_mask) | (uint32_t{status_value} << 16);
             return copy;
         }
 
-        Reader_state_union with_guard(uint8_t octile, bool present) const
+        constexpr Reader_state_union with_guard(uint8_t octile, bool present) const noexcept
         {
             Reader_state_union copy(*this);
-            copy.fields.octile = octile;
-            copy.fields.guard_present = present ? 1 : 0;
+            copy.word = (copy.word & ~(octile_mask | guard_present_mask))
+                | uint32_t{octile}
+                | (uint32_t{present ? 1u : 0u} << 8);
             return copy;
         }
 
-        Reader_state_union with_pending(uint8_t octile) const
+        constexpr Reader_state_union with_pending(uint8_t octile) const noexcept
         {
             Reader_state_union copy(*this);
-            copy.fields.pending_octile = octile;
+            copy.word = (copy.word & ~pending_octile_mask) | (uint32_t{octile} << 24);
             return copy;
         }
 
-        Reader_state_union clear_pending() const
+        constexpr Reader_state_union clear_pending() const noexcept
         {
             Reader_state_union copy(*this);
-            copy.fields.pending_octile = k_no_pending_octile;
+            copy.word = (copy.word & ~pending_octile_mask)
+                | (uint32_t{k_no_pending_octile} << 24);
             return copy;
         }
 
@@ -1049,11 +1085,10 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         return encoded & 0x07;
     }
 
-    // All atomic operations use seq_cst (default) memory ordering for maximum safety.
-    // Relaxed orderings provide minimal performance benefit but introduce subtle race
-    // conditions that may only appear after hours or days of testing. The performance
-    // cost of seq_cst is negligible compared to the IPC communication overhead, and
-    // the correctness guarantee is invaluable for a lock-free concurrent data structure.
+    // Memory ordering is protocol-specific. Reader slot transitions and the ring
+    // spinlock use the default sequentially consistent operations. Diagnostic
+    // counters use relaxed operations. Shutdown/initialization state that gates
+    // access to other shared fields uses explicit acquire/release operations.
 
     // Helper: pad to a cache line to reduce false sharing in Control arrays.
     struct cache_line_sized_t
@@ -1176,7 +1211,9 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
 
         void push(int value)
         {
-            assert(count < N);
+            if (count < 0 || count >= N) {
+                throw std::runtime_error("sintra::Ring control stack capacity exceeded");
+            }
             arr[count++] = value;
         }
 
@@ -2685,8 +2722,9 @@ struct Ring_W : Ring<T, false>
      * Returns the new leading sequence value.
      *
      * Publish semantics:
-     *  * All element stores must be completed before this atomic store (the
-     *    default seq-cst store is sufficient here).
+     *  * All element stores must be completed before leading_sequence is updated.
+     *    The update occurs under the ring spinlock and uses the default atomic
+     *    ordering of leading_sequence.
      */
     sequence_counter_type done_writing()
     {
@@ -3098,8 +3136,23 @@ public:
     [[nodiscard]] element_t*       begin() const noexcept { return m_range.begin; }
     [[nodiscard]] element_t*       end()   const noexcept { return m_range.end;   }
 
-    // If caller finished early, prevent done_reading() in dtor.
-    void dismiss() noexcept { m_active = false; }
+    void done() noexcept
+    {
+        if (m_active && m_reader) {
+            m_reader->done_reading();
+        }
+        m_reader = nullptr;
+        m_active = false;
+        m_range  = Range<element_t>{};
+    }
+
+    // Use only when the caller already released the snapshot through the reader.
+    void release_without_done_reading() noexcept
+    {
+        m_reader = nullptr;
+        m_active = false;
+        m_range  = Range<element_t>{};
+    }
 
 private:
     Reader*          m_reader = nullptr;

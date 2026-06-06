@@ -221,6 +221,34 @@ size_t accumulate_vb_size(size_t offset, const T& value, Args&&... args)
     }
 }
 
+class variable_buffer_context_guard
+{
+public:
+    variable_buffer_context_guard(
+        char*     message_start_address,
+        uint32_t* pbytes_to_next_message) noexcept
+    :
+        m_old_message_start_address(variable_buffer::tl_message_start_address),
+        m_old_pbytes_to_next_message(variable_buffer::tl_pbytes_to_next_message)
+    {
+        variable_buffer::tl_message_start_address  = message_start_address;
+        variable_buffer::tl_pbytes_to_next_message = pbytes_to_next_message;
+    }
+
+    ~variable_buffer_context_guard() noexcept
+    {
+        variable_buffer::tl_message_start_address  = m_old_message_start_address;
+        variable_buffer::tl_pbytes_to_next_message = m_old_pbytes_to_next_message;
+    }
+
+    variable_buffer_context_guard(const variable_buffer_context_guard&) = delete;
+    variable_buffer_context_guard& operator=(const variable_buffer_context_guard&) = delete;
+
+private:
+    char*     m_old_message_start_address;
+    uint32_t* m_old_pbytes_to_next_message;
+};
+
 } // namespace detail
 
 
@@ -402,6 +430,13 @@ struct Message_prefix
     instance_id_type   receiver_instance_id = invalid_instance_id;
 };
 
+struct corrupted_message_exception : public std::runtime_error
+{
+    explicit corrupted_message_exception(const char* what_arg)
+        : std::runtime_error(what_arg)
+    {}
+};
+
 template <typename T>
 sintra::type_id_type get_type_id();
 
@@ -470,14 +505,12 @@ struct Message: public Message_prefix, public T
     {
         bytes_to_next_message = sizeof(Message);
 
-        variable_buffer::tl_message_start_address = (char*) this;
-        variable_buffer::tl_pbytes_to_next_message = &bytes_to_next_message;
+        detail::variable_buffer_context_guard context(
+            reinterpret_cast<char*>(this),
+            &bytes_to_next_message);
 
         void* body_ptr = static_cast<body_type*>(this);
         new (body_ptr) body_type{args...};
-
-        variable_buffer::tl_message_start_address = nullptr;
-        variable_buffer::tl_pbytes_to_next_message = nullptr;
 
         assert(bytes_to_next_message < (message_ring_size / 8));
 
@@ -777,9 +810,40 @@ struct Message_ring_R: Ring_R<char>
             return nullptr;
         }
 
-        Message_prefix* ret = (Message_prefix*)m_range.begin;
-        assert(ret->magic == message_magic);
-        m_range.begin += ret->bytes_to_next_message;
+        auto fail = [this](const char* reason) -> Message_prefix*
+        {
+            m_reading_lock = false;
+            throw corrupted_message_exception(reason);
+        };
+
+        if (m_range.end < m_range.begin) {
+            return fail("Sintra message ring contains an invalid readable range.");
+        }
+
+        const auto available_bytes = static_cast<size_t>(m_range.end - m_range.begin);
+        if (available_bytes < sizeof(Message_prefix)) {
+            return fail("Sintra message ring contains a truncated message prefix.");
+        }
+
+        Message_prefix* ret = reinterpret_cast<Message_prefix*>(m_range.begin);
+        if (ret->magic != message_magic) {
+            return fail("Sintra message ring contains an invalid message magic.");
+        }
+
+        const uint32_t bytes_to_next = ret->bytes_to_next_message;
+        if (bytes_to_next < sizeof(Message_prefix)) {
+            return fail("Sintra message ring contains an invalid message length.");
+        }
+
+        if (bytes_to_next >= static_cast<uint32_t>(message_ring_size / 8)) {
+            return fail("Sintra message ring contains a message larger than the maximum frame size.");
+        }
+
+        if (bytes_to_next > available_bytes) {
+            return fail("Sintra message ring contains a message that exceeds the readable range.");
+        }
+
+        m_range.begin += bytes_to_next;
 
         m_reading_lock = false;
         return ret;
@@ -828,4 +892,3 @@ public:
  //////////////////////////////////////////////////////////////////////////
 
 } // namespace sintra
-

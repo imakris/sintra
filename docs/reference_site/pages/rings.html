@@ -129,7 +129,8 @@
             Range&lt;element_t&gt; range() const noexcept;
             element_t*       begin() const noexcept;
             element_t*       end()   const noexcept;
-            void             dismiss() noexcept;
+            void             done() noexcept;
+            void             release_without_done_reading() noexcept;
         };
 
         template &lt;class Reader, class... Args&gt;
@@ -192,7 +193,7 @@
         <li>The templated overload <code>Ring_W::write&lt;T2&gt;(num_extra_elements, args...)</code> in-place constructs a <code>T2</code> whose footprint is a multiple of <code>T</code>. By default <code>T2</code> must be both trivially copyable and trivially destructible. Specialise `ring_payload_traits&lt;T2&gt;::allow_nontrivial = true` to opt a specific payload type into non-trivial semantics.</li>
         <li><code>Ring_R::start_reading(n)</code> returns a <code>Range&lt;T&gt;</code> view of up to <code>n</code> trailing elements behind the current leading sequence. <code>n</code> must not exceed <code>max_trailing_elements</code>. Each <code>start_reading</code> must be paired with <code>done_reading</code> before the next call.</li>
         <li><code>Ring_R::wait_for_new_data()</code> blocks until the leading sequence advances and returns the newly readable range. Pair every non-empty result with <code>done_reading_new_data()</code> before the next wait or read operation so the reader guard can migrate across octiles.</li>
-        <li><code>Ring_R_snapshot</code> enforces that pairing by RAII. `make_snapshot(reader, args...)` throws on failure (typically <code>ring_reader_evicted_exception</code>); <code>try_snapshot_e(reader, args...)</code> is <code>noexcept</code> and returns the snapshot together with a <code>Ring_R_snapshot_error</code> (<code>none</code>, <code>evicted</code>, <code>exception</code>). Dismiss before destruction with <code>Ring_R_snapshot::dismiss()</code> if the consumer released the data through some other path.</li>
+        <li><code>Ring_R_snapshot</code> enforces that pairing by RAII. `make_snapshot(reader, args...)` throws on failure (typically <code>ring_reader_evicted_exception</code>); <code>try_snapshot_e(reader, args...)</code> is <code>noexcept</code> and returns the snapshot together with a <code>Ring_R_snapshot_error</code> (<code>none</code>, <code>evicted</code>, <code>exception</code>). Call <code>Ring_R_snapshot::done()</code> to release the snapshot early, or <code>Ring_R_snapshot::release_without_done_reading()</code> only if the consumer already released the data through the underlying reader.</li>
         <li><code>invalid_sequence</code> is the sentinel returned by ring-aware APIs to mean &quot;no sequence&quot;. Compare against it instead of any literal.</li>
         <li><code>Ring_diagnostics</code> is a snapshot of counters maintained by the ring (max reader lag, eviction counters, stale-guard clears, accounting mismatches). Read with <code>get_diagnostics()</code> on either the writer or any reader.</li>
         <li>A reader that falls too far behind may be evicted by the writer when <code>SINTRA_ENABLE_SLOW_READER_EVICTION</code> is defined (the default). Any subsequent <code>start_reading</code> or <code>make_snapshot</code> throws <code>ring_reader_evicted_exception</code>; <code>try_snapshot_e</code> returns <code>Ring_R_snapshot_error::evicted</code>. The reader must be reconstructed.</li>

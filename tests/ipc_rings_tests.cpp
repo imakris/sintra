@@ -299,7 +299,7 @@ TEST_CASE(test_snapshot_raii)
     }
 
     auto second_snapshot = sintra::make_snapshot(reader, payload.size());
-    second_snapshot.dismiss();
+    second_snapshot.release_without_done_reading();
     reader.done_reading();
 }
 
@@ -607,6 +607,28 @@ TEST_CASE(test_guard_pending_prevents_underflow)
 
     ASSERT_EQ(0u, static_cast<unsigned>(guard_count));
     ASSERT_EQ(uint64_t(0), read_access & guard_mask);
+}
+
+TEST_CASE(test_reader_state_word_layout)
+{
+    using Reader_state_union = sintra::Ring<uint32_t, true>::Reader_state_union;
+    using Reader_status      = sintra::Ring<uint32_t, true>::Reader_status;
+
+    constexpr Reader_state_union state = Reader_state_union::make(
+        Reader_status::READER_STATE_ACTIVE,
+        3,
+        true).with_pending(6);
+
+    static_assert(state.word == 0x06010103u);
+    static_assert(state.guard_octile() == 3);
+    static_assert(state.guard_present());
+    static_assert(state.status() == Reader_status::READER_STATE_ACTIVE);
+    static_assert(state.guard_pending());
+    static_assert(state.pending_octile() == 6);
+
+    constexpr Reader_state_union cleared = state.clear_pending();
+    static_assert(cleared.word == 0xff010103u);
+    static_assert(!cleared.guard_pending());
 }
 
 TEST_CASE(test_guard_rollback_success)

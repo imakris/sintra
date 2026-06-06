@@ -6,9 +6,11 @@
 
 #include "test_utils.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <exception>
 #include <limits>
+#include <new>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -30,6 +32,22 @@ struct Fake_container
     size_t         count = 0;
     std::vector<T> backing;
 };
+
+struct Throwing_variable_buffer_payload
+{
+    sintra::typed_variable_buffer<std::vector<uint8_t>> bytes;
+
+    Throwing_variable_buffer_payload() = default;
+
+    explicit Throwing_variable_buffer_payload(const std::vector<uint8_t>& value)
+        : bytes(value)
+    {
+        throw std::runtime_error("intentional variable_buffer construction failure");
+    }
+};
+
+using Throwing_variable_buffer_message =
+    sintra::Message<Throwing_variable_buffer_payload, void, 0xE7707ull>;
 
 template <typename Ex, typename Fn>
 bool expect_throw(std::string_view label, Fn&& fn)
@@ -75,6 +93,46 @@ bool test_variable_buffer_payload_too_large()
         [&]() { sintra::variable_buffer vb(container); });
 }
 
+bool test_variable_buffer_requires_message_context()
+{
+    std::vector<uint8_t> payload{1, 2, 3};
+    return expect_throw<std::runtime_error>(
+        "variable_buffer requires message construction context",
+        [&]() { sintra::variable_buffer vb(payload); });
+}
+
+bool test_variable_buffer_context_restored_after_throw()
+{
+    std::vector<uint8_t> payload{1, 2, 3};
+    const size_t         extra_bytes =
+        sintra::vb_size<Throwing_variable_buffer_message>(payload);
+    const size_t         total_size =
+        sizeof(Throwing_variable_buffer_message) + extra_bytes;
+
+    void* raw = ::operator new(
+        total_size,
+        std::align_val_t(alignof(Throwing_variable_buffer_message)));
+
+    bool ok = expect_throw<std::runtime_error>(
+        "variable_buffer context is restored after body constructor throws",
+        [&]()
+        {
+            new (raw) Throwing_variable_buffer_message(payload);
+        });
+
+    ::operator delete(
+        raw,
+        std::align_val_t(alignof(Throwing_variable_buffer_message)));
+
+    return ok &&
+        sintra::test::assert_true(
+            sintra::variable_buffer::tl_message_start_address == nullptr &&
+            sintra::variable_buffer::tl_pbytes_to_next_message == nullptr,
+            k_prefix,
+            "variable_buffer TLS context should be cleared after constructor failure"
+        );
+}
+
 bool test_align_up_size_overflow()
 {
     const size_t value = std::numeric_limits<size_t>::max() - 3;
@@ -112,6 +170,8 @@ int main()
     bool ok = true;
     ok &= test_variable_buffer_container_too_large();
     ok &= test_variable_buffer_payload_too_large();
+    ok &= test_variable_buffer_requires_message_context();
+    ok &= test_variable_buffer_context_restored_after_throw();
     ok &= test_align_up_size_overflow();
     ok &= test_process_index_exhaustion();
     return ok ? 0 : 1;

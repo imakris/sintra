@@ -116,7 +116,8 @@ public:
     Range<element_t> range() const noexcept;
     element_t*       begin() const noexcept;
     element_t*       end()   const noexcept;
-    void             dismiss() noexcept;
+    void             done() noexcept;
+    void             release_without_done_reading() noexcept;
 };
 
 template <class Reader, class... Args>
@@ -249,9 +250,10 @@ Contract:
   args...)` throws on failure (typically
   `ring_reader_evicted_exception`); `try_snapshot_e(reader, args...)`
   is `noexcept` and returns the snapshot together with a
-  `Ring_R_snapshot_error` (`none`, `evicted`, `exception`). Dismiss
-  before destruction with `Ring_R_snapshot::dismiss()` if the consumer
-  released the data through some other path.
+  `Ring_R_snapshot_error` (`none`, `evicted`, `exception`). Call
+  `Ring_R_snapshot::done()` to release the snapshot early, or
+  `Ring_R_snapshot::release_without_done_reading()` only if the consumer
+  already released the data through the underlying reader.
 - `invalid_sequence` is the sentinel returned by ring-aware APIs to
   mean "no sequence". Compare against it instead of any literal.
 - `Ring_diagnostics` is a snapshot of counters maintained by the ring

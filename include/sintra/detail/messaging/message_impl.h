@@ -34,6 +34,13 @@ variable_buffer::variable_buffer(const TC& container)
         throw std::runtime_error("sintra::variable_buffer overflow: payload exceeds 32-bit limit");
     }
 
+    if (!variable_buffer::tl_message_start_address ||
+        !variable_buffer::tl_pbytes_to_next_message)
+    {
+        throw std::runtime_error(
+            "sintra::variable_buffer constructed outside a message construction context");
+    }
+
     const size_t current_offset = static_cast<size_t>(*variable_buffer::tl_pbytes_to_next_message);
     const size_t aligned_offset = detail::align_up_size(current_offset, alignof(T));
 
