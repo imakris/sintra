@@ -489,7 +489,7 @@ struct Message: public Message_prefix, public T
         bytes_to_next_message = sizeof(Message);
 
         void* body_ptr = static_cast<body_type*>(this);
-        new (body_ptr) body_type{args...};
+        new (body_ptr) body_type{std::forward<Args>(args)...};
 
         assert(bytes_to_next_message < (message_ring_size / 8));
 
@@ -510,7 +510,7 @@ struct Message: public Message_prefix, public T
             &bytes_to_next_message);
 
         void* body_ptr = static_cast<body_type*>(this);
-        new (body_ptr) body_type{args...};
+        new (body_ptr) body_type{std::forward<Args>(args)...};
 
         assert(bytes_to_next_message < (message_ring_size / 8));
 

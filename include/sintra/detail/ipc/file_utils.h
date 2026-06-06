@@ -23,6 +23,13 @@ namespace sintra {
 
 namespace detail {
 
+enum class publish_file_result
+{
+    published,
+    already_exists,
+    failed
+};
+
 #ifdef _WIN32
 using native_file_handle = HANDLE;
 
@@ -85,6 +92,26 @@ inline bool close_file(native_file_handle handle)
 {
     return ::CloseHandle(handle) != 0;
 }
+
+inline publish_file_result publish_file_if_absent(
+    const std::filesystem::path& source,
+    const std::filesystem::path& target)
+{
+    if (::MoveFileExW(
+            source.wstring().c_str(),
+            target.wstring().c_str(),
+            MOVEFILE_WRITE_THROUGH))
+    {
+        return publish_file_result::published;
+    }
+
+    const DWORD error = ::GetLastError();
+    if (error == ERROR_ALREADY_EXISTS || error == ERROR_FILE_EXISTS) {
+        return publish_file_result::already_exists;
+    }
+
+    return publish_file_result::failed;
+}
 #else
 using native_file_handle = int;
 
@@ -130,6 +157,25 @@ inline bool write_file(native_file_handle handle, const void* data, std::size_t 
 inline bool close_file(native_file_handle handle)
 {
     return ::close(handle) == 0;
+}
+
+inline publish_file_result publish_file_if_absent(
+    const std::filesystem::path& source,
+    const std::filesystem::path& target)
+{
+    int rc;
+    do {
+        rc = ::link(source.c_str(), target.c_str());
+    }
+    while (rc != 0 && errno == EINTR);
+
+    if (rc == 0) {
+        return publish_file_result::published;
+    }
+    if (errno == EEXIST) {
+        return publish_file_result::already_exists;
+    }
+    return publish_file_result::failed;
 }
 #endif
 

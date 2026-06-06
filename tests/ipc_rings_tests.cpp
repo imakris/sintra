@@ -219,6 +219,82 @@ TEST_CASE(test_directory_helpers)
     ASSERT_FALSE(std::filesystem::exists(dir_to_create));
 }
 
+TEST_CASE(test_control_file_first_attach_is_published_initialized)
+{
+    Temp_ring_dir tmp("control_first_attach");
+    const std::string ring_name     = "ring_data";
+    const size_t      ring_elements = pick_ring_elements<uint32_t>(256);
+    constexpr size_t  reader_count  = 12;
+    const auto        data_file     = tmp.path / ring_name;
+
+    ASSERT_TRUE(sintra::create_ring_backing_file(
+        data_file.string(),
+        ring_elements * sizeof(uint32_t),
+        nullptr));
+
+    std::atomic<size_t> ready{0};
+    std::atomic<bool>   go{false};
+    std::vector<std::unique_ptr<sintra::Ring_R<uint32_t>>> readers(reader_count);
+    std::vector<std::exception_ptr> errors(reader_count);
+    std::vector<std::thread> threads;
+    threads.reserve(reader_count);
+
+    for (size_t i = 0; i < reader_count; ++i) {
+        threads.emplace_back([&, i]() {
+            ready.fetch_add(1, std::memory_order_release);
+            while (!go.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+
+            try {
+                readers[i] = std::make_unique<sintra::Ring_R<uint32_t>>(
+                    tmp.str(),
+                    ring_name,
+                    ring_elements,
+                    ring_elements / 2);
+            }
+            catch (...) {
+                errors[i] = std::current_exception();
+            }
+        });
+    }
+
+    while (ready.load(std::memory_order_acquire) != reader_count) {
+        std::this_thread::yield();
+    }
+    go.store(true, std::memory_order_release);
+
+    for (auto& thread : threads) {
+        thread.join();
+    }
+
+    for (const auto& error : errors) {
+        if (error) {
+            std::rethrow_exception(error);
+        }
+    }
+
+    const auto control_file = tmp.path / (ring_name + "_control");
+    ASSERT_TRUE(std::filesystem::exists(control_file));
+
+    std::ifstream input(control_file, std::ios::binary);
+    ASSERT_TRUE(static_cast<bool>(input));
+
+    uint64_t observed_fingerprint = 0;
+    input.read(
+        reinterpret_cast<char*>(&observed_fingerprint),
+        sizeof(observed_fingerprint));
+    ASSERT_TRUE(static_cast<bool>(input));
+    ASSERT_EQ(sintra::detail::k_ring_abi_fingerprint, observed_fingerprint);
+
+    for (const auto& entry : std::filesystem::directory_iterator(tmp.path)) {
+        const auto filename = entry.path().filename().string();
+        ASSERT_TRUE(filename.find("_control.tmp.") == std::string::npos);
+    }
+
+    readers.clear();
+}
+
 TEST_CASE(test_ring_write_read_single_reader)
 {
     Temp_ring_dir tmp("single_reader");

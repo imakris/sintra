@@ -565,8 +565,10 @@ inline void write_outbound_request(
     // Dynamic type resolution may RPC through the same request ring; do it
     // before reserving the outbound message slot.
     (void)MESSAGE_T::id();
+    const size_t extra = vb_size<MESSAGE_T>(args...);
     MESSAGE_T* msg = s_mproc->m_out_req_c->write<MESSAGE_T>(
-        vb_size<MESSAGE_T>(args...), args...);
+        extra,
+        std::forward<Args>(args)...);
     msg->sender_instance_id   = sender_iid;
     msg->receiver_instance_id = receiver_iid;
     msg->function_instance_id = function_iid;
@@ -601,7 +603,10 @@ void Transceiver::send(Args&&... args)
     static_assert(sender_capability, "This type of sender cannot send messages of this type.");
 
     write_outbound_request<MESSAGE_T>(
-        m_instance_id, LOCALITY, invalid_instance_id, args...);
+        m_instance_id,
+        LOCALITY,
+        invalid_instance_id,
+        std::forward<Args>(args)...);
 }
 
 
@@ -1160,7 +1165,7 @@ Transceiver::rpc_async_impl(instance_id_type instance_id, Args... args)
             s_mproc->m_instance_id,
             instance_id,
             rpc_state->function_instance_id,
-            args...);
+            std::forward<Args>(args)...);
     }
     catch (...) {
         const auto function_instance_id = rpc_state->function_instance_id;
@@ -1200,7 +1205,7 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
             if (!handle.guard) {
                 throw rpc_unavailable("Attempted to call an RPC on a target that is shutting down.");
             }
-            return (handle.object->*RPCTC::mf())(args...);
+            return (handle.object->*RPCTC::mf())(std::forward<Args>(args)...);
         }
     }
 
@@ -1209,11 +1214,13 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
             s_mproc->m_instance_id,
             instance_id,
             invalid_instance_id,
-            args...);
+            std::forward<Args>(args)...);
         return;
     }
 
-    auto handle = rpc_async_impl<RPCTC, MESSAGE_T, Args...>(instance_id, args...);
+    auto handle = rpc_async_impl<RPCTC, MESSAGE_T, Args...>(
+        instance_id,
+        std::forward<Args>(args)...);
     handle.wait();
     return handle.get();
 }

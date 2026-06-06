@@ -458,13 +458,21 @@ public:
         template <typename... RArgs>
         static RT sync(instance_id_type instance_id, RArgs&&... args)
         {
-            return Transceiver::rpc_impl<RPCTC, message_type, FArgs...>(instance_id, args...);
+            // Keep FArgs explicit so RPC arguments are converted according to
+            // the exported signature before vb_size() and message construction.
+            return Transceiver::rpc_impl<RPCTC, message_type, FArgs...>(
+                instance_id,
+                std::forward<RArgs>(args)...);
         }
 
         template <typename... RArgs>
         static Rpc_handle<RT> async(instance_id_type instance_id, RArgs&&... args)
         {
-            return Transceiver::rpc_async_impl<RPCTC, message_type, FArgs...>(instance_id, args...);
+            // See sync(): the message layout follows the exported signature,
+            // not the exact call-site argument types.
+            return Transceiver::rpc_async_impl<RPCTC, message_type, FArgs...>(
+                instance_id,
+                std::forward<RArgs>(args)...);
         }
     };
 
@@ -555,7 +563,7 @@ public:
     template<typename... Args>                                                               \
     static auto rpc_ ## m (sintra::Resolvable_instance_id instance_id, Args&&... args)       \
     {                                                                                        \
-        return rpc<m ## _mftc>(mfp, instance_id, args...);                                   \
+        return rpc<m ## _mftc>(mfp, instance_id, std::forward<Args>(args)...);               \
     }                                                                                        \
                                                                                              \
     template<typename... Args>                                                               \
@@ -563,7 +571,7 @@ public:
     {                                                                                        \
         static_assert(!m ## _mftc::is_fire_and_forget,                                       \
             "rpc_async_<method>() is not available for fire-and-forget exports.");           \
-        return rpc_async<m ## _mftc>(mfp, instance_id, args...);                             \
+        return rpc_async<m ## _mftc>(mfp, instance_id, std::forward<Args>(args)...);         \
     }
 
     

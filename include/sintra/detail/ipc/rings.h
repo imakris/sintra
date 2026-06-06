@@ -452,11 +452,11 @@ inline constexpr uint64_t fnv1a_64(std::initializer_list<uint64_t> words) noexce
     return hash;
 }
 
-// Bump SINTRA_RING_ABI_VERSION whenever Control's layout, sentinel values, or
-// the on-the-wire framing change in a way that would make two builds
-// incompatible at the ring level. The version is one input among several to
-// the fingerprint below.
-inline constexpr uint64_t k_ring_abi_version = 1;
+// Bump SINTRA_RING_ABI_VERSION whenever Control's layout, sentinel values,
+// control-file creation protocol, or the on-the-wire framing change in a way
+// that would make two builds incompatible at the ring level. The version is one
+// input among several to the fingerprint below.
+inline constexpr uint64_t k_ring_abi_version = 2;
 
 inline constexpr uint64_t k_ring_abi_fingerprint = fnv1a_64({
     k_ring_abi_version,
@@ -1510,8 +1510,14 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
         m_control_filename = this->m_data_filename + "_control";
 
         fs::path pc(m_control_filename);
-        const bool already_exists = fs::exists(pc) && fs::is_regular_file(pc) && fs::file_size(pc);
-        const bool created_or_ok  = already_exists || create();
+        detail::publish_file_result control_publish_result =
+            detail::publish_file_result::already_exists;
+        if (!fs::exists(pc)) {
+            control_publish_result = create();
+            if (control_publish_result == detail::publish_file_result::failed) {
+                throw ring_acquisition_failure_exception();
+            }
+        }
 
         // The base class destructor runs if a Ring constructor body throws,
         // but Ring's own m_control_region/m_control members do not get cleaned
@@ -1525,35 +1531,30 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
             m_control = nullptr;
         };
 
-        if (!created_or_ok || !attach()) {
+        if (control_publish_result == detail::publish_file_result::already_exists &&
+            !fs::exists(pc))
+        {
             release_control_mapping();
             throw ring_acquisition_failure_exception();
         }
 
-        if (!already_exists) {
-            // Placement-new the shared Control block
-            try {
-                new (m_control) Control;
-            }
-            catch (...) {
-                release_control_mapping();
-                throw ring_acquisition_failure_exception();
-            }
+        if (!attach()) {
+            release_control_mapping();
+            throw ring_acquisition_failure_exception();
         }
-        else {
-            // Validate that the existing control file was written by a binary
-            // with a compatible ABI. The size check inside attach() catches
-            // most layout drift; the fingerprint catches the residual case
-            // where sizeof(Control) coincidentally matches.
-            const auto observed = m_control->abi_fingerprint.load(std::memory_order_acquire);
-            if (observed != detail::k_ring_abi_fingerprint) {
-                // Construct the exception object before tearing the mapping
-                // down so the diagnostic captures the observed value.
-                ring_abi_mismatch_exception abi_ex(
-                    detail::k_ring_abi_fingerprint, observed);
-                release_control_mapping();
-                throw abi_ex;
-            }
+
+        // Validate that the control file was written by a binary with a
+        // compatible ABI. The size check inside attach() catches most layout
+        // drift; the fingerprint catches the residual case where
+        // sizeof(Control) coincidentally matches.
+        const auto observed = m_control->abi_fingerprint.load(std::memory_order_acquire);
+        if (observed != detail::k_ring_abi_fingerprint) {
+            // Construct the exception object before tearing the mapping down
+            // so the diagnostic captures the observed value.
+            ring_abi_mismatch_exception abi_ex(
+                detail::k_ring_abi_fingerprint, observed);
+            release_control_mapping();
+            throw abi_ex;
         }
 
         // Multiple writers/readers may attach concurrently (e.g. stress tests spawn
@@ -1615,10 +1616,89 @@ struct Ring: Ring_data<T, READ_ONLY_DATA>
 
 private:
 
-    // Create the control file (debug-filled in !NDEBUG).
-    bool create()
+    // Create and fully initialize a temporary control file, then publish it
+    // under the final name in a single no-clobber filesystem operation. Joiners
+    // never map the final control file until Control's lifetime has begun.
+    detail::publish_file_result create()
     {
-        return create_ring_backing_file(m_control_filename, sizeof(Control), nullptr);
+        static std::atomic<uint64_t> next_temp_id{0};
+
+        const fs::path final_path(m_control_filename);
+        fs::path       temp_path;
+
+        for (int attempt = 0; attempt < 16; ++attempt) {
+            const auto temp_id = next_temp_id.fetch_add(1, std::memory_order_relaxed);
+            temp_path = final_path;
+            temp_path += ".tmp.";
+            temp_path += std::to_string(static_cast<unsigned long long>(get_current_pid()));
+            temp_path += ".";
+            temp_path += std::to_string(static_cast<unsigned long long>(get_current_tid()));
+            temp_path += ".";
+            temp_path += std::to_string(static_cast<unsigned long long>(temp_id));
+
+            std::error_code cleanup_ec;
+            (void)fs::remove(temp_path, cleanup_ec);
+
+            if (create_ring_backing_file(temp_path.string(), sizeof(Control), nullptr)) {
+                break;
+            }
+            temp_path.clear();
+        }
+
+        if (temp_path.empty()) {
+            return detail::publish_file_result::failed;
+        }
+
+        auto remove_temp = [&]() noexcept {
+            std::error_code ec;
+            (void)fs::remove(temp_path, ec);
+        };
+
+        bool temp_control_constructed = false;
+        auto destroy_temp_control = [&]() noexcept {
+            if (!temp_control_constructed) {
+                return;
+            }
+
+            try {
+                ipc::file_mapping fm_control(temp_path, ipc::read_write);
+                ipc::mapped_region control_region(fm_control, ipc::read_write, 0, 0);
+                auto* control = static_cast<Control*>(control_region.data());
+                control->~Control();
+                temp_control_constructed = false;
+            }
+            catch (...) {
+            }
+        };
+
+        try {
+            {
+                ipc::file_mapping fm_control(temp_path, ipc::read_write);
+                ipc::mapped_region control_region(fm_control, ipc::read_write, 0, 0);
+                auto* control = static_cast<Control*>(control_region.data());
+
+                new (control) Control;
+                temp_control_constructed = true;
+                control->abi_fingerprint.store(
+                    detail::k_ring_abi_fingerprint,
+                    std::memory_order_release);
+
+                control_region.flush();
+                fm_control.flush_file();
+            }
+
+            const auto published = detail::publish_file_if_absent(temp_path, final_path);
+            if (published != detail::publish_file_result::published) {
+                destroy_temp_control();
+            }
+            remove_temp();
+            return published;
+        }
+        catch (...) {
+            destroy_temp_control();
+            remove_temp();
+            return detail::publish_file_result::failed;
+        }
     }
 
     // Map the control file read-write.
