@@ -410,10 +410,11 @@ struct ring_reader_evicted_exception : public std::runtime_error
               "Ring reader was evicted by the writer due to being too slow.") {}
 };
 
-// Thrown by Ring::attach() when an existing ring shared file's ABI fingerprint
-// does not match this binary. Distinct from ring_acquisition_failure_exception
-// so callers can give a clearer diagnostic when the failure mode is "another
-// participant in this swarm was built against a different sintra ABI."
+// Thrown during ring construction when an existing ring control file or
+// lifecycle anchor has an incompatible ABI fingerprint. Distinct from
+// ring_acquisition_failure_exception so callers can give a clearer diagnostic
+// when the failure mode is "another participant in this swarm was built
+// against a different sintra ABI."
 struct ring_abi_mismatch_exception : public std::runtime_error
 {
     ring_abi_mismatch_exception(
@@ -2199,7 +2200,13 @@ struct Ring:
             throw abi_ex;
         }
 
-        this->claim_lifecycle_attachment(*m_control);
+        try {
+            this->claim_lifecycle_attachment(*m_control);
+        }
+        catch (...) {
+            release_control_mapping();
+            throw;
+        }
         this->unlock_lifecycle_after_acquire();
     }
 

@@ -132,7 +132,13 @@ bool terminate_process_and_wait(int pid)
             return true;
         }
         if (result == -1 && errno == ECHILD) {
-            return true;
+            while (std::chrono::steady_clock::now() < deadline) {
+                if (!sintra::is_process_alive(static_cast<std::uint32_t>(pid))) {
+                    return true;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            return !sintra::is_process_alive(static_cast<std::uint32_t>(pid));
         }
         if (result == -1 && errno != EINTR) {
             return false;

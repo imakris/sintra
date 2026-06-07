@@ -105,7 +105,7 @@
 | [`sintra::try_snapshot_e`](rings.md#try_snapshot_e) | function template | `<sintra/rings.h>` | Create a non-throwing RAII read snapshot with status. |
 | [`sintra::ring_payload_traits`](rings.md#ring_payload_traits) | type template | `<sintra/rings.h>` | Opt a specific non-trivial payload type into ring writes. |
 | [`sintra::ring_acquisition_failure_exception`](rings.md#ring_acquisition_failure_exception) | exception | `<sintra/rings.h>` | Ring file, mapping, or ownership acquisition failure. |
-| [`sintra::ring_abi_mismatch_exception`](rings.md#ring_abi_mismatch_exception) | exception | `<sintra/rings.h>` | Ring control file was created by an incompatible Sintra ABI. |
+| [`sintra::ring_abi_mismatch_exception`](rings.md#ring_abi_mismatch_exception) | exception | `<sintra/rings.h>` | Ring control file or lifecycle anchor was created by an incompatible Sintra ABI. |
 | [`sintra::ring_reader_evicted_exception`](rings.md#ring_reader_evicted_exception) | exception | `<sintra/rings.h>` | Reader fell too far behind and was evicted. |
 
 ## Headers

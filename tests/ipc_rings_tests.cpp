@@ -357,6 +357,62 @@ TEST_CASE(test_control_file_first_attach_is_published_initialized)
     ASSERT_FALSE(has_ring_temp_publish_files(tmp.path));
 }
 
+TEST_CASE(test_lifecycle_attachment_exhaustion_releases_failed_control_mapping)
+{
+    Temp_ring_dir tmp("lifecycle_attachment_exhaustion");
+    const std::string ring_name      = "ring_data";
+    const size_t      ring_elements  = pick_ring_elements<uint32_t>(256);
+    const auto        data_file      = tmp.path / ring_name;
+    const auto        control_file   = tmp.path / (ring_name + "_control");
+    const auto        lifecycle_file = tmp.path / (ring_name + "_lifecycle");
+
+    {
+        sintra::Ring_W<uint32_t> writer(tmp.str(), ring_name, ring_elements);
+        std::vector<std::unique_ptr<sintra::Ring_R<uint32_t>>> readers;
+        readers.reserve(static_cast<size_t>(sintra::max_process_index));
+
+        for (int i = 0; i < sintra::max_process_index; ++i) {
+            readers.emplace_back(std::make_unique<sintra::Ring_R<uint32_t>>(
+                tmp.str(),
+                ring_name,
+                ring_elements,
+                ring_elements / 2));
+        }
+
+        bool threw_typed = false;
+        try {
+            sintra::Ring_R<uint32_t> extra_reader(
+                tmp.str(),
+                ring_name,
+                ring_elements,
+                ring_elements / 2);
+            (void)extra_reader;
+        }
+        catch (const sintra::ring_acquisition_failure_exception&) {
+            threw_typed = true;
+        }
+
+        ASSERT_TRUE(threw_typed);
+        ASSERT_TRUE(std::filesystem::exists(control_file));
+        ASSERT_TRUE(std::filesystem::exists(lifecycle_file));
+        ASSERT_FALSE(has_ring_temp_publish_files(tmp.path));
+    }
+
+    for (int retry = 0; retry < 40; ++retry) {
+        if (!std::filesystem::exists(control_file) &&
+            !std::filesystem::exists(data_file))
+        {
+            break;
+        }
+        std::this_thread::sleep_for(25ms);
+    }
+
+    ASSERT_FALSE(std::filesystem::exists(control_file));
+    ASSERT_FALSE(std::filesystem::exists(data_file));
+    ASSERT_TRUE(std::filesystem::exists(lifecycle_file));
+    ASSERT_FALSE(has_ring_temp_publish_files(tmp.path));
+}
+
 TEST_CASE(test_ring_write_read_single_reader)
 {
     Temp_ring_dir tmp("single_reader");

@@ -978,7 +978,7 @@ Primary names:
 | `sintra::Ring_R_snapshot_error` | `none`, `evicted`, or `exception`. |
 | `sintra::Ring_diagnostics` | Counters and last-seen values for lag, overflow, eviction, and guard accounting. |
 | `sintra::ring_acquisition_failure_exception` | Thrown when a ring buffer cannot be acquired. |
-| `sintra::ring_abi_mismatch_exception` | Thrown when an existing ring control file was created by an incompatible Sintra ABI. |
+| `sintra::ring_abi_mismatch_exception` | Thrown when an existing ring control file or lifecycle anchor was created by an incompatible Sintra ABI. |
 | `sintra::ring_reader_evicted_exception` | Thrown when a reader has been evicted by writer progress. |
 | `sintra::ring_payload_traits<T>` | Advanced extension point for allowing non-trivial payload semantics. |
 | `sintra::aligned_capacity<T>(requested)` | Capacity adjusted for ring alignment constraints. |
