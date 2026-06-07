@@ -82,13 +82,16 @@
  *  * Any process may create; subsequent processes attach.
  *  * Each Ring_R object acquires a unique "reader slot" at construction and
  *    releases it on normal destruction.
+ *  * Each Ring object also records a process-owned attachment in the persistent
+ *    lifecycle anchor. These records, not the control block's diagnostic
+ *    num_attached counter, decide whether data/control files are still owned.
  *  * The *last* detaching process removes the data/control files. The lifecycle
  *    anchor is intentionally left behind so future attachers synchronize on the
  *    same stable lock object.
- *  * The lifecycle anchor can recover cleanup that was interrupted after the
- *    final detacher recorded deletion-in-progress. It does not make the scalar
- *    attachment count crash-robust; a process that dies after a successful
- *    attach may still require external scratch-directory cleanup.
+ *  * A later attacher/detacher can scavenge attachment records for dead
+ *    processes using PID plus process start stamp, then recover stale
+ *    data/control files. If a live process's start stamp cannot be confirmed,
+ *    its attachment is treated conservatively as live.
  *
  * PLATFORM MAPPING OVERVIEW
  * -------------------------
@@ -471,7 +474,7 @@ inline constexpr uint64_t fnv1a_64(std::initializer_list<uint64_t> words) noexce
 // control-file creation protocol, or the on-the-wire framing change in a way
 // that would make two builds incompatible at the ring level. The version is one
 // input among several to the fingerprint below.
-inline constexpr uint64_t k_ring_abi_version = 3;
+inline constexpr uint64_t k_ring_abi_version = 4;
 
 inline constexpr uint64_t k_ring_abi_fingerprint = fnv1a_64({
     k_ring_abi_version,
@@ -490,18 +493,30 @@ inline constexpr uint64_t k_ring_abi_fingerprint = fnv1a_64({
 // order, alignment, interprocess_mutex representation, or mutex recovery
 // semantics change in a way that affects compatibility of an existing
 // <ring>_lifecycle file.
-inline constexpr uint64_t k_ring_lifecycle_anchor_abi_version = 1;
+inline constexpr uint64_t k_ring_lifecycle_anchor_abi_version = 2;
+
+inline constexpr size_t k_ring_lifecycle_attachment_slots =
+    static_cast<size_t>(max_process_index) + 1;
+
+struct ring_lifecycle_attachment_record
+{
+    std::atomic<uint64_t> start_stamp{0};
+    std::atomic<uint32_t> pid{0};
+};
 
 inline constexpr uint64_t k_ring_lifecycle_anchor_fingerprint = fnv1a_64({
     0x73696e7472615f6cull, // "sintra_l"
     k_ring_lifecycle_anchor_abi_version,
-    3, // Anchor field count/order marker.
+    4, // Anchor field count/order marker.
     static_cast<uint64_t>(sizeof(std::atomic<uint64_t>)),
     static_cast<uint64_t>(alignof(std::atomic<uint64_t>)),
     static_cast<uint64_t>(sizeof(interprocess_mutex)),
     static_cast<uint64_t>(alignof(interprocess_mutex)),
     static_cast<uint64_t>(sizeof(std::atomic<uint32_t>)),
     static_cast<uint64_t>(alignof(std::atomic<uint32_t>)),
+    static_cast<uint64_t>(k_ring_lifecycle_attachment_slots),
+    static_cast<uint64_t>(sizeof(ring_lifecycle_attachment_record)),
+    static_cast<uint64_t>(alignof(ring_lifecycle_attachment_record)),
 });
 
 } // namespace detail
@@ -775,6 +790,20 @@ protected:
             throw ring_acquisition_failure_exception();
         }
 
+        std::error_code anchor_size_ec;
+        const auto anchor_size = fs::file_size(
+            m_lifecycle_anchor_filename,
+            anchor_size_ec);
+        if (anchor_size_ec) {
+            throw ring_acquisition_failure_exception();
+        }
+        if (anchor_size != sizeof(Anchor)) {
+            throw ring_abi_mismatch_exception(
+                detail::k_ring_lifecycle_anchor_fingerprint,
+                read_anchor_fingerprint_prefix(),
+                "Ring lifecycle anchor");
+        }
+
         if (!attach_anchor()) {
             throw ring_acquisition_failure_exception();
         }
@@ -790,7 +819,7 @@ protected:
         }
 
         lock_lifecycle();
-        if (!recover_interrupted_delete()) {
+        if (!recover_before_data_attach()) {
             unlock_lifecycle();
             release_anchor_mapping();
             throw ring_acquisition_failure_exception();
@@ -799,6 +828,14 @@ protected:
 
     ~Ring_lifecycle_guard_base()
     {
+        if (!m_lifecycle_acquire_complete && m_anchor) {
+            clear_owned_attachment_slot();
+            scavenge_dead_attachments();
+            if (count_live_attachments() == 0) {
+                (void)remove_ring_files();
+            }
+        }
+
         if (m_lifecycle_delete_in_progress && m_anchor) {
             if (remove_ring_files()) {
                 m_anchor->deleting.store(0, std::memory_order_release);
@@ -815,6 +852,7 @@ protected:
 
     void unlock_lifecycle_after_acquire()
     {
+        m_lifecycle_acquire_complete = true;
         unlock_lifecycle();
     }
 
@@ -833,12 +871,69 @@ protected:
         m_lifecycle_delete_in_progress = true;
     }
 
+    template <typename Control>
+    void claim_lifecycle_attachment(Control& control)
+    {
+        if (!m_anchor || m_attachment_slot != no_attachment_slot) {
+            throw ring_acquisition_failure_exception();
+        }
+
+        scavenge_dead_attachments();
+
+        const uint32_t self_pid         = get_current_pid();
+        const auto     self_start_stamp = current_process_start_stamp().value_or(0);
+
+        for (size_t i = 0; i < detail::k_ring_lifecycle_attachment_slots; ++i) {
+            auto& slot = m_anchor->attachments[i];
+            if (slot.pid.load(std::memory_order_acquire) != 0) {
+                continue;
+            }
+
+            slot.start_stamp.store(self_start_stamp, std::memory_order_release);
+            slot.pid.store(self_pid, std::memory_order_release);
+            m_attachment_slot = i;
+            sync_control_num_attached(control);
+            return;
+        }
+
+        throw ring_acquisition_failure_exception();
+    }
+
+    template <typename Control>
+    bool release_lifecycle_attachment(Control& control)
+    {
+        if (!m_anchor || m_attachment_slot == no_attachment_slot) {
+            sync_control_num_attached(control);
+            return false;
+        }
+
+        scavenge_dead_attachments();
+        const bool final_attachment = (count_live_attachments() <= 1);
+        if (final_attachment) {
+            begin_lifecycle_delete();
+        }
+
+        clear_owned_attachment_slot();
+        sync_control_num_attached(control);
+        return final_attachment;
+    }
+
+    template <typename Control>
+    void sync_control_num_attached(Control& control)
+    {
+        control.num_attached.store(count_live_attachments(), std::memory_order_release);
+    }
+
 private:
+    static constexpr size_t no_attachment_slot = std::numeric_limits<size_t>::max();
+
     struct Anchor
     {
         std::atomic<uint64_t>      abi_fingerprint{detail::k_ring_lifecycle_anchor_fingerprint};
         detail::interprocess_mutex mutex;
         std::atomic<uint32_t>      deleting{0};
+        detail::ring_lifecycle_attachment_record attachments[
+            detail::k_ring_lifecycle_attachment_slots];
     };
 
     void lock_lifecycle()
@@ -879,6 +974,103 @@ private:
         return true;
     }
 
+    uint64_t read_anchor_fingerprint_prefix() const noexcept
+    {
+        try {
+            std::ifstream input(m_lifecycle_anchor_filename, std::ios::binary);
+            uint64_t value = 0;
+            input.read(reinterpret_cast<char*>(&value), sizeof(value));
+            return input ? value : 0;
+        }
+        catch (...) {
+            return 0;
+        }
+    }
+
+    bool recover_before_data_attach()
+    {
+        if (!recover_interrupted_delete()) {
+            return false;
+        }
+
+        scavenge_dead_attachments();
+        if (count_live_attachments() != 0) {
+            return true;
+        }
+
+        return remove_ring_files();
+    }
+
+    bool attachment_owner_live(
+        const detail::ring_lifecycle_attachment_record& slot) const
+    {
+        const uint32_t pid = slot.pid.load(std::memory_order_acquire);
+        if (pid == 0) {
+            return false;
+        }
+
+        if (!is_process_alive(pid)) {
+            return false;
+        }
+
+        const uint64_t start_stamp =
+            slot.start_stamp.load(std::memory_order_acquire);
+        if (start_stamp == 0) {
+            return true;
+        }
+
+        const auto observed_start_stamp = query_process_start_stamp(pid);
+        return !observed_start_stamp || *observed_start_stamp == start_stamp;
+    }
+
+    static void clear_attachment_slot(
+        detail::ring_lifecycle_attachment_record& slot) noexcept
+    {
+        slot.pid.store(0, std::memory_order_release);
+        slot.start_stamp.store(0, std::memory_order_release);
+    }
+
+    void clear_owned_attachment_slot() noexcept
+    {
+        if (!m_anchor || m_attachment_slot == no_attachment_slot) {
+            return;
+        }
+
+        clear_attachment_slot(m_anchor->attachments[m_attachment_slot]);
+        m_attachment_slot = no_attachment_slot;
+    }
+
+    void scavenge_dead_attachments()
+    {
+        if (!m_anchor) {
+            return;
+        }
+
+        for (size_t i = 0; i < detail::k_ring_lifecycle_attachment_slots; ++i) {
+            auto& slot = m_anchor->attachments[i];
+            if (slot.pid.load(std::memory_order_acquire) != 0 &&
+                !attachment_owner_live(slot))
+            {
+                clear_attachment_slot(slot);
+            }
+        }
+    }
+
+    size_t count_live_attachments() const
+    {
+        if (!m_anchor) {
+            return 0;
+        }
+
+        size_t count = 0;
+        for (size_t i = 0; i < detail::k_ring_lifecycle_attachment_slots; ++i) {
+            if (attachment_owner_live(m_anchor->attachments[i])) {
+                ++count;
+            }
+        }
+        return count;
+    }
+
     static bool path_absent(const std::string& path) noexcept
     {
         std::error_code ec;
@@ -916,10 +1108,6 @@ private:
     bool attach_anchor()
     {
         try {
-            if (fs::file_size(m_lifecycle_anchor_filename) != sizeof(Anchor)) {
-                return false;
-            }
-
             ipc::file_mapping fm_anchor(m_lifecycle_anchor_filename.c_str(), ipc::read_write);
             m_anchor_region = std::make_unique<ipc::mapped_region>(
                 fm_anchor,
@@ -946,8 +1134,10 @@ private:
     std::string                         m_lifecycle_control_filename;
     std::string                         m_lifecycle_anchor_filename;
     Anchor*                             m_anchor                       = nullptr;
+    size_t                              m_attachment_slot              = no_attachment_slot;
     bool                                m_lifecycle_locked             = false;
     bool                                m_lifecycle_delete_in_progress = false;
+    bool                                m_lifecycle_acquire_complete   = false;
 };
 
 // A binary semaphore tailored for the ring's reader wakeup policy.
@@ -1750,6 +1940,8 @@ struct Ring:
         // The atomics below are used for *cross-process* communication, including in a
         // double-mapped ("magic ring") region. See the detailed note & lock-free checks
         // in Control() about address-free atomics (N4713 [atomics.lockfree]).
+        // Diagnostic mirror of live lifecycle-anchor attachment records.
+        // Cleanup correctness must not depend on this scalar count.
         std::atomic<size_t>                  num_attached{0};
 
         // The sequence number of the NEXT element to be written (published by the writer).
@@ -2007,13 +2199,7 @@ struct Ring:
             throw abi_ex;
         }
 
-        // Multiple writers/readers may attach concurrently (e.g. stress tests spawn
-        // readers in parallel). num_attached is an interprocess atomic so we must use
-        // a fetch_add here; a plain ++ loses updates under contention and the final
-        // detacher would see an incorrect count and tear down the shared state while
-        // other processes still use it. This is still a scalar count, not a
-        // crash-recoverable owner table.
-        m_control->num_attached++;
+        this->claim_lifecycle_attachment(*m_control);
         this->unlock_lifecycle_after_acquire();
     }
 
@@ -2025,20 +2211,13 @@ struct Ring:
 
         if (m_control) {
             m_control->release_local_semaphores();
-            // The *last* detaching process deletes both control and data files. On
-            // platforms where Control wraps kernel semaphore handles (Windows/macOS)
-            // we must explicitly run the destructor once the final reference drops.
-            const auto attached = m_control->num_attached.load(std::memory_order_acquire);
-            if (attached == 1) {
-                this->begin_lifecycle_delete();
-                m_control->num_attached.store(0, std::memory_order_release);
+            // The lifecycle anchor attachment table, not num_attached, decides
+            // final cleanup. num_attached is only a diagnostic mirror.
+            if (this->release_lifecycle_attachment(*m_control)) {
 #if defined(_WIN32) || defined(__APPLE__)
                 m_control->~Control();
 #endif
                 this->m_remove_files_on_destruction = true;
-            }
-            else if (attached > 1) {
-                m_control->num_attached.fetch_sub(1, std::memory_order_acq_rel);
             }
         }
 

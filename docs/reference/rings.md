@@ -274,6 +274,10 @@ Threading and lifecycle:
   `ring_acquisition_failure_exception` if it is already held.
 - Multiple readers are supported. Each `Ring_R` acquires a unique
   reader slot in its constructor and releases it in the destructor.
+- Each `Ring_R`/`Ring_W` also acquires a lifecycle attachment record.
+  The lifecycle anchor has `max_process_index + 1` attachment records,
+  enough for the configured maximum readers plus one writer; construction
+  fails if those records are exhausted.
 - The active snapshot count per `Ring_R` is one. Reentrant
   `start_reading` against the same reader throws `std::logic_error`.
   Use a separate `Ring_R<T>` instance for concurrent snapshots.
@@ -286,9 +290,11 @@ Threading and lifecycle:
   or remove that anchor only when no process can still use the ring, if a
   pristine directory is required.
 - The lifecycle anchor can recover cleanup that was interrupted after the
-  final detacher recorded deletion-in-progress. It does not make the
-  scalar attachment count crash-robust; a process that dies after a
-  successful attach may still require external scratch-directory cleanup.
+  final detacher recorded deletion-in-progress. It can also scavenge
+  attachment records for processes that died after a successful attach,
+  using PID plus process start stamp, so a later attacher/detacher can
+  remove stale data/control files. If a live PID's start stamp cannot be
+  confirmed, the record is treated conservatively as live.
 
 Failures:
 
@@ -298,7 +304,9 @@ Failures:
 - `ring_abi_mismatch_exception` from the constructors when an existing
   control file or lifecycle anchor belongs to an incompatible Sintra ring
   ABI. Rebuild every process that shares the ring against the same Sintra
-  version and configuration.
+  version and configuration. If an old persistent lifecycle anchor remains
+  after an upgrade, remove `<data filename>_lifecycle` only when no process
+  can still use that ring.
 - `ring_reader_evicted_exception` from `start_reading` or
   `make_snapshot` when the writer evicted the reader for being too far
   behind.

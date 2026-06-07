@@ -202,15 +202,16 @@
         <ul>
         <li>Exactly one writer is permitted across processes. <code>Ring_W</code>&#x27;s constructor takes the cross-process ownership mutex and throws <code>ring_acquisition_failure_exception</code> if it is already held.</li>
         <li>Multiple readers are supported. Each <code>Ring_R</code> acquires a unique reader slot in its constructor and releases it in the destructor.</li>
+        <li>Each <code>Ring_R</code>/<code>Ring_W</code> also acquires a lifecycle attachment record. The lifecycle anchor has <code>max_process_index + 1</code> attachment records, enough for the configured maximum readers plus one writer; construction fails if those records are exhausted.</li>
         <li>The active snapshot count per <code>Ring_R</code> is one. Reentrant <code>start_reading</code> against the same reader throws <code>std::logic_error</code>. Use a separate <code>Ring_R&lt;T&gt;</code> instance for concurrent snapshots.</li>
         <li><code>Ring_W</code> should be destroyed on the same thread that constructed it. If destroyed elsewhere, the destructor logs an error and continues.</li>
         <li>The last process to detach removes the data file and the control file from the chosen directory. A <code>&lt;data filename&gt;_lifecycle</code> anchor file may remain; it is the persistent synchronization object used to serialize future attach/detach cleanup. Remove the whole ring directory, or remove that anchor only when no process can still use the ring, if a pristine directory is required.</li>
-        <li>The lifecycle anchor can recover cleanup that was interrupted after the final detacher recorded deletion-in-progress. It does not make the scalar attachment count crash-robust; a process that dies after a successful attach may still require external scratch-directory cleanup.</li>
+        <li>The lifecycle anchor can recover cleanup that was interrupted after the final detacher recorded deletion-in-progress. It can also scavenge attachment records for processes that died after a successful attach, using PID plus process start stamp, so a later attacher/detacher can remove stale data/control files. If a live PID&#x27;s start stamp cannot be confirmed, the record is treated conservatively as live.</li>
         </ul>
         <p>Failures:</p>
         <ul>
         <li><code>ring_acquisition_failure_exception</code> from the constructors when the data file or control file cannot be mapped, when the size does not match, or when an exclusive writer slot cannot be obtained.</li>
-        <li><code>ring_abi_mismatch_exception</code> from the constructors when an existing control file or lifecycle anchor belongs to an incompatible Sintra ring ABI. Rebuild every process that shares the ring against the same Sintra version and configuration.</li>
+        <li><code>ring_abi_mismatch_exception</code> from the constructors when an existing control file or lifecycle anchor belongs to an incompatible Sintra ring ABI. Rebuild every process that shares the ring against the same Sintra version and configuration. If an old persistent lifecycle anchor remains after an upgrade, remove <code>&lt;data filename&gt;_lifecycle</code> only when no process can still use that ring.</li>
         <li><code>ring_reader_evicted_exception</code> from <code>start_reading</code> or <code>make_snapshot</code> when the writer evicted the reader for being too far behind.</li>
         <li><code>std::logic_error</code> from <code>start_reading</code> when called twice without an intervening <code>done_reading</code>.</li>
         <li><code>std::invalid_argument</code> from a writer attempting to commit more than <code>num_elements / 8</code> elements in a single write (the single-octile limit).</li>
