@@ -777,23 +777,24 @@ protected:
         m_lifecycle_control_filename = m_lifecycle_data_filename + "_control";
         m_lifecycle_anchor_filename  = m_lifecycle_data_filename + "_lifecycle";
 
-        detail::publish_file_result anchor_publish_result =
-            detail::publish_file_result::already_exists;
-        if (!fs::exists(m_lifecycle_anchor_filename)) {
+        if (!lifecycle_anchor_exists()) {
             if (ring_files_may_exist()) {
-                throw ring_acquisition_failure_exception(
-                    "Ring data/control files exist without a lifecycle anchor; "
-                    "refusing to attach or delete them.");
+                // Anchor creation precedes data/control publication, but these
+                // path observations are not an atomic directory snapshot.
+                if (!wait_for_lifecycle_anchor_visibility()) {
+                    throw ring_acquisition_failure_exception(
+                        "Ring data/control files exist without a lifecycle anchor; "
+                        "refusing to attach or delete them.");
+                }
             }
-            anchor_publish_result = create_anchor();
-            if (anchor_publish_result == detail::publish_file_result::failed) {
-                throw ring_acquisition_failure_exception();
+            else {
+                if (create_anchor() == detail::publish_file_result::failed) {
+                    throw ring_acquisition_failure_exception();
+                }
             }
         }
 
-        if (anchor_publish_result == detail::publish_file_result::already_exists &&
-            !fs::exists(m_lifecycle_anchor_filename))
-        {
+        if (!wait_for_lifecycle_anchor_visibility()) {
             throw ring_acquisition_failure_exception();
         }
 
@@ -1100,6 +1101,35 @@ private:
         const bool control_exists =
             fs::exists(fs::path(m_lifecycle_control_filename), control_ec);
         return data_ec || control_ec || data_exists || control_exists;
+    }
+
+    bool lifecycle_anchor_exists() const noexcept
+    {
+        std::error_code ec;
+        const bool exists = fs::exists(fs::path(m_lifecycle_anchor_filename), ec);
+        return !ec && exists;
+    }
+
+    bool wait_for_lifecycle_anchor_visibility() const noexcept
+    {
+        if (lifecycle_anchor_exists()) {
+            return true;
+        }
+
+        for (int attempt = 0; attempt < 64; ++attempt) {
+            if (attempt < 8) {
+                std::this_thread::yield();
+            }
+            else {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+
+            if (lifecycle_anchor_exists()) {
+                return true;
+            }
+        }
+
+        return lifecycle_anchor_exists();
     }
 
     bool remove_ring_files() const noexcept

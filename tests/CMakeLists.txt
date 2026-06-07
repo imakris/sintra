@@ -188,7 +188,8 @@ function(add_test_suite SUFFIX IS_DEBUG)
         return()
     endif()
 
-    message(STATUS "Building ${SUFFIX} configuration for ${CMAKE_CURRENT_LIST_LENGTH} active tests")
+    list(LENGTH TEST_PATHS ACTIVE_TEST_COUNT)
+    message(STATUS "Building ${SUFFIX} configuration for ${ACTIVE_TEST_COUNT} active tests")
 
     # Create test executables based on active_tests.txt
     foreach(TEST_PATH IN LISTS TEST_PATHS)
