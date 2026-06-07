@@ -168,6 +168,8 @@ namespace detail
 
 inline constexpr size_t message_frame_alignment =
     (alignof(std::max_align_t) > 16u) ? alignof(std::max_align_t) : 16u;
+inline constexpr size_t message_frame_size_limit =
+    static_cast<size_t>(message_ring_size) / 8u;
 
 inline size_t align_up_size(size_t value, size_t alignment)
 {
@@ -202,6 +204,9 @@ inline size_t finish_message_frame_size(size_t span_end)
     if (aligned > std::numeric_limits<uint32_t>::max()) {
         throw std::overflow_error("sintra message frame exceeds 32-bit length field");
     }
+    if (aligned >= message_frame_size_limit) {
+        throw std::length_error("sintra message frame exceeds maximum frame size");
+    }
     return aligned;
 }
 
@@ -231,6 +236,10 @@ size_t accumulate_vb_size(size_t offset, const T& value, Args&&... args)
         static_assert(
             std::is_trivially_copyable_v<value_type>,
             "variable_buffer payloads must be trivially copyable."
+        );
+        static_assert(
+            alignof(value_type) <= message_frame_alignment,
+            "variable_buffer payload alignment exceeds the message frame alignment."
         );
 
         if (value.size() >
@@ -528,7 +537,7 @@ struct Message: public Message_prefix, public T
         void* body_ptr = static_cast<body_type*>(this);
         new (body_ptr) body_type{std::forward<Args>(args)...};
 
-        assert(bytes_to_next_message < (message_ring_size / 8));
+        assert(bytes_to_next_message < detail::message_frame_size_limit);
 
         message_type_id = id();
     }
@@ -551,7 +560,7 @@ struct Message: public Message_prefix, public T
         bytes_to_next_message = static_cast<uint32_t>(
             detail::finish_message_frame_size(bytes_to_next_message));
 
-        assert(bytes_to_next_message < (message_ring_size / 8));
+        assert(bytes_to_next_message < detail::message_frame_size_limit);
 
         message_type_id = id();
     }
@@ -878,7 +887,7 @@ struct Message_ring_R: Ring_R<char>
             return fail("Sintra message ring contains a misaligned message frame length.");
         }
 
-        if (bytes_to_next >= static_cast<uint32_t>(message_ring_size / 8)) {
+        if (bytes_to_next >= detail::message_frame_size_limit) {
             return fail("Sintra message ring contains a message larger than the maximum frame size.");
         }
 

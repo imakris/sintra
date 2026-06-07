@@ -476,7 +476,7 @@ inline constexpr uint64_t fnv1a_64(std::initializer_list<uint64_t> words) noexce
 // control-file creation protocol, or the on-the-wire framing change in a way
 // that would make two builds incompatible at the ring level. The version is one
 // input among several to the fingerprint below.
-inline constexpr uint64_t k_ring_abi_version = 4;
+inline constexpr uint64_t k_ring_abi_version = 5;
 
 inline constexpr uint64_t k_ring_abi_fingerprint = fnv1a_64({
     k_ring_abi_version,

@@ -586,9 +586,9 @@ for (auto recipient : completion.recipients) {
 
 ## References
 
-- **Ring Implementation**: `include/sintra/detail/ipc_rings.h`
-- **Process Management**: `include/sintra/detail/managed_process.h`
-- **Coordinator**: `include/sintra/detail/coordinator.h`, `coordinator_impl.h`
+- **Ring Implementation**: `include/sintra/detail/ipc/rings.h`
+- **Process Management**: `include/sintra/detail/process/managed_process.h`
+- **Coordinator**: `include/sintra/detail/process/coordinator.h`, `include/sintra/detail/process/coordinator_impl.h`
 - **Shutdown Semantics**: `docs/barriers_and_shutdown.md`
 - **Stress/Timeout Harness**: `tests/run_tests.py`
 

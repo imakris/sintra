@@ -21,6 +21,10 @@ variable_buffer::variable_buffer(const TC& container)
         std::is_trivially_copyable_v<T>,
         "variable_buffer requires trivially copyable element types."
     );
+    static_assert(
+        alignof(T) <= detail::message_frame_alignment,
+        "variable_buffer payload alignment exceeds the message frame alignment."
+    );
 
     const size_t element_count = container.size();
 
@@ -59,6 +63,10 @@ variable_buffer::variable_buffer(const TC& container)
     (void)detail::finish_message_frame_size(span_end);
 
     char* data = variable_buffer::tl_message_start_address + aligned_offset;
+    if ((reinterpret_cast<std::uintptr_t>(data) % alignof(T)) != 0) {
+        throw std::runtime_error(
+            "sintra::variable_buffer storage does not satisfy payload alignment");
+    }
     assert(
         (reinterpret_cast<std::uintptr_t>(data) % alignof(T)) == 0 &&
         "variable_buffer storage must satisfy alignment requirements."

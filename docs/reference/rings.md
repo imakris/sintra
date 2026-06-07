@@ -289,6 +289,12 @@ Threading and lifecycle:
   serialize future attach/detach cleanup. Remove the whole ring directory,
   or remove that anchor only when no process can still use the ring, if a
   pristine directory is required.
+- If `<data filename>` or `<data filename>_control` exists but
+  `<data filename>_lifecycle` is missing, Sintra refuses to attach and
+  refuses to clean up those files automatically. Without the lifecycle
+  anchor, it cannot distinguish stale files from files still mapped by a
+  live process. Remove the files manually only when you know no process can
+  still use that ring.
 - The lifecycle anchor can recover cleanup that was interrupted after the
   final detacher recorded deletion-in-progress. It can also scavenge
   attachment records for processes that died after a successful attach,

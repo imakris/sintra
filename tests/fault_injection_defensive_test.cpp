@@ -51,6 +51,14 @@ struct Throwing_variable_buffer_payload
 using Throwing_variable_buffer_message =
     sintra::Message<Throwing_variable_buffer_payload, void, 0xE7707ull>;
 
+struct Large_variable_buffer_payload
+{
+    sintra::typed_variable_buffer<std::vector<uint8_t>> bytes;
+};
+
+using Large_variable_buffer_message =
+    sintra::Message<Large_variable_buffer_payload, void, 0xE7708ull>;
+
 template <typename Ex, typename Fn>
 bool expect_throw(std::string_view label, Fn&& fn)
 {
@@ -180,6 +188,14 @@ bool test_message_ring_rejects_misaligned_frame_length()
         [&]() { (void)reader.fetch_message(); });
 }
 
+bool test_message_frame_size_limit_is_enforced_before_write()
+{
+    std::vector<uint8_t> payload(sintra::detail::message_frame_size_limit, 0);
+    return expect_throw<std::length_error>(
+        "message frame size limit is enforced before write",
+        [&]() { (void)sintra::vb_size<Large_variable_buffer_message>(payload); });
+}
+
 bool test_process_index_exhaustion()
 {
     bool      threw    = false;
@@ -213,6 +229,7 @@ int main()
     ok &= test_variable_buffer_context_restored_after_throw();
     ok &= test_align_up_size_overflow();
     ok &= test_message_ring_rejects_misaligned_frame_length();
+    ok &= test_message_frame_size_limit_is_enforced_before_write();
     ok &= test_process_index_exhaustion();
     return ok ? 0 : 1;
 }
