@@ -56,6 +56,7 @@ variable_buffer::variable_buffer(const TC& container)
     if (span_end > std::numeric_limits<uint32_t>::max()) {
         throw std::runtime_error("sintra::variable_buffer overflow: message span exceeds representable range");
     }
+    (void)detail::finish_message_frame_size(span_end);
 
     char* data = variable_buffer::tl_message_start_address + aligned_offset;
     assert(

@@ -24,6 +24,16 @@ struct Alignment_payload
     sintra::typed_variable_buffer<std::vector<double>>     doubles;
 };
 
+struct One_byte_payload
+{
+    sintra::typed_variable_buffer<std::vector<char>> chars;
+};
+
+struct Plain_payload
+{
+    std::uint64_t value = 0x123456789abcdef0ull;
+};
+
 bool is_aligned(const void* ptr, std::size_t alignment)
 {
     return (reinterpret_cast<std::uintptr_t>(ptr) % alignment) == 0;
@@ -32,6 +42,8 @@ bool is_aligned(const void* ptr, std::size_t alignment)
 } // namespace
 
 using Alignment_message = sintra::Message<Alignment_payload, void, 0xA11E71Dull>;
+using One_byte_message  = sintra::Message<One_byte_payload, void, 0xA11E71Eull>;
+using Plain_message     = sintra::Message<Plain_payload, void, 0xA11E71Full>;
 
 int main()
 {
@@ -81,8 +93,22 @@ int main()
     }
 
     const std::size_t last_payload_end = absolute_offset(doubles_ptr) + message->doubles.size_bytes();
-    if (message->bytes_to_next_message != last_payload_end) {
-        std::cerr << "Message byte span does not match payload placement" << std::endl;
+    if (message->bytes_to_next_message < last_payload_end) {
+        std::cerr << "Message byte span ends before the last payload" << std::endl;
+        return cleanup_and_fail(1);
+    }
+
+    if ((message->bytes_to_next_message - last_payload_end) >=
+        sintra::detail::message_frame_alignment)
+    {
+        std::cerr << "Message frame padding is larger than expected" << std::endl;
+        return cleanup_and_fail(1);
+    }
+
+    if (!is_aligned(base + message->bytes_to_next_message,
+            sintra::detail::message_frame_alignment))
+    {
+        std::cerr << "Message frame end is not correctly aligned" << std::endl;
         return cleanup_and_fail(1);
     }
 
@@ -98,5 +124,44 @@ int main()
 
     message->~Alignment_message();
     ::operator delete(raw, std::align_val_t(alignof(Alignment_message)));
+
+    std::vector<char> single_char = {'x'};
+    const std::size_t first_frame =
+        sizeof(One_byte_message) + sintra::vb_size<One_byte_message>(single_char);
+    const std::size_t second_frame =
+        sizeof(Plain_message) + sintra::vb_size<Plain_message>();
+    const std::size_t combined_size = first_frame + second_frame;
+
+    void* combined_raw = ::operator new(
+        combined_size,
+        std::align_val_t(sintra::detail::message_frame_alignment));
+    auto* first = new (combined_raw) One_byte_message(single_char);
+    auto* second_address = reinterpret_cast<char*>(combined_raw) +
+        first->bytes_to_next_message;
+
+    if (first->bytes_to_next_message != first_frame) {
+        std::cerr << "One-byte variable frame size did not match vb_size" << std::endl;
+        first->~One_byte_message();
+        ::operator delete(
+            combined_raw,
+            std::align_val_t(sintra::detail::message_frame_alignment));
+        return 1;
+    }
+
+    if (!is_aligned(second_address, alignof(Plain_message))) {
+        std::cerr << "Second message address is not aligned after one-byte variable payload" << std::endl;
+        first->~One_byte_message();
+        ::operator delete(
+            combined_raw,
+            std::align_val_t(sintra::detail::message_frame_alignment));
+        return 1;
+    }
+
+    auto* second = new (second_address) Plain_message();
+    second->~Plain_message();
+    first->~One_byte_message();
+    ::operator delete(
+        combined_raw,
+        std::align_val_t(sintra::detail::message_frame_alignment));
     return 0;
 }

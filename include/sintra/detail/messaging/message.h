@@ -9,6 +9,7 @@
 #include "../messaging/message_args.h"
 
 #include <cassert>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <format>
@@ -165,6 +166,9 @@ struct is_variable_buffer_argument
 namespace detail
 {
 
+inline constexpr size_t message_frame_alignment =
+    (alignof(std::max_align_t) > 16u) ? alignof(std::max_align_t) : 16u;
+
 inline size_t align_up_size(size_t value, size_t alignment)
 {
     if (alignment <= 1) {
@@ -182,6 +186,23 @@ inline size_t align_up_size(size_t value, size_t alignment)
     }
 
     return value + padding;
+}
+
+inline size_t checked_add_size(size_t lhs, size_t rhs, const char* message)
+{
+    if (rhs > (std::numeric_limits<size_t>::max() - lhs)) {
+        throw std::overflow_error(message);
+    }
+    return lhs + rhs;
+}
+
+inline size_t finish_message_frame_size(size_t span_end)
+{
+    const size_t aligned = align_up_size(span_end, message_frame_alignment);
+    if (aligned > std::numeric_limits<uint32_t>::max()) {
+        throw std::overflow_error("sintra message frame exceeds 32-bit length field");
+    }
+    return aligned;
 }
 
 template <typename T, typename = void>
@@ -212,8 +233,17 @@ size_t accumulate_vb_size(size_t offset, const T& value, Args&&... args)
             "variable_buffer payloads must be trivially copyable."
         );
 
+        if (value.size() >
+            (std::numeric_limits<size_t>::max() / sizeof(value_type)))
+        {
+            throw std::overflow_error("variable_buffer payload size overflow");
+        }
+
         const size_t data_bytes = value.size() * sizeof(value_type);
-        offset = align_up_size(offset, alignof(value_type)) + data_bytes;
+        offset = checked_add_size(
+            align_up_size(offset, alignof(value_type)),
+            data_bytes,
+            "variable_buffer message span overflow");
         return accumulate_vb_size(offset, std::forward<Args>(args)...);
     }
     else {
@@ -259,9 +289,11 @@ size_t vb_size(Args&&... args)
     const size_t final_offset = detail::accumulate_vb_size(
         base_size,
         std::forward<Args>(args)...);
+    const size_t aligned_final_offset =
+        detail::finish_message_frame_size(final_offset);
 
-    assert(final_offset >= base_size);
-    return final_offset - base_size;
+    assert(aligned_final_offset >= base_size);
+    return aligned_final_offset - base_size;
 }
 
 
@@ -454,6 +486,10 @@ struct Message: public Message_prefix, public T
     using return_type = RT;
     using exporter    = EXPORTER;
 
+    static_assert(
+        alignof(T) <= detail::message_frame_alignment,
+        "Sintra message body alignment exceeds the message frame alignment.");
+
     static constexpr type_id_type sintra_type_id()
     {
         if constexpr (ID != 0) {
@@ -486,7 +522,8 @@ struct Message: public Message_prefix, public T
     >
     Message(Args&& ...args)
     {
-        bytes_to_next_message = sizeof(Message);
+        bytes_to_next_message = static_cast<uint32_t>(
+            detail::finish_message_frame_size(sizeof(Message)));
 
         void* body_ptr = static_cast<body_type*>(this);
         new (body_ptr) body_type{std::forward<Args>(args)...};
@@ -511,6 +548,8 @@ struct Message: public Message_prefix, public T
 
         void* body_ptr = static_cast<body_type*>(this);
         new (body_ptr) body_type{std::forward<Args>(args)...};
+        bytes_to_next_message = static_cast<uint32_t>(
+            detail::finish_message_frame_size(bytes_to_next_message));
 
         assert(bytes_to_next_message < (message_ring_size / 8));
 
@@ -833,6 +872,10 @@ struct Message_ring_R: Ring_R<char>
         const uint32_t bytes_to_next = ret->bytes_to_next_message;
         if (bytes_to_next < sizeof(Message_prefix)) {
             return fail("Sintra message ring contains an invalid message length.");
+        }
+
+        if ((bytes_to_next % detail::message_frame_alignment) != 0) {
+            return fail("Sintra message ring contains a misaligned message frame length.");
         }
 
         if (bytes_to_next >= static_cast<uint32_t>(message_ring_size / 8)) {

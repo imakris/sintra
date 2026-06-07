@@ -6,8 +6,10 @@
 
 #include "test_utils.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <exception>
 #include <limits>
 #include <new>
@@ -141,6 +143,43 @@ bool test_align_up_size_overflow()
         [&]() { (void)sintra::detail::align_up_size(value, 8); });
 }
 
+bool test_message_ring_rejects_misaligned_frame_length()
+{
+    const auto directory =
+        sintra::test::unique_scratch_directory("fault_injection_misaligned_message_frame");
+    struct Cleanup
+    {
+        std::filesystem::path directory;
+        ~Cleanup()
+        {
+            std::error_code ec;
+            (void)std::filesystem::remove_all(directory, ec);
+        }
+    } cleanup{directory};
+
+    sintra::Message_ring_R reader(directory.string(), "message_ring", 0xFA17u);
+    reader.start_reading();
+
+    sintra::Message_prefix prefix;
+    uint32_t bytes_to_next =
+        static_cast<uint32_t>(sizeof(sintra::Message_prefix) + 1);
+    if ((bytes_to_next % sintra::detail::message_frame_alignment) == 0) {
+        ++bytes_to_next;
+    }
+    prefix.bytes_to_next_message = bytes_to_next;
+
+    std::array<char, sizeof(sintra::Message_prefix) + 16> raw{};
+    std::memcpy(raw.data(), &prefix, sizeof(prefix));
+
+    sintra::Message_ring_W writer(directory.string(), "message_ring", 0xFA17u);
+    writer.write(raw.data(), bytes_to_next);
+    writer.done_writing();
+
+    return expect_throw<sintra::corrupted_message_exception>(
+        "message ring rejects misaligned frame length",
+        [&]() { (void)reader.fetch_message(); });
+}
+
 bool test_process_index_exhaustion()
 {
     bool      threw    = false;
@@ -173,6 +212,7 @@ int main()
     ok &= test_variable_buffer_requires_message_context();
     ok &= test_variable_buffer_context_restored_after_throw();
     ok &= test_align_up_size_overflow();
+    ok &= test_message_ring_rejects_misaligned_frame_length();
     ok &= test_process_index_exhaustion();
     return ok ? 0 : 1;
 }

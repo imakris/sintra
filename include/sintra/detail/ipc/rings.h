@@ -402,6 +402,7 @@ inline uint8_t octile_of_index(size_t idx, size_t ring) noexcept
 struct ring_acquisition_failure_exception : public std::runtime_error
 {
     ring_acquisition_failure_exception() : std::runtime_error("Failed to acquire ring buffer.") {}
+    explicit ring_acquisition_failure_exception(const char* what_arg) : std::runtime_error(what_arg) {}
 };
 
 struct ring_reader_evicted_exception : public std::runtime_error
@@ -779,6 +780,11 @@ protected:
         detail::publish_file_result anchor_publish_result =
             detail::publish_file_result::already_exists;
         if (!fs::exists(m_lifecycle_anchor_filename)) {
+            if (ring_files_may_exist()) {
+                throw ring_acquisition_failure_exception(
+                    "Ring data/control files exist without a lifecycle anchor; "
+                    "refusing to attach or delete them.");
+            }
             anchor_publish_result = create_anchor();
             if (anchor_publish_result == detail::publish_file_result::failed) {
                 throw ring_acquisition_failure_exception();
@@ -1083,6 +1089,17 @@ private:
     {
         return path_absent(m_lifecycle_control_filename) &&
                path_absent(m_lifecycle_data_filename);
+    }
+
+    bool ring_files_may_exist() const noexcept
+    {
+        std::error_code data_ec;
+        std::error_code control_ec;
+        const bool data_exists =
+            fs::exists(fs::path(m_lifecycle_data_filename), data_ec);
+        const bool control_exists =
+            fs::exists(fs::path(m_lifecycle_control_filename), control_ec);
+        return data_ec || control_ec || data_exists || control_exists;
     }
 
     bool remove_ring_files() const noexcept

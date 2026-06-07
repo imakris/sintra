@@ -164,7 +164,9 @@ sequence_counter_type Process_group::barrier(
         auto* current_message = s_tl_current_message;
         assert(current_message);
 
-        deferral* placed_msg = s_mproc->m_out_rep_c->write<deferral>(0, b.common_function_iid);
+        deferral* placed_msg = s_mproc->m_out_rep_c->write<deferral>(
+            vb_size<deferral>(b.common_function_iid),
+            b.common_function_iid);
         Transceiver::finalize_rpc_write(
             placed_msg,
             current_message->sender_instance_id,
@@ -860,7 +862,9 @@ instance_id_type Coordinator::wait_for_instance(const string& assigned_name)
     auto* current_message = s_tl_current_message;
     assert(current_message);
 
-    deferral* placed_msg = s_mproc->m_out_rep_c->write<deferral>(0, common_function_iid);
+    deferral* placed_msg = s_mproc->m_out_rep_c->write<deferral>(
+        vb_size<deferral>(common_function_iid),
+        common_function_iid);
     Transceiver::finalize_rpc_write(
         placed_msg,
         current_message->sender_instance_id,

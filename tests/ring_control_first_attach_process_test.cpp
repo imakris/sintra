@@ -336,15 +336,6 @@ int run_parent(const std::string& binary_path)
     const auto ring_elements =
         sintra::test::pick_ring_elements<std::uint32_t>(256);
 
-    if (!sintra::create_ring_backing_file(
-            (temp.path / k_ring_name).string(),
-            ring_elements * sizeof(std::uint32_t),
-            nullptr))
-    {
-        std::fprintf(stderr, "%sfailed to create data backing file\n", k_failure_prefix);
-        return 1;
-    }
-
     std::vector<launched_process_t> children;
     children.reserve(k_child_count);
     for (int i = 0; i < k_child_count; ++i) {
