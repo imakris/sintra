@@ -21,6 +21,7 @@ Options:
 
 import argparse
 import contextlib
+import hashlib
 from functools import partial
 import math
 import os
@@ -477,6 +478,8 @@ class TestRunner:
         """Create a per-invocation scratch directory for test artifacts."""
 
         safe_name = ''.join(c if c.isalnum() or c in ('-', '_') else '_' for c in invocation.name)
+        name_hash = hashlib.sha1(invocation.name.encode('utf-8')).hexdigest()[:10]
+        safe_name = f"{safe_name[:24]}_{name_hash}"
         with self._scratch_lock:
             index = self._scratch_counter
             self._scratch_counter += 1

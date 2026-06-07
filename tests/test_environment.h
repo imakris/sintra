@@ -239,9 +239,10 @@ inline std::filesystem::path unique_scratch_directory(std::string_view prefix)
     auto now      = std::chrono::steady_clock::now().time_since_epoch();
     auto ticks    = std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
     auto sequence = counter.fetch_add(1);
+    auto hint      = prefix.substr(0, prefix.size() > 24 ? 24 : prefix.size());
 
     std::ostringstream oss;
-    oss << prefix << '_' << ticks << '_' << sequence;
+    oss << hint << '_' << ticks << '_' << sequence;
 
     auto directory = scratch_subdirectory("runs") / oss.str();
     std::filesystem::create_directories(directory);
@@ -249,4 +250,3 @@ inline std::filesystem::path unique_scratch_directory(std::string_view prefix)
 }
 
 } // namespace sintra::test
-
