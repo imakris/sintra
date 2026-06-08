@@ -398,12 +398,27 @@ The test infrastructure is used by CI workflows on multiple platforms.
     python run_tests.py --timeout 30 --build-dir ../build --config Release
 ```
 
-### Cirrus CI (FreeBSD)
+### GitHub Actions (FreeBSD via QEMU)
+
+FreeBSD runs on a GitHub Actions Ubuntu runner inside a QEMU VM
+(`vmactions/freebsd-vm`):
 
 ```yaml
-test_script:
-  - cd tests
-  - SINTRA_TEST_ITERATION_MULTIPLIER=0.5 python3 run_tests.py --timeout 30 --build-dir ../build --config Release
+- name: Build and test (FreeBSD 15.0)
+  uses: vmactions/freebsd-vm@v1
+  env:
+    SINTRA_TEST_ITERATION_MULTIPLIER: "0.5"
+  with:
+    release: "15.0"
+    usesh: true
+    envs: 'SINTRA_TEST_ITERATION_MULTIPLIER'
+    prepare: |
+      pkg install -y cmake python
+    run: |
+      cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      cmake --build build
+      cd tests
+      python3 run_tests.py --timeout 30 --build-dir ../build --config Release
 ```
 
 ### Test Matrix Control

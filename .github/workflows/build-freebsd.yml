@@ -1,0 +1,56 @@
+name: Build & Test - FreeBSD
+
+on:
+  push:
+    branches: [ '*' ]
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'cmake/**'
+      - 'CMakeLists.txt'
+      - 'CMakePresets.json'
+      - 'third_party/**'
+      - 'tests/**'
+      - 'example/**'
+      - '.github/workflows/**'
+      - 'flip_to_trigger_ci'
+  pull_request:
+    branches: [ '*' ]
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'cmake/**'
+      - 'CMakeLists.txt'
+      - 'CMakePresets.json'
+      - 'third_party/**'
+      - 'tests/**'
+      - 'example/**'
+      - '.github/workflows/**'
+      - 'flip_to_trigger_ci'
+
+jobs:
+  freebsd:
+    name: FreeBSD Build & Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build and test (FreeBSD 15.0)
+        uses: vmactions/freebsd-vm@v1
+        env:
+          SINTRA_TEST_ITERATION_MULTIPLIER: "0.5"
+        with:
+          release: "15.0"
+          usesh: true
+          envs: 'SINTRA_TEST_ITERATION_MULTIPLIER'
+          prepare: |
+            date +%s > /tmp/ci_start_time
+            pkg install -y cmake python
+          run: |
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+            cmake --build build
+            cd tests
+            budget=$(( 3500 - $(date +%s) + $(cat /tmp/ci_start_time) ))
+            python3 run_tests.py --timeout 30 --build-dir ../build --config Release --time-budget $budget
