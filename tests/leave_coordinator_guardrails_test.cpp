@@ -7,6 +7,7 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <stdexcept>
 #include <string>
 #include <thread>
 
@@ -17,8 +18,21 @@ constexpr auto k_poll_interval = std::chrono::milliseconds(50);
 
 void write_text(const std::filesystem::path& path, const std::string& text)
 {
-    std::ofstream out(path, std::ios::binary | std::ios::trunc);
-    out << text;
+    // Write through a temp file and rename into place so a reader gated on
+    // file existence never observes a created-but-not-yet-flushed marker.
+    const auto tmp_path = path.string() + ".tmp." +
+        std::to_string(static_cast<unsigned long long>(sintra::test::get_pid()));
+
+    {
+        std::ofstream out(tmp_path, std::ios::binary | std::ios::trunc);
+        out << text;
+        out.close();
+        if (!out) {
+            throw std::runtime_error("failed to write " + tmp_path);
+        }
+    }
+
+    std::filesystem::rename(tmp_path, path);
 }
 
 std::string read_text(const std::filesystem::path& path)
@@ -106,10 +120,11 @@ int coordinator_action()
         return 1;
     }
 
-    if (read_text(result_path) != "ok") {
+    const auto worker_result = read_text(result_path);
+    if (worker_result != "ok") {
         std::fprintf(stderr,
             "[leave_coordinator_guardrails] worker did not exit cleanly: %s\n",
-            read_text(result_path).c_str());
+            worker_result.c_str());
         return 1;
     }
 
