@@ -8,6 +8,7 @@
 #include "../process/managed_process.h"
 #include "../process/dispatch_wait_guard.h"
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <chrono>
 #include <functional>
@@ -65,6 +66,42 @@ inline void emit_direct_publish_waiters(
 
 } // namespace
 
+namespace detail { namespace test_hooks {
+
+// Stage names shared between the coordinator lock-stage call sites and the
+// tests that rendezvous on them, so neither side can silently drift.
+inline constexpr const char* k_stage_unpublish_pre_barrier_collection =
+    "unpublish_transceiver/pre_barrier_completion_collection";
+inline constexpr const char* k_stage_make_process_group_groups_locked =
+    "make_process_group/groups_locked";
+
+}} // namespace detail::test_hooks
+
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+namespace detail { namespace test_hooks {
+
+// Coordinator lock-stage hook: tests running in the coordinator process may
+// install a callback to rendezvous threads at named coordinator locking
+// stages (see coordinator_lock_order_test). The callback runs on RPC/reader
+// threads while coordinator mutexes may be held; it must not call back into
+// the coordinator.
+using Coordinator_lock_stage_callback = void (*)(const char* stage);
+inline std::atomic<Coordinator_lock_stage_callback> s_coordinator_lock_stage{nullptr};
+
+}} // namespace detail::test_hooks
+
+inline void coordinator_lock_stage_for_test(const char* stage)
+{
+    const auto callback =
+        detail::test_hooks::s_coordinator_lock_stage.load(std::memory_order_acquire);
+    if (callback) {
+        callback(stage);
+    }
+}
+#else
+inline void coordinator_lock_stage_for_test(const char*) {}
+#endif
+
 // EXPORTED EXCLUSIVELY FOR RPC
 inline
 sequence_counter_type Process_group::barrier(
@@ -85,7 +122,7 @@ sequence_counter_type Process_group::barrier(
     auto     barrier = barrier_entry; // keep the barrier alive even if the map rehashes
     Barrier& b       = *barrier;
     // Lock ordering: m_call_mutex before barrier->m to prevent deadlock.
-    b.m.lock();
+    std::unique_lock<std::mutex> barrier_lock(b.m);
 
     // Atomically snapshot membership and filter draining processes while holding m_call_mutex.
     // This ensures a consistent view: no process can be added/removed or change draining state
@@ -114,7 +151,6 @@ sequence_counter_type Process_group::barrier(
     }
     else
     if (b.mode_tag != barrier_mode_tag) {
-        b.m.unlock();
         throw std::logic_error(
             "Barrier mode mismatch for barrier '" + barrier_name +
             "'. All participants must use the same barrier mode.");
@@ -142,7 +178,9 @@ sequence_counter_type Process_group::barrier(
 
         const auto current_common_fiid = b.common_function_iid;
         s_tl_common_function_iid = current_common_fiid;
-        b.m.unlock();
+        // Release barrier->m before re-acquiring m_call_mutex, honoring the
+        // m_call_mutex -> barrier->m lock order.
+        barrier_lock.unlock();
 
         // Re-lock m_call_mutex to safely erase from m_barriers
         basic_lock.lock();
@@ -175,7 +213,6 @@ sequence_counter_type Process_group::barrier(
             (type_id_type)detail::reserved_id::deferral);
 
         mark_rpc_reply_deferred();
-        b.m.unlock();
         return 0;
     }
 }
@@ -762,17 +799,19 @@ inline bool Coordinator::claim_external_process_invitation(
         m_external_attached_processes.insert(process_iid);
     }
 
+    // The snapshot is taken on its own (the canonical order is m_publish_mutex
+    // before m_init_tracking_mutex, see coordinator.h). Acting on the snapshot
+    // after releasing the lock is safe because process ids are allocated
+    // monotonically and never reused: a process id found in initialization
+    // here cannot also complete a publish as this external process before the
+    // rollback below runs.
+    bool in_initialization = false;
     {
         lock_guard<mutex> init_lock(m_init_tracking_mutex);
-        if (m_processes_in_initialization.count(process_iid) != 0) {
-            lock_guard<mutex> publish_lock(m_publish_mutex);
-            m_external_attached_processes.erase(process_iid);
-            m_transceiver_registry.erase(process_iid);
-            return false;
-        }
+        in_initialization = m_processes_in_initialization.count(process_iid) != 0;
     }
 
-    if (!add_external_process_to_standard_groups(process_iid)) {
+    if (in_initialization || !add_external_process_to_standard_groups(process_iid)) {
         lock_guard<mutex> publish_lock(m_publish_mutex);
         m_external_attached_processes.erase(process_iid);
         m_transceiver_registry.erase(process_iid);
@@ -842,12 +881,11 @@ instance_id_type Coordinator::wait_for_instance(const string& assigned_name)
     // the instance, thus using it for synchronization may not always be
     // applicable.
 
-    m_publish_mutex.lock();
+    std::lock_guard<mutex> publish_lock(m_publish_mutex);
     instance_id_type caller_piid = s_tl_current_message->sender_instance_id;
 
     auto iid = resolve_instance(assigned_name);
     if (iid != invalid_instance_id) {
-        m_publish_mutex.unlock();
         return iid;
     }
 
@@ -873,7 +911,6 @@ instance_id_type Coordinator::wait_for_instance(const string& assigned_name)
         (type_id_type)detail::reserved_id::deferral);
 
     mark_rpc_reply_deferred();
-    m_publish_mutex.unlock();
     return invalid_instance_id;
 }
 
@@ -991,11 +1028,24 @@ instance_id_type Coordinator::publish_transceiver(
 inline
 bool Coordinator::unpublish_transceiver(instance_id_type iid)
 {
+    // The Managed_process branch below removes the process from groups, which
+    // requires m_groups_mutex. The canonical order (see coordinator.h) is
+    // m_groups_mutex before m_publish_mutex, so for process unpublishes the
+    // groups mutex is acquired first and held across the whole cleanup. This
+    // keeps the registry erase, the group/barrier removal, the
+    // lifecycle/recovery decision and the instance_unpublished broadcast
+    // atomic with respect to a concurrent re-publish of the same process slot
+    // (e.g. a recovery respawn or an external re-attach reusing the id).
+    const auto process_iid = process_of(iid);
+
+    std::unique_lock<mutex> groups_lock(m_groups_mutex, std::defer_lock);
+    if (iid == process_iid) {
+        groups_lock.lock();
+    }
     lock_guard<mutex> publish_lock(m_publish_mutex);
 
     // the process of the transceiver must have been registered
-    auto process_iid = process_of(iid);
-    auto pr_it       = m_transceiver_registry.find(process_iid);
+    auto pr_it = m_transceiver_registry.find(process_iid);
     if (pr_it == m_transceiver_registry.end()) {
         return false;
     }
@@ -1074,6 +1124,11 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
         draining_index = get_process_index(process_iid);
         exchange_draining_state(process_iid, 1, was_draining);
 
+        coordinator_lock_stage_for_test(
+            detail::test_hooks::k_stage_unpublish_pre_barrier_collection);
+
+        // Drop the process from groups and in-flight barriers. m_groups_mutex
+        // is already held (acquired before m_publish_mutex above).
         collect_and_schedule_barrier_completions(
             process_iid,
             true);
@@ -1388,6 +1443,9 @@ instance_id_type Coordinator::make_process_group(
 {
     lock_guard<mutex> lock(m_groups_mutex);
 
+    coordinator_lock_stage_for_test(
+        detail::test_hooks::k_stage_make_process_group_groups_locked);
+
     // check if it exists
     if (m_groups.count(name)) {
         return invalid_instance_id;
@@ -1447,8 +1505,15 @@ instance_id_type Coordinator::join_swarm(
 
         // Safety: refuse joins when the process space is nearly exhausted to avoid
         // runaway spawning that would otherwise trip hard asserts.
+        // m_processes_in_initialization is guarded by m_init_tracking_mutex
+        // (nested here, consistent with the m_publish_mutex ->
+        // m_init_tracking_mutex order).
+        size_t initializing = 0;
+        {
+            std::lock_guard<mutex> init_lock(m_init_tracking_mutex);
+            initializing = m_processes_in_initialization.size();
+        }
         const auto current_processes = m_transceiver_registry.size();
-        const auto initializing      = m_processes_in_initialization.size();
         if (current_processes + initializing >= static_cast<size_t>(max_process_index)) {
             return invalid_instance_id;
         }
@@ -1533,13 +1598,19 @@ void Coordinator::enable_recovery(instance_id_type piid)
 {
     // enable crash recovery for the calling process
     assert(is_process(piid));
-    if (m_external_attached_processes.count(piid) != 0) {
+    bool externally_attached = false;
+    {
+        lock_guard<mutex> publish_lock(m_publish_mutex);
+        externally_attached = m_external_attached_processes.count(piid) != 0;
+    }
+    if (externally_attached) {
         Log_stream(log_level::warning)
             << "Recovery is not available for externally attached process "
             << static_cast<unsigned long long>(piid)
             << " because Sintra does not have a recovery launch command for it.\n";
         return;
     }
+    std::lock_guard<mutex> lifecycle_lock(m_lifecycle_mutex);
     m_requested_recovery.insert(piid);
 }
 
@@ -1552,14 +1623,13 @@ void Coordinator::recover_if_required(const Crash_info& info)
         return;
     }
 
-    if (!m_requested_recovery.count(info.process_iid)) {
-        return;
-    }
-
     Recovery_policy policy;
     Recovery_runner runner;
     {
         std::lock_guard<mutex> lock(m_lifecycle_mutex);
+        if (!m_requested_recovery.count(info.process_iid)) {
+            return;
+        }
         policy = m_recovery_policy;
         runner = m_recovery_runner;
     }
@@ -1713,32 +1783,40 @@ Coordinator::finalize_initialization_tracking(instance_id_type process_iid)
 
 inline
 std::vector<Coordinator::Pending_completion>
+Coordinator::collect_pending_barrier_completions_unlocked(
+    instance_id_type   process_iid,
+    bool               remove_process)
+{
+    // Caller must hold m_groups_mutex.
+    std::vector<Pending_completion> pending_completions;
+    pending_completions.reserve(m_groups.size());
+
+    for (auto& [name, group] : m_groups) {
+        std::vector<Process_group::Barrier_completion> completions;
+        group.drop_from_inflight_barriers(process_iid, completions);
+        if (!completions.empty()) {
+            pending_completions.push_back({name, std::move(completions)});
+        }
+        if (remove_process) {
+            group.remove_process(process_iid);
+        }
+    }
+
+    if (remove_process) {
+        m_groups_of_process.erase(process_iid);
+    }
+
+    return pending_completions;
+}
+
+inline
+std::vector<Coordinator::Pending_completion>
 Coordinator::collect_pending_barrier_completions(
     instance_id_type   process_iid,
     bool               remove_process)
 {
-    std::vector<Pending_completion> pending_completions;
-    {
-        lock_guard<mutex> groups_lock(m_groups_mutex);
-        pending_completions.reserve(m_groups.size());
-
-        for (auto& [name, group] : m_groups) {
-            std::vector<Process_group::Barrier_completion> completions;
-            group.drop_from_inflight_barriers(process_iid, completions);
-            if (!completions.empty()) {
-                pending_completions.push_back({name, std::move(completions)});
-            }
-            if (remove_process) {
-                group.remove_process(process_iid);
-            }
-        }
-
-        if (remove_process) {
-            m_groups_of_process.erase(process_iid);
-        }
-    }
-
-    return pending_completions;
+    lock_guard<mutex> groups_lock(m_groups_mutex);
+    return collect_pending_barrier_completions_unlocked(process_iid, remove_process);
 }
 
 inline
@@ -1763,7 +1841,9 @@ void Coordinator::collect_and_schedule_barrier_completions(
     instance_id_type   process_iid,
     bool               remove_process)
 {
-    auto pending_completions = collect_pending_barrier_completions(process_iid, remove_process);
+    // Caller must hold m_groups_mutex.
+    auto pending_completions =
+        collect_pending_barrier_completions_unlocked(process_iid, remove_process);
     if (pending_completions.empty() || !s_mproc) {
         return;
     }

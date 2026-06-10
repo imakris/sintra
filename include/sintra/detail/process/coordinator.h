@@ -303,6 +303,21 @@ public:
 
     void print(const string& str);
 
+    // Coordinator lock ordering (outermost first). A thread may skip levels,
+    // but must never acquire an earlier-listed mutex while holding a
+    // later-listed one:
+    //   1. m_external_process_invitations_mutex
+    //      (held across the "is this process known" checks during invitation
+    //      reservation)
+    //   2. m_groups_mutex
+    //   3. m_publish_mutex
+    //   4. m_init_tracking_mutex
+    // Process_group locks nest below m_groups_mutex:
+    //   m_groups_mutex -> Process_group::m_call_mutex -> Barrier::m
+    // The remaining coordinator mutexes are leaves; no other coordinator
+    // mutex may be acquired while holding one of them:
+    //   m_type_resolution_mutex, m_lifecycle_mutex, m_crash_mutex,
+    //   m_recovery_threads_mutex, m_draining_state_mutex
     mutex                                          m_type_resolution_mutex;
     mutex                                          m_publish_mutex;
     mutex                                          m_groups_mutex;
@@ -338,7 +353,10 @@ public:
         waited_instance_info
     >                                              m_instances_waited;
 
+    // access only after acquiring m_lifecycle_mutex
     set<instance_id_type>                          m_requested_recovery;
+
+    // access only after acquiring m_publish_mutex
     unordered_set<instance_id_type>                m_external_attached_processes;
     mutable std::mutex                             m_lifecycle_mutex;
     Recovery_policy                                m_recovery_policy;
@@ -385,6 +403,12 @@ public:
         instance_id_type   process_iid);
 
     std::vector<Pending_completion> collect_pending_barrier_completions(
+        instance_id_type   process_iid,
+        bool               remove_process);
+
+    // Same as collect_pending_barrier_completions, for callers that already
+    // hold m_groups_mutex.
+    std::vector<Pending_completion> collect_pending_barrier_completions_unlocked(
         instance_id_type   process_iid,
         bool               remove_process);
 

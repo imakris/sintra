@@ -7,6 +7,10 @@
 #include <chrono>
 #include <thread>
 
+#if defined(_MSC_VER)
+    #include <intrin.h>
+#endif
+
 #include "../debug_pause.h"
 #include "../logging.h"
 #include "../process/process_id.h"
@@ -14,6 +18,48 @@
 #include "process_utils.h"
 
 namespace sintra {
+
+namespace detail {
+
+inline void spin_pause() noexcept
+{
+#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
+    _mm_pause();
+#elif defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#elif defined(__aarch64__)
+    __asm__ __volatile__("yield" ::: "memory");
+#elif defined(__arm__)
+    __asm__ __volatile__("yield");
+#else
+    #if defined(_MSC_VER)
+        #pragma message("Sintra: unsupported architecture; spin_pause is a no-op and performance may degrade.")
+    #elif defined(__GNUC__) || defined(__clang__)
+        #warning "Sintra: unsupported architecture; spin_pause is a no-op and performance may degrade."
+    #endif
+    // No-op fallback for other architectures
+#endif
+}
+
+// Cooperative backoff for spin loops around short critical sections: pause
+// the CPU each iteration and yield the thread after sustained spinning, so a
+// preempted lock holder is not starved on oversubscribed machines.
+struct Spin_backoff
+{
+    void spin() noexcept
+    {
+        spin_pause();
+        if (++m_spin_count >= 1024) {
+            std::this_thread::yield();
+            m_spin_count = 0;
+        }
+    }
+
+private:
+    unsigned m_spin_count = 0;
+};
+
+} // namespace detail
 
 struct spinlock
 {
@@ -42,6 +88,7 @@ struct spinlock
                 return;
             }
 
+            detail::spin_pause();
             if ((++spin_count & k_spin_yield_mask) == 0) {
                 std::this_thread::yield();
             }

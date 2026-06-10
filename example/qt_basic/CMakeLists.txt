@@ -20,6 +20,7 @@ target_link_libraries(
     sintra_example_qt_cursor_sync_sender
     PRIVATE
         sintra
+        sintra_dev_flags
         Qt6::Widgets
 )
 
@@ -32,5 +33,6 @@ target_link_libraries(
     sintra_example_qt_cursor_sync_receiver
     PRIVATE
         sintra
+        sintra_dev_flags
         Qt6::Widgets
 )

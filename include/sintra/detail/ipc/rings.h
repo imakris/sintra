@@ -2493,8 +2493,10 @@ struct Ring_R : Ring<T, true>
     Range<T> start_reading(size_t num_trailing_elements)
     {
         bool f = false;
+        detail::Spin_backoff backoff;
         while (!m_reading_lock.compare_exchange_strong(f, true)) {
             f = false;
+            backoff.spin();
         }
 
         if (m_reading) {
@@ -2675,8 +2677,10 @@ struct Ring_R : Ring<T, true>
         }
 
         bool expected = false;
+        detail::Spin_backoff backoff;
         while (!m_reading_lock.compare_exchange_strong(expected, true)) {
             expected = false;
+            backoff.spin();
         }
 
         if (m_reading) {

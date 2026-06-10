@@ -265,11 +265,13 @@ instance_id_type make_process_instance_id()
     // 1 is the wildcard for the local process
     // thus process indices start from 2
     static atomic<uint64_t> process_index_counter(2);
-    if (process_index_counter.load() > max_process_index) {
+    // Allocate and range-check in a single atomic step; a separate
+    // check-then-increment would let concurrent callers slip past the limit.
+    const auto index = process_index_counter.fetch_add(1, std::memory_order_relaxed);
+    if (index > max_process_index) {
         throw std::runtime_error("Sintra process index space exhausted");
     }
-    const auto index = static_cast<uint32_t>(process_index_counter++);
-    return compose_instance(index, 1ull);
+    return compose_instance(static_cast<uint32_t>(index), 1ull);
 }
 
 

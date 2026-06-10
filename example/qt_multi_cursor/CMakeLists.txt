@@ -26,6 +26,7 @@ target_link_libraries(
     sintra_example_qt_multi_cursor_coordinator
     PRIVATE
         sintra
+        sintra_dev_flags
 )
 
 # Window executable (Qt GUI)
@@ -38,5 +39,6 @@ target_link_libraries(
     sintra_example_qt_multi_cursor_window
     PRIVATE
         sintra
+        sintra_dev_flags
         Qt6::Widgets
 )

@@ -86,23 +86,23 @@ if(WIN32)
     target_link_libraries(sintra INTERFACE winmm)
 endif()
 
-# Apply debug-friendly flags only when building Debug configurations
+# The public sintra target stays flag-neutral: debug/optimization/runtime
+# flags must not leak to consumers through the INTERFACE target. Internal
+# targets (the examples; the tests manage their own flags in
+# tests/CMakeLists.txt) opt in via sintra_dev_flags. CMake's per-config
+# defaults already provide the standard debug flags (/Od /Zi /RTC1 /MDd, -g)
+# for Debug builds, so only the non-default extras live here.
+add_library(sintra_dev_flags INTERFACE)
 if(MSVC)
-    target_compile_options(sintra INTERFACE
-        $<$<CONFIG:Debug>:/Zi>          # Full debug info
-        $<$<CONFIG:Debug>:/Od>          # Disable optimizations
-        $<$<CONFIG:Debug>:/RTC1>        # Runtime checks
-        $<$<CONFIG:Debug>:/MDd>         # Debug runtime library
+    target_compile_options(sintra_dev_flags INTERFACE
         $<$<AND:$<CONFIG:Release>,$<BOOL:${SINTRA_RELEASE_WITH_DEBUG_SYMBOLS}>>:/Zi>
     )
-    target_link_options(sintra INTERFACE
+    target_link_options(sintra_dev_flags INTERFACE
         $<$<CONFIG:Debug>:/DEBUG:FULL>
         $<$<AND:$<CONFIG:Release>,$<BOOL:${SINTRA_RELEASE_WITH_DEBUG_SYMBOLS}>>:/DEBUG:FULL>
     )
 else()
-    target_compile_options(sintra INTERFACE
-        $<$<CONFIG:Debug>:-g>
-        $<$<CONFIG:Debug>:-O0>
+    target_compile_options(sintra_dev_flags INTERFACE
         $<$<AND:$<CONFIG:Release>,$<BOOL:${SINTRA_RELEASE_WITH_DEBUG_SYMBOLS}>>:-g>
     )
 endif()

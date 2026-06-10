@@ -22,6 +22,35 @@ reclassified.
 - Producer-side message-frame sizing now uses the same exclusive single-octile
   limit as readers.
 - Test scratch paths are shortened to avoid Windows path-length failures.
+- Coordinator lock ordering is established and documented in `coordinator.h`
+  (`m_external_process_invitations_mutex` -> `m_groups_mutex` ->
+  `m_publish_mutex` -> `m_init_tracking_mutex`). `unpublish_transceiver()`
+  acquires `m_groups_mutex` before `m_publish_mutex` for process unpublishes,
+  keeping the registry erase, group/barrier removal, lifecycle/recovery
+  decision and the unpublished broadcast atomic with respect to same-slot
+  re-publishes, and `claim_external_process_invitation()` no longer acquires
+  `m_publish_mutex` under `m_init_tracking_mutex`. The previously possible
+  ABBA deadlock against `make_process_group()` is reproduced (pre-fix) and
+  guarded by `coordinator_lock_order_test`.
+- Coordinator manual `lock()`/`unlock()` around message writes
+  (`wait_for_instance()`, `Process_group::barrier()`) is converted to RAII
+  locking; a throwing ring write can no longer leak a locked mutex.
+- `m_processes_in_initialization` is consistently guarded by
+  `m_init_tracking_mutex` (the `join_swarm()` capacity check used to read it
+  under `m_publish_mutex`).
+- Recovery membership state has a locking policy: `m_requested_recovery` is
+  guarded by `m_lifecycle_mutex` (which already guards the recovery
+  policy/runner), and `m_external_attached_processes` is guarded by (and
+  documented under) `m_publish_mutex`.
+- `make_process_instance_id()` allocates and range-checks in a single atomic
+  fetch/check step.
+- The remaining ring reader-lock spin loops use a shared pause/yield backoff
+  helper (`detail::Spin_backoff`, in `ipc/spinlock.h`), matching the
+  `Message_ring_R::fetch_message()` pattern; `spinlock::lock()` now also
+  issues a CPU pause while spinning.
+- Debug/optimization flags are no longer propagated through the public
+  `sintra` INTERFACE target; internal example targets opt in via
+  `sintra_dev_flags`, and tests keep their own per-suite flags.
 
 ## Correctness TODO
 
@@ -31,24 +60,18 @@ reclassified.
 - Audit `Transceiver::destroy()`. Local pointer-map cleanup currently depends
   on runtime/coordinator/reader availability because the function can return
   before erasing `m_local_pointer_of_instance_id`.
-- Establish and document coordinator lock ordering. Review paths that can take
-  `m_groups_mutex -> m_publish_mutex` and `m_publish_mutex -> m_groups_mutex`.
-- Convert coordinator manual `lock()`/`unlock()` paths around message writes to
-  RAII locking, especially deferral and wait-for-instance paths.
-- Guard `m_processes_in_initialization` consistently. `join_swarm()` reads it
-  while holding `m_publish_mutex`, but other paths use `m_init_tracking_mutex`.
-- Define a locking policy for recovery membership state such as
-  `m_requested_recovery` and `m_external_attached_processes`.
-- Make `make_process_instance_id()` allocation use a single atomic
-  fetch/check operation, or move process-id allocation under coordinator
-  membership ownership.
 - Revisit detached `Process_message_reader` threads and destructor-time
   `exit(1)`. Prefer joinable ownership or a process-supervision policy outside
   the object destructor.
 - Split `Ring_R::done_reading()` shutdown signalling from snapshot release.
   A redundant public `done_reading()` currently requests stop.
-- Add backoff/yield helpers to remaining spin loops, matching the more careful
-  `Message_ring_R::fetch_message()` spin/yield pattern.
+- Add a debug-build lock-rank assertion for the coordinator mutex hierarchy
+  documented in `coordinator.h`, so order violations fail loudly instead of
+  relying on the comment and on `coordinator_lock_order_test`'s two
+  instrumented stages.
+- Consolidate `detail::spin_pause()` with `backoff_yield()` in
+  `ipc/semaphore.h`, and add MSVC ARM64 support (`YieldProcessor`/`_M_ARM64`)
+  to the shared implementation.
 
 ## Message and ring protocol TODO
 
@@ -71,10 +94,6 @@ reclassified.
   path and keeping header-only mode as an opt-in. Current public includes pull
   in the coordinator, managed-process runtime, IPC primitives, and message
   readers.
-- Stop propagating debug/optimization flags through the public `sintra`
-  interface target. Restrict those flags to tests/examples/internal targets.
-- Fix the test CMake active-test count message; it currently prints a blank
-  count.
 - Revisit release-with-debug test flags. `-O0 -g -DNDEBUG` is not a normal
   release-with-debug configuration.
 - Add a non-blocking strict-warning CI lane before making it blocking:
@@ -106,7 +125,9 @@ reclassified.
 
 - Add an internal source map for message send, RPC, shutdown, direct rings,
   recovery, and external process invitation flows.
-- Document coordinator lock order and forbidden lock/callback patterns.
+- Document forbidden lock/callback patterns beyond the coordinator lock order
+  now described in `coordinator.h` (e.g., which user callbacks may run while
+  coordinator locks are held).
 - Document runtime lifecycle phases and the `shutdown_protocol_state` state
   machine.
 - Document internal child-process CLI arguments parsed by the runtime.

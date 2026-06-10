@@ -15,13 +15,8 @@
 #include <format>
 #include <stdexcept>
 #include <string>
-#include <thread>
 #include <type_traits>
 #include <utility>
-
-#if defined(_MSC_VER)
-    #include <intrin.h>
-#endif
 
 namespace sintra {
 
@@ -34,31 +29,6 @@ using std::is_trivial_v;
 using std::remove_cv;
 using std::remove_reference;
 using std::string;
-
-namespace detail {
-
-inline void spin_pause() noexcept
-{
-#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
-    _mm_pause();
-#elif defined(__x86_64__) || defined(__i386__)
-    __builtin_ia32_pause();
-#elif defined(__aarch64__)
-    __asm__ __volatile__("yield" ::: "memory");
-#elif defined(__arm__)
-    __asm__ __volatile__("yield");
-#else
-    #if defined(_MSC_VER)
-        #pragma message("Sintra: unsupported architecture; spin_pause is a no-op and performance may degrade.")
-    #elif defined(__GNUC__) || defined(__clang__)
-        #warning "Sintra: unsupported architecture; spin_pause is a no-op and performance may degrade."
-    #endif
-    // No-op fallback for other architectures
-#endif
-}
-
-} // namespace detail
-
 
 constexpr uint64_t message_magic     = 0xc18a1aca1ebac17a;
 constexpr int      message_ring_size = 0x200000;
@@ -842,14 +812,10 @@ struct Message_ring_R: Ring_R<char>
         }
 
         bool f = false;
-        unsigned spin_count = 0;
+        detail::Spin_backoff backoff;
         while (!m_reading_lock.compare_exchange_strong(f, true)) {
             f = false;
-            detail::spin_pause();
-            if (++spin_count >= 1024) {
-                std::this_thread::yield();
-                spin_count = 0;
-            }
+            backoff.spin();
         }
 
         //m_reading_lock
