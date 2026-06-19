@@ -80,19 +80,6 @@ std::string read_first_line(const std::filesystem::path& path)
     return line;
 }
 
-bool wait_for_file(
-    const std::filesystem::path& path,
-    std::chrono::steady_clock::time_point deadline)
-{
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (std::filesystem::exists(path)) {
-            return true;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
-    return false;
-}
-
 bool set_env_var(const char* name, const std::string& value)
 {
 #ifdef _WIN32
@@ -287,9 +274,10 @@ int run_holder(const std::filesystem::path& directory)
                 ring_elements);
             touch_file(marker_path(directory, "holder_attached"));
 
-            if (!wait_for_file(
+            if (!sintra::test::wait_for_file(
                     marker_path(directory, "release_holder"),
-                    std::chrono::steady_clock::now() + std::chrono::seconds(10)))
+                    std::chrono::seconds(10),
+                    std::chrono::milliseconds(5)))
             {
                 write_text(marker_path(directory, "holder_status"), "timeout:release");
                 return 1;
@@ -335,9 +323,10 @@ int run_joiner(const std::filesystem::path& directory)
             write_text(marker_path(directory, "joiner_status"), "attached");
             touch_file(marker_path(directory, "joiner_attached"));
 
-            if (!wait_for_file(
+            if (!sintra::test::wait_for_file(
                     marker_path(directory, "release_joiner"),
-                    std::chrono::steady_clock::now() + std::chrono::seconds(10)))
+                    std::chrono::seconds(10),
+                    std::chrono::milliseconds(5)))
             {
                 write_text(marker_path(directory, "joiner_status"), "timeout:release");
                 return 1;
@@ -417,9 +406,10 @@ int run_parent(const std::string& binary_path)
         return 1;
     }
 
-    if (!wait_for_file(
+    if (!sintra::test::wait_for_file(
             marker_path(temp.path, "holder_attached"),
-            std::chrono::steady_clock::now() + std::chrono::seconds(10)))
+            std::chrono::seconds(10),
+            std::chrono::milliseconds(5)))
     {
         std::fprintf(stderr, "%sholder did not attach\n", k_failure_prefix);
         ok = false;
@@ -441,7 +431,10 @@ int run_parent(const std::string& binary_path)
     }
 
     if (ok &&
-        !wait_for_file(paused_file, std::chrono::steady_clock::now() + std::chrono::seconds(10)))
+        !sintra::test::wait_for_file(
+            paused_file,
+            std::chrono::seconds(10),
+            std::chrono::milliseconds(5)))
     {
         std::fprintf(stderr, "%sjoiner did not pause in lifecycle window\n", k_failure_prefix);
         ok = false;
@@ -449,9 +442,10 @@ int run_parent(const std::string& binary_path)
 
     if (ok) {
         touch_file(marker_path(temp.path, "release_holder"));
-        if (!wait_for_file(
+        if (!sintra::test::wait_for_file(
                 release_waiting_file,
-                std::chrono::steady_clock::now() + std::chrono::seconds(10)))
+                std::chrono::seconds(10),
+                std::chrono::milliseconds(5)))
         {
             std::fprintf(stderr, "%sholder did not reach lifecycle release lock\n", k_failure_prefix);
             ok = false;
@@ -459,9 +453,10 @@ int run_parent(const std::string& binary_path)
     }
 
     if (ok) {
-        if (wait_for_file(
+        if (sintra::test::wait_for_file(
                 release_locked_file,
-                std::chrono::steady_clock::now() + std::chrono::milliseconds(500)))
+                std::chrono::milliseconds(500),
+                std::chrono::milliseconds(5)))
         {
             std::fprintf(stderr,
                 "%sholder acquired lifecycle lock before paused joiner resumed\n",
@@ -509,9 +504,10 @@ int run_parent(const std::string& binary_path)
     }
 
     if (joiner.launched &&
-        !wait_for_file(
+        !sintra::test::wait_for_file(
             marker_path(temp.path, "joiner_attached"),
-            std::chrono::steady_clock::now() + std::chrono::seconds(10)))
+            std::chrono::seconds(10),
+            std::chrono::milliseconds(5)))
     {
         std::fprintf(stderr, "%sjoiner did not finish attaching\n", k_failure_prefix);
         ok = false;

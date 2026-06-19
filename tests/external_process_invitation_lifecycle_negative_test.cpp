@@ -138,21 +138,11 @@ bool wait_for_marker(
     std::string_view               expected,
     std::chrono::milliseconds      timeout)
 {
-    const auto path     = marker_path(dir, marker);
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    const auto path = marker_path(dir, marker);
     std::string actual;
 
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (std::filesystem::exists(path)) {
-            const auto lines = sintra::test::read_lines(path);
-            if (!lines.empty()) {
-                actual = lines.front();
-                if (actual == expected) {
-                    return true;
-                }
-            }
-        }
-        std::this_thread::sleep_for(20ms);
+    if (sintra::test::wait_for_first_line(path, expected, actual, timeout, 20ms)) {
+        return true;
     }
 
     if (actual.empty()) {
@@ -176,23 +166,17 @@ bool wait_for_marker_in(
     const std::vector<std::string_view>&   expected_values,
     std::chrono::milliseconds              timeout)
 {
-    const auto path     = marker_path(dir, marker);
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    const auto path = marker_path(dir, marker);
     std::string actual;
 
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (std::filesystem::exists(path)) {
-            const auto lines = sintra::test::read_lines(path);
-            if (!lines.empty()) {
-                actual = lines.front();
-                for (auto expected : expected_values) {
-                    if (actual == expected) {
-                        return true;
-                    }
-                }
-            }
-        }
-        std::this_thread::sleep_for(20ms);
+    if (sintra::test::wait_for_first_line_until(
+            path,
+            expected_values,
+            actual,
+            std::chrono::steady_clock::now() + timeout,
+            20ms))
+    {
+        return true;
     }
 
     std::fprintf(stderr,

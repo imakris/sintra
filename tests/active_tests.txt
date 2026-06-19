@@ -1,6 +1,6 @@
 # Active Tests Configuration
 #
-# This file controls which tests are built and run by the test infrastructure.
+# This file controls which built tests are run by the test infrastructure.
 # Format: <test_path> <iterations>
 #   - test_path: relative path to test from tests/ directory (without .cpp extension or sintra_ prefix)
 #   - iterations: number of times to run the test (minimum: 1)
@@ -11,8 +11,8 @@
 #   ping_pong_test 200
 #   manual/some_problematic_test 10
 #
-# The build system will only build tests listed here (not commented).
-# The test runner will run each test for the specified number of iterations.
+# CMake builds available test binaries.
+# The test runner selects entries listed here and runs them for the specified iterations.
 
 # Main test suite
 # Iteration counts are tuned for CI (detect flakiness and race conditions)
@@ -41,8 +41,6 @@ interprocess_mutex_test                   30
 interprocess_semaphore_test               10
 ipc_rings_tests                           10
 ring_helpers_test                          5
-macos_named_semaphore_benchmark           20
-macos_os_sync_semaphore_benchmark         20
 message_args_traits_test                   5
 abi_description_test                       1
 tn_type_hash_test                         10
@@ -104,11 +102,4 @@ coordinator_lock_order_test                5
 
 # manual/barrier_delivery_fence_repro_test 1
 # manual/guard_pending_writer_integration_test 1
-# manual/hang_test 1
-# manual/coordinator_crash_children_hang_test 1
-# manual/children_crash_coordinator_deadlock_test 1
 # manual/temp_ring 1
-
-# Test for lldb stack capture with multi-process hang
-# This test intentionally hangs to verify lldb captures all threads/processes
-# ping_pong_hang_test 1

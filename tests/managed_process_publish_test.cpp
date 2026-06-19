@@ -142,12 +142,10 @@ int run_worker(int argc, char* argv[])
     }
 
     const auto done_path = shared_dir / std::string(k_done_file);
-    const auto deadline  = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-    while (std::chrono::steady_clock::now() < deadline && !std::filesystem::exists(done_path)) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    }
-
-    const bool done = std::filesystem::exists(done_path);
+    const bool done = sintra::test::wait_for_file(
+        done_path,
+        std::chrono::seconds(10),
+        std::chrono::milliseconds(20));
     if (!done) {
         std::fprintf(stderr, "managed_process_publish_test: timed out waiting for done signal\n");
         sintra::detail::finalize();
@@ -199,7 +197,7 @@ int run_delayed_publication_worker(int argc, char* argv[])
         marked_file << "marked\n";
         marked_file.close();
 
-        if (!sintra::test::wait_for_path(done_path, std::chrono::seconds(10))) {
+        if (!sintra::test::wait_for_file(done_path, std::chrono::seconds(10))) {
             std::fprintf(stderr, "managed_process_publish_test: delayed worker timed out\n");
             sintra::detail::finalize();
             return 1;
@@ -213,7 +211,7 @@ int run_delayed_publication_worker(int argc, char* argv[])
     }
     else
     if (role == "a") {
-        if (!sintra::test::wait_for_path(marked_path, std::chrono::seconds(10))) {
+        if (!sintra::test::wait_for_file(marked_path, std::chrono::seconds(10))) {
             std::fprintf(stderr, "managed_process_publish_test: delayed worker missing mark\n");
             sintra::detail::finalize();
             return 1;
@@ -332,7 +330,7 @@ bool run_manual_publish_scenario(
     }
 
     const auto info_path = shared_dir / std::string(k_info_file);
-    if (!sintra::test::wait_for_path(info_path, std::chrono::seconds(5))) {
+    if (!sintra::test::wait_for_file(info_path, std::chrono::seconds(5))) {
         std::fprintf(stderr, "managed_process_publish_test: worker info file not found\n");
         return false;
     }
@@ -366,7 +364,7 @@ bool run_manual_publish_scenario(
     done.close();
 
     const auto exit_path = shared_dir / std::string(k_exit_file);
-    if (!sintra::test::wait_for_path(exit_path, std::chrono::seconds(5))) {
+    if (!sintra::test::wait_for_file(exit_path, std::chrono::seconds(5))) {
         std::fprintf(stderr, "managed_process_publish_test: worker did not confirm exit\n");
         resolved_ok = false;
     }
@@ -422,7 +420,7 @@ bool run_delayed_publication_scenario(const std::string& binary_path)
     }
 
     const auto name_path = shared_dir / std::string(k_delayed_b_name_file);
-    if (!sintra::test::wait_for_path(name_path, std::chrono::seconds(5))) {
+    if (!sintra::test::wait_for_file(name_path, std::chrono::seconds(5))) {
         std::fprintf(stderr, "managed_process_publish_test: delayed name file missing\n");
         return false;
     }
@@ -436,7 +434,7 @@ bool run_delayed_publication_scenario(const std::string& binary_path)
     }
 
     const auto marked_path = shared_dir / std::string(k_delayed_b_marked_file);
-    if (!sintra::test::wait_for_path(marked_path, std::chrono::seconds(5))) {
+    if (!sintra::test::wait_for_file(marked_path, std::chrono::seconds(5))) {
         std::fprintf(stderr, "managed_process_publish_test: delayed mark file missing\n");
         return false;
     }
@@ -460,7 +458,7 @@ bool run_delayed_publication_scenario(const std::string& binary_path)
     done.close();
 
     const auto exit_path = shared_dir / std::string(k_delayed_exit_file);
-    if (!sintra::test::wait_for_path(exit_path, std::chrono::seconds(5))) {
+    if (!sintra::test::wait_for_file(exit_path, std::chrono::seconds(5))) {
         std::fprintf(stderr, "managed_process_publish_test: delayed worker did not exit\n");
         published = false;
     }

@@ -23,6 +23,11 @@ on:
         description: "PR number if this came from a PR"
         required: false
         type: string
+      force_tests:
+        description: "Run tests even when path filters do not match"
+        required: false
+        type: boolean
+        default: false
     secrets:
       repository-token:
         description: "GitHub token forwarded from the caller workflow"
@@ -120,7 +125,6 @@ jobs:
               - 'CMakeLists.txt'
               - 'CMakePresets.json'
               - 'third_party/**'
-              - 'flip_to_trigger_ci'
             tests:
               - 'tests/**'
             examples:
@@ -226,7 +230,7 @@ jobs:
           python-version: '3.x'
 
       - name: Run stress tests with run_tests.py
-        if: steps.changed.outputs.tests == 'true' || steps.changed.outputs.core == 'true' || steps.changed.outputs.workflows == 'true'
+        if: inputs.force_tests || steps.changed.outputs.tests == 'true' || steps.changed.outputs.core == 'true' || steps.changed.outputs.workflows == 'true'
         shell: bash
         env:
           SINTRA_PRESERVE_SCRATCH: "1"

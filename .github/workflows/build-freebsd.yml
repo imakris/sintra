@@ -1,6 +1,7 @@
 name: Build & Test - FreeBSD
 
 on:
+  workflow_dispatch:
   push:
     branches: [ '*' ]
     paths:
@@ -13,7 +14,6 @@ on:
       - 'tests/**'
       - 'example/**'
       - '.github/workflows/**'
-      - 'flip_to_trigger_ci'
   pull_request:
     branches: [ '*' ]
     paths:
@@ -26,7 +26,6 @@ on:
       - 'tests/**'
       - 'example/**'
       - '.github/workflows/**'
-      - 'flip_to_trigger_ci'
 
 jobs:
   freebsd:

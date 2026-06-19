@@ -115,9 +115,9 @@
 
 // --- Project config & utilities (kept as in original codebase) ---------------
 #include "../config.h"      // configuration constants for adaptive waiting, cache sizes, etc.
-#include "../get_wtime.h"   // high-res wall clock (used by adaptive reader policy)
 #include "../id_types.h"    // ID and type aliases as used by the project
 #include "../logging.h"
+#include "../time_utils.h"  // high-res wall clock (used by adaptive reader policy)
 
 // --- STL / stdlib ------------------------------------------------------------
 #include <algorithm>     // std::reverse

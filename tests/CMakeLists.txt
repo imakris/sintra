@@ -1,38 +1,3 @@
-# Function to parse active_tests.txt and return list of test paths
-function(read_active_tests OUT_VAR)
-    set(ACTIVE_TESTS_FILE "${CMAKE_CURRENT_SOURCE_DIR}/active_tests.txt")
-
-    if(NOT EXISTS "${ACTIVE_TESTS_FILE}")
-        message(FATAL_ERROR "active_tests.txt not found at ${ACTIVE_TESTS_FILE}")
-    endif()
-
-    file(STRINGS "${ACTIVE_TESTS_FILE}" LINES)
-    set(TEST_PATHS "")
-    set(LINE_NUMBER 0)
-
-    foreach(LINE IN LISTS LINES)
-        math(EXPR LINE_NUMBER "${LINE_NUMBER} + 1")
-
-        # Strip leading/trailing whitespace
-        string(STRIP "${LINE}" LINE)
-
-        # Skip empty lines and comments
-        if(LINE STREQUAL "" OR LINE MATCHES "^#")
-            continue()
-        endif()
-
-        if(NOT LINE MATCHES "^([^ \t]+)[ \t]+([1-9][0-9]*)$")
-            message(FATAL_ERROR
-                "Malformed active_tests.txt entry at line ${LINE_NUMBER}: '${LINE}'. "
-                "Expected '<test_path> <iterations>' with iterations >= 1.")
-        endif()
-
-        list(APPEND TEST_PATHS "${CMAKE_MATCH_1}")
-    endforeach()
-
-    set(${OUT_VAR} ${TEST_PATHS} PARENT_SCOPE)
-endfunction()
-
 function(assign_test_suite_configuration TARGET_NAME SUITE_CONFIG)
     if(NOT CMAKE_CONFIGURATION_TYPES)
         return()
@@ -180,72 +145,24 @@ function(add_test_suite SUFFIX IS_DEBUG)
         endif()
     endif()
 
-    # Read test list from active_tests.txt
-    read_active_tests(TEST_PATHS)
+    file(GLOB TEST_FILES CONFIGURE_DEPENDS "*.cpp")
 
-    if(NOT TEST_PATHS)
-        message(WARNING "No active tests found in active_tests.txt")
+    if(NOT TEST_FILES)
+        message(WARNING "No tests found")
         return()
     endif()
 
-    list(LENGTH TEST_PATHS ACTIVE_TEST_COUNT)
-    message(STATUS "Building ${SUFFIX} configuration for ${ACTIVE_TEST_COUNT} active tests")
+    list(SORT TEST_FILES)
+    list(LENGTH TEST_FILES TEST_COUNT)
+    message(STATUS "Building ${SUFFIX} configuration for ${TEST_COUNT} tests")
 
-    # Create test executables based on active_tests.txt
-    foreach(TEST_PATH IN LISTS TEST_PATHS)
-        # Handle paths like "manual/some_test" or just "some_test"
-        # Convert path to file location and extract test name
-        string(REPLACE "/" ";" PATH_PARTS "${TEST_PATH}")
-        list(LENGTH PATH_PARTS PARTS_COUNT)
+    foreach(FULL_TEST_PATH IN LISTS TEST_FILES)
+        get_filename_component(TEST_FILE "${FULL_TEST_PATH}" NAME)
+        get_filename_component(TEST_NAME "${FULL_TEST_PATH}" NAME_WE)
 
-        if(PARTS_COUNT EQUAL 1)
-            # Simple test in main directory: "some_test" -> "some_test.cpp"
-            set(TEST_NAME "${TEST_PATH}")
-            set(SUBDIR "")
-        elseif(PARTS_COUNT EQUAL 2)
-            # Subdirectory test: "manual/some_test" -> "manual/some_test.cpp"
-            list(GET PATH_PARTS 0 SUBDIR)
-            list(GET PATH_PARTS 1 TEST_NAME)
-        else()
-            message(WARNING "Unsupported test path format: ${TEST_PATH}")
-            continue()
-        endif()
-
-        set(CONFIG_FILTER "")
-        if(TEST_NAME MATCHES "^(.*)_debug$")
-            set(TEST_NAME "${CMAKE_MATCH_1}")
-            set(CONFIG_FILTER "debug")
-        elseif(TEST_NAME MATCHES "^(.*)_release$")
-            set(TEST_NAME "${CMAKE_MATCH_1}")
-            set(CONFIG_FILTER "release")
-        endif()
-
-        if(CONFIG_FILTER AND NOT CONFIG_FILTER STREQUAL SUFFIX)
-            continue()
-        endif()
-
-        if(SUBDIR)
-            set(TEST_FILE "${SUBDIR}/${TEST_NAME}.cpp")
-        else()
-            set(TEST_FILE "${TEST_NAME}.cpp")
-        endif()
-
-        # Check if file exists
-        set(FULL_TEST_PATH "${CMAKE_CURRENT_SOURCE_DIR}/${TEST_FILE}")
-        if(NOT EXISTS "${FULL_TEST_PATH}")
-            message(WARNING "Test file not found: ${FULL_TEST_PATH} (from active_tests.txt entry: ${TEST_PATH})")
-            continue()
-        endif()
-
-        # Create executable
         add_executable(sintra_${TEST_NAME}_${SUFFIX} ${TEST_FILE})
         target_link_libraries(sintra_${TEST_NAME}_${SUFFIX} PRIVATE ${LIB_TARGET})
         assign_test_suite_configuration(sintra_${TEST_NAME}_${SUFFIX} ${SUITE_CONFIG})
-
-        # Include parent directory for manual tests that need test utilities
-        if(SUBDIR)
-            target_include_directories(sintra_${TEST_NAME}_${SUFFIX} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-        endif()
 
         if(APPLE)
             if(NOT DEFINED SINTRA_DSYMUTIL_EXECUTABLE)

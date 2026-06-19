@@ -26,6 +26,7 @@ __pycache__/
 /build_mingw/
 .claude/
 .qtcreator/
+docs/reference_site/
 include/sintra/detail/ipc/rings.h.BASE.h
 include/sintra/detail/ipc/rings.h.LOCAL.h
 include/sintra/detail/ipc/rings.h.REMOTE.h

@@ -90,19 +90,6 @@ std::string read_first_line(const std::filesystem::path& path)
     return line;
 }
 
-bool wait_for_file(
-    const std::filesystem::path& path,
-    std::chrono::steady_clock::time_point deadline)
-{
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (std::filesystem::exists(path)) {
-            return true;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
-    return false;
-}
-
 bool wait_for_all_markers(
     const std::filesystem::path& directory,
     std::string_view             name,
@@ -111,7 +98,11 @@ bool wait_for_all_markers(
 {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     for (int i = 0; i < count; ++i) {
-        if (!wait_for_file(marker_path(directory, name, i), deadline)) {
+        if (!sintra::test::wait_for_file_until(
+                marker_path(directory, name, i),
+                deadline,
+                std::chrono::milliseconds(5)))
+        {
             std::fprintf(stderr,
                 "%smissing marker %.*s_%d\n",
                 k_failure_prefix,
@@ -292,7 +283,11 @@ int run_child(int argc, char* argv[])
 
     try {
         touch_file(marker_path(directory, "ready", index));
-        if (!wait_for_file(marker_path(directory, "go"), std::chrono::steady_clock::now() + std::chrono::seconds(10))) {
+        if (!sintra::test::wait_for_file(
+                marker_path(directory, "go"),
+                std::chrono::seconds(10),
+                std::chrono::milliseconds(5)))
+        {
             write_text(marker_path(directory, "status", index), "timeout:go");
             return 1;
         }
@@ -305,7 +300,11 @@ int run_child(int argc, char* argv[])
         write_text(marker_path(directory, "status", index), "attached");
         touch_file(marker_path(directory, "attached", index));
 
-        if (!wait_for_file(marker_path(directory, "release"), std::chrono::steady_clock::now() + std::chrono::seconds(10))) {
+        if (!sintra::test::wait_for_file(
+                marker_path(directory, "release"),
+                std::chrono::seconds(10),
+                std::chrono::milliseconds(5)))
+        {
             write_text(marker_path(directory, "status", index), "timeout:release");
             return 1;
         }

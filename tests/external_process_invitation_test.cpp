@@ -105,21 +105,17 @@ bool wait_for_marker(
     const std::string&             expected,
     std::chrono::milliseconds      timeout)
 {
-    const auto path     = marker_path(dir, marker);
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    const auto path = marker_path(dir, marker);
     std::string actual;
 
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (std::filesystem::exists(path)) {
-            const auto lines = sintra::test::read_lines(path);
-            if (!lines.empty()) {
-                actual = lines.front();
-                if (actual == expected) {
-                    return true;
-                }
-            }
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    if (sintra::test::wait_for_first_line(
+            path,
+            expected,
+            actual,
+            timeout,
+            std::chrono::milliseconds(20)))
+    {
+        return true;
     }
 
     if (actual.empty()) {

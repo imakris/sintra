@@ -30,26 +30,24 @@ public:
         try {
             Coordinator::rpc_print(s_coord_id, m_stream.str());
         }
-        catch (...) {
+        catch (const std::exception& e) {
             try {
-                const char* what_text = nullptr;
-                try {
-                    throw;
-                }
-                catch (const std::exception& nested) {
-                    what_text = nested.what();
-                }
-                catch (...) {
-                    what_text = "unknown exception";
-                }
                 Log_stream(log_level::warning)
                     << "sintra::console: rpc_print failed ("
-                    << (what_text ? what_text : "unknown exception")
+                    << e.what()
                     << "); message dropped\n";
             }
             catch (...) {
                 // Logging path itself failed (e.g., bad_alloc inside
                 // Log_stream). Swallow so the destructor stays noexcept.
+            }
+        }
+        catch (...) {
+            try {
+                Log_stream(log_level::warning)
+                    << "sintra::console: rpc_print failed (unknown exception); message dropped\n";
+            }
+            catch (...) {
             }
         }
     }

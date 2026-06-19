@@ -426,7 +426,7 @@ See `example/sintra/sintra_example_7_explicit_type_ids.cpp` for a full example.
 ## Tests and continuous integration
 
 The library includes a comprehensive test suite covering publish/subscribe, RPC,
-barriers, and crash recovery. Tests are controlled by `tests/active_tests.txt`.
+barriers, and crash recovery. Test runs are selected by `tests/active_tests.txt`.
 
 ```bash
 cmake -B build -DSINTRA_BUILD_TESTS=ON

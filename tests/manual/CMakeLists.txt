@@ -1,5 +1,5 @@
 # Manual tests - reproduction cases and intentionally failing tests
-# These are only built when BUILD_MANUAL_TESTS=ON
+# These are only built when SINTRA_BUILD_MANUAL_TESTS=ON
 # They may fail by design and are used for debugging specific issues
 
 function(add_manual_test_suite SUFFIX IS_DEBUG)
@@ -12,19 +12,17 @@ function(add_manual_test_suite SUFFIX IS_DEBUG)
         crash_capture_child_test.cpp
         crash_capture_self_test.cpp
         guard_pending_writer_integration_test.cpp
-        hang_test.cpp
-        coordinator_crash_children_hang_test.cpp
-        children_crash_coordinator_deadlock_test.cpp
     )
 
     foreach(TEST_FILE IN LISTS MANUAL_TEST_FILES)
         get_filename_component(TEST_NAME "${TEST_FILE}" NAME_WE)
-        if(TARGET sintra_${TEST_NAME}_${SUFFIX})
+        set(TARGET_NAME sintra_manual_${TEST_NAME}_${SUFFIX})
+        if(TARGET ${TARGET_NAME})
             continue()
         endif()
-        add_executable(sintra_${TEST_NAME}_${SUFFIX} ${TEST_FILE})
-        target_include_directories(sintra_${TEST_NAME}_${SUFFIX} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
-        target_link_libraries(sintra_${TEST_NAME}_${SUFFIX} PRIVATE ${LIB_TARGET})
+        add_executable(${TARGET_NAME} ${TEST_FILE})
+        target_include_directories(${TARGET_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+        target_link_libraries(${TARGET_NAME} PRIVATE ${LIB_TARGET})
 
         if(APPLE AND SINTRA_RELEASE_WITH_DEBUG_SYMBOLS AND NOT IS_DEBUG)
             if(NOT DEFINED SINTRA_DSYMUTIL_EXECUTABLE)
@@ -34,10 +32,10 @@ function(add_manual_test_suite SUFFIX IS_DEBUG)
                 endif()
             endif()
 
-            add_custom_command(TARGET sintra_${TEST_NAME}_${SUFFIX}
+            add_custom_command(TARGET ${TARGET_NAME}
                 POST_BUILD
-                COMMAND "${SINTRA_DSYMUTIL_EXECUTABLE}" "$<TARGET_FILE:sintra_${TEST_NAME}_${SUFFIX}>"
-                COMMENT "Generating dSYM for $<TARGET_FILE_NAME:sintra_${TEST_NAME}_${SUFFIX}>"
+                COMMAND "${SINTRA_DSYMUTIL_EXECUTABLE}" "$<TARGET_FILE:${TARGET_NAME}>"
+                COMMENT "Generating dSYM for $<TARGET_FILE_NAME:${TARGET_NAME}>"
                 VERBATIM
             )
         endif()

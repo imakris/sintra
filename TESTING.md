@@ -17,7 +17,7 @@ This document describes how to build and run tests for the Sintra library.
 ## Quick Start
 
 ```bash
-# 1. Configure and build tests (reads tests/active_tests.txt)
+# 1. Configure and build test binaries
 cmake -B build -DSINTRA_BUILD_TESTS=ON
 cmake --build build
 
@@ -28,7 +28,7 @@ python3 run_tests.py --build-dir ../build --config Release
 
 ## Test Selection: active_tests.txt
 
-Sintra uses a **single file** to control which tests are built and run: `tests/active_tests.txt`
+Sintra uses `tests/active_tests.txt` to control which built tests are run and how often.
 
 ### Format
 
@@ -61,22 +61,20 @@ recovery_test 10
 
 ### How It Works
 
-The same file controls both build-time and run-time behavior:
+Build and run selection are separate:
 
 **CMake (Build Phase)**
-- Parses `active_tests.txt` during configuration
-- Creates build targets **only** for tests listed (non-commented)
-- Ignores the iteration count (only uses test names)
-- Skips all commented-out tests completely
+- Builds the available test binaries
+- Builds manual tests only when `SINTRA_BUILD_MANUAL_TESTS=ON`
 
 **run_tests.py (Run Phase)**
 - Reads `active_tests.txt` at startup
-- Discovers built test binaries matching the active tests
+- Discovers built test binaries matching the selected tests
 - Runs each test for the specified number of iterations
 
-This unified approach means:
-- One file controls everything - no multiple mechanisms
-- Commented tests are not built (saves build time)
+This split means:
+- CMake does not duplicate the `active_tests.txt` parser
+- Commented tests are not run
 - Iteration counts are versioned with the code
 - Easy to focus on specific tests during debugging
 
@@ -300,7 +298,7 @@ These are **commented out by default** in `active_tests.txt`:
 
 ```
 # manual/barrier_delivery_fence_repro_test 1
-# manual/hang_test 1
+# manual/guard_pending_writer_integration_test 1
 ```
 
 ### Enabling Manual Tests
@@ -310,8 +308,9 @@ These are **commented out by default** in `active_tests.txt`:
    manual/barrier_delivery_fence_repro_test 10
    ```
 
-2. **Rebuild** (CMake will now build it):
+2. **Configure with manual tests enabled, then rebuild**:
    ```bash
+   cmake -B build -DSINTRA_BUILD_TESTS=ON -DSINTRA_BUILD_MANUAL_TESTS=ON
    cmake --build build
    ```
 
@@ -321,7 +320,7 @@ These are **commented out by default** in `active_tests.txt`:
    python3 run_tests.py --build-dir ../build --config Debug
    ```
 
-Manual tests are built alongside regular tests (no special CMake option needed).
+Manual tests are only built when `SINTRA_BUILD_MANUAL_TESTS=ON`.
 
 ## Test Runner Options
 
@@ -423,7 +422,7 @@ FreeBSD runs on a GitHub Actions Ubuntu runner inside a QEMU VM
 
 ### Test Matrix Control
 
-CI builds use the same `active_tests.txt` as local development, ensuring:
+CI runs use the same `active_tests.txt` as local development, ensuring:
 - Consistent test coverage across platforms
 - Easy adjustment of test scope (comment out flaky tests temporarily)
 - Single source of truth for all environments
@@ -487,7 +486,7 @@ If you're used to the old test selection flags, here's the mapping:
 | `--test ping_pong` | Edit `active_tests.txt`, comment out other tests |
 | `--include "*stress*"` | Edit `active_tests.txt`, comment out non-stress tests |
 | `--exclude recovery` | Comment out `recovery_test` in `active_tests.txt` |
-| `--test-dir manual` | Uncomment `manual/*` tests in `active_tests.txt` |
-| `-DBUILD_MANUAL_TESTS=ON` | Uncomment `manual/*` tests in `active_tests.txt` |
+| `--test-dir manual` | Configure with `-DSINTRA_BUILD_MANUAL_TESTS=ON`, then uncomment `manual/*` tests |
+| `-DBUILD_MANUAL_TESTS=ON` | `-DSINTRA_BUILD_MANUAL_TESTS=ON` |
 
-The new system is simpler: one file controls everything.
+The runner selection lives in one file; CMake just builds binaries.

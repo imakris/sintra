@@ -61,19 +61,6 @@ void write_text(const std::filesystem::path& path, const std::string& text)
     out << text << '\n';
 }
 
-bool wait_for_file(
-    const std::filesystem::path& path,
-    std::chrono::steady_clock::time_point deadline)
-{
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (std::filesystem::exists(path)) {
-            return true;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
-    return false;
-}
-
 launched_process_t launch_child(
     const std::string&           binary_path,
     const std::filesystem::path& directory,
@@ -277,9 +264,10 @@ int run_reader_child(const std::filesystem::path& directory)
             ring_elements / 2);
         touch_file(marker_path(directory, "reader_attached"));
 
-        if (!wait_for_file(
+        if (!sintra::test::wait_for_file(
                 marker_path(directory, "release_reader"),
-                std::chrono::steady_clock::now() + std::chrono::seconds(30)))
+                std::chrono::seconds(30),
+                std::chrono::milliseconds(5)))
         {
             write_text(marker_path(directory, "reader_status"), "timeout:release");
             return 1;
@@ -311,9 +299,10 @@ int run_writer_child(const std::filesystem::path& directory)
             ring_elements);
         touch_file(marker_path(directory, "writer_attached"));
 
-        if (!wait_for_file(
+        if (!sintra::test::wait_for_file(
                 marker_path(directory, "release_writer"),
-                std::chrono::steady_clock::now() + std::chrono::seconds(30)))
+                std::chrono::seconds(30),
+                std::chrono::milliseconds(5)))
         {
             write_text(marker_path(directory, "writer_status"), "timeout:release");
             return 1;
@@ -356,9 +345,10 @@ bool run_killed_reader_with_live_writer_case(const std::string& binary_path)
             return false;
         }
 
-        if (!wait_for_file(
+        if (!sintra::test::wait_for_file(
                 marker_path(temp.path, "reader_attached"),
-                std::chrono::steady_clock::now() + std::chrono::seconds(10)))
+                std::chrono::seconds(10),
+                std::chrono::milliseconds(5)))
         {
             std::fprintf(stderr, "%sreader child did not attach\n", k_failure_prefix);
             (void)terminate_process_and_wait(reader.pid);
@@ -399,9 +389,10 @@ bool run_killed_sole_writer_second_generation_case(const std::string& binary_pat
         return false;
     }
 
-    if (!wait_for_file(
+    if (!sintra::test::wait_for_file(
             marker_path(temp.path, "writer_attached"),
-            std::chrono::steady_clock::now() + std::chrono::seconds(10)))
+            std::chrono::seconds(10),
+            std::chrono::milliseconds(5)))
     {
         std::fprintf(stderr, "%swriter child did not attach\n", k_failure_prefix);
         (void)terminate_process_and_wait(writer.pid);

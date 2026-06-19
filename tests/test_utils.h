@@ -747,13 +747,39 @@ inline bool wait_for_file(
     return wait_for_file_until(path, deadline, poll);
 }
 
-inline bool wait_for_path(
-    const std::filesystem::path&           path,
-    std::chrono::milliseconds              timeout = std::chrono::milliseconds(30000),
-    std::chrono::milliseconds              poll = std::chrono::milliseconds(10))
+inline bool wait_for_first_line_until(
+    const std::filesystem::path&                 path,
+    const std::vector<std::string_view>&         expected_values,
+    std::string&                                 actual,
+    std::chrono::steady_clock::time_point        deadline,
+    std::chrono::milliseconds                    poll = std::chrono::milliseconds(10))
 {
-    return wait_for_file(path, timeout, poll);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (std::filesystem::exists(path)) {
+            const auto lines = read_lines(path);
+            if (!lines.empty()) {
+                actual = lines.front();
+                for (auto expected : expected_values) {
+                    if (actual == expected) {
+                        return true;
+                    }
+                }
+            }
+        }
+        std::this_thread::sleep_for(poll);
+    }
+    return false;
 }
 
+inline bool wait_for_first_line(
+    const std::filesystem::path&           path,
+    std::string_view                       expected,
+    std::string&                           actual,
+    std::chrono::milliseconds              timeout,
+    std::chrono::milliseconds              poll = std::chrono::milliseconds(10))
+{
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    return wait_for_first_line_until(path, {expected}, actual, deadline, poll);
+}
 
 } // namespace sintra::test

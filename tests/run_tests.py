@@ -168,6 +168,20 @@ def _canonical_test_name(name: str) -> str:
     return canonical
 
 
+def _active_test_weight(name: str, active_tests: Dict[str, int]) -> Optional[int]:
+    if name in active_tests:
+        return active_tests[name]
+    if name.startswith("manual_"):
+        return active_tests.get("manual/" + name[len("manual_"):])
+    return None
+
+
+def _strip_manual_target_prefix(name: str) -> str:
+    if name.startswith("manual_"):
+        return name[len("manual_"):]
+    return name
+
+
 def _strip_config_suffix(name: str) -> str:
     if name.endswith("_release") or name.endswith("_debug"):
         return name.rsplit("_", 1)[0]
@@ -178,6 +192,7 @@ def _is_stack_capture_test(name: str) -> bool:
     canonical = _canonical_test_name(name)
     if ':' in canonical:
         canonical = canonical.split(':', 1)[0]
+    canonical = _strip_manual_target_prefix(canonical)
     canonical = _strip_config_suffix(canonical)
     return canonical.startswith(STACK_CAPTURE_PREFIXES)
 
@@ -228,22 +243,24 @@ def _lookup_test_weight(name: str, active_tests: Dict[str, int]) -> int:
     if ':' in canonical:
         # Extract base test name before first colon
         base_test = canonical.split(':')[0]
-        if base_test in active_tests:
-            return active_tests.get(base_test, 1)
+        weight = _active_test_weight(base_test, active_tests)
+        if weight is not None:
+            return weight
         # Remove _release or _debug suffix
         if base_test.endswith('_release') or base_test.endswith('_debug'):
             base_test = base_test.rsplit('_', 1)[0]
-        return active_tests.get(base_test, 1)
+        return _active_test_weight(base_test, active_tests) or 1
 
     # For regular tests, try with and without config suffix
     # e.g., "ping_pong_test_release" -> "ping_pong_test"
     if canonical.endswith('_release') or canonical.endswith('_debug'):
-        if canonical in active_tests:
-            return active_tests.get(canonical, 1)
+        weight = _active_test_weight(canonical, active_tests)
+        if weight is not None:
+            return weight
         base_test = canonical.rsplit('_', 1)[0]
-        return active_tests.get(base_test, 1)
+        return _active_test_weight(base_test, active_tests) or 1
 
-    return active_tests.get(canonical, 1)
+    return _active_test_weight(canonical, active_tests) or 1
 
 
 def _scale_test_weight(iterations: int, multiplier: float) -> int:
@@ -259,6 +276,12 @@ def _lookup_test_timeout(name: str, default: float) -> float:
     override = TEST_TIMEOUT_OVERRIDES.get(canonical)
     if override is None:
         base_test = canonical.split(':', 1)[0]
+        override = TEST_TIMEOUT_OVERRIDES.get(_strip_config_suffix(base_test))
+    if override is None:
+        base_test = _strip_manual_target_prefix(canonical.split(':', 1)[0])
+        override = TEST_TIMEOUT_OVERRIDES.get(base_test)
+    if override is None:
+        base_test = _strip_manual_target_prefix(canonical.split(':', 1)[0])
         override = TEST_TIMEOUT_OVERRIDES.get(_strip_config_suffix(base_test))
     if override is None:
         return default
@@ -817,14 +840,16 @@ class TestRunner:
         }
 
         for test_path in active_tests.keys():
-            # Extract test name from path (e.g., "manual/some_test" -> "some_test")
             test_name = test_path.split('/')[-1]
+            test_names = [f"manual_{test_name}"] if test_path.startswith("manual/") else [test_name]
             target_config = None
 
             if test_name.endswith('_release') or test_name.endswith('_debug'):
                 test_name, target_config = test_name.rsplit('_', 1)
+                test_names = [f"manual_{test_name}"] if test_path.startswith("manual/") else [test_name]
 
-            if test_name not in available_tests:
+            test_name = next((name for name in test_names if name in available_tests), None)
+            if test_name is None:
                 print(f"{Color.YELLOW}Warning: Test '{test_path}' from active_tests.txt not found in build directory{Color.RESET}")
                 continue
 
