@@ -1,47 +1,34 @@
-# Manual tests - reproduction cases and intentionally failing tests
-# These are only built when SINTRA_BUILD_MANUAL_TESTS=ON
-# They may fail by design and are used for debugging specific issues
+# Manual tests - reproduction cases and intentionally failing tests.
+# These are only built when SINTRA_BUILD_MANUAL_TESTS=ON.
 
-function(add_manual_test_suite SUFFIX IS_DEBUG)
-    # Reuse the library target from parent tests
-    set(LIB_TARGET sintra_for_${SUFFIX})
+set(MANUAL_TEST_FILES
+    barrier_deadlock_reproduction_test.cpp
+    barrier_delivery_fence_repro_test.cpp
+    crash_capture_child_test.cpp
+    crash_capture_self_test.cpp
+    guard_pending_writer_integration_test.cpp
+)
 
-    set(MANUAL_TEST_FILES
-        barrier_deadlock_reproduction_test.cpp
-        barrier_delivery_fence_repro_test.cpp
-        crash_capture_child_test.cpp
-        crash_capture_self_test.cpp
-        guard_pending_writer_integration_test.cpp
-    )
+foreach(TEST_FILE IN LISTS MANUAL_TEST_FILES)
+    get_filename_component(TEST_NAME "${TEST_FILE}" NAME_WE)
+    set(TARGET_NAME sintra_manual_${TEST_NAME})
+    add_executable(${TARGET_NAME} ${TEST_FILE})
+    target_include_directories(${TARGET_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+    target_link_libraries(${TARGET_NAME} PRIVATE sintra_for_tests)
 
-    foreach(TEST_FILE IN LISTS MANUAL_TEST_FILES)
-        get_filename_component(TEST_NAME "${TEST_FILE}" NAME_WE)
-        set(TARGET_NAME sintra_manual_${TEST_NAME}_${SUFFIX})
-        if(TARGET ${TARGET_NAME})
-            continue()
-        endif()
-        add_executable(${TARGET_NAME} ${TEST_FILE})
-        target_include_directories(${TARGET_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
-        target_link_libraries(${TARGET_NAME} PRIVATE ${LIB_TARGET})
-
-        if(APPLE AND SINTRA_RELEASE_WITH_DEBUG_SYMBOLS AND NOT IS_DEBUG)
-            if(NOT DEFINED SINTRA_DSYMUTIL_EXECUTABLE)
-                find_program(SINTRA_DSYMUTIL_EXECUTABLE dsymutil)
-                if(NOT SINTRA_DSYMUTIL_EXECUTABLE)
-                    message(FATAL_ERROR "dsymutil is required to generate debug symbols for Release builds on macOS")
-                endif()
+    if(APPLE)
+        if(NOT DEFINED SINTRA_DSYMUTIL_EXECUTABLE)
+            find_program(SINTRA_DSYMUTIL_EXECUTABLE dsymutil)
+            if(NOT SINTRA_DSYMUTIL_EXECUTABLE)
+                message(FATAL_ERROR "dsymutil is required to generate debug symbols on macOS")
             endif()
-
-            add_custom_command(TARGET ${TARGET_NAME}
-                POST_BUILD
-                COMMAND "${SINTRA_DSYMUTIL_EXECUTABLE}" "$<TARGET_FILE:${TARGET_NAME}>"
-                COMMENT "Generating dSYM for $<TARGET_FILE_NAME:${TARGET_NAME}>"
-                VERBATIM
-            )
         endif()
-    endforeach()
-endfunction()
 
-# Build manual test suites for both build types
-add_manual_test_suite("release" FALSE)
-add_manual_test_suite("debug" TRUE)
+        add_custom_command(TARGET ${TARGET_NAME}
+            POST_BUILD
+            COMMAND "${SINTRA_DSYMUTIL_EXECUTABLE}" "$<TARGET_FILE:${TARGET_NAME}>"
+            COMMENT "Generating dSYM for $<TARGET_FILE_NAME:${TARGET_NAME}>"
+            VERBATIM
+        )
+    endif()
+endforeach()

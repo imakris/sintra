@@ -428,19 +428,21 @@ class TestRunner:
             collect_descendant_pids=self._collect_descendant_pids,
         )
 
-        # Determine test directories - check both multi-config subdirectories
-        # and the flat tests/ directory used by single-config generators.
+        # Multi-config builds place the same unsuffixed test target under each
+        # configuration directory. Single-config builds use a flat tests/ dir.
         test_dirs_with_config = [
-            build_dir / 'tests' / config_name.capitalize()
+            (config_name, build_dir / 'tests' / config_name.capitalize())
             for config_name in self.configurations
         ]
-        test_dir_simple = build_dir / 'tests'
-
-        existing_config_dirs = [test_dir for test_dir in test_dirs_with_config if test_dir.exists()]
+        existing_config_dirs = [
+            (config_name, test_dir)
+            for config_name, test_dir in test_dirs_with_config
+            if test_dir.exists()
+        ]
         if existing_config_dirs:
             self.test_dirs = existing_config_dirs
         else:
-            self.test_dirs = [test_dir_simple]
+            self.test_dirs = [(None, build_dir / 'tests')]
 
         # Kill any existing sintra processes for a clean start
         self._kill_all_sintra_processes()
@@ -791,23 +793,28 @@ class TestRunner:
             print(f"{Color.YELLOW}No tests specified in active_tests.txt{Color.RESET}")
             return {}, active_tests
 
-        # Test binaries are suffixed by suite configuration. The runner executes
-        # every suite requested by --config, e.g. Debug,Release.
+        # Multi-config builds use unsuffixed binaries under per-config
+        # directories. Keep the logical invocation names suffixed so existing
+        # filters, timeouts, and logs continue to distinguish Debug/Release.
         configurations = self.configurations
 
-        # Map to store discovered test executables by base name
+        # Map to store discovered test executables by base name.
         # Key: base test name (e.g., "ping_pong_test")
         # Value: dict of {config: Path}
         available_tests: Dict[str, Dict[str, Path]] = {}
 
-        existing_test_dirs = [test_dir for test_dir in self.test_dirs if test_dir.exists()]
+        existing_test_dirs = [
+            (config_hint, test_dir)
+            for config_hint, test_dir in self.test_dirs
+            if test_dir.exists()
+        ]
         if not existing_test_dirs:
-            searched_dirs = ", ".join(str(test_dir) for test_dir in self.test_dirs)
+            searched_dirs = ", ".join(str(test_dir) for _, test_dir in self.test_dirs)
             print(f"{Color.RED}Test directory not found: {searched_dirs}{Color.RESET}")
             return {}, active_tests
 
         # Scan for available test binaries
-        for test_dir in existing_test_dirs:
+        for config_hint, test_dir in existing_test_dirs:
             try:
                 directory_entries = sorted(test_dir.iterdir())
             except OSError as exc:
@@ -820,19 +827,34 @@ class TestRunner:
 
                 normalized_name = self.platform.adjust_executable_name(entry.name)
 
-                # Check if this matches a test with config suffix
+                detected_config = config_hint
+                base_name = normalized_name
+                legacy_suffixed_name = False
+
+                # Keep compatibility with older suffixed artifacts.
                 for config in configurations:
                     suffix = f"_{config}"
                     if normalized_name.endswith(suffix):
+                        detected_config = config
                         base_name = normalized_name[:-len(suffix)]
-                        # Remove "sintra_" prefix if present
-                        if base_name.startswith("sintra_"):
-                            base_name = base_name[len("sintra_"):]
-
-                        if base_name not in available_tests:
-                            available_tests[base_name] = {}
-                        available_tests[base_name][config] = entry
+                        legacy_suffixed_name = True
                         break
+
+                if detected_config is None:
+                    if len(configurations) != 1:
+                        continue
+                    detected_config = configurations[0]
+
+                if detected_config not in configurations:
+                    continue
+
+                # Remove "sintra_" prefix if present.
+                if base_name.startswith("sintra_"):
+                    base_name = base_name[len("sintra_"):]
+
+                available_by_config = available_tests.setdefault(base_name, {})
+                if detected_config not in available_by_config or not legacy_suffixed_name:
+                    available_by_config[detected_config] = entry
 
         # Now match active_tests entries with available binaries
         discovered_tests: Dict[str, List[TestInvocation]] = {
@@ -857,7 +879,7 @@ class TestRunner:
             for config, test_binary in available_tests[test_name].items():
                 if target_config is not None and config != target_config:
                     continue
-                normalized_name = self.platform.adjust_executable_name(test_binary.name)
+                normalized_name = f"sintra_{test_name}_{config}"
 
                 invocations = self._expand_test_invocations(test_binary, f"sintra_{test_name}", normalized_name)
                 if invocations:

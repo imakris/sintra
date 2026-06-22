@@ -83,15 +83,16 @@ This split means:
 ### Standard Build
 
 ```bash
-cmake -B build -DSINTRA_BUILD_TESTS=ON
-cmake --build build
+cmake -G "Ninja Multi-Config" -B build -DSINTRA_BUILD_TESTS=ON
+cmake --build build --config Debug
+cmake --build build --config Release
 ```
 
-Tests are built in two configurations:
-- **Debug** (`_debug` suffix): `-O0 -g` for debugging
-- **Release** (`_release` suffix): `-O3 -DNDEBUG` for performance testing
+Tests are built once per CMake configuration:
+- **Debug**: `-O0 -g` style flags for debugging
+- **Release**: `-DNDEBUG` and release-mode flags for performance testing
 
-### Build Only Specific Tests
+### Run Only Specific Tests
 
 Edit `tests/active_tests.txt` and comment out tests you don't need:
 
@@ -99,17 +100,11 @@ Edit `tests/active_tests.txt` and comment out tests you don't need:
 # Comment out all tests except the one you're working on
 # barrier_complex_choreography_test 1
 # barrier_flush_test 20
-ping_pong_test 5    # Only this will be built
+ping_pong_test 5    # Only this will be run
 # ...rest commented out...
 ```
 
-Then rebuild:
-
-```bash
-cmake --build build
-```
-
-CMake will skip building the commented-out tests.
+The runner will skip commented-out tests. CMake still builds available test binaries.
 
 ### Build with Debug Symbols in Release Mode
 
@@ -212,7 +207,7 @@ python3 run_tests.py --verbose --build-dir ../build --config Release
 
 4. **Run under debugger** (if needed):
    ```bash
-   gdb ../build/tests/sintra_problematic_test_debug
+   gdb ../build/tests/Debug/sintra_problematic_test
    ```
 
 5. **Restore all tests** when done - Uncomment tests in `active_tests.txt`
@@ -268,7 +263,7 @@ ipc_rings_tests 1
 ```
 
 Becomes:
-- `ipc_rings_tests_release:unit:test_ring_write_read_single_reader`
+- `ipc_rings_tests_debug:unit:test_ring_write_read_single_reader`
 - `ipc_rings_tests_release:unit:test_multiple_readers_see_same_data`
 - `ipc_rings_tests_release:stress:stress_attach_detach_readers`
 - ... (and more)
