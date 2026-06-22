@@ -58,7 +58,7 @@ void add_initializing_probe(sintra::instance_id_type process_iid)
 {
     const auto process_index = static_cast<size_t>(sintra::get_process_index(process_iid));
     {
-        std::lock_guard<std::mutex> init_lock(sintra::s_coord->m_init_tracking_mutex);
+        std::lock_guard init_lock(sintra::s_coord->m_init_tracking_mutex);
         sintra::s_coord->m_processes_in_initialization.insert(process_iid);
     }
     sintra::s_coord->m_draining_process_states[process_index] = 0;
@@ -68,7 +68,7 @@ void remove_initializing_probe(sintra::instance_id_type process_iid)
 {
     const auto process_index = static_cast<size_t>(sintra::get_process_index(process_iid));
     {
-        std::lock_guard<std::mutex> init_lock(sintra::s_coord->m_init_tracking_mutex);
+        std::lock_guard init_lock(sintra::s_coord->m_init_tracking_mutex);
         sintra::s_coord->m_processes_in_initialization.erase(process_iid);
     }
     sintra::s_coord->m_draining_process_states[process_index] = 0;
@@ -76,7 +76,7 @@ void remove_initializing_probe(sintra::instance_id_type process_iid)
 
 void add_group_probe(const std::string& group_name, sintra::instance_id_type process_iid)
 {
-    std::lock_guard<std::mutex> groups_lock(sintra::s_coord->m_groups_mutex);
+    std::lock_guard groups_lock(sintra::s_coord->m_groups_mutex);
     auto& group = sintra::s_coord->m_groups[group_name];
     std::lock_guard<std::mutex> group_lock(group.m_call_mutex);
     group.m_process_ids.insert(sintra::s_mproc_id);
@@ -85,7 +85,7 @@ void add_group_probe(const std::string& group_name, sintra::instance_id_type pro
 
 void remove_group_probe(const std::string& group_name, sintra::instance_id_type process_iid)
 {
-    std::lock_guard<std::mutex> groups_lock(sintra::s_coord->m_groups_mutex);
+    std::lock_guard groups_lock(sintra::s_coord->m_groups_mutex);
     auto group_it = sintra::s_coord->m_groups.find(group_name);
     if (group_it == sintra::s_coord->m_groups.end()) {
         return;

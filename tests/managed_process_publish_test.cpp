@@ -407,7 +407,7 @@ bool run_delayed_publication_scenario(const std::string& binary_path)
     }
 
     {
-        std::lock_guard<std::mutex> lock(s_coord->m_init_tracking_mutex);
+        std::lock_guard lock(s_coord->m_init_tracking_mutex);
         s_coord->m_processes_in_initialization.insert(process_a);
         s_coord->m_processes_in_initialization.insert(process_b);
     }

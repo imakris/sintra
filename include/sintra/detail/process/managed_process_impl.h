@@ -1693,7 +1693,7 @@ void Managed_process::init(int argc, const char* const* argv)
         s_coord_id = s_coord->m_instance_id;
 
         {
-            lock_guard<mutex> lock(s_coord->m_publish_mutex);
+            std::lock_guard lock(s_coord->m_publish_mutex);
             s_coord->m_transceiver_registry[s_mproc_id];
         }
     }
@@ -1971,7 +1971,7 @@ Managed_process::Spawn_result Managed_process::spawn_swarm_process(
     spawn_options.argv = cargs.v();
 
     if (s_coord) {
-        std::lock_guard<mutex> init_lock(s_coord->m_init_tracking_mutex);
+        std::lock_guard init_lock(s_coord->m_init_tracking_mutex);
         s_coord->m_processes_in_initialization.insert(s.piid);
     }
 
@@ -2023,7 +2023,7 @@ Managed_process::Spawn_result Managed_process::spawn_swarm_process(
         // Create an entry in the coordinator's transceiver registry.
         // This is essential for the implementation of publish_transceiver()
         {
-            lock_guard<mutex> lock(s_coord->m_publish_mutex);
+            std::lock_guard lock(s_coord->m_publish_mutex);
             s_coord->m_transceiver_registry[s.piid];
         }
 
@@ -2135,7 +2135,7 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
     if (s_coord) {
 
         {
-            std::lock_guard<mutex> init_lock(s_coord->m_init_tracking_mutex);
+            std::lock_guard init_lock(s_coord->m_init_tracking_mutex);
             s_coord->m_processes_in_initialization.insert(m_instance_id);
         }
 

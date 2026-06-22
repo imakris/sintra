@@ -10,6 +10,7 @@
 #include "../transceiver.h"
 #include <array>
 #include <atomic>
+#include <cassert>
 #include <chrono>
 #include <condition_variable>
 #include <memory>
@@ -128,6 +129,87 @@ void Process_group::remove_process(instance_id_type process_iid)
     std::lock_guard lock(m_call_mutex);
     m_process_ids.erase(process_iid);
 }
+
+
+namespace detail {
+
+enum class Coordinator_mutex_rank: unsigned
+{
+    external_process_invitations = 1,
+    groups                       = 2,
+    publish                      = 3,
+    init_tracking                = 4,
+};
+
+#ifndef NDEBUG
+
+inline thread_local unsigned s_coordinator_mutex_rank = 0;
+
+template <Coordinator_mutex_rank Rank>
+class Coordinator_ranked_mutex
+{
+public:
+    Coordinator_ranked_mutex() = default;
+    Coordinator_ranked_mutex(const Coordinator_ranked_mutex&) = delete;
+    Coordinator_ranked_mutex& operator=(const Coordinator_ranked_mutex&) = delete;
+
+    void lock()
+    {
+        assert(s_coordinator_mutex_rank < rank_value &&
+            "coordinator mutex acquired out of rank order");
+        m_mutex.lock();
+        m_previous_rank = s_coordinator_mutex_rank;
+        s_coordinator_mutex_rank = rank_value;
+    }
+
+    bool try_lock()
+    {
+        assert(s_coordinator_mutex_rank < rank_value &&
+            "coordinator mutex acquired out of rank order");
+        if (!m_mutex.try_lock()) {
+            return false;
+        }
+        m_previous_rank = s_coordinator_mutex_rank;
+        s_coordinator_mutex_rank = rank_value;
+        return true;
+    }
+
+    void unlock()
+    {
+        assert(s_coordinator_mutex_rank == rank_value &&
+            "coordinator mutex unlocked out of rank stack order");
+        s_coordinator_mutex_rank = m_previous_rank;
+        m_mutex.unlock();
+    }
+
+private:
+    static constexpr auto rank_value = static_cast<unsigned>(Rank);
+
+    std::mutex m_mutex;
+    unsigned   m_previous_rank = 0;
+};
+
+using Coordinator_condition_variable = std::condition_variable_any;
+
+#else
+
+template <Coordinator_mutex_rank>
+using Coordinator_ranked_mutex = std::mutex;
+
+using Coordinator_condition_variable = std::condition_variable;
+
+#endif
+
+using Coordinator_external_process_invitations_mutex =
+    Coordinator_ranked_mutex<Coordinator_mutex_rank::external_process_invitations>;
+using Coordinator_groups_mutex =
+    Coordinator_ranked_mutex<Coordinator_mutex_rank::groups>;
+using Coordinator_publish_mutex =
+    Coordinator_ranked_mutex<Coordinator_mutex_rank::publish>;
+using Coordinator_init_tracking_mutex =
+    Coordinator_ranked_mutex<Coordinator_mutex_rank::init_tracking>;
+
+} // namespace detail
 
 
 
@@ -319,9 +401,9 @@ public:
     //   m_type_resolution_mutex, m_lifecycle_mutex, m_crash_mutex,
     //   m_recovery_threads_mutex, m_draining_state_mutex
     mutex                                          m_type_resolution_mutex;
-    mutex                                          m_publish_mutex;
-    mutex                                          m_groups_mutex;
-    mutex                                          m_init_tracking_mutex;
+    detail::Coordinator_publish_mutex             m_publish_mutex;
+    detail::Coordinator_groups_mutex              m_groups_mutex;
+    detail::Coordinator_init_tracking_mutex       m_init_tracking_mutex;
 
     // access only after acquiring m_publish_mutex
     map<
@@ -368,8 +450,9 @@ public:
     std::vector<std::thread>                       m_recovery_threads;
     std::atomic<bool>                              m_shutdown{false};
 
-    std::mutex                                     m_external_process_invitations_mutex;
-    std::condition_variable                        m_external_process_invitations_cv;
+    detail::Coordinator_external_process_invitations_mutex
+                                                   m_external_process_invitations_mutex;
+    detail::Coordinator_condition_variable         m_external_process_invitations_cv;
     std::unordered_map<
         instance_id_type,
         External_process_invitation_record

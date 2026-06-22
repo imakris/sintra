@@ -32,6 +32,8 @@ reclassified.
   `m_publish_mutex` under `m_init_tracking_mutex`. The previously possible
   ABBA deadlock against `make_process_group()` is reproduced (pre-fix) and
   guarded by `coordinator_lock_order_test`.
+- Debug builds assert the coordinator lock rank order above at the mutex
+  `lock()`/`try_lock()` boundary; release builds keep using standard mutexes.
 - Coordinator manual `lock()`/`unlock()` around message writes
   (`wait_for_instance()`, `Process_group::barrier()`) is converted to RAII
   locking; a throwing ring write can no longer leak a locked mutex.
@@ -67,10 +69,6 @@ reclassified.
   the object destructor.
 - Split `Ring_R::done_reading()` shutdown signalling from snapshot release.
   A redundant public `done_reading()` currently requests stop.
-- Add a debug-build lock-rank assertion for the coordinator mutex hierarchy
-  documented in `coordinator.h`, so order violations fail loudly instead of
-  relying on the comment and on `coordinator_lock_order_test`'s two
-  instrumented stages.
 
 ## Message and ring protocol TODO
 

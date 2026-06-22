@@ -268,8 +268,10 @@ bool is_process_draining(instance_id_type process_iid) const {
 
 **Lock Hierarchy**: To prevent deadlocks:
 ```
-m_publish_mutex -> m_groups_mutex -> m_call_mutex -> b.m -> atomics
+m_external_process_invitations_mutex -> m_groups_mutex -> m_publish_mutex -> m_init_tracking_mutex
+m_groups_mutex -> Process_group::m_call_mutex -> Barrier::m -> atomics
 ```
+Threads may skip hierarchy levels. Other coordinator mutexes are leaf locks and do not nest with these.
 
 ---
 

@@ -91,7 +91,7 @@ void lock_stage_callback(const char* stage)
 // locally; seeding directly keeps both racing threads under test control.)
 void seed_fake_process(sintra::instance_id_type fake_piid)
 {
-    std::lock_guard<std::mutex> publish_lock(s_coord->m_publish_mutex);
+    std::lock_guard publish_lock(s_coord->m_publish_mutex);
     s_coord->m_transceiver_registry[fake_piid][fake_piid] =
         sintra::Tn_type{0, "coordinator_lock_order_fake"};
     s_mproc->m_instance_id_of_assigned_name.set_value(

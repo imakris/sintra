@@ -322,7 +322,7 @@ Coordinator::~Coordinator()
 {
     m_shutdown.store(true, std::memory_order_release);
     {
-        std::lock_guard<mutex> lock(m_external_process_invitations_mutex);
+        std::lock_guard lock(m_external_process_invitations_mutex);
         m_external_process_invitation_cleanup_stop = true;
     }
     m_external_process_invitations_cv.notify_all();
@@ -368,7 +368,7 @@ inline bool Coordinator::external_process_invitation_exists_unlocked(
 
 inline bool Coordinator::external_process_invitation_exists(instance_id_type process_iid)
 {
-    std::lock_guard<mutex> lock(m_external_process_invitations_mutex);
+    std::lock_guard lock(m_external_process_invitations_mutex);
     return external_process_invitation_exists_unlocked(process_iid);
 }
 
@@ -378,7 +378,7 @@ inline bool Coordinator::group_has_non_external_peer(
 {
     std::vector<instance_id_type> members;
     {
-        lock_guard<mutex> groups_lock(m_groups_mutex);
+        std::lock_guard groups_lock(m_groups_mutex);
         auto group_it = m_groups.find(group_name);
         if (group_it == m_groups.end()) {
             return false;
@@ -389,7 +389,7 @@ inline bool Coordinator::group_has_non_external_peer(
         members.assign(group.m_process_ids.begin(), group.m_process_ids.end());
     }
 
-    lock_guard<mutex> publish_lock(m_publish_mutex);
+    std::lock_guard publish_lock(m_publish_mutex);
     for (auto process_iid : members) {
         if (process_iid                                      != self_process_iid &&
             m_external_attached_processes.count(process_iid) == 0)
@@ -413,7 +413,7 @@ inline bool Coordinator::process_id_is_known_for_external_invitation(
     }
 
     {
-        lock_guard<mutex> lock(m_publish_mutex);
+        std::lock_guard lock(m_publish_mutex);
         if (m_transceiver_registry.count(process_iid)  != 0) { return true; }
         if (m_joined_process_branch.count(process_iid) != 0) { return true; }
         for (const auto& entry : m_inflight_joins) {
@@ -427,14 +427,14 @@ inline bool Coordinator::process_id_is_known_for_external_invitation(
     }
 
     {
-        lock_guard<mutex> lock(m_init_tracking_mutex);
+        std::lock_guard lock(m_init_tracking_mutex);
         if (m_processes_in_initialization.count(process_iid) != 0) {
             return true;
         }
     }
 
     {
-        lock_guard<mutex> lock(m_groups_mutex);
+        std::lock_guard lock(m_groups_mutex);
         if (m_groups_of_process.count(process_iid) != 0) {
             return true;
         }
@@ -475,7 +475,7 @@ inline bool Coordinator::reserve_external_process_invitation(
         return false;
     }
 
-    std::lock_guard<mutex> lock(m_external_process_invitations_mutex);
+    std::lock_guard lock(m_external_process_invitations_mutex);
     if (external_process_invitation_exists_unlocked(process_iid)) {
         return false;
     }
@@ -506,7 +506,7 @@ inline bool Coordinator::reserve_external_process_invitation(
 
 inline bool Coordinator::cancel_external_process_invitation(instance_id_type process_iid)
 {
-    std::lock_guard<mutex> lock(m_external_process_invitations_mutex);
+    std::lock_guard lock(m_external_process_invitations_mutex);
     auto it = m_external_process_invitations.find(process_iid);
     if (it == m_external_process_invitations.end())                     { return false; }
     if (it->second.state != External_process_invitation_state::pending) { return false; }
@@ -522,7 +522,7 @@ inline bool Coordinator::cancel_external_process_invitation(
     instance_id_type   process_iid,
     const string&      token)
 {
-    std::lock_guard<mutex> lock(m_external_process_invitations_mutex);
+    std::lock_guard lock(m_external_process_invitations_mutex);
     auto it = m_external_process_invitations.find(process_iid);
     if (it == m_external_process_invitations.end())                                      { return false; }
     if (it->second.state != External_process_invitation_state::pending)                  { return false; }
@@ -585,7 +585,7 @@ inline void Coordinator::remove_external_process_invitation_readers(
 
 inline void Coordinator::external_process_invitation_cleanup_loop()
 {
-    std::unique_lock<mutex> lock(m_external_process_invitations_mutex);
+    std::unique_lock lock(m_external_process_invitations_mutex);
 
     while (!m_external_process_invitation_cleanup_stop) {
         std::vector<instance_id_type> readers_to_remove;
@@ -629,7 +629,7 @@ inline void Coordinator::cancel_all_external_process_invitations()
 {
     std::vector<instance_id_type> readers_to_remove;
     {
-        std::lock_guard<mutex> lock(m_external_process_invitations_mutex);
+        std::lock_guard lock(m_external_process_invitations_mutex);
         readers_to_remove.reserve(m_external_process_invitations.size());
         for (const auto& entry : m_external_process_invitations) {
             set_draining_state(entry.first, 1);
@@ -643,7 +643,7 @@ inline void Coordinator::cancel_all_external_process_invitations()
 
 inline bool Coordinator::add_external_process_to_standard_groups(instance_id_type process_iid)
 {
-    lock_guard<mutex> lock(m_groups_mutex);
+    std::lock_guard lock(m_groups_mutex);
 
     struct group_update
     {
@@ -748,7 +748,7 @@ inline bool Coordinator::claim_external_process_invitation(
     }
 
     {
-        std::lock_guard<mutex> lock(m_external_process_invitations_mutex);
+        std::lock_guard lock(m_external_process_invitations_mutex);
         auto it = m_external_process_invitations.find(process_iid);
         if (it == m_external_process_invitations.end()) {
             return false;
@@ -781,7 +781,7 @@ inline bool Coordinator::claim_external_process_invitation(
     }
 
     {
-        lock_guard<mutex> publish_lock(m_publish_mutex);
+        std::lock_guard publish_lock(m_publish_mutex);
         if (m_transceiver_registry.count(process_iid)  != 0 ||
             m_joined_process_branch.count(process_iid) != 0)
         {
@@ -807,12 +807,12 @@ inline bool Coordinator::claim_external_process_invitation(
     // rollback below runs.
     bool in_initialization = false;
     {
-        lock_guard<mutex> init_lock(m_init_tracking_mutex);
+        std::lock_guard init_lock(m_init_tracking_mutex);
         in_initialization = m_processes_in_initialization.count(process_iid) != 0;
     }
 
     if (in_initialization || !add_external_process_to_standard_groups(process_iid)) {
-        lock_guard<mutex> publish_lock(m_publish_mutex);
+        std::lock_guard publish_lock(m_publish_mutex);
         m_external_attached_processes.erase(process_iid);
         m_transceiver_registry.erase(process_iid);
         return false;
@@ -881,7 +881,7 @@ instance_id_type Coordinator::wait_for_instance(const string& assigned_name)
     // the instance, thus using it for synchronization may not always be
     // applicable.
 
-    std::lock_guard<mutex> publish_lock(m_publish_mutex);
+    std::lock_guard publish_lock(m_publish_mutex);
     instance_id_type caller_piid = s_tl_current_message->sender_instance_id;
 
     auto iid = resolve_instance(assigned_name);
@@ -923,7 +923,7 @@ instance_id_type Coordinator::publish_transceiver(
     instance_id_type   iid,
     const string&      assigned_name)
 {
-    lock_guard<mutex> lock(m_publish_mutex);
+    std::lock_guard lock(m_publish_mutex);
 
     // empty strings are not valid names
     if (assigned_name.empty()) {
@@ -937,7 +937,7 @@ instance_id_type Coordinator::publish_transceiver(
     auto true_sequence = [&](bool allow_notification_delay) {
         bool queued_notification = false;
         if (allow_notification_delay) {
-            std::lock_guard<mutex> init_lock(m_init_tracking_mutex);
+            std::lock_guard init_lock(m_init_tracking_mutex);
             if (!m_processes_in_initialization.empty()) {
                 // Delay instance_published while startup is still in progress to prevent
                 // circular RPC activation between not-yet-ready processes.
@@ -1038,11 +1038,11 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
     // (e.g. a recovery respawn or an external re-attach reusing the id).
     const auto process_iid = process_of(iid);
 
-    std::unique_lock<mutex> groups_lock(m_groups_mutex, std::defer_lock);
+    std::unique_lock groups_lock(m_groups_mutex, std::defer_lock);
     if (iid == process_iid) {
         groups_lock.lock();
     }
-    lock_guard<mutex> publish_lock(m_publish_mutex);
+    std::lock_guard publish_lock(m_publish_mutex);
 
     // the process of the transceiver must have been registered
     auto pr_it = m_transceiver_registry.find(process_iid);
@@ -1234,7 +1234,7 @@ inline void Coordinator::collect_known_process_candidates_unlocked(
     candidates.clear();
     std::unordered_set<instance_id_type> external_invitation_processes;
     {
-        std::lock_guard<mutex> invitation_lock(m_external_process_invitations_mutex);
+        std::lock_guard invitation_lock(m_external_process_invitations_mutex);
         external_invitation_processes.reserve(m_external_process_invitations.size());
         for (const auto& entry : m_external_process_invitations) {
             external_invitation_processes.insert(entry.first);
@@ -1245,7 +1245,7 @@ inline void Coordinator::collect_known_process_candidates_unlocked(
     // Processes that have never registered any transceivers are not represented
     // here and therefore do not participate in coordinated draining.
     {
-        std::lock_guard<mutex> publish_lock(m_publish_mutex);
+        std::lock_guard publish_lock(m_publish_mutex);
         for (const auto& entry : m_transceiver_registry) {
             candidates.push_back(entry.first);
         }
@@ -1255,14 +1255,14 @@ inline void Coordinator::collect_known_process_candidates_unlocked(
     }
 
     {
-        std::lock_guard<mutex> init_lock(m_init_tracking_mutex);
+        std::lock_guard init_lock(m_init_tracking_mutex);
         for (const auto& piid : m_processes_in_initialization) {
             candidates.push_back(piid);
         }
     }
 
     {
-        lock_guard<mutex> groups_lock(m_groups_mutex);
+        std::lock_guard groups_lock(m_groups_mutex);
         auto it = m_groups.find("_sintra_all_processes");
         if (it != m_groups.end()) {
             auto& group = it->second;
@@ -1441,7 +1441,7 @@ instance_id_type Coordinator::make_process_group(
     const string&                          name,
     const unordered_set<instance_id_type>& member_process_ids)
 {
-    lock_guard<mutex> lock(m_groups_mutex);
+    std::lock_guard lock(m_groups_mutex);
 
     coordinator_lock_stage_for_test(
         detail::test_hooks::k_stage_make_process_group_groups_locked);
@@ -1501,7 +1501,7 @@ instance_id_type Coordinator::join_swarm(
 
     instance_id_type new_instance_id = invalid_instance_id;
     {
-        lock_guard<mutex> guard(m_publish_mutex);
+        std::lock_guard guard(m_publish_mutex);
 
         // Safety: refuse joins when the process space is nearly exhausted to avoid
         // runaway spawning that would otherwise trip hard asserts.
@@ -1510,7 +1510,7 @@ instance_id_type Coordinator::join_swarm(
         // m_init_tracking_mutex order).
         size_t initializing = 0;
         {
-            std::lock_guard<mutex> init_lock(m_init_tracking_mutex);
+            std::lock_guard init_lock(m_init_tracking_mutex);
             initializing = m_processes_in_initialization.size();
         }
         const auto current_processes = m_transceiver_registry.size();
@@ -1534,7 +1534,7 @@ instance_id_type Coordinator::join_swarm(
     // calls barrier() before being added to the group, causing it to be excluded
     // from the barrier's processes_pending set.
     {
-        lock_guard<mutex> groups_lock(m_groups_mutex);
+        std::lock_guard groups_lock(m_groups_mutex);
         auto add_to_group = [&](const string& name) {
             auto it = m_groups.find(name);
             if (it != m_groups.end()) {
@@ -1561,7 +1561,7 @@ instance_id_type Coordinator::join_swarm(
 
     if (!result.success) {
         // Roll back group insertion on spawn failure.
-        lock_guard<mutex> groups_lock(m_groups_mutex);
+        std::lock_guard groups_lock(m_groups_mutex);
         auto remove_from_group = [&](const string& name) {
             auto it = m_groups.find(name);
             if (it != m_groups.end()) {
@@ -1572,7 +1572,7 @@ instance_id_type Coordinator::join_swarm(
         remove_from_group("_sintra_external_processes");
         m_groups_of_process.erase(new_instance_id);
 
-        lock_guard<mutex> guard(m_publish_mutex);
+        std::lock_guard guard(m_publish_mutex);
         m_inflight_joins.erase(branch_index);
         m_joined_process_branch.erase(new_instance_id);
         return invalid_instance_id;
@@ -1600,7 +1600,7 @@ void Coordinator::enable_recovery(instance_id_type piid)
     assert(is_process(piid));
     bool externally_attached = false;
     {
-        lock_guard<mutex> publish_lock(m_publish_mutex);
+        std::lock_guard publish_lock(m_publish_mutex);
         externally_attached = m_external_attached_processes.count(piid) != 0;
     }
     if (externally_attached) {
@@ -1723,7 +1723,7 @@ void Coordinator::begin_shutdown()
 
     bool changed = false;
     {
-        lock_guard<mutex> publish_lock(m_publish_mutex);
+        std::lock_guard publish_lock(m_publish_mutex);
         for (auto process_iid : m_external_attached_processes) {
             if (set_draining_state(process_iid, 1)) {
                 changed = true;
@@ -1770,7 +1770,7 @@ Coordinator::finalize_initialization_tracking(instance_id_type process_iid)
 {
     std::vector<Pending_instance_publication> ready_notifications;
     {
-        std::lock_guard<mutex> lock(m_init_tracking_mutex);
+        std::lock_guard lock(m_init_tracking_mutex);
         if (process_iid != invalid_instance_id) {
             m_processes_in_initialization.erase(process_iid);
         }
@@ -1815,7 +1815,7 @@ Coordinator::collect_pending_barrier_completions(
     instance_id_type   process_iid,
     bool               remove_process)
 {
-    lock_guard<mutex> groups_lock(m_groups_mutex);
+    std::lock_guard groups_lock(m_groups_mutex);
     return collect_pending_barrier_completions_unlocked(process_iid, remove_process);
 }
 
@@ -1827,7 +1827,7 @@ void Coordinator::emit_pending_barrier_completions(
         return;
     }
 
-    lock_guard<mutex> groups_lock(m_groups_mutex);
+    std::lock_guard groups_lock(m_groups_mutex);
     for (const auto& entry : pending_completions) {
         auto group_it = m_groups.find(entry.group_name);
         if (group_it != m_groups.end()) {
@@ -1897,7 +1897,7 @@ inline
 void Coordinator::mark_initialization_complete(instance_id_type process_iid)
 {
     {
-        std::lock_guard<mutex> publish_lock(m_publish_mutex);
+        std::lock_guard publish_lock(m_publish_mutex);
         if (auto branch_it = m_joined_process_branch.find(process_iid); branch_it != m_joined_process_branch.end()) {
             m_inflight_joins.erase(branch_it->second);
             m_joined_process_branch.erase(branch_it);
