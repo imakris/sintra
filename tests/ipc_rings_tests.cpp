@@ -795,6 +795,47 @@ TEST_CASE(test_stale_guard_clears_after_timeout)
     ASSERT_GT(diag.stale_guard_clear_count + diag.guard_accounting_mismatch_count, uint64_t(0));
 }
 
+TEST_CASE(test_inactive_guard_slot_does_not_block_read_access_recovery)
+{
+    Temp_ring_dir tmp("inactive_guard_recovery");
+    const std::string ring_name     = "ring_data";
+    const size_t      ring_elements = pick_ring_elements<uint32_t>(64);
+
+    sintra::Ring_W<uint32_t> writer(tmp.str(), ring_name, ring_elements);
+
+    const size_t  head_index = ring_elements / 8;
+    const uint8_t new_octile = sintra::octile_of_index(head_index, ring_elements);
+    writer.m_octile = static_cast<uint8_t>((new_octile + 7) % 8);
+
+    const uint64_t guard_mask = sintra::octile_mask(new_octile);
+    const uint64_t range_mask = uint64_t(0xff) << (8 * new_octile);
+    auto&          slot       = writer.c.reading_sequences[0].data;
+
+    slot.owner_pid.store(0);
+    slot.set_status(sintra::Ring<uint32_t, true>::READER_STATE_INACTIVE);
+    slot.set_guard_token(static_cast<uint8_t>(0x08 | new_octile));
+    writer.c.read_access.store(guard_mask);
+
+    ASSERT_EQ(0u, writer.c.count_guards_for_octile(new_octile));
+
+    writer.c.scavenge_orphans();
+
+    ASSERT_EQ(uint8_t(0), slot.guard_token());
+    ASSERT_EQ(uint64_t(0), writer.c.read_access.load() & range_mask);
+
+    slot.set_guard_token(static_cast<uint8_t>(0x08 | new_octile));
+    writer.c.read_access.store(guard_mask);
+
+    writer.advance_writer_octile_if_needed(head_index);
+
+    ASSERT_EQ(new_octile, writer.m_octile);
+    ASSERT_EQ(uint8_t(0), slot.guard_token());
+    ASSERT_EQ(uint64_t(0), writer.c.read_access.load() & range_mask);
+
+    auto diag = writer.get_diagnostics();
+    ASSERT_GT(diag.guard_accounting_mismatch_count, uint64_t(0));
+}
+
 TEST_CASE(test_guard_pending_prevents_underflow)
 {
     Temp_ring_dir tmp("stale_guard_pending");
@@ -914,7 +955,9 @@ TEST_CASE(test_guard_rollback_fails_with_active_guard)
 
     // Set a guard token for this octile
     const uint8_t guard_token = 0x08 | test_octile;
-    reader.c.reading_sequences[0].data.set_guard_token(guard_token);
+    auto& slot = reader.c.reading_sequences[reader.m_rs_index].data;
+    slot.set_status(sintra::Ring<uint32_t, true>::READER_STATE_ACTIVE);
+    slot.set_guard_token(guard_token);
 
     // Verify the guard exists
     uint64_t access_before = reader.c.read_access.load();
