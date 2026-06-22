@@ -51,15 +51,17 @@ reclassified.
 - Debug/optimization flags are no longer propagated through the public
   `sintra` INTERFACE target; internal example targets opt in via
   `sintra_dev_flags`, and tests keep their own per-suite flags.
+- `Message<T>` constructors now directly initialize the body base subobject
+  instead of placement-newing over an already constructed base; variable-buffer
+  construction context is still active during body construction.
+- `Transceiver::destroy()` now erases the local instance pointer map entry even
+  when shutdown/runtime state makes it return before unpublish/deactivation.
+- `ipc/semaphore.h` now uses the shared `detail::spin_pause()` implementation
+  instead of a private `backoff_yield()` macro; MSVC builds use
+  `YieldProcessor()`, including ARM64-family targets.
 
 ## Correctness TODO
 
-- Redesign `Message<T>` lifetime. It still inherits the body type and
-  placement-news over the already constructed base subobject. Move toward
-  composition/storage and provide compatibility accessors if needed.
-- Audit `Transceiver::destroy()`. Local pointer-map cleanup currently depends
-  on runtime/coordinator/reader availability because the function can return
-  before erasing `m_local_pointer_of_instance_id`.
 - Revisit detached `Process_message_reader` threads and destructor-time
   `exit(1)`. Prefer joinable ownership or a process-supervision policy outside
   the object destructor.
@@ -69,9 +71,6 @@ reclassified.
   documented in `coordinator.h`, so order violations fail loudly instead of
   relying on the comment and on `coordinator_lock_order_test`'s two
   instrumented stages.
-- Consolidate `detail::spin_pause()` with `backoff_yield()` in
-  `ipc/semaphore.h`, and add MSVC ARM64 support (`YieldProcessor`/`_M_ARM64`)
-  to the shared implementation.
 
 ## Message and ring protocol TODO
 
@@ -115,6 +114,8 @@ reclassified.
   construction from `managed_process_impl.h`.
 - Add C++20 concepts for message types, transceiver-like types,
   variable-buffer-compatible containers, and trivially serializable payloads.
+- Consider replacing `Message<T>` public body inheritance with
+  composition/storage and compatibility accessors in a planned API cleanup.
 - Reduce public `using std::...` aliases in namespace `sintra`.
 - Replace `Named_instance : std::string` with composition in a planned API
   cleanup.

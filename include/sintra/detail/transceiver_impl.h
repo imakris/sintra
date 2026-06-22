@@ -252,10 +252,20 @@ void Transceiver::destroy()
         no_readers = s_mproc->m_readers.empty();
     }
 
+    auto erase_local_pointer = [&]() {
+        // Always remove from local pointer map (for both published and unpublished
+        // transceivers) to prevent stale pointers when shutdown skips unpublish.
+        if (s_mproc && m_instance_id != s_coord_id) {
+            auto scoped_map = s_mproc->m_local_pointer_of_instance_id.scoped();
+            scoped_map.get().erase(m_instance_id);
+        }
+    };
+
     if (!s_mproc || !s_coord_id || no_readers) {
         // If the process is not running, there is nothing to facilitate the basic
         // functionality of a Transceiver object. This can happen if the process object is
         // itself being destroyed.
+        erase_local_pointer();
         return;
     }
 
@@ -306,12 +316,7 @@ void Transceiver::destroy()
         }
     }
 
-    // Always remove from local pointer map (for both published and unpublished transceivers)
-    // to prevent stale pointers when unpublish_all_transceivers() is called during finalize().
-    if (m_instance_id != s_coord_id) {
-        auto scoped_map = s_mproc->m_local_pointer_of_instance_id.scoped();
-        scoped_map.get().erase(m_instance_id);
-    }
+    erase_local_pointer();
 }
 
 

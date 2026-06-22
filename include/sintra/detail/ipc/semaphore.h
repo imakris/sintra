@@ -90,6 +90,7 @@ CAVEATS
   #define SINTRA_BACKEND_POLLING 1
 #elif defined(_WIN32)
   #include "../sintra_windows.h"
+  #include "spinlock.h"
   #include <synchapi.h>
   #include <mutex>
   #include <unordered_map>
@@ -218,17 +219,9 @@ struct ips_backend
   #if defined(_MSC_VER)
     #define bounded_swprintf(buf, cch, fmt, x)  _snwprintf_s(buf, cch, _TRUNCATE, fmt, x)
     #define bounded_swprintf2(buf, cch, fmt, s) _snwprintf_s(buf, cch, _TRUNCATE, fmt, s)
-    #define backoff_yield() YieldProcessor()
   #else
     #define bounded_swprintf(buf, cch, fmt, x)  swprintf(buf, cch, fmt, x)
     #define bounded_swprintf2(buf, cch, fmt, s) swprintf(buf, cch, fmt, s)
-    #if defined(__x86_64__) || defined(__i386__)
-      #define backoff_yield() __asm__ __volatile__("pause")
-    #elif defined(__aarch64__) || defined(__arm__)
-      #define backoff_yield() __asm__ __volatile__("yield")
-    #else
-      #define backoff_yield() ((void)0)  // No-op on other archs
-    #endif
   #endif
 
 
@@ -385,7 +378,7 @@ static void ips_win_ensure_ready(ips_backend& b) noexcept
         // Wait until published (state==2)
         unsigned spins = 0;
         while (st.init_flag.load(std::memory_order_acquire) != 2) {
-            backoff_yield();
+            detail::spin_pause();
             if ((++spins & 0x3FFF) == 0) {
                 Sleep(0);
             }

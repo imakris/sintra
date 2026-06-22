@@ -8,6 +8,7 @@
 #include <thread>
 
 #if defined(_MSC_VER)
+    #include "../sintra_windows.h"
     #include <intrin.h>
 #endif
 
@@ -23,8 +24,8 @@ namespace detail {
 
 inline void spin_pause() noexcept
 {
-#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
-    _mm_pause();
+#if defined(_MSC_VER)
+    YieldProcessor();
 #elif defined(__x86_64__) || defined(__i386__)
     __builtin_ia32_pause();
 #elif defined(__aarch64__)
@@ -192,4 +193,3 @@ private:
 };
 
 } // namespace sintra
-

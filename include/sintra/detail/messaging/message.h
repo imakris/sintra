@@ -258,6 +258,13 @@ private:
     uint32_t* m_old_pbytes_to_next_message;
 };
 
+inline variable_buffer_context_guard make_variable_buffer_context(
+    char*     message_start_address,
+    uint32_t* pbytes_to_next_message) noexcept
+{
+    return variable_buffer_context_guard(message_start_address, pbytes_to_next_message);
+}
+
 } // namespace detail
 
 
@@ -500,13 +507,12 @@ struct Message: public Message_prefix, public T
         typename = enable_if_t< !args_require_varbuffer<Args...> >
     >
     Message(Args&& ...args)
+    :
+        Message_prefix{
+            .bytes_to_next_message = static_cast<uint32_t>(
+                detail::finish_message_frame_size(sizeof(Message)))},
+        T{std::forward<Args>(args)...}
     {
-        bytes_to_next_message = static_cast<uint32_t>(
-            detail::finish_message_frame_size(sizeof(Message)));
-
-        void* body_ptr = static_cast<body_type*>(this);
-        new (body_ptr) body_type{std::forward<Args>(args)...};
-
         assert(bytes_to_next_message < detail::message_frame_size_limit);
 
         message_type_id = id();
@@ -518,15 +524,18 @@ struct Message: public Message_prefix, public T
         typename = enable_if_t< args_require_varbuffer<Args...> >
     >
     Message(Args&& ...args)
+    :
+        Message_prefix{
+            .bytes_to_next_message = static_cast<uint32_t>(sizeof(Message))},
+        // The discarded guard temporaries live through this full initializer,
+        // keeping TLS active while the T base subobject is built.
+        T{
+            (detail::make_variable_buffer_context(
+                reinterpret_cast<char*>(this),
+                &bytes_to_next_message),
+             std::forward<Args>(args))...
+        }
     {
-        bytes_to_next_message = sizeof(Message);
-
-        detail::variable_buffer_context_guard context(
-            reinterpret_cast<char*>(this),
-            &bytes_to_next_message);
-
-        void* body_ptr = static_cast<body_type*>(this);
-        new (body_ptr) body_type{std::forward<Args>(args)...};
         bytes_to_next_message = static_cast<uint32_t>(
             detail::finish_message_frame_size(bytes_to_next_message));
 
