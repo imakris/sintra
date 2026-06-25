@@ -10,6 +10,7 @@
 #include <memory>
 #include <mutex>
 #include <set>
+#include <string>
 #include <thread>
 namespace sintra {
 
@@ -107,9 +108,10 @@ struct Process_message_reader
     struct Delivery_target
     {
         Delivery_progress_weak_ptr progress;
-        Delivery_stream            stream      = Delivery_stream::Request;
-        sequence_counter_type      target      = invalid_sequence;
-        bool                       wait_needed = false;
+        instance_id_type           process_instance_id = invalid_instance_id;
+        Delivery_stream            stream              = Delivery_stream::Request;
+        sequence_counter_type      target              = invalid_sequence;
+        bool                       wait_needed         = false;
     };
 
     inline
@@ -187,6 +189,18 @@ struct Process_message_reader
     Delivery_progress_ptr delivery_progress() const { return m_delivery_progress; }
 
     State state() const { return m_reader_state.load(); }
+
+    static const char* reader_state_name(State state);
+    static const char* delivery_stream_name(Delivery_stream stream);
+    static const char* communication_state_name(int communication_state);
+
+    const char* reader_condition_name() const;
+    std::string diagnostic_summary() const;
+    std::string delivery_target_summary(
+        Delivery_stream        stream,
+        sequence_counter_type  target_sequence) const;
+
+    static std::string missing_reader_summary(instance_id_type target_process_id);
 
 private:
 

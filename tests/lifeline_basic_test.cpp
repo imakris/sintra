@@ -51,8 +51,11 @@ constexpr const char* k_case_crash           = "crash";
 constexpr const char* k_case_hung            = "hung";
 constexpr const char* k_case_leak            = "leak";
 constexpr const char* k_case_respawn         = "respawn";
+constexpr const char* k_case_wait_timeout    = "wait_timeout";
 constexpr const char* k_case_wedged_handler  = "wedged_handler";
 constexpr const char* k_wedged_service_name  = "lifeline_wedged_service";
+constexpr const char* k_wait_timeout_service_name =
+    "lifeline_wait_timeout_never_published";
 
 constexpr int k_owner_exit_timeout_ms         = 4000;
 constexpr int k_child_exit_timeout_ms         = 2000;
@@ -65,6 +68,10 @@ constexpr int k_leak_child_lifetime_ms        = 50;
 constexpr int k_leak_owner_timeout_ms         = 10000;
 constexpr int k_respawn_owner_timeout_ms      = 10000;
 constexpr int k_respawn_child_exit_timeout_ms = 2000;
+
+constexpr int k_wait_timeout_spawn_wait_ms     = 4000;
+constexpr int k_wait_timeout_child_pid_wait_ms = 6000;
+constexpr int k_wait_timeout_owner_hold_ms     = 6000;
 
 struct process_handle_t
 {
@@ -110,6 +117,16 @@ std::filesystem::path child_done_path(
 std::filesystem::path wedged_handler_started_path(const std::filesystem::path& dir)
 {
     return dir / "wedged_handler_started.txt";
+}
+
+std::filesystem::path wait_timeout_returned_path(const std::filesystem::path& dir)
+{
+    return dir / "wait_timeout_returned.txt";
+}
+
+std::filesystem::path wait_timeout_owner_release_path(const std::filesystem::path& dir)
+{
+    return dir / "wait_timeout_owner_release.txt";
 }
 
 std::filesystem::path respawn_occurrence_path(const std::filesystem::path& dir, uint32_t occurrence)
@@ -389,6 +406,58 @@ bool poll_exit(process_handle_t& process)
 void close_process(process_handle_t& /*process*/) {}
 #endif
 
+bool has_process_reference(const process_handle_t& process)
+{
+#ifdef _WIN32
+    return process.handle != nullptr;
+#else
+    return process.pid > 0;
+#endif
+}
+
+bool open_process_by_pid(long long pid, const char* label, process_handle_t& out)
+{
+    if (pid <= 0) {
+        std::fprintf(stderr, "[test] invalid %s pid: %lld\n", label, pid);
+        return false;
+    }
+
+#ifdef _WIN32
+    out.pid = static_cast<DWORD>(pid);
+    out.handle = OpenProcess(
+        SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+        FALSE,
+        out.pid);
+    if (!out.handle) {
+        std::fprintf(
+            stderr,
+            "[test] failed to open %s process (pid %lld, error %lu)\n",
+            label,
+            pid,
+            GetLastError());
+        return false;
+    }
+#else
+    out.pid = static_cast<pid_t>(pid);
+    out.waitable = false;
+#endif
+
+    return true;
+}
+
+void terminate_process(process_handle_t& process)
+{
+#ifdef _WIN32
+    if (process.handle && !process.exited) {
+        TerminateProcess(process.handle, 1);
+    }
+#else
+    if (process.pid > 0 && !process.exited) {
+        ::kill(process.pid, SIGKILL);
+    }
+#endif
+}
+
 bool wait_for_exit(process_handle_t& process, int timeout_ms, int& exit_code_out)
 {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
@@ -583,6 +652,12 @@ int run_owner(
         spawn_options.lifetime.hard_exit_timeout_ms = k_hung_hard_exit_timeout_ms;
     }
     else
+    if (test_case == k_case_wait_timeout) {
+        spawn_options.lifetime.hard_exit_timeout_ms = k_hung_hard_exit_timeout_ms;
+        spawn_options.wait_for_instance_name = k_wait_timeout_service_name;
+        spawn_options.wait_timeout = std::chrono::milliseconds(k_wait_timeout_spawn_wait_ms);
+    }
+    else
     if (test_case == k_case_wedged_handler) {
         spawn_options.lifetime.hard_exit_timeout_ms = k_hung_hard_exit_timeout_ms;
         spawn_options.wait_for_instance_name = k_wedged_service_name;
@@ -590,6 +665,28 @@ int run_owner(
     }
 
     const size_t spawned = sintra::spawn_swarm_process(spawn_options);
+    if (test_case == k_case_wait_timeout) {
+        if (spawned != 0) {
+            std::fprintf(stderr, "[owner] wait-timeout spawn unexpectedly returned %zu\n", spawned);
+            std::_Exit(6);
+        }
+
+        if (!write_text_file(wait_timeout_returned_path(dir), "timeout")) {
+            std::fprintf(stderr, "[owner] failed to write wait-timeout marker\n");
+            std::_Exit(7);
+        }
+
+        if (!sintra::test::wait_for_file(
+                wait_timeout_owner_release_path(dir),
+                std::chrono::milliseconds(k_wait_timeout_owner_hold_ms)))
+        {
+            std::fprintf(stderr, "[owner] wait-timeout release marker not received\n");
+            std::_Exit(8);
+        }
+
+        std::_Exit(0);
+    }
+
     if (spawned != 1) {
         std::fprintf(stderr, "[owner] failed to spawn child\n");
         std::_Exit(2);
@@ -855,20 +952,10 @@ bool run_respawn_test(const std::string& binary_path, const std::filesystem::pat
     }
 
     process_handle_t respawned_child{};
-#ifdef _WIN32
-    respawned_child.pid = static_cast<DWORD>(respawned_pid);
-    respawned_child.handle = OpenProcess(
-        SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
-        FALSE, respawned_child.pid);
-    if (!respawned_child.handle) {
-        std::fprintf(stderr, "[test] OpenProcess failed with error %lu\n", GetLastError());
+    if (!open_process_by_pid(respawned_pid, "respawned child", respawned_child)) {
         close_process(owner);
         return false;
     }
-#else
-    respawned_child.pid = static_cast<pid_t>(respawned_pid);
-    respawned_child.waitable = false;
-#endif
 
     if (!write_text_file(respawn_test_ready_path(dir), "ready")) {
         std::fprintf(stderr, "[test] failed to write respawn test ready file\n");
@@ -947,18 +1034,10 @@ bool run_owner_case(
     }
 
     process_handle_t child{};
-#ifdef _WIN32
-    child.pid = static_cast<DWORD>(child_pid_value_raw);
-    child.handle = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, child.pid);
-    if (!child.handle) {
-        std::fprintf(stderr, "[test] failed to open child process\n");
+    if (!open_process_by_pid(child_pid_value_raw, "child", child)) {
         close_process(owner);
         return false;
     }
-#else
-    child.pid = static_cast<pid_t>(child_pid_value_raw);
-    child.waitable = false;
-#endif
 
     int owner_exit = 0;
     if (!wait_for_exit(owner, k_owner_exit_timeout_ms, owner_exit)) {
@@ -998,6 +1077,99 @@ bool run_owner_case(
     }
 
     return true;
+}
+
+bool run_wait_timeout_cleanup_case(
+    const std::string&             binary_path,
+    const std::filesystem::path&   dir)
+{
+    std::vector<std::string> args = {
+        k_role_arg, k_role_owner,
+        k_case_arg, k_case_wait_timeout,
+        k_dir_arg, dir.string()
+    };
+
+    process_handle_t owner{};
+    if (!spawn_process(binary_path, args, owner)) {
+        std::fprintf(stderr, "[test] failed to spawn wait-timeout owner\n");
+        close_process(owner);
+        return false;
+    }
+
+    bool ok = true;
+
+    long long child_pid_value_raw = 0;
+    if (!wait_for_pid_value(
+            child_pid_path(dir, k_case_wait_timeout),
+            k_wait_timeout_child_pid_wait_ms,
+            child_pid_value_raw))
+    {
+        std::fprintf(stderr, "[test] failed to read wait-timeout child pid\n");
+        ok = false;
+    }
+
+    process_handle_t child{};
+    bool child_already_exited = false;
+    if (ok && !open_process_by_pid(child_pid_value_raw, "wait-timeout child", child)) {
+        child_already_exited = !process_exists(child_pid_value_raw);
+        if (!child_already_exited) {
+            ok = false;
+        }
+    }
+
+    if (ok &&
+        !sintra::test::wait_for_file(
+            wait_timeout_returned_path(dir),
+            std::chrono::milliseconds(k_wait_timeout_spawn_wait_ms + 2000)))
+    {
+        std::fprintf(stderr, "[test] wait-timeout owner did not report timeout\n");
+        ok = false;
+    }
+
+    if (ok && !is_running(owner)) {
+        std::fprintf(
+            stderr,
+            "[test] wait-timeout owner exited before release marker with code %d\n",
+            owner.exit_code);
+        ok = false;
+    }
+
+    int child_exit = 0;
+    if (ok && !child_already_exited &&
+        !wait_for_exit(child, k_hung_child_exit_timeout_ms, child_exit))
+    {
+        std::fprintf(stderr, "[test] wait-timeout child did not exit while owner was alive\n");
+        ok = false;
+    }
+
+    if (!write_text_file(wait_timeout_owner_release_path(dir), "release")) {
+        std::fprintf(stderr, "[test] failed to release wait-timeout owner\n");
+        ok = false;
+    }
+
+    int owner_exit = 0;
+    if (!wait_for_exit(owner, k_wait_timeout_owner_hold_ms, owner_exit)) {
+        std::fprintf(stderr, "[test] wait-timeout owner did not exit after release\n");
+        terminate_process(owner);
+        int ignored_exit = 0;
+        (void)wait_for_exit(owner, k_owner_exit_timeout_ms, ignored_exit);
+        ok = false;
+    }
+    else
+    if (owner_exit != 0) {
+        std::fprintf(stderr, "[test] wait-timeout owner exited with code %d\n", owner_exit);
+        ok = false;
+    }
+
+    if (has_process_reference(child) && !child.exited && is_running(child)) {
+        terminate_process(child);
+        int ignored_exit = 0;
+        (void)wait_for_exit(child, k_child_exit_timeout_ms, ignored_exit);
+    }
+
+    close_process(owner);
+    close_process(child);
+    return ok;
 }
 
 bool run_missing_lifeline_case(const std::string& binary_path)
@@ -1166,7 +1338,16 @@ int main(int argc, char* argv[])
             std::fprintf(stderr, "[child] missing args\n");
             return 1;
         }
-        return run_child(std::filesystem::path(dir_value), test_case, argc, argv);
+
+        const auto dir = std::filesystem::path(dir_value);
+        if (test_case == k_case_wait_timeout &&
+            !write_text_file(child_pid_path(dir, test_case), std::to_string(child_pid_value())))
+        {
+            std::fprintf(stderr, "[child] failed to write pre-init pid file\n");
+            return 1;
+        }
+
+        return run_child(dir, test_case, argc, argv);
     }
 
     if (!role.empty() && role == k_role_owner) {
@@ -1264,28 +1445,33 @@ int main(int argc, char* argv[])
         /*allow_any_owner_exit=*/false,
         /*child_exit_timeout_ms=*/k_hung_child_exit_timeout_ms);
 
-    // Test 7: Rapid spawn/kill cycles - detect handle/fd leaks (different owners)
+    // Test 7: Wait timeout cleanup - child exits while owner process remains alive.
+    const auto wait_timeout_dir =
+        sintra::test::unique_scratch_directory("lifeline_wait_timeout_cleanup");
+    ok &= run_wait_timeout_cleanup_case(binary_path, wait_timeout_dir);
+
+    // Test 8: Rapid spawn/kill cycles - detect handle/fd leaks (different owners)
     for (int i = 0; i < k_rapid_spawn_iterations && ok; ++i) {
         const auto rapid_dir = sintra::test::unique_scratch_directory(
             "lifeline_rapid_" + std::to_string(i));
         ok &= run_owner_case(binary_path, rapid_dir, k_case_normal, 99, false);
     }
 
-    // Test 8: Proper leak test - single owner spawns/kills many children
+    // Test 9: Proper leak test - single owner spawns/kills many children
     // This detects handle/fd leaks that accumulate in a long-running owner process.
     const auto leak_dir = sintra::test::unique_scratch_directory("lifeline_leak");
     ok &= run_leak_test(binary_path, leak_dir);
 
-    // Test 9: Auto-respawn test - respawned child gets new lifeline from coordinator
+    // Test 10: Auto-respawn test - respawned child gets new lifeline from coordinator
     // Verifies that the lifeline mechanism works correctly with sintra's recovery feature.
     const auto respawn_dir = sintra::test::unique_scratch_directory("lifeline_respawn");
     ok &= run_respawn_test(binary_path, respawn_dir);
 
-    // Test 10: Manual --lifeline_disable argument
+    // Test 11: Manual --lifeline_disable argument
     // Verifies that passing --lifeline_disable directly works correctly.
     ok &= run_manual_disable_case(binary_path);
 
-    // Test 11: Short option handling
+    // Test 12: Short option handling
     // Verifies that short options like -f don't accidentally trigger lifeline parsing.
     ok &= run_short_option_case(binary_path);
 

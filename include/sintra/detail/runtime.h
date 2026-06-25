@@ -866,10 +866,10 @@ inline bool cancel_external_process_invitation(const External_process_invitation
 }
 
 // Returns the number of processes spawned. When wait_for_instance_name is set in
-// options, this waits for the instance to appear and returns 0 on wait failure
-// even if spawning succeeded (the process may still be running). process_instance_id
-// is not validated for uniqueness; callers must ensure it is unused. Timeout
-// waits use polling with backoff to provide bounded wait durations.
+// options, this waits for the instance to appear and returns 0 on wait failure,
+// attempting cleanup if a process was created. process_instance_id is not
+// validated for uniqueness; callers must ensure it is unused. Timeout waits use
+// polling with backoff to provide bounded wait durations.
 inline size_t spawn_swarm_process(const Spawn_options& options)
 {
     if (options.binary_path.empty()) {
@@ -901,6 +901,88 @@ inline size_t spawn_swarm_process(const Spawn_options& options)
     const auto piid = (options.process_instance_id != invalid_instance_id)
         ? options.process_instance_id
         : make_process_instance_id();
+    std::optional<Managed_process::Spawn_result> wait_spawn_result;
+
+#ifdef _WIN32
+    auto close_wait_spawn_process_handle = [&]() {
+        if (!wait_spawn_result ||
+            !wait_spawn_result->os_process_handle_owned ||
+            wait_spawn_result->os_process_handle == 0)
+        {
+            return;
+        }
+
+        CloseHandle(reinterpret_cast<HANDLE>(wait_spawn_result->os_process_handle));
+        wait_spawn_result->os_process_handle       = 0;
+        wait_spawn_result->os_process_handle_owned = false;
+    };
+#endif
+
+    auto cleanup_failed_wait = [&](const char* failure_stage, const std::string& failure_reason) {
+        if (!wait_spawn_result ||
+            !wait_spawn_result->success ||
+            !wait_spawn_result->os_process_created)
+        {
+#ifdef _WIN32
+            close_wait_spawn_process_handle();
+#endif
+            return;
+        }
+
+        if (!s_mproc) {
+            Log_stream(log_level::warning)
+                << "spawn_swarm_process: wait failed but cleanup cannot run because "
+                << "the runtime process is no longer active"
+                << " process_instance_id="
+                << static_cast<unsigned long long>(wait_spawn_result->instance_id)
+                << " wait_target='" << options.wait_for_instance_name << "'"
+                << " failure_stage='" << failure_stage << "'"
+                << " failure_reason='" << failure_reason << "'"
+                << "\n";
+#ifdef _WIN32
+            close_wait_spawn_process_handle();
+#endif
+            return;
+        }
+
+        const auto first_publish_name = wait_spawn_result->os_pid > 0
+            ? std::string("sintra_process_") + std::to_string(wait_spawn_result->os_pid)
+            : std::string();
+
+        Managed_process::Spawn_cleanup_request cleanup_request;
+        cleanup_request.binary_name         = wait_spawn_result->binary_name;
+        cleanup_request.wait_target_name    = options.wait_for_instance_name;
+        cleanup_request.first_publish_name  = first_publish_name;
+        cleanup_request.instance_id         = wait_spawn_result->instance_id;
+        cleanup_request.wait_timeout        = wait_timeout;
+        cleanup_request.os_pid              = wait_spawn_result->os_pid;
+        cleanup_request.lifeline_enabled    = wait_spawn_result->lifeline_enabled;
+        cleanup_request.lifeline_timeout_ms = options.lifetime.hard_exit_timeout_ms;
+        cleanup_request.failure_stage       = failure_stage;
+        cleanup_request.failure_reason      = failure_reason;
+#ifdef _WIN32
+        cleanup_request.os_process_handle       = wait_spawn_result->os_process_handle;
+        cleanup_request.os_process_handle_owned = wait_spawn_result->os_process_handle_owned;
+        wait_spawn_result->os_process_handle       = 0;
+        wait_spawn_result->os_process_handle_owned = false;
+#endif
+
+        Log_stream(log_level::warning)
+            << "spawn_swarm_process: wait failed; initiating startup cleanup"
+            << " process_instance_id="
+            << static_cast<unsigned long long>(cleanup_request.instance_id)
+            << " pid=" << cleanup_request.os_pid
+#ifdef _WIN32
+            << " process_handle=" << cleanup_request.os_process_handle
+#endif
+            << " wait_target='" << cleanup_request.wait_target_name << "'"
+            << " wait_timeout_ms=" << cleanup_request.wait_timeout.count()
+            << " failure_stage='" << cleanup_request.failure_stage << "'"
+            << " failure_reason='" << cleanup_request.failure_reason << "'"
+            << "\n";
+
+        s_mproc->cleanup_failed_spawned_process_startup(cleanup_request);
+    };
 
     // Ensure argv[0] is the program name (required on Windows); avoid duplicates.
     {
@@ -960,10 +1042,16 @@ inline size_t spawn_swarm_process(const Spawn_options& options)
         spawn_args.args          = args;
         spawn_args.env_overrides = options.env_overrides;
         spawn_args.lifetime      = options.lifetime;
+#ifdef _WIN32
+        spawn_args.capture_process_handle = wait_requested;
+#endif
 
         for (size_t i = 0; i < options.count; ++i) {
             spawn_args.piid = piid;
             auto result = s_mproc->spawn_swarm_process(spawn_args);
+            if (wait_requested) {
+                wait_spawn_result = result;
+            }
             if (result.success) {
                 ++spawned;
             }
@@ -1025,22 +1113,33 @@ inline size_t spawn_swarm_process(const Spawn_options& options)
     catch (const std::exception& ex) {
         Log_stream(log_level::warning)
             << "spawn_swarm_process: wait failed (" << ex.what() << ")\n";
+        cleanup_failed_wait("wait_for_instance_name_exception", ex.what());
         return 0;
     }
     catch (...) {
         Log_stream(log_level::warning)
             << "spawn_swarm_process: wait failed (unknown exception)\n";
+        cleanup_failed_wait(
+            "wait_for_instance_name_exception",
+            "unknown exception");
         return 0;
     }
 
     if (!wait_succeeded) {
+        if (!wait_failure_reason) {
+            wait_failure_reason = "unknown wait failure";
+        }
         Log_stream(log_level::warning)
             << "spawn_swarm_process: wait failed (" << wait_failure_reason
             << ") for instance '" << options.wait_for_instance_name
             << "' (spawned=" << spawned << ")\n";
+        cleanup_failed_wait("wait_for_instance_name", wait_failure_reason);
         return 0;
     }
 
+#ifdef _WIN32
+    close_wait_spawn_process_handle();
+#endif
     return spawned;
 }
 

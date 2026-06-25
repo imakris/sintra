@@ -352,15 +352,63 @@ struct Managed_process: Derived_transceiver<Managed_process>
         instance_id_type           piid;
         uint32_t                   occurrence = 0;
         Lifetime_policy            lifetime;
+#ifdef _WIN32
+        bool                       capture_process_handle = false;
+#endif
     };
 
     struct Spawn_result
     {
-        bool                       success;
+        bool                       success = false;
+        bool                       os_process_created = false;
+        bool                       lifeline_enabled = false;
+        bool                       lifeline_write_retained = false;
         std::string                binary_name;
         instance_id_type           instance_id;
-        int                        errno_value;
+        int                        os_pid = -1;
+#ifdef _WIN32
+        uintptr_t                  os_process_handle = 0;
+        bool                       os_process_handle_owned = false;
+#endif
+        int                        errno_value = 0;
+        std::string                failure_stage;
         std::string                error_message;
+    };
+
+    struct Spawn_cleanup_request
+    {
+        std::string                binary_name;
+        std::string                wait_target_name;
+        std::string                first_publish_name;
+        instance_id_type           instance_id = invalid_instance_id;
+        std::chrono::milliseconds  wait_timeout{0};
+        int                        os_pid = -1;
+#ifdef _WIN32
+        uintptr_t                  os_process_handle = 0;
+        bool                       os_process_handle_owned = false;
+#endif
+        bool                       lifeline_enabled = false;
+        int                        lifeline_timeout_ms = 0;
+        std::string                failure_stage;
+        std::string                failure_reason;
+    };
+
+    struct Spawn_cleanup_result
+    {
+        bool                       process_was_registered = false;
+        bool                       normal_unpublish_attempted = false;
+        bool                       normal_unpublish_succeeded = false;
+        bool                       lifeline_release_attempted = false;
+        bool                       lifeline_released = false;
+        bool                       startup_bookkeeping_removed = false;
+        bool                       reader_removed = false;
+        bool                       forced_termination_attempted = false;
+        bool                       forced_termination_signal_sent = false;
+        bool                       forced_termination_confirmed = false;
+#ifdef _WIN32
+        uintptr_t                  os_process_handle_used = 0;
+#endif
+        std::string                forced_termination_error;
     };
 
 #ifndef _WIN32
@@ -368,6 +416,7 @@ struct Managed_process: Derived_transceiver<Managed_process>
     mutable std::mutex                  m_spawned_child_pids_mutex;
 
     void reap_finished_children();
+    void forget_spawned_child_pid(pid_t pid);
 #endif
 
     using lifeline_handle_type = uintptr_t;
@@ -375,9 +424,11 @@ struct Managed_process: Derived_transceiver<Managed_process>
                                         m_lifeline_writes;
     mutable std::mutex                  m_lifeline_mutex;
 
-    void release_lifeline(instance_id_type process_instance_id);
+    bool release_lifeline(instance_id_type process_instance_id);
     void release_all_lifelines();
 
+    Spawn_cleanup_result cleanup_failed_spawned_process_startup(
+        const Spawn_cleanup_request& request);
 
     Spawn_result spawn_swarm_process( const Spawn_swarm_process_args& ssp_args);
 

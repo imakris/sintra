@@ -188,6 +188,7 @@ struct Spawn_detached_options
 #ifdef _WIN32
     bool                       inherit_standard_handles = true;
     std::vector<HANDLE>        inherit_handles;
+    HANDLE*                    child_process_handle_out = nullptr;
 #endif
 };
 
@@ -632,8 +633,23 @@ bool spawn_detached_win32(const Spawn_detached_options& options)
     const char*        prog          = options.prog;
     const char* const* argv          = options.argv;
     int*               child_pid_out = options.child_pid_out;
+    HANDLE*            child_process_handle_out = options.child_process_handle_out;
+
+    auto reset_child_outputs = [&]() {
+        if (child_pid_out) {
+            *child_pid_out = -1;
+        }
+        if (child_process_handle_out) {
+            *child_process_handle_out = nullptr;
+        }
+    };
+
+    if (child_process_handle_out) {
+        *child_process_handle_out = nullptr;
+    }
 
     if (prog == nullptr || argv == nullptr) {
+        reset_child_outputs();
         return false;
     }
 
@@ -643,9 +659,7 @@ bool spawn_detached_win32(const Spawn_detached_options& options)
 
     char full_path[_MAX_PATH];
     if (_fullpath(full_path, prog, _MAX_PATH) == nullptr) {
-        if (child_pid_out) {
-            *child_pid_out = -1;
-        }
+        reset_child_outputs();
         return false;
     }
 
@@ -658,9 +672,7 @@ bool spawn_detached_win32(const Spawn_detached_options& options)
     // Validate command line length (Windows limit is 32,767 characters)
     constexpr size_t k_max_command_line_length = 32767;
     if (cmdline_str.length() >= k_max_command_line_length) {
-        if (child_pid_out) {
-            *child_pid_out = -1;
-        }
+        reset_child_outputs();
         errno = E2BIG;  // Argument list too long
         return false;
     }
@@ -851,9 +863,15 @@ bool spawn_detached_win32(const Spawn_detached_options& options)
             if (child_pid_out) {
                 *child_pid_out = static_cast<int>(pi.dwProcessId);
             }
+            if (child_process_handle_out) {
+                *child_process_handle_out = pi.hProcess;
+            }
+            else {
+                CloseHandle(pi.hProcess);
+            }
 
-            // Close handles - we don't need to hold them
-            CloseHandle(pi.hProcess);
+            // Close the thread handle - the optional process handle is returned
+            // to the caller when requested.
             CloseHandle(pi.hThread);
 
             if (use_handle_list && si_ex.lpAttributeList) {
@@ -891,7 +909,7 @@ bool spawn_detached_win32(const Spawn_detached_options& options)
         break;
     }
 
-    if (child_pid_out)   { *child_pid_out = -1;    }
+    reset_child_outputs();
     if (last_errno != 0) { _set_errno(last_errno); }
 
     if (last_doserrno != 0)                       { _set_doserrno(last_doserrno);                             }

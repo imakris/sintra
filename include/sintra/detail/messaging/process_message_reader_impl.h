@@ -14,6 +14,7 @@
 #include <initializer_list>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -34,10 +35,244 @@ void install_signal_handler();
 
 inline bool thread_local tl_is_req_thread = false;
 
+inline const char* Process_message_reader::reader_state_name(State state)
+{
+    switch (state) {
+        case READER_NORMAL:   return "normal";
+        case READER_SERVICE:  return "service";
+        case READER_STOPPING: return "stopping";
+        default:              return "unknown";
+    }
+}
+
+inline const char* Process_message_reader::delivery_stream_name(Delivery_stream stream)
+{
+    switch (stream) {
+        case Delivery_stream::Request: return "request";
+        case Delivery_stream::Reply:   return "reply";
+        default:                       return "unknown";
+    }
+}
+
+inline const char* Process_message_reader::communication_state_name(int communication_state)
+{
+    switch (communication_state) {
+        case Managed_process::COMMUNICATION_STOPPED: return "stopped";
+        case Managed_process::COMMUNICATION_PAUSED:  return "paused";
+        case Managed_process::COMMUNICATION_RUNNING: return "running";
+        default:                                     return "unknown";
+    }
+}
+
+inline void append_instance_id_value(std::ostringstream& out, instance_id_type value)
+{
+    if (value == invalid_instance_id) {
+        out << "unknown";
+        return;
+    }
+
+    out << static_cast<unsigned long long>(value);
+}
+
+inline void append_sequence_value(std::ostringstream& out, sequence_counter_type value)
+{
+    if (value == invalid_sequence) {
+        out << "invalid";
+        return;
+    }
+
+    out << value;
+}
+
+inline void append_sequence_lag(
+    std::ostringstream&    out,
+    sequence_counter_type  reading_sequence,
+    sequence_counter_type  leading_sequence)
+{
+    out << " lag=";
+    if (reading_sequence == invalid_sequence || leading_sequence == invalid_sequence) {
+        out << "unknown";
+        return;
+    }
+
+    if (leading_sequence < reading_sequence) {
+        out << "regressed";
+        return;
+    }
+
+    out << (leading_sequence - reading_sequence);
+}
+
+inline void append_current_communication_state(std::ostringstream& out)
+{
+    if (!s_mproc) {
+        out << " communication_state=unreachable";
+        return;
+    }
+
+    out << " communication_state="
+        << Process_message_reader::communication_state_name(s_mproc->m_communication_state);
+}
+
+inline void append_message_ring_summary(
+    std::ostringstream&                         out,
+    const char*                                 label,
+    const std::shared_ptr<Message_ring_R>&      ring,
+    bool                                        running,
+    bool                                        progress_available,
+    sequence_counter_type                       published_sequence,
+    bool                                        progress_stopped)
+{
+    out << " " << label
+        << "{running=" << (running ? 1 : 0)
+        << " progress_stopped=" << (progress_stopped ? 1 : 0);
+
+    out << " published=";
+    if (progress_available) {
+        append_sequence_value(out, published_sequence);
+    }
+    else {
+        out << "missing";
+    }
+
+    if (!ring) {
+        out << " ring=missing}";
+        return;
+    }
+
+    const auto reading_sequence = ring->get_message_reading_sequence();
+    const auto leading_sequence = ring->get_leading_sequence();
+    const auto ring_diagnostics = ring->get_diagnostics();
+
+    out << " ring_stopping=" << (ring->is_stopping() ? 1 : 0)
+        << " read=";
+    append_sequence_value(out, reading_sequence);
+    out << " lead=";
+    append_sequence_value(out, leading_sequence);
+    append_sequence_lag(out, reading_sequence, leading_sequence);
+    out << " capacity=" << message_ring_size
+        << " max_lag=" << ring_diagnostics.max_reader_lag
+        << " overflow_count=" << ring_diagnostics.reader_lag_overflow_count
+        << " worst_overflow_lag=" << ring_diagnostics.worst_overflow_lag
+        << " evictions=" << ring_diagnostics.reader_eviction_count
+        << " regressions=" << ring_diagnostics.reader_sequence_regressions
+        << "}";
+}
+
+inline const char* Process_message_reader::reader_condition_name() const
+{
+    if (m_reader_state.load() == READER_STOPPING) {
+        return "stopping";
+    }
+
+    if (m_req_running.load() || m_rep_running.load()) {
+        return "running";
+    }
+
+    return "stopped";
+}
+
+inline std::string Process_message_reader::diagnostic_summary() const
+{
+    std::ostringstream out;
+
+    out << "condition=" << reader_condition_name()
+        << " state=" << reader_state_name(m_reader_state.load())
+        << " target_process_id=";
+    append_instance_id_value(out, m_process_instance_id);
+    append_current_communication_state(out);
+
+    const auto progress           = m_delivery_progress;
+    const bool progress_available = static_cast<bool>(progress);
+
+    const auto request_published = progress_available
+        ? progress->request_sequence.load()
+        : invalid_sequence;
+    const auto reply_published = progress_available
+        ? progress->reply_sequence.load()
+        : invalid_sequence;
+
+    const bool request_stopped = progress_available && progress->request_stopped.load();
+    const bool reply_stopped   = progress_available && progress->reply_stopped.load();
+
+    append_message_ring_summary(
+        out,
+        "request",
+        m_in_req_c,
+        m_req_running.load(),
+        progress_available,
+        request_published,
+        request_stopped);
+    append_message_ring_summary(
+        out,
+        "reply",
+        m_in_rep_c,
+        m_rep_running.load(),
+        progress_available,
+        reply_published,
+        reply_stopped);
+
+    return out.str();
+}
+
+inline std::string Process_message_reader::delivery_target_summary(
+    Delivery_stream        stream,
+    sequence_counter_type  target_sequence) const
+{
+    std::ostringstream out;
+
+    out << "stream=" << delivery_stream_name(stream)
+        << " target_sequence=";
+    append_sequence_value(out, target_sequence);
+
+    const auto progress = m_delivery_progress;
+    if (!progress) {
+        out << " observed=missing stream_stopped=unknown ";
+        out << diagnostic_summary();
+        return out.str();
+    }
+
+    const auto observed_sequence = (stream == Delivery_stream::Request)
+        ? progress->request_sequence.load()
+        : progress->reply_sequence.load();
+    const bool stream_stopped = (stream == Delivery_stream::Request)
+        ? progress->request_stopped.load()
+        : progress->reply_stopped.load();
+
+    out << " observed=";
+    append_sequence_value(out, observed_sequence);
+    out << " stream_stopped=" << (stream_stopped ? 1 : 0)
+        << " target_lag=";
+    if (target_sequence == invalid_sequence || observed_sequence == invalid_sequence) {
+        out << "unknown";
+    }
+    else
+    if (target_sequence > observed_sequence) {
+        out << (target_sequence - observed_sequence);
+    }
+    else {
+        out << 0;
+    }
+
+    out << " " << diagnostic_summary();
+    return out.str();
+}
+
+inline std::string Process_message_reader::missing_reader_summary(instance_id_type target_process_id)
+{
+    std::ostringstream out;
+
+    out << "condition=missing target_process_id=";
+    append_instance_id_value(out, target_process_id);
+    append_current_communication_state(out);
+    return out.str();
+}
+
 inline bool validate_relay_sender(
-    Message_prefix&    message,
-    instance_id_type   ring_owner,
-    const char*        ring_name)
+    Message_prefix&                  message,
+    instance_id_type                 ring_owner,
+    const char*                      ring_name,
+    const Process_message_reader&    reader)
 {
     const instance_id_type sender_process      = process_of(message.sender_instance_id);
     const instance_id_type coordinator_process = process_of(s_coord_id);
@@ -52,36 +287,45 @@ inline bool validate_relay_sender(
         << " does not belong to ring owner "
         << static_cast<unsigned long long>(ring_owner)
         << " or coordinator process "
-        << static_cast<unsigned long long>(coordinator_process) << ".\n";
+        << static_cast<unsigned long long>(coordinator_process)
+        << ". " << reader.diagnostic_summary() << "\n";
     return false;
 }
 
-inline bool validate_request_message(Message_prefix& message, instance_id_type ring_owner)
+inline bool validate_request_message(
+    Message_prefix&                  message,
+    instance_id_type                 ring_owner,
+    const Process_message_reader&    reader)
 {
-    if (!validate_relay_sender(message, ring_owner, "request")) {
+    if (!validate_relay_sender(message, ring_owner, "request", reader)) {
         return false;
     }
 
     if (message.message_type_id == not_defined_type_id) {
         Log_stream(log_level::warning)
             << "Sintra dropped a request message with undefined message_type_id from sender_instance_id="
-            << static_cast<unsigned long long>(message.sender_instance_id) << ".\n";
+            << static_cast<unsigned long long>(message.sender_instance_id)
+            << ". " << reader.diagnostic_summary() << "\n";
         return false;
     }
 
     return true;
 }
 
-inline bool validate_reply_message(Message_prefix& message, instance_id_type ring_owner)
+inline bool validate_reply_message(
+    Message_prefix&                  message,
+    instance_id_type                 ring_owner,
+    const Process_message_reader&    reader)
 {
-    if (!validate_relay_sender(message, ring_owner, "reply")) {
+    if (!validate_relay_sender(message, ring_owner, "reply", reader)) {
         return false;
     }
 
     if (message.receiver_instance_id == any_local) {
         Log_stream(log_level::warning)
             << "Sintra dropped a reply message with invalid any_local receiver from sender_instance_id="
-            << static_cast<unsigned long long>(message.sender_instance_id) << ".\n";
+            << static_cast<unsigned long long>(message.sender_instance_id)
+            << ". " << reader.diagnostic_summary() << "\n";
         return false;
     }
 
@@ -308,10 +552,8 @@ bool Process_message_reader::stop_and_wait(double waiting_period)
             lk, std::chrono::duration<double>(1.0), no_readers);
         if (!no_readers()) {
             Log_stream(log_level::warning)
-                << "Process_message_reader::stop_and_wait timeout: pid="
-                << static_cast<unsigned long long>(m_process_instance_id)
-                << " req_running=" << m_req_running.load()
-                << " rep_running=" << m_rep_running.load() << "\n";
+                << "Process_message_reader::stop_and_wait timeout: "
+                << diagnostic_summary() << "\n";
         }
     }
     return no_readers();
@@ -429,7 +671,7 @@ void Process_message_reader::request_reader_function()
             break;
         }
 
-        if (!validate_request_message(*m, m_in_req_c->m_id)) {
+        if (!validate_request_message(*m, m_in_req_c->m_id, *this)) {
             publish_request_progress(m_in_req_c->get_message_reading_sequence());
             continue;
         }
@@ -506,7 +748,8 @@ void Process_message_reader::request_reader_function()
                             Log_stream(log_level::warning)
                                 << "Received RPC for unknown message type "
                                 << static_cast<unsigned long long>(m->message_type_id)
-                                << "; rejecting the request.\n";
+                                << "; rejecting the request. "
+                                << diagnostic_summary() << "\n";
 
                             const std::string reason     = "RPC function is not available.";
                             auto*             placed_msg =
@@ -629,8 +872,9 @@ Process_message_reader::Delivery_target Process_message_reader::prepare_delivery
     sequence_counter_type  target_sequence) const
 {
     Delivery_target target;
-    target.stream = stream;
-    target.target = target_sequence;
+    target.process_instance_id = m_process_instance_id;
+    target.stream              = stream;
+    target.target              = target_sequence;
 
     if (target_sequence == invalid_sequence) {
         return target;
@@ -726,7 +970,7 @@ void Process_message_reader::reply_reader_function()
             break;
         }
 
-        if (!validate_reply_message(*m, m_in_rep_c->m_id)) {
+        if (!validate_reply_message(*m, m_in_rep_c->m_id, *this)) {
             publish_reply_progress(m_in_rep_c->get_message_reading_sequence());
             continue;
         }
@@ -797,7 +1041,8 @@ void Process_message_reader::reply_reader_function()
                                 << "Warning: Reply reader received message for function_instance_id="
                                 << static_cast<unsigned long long>(m->function_instance_id)
                                 << " but no active handler found (receiver_instance_id="
-                                << static_cast<unsigned long long>(m->receiver_instance_id) << ")\n";
+                                << static_cast<unsigned long long>(m->receiver_instance_id)
+                                << ") " << diagnostic_summary() << "\n";
                         }
                     }
                 }
@@ -811,7 +1056,8 @@ void Process_message_reader::reply_reader_function()
                             << static_cast<unsigned long long>(m->receiver_instance_id)
                             << " but object no longer exists (sender="
                             << static_cast<unsigned long long>(m->sender_instance_id)
-                            << ", function=" << static_cast<unsigned long long>(m->function_instance_id) << ")\n";
+                            << ", function=" << static_cast<unsigned long long>(m->function_instance_id)
+                            << ") " << diagnostic_summary() << "\n";
                     }
                 }
             }

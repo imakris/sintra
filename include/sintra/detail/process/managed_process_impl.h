@@ -1260,6 +1260,14 @@ inline void Managed_process::reap_finished_children()
 
     m_spawned_child_pids.swap(remaining);
 }
+
+inline void Managed_process::forget_spawned_child_pid(pid_t pid)
+{
+    std::lock_guard<std::mutex> guard(m_spawned_child_pids_mutex);
+    m_spawned_child_pids.erase(
+        std::remove(m_spawned_child_pids.begin(), m_spawned_child_pids.end(), pid),
+        m_spawned_child_pids.end());
+}
 #endif
 
 // returns the argc/argv as a vector of strings
@@ -1887,7 +1895,7 @@ Managed_process::Spawn_result Managed_process::spawn_swarm_process(
     Spawn_result result;
     result.binary_name = s.binary_name;
     result.instance_id = s.piid;
-    result.errno_value = 0;
+    result.lifeline_enabled = s.lifetime.enable_lifeline;
 
     auto args = s.args;
     args.insert(args.end(), {"--recovery_occurrence", std::to_string(s.occurrence)});
@@ -1896,7 +1904,7 @@ Managed_process::Spawn_result Managed_process::spawn_swarm_process(
     // reading threads are up and running.
     if (!prepare_process_reader(s.piid, s.occurrence, true)) {
         result.success       = false;
-        result.errno_value   = 0;
+        result.failure_stage = "prepare_process_reader";
         result.error_message = "Failed to prepare process reader";
         return result;
     }
@@ -1909,6 +1917,7 @@ Managed_process::Spawn_result Managed_process::spawn_swarm_process(
 #ifdef _WIN32
     HANDLE lifeline_read_handle      = nullptr;
     HANDLE lifeline_write_handle_win = nullptr;
+    HANDLE spawned_process_handle    = nullptr;
 #else
     int lifeline_read_fd  = -1;
     int lifeline_write_fd = -1;
@@ -1919,12 +1928,18 @@ Managed_process::Spawn_result Managed_process::spawn_swarm_process(
     spawn_options.prog = s.binary_name.c_str();
     spawn_options.child_pid_out = &spawned_pid;
     spawn_options.env_overrides = s.env_overrides;
+#ifdef _WIN32
+    if (s.capture_process_handle) {
+        spawn_options.child_process_handle_out = &spawned_process_handle;
+    }
+#endif
 
     if (s.lifetime.enable_lifeline) {
 #ifdef _WIN32
         if (!create_lifeline_pipe(lifeline_read_handle, lifeline_write_handle_win, &spawn_error)) {
             spawn_ready = false;
             spawn_error_message = "Failed to create lifeline pipe";
+            result.failure_stage = "lifeline_pipe";
         }
         else {
             lifeline_write_handle = static_cast<Managed_process::lifeline_handle_type>(
@@ -1945,6 +1960,7 @@ Managed_process::Spawn_result Managed_process::spawn_swarm_process(
         if (!create_lifeline_pipe(lifeline_read_fd, lifeline_write_fd, &spawn_error)) {
             spawn_ready = false;
             spawn_error_message = "Failed to create lifeline pipe";
+            result.failure_stage = "lifeline_pipe";
         }
         else {
             lifeline_write_handle =
@@ -1976,7 +1992,30 @@ Managed_process::Spawn_result Managed_process::spawn_swarm_process(
     }
 
     if (spawn_ready) {
+        Log_stream(log_level::debug)
+            << "spawn_swarm_process: launching OS process"
+            << " process_instance_id=" << static_cast<unsigned long long>(s.piid)
+            << " occurrence=" << s.occurrence
+            << " binary='" << s.binary_name << "'"
+            << " lifeline=" << (s.lifetime.enable_lifeline ? "enabled" : "disabled")
+            << "\n";
+
         result.success = spawn_detached(spawn_options);
+        result.os_pid  = spawned_pid;
+#ifdef _WIN32
+        if (spawned_process_handle) {
+            result.os_process_handle =
+                reinterpret_cast<uintptr_t>(spawned_process_handle);
+            result.os_process_handle_owned = true;
+        }
+#endif
+        result.os_process_created =
+            result.success &&
+            (spawned_pid > 0
+#ifdef _WIN32
+                || result.os_process_handle != 0
+#endif
+            );
     }
     else {
         result.success = false;
@@ -2003,6 +2042,16 @@ Managed_process::Spawn_result Managed_process::spawn_swarm_process(
 #endif
 
     if (result.success) {
+        Log_stream(log_level::debug)
+            << "spawn_swarm_process: OS spawn succeeded"
+            << " process_instance_id=" << static_cast<unsigned long long>(s.piid)
+            << " pid=" << result.os_pid
+#ifdef _WIN32
+            << " process_handle=" << result.os_process_handle
+#endif
+            << " binary='" << s.binary_name << "'"
+            << "\n";
+
 #ifndef _WIN32
         if (spawned_pid > 0) {
             std::lock_guard<std::mutex> guard(m_spawned_child_pids_mutex);
@@ -2019,6 +2068,7 @@ Managed_process::Spawn_result Managed_process::spawn_swarm_process(
             else {
                 m_lifeline_writes.emplace(s.piid, lifeline_write_handle);
             }
+            result.lifeline_write_retained = true;
         }
         // Create an entry in the coordinator's transceiver registry.
         // This is essential for the implementation of publish_transceiver()
@@ -2035,6 +2085,12 @@ Managed_process::Spawn_result Managed_process::spawn_swarm_process(
         m_cached_spawns[s.piid].occurrence++;
     }
     else {
+#ifdef _WIN32
+        if (spawned_process_handle) {
+            CloseHandle(spawned_process_handle);
+            spawned_process_handle = nullptr;
+        }
+#endif
         if (lifeline_handle_valid(lifeline_write_handle)) {
             close_lifeline_handle(lifeline_write_handle);
         }
@@ -2051,6 +2107,9 @@ Managed_process::Spawn_result Managed_process::spawn_swarm_process(
 #endif
         if (result.error_message.empty()) {
             result.errno_value = saved_errno;
+            if (result.failure_stage.empty()) {
+                result.failure_stage = "os_spawn";
+            }
             std::ostringstream error_msg;
             error_msg << "Failed to spawn process";
             if (saved_errno != 0) {
@@ -2252,15 +2311,16 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
 }
 
 inline
-void Managed_process::release_lifeline(instance_id_type process_instance_id)
+bool Managed_process::release_lifeline(instance_id_type process_instance_id)
 {
     std::lock_guard<mutex> lock(m_lifeline_mutex);
     auto it = m_lifeline_writes.find(process_instance_id);
     if (it == m_lifeline_writes.end()) {
-        return;
+        return false;
     }
     close_lifeline_handle(it->second);
     m_lifeline_writes.erase(it);
+    return true;
 }
 
 inline
@@ -2271,6 +2331,294 @@ void Managed_process::release_all_lifelines()
         close_lifeline_handle(entry.second);
     }
     m_lifeline_writes.clear();
+}
+
+inline Managed_process::Spawn_cleanup_result
+Managed_process::cleanup_failed_spawned_process_startup(
+    const Spawn_cleanup_request& request)
+{
+    Spawn_cleanup_result result;
+    auto bool_text = [](bool value) { return value ? "true" : "false"; };
+
+    if (request.instance_id == invalid_instance_id) {
+        result.forced_termination_error = "invalid process instance id";
+        return result;
+    }
+
+    Log_stream(log_level::warning)
+        << "spawn_swarm_process: cleaning up failed startup"
+        << " process_instance_id=" << static_cast<unsigned long long>(request.instance_id)
+        << " pid=" << request.os_pid
+#ifdef _WIN32
+        << " process_handle=" << request.os_process_handle
+#endif
+        << " binary='" << request.binary_name << "'"
+        << " first_publish='" << request.first_publish_name << "'"
+        << " wait_target='" << request.wait_target_name << "'"
+        << " wait_timeout_ms=" << request.wait_timeout.count()
+        << " failure_stage='" << request.failure_stage << "'"
+        << " failure_reason='" << request.failure_reason << "'"
+        << "\n";
+
+    if (s_coord && s_coord->set_draining_state(request.instance_id, 1)) {
+        s_coord->note_draining_state_change();
+    }
+
+    if (m_cached_spawns.erase(request.instance_id) != 0) {
+        result.startup_bookkeeping_removed = true;
+    }
+
+    if (request.lifeline_enabled) {
+        result.lifeline_release_attempted = true;
+        result.lifeline_released = release_lifeline(request.instance_id);
+        Log_stream(log_level::warning)
+            << "spawn_swarm_process: lifeline release for failed startup"
+            << " process_instance_id=" << static_cast<unsigned long long>(request.instance_id)
+            << " released=" << bool_text(result.lifeline_released)
+            << "\n";
+    }
+    else {
+        Log_stream(log_level::debug)
+            << "spawn_swarm_process: no lifeline to release for failed startup"
+            << " process_instance_id=" << static_cast<unsigned long long>(request.instance_id)
+            << "\n";
+    }
+
+    if (s_coord) {
+        std::lock_guard publish_lock(s_coord->m_publish_mutex);
+        auto registry_it = s_coord->m_transceiver_registry.find(request.instance_id);
+        result.process_was_registered =
+            registry_it != s_coord->m_transceiver_registry.end() &&
+            registry_it->second.find(request.instance_id) != registry_it->second.end();
+    }
+
+    if (result.process_was_registered && s_coord) {
+        result.normal_unpublish_attempted = true;
+        try {
+            result.normal_unpublish_succeeded =
+                s_coord->unpublish_transceiver(request.instance_id);
+        }
+        catch (const std::exception& ex) {
+            result.forced_termination_error =
+                std::string("normal unpublish failed: ") + ex.what();
+        }
+        catch (...) {
+            result.forced_termination_error =
+                "normal unpublish failed with an unknown exception";
+        }
+    }
+
+    if (!result.normal_unpublish_succeeded) {
+        if (s_coord) {
+            auto pending_completions =
+                s_coord->collect_pending_barrier_completions(request.instance_id, true);
+            s_coord->emit_pending_barrier_completions(pending_completions);
+
+            {
+                std::lock_guard publish_lock(s_coord->m_publish_mutex);
+                auto registry_it = s_coord->m_transceiver_registry.find(request.instance_id);
+                if (registry_it != s_coord->m_transceiver_registry.end()) {
+                    s_coord->m_transceiver_registry.erase(registry_it);
+                    result.startup_bookkeeping_removed = true;
+                }
+                s_coord->m_external_attached_processes.erase(request.instance_id);
+            }
+
+            {
+                auto name_map = m_instance_id_of_assigned_name.scoped();
+                for (auto name_it = name_map.begin(); name_it != name_map.end();)
+                {
+                    if (process_of(name_it->second) == request.instance_id) {
+                        name_it = name_map.erase(name_it);
+                    }
+                    else {
+                        ++name_it;
+                    }
+                }
+            }
+
+            s_coord->mark_initialization_complete(request.instance_id);
+        }
+
+        const bool had_reader = has_process_reader(request.instance_id);
+        remove_process_reader(request.instance_id, 1.0);
+        result.reader_removed = had_reader && !has_process_reader(request.instance_id);
+    }
+
+    auto cleanup_grace = [&]() {
+        auto grace = std::chrono::milliseconds(
+            request.lifeline_timeout_ms > 0 ? request.lifeline_timeout_ms : 100);
+        grace = std::max(grace, std::chrono::milliseconds(100));
+        grace = std::min(grace, std::chrono::milliseconds(1000));
+        return grace;
+    };
+
+    if (!result.normal_unpublish_succeeded) {
+#ifdef _WIN32
+        HANDLE process_handle = reinterpret_cast<HANDLE>(request.os_process_handle);
+        bool close_process_handle = request.os_process_handle_owned && process_handle;
+        if (!process_handle && request.os_pid > 0) {
+            process_handle = OpenProcess(
+                PROCESS_TERMINATE | SYNCHRONIZE,
+                FALSE,
+                static_cast<DWORD>(request.os_pid));
+            close_process_handle = process_handle != nullptr;
+        }
+
+        result.os_process_handle_used = reinterpret_cast<uintptr_t>(process_handle);
+        result.forced_termination_attempted = process_handle != nullptr;
+
+        if (process_handle) {
+            const auto grace_ms = static_cast<DWORD>(cleanup_grace().count());
+            DWORD wait_result = WaitForSingleObject(process_handle, grace_ms);
+            if (wait_result == WAIT_OBJECT_0) {
+                result.forced_termination_confirmed = true;
+            }
+            else {
+                if (TerminateProcess(process_handle, 1)) {
+                    result.forced_termination_signal_sent = true;
+                    wait_result = WaitForSingleObject(process_handle, 1000);
+                    result.forced_termination_confirmed = wait_result == WAIT_OBJECT_0;
+                    if (!result.forced_termination_confirmed &&
+                        result.forced_termination_error.empty())
+                    {
+                        result.forced_termination_error =
+                            "process did not exit after TerminateProcess";
+                    }
+                }
+                else {
+                    const DWORD error = GetLastError();
+                    result.forced_termination_error =
+                        "TerminateProcess failed with Windows error " +
+                        std::to_string(static_cast<unsigned long>(error));
+                }
+            }
+
+            if (close_process_handle) {
+                CloseHandle(process_handle);
+            }
+        }
+        else {
+            result.forced_termination_error =
+                "no process handle available for forced termination";
+        }
+#else
+        if (request.os_pid > 0) {
+            const auto pid = static_cast<pid_t>(request.os_pid);
+            result.forced_termination_attempted = true;
+
+            auto wait_until_gone = [&](std::chrono::milliseconds timeout) {
+                const auto deadline = std::chrono::steady_clock::now() + timeout;
+                while (true) {
+                    int   status = 0;
+                    pid_t wait_result = ::waitpid(pid, &status, WNOHANG);
+                    if (wait_result == pid) {
+                        forget_spawned_child_pid(pid);
+                        return true;
+                    }
+                    if (wait_result == -1) {
+                        if (errno == EINTR) {
+                            continue;
+                        }
+                        if (errno != ECHILD) {
+                            result.forced_termination_error =
+                                "waitpid failed with errno " + std::to_string(errno);
+                            return false;
+                        }
+                    }
+
+                    if (::kill(pid, 0) == -1 && errno == ESRCH) {
+                        forget_spawned_child_pid(pid);
+                        return true;
+                    }
+
+                    const auto now = std::chrono::steady_clock::now();
+                    if (now >= deadline) {
+                        return false;
+                    }
+
+                    const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        deadline - now);
+                    std::this_thread::sleep_for(std::min(
+                        std::chrono::milliseconds(20),
+                        remaining));
+                }
+            };
+
+            result.forced_termination_confirmed = wait_until_gone(cleanup_grace());
+            if (!result.forced_termination_confirmed) {
+                if (::kill(pid, SIGTERM) == 0) {
+                    result.forced_termination_signal_sent = true;
+                    result.forced_termination_confirmed =
+                        wait_until_gone(std::chrono::seconds(1));
+                }
+                else
+                if (errno == ESRCH) {
+                    forget_spawned_child_pid(pid);
+                    result.forced_termination_confirmed = true;
+                }
+                else {
+                    result.forced_termination_error =
+                        "SIGTERM failed with errno " + std::to_string(errno);
+                }
+            }
+
+            if (!result.forced_termination_confirmed &&
+                result.forced_termination_error.empty())
+            {
+                if (::kill(pid, SIGKILL) == 0) {
+                    result.forced_termination_signal_sent = true;
+                    result.forced_termination_confirmed =
+                        wait_until_gone(std::chrono::seconds(1));
+                }
+                else
+                if (errno == ESRCH) {
+                    forget_spawned_child_pid(pid);
+                    result.forced_termination_confirmed = true;
+                }
+                else {
+                    result.forced_termination_error =
+                        "SIGKILL failed with errno " + std::to_string(errno);
+                }
+            }
+
+            if (!result.forced_termination_confirmed &&
+                result.forced_termination_error.empty())
+            {
+                result.forced_termination_error =
+                    "process did not exit after SIGKILL";
+            }
+        }
+        else {
+            result.forced_termination_error =
+                "no pid available for forced termination";
+        }
+#endif
+    }
+#ifdef _WIN32
+    else
+    if (request.os_process_handle_owned && request.os_process_handle != 0) {
+        CloseHandle(reinterpret_cast<HANDLE>(request.os_process_handle));
+    }
+#endif
+
+    Log_stream(log_level::warning)
+        << "spawn_swarm_process: failed-startup cleanup result"
+        << " process_instance_id=" << static_cast<unsigned long long>(request.instance_id)
+        << " registered=" << bool_text(result.process_was_registered)
+        << " normal_unpublish_attempted=" << bool_text(result.normal_unpublish_attempted)
+        << " normal_unpublish_succeeded=" << bool_text(result.normal_unpublish_succeeded)
+        << " lifeline_release_attempted=" << bool_text(result.lifeline_release_attempted)
+        << " lifeline_released=" << bool_text(result.lifeline_released)
+        << " bookkeeping_removed=" << bool_text(result.startup_bookkeeping_removed)
+        << " reader_removed=" << bool_text(result.reader_removed)
+        << " forced_attempted=" << bool_text(result.forced_termination_attempted)
+        << " forced_signal_sent=" << bool_text(result.forced_termination_signal_sent)
+        << " forced_confirmed=" << bool_text(result.forced_termination_confirmed)
+        << " forced_error='" << result.forced_termination_error << "'"
+        << "\n";
+
+    return result;
 }
 
 inline
