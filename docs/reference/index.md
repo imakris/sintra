@@ -8,7 +8,7 @@
 | [`sintra::make_branches`](make_branches.md) | function | `<sintra/sintra.h>` | Build the branch vector consumed by `init`. |
 | [`sintra::process_index`](process_index.md) | function | `<sintra/sintra.h>` | Return the current process branch index. |
 | [`sintra::Process_descriptor`](process_descriptor.md) | type | `<sintra/sintra.h>` | Describe a process branch or spawn target. |
-| [`sintra::spawn_swarm_process`](spawn_swarm_process.md) | function | `<sintra/sintra.h>` | Add managed processes to a running swarm. |
+| [`sintra::spawn_swarm_process`](spawn_swarm_process.md) | function | `<sintra/sintra.h>` | Add a managed process to a running swarm. |
 | [`sintra::join_swarm`](join_swarm.md) | function | `<sintra/sintra.h>` | Join an existing branch at runtime. |
 | [`sintra::create_external_process_invitation`](external_process_invitation.md) | function | `<sintra/sintra.h>` | Pre-admit a manually launched process into an existing swarm. |
 | [`sintra::disable_debug_pause_for_current_process`](disable_debug_pause_for_current_process.md) | function | `<sintra/sintra.h>` | Opt the current process out of debug pause-on-exit behavior. |
@@ -62,7 +62,6 @@
 | Symbol | Kind | Header | Purpose |
 | --- | --- | --- | --- |
 | [`sintra::barrier`](barrier.md) | function template | `<sintra/sintra.h>` | Synchronize a process group at a named checkpoint. |
-| [`sintra::barrier_completed`](barrier.md) | function | `<sintra/sintra.h>` | Test whether a barrier returned a valid sequence. |
 | [`sintra::rendezvous_t`](barrier_modes.md) | tag type | `<sintra/sintra.h>` | Barrier mode for rendezvous only. |
 | [`sintra::delivery_fence_t`](barrier_modes.md) | tag type | `<sintra/sintra.h>` | Barrier mode for rendezvous plus delivery drain. |
 | [`sintra::processing_fence_t`](barrier_modes.md) | tag type | `<sintra/sintra.h>` | Barrier mode for completed handler side effects. |

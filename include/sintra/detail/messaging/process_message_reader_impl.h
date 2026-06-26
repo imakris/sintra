@@ -4,7 +4,6 @@
 #pragma once
 
 #include "../logging.h"
-#include "../process/process_id.h"
 #include "../transceiver_impl.h"
 #include "../tls_post_handler.h"
 #include <atomic>
@@ -18,10 +17,6 @@
 #include <thread>
 #include <utility>
 #include <vector>
-
-#ifndef SINTRA_TRACE_WORLD
-#define SINTRA_TRACE_WORLD 0
-#endif
 
 namespace sintra {
 
@@ -457,8 +452,7 @@ private:
 
 inline void dispatch_event_handlers(
     Message_prefix&                            message,
-    std::initializer_list<instance_id_type>    scope_ids,
-    bool                                       trace_world)
+    std::initializer_list<instance_id_type>    scope_ids)
 {
     // Collect matching handlers under the lock, then invoke them after releasing
     // it.  On Windows, CRITICAL_SECTION (backing std::recursive_mutex) has unfair
@@ -500,12 +494,6 @@ inline void dispatch_event_handlers(
         return;
     }
     detail::Handler_dispatch_depth_scope dispatch_depth_scope(dispatch_registered);
-
-    if (trace_world) {
-        Log_stream(log_level::debug)
-            << "[sintra_trace_world] pid=" << static_cast<int>(detail::get_current_process_id())
-            << " handlers=" << collected.size() << "\n";
-    }
 
     try {
         for (auto& collected_slot : collected) {
@@ -826,8 +814,7 @@ void Process_message_reader::request_reader_function()
                 {
                     dispatch_event_handlers(
                         *m,
-                        {m->sender_instance_id, any_local, any_local_or_remote},
-                        false);
+                        {m->sender_instance_id, any_local, any_local_or_remote});
                 }
             }
             else {
@@ -931,24 +918,9 @@ void Process_message_reader::request_reader_function()
                     (m->receiver_instance_id == any_remote) && sender_is_local;
 
                 if (!coordinator_reading_remote && !skip_local_sender) {
-                    // Optional debug tracing for world broadcasts to diagnose missing deliveries (SINTRA_TRACE_WORLD).
-                    const bool trace_world = (SINTRA_TRACE_WORLD != 0);
-
-                    if (trace_world) {
-                        Log_stream(log_level::debug)
-                            << "[sintra_trace_world] pid=" << static_cast<int>(detail::get_current_process_id())
-                            << " reader_state=" << static_cast<int>(reader_state)
-                            << " msg_type="     << static_cast<unsigned long long>(m->message_type_id)
-                            << " sender_iid="   << static_cast<unsigned long long>(m->sender_instance_id)
-                            << " recv_iid="     << static_cast<unsigned long long>(m->receiver_instance_id)
-                            << " proc_iid="
-                            << static_cast<unsigned long long>(s_mproc ? s_mproc->m_instance_id : 0ULL) << "\n";
-                    }
-
                     dispatch_event_handlers(
                         *m,
-                        {m->sender_instance_id, any_remote, any_local_or_remote},
-                        trace_world);
+                        {m->sender_instance_id, any_remote, any_local_or_remote});
                 }
             }
 

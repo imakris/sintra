@@ -181,28 +181,6 @@ bool run_preinit_spawn_swarm_validation()
     {
         sintra::Spawn_options options;
         options.binary_path = "dummy_binary";
-        options.count = 0;
-        const size_t spawned = sintra::spawn_swarm_process(options);
-        ok &= sintra::test::assert_true(spawned == 0,
-            "[PREINIT] ",
-            "spawn_swarm_process should return 0 when count == 0");
-    }
-
-    {
-        sintra::Spawn_options options;
-        options.binary_path            = "dummy_binary";
-        options.count                  = 2;
-        options.wait_for_instance_name = "dummy_instance";
-        const size_t spawned = sintra::spawn_swarm_process(options);
-        ok &= sintra::test::assert_true(
-            spawned == 0,
-            "[PREINIT] ",
-            "spawn_swarm_process should return 0 when wait_for_instance_name is set with count != 1");
-    }
-
-    {
-        sintra::Spawn_options options;
-        options.binary_path = "dummy_binary";
         options.wait_for_instance_name = "dummy_instance";
         const size_t spawned = sintra::spawn_swarm_process(options);
         ok &= sintra::test::assert_true(

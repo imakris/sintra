@@ -25,7 +25,7 @@
 #define SINTRA_STALE_GUARD_DELAY_MS 25
 #define private public
 #define protected public
-#include "sintra/detail/ipc/rings.h"
+#include "sintra/rings.h"
 
 #include "test_utils.h"
 #include "test_ring_utils.h"

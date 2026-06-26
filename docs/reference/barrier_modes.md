@@ -28,7 +28,7 @@ Each mode causes `sintra::barrier` to return the same shape:
 - `sequence_counter_type` — the reply-ring watermark for the completed
   barrier.
 - `invalid_sequence` — returned when the barrier was treated as satisfied
-  during shutdown or drain handling. Use `barrier_completed(seq)` to
+  during shutdown or drain handling. Use `seq != invalid_sequence` to
   distinguish a normal completion.
 
 ## Throws

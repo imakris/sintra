@@ -72,7 +72,7 @@ Contract:
   rings for ordering messages and reporting barrier completion. The
   sentinel `invalid_sequence` is `~sequence_counter_type(0)`. Treat
   `sequence_counter_type` as opaque outside the ring helpers; the value
-  returned by `barrier(...)` is consumed via `barrier_completed(...)`.
+  returned by `barrier(...)` is compared with `invalid_sequence`.
 
 Threading and lifecycle:
 - All listed helpers are pure value-level operations and have no runtime

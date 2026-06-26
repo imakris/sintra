@@ -137,7 +137,6 @@
 #include <initializer_list>
 #include <limits>
 #include <memory>
-#include <mutex>         // std::once_flag, std::call_once
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -186,7 +185,6 @@
 namespace sintra {
 
 namespace fs  = std::filesystem;
-namespace ipc = detail::ipc;
 
 using sequence_counter_type = uint64_t;
 
@@ -1548,13 +1546,6 @@ private:
                 return false;
             }
 
-#if defined(SINTRA_RUNTIME_CACHELINE_CHECK) && (defined(__linux__) || defined(__APPLE__))
-            // Warn ONCE per process if we detect a cache-line mismatch.
-            static std::once_flag once;
-            std::call_once(once, []{
-                sintra_warn_if_cacheline_mismatch(assumed_cache_line_size);
-            });
-#endif
             return true;
         }
         catch (...) {

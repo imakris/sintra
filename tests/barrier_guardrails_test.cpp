@@ -34,7 +34,7 @@ int processing_worker()
             sintra::barrier<sintra::processing_fence_t>("mixed-mode", "_sintra_external_processes");
         write_text(
             result_path,
-            sintra::barrier_completed(sequence) ? "completed" : "bypassed");
+            sequence != sintra::invalid_sequence ? "completed" : "bypassed");
         return 0;
     }
     catch (const std::logic_error& e) {
@@ -59,7 +59,7 @@ int rendezvous_worker()
             sintra::barrier<sintra::rendezvous_t>("mixed-mode", "_sintra_external_processes");
         write_text(
             result_path,
-            sintra::barrier_completed(sequence) ? "completed" : "bypassed");
+            sequence != sintra::invalid_sequence ? "completed" : "bypassed");
         return 0;
     }
     catch (const std::logic_error& e) {

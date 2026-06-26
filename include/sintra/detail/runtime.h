@@ -41,10 +41,6 @@
 #include <unistd.h>
 #endif
 
-#ifndef SINTRA_TRACE_FINALIZE
-#define SINTRA_TRACE_FINALIZE 0
-#endif
-
 namespace sintra {
 namespace detail {
 
@@ -197,7 +193,6 @@ struct Spawn_options
     std::string                binary_path;
     std::vector<std::string>   args;
     std::vector<std::string>   env_overrides;
-    size_t                     count               = 1;
     instance_id_type           process_instance_id = invalid_instance_id;
     std::string                wait_for_instance_name;
     std::chrono::milliseconds  wait_timeout{0};
@@ -368,25 +363,10 @@ inline bool finalize_impl()
         shutdown_protocol_state::finalizing, std::memory_order_acq_rel);
     (void)prev;  // Previous state is informational; no assertion needed here.
 
-    const bool trace_finalize = (SINTRA_TRACE_FINALIZE != 0);
-
-    auto trace = [&](const char* stage) {
-        if (trace_finalize) {
-            Log_stream(log_level::debug)
-                << "[sintra_finalize] stage=" << stage
-                << " coord="    << (s_coord ? 1 : 0)
-                << " mproc_id=" << static_cast<unsigned long long>(s_mproc_id)
-                << "\n";
-        }
-    };
-
-    trace("begin");
-
     sequence_counter_type flush_seq = invalid_sequence;
 
     if (s_coord) {
         s_coord->begin_shutdown();
-        trace("begin_process_draining_local.start");
         // Coordinator-local finalize: announce draining to local state so that
         // new barriers exclude this process, then wait until all known
         // processes have entered the draining state (or been scavenged) before
@@ -395,10 +375,8 @@ inline bool finalize_impl()
         // coordinator remains alive.
         flush_seq = s_coord->begin_process_draining(s_mproc_id);
         s_coord->wait_for_all_draining(s_mproc_id);
-        trace("begin_process_draining_local.done");
     }
     else {
-        trace("begin_process_draining_remote.start");
         if (s_mproc->m_must_stop.load(std::memory_order_acquire)) {
             // The coordinator has already been unpublished or observed as gone.
             // A drain RPC cannot complete in this state, so proceed with local
@@ -442,7 +420,6 @@ inline bool finalize_impl()
                     << " with an unknown exception. Proceeding with degraded shutdown semantics.\n";
             }
         }
-        trace("begin_process_draining_remote.done");
     }
 
     if (!s_coord && flush_seq != invalid_sequence) {
@@ -453,21 +430,13 @@ inline bool finalize_impl()
     // transceivers. This prevents user-level event handlers from running
     // concurrently with teardown while still allowing RPCs and service
     // messages (including unpublish notifications) to flow.
-    trace("pause.start");
     s_mproc->pause();
-    trace("pause.done");
 
-    trace("unblock_rpc.start");
     s_mproc->unblock_rpc();
-    trace("unblock_rpc.done");
 
-    trace("deactivate_all.start");
     s_mproc->deactivate_all();
-    trace("deactivate_all.done");
 
-    trace("unpublish_all.start");
     s_mproc->unpublish_all_transceivers();
-    trace("unpublish_all.done");
 
     delete s_mproc;
     s_mproc = nullptr;
@@ -479,8 +448,6 @@ inline bool finalize_impl()
         s_shutdown_state.store(shutdown_protocol_state::idle, std::memory_order_release);
         s_teardown_admission_closed.store(false, std::memory_order_release);
     }
-
-    trace("end");
 
     return true;
 }
@@ -878,21 +845,6 @@ inline size_t spawn_swarm_process(const Spawn_options& options)
         return 0;
     }
 
-    if (options.count == 0) {
-        Log_stream(log_level::error)
-            << "spawn_swarm_process: count must be greater than zero\n";
-        return 0;
-    }
-
-    if ((options.process_instance_id != invalid_instance_id ||
-        !options.wait_for_instance_name.empty()) &&
-        options.count != 1)
-    {
-        Log_stream(log_level::error)
-            << "spawn_swarm_process: explicit instance or wait requires count == 1\n";
-        return 0;
-    }
-
     const bool       wait_requested = !options.wait_for_instance_name.empty();
     const auto       wait_timeout   = options.wait_timeout;
     instance_id_type coord_id       = invalid_instance_id;
@@ -1046,15 +998,13 @@ inline size_t spawn_swarm_process(const Spawn_options& options)
         spawn_args.capture_process_handle = wait_requested;
 #endif
 
-        for (size_t i = 0; i < options.count; ++i) {
-            spawn_args.piid = piid;
-            auto result = s_mproc->spawn_swarm_process(spawn_args);
-            if (wait_requested) {
-                wait_spawn_result = result;
-            }
-            if (result.success) {
-                ++spawned;
-            }
+        spawn_args.piid = piid;
+        auto result = s_mproc->spawn_swarm_process(spawn_args);
+        if (wait_requested) {
+            wait_spawn_result = result;
+        }
+        if (result.success) {
+            ++spawned;
         }
     }
 

@@ -1,4 +1,4 @@
-#include "sintra/detail/ipc/rings.h"
+#include "sintra/rings.h"
 #include "test_utils.h"
 
 #include <cstddef>

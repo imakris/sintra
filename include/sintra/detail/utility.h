@@ -537,7 +537,7 @@ inline std::vector<std::string> build_environment_entries(const std::vector<std:
 
 } // namespace detail
 
-#ifndef _WIN32
+#if !defined(_WIN32) && defined(SINTRA_ENABLE_TEST_HOOKS)
 
 namespace testing {
 
@@ -568,7 +568,7 @@ inline detail::spawn_detached_debug_fn set_spawn_detached_debug(detail::spawn_de
 
 } // namespace testing
 
-#endif // !_WIN32
+#endif // !defined(_WIN32) && defined(SINTRA_ENABLE_TEST_HOOKS)
 
 namespace detail {
 

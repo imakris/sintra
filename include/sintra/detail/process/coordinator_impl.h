@@ -75,11 +75,7 @@ inline constexpr const char* k_stage_unpublish_pre_barrier_collection =
 inline constexpr const char* k_stage_make_process_group_groups_locked =
     "make_process_group/groups_locked";
 
-}} // namespace detail::test_hooks
-
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
-namespace detail { namespace test_hooks {
-
 // Coordinator lock-stage hook: tests running in the coordinator process may
 // install a callback to rendezvous threads at named coordinator locking
 // stages (see coordinator_lock_order_test). The callback runs on RPC/reader
@@ -87,9 +83,11 @@ namespace detail { namespace test_hooks {
 // the coordinator.
 using Coordinator_lock_stage_callback = void (*)(const char* stage);
 inline std::atomic<Coordinator_lock_stage_callback> s_coordinator_lock_stage{nullptr};
+#endif
 
 }} // namespace detail::test_hooks
 
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
 inline void coordinator_lock_stage_for_test(const char* stage)
 {
     const auto callback =

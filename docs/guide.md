@@ -280,7 +280,6 @@ struct Spawn_options
 {
     std::string binary_path;
     std::vector<std::string> args;
-    size_t count = 1;
     instance_id_type process_instance_id = invalid_instance_id;
     std::string wait_for_instance_name;
     std::chrono::milliseconds wait_timeout{0};
@@ -315,8 +314,8 @@ Signature:
 size_t spawn_swarm_process(const Spawn_options& options);
 ```
 
-Spawns one or more additional managed processes. Use `Spawn_options` to select
-the binary, arguments, count, optional expected instance name, wait timeout, and
+Spawns one additional managed process. Use `Spawn_options` to select
+the binary, arguments, optional expected instance name, wait timeout, and
 lifeline policy.
 
 Compiled examples/tests:
@@ -762,7 +761,6 @@ sequence_counter_type barrier(
     const std::string& barrier_name,
     const std::string& group_name = "_sintra_external_processes");
 
-bool barrier_completed(sequence_counter_type barrier_sequence);
 ```
 
 Barrier modes:
@@ -773,8 +771,8 @@ Barrier modes:
 | `delivery_fence_t` | Default. Pre-barrier messages have been fetched by local readers and queued for handling. Handlers may still be running. |
 | `processing_fence_t` | Control-thread fence for completed handler side effects. See handler-context caveat below. |
 
-`barrier()` returns a reply-ring watermark. `barrier_completed(seq)` is true
-unless `seq == invalid_sequence`. `invalid_sequence` can be returned when the
+`barrier()` returns a reply-ring watermark. `seq != invalid_sequence` is true
+for a normal completion. `invalid_sequence` can be returned when the
 barrier is treated as satisfied during shutdown or draining.
 
 Barrier names beginning with `_sintra_` are reserved. Mixed barrier modes for
@@ -1241,7 +1239,6 @@ sources.
 | `sintra::any_local_or_remote` | [Targeting and IDs](#targeting-and-ids) |
 | `sintra::any_remote` | [Targeting and IDs](#targeting-and-ids) |
 | `sintra::barrier` | [Barriers and Fences](#barriers-and-fences) |
-| `sintra::barrier_completed` | [Barriers and Fences](#barriers-and-fences) |
 | `sintra::cancel_external_process_invitation` | [Initialization and Process Topology](#initialization-and-process-topology) |
 | `sintra::compose_instance` | [Targeting and IDs](#targeting-and-ids) |
 | `sintra::console` | [Errors and Diagnostics](#errors-and-diagnostics) |

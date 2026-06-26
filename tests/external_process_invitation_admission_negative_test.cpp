@@ -558,7 +558,6 @@ bool run_spawn_collision_keeps_invitation_claimable_case(
     sintra::Spawn_options spawn_options;
     spawn_options.binary_path         = missing_executable_path(dir).string();
     spawn_options.process_instance_id = explicit_iid;
-    spawn_options.count               = 1;
     const size_t spawned = sintra::spawn_swarm_process(spawn_options);
     ok &= sintra::test::assert_true(
         spawned == 0,

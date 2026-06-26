@@ -9,16 +9,12 @@ template <typename BarrierMode = delivery_fence_t>
 sequence_counter_type barrier(
     const std::string& barrier_name,
     const std::string& group_name = "_sintra_external_processes");
-
-bool barrier_completed(sequence_counter_type barrier_sequence);
 ```
 
 Description: Block the calling thread until every live member process in
 `group_name` has reached the same named barrier, then optionally enforce
 a delivery or processing fence according to the selected
 [barrier mode](barrier_modes.md). The default mode is `delivery_fence_t`.
-The companion helper `barrier_completed(seq)` reports whether the
-returned sequence describes a successful collective barrier.
 
 ## Parameters
 
@@ -38,8 +34,8 @@ returned sequence describes a successful collective barrier.
   barrier.
 - `invalid_sequence` — returned when the barrier was treated as satisfied
   during shutdown or drain handling. The bypass is logged as a warning so
-  callers can proceed without re-entering teardown. Use
-  `barrier_completed(seq)` to test for a normal completion.
+  callers can proceed without re-entering teardown. Test
+  `seq != invalid_sequence` for a normal completion.
 
 ## Throws
 

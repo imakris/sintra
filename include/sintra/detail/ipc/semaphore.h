@@ -14,9 +14,9 @@ OVERVIEW
 - POSIX uses a wait-on-address shim; Windows uses a named kernel semaphore.
 - Single monotonic deadline timeline (ns). No fairness guarantee.
 
-SUPPORTED OS (intentional; no fallbacks)
+SUPPORTED OS
 - Linux (futex), macOS 14.4+ (<os/sync_wait_on_address.h>), Windows 8+ (named kernel semaphore).
-- Polling backend: Define SINTRA_USE_SEMAPHORE_POLLING to force on any platform, or automatic fallback on unsupported platforms.
+- Polling backend: automatic fallback on unsupported platforms.
 - Platform notes:
   * macOS: wake-all is used; may over-wake. If Apple adds wake-one/wake-N, prefer bounded waking.
   * POSIX wait(): implemented via a very large relative wait on a monotonic clock; effectively "infinite".
@@ -85,10 +85,7 @@ CAVEATS
 #include "../time_utils.h"
 
 // Platform headers MUST be included BEFORE opening namespaces to avoid polluting them
-#if defined(SINTRA_USE_SEMAPHORE_POLLING)
-  // User explicitly requested polling backend on all platforms
-  #define SINTRA_BACKEND_POLLING 1
-#elif defined(_WIN32)
+#if defined(_WIN32)
   #include "../sintra_windows.h"
   #include "spinlock.h"
   #include <synchapi.h>

@@ -160,12 +160,6 @@ sequence_counter_type barrier(
     const std::string& barrier_name,
     const std::string& group_name = "_sintra_external_processes");
 
-/// Returns true only when a barrier completed normally.
-inline bool barrier_completed(sequence_counter_type barrier_sequence)
-{
-    return barrier_sequence != invalid_sequence;
-}
-
 // ---------------------------------------------------------------------------
 // Shutdown options
 // ---------------------------------------------------------------------------
@@ -327,4 +321,3 @@ void set_lifecycle_handler(Lifecycle_handler handler);
 #include "detail/console.h"
 #include "detail/maildrop.h"
 #include "detail/runtime.h"
-

@@ -8,7 +8,7 @@
 #include <system_error>
 #include <vector>
 
-#include "sintra/detail/ipc/file_mapping.h"
+#include "sintra/ipc/file_mapping.h"
 #include "sintra/detail/ipc/platform_defs.h"
 
 #include "test_utils.h"
@@ -109,7 +109,7 @@ std::vector<std::uint8_t> make_test_data(std::size_t size)
 
 int main()
 {
-    namespace ipc = sintra::detail::ipc;
+    namespace ipc = sintra::ipc;
 
     const std::size_t page_size     = sintra::system_page_size();
     const std::size_t data_size     = page_size * 2 + 128;

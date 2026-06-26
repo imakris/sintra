@@ -8,7 +8,7 @@ Include:
 
 Summary:
 
-`spawn_swarm_process` adds one or more managed processes to a running swarm
+`spawn_swarm_process` adds one managed process to a running swarm
 after `init` has completed. It launches the requested binary with the
 required Sintra arguments, optionally waits for a named instance to appear,
 and applies the configured lifeline policy. The starter process or any
@@ -22,7 +22,6 @@ struct Spawn_options
 {
     std::string                binary_path;
     std::vector<std::string>   args;
-    size_t                     count = 1;
     instance_id_type           process_instance_id = invalid_instance_id;
     std::string                wait_for_instance_name;
     std::chrono::milliseconds  wait_timeout{0};
@@ -46,9 +45,6 @@ Contract:
   receives `args` as positional arguments (Sintra inserts the binary name
   as `argv[0]` if not already present), and gets `--swarm_id`,
   `--instance_id`, and `--coordinator_id` appended automatically.
-- `count` must be at least one. Counts greater than one are not allowed
-  when `process_instance_id` is set or when `wait_for_instance_name` is
-  non-empty; in those cases the call is rejected and returns zero.
 - `process_instance_id` defaults to a fresh process instance id. Setting it
   pins the new process to a specific id; the caller must guarantee the id
   is not already in use.
@@ -59,7 +55,7 @@ Contract:
   exponential backoff up to the deadline.
 - `lifetime` controls the lifeline policy applied to the child (see
   `Lifetime_policy`).
-- The return value is the count of successful spawns. When the wait phase
+- The return value is `1` on successful spawn. When the wait phase
   fails (timeout, exception, or the resolved id remained invalid), the
   function returns zero even when the OS spawn itself succeeded.
 - Calls made while a lifecycle teardown protocol is active are rejected and
@@ -80,8 +76,7 @@ Threading and lifecycle:
 
 Failures:
 
-- Returns zero (with a logged error) when `binary_path` is empty,
-  `count` is zero, or when an invalid combination of options is passed.
+- Returns zero (with a logged error) when `binary_path` is empty.
 - Returns zero when wait fails: the coordinator returned
   `invalid_instance_id`, `wait_timeout` elapsed, or the wait RPC threw.
 
