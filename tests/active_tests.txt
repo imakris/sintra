@@ -41,6 +41,7 @@ interprocess_mutex_test                   30
 interprocess_semaphore_test               10
 ipc_rings_tests                           10
 ring_helpers_test                          5
+handler_lifetime_test                      5
 message_args_traits_test                   5
 abi_description_test                       1
 tn_type_hash_test                         10

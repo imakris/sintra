@@ -332,6 +332,129 @@ inline bool validate_reply_message(
     return true;
 }
 
+namespace detail
+{
+
+class Collected_handler_slot
+{
+public:
+    Collected_handler_slot(
+        const function<void(const Message_prefix&)>& handler,
+        std::shared_ptr<Handler_slot_state>          state)
+    :
+        m_handler(handler),
+        m_state(std::move(state))
+    {}
+
+    Collected_handler_slot(Collected_handler_slot&& other) noexcept
+    :
+        m_handler(std::move(other.m_handler)),
+        m_state(std::move(other.m_state))
+    {}
+
+    Collected_handler_slot& operator=(Collected_handler_slot&& other) noexcept
+    {
+        if (this != &other) {
+            m_handler = std::move(other.m_handler);
+            m_state   = std::move(other.m_state);
+        }
+        return *this;
+    }
+
+    ~Collected_handler_slot() noexcept = default;
+
+    Collected_handler_slot(const Collected_handler_slot&) = delete;
+    Collected_handler_slot& operator=(const Collected_handler_slot&) = delete;
+
+    void clear_handler() noexcept
+    {
+        m_handler = nullptr;
+    }
+
+    bool active() const noexcept
+    {
+        return m_state && m_state->active.load(std::memory_order_acquire);
+    }
+
+    const std::shared_ptr<Handler_slot_state>& state() const noexcept
+    {
+        return m_state;
+    }
+
+    void invoke(Message_prefix& message)
+    {
+        m_handler(message);
+    }
+
+private:
+    function<void(const Message_prefix&)>   m_handler;
+    std::shared_ptr<Handler_slot_state>     m_state;
+};
+
+
+class Handler_dispatch_depth_scope
+{
+public:
+    explicit Handler_dispatch_depth_scope(bool registered) noexcept
+    :
+        m_registered(registered)
+    {}
+
+    ~Handler_dispatch_depth_scope() noexcept
+    {
+        release();
+    }
+
+    Handler_dispatch_depth_scope(const Handler_dispatch_depth_scope&) = delete;
+    Handler_dispatch_depth_scope& operator=(const Handler_dispatch_depth_scope&) = delete;
+
+    void release() noexcept
+    {
+        if (!m_registered) {
+            return;
+        }
+
+        s_mproc->m_handlers_dispatch_depth.fetch_sub(1, std::memory_order_acq_rel);
+        m_registered = false;
+    }
+
+private:
+    bool m_registered;
+};
+
+
+class Handler_slot_invocation_scope
+{
+public:
+    explicit Handler_slot_invocation_scope(const std::shared_ptr<Handler_slot_state>& state) noexcept
+    :
+        m_state(state),
+        m_previous_handler_state(tl_current_handler_slot_state),
+        m_previous_in_handler_dispatch(tl_in_handler_dispatch)
+    {
+        m_state->invocations.fetch_add(1, std::memory_order_acq_rel);
+        tl_current_handler_slot_state             = m_state.get();
+        tl_in_handler_dispatch                    = true;
+    }
+
+    ~Handler_slot_invocation_scope() noexcept
+    {
+        tl_in_handler_dispatch        = m_previous_in_handler_dispatch;
+        tl_current_handler_slot_state = m_previous_handler_state;
+        m_state->invocations.fetch_sub(1, std::memory_order_acq_rel);
+    }
+
+    Handler_slot_invocation_scope(const Handler_slot_invocation_scope&) = delete;
+    Handler_slot_invocation_scope& operator=(const Handler_slot_invocation_scope&) = delete;
+
+private:
+    std::shared_ptr<Handler_slot_state>  m_state;
+    const Handler_slot_state*            m_previous_handler_state;
+    bool                                 m_previous_in_handler_dispatch;
+};
+
+} // namespace detail
+
 inline void dispatch_event_handlers(
     Message_prefix&                            message,
     std::initializer_list<instance_id_type>    scope_ids,
@@ -344,7 +467,7 @@ inline void dispatch_event_handlers(
     // thread trying to register a handler via activate_slot() / receive<T>().
     // Releasing before invocation gives waiting threads a chance to acquire the
     // lock between messages.
-    std::vector<function<void(const Message_prefix&)>> collected;
+    std::vector<detail::Collected_handler_slot> collected;
     bool dispatch_registered = false;
 
     {
@@ -360,15 +483,13 @@ inline void dispatch_event_handlers(
             auto shl = sender_map->find(sid);
             if (shl != sender_map->end()) {
                 for (auto& handler : shl->second) {
-                    collected.push_back(handler);
+                    collected.emplace_back(handler, detail::handler_slot_state_for(handler));
                 }
             }
         }
 
-        // Register the out-of-lock invocation while still holding the
-        // handler mutex. This closes the race where a deactivator could
-        // remove the slot and observe depth==0 after we copied the handler
-        // list but before we started invoking it.
+        // Preserve the existing dispatch-depth bookkeeping while callbacks run
+        // outside the handler mutex.
         if (!collected.empty()) {
             s_mproc->m_handlers_dispatch_depth.fetch_add(1, std::memory_order_acq_rel);
             dispatch_registered = true;
@@ -378,6 +499,7 @@ inline void dispatch_event_handlers(
     if (!dispatch_registered) {
         return;
     }
+    detail::Handler_dispatch_depth_scope dispatch_depth_scope(dispatch_registered);
 
     if (trace_world) {
         Log_stream(log_level::debug)
@@ -385,20 +507,37 @@ inline void dispatch_event_handlers(
             << " handlers=" << collected.size() << "\n";
     }
 
-    tl_in_handler_dispatch = true;
     try {
-        for (auto& handler : collected) {
-            handler(message);
+        for (auto& collected_slot : collected) {
+            detail::Collected_handler_slot slot = std::move(collected_slot);
+            if (!slot.active()) {
+                continue;
+            }
+
+            std::unique_lock<std::mutex> slot_invocation_lock(slot.state()->invocation_mutex);
+            if (!slot.active()) {
+                continue;
+            }
+
+            detail::Handler_slot_invocation_scope invocation(slot.state());
+            try {
+                if (slot.active()) {
+                    slot.invoke(message);
+                }
+            }
+            catch (...) {
+                slot.clear_handler();
+                throw;
+            }
+            slot.clear_handler();
         }
     }
     catch (...) {
-        tl_in_handler_dispatch = false;
-        s_mproc->m_handlers_dispatch_depth.fetch_sub(1, std::memory_order_acq_rel);
+        dispatch_depth_scope.release();
         throw;
     }
-    tl_in_handler_dispatch = false;
 
-    s_mproc->m_handlers_dispatch_depth.fetch_sub(1, std::memory_order_acq_rel);
+    dispatch_depth_scope.release();
 }
 
 // Historical note: mingw 11.2.0 had issues with inline thread_local non-POD objects.
@@ -670,7 +809,6 @@ void Process_message_reader::request_reader_function()
         if (m == nullptr) {
             break;
         }
-
         if (!validate_request_message(*m, m_in_req_c->m_id, *this)) {
             publish_request_progress(m_in_req_c->get_message_reading_sequence());
             continue;
@@ -771,7 +909,7 @@ void Process_message_reader::request_reader_function()
                         // Spinlock released here automatically when scoped_map goes out of scope
                     }
 
-                    (*handler_fn)(*m); // call the handler
+                    (*handler_fn)(*m);
                 }
             }
         }
@@ -969,7 +1107,6 @@ void Process_message_reader::reply_reader_function()
         if (m == nullptr) {
             break;
         }
-
         if (!validate_reply_message(*m, m_in_rep_c->m_id, *this)) {
             publish_reply_progress(m_in_rep_c->get_message_reading_sequence());
             continue;

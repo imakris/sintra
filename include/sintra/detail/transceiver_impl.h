@@ -9,9 +9,15 @@
 #include "logging.h"
 #include "transceiver.h"
 
-// Shared handler-dispatch TLS flag. The deactivator lambda below uses this to
-// skip the dispatch-depth wait during self-deactivation on the same thread.
+// Runtime teardown already uses this global flag; keep newer handler-slot TLS
+// under sintra::detail so this public header does not grow more global names.
 inline bool thread_local tl_in_handler_dispatch = false;
+
+namespace sintra { namespace detail {
+
+inline thread_local const Handler_slot_state* tl_current_handler_slot_state = nullptr;
+
+}} // namespace sintra::detail
 
 #include <cassert>
 #include <cstring>
@@ -357,13 +363,16 @@ Transceiver::activate_impl(
     };
 
     function<void(const Message_prefix&)> wrapper(wrapper_lambda);
+    auto slot_state = std::make_shared<detail::Handler_slot_state>();
 
     lock_guard<recursive_mutex> sl(s_mproc->m_handlers_mutex);
 
     auto& sender_map = s_mproc->m_active_handlers[message_type_id];
 
     auto& handler_list = sender_map[effective_sender_id];
-    auto  mid_sid_it   = handler_list.emplace(handler_list.end(), wrapper);
+    auto mid_sid_it = handler_list.emplace(handler_list.end(), std::move(wrapper));
+    const auto slot_key = detail::handler_slot_key(*mid_sid_it);
+    detail::handler_slot_states()[slot_key] = slot_state;
 
     decltype(m_deactivators)::iterator deactivator_it;
 
@@ -377,38 +386,49 @@ Transceiver::activate_impl(
         deactivator_it = *deactivator_it_ptr;
     }
 
-    *deactivator_it = [this, message_type_id, effective_sender_id, mid_sid_it, deactivator_it] () {
-        {
+    *deactivator_it = [
+        this,
+        message_type_id,
+        effective_sender_id,
+        mid_sid_it,
+        slot_key,
+        deactivator_it,
+        slot_state
+    ] () {
+        auto state = slot_state;
+        state->active.store(false, std::memory_order_release);
+
+        const bool claimed_deactivation =
+            !state->deactivation_claimed.exchange(true, std::memory_order_acq_rel);
+        if (claimed_deactivation) {
             lock_guard<recursive_mutex> sl(s_mproc->m_handlers_mutex);
+            detail::handler_slot_states().erase(slot_key);
             auto it_mt = s_mproc->m_active_handlers.find(message_type_id);
-            if (it_mt == s_mproc->m_active_handlers.end()) {
-                m_deactivators.erase(deactivator_it);
-                return;
-            }
-            auto& sender_map = it_mt->second;
+            if (it_mt != s_mproc->m_active_handlers.end()) {
+                auto& sender_map = it_mt->second;
 
-            auto msm_it = sender_map.find(effective_sender_id);
-            if (msm_it == sender_map.end()) {
-                m_deactivators.erase(deactivator_it);
-                return;
-            }
-
-            msm_it->second.erase(mid_sid_it);
-            if (msm_it->second.empty()) {
-                sender_map.erase(msm_it);
+                auto msm_it = sender_map.find(effective_sender_id);
+                if (msm_it != sender_map.end()) {
+                    msm_it->second.erase(mid_sid_it);
+                    if (msm_it->second.empty()) {
+                        sender_map.erase(msm_it);
+                    }
+                }
             }
             m_deactivators.erase(deactivator_it);
         }
-        // Wait for any in-flight dispatch_event_handlers invocation to
-        // finish before returning, so the caller can safely destroy
-        // state captured by the handler (e.g. receive()'s stack locals).
-        // Skip the wait if called from within a handler (self-deactivation),
-        // because the depth counter won't reach zero until the handler
-        // returns — waiting would deadlock.
-        if (!tl_in_handler_dispatch) {
-            while (s_mproc->m_handlers_dispatch_depth.load(std::memory_order_acquire) > 0) {
-                std::this_thread::yield();
-            }
+
+        const uint32_t allowed_invocations =
+            detail::tl_current_handler_slot_state == state.get()
+                ? 1u
+                : 0u;
+        // Wait for invocations of this slot to finish before returning, so
+        // the caller can safely destroy state captured by the handler. A
+        // self-deactivating handler accounts for its own stack frame; same-slot
+        // dispatch is serialized, so there is no second active invocation to
+        // mask here.
+        while (state->invocations.load(std::memory_order_acquire) > allowed_invocations) {
+            std::this_thread::yield();
         }
     };
 

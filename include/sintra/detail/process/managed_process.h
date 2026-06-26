@@ -314,10 +314,9 @@ struct Managed_process: Derived_transceiver<Managed_process>
     // published transceiver, so this registry lock must currently be recursive.
     recursive_mutex                     m_handlers_mutex;
 
-    // Incremented before invoking copied handlers outside m_handlers_mutex,
-    // decremented after.  Slot deactivation waits for this to reach zero so
-    // that no in-flight handler can access captures after the deactivator
-    // returns.
+    // Incremented before invoking copied local-event handlers outside
+    // m_handlers_mutex, decremented after the dispatch window closes.
+    // Individual slot state governs deactivation safety.
     std::atomic<uint32_t>               m_handlers_dispatch_depth{0};
 
     // Calls f when the specified transceiver becomes available.

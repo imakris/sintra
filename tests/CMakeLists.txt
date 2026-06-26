@@ -10,6 +10,7 @@ target_compile_definitions(sintra_for_tests INTERFACE
 if(MSVC)
     target_compile_options(sintra_for_tests INTERFACE
         /FS
+        /bigobj
         $<$<CONFIG:Debug>:/UNDEBUG>
         $<$<AND:$<CONFIG:Release>,$<BOOL:${SINTRA_RELEASE_WITH_DEBUG_SYMBOLS}>>:/O1>
         $<$<AND:$<CONFIG:Release>,$<BOOL:${SINTRA_RELEASE_WITH_DEBUG_SYMBOLS}>>:/Zi>
