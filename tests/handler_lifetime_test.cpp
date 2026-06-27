@@ -80,8 +80,7 @@ void dispatch_direct_event(int value)
 
     sintra::dispatch_event_handlers(
         message,
-        {sintra::any_local_or_remote},
-        false);
+        {sintra::any_local_or_remote});
 }
 
 struct Copied_slot_capture
