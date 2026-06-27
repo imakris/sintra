@@ -137,6 +137,18 @@ std::vector<std::uint8_t> make_test_data(std::size_t size)
     return data;
 }
 
+bool file_mapping_is_empty(const sintra::ipc::file_mapping& mapping)
+{
+    if (mapping.size() != 0 || mapping.mode() != sintra::ipc::read_only) {
+        return false;
+    }
+#if defined(_WIN32)
+    return mapping.native_handle() == INVALID_HANDLE_VALUE;
+#else
+    return mapping.native_handle() == -1;
+#endif
+}
+
 } // namespace
 
 int main()
@@ -359,6 +371,9 @@ int main()
     {
         ipc::file_mapping mapping1(temp.path, ipc::read_only);
         ipc::file_mapping mapping2(std::move(mapping1));
+        sintra::test::expect(file_mapping_is_empty(mapping1),
+            k_failure_prefix,
+            "move-constructed source file_mapping should be empty");
         ipc::mapped_region region(mapping2, ipc::read_only, 0, 0);
         sintra::test::expect(region.size() == original_data.size(),
             k_failure_prefix,
@@ -373,6 +388,11 @@ int main()
         ipc::file_mapping mapping1(temp.path, ipc::read_only);
         ipc::file_mapping mapping2(temp.path, ipc::read_only);
         mapping2 = std::move(mapping1);
+        sintra::test::expect(file_mapping_is_empty(mapping1),
+            k_failure_prefix,
+            "move-assigned source file_mapping should be empty");
+        auto* same_mapping = &mapping2;
+        mapping2 = std::move(*same_mapping);
         ipc::mapped_region region(mapping2, ipc::read_only, 0, 0);
         sintra::test::expect(region.size() == original_data.size(),
             k_failure_prefix,
@@ -407,6 +427,11 @@ int main()
         sintra::test::expect(region1.size() == 0 && region1.data() == nullptr,
             k_failure_prefix,
             "move-assigned source mapped_region should be empty");
+        auto* same_region = &region2;
+        region2 = std::move(*same_region);
+        sintra::test::expect(region2.size() == original_data.size() && region2.data() != nullptr,
+            k_failure_prefix,
+            "self move-assigned mapped_region should keep its mapping");
     }
 
     // Test const data() accessor.
@@ -430,6 +455,7 @@ int main()
         bytes[0] = static_cast<std::uint8_t>(bytes[0] ^ 0xFF);
         region.flush();  // Flush entire region
         region.flush(0, 64);  // Flush partial region
+        region.flush(region.size());
         expect_system_error([&] {
             region.flush(region.size() + 1);
         }, std::errc::invalid_argument, "flush offset beyond region");
@@ -440,6 +466,14 @@ int main()
 
     // Test flush_file() on file_mapping.
     temp.write(original_data);
+    {
+        ipc::file_mapping mapping(temp.path, ipc::read_only);
+        mapping.flush_file();
+    }
+    {
+        ipc::file_mapping mapping(temp.path, ipc::copy_on_write);
+        mapping.flush_file();
+    }
     {
         ipc::file_mapping mapping(temp.path, ipc::read_write);
         ipc::mapped_region region(mapping, ipc::read_write, 0, 0);

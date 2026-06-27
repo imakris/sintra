@@ -15,12 +15,14 @@
 // 12. init()/finalize() cycles work correctly (state resets between cycles).
 // 13. Process-entry APIs reject while teardown admission is closed.
 // 14. Message-reader diagnostic helpers report stable names and missing-reader state.
+// 15. Runtime process-entry APIs take cheap no-runtime/no-spawn exits.
 
 #include <sintra/sintra.h>
 
 #include "test_utils.h"
 
 #include <array>
+#include <chrono>
 #include <exception>
 #include <stdexcept>
 #include <string>
@@ -46,9 +48,7 @@ constexpr std::array<state_case_t, 5> k_non_idle_states{{
 
 void reset_shutdown_state()
 {
-    sintra::detail::s_shutdown_state.store(
-        sintra::detail::shutdown_protocol_state::idle,
-        std::memory_order_release);
+    sintra::detail::reset_lifecycle_teardown_to_idle();
 }
 
 struct Teardown_admission_guard
@@ -292,6 +292,62 @@ bool test_runtime_required_apis_without_runtime_throw()
         );
 }
 
+bool test_runtime_process_entry_early_returns(int argc, char* argv[])
+{
+    reset_shutdown_state();
+
+    bool ok = true;
+
+    ok &= sintra::test::assert_true(
+        !sintra::create_external_process_invitation(),
+        k_prefix,
+        "create_external_process_invitation() without runtime should return an invalid invitation");
+
+    sintra::Spawn_options empty_spawn_options;
+    ok &= sintra::test::assert_true(
+        sintra::spawn_swarm_process(empty_spawn_options) == 0,
+        k_prefix,
+        "spawn_swarm_process() with empty binary should return 0 without runtime");
+
+    ok &= sintra::test::assert_true(
+        sintra::join_swarm(0) == sintra::invalid_instance_id,
+        k_prefix,
+        "join_swarm() with an invalid branch index should return invalid_instance_id");
+
+    sintra::init(argc, argv);
+
+    sintra::External_process_invitation_options timeout_options;
+    timeout_options.timeout = std::chrono::milliseconds{0};
+    ok &= sintra::test::assert_true(
+        !sintra::create_external_process_invitation(timeout_options),
+        k_prefix,
+        "create_external_process_invitation() with zero timeout should return an invalid invitation");
+
+    sintra::External_process_invitation_options invalid_id_options;
+    invalid_id_options.process_instance_id = sintra::compose_instance(2, 2);
+    ok &= sintra::test::assert_true(
+        !sintra::create_external_process_invitation(invalid_id_options),
+        k_prefix,
+        "create_external_process_invitation() with a non-process instance id should return an invalid invitation");
+
+    ok &= sintra::test::assert_true(
+        !sintra::cancel_external_process_invitation(sintra::invalid_instance_id),
+        k_prefix,
+        "cancel_external_process_invitation() with invalid_instance_id should return false");
+
+    ok &= sintra::test::assert_true(
+        !sintra::cancel_external_process_invitation(sintra::External_process_invitation{}),
+        k_prefix,
+        "cancel_external_process_invitation() with a default invitation should return false");
+
+    ok &= sintra::test::assert_true(
+        sintra::detail::finalize(),
+        k_prefix,
+        "finalize() should succeed after runtime process-entry early-return checks");
+
+    return ok;
+}
+
 bool test_process_message_reader_diagnostic_helpers()
 {
     reset_shutdown_state();
@@ -329,6 +385,17 @@ bool test_process_message_reader_diagnostic_helpers()
         missing_summary.find("communication_state=unreachable") != std::string::npos,
         k_prefix,
         "missing_reader_summary() should describe missing invalid readers without runtime");
+
+    const auto process_iid     = sintra::compose_instance(2, 1);
+    const auto process_summary = Reader::missing_reader_summary(process_iid);
+    ok &= sintra::test::assert_true(
+        process_summary.find("condition=missing") != std::string::npos &&
+        process_summary.find(
+            std::string("target_process_id=") +
+            std::to_string(static_cast<unsigned long long>(process_iid))) != std::string::npos &&
+        process_summary.find("communication_state=unreachable") != std::string::npos,
+        k_prefix,
+        "missing_reader_summary() should include numeric process ids without runtime");
 
     return ok;
 }
@@ -474,6 +541,7 @@ int main(int argc, char* argv[])
     ok &= test_leave_without_runtime_returns_false();
     ok &= test_finalize_without_init_returns_false();
     ok &= test_runtime_required_apis_without_runtime_throw();
+    ok &= test_runtime_process_entry_early_returns(argc, argv);
     ok &= test_process_message_reader_diagnostic_helpers();
     ok &= test_leave_after_init_returns_true_and_resets_state(argc, argv);
     ok &= test_leave_rejects_in_handler_context(argc, argv);

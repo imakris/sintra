@@ -1,9 +1,15 @@
 #include <sintra/detail/utility.h>
 #include <sintra/detail/ipc/spinlocked_containers.h>
+#include <sintra/detail/ipc/process_utils.h>
+#include <sintra/detail/time_utils.h>
 
 #include "test_utils.h"
 
 #include <cstdio>
+#include <cstdlib>
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <string>
 #include <vector>
@@ -221,6 +227,81 @@ void test_spinlocked_umap_scoped_erase()
         "'three' should remain");
 }
 
+void test_process_utility_helpers()
+{
+    const auto current_pid = static_cast<std::uint32_t>(sintra::get_current_pid());
+
+    sintra::test::require_true(!sintra::is_process_alive(0), k_failure_prefix,
+        "pid 0 should not be reported alive");
+    sintra::test::require_true(sintra::is_process_alive(current_pid), k_failure_prefix,
+        "current process should be reported alive");
+    sintra::test::require_true(!sintra::query_process_start_stamp(0).has_value(), k_failure_prefix,
+        "pid 0 should not have a process start stamp");
+
+    const auto current_start = sintra::current_process_start_stamp().value_or(0);
+    const auto scratch = sintra::test::unique_scratch_directory("utility_process_utils");
+
+    sintra::run_marker_record_t record{};
+    record.pid                  = current_pid;
+    record.start_stamp          = current_start;
+    record.created_monotonic_ns = sintra::monotonic_now_ns();
+    record.recovery_occurrence  = 7;
+
+    sintra::test::require_true(sintra::write_run_marker(scratch, record), k_failure_prefix,
+        "write_run_marker should write into an existing directory");
+
+    const auto read_record = sintra::read_run_marker(sintra::run_marker_path(scratch));
+    sintra::test::require_true(read_record.has_value(), k_failure_prefix,
+        "read_run_marker should parse a valid marker");
+    sintra::test::require_true(
+        read_record->pid == record.pid &&
+        read_record->start_stamp == record.start_stamp &&
+        read_record->created_monotonic_ns == record.created_monotonic_ns &&
+        read_record->recovery_occurrence == record.recovery_occurrence,
+        k_failure_prefix,
+        "read_run_marker should preserve all marker fields");
+
+    sintra::mark_run_directory_for_cleanup(scratch);
+    sintra::test::require_true(
+        std::filesystem::exists(sintra::run_marker_cleanup_path(scratch)) &&
+        !std::filesystem::exists(sintra::run_marker_path(scratch)),
+        k_failure_prefix,
+        "mark_run_directory_for_cleanup should move the marker to cleanup state");
+
+    sintra::remove_run_marker_files(scratch);
+    sintra::test::require_true(
+        !std::filesystem::exists(sintra::run_marker_path(scratch)) &&
+        !std::filesystem::exists(sintra::run_marker_cleanup_path(scratch)),
+        k_failure_prefix,
+        "remove_run_marker_files should remove marker and cleanup files");
+
+    std::ofstream bad_marker(sintra::run_marker_path(scratch), std::ios::trunc);
+    bad_marker << "pid=not-a-pid\n";
+    bad_marker.close();
+    sintra::test::require_true(!sintra::read_run_marker(sintra::run_marker_path(scratch)).has_value(),
+        k_failure_prefix,
+        "read_run_marker should reject malformed numeric fields");
+
+    const auto cleanup_base = sintra::test::unique_scratch_directory("utility_process_cleanup");
+    const auto stale_dir    = cleanup_base / "stale";
+    std::filesystem::create_directories(stale_dir);
+    std::ofstream stale_marker(sintra::run_marker_path(stale_dir), std::ios::trunc);
+    stale_marker << "pid=not-a-pid\n";
+    stale_marker.close();
+
+    sintra::cleanup_stale_swarm_directories(cleanup_base, current_pid, current_start);
+#if defined(_WIN32)
+    const char* preserve_scratch = std::getenv("SINTRA_PRESERVE_SCRATCH");
+    const char* test_root        = std::getenv("SINTRA_TEST_ROOT");
+    const bool preserve_without_test_root =
+        preserve_scratch && preserve_scratch[0] != '\0' && preserve_scratch[0] != '0' &&
+        (!test_root || test_root[0] == '\0');
+    if (!preserve_without_test_root)
+#endif
+    sintra::test::require_true(!std::filesystem::exists(stale_dir), k_failure_prefix,
+        "cleanup_stale_swarm_directories should remove malformed marker directories");
+}
+
 } // namespace
 
 int main()
@@ -237,6 +318,7 @@ int main()
         test_build_environment_entries();
 #endif
         test_spinlocked_umap_scoped_erase();
+        test_process_utility_helpers();
     }
     catch (const std::exception& ex) {
         std::fprintf(stderr, "utility_test failed: %s\n", ex.what());
