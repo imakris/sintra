@@ -38,7 +38,7 @@ namespace sintra {
     constexpr double    fast_spin_duration                  = 0.00005; // secs (50μs)
 
     // Adaptive policy: Precision sleep cycle duration (seconds).
-    // Uses high-resolution sleep (timeBeginPeriod on Windows, nanosleep on Linux).
+    // Uses the platform precision sleep backend.
     constexpr double    precision_sleep_cycle               = 0.001;   // secs (1ms)
 
     // Adaptive policy: Total time to spend in precision sleep phase before

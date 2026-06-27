@@ -16,7 +16,6 @@
 
 #if defined(_WIN32)
   #include "sintra_windows.h"
-  #include <timeapi.h>
 #elif defined(__APPLE__)
   #include <mach/mach.h>
   #include <mach/mach_time.h>
@@ -252,31 +251,4 @@ inline void precision_sleep_for(std::chrono::duration<double> duration)
 }
 #endif
 
-#ifdef _WIN32
-class Scoped_timer_resolution
-{
-public:
-    explicit Scoped_timer_resolution(UINT period)
-        : m_period(period), m_active(::timeBeginPeriod(period) == TIMERR_NOERROR) {}
-
-    ~Scoped_timer_resolution()
-    {
-        if (m_active) {
-            ::timeEndPeriod(m_period);
-        }
-    }
-
-private:
-    UINT   m_period;
-    bool   m_active;
-};
-#else
-class Scoped_timer_resolution
-{
-public:
-    explicit Scoped_timer_resolution(unsigned int) {}
-};
-#endif
-
 } // namespace sintra
-

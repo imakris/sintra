@@ -81,10 +81,6 @@ target_include_directories(sintra INTERFACE
 )
 target_compile_features(sintra INTERFACE cxx_std_20)
 target_link_libraries(sintra INTERFACE Threads::Threads)
-# Link winmm on Windows for timeBeginPeriod/timeEndPeriod (ADAPTIVE_SPIN policy)
-if(WIN32)
-    target_link_libraries(sintra INTERFACE winmm)
-endif()
 
 # The public sintra target stays flag-neutral: debug/optimization/runtime
 # flags must not leak to consumers through the INTERFACE target. Internal

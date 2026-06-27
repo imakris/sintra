@@ -2936,7 +2936,6 @@ struct Ring_R : Ring<T, true>
                 if (sequences_equal()) {
                     // Phase 2 - precision sleeps: yield the CPU in 1ms slices while
                     // still polling at a high enough cadence to catch bursts quickly.
-                    Scoped_timer_resolution timer_resolution_guard(1);
                     const double precision_sleep_end = get_wtime() + precision_sleep_duration;
                     while (sequences_equal() && get_wtime() < precision_sleep_end) {
                         if (m_stopping) {
