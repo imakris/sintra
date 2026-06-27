@@ -10,6 +10,8 @@
 
 #include <cstdint>
 #include <chrono>
+#include <cmath>
+#include <limits>
 #include <thread>
 
 #if defined(_WIN32)
@@ -82,7 +84,137 @@ inline double get_wtime() noexcept
     return static_cast<double>(monotonic_now_ns()) * 1e-9;
 }
 
-#if defined(__APPLE__)
+#if defined(_WIN32)
+constexpr DWORD k_max_finite_sleep_ms = INFINITE - 1u;
+constexpr LONGLONG k_max_finite_waitable_timer_intervals =
+    static_cast<LONGLONG>(k_max_finite_sleep_ms) * 10000LL;
+
+inline void coarse_sleep_for(std::chrono::duration<double> duration)
+{
+    if (duration <= std::chrono::duration<double>::zero()) {
+        return;
+    }
+
+    const double seconds = duration.count();
+    if (std::isnan(seconds)) {
+        return;
+    }
+    if (!std::isfinite(seconds)) {
+        ::Sleep(k_max_finite_sleep_ms);
+        return;
+    }
+
+    constexpr std::chrono::duration<double, std::milli> max_duration(
+        k_max_finite_sleep_ms);
+    if (duration >= max_duration) {
+        ::Sleep(k_max_finite_sleep_ms);
+        return;
+    }
+
+    auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(duration);
+    if (millis < duration) {
+        ++millis;
+    }
+
+    if (millis.count() <= 0) {
+        ::Sleep(0);
+        return;
+    }
+
+    ::Sleep(static_cast<DWORD>(millis.count()));
+}
+
+inline HANDLE create_precision_waitable_timer() noexcept
+{
+#if defined(CREATE_WAITABLE_TIMER_HIGH_RESOLUTION)
+    constexpr DWORD high_resolution_flag = CREATE_WAITABLE_TIMER_HIGH_RESOLUTION;
+#else
+    constexpr DWORD high_resolution_flag = 0x00000002u;
+#endif
+
+    constexpr DWORD access = SYNCHRONIZE | TIMER_MODIFY_STATE;
+    HANDLE timer = ::CreateWaitableTimerExW(nullptr, nullptr, high_resolution_flag, access);
+    if (timer != nullptr) {
+        return timer;
+    }
+    return ::CreateWaitableTimerExW(nullptr, nullptr, 0, access);
+}
+
+inline LONGLONG waitable_timer_100ns_intervals(
+    std::chrono::duration<double> duration) noexcept
+{
+    if (duration <= std::chrono::duration<double>::zero()) {
+        return 1;
+    }
+
+    const double seconds_value = duration.count();
+    if (std::isnan(seconds_value)) {
+        return 1;
+    }
+
+    const long double seconds = static_cast<long double>(seconds_value);
+    if (!std::isfinite(seconds)) {
+        return k_max_finite_waitable_timer_intervals;
+    }
+
+    constexpr long double intervals_per_second = 10000000.0L;
+    const long double intervals = std::ceil(seconds * intervals_per_second);
+
+    if (!std::isfinite(intervals) ||
+        intervals >= static_cast<long double>(k_max_finite_waitable_timer_intervals))
+    {
+        return k_max_finite_waitable_timer_intervals;
+    }
+    if (intervals <= 0.0L) {
+        return 1;
+    }
+    return static_cast<LONGLONG>(intervals);
+}
+
+inline void precision_sleep_for(std::chrono::duration<double> duration)
+{
+    if (duration <= std::chrono::duration<double>::zero()) {
+        return;
+    }
+    if (std::isnan(duration.count())) {
+        return;
+    }
+
+    class Precision_timer
+    {
+    public:
+        ~Precision_timer()
+        {
+            if (m_handle != nullptr) {
+                ::CloseHandle(m_handle);
+            }
+        }
+
+        HANDLE handle() const noexcept { return m_handle; }
+
+    private:
+        HANDLE m_handle = create_precision_waitable_timer();
+    };
+
+    static thread_local Precision_timer timer;
+    if (timer.handle() == nullptr) {
+        coarse_sleep_for(duration);
+        return;
+    }
+
+    LARGE_INTEGER due_time{};
+    due_time.QuadPart = -waitable_timer_100ns_intervals(duration);
+
+    if (::SetWaitableTimer(timer.handle(), &due_time, 0, nullptr, nullptr, FALSE)) {
+        const DWORD wait_result = ::WaitForSingleObject(timer.handle(), INFINITE);
+        if (wait_result != WAIT_FAILED) {
+            return;
+        }
+    }
+
+    coarse_sleep_for(duration);
+}
+#elif defined(__APPLE__)
 inline void precision_sleep_for(std::chrono::duration<double> duration)
 {
     if (duration <= std::chrono::duration<double>::zero()) {
