@@ -198,6 +198,29 @@ void test_basic_semantics()
     REQUIRE_FALSE(sem.try_wait());
 }
 
+void test_timeout_and_overflow_edges()
+{
+    interprocess_semaphore ready(1);
+    REQUIRE_FALSE(ready.timed_wait(std::chrono::steady_clock::now() - std::chrono::milliseconds(1)));
+    REQUIRE_TRUE(ready.try_wait());
+    REQUIRE_FALSE(ready.try_wait());
+
+    interprocess_semaphore empty(0);
+    errno = 0;
+    REQUIRE_FALSE(empty.try_wait_for(std::chrono::nanoseconds(0)));
+    REQUIRE_EQ(ETIMEDOUT, errno);
+
+    empty.post();
+    REQUIRE_TRUE(empty.try_wait_for(std::chrono::nanoseconds(0)));
+
+    interprocess_semaphore capped(1, nullptr, 1);
+    errno = 0;
+    capped.post();
+    REQUIRE_EQ(EOVERFLOW, errno);
+    REQUIRE_TRUE(capped.try_wait());
+    REQUIRE_FALSE(capped.try_wait());
+}
+
 void test_threaded_producer_consumer()
 {
     constexpr int k_producer_count = 3;
@@ -707,6 +730,7 @@ int main(int argc, char* argv[])
 
     const std::vector<Test_case> tests = {
         {"basic_semantics", test_basic_semantics, false},
+        {"timeout_and_overflow_edges", test_timeout_and_overflow_edges, false},
         {"release_local_handle_idempotent", test_release_local_handle_idempotent, false},
         {"threaded_producer_consumer", test_threaded_producer_consumer, true},
         {"multithreaded_contention", test_multithreaded_contention, true},

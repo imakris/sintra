@@ -531,6 +531,52 @@ TEST_CASE(test_snapshot_raii)
     reader.done_reading();
 }
 
+TEST_CASE(test_done_reading_without_snapshot_requests_stop)
+{
+    Temp_ring_dir tmp("reader_stop_without_snapshot");
+    size_t ring_elements = pick_ring_elements<int>(128);
+    sintra::Ring_W<int> writer(tmp.str(), "ring_data", ring_elements);
+    sintra::Ring_R<int> reader(tmp.str(), "ring_data", ring_elements, (ring_elements * 3) / 4);
+
+    ASSERT_FALSE(reader.is_stopping());
+    reader.done_reading();
+    ASSERT_TRUE(reader.is_stopping());
+
+    auto range = reader.wait_for_new_data();
+    ASSERT_TRUE(range.begin == nullptr || range.begin == range.end);
+}
+
+TEST_CASE(test_writer_closed_delivers_final_payload_before_stop)
+{
+    Temp_ring_dir tmp("writer_closed_final_payload");
+    size_t ring_elements = pick_ring_elements<int>(128);
+    const std::vector<int> payload{21, 22, 23, 24};
+
+    std::optional<sintra::Ring_R<int>> reader;
+    {
+        sintra::Ring_W<int> writer(tmp.str(), "ring_data", ring_elements);
+        reader.emplace(tmp.str(), "ring_data", ring_elements, (ring_elements * 3) / 4);
+
+        auto initial = reader->start_reading();
+        ASSERT_EQ(static_cast<size_t>(initial.end - initial.begin), size_t(0));
+
+        writer.write(payload.data(), payload.size());
+        writer.done_writing();
+    }
+
+    auto final_range = reader->wait_for_new_data();
+    ASSERT_EQ(static_cast<size_t>(final_range.end - final_range.begin), payload.size());
+    for (size_t i = 0; i < payload.size(); ++i) {
+        ASSERT_EQ(final_range.begin[i], payload[i]);
+    }
+    reader->done_reading_new_data();
+
+    auto stopped = reader->wait_for_new_data();
+    ASSERT_TRUE(stopped.begin == nullptr || stopped.begin == stopped.end);
+    ASSERT_TRUE(reader->is_stopping());
+    reader->done_reading();
+}
+
 TEST_CASE(test_wait_for_new_data)
 {
     Temp_ring_dir tmp("wait_for_new_data");

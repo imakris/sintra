@@ -30,6 +30,38 @@ void expect_error_code(
     }
 }
 
+template <typename Function>
+void expect_system_error(
+    Function            fn,
+    std::errc           expected,
+    const std::string&  context)
+{
+    bool threw = false;
+    try {
+        fn();
+    }
+    catch (const std::system_error& error) {
+        threw = true;
+        expect_error_code(error, expected, context);
+    }
+    sintra::test::expect(threw, k_failure_prefix, context + " should throw");
+}
+
+template <typename Function>
+void expect_system_error(
+    Function            fn,
+    const std::string&  context)
+{
+    bool threw = false;
+    try {
+        fn();
+    }
+    catch (const std::system_error&) {
+        threw = true;
+    }
+    sintra::test::expect(threw, k_failure_prefix, context + " should throw");
+}
+
 std::filesystem::path make_unique_path()
 {
     auto dir = sintra::test::scratch_subdirectory("interprocess_file_mapping");
@@ -193,6 +225,63 @@ int main()
             "zero-length mapping should throw");
     }
 
+    // Basic open and view validation.
+    {
+        const char* null_filename = nullptr;
+        expect_system_error([&] {
+            ipc::file_mapping mapping(null_filename, ipc::read_only);
+            (void)mapping;
+        }, std::errc::invalid_argument, "null filename");
+
+        expect_system_error([&] {
+            ipc::file_mapping mapping(std::filesystem::path{}, ipc::read_only);
+            (void)mapping;
+        }, std::errc::invalid_argument, "empty filename");
+
+        const auto missing_path = make_unique_path();
+        expect_system_error([&] {
+            ipc::file_mapping mapping(missing_path, ipc::read_only);
+            (void)mapping;
+        }, "missing file");
+
+        ipc::file_mapping read_only_mapping(temp.path, ipc::read_only);
+        expect_system_error([&] {
+            ipc::mapped_region region(read_only_mapping, ipc::read_write, 0, 64);
+            (void)region;
+        }, std::errc::operation_not_permitted, "read-write view on read-only file");
+
+        expect_system_error([&] {
+            ipc::mapped_region region(
+                read_only_mapping,
+                ipc::read_only,
+                static_cast<std::uint64_t>(original_data.size() - 32),
+                64);
+            (void)region;
+        }, std::errc::invalid_argument, "mapping extends beyond file size");
+
+#if !defined(_WIN32)
+        const auto directory_path =
+            sintra::test::scratch_subdirectory("interprocess_file_mapping_directory");
+        expect_system_error([&] {
+            ipc::file_mapping mapping(directory_path, ipc::read_only);
+            (void)mapping;
+        }, std::errc::invalid_argument, "directory mapping");
+
+#if defined(MAP_ANONYMOUS)
+        expect_system_error([&] {
+            ipc::mapped_region region(
+                read_only_mapping,
+                ipc::read_only,
+                0,
+                64,
+                nullptr,
+                MAP_ANONYMOUS);
+            (void)region;
+        }, std::errc::invalid_argument, "anonymous option on file-backed mapping");
+#endif
+#endif
+    }
+
     // Copy-on-write mappings should see local modifications without altering the file.
     temp.write(original_data);
     {
@@ -219,6 +308,25 @@ int main()
             sintra::test::fail(k_failure_prefix, "copy-on-write mapping modified file contents");
         }
     }
+
+#if !defined(_WIN32)
+    // POSIX copy-on-write does not require a write-open file descriptor.
+    temp.write(original_data);
+    {
+        ipc::file_mapping mapping(temp.path, ipc::read_only);
+        ipc::mapped_region region(mapping, ipc::copy_on_write, 0, 0);
+        auto* bytes = static_cast<std::uint8_t*>(region.data());
+        sintra::test::expect(bytes != nullptr, k_failure_prefix,
+            "copy-on-write mapping from read-only file returned null address");
+        bytes[0] = static_cast<std::uint8_t>(bytes[0] ^ 0xA5u);
+    }
+    const auto after_read_only_cow = temp.read();
+    for (std::size_t i = 0; i < after_read_only_cow.size(); ++i) {
+        if (after_read_only_cow[i] != original_data[i]) {
+            sintra::test::fail(k_failure_prefix, "read-only copy-on-write mapping modified file contents");
+        }
+    }
+#endif
 
     // Read-write mappings should persist modifications back to the file.
     temp.write(original_data);
@@ -279,6 +387,9 @@ int main()
         sintra::test::expect(region2.size() == original_data.size(),
             k_failure_prefix,
             "move-constructed mapped_region should work");
+        sintra::test::expect(region1.size() == 0 && region1.data() == nullptr,
+            k_failure_prefix,
+            "move-constructed source mapped_region should be empty");
         auto* bytes = static_cast<const std::uint8_t*>(region2.data());
         sintra::test::expect(bytes != nullptr, k_failure_prefix,
             "move-constructed region returned null");
@@ -293,6 +404,9 @@ int main()
         sintra::test::expect(region2.size() == original_data.size(),
             k_failure_prefix,
             "move-assigned mapped_region should work");
+        sintra::test::expect(region1.size() == 0 && region1.data() == nullptr,
+            k_failure_prefix,
+            "move-assigned source mapped_region should be empty");
     }
 
     // Test const data() accessor.
@@ -316,6 +430,12 @@ int main()
         bytes[0] = static_cast<std::uint8_t>(bytes[0] ^ 0xFF);
         region.flush();  // Flush entire region
         region.flush(0, 64);  // Flush partial region
+        expect_system_error([&] {
+            region.flush(region.size() + 1);
+        }, std::errc::invalid_argument, "flush offset beyond region");
+        expect_system_error([&] {
+            region.flush(region.size() - 1, 2);
+        }, std::errc::invalid_argument, "flush length beyond region");
     }
 
     // Test flush_file() on file_mapping.
