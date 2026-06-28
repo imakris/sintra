@@ -46,9 +46,8 @@
 | [`SINTRA_RPC_STRICT`](rpc.md) | macro | `<sintra/sintra.h>` | Export an RPC that always uses the transported path. |
 | [`SINTRA_UNICAST`](rpc.md) | macro | `<sintra/sintra.h>` | Export a void fire-and-forget targeted message. |
 | [`sintra::Rpc_handle`](rpc_handle.md) | type template | `<sintra/sintra.h>` | Move-only async RPC result handle. |
-| [`sintra::Rpc_wait_status`](rpc_wait_status.md) | enum | `<sintra/sintra.h>` | Result of bounded async RPC waits. |
-| [`sintra::Rpc_completion_state`](rpc_completion_state.md) | enum | `<sintra/sintra.h>` | Final async RPC completion state. |
 | [`sintra::rpc_cancelled`](rpc_cancelled.md) | exception | `<sintra/sintra.h>` | Exception for RPC cancellation/drain paths. |
+| [`sintra::rpc_timeout`](rpc_timeout.md) | exception | `<sintra/sintra.h>` | Exception for bounded async RPC result timeouts. |
 | [`sintra::rpc_unavailable`](rpc_unavailable.md) | exception | `<sintra/sintra.h>` | Exception for target-side RPC unavailability. |
 | [`sintra::Resolvable_instance_id`](resolvable_instance_id.md) | type | `<sintra/sintra.h>` | Generated RPC target parameter accepting raw ids or names. |
 | [`sintra::Typed_instance_id`](typed_instance_id.md) | type template | `<sintra/sintra.h>` | Type-tagged instance id wrapper. |

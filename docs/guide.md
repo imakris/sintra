@@ -669,29 +669,47 @@ standard exception families and unknown exceptions.
 Relevant API:
 
 ```cpp
-enum class Rpc_wait_status { completed, deadline_exceeded };
-enum class Rpc_completion_state { pending, returned, remote_exception, cancelled, abandoned };
+namespace sintra {
 
-void Rpc_handle<T>::wait() const;
-template<typename Clock, typename Duration>
-Rpc_wait_status Rpc_handle<T>::wait_until(
-    const std::chrono::time_point<Clock, Duration>& deadline) const;
-bool Rpc_handle<T>::ready() const;
-Rpc_completion_state Rpc_handle<T>::state() const;
-bool Rpc_handle<T>::abandon();
-T Rpc_handle<T>::get() const;
+struct rpc_timeout : std::runtime_error
+{
+    using std::runtime_error::runtime_error;
+};
+
+template <typename R>
+class Rpc_handle
+{
+public:
+    Rpc_handle();
+    Rpc_handle(const Rpc_handle&) = delete;
+    Rpc_handle(Rpc_handle&&) noexcept = default;
+    Rpc_handle& operator=(const Rpc_handle&) = delete;
+    Rpc_handle& operator=(Rpc_handle&& other) noexcept;
+    ~Rpc_handle();
+
+    template <typename Clock, typename Duration>
+    auto get_until(
+        const std::chrono::time_point<Clock, Duration>& deadline) -> R;
+
+    auto get() const -> R;
+};
+
+} // namespace sintra
 ```
 
-Deadline expiry does not cancel remote execution. Call `abandon()` when the
-caller no longer wants the result. Destroying a pending handle is equivalent to
-non-blocking abandon. `get()` throws on abandoned and cancelled handles, and
-rethrows remote exceptions.
+Use `get_until(deadline)` for normal bounded result retrieval. It returns the
+value, rethrows the remote exception or cancellation, or throws `rpc_timeout`
+when the deadline expires and caller-side abandon wins. Deadline expiry does
+not cancel remote execution; abandoned late replies are discarded. Destroying
+a still-pending handle also abandons caller-side interest without cancelling
+remote execution.
 
 Use `SINTRA_RPC_STRICT` when the local target must use the same transported path
 as remote targets. This matters for local async-handle behavior.
 
 Compiled examples/tests:
 - [`example/sintra/sintra_example_2_rpc_append.cpp`](../example/sintra/sintra_example_2_rpc_append.cpp)
+- [`tests/rpc_bounded_result_test.cpp`](../tests/rpc_bounded_result_test.cpp)
 - [`tests/rpc_async_lifecycle_test.cpp`](../tests/rpc_async_lifecycle_test.cpp)
 - [`tests/finalize_async_rpc_lifecycle_test.cpp`](../tests/finalize_async_rpc_lifecycle_test.cpp)
 
@@ -1035,6 +1053,11 @@ exception path.
 `sintra::rpc_cancelled` is thrown when an outstanding RPC is unblocked by
 teardown or coordinator/process loss.
 
+`sintra::rpc_timeout` is thrown by `Rpc_handle<R>::get_until(deadline)` when
+the deadline expires while the RPC is still pending and caller-side abandon
+wins; the timeout is local to the caller, does not cancel remote execution,
+and late remote results are discarded.
+
 `sintra::rpc_unavailable` is thrown when an RPC target has been unpublished,
 destroyed, is shutting down, or its process is gone. It derives from
 `std::runtime_error`, but can be caught directly when caller code needs to
@@ -1085,7 +1108,7 @@ threading rules.
 | Slot or RPC handler | Use slots, RPC continuations, or control-thread receives for blocking waits. | Call `receive<T>()` from the handler. |
 | Slot or RPC handler | Use fences only when handler-context exclusions are OK. | Assume the current handler was fenced. |
 | Slot or RPC handler | Keep shutdown decisions on a control thread. | Call `leave()` from handler or post-handler callbacks. |
-| Async RPC caller | Use `wait_until` for bounded waits and call `abandon()` when giving up. | Treat deadline expiry as remote cancellation. |
+| Async RPC caller | Use `get_until` for bounded result retrieval; drop the handle to abandon caller-side interest. | Treat deadline expiry as remote cancellation. |
 | Collective shutdown | Have every live finishing participant call `shutdown()`. | Call `shutdown()` in only one participant while peers continue. |
 | Unilateral departure | Use `leave()` from a top-level control thread. | Use `leave()` from a coordinator that still owns known peers. |
 | Shared payload buffers | Copy data out before the valid message scope ends. | Keep variable-buffer backed data past the handler/receive scope. |
@@ -1167,7 +1190,8 @@ sources.
 | Basic broadcast and slot | [`example/sintra/sintra_example_0_basic_pubsub.cpp`](../example/sintra/sintra_example_0_basic_pubsub.cpp) |
 | Blocking receive on a control thread | [`tests/receive_test.cpp`](../tests/receive_test.cpp) |
 | Named transceiver RPC | [`example/sintra/sintra_example_2_rpc_append.cpp`](../example/sintra/sintra_example_2_rpc_append.cpp) |
-| Async RPC with completed/timeout branches and `abandon()` | [`tests/rpc_async_lifecycle_test.cpp`](../tests/rpc_async_lifecycle_test.cpp) |
+| Async RPC with bounded result retrieval | [`tests/rpc_bounded_result_test.cpp`](../tests/rpc_bounded_result_test.cpp) |
+| Async RPC lifecycle outcomes | [`tests/rpc_async_lifecycle_test.cpp`](../tests/rpc_async_lifecycle_test.cpp) |
 | Fire-and-forget unicast | [`example/sintra/sintra_example_6_unicast_send_to.cpp`](../example/sintra/sintra_example_6_unicast_send_to.cpp) |
 | Spawn and wait for a process | [`tests/spawn_wait_test.cpp`](../tests/spawn_wait_test.cpp) |
 | Admit a manually launched process | [`tests/external_process_invitation_test.cpp`](../tests/external_process_invitation_test.cpp) |
@@ -1227,9 +1251,7 @@ sources.
 | `sintra::Ring_R_snapshot_error` | [Direct Ring Helpers](#direct-ring-helpers) |
 | `sintra::Ring_W<T>` | [Direct Ring Helpers](#direct-ring-helpers) |
 | `sintra::Ring_diagnostics` | [Direct Ring Helpers](#direct-ring-helpers) |
-| `sintra::Rpc_completion_state` | [RPC](#rpc) |
 | `sintra::Rpc_handle<T>` | [RPC](#rpc) |
-| `sintra::Rpc_wait_status` | [RPC](#rpc) |
 | `sintra::Spawn_options` | [Initialization and Process Topology](#initialization-and-process-topology) |
 | `sintra::Transceiver` | [Transceivers](#transceivers) |
 | `sintra::Typed_instance_id<T>` | [Targeting and IDs](#targeting-and-ids) |
@@ -1287,6 +1309,7 @@ sources.
 | `sintra::ring_payload_traits<T>` | [Direct Ring Helpers](#direct-ring-helpers) |
 | `sintra::ring_reader_evicted_exception` | [Direct Ring Helpers](#direct-ring-helpers) |
 | `sintra::rpc_cancelled` | [RPC](#rpc), [Errors and Diagnostics](#errors-and-diagnostics) |
+| `sintra::rpc_timeout` | [RPC](#rpc), [Errors and Diagnostics](#errors-and-diagnostics) |
 | `sintra::rpc_unavailable` | [RPC](#rpc), [Errors and Diagnostics](#errors-and-diagnostics) |
 | `sintra::sequence_counter_type` | [Targeting and IDs](#targeting-and-ids), [Barriers and Fences](#barriers-and-fences) |
 | `sintra::set_lifecycle_handler` | [Recovery and Lifecycle Hooks](#recovery-and-lifecycle-hooks) |

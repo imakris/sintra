@@ -415,12 +415,13 @@ bool rejected_helper_can_create_group()
         "rejected_cleanup_group",
         members);
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-    if (handle.wait_until(deadline) != sintra::Rpc_wait_status::completed) {
-        handle.abandon();
+    try {
+        return handle.get_until(deadline) != sintra::invalid_instance_id;
+    }
+    catch (const sintra::rpc_timeout&) {
         sintra::s_mproc->unblock_rpc(sintra::process_of(sintra::s_coord_id));
         return false;
     }
-    return handle.get() != sintra::invalid_instance_id;
 }
 
 bool rejected_helper_can_publish_process()
@@ -435,13 +436,15 @@ bool rejected_helper_can_publish_process()
         sintra::s_mproc_id,
         "rejected_cleanup_process");
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-    if (handle.wait_until(deadline) != sintra::Rpc_wait_status::completed) {
-        handle.abandon();
+    bool published = false;
+    try {
+        published = handle.get_until(deadline) != sintra::invalid_instance_id;
+    }
+    catch (const sintra::rpc_timeout&) {
         sintra::s_mproc->unblock_rpc(sintra::process_of(sintra::s_coord_id));
         return false;
     }
 
-    const bool published = handle.get() != sintra::invalid_instance_id;
     if (published) {
         try {
             (void)sintra::Coordinator::rpc_unpublish_transceiver(sintra::s_coord_id, sintra::s_mproc_id);

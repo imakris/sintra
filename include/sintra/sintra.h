@@ -76,7 +76,7 @@
 // RPC is part of this surface as well:
 // - `rpc_<method>(...)` remains the blocking call/return API
 // - `rpc_async_<method>(...)` returns an `Rpc_handle<T>` for async waiting,
-//   deadline-bounded waits, abandonment, and later result retrieval
+//   deadline-bounded result retrieval, and local abandon on drop
 //
 // Typical usage:
 // \code
@@ -92,10 +92,12 @@
 // auto sum = Calculator::rpc_add(target, 10, 15); // blocking
 //
 // auto handle = Calculator::rpc_async_slow_add(target, 10, 15); // async
-// if (handle.wait_until(deadline) == sintra::Rpc_wait_status::completed) {
-//     auto value = handle.get();
-// } else {
-//     handle.abandon();
+// const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+// try {
+//     auto value = handle.get_until(deadline);
+// }
+// catch (const sintra::rpc_timeout&) {
+//     // The deadline expired and the handle was abandoned.
 // }
 // \endcode
 //

@@ -1873,11 +1873,10 @@ void Managed_process::init(int argc, const char* const* argv)
             detail::k_external_attach_claim_timeout;
 
         bool claim_accepted = false;
-        if (handle.wait_until(deadline) == Rpc_wait_status::completed) {
-            claim_accepted = handle.get();
+        try {
+            claim_accepted = handle.get_until(deadline);
         }
-        else {
-            handle.abandon();
+        catch (const rpc_timeout&) {
             unblock_rpc(process_of(s_coord_id));
         }
 

@@ -78,8 +78,8 @@ to take a direct in-process shortcut and whether a reply is produced.
   swarm.
 - Local code wants a single call site that works whether the target lives
   in the current process or another process.
-- The async-handle surface (deadline waits, abandonment, deferred result
-  inspection) must work for a same-process target. Use
+- The async-handle surface (bounded result retrieval and local abandon on
+  drop) must work for a same-process target. Use
   `SINTRA_RPC_STRICT`, since `SINTRA_RPC` may pick a non-transported
   shortcut for which `rpc_async_<method>` is not supported.
 - One-way notifications without a reply round-trip are needed. Use
@@ -127,14 +127,14 @@ to take a direct in-process shortcut and whether a reply is produced.
 
 - [example/sintra/sintra_example_2_rpc_append.cpp](../../example/sintra/sintra_example_2_rpc_append.cpp)
 - [example/sintra/sintra_example_6_unicast_send_to.cpp](../../example/sintra/sintra_example_6_unicast_send_to.cpp)
+- [tests/rpc_bounded_result_test.cpp](../../tests/rpc_bounded_result_test.cpp)
 - [tests/rpc_async_lifecycle_test.cpp](../../tests/rpc_async_lifecycle_test.cpp)
 
 ## See also
 
 - [`sintra::Rpc_handle`](rpc_handle.md)
-- [`sintra::Rpc_wait_status`](rpc_wait_status.md)
-- [`sintra::Rpc_completion_state`](rpc_completion_state.md)
 - [`sintra::rpc_cancelled`](rpc_cancelled.md)
+- [`sintra::rpc_timeout`](rpc_timeout.md)
 - [`sintra::rpc_unavailable`](rpc_unavailable.md)
 - [`sintra::Resolvable_instance_id`](resolvable_instance_id.md)
 - [`sintra::Derived_transceiver`](derived_transceiver.md)

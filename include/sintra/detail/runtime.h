@@ -389,20 +389,17 @@ inline bool finalize_impl()
                     s_coord_id,
                     s_mproc_id);
                 const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-                if (handle.wait_until(deadline) == Rpc_wait_status::completed) {
-                    flush_seq = handle.get();
-                }
-                else {
-                    handle.abandon();
-                    s_mproc->unblock_rpc(process_of(s_coord_id));
-                    flush_seq = invalid_sequence;
-                    Log_stream(log_level::warning)
-                        << "finalize(): begin_process_draining timed out after 5 seconds for process "
-                        << static_cast<unsigned long long>(s_mproc_id)
-                        << " while waiting on coordinator "
-                        << static_cast<unsigned long long>(s_coord_id)
-                        << ". Proceeding with degraded shutdown semantics.\n";
-                }
+                flush_seq = handle.get_until(deadline);
+            }
+            catch (const rpc_timeout&) {
+                s_mproc->unblock_rpc(process_of(s_coord_id));
+                flush_seq = invalid_sequence;
+                Log_stream(log_level::warning)
+                    << "finalize(): begin_process_draining timed out after 5 seconds for process "
+                    << static_cast<unsigned long long>(s_mproc_id)
+                    << " while waiting on coordinator "
+                    << static_cast<unsigned long long>(s_coord_id)
+                    << ". Proceeding with degraded shutdown semantics.\n";
             }
             catch (const std::exception& e) {
                 flush_seq = invalid_sequence;
