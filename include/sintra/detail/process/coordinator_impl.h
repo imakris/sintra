@@ -83,6 +83,13 @@ inline constexpr const char* k_stage_make_process_group_groups_locked =
 // the coordinator.
 using Coordinator_lock_stage_callback = void (*)(const char* stage);
 inline std::atomic<Coordinator_lock_stage_callback> s_coordinator_lock_stage{nullptr};
+
+// Runs inside the real begin_process_draining RPC handler before production
+// drain state changes, so tests can force the transported result path.
+using Coordinator_begin_process_draining_callback =
+    void (*)(instance_id_type process_iid);
+inline std::atomic<Coordinator_begin_process_draining_callback>
+    s_coordinator_begin_process_draining{nullptr};
 #endif
 
 }} // namespace detail::test_hooks
@@ -1194,6 +1201,15 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
 
 inline sequence_counter_type Coordinator::begin_process_draining(instance_id_type process_iid)
 {
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    const auto callback =
+        detail::test_hooks::s_coordinator_begin_process_draining.load(
+            std::memory_order_acquire);
+    if (callback) {
+        callback(process_iid);
+    }
+#endif
+
     set_draining_state(process_iid, 1);
 
     auto pending_completions = collect_pending_barrier_completions(
