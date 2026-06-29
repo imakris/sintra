@@ -26,10 +26,8 @@ remote reply will be observed for the call.
 
 ## Use when
 
-- Catching the failure mode that corresponds to
-  `Rpc_completion_state::cancelled`.
 - Distinguishing runtime-driven cancellation from a remote-side exception
-  or from a caller-driven abandonment.
+  or from caller-side timeout abandonment.
 
 ## Contract
 
@@ -56,6 +54,5 @@ remote reply will be observed for the call.
 ## See also
 
 - [`sintra::Rpc_handle`](rpc_handle.md)
-- [`sintra::Rpc_completion_state`](rpc_completion_state.md)
 - [`sintra::rpc_unavailable`](rpc_unavailable.md)
 - [`SINTRA_RPC / SINTRA_RPC_STRICT / SINTRA_UNICAST`](rpc.md)

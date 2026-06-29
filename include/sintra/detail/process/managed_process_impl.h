@@ -1873,11 +1873,10 @@ void Managed_process::init(int argc, const char* const* argv)
             detail::k_external_attach_claim_timeout;
 
         bool claim_accepted = false;
-        if (handle.wait_until(deadline) == Rpc_wait_status::completed) {
-            claim_accepted = handle.get();
+        try {
+            claim_accepted = handle.get_until(deadline);
         }
-        else {
-            handle.abandon();
+        catch (const rpc_timeout&) {
             unblock_rpc(process_of(s_coord_id));
         }
 
@@ -2250,6 +2249,16 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
         notify_init_complete();
 
         s_branch_index = 0;
+
+        if (!spawn_failures.empty()) {
+            std::vector<instance_id_type> successful_list(
+                successfully_spawned.begin(),
+                successfully_spawned.end()
+            );
+            successful_list.push_back(m_instance_id); // Include coordinator
+
+            throw init_error(std::move(spawn_failures), std::move(successful_list));
+        }
     }
     else {
         assert(s_branch_index != -1);
@@ -2274,20 +2283,18 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
         bool all_started = Process_group::rpc_barrier(m_group_all, UIBS, 0);
 
         // If we're the coordinator and have failures to report, throw init_error
-        if (s_coord && (!spawn_failures.empty() || !all_started)) {
+        if (s_coord && !all_started) {
             // If barrier failed, some successfully spawned processes didn't reach it
-            if (!all_started && spawn_failures.empty()) {
-                // All processes that we attempted to spawn but didn't reach the barrier
-                for (const auto& iid : successfully_spawned) {
-                    spawn_failures.emplace_back(
-                        "", // We don't have binary name readily available here
-                        iid,
-                        init_error::cause::barrier_timeout,
-                        0,
-                        "Process spawned successfully but did not reach "
-                        "initialization barrier (may have crashed during startup)"
-                    );
-                }
+            // All processes that we attempted to spawn but didn't reach the barrier
+            for (const auto& iid : successfully_spawned) {
+                spawn_failures.emplace_back(
+                    "", // We don't have binary name readily available here
+                    iid,
+                    init_error::cause::barrier_timeout,
+                    0,
+                    "Process spawned successfully but did not reach "
+                    "initialization barrier (may have crashed during startup)"
+                );
             }
 
             // Collect successfully spawned instance IDs to include in exception

@@ -80,18 +80,9 @@ bool expect_runtime_error_reply(
     std::string_view   context)
 {
     bool       ok          = true;
-    const auto wait_status = handle.wait_until(std::chrono::steady_clock::now() + 2s);
-    ok &= sintra::test::assert_true(
-        wait_status == sintra::Rpc_wait_status::completed,
-        k_prefix,
-        std::string(context) + " should complete with an exception reply");
-
-    if (wait_status != sintra::Rpc_wait_status::completed) {
-        return false;
-    }
 
     try {
-        (void)handle.get();
+        (void)handle.get_until(std::chrono::steady_clock::now() + 2s);
         ok &= sintra::test::assert_true(
             false,
             k_prefix,

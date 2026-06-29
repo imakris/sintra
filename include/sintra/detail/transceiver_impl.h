@@ -826,8 +826,11 @@ void Rpc_handle<RT>::wait() const
 
 template<typename RT>
 template<typename Clock, typename Duration>
-Rpc_wait_status Rpc_handle<RT>::wait_until(const std::chrono::time_point<Clock, Duration>& deadline) const
+detail::Rpc_wait_status Rpc_handle<RT>::wait_until(
+    const std::chrono::time_point<Clock, Duration>& deadline) const
 {
+    using detail::Rpc_wait_status;
+
     if (!m_state) {
         return Rpc_wait_status::completed;
     }
@@ -851,14 +854,33 @@ Rpc_wait_status Rpc_handle<RT>::wait_until(const std::chrono::time_point<Clock, 
 }
 
 template<typename RT>
-bool Rpc_handle<RT>::ready() const
+template<typename Clock, typename Duration>
+auto Rpc_handle<RT>::get_until(const std::chrono::time_point<Clock, Duration>& deadline) -> RT
 {
-    return state() != Rpc_completion_state::pending;
+    if (wait_until(deadline) == detail::Rpc_wait_status::completed) {
+        return get();
+    }
+
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    const auto callback =
+        detail::test_hooks::s_rpc_get_until_stage.load(std::memory_order_acquire);
+    if (callback) {
+        callback(detail::test_hooks::k_stage_rpc_get_until_deadline_before_abandon);
+    }
+#endif
+
+    if (abandon()) {
+        throw rpc_timeout("rpc timed out");
+    }
+
+    return get();
 }
 
 template<typename RT>
-Rpc_completion_state Rpc_handle<RT>::state() const
+detail::Rpc_completion_state Rpc_handle<RT>::state() const
 {
+    using detail::Rpc_completion_state;
+
     if (!m_state) {
         return Rpc_completion_state::abandoned;
     }
@@ -916,6 +938,8 @@ bool Rpc_handle<RT>::abandon()
 template<typename RT>
 auto Rpc_handle<RT>::get() const -> RT
 {
+    using detail::Rpc_completion_state;
+
     if (!m_state) {
         throw runtime_error("RPC handle has no state.");
     }
@@ -1246,7 +1270,6 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
     auto handle = rpc_async_impl<RPCTC, MESSAGE_T, Args...>(
         instance_id,
         std::forward<Args>(args)...);
-    handle.wait();
     return handle.get();
 }
 

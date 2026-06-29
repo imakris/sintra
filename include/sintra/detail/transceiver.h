@@ -16,6 +16,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <unordered_map>
@@ -39,11 +40,12 @@ using std::string;
 using std::unordered_map;
 using std::unordered_set;
 
-// Wait results for Rpc_handle::wait_until(...). This is part of the async RPC
-// surface returned by rpc_async_<method>().
+namespace detail {
+
+// Internal wait result used by Rpc_handle::get_until(...).
 enum class Rpc_wait_status
 {
-    // The async RPC reached a terminal state before the deadline.
+    // This wait observed the handle in a terminal state.
     completed,
 
     // The deadline expired but the async RPC may still complete later unless
@@ -51,11 +53,9 @@ enum class Rpc_wait_status
     deadline_exceeded,
 };
 
-// Observable lifecycle states for an async Rpc_handle. Synchronous rpc_<method>()
-// does not expose this state machine publicly, even though transported sync RPC
-// reuses the same internal wait/result plumbing.
+// Internal lifecycle state for async RPC result retrieval.
 // - cancelled: wait ended because process/coordinator teardown unblocked it
-// - abandoned: caller explicitly gave up interest via abandon()
+// - abandoned: caller locally dropped interest before a result arrived
 enum class Rpc_completion_state
 {
     // The async RPC is still waiting for a final outcome.
@@ -70,9 +70,11 @@ enum class Rpc_completion_state
     // The wait ended because teardown or lifeline loss unblocked outstanding RPCs.
     cancelled,
 
-    // The caller explicitly gave up interest via abandon().
+    // Caller-side interest was dropped locally before a result arrived.
     abandoned,
 };
+
+} // namespace detail
 
 template<typename RT>
 class Rpc_handle;
@@ -877,6 +879,12 @@ struct rpc_unavailable : std::runtime_error
     using std::runtime_error::runtime_error;
 };
 
+// Typed exception: thrown when a local bounded wait gives up on a pending RPC.
+struct rpc_timeout : std::runtime_error
+{
+    using std::runtime_error::runtime_error;
+};
+
 struct Outstanding_rpc_control
 {
     mutex               keep_waiting_mutex;
@@ -893,6 +901,20 @@ struct Outstanding_rpc_control
     bool                cleaned_up = false;
 };
 
+namespace detail { namespace test_hooks {
+
+// Stage name shared with tests that exercise the get_until timeout/abandon
+// race deterministically.
+inline constexpr const char* k_stage_rpc_get_until_deadline_before_abandon =
+    "rpc_handle/get_until/deadline_before_abandon";
+
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+using Rpc_get_until_stage_callback = void (*)(const char* stage);
+inline std::atomic<Rpc_get_until_stage_callback> s_rpc_get_until_stage{nullptr};
+#endif
+
+}} // namespace detail::test_hooks
+
 template<typename RT>
 class Rpc_handle
 {
@@ -908,27 +930,14 @@ public:
     Rpc_handle& operator=(const Rpc_handle&) = delete;
     Rpc_handle& operator=(Rpc_handle&& other) noexcept;
 
-    // Destroying a pending handle is equivalent to non-blocking abandon().
+    // Destroying a pending handle drops caller-side interest without blocking.
     ~Rpc_handle();
 
-    // Block until the async RPC reaches a terminal state.
-    void wait() const;
-
-    // Wait until deadline or terminal completion, whichever happens first.
-    // Repeated bounded waits are allowed; deadline expiry does not change the
-    // terminal state by itself.
+    // Wait until deadline, then return the value or rethrow the terminal failure.
+    // If the deadline expires and this handle wins the local drop race, throws rpc_timeout.
+    // If completion wins that race, preserves get()'s outcome.
     template<typename Clock, typename Duration>
-    Rpc_wait_status wait_until(const std::chrono::time_point<Clock, Duration>& deadline) const;
-
-    // True once the handle is no longer pending.
-    bool ready() const;
-
-    // Inspect the current async terminal state without consuming the result.
-    Rpc_completion_state state() const;
-
-    // Give up caller-side interest without cancelling remote execution.
-    // Idempotent: returns true only on the transition from pending to abandoned.
-    bool abandon();
+    auto get_until(const std::chrono::time_point<Clock, Duration>& deadline) -> RT;
 
     // Block if needed, then return the value or rethrow the terminal failure.
     // - returned: yields the reply value
@@ -942,6 +951,16 @@ private:
     using state_type   = Rpc_state<storage_type>;
 
     explicit Rpc_handle(std::shared_ptr<state_type> state);
+
+    void wait() const;
+
+    template<typename Clock, typename Duration>
+    detail::Rpc_wait_status wait_until(
+        const std::chrono::time_point<Clock, Duration>& deadline) const;
+
+    detail::Rpc_completion_state state() const;
+
+    bool abandon();
 
     std::shared_ptr<state_type> m_state;
 

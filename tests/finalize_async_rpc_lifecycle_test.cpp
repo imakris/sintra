@@ -39,24 +39,9 @@ int main(int argc, char* argv[])
         515,
         500);
 
-    if (handle.wait_until(std::chrono::steady_clock::now() + 40ms) !=
-        sintra::Rpc_wait_status::deadline_exceeded)
-    {
-        std::fprintf(stderr, "Async RPC completed before finalize began.\n");
-        return 1;
-    }
+    std::this_thread::sleep_for(40ms);
 
     sintra::detail::finalize();
-
-    if (!handle.ready()) {
-        std::fprintf(stderr, "Handle was still pending after finalize.\n");
-        return 1;
-    }
-
-    if (handle.state() != sintra::Rpc_completion_state::cancelled) {
-        std::fprintf(stderr, "Handle did not transition to cancelled after finalize.\n");
-        return 1;
-    }
 
     try {
         (void)handle.get();

@@ -1,23 +1,30 @@
-#include <sintra/sintra.h>
-
-#include "test_utils.h"
-
-#include <cstdio>
 #include <chrono>
+#include <cstdio>
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <type_traits>
 #include <vector>
 
+// ponytail: test-only access for asserting Rpc_handle destructor cleanup.
+#define private public
+#include <sintra/sintra.h>
+#undef private
+
+#include "test_utils.h"
+
 namespace {
 
-constexpr const char* k_service_name     = "async lifecycle service";
-constexpr const char* k_ready_barrier    = "async-lifecycle-service-ready";
-constexpr const char* k_finished_barrier = "async-lifecycle-test-finished";
+constexpr std::string_view k_failure_prefix   = "rpc_async_lifecycle_test: ";
+constexpr const char*      k_service_name     = "async lifecycle service";
+constexpr const char*      k_ready_barrier    = "async-lifecycle-service-ready";
+constexpr const char*      k_finished_barrier = "async-lifecycle-test-finished";
 std::filesystem::path owner_events_path(const std::filesystem::path& shared_dir)
 {
     return shared_dir / "owner_events.txt";
@@ -42,6 +49,72 @@ void touch_done_marker(const std::filesystem::path& path)
         throw std::runtime_error("failed to create marker file: " + path.string());
     }
     out << "done\n";
+}
+
+bool report_state_failure(std::string_view context, std::string_view message)
+{
+    std::fprintf(stderr,
+        "%.*s%.*s %.*s\n",
+        static_cast<int>(k_failure_prefix.size()),
+        k_failure_prefix.data(),
+        static_cast<int>(context.size()),
+        context.data(),
+        static_cast<int>(message.size()),
+        message.data());
+    return false;
+}
+
+bool wait_for_owner_event(const std::filesystem::path& shared_dir, std::string_view expected)
+{
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (std::chrono::steady_clock::now() < deadline) {
+        for (const auto& event : sintra::test::read_lines(owner_events_path(shared_dir))) {
+            if (event == expected) {
+                return true;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return false;
+}
+
+template <typename State>
+bool expect_rpc_abandoned_and_detached(
+    const std::shared_ptr<State>&  rpc_state,
+    std::string_view              context)
+{
+    {
+        std::lock_guard<std::mutex> lock(rpc_state->control.keep_waiting_mutex);
+        if (rpc_state->control.keep_waiting) {
+            return report_state_failure(context, "is still waiting");
+        }
+        if (!rpc_state->control.abandoned) {
+            return report_state_failure(context, "is not marked abandoned");
+        }
+        if (!rpc_state->control.cleaned_up) {
+            return report_state_failure(context, "is not cleaned up");
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(sintra::s_outstanding_rpcs_mutex());
+        if (sintra::s_outstanding_rpcs().find(&rpc_state->control) !=
+            sintra::s_outstanding_rpcs().end())
+        {
+            return report_state_failure(context, "still has outstanding rpc control");
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(sintra::s_mproc->m_return_handlers_mutex);
+        if (sintra::s_mproc->m_active_return_handlers.find(rpc_state->function_instance_id) !=
+            sintra::s_mproc->m_active_return_handlers.end())
+        {
+            return report_state_failure(context, "still has active return handler");
+        }
+    }
+
+    return true;
 }
 
 template <typename Handle>
@@ -213,29 +286,11 @@ int process_client()
             "local_strict",
             shared_dir.string());
 
-        if (handle.ready()) {
-            sintra::test::append_line_or_throw(client_path, "local_async_strict_ready_initial:unexpected");
+        if (handle.get_until(std::chrono::steady_clock::now() + 2s) != 88) {
+            sintra::test::append_line_or_throw(client_path, "local_async_strict_get_until:unexpected");
             return 1;
         }
-
-        const auto wait_status = handle.wait_until(std::chrono::steady_clock::now() + 2s);
-        if (wait_status != sintra::Rpc_wait_status::completed) {
-            sintra::test::append_line_or_throw(client_path, "local_async_strict_wait:unexpected");
-            return 1;
-        }
-        sintra::test::append_line_or_throw(client_path, "local_async_strict_wait:completed");
-
-        if (!handle.ready()) {
-            sintra::test::append_line_or_throw(client_path, "local_async_strict_ready_final:unexpected");
-            return 1;
-        }
-        sintra::test::append_line_or_throw(client_path, "local_async_strict_ready_final:ready");
-
-        if (handle.state() != sintra::Rpc_completion_state::returned) {
-            sintra::test::append_line_or_throw(client_path, "local_async_strict_state:unexpected");
-            return 1;
-        }
-        sintra::test::append_line_or_throw(client_path, "local_async_strict_state:returned");
+        sintra::test::append_line_or_throw(client_path, "local_async_strict_get_until:returned");
 
         if (handle.get() != 88) {
             sintra::test::append_line_or_throw(client_path, "local_async_strict_get:unexpected");
@@ -254,30 +309,17 @@ int process_client()
 
         std::this_thread::sleep_for(40ms);
 
-        const auto wait_status = handle.wait_until(std::chrono::steady_clock::now() + 100ms);
-        if (wait_status != sintra::Rpc_wait_status::completed) {
-            sintra::test::append_line_or_throw(client_path, "fast_complete_wait:unexpected");
+        if (handle.get_until(std::chrono::steady_clock::now() + 100ms) != 303) {
+            sintra::test::append_line_or_throw(client_path, "fast_complete_get_until:unexpected");
             return 1;
         }
-        sintra::test::append_line_or_throw(client_path, "fast_complete_wait:completed");
+        sintra::test::append_line_or_throw(client_path, "fast_complete_get_until:returned");
 
         if (sintra::s_mproc->unblock_rpc() != 0) {
             sintra::test::append_line_or_throw(client_path, "fast_complete_unblock:unexpected");
             return 1;
         }
         sintra::test::append_line_or_throw(client_path, "fast_complete_unblock:clean");
-
-        if (handle.state() != sintra::Rpc_completion_state::returned) {
-            sintra::test::append_line_or_throw(client_path, "fast_complete_state:unexpected");
-            return 1;
-        }
-        sintra::test::append_line_or_throw(client_path, "fast_complete_state:returned");
-
-        if (!handle.ready()) {
-            sintra::test::append_line_or_throw(client_path, "fast_complete_ready:unexpected");
-            return 1;
-        }
-        sintra::test::append_line_or_throw(client_path, "fast_complete_ready:ready");
 
         if (handle.get() != 303) {
             sintra::test::append_line_or_throw(client_path, "fast_complete_get:unexpected");
@@ -293,18 +335,22 @@ int process_client()
             "remote_exception",
             shared_dir.string());
 
-        const auto wait_status = handle.wait_until(std::chrono::steady_clock::now() + 2s);
-        if (wait_status != sintra::Rpc_wait_status::completed) {
-            sintra::test::append_line_or_throw(client_path, "remote_exception_wait:unexpected");
+        try {
+            (void)handle.get_until(std::chrono::steady_clock::now() + 2s);
+            sintra::test::append_line_or_throw(client_path, "remote_exception_get_until:unexpected");
             return 1;
         }
-        sintra::test::append_line_or_throw(client_path, "remote_exception_wait:completed");
-
-        if (handle.state() != sintra::Rpc_completion_state::remote_exception) {
-            sintra::test::append_line_or_throw(client_path, "remote_exception_state:unexpected");
+        catch (const std::runtime_error& ex) {
+            if (std::string(ex.what()) != "remote exception observed") {
+                sintra::test::append_line_or_throw(client_path, "remote_exception_get_until:unexpected");
+                return 1;
+            }
+        }
+        catch (...) {
+            sintra::test::append_line_or_throw(client_path, "remote_exception_get_until:unexpected");
             return 1;
         }
-        sintra::test::append_line_or_throw(client_path, "remote_exception_state:remote_exception");
+        sintra::test::append_line_or_throw(client_path, "remote_exception_get_until:threw");
 
         if (!get_throws_runtime_error_message(handle, "remote exception observed")) {
             sintra::test::append_line_or_throw(client_path, "remote_exception_get:unexpected");
@@ -321,47 +367,23 @@ int process_client()
             "abandon",
             shared_dir.string());
 
-        if (handle.ready()) {
-            sintra::test::append_line_or_throw(client_path, "abandon_ready_initial:unexpected");
+        try {
+            (void)handle.get_until(std::chrono::steady_clock::now() + 40ms);
+            sintra::test::append_line_or_throw(client_path, "abandon_get_until:unexpected");
             return 1;
         }
-        sintra::test::append_line_or_throw(client_path, "abandon_ready_initial:pending");
-
-        const auto wait_status = handle.wait_until(std::chrono::steady_clock::now() + 40ms);
-        if (wait_status != sintra::Rpc_wait_status::deadline_exceeded) {
-            sintra::test::append_line_or_throw(client_path, "abandon_wait:unexpected");
+        catch (const sintra::rpc_timeout&) {
+        }
+        catch (...) {
+            sintra::test::append_line_or_throw(client_path, "abandon_get_until:unexpected");
             return 1;
         }
-        sintra::test::append_line_or_throw(client_path, "abandon_wait:deadline_exceeded");
-
-        if (!handle.abandon()) {
-            sintra::test::append_line_or_throw(client_path, "abandon_call_first:unexpected");
-            return 1;
-        }
-        sintra::test::append_line_or_throw(client_path, "abandon_call_first:transitioned");
-
-        if (handle.abandon()) {
-            sintra::test::append_line_or_throw(client_path, "abandon_call_second:unexpected");
-            return 1;
-        }
-        sintra::test::append_line_or_throw(client_path, "abandon_call_second:stable");
-
-        if (handle.state() != sintra::Rpc_completion_state::abandoned) {
-            sintra::test::append_line_or_throw(client_path, "abandon_state_initial:unexpected");
-            return 1;
-        }
-        sintra::test::append_line_or_throw(client_path, "abandon_state_initial:abandoned");
+        sintra::test::append_line_or_throw(client_path, "abandon_get_until:timed_out");
 
         if (!sintra::test::wait_for_file(done_marker_path(shared_dir, "abandon"), 2s, 5ms)) {
             sintra::test::append_line_or_throw(client_path, "abandon_late_reply:missing");
             return 1;
         }
-
-        if (handle.state() != sintra::Rpc_completion_state::abandoned) {
-            sintra::test::append_line_or_throw(client_path, "abandon_state_final:unexpected");
-            return 1;
-        }
-        sintra::test::append_line_or_throw(client_path, "abandon_state_final:abandoned");
 
         if (!get_throws_runtime_error_not_cancelled(handle)) {
             sintra::test::append_line_or_throw(client_path, "abandon_get:returned");
@@ -371,6 +393,8 @@ int process_client()
     }
 
     {
+        std::shared_ptr<sintra::Rpc_state<int>> rpc_state;
+
         {
             auto handle = Lifecycle_service::rpc_async_delayed_reply(
                 k_service_name,
@@ -378,14 +402,19 @@ int process_client()
                 250,
                 "scope_abandon",
                 shared_dir.string());
+            rpc_state = handle.m_state;
 
-            const auto wait_status = handle.wait_until(std::chrono::steady_clock::now() + 40ms);
-            if (wait_status != sintra::Rpc_wait_status::deadline_exceeded) {
-                sintra::test::append_line_or_throw(client_path, "scope_abandon_wait:unexpected");
+            if (!wait_for_owner_event(shared_dir, "start:scope_abandon")) {
+                sintra::test::append_line_or_throw(client_path, "scope_abandon_start:missing");
                 return 1;
             }
-            sintra::test::append_line_or_throw(client_path, "scope_abandon_wait:deadline_exceeded");
         }
+
+        if (!expect_rpc_abandoned_and_detached(rpc_state, "scope_abandon_drop")) {
+            sintra::test::append_line_or_throw(client_path, "scope_abandon_drop:unexpected");
+            return 1;
+        }
+        sintra::test::append_line_or_throw(client_path, "scope_abandon_drop:destroyed");
 
         if (!sintra::test::wait_for_file(done_marker_path(shared_dir, "scope_abandon"), 2s, 5ms)) {
             sintra::test::append_line_or_throw(client_path, "scope_abandon_late_reply:missing");
@@ -423,18 +452,18 @@ int process_client()
         }
         sintra::test::append_line_or_throw(client_path, "cancel_unblock:observed");
 
-        const auto wait_status = handle.wait_until(std::chrono::steady_clock::now() + 200ms);
-        if (wait_status != sintra::Rpc_wait_status::completed) {
-            sintra::test::append_line_or_throw(client_path, "cancel_wait:unexpected");
+        try {
+            (void)handle.get_until(std::chrono::steady_clock::now() + 200ms);
+            sintra::test::append_line_or_throw(client_path, "cancel_get_until:unexpected");
             return 1;
         }
-        sintra::test::append_line_or_throw(client_path, "cancel_wait:completed");
-
-        if (handle.state() != sintra::Rpc_completion_state::cancelled) {
-            sintra::test::append_line_or_throw(client_path, "cancel_state_initial:unexpected");
+        catch (const sintra::rpc_cancelled&) {
+        }
+        catch (...) {
+            sintra::test::append_line_or_throw(client_path, "cancel_get_until:unexpected");
             return 1;
         }
-        sintra::test::append_line_or_throw(client_path, "cancel_state_initial:cancelled");
+        sintra::test::append_line_or_throw(client_path, "cancel_get_until:threw");
 
         if (!get_throws_cancelled(handle)) {
             sintra::test::append_line_or_throw(client_path, "cancel_get:returned");
@@ -446,12 +475,6 @@ int process_client()
             sintra::test::append_line_or_throw(client_path, "cancel_late_reply:missing");
             return 1;
         }
-
-        if (handle.state() != sintra::Rpc_completion_state::cancelled) {
-            sintra::test::append_line_or_throw(client_path, "cancel_state_final:unexpected");
-            return 1;
-        }
-        sintra::test::append_line_or_throw(client_path, "cancel_state_final:cancelled");
     }
 
     {
@@ -495,32 +518,20 @@ int verify_results(const std::filesystem::path& shared_dir)
 
     const std::vector<std::string> expected_client_events = {
         "local_async_non_strict:rejected",
-        "local_async_strict_wait:completed",
-        "local_async_strict_ready_final:ready",
-        "local_async_strict_state:returned",
+        "local_async_strict_get_until:returned",
         "local_async_strict_get:returned",
-        "fast_complete_wait:completed",
+        "fast_complete_get_until:returned",
         "fast_complete_unblock:clean",
-        "fast_complete_state:returned",
-        "fast_complete_ready:ready",
         "fast_complete_get:returned",
-        "remote_exception_wait:completed",
-        "remote_exception_state:remote_exception",
+        "remote_exception_get_until:threw",
         "remote_exception_get:threw",
-        "abandon_ready_initial:pending",
-        "abandon_wait:deadline_exceeded",
-        "abandon_call_first:transitioned",
-        "abandon_call_second:stable",
-        "abandon_state_initial:abandoned",
-        "abandon_state_final:abandoned",
+        "abandon_get_until:timed_out",
         "abandon_get:threw",
-        "scope_abandon_wait:deadline_exceeded",
+        "scope_abandon_drop:destroyed",
         "scope_abandon_cleanup:clean",
         "cancel_unblock:observed",
-        "cancel_wait:completed",
-        "cancel_state_initial:cancelled",
+        "cancel_get_until:threw",
         "cancel_get:threw",
-        "cancel_state_final:cancelled",
         "unicast_call:returned",
         "unicast_delivery:observed",
     };

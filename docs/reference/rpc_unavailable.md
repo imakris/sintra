@@ -57,6 +57,5 @@ cancellation.
 ## See also
 
 - [`sintra::Rpc_handle`](rpc_handle.md)
-- [`sintra::Rpc_completion_state`](rpc_completion_state.md)
 - [`sintra::rpc_cancelled`](rpc_cancelled.md)
 - [`SINTRA_RPC / SINTRA_RPC_STRICT / SINTRA_UNICAST`](rpc.md)
