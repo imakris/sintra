@@ -9,6 +9,7 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -37,6 +38,8 @@ constexpr const char* k_role_recover = "enable_recovery_after_init";
 constexpr const char* k_role_reuse   = "reuse_attach";
 
 constexpr const char* k_failure_prefix = "external_process_invitation_lifecycle_negative_test: ";
+constexpr const char* k_external_attach_rejected_message =
+    "Sintra external process invitation was rejected.";
 
 struct launched_process_t
 {
@@ -356,6 +359,15 @@ int run_delayed_init_helper(int argc, char* argv[])
     try {
         sintra::init(argc, argv);
     }
+    catch (const std::runtime_error& e) {
+        write_marker(
+            dir,
+            marker,
+            std::string(e.what()) == k_external_attach_rejected_message
+                ? "rejected"
+                : "init_failed");
+        return 0;
+    }
     catch (...) {
         write_marker(dir, marker, "init_failed");
         return 0;
@@ -546,15 +558,14 @@ bool run_shutdown_hook_claim_rejection_preserves_invitation_case(
                 if (!wait_for_marker_in(
                         dir,
                         marker,
-                        {"init_failed", "rejected", "unexpected_success"},
+                        {"rejected", "init_failed", "unexpected_success"},
                         5s))
                 {
                     return;
                 }
 
                 const auto lines = sintra::test::read_lines(marker_path(dir, marker));
-                helper_rejected = !lines.empty() &&
-                    (lines.front() == "init_failed" || lines.front() == "rejected");
+                helper_rejected = !lines.empty() && lines.front() == "rejected";
                 invitation_preserved =
                     sintra::cancel_external_process_invitation(invitation);
             }

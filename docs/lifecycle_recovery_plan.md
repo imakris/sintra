@@ -1,7 +1,8 @@
 # Lifecycle Recovery Plan
 
-Status: Slice 1 architecture review found one gate blocker. Resolve the
-test-first repro before any production change.
+Status: Slice 1 has a red gate, a production fix, and local focused green
+evidence. Independent production review is in progress; normal CI remains
+required before advancing to the next slice.
 
 ## Relation To Existing Lifecycle Plans
 
@@ -224,6 +225,19 @@ Slice 1 architecture review record, 2026-07-09:
   The focused MinGW bigobj target rebuilt successfully and
   `build\slice1-focused-mingw-bigobj\tests\sintra_external_process_invitation_lifecycle_negative_test.exe`
   exited `0`.
+- Review amendment, 2026-07-09: the first production-review round found that
+  the new hook oracle accepted generic `init_failed`. The gate now classifies
+  the exact `Sintra external process invitation was rejected.` exception as
+  `rejected`; other init failures remain acceptable only for the older
+  post-shutdown delayed-helper case and fail the hook case.
+- Tightened-oracle evidence, 2026-07-09: applying only the test tightening to
+  pre-production commit `6cf1ce1` built successfully in
+  `C:\plms\bsd_licensed\sintra-slice1-red-tight-20260709-0329` and exited `1`
+  with the two hook failures. The log is
+  `C:\plms\bsd_licensed\sintra-lifecycle-artifacts\slice1_tightened_oracle_red_6cf1ce1.txt`.
+  Rebuilding and rerunning the same target on the production branch exited `0`;
+  the green log is
+  `C:\plms\bsd_licensed\sintra-lifecycle-artifacts\slice1_tightened_oracle_green_9ae88cb_plus_fix.txt`.
 
 ## Implementation Slices
 
@@ -395,6 +409,6 @@ changes, the slice becomes multi-domain, or the same blocker class repeats.
 
 ## Next Action
 
-Do not code in the preserved dirty worktree. Create a clean implementation
-worktree from `02f03bf`, run an architecture/scope review for Slice 1, then
-implement the external invitation claim fix and its focused gate.
+Do not code in the preserved dirty worktree. Complete the Slice 1 production
+review reround after the tightened oracle, then run the required CI gate before
+advancing to the next slice.
