@@ -510,6 +510,73 @@ bool run_shutdown_before_claim_case(
     return ok;
 }
 
+bool run_shutdown_hook_claim_rejection_preserves_invitation_case(
+    int                            argc,
+    char*                          argv[],
+    const std::string&             binary_path,
+    const std::filesystem::path&   dir)
+{
+    sintra::init(argc, argv);
+    Runtime_guard guard{true};
+
+    auto invitation = make_invitation(sintra::invalid_instance_id, 30s);
+    bool ok = sintra::test::assert_true(
+        static_cast<bool>(invitation),
+        k_failure_prefix,
+        "shutdown-hook claim-rejection should create an invitation");
+
+    constexpr const char* marker = "hook_delayed";
+    const auto helper = launch_direct_process(
+        binary_path,
+        helper_args(dir, k_role_delayed, marker, invitation));
+    ok &= sintra::test::assert_true(
+        helper.launched,
+        k_failure_prefix,
+        "shutdown-hook claim-rejection helper should launch");
+    ok &= wait_for_marker(dir, marker, "before_init", 5s);
+
+    bool helper_rejected = false;
+    bool invitation_preserved = false;
+    Shutdown_watchdog watchdog("shutdown-hook-claim-rejection", 8s);
+    guard.active = false;
+    ok &= sintra::test::assert_true(
+        sintra::shutdown(sintra::shutdown_options{
+            .coordinator_shutdown_hook = [&] {
+                write_control_file(dir, marker, ".go");
+                if (!wait_for_marker_in(
+                        dir,
+                        marker,
+                        {"init_failed", "rejected", "unexpected_success"},
+                        5s))
+                {
+                    return;
+                }
+
+                const auto lines = sintra::test::read_lines(marker_path(dir, marker));
+                helper_rejected = !lines.empty() &&
+                    (lines.front() == "init_failed" || lines.front() == "rejected");
+                invitation_preserved =
+                    sintra::cancel_external_process_invitation(invitation);
+            }
+        }),
+        k_failure_prefix,
+        "shutdown-hook claim-rejection shutdown should complete");
+    ok &= sintra::test::assert_true(
+        helper_rejected,
+        k_failure_prefix,
+        "shutdown-hook helper init should be rejected while teardown admission is closed");
+    ok &= sintra::test::assert_true(
+        invitation_preserved,
+        k_failure_prefix,
+        "shutdown-hook rejected claim should leave the original invitation cancelable");
+    ok &= sintra::test::assert_true(
+        wait_for_process_exit(helper.pid, 5s),
+        k_failure_prefix,
+        "shutdown-hook delayed helper should exit after rejected init");
+
+    return ok;
+}
+
 bool run_shutdown_with_admitted_alive_case(
     int                            argc,
     char*                          argv[],
@@ -767,6 +834,7 @@ int main(int argc, char* argv[])
     ok &= run_crash_after_init_case(argc, argv, binary_path, dir);
     ok &= run_enable_recovery_after_admission_case(argc, argv, binary_path, dir);
     ok &= run_cancel_expire_reuse_case(argc, argv, binary_path, dir);
+    ok &= run_shutdown_hook_claim_rejection_preserves_invitation_case(argc, argv, binary_path, dir);
 
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);

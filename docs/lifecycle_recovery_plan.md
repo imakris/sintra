@@ -207,6 +207,17 @@ Slice 1 architecture review record, 2026-07-09:
   test rendezvous or to drop/re-scope Slice 1.
 - Production eligibility: only after the new gate is observed red on
   unmodified `02f03bf` may the production claim fix be implemented.
+- Red-gate evidence, 2026-07-09: the public hook-based test was added to
+  `tests/external_process_invitation_lifecycle_negative_test.cpp` with no
+  production changes. Local Ninja configure was unavailable because `ninja` was
+  not on `PATH`; a MinGW focused build using `-Wa,-mbig-obj` succeeded. Running
+  `build\slice1-focused-mingw-bigobj\tests\sintra_external_process_invitation_lifecycle_negative_test.exe`
+  on unmodified production returned exit code `1` and failed the two new
+  assertions: `shutdown-hook helper init should be rejected while teardown
+  admission is closed` and `shutdown-hook rejected claim should leave the
+  original invitation cancelable`. The captured rerun log is
+  `build\slice1-focused-mingw-bigobj\slice1_red_gate_rerun.txt` in this
+  worktree.
 
 ## Implementation Slices
 
