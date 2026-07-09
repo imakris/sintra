@@ -16,6 +16,7 @@
 #include <mutex>
 #include <shared_mutex>
 #include <stdexcept>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -25,10 +26,22 @@ namespace sintra {
 using std::lock_guard;
 using std::mutex;
 using std::string;
+using std::string_view;
 
 namespace {
 
 constexpr auto k_external_process_invitation_rejection_grace = std::chrono::seconds(2);
+constexpr string_view k_processing_phase_barrier_prefix = "_sintra_processing_phase/";
+constexpr string_view k_reserved_barrier_prefix = "_sintra_";
+
+inline bool is_lifecycle_internal_barrier_name(const string& barrier_name)
+{
+    string_view base_name{barrier_name};
+    if (base_name.starts_with(k_processing_phase_barrier_prefix)) {
+        base_name.remove_prefix(k_processing_phase_barrier_prefix.size());
+    }
+    return base_name.starts_with(k_reserved_barrier_prefix);
+}
 
 inline void emit_direct_publish_waiters(
     instance_id_type   instance_id,
@@ -142,12 +155,15 @@ sequence_counter_type Process_group::barrier(
         b.mode_tag            = barrier_mode_tag;
         b.common_function_iid = make_instance_id();
 
-        // Filter out draining processes while still holding m_call_mutex for atomicity
+        // Filter out absent processes while still holding m_call_mutex for atomicity.
         if (auto* coord = s_coord) {
+            const bool user_barrier = !is_lifecycle_internal_barrier_name(barrier_name);
             for (auto it = b.processes_pending.begin();
                 it != b.processes_pending.end();)
             {
-                if (coord->is_process_draining(*it)) {
+                if (coord->is_process_draining(*it) ||
+                    (user_barrier && coord->is_process_in_collective_shutdown(*it)))
+                {
                     it = b.processes_pending.erase(it);
                 }
                 else {
@@ -227,11 +243,17 @@ sequence_counter_type Process_group::barrier(
 
 inline void Process_group::drop_from_inflight_barriers(
     instance_id_type                   process_iid,
-    std::vector<Barrier_completion>&   completions)
+    std::vector<Barrier_completion>&   completions,
+    bool                               user_barriers_only)
 {
     std::lock_guard basic_lock(m_call_mutex);
 
     for (auto barrier_it = m_barriers.begin(); barrier_it != m_barriers.end(); ) {
+        if (user_barriers_only && is_lifecycle_internal_barrier_name(barrier_it->first)) {
+            ++barrier_it;
+            continue;
+        }
+
         auto barrier = barrier_it->second;
         if (!barrier) {
             barrier_it = m_barriers.erase(barrier_it);
@@ -316,6 +338,9 @@ Coordinator::Coordinator():
     // never grows, eliminating data races from container mutation.
     for (auto& draining_state : m_draining_process_states) {
         draining_state = 0;
+    }
+    for (auto& collective_shutdown_state : m_collective_shutdown_process_states) {
+        collective_shutdown_state = 0;
     }
 
     m_external_process_invitation_cleanup_thread = std::thread(
@@ -821,15 +846,23 @@ inline bool Coordinator::claim_external_process_invitation(
         in_initialization = m_processes_in_initialization.count(process_iid) != 0;
     }
 
-    if (in_initialization || !add_external_process_to_standard_groups(process_iid)) {
+    if (in_initialization) {
         std::lock_guard publish_lock(m_publish_mutex);
         m_external_attached_processes.erase(process_iid);
         m_transceiver_registry.erase(process_iid);
         return false;
     }
 
+    set_collective_shutdown_state(process_iid, 0);
     if (set_draining_state(process_iid, 0)) {
         note_draining_state_change();
+    }
+
+    if (!add_external_process_to_standard_groups(process_iid)) {
+        std::lock_guard publish_lock(m_publish_mutex);
+        m_external_attached_processes.erase(process_iid);
+        m_transceiver_registry.erase(process_iid);
+        return false;
     }
 
     m_external_process_invitations.erase(it);
@@ -1025,6 +1058,7 @@ instance_id_type Coordinator::publish_transceiver(
 
         // Reset draining state to 0 (ACTIVE) when publishing a Managed_process.
         // This handles recovery/restart scenarios where the process slot might still be marked as draining.
+        set_collective_shutdown_state(process_iid, 0);
         set_draining_state(process_iid, 0);
 
         return true_sequence(true);
@@ -1238,6 +1272,43 @@ inline sequence_counter_type Coordinator::begin_process_draining(instance_id_typ
 }
 
 
+inline sequence_counter_type Coordinator::begin_collective_shutdown(instance_id_type process_iid)
+{
+    if (!detail::is_valid_process_instance_id(process_iid)) {
+        return invalid_sequence;
+    }
+
+    const bool called_via_rpc =
+        s_tl_current_message &&
+        s_tl_current_message->receiver_instance_id == m_instance_id &&
+        s_tl_current_message->message_type_id ==
+            static_cast<type_id_type>(detail::reserved_id::begin_collective_shutdown);
+    if (s_tl_current_message && !called_via_rpc) {
+        return invalid_sequence;
+    }
+
+    if (called_via_rpc) {
+        if (process_of(s_tl_current_message->sender_instance_id) != process_iid) {
+            return invalid_sequence;
+        }
+    }
+    else
+    if (process_iid != s_mproc_id) {
+        return invalid_sequence;
+    }
+
+    set_collective_shutdown_state(process_iid, 1);
+
+    auto pending_completions = collect_pending_barrier_completions(
+        process_iid,
+        false,
+        true);
+    emit_pending_barrier_completions(pending_completions);
+
+    return s_mproc ? s_mproc->m_out_rep_c->get_leading_sequence() : invalid_sequence;
+}
+
+
 inline bool Coordinator::is_process_draining(instance_id_type process_iid) const
 {
     size_t draining_slot = 0;
@@ -1246,6 +1317,17 @@ inline bool Coordinator::is_process_draining(instance_id_type process_iid) const
     }
 
     return m_draining_process_states[draining_slot].load() != 0;
+}
+
+
+inline bool Coordinator::is_process_in_collective_shutdown(instance_id_type process_iid) const
+{
+    size_t shutdown_slot = 0;
+    if (!draining_slot_of_index(get_process_index(process_iid), shutdown_slot)) {
+        return false;
+    }
+
+    return m_collective_shutdown_process_states[shutdown_slot].load() != 0;
 }
 
 
@@ -1808,7 +1890,8 @@ inline
 std::vector<Coordinator::Pending_completion>
 Coordinator::collect_pending_barrier_completions_unlocked(
     instance_id_type   process_iid,
-    bool               remove_process)
+    bool               remove_process,
+    bool               user_barriers_only)
 {
     // Caller must hold m_groups_mutex.
     std::vector<Pending_completion> pending_completions;
@@ -1816,7 +1899,10 @@ Coordinator::collect_pending_barrier_completions_unlocked(
 
     for (auto& [name, group] : m_groups) {
         std::vector<Process_group::Barrier_completion> completions;
-        group.drop_from_inflight_barriers(process_iid, completions);
+        group.drop_from_inflight_barriers(
+            process_iid,
+            completions,
+            user_barriers_only);
         if (!completions.empty()) {
             pending_completions.push_back({name, std::move(completions)});
         }
@@ -1836,10 +1922,14 @@ inline
 std::vector<Coordinator::Pending_completion>
 Coordinator::collect_pending_barrier_completions(
     instance_id_type   process_iid,
-    bool               remove_process)
+    bool               remove_process,
+    bool               user_barriers_only)
 {
     std::lock_guard groups_lock(m_groups_mutex);
-    return collect_pending_barrier_completions_unlocked(process_iid, remove_process);
+    return collect_pending_barrier_completions_unlocked(
+        process_iid,
+        remove_process,
+        user_barriers_only);
 }
 
 inline
@@ -1897,6 +1987,18 @@ bool Coordinator::set_draining_state(instance_id_type process_iid, int value)
         return false;
     }
     m_draining_process_states[draining_slot] = value;
+    return true;
+}
+
+
+inline
+bool Coordinator::set_collective_shutdown_state(instance_id_type process_iid, int value)
+{
+    size_t shutdown_slot = 0;
+    if (!draining_slot_of_index(get_process_index(process_iid), shutdown_slot)) {
+        return false;
+    }
+    m_collective_shutdown_process_states[shutdown_slot] = value;
     return true;
 }
 

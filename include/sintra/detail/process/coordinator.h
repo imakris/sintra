@@ -90,7 +90,8 @@ public:
     // for any barriers that become satisfied as a result.
     void drop_from_inflight_barriers(
         instance_id_type                   process_iid,
-        std::vector<Barrier_completion>&   completions);
+        std::vector<Barrier_completion>&   completions,
+        bool                               user_barriers_only = false);
     // Emit barrier completion messages for the recorded recipients (per-recipient
     // reply tokens are computed at write time).
     void emit_barrier_completions(
@@ -376,6 +377,10 @@ public:
         const string&          group_name,
         instance_id_type       self_process_iid);
 
+    // Mark a process as inside collective shutdown. Ordinary user barriers
+    // stop waiting for it, but internal shutdown barriers still count it.
+    sequence_counter_type begin_collective_shutdown(instance_id_type process_iid);
+
     // Blocks until all processes identified by process_group_id have called the function.
     // num_absences may be used by a caller to specify that it is aware that other callers will
     // not make it to the barrier, thus prevent a deadlock.
@@ -469,6 +474,8 @@ public:
 
     std::array<std::atomic<uint8_t>, max_process_index + 1>
                                                    m_draining_process_states{};
+    std::array<std::atomic<uint8_t>, max_process_index + 1>
+                                                   m_collective_shutdown_process_states{};
 
     unordered_set<instance_id_type>                m_processes_in_initialization;
     struct Pending_instance_publication
@@ -487,13 +494,15 @@ public:
 
     std::vector<Pending_completion> collect_pending_barrier_completions(
         instance_id_type   process_iid,
-        bool               remove_process);
+        bool               remove_process,
+        bool               user_barriers_only = false);
 
     // Same as collect_pending_barrier_completions, for callers that already
     // hold m_groups_mutex.
     std::vector<Pending_completion> collect_pending_barrier_completions_unlocked(
         instance_id_type   process_iid,
-        bool               remove_process);
+        bool               remove_process,
+        bool               user_barriers_only = false);
 
     void emit_pending_barrier_completions(
         const std::vector<Pending_completion>& pending_completions);
@@ -509,6 +518,8 @@ public:
     // Writes value into the draining-state slot for process_iid (if any).
     // Returns true when a slot exists.
     bool set_draining_state(instance_id_type process_iid, int value);
+
+    bool set_collective_shutdown_state(instance_id_type process_iid, int value);
 
     // Like set_draining_state, but also reports the prior value through was_draining.
     bool exchange_draining_state(
@@ -556,6 +567,7 @@ public:
     SINTRA_RPC_STRICT_EXPLICIT(publish_transceiver)
     SINTRA_RPC_EXPLICIT(unpublish_transceiver)
     SINTRA_RPC_STRICT_EXPLICIT(begin_process_draining)
+    SINTRA_RPC_STRICT_EXPLICIT(begin_collective_shutdown)
     SINTRA_RPC_EXPLICIT(make_process_group)
     SINTRA_RPC_EXPLICIT(print)
     SINTRA_RPC_EXPLICIT(enable_recovery)
@@ -565,6 +577,7 @@ public:
 
     // Read the draining bit for a process slot; does not validate liveness.
     bool is_process_draining(instance_id_type process_iid) const;
+    bool is_process_in_collective_shutdown(instance_id_type process_iid) const;
     bool is_sole_known_process(instance_id_type self_process);
 
     SINTRA_MESSAGE_RESERVED(instance_published,

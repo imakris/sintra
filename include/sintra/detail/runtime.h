@@ -498,8 +498,28 @@ inline void close_teardown_admission_and_claim_state(
     const char*                api_name)
 {
     std::lock_guard<std::mutex> admission_lock(s_teardown_admission_mutex);
+    if (s_teardown_admission_closed.load(std::memory_order_acquire)) {
+        throw std::logic_error(
+            std::string(api_name) + " called while another lifecycle teardown is already in progress.");
+    }
     s_teardown_admission_closed.store(true, std::memory_order_release);
     claim_lifecycle_teardown_state(desired_state, api_name);
+}
+
+inline void close_teardown_admission_for_shutdown(const char* api_name)
+{
+    std::lock_guard<std::mutex> admission_lock(s_teardown_admission_mutex);
+    if (s_teardown_admission_closed.load(std::memory_order_acquire)) {
+        throw std::logic_error(
+            std::string(api_name) + " called while another lifecycle teardown is already in progress.");
+    }
+    const auto state = s_shutdown_state.load(std::memory_order_acquire);
+    if (state != shutdown_protocol_state::idle) {
+        throw std::logic_error(
+            std::string(api_name) + " called while another lifecycle teardown is already in progress "
+            "(state=" + std::to_string(static_cast<int>(state)) + ").");
+    }
+    s_teardown_admission_closed.store(true, std::memory_order_release);
 }
 
 inline void reset_lifecycle_teardown_to_idle()
@@ -622,6 +642,47 @@ inline bool shutdown_group_is_trivial(const std::string& group_name)
     return !s_coord->group_has_non_external_peer(group_name, s_mproc_id);
 }
 
+inline void begin_collective_shutdown_for_barriers()
+{
+    sequence_counter_type flush_seq = invalid_sequence;
+    if (s_coord) {
+        flush_seq = s_coord->begin_collective_shutdown(s_mproc_id);
+    }
+    else {
+        try {
+            flush_seq = Coordinator::rpc_begin_collective_shutdown(
+                s_coord_id,
+                s_mproc_id);
+        }
+        catch (const rpc_cancelled&) {
+            if (!s_teardown_admission_closed.load(std::memory_order_acquire)) {
+                throw;
+            }
+            Log_stream(log_level::warning)
+                << "shutdown(): collective shutdown entry RPC was cancelled; "
+                   "continuing teardown.\n";
+            return;
+        }
+        catch (const rpc_unavailable& e) {
+            if (!s_teardown_admission_closed.load(std::memory_order_acquire)) {
+                throw;
+            }
+            Log_stream(log_level::warning)
+                << "shutdown(): collective shutdown entry RPC was unavailable ("
+                << e.what() << "); continuing teardown.\n";
+            return;
+        }
+        if (flush_seq != invalid_sequence) {
+            s_mproc->flush(process_of(s_coord_id), flush_seq);
+        }
+    }
+
+    if (flush_seq == invalid_sequence) {
+        throw std::runtime_error(
+            "shutdown(): failed to announce collective shutdown entry");
+    }
+}
+
 inline bool coordinator_can_leave_now()
 {
     return !s_coord || s_coord->is_sole_known_process(s_mproc_id);
@@ -636,9 +697,7 @@ inline bool shutdown()
 
 inline bool shutdown(const shutdown_options& options)
 {
-    detail::close_teardown_admission_and_claim_state(
-        detail::shutdown_protocol_state::collective_shutdown_entered,
-        "sintra::shutdown()");
+    detail::close_teardown_admission_for_shutdown("sintra::shutdown()");
 
     if (!s_mproc) {
         detail::reset_lifecycle_teardown_to_idle();
@@ -650,6 +709,9 @@ inline bool shutdown(const shutdown_options& options)
     // multi-process setup (s_coord_id is valid) must enter the collective
     // barriers so that the coordinator's processing-fence can complete.
     if (!s_coord && s_coord_id == invalid_instance_id) {
+        detail::s_shutdown_state.store(
+            detail::shutdown_protocol_state::collective_shutdown_entered,
+            std::memory_order_release);
         return detail::finalize_impl();
     }
 
@@ -658,6 +720,9 @@ inline bool shutdown(const shutdown_options& options)
     constexpr const char* hook_done_barrier_name = "_sintra_shutdown_hook_done";
 
     if (detail::shutdown_group_is_trivial(group_name)) {
+        detail::s_shutdown_state.store(
+            detail::shutdown_protocol_state::collective_shutdown_entered,
+            std::memory_order_release);
         if (s_coord && options.coordinator_shutdown_hook) {
             detail::s_shutdown_state.store(
                 detail::shutdown_protocol_state::coordinator_hook_running,
@@ -685,6 +750,11 @@ inline bool shutdown(const shutdown_options& options)
     // and s_shutdown_state reset to idle.  finalize_impl() is safe to call
     // more than once (returns false if already finalized).
     try {
+        detail::begin_collective_shutdown_for_barriers();
+        detail::s_shutdown_state.store(
+            detail::shutdown_protocol_state::collective_shutdown_entered,
+            std::memory_order_release);
+
         // Step 1: Collective processing fence — all participants synchronize here.
         detail::internal_processing_fence_barrier(shutdown_barrier_name, group_name);
 

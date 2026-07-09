@@ -750,7 +750,7 @@ Durable drop decision, 2026-07-09:
 
 ### Slice 5: Shutdown/User-Barrier Membership
 
-Red-gate-only decision, 2026-07-09:
+Red-gate decision, 2026-07-09:
 
 - Six xhigh Codex reviewers and Claude converged on one next step: no production
   work yet; add only a focused test-only gate adapted from
@@ -775,6 +775,31 @@ Red-gate-only decision, 2026-07-09:
   authority, public API changes, `Admission_boundary`, runtime-work counters,
   pending-owner state, finalize/drain result machinery, and broad `ae7fed3`
   cherry-picking from Slice 5.
+
+Production authorization, 2026-07-09:
+
+- The focused gate failed red for the intended reason: an early collective
+  shutdown participant could keep live peers blocked in a user
+  `processing_fence_t` barrier.
+- Fresh architecture review authorized only the minimal production shape:
+  a private per-process collective-shutdown bit, one internal
+  `begin_collective_shutdown(process_iid)` RPC, user-barrier-only membership
+  filtering, and shared `_sintra_processing_phase/` internal-barrier
+  classification.
+- Production remains bounded by the original exclusions above. Do not add
+  public APIs, `Admission_boundary`, pending-owner state, result/finalize
+  matrices, or broad lifecycle framework code.
+- The open implementation gate is local focused green, six xhigh Codex
+  implementation review, Claude implementation review, then shortened active
+  CI. The first implementation review round found narrow blockers in sender
+  validation, the admission-closed/state-idle barrier guard, external-attach
+  reset ordering, and this durable plan record; those must be closed before
+  Slice 5 can be accepted.
+- The second implementation review round found two additional narrow blockers:
+  RPC-context validation had to require the actual `begin_collective_shutdown`
+  reserved message id, and the pre-barrier announcement had to preserve
+  degraded teardown on `rpc_cancelled`/`rpc_unavailable`. Those must also be
+  closed before Slice 5 can be accepted.
 
 ### Slice 6: Group Membership Authority
 
@@ -859,5 +884,7 @@ Focused platform CI is green. Slice 1C is durably dropped. Slice 2 is closed:
 the two source-confirmed residual admission/recovery issues have local
 red-then-green evidence, six-reviewer green implementation review, and shortened
 CI green on all four platforms at `577a6cf`. Slices 3 and 4 are durably dropped
-on this baseline. Slice 5 is authorized only for a focused test-only red gate;
-production work remains blocked until that gate fails for the intended reason.
+on this baseline. Slice 5 production is open only for the minimal
+collective-shutdown/user-barrier fix described above; it is not closeable until
+the focused local gates, six xhigh Codex review, Claude review, and shortened
+active CI are green.

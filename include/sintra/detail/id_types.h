@@ -80,6 +80,7 @@ namespace detail {
         // runtime can disambiguate teardown-induced failures without inspecting
         // exception messages.
         sintra_rpc_unavailable,
+        begin_collective_shutdown,
 
         // EXPLICITLY DEFINED SIGNALS HANDLED BY COORDINATOR
         base_of_messages_handled_by_coordinator = 0x80000000,

@@ -38,8 +38,10 @@ inline void validate_no_barrier_during_shutdown(const std::string& group_name)
     if (group_name != "_sintra_all_processes") {
         return;
     }
+    const auto admission_closed =
+        s_teardown_admission_closed.load(std::memory_order_acquire);
     const auto state = s_shutdown_state.load(std::memory_order_acquire);
-    if (state != shutdown_protocol_state::idle) {
+    if (admission_closed || state != shutdown_protocol_state::idle) {
         throw std::logic_error(
             "User barrier on '_sintra_all_processes' called while a lifecycle "
             "teardown protocol is active (state=" + std::to_string(static_cast<int>(state)) + "). "
