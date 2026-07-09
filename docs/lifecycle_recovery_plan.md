@@ -464,13 +464,42 @@ Slice 1B.1 closure record, 2026-07-09:
 
 #### Slice 1B.3: lifeline release ordering
 
-- Not part of Slice 1B.1 or Slice 1B.2.
-- Before changing `include/sintra/detail/process/managed_process_impl.h`, record
-  a focused gate or an explicit source-audit exception accepted by independent
-  review. If no such evidence is produced, record a durable drop instead of
-  carrying the item as unowned deferred work.
+- Durable drop decision, 2026-07-09: do not implement Slice 1B.3 on the
+  current baseline.
+- Six Codex architecture reviewers did not produce a safe production-green
+  consensus: three required a focused gate, two allowed a tiny source-audit
+  implementation, and one recommended drop. The accepted governance decision is
+  to prefer the smallest source-confirmed path and avoid a source-audit
+  exception where reviewers did not converge.
+- Claude architecture review artifact:
+  `C:\plms\bsd_licensed\sintra-lifecycle-artifacts\claude-slice1b3-arch-20260709\sintra_slice1b3_arch_review_20260709_20260709_103639\outputs\slice1b3_lifeline_arch.md`.
+  Claude returned DROP and supplied the deciding source-audit objection: the
+  `5cd9149` lifeline move is not atomic on this baseline. The quarry moved
+  `release_all_lifelines()` after a `spawned_child_process_created` directory
+  retention gate, while this branch has no such gate and removes
+  `m_directory` unconditionally in `Managed_process::~Managed_process()`.
+  Moving the lifeline release alone could leave children alive while the parent
+  unlinks their ring files.
+- Current-source evidence: `Managed_process::~Managed_process()` still releases
+  lifelines before local reader/writer teardown, but the named quarry rationale
+  depends on exit-time ring lifecycle lock recovery while a child is becoming
+  observable as dead on macOS. The branch already has the base robust mutex
+  owner-death recovery path, and Slice 1B.1 fixed the macOS process-liveness
+  predicate consumed by that recovery. No residual hang or corruption repro has
+  been produced for this baseline.
+- The `runtime.h` half of `5cd9149` is not accepted as 1B.3 work. The current
+  `cleanup_failed_init_noexcept()` no longer calls `release_all_lifelines()`
+  directly, and the destructor call is idempotent in any case. If a future slice
+  legitimately edits failed-init cleanup, it must re-audit that path locally.
+- This is a drop, not a defer. Reopen only if a real red repro of an
+  exit-time ring-lifecycle-mutex stall or corruption is produced on the current
+  ordering. If Slice 1B.2 changes mutex owner-death/recovery semantics, it may
+  only record a new 1B.3 risk; lifeline ordering and any required directory
+  retention rule must be handled by a separate focused slice/review. Do not
+  import the standalone `5cd9149` lifeline hunk.
 - No `managed_process_impl.h` or `runtime.h` lifeline ordering changes may ride
-  along with process liveness or mutex recovery.
+  along with process liveness, mutex recovery, child-shutdown oracle work, or
+  later drain/finalize work.
 
 ### Slice 1C: Child Shutdown Test Oracle
 
@@ -612,8 +641,7 @@ changes, the slice becomes multi-domain, or the same blocker class repeats.
 ## Next Action
 
 Do not code in the preserved dirty worktree. Slice 1A and Slice 1B.1 are
-complete. Slice 1B is still split: do not start Slice 1B.2 or Slice 1B.3
-implementation before a separate architecture/gate review. Next action is an
-architecture decision for Slice 1B.3 lifeline release ordering, unless review
-chooses to durably drop it or to prioritize the blocked Slice 1B.2 mutex
-owner-generation gate first.
+complete. Slice 1B.3 is durably dropped. Slice 1B.2 remains blocked pending a
+separate architecture decision and red gate for mutex owner-generation recovery.
+Next action is the Slice 1B.2 architecture/gate decision unless the owner
+chooses to skip it and advance to Slice 1C.
