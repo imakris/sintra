@@ -47,6 +47,51 @@ namespace detail {
 #define SINTRA_TEST_ROOT nullptr
 #endif
 
+#if defined(__APPLE__) && !defined(_WIN32)
+inline constexpr int k_macos_process_status_zombie = 5; // SZOMB in <sys/proc.h>
+
+inline std::optional<bool> macos_process_is_exited_or_zombie(uint32_t pid)
+{
+    struct proc_bsdinfo bsd_info;
+    std::memset(&bsd_info, 0, sizeof(bsd_info));
+
+    errno = 0;
+    const int proc_result = ::proc_pidinfo(
+        static_cast<int>(pid),
+        PROC_PIDTBSDINFO,
+        0,
+        &bsd_info,
+        sizeof(bsd_info));
+    if (proc_result > 0 && static_cast<size_t>(proc_result) >= sizeof(bsd_info)) {
+        return bsd_info.pbi_status == k_macos_process_status_zombie;
+    }
+    if (proc_result <= 0 && errno == ESRCH) {
+        return true;
+    }
+
+    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, static_cast<int>(pid)};
+    struct kinfo_proc kip;
+    std::memset(&kip, 0, sizeof(kip));
+    size_t len = sizeof(kip);
+
+    errno = 0;
+    if (::sysctl(mib, 4, &kip, &len, nullptr, 0) == 0) {
+        if (len == 0) {
+            return true;
+        }
+        if (len < sizeof(kip)) {
+            return std::nullopt;
+        }
+        return kip.kp_proc.p_stat == k_macos_process_status_zombie;
+    }
+    if (errno == ESRCH) {
+        return true;
+    }
+
+    return std::nullopt;
+}
+#endif
+
 } // namespace detail
 
 inline bool is_process_alive(uint32_t pid)
@@ -104,15 +149,11 @@ inline bool is_process_alive(uint32_t pid)
             return true;
     }
 #elif defined(__APPLE__)
-    struct proc_bsdinfo bsd_info;
-    std::memset(&bsd_info, 0, sizeof(bsd_info));
-    int result = ::proc_pidinfo(static_cast<int>(pid), PROC_PIDTBSDINFO, 0, &bsd_info, sizeof(bsd_info));
-    if (result <= 0 || static_cast<size_t>(result) < sizeof(bsd_info)) {
-        return true;
+    const auto exited_or_zombie = detail::macos_process_is_exited_or_zombie(pid);
+    if (exited_or_zombie) {
+        return !*exited_or_zombie;
     }
-
-    constexpr int k_proc_status_zombie = 5; // corresponds to SZOMB in <sys/proc.h>
-    return bsd_info.pbi_status != k_proc_status_zombie;
+    return true;
 #else
     std::ifstream stat_file;
     stat_file.open(std::string("/proc/") + std::to_string(pid) + "/stat");
