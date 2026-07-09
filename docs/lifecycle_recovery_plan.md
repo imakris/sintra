@@ -293,6 +293,34 @@ This slice is not the bucket for every independent salvage fix.
 - Keep it independent of external invitation admission, process retirement,
   drain wait, and mutex recovery.
 
+Slice 1A scope review record, 2026-07-09:
+
+- Six Codex architecture/scope lanes returned GREEN_TO_IMPLEMENT on clean
+  `d196276`: the `a29dfbc` hazards remain present by audit. The cleanup guard
+  installed by `init()` can own process-exit finalization; teardown then reaches
+  handler/RPC registries and the Windows semaphore handle cache that are still
+  destructible function-local statics. `Transceiver::deactivate_all()` also
+  invokes `m_deactivators.back()` while the invoked deactivator can erase that
+  list node.
+- Focused gate: make a test-only change to
+  `tests/handler_lifetime_test.cpp` by adapting the missing `a29dfbc` cases:
+  stable copied deactivators through `deactivate_all_slots()`, and a
+  process-exit cleanup-guard path with live slots. Run the
+  `sintra_handler_lifetime_test` target on unmodified production and record red
+  evidence before touching headers. If this gate does not fail red, stop and
+  amend or drop Slice 1A.
+- Production scope after red evidence only:
+  `include/sintra/detail/transceiver.h`,
+  `include/sintra/detail/transceiver_impl.h`, and Windows
+  `include/sintra/detail/ipc/semaphore.h`, limited to process-lifetime
+  teardown-touched statics and stable deactivator copies in
+  `Transceiver::deactivate_all()`.
+- Out of scope: coordinator changes, external invitation admission, teardown
+  admission mutexes, process retirement, drain/finalize redesign, process
+  liveness/mutex recovery, child-shutdown oracle work, group
+  membership/publication, CMake/workflow/active-test changes, new public hooks,
+  and lifecycle blocker/result matrices.
+
 ### Slice 1B: Process Liveness And Mutex Recovery
 
 - Reproduce or audit the base bug from `5cd9149`: process liveness/zombie
