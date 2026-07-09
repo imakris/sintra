@@ -371,11 +371,76 @@ Slice 1A scope review record, 2026-07-09:
 
 ### Slice 1B: Process Liveness And Mutex Recovery
 
-- Reproduce or audit the base bug from `5cd9149`: process liveness/zombie
-  handling, robust mutex PID/TID reuse, and lifeline release after local
-  message-ring attachments are dropped.
-- Keep the ring ABI decision explicit in this slice; do not smuggle it through
-  unrelated lifecycle work.
+This slice is split. `5cd9149` grouped several concerns that do not share one
+focused gate, and the first Slice 1B architecture review found that copying the
+quarry mutex side-channel design would add a new race.
+
+Slice 1B scope review record, 2026-07-09:
+
+- Six Codex architecture lanes did not converge on the original combined
+  Slice 1B. They agreed the branch should not copy `5cd9149` wholesale. The
+  useful current amendment is to split process liveness, mutex owner identity,
+  and lifeline release ordering into separate decisions.
+- Claude review artifact:
+  `C:\plms\bsd_licensed\sintra-lifecycle-artifacts\claude-slice1b-scope-20260709\sintra_slice1b_scope_review_20260709_20260709_061945\combined_reviews.md`.
+  Claude agreed the original Slice 1B is too broad and must be split before
+  implementation. Its mutex quarry assessment lacked raw `git show` access, so
+  future mutex decisions must cite local git evidence directly; the split and
+  gate discipline remain accepted.
+- Local git evidence confirms `git show 5cd9149 -- include/sintra/detail/ipc/mutex.h`
+  does contain a start-stamp side-channel design. That design is not accepted
+  for implementation here: a losing contender can invalidate owner identity
+  after another contender wins and publishes it. Any future mutex fix must
+  prevent losing contenders from mutating winner identity and must prove that
+  invariant before production code lands.
+- ABI decision for future mutex work: if `interprocess_mutex` layout or
+  persisted recovery semantics change, bump branch-local
+  `k_ring_abi_version` from `5` to `6` and
+  `k_ring_lifecycle_anchor_abi_version` from `2` to `3`, because
+  `interprocess_mutex` is embedded in both ring control and lifecycle anchor
+  shared-memory objects. A process-utils-only liveness fix requires no ABI
+  bump.
+
+#### Slice 1B.1: macOS process liveness
+
+- Red gate only: add a test-only POSIX child process check that forks, lets the
+  child exit without reaping, asserts `!sintra::is_process_alive(child_pid)`,
+  and then always reaps with `waitpid`.
+- Required red evidence: macOS CI must fail the test-only patch for the
+  intended reason, `exited unreaped child should not be reported alive`.
+  Windows skips this path, and local Linux/FreeBSD results do not authorize the
+  macOS fallback production change.
+- Allowed production after red: `include/sintra/detail/ipc/process_utils.h`
+  macOS liveness fallback only. No mutex, ring, or lifeline production changes
+  are allowed in Slice 1B.1. Workflow or `active_tests.txt` changes are allowed
+  only if CI proves the focused utility target is not running, and then only to
+  run that target; they must not add or enable mutex, ring, or lifeline code.
+- Stop condition: if macOS CI passes the test-only patch, or fails for fork,
+  waitpid, timeout/flakiness, compile leakage, or any reason other than the
+  liveness assertion, do not patch production. Record Slice 1B.1 as dropped or
+  amend the gate.
+
+#### Slice 1B.2: interprocess_mutex owner-generation recovery
+
+- Blocked pending a separate architecture decision and red gate. Do not import
+  `owner_identity`, `m_owner_start_stamp`, `m_owner_stamp_token`,
+  `try_claim_unowned`, or side-channel-shaped test hooks from `5cd9149`.
+- Any future red gate must prove stale owner-generation recovery through mutex
+  behavior and must also prove that a live owner cannot be recovered. Test hooks,
+  if unavoidable, must be semantic `SINTRA_ENABLE_TEST_HOOKS` hooks and must not
+  expose implementation storage mechanics.
+- Green gate must include `sintra_interprocess_mutex_test`,
+  `sintra_ring_abi_fingerprint_test`, and normal platform CI.
+
+#### Slice 1B.3: lifeline release ordering
+
+- Not part of Slice 1B.1 or Slice 1B.2.
+- Before changing `include/sintra/detail/process/managed_process_impl.h`, record
+  a focused gate or an explicit source-audit exception accepted by independent
+  review. If no such evidence is produced, record a durable drop instead of
+  carrying the item as unowned deferred work.
+- No `managed_process_impl.h` or `runtime.h` lifeline ordering changes may ride
+  along with process liveness or mutex recovery.
 
 ### Slice 1C: Child Shutdown Test Oracle
 
@@ -514,7 +579,8 @@ changes, the slice becomes multi-domain, or the same blocker class repeats.
 
 ## Next Action
 
-Do not code in the preserved dirty worktree. Slice 1A is complete. The next
-implementation batch is Slice 1B, but start it only after an architecture/scope
-review confirms the process liveness/mutex recovery bug is still present on
-this reduced branch and defines one focused gate.
+Do not code in the preserved dirty worktree. Slice 1A is complete. Slice 1B is
+split. The next implementation batch is Slice 1B.1 red-gate only: add the
+test-only POSIX unreaped-child liveness oracle, push it, and require macOS CI to
+fail for the intended liveness assertion before any `process_utils.h`
+production change.
