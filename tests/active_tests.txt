@@ -20,6 +20,7 @@ complex_choreography_test                 60
 external_process_invitation_lifecycle_negative_test 1
 extreme_choreography_test                 80
 init_error_spawn_failure_test              1
+interprocess_mutex_test                    1
 join_swarm_failure_test                    1
 join_swarm_midflight_test                 40
 utility_test                               1

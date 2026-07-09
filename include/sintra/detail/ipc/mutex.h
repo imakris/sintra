@@ -177,6 +177,30 @@ public:
         }
     }
 
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    struct test_owner_fixture
+    {
+        std::uint32_t pid = 0;
+        std::uint32_t tid = 0;
+        std::uint64_t start_stamp = 0;
+    };
+
+    void test_install_owner_fixture(test_owner_fixture owner) noexcept
+    {
+        (void)owner.start_stamp;
+        const auto token =
+            (static_cast<std::uint64_t>(owner.pid) << 32u) |
+            (static_cast<std::uint64_t>(owner.tid) & 0xFFFFFFFFull);
+        m_owner.store(token, std::memory_order_release);
+        m_recovering.store(0, std::memory_order_release);
+    }
+
+    std::uint64_t test_owner_token() const noexcept
+    {
+        return m_owner.load(std::memory_order_acquire);
+    }
+#endif
+
 private:
     // === Types & constants ===
     using owner_token = std::uint64_t; // upper 32 bits: pid, lower 32 bits: tid

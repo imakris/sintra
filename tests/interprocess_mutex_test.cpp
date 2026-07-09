@@ -28,58 +28,83 @@ void expect_error_code(
     }
 }
 
-class Test_mutex : public sintra::detail::interprocess_mutex
+using Test_mutex = sintra::detail::interprocess_mutex;
+using owner_token = std::uint64_t;
+
+owner_token make_owner_token(uint32_t pid, uint32_t tid)
 {
-public:
-    using owner_token = std::uint64_t;
+    return (static_cast<owner_token>(pid) << 32u) |
+        (static_cast<owner_token>(tid) & 0xFFFFFFFFull);
+}
 
-    void set_raw_owner(owner_token token)
-    {
-        owner_atomic().store(token);
+owner_token make_current_owner_token()
+{
+    return make_owner_token(
+        static_cast<uint32_t>(sintra::get_current_pid()),
+        static_cast<uint32_t>(sintra::get_current_tid()));
+}
+
+void install_owner_fixture(
+    Test_mutex&   mutex,
+    uint32_t      pid,
+    uint32_t      tid,
+    uint64_t      start_stamp)
+{
+    mutex.test_install_owner_fixture({pid, tid, start_stamp});
+}
+
+void run_owner_generation_recovery_red_gate()
+{
+    const auto current_start_stamp = sintra::current_process_start_stamp();
+    if (!current_start_stamp || *current_start_stamp == 0) {
+        sintra::test::expect(false, k_failure_prefix,
+            "current_process_start_stamp is required for owner-generation recovery red gate");
     }
 
-    owner_token raw_owner() const
-    {
-        return owner_atomic().load(std::memory_order_acquire);
-    }
+    const auto current_pid = static_cast<uint32_t>(sintra::get_current_pid());
+    const auto current_tid = static_cast<uint32_t>(sintra::get_current_tid());
+    const auto other_tid = (current_tid == 1u) ? 2u : 1u;
+    const auto stale_start_stamp =
+        (*current_start_stamp == 1u) ? 2u : (*current_start_stamp - 1u);
 
-    void set_recovering(uint32_t pid)
-    {
-        recovering_atomic().store(pid);
-    }
+    bool ok = true;
+    auto require_recovery = [&](uint32_t tid, std::string_view context) {
+        Test_mutex mutex;
+        install_owner_fixture(mutex, current_pid, tid, stale_start_stamp);
+        const bool acquired = mutex.try_lock_for(20ms);
+        ok &= sintra::test::assert_true(acquired, k_failure_prefix, context);
+        if (acquired) {
+            mutex.unlock();
+        }
+    };
 
-    static owner_token make_current_owner_token()
-    {
-        const owner_token pid = static_cast<owner_token>(sintra::get_current_pid());
-        const owner_token tid = static_cast<owner_token>(sintra::get_current_tid());
-        return (pid << 32u) | (tid & 0xFFFFFFFFull);
-    }
+    auto require_no_recovery = [&](uint32_t tid, std::string_view context) {
+        Test_mutex mutex;
+        install_owner_fixture(mutex, current_pid, tid, *current_start_stamp);
+        const auto seeded_owner = mutex.test_owner_token();
+        const bool acquired = mutex.try_lock_for(20ms);
+        const auto after_owner = mutex.test_owner_token();
+        ok &= sintra::test::assert_true(!acquired, k_failure_prefix, context);
+        ok &= sintra::test::assert_true(after_owner == seeded_owner,
+            k_failure_prefix,
+            "live current-generation owner token should remain unchanged");
+        if (acquired) {
+            mutex.unlock();
+        }
+    };
 
-private:
-    std::atomic<owner_token>& owner_atomic()
-    {
-        return *reinterpret_cast<std::atomic<owner_token>*>(this);
-    }
+    require_recovery(other_tid,
+        "stale-generation owner with current pid and different tid should recover");
+    require_recovery(current_tid,
+        "stale-generation owner with current pid and current tid should recover");
+    require_no_recovery(other_tid,
+        "live current-generation owner with different tid should not recover");
+    require_no_recovery(current_tid,
+        "live current-generation owner with current tid should not recover");
 
-    const std::atomic<owner_token>& owner_atomic() const
-    {
-        return *reinterpret_cast<const std::atomic<owner_token>*>(this);
-    }
-
-    std::atomic<uint32_t>& recovering_atomic()
-    {
-        auto* ptr = reinterpret_cast<std::atomic<uint32_t>*>(
-            reinterpret_cast<char*>(this) + sizeof(std::atomic<owner_token>));
-        return *ptr;
-    }
-
-    const std::atomic<uint32_t>& recovering_atomic() const
-    {
-        auto* ptr = reinterpret_cast<const std::atomic<uint32_t>*>(
-            reinterpret_cast<const char*>(this) + sizeof(std::atomic<owner_token>));
-        return *ptr;
-    }
-};
+    sintra::test::expect(ok, k_failure_prefix,
+        "owner-generation recovery red gate failed");
+}
 
 } // namespace
 
@@ -268,15 +293,11 @@ int main()
     const auto dead_pid = static_cast<uint32_t>(0);
     // PID 0 is reserved on all supported platforms and treated as always-dead by
     // is_process_alive, guaranteeing deterministic recovery behaviour.
-    const Test_mutex::owner_token dead_owner =
-        (static_cast<Test_mutex::owner_token>(dead_pid) << 32u) | 0x12345678ull;
-
-    recovery.set_raw_owner(dead_owner);
-    recovery.set_recovering(0);
+    install_owner_fixture(recovery, dead_pid, 0x12345678u, 0);
 
     recovery.lock();
-    const auto expected_owner = Test_mutex::make_current_owner_token();
-    sintra::test::expect(recovery.raw_owner() == expected_owner,
+    const auto expected_owner = make_current_owner_token();
+    sintra::test::expect(recovery.test_owner_token() == expected_owner,
         k_failure_prefix,
         "lock should recover ownership from a dead process");
 
@@ -284,6 +305,8 @@ int main()
     sintra::test::expect(recovery.try_lock(), k_failure_prefix,
         "mutex should be usable after recovery");
     recovery.unlock();
+
+    run_owner_generation_recovery_red_gate();
 
     return 0;
 }
