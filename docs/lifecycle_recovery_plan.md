@@ -1,7 +1,7 @@
 # Lifecycle Recovery Plan
 
 Status: Slice 1 is complete. The red gate, production fix, tightened oracle,
-independent review rerounds, Claude review, and normal platform CI are green.
+independent review rerounds, Claude review, and focused platform CI are green.
 
 ## Relation To Existing Lifecycle Plans
 
@@ -551,6 +551,10 @@ Slice 1B.1 closure record, 2026-07-09:
   production diff removed live stalled-gate preemption, made recovery clear
   only the exact observed stamp, and changed `unlock()` to leave stamp cleanup
   to the gated unowned-acquisition path.
+- Focused platform CI evidence, 2026-07-09: commit `3960b3e` passed the active
+  `Build & Test` workflows on Linux (`29011919650`), FreeBSD (`29011919518`),
+  Windows (`29011919631`), and macOS (`29011919564`). This closes Slice 1B.2;
+  it is not evidence that the comprehensive suite is green.
 
 #### Slice 1B.3: lifeline release ordering
 
@@ -733,4 +737,5 @@ changes, the slice becomes multi-domain, or the same blocker class repeats.
 Do not code in the preserved dirty worktree. Slice 1A and Slice 1B.1 are
 complete. Slice 1B.3 is durably dropped. Slice 1B.2 red-gate and local green
 gate are complete, and the production diff passed six-reviewer validation.
-Next action is to commit/push Slice 1B.2 and run the focused platform CI gate.
+Focused platform CI is green. Next action is Slice 1C: verify whether the
+child-shutdown failure propagation test is still red on the selected baseline.
