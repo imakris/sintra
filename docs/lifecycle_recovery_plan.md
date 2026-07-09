@@ -750,14 +750,31 @@ Durable drop decision, 2026-07-09:
 
 ### Slice 5: Shutdown/User-Barrier Membership
 
-Reimplement narrowly from `ae7fed3` only if the baseline still has the bug:
+Red-gate-only decision, 2026-07-09:
 
-- Collective shutdown participants leave user barriers but stay in internal
-  lifecycle barriers.
-- Stale process-slot state is reset on activation/reuse.
-- Forged `begin_collective_shutdown` calls are rejected.
-
-Do not fold this into group membership authority.
+- Six xhigh Codex reviewers and Claude converged on one next step: no production
+  work yet; add only a focused test-only gate adapted from
+  `ae7fed3`'s `shutdown_user_barrier_departure_test`.
+- Valid red evidence: one process enters collective `shutdown()` and waits in a
+  Sintra internal shutdown barrier; remaining live peers then cannot complete a
+  normal user barrier because the shutdown participant is still counted in
+  user-barrier membership.
+- The gate must be re-derived against current HEAD using existing observability.
+  Do not add a production test hook, `begin_collective_shutdown`, a new state
+  array, or any part of the production fix to make the red observable.
+- If the gate passes, fails before proving the shutdown-participant/user-barrier
+  membership cause, or only reports a generic timeout, durably drop Slice 5.
+- If the gate fails for the intended reason, run a fresh architecture review
+  before production work. First attempt the smallest internal fix; add a distinct
+  collective-shutdown state or internal RPC only if the reproduced red proves the
+  existing draining state plus barrier classification cannot represent the case.
+- Treat stale process-slot reset and forged `begin_collective_shutdown`
+  rejection as follow-on green coverage only if production adds the corresponding
+  internal state/RPC. They are not standalone current-HEAD red gates.
+- Exclude `tests/admission_process_entry_contract_test.cpp`, group membership
+  authority, public API changes, `Admission_boundary`, runtime-work counters,
+  pending-owner state, finalize/drain result machinery, and broad `ae7fed3`
+  cherry-picking from Slice 5.
 
 ### Slice 6: Group Membership Authority
 
@@ -842,5 +859,5 @@ Focused platform CI is green. Slice 1C is durably dropped. Slice 2 is closed:
 the two source-confirmed residual admission/recovery issues have local
 red-then-green evidence, six-reviewer green implementation review, and shortened
 CI green on all four platforms at `577a6cf`. Slices 3 and 4 are durably dropped
-on this baseline. Next action is Slice 5 architecture and scope review before
-any shutdown/user-barrier membership work.
+on this baseline. Slice 5 is authorized only for a focused test-only red gate;
+production work remains blocked until that gate fails for the intended reason.
