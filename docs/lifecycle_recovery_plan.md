@@ -426,6 +426,30 @@ Slice 1B scope review record, 2026-07-09:
   liveness assertion, do not patch production. Record Slice 1B.1 as dropped or
   amend the gate.
 
+Slice 1B.1 closure record, 2026-07-09:
+
+- Red gate commit `7c01627` added the POSIX unreaped-child liveness oracle in
+  `tests/utility_test.cpp`. macOS CI run `28994505589` failed for the intended
+  assertion, `utility_test: exited unreaped child should not be reported alive`.
+  Linux run `28994505545`, FreeBSD run `28994505371`, and Windows run
+  `28994505519` completed successfully for the same red-gate commit.
+- Production commit `9db0b08` changed only
+  `include/sintra/detail/ipc/process_utils.h`, adding a macOS-only liveness
+  fallback that treats zombie or missing `KERN_PROC_PID` evidence as not alive
+  and leaves unknown evidence conservative.
+- Six xhigh production reviewers accepted the code and scope; one closure-only
+  blocker required durable evidence in this plan. CI discipline was amended in
+  `4390b4a`, `01c7246`, and `a064cc6` to restore a branch-valid focused CI
+  gate, cap repetition-heavy stress runs, reject `did_not_run` budget greens,
+  and fail if any active-test binary is missing from the requested build
+  configuration set. Those CI changes had separate reviewer gates, including
+  blocker/rerun checks for budget and missing-binary semantics.
+- Focused blocking CI for `a064cc6` completed successfully on Linux
+  `29002418892`, FreeBSD `29002418747`, Windows `29002418884`, and macOS
+  `29002418901`.
+- Slice 1B.1 is closed. Do not add mutex, ring, lifeline, drain, or lifecycle
+  gate work to this slice after closure.
+
 #### Slice 1B.2: interprocess_mutex owner-generation recovery
 
 - Blocked pending a separate architecture decision and red gate. Do not import
@@ -570,7 +594,9 @@ Only if reproduced after earlier slices:
   with the baseline decision, then code.
 - Do not add broad `#define private public` tests unless a smaller public
   regression test is impossible.
-- Do not keep CI active-tests-only as the normal branch signal.
+- Do not treat the focused active-tests CI as proof that the full suite is
+  clean, merge-ready, or release-ready. It is the blocking signal for this
+  recovery branch only.
 - Do not patch around the same class of review finding twice. Stop and shrink
   the slice.
 
@@ -585,8 +611,9 @@ changes, the slice becomes multi-domain, or the same blocker class repeats.
 
 ## Next Action
 
-Do not code in the preserved dirty worktree. Slice 1A is complete and Slice 1B
-is split. Slice 1B.1 has the red macOS CI evidence and production patch, but
-closure is pending one final focused CI pass after the runner discovery
-hardening that makes missing active-test binaries fatal. Do not start Slice
-1B.2 or Slice 1B.3 implementation before a separate architecture/gate review.
+Do not code in the preserved dirty worktree. Slice 1A and Slice 1B.1 are
+complete. Slice 1B is still split: do not start Slice 1B.2 or Slice 1B.3
+implementation before a separate architecture/gate review. Next action is an
+architecture decision for Slice 1B.3 lifeline release ordering, unless review
+chooses to durably drop it or to prioritize the blocked Slice 1B.2 mutex
+owner-generation gate first.
