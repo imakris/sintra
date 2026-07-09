@@ -1,29 +1,95 @@
-# Active Tests Configuration
+# Full Tests Configuration
 #
 # Format: <test_path> <iterations>
-#   - test_path: relative path to test from tests/ directory (without .cpp extension or sintra_ prefix)
+#   - test_path: relative path to test from tests/ directory
+#     (without .cpp extension or sintra_ prefix)
 #   - iterations: number of times to run the test (minimum: 1)
 #   - Lines starting with # are ignored
 #   - Empty lines are ignored
 #
-# Temporary CI focus set: branch-valid subset of tests that failed on
-# lifecycle-group-publication-rebuild CI from 2026-07-04 through 2026-07-08,
-# plus focused tests for the active recovery slice.
-# GitHub workflows pass SINTRA_BUILD_ACTIVE_TESTS_ONLY=ON, so tests omitted
-# here are not compiled in blocking CI.
+# This file intentionally lists every top-level non-manual test so the CI
+# runner executes the full suite. Higher iteration counts preserve the prior
+# lifecycle recovery stress coverage.
 
-barrier_guardrails_test                    5
-barrier_stress_test                       30
-choreography_extreme_test                 80
-complex_choreography_stress_test          60
-complex_choreography_test                 60
-external_process_invitation_lifecycle_negative_test 1
-extreme_choreography_test                 80
-init_error_spawn_failure_test              1
-interprocess_mutex_test                    1
-join_swarm_failure_test                    1
-join_swarm_midflight_test                 40
-recovery_unpublish_deadlock_test           1
-ring_abi_fingerprint_test                  1
-shutdown_user_barrier_departure_test       1
-utility_test                               1
+abi_description_test                                     1
+barrier_complex_choreography_test                        1
+barrier_delivery_fence_repro_test                        1
+barrier_drain_and_unpublish_test                         1
+barrier_flush_test                                       1
+barrier_guardrails_test                                  5
+barrier_pathological_choreography_test                   1
+barrier_rapid_reuse_test                                 1
+barrier_stress_test                                      30
+basic_pub_sub                                            1
+choreography_extreme_test                                80
+complex_choreography_stress_test                         60
+complex_choreography_test                                60
+console_test                                             1
+coordinator_lock_order_test                              1
+defensive_paths_test                                     1
+drain_wake_coordination_test                             1
+dummy_test                                               1
+exception_conversions_test                               1
+explicit_type_id_test                                    1
+external_process_invitation_admission_negative_test      1
+external_process_invitation_lifecycle_negative_test      1
+external_process_invitation_rejection_cleanup_test       1
+external_process_invitation_test                         1
+extreme_choreography_test                                80
+fault_injection_defensive_test                           1
+finalize_async_rpc_lifecycle_test                        1
+finalize_emit_rpc_test                                   1
+handler_lifetime_test                                    1
+id_types_locality_test                                   1
+init_error_spawn_failure_test                            1
+interprocess_file_mapping_test                           1
+interprocess_mutex_test                                  1
+interprocess_semaphore_test                              1
+ipc_rings_tests                                          1
+join_swarm_failure_test                                  1
+join_swarm_midflight_test                                40
+leave_coordinator_guardrails_test                        1
+leave_lifecycle_test                                     1
+lifecycle_guardrails_test                                1
+lifecycle_handler_test                                   1
+lifeline_basic_test                                      1
+locality_messaging_test                                  1
+log_stream_move_test                                     1
+managed_process_publish_test                             1
+message_args_traits_test                                 1
+parent_child_targeted_rpc_test                           1
+ping_pong_multi_test                                     1
+ping_pong_test                                           1
+processing_fence_test                                    1
+receive_test                                             1
+recovery_policy_test                                     1
+recovery_runner_thread_test                              1
+recovery_test                                            1
+recovery_unpublish_deadlock_test                         1
+rendezvous_barrier_error_paths_test                      1
+ring_abi_fingerprint_test                                1
+ring_cleanup_stress_test                                 1
+ring_control_first_attach_process_test                   1
+ring_helpers_test                                        1
+ring_lifecycle_anchor_race_process_test                  1
+ring_lifecycle_attachment_recovery_process_test          1
+rpc_append_test                                          1
+rpc_async_lifecycle_test                                 1
+rpc_bounded_result_test                                  1
+rpc_destruction_race_test                                1
+rpc_unavailable_typed_test                               1
+semaphore_high_contention_stress                         1
+shutdown_helper_test                                     1
+shutdown_options_mixed_modes_test                        1
+shutdown_options_test                                    1
+shutdown_options_throwing_hook_test                      1
+shutdown_user_barrier_departure_test                     1
+spawn_detached_test                                      1
+spawn_wait_test                                          1
+spinlock_recovery_test                                   1
+teardown_targeted_rpc_exception_test                     1
+tls_post_handler_test                                    1
+tn_type_hash_test                                        1
+transceiver_ctor_test                                    1
+utility_test                                             1
+variable_buffer_alignment_test                           1
