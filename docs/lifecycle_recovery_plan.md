@@ -265,22 +265,40 @@ evidence was checked, and which focused gate covers the decision.
   `tests/runner/configuration.py`, and `tests/external_process_invitation_test.cpp`
   here or in the admission slice. Do not leave them as unowned cleanup.
 
-### Slice 1: Independent Base Fixes
+### Slice 1: External Claim Admission
 
-Reapply only fixes orthogonal to the lifecycle redesign:
+Owns only the original external invitation/claim hole on the chosen baseline.
+This slice is not the bucket for every independent salvage fix.
 
-- First add the red gate for the original external invitation/claim hole on the
-  chosen baseline. The gate must exercise a claim attempt while teardown
-  admission is closed but before shutdown completion. Only after observing that
-  gate fail on unmodified `02f03bf`, fix the narrow existing claim path.
-- `a29dfbc`: static teardown registry lifetime and `deactivate_all` safety.
-- `5cd9149`: process liveness/zombie handling, robust mutex PID/TID reuse, and
-  lifeline release after local message-ring attachments are dropped.
-- `64dc45f`: choreography child-shutdown failure propagation in tests.
+- First add the red gate for a claim attempt while teardown admission is closed
+  but before shutdown completion. Only after observing that gate fail on
+  unmodified production, fix the narrow existing claim path.
+- The production fix may touch only the external-claim commit boundary unless a
+  reviewer accepts a recorded amendment.
+- After the tightened oracle and production review reround are green, run the
+  normal CI gate from Slice 0 before advancing.
 
-For `2cbbb1c`, keep only independent fragments here if they apply cleanly:
-ring writer-owner-lost detection and reader `shared_from_this` lifetime. The
-retirement subsystem belongs to Slice 7.
+### Slice 1A: Static Teardown Registry Lifetime
+
+- Reproduce or audit the base bug from `a29dfbc`: static teardown registry
+  lifetime and `deactivate_all` mutation while iterating.
+- Keep it independent of external invitation admission, process retirement,
+  drain wait, and mutex recovery.
+
+### Slice 1B: Process Liveness And Mutex Recovery
+
+- Reproduce or audit the base bug from `5cd9149`: process liveness/zombie
+  handling, robust mutex PID/TID reuse, and lifeline release after local
+  message-ring attachments are dropped.
+- Keep the ring ABI decision explicit in this slice; do not smuggle it through
+  unrelated lifecycle work.
+
+### Slice 1C: Child Shutdown Test Oracle
+
+- Reapply the `64dc45f` child-shutdown failure propagation test only if the
+  baseline still swallows the failure.
+- This is test-oracle work; do not combine it with production lifecycle
+  scaffolding.
 
 ### Slice 2: Minimal Admission Repair
 
@@ -364,6 +382,9 @@ Do not fold this into group membership authority.
   confirmed fixes and discard the rest.
 - After any `2cbbb1c` reader/ring fragments, salvage from `f6dac12` the
   reader detach/stop rollback for failed startup and external reservation.
+- Own any independent `2cbbb1c` fragments here: ring writer-owner-lost
+  detection and reader `shared_from_this` lifetime. Do not carry the retirement
+  subsystem/result matrix unless this slice's focused gate proves it necessary.
 - First try to make retirement `not started` or `committed` using explicit
   identity `{process_iid, occurrence, reader}`. That identity should make stale
   readers impossible instead of adding a broad result matrix.
