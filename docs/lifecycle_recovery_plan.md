@@ -103,9 +103,9 @@ must be cross-grafted:
   RPC terminal-state code is in `a5f7f72` and is entangled with runtime blocker
   machinery. Do not select it merely because the range has useful-looking RPC
   terminal-state work.
-- `1cf7239`: repair sibling through 6A0. Candidate only if the audit proves the
-  4B lifecycle expansion is removed or independently safe. Otherwise quarry
-  only the narrow 6A0 idea.
+- `1cf7239`: repair sibling post-6A0 closure record. Candidate only if the audit
+  proves the 4B lifecycle expansion is removed or independently safe. The actual
+  6A0 code carrier is `55918b4`, not `1cf7239`.
 
 Baseline choice rule: pick the smallest candidate that keeps real fixes and
 does not require preserving speculative lifecycle state.
@@ -138,10 +138,10 @@ Baseline decision record, 2026-07-09:
   direct-spawn gating ideas. It is not a baseline because it is a sibling of the
   repair/publication line and still needs join/recovery admission repair before
   it can be trusted.
-- `a5f7f72` and `1cf7239` remain quarry references for 4A RPC terminal cleanup
+- `a5f7f72` and `55918b4` remain quarry references for 4A RPC terminal cleanup
   and the narrow 6A0 drain idea. They are not baselines because the deletion
-  burden is larger than cross-grafting the useful pieces. `436e7f2` itself is
-  only the 4A closure record.
+  burden is larger than cross-grafting the useful pieces. `436e7f2` and
+  `1cf7239` themselves are closure records, not the code carriers.
 - First implementation slice: fix only the external invitation claim admission
   hole on `02f03bf`, with one focused regression test, then run focused local
   checks before the six-reviewer and CI gates.
@@ -716,25 +716,37 @@ Durable drop decision, 2026-07-09:
 
 ### Slice 4: Finalize And Drain
 
-Only if a focused repro or audit proves the issue on the selected baseline:
+Durable drop decision, 2026-07-09:
 
-- From `5062001`, salvage `s_finalize_drain_prepared` as distinct from
-  "admission closed" and explicit teardown drain registration after admission is
-  closed.
-- From `5062001`, salvage external-attached-process exclusion from drain-wait
-  candidates if external attachment remains in the selected baseline.
-- For 6A0, reimplement only the small rule: drain wait completes on known
-  non-self cleanup/removal, not merely on "draining".
-- Do not take the 6A0 cleanup/removal predicate unless the selected baseline
-  already has, or the same slice adds, the minimal producer for known graceful
-  cleanup/removal. If no producer is present, drop 6A0 rather than waiting on a
-  state no code can produce.
-- If that producer is missing, the only allowed same-slice producer is the
-  minimal `330a29f` acknowledged self-unpublish before local teardown, in
-  service mode, without user-handler dispatch. Do not defer it to a later slice
-  after keeping 6A0.
-- Start without drain attribution maps. Add timeout attribution only if
-  diagnostics are needed after the predicate is correct.
+- Drop Slice 4 production work on this recovery branch. The first review round
+  split on narrowed 6A0, then six xhigh Codex convergence reviewers and Claude
+  unanimously returned DROP.
+- Drop `5062001`'s `s_finalize_drain_prepared` and explicit teardown admission
+  registration. That shape belongs to the old Admission_boundary/finalize-result
+  line and no current-HEAD red evidence shows the linear finalize path needs it.
+- Do not port `5062001`'s external-attached drain-wait exclusion. HEAD already
+  handles external peers in the supported shutdown path through
+  `group_has_non_external_peer()`, `shutdown_coordinator_drain_wait()`, and
+  `begin_shutdown()` marking external-attached processes draining.
+- Drop the 6A0 cleanup/removal predicate from `55918b4` on this baseline.
+  Current source, tests, and docs define `wait_for_all_draining()` as the
+  draining-bit predicate. Cleanup/removal semantics are owned by
+  `shutdown_coordinator_drain_wait()` before finalize on the supported
+  collective shutdown path.
+- Do not add a test-only red gate that merely rewrites
+  `drain_wake_coordination_test` from "draining bit satisfies wait" to
+  "cleanup/removal satisfies wait"; that would mint a new oracle, not reproduce
+  a current bug.
+- Exclude `330a29f` from Slice 4. Its acknowledged self-unpublish producer is
+  conditional on keeping 6A0, and the 6A0 predicate is dropped here.
+- Exclude `Drain_wait_snapshot`, `Drain_wait_result`,
+  `wait_for_all_draining_result`, `drain_waiter_live`, finalize blocker/result
+  plumbing, drain attribution maps, `Admission_boundary`, and all runtime-work
+  or pending-owner scaffolding from this recovery line.
+- Reopen only with deterministic current-HEAD evidence that a supported public
+  path finalizes while a peer is draining-but-not-removed and that this causes
+  observable harm, such as lost messages, hang, corruption, or torn lifeline
+  behavior. A retained synthetic candidate alone is not enough.
 
 ### Slice 5: Shutdown/User-Barrier Membership
 
@@ -790,8 +802,8 @@ Do not fold this into group membership authority.
 
 Only if reproduced after earlier slices:
 
-- If Slice 4 already kept the minimal `330a29f` producer, do not duplicate it
-  here.
+- Slice 4 dropped the minimal `330a29f` producer. If a future reopened Slice 4
+  keeps it, do not duplicate it here.
 - From `edd32dc`, do not replay wholesale. Consider only terminal
   self-unpublish result handling, remote-coordinator/self-root terminal flags,
   and reserved-RPC sender validation if a focused repro requires them.
@@ -829,6 +841,6 @@ gate are complete, and the production diff passed six-reviewer validation.
 Focused platform CI is green. Slice 1C is durably dropped. Slice 2 is closed:
 the two source-confirmed residual admission/recovery issues have local
 red-then-green evidence, six-reviewer green implementation review, and shortened
-CI green on all four platforms at `577a6cf`. Slice 3 is durably dropped on this
-baseline. Next action is Slice 4 architecture and scope review before any
-finalize/drain work.
+CI green on all four platforms at `577a6cf`. Slices 3 and 4 are durably dropped
+on this baseline. Next action is Slice 5 architecture and scope review before
+any shutdown/user-barrier membership work.
