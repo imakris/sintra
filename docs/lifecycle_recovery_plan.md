@@ -1,8 +1,7 @@
 # Lifecycle Recovery Plan
 
-Status: Slice 1 has a red gate, a production fix, and local focused green
-evidence. Independent production review is in progress; normal CI remains
-required before advancing to the next slice.
+Status: Slice 1 is complete. The red gate, production fix, tightened oracle,
+independent review rerounds, Claude review, and normal platform CI are green.
 
 ## Relation To Existing Lifecycle Plans
 
@@ -238,6 +237,15 @@ Slice 1 architecture review record, 2026-07-09:
   Rebuilding and rerunning the same target on the production branch exited `0`;
   the green log is
   `C:\plms\bsd_licensed\sintra-lifecycle-artifacts\slice1_tightened_oracle_green_9ae88cb_plus_fix.txt`.
+- Independent review and CI evidence, 2026-07-09: the final six-Codex reround
+  against `7634b53` returned GREEN on correctness, architecture, test oracle,
+  lock ordering, integration/CI readiness, and governance/defer-trap. The Claude
+  review batch at
+  `C:\plms\bsd_licensed\sintra-lifecycle-artifacts\claude-slice1-production-20260709\sintra_slice1_production_review_20260709_20260709_031659\combined_reviews.md`
+  returned GREEN with only low follow-ups. Push CI on
+  `7634b5344e0ea0c934b82949f2df84aa009a33d9` succeeded on Linux
+  (`28988282975`), macOS (`28988282969`), Windows (`28988282967`), and FreeBSD
+  (`28988282901`).
 
 ## Implementation Slices
 
@@ -430,6 +438,7 @@ changes, the slice becomes multi-domain, or the same blocker class repeats.
 
 ## Next Action
 
-Do not code in the preserved dirty worktree. Complete the Slice 1 production
-review reround after the tightened oracle, then run the required CI gate before
-advancing to the next slice.
+Do not code in the preserved dirty worktree. The next implementation batch is
+Slice 1A, but start it only after an architecture/scope review confirms the
+static teardown registry lifetime bug is still present on this reduced branch
+and defines one focused gate.
