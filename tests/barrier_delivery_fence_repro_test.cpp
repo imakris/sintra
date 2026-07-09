@@ -35,6 +35,7 @@ constexpr std::size_t k_worker_count  = 2;
 constexpr std::size_t k_iterations    = 64;
 constexpr std::size_t k_burst_count   = 8;
 constexpr auto        k_handler_delay = std::chrono::milliseconds(12);
+constexpr const char* k_iteration_start_barrier = "delivery-fence-repro-iteration-start";
 
 struct iteration_marker_t
 {
@@ -148,6 +149,8 @@ int coordinator_process()
             state.iteration_failed      = false;
             state.failure_detail.clear();
         }
+
+        sintra::barrier<sintra::rendezvous_t>(k_iteration_start_barrier);
 
         if (!aborted) {
             std::unique_lock<std::mutex> lock(state.mutex);
@@ -270,6 +273,7 @@ int worker_process(std::uint32_t worker_index)
     std::uint32_t sequence = 0;
 
     for (std::uint32_t iteration = 0; iteration < k_iterations; ++iteration) {
+        barrier<rendezvous_t>(k_iteration_start_barrier);
 
         for (std::uint32_t burst = 0; burst < k_burst_count; ++burst) {
             world() << iteration_marker_t{worker_index, iteration, sequence};
