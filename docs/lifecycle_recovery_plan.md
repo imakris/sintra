@@ -272,6 +272,9 @@ evidence was checked, and which focused gate covers the decision.
   cap so repetition-heavy focus rosters cannot turn CI into an unbounded wait.
   Budget exhaustion is green only after each selected test has at least one
   passing run; `did_not_run` does not satisfy the budget cap.
+- `active_tests.txt` entries missing from the build are fatal runner errors.
+  The shortened gate is invalid if it silently runs only the subset of active
+  tests whose binaries happened to be present.
 - Triage `ee15fec` and the dirty edits to `tests/active_tests.txt`,
   `tests/runner/configuration.py`, and `tests/external_process_invitation_test.cpp`
   here or in the admission slice. Do not leave them as unowned cleanup.
@@ -583,7 +586,7 @@ changes, the slice becomes multi-domain, or the same blocker class repeats.
 ## Next Action
 
 Do not code in the preserved dirty worktree. Slice 1A is complete and Slice 1B
-is split. Slice 1B.1 has the red macOS CI evidence and production patch; close
-it only after the focused CI gate for `4390b4a` resolves or after a recorded CI
-outage/queue exception is accepted. Do not start Slice 1B.2 or Slice 1B.3
-implementation before a separate architecture/gate review.
+is split. Slice 1B.1 has the red macOS CI evidence and production patch, but
+closure is pending one final focused CI pass after the runner discovery
+hardening that makes missing active-test binaries fatal. Do not start Slice
+1B.2 or Slice 1B.3 implementation before a separate architecture/gate review.

@@ -860,6 +860,7 @@ class TestRunner:
         discovered_tests: Dict[str, List[TestInvocation]] = {
             config: [] for config in configurations
         }
+        missing_active_tests: List[str] = []
 
         for test_path in active_tests.keys():
             test_name = test_path.split('/')[-1]
@@ -872,18 +873,42 @@ class TestRunner:
 
             test_name = next((name for name in test_names if name in available_tests), None)
             if test_name is None:
-                print(f"{Color.YELLOW}Warning: Test '{test_path}' from active_tests.txt not found in build directory{Color.RESET}")
+                missing_active_tests.append(test_path)
                 continue
 
             # Add test invocations for each available configuration
-            for config, test_binary in available_tests[test_name].items():
-                if target_config is not None and config != target_config:
-                    continue
+            if target_config is not None and target_config not in configurations:
+                continue
+
+            expected_configs = [target_config] if target_config is not None else configurations
+            matching_binaries = []
+            for config in expected_configs:
+                test_binary = available_tests[test_name].get(config)
+                if test_binary is None:
+                    matching_binaries = []
+                    break
+                matching_binaries.append((config, test_binary))
+
+            if not matching_binaries:
+                missing_active_tests.append(test_path)
+                continue
+
+            added_invocation = False
+            for config, test_binary in matching_binaries:
                 normalized_name = f"sintra_{test_name}_{config}"
 
                 invocations = self._expand_test_invocations(test_binary, f"sintra_{test_name}", normalized_name)
                 if invocations:
                     discovered_tests[config].extend(invocations)
+                    added_invocation = True
+
+            if not added_invocation:
+                missing_active_tests.append(test_path)
+
+        if missing_active_tests:
+            for test_path in missing_active_tests:
+                print(f"{Color.RED}Error: Test '{test_path}' from active_tests.txt not found in build directory{Color.RESET}")
+            return {}, active_tests
 
         # Build final test suites with ordering (dummy_test first)
         test_suites = {}
