@@ -601,6 +601,25 @@ Slice 1B.1 closure record, 2026-07-09:
   baseline still swallows the failure.
 - This is test-oracle work; do not combine it with production lifecycle
   scaffolding.
+- Durable drop decision, 2026-07-09: do not keep the adapted
+  `choreography_extreme_test` status-file oracle on this baseline.
+- Evidence: the exact `64dc45f` patch targets the sibling repair line and
+  depends on finalize-blocker types absent from this branch. The adapted
+  bool/exception-only oracle never produced the intended red signal: no child
+  `sintra::shutdown()` false/throw status was observed and swallowed by the
+  root. The unmodified test passed 10/10 under a 30-second per-run harness,
+  while the adapted oracle timed out by iteration 4 under the same harness.
+  That timeout is a different liveness signal, not accepted Slice 1C evidence.
+- Review evidence: the first six-Codex review round split 2 keep, 2 drop, 2
+  narrow. Claude returned `RED_DROP_ORACLE` in
+  `C:\plms\bsd_licensed\sintra-lifecycle-artifacts\claude-slice1c-decision-20260709\sintra_slice1c_decision_review_20260709_20260709_132913\outputs\slice1c_decision.md`.
+  A second six-Codex convergence round returned `GREEN_DROP_RECORD`.
+- Reopen only with deterministic intended-reason red evidence on this baseline:
+  a child `sintra::shutdown()` genuinely returns `false` or throws, and the
+  unmodified root demonstrably fails to surface that child shutdown failure.
+  Do not treat the observed repetition timeout as this slice's oracle; if that
+  liveness symptom is pursued, it must be a separately scoped reproduced-first
+  slice.
 
 ### Slice 2: Minimal Admission Repair
 
@@ -737,5 +756,6 @@ changes, the slice becomes multi-domain, or the same blocker class repeats.
 Do not code in the preserved dirty worktree. Slice 1A and Slice 1B.1 are
 complete. Slice 1B.3 is durably dropped. Slice 1B.2 red-gate and local green
 gate are complete, and the production diff passed six-reviewer validation.
-Focused platform CI is green. Next action is Slice 1C: verify whether the
-child-shutdown failure propagation test is still red on the selected baseline.
+Focused platform CI is green. Slice 1C is durably dropped. Next action is a
+Slice 2 scope/architecture check: verify whether any minimal admission repair
+remains on this branch before coding.
