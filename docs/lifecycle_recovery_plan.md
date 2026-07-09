@@ -1,9 +1,9 @@
 # Lifecycle Recovery Plan
 
 Status: Slices 1, 1A, 1B.1, 1B.2, 2, and 5 are closed; Slices 1B.3,
-1C, 3, and 4 are durably dropped. The test/CI recovery remediation after
-`ceafde0` has local green evidence; four-platform CI is pending. Slice 6 cannot
-start until clean Linux, FreeBSD, macOS, and Windows CI completes the repair.
+1C, 3, and 4 are durably dropped. The test/CI recovery remediation is closed at
+`266fa2b` with local green evidence and full-selection CI green on Linux,
+FreeBSD, macOS, and Windows. Slice 6 is ready for scope validation only.
 
 ## Relation To Existing Lifecycle Plans
 
@@ -859,6 +859,16 @@ Closure, 2026-07-09:
 - CI acceptance requires clean full-selection runs on Linux, FreeBSD, macOS, and
   Windows. This is the user-requested blocking recovery gate, but it remains a
   breadth gate and does not claim historical stress-depth restoration.
+- Closure, 2026-07-10: the bounded remediation landed at `266fa2b` after an
+  independent `gpt-5.5` xhigh implementation review returned push-ready green.
+  Full-selection CI passed on the recovery branch for Linux (`29052340175`),
+  FreeBSD (`29052340086`), macOS (`29052340069`), and Windows (`29052340133`),
+  and on `master` for Linux (`29052340302`), FreeBSD (`29052340088`), macOS
+  (`29052340584`), and Windows (`29052340173`). Coverage also passed with runner
+  failure propagation enabled (`29052340089`). All platform runs discovered the
+  complete 82-test roster. The restored 64-round processing-fence test passed
+  in every exercised configuration, including macOS within the 90-second
+  override.
 - Separate architecture blocker/risk: the delivery-vs-processing contract and
   implementation relationship remains unsettled. The documented distinction is
   local-only proof for `delivery_fence_t` versus cross-participant processing
@@ -866,8 +876,8 @@ Closure, 2026-07-09:
   for deciding which production side, if any, must change. Resolve that question
   in a separately reviewed architecture slice with a confirmed oracle. This
   remediation must not change production barrier, IPC, or runtime semantics.
-- Slice 6 must remain closed until both the local remediation gates and clean
-  four-platform CI above are recorded green.
+- The remediation is closed. Slice 6 may proceed only to its existing scope
+  validation; do not infer that the separate barrier-contract risk was resolved.
 
 ### Slice 6: Group Membership Authority
 
@@ -946,10 +956,10 @@ changes, the slice becomes multi-domain, or the same blocker class repeats.
 ## Next Action
 
 Do not code in the preserved dirty worktree. The accepted and dropped slice
-history above remains unchanged, and Slice 5 is closed at `f95cf6e`. The next
-action is the bounded test/CI recovery remediation recorded after Slice 5:
-complete its local acceptance gates, then obtain clean full-selection CI on
-Linux, FreeBSD, macOS, and Windows. Do not begin Slice 6 scope validation until
-both gates are green. After that stop condition is cleared, open Slice 6 only if
-duplicate group-membership authority is proven to block cleanup correctness;
-otherwise durably drop it and move to Slice 7.
+history above remains unchanged, Slice 5 is closed at `f95cf6e`, and the
+test/CI recovery remediation is closed at `266fa2b`. The next action is Slice 6
+scope validation. Open Slice 6 only if duplicate group-membership authority is
+proven to block cleanup correctness; otherwise durably drop it and move to
+Slice 7. The separate delivery-vs-processing contract risk is not part of
+Slice 6 and requires its own reviewed architecture decision before production
+barrier semantics change.
