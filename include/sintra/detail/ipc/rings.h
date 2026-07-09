@@ -474,7 +474,7 @@ inline constexpr uint64_t fnv1a_64(std::initializer_list<uint64_t> words) noexce
 // control-file creation protocol, or the on-the-wire framing change in a way
 // that would make two builds incompatible at the ring level. The version is one
 // input among several to the fingerprint below.
-inline constexpr uint64_t k_ring_abi_version = 5;
+inline constexpr uint64_t k_ring_abi_version = 6;
 
 inline constexpr uint64_t k_ring_abi_fingerprint = fnv1a_64({
     k_ring_abi_version,
@@ -493,7 +493,7 @@ inline constexpr uint64_t k_ring_abi_fingerprint = fnv1a_64({
 // order, alignment, interprocess_mutex representation, or mutex recovery
 // semantics change in a way that affects compatibility of an existing
 // <ring>_lifecycle file.
-inline constexpr uint64_t k_ring_lifecycle_anchor_abi_version = 2;
+inline constexpr uint64_t k_ring_lifecycle_anchor_abi_version = 3;
 
 inline constexpr size_t k_ring_lifecycle_attachment_slots =
     static_cast<size_t>(max_process_index) + 1;

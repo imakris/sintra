@@ -496,12 +496,25 @@ Slice 1B.1 closure record, 2026-07-09:
 - Production candidate after accepted red evidence only: a one-stamp mutex
   design. Add exactly one owner start-stamp field. Only a thread/process that
   has won the owner CAS may publish a nonzero stamp; failed contenders must not
-  write or clear it. Unlock must verify `m_owner == self` before clearing the
-  stamp and must throw without touching the stamp when that check fails.
-  Recovery must hold `m_recovering`, re-read `m_owner == observed_owner`, and
-  only then clear the stamp immediately before CASing that same owner token to
-  `0`; if the owner token changed, restart without touching the stamp. Recover
-  only when the owner PID is dead, or when the stored stamp is nonzero,
+  write or clear it. Unlock must CAS `m_owner` from `self` to `0` and must not
+  touch the owner stamp; the gated unowned acquisition path clears stale
+  unowned stamps before publishing the next owner.
+  Acquisition must acquire `m_recovering` before publishing a new owner and
+  must not publish while another thread/process holds that gate. While holding
+  the gate, acquisition must clear any old unowned stamp immediately before
+  CASing `m_owner` from `0` to `self`.
+  Recovery must hold `m_recovering`, re-read `m_owner == observed_owner`, CAS
+  that same owner token to `0`, and clear only the exact stamp value it
+  observed, only after that CAS succeeds and while it still owns the same
+  `m_recovering` gate; if the owner token, stamp, or gate changed, restart or
+  leave the stamp untouched. Recovery/publication gates may be stolen only from
+  dead gate-owner processes; live stalled gate holders are not preempted,
+  because same-token owner reuse makes both destructive recovery and owner-stamp
+  publication unsafe to steal from a live holder. Same-token recursion may be
+  classified
+  only after a fresh snapshot confirms that recovery is not active and
+  `m_owner` still equals `self`. Recover only when the owner PID is dead, or
+  when the stored stamp is nonzero,
   `query_process_start_stamp(owner_pid)` returns a value, and that value differs
   from the stored stamp. A zero stored stamp or unavailable queried stamp is
   unknown evidence and must not recover a live PID. The design deliberately does
@@ -520,6 +533,24 @@ Slice 1B.1 closure record, 2026-07-09:
   reason other than stale-generation non-recovery, requires actual PID/TID reuse
   or flaky timing, or needs storage-mechanic hooks, stop and record Slice 1B.2
   as dropped or redesign the gate through another architecture review.
+- Red-gate evidence, 2026-07-09: commit `9894b12` added the semantic owner
+  fixture hook and owner-generation oracle with no production recovery logic.
+  The focused MinGW debug target `sintra_interprocess_mutex_test` exited `1`
+  with only the intended stale-generation failures:
+  `stale-generation owner with current pid and different tid should recover`,
+  `stale-generation owner with current pid and current tid should recover`, and
+  `owner-generation recovery red gate failed`. The active-only MinGW build also
+  built the newly active mutex test and produced the same red output.
+- Green-gate evidence, 2026-07-09: the production fix uses the reviewed
+  one-stamp mutex design, bumps branch-local ring ABI `5 -> 6` and lifecycle
+  anchor ABI `2 -> 3`, and adds `ring_abi_fingerprint_test` to the active
+  roster. Local active-only MinGW build/run succeeded for
+  `sintra_interprocess_mutex_test`, `sintra_ring_abi_fingerprint_test`, and
+  `sintra_utility_test`.
+- Final review evidence, 2026-07-09: six xhigh lanes returned green after the
+  production diff removed live stalled-gate preemption, made recovery clear
+  only the exact observed stamp, and changed `unlock()` to leave stamp cleanup
+  to the gated unowned-acquisition path.
 
 #### Slice 1B.3: lifeline release ordering
 
@@ -700,7 +731,6 @@ changes, the slice becomes multi-domain, or the same blocker class repeats.
 ## Next Action
 
 Do not code in the preserved dirty worktree. Slice 1A and Slice 1B.1 are
-complete. Slice 1B.3 is durably dropped. Slice 1B.2 remains blocked pending a
-red gate for mutex owner-generation recovery. Next action is the Slice 1B.2
-test-only red-gate attempt described above, unless review rejects this plan
-amendment or the owner chooses to skip 1B.2 and advance to Slice 1C.
+complete. Slice 1B.3 is durably dropped. Slice 1B.2 red-gate and local green
+gate are complete, and the production diff passed six-reviewer validation.
+Next action is to commit/push Slice 1B.2 and run the focused platform CI gate.

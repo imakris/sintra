@@ -14,9 +14,9 @@ process terminates unexpectedly.
 ROBUSTNESS MODEL
 This mutex is process-robust: it detects and recovers from owner-process death.
 If the owning thread exits while its process continues to run, the mutex
-remains locked until the process terminates. Recovery preemption is supported:
-if a recovery attempt stalls beyond a configurable timeout window, another
-thread may safely take over and complete the recovery.
+remains locked until the process terminates. A recovery/publication gate left
+by a dead process may be reclaimed; live stalled gate holders are not
+preempted.
 
 MEMORY & ORDERING
 Ownership transitions rely on 64-bit atomic compare-exchange operations using
@@ -31,6 +31,8 @@ processes. The platform utilities defined in `platform_defs.h` and
   - get_current_pid()
   - get_current_tid()
   - is_process_alive(uint32_t)
+  - query_process_start_stamp(uint32_t)
+  - current_process_start_stamp()
 No explicit initialization routine is required.
 
 PORTABILITY
@@ -41,11 +43,13 @@ kernel synchronization primitives are required.
 
 CAVEATS
 - Thread death within a still-running process is not detected.
-- Recovery preemption may result in short overlapping recovery attempts,
-  but only one can succeed in resetting ownership.
+- Recovery/publication gates are reclaimed only when the gate-owner process is
+  dead.
 - Timed waits (try_lock_for, try_lock_until) may exceed their timeout by
   up to one backoff interval (~16 ms).
 - Recursive lock attempts throw resource_deadlock_would_occur.
+- If process start-stamp evidence is unavailable, recovery stays conservative
+  and falls back to PID-liveness only.
 */
 
 #include <algorithm>
@@ -187,12 +191,12 @@ public:
 
     void test_install_owner_fixture(test_owner_fixture owner) noexcept
     {
-        (void)owner.start_stamp;
         const auto token =
             (static_cast<std::uint64_t>(owner.pid) << 32u) |
             (static_cast<std::uint64_t>(owner.tid) & 0xFFFFFFFFull);
-        m_owner.store(token, std::memory_order_release);
         m_recovering.store(0, std::memory_order_release);
+        m_owner_start_stamp.store(owner.start_stamp, std::memory_order_release);
+        m_owner.store(token, std::memory_order_release);
     }
 
     std::uint64_t test_owner_token() const noexcept
@@ -217,9 +221,6 @@ private:
     static_assert(std::atomic<std::uint32_t>::is_always_lock_free,
         "interprocess_mutex requires lock-free 32-bit atomics for flags");
 
-    // If a recoverer stalls while still "alive", let others preempt after this many ms.
-    static constexpr std::uint32_t k_recovery_stale_ms = 10000; // 10s; conservative
-
     static owner_token make_owner_token()
     {
         const owner_token pid = static_cast<owner_token>(get_current_pid());
@@ -242,9 +243,61 @@ private:
         return static_cast<std::uint32_t>(tok >> 32u);
     }
 
-    static std::uint32_t recover_ticks(recover_token tok)
+    bool acquire_recovery_gate(recover_token& owned_token)
     {
-        return static_cast<std::uint32_t>(tok & 0xFFFFFFFFull);
+        recover_token rec = m_recovering.load(std::memory_order_acquire);
+        if (rec != 0) {
+            const auto rp = recover_pid(rec);
+            if (rp != 0 && !is_process_alive(rp)) {
+                m_recovering.compare_exchange_strong(rec, static_cast<recover_token>(0));
+            }
+        }
+
+        owned_token = make_recover_token(get_current_pid(), now_ticks32());
+        recover_token zero = 0;
+        return m_recovering.compare_exchange_strong(zero, owned_token);
+    }
+
+    void release_recovery_gate(recover_token owned_token) noexcept
+    {
+        recover_token expected = owned_token;
+        m_recovering.compare_exchange_strong(expected, static_cast<recover_token>(0));
+    }
+
+    static bool owner_generation_is_stale(owner_token token, std::uint64_t stored_stamp)
+    {
+        if (stored_stamp == 0) {
+            return false;
+        }
+
+        const auto current_stamp = query_process_start_stamp(owner_pid(token));
+        return current_stamp && *current_stamp != stored_stamp;
+    }
+
+    bool try_acquire_unowned_when_no_recovery(owner_token self)
+    {
+        recover_token gate = 0;
+        if (!acquire_recovery_gate(gate)) {
+            return false;
+        }
+
+        if (m_owner.load(std::memory_order_acquire) != k_unowned) {
+            release_recovery_gate(gate);
+            return false;
+        }
+
+        m_owner_start_stamp.store(0, std::memory_order_release);
+        owner_token expected = k_unowned;
+        if (!m_owner.compare_exchange_strong(expected, self)) {
+            release_recovery_gate(gate);
+            return false;
+        }
+
+        m_owner_start_stamp.store(
+            current_process_start_stamp().value_or(0),
+            std::memory_order_release);
+        release_recovery_gate(gate);
+        return true;
     }
 
     static std::uint32_t now_ticks32() noexcept
@@ -276,27 +329,41 @@ private:
     // Internal helper lets timed/try APIs avoid throwing on recursion.
     bool try_acquire(owner_token self, bool throw_on_recursive)
     {
-        owner_token expected = k_unowned;
-        if (m_owner.compare_exchange_strong(expected, self)) {
+        if (try_acquire_unowned_when_no_recovery(self)) {
             return true;
         }
 
-        // Recursive acquisition by the same thread
+        owner_token expected = m_owner.load(std::memory_order_acquire);
+
+        // Recovery path: previous owner is gone (process crashed/exited).
+        if (expected != k_unowned && try_recover(expected, self)) {
+            if (try_acquire_unowned_when_no_recovery(self)) {
+                return true;
+            }
+        }
+
+        // Recursive acquisition by the same current-generation thread. A same-token
+        // stale generation is recoverable, so do not classify it as recursion.
         if (expected == self) {
+            const owner_token current_owner = m_owner.load(std::memory_order_acquire);
+            const recover_token current_recovering = m_recovering.load(std::memory_order_acquire);
+            if (current_recovering != 0 || current_owner != self) {
+                return false;
+            }
+
+            if (owner_generation_is_stale(
+                    current_owner,
+                    m_owner_start_stamp.load(std::memory_order_acquire)))
+            {
+                return false;
+            }
+
             if (throw_on_recursive) {
                 throw std::system_error(
                     std::make_error_code(std::errc::resource_deadlock_would_occur),
                     "interprocess_mutex: recursive lock detected");
             }
             return false;
-        }
-
-        // Recovery path: previous owner is gone (process crashed/exited).
-        if (expected != k_unowned && try_recover(expected, self)) {
-            expected = k_unowned;
-            if (m_owner.compare_exchange_strong(expected, self)) {
-                return true;
-            }
         }
 
         return false;
@@ -310,44 +377,41 @@ private:
             return false;
         }
 
-        // If someone is recovering but that process is dead or stalled, clear it first.
-        recover_token rec = m_recovering;
-        if (rec != 0) {
-            const auto rp = recover_pid(rec);
-            const auto rt = recover_ticks(rec);
-            const auto nowt = now_ticks32();
-            
-            // uint32_t subtraction is wrap-safe for tick comparisons
-            const bool stalled = static_cast<std::uint32_t>(nowt - rt) > k_recovery_stale_ms;
-
-            if ((rp != 0 && !is_process_alive(rp)) || stalled) {
-                m_recovering.compare_exchange_strong(rec, static_cast<recover_token>(0));
-            }
-        }
-
-        // Try to become the recoverer for a short critical sequence.
-        const recover_token want = make_recover_token(get_current_pid(), now_ticks32());
-        recover_token zero = 0;
-        if (!m_recovering.compare_exchange_strong(zero, want)) {
+        recover_token gate = 0;
+        if (!acquire_recovery_gate(gate)) {
             return false; // someone else is (still) recovering
         }
 
         // We are the recoverer now.
         bool recovered = false;
-        owner_token current_owner = m_owner;
+        owner_token current_owner = m_owner.load(std::memory_order_acquire);
 
         // If unlocked meanwhile, consider it recovered.
         if (current_owner == k_unowned) {
             recovered = true;
         }
         else
-        if (current_owner == observed_owner && !is_process_alive(owner_pid(observed_owner))) {
-            // Owner process is dead -> forcibly clear ownership.
-            recovered = m_owner.compare_exchange_strong(current_owner, k_unowned);
+        if (current_owner == observed_owner) {
+            const auto stored_stamp = m_owner_start_stamp.load(std::memory_order_acquire);
+            if (!is_process_alive(owner_pid(observed_owner)) ||
+                owner_generation_is_stale(observed_owner, stored_stamp))
+            {
+                // Owner process is dead or belongs to a stale process generation.
+                recovered = m_owner.compare_exchange_strong(current_owner, k_unowned);
+                if (recovered &&
+                    m_recovering.load(std::memory_order_acquire) == gate)
+                {
+                    auto stamp_to_clear = stored_stamp;
+                    m_owner_start_stamp.compare_exchange_strong(
+                        stamp_to_clear,
+                        static_cast<std::uint64_t>(0),
+                        std::memory_order_release,
+                        std::memory_order_acquire);
+                }
+            }
         }
 
-        // Release the recovery lock.
-        m_recovering = static_cast<recover_token>(0);
+        release_recovery_gate(gate);
         return recovered;
     }
 
@@ -355,8 +419,12 @@ private:
     // Owner token in shared memory: who currently owns the mutex.
     alignas(64) std::atomic<owner_token> m_owner{ k_unowned };
 
-    // Recovery gate. Packs {recoverer_pid, ticks_ms}. Used to serialize robust recovery and
-    // to allow preemption if a recoverer stalls without dying.
+    // Start stamp for the current owner process. Zero means unknown.
+    std::atomic<std::uint64_t> m_owner_start_stamp{ 0 };
+
+    // Recovery/publication gate. Packs {recoverer_pid, ticks_ms}. Used to
+    // serialize robust recovery and owner-stamp publication. Dead gate-owner
+    // PIDs are recoverable; live stalled gates are not preempted.
     alignas(64) std::atomic<recover_token> m_recovering{ 0 };
 
 };
