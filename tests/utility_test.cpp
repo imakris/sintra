@@ -5,6 +5,8 @@
 
 #include "test_utils.h"
 
+#include <cerrno>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstdint>
@@ -12,7 +14,14 @@
 #include <fstream>
 #include <functional>
 #include <string>
+#include <thread>
 #include <vector>
+
+#ifndef _WIN32
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 namespace {
 
@@ -237,6 +246,36 @@ void test_process_utility_helpers()
         "current process should be reported alive");
     sintra::test::require_true(!sintra::query_process_start_stamp(0).has_value(), k_failure_prefix,
         "pid 0 should not have a process start stamp");
+
+#ifndef _WIN32
+    const pid_t child_pid = ::fork();
+    sintra::test::require_true(child_pid >= 0, k_failure_prefix,
+        "fork should succeed for zombie liveness check");
+
+    if (child_pid == 0) {
+        ::_exit(0);
+    }
+
+    bool exited_child_reported_dead = false;
+    for (int attempt = 0; attempt < 200; ++attempt) {
+        if (!sintra::is_process_alive(static_cast<std::uint32_t>(child_pid))) {
+            exited_child_reported_dead = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    int   child_status = 0;
+    pid_t waited       = 0;
+    do {
+        waited = ::waitpid(child_pid, &child_status, 0);
+    } while (waited < 0 && errno == EINTR);
+
+    sintra::test::require_true(waited == child_pid, k_failure_prefix,
+        "waitpid should reap the zombie liveness child");
+    sintra::test::require_true(exited_child_reported_dead, k_failure_prefix,
+        "exited unreaped child should not be reported alive");
+#endif
 
     const auto current_start = sintra::current_process_start_stamp().value_or(0);
     const auto scratch = sintra::test::unique_scratch_directory("utility_process_utils");
