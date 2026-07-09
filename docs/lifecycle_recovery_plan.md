@@ -675,9 +675,15 @@ Slice 2 decision and implementation record, 2026-07-09:
 - Focused CI roster impact: add only `recovery_unpublish_deadlock_test 1` to
   `tests/active_tests.txt`. Do not add broad recovery suites to blocking CI for
   this slice.
-- Review gate still required before Slice 2 closure: six xhigh reviewers must
-  validate the implemented diff, local gates, active-test scope, and absence of
-  4B lifecycle scaffolding. Then run focused platform CI.
+- Implementation review, 2026-07-09: six xhigh Codex reviewers returned green
+  after the stale recovery docs were updated. The review covered the production
+  diff, local red/green gates, active-test scope, lock ordering, and absence of
+  4B lifecycle scaffolding.
+- Focused platform CI, 2026-07-09: commit `577a6cf` passed the shortened
+  active-test gate on all four platforms. Windows passed on the original run
+  `29018511603`; Linux `29018511468`, FreeBSD `29018511306`, and macOS
+  `29018511519` passed on attempt 2 after the original jobs were cancelled
+  without failed logs. Slice 2 is closed.
 
 ### Slice 3: RPC Terminal Cleanup
 
@@ -801,7 +807,8 @@ changes, the slice becomes multi-domain, or the same blocker class repeats.
 Do not code in the preserved dirty worktree. Slice 1A and Slice 1B.1 are
 complete. Slice 1B.3 is durably dropped. Slice 1B.2 red-gate and local green
 gate are complete, and the production diff passed six-reviewer validation.
-Focused platform CI is green. Slice 1C is durably dropped. Slice 2 has local
-red-then-green evidence for the two source-confirmed residual admission/recovery
-issues. Next action is the Slice 2 six-reviewer implementation gate, followed by
-focused platform CI if the review is green.
+Focused platform CI is green. Slice 1C is durably dropped. Slice 2 is closed:
+the two source-confirmed residual admission/recovery issues have local
+red-then-green evidence, six-reviewer green implementation review, and shortened
+CI green on all four platforms at `577a6cf`. Next action is Slice 3 architecture
+and scope review before any RPC terminal cleanup refactoring.
