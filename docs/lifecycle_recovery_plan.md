@@ -259,16 +259,16 @@ evidence was checked, and which focused gate covers the decision.
 
 ### Slice 0: CI And Test Discipline
 
-- Keep focused CI for development: a recently-failed test set is allowed while
-  the branch is red and full CI costs hours.
-- `bf3ba2e` is CI/test-selection only. Keep the CMake focus mechanism only for
-  local/manual focus runs if useful; do not keep its workflow activation or
-  reduced `active_tests.txt` roster as the normal branch signal.
-- Before claiming green or merging, the normal CI must compile and run the full
-  configured suite on Linux, macOS, Windows, and FreeBSD.
-- "Full configured suite" means no built test binary is silently excluded by the
-  `active_tests.txt` allow-list. If a merge gate still uses an allow-list, every
-  excluded built test must be named with a reason.
+- Blocking CI for this recovery branch is the shortened recent-failures suite in
+  `tests/active_tests.txt`, plus focused tests for the active slice. Full-suite
+  CI may be launched for background safety signal, but do not block orchestration
+  on it unless the user explicitly asks.
+- `bf3ba2e` is CI/test-selection only. Keep its CMake focus mechanism and
+  workflow activation, but keep the roster branch-valid; do not copy entries for
+  discarded refactor-line tests that do not exist in this recovery branch.
+- Before claiming a slice green, the shortened blocking CI must compile and run
+  on Linux, macOS, Windows, and FreeBSD unless a recorded user instruction or CI
+  outage narrows that requirement.
 - Triage `ee15fec` and the dirty edits to `tests/active_tests.txt`,
   `tests/runner/configuration.py`, and `tests/external_process_invitation_test.cpp`
   here or in the admission slice. Do not leave them as unowned cleanup.

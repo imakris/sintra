@@ -105,6 +105,7 @@ endif()
 
 option(SINTRA_BUILD_EXAMPLES "Build Sintra examples" ON)
 option(SINTRA_BUILD_TESTS "Build Sintra tests" ON)
+option(SINTRA_BUILD_ACTIVE_TESTS_ONLY "Build only tests listed in tests/active_tests.txt" OFF)
 option(SINTRA_BUILD_MANUAL_TESTS "Build Sintra manual/reproduction tests" OFF)
 option(SINTRA_BUILD_QT_EXAMPLES "Build Qt examples (requires Qt6 Widgets)" OFF)
 

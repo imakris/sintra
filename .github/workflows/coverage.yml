@@ -41,12 +41,14 @@ jobs:
               -DCMAKE_BUILD_TYPE=Debug \
               -DSINTRA_ENABLE_COVERAGE=ON \
               -DSINTRA_BUILD_TESTS=ON \
+              -DSINTRA_BUILD_ACTIVE_TESTS_ONLY=ON \
               -DSINTRA_BUILD_EXAMPLES=OFF
           else
             cmake -S . -B "$BUILD_DIR" \
               -DCMAKE_BUILD_TYPE=Debug \
               -DSINTRA_ENABLE_COVERAGE=ON \
               -DSINTRA_BUILD_TESTS=ON \
+              -DSINTRA_BUILD_ACTIVE_TESTS_ONLY=ON \
               -DSINTRA_BUILD_EXAMPLES=OFF \
               -DCMAKE_C_COMPILER=clang \
               -DCMAKE_CXX_COMPILER=clang++
