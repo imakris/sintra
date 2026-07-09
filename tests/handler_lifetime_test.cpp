@@ -5,15 +5,20 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <exception>
 #include <iostream>
 #include <mutex>
+#include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 namespace {
 
 constexpr std::string_view k_failure_prefix = "handler_lifetime_test: ";
+constexpr std::string_view k_no_shutdown_child_arg =
+    "--handler-lifetime-no-shutdown-child";
 constexpr int              k_event_value    = 19;
 
 struct Handler_lifetime_bus : sintra::Derived_transceiver<Handler_lifetime_bus>
@@ -410,10 +415,98 @@ void run_self_deactivation_suppresses_queued_same_slot_dispatch()
     }
 }
 
+void run_deactivate_all_slots_invokes_stable_deactivator_copies()
+{
+    constexpr int k_slot_count = 256;
+
+    std::vector<sintra::Transceiver::handler_deactivator> deactivators;
+    deactivators.reserve(k_slot_count);
+    std::atomic<int> entries{0};
+
+    try {
+        for (int i = 0; i < k_slot_count; ++i) {
+            const std::string payload(64 + (i % 8), static_cast<char>('a' + (i % 26)));
+            deactivators.emplace_back(sintra::activate_slot(
+                [payload, &entries](const Handler_lifetime_bus::Event_message& message) {
+                    if (!payload.empty() && message.value == k_event_value) {
+                        entries.fetch_add(1, std::memory_order_acq_rel);
+                    }
+                }));
+        }
+
+        sintra::deactivate_all_slots();
+
+        dispatch_direct_event(k_event_value);
+        sintra::test::require_true(
+            entries.load(std::memory_order_acquire) == 0,
+            k_failure_prefix,
+            "deactivate_all_slots left copied handlers dispatchable");
+
+        for (auto& deactivator : deactivators) {
+            if (deactivator) {
+                deactivator();
+            }
+        }
+    }
+    catch (...) {
+        for (auto& deactivator : deactivators) {
+            if (deactivator) {
+                try {
+                    deactivator();
+                }
+                catch (...) {
+                }
+            }
+        }
+        throw;
+    }
+}
+
+void arm_static_cleanup_guard_with_live_slots()
+{
+    constexpr int k_slot_count = 32;
+
+    for (int i = 0; i < k_slot_count; ++i) {
+        const std::string payload(32 + (i % 4), static_cast<char>('A' + (i % 26)));
+        (void)sintra::activate_slot(
+            [payload](const Handler_lifetime_bus::Event_message& message) {
+                (void)message;
+                (void)payload;
+            });
+    }
+}
+
+std::string quote_command_arg(std::string_view value)
+{
+    return std::string("\"") + std::string(value) + "\"";
+}
+
+void run_no_shutdown_cleanup_guard_child_process(char* binary_path)
+{
+    const std::string command =
+        quote_command_arg(binary_path) + " " + std::string(k_no_shutdown_child_arg);
+    const int child_status = std::system(command.c_str());
+    sintra::test::require_true(child_status == 0, k_failure_prefix,
+        "no-explicit-shutdown cleanup-guard child failed");
+}
+
 } // namespace
 
 int main(int argc, char* argv[])
 {
+    if (sintra::test::has_argv_flag(argc, argv, k_no_shutdown_child_arg)) {
+        try {
+            const char* child_argv[] = {argv[0]};
+            sintra::init(1, child_argv);
+            arm_static_cleanup_guard_with_live_slots();
+            return 0;
+        }
+        catch (const std::exception& ex) {
+            std::cerr << "handler_lifetime_test child failed: " << ex.what() << std::endl;
+            return 1;
+        }
+    }
+
     bool initialized = false;
 
     try {
@@ -423,9 +516,12 @@ int main(int argc, char* argv[])
         run_deactivating_handler_skips_later_copied_slot();
         run_external_deactivation_waits_for_active_invocation();
         run_self_deactivation_suppresses_queued_same_slot_dispatch();
+        run_deactivate_all_slots_invokes_stable_deactivator_copies();
 
         sintra::shutdown();
         initialized = false;
+
+        run_no_shutdown_cleanup_guard_child_process(argv[0]);
     }
     catch (const std::exception& ex) {
         if (initialized) {

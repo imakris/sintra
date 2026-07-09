@@ -331,6 +331,22 @@ Slice 1A scope review record, 2026-07-09:
   returned GREEN_TO_IMPLEMENT for the red-first step with the calibration above:
   do not force the formal `deactivate_all()` hazard to be red, and use the
   cleanup-guard path as the real red proof.
+- Red-gate evidence, 2026-07-09: the test-only gate in
+  `tests/handler_lifetime_test.cpp` adds a self-exec child that initializes
+  Sintra, arms live slots, and exits without explicit shutdown so the static
+  cleanup guard owns finalization. Normal MinGW bigobj focused build/run stayed
+  green, as expected for this sanitizer-dependent lifetime bug; log:
+  `C:\plms\bsd_licensed\sintra-lifecycle-artifacts\slice1a_handler_lifetime_normal_after_child_argv_cleanup.txt`.
+  MinGW and clang/GNU ASan configurations could not link an ASan runtime, and
+  WSL lacked local CMake tooling. A fresh MSVC ASan NMake build succeeded and
+  the focused test exited `1` because the no-explicit-shutdown child failed;
+  logs:
+  `C:\plms\bsd_licensed\sintra-lifecycle-artifacts\slice1a_handler_lifetime_msvc_asan_build_after_child_argv_cleanup.txt`,
+  `C:\plms\bsd_licensed\sintra-lifecycle-artifacts\slice1a_handler_lifetime_msvc_asan_red_after_child_argv_cleanup.txt`,
+  and
+  `C:\plms\bsd_licensed\sintra-lifecycle-artifacts\slice1a_handler_lifetime_msvc_asan_child_direct_after_child_argv_cleanup.txt`.
+  Production headers remain untouched; run the independent red-gate review
+  before implementing the header fix.
 
 ### Slice 1B: Process Liveness And Mutex Recovery
 
