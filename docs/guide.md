@@ -962,6 +962,8 @@ observation, while recovery policy and runner hooks control respawn behavior.
 Threading:
 - `Recovery_policy` and `Lifecycle_handler` run on the coordinator thread.
 - `Recovery_runner` runs on a recovery thread.
+- Default recovery, when no runner is configured, also spawns on a
+  coordinator-owned recovery thread.
 - `Recovery_control::should_cancel()` becomes true when shutdown begins.
 - Callback code must be thread-safe.
 

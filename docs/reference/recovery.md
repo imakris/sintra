@@ -84,8 +84,8 @@ count is exposed through the process-local global
 - The default behaviour, when no policy is configured, is to recover the
   process. A policy that returns `false` from a crash-info inspection skips
   the recovery for that event.
-- The default runner, when none is configured, invokes the spawn
-  immediately on the coordinator path. A custom runner runs on its own
+- The default runner, when none is configured, schedules the spawn on a
+  coordinator-owned recovery thread. A custom runner runs on its own recovery
   thread and decides when to call `Recovery_control::spawn()`. Calling
   `spawn()` more than once is ignored.
 - `Recovery_control::should_cancel()` becomes `true` when the coordinator
@@ -108,6 +108,8 @@ count is exposed through the process-local global
 - The runner runs on a dedicated coordinator-owned thread for the duration
   of one recovery decision. It must be thread-safe relative to other
   coordinator state it touches.
+- Default recovery uses the same coordinator-owned recovery-thread mechanism,
+  even though it calls `spawn()` immediately on that thread.
 - Recovery is opt-in per process. Processes that did not call
   `enable_recovery()` are not respawned even when a policy or runner is
   configured.

@@ -23,5 +23,6 @@ init_error_spawn_failure_test              1
 interprocess_mutex_test                    1
 join_swarm_failure_test                    1
 join_swarm_midflight_test                 40
+recovery_unpublish_deadlock_test           1
 ring_abi_fingerprint_test                  1
 utility_test                               1

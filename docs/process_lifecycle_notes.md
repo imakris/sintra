@@ -3,7 +3,8 @@
 This note documents the lifecycle and recovery callbacks that take effect in
 the coordinator process, introduced in `lifecycle_types.h` and wired through
 `Coordinator`. These hooks are optional; if no handler is configured, recovery
-defaults to immediate respawn when enabled.
+defaults to immediate respawn on a coordinator-owned recovery thread when
+enabled.
 
 ## Scope and entry points
 
@@ -50,13 +51,15 @@ unpublished event occurs, the coordinator executes:
 2. If the process did not opt in, return immediately.
 3. If a `Recovery_policy` is configured and returns `false`, skip recovery.
    When no policy is configured, recovery proceeds by default.
-4. If a `Recovery_runner` is configured, the coordinator starts a recovery
-   thread and invokes the runner with a `Recovery_control` containing:
+4. The coordinator starts a recovery thread. If a `Recovery_runner` is
+   configured, the thread invokes the runner with a `Recovery_control`
+   containing:
    - `should_cancel()` (true when shutdown has begun)
    - `spawn()` (respawns the process once)
 5. The runner owns any delay, countdown, or gating logic and decides when to
    call `spawn()`.
-6. If no runner is configured, the coordinator respawns immediately.
+6. If no runner is configured, the recovery thread calls `spawn()`
+   immediately.
 
 `Coordinator::begin_shutdown()` flips the shutdown flag so `should_cancel()`
 becomes true and recovery threads can exit early.
@@ -89,6 +92,7 @@ Key points:
 
 - `Recovery_policy` and `Lifecycle_handler` run on the coordinator thread.
 - `Recovery_runner` runs on a recovery thread.
+- Default recovery also spawns on a recovery thread.
 - `Recovery_control::should_cancel()` reflects the coordinator shutdown flag.
 
 All handlers must be thread-safe.

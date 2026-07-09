@@ -634,6 +634,51 @@ Only if the selected baseline keeps an admission gate:
 - Do not add runtime-work counters, pending-start owners, or lifecycle-state
   exchange APIs unless a focused failing repro proves they are necessary.
 
+Slice 2 decision and implementation record, 2026-07-09:
+
+- Initial source audit confirmed the simple admission gate is still the only
+  lifecycle admission primitive: `s_teardown_admission_mutex` plus
+  `s_teardown_admission_closed`. No `288139f` runtime-work,
+  finalize-blocker, pending-owner, or lifecycle-exchange machinery is needed.
+- The first six-Codex scope review split: four reviewers returned no-code or
+  doc-only closure, while two reviewers found source-confirmed residual risks.
+  Claude's first Slice 2 review returned `GREEN_DOC_ONLY`, but the local
+  source audit preserved the two red claims for convergence.
+- The targeted convergence round found two concrete Slice 2 issues. Three
+  Codex reviewers returned `GREEN_FIX_BOTH`, one `GREEN_FIX_A_ONLY`, one
+  `GREEN_DOC_ONLY`, and one `RED_NEEDS_RED_GATE_FIRST`. Claude returned
+  `RED_NEEDS_RED_GATE_FIRST`. The orchestrator chose the red-gate-first path
+  under governance rule 12.
+- Finding A: `create_external_process_invitation()` checked `s_mproc/s_coord`
+  before `s_teardown_admission_mutex`, then used them after a possible
+  finalize/reopen interleaving. The active
+  `external_process_invitation_lifecycle_negative_test` now pauses creation at
+  a test-only pre-admission hook, finalizes the runtime, resumes creation, and
+  asserts that coordinator reservation is not reached. Red evidence:
+  `build\slice1-focused-mingw-bigobj\slice2_a_invitation_toc_red_run.txt`
+  exited `1` on current production with the reservation-reached assertion.
+  Production fix: re-check active coordinator/runtime state under the admission
+  mutex before the closed check and before reservation. Green evidence:
+  `slice2_a_invitation_toc_green_run.txt` and
+  `slice2_a_invitation_toc_green_rerun_after_b.txt` exited `0`.
+- Finding B: default recovery could run inline from
+  `Coordinator::unpublish_transceiver()` while `m_publish_mutex` was still
+  held, then successful recovery spawn re-acquired `m_publish_mutex`. The new
+  active `recovery_unpublish_deadlock_test` seeds one recoverable fake process
+  with a cached spawn command and calls coordinator unpublish. Red evidence:
+  `build\slice1-focused-mingw-bigobj\slice2_b_recovery_unpublish_red_run.txt`
+  exited `1` with the ranked publish-mutex assertion at
+  `coordinator.h:158`. Production fix: route the default recovery spawn through
+  the existing `m_recovery_threads` path, matching custom recovery runners and
+  letting unpublish release coordinator locks before spawn. Green evidence:
+  `slice2_b_recovery_unpublish_green_run.txt` exited `0`.
+- Focused CI roster impact: add only `recovery_unpublish_deadlock_test 1` to
+  `tests/active_tests.txt`. Do not add broad recovery suites to blocking CI for
+  this slice.
+- Review gate still required before Slice 2 closure: six xhigh reviewers must
+  validate the implemented diff, local gates, active-test scope, and absence of
+  4B lifecycle scaffolding. Then run focused platform CI.
+
 ### Slice 3: RPC Terminal Cleanup
 
 - Keep the 4A-style collapse from overlapping RPC cleanup booleans into one
@@ -756,6 +801,7 @@ changes, the slice becomes multi-domain, or the same blocker class repeats.
 Do not code in the preserved dirty worktree. Slice 1A and Slice 1B.1 are
 complete. Slice 1B.3 is durably dropped. Slice 1B.2 red-gate and local green
 gate are complete, and the production diff passed six-reviewer validation.
-Focused platform CI is green. Slice 1C is durably dropped. Next action is a
-Slice 2 scope/architecture check: verify whether any minimal admission repair
-remains on this branch before coding.
+Focused platform CI is green. Slice 1C is durably dropped. Slice 2 has local
+red-then-green evidence for the two source-confirmed residual admission/recovery
+issues. Next action is the Slice 2 six-reviewer implementation gate, followed by
+focused platform CI if the review is green.

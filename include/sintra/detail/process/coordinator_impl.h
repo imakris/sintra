@@ -74,6 +74,8 @@ inline constexpr const char* k_stage_unpublish_pre_barrier_collection =
     "unpublish_transceiver/pre_barrier_completion_collection";
 inline constexpr const char* k_stage_make_process_group_groups_locked =
     "make_process_group/groups_locked";
+inline constexpr const char* k_stage_reserve_external_invitation_entered =
+    "reserve_external_process_invitation/entered";
 
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
 // Coordinator lock-stage hook: tests running in the coordinator process may
@@ -476,6 +478,9 @@ inline bool Coordinator::reserve_external_process_invitation(
     std::chrono::steady_clock::time_point  expires_at,
     uint32_t&                              occurrence_out)
 {
+    coordinator_lock_stage_for_test(
+        detail::test_hooks::k_stage_reserve_external_invitation_entered);
+
     if (!s_mproc || token.empty() || expires_at <= std::chrono::steady_clock::now()) {
         return false;
     }
@@ -1696,7 +1701,9 @@ void Coordinator::recover_if_required(const Crash_info& info)
     };
 
     if (!runner) {
-        spawn_now();
+        std::lock_guard<mutex> lock(m_recovery_threads_mutex);
+        m_recovery_threads.emplace_back(detail::Exception_boundary{"recovery_runner"}.wrap(
+            [spawn_now]() mutable { spawn_now(); }));
         return;
     }
 

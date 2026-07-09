@@ -44,6 +44,29 @@
 namespace sintra {
 namespace detail {
 
+namespace test_hooks {
+
+inline constexpr const char* k_stage_create_invitation_pre_admission_lock =
+    "create_external_process_invitation/pre_admission_lock";
+
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+using Runtime_stage_callback = void (*)(const char*);
+inline std::atomic<Runtime_stage_callback> s_runtime_stage{nullptr};
+#endif
+
+} // namespace test_hooks
+
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+inline void runtime_stage_for_test(const char* stage)
+{
+    if (auto callback = test_hooks::s_runtime_stage.load(std::memory_order_acquire)) {
+        callback(stage);
+    }
+}
+#else
+inline void runtime_stage_for_test(const char*) {}
+#endif
+
 inline void append_branch(
     std::vector<Process_descriptor>&   branches,
     const Process_descriptor&          descriptor,
@@ -753,7 +776,16 @@ inline External_process_invitation create_external_process_invitation(
         return {};
     }
 
+    detail::runtime_stage_for_test(
+        detail::test_hooks::k_stage_create_invitation_pre_admission_lock);
+
     std::lock_guard<std::mutex> admission_lock(detail::s_teardown_admission_mutex);
+    if (!s_mproc || !s_coord) {
+        Log_stream(log_level::error)
+            << "create_external_process_invitation: an active coordinator is required\n";
+        return {};
+    }
+
     if (detail::s_teardown_admission_closed.load(std::memory_order_acquire)) {
         Log_stream(log_level::warning)
             << "create_external_process_invitation: rejected because lifecycle "

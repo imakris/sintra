@@ -4,11 +4,13 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -40,6 +42,13 @@ constexpr const char* k_role_reuse   = "reuse_attach";
 constexpr const char* k_failure_prefix = "external_process_invitation_lifecycle_negative_test: ";
 constexpr const char* k_external_attach_rejected_message =
     "Sintra external process invitation was rejected.";
+
+std::mutex              g_create_invitation_hook_mutex;
+std::condition_variable g_create_invitation_hook_cv;
+bool                    g_create_invitation_hook_armed    = false;
+bool                    g_create_invitation_hook_reached  = false;
+bool                    g_create_invitation_hook_released = false;
+bool                    g_create_invitation_reserve_seen  = false;
 
 struct launched_process_t
 {
@@ -299,6 +308,66 @@ bool wait_for_process_exit(int pid, std::chrono::milliseconds timeout)
 bool has_argv_flag_or_value(int argc, char* argv[], std::string_view flag)
 {
     return sintra::test::has_argv_flag(argc, argv, flag);
+}
+
+void create_invitation_stage_hook(const char* stage)
+{
+    if (std::string_view(stage) !=
+        sintra::detail::test_hooks::k_stage_create_invitation_pre_admission_lock)
+    {
+        return;
+    }
+
+    std::unique_lock lock(g_create_invitation_hook_mutex);
+    if (!g_create_invitation_hook_armed) {
+        return;
+    }
+
+    g_create_invitation_hook_reached = true;
+    g_create_invitation_hook_cv.notify_all();
+    g_create_invitation_hook_cv.wait(lock, [] {
+        return g_create_invitation_hook_released;
+    });
+}
+
+void reset_create_invitation_stage_hook()
+{
+    std::lock_guard lock(g_create_invitation_hook_mutex);
+    g_create_invitation_hook_armed    = false;
+    g_create_invitation_hook_reached  = false;
+    g_create_invitation_hook_released = false;
+    g_create_invitation_reserve_seen  = false;
+}
+
+bool wait_for_create_invitation_stage(std::chrono::milliseconds timeout)
+{
+    std::unique_lock lock(g_create_invitation_hook_mutex);
+    return g_create_invitation_hook_cv.wait_for(lock, timeout, [] {
+        return g_create_invitation_hook_reached;
+    });
+}
+
+void release_create_invitation_stage_hook()
+{
+    {
+        std::lock_guard lock(g_create_invitation_hook_mutex);
+        g_create_invitation_hook_released = true;
+    }
+    g_create_invitation_hook_cv.notify_all();
+}
+
+void reserve_invitation_stage_hook(const char* stage)
+{
+    if (std::string_view(stage) !=
+        sintra::detail::test_hooks::k_stage_reserve_external_invitation_entered)
+    {
+        return;
+    }
+
+    std::lock_guard lock(g_create_invitation_hook_mutex);
+    if (g_create_invitation_hook_armed) {
+        g_create_invitation_reserve_seen = true;
+    }
 }
 
 sintra::External_process_invitation make_invitation(
@@ -588,6 +657,75 @@ bool run_shutdown_hook_claim_rejection_preserves_invitation_case(
     return ok;
 }
 
+bool run_create_invitation_after_finalize_reopens_case(int argc, char* argv[])
+{
+    sintra::init(argc, argv);
+
+    bool invitation_valid = true;
+    bool creator_returned = false;
+    bool ok = true;
+
+    reset_create_invitation_stage_hook();
+    {
+        std::lock_guard lock(g_create_invitation_hook_mutex);
+        g_create_invitation_hook_armed = true;
+    }
+    sintra::detail::test_hooks::s_runtime_stage.store(
+        &create_invitation_stage_hook,
+        std::memory_order_release);
+    sintra::detail::test_hooks::s_coordinator_lock_stage.store(
+        &reserve_invitation_stage_hook,
+        std::memory_order_release);
+
+    Shutdown_watchdog watchdog("create-invitation-after-finalize-reopens", 8s);
+    std::thread creator([&] {
+        auto invitation = make_invitation(sintra::invalid_instance_id, 30s);
+        invitation_valid = static_cast<bool>(invitation);
+        creator_returned = true;
+    });
+
+    ok &= sintra::test::assert_true(
+        wait_for_create_invitation_stage(3s),
+        k_failure_prefix,
+        "create-invitation stale-runtime gate should reach the pre-admission hook");
+
+    sintra::detail::finalize();
+    release_create_invitation_stage_hook();
+
+    if (creator.joinable()) {
+        creator.join();
+    }
+
+    sintra::detail::test_hooks::s_runtime_stage.store(
+        nullptr,
+        std::memory_order_release);
+    sintra::detail::test_hooks::s_coordinator_lock_stage.store(
+        nullptr,
+        std::memory_order_release);
+
+    bool reserve_seen = false;
+    {
+        std::lock_guard lock(g_create_invitation_hook_mutex);
+        reserve_seen = g_create_invitation_reserve_seen;
+    }
+    reset_create_invitation_stage_hook();
+
+    ok &= sintra::test::assert_true(
+        creator_returned,
+        k_failure_prefix,
+        "create-invitation stale-runtime caller should return after admission reopens");
+    ok &= sintra::test::assert_true(
+        !invitation_valid,
+        k_failure_prefix,
+        "create-invitation stale-runtime caller should receive an invalid invitation");
+    ok &= sintra::test::assert_true(
+        !reserve_seen,
+        k_failure_prefix,
+        "create-invitation stale-runtime caller must not reach coordinator reservation");
+
+    return ok;
+}
+
 bool run_shutdown_with_admitted_alive_case(
     int                            argc,
     char*                          argv[],
@@ -846,6 +984,7 @@ int main(int argc, char* argv[])
     ok &= run_enable_recovery_after_admission_case(argc, argv, binary_path, dir);
     ok &= run_cancel_expire_reuse_case(argc, argv, binary_path, dir);
     ok &= run_shutdown_hook_claim_rejection_preserves_invitation_case(argc, argv, binary_path, dir);
+    ok &= run_create_invitation_after_finalize_reopens_case(argc, argv);
 
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
