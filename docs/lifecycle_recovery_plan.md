@@ -218,6 +218,12 @@ Slice 1 architecture review record, 2026-07-09:
   original invitation cancelable`. The captured rerun log is
   `build\slice1-focused-mingw-bigobj\slice1_red_gate_rerun.txt` in this
   worktree.
+- Green-gate evidence, 2026-07-09: the production fix now serializes
+  `claim_external_process_invitation()` with `s_teardown_admission_mutex` and
+  erases a valid invitation only after the full external attach commit succeeds.
+  The focused MinGW bigobj target rebuilt successfully and
+  `build\slice1-focused-mingw-bigobj\tests\sintra_external_process_invitation_lifecycle_negative_test.exe`
+  exited `0`.
 
 ## Implementation Slices
 

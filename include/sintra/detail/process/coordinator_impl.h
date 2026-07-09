@@ -752,34 +752,34 @@ inline bool Coordinator::claim_external_process_invitation(
         return false;
     }
 
-    {
-        std::lock_guard lock(m_external_process_invitations_mutex);
-        auto it = m_external_process_invitations.find(process_iid);
-        if (it == m_external_process_invitations.end()) {
-            return false;
-        }
-
-        auto&      record = it->second;
-        const auto now    = std::chrono::steady_clock::now();
-        if (record.state != External_process_invitation_state::pending) {
-            return false;
-        }
-        if (record.expires_at <= now) {
-            record.state      = External_process_invitation_state::rejecting;
-            record.expires_at = now + k_external_process_invitation_rejection_grace;
-            m_external_process_invitations_cv.notify_all();
-            return false;
-        }
-        if (!detail::external_attach_tokens_equal(record.token, token)) {
-            record.state      = External_process_invitation_state::rejecting;
-            record.expires_at = now;
-            m_external_process_invitations_cv.notify_all();
-            return false;
-        }
-
-        m_external_process_invitations.erase(it);
+    std::lock_guard<mutex> admission_lock(detail::s_teardown_admission_mutex);
+    std::lock_guard lock(m_external_process_invitations_mutex);
+    auto it = m_external_process_invitations.find(process_iid);
+    if (it == m_external_process_invitations.end()) {
+        return false;
     }
-    m_external_process_invitations_cv.notify_all();
+
+    auto&      record = it->second;
+    const auto now    = std::chrono::steady_clock::now();
+    if (record.state != External_process_invitation_state::pending) {
+        return false;
+    }
+    if (record.expires_at <= now) {
+        record.state      = External_process_invitation_state::rejecting;
+        record.expires_at = now + k_external_process_invitation_rejection_grace;
+        m_external_process_invitations_cv.notify_all();
+        return false;
+    }
+    if (!detail::external_attach_tokens_equal(record.token, token)) {
+        record.state      = External_process_invitation_state::rejecting;
+        record.expires_at = now;
+        m_external_process_invitations_cv.notify_all();
+        return false;
+    }
+
+    if (detail::s_teardown_admission_closed.load(std::memory_order_acquire)) {
+        return false;
+    }
 
     if (!s_mproc || !s_mproc->has_process_reader(process_iid)) {
         return false;
@@ -827,6 +827,8 @@ inline bool Coordinator::claim_external_process_invitation(
         note_draining_state_change();
     }
 
+    m_external_process_invitations.erase(it);
+    m_external_process_invitations_cv.notify_all();
     return true;
 }
 
