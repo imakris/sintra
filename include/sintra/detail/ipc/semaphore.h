@@ -258,8 +258,12 @@ struct ips_win_handle_cache
 
 static inline ips_win_handle_cache& ips_win_handles()
 {
-    static ips_win_handle_cache cache;
-    return cache;
+    // The runtime cleanup guard can still unblock/join reader threads during
+    // static teardown. Keep the per-process handle cache alive until process
+    // exit so late semaphore waits cannot race a destroyed function-local
+    // static; the OS reclaims any remaining handles at process termination.
+    static auto* cache = new ips_win_handle_cache();
+    return *cache;
 }
 
 static bool ips_win_copy_name(ips_backend& b, const wchar_t* s) noexcept

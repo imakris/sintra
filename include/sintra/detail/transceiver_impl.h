@@ -569,8 +569,21 @@ Transceiver::activate(
 template <typename /* = void*/>
 void Transceiver::deactivate_all()
 {
-    while (!m_deactivators.empty()) {
-        m_deactivators.back()();
+    while (true) {
+        handler_deactivator deactivator;
+        {
+            lock_guard<recursive_mutex> sl(s_mproc->m_handlers_mutex);
+            if (m_deactivators.empty()) {
+                return;
+            }
+            deactivator = m_deactivators.back();
+            if (!deactivator) {
+                m_deactivators.pop_back();
+                continue;
+            }
+        }
+
+        deactivator();
     }
 }
 
@@ -650,15 +663,22 @@ void Transceiver::send(Args&&... args)
 inline
 auto& Transceiver::get_rpc_handler_map()
 {
-    static spinlocked_umap<type_id_type, void(*)(Message_prefix&)> message_id_to_handler;
-    return message_id_to_handler;
+    // Reader threads can still dispatch or reject RPCs while the init()
+    // cleanup guard is finalizing during static teardown. Keep this registry
+    // process-lifetime, matching the outstanding-RPC registries.
+    static auto* message_id_to_handler =
+        new spinlocked_umap<type_id_type, void(*)(Message_prefix&)>();
+    return *message_id_to_handler;
 }
 
 template <typename RPCTC>
 auto& Transceiver::get_instance_to_object_map()
 {
-    static spinlocked_umap<instance_id_type, typename RPCTC::o_type*> instance_to_object;
-    return instance_to_object;
+    // Export Instantiators erase from this map when transceivers are destroyed
+    // by late cleanup. The map must outlive the init() cleanup guard.
+    static auto* instance_to_object =
+        new spinlocked_umap<instance_id_type, typename RPCTC::o_type*>();
+    return *instance_to_object;
 }
 
 

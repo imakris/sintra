@@ -347,6 +347,15 @@ Slice 1A scope review record, 2026-07-09:
   `C:\plms\bsd_licensed\sintra-lifecycle-artifacts\slice1a_handler_lifetime_msvc_asan_child_direct_after_child_argv_cleanup.txt`.
   Production headers remain untouched; run the independent red-gate review
   before implementing the header fix.
+- Green-gate evidence, 2026-07-09: the scoped production header fix rebuilt
+  and ran `sintra_handler_lifetime_test` in the normal MinGW focused dir and
+  the MSVC ASan NMake focused dir. MinGW build/run exited `0`/`0`; logs:
+  `build\slice1-focused-mingw-bigobj\slice1a_production_fix_mingw_build.log`
+  and
+  `build\slice1-focused-mingw-bigobj\slice1a_production_fix_mingw_run.log`.
+  MSVC ASan build/run exited `0`/`0`; logs:
+  `build\slice1a-asan-msvc\slice1a_production_fix_msvc_asan_build.log` and
+  `build\slice1a-asan-msvc\slice1a_production_fix_msvc_asan_run.log`.
 
 ### Slice 1B: Process Liveness And Mutex Recovery
 

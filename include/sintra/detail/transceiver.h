@@ -204,8 +204,12 @@ inline handler_slot_key_t handler_slot_key(
 inline unordered_map<handler_slot_key_t, std::shared_ptr<Handler_slot_state>>&
 handler_slot_states()
 {
-    static unordered_map<handler_slot_key_t, std::shared_ptr<Handler_slot_state>> states;
-    return states;
+    // This registry is used by the init() cleanup guard during static teardown.
+    // Keep it alive until process exit so deactivation cannot race a destroyed
+    // function-local static.
+    static auto* states =
+        new unordered_map<handler_slot_key_t, std::shared_ptr<Handler_slot_state>>();
+    return *states;
 }
 
 
