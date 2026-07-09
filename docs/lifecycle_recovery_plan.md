@@ -169,11 +169,10 @@ Lifecycle test classification for this baseline:
   `shutdown_user_barrier_departure_test` for Slice 5,
   `process_group_membership_authority_test` for Slice 6, and
   `hard_dead_process_retirement_test` for Slice 7.
-- CI/test discipline finding: the current branch builds 91 top-level tests and
-  has 90 active entries; `barrier_delivery_fence_repro_test` is the current
-  built-but-not-active test. Do not claim a final full-suite gate until built
-  tests and active-test execution are reconciled or every exclusion is recorded
-  with a reason.
+- CI/test discipline finding: blocking CI now builds the branch-valid
+  recent-failures roster in `tests/active_tests.txt`, plus focused tests for the
+  active slice. Treat any full-suite run as background signal unless the user
+  explicitly asks to wait for it.
 
 Slice 1 architecture review record, 2026-07-09:
 
@@ -269,6 +268,10 @@ evidence was checked, and which focused gate covers the decision.
 - Before claiming a slice green, the shortened blocking CI must compile and run
   on Linux, macOS, Windows, and FreeBSD unless a recorded user instruction or CI
   outage narrows that requirement.
+- Blocking stress-test jobs should use a global `run_tests.py --time-budget`
+  cap so repetition-heavy focus rosters cannot turn CI into an unbounded wait.
+  Budget exhaustion is green only after each selected test has at least one
+  passing run; `did_not_run` does not satisfy the budget cap.
 - Triage `ee15fec` and the dirty edits to `tests/active_tests.txt`,
   `tests/runner/configuration.py`, and `tests/external_process_invitation_test.cpp`
   here or in the admission slice. Do not leave them as unowned cleanup.
@@ -579,8 +582,8 @@ changes, the slice becomes multi-domain, or the same blocker class repeats.
 
 ## Next Action
 
-Do not code in the preserved dirty worktree. Slice 1A is complete. Slice 1B is
-split. The next implementation batch is Slice 1B.1 red-gate only: add the
-test-only POSIX unreaped-child liveness oracle, push it, and require macOS CI to
-fail for the intended liveness assertion before any `process_utils.h`
-production change.
+Do not code in the preserved dirty worktree. Slice 1A is complete and Slice 1B
+is split. Slice 1B.1 has the red macOS CI evidence and production patch; close
+it only after the focused CI gate for `4390b4a` resolves or after a recorded CI
+outage/queue exception is accepted. Do not start Slice 1B.2 or Slice 1B.3
+implementation before a separate architecture/gate review.

@@ -2729,11 +2729,11 @@ def main():
 
             if budget_exhausted:
                 elapsed = time.time() - overall_start_time
-                every_test_attempted = all(
-                    data['passed'] + data['failed'] + data['did_not_run'] > 0
+                every_test_passed = all(
+                    data['passed'] > 0
                     for data in accumulated_results.values()
                 )
-                if every_test_attempted and suite_all_passed:
+                if every_test_passed and suite_all_passed:
                     print(
                         f"\n{Color.YELLOW}Time budget exhausted after "
                         f"{format_duration(elapsed)}. "
@@ -2826,6 +2826,9 @@ def main():
 
             suite_did_not_run = sum(data['did_not_run'] for data in accumulated_results.values())
             overall_did_not_run += suite_did_not_run
+            if time_budget is not None and suite_did_not_run > 0:
+                suite_all_passed = False
+                overall_all_passed = False
 
             skipped_tests = {
                 name: data['did_not_run_reasons']

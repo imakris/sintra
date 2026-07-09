@@ -215,7 +215,7 @@ jobs:
         shell: bash
         run: |
           cd tests
-          python run_tests.py --timeout 30 --build-dir ../build --config Debug,Release
+          python run_tests.py --timeout 30 --build-dir ../build --config Debug,Release --time-budget 1800
 
       - name: Mark status success
         if: success()
