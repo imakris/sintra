@@ -801,6 +801,16 @@ Production authorization, 2026-07-09:
   degraded teardown on `rpc_cancelled`/`rpc_unavailable`. Those must also be
   closed before Slice 5 can be accepted.
 
+Closure, 2026-07-09:
+
+- Slice 5 is closed at `f95cf6e`. The implementation received a green third
+  review round from six xhigh Codex reviewers and Claude.
+- Local focused gates passed: `git diff --cached --check`,
+  `sintra_shutdown_user_barrier_departure_test` build and direct executable,
+  and `sintra_ring_abi_fingerprint_test` build and direct executable.
+- Shortened active CI passed on Linux, FreeBSD, Windows, and macOS for
+  `f95cf6e`.
+
 ### Slice 6: Group Membership Authority
 
 - Reimplement the invariant from `9473218` only if a test demonstrates duplicate
@@ -884,7 +894,8 @@ Focused platform CI is green. Slice 1C is durably dropped. Slice 2 is closed:
 the two source-confirmed residual admission/recovery issues have local
 red-then-green evidence, six-reviewer green implementation review, and shortened
 CI green on all four platforms at `577a6cf`. Slices 3 and 4 are durably dropped
-on this baseline. Slice 5 production is open only for the minimal
-collective-shutdown/user-barrier fix described above; it is not closeable until
-the focused local gates, six xhigh Codex review, Claude review, and shortened
-active CI are green.
+on this baseline. Slice 5 is closed at `f95cf6e` with focused local gates,
+six xhigh Codex review, Claude review, and shortened active CI green. The next
+step is Slice 6 scope validation: only open it if duplicate group-membership
+authority is proven to block cleanup correctness; otherwise durably drop it and
+move to Slice 7.
