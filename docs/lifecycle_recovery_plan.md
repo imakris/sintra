@@ -452,15 +452,74 @@ Slice 1B.1 closure record, 2026-07-09:
 
 #### Slice 1B.2: interprocess_mutex owner-generation recovery
 
-- Blocked pending a separate architecture decision and red gate. Do not import
-  `owner_identity`, `m_owner_start_stamp`, `m_owner_stamp_token`,
-  `try_claim_unowned`, or side-channel-shaped test hooks from `5cd9149`.
-- Any future red gate must prove stale owner-generation recovery through mutex
-  behavior and must also prove that a live owner cannot be recovered. Test hooks,
-  if unavoidable, must be semantic `SINTRA_ENABLE_TEST_HOOKS` hooks and must not
-  expose implementation storage mechanics.
-- Green gate must include `sintra_interprocess_mutex_test`,
-  `sintra_ring_abi_fingerprint_test`, and normal platform CI.
+- Architecture decision, 2026-07-09: attempt a red gate first; do not implement
+  production mutex recovery until that gate is observed red for the intended
+  stale-generation reason and independently accepted as a valid oracle.
+- Six Codex xhigh architecture lanes and the Claude review agreed that
+  `5cd9149` must not be cherry-picked. The current mutex owner token is only
+  `{pid, tid}` and recovery uses `is_process_alive(owner_pid)`, so PID/TID reuse
+  can leave a stale owner token looking live. Ring attachment start stamps do
+  not cover this path because the lifecycle mutex must be locked before
+  attachment scavenging can inspect those stamps.
+- Claude architecture review artifact:
+  `C:\plms\bsd_licensed\sintra-lifecycle-artifacts\claude-slice1b2-arch-20260709\sintra_slice1b2_arch_review_20260709_20260709_105813\outputs\slice1b2_mutex_arch.md`.
+  Claude returned BLOCKED_NEEDS_GATE and warned that a synthetic
+  stale-generation test is valid only if it is treated as the source-confirmed
+  PID/TID-reuse hazard, not as a test laundering a new feature. If that oracle
+  cannot be made red and accepted without storage-mechanic hooks, durably drop
+  Slice 1B.2.
+- Red-gate scope: `tests/interprocess_mutex_test.cpp`,
+  `tests/active_tests.txt`, and `include/sintra/detail/ipc/mutex.h` only for
+  semantic `SINTRA_ENABLE_TEST_HOOKS` support needed to seed/read mutex owner
+  identity. Do not touch `rings.h`, `process_utils.h`, runtime, process,
+  lifeline, drain, coordinator, or admission files in the red gate.
+  Add `interprocess_mutex_test 1` to `tests/active_tests.txt` for the red-gate
+  attempt because blocking CI builds only the active roster.
+- Red-gate oracle: using a nonzero stale start stamp different from
+  `current_process_start_stamp()`, seed `{current_pid, different_nonzero_tid,
+  stale_start_stamp}` and require `try_lock_for()` to recover it; seed
+  `{current_pid, current_tid, stale_start_stamp}` and require recovery instead
+  of recursive/self-owner refusal. Also seed both
+  `{current_pid, different_nonzero_tid, current_start_stamp}` and
+  `{current_pid, current_tid, current_start_stamp}`, and require that
+  `try_lock_for()` does not recover either live-current-generation owner. The
+  two current-start-stamp cases are safety guards and must pass on both red and
+  green revisions. Expected red on current production: the stale-generation
+  cases time out or are refused because the mutex has no owner-generation state
+  and only checks PID liveness.
+- Test hooks must be semantic. Allowed examples are installing an owner identity
+  fixture `{pid, tid, start_stamp}` and reading the owner token for assertion.
+  Forbidden hooks include raw atomic/offset access, separate side-channel
+  token/stamp APIs,
+  `test_set_raw_owner_with_side_channel()`, `test_invalidate_owner_identity()`,
+  and any hook that exposes implementation storage mechanics.
+- Production candidate after accepted red evidence only: a one-stamp mutex
+  design. Add exactly one owner start-stamp field. Only a thread/process that
+  has won the owner CAS may publish a nonzero stamp; failed contenders must not
+  write or clear it. Unlock must verify `m_owner == self` before clearing the
+  stamp and must throw without touching the stamp when that check fails.
+  Recovery must hold `m_recovering`, re-read `m_owner == observed_owner`, and
+  only then clear the stamp immediately before CASing that same owner token to
+  `0`; if the owner token changed, restart without touching the stamp. Recover
+  only when the owner PID is dead, or when the stored stamp is nonzero,
+  `query_process_start_stamp(owner_pid)` returns a value, and that value differs
+  from the stored stamp. A zero stored stamp or unavailable queried stamp is
+  unknown evidence and must not recover a live PID. The design deliberately does
+  not recover the crash window after owner CAS and before stamp publication;
+  closing that window requires another accepted architecture review. This
+  candidate intentionally avoids `owner_identity`, `m_owner_stamp_token`,
+  `try_claim_unowned`, and loser-contender invalidation from `5cd9149`.
+- If production changes `interprocess_mutex` layout or persisted recovery
+  semantics, bump branch-local `k_ring_abi_version` from `5` to `6` and
+  `k_ring_lifecycle_anchor_abi_version` from `2` to `3`; do not copy the
+  sibling-line ABI numbers from `5cd9149`. Green gate must include
+  `sintra_interprocess_mutex_test`, `sintra_ring_abi_fingerprint_test`,
+  `sintra_utility_test`, and focused platform CI with `interprocess_mutex_test`
+  and `ring_abi_fingerprint_test` present in `tests/active_tests.txt`.
+- Stop conditions: if the red gate passes current production, fails for a
+  reason other than stale-generation non-recovery, requires actual PID/TID reuse
+  or flaky timing, or needs storage-mechanic hooks, stop and record Slice 1B.2
+  as dropped or redesign the gate through another architecture review.
 
 #### Slice 1B.3: lifeline release ordering
 
@@ -642,6 +701,6 @@ changes, the slice becomes multi-domain, or the same blocker class repeats.
 
 Do not code in the preserved dirty worktree. Slice 1A and Slice 1B.1 are
 complete. Slice 1B.3 is durably dropped. Slice 1B.2 remains blocked pending a
-separate architecture decision and red gate for mutex owner-generation recovery.
-Next action is the Slice 1B.2 architecture/gate decision unless the owner
-chooses to skip it and advance to Slice 1C.
+red gate for mutex owner-generation recovery. Next action is the Slice 1B.2
+test-only red-gate attempt described above, unless review rejects this plan
+amendment or the owner chooses to skip 1B.2 and advance to Slice 1C.
