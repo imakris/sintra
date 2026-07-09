@@ -1,12 +1,11 @@
 //
-// Sintra Delivery Fence Regression Reproducer
+// Sintra Processing Fence Backlog Test
 //
-// Exercises the delivery-fence barrier semantics under heavy backlog. Workers
-// emit bursts of markers and immediately enter a delivery-fence barrier while
-// the coordinator handles the markers very slowly. The coordinator trusts the
-// barrier to flush all pre-barrier messages and checks after the barrier returns
-// whether every reader observed the complete burst. Any gap indicates that the
-// delivery fence released too early.
+// Exercises processing-fence semantics under heavy backlog. Workers emit bursts
+// of markers and immediately enter a processing-fence barrier while the
+// coordinator handles the markers very slowly. After the barrier returns, the
+// coordinator verifies that every delayed handler completed the full burst. Any
+// gap indicates that cross-participant processing completed too early.
 //
 
 #include <sintra/sintra.h>
@@ -35,6 +34,7 @@ constexpr std::size_t k_worker_count  = 2;
 constexpr std::size_t k_iterations    = 64;
 constexpr std::size_t k_burst_count   = 8;
 constexpr auto        k_handler_delay = std::chrono::milliseconds(12);
+constexpr const char* k_iteration_start_barrier = "processing-fence-backlog-iteration-start";
 
 struct iteration_marker_t
 {
@@ -133,7 +133,7 @@ int coordinator_process()
         state.cv.notify_all();
     });
 
-    barrier("delivery-fence-repro-ready");
+    barrier("processing-fence-backlog-ready");
 
     constexpr auto first_marker_timeout = std::chrono::seconds(5);
     constexpr auto drain_timeout        = std::chrono::seconds(10);
@@ -149,6 +149,8 @@ int coordinator_process()
             state.failure_detail.clear();
         }
 
+        sintra::barrier<sintra::rendezvous_t>(k_iteration_start_barrier);
+
         if (!aborted) {
             std::unique_lock<std::mutex> lock(state.mutex);
             const bool first_arrived = state.cv.wait_for(lock, first_marker_timeout, [&] {
@@ -160,9 +162,6 @@ int coordinator_process()
                     std::ostringstream oss;
                     oss << "Coordinator did not observe first marker for iteration " << iteration;
                     failure_reason = oss.str();
-                    // Print [FAIL] to trigger live stack capture
-                    std::fprintf(stderr, "[FAIL] %s\n", failure_reason.c_str());
-                    std::fflush(stderr);
                 }
                 success = false;
                 aborted = true;
@@ -173,9 +172,6 @@ int coordinator_process()
                     failure_reason = state.failure_detail.empty()
                         ? "Coordinator observed invalid marker sequence"
                         : state.failure_detail;
-                    // Print [FAIL] to trigger live stack capture
-                    std::fprintf(stderr, "[FAIL] %s\n", failure_reason.c_str());
-                    std::fflush(stderr);
                 }
                 success = false;
                 aborted = true;
@@ -183,7 +179,8 @@ int coordinator_process()
             lock.unlock();
 
             if (!aborted) {
-                const bool barrier_ok = sintra::barrier("delivery-fence-repro-iteration");
+                const bool barrier_ok = sintra::barrier<sintra::processing_fence_t>(
+                    "processing-fence-backlog-iteration");
                 barrier_called = true;
                 if (!barrier_ok) {
                     if (success) {
@@ -206,15 +203,12 @@ int coordinator_process()
                 if (!missing_workers.empty()) {
                     if (success) {
                         std::ostringstream oss;
-                        oss << "Barrier released before delivery completed for iteration " << iteration
-                            << ". Missing workers:";
+                        oss << "Processing fence released before backlog processing completed for iteration "
+                            << iteration << ". Missing workers:";
                         for (std::size_t idx = 0; idx < missing_workers.size(); ++idx) {
                             oss << (idx == 0 ? " " : " ") << missing_workers[idx];
                         }
                         failure_reason = oss.str();
-                        // Print [FAIL] to trigger live stack capture
-                        std::fprintf(stderr, "[FAIL] %s\n", failure_reason.c_str());
-                        std::fflush(stderr);
                     }
                     success = false;
                     aborted = true;
@@ -234,7 +228,7 @@ int coordinator_process()
                 if (!drained) {
                     if (success) {
                         std::ostringstream oss;
-                        oss << "Iteration " << iteration << " did not drain after barrier";
+                        oss << "Iteration " << iteration << " did not drain after processing fence";
                         failure_reason = oss.str();
                     }
                     success = false;
@@ -250,15 +244,16 @@ int coordinator_process()
         }
 
         if (!barrier_called) {
-            sintra::barrier("delivery-fence-repro-iteration");
+            sintra::barrier<sintra::processing_fence_t>(
+                "processing-fence-backlog-iteration");
         }
     }
 
     deactivate_all_slots();
 
-    const sintra::test::Shared_directory shared(
-        "SINTRA_DELIVERY_FENCE_DIR",
-        "barrier_delivery_fence");
+    sintra::test::Shared_directory shared(
+        "SINTRA_PROCESSING_FENCE_BACKLOG_DIR", "barrier_processing_fence_backlog");
+    const auto shared_dir = shared.path();
     std::vector<std::string> lines;
     lines.reserve(success ? 3 : 4);
     lines.push_back(success ? "ok" : "fail");
@@ -267,7 +262,7 @@ int coordinator_process()
     if (!success) {
         lines.push_back(failure_reason);
     }
-    sintra::test::write_lines(shared.path() / "delivery_fence_repro_result.txt", lines);
+    sintra::test::write_lines(shared_dir / "processing_fence_backlog_result.txt", lines);
     return success ? 0 : 1;
 }
 
@@ -275,11 +270,12 @@ int worker_process(std::uint32_t worker_index)
 {
     using namespace sintra;
 
-    barrier("delivery-fence-repro-ready");
+    barrier("processing-fence-backlog-ready");
 
     std::uint32_t sequence = 0;
 
     for (std::uint32_t iteration = 0; iteration < k_iterations; ++iteration) {
+        barrier<rendezvous_t>(k_iteration_start_barrier);
 
         for (std::uint32_t burst = 0; burst < k_burst_count; ++burst) {
             world() << iteration_marker_t{worker_index, iteration, sequence};
@@ -290,10 +286,16 @@ int worker_process(std::uint32_t worker_index)
             }
         }
 
-        barrier("delivery-fence-repro-iteration");
+        const bool barrier_ok = barrier<processing_fence_t>(
+            "processing-fence-backlog-iteration");
+        if (!barrier_ok) {
+            std::fprintf(stderr,
+                "Worker %u processing fence returned false at iteration %u\n",
+                worker_index, iteration);
+            return 1;
+        }
     }
 
-    barrier("delivery-fence-repro-done", "_sintra_all_processes");
     return 0;
 }
 
@@ -312,62 +314,56 @@ int worker1_process()
 int main(int argc, char* argv[])
 {
     std::set_terminate(sintra::test::custom_terminate_handler);
+    return sintra::test::run_multi_process_shutdown_test(
+        argc,
+        argv,
+        "SINTRA_PROCESSING_FENCE_BACKLOG_DIR",
+        "barrier_processing_fence_backlog",
+        {coordinator_process, worker0_process, worker1_process},
+        [](const std::filesystem::path& shared_dir) {
+            const auto result_path = shared_dir / "processing_fence_backlog_result.txt";
+            if (!std::filesystem::exists(result_path)) {
+                std::fprintf(stderr,
+                    "Error: result file not found at %s\n",
+                    result_path.string().c_str());
+                return 1;
+            }
 
-    sintra::test::Shared_directory shared("SINTRA_DELIVERY_FENCE_DIR", "barrier_delivery_fence");
+            std::ifstream in(result_path, std::ios::binary);
+            if (!in) {
+                std::fprintf(stderr,
+                    "Error: failed to open result file %s\n",
+                    result_path.string().c_str());
+                return 1;
+            }
 
-    std::vector<sintra::Process_descriptor> processes;
-    processes.emplace_back(coordinator_process);
-    processes.emplace_back(worker0_process);
-    processes.emplace_back(worker1_process);
+            std::string status;
+            std::size_t iterations_completed = 0;
+            std::size_t total_messages       = 0;
+            std::string reason;
 
-    sintra::init(argc, argv, processes);
+            std::getline(in, status);
+            in >> iterations_completed;
+            in >> total_messages;
+            std::getline(in >> std::ws, reason);
 
-    sintra::shutdown();
-
-    if (!sintra::test::has_branch_flag(argc, argv)) {
-        const auto result_path = shared.path() / "delivery_fence_repro_result.txt";
-        if (!std::filesystem::exists(result_path)) {
-            std::fprintf(stderr, "Error: result file not found at %s\n", result_path.string().c_str());
-            shared.cleanup();
-            return 1;
-        }
-
-        std::ifstream in(result_path, std::ios::binary);
-        if (!in) {
-            std::fprintf(stderr, "Error: failed to open result file %s\n", result_path.string().c_str());
-            shared.cleanup();
-            return 1;
-        }
-
-        std::string status;
-        std::size_t iterations_completed = 0;
-        std::size_t total_messages       = 0;
-        std::string reason;
-
-        std::getline(in, status);
-        in >> iterations_completed;
-        in >> total_messages;
-        std::getline(in >> std::ws, reason);
-        in.close();
-
-        shared.cleanup();
-
-        if (status != "ok") {
-            std::fprintf(stderr, "Delivery fence regression repro reported failure: %s\n", reason.c_str());
-            return 1;
-        }
-        if (iterations_completed != k_iterations) {
-            std::fprintf(stderr, "Expected %zu iterations, got %zu\n",
-                k_iterations, iterations_completed);
-            return 1;
-        }
-        const std::size_t expected_messages = k_worker_count * k_iterations * k_burst_count;
-        if (total_messages != expected_messages) {
-            std::fprintf(stderr, "Expected %zu total messages, got %zu\n",
-                expected_messages, total_messages);
-            return 1;
-        }
-    }
-
-    return 0;
+            if (status != "ok") {
+                std::fprintf(stderr,
+                    "Processing fence backlog test reported failure: %s\n",
+                    reason.c_str());
+                return 1;
+            }
+            if (iterations_completed != k_iterations) {
+                std::fprintf(stderr, "Expected %zu iterations, got %zu\n",
+                    k_iterations, iterations_completed);
+                return 1;
+            }
+            const std::size_t expected_messages = k_worker_count * k_iterations * k_burst_count;
+            if (total_messages != expected_messages) {
+                std::fprintf(stderr, "Expected %zu total messages, got %zu\n",
+                    expected_messages, total_messages);
+                return 1;
+            }
+            return 0;
+        });
 }

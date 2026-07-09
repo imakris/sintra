@@ -1,7 +1,9 @@
 # Lifecycle Recovery Plan
 
-Status: Slice 1 is complete. The red gate, production fix, tightened oracle,
-independent review rerounds, Claude review, and focused platform CI are green.
+Status: Slices 1, 1A, 1B.1, 1B.2, 2, and 5 are closed; Slices 1B.3,
+1C, 3, and 4 are durably dropped. The test/CI recovery remediation after
+`ceafde0` has local green evidence; four-platform CI is pending. Slice 6 cannot
+start until clean Linux, FreeBSD, macOS, and Windows CI completes the repair.
 
 ## Relation To Existing Lifecycle Plans
 
@@ -259,26 +261,27 @@ evidence was checked, and which focused gate covers the decision.
 
 ### Slice 0: CI And Test Discipline
 
-- Blocking CI for this recovery branch is the shortened recent-failures suite in
-  `tests/active_tests.txt`, plus focused tests for the active slice. Full-suite
-  CI may be launched for background safety signal, but do not block orchestration
-  on it unless the user explicitly asks.
-- `bf3ba2e` is CI/test-selection only. Keep its CMake focus mechanism and
-  workflow activation, but keep the roster branch-valid; do not copy entries for
-  discarded refactor-line tests that do not exist in this recovery branch.
-- Before claiming a slice green, the shortened blocking CI must compile and run
-  on Linux, macOS, Windows, and FreeBSD unless a recorded user instruction or CI
-  outage narrows that requirement.
+- As of the user-requested restoration in `8f782bf`, blocking recovery CI uses
+  the full top-level non-manual selection in `tests/active_tests.txt`. The
+  earlier `bf3ba2e` active-only recent-failures roster is historical and no
+  longer defines the blocking gate.
+- Full selection restores test breadth, not historical stress depth. The
+  checked-in iteration counts remain the current source of truth, but this gate
+  does not claim that every historical stress multiplier, repetition count, or
+  runtime duration has been restored.
+- Before claiming a slice green, the full-selection blocking CI must compile and
+  run on Linux, macOS, Windows, and FreeBSD unless a recorded user instruction
+  or CI outage narrows that requirement.
 - Blocking stress-test jobs should use a global `run_tests.py --time-budget`
-  cap so repetition-heavy focus rosters cannot turn CI into an unbounded wait.
+  cap so repetition-heavy full-selection runs cannot turn CI into an unbounded
+  wait.
   Budget exhaustion is green only after each selected test has at least one
   passing run; `did_not_run` does not satisfy the budget cap.
 - `active_tests.txt` entries missing from the build are fatal runner errors.
-  The shortened gate is invalid if it silently runs only the subset of active
-  tests whose binaries happened to be present.
-- Triage `ee15fec` and the dirty edits to `tests/active_tests.txt`,
-  `tests/runner/configuration.py`, and `tests/external_process_invitation_test.cpp`
-  here or in the admission slice. Do not leave them as unowned cleanup.
+  The full-selection gate is invalid if it silently runs only the subset of
+  active tests whose binaries happened to be present.
+- The post-`ceafde0` remediation owns only the test and CI corrections recorded
+  below. Production IPC and runtime headers are outside that repair.
 
 ### Slice 1: External Claim Admission
 
@@ -811,6 +814,61 @@ Closure, 2026-07-09:
 - Shortened active CI passed on Linux, FreeBSD, Windows, and macOS for
   `f95cf6e`.
 
+#### Test/CI recovery remediation after `8f782bf..ceafde0`
+
+- `8f782bf` restored the full top-level test selection and exposed a pre-existing
+  iteration-handoff race in the backlog fence test. It did not expose a
+  production runtime failure or a Slice 5 regression.
+- `ea20e30` added a per-iteration start rendezvous before workers emit the next
+  burst and before the coordinator begins its first-marker wait. That ordering
+  directly closes the observed stale-iteration handoff instead of masking it.
+- `ceafde0` reduced the internal rounds from 64 to 16 only to fit the generic
+  30-second macOS runner timeout. It did not change the oracle or fix another
+  race.
+- Four independent reviewers accepted that causal account: the failure belonged
+  to the old test handoff, the `ea20e30` rendezvous fixes the exact interleaving,
+  and neither production behavior nor the Slice 5 implementation was implicated.
+  They also agreed that the active oracle waits for delayed handler completion,
+  which is processing-fence behavior under the documented contract, not a
+  delivery-fence oracle.
+- The same review found three CI integrity gaps. Linux, macOS, and Windows branch
+  builds could compile with tests disabled while their reusable stress workflows
+  independently decided to run tests; all three stress workflows published the
+  same external status context; and coverage discarded the runner failure with
+  a bare `|| true`. The canonical plan also had no record of
+  `8f782bf..ceafde0`.
+- The bounded remediation reclassifies and renames the active test as a
+  processing-fence backlog test, keeps the `ea20e30` rendezvous, restores 64
+  internal rounds behind a canonical 90-second timeout override, and removes the
+  stale manual delivery-fence duplicate as a false-oracle artifact. It also
+  makes test compilation unconditional in the Linux, macOS, and Windows build
+  workflows, gives their external stress statuses distinct contexts, and
+  propagates the captured coverage runner result only after coverage generation
+  and upload steps have run.
+- Local acceptance requires `git diff --check`, focused Python and workflow
+  static checks, isolated configure/build of the renamed target, and at least one
+  direct successful execution of its full 64 internal rounds. The roster,
+  timeout lookup, manual CMake list, and documentation references must all name
+  only the surviving processing-fence test.
+- Local remediation evidence, 2026-07-09: `git diff --check`, Python syntax,
+  active-roster/timeout lookup, and PyYAML workflow/invariant checks passed.
+  `actionlint` was not available. An isolated MinGW 13.1 Release configure with
+  `-Wa,-mbig-obj` discovered 82 top-level tests, built
+  `sintra_barrier_processing_fence_backlog_test`, and the executable completed
+  all 64 internal rounds with exit code `0` in 18.02 seconds.
+- CI acceptance requires clean full-selection runs on Linux, FreeBSD, macOS, and
+  Windows. This is the user-requested blocking recovery gate, but it remains a
+  breadth gate and does not claim historical stress-depth restoration.
+- Separate architecture blocker/risk: the delivery-vs-processing contract and
+  implementation relationship remains unsettled. The documented distinction is
+  local-only proof for `delivery_fence_t` versus cross-participant processing
+  proof for `processing_fence_t`; the misnamed backlog test is not a valid oracle
+  for deciding which production side, if any, must change. Resolve that question
+  in a separately reviewed architecture slice with a confirmed oracle. This
+  remediation must not change production barrier, IPC, or runtime semantics.
+- Slice 6 must remain closed until both the local remediation gates and clean
+  four-platform CI above are recorded green.
+
 ### Slice 6: Group Membership Authority
 
 - Reimplement the invariant from `9473218` only if a test demonstrates duplicate
@@ -870,9 +928,9 @@ Only if reproduced after earlier slices:
   with the baseline decision, then code.
 - Do not add broad `#define private public` tests unless a smaller public
   regression test is impossible.
-- Do not treat the focused active-tests CI as proof that the full suite is
-  clean, merge-ready, or release-ready. It is the blocking signal for this
-  recovery branch only.
+- Do not treat the full-selection recovery gate as proof that historical stress
+  depth is restored or that the branch is release-ready. It is the blocking
+  breadth signal for this recovery branch.
 - Do not patch around the same class of review finding twice. Stop and shrink
   the slice.
 
@@ -887,15 +945,11 @@ changes, the slice becomes multi-domain, or the same blocker class repeats.
 
 ## Next Action
 
-Do not code in the preserved dirty worktree. Slice 1A and Slice 1B.1 are
-complete. Slice 1B.3 is durably dropped. Slice 1B.2 red-gate and local green
-gate are complete, and the production diff passed six-reviewer validation.
-Focused platform CI is green. Slice 1C is durably dropped. Slice 2 is closed:
-the two source-confirmed residual admission/recovery issues have local
-red-then-green evidence, six-reviewer green implementation review, and shortened
-CI green on all four platforms at `577a6cf`. Slices 3 and 4 are durably dropped
-on this baseline. Slice 5 is closed at `f95cf6e` with focused local gates,
-six xhigh Codex review, Claude review, and shortened active CI green. The next
-step is Slice 6 scope validation: only open it if duplicate group-membership
-authority is proven to block cleanup correctness; otherwise durably drop it and
-move to Slice 7.
+Do not code in the preserved dirty worktree. The accepted and dropped slice
+history above remains unchanged, and Slice 5 is closed at `f95cf6e`. The next
+action is the bounded test/CI recovery remediation recorded after Slice 5:
+complete its local acceptance gates, then obtain clean full-selection CI on
+Linux, FreeBSD, macOS, and Windows. Do not begin Slice 6 scope validation until
+both gates are green. After that stop condition is cleared, open Slice 6 only if
+duplicate group-membership authority is proven to block cleanup correctness;
+otherwise durably drop it and move to Slice 7.

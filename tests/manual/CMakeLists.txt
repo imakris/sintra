@@ -3,7 +3,6 @@
 
 set(MANUAL_TEST_FILES
     barrier_deadlock_reproduction_test.cpp
-    barrier_delivery_fence_repro_test.cpp
     crash_capture_child_test.cpp
     crash_capture_self_test.cpp
     guard_pending_writer_integration_test.cpp

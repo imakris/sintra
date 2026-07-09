@@ -61,12 +61,9 @@ jobs:
         id: flags
         shell: bash
         run: |
-          CT="-DSINTRA_BUILD_TESTS=OFF -DSINTRA_TEST_MATRIX=quick"
+          CT="-DSINTRA_BUILD_TESTS=ON"
           CE="-DSINTRA_BUILD_EXAMPLES=OFF"
           CS="-DSINTRA_RELEASE_WITH_DEBUG_SYMBOLS=ON"
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "${{ steps.changed.outputs.tests }}" = "true" ] || [ "${{ steps.changed.outputs.core }}" = "true" ] || [ "${{ steps.changed.outputs.workflows }}" = "true" ]; then
-            CT="-DSINTRA_BUILD_TESTS=ON -DSINTRA_TEST_MATRIX=quick"
-          fi
           if [ "${{ steps.changed.outputs.examples }}" = "true" ]; then
             CE="-DSINTRA_BUILD_EXAMPLES=ON"
           fi

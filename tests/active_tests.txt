@@ -13,7 +13,7 @@
 
 abi_description_test                                     1
 barrier_complex_choreography_test                        1
-barrier_delivery_fence_repro_test                        1
+barrier_processing_fence_backlog_test                    1
 barrier_drain_and_unpublish_test                         1
 barrier_flush_test                                       1
 barrier_guardrails_test                                  5

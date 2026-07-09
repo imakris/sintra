@@ -79,9 +79,14 @@ jobs:
 
       - name: Run tests
         working-directory: tests
+        shell: bash
         run: |
-          # Continue even on test failure to collect coverage data
-          python3 run_tests.py --timeout 120 --build-dir ../${{ env.BUILD_DIR }} --config Debug --iteration-multiplier 0.25 || true
+          set +e
+          python3 run_tests.py --timeout 120 --build-dir ../${{ env.BUILD_DIR }} --config Debug --iteration-multiplier 0.25
+          runner_exit_code=$?
+          set -e
+          echo "RUNNER_EXIT_CODE=$runner_exit_code" >> "$GITHUB_ENV"
+          echo "Captured test runner exit code: $runner_exit_code"
 
       # GCC: capture executed lines, then keep only library headers
       - name: Coverage (lcov/gcc)
@@ -160,3 +165,8 @@ jobs:
         with:
           name: ${{ matrix.compiler }}-coverage
           path: build/lcov.info
+
+      - name: Propagate test runner result
+        if: always()
+        shell: bash
+        run: exit "${RUNNER_EXIT_CODE:-1}"

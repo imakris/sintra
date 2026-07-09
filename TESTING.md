@@ -275,6 +275,7 @@ Each sub-test inherits the iteration count from the parent entry.
 Default timeout is 5 seconds per test run. Some tests override this:
 
 - `recovery_test`: 120 seconds (tests crash recovery, which is slow)
+- `barrier_processing_fence_backlog_test`: 90 seconds (runs 64 internal backlog rounds)
 
 Override globally with `--timeout`:
 
@@ -289,18 +290,17 @@ The `tests/manual/` directory contains:
 - Tests that intentionally fail (for infrastructure testing)
 - Experimental or one-off diagnostics
 
-These are **commented out by default** in `active_tests.txt`:
+These are **not selected by default** in `active_tests.txt`:
 
 ```
-# manual/barrier_delivery_fence_repro_test 1
-# manual/guard_pending_writer_integration_test 1
+# No manual tests selected by default
 ```
 
 ### Enabling Manual Tests
 
-1. **Uncomment the test** in `active_tests.txt`:
+1. **Add the test** to `active_tests.txt`:
    ```
-   manual/barrier_delivery_fence_repro_test 10
+   manual/guard_pending_writer_integration_test 10
    ```
 
 2. **Configure with manual tests enabled, then rebuild**:

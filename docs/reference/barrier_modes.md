@@ -91,7 +91,7 @@ Each mode causes `sintra::barrier` to return the same shape:
 
 - [example/sintra/sintra_example_5_barrier_flush.cpp](../../example/sintra/sintra_example_5_barrier_flush.cpp)
 - [tests/processing_fence_test.cpp](../../tests/processing_fence_test.cpp)
-- [tests/barrier_delivery_fence_repro_test.cpp](../../tests/barrier_delivery_fence_repro_test.cpp)
+- [tests/barrier_processing_fence_backlog_test.cpp](../../tests/barrier_processing_fence_backlog_test.cpp)
 - [tests/barrier_complex_choreography_test.cpp](../../tests/barrier_complex_choreography_test.cpp)
 
 ## See also

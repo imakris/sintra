@@ -11,6 +11,7 @@ TEST_TIMEOUT_OVERRIDES = {
     "recovery_test_release": 120.0,
     "barrier_complex_choreography_test": 120.0,
     "barrier_pathological_choreography_test": 120.0,
+    "barrier_processing_fence_backlog_test": 90.0,
     "barrier_stress_test": 120.0,
     "barrier_drain_and_unpublish_test_debug": 75.0,
     "barrier_drain_and_unpublish_test_release": 75.0,

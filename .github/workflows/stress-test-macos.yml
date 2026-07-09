@@ -193,7 +193,7 @@ jobs:
             const sha = process.env.HEAD_SHA;
             const branch = process.env.HEAD_BRANCH;
             const prNumber = process.env.PR_NUMBER;
-            const statusContext = 'Stress Test';
+            const statusContext = 'Stress Test (macOS)';
             await github.rest.repos.createCommitStatus({
               owner, repo, sha,
               state: 'success',
@@ -211,7 +211,7 @@ jobs:
             const sha = process.env.HEAD_SHA;
             const branch = process.env.HEAD_BRANCH;
             const prNumber = process.env.PR_NUMBER;
-            const statusContext = 'Stress Test';
+            const statusContext = 'Stress Test (macOS)';
             await github.rest.repos.createCommitStatus({
               owner, repo, sha,
               state: 'failure',
