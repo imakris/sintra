@@ -305,21 +305,32 @@ Slice 1A scope review record, 2026-07-09:
 - Focused gate: make a test-only change to
   `tests/handler_lifetime_test.cpp` by adapting the missing `a29dfbc` cases:
   stable copied deactivators through `deactivate_all_slots()`, and a
-  process-exit cleanup-guard path with live slots. Run the
-  `sintra_handler_lifetime_test` target on unmodified production and record red
-  evidence before touching headers. If this gate does not fail red, stop and
-  amend or drop Slice 1A.
+  no-explicit-shutdown process-exit cleanup-guard path with live slots. The
+  cleanup-guard path is the required red proof for this slice. The
+  `deactivate_all_slots()` case may stay as a smoke/hardening assertion, but it
+  is not sufficient red evidence if it remains green. Prefer an ASan build for
+  the cleanup-guard red gate; if no deterministic red can be produced, stop and
+  amend or drop Slice 1A before touching headers.
 - Production scope after red evidence only:
   `include/sintra/detail/transceiver.h`,
   `include/sintra/detail/transceiver_impl.h`, and Windows
   `include/sintra/detail/ipc/semaphore.h`, limited to process-lifetime
   teardown-touched statics and stable deactivator copies in
-  `Transceiver::deactivate_all()`.
+  `Transceiver::deactivate_all()`. The static conversion list must include
+  `handler_slot_states()`, `Transceiver::get_rpc_handler_map()`,
+  `Transceiver::get_instance_to_object_map<RPCTC>()`, and `ips_win_handles()`.
+  Do not add `exception_conversions_impl.h` unless the red-gate work proves
+  that exception conversion is reachable on the no-shutdown exit path.
 - Out of scope: coordinator changes, external invitation admission, teardown
   admission mutexes, process retirement, drain/finalize redesign, process
   liveness/mutex recovery, child-shutdown oracle work, group
   membership/publication, CMake/workflow/active-test changes, new public hooks,
   and lifecycle blocker/result matrices.
+- Claude architecture review, 2026-07-09:
+  `C:\plms\bsd_licensed\sintra-lifecycle-artifacts\claude-slice1a-arch-20260709\sintra_slice1a_arch_review_20260709_20260709_042432\combined_reviews.md`
+  returned GREEN_TO_IMPLEMENT for the red-first step with the calibration above:
+  do not force the formal `deactivate_all()` hazard to be red, and use the
+  cleanup-guard path as the real red proof.
 
 ### Slice 1B: Process Liveness And Mutex Recovery
 
