@@ -99,10 +99,10 @@ must be cross-grafted:
   any join/recovery close-after-check regression before other work. It still
   needs every accepted repair-line fix cross-grafted and must reconcile the
   independently reimplemented admission line on the repair/publication sibling.
-- `436e7f2`: repair sibling through 4A. Candidate only if the audit explicitly
-  keeps or deletes its inherited runtime-work counters, pending-start/recovery
-  owners, and `Finalize_blocker_kind` matrix. Do not select it merely because
-  it has useful RPC terminal-state work.
+- `436e7f2`: repair sibling 4A closure record. It is doc-only; the actual 4A
+  RPC terminal-state code is in `a5f7f72` and is entangled with runtime blocker
+  machinery. Do not select it merely because the range has useful-looking RPC
+  terminal-state work.
 - `1cf7239`: repair sibling through 6A0. Candidate only if the audit proves the
   4B lifecycle expansion is removed or independently safe. Otherwise quarry
   only the narrow 6A0 idea.
@@ -138,9 +138,10 @@ Baseline decision record, 2026-07-09:
   direct-spawn gating ideas. It is not a baseline because it is a sibling of the
   repair/publication line and still needs join/recovery admission repair before
   it can be trusted.
-- `436e7f2` and `1cf7239` remain quarry for 4A RPC terminal cleanup and the
-  narrow 6A0 drain idea. They are not baselines because the deletion burden is
-  larger than cross-grafting the useful pieces.
+- `a5f7f72` and `1cf7239` remain quarry references for 4A RPC terminal cleanup
+  and the narrow 6A0 drain idea. They are not baselines because the deletion
+  burden is larger than cross-grafting the useful pieces. `436e7f2` itself is
+  only the 4A closure record.
 - First implementation slice: fix only the external invitation claim admission
   hole on `02f03bf`, with one focused regression test, then run focused local
   checks before the six-reviewer and CI gates.
@@ -687,13 +688,31 @@ Slice 2 decision and implementation record, 2026-07-09:
 
 ### Slice 3: RPC Terminal Cleanup
 
-- Keep the 4A-style collapse from overlapping RPC cleanup booleans into one
-  terminal state enum if it remains self-contained.
-- `d373c56` is allowed only after extracting the minimal
-  `cleanup_rpc_handle_if_terminal_blocking` helper from its repair-line
-  dependencies. If that helper cannot stay small, drop `d373c56`.
-- Do not keep the broad `Finalize_blocker_kind` matrix. Add a blocker kind only
-  when production code emits and consumes it.
+Durable drop decision, 2026-07-09:
+
+- Drop Slice 3 production work on this recovery branch. Six xhigh Codex
+  convergence reviewers and Claude returned green on the drop decision after
+  the first round split between narrow enum polish and no-production findings.
+- No current-HEAD RPC terminal cleanup bug was reproduced. HEAD already has
+  `detail::Rpc_completion_state`, and sync RPC already routes
+  `rpc_impl() -> handle.get() -> wait()/state() -> cleanup_rpc_state_if_needed()`
+  before returning or throwing.
+- The remaining `Outstanding_rpc_control` booleans are representation polish,
+  not red evidence. They are guarded by `keep_waiting_mutex`; reply, exception,
+  abandon, and teardown unblock paths test the waiting latch before committing a
+  terminal outcome.
+- Anchor correction: `436e7f2` is doc-only. The real 4A RPC terminal-state
+  patch is `a5f7f72`, and it is not self-contained because it also carries
+  runtime blocker/finalize machinery.
+- Exclude `d373c56` on this baseline. Its `Terminal_cleanup_guard` depends on
+  repair-line helper shape absent from HEAD and is redundant with current
+  `handle.get()` cleanup.
+- Exclude `Finalize_blocker_kind`, `rpc_cleanup_busy`,
+  `append_rpc_cleanup_blockers`, shared-ownership reshaping of
+  `s_outstanding_rpcs`, and all 4B lifecycle/helper imports from Slice 3.
+- Reopen only with deterministic current-HEAD red evidence showing a real RPC
+  terminal-state or cleanup correctness failure. Otherwise treat enum collapse
+  as later non-recovery polish, not as part of this recovery line.
 
 ### Slice 4: Finalize And Drain
 
@@ -810,5 +829,6 @@ gate are complete, and the production diff passed six-reviewer validation.
 Focused platform CI is green. Slice 1C is durably dropped. Slice 2 is closed:
 the two source-confirmed residual admission/recovery issues have local
 red-then-green evidence, six-reviewer green implementation review, and shortened
-CI green on all four platforms at `577a6cf`. Next action is Slice 3 architecture
-and scope review before any RPC terminal cleanup refactoring.
+CI green on all four platforms at `577a6cf`. Slice 3 is durably dropped on this
+baseline. Next action is Slice 4 architecture and scope review before any
+finalize/drain work.
