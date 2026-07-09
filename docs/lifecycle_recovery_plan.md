@@ -345,8 +345,13 @@ Slice 1A scope review record, 2026-07-09:
   `C:\plms\bsd_licensed\sintra-lifecycle-artifacts\slice1a_handler_lifetime_msvc_asan_red_after_child_argv_cleanup.txt`,
   and
   `C:\plms\bsd_licensed\sintra-lifecycle-artifacts\slice1a_handler_lifetime_msvc_asan_child_direct_after_child_argv_cleanup.txt`.
-  Production headers remain untouched; run the independent red-gate review
-  before implementing the header fix.
+  Production headers remained untouched at the red gate.
+- Red-gate review record, 2026-07-09: six Codex reviewers independently
+  returned GREEN before the production header worker started. The lanes covered
+  oracle correctness, sanitizer evidence, portability/integration, complexity,
+  governance, and expected production fit. Governance repair note: this durable
+  record was added after the production commit when production review found the
+  missing plan artifact; the review itself occurred before production work.
 - Green-gate evidence, 2026-07-09: the scoped production header fix rebuilt
   and ran `sintra_handler_lifetime_test` in the normal MinGW focused dir and
   the MSVC ASan NMake focused dir. MinGW build/run exited `0`/`0`; logs:
@@ -502,7 +507,6 @@ changes, the slice becomes multi-domain, or the same blocker class repeats.
 
 ## Next Action
 
-Do not code in the preserved dirty worktree. The next implementation batch is
-Slice 1A, but start it only after an architecture/scope review confirms the
-static teardown registry lifetime bug is still present on this reduced branch
-and defines one focused gate.
+Do not code in the preserved dirty worktree. Complete the Slice 1A production
+review reround after this governance repair. If it is green, run the required
+CI gate on the branch before starting Slice 1B.
