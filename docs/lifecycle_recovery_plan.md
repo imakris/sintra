@@ -1,7 +1,7 @@
 # Lifecycle Recovery Plan
 
-Status: baseline selected. Run one architecture/scope review for Slice 1, then
-implement from a clean `02f03bf` worktree.
+Status: Slice 1 architecture review found one gate blocker. Resolve the
+test-first repro before any production change.
 
 ## Relation To Existing Lifecycle Plans
 
@@ -175,6 +175,39 @@ Lifecycle test classification for this baseline:
   tests and active-test execution are reconciled or every exclusion is recorded
   with a reason.
 
+Slice 1 architecture review record, 2026-07-09:
+
+- Six xhigh Codex reviewers returned GREEN for a narrow Slice 1, with this
+  invariant: `claim_external_process_invitation()` must serialize with the
+  existing `s_teardown_admission_mutex`; if teardown admission is closed before
+  the claim commit point, the claim returns `false` without consuming the
+  invitation token or mutating registry, external-attached state, groups, or
+  drain state. Wrong-token and expired-token rejection semantics stay as-is.
+- Claude review artifact:
+  `C:\plms\bsd_licensed\sintra-lifecycle-artifacts\claude-slice1-arch-20260709\sintra_slice1_arch_review_20260709_023734\combined_reviews.md`.
+  Claude agreed the production direction is narrow, but returned BLOCKER on the
+  test gate: a shutdown-complete test is not enough. The gate must reproduce a
+  claim attempt during teardown admission, before production code is changed.
+- Base-path read on the clean implementation worktree:
+  `create_external_process_invitation()` holds `s_teardown_admission_mutex`
+  across reservation; `spawn_swarm_process()` holds it across direct-spawn
+  argument/launch commit; RPC `Coordinator::join_swarm()` enters under the same
+  mutex; recovery's actual `spawn_now()` commit is also mutex-guarded. The
+  external claim path is the Slice 1 asymmetry: it checks only `m_shutdown` and
+  erases the invitation before the reader, registry, group, and drain commits.
+- Gate decision: first try a public black-box gate, not a private rendezvous.
+  Use `shutdown_options.coordinator_shutdown_hook` to release the existing
+  delayed external helper after `shutdown()` closes teardown admission and
+  before `finalize_impl()` calls `Coordinator::begin_shutdown()`. The hook must
+  wait for the helper to attempt `sintra::init()`, observe rejection, and verify
+  the original invitation is still cancellable. This is the chosen deterministic
+  public interleaving.
+- If that test does not fail on unmodified `02f03bf`, stop. Do not patch
+  production. Amend this plan either to allow exactly one narrow claim-commit
+  test rendezvous or to drop/re-scope Slice 1.
+- Production eligibility: only after the new gate is observed red on
+  unmodified `02f03bf` may the production claim fix be implemented.
+
 ## Implementation Slices
 
 Each slice has one objective, one focused test or existing test target, and no
@@ -205,10 +238,10 @@ evidence was checked, and which focused gate covers the decision.
 
 Reapply only fixes orthogonal to the lifecycle redesign:
 
-- Unconditionally fix the original external invitation/claim hole on the chosen
-  baseline. If the baseline has no admission gate, this is the narrow existing
-  claim path fix; if it keeps an admission gate, Slice 2 must prove this same
-  hole is covered there.
+- First add the red gate for the original external invitation/claim hole on the
+  chosen baseline. The gate must exercise a claim attempt while teardown
+  admission is closed but before shutdown completion. Only after observing that
+  gate fail on unmodified `02f03bf`, fix the narrow existing claim path.
 - `a29dfbc`: static teardown registry lifetime and `deactivate_all` safety.
 - `5cd9149`: process liveness/zombie handling, robust mutex PID/TID reuse, and
   lifeline release after local message-ring attachments are dropped.
