@@ -361,6 +361,13 @@ Slice 1A scope review record, 2026-07-09:
   MSVC ASan build/run exited `0`/`0`; logs:
   `build\slice1a-asan-msvc\slice1a_production_fix_msvc_asan_build.log` and
   `build\slice1a-asan-msvc\slice1a_production_fix_msvc_asan_run.log`.
+- Independent review and CI evidence, 2026-07-09: the final six-Codex
+  production reround against `ccce56f` returned GREEN on lifetime correctness,
+  production boundary, red-to-green evidence, Windows/cross-platform readiness,
+  complexity, and governance/defer-trap. Push CI on
+  `ccce56fe7589f143f1d9845a11c3cbecf8360a0b` succeeded on Linux
+  (`28991838368`), macOS (`28991838406`), Windows (`28991838378`), and FreeBSD
+  (`28991838352`).
 
 ### Slice 1B: Process Liveness And Mutex Recovery
 
@@ -507,6 +514,7 @@ changes, the slice becomes multi-domain, or the same blocker class repeats.
 
 ## Next Action
 
-Do not code in the preserved dirty worktree. Complete the Slice 1A production
-review reround after this governance repair. If it is green, run the required
-CI gate on the branch before starting Slice 1B.
+Do not code in the preserved dirty worktree. Slice 1A is complete. The next
+implementation batch is Slice 1B, but start it only after an architecture/scope
+review confirms the process liveness/mutex recovery bug is still present on
+this reduced branch and defines one focused gate.
