@@ -263,23 +263,23 @@ historical weights forward for the tests that still exist; new or substantially
 reworked contract tests start at one repetition until dedicated evidence
 justifies a higher weight.
 
-For the current 89-entry roster, a stability full run means all of the
+For the current 90-entry roster, a stability full run means all of the
 following:
 
 - use `tests/active_tests.txt` unchanged, with an iteration multiplier of `1`;
 - run both Debug and Release;
 - do not supply `--time-budget` or otherwise stop after partial repetition
   coverage;
-- complete all 1,480 base roster repetitions in each configuration;
+- complete all 1,481 base roster repetitions in each configuration;
 - include all 27 cases discovered from `ipc_rings_tests`, each of which inherits
-  the roster weight of 10, producing 1,740 actual invocations per configuration
-  and 3,480 across Debug and Release; and
+  the roster weight of 10, producing 1,741 actual invocations per configuration
+  and 3,482 across Debug and Release; and
 - exclude tests under `tests/manual/`.
 
 Windows, Linux, and macOS are stability-full lanes only when they run those
 multiplier-1 Debug and Release schedules to completion without a time budget.
-The FreeBSD Release lane uses multiplier `0.5` (894 actual invocations), and the
-Debug coverage lanes use multiplier `0.25` (496 actual invocations). They are
+The FreeBSD Release lane uses multiplier `0.5` (895 actual invocations), and the
+Debug coverage lanes use multiplier `0.25` (497 actual invocations). They are
 scaled supporting lanes, not stability full runs.
 
 During active repair, CI may intentionally use a time budget. The runner can
