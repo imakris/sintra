@@ -161,7 +161,9 @@ struct Managed_child_occurrence_record
     setup_state                setup = setup_state::pending;
     bool                       os_creation_attempted = false;
     bool                       os_process_created = false;
+    bool                       initialization_reservation_active = false;
     bool                       publication_retired = false;
+    bool                       communication_retirement_started = false;
     bool                       communication_retired = false;
     bool                       os_exit_confirmed = false;
     int                        os_pid = -1;
@@ -182,6 +184,15 @@ struct Managed_child_active_occurrence
     uint32_t                                    occurrence = 0;
 };
 
+struct Managed_child_occurrence_token
+{
+    std::weak_ptr<Managed_child_custody_record> custody;
+    instance_id_type                            process_instance_id = invalid_instance_id;
+    uint32_t                                    occurrence = 0;
+
+    explicit operator bool() const noexcept { return !custody.expired(); }
+};
+
 // One retained logical custody record.  Subsystems remain authoritative for
 // their own facts; this record only joins their exact-occurrence reports.
 struct Managed_child_custody_record
@@ -196,6 +207,8 @@ struct Managed_child_custody_record
     bool                                       release_requested = false;
     bool                                       cleanup_requested = false;
     bool                                       cleanup_started = false;
+    uint64_t                                   cleanup_attempt = 0;
+    bool                                       cleanup_attempt_failed = false;
     bool                                       release_complete = false;
     std::string                                wait_target_name;
     std::vector<Managed_child_occurrence_record> occurrences;
@@ -465,7 +478,27 @@ struct Managed_process: Derived_transceiver<Managed_process>
         std::chrono::steady_clock::time_point deadline);
     bool all_child_custodies_released() const;
     bool child_custody_allows_recovery(instance_id_type process_instance_id) const;
-    void note_child_publication_and_communication_retired(instance_id_type process_instance_id);
+    detail::Managed_child_occurrence_token child_custody_occurrence_token(
+        instance_id_type process_instance_id) const;
+    void note_child_initialization_complete(
+        const detail::Managed_child_occurrence_token& token);
+    void note_child_publication_retired(
+        const detail::Managed_child_occurrence_token& token);
+    void note_child_communication_retired(
+        const detail::Managed_child_occurrence_token& token);
+    bool begin_child_communication_retirement(
+        const detail::Managed_child_occurrence_token& token,
+        uint64_t expected_cleanup_attempt,
+        uint64_t& claimed_cleanup_attempt);
+    void reset_child_communication_retirement(
+        const detail::Managed_child_occurrence_token& token,
+        uint64_t cleanup_attempt);
+    bool join_child_communication(
+        const detail::Managed_child_occurrence_token& token,
+        const std::shared_ptr<Process_message_reader>& reader);
+    void retire_child_communication(
+        const detail::Managed_child_occurrence_token& token,
+        std::shared_ptr<Process_message_reader> reader);
     void note_child_os_exit(int os_pid);
     void start_child_custody_worker(
         std::function<void()> worker,

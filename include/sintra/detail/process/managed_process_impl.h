@@ -100,6 +100,11 @@ using Managed_child_cleanup_callback =
     void (*)(const char*, instance_id_type, uint32_t);
 inline std::atomic<Managed_child_cleanup_callback>
     s_managed_child_cleanup{nullptr};
+
+using Managed_child_transport_retirement_callback =
+    void (*)(const char*, instance_id_type, uint32_t);
+inline std::atomic<Managed_child_transport_retirement_callback>
+    s_managed_child_transport_retirement{nullptr};
 #endif
 
 inline constexpr const char* k_managed_child_fail_pre_create_setup =
@@ -112,6 +117,8 @@ inline constexpr const char* k_managed_child_fail_release_worker =
     "managed_child_release_worker";
 inline constexpr const char* k_managed_child_fail_cleanup_actions =
     "managed_child_cleanup_actions";
+inline constexpr const char* k_managed_child_fail_communication_worker_start =
+    "managed_child_communication_worker_start";
 inline constexpr const char* k_managed_child_prepublication_first_miss =
     "managed_child_prepublication_first_miss";
 inline constexpr const char* k_managed_child_prepublication_reader_terminal =
@@ -124,6 +131,12 @@ inline constexpr const char* k_managed_child_cleanup_retirement_confirmed =
     "managed_child_cleanup_retirement_confirmed";
 inline constexpr const char* k_managed_child_release_waiting_passive =
     "managed_child_release_waiting_passive";
+inline constexpr const char* k_managed_child_communication_before_join =
+    "managed_child_communication_before_join";
+inline constexpr const char* k_managed_child_communication_after_join =
+    "managed_child_communication_after_join";
+inline constexpr const char* k_managed_child_communication_join_incomplete =
+    "managed_child_communication_join_incomplete";
 
 } // namespace test_hooks
 
@@ -207,6 +220,24 @@ inline void managed_child_cleanup_for_test(
 {
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
     if (auto callback = test_hooks::s_managed_child_cleanup.load(
+            std::memory_order_acquire))
+    {
+        callback(stage, process_instance_id, occurrence);
+    }
+#else
+    (void)stage;
+    (void)process_instance_id;
+    (void)occurrence;
+#endif
+}
+
+inline void managed_child_transport_retirement_for_test(
+    const char* stage,
+    instance_id_type process_instance_id,
+    uint32_t occurrence)
+{
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    if (auto callback = test_hooks::s_managed_child_transport_retirement.load(
             std::memory_order_acquire))
     {
         callback(stage, process_instance_id, occurrence);
@@ -2228,19 +2259,29 @@ inline void Managed_process::request_child_custody_release(
         return;
     }
 
+    uint64_t cleanup_attempt = 0;
     {
         std::lock_guard<std::mutex> lock(custody->mutex);
         custody->recovery_open = false;
         custody->release_requested = true;
         custody->cleanup_requested = custody->cleanup_requested || initiate_cleanup;
+        if (custody->release_complete) {
+            custody->changed.notify_all();
+            return;
+        }
         if (custody->cleanup_started) {
             custody->changed.notify_all();
             return;
         }
         custody->cleanup_started = true;
+        cleanup_attempt = ++custody->cleanup_attempt;
+        if (cleanup_attempt == 0) {
+            cleanup_attempt = ++custody->cleanup_attempt;
+        }
+        custody->cleanup_attempt_failed = false;
     }
 
-    auto cleanup_worker = [this, custody]() {
+    auto cleanup_worker = [this, custody, cleanup_attempt]() {
         try {
             instance_id_type failure_iid = invalid_instance_id;
             uint32_t failure_occurrence = 0;
@@ -2308,27 +2349,61 @@ inline void Managed_process::request_child_custody_release(
 
         }
 
-        auto perform_cleanup = [&]() {
-            if (!active.empty()) {
+        auto release_attempt_active = [&]() {
+            std::lock_guard<std::mutex> lock(custody->mutex);
+            return custody->cleanup_started &&
+                custody->cleanup_attempt == cleanup_attempt &&
+                !custody->cleanup_attempt_failed;
+        };
+
+        auto retire_transport = [this, &custody, cleanup_attempt,
+                                 &release_attempt_active](
+            const std::vector<std::pair<uint32_t, instance_id_type>>& targets,
+            bool initiate_cleanup) -> bool
+        {
+            if (initiate_cleanup && !targets.empty()) {
                 detail::managed_child_failure_for_test(
                     detail::test_hooks::k_managed_child_fail_cleanup_actions,
-                    active.front().second,
-                    active.front().first);
+                    targets.front().second,
+                    targets.front().first);
             }
-            for (const auto& [occurrence, process_iid] : active) {
-                detail::managed_child_cleanup_for_test(
-                    detail::test_hooks::k_managed_child_cleanup_before_actions,
+            for (const auto& [occurrence, process_iid] : targets) {
+                if (!release_attempt_active()) {
+                    return false;
+                }
+                const detail::Managed_child_occurrence_token token{
+                    custody,
                     process_iid,
-                    occurrence);
+                    occurrence};
+                if (initiate_cleanup) {
+                    detail::managed_child_cleanup_for_test(
+                        detail::test_hooks::k_managed_child_cleanup_before_actions,
+                        process_iid,
+                        occurrence);
+                }
                 if (s_coord && s_coord->set_draining_state(process_iid, 1)) {
                     s_coord->note_draining_state_change();
                 }
-                release_lifeline(process_iid);
-                detail::managed_child_cleanup_for_test(
-                    detail::test_hooks::k_managed_child_cleanup_lifeline_released,
-                    process_iid,
-                    occurrence);
+                if (initiate_cleanup) {
+                    release_lifeline(process_iid);
+                    detail::managed_child_cleanup_for_test(
+                        detail::test_hooks::k_managed_child_cleanup_lifeline_released,
+                        process_iid,
+                        occurrence);
+                }
                 if (s_coord && !s_coord->unpublish_transceiver(process_iid)) {
+                    uint64_t claimed_cleanup_attempt = 0;
+                    const bool communication_claimed =
+                        begin_child_communication_retirement(
+                            token,
+                            cleanup_attempt,
+                            claimed_cleanup_attempt);
+                    if (!communication_claimed) {
+                        if (!release_attempt_active()) {
+                            return false;
+                        }
+                    }
+                    else {
                     // A first miss is provisional: a publish RPC may already
                     // be in flight. Stop and terminally join the exact reader,
                     // then re-enter coordinator publication authority. The
@@ -2339,26 +2414,41 @@ inline void Managed_process::request_child_custody_release(
                         detail::test_hooks::k_managed_child_prepublication_first_miss,
                         process_iid,
                         occurrence);
-                    remove_process_reader(process_iid, 1.0);
+                    std::shared_ptr<Process_message_reader> retiring_reader;
+                    {
+                        Dispatch_shared_lock readers_lock(m_readers_mutex);
+                        auto reader = m_readers.find(process_iid);
+                        if (reader != m_readers.end()) {
+                            retiring_reader = reader->second;
+                        }
+                    }
+                    try {
+                        if (!join_child_communication(token, retiring_reader)) {
+                            reset_child_communication_retirement(
+                                token, claimed_cleanup_attempt);
+                            return false;
+                        }
+                    }
+                    catch (...) {
+                        reset_child_communication_retirement(
+                            token, claimed_cleanup_attempt);
+                        throw;
+                    }
                     detail::managed_child_prepublication_cleanup_for_test(
                         detail::test_hooks::k_managed_child_prepublication_reader_terminal,
                         process_iid,
                         occurrence);
                     if (!s_coord->unpublish_transceiver(process_iid)) {
-                        std::lock_guard<std::mutex> lock(custody->mutex);
-                        for (auto& owned : custody->occurrences) {
-                            if (owned.process_instance_id == process_iid &&
-                                owned.occurrence == occurrence)
-                            {
-                                owned.publication_retired = true;
-                                owned.communication_retired = true;
-                                break;
-                            }
-                        }
-                        custody->changed.notify_all();
+                        note_child_publication_retired(token);
+                    }
+                    s_coord->mark_initialization_complete(process_iid);
+                    note_child_initialization_complete(token);
                     }
                 }
-                if (s_coord) {
+                if (!release_attempt_active()) {
+                    return false;
+                }
+                if (initiate_cleanup && s_coord) {
                     // The coordinator path above either reported the exact
                     // occurrence's publication/communication retirement, or
                     // the canonical second miss confirmed both after its
@@ -2369,38 +2459,78 @@ inline void Managed_process::request_child_custody_release(
                         occurrence);
                 }
             }
+            return release_attempt_active();
         };
 
         auto all_terminal_locked = [&]() {
             return std::all_of(
                 custody->occurrences.begin(), custody->occurrences.end(),
                 [](const detail::Managed_child_occurrence_record& occurrence) {
-                    return
-                        occurrence.setup ==
+                    return !occurrence.initialization_reservation_active &&
+                        (occurrence.setup ==
                             detail::Managed_child_occurrence_record::setup_state::no_child ||
                         (occurrence.setup ==
                             detail::Managed_child_occurrence_record::setup_state::ownership_ready &&
                          occurrence.publication_retired &&
                          occurrence.communication_retired &&
-                         occurrence.os_exit_confirmed);
+                         occurrence.os_exit_confirmed));
                 });
         };
 
         bool cleanup_applied = false;
         bool passive_wait_reported = false;
+        auto passive_targets_locked = [&]() {
+            std::vector<std::pair<uint32_t, instance_id_type>> targets;
+            for (const auto& [occurrence_number, process_iid] : active) {
+                auto occurrence = std::find_if(
+                    custody->occurrences.begin(),
+                    custody->occurrences.end(),
+                    [&](const detail::Managed_child_occurrence_record& candidate) {
+                        return candidate.occurrence == occurrence_number &&
+                            candidate.process_instance_id == process_iid;
+                    });
+                if (occurrence != custody->occurrences.end() &&
+                    (cleanup_applied || occurrence->os_exit_confirmed) &&
+                    !occurrence->communication_retirement_started &&
+                    (occurrence->initialization_reservation_active ||
+                     !occurrence->publication_retired ||
+                     !occurrence->communication_retired))
+                {
+                    targets.emplace_back(occurrence_number, process_iid);
+                }
+            }
+            return targets;
+        };
         while (true) {
             bool should_cleanup = false;
+            std::vector<std::pair<uint32_t, instance_id_type>> passive_targets;
 #ifdef _WIN32
             HANDLE fallback_handle = nullptr;
             uint32_t fallback_occurrence = 0;
 #endif
             {
                 std::unique_lock<std::mutex> lock(custody->mutex);
+                if (!custody->cleanup_started ||
+                    custody->cleanup_attempt != cleanup_attempt ||
+                    custody->cleanup_attempt_failed)
+                {
+                    if (custody->cleanup_started &&
+                        custody->cleanup_attempt == cleanup_attempt)
+                    {
+                        custody->cleanup_started = false;
+                    }
+                    lock.unlock();
+                    custody->changed.notify_all();
+                    return;
+                }
                 if (all_terminal_locked()) {
                     custody->release_complete = true;
                     break;
                 }
                 should_cleanup = custody->cleanup_requested && !cleanup_applied;
+                if (!should_cleanup) {
+                    passive_targets = passive_targets_locked();
+                }
                 if (!custody->cleanup_requested && !passive_wait_reported) {
                     // Observation-only test seam: at this point the single
                     // retained worker has evaluated the monotone cleanup flag
@@ -2430,23 +2560,36 @@ inline void Managed_process::request_child_custody_release(
                     }
                 }
 #endif
-                if (!should_cleanup
+                if (!should_cleanup && passive_targets.empty()
 #ifdef _WIN32
                     && !fallback_handle
 #endif
                     )
                 {
                     custody->changed.wait(lock, [&]() {
-                        return all_terminal_locked() ||
-                            (custody->cleanup_requested && !cleanup_applied);
+                        return !custody->cleanup_started ||
+                            custody->cleanup_attempt != cleanup_attempt ||
+                            custody->cleanup_attempt_failed ||
+                            all_terminal_locked() ||
+                            (custody->cleanup_requested && !cleanup_applied) ||
+                            !passive_targets_locked().empty();
                     });
                     continue;
                 }
             }
 
             if (should_cleanup) {
-                perform_cleanup();
+                if (!retire_transport(active, true)) {
+                    continue;
+                }
                 cleanup_applied = true;
+                continue;
+            }
+
+            if (!passive_targets.empty()) {
+                if (!retire_transport(passive_targets, false)) {
+                    continue;
+                }
                 continue;
             }
 
@@ -2488,7 +2631,9 @@ inline void Managed_process::request_child_custody_release(
             // custody can be retried without reconstructing authority.
             {
                 std::lock_guard<std::mutex> lock(custody->mutex);
-                if (!custody->release_complete) {
+                if (!custody->release_complete &&
+                    custody->cleanup_attempt == cleanup_attempt)
+                {
                     custody->cleanup_started = false;
                 }
             }
@@ -2502,7 +2647,9 @@ inline void Managed_process::request_child_custody_release(
     catch (...) {
         {
             std::lock_guard<std::mutex> lock(custody->mutex);
-            if (!custody->release_complete) {
+            if (!custody->release_complete &&
+                custody->cleanup_attempt == cleanup_attempt)
+            {
                 custody->cleanup_started = false;
             }
         }
@@ -2573,33 +2720,214 @@ inline bool Managed_process::child_custody_allows_recovery(
     return custody->recovery_open && !custody->release_requested;
 }
 
-inline void Managed_process::note_child_publication_and_communication_retired(
-    instance_id_type process_instance_id)
+inline detail::Managed_child_occurrence_token
+Managed_process::child_custody_occurrence_token(
+    instance_id_type process_instance_id) const
 {
-    std::shared_ptr<detail::Managed_child_custody_record> custody;
-    uint32_t occurrence_number = 0;
+    detail::Managed_child_occurrence_token token;
     {
         std::lock_guard<std::mutex> lock(m_child_custody_mutex);
         auto it = m_child_custody_by_process.find(process_instance_id);
         if (it != m_child_custody_by_process.end()) {
-            custody = it->second.custody.lock();
-            occurrence_number = it->second.occurrence;
+            token.custody = it->second.custody;
+            token.process_instance_id = process_instance_id;
+            token.occurrence = it->second.occurrence;
         }
     }
+    return token;
+}
+
+namespace detail {
+
+inline void update_child_occurrence(
+    const Managed_child_occurrence_token& token,
+    bool Managed_child_occurrence_record::* fact)
+{
+    auto custody = token.custody.lock();
     if (!custody) {
         return;
     }
     std::lock_guard<std::mutex> lock(custody->mutex);
     for (auto& occurrence : custody->occurrences) {
-        if (occurrence.process_instance_id == process_instance_id &&
-            occurrence.occurrence == occurrence_number)
+        if (occurrence.process_instance_id == token.process_instance_id &&
+            occurrence.occurrence == token.occurrence)
         {
-            occurrence.publication_retired = true;
-            occurrence.communication_retired = true;
+            occurrence.*fact = true;
             break;
         }
     }
     custody->changed.notify_all();
+}
+
+} // namespace detail
+
+inline void Managed_process::note_child_initialization_complete(
+    const detail::Managed_child_occurrence_token& token)
+{
+    auto custody = token.custody.lock();
+    if (!custody) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(custody->mutex);
+    for (auto& occurrence : custody->occurrences) {
+        if (occurrence.process_instance_id == token.process_instance_id &&
+            occurrence.occurrence == token.occurrence)
+        {
+            occurrence.initialization_reservation_active = false;
+            break;
+        }
+    }
+    custody->changed.notify_all();
+}
+
+inline void Managed_process::note_child_publication_retired(
+    const detail::Managed_child_occurrence_token& token)
+{
+    detail::update_child_occurrence(
+        token,
+        &detail::Managed_child_occurrence_record::publication_retired);
+}
+
+inline void Managed_process::note_child_communication_retired(
+    const detail::Managed_child_occurrence_token& token)
+{
+    detail::update_child_occurrence(
+        token,
+        &detail::Managed_child_occurrence_record::communication_retired);
+}
+
+inline bool Managed_process::begin_child_communication_retirement(
+    const detail::Managed_child_occurrence_token& token,
+    uint64_t expected_cleanup_attempt,
+    uint64_t& claimed_cleanup_attempt)
+{
+    claimed_cleanup_attempt = 0;
+    auto custody = token.custody.lock();
+    if (!custody) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(custody->mutex);
+    if (expected_cleanup_attempt != 0 &&
+        (!custody->cleanup_started ||
+         custody->cleanup_attempt != expected_cleanup_attempt))
+    {
+        return false;
+    }
+    // A failed release pass is reopened only by the next explicit custody
+    // release/cleanup/finalization call, which clears this attempt latch.
+    if (custody->cleanup_attempt_failed) {
+        return false;
+    }
+    for (auto& occurrence : custody->occurrences) {
+        if (occurrence.process_instance_id == token.process_instance_id &&
+            occurrence.occurrence == token.occurrence)
+        {
+            if (occurrence.communication_retired ||
+                occurrence.communication_retirement_started)
+            {
+                return false;
+            }
+            occurrence.communication_retirement_started = true;
+            if (custody->cleanup_started) {
+                claimed_cleanup_attempt = custody->cleanup_attempt;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+inline void Managed_process::reset_child_communication_retirement(
+    const detail::Managed_child_occurrence_token& token,
+    uint64_t cleanup_attempt)
+{
+    auto custody = token.custody.lock();
+    if (!custody) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(custody->mutex);
+    for (auto& occurrence : custody->occurrences) {
+        if (occurrence.process_instance_id == token.process_instance_id &&
+            occurrence.occurrence == token.occurrence &&
+            !occurrence.communication_retired)
+        {
+            occurrence.communication_retirement_started = false;
+            if (cleanup_attempt != 0 && custody->cleanup_started &&
+                custody->cleanup_attempt == cleanup_attempt)
+            {
+                custody->cleanup_attempt_failed = true;
+            }
+            custody->changed.notify_all();
+            return;
+        }
+    }
+}
+
+inline bool Managed_process::join_child_communication(
+    const detail::Managed_child_occurrence_token& token,
+    const std::shared_ptr<Process_message_reader>& reader)
+{
+    detail::managed_child_transport_retirement_for_test(
+        detail::test_hooks::k_managed_child_communication_before_join,
+        token.process_instance_id,
+        token.occurrence);
+    if (reader && !reader->stop_and_wait(1.0)) {
+        detail::managed_child_transport_retirement_for_test(
+            detail::test_hooks::k_managed_child_communication_join_incomplete,
+            token.process_instance_id,
+            token.occurrence);
+        return false;
+    }
+    unblock_rpc(token.process_instance_id);
+    note_child_communication_retired(token);
+    if (reader) {
+        Dispatch_unique_lock readers_lock(m_readers_mutex);
+        auto it = m_readers.find(token.process_instance_id);
+        if (it != m_readers.end() && it->second == reader) {
+            m_readers.erase(it);
+        }
+    }
+    detail::managed_child_transport_retirement_for_test(
+        detail::test_hooks::k_managed_child_communication_after_join,
+        token.process_instance_id,
+        token.occurrence);
+    return true;
+}
+
+inline void Managed_process::retire_child_communication(
+    const detail::Managed_child_occurrence_token& token,
+    std::shared_ptr<Process_message_reader> reader)
+{
+    uint64_t cleanup_attempt = 0;
+    if (!token || !begin_child_communication_retirement(
+            token, 0, cleanup_attempt))
+    {
+        return;
+    }
+    try {
+        start_child_custody_worker(
+            [this, token, cleanup_attempt, reader = std::move(reader)]() mutable {
+            try {
+                if (!join_child_communication(token, reader)) {
+                    reset_child_communication_retirement(
+                        token, cleanup_attempt);
+                }
+            }
+            catch (...) {
+                reset_child_communication_retirement(token, cleanup_attempt);
+                throw;
+            }
+        },
+        detail::test_hooks::k_managed_child_fail_communication_worker_start,
+        token.process_instance_id,
+        token.occurrence);
+    }
+    catch (...) {
+        // Publication retirement remains authoritative. Without a terminal
+        // reader join, communication stays nonterminal and custody cannot
+        // report completion.
+        reset_child_communication_retirement(token, cleanup_attempt);
+    }
 }
 
 inline void Managed_process::note_child_os_exit(int os_pid)
@@ -2640,6 +2968,8 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
 
     bool setup_resolved = false;
     bool reader_prepared = false;
+    bool initialization_reservation_acquired = false;
+    bool initialization_reservation_transferred = false;
 #ifndef _WIN32
     uint64_t posix_reap_reservation = 0;
 #endif
@@ -2682,6 +3012,20 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
                 m_spawned_child_pids.end());
         }
 #endif
+    }));
+    const detail::Managed_child_occurrence_token occurrence_token{
+        custody,
+        s.piid,
+        s.occurrence};
+    Instantiator initialization_reservation_guard(std::function<void()>([&]() {
+        if (!initialization_reservation_acquired ||
+            initialization_reservation_transferred)
+        {
+            return;
+        }
+        s_coord->mark_initialization_complete(s.piid);
+        note_child_initialization_complete(occurrence_token);
+        initialization_reservation_acquired = false;
     }));
     result.binary_name = s.binary_name;
     result.instance_id = s.piid;
@@ -2841,6 +3185,12 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
     if (s_coord) {
         std::lock_guard init_lock(s_coord->m_init_tracking_mutex);
         s_coord->m_processes_in_initialization.insert(s.piid);
+    }
+    {
+        std::lock_guard<std::mutex> lock(custody->mutex);
+        exact_occurrence_locked().initialization_reservation_active = true;
+        initialization_reservation_acquired = true;
+        custody->changed.notify_all();
     }
 
     if (spawn_ready) {
@@ -3046,6 +3396,7 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
             occurrence.setup =
                 detail::Managed_child_occurrence_record::setup_state::ownership_ready;
             setup_resolved = true;
+            initialization_reservation_transferred = true;
             custody->changed.notify_all();
         }
     }
@@ -3130,6 +3481,7 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
 
         if (s_coord) {
             s_coord->mark_initialization_complete(s.piid);
+            initialization_reservation_acquired = false;
         }
     }
 

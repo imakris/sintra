@@ -1157,6 +1157,9 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
     // atomic with respect to a concurrent re-publish of the same process slot
     // (e.g. a recovery respawn or an external re-attach reusing the id).
     const auto process_iid = process_of(iid);
+    const auto custody_occurrence = s_mproc
+        ? s_mproc->child_custody_occurrence_token(process_iid)
+        : detail::Managed_child_occurrence_token{};
 
     std::unique_lock groups_lock(m_groups_mutex, std::defer_lock);
     if (iid == process_iid) {
@@ -1209,6 +1212,9 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
         }
 
         ready_notifications = finalize_initialization_tracking(process_iid);
+        if (s_mproc) {
+            s_mproc->note_child_initialization_complete(custody_occurrence);
+        }
         if (!ready_notifications.empty()) {
             ready_notifications.erase(
                 std::remove_if(
@@ -1235,6 +1241,9 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
         // remove the unpublished process's registry entry
         m_transceiver_registry.erase(pr_it);
         m_external_attached_processes.erase(process_iid);
+        if (s_mproc) {
+            s_mproc->note_child_publication_retired(custody_occurrence);
+        }
 
         if (s_mproc) {
             s_mproc->release_lifeline(process_iid);
@@ -1260,22 +1269,28 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
         // where resetting too early allows concurrent barriers to include a dying process.
 
         //// and finally, if the process was being read, stop reading from it
+        std::shared_ptr<Process_message_reader> retiring_reader;
         if (iid != s_mproc_id) {
             Dispatch_shared_lock readers_lock(s_mproc->m_readers_mutex);
             auto reader_it = s_mproc->m_readers.find(process_iid);
             if (reader_it != s_mproc->m_readers.end()) {
                 if (auto& reader = reader_it->second) {
                     reader->stop_nowait();
+                    retiring_reader = reader;
                 }
             }
         }
 
         note_draining_state_change();
         if (s_mproc) {
-            // Registry/group retirement and reader stop are authoritative here;
-            // report them to the exact active custody occurrence before any
-            // recovery can admit its immutable successor.
-            s_mproc->note_child_publication_and_communication_retired(process_iid);
+            // Publication retirement was committed by the registry transaction
+            // above. Communication becomes terminal only after the captured
+            // predecessor reader has stopped and outstanding RPC participation
+            // has been unblocked. The occurrence token prevents a replacement
+            // from satisfying its predecessor's fact.
+            s_mproc->retire_child_communication(
+                custody_occurrence,
+                std::move(retiring_reader));
         }
         {
             std::lock_guard<mutex> crash_lock(m_crash_mutex);
@@ -2115,6 +2130,9 @@ bool Coordinator::exchange_draining_state(
 inline
 void Coordinator::mark_initialization_complete(instance_id_type process_iid)
 {
+    const auto custody_occurrence = s_mproc
+        ? s_mproc->child_custody_occurrence_token(process_iid)
+        : detail::Managed_child_occurrence_token{};
     {
         std::lock_guard publish_lock(m_publish_mutex);
         if (auto branch_it = m_joined_process_branch.find(process_iid); branch_it != m_joined_process_branch.end()) {
@@ -2124,6 +2142,9 @@ void Coordinator::mark_initialization_complete(instance_id_type process_iid)
     }
 
     auto ready_notifications = finalize_initialization_tracking(process_iid);
+    if (s_mproc) {
+        s_mproc->note_child_initialization_complete(custody_occurrence);
+    }
     if (ready_notifications.empty()) {
         return;
     }
