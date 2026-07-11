@@ -7,8 +7,8 @@
 #   - Lines starting with # are ignored
 #   - Empty lines are ignored
 #
-# The new causal baseline runs with runnable, extant tests that actually failed
+# The new causal witness runs with runnable, extant tests that actually failed
 # on this source line during the preceding 72 hours. Intended RED gates and
 # infrastructure-only failures are excluded.
 
-managed_child_readiness_deadline_contract_test           1
+managed_child_custody_name_retirement_contract_test      1
