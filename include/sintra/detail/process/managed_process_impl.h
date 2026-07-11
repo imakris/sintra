@@ -2290,12 +2290,12 @@ inline void Managed_process::request_child_custody_release(
                 }
             }
 
-            if (s_coord && s_coord->set_draining_state(process_iid, 1)) {
-                s_coord->note_draining_state_change();
-            }
-            release_lifeline(process_iid);
-            if (cleanup_requested && s_coord) {
-                if (!s_coord->unpublish_transceiver(process_iid)) {
+            if (cleanup_requested) {
+                if (s_coord && s_coord->set_draining_state(process_iid, 1)) {
+                    s_coord->note_draining_state_change();
+                }
+                release_lifeline(process_iid);
+                if (s_coord && !s_coord->unpublish_transceiver(process_iid)) {
                     // A first miss is provisional: a publish RPC may already
                     // be in flight. Stop and terminally join the exact reader,
                     // then re-enter coordinator publication authority. The

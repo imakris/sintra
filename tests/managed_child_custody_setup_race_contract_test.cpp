@@ -445,6 +445,43 @@ void clear_concurrent_posix_reaps()
 }
 #endif
 
+bool s_teardown_settled = true;
+
+template <typename Finalizer>
+bool settle_runtime_teardown(const char* phase, Finalizer&& finalizer)
+{
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    unsigned attempts = 0;
+    do {
+        ++attempts;
+        try {
+            if (finalizer()) {
+                return true;
+            }
+        }
+        catch (...) {
+            s_teardown_settled = false;
+            std::fprintf(stderr,
+                "SETUP_FINALIZE_INVALID phase=%s exception=1 attempts=%u\n",
+                phase, attempts);
+            return false;
+        }
+        std::this_thread::sleep_for(10ms);
+    } while (std::chrono::steady_clock::now() < deadline);
+
+    s_teardown_settled = false;
+    std::fprintf(stderr,
+        "SETUP_FINALIZE_INVALID phase=%s settled=0 attempts=%u\n",
+        phase, attempts);
+    return false;
+}
+
+bool settle_detail_finalize(const char* phase)
+{
+    return settle_runtime_teardown(
+        phase, []() { return sintra::detail::finalize(); });
+}
+
 bool run_recovery_create_release_race(
     int argc,
     char* argv[],
@@ -515,7 +552,7 @@ bool run_recovery_create_release_race(
     sintra::detail::test_hooks::s_managed_child_reader_setup.store(
         nullptr, std::memory_order_release);
     s_gate = nullptr;
-    const bool finalized = sintra::detail::finalize();
+    const bool finalized = settle_detail_finalize("recovery_create_release");
     const bool no_child_after = marker_absent(marker);
     std::filesystem::remove(marker, ec);
 
@@ -583,13 +620,9 @@ bool run_deadline_setup_shutdown_retry(
         nullptr, std::memory_order_release);
     s_gate = nullptr;
 
-    bool final_shutdown = false;
-    try {
-        final_shutdown = sintra::shutdown();
-    }
-    catch (...) {
-        shutdown_threw = true;
-    }
+    const bool final_shutdown = settle_runtime_teardown(
+        "deadline_setup_shutdown",
+        []() { return sintra::shutdown(); });
     const bool no_child_after = marker_absent(marker);
     std::filesystem::remove(marker, ec);
 
@@ -640,7 +673,7 @@ bool run_pre_create_exception(
         custody, std::chrono::steady_clock::now() + 5s);
     const auto hits = failure_hits(plan);
     reset_failure_hook();
-    const bool finalized = sintra::detail::finalize();
+    const bool finalized = settle_detail_finalize("pre_create_exception");
     const bool marker_missing = marker_absent(marker);
     std::filesystem::remove(marker, ec);
 
@@ -712,7 +745,7 @@ bool run_owned_native_exception(
 #else
     const bool reap_normal = true;
 #endif
-    const bool finalized = sintra::detail::finalize();
+    const bool finalized = settle_detail_finalize(phase);
     std::filesystem::remove(marker, ec);
     std::filesystem::remove(release, ec);
 
@@ -776,7 +809,7 @@ bool run_release_worker_retry(
 #else
     const bool reap_normal = true;
 #endif
-    const bool finalized = sintra::detail::finalize();
+    const bool finalized = settle_detail_finalize("release_worker_retry");
     std::filesystem::remove(marker, ec);
     std::filesystem::remove(release, ec);
 
@@ -889,7 +922,7 @@ bool run_prepublication_publish_race(
 #else
     const bool reap_normal = true;
 #endif
-    const bool finalized = sintra::detail::finalize();
+    const bool finalized = settle_detail_finalize("prepublication_publish_race");
     std::filesystem::remove(marker, ec);
     std::filesystem::remove(release, ec);
 
@@ -1039,7 +1072,7 @@ bool run_concurrent_posix_roster_reservations(
                     });
         }
     }
-    const bool finalized = sintra::detail::finalize();
+    const bool finalized = settle_detail_finalize("concurrent_posix_roster");
     for (size_t i = 0; i < 2; ++i) {
         std::filesystem::remove(markers[i], ec);
         std::filesystem::remove(releases[i], ec);
@@ -1076,7 +1109,7 @@ int main(int argc, char* argv[])
             sintra::init(argc, argv);
             const bool identity_written = write_child_identity(marker);
             const bool released = wait_for_file(release_marker(marker), 10s);
-            const bool finalized = sintra::detail::finalize();
+            const bool finalized = settle_detail_finalize("owned_child");
             return identity_written && released && finalized ? 0 : 3;
         }
     }
@@ -1084,24 +1117,48 @@ int main(int argc, char* argv[])
     const std::string binary_path = std::filesystem::absolute(argv[0]).string();
     const bool recovery_race = run_recovery_create_release_race(
         argc, argv, binary_path);
+    if (!s_teardown_settled) {
+        return 2;
+    }
     const bool deadline_race = run_deadline_setup_shutdown_retry(
         argc, argv, binary_path);
+    if (!s_teardown_settled) {
+        return 2;
+    }
     const bool pre_create_exception = run_pre_create_exception(
         argc, argv, binary_path);
+    if (!s_teardown_settled) {
+        return 2;
+    }
     const bool post_native_exception = run_owned_native_exception(
         argc, argv, binary_path,
         "post_native_exception",
         sintra::detail::test_hooks::k_managed_child_fail_post_native_setup);
+    if (!s_teardown_settled) {
+        return 2;
+    }
     const bool observer_start_failure = run_owned_native_exception(
         argc, argv, binary_path,
         "observer_start_failure",
         sintra::detail::test_hooks::k_managed_child_fail_native_observer_start);
+    if (!s_teardown_settled) {
+        return 2;
+    }
     const bool release_worker_retry = run_release_worker_retry(
         argc, argv, binary_path);
+    if (!s_teardown_settled) {
+        return 2;
+    }
     const bool prepublication_publish_race = run_prepublication_publish_race(
         argc, argv, binary_path);
+    if (!s_teardown_settled) {
+        return 2;
+    }
     const bool concurrent_posix_roster = run_concurrent_posix_roster_reservations(
         argc, argv, binary_path);
+    if (!s_teardown_settled) {
+        return 2;
+    }
 
     if (recovery_race && deadline_race && pre_create_exception &&
         post_native_exception && observer_start_failure && release_worker_retry &&

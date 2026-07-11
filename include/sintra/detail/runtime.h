@@ -359,6 +359,12 @@ inline bool s_init_once = false;
 
 namespace detail {
 
+// Finalization may return bounded-incomplete while managed-child custody is
+// still resolving. Keep the authoritative drain admission as retained runtime
+// state so a retry resumes after it instead of replaying shutdown/barrier work.
+inline std::mutex s_finalization_drain_mutex;
+inline bool       s_finalization_drain_started = false;
+
 inline void cleanup_failed_init_noexcept()
 {
     auto* failed_mproc = s_mproc;
@@ -384,6 +390,10 @@ inline void cleanup_failed_init_noexcept()
     s_coord_id            = invalid_instance_id;
     s_branch_index        = -1;
     s_recovery_occurrence = 0;
+    {
+        std::lock_guard<std::mutex> lock(s_finalization_drain_mutex);
+        s_finalization_drain_started = false;
+    }
 
     {
         std::lock_guard<std::mutex> admission_lock(s_teardown_admission_mutex);
@@ -480,10 +490,62 @@ inline bool finalize_impl()
         }
     }
 
-    // Finalization participates in the same custody contract.  It closes
-    // recovery and requests release, but it does not erase runtime state or
-    // report success while an exact occurrence is still unresolved.
+    // Finalization participates in the same custody contract. It first closes
+    // recovery and requests release without manufacturing per-child
+    // retirement. The system-level drain announcement must precede the
+    // bounded custody wait so an in-flight _sintra_all_processes barrier can
+    // complete and children can retire naturally. This phase is retained
+    // across an incomplete retry and is never replayed.
     s_mproc->request_all_child_custody_releases();
+
+    {
+        std::lock_guard<std::mutex> drain_lock(s_finalization_drain_mutex);
+        if (!s_finalization_drain_started) {
+            sequence_counter_type flush_seq = invalid_sequence;
+            if (s_coord) {
+                s_coord->begin_shutdown();
+                flush_seq = s_coord->begin_process_draining(s_mproc_id);
+            }
+            else if (!s_mproc->m_must_stop.load(std::memory_order_acquire)) {
+                try {
+                    auto handle = Coordinator::rpc_async_begin_process_draining(
+                        s_coord_id,
+                        s_mproc_id);
+                    const auto deadline =
+                        std::chrono::steady_clock::now() + std::chrono::seconds(5);
+                    flush_seq = handle.get_until(deadline);
+                }
+                catch (const rpc_timeout&) {
+                    s_mproc->unblock_rpc(process_of(s_coord_id));
+                    Log_stream(log_level::warning)
+                        << "finalize(): begin_process_draining timed out after 5 seconds for process "
+                        << static_cast<unsigned long long>(s_mproc_id)
+                        << " while waiting on coordinator "
+                        << static_cast<unsigned long long>(s_coord_id)
+                        << ". Proceeding with degraded shutdown semantics.\n";
+                }
+                catch (const std::exception& e) {
+                    Log_stream(log_level::warning)
+                        << "finalize(): begin_process_draining failed for process "
+                        << static_cast<unsigned long long>(s_mproc_id)
+                        << " with: " << e.what()
+                        << ". Proceeding with degraded shutdown semantics.\n";
+                }
+                catch (...) {
+                    Log_stream(log_level::warning)
+                        << "finalize(): begin_process_draining failed for process "
+                        << static_cast<unsigned long long>(s_mproc_id)
+                        << " with an unknown exception. Proceeding with degraded shutdown semantics.\n";
+                }
+            }
+
+            if (!s_coord && flush_seq != invalid_sequence) {
+                s_mproc->flush(process_of(s_coord_id), flush_seq);
+            }
+            s_finalization_drain_started = true;
+        }
+    }
+
     if (!s_mproc->wait_for_all_child_custodies(
             std::chrono::steady_clock::now() + std::chrono::milliseconds(250)))
     {
@@ -494,64 +556,11 @@ inline bool finalize_impl()
         shutdown_protocol_state::finalizing, std::memory_order_acq_rel);
     (void)prev;  // Previous state is informational; no assertion needed here.
 
-    sequence_counter_type flush_seq = invalid_sequence;
-
     if (s_coord) {
-        s_coord->begin_shutdown();
-        // Coordinator-local finalize: announce draining to local state so that
-        // new barriers exclude this process, then wait until all known
-        // processes have entered the draining state (or been scavenged) before
-        // proceeding with teardown. This ensures that remote processes can
-        // still complete their own begin_process_draining() RPCs while the
-        // coordinator remains alive.
-        flush_seq = s_coord->begin_process_draining(s_mproc_id);
+        // The coordinator drain announcement was made before the custody wait.
+        // Once every child occurrence is terminal, wait for remaining known
+        // peers to drain before deleting runtime state.
         s_coord->wait_for_all_draining(s_mproc_id);
-    }
-    else {
-        if (s_mproc->m_must_stop.load(std::memory_order_acquire)) {
-            // The coordinator has already been unpublished or observed as gone.
-            // A drain RPC cannot complete in this state, so proceed with local
-            // teardown instead of spending the fallback timeout first.
-            flush_seq = invalid_sequence;
-        }
-        else {
-            try {
-                auto handle = Coordinator::rpc_async_begin_process_draining(
-                    s_coord_id,
-                    s_mproc_id);
-                const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-                flush_seq = handle.get_until(deadline);
-            }
-            catch (const rpc_timeout&) {
-                s_mproc->unblock_rpc(process_of(s_coord_id));
-                flush_seq = invalid_sequence;
-                Log_stream(log_level::warning)
-                    << "finalize(): begin_process_draining timed out after 5 seconds for process "
-                    << static_cast<unsigned long long>(s_mproc_id)
-                    << " while waiting on coordinator "
-                    << static_cast<unsigned long long>(s_coord_id)
-                    << ". Proceeding with degraded shutdown semantics.\n";
-            }
-            catch (const std::exception& e) {
-                flush_seq = invalid_sequence;
-                Log_stream(log_level::warning)
-                    << "finalize(): begin_process_draining failed for process "
-                    << static_cast<unsigned long long>(s_mproc_id)
-                    << " with: " << e.what()
-                    << ". Proceeding with degraded shutdown semantics.\n";
-            }
-            catch (...) {
-                flush_seq = invalid_sequence;
-                Log_stream(log_level::warning)
-                    << "finalize(): begin_process_draining failed for process "
-                    << static_cast<unsigned long long>(s_mproc_id)
-                    << " with an unknown exception. Proceeding with degraded shutdown semantics.\n";
-            }
-        }
-    }
-
-    if (!s_coord && flush_seq != invalid_sequence) {
-        s_mproc->flush(process_of(s_coord_id), flush_seq);
     }
 
     // Transition into service mode before deactivating slots and unpublishing
@@ -571,6 +580,10 @@ inline bool finalize_impl()
 
     // Reset flags to allow another init()/finalize() cycle.
     s_init_once = false;
+    {
+        std::lock_guard<std::mutex> lock(s_finalization_drain_mutex);
+        s_finalization_drain_started = false;
+    }
     {
         std::lock_guard<std::mutex> admission_lock(s_teardown_admission_mutex);
         s_shutdown_state.store(shutdown_protocol_state::idle, std::memory_order_release);

@@ -75,6 +75,39 @@ struct Occurrence_ledger
     std::string witness_name;
 };
 
+struct Custody_tuple_facts
+{
+    bool record_found = false;
+    bool occurrence_count_exact = false;
+    bool predecessor_occurrence = false;
+    bool predecessor_setup = false;
+    bool predecessor_pid = false;
+    bool predecessor_stamp_available = false;
+    bool predecessor_stamp = false;
+    bool predecessor_publication_retired = false;
+    bool predecessor_communication_retired = false;
+    bool predecessor_exit_confirmed = false;
+    bool replacement_occurrence = false;
+    bool replacement_setup = false;
+    bool replacement_pid = false;
+    bool replacement_stamp_available = false;
+    bool replacement_stamp = false;
+    bool replacement_created = false;
+    bool replacement_not_exited = false;
+
+    bool complete() const
+    {
+        return record_found && occurrence_count_exact &&
+            predecessor_occurrence && predecessor_setup && predecessor_pid &&
+            predecessor_stamp_available && predecessor_stamp &&
+            predecessor_publication_retired &&
+            predecessor_communication_retired && predecessor_exit_confirmed &&
+            replacement_occurrence && replacement_setup && replacement_pid &&
+            replacement_stamp_available && replacement_stamp &&
+            replacement_created && replacement_not_exited;
+    }
+};
+
 struct Outbound_hold
 {
     std::atomic<sintra::instance_id_type> expected{sintra::invalid_instance_id};
@@ -485,39 +518,120 @@ int main(int argc, char* argv[])
 #endif
     }
 
+    Custody_tuple_facts tuple_facts;
     std::shared_ptr<sintra::detail::Managed_child_custody_record> custody_record;
-    if (ledger_1) {
-        std::lock_guard<std::mutex> lock(sintra::s_mproc->m_child_custody_mutex);
-        auto it = sintra::s_mproc->m_child_custody_by_process.find(ledger_1->process_iid);
-        if (it != sintra::s_mproc->m_child_custody_by_process.end()) {
-            custody_record = it->second.custody.lock();
+    auto observe_custody_tuple = [&]() {
+        Custody_tuple_facts facts;
+        if (!ledger_0 || !ledger_1 || !sintra::s_mproc) {
+            return facts;
         }
-    }
-    bool custody_occurrences_isolated = false;
-    if (custody_record && ledger_0 && ledger_1) {
+
+        {
+            std::lock_guard<std::mutex> lock(
+                sintra::s_mproc->m_child_custody_mutex);
+            const auto it = sintra::s_mproc->m_child_custody_by_process.find(
+                ledger_1->process_iid);
+            if (it != sintra::s_mproc->m_child_custody_by_process.end()) {
+                custody_record = it->second.custody.lock();
+            }
+        }
+        facts.record_found = static_cast<bool>(custody_record);
+        if (!custody_record) {
+            return facts;
+        }
+
         std::lock_guard<std::mutex> lock(custody_record->mutex);
-        if (custody_record->occurrences.size() == 2) {
-            const auto& predecessor = custody_record->occurrences[0];
-            const auto& replacement = custody_record->occurrences[1];
-            custody_occurrences_isolated =
-                predecessor.occurrence == ledger_0->occurrence &&
-                predecessor.setup == sintra::detail::Managed_child_occurrence_record::
-                    setup_state::ownership_ready &&
-                predecessor.os_pid == ledger_0->pid &&
-                predecessor.os_process_start_stamp_available &&
-                predecessor.os_process_start_stamp == ledger_0->start_stamp &&
-                predecessor.publication_retired &&
-                predecessor.communication_retired &&
-                predecessor.os_exit_confirmed &&
-                replacement.occurrence == ledger_1->occurrence &&
-                replacement.setup == sintra::detail::Managed_child_occurrence_record::
-                    setup_state::ownership_ready &&
-                replacement.os_pid == ledger_1->pid &&
-                replacement.os_process_start_stamp_available &&
-                replacement.os_process_start_stamp == ledger_1->start_stamp &&
-                replacement.os_process_created &&
-                !replacement.os_exit_confirmed;
+        facts.occurrence_count_exact = custody_record->occurrences.size() == 2;
+        if (!facts.occurrence_count_exact) {
+            return facts;
         }
+
+        const auto& predecessor = custody_record->occurrences[0];
+        const auto& replacement = custody_record->occurrences[1];
+        facts.predecessor_occurrence =
+            predecessor.occurrence == ledger_0->occurrence;
+        facts.predecessor_setup =
+            predecessor.setup == sintra::detail::Managed_child_occurrence_record::
+                setup_state::ownership_ready;
+        facts.predecessor_pid = predecessor.os_pid == ledger_0->pid;
+        facts.predecessor_stamp_available =
+            predecessor.os_process_start_stamp_available;
+        facts.predecessor_stamp =
+            predecessor.os_process_start_stamp == ledger_0->start_stamp;
+        facts.predecessor_publication_retired = predecessor.publication_retired;
+        facts.predecessor_communication_retired = predecessor.communication_retired;
+        facts.predecessor_exit_confirmed = predecessor.os_exit_confirmed;
+        facts.replacement_occurrence =
+            replacement.occurrence == ledger_1->occurrence;
+        facts.replacement_setup =
+            replacement.setup == sintra::detail::Managed_child_occurrence_record::
+                setup_state::ownership_ready;
+        facts.replacement_pid = replacement.os_pid == ledger_1->pid;
+        facts.replacement_stamp_available =
+            replacement.os_process_start_stamp_available;
+        facts.replacement_stamp =
+            replacement.os_process_start_stamp == ledger_1->start_stamp;
+        facts.replacement_created = replacement.os_process_created;
+        facts.replacement_not_exited = !replacement.os_exit_confirmed;
+        return facts;
+    };
+
+    bool tuple_observed_while_replacement_live_and_request_held = false;
+    const auto tuple_deadline = std::chrono::steady_clock::now() + 10s;
+    while (true) {
+        const bool request_held_now = predecessor_request_held &&
+            !request_done.load(std::memory_order_acquire);
+#ifdef _WIN32
+        const bool replacement_live_now =
+            process_1 && WaitForSingleObject(process_1, 0) == WAIT_TIMEOUT;
+#else
+        const bool replacement_live_now = ledger_1 &&
+            exact_process_is_live(ledger_1->pid, ledger_1->start_stamp);
+#endif
+        tuple_facts = observe_custody_tuple();
+        if (tuple_facts.complete() && request_held_now && replacement_live_now) {
+            tuple_observed_while_replacement_live_and_request_held = true;
+            break;
+        }
+        if (!request_held_now || !replacement_live_now) {
+            break;
+        }
+        if (std::chrono::steady_clock::now() >= tuple_deadline) {
+            break;
+        }
+        std::this_thread::sleep_for(10ms);
+    }
+
+    const bool custody_occurrences_isolated = tuple_facts.complete() &&
+        tuple_observed_while_replacement_live_and_request_held;
+    if (!custody_occurrences_isolated) {
+        std::fprintf(stderr,
+            "R6_TUPLE_INVALID record=%d count=%d "
+            "pred_occurrence=%d pred_setup=%d pred_pid=%d "
+            "pred_stamp_available=%d pred_stamp=%d pred_publication_retired=%d "
+            "pred_communication_retired=%d pred_exit_confirmed=%d "
+            "replacement_occurrence=%d replacement_setup=%d replacement_pid=%d "
+            "replacement_stamp_available=%d replacement_stamp=%d "
+            "replacement_created=%d replacement_not_exited=%d "
+            "observed_while_live_and_held=%d\n",
+            tuple_facts.record_found ? 1 : 0,
+            tuple_facts.occurrence_count_exact ? 1 : 0,
+            tuple_facts.predecessor_occurrence ? 1 : 0,
+            tuple_facts.predecessor_setup ? 1 : 0,
+            tuple_facts.predecessor_pid ? 1 : 0,
+            tuple_facts.predecessor_stamp_available ? 1 : 0,
+            tuple_facts.predecessor_stamp ? 1 : 0,
+            tuple_facts.predecessor_publication_retired ? 1 : 0,
+            tuple_facts.predecessor_communication_retired ? 1 : 0,
+            tuple_facts.predecessor_exit_confirmed ? 1 : 0,
+            tuple_facts.replacement_occurrence ? 1 : 0,
+            tuple_facts.replacement_setup ? 1 : 0,
+            tuple_facts.replacement_pid ? 1 : 0,
+            tuple_facts.replacement_stamp_available ? 1 : 0,
+            tuple_facts.replacement_stamp ? 1 : 0,
+            tuple_facts.replacement_created ? 1 : 0,
+            tuple_facts.replacement_not_exited ? 1 : 0,
+            tuple_observed_while_replacement_live_and_request_held ? 1 : 0);
     }
 
     const bool predecessor_request_still_held =
