@@ -50,6 +50,32 @@ using std::unique_lock;
 
 extern thread_local bool tl_is_req_thread;
 
+#ifndef _WIN32
+namespace detail {
+namespace test_hooks {
+
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+using Child_reaped_callback = void (*)(pid_t, int) noexcept;
+inline std::atomic<Child_reaped_callback> s_child_reaped{nullptr};
+#endif
+
+} // namespace test_hooks
+
+inline void child_reaped_for_test(pid_t pid, int status) noexcept
+{
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    if (auto callback = test_hooks::s_child_reaped.load(std::memory_order_acquire)) {
+        callback(pid, status);
+    }
+#else
+    (void)pid;
+    (void)status;
+#endif
+}
+
+} // namespace detail
+#endif
+
 // Protects access to s_mproc during signal dispatch to prevent use-after-free.
 // On POSIX: The signal dispatch thread takes a shared lock when accessing s_mproc.
 // On Windows: The CRT signal handler thread takes a shared lock when accessing s_mproc.
@@ -1139,6 +1165,7 @@ Managed_process::~Managed_process()
             pid_t result = ::waitpid(pid, &status, sent_sigkill ? 0 : WNOHANG);
 
             if (result == pid) {
+                detail::child_reaped_for_test(pid, status);
                 break;
             }
 
@@ -1228,37 +1255,55 @@ Managed_process::~Managed_process()
 #ifndef _WIN32
 inline void Managed_process::reap_finished_children()
 {
-    std::lock_guard<std::mutex> guard(m_spawned_child_pids_mutex);
-    if (m_spawned_child_pids.empty()) {
-        return;
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    std::vector<std::pair<pid_t, int>> reaped_children;
+#endif
+    {
+        std::lock_guard<std::mutex> guard(m_spawned_child_pids_mutex);
+        if (m_spawned_child_pids.empty()) {
+            return;
+        }
+
+        std::vector<pid_t> remaining;
+        remaining.reserve(m_spawned_child_pids.size());
+
+        for (pid_t pid : m_spawned_child_pids) {
+            if (pid <= 0) {
+                continue;
+            }
+
+            int   status = 0;
+            pid_t result = 0;
+            do {
+                result = ::waitpid(pid, &status, WNOHANG);
+            }
+            while (result == -1 && errno == EINTR);
+
+            if (result == 0) {
+                remaining.push_back(pid);
+                continue;
+            }
+
+            if (result == pid) {
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+                reaped_children.emplace_back(pid, status);
+#endif
+                continue;
+            }
+
+            if (result == -1 && errno != ECHILD) {
+                remaining.push_back(pid);
+            }
+        }
+
+        m_spawned_child_pids.swap(remaining);
     }
 
-    std::vector<pid_t> remaining;
-    remaining.reserve(m_spawned_child_pids.size());
-
-    for (pid_t pid : m_spawned_child_pids) {
-        if (pid <= 0) {
-            continue;
-        }
-
-        int   status = 0;
-        pid_t result = 0;
-        do {
-            result = ::waitpid(pid, &status, WNOHANG);
-        }
-        while (result == -1 && errno == EINTR);
-
-        if (result == 0) {
-            remaining.push_back(pid);
-            continue;
-        }
-
-        if (result == -1 && errno != ECHILD) {
-            remaining.push_back(pid);
-        }
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    for (const auto& [pid, status] : reaped_children) {
+        detail::child_reaped_for_test(pid, status);
     }
-
-    m_spawned_child_pids.swap(remaining);
+#endif
 }
 
 inline void Managed_process::forget_spawned_child_pid(pid_t pid)
@@ -2521,6 +2566,7 @@ Managed_process::cleanup_failed_spawned_process_startup(
                     pid_t wait_result = ::waitpid(pid, &status, WNOHANG);
                     if (wait_result == pid) {
                         forget_spawned_child_pid(pid);
+                        detail::child_reaped_for_test(pid, status);
                         return true;
                     }
                     if (wait_result == -1) {

@@ -48,6 +48,8 @@ namespace test_hooks {
 
 inline constexpr const char* k_stage_create_invitation_pre_admission_lock =
     "create_external_process_invitation/pre_admission_lock";
+inline constexpr const char* k_stage_spawn_success_before_readiness_wait =
+    "spawn_swarm_process/success_before_readiness_wait";
 
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
 using Runtime_stage_callback = void (*)(const char*);
@@ -953,6 +955,7 @@ inline size_t spawn_swarm_process(const Spawn_options& options)
         ? options.process_instance_id
         : make_process_instance_id();
     std::optional<Managed_process::Spawn_result> wait_spawn_result;
+    bool os_process_created = false;
 
 #ifdef _WIN32
     auto close_wait_spawn_process_handle = [&]() {
@@ -1099,12 +1102,18 @@ inline size_t spawn_swarm_process(const Spawn_options& options)
 
         spawn_args.piid = piid;
         auto result = s_mproc->spawn_swarm_process(spawn_args);
+        os_process_created = result.success && result.os_process_created;
         if (wait_requested) {
             wait_spawn_result = result;
         }
         if (result.success) {
             ++spawned;
         }
+    }
+
+    if (os_process_created) {
+        detail::runtime_stage_for_test(
+            detail::test_hooks::k_stage_spawn_success_before_readiness_wait);
     }
 
     if (spawned == 0 || !wait_requested) {
