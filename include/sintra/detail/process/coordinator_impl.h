@@ -105,6 +105,12 @@ using Coordinator_begin_process_draining_callback =
     void (*)(instance_id_type process_iid);
 inline std::atomic<Coordinator_begin_process_draining_callback>
     s_coordinator_begin_process_draining{nullptr};
+
+// Runs inside the real resolve_instance RPC handler so deadline tests can hold
+// nested synchronous readiness work without replacing the RPC path.
+using Coordinator_resolve_instance_callback = void (*)(const string& assigned_name);
+inline std::atomic<Coordinator_resolve_instance_callback>
+    s_coordinator_resolve_instance{nullptr};
 #endif
 
 }} // namespace detail::test_hooks
@@ -120,6 +126,19 @@ inline void coordinator_lock_stage_for_test(const char* stage)
 }
 #else
 inline void coordinator_lock_stage_for_test(const char*) {}
+#endif
+
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+inline void coordinator_resolve_instance_for_test(const string& assigned_name)
+{
+    const auto callback =
+        detail::test_hooks::s_coordinator_resolve_instance.load(std::memory_order_acquire);
+    if (callback) {
+        callback(assigned_name);
+    }
+}
+#else
+inline void coordinator_resolve_instance_for_test(const string&) {}
 #endif
 
 // EXPORTED EXCLUSIVELY FOR RPC
@@ -900,6 +919,8 @@ type_id_type Coordinator::resolve_type(const string& pretty_name)
 inline
 instance_id_type Coordinator::resolve_instance(const string& assigned_name)
 {
+    coordinator_resolve_instance_for_test(assigned_name);
+
     // Hold spinlock while accessing the iterator to prevent use-after-invalidation
     auto scoped_map = s_mproc->m_instance_id_of_assigned_name.scoped();
     auto it         = scoped_map.get().find(assigned_name);

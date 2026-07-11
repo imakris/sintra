@@ -1,0 +1,689 @@
+//
+// Managed-child hard readiness deadline baseline contract evidence (R1).
+//
+
+#include <sintra/sintra.h>
+#include <sintra/detail/ipc/process_utils.h>
+#include <sintra/detail/runtime.h>
+
+#include "test_utils.h"
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <signal.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#endif
+
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <cstdint>
+#include <cstdio>
+#include <exception>
+#include <filesystem>
+#include <fstream>
+#include <limits>
+#include <mutex>
+#include <optional>
+#include <sstream>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <thread>
+
+namespace {
+
+namespace fs = std::filesystem;
+
+constexpr std::string_view k_child_flag = "--managed_child_readiness_deadline_child";
+constexpr std::string_view k_nonce_flag = "--managed_child_readiness_deadline_nonce";
+constexpr std::string_view k_child_ledger_file = "child_ledger.complete";
+constexpr std::string_view k_child_release_file = "child_release.complete";
+constexpr std::string_view k_child_finalized_file = "child_finalized.complete";
+constexpr auto k_requested_wait_timeout = std::chrono::milliseconds(250);
+constexpr auto k_scheduling_tolerance = std::chrono::milliseconds(150);
+constexpr auto k_watchdog_timeout = std::chrono::seconds(10);
+constexpr sintra::instance_id_type k_child_process_iid = sintra::compose_instance(30u, 1ull);
+
+struct Child_ledger
+{
+    std::string nonce;
+    int       pid = -1;
+    bool      start_stamp_available = false;
+    uint64_t  start_stamp = 0;
+};
+
+struct Deadline_gate
+{
+    std::mutex                                  mutex;
+    std::condition_variable                     cv;
+    std::string                                 requested_target;
+    bool                                        readiness_started = false;
+    bool                                        resolution_entered = false;
+    bool                                        released = false;
+    std::chrono::steady_clock::time_point       readiness_started_at;
+    std::chrono::steady_clock::time_point       resolution_entered_at;
+};
+
+struct Spawn_call
+{
+    std::mutex               mutex;
+    std::condition_variable  cv;
+    bool                     done = false;
+    size_t                   scalar = std::numeric_limits<size_t>::max();
+    bool                     threw = false;
+};
+
+Deadline_gate* s_deadline_gate = nullptr;
+
+fs::path child_ledger_path(const fs::path& dir)
+{
+    return dir / std::string(k_child_ledger_file);
+}
+
+fs::path child_release_path(const fs::path& dir)
+{
+    return dir / std::string(k_child_release_file);
+}
+
+fs::path child_finalized_path(const fs::path& dir)
+{
+    return dir / std::string(k_child_finalized_file);
+}
+
+bool write_complete_file(const fs::path& path, const std::string& contents)
+{
+    const auto temporary_path = path.string() + ".tmp";
+    try {
+        {
+            std::ofstream out(temporary_path, std::ios::binary | std::ios::trunc);
+            if (!out) {
+                return false;
+            }
+            out << contents;
+            out.flush();
+            if (!out) {
+                return false;
+            }
+        }
+        fs::rename(temporary_path, path);
+        return true;
+    }
+    catch (...) {
+        std::error_code ignored;
+        fs::remove(temporary_path, ignored);
+        return false;
+    }
+}
+
+std::optional<Child_ledger> read_child_ledger(const fs::path& path)
+{
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        return std::nullopt;
+    }
+
+    Child_ledger ledger;
+    bool complete = false;
+    std::string line;
+    try {
+        while (std::getline(in, line)) {
+            const auto separator = line.find('=');
+            if (separator == std::string::npos) {
+                return std::nullopt;
+            }
+            const auto key = line.substr(0, separator);
+            const auto value = line.substr(separator + 1);
+            if (key == "nonce") {
+                ledger.nonce = value;
+            }
+            else
+            if (key == "pid") {
+                ledger.pid = std::stoi(value);
+            }
+            else
+            if (key == "start_stamp_available") {
+                ledger.start_stamp_available = value == "1";
+            }
+            else
+            if (key == "start_stamp") {
+                ledger.start_stamp = std::stoull(value);
+            }
+            else
+            if (key == "complete") {
+                complete = value == "1";
+            }
+        }
+    }
+    catch (...) {
+        return std::nullopt;
+    }
+
+    if (!complete || ledger.nonce.empty() || ledger.pid <= 0) {
+        return std::nullopt;
+    }
+    return ledger;
+}
+
+void runtime_stage_callback(const char* stage)
+{
+    if (!stage ||
+        std::string_view(stage) !=
+            sintra::detail::test_hooks::k_stage_spawn_success_before_readiness_wait)
+    {
+        return;
+    }
+
+    Deadline_gate* gate = s_deadline_gate;
+    if (!gate) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(gate->mutex);
+    gate->readiness_started = true;
+    gate->readiness_started_at = std::chrono::steady_clock::now();
+    gate->cv.notify_all();
+}
+
+void resolve_instance_callback(const std::string& assigned_name)
+{
+    Deadline_gate* gate = s_deadline_gate;
+    if (!gate) {
+        return;
+    }
+
+    std::unique_lock<std::mutex> lock(gate->mutex);
+    if (!gate->readiness_started || assigned_name != gate->requested_target) {
+        return;
+    }
+
+    gate->resolution_entered = true;
+    gate->resolution_entered_at = std::chrono::steady_clock::now();
+    gate->cv.notify_all();
+    gate->cv.wait(lock, [&]() {
+        return gate->released;
+    });
+}
+
+bool wait_for_resolution_entry(Deadline_gate& gate, std::chrono::milliseconds timeout)
+{
+    std::unique_lock<std::mutex> lock(gate.mutex);
+    return gate.cv.wait_for(lock, timeout, [&]() {
+        return gate.readiness_started && gate.resolution_entered;
+    });
+}
+
+void release_resolution(Deadline_gate& gate)
+{
+    std::lock_guard<std::mutex> lock(gate.mutex);
+    gate.released = true;
+    gate.cv.notify_all();
+}
+
+bool wait_for_spawn_call(Spawn_call& call, std::chrono::milliseconds timeout)
+{
+    std::unique_lock<std::mutex> lock(call.mutex);
+    return call.cv.wait_for(lock, timeout, [&]() {
+        return call.done;
+    });
+}
+
+bool exact_child_is_live(const Child_ledger& ledger)
+{
+    if (ledger.pid <= 0 ||
+        !ledger.start_stamp_available ||
+        !sintra::is_process_alive(static_cast<uint32_t>(ledger.pid)))
+    {
+        return false;
+    }
+
+    const auto observed = sintra::query_process_start_stamp(
+        static_cast<uint32_t>(ledger.pid));
+    return observed && *observed == ledger.start_stamp;
+}
+
+#ifndef _WIN32
+struct Posix_reap_observation
+{
+    std::atomic<pid_t>     expected_pid{-1};
+    std::atomic<uint32_t>  count{0};
+    std::atomic<int>       status{0};
+};
+
+Posix_reap_observation s_posix_reap;
+
+void posix_child_reaped(pid_t pid, int status) noexcept
+{
+    if (s_posix_reap.expected_pid.load(std::memory_order_acquire) != pid) {
+        return;
+    }
+
+    s_posix_reap.status.store(status, std::memory_order_relaxed);
+    s_posix_reap.count.fetch_add(1, std::memory_order_release);
+}
+
+bool wait_for_posix_reap(std::chrono::milliseconds timeout)
+{
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (s_posix_reap.count.load(std::memory_order_acquire) != 0) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return s_posix_reap.count.load(std::memory_order_acquire) != 0;
+}
+#endif
+
+bool terminate_exact_child(const Child_ledger& ledger)
+{
+    if (!exact_child_is_live(ledger)) {
+        return false;
+    }
+
+#ifdef _WIN32
+    HANDLE process = OpenProcess(
+        PROCESS_TERMINATE | SYNCHRONIZE,
+        FALSE,
+        static_cast<DWORD>(ledger.pid));
+    if (!process) {
+        return false;
+    }
+    const bool terminated = TerminateProcess(process, 2) != 0;
+    if (terminated) {
+        WaitForSingleObject(process, 2000);
+    }
+    CloseHandle(process);
+    return terminated;
+#else
+    return ::kill(static_cast<pid_t>(ledger.pid), SIGTERM) == 0;
+#endif
+}
+
+int run_child(int argc, char* argv[], const fs::path& shared_dir)
+{
+    const std::string nonce = sintra::test::get_argv_value(argc, argv, k_nonce_flag);
+    if (nonce.empty()) {
+        std::fprintf(stderr, "managed_child_readiness_deadline: child nonce missing\n");
+        return 2;
+    }
+
+    try {
+        sintra::init(argc, argv);
+    }
+    catch (const std::exception& error) {
+        std::fprintf(stderr, "managed_child_readiness_deadline: child init failed: %s\n", error.what());
+        return 2;
+    }
+
+    const int pid = sintra::test::get_pid();
+    const auto start_stamp = sintra::current_process_start_stamp();
+    std::ostringstream marker;
+    marker << "nonce=" << nonce << '\n'
+           << "pid=" << pid << '\n'
+           << "start_stamp_available=" << (start_stamp.has_value() ? 1 : 0) << '\n'
+           << "start_stamp=" << start_stamp.value_or(0) << '\n'
+           << "complete=1\n";
+    if (!write_complete_file(child_ledger_path(shared_dir), marker.str())) {
+        sintra::detail::finalize();
+        return 2;
+    }
+
+    const bool released = sintra::test::wait_for_file(
+        child_release_path(shared_dir),
+        std::chrono::seconds(30),
+        std::chrono::milliseconds(10));
+    if (!released) {
+        sintra::detail::finalize();
+        return 2;
+    }
+
+    bool finalized = false;
+    try {
+        finalized = sintra::detail::finalize();
+    }
+    catch (...) {
+        return 2;
+    }
+
+    if (!finalized ||
+        !write_complete_file(
+            child_finalized_path(shared_dir),
+            "finalized=1\ncomplete=1\n"))
+    {
+        return 2;
+    }
+    return 0;
+}
+
+int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
+{
+    const std::string binary_path = sintra::test::get_binary_path(argc, argv);
+    if (binary_path.empty()) {
+        return 2;
+    }
+
+    try {
+        sintra::init(argc, argv);
+    }
+    catch (const std::exception& error) {
+        std::fprintf(stderr, "managed_child_readiness_deadline: root init failed: %s\n", error.what());
+        return 2;
+    }
+
+    const auto nonce_value = std::chrono::steady_clock::now().time_since_epoch().count();
+    const std::string nonce = std::to_string(nonce_value) + "_" +
+        std::to_string(sintra::test::get_pid());
+    Deadline_gate gate;
+    gate.requested_target = "managed_child_deadline_target_" + nonce;
+    Spawn_call call;
+    s_deadline_gate = &gate;
+    sintra::detail::test_hooks::s_runtime_stage.store(
+        &runtime_stage_callback,
+        std::memory_order_release);
+    sintra::detail::test_hooks::s_coordinator_resolve_instance.store(
+        &resolve_instance_callback,
+        std::memory_order_release);
+#ifndef _WIN32
+    s_posix_reap.expected_pid.store(-1, std::memory_order_relaxed);
+    s_posix_reap.count.store(0, std::memory_order_relaxed);
+    s_posix_reap.status.store(0, std::memory_order_relaxed);
+    sintra::detail::test_hooks::s_child_reaped.store(
+        &posix_child_reaped,
+        std::memory_order_release);
+#endif
+
+    sintra::Spawn_options options;
+    options.binary_path = binary_path;
+    options.args = {
+        std::string(k_child_flag),
+        std::string(k_nonce_flag),
+        nonce,
+    };
+    options.process_instance_id = k_child_process_iid;
+    options.wait_for_instance_name = gate.requested_target;
+    options.wait_timeout = k_requested_wait_timeout;
+    options.lifetime.enable_lifeline = false;
+
+    std::thread spawn_thread([&]() {
+        try {
+            call.scalar = sintra::spawn_swarm_process(options);
+        }
+        catch (...) {
+            call.threw = true;
+        }
+        {
+            std::lock_guard<std::mutex> lock(call.mutex);
+            call.done = true;
+        }
+        call.cv.notify_all();
+    });
+
+    const bool resolution_entered = wait_for_resolution_entry(gate, k_watchdog_timeout);
+    std::chrono::steady_clock::time_point readiness_started_at;
+    std::chrono::steady_clock::time_point resolution_entered_at;
+    if (resolution_entered) {
+        std::lock_guard<std::mutex> lock(gate.mutex);
+        readiness_started_at = gate.readiness_started_at;
+        resolution_entered_at = gate.resolution_entered_at;
+    }
+
+    const bool ledger_file_seen = sintra::test::wait_for_file(
+        child_ledger_path(shared.path()),
+        k_watchdog_timeout,
+        std::chrono::milliseconds(10));
+    const auto ledger = ledger_file_seen
+        ? read_child_ledger(child_ledger_path(shared.path()))
+        : std::nullopt;
+    const bool ledger_identity_valid = ledger && ledger->nonce == nonce;
+    const auto observed_start_stamp = ledger
+        ? sintra::query_process_start_stamp(static_cast<uint32_t>(ledger->pid))
+        : std::nullopt;
+    const bool start_stamp_verified =
+        ledger_identity_valid &&
+        ledger->start_stamp_available &&
+        observed_start_stamp &&
+        *observed_start_stamp == ledger->start_stamp;
+    const bool child_alive_during_hold =
+        start_stamp_verified && exact_child_is_live(*ledger);
+
+#ifdef _WIN32
+    HANDLE child_process = ledger
+        ? OpenProcess(
+            SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE,
+            FALSE,
+            static_cast<DWORD>(ledger->pid))
+        : nullptr;
+    const bool native_identity_verified =
+        child_alive_during_hold &&
+        child_process &&
+        WaitForSingleObject(child_process, 0) == WAIT_TIMEOUT;
+#else
+    if (ledger_identity_valid) {
+        s_posix_reap.expected_pid.store(
+            static_cast<pid_t>(ledger->pid),
+            std::memory_order_release);
+    }
+    const bool native_identity_verified = child_alive_during_hold;
+#endif
+
+    const auto requested_deadline = readiness_started_at + k_requested_wait_timeout;
+    // The production deadline is constructed immediately before the transported
+    // resolve call. Measuring a full timeout plus tolerance from entry into the
+    // handler is therefore a conservative lower bound on its overrun.
+    const auto observation_time =
+        resolution_entered_at + k_requested_wait_timeout + k_scheduling_tolerance;
+    if (resolution_entered && std::chrono::steady_clock::now() < observation_time) {
+        std::this_thread::sleep_until(observation_time);
+    }
+
+    bool caller_done_at_observation = false;
+    {
+        std::lock_guard<std::mutex> lock(call.mutex);
+        caller_done_at_observation = call.done;
+    }
+    const auto observed_at = std::chrono::steady_clock::now();
+    const bool resolution_entered_before_deadline =
+        resolution_entered && resolution_entered_at < requested_deadline;
+    const bool child_alive_at_observation =
+        ledger && start_stamp_verified && exact_child_is_live(*ledger);
+    const bool trapped_beyond_deadline =
+        resolution_entered &&
+        !caller_done_at_observation &&
+        observed_at >= observation_time &&
+        child_alive_at_observation;
+    const auto overrun_ms = resolution_entered
+        ? std::chrono::duration_cast<std::chrono::milliseconds>(
+            observed_at - resolution_entered_at - k_requested_wait_timeout).count()
+        : -1;
+
+    release_resolution(gate);
+    const bool spawn_call_completed = wait_for_spawn_call(call, k_watchdog_timeout);
+    if (!spawn_call_completed) {
+        write_complete_file(child_release_path(shared.path()), "release=1\ncomplete=1\n");
+    }
+    spawn_thread.join();
+
+    sintra::detail::test_hooks::s_coordinator_resolve_instance.store(
+        nullptr,
+        std::memory_order_release);
+    sintra::detail::test_hooks::s_runtime_stage.store(
+        nullptr,
+        std::memory_order_release);
+    s_deadline_gate = nullptr;
+
+    bool scalar_zero = false;
+    bool call_threw = false;
+    {
+        std::lock_guard<std::mutex> lock(call.mutex);
+        scalar_zero = call.done && call.scalar == 0;
+        call_threw = call.threw;
+    }
+
+    const bool child_release_written = write_complete_file(
+        child_release_path(shared.path()),
+        "release=1\ncomplete=1\n");
+    const bool child_finalized = sintra::test::wait_for_file(
+        child_finalized_path(shared.path()),
+        k_watchdog_timeout,
+        std::chrono::milliseconds(10));
+
+    bool native_exit_confirmed = false;
+    bool native_normal_exit = false;
+    bool survivor_absent = false;
+    bool forced_cleanup = false;
+
+#ifdef _WIN32
+    if (child_process && WaitForSingleObject(child_process, 10000) == WAIT_OBJECT_0) {
+        DWORD exit_code = STILL_ACTIVE;
+        native_exit_confirmed = GetExitCodeProcess(child_process, &exit_code) != 0;
+        native_normal_exit = native_exit_confirmed && exit_code == 0;
+    }
+#else
+    wait_for_posix_reap(k_watchdog_timeout);
+#endif
+
+    if (ledger && !native_exit_confirmed && exact_child_is_live(*ledger)) {
+        forced_cleanup = terminate_exact_child(*ledger);
+#ifdef _WIN32
+        if (child_process && WaitForSingleObject(child_process, 2000) == WAIT_OBJECT_0) {
+            DWORD exit_code = STILL_ACTIVE;
+            native_exit_confirmed = GetExitCodeProcess(child_process, &exit_code) != 0;
+        }
+#else
+        wait_for_posix_reap(std::chrono::seconds(2));
+#endif
+    }
+
+    bool root_finalized = false;
+    try {
+        root_finalized = sintra::detail::finalize();
+    }
+    catch (...) {
+    }
+
+#ifndef _WIN32
+    if (root_finalized) {
+        wait_for_posix_reap(std::chrono::seconds(1));
+    }
+    const uint32_t reap_count = s_posix_reap.count.load(std::memory_order_acquire);
+    const int reap_status = s_posix_reap.status.load(std::memory_order_relaxed);
+    native_exit_confirmed = reap_count == 1;
+    native_normal_exit =
+        native_exit_confirmed &&
+        WIFEXITED(reap_status) &&
+        WEXITSTATUS(reap_status) == 0;
+    sintra::detail::test_hooks::s_child_reaped.store(nullptr, std::memory_order_release);
+    s_posix_reap.expected_pid.store(-1, std::memory_order_release);
+    const bool child_reap_hook_cleared = true;
+#else
+    const uint32_t reap_count = 0;
+    const int reap_status = 0;
+    const bool child_reap_hook_cleared = true;
+#endif
+
+    survivor_absent =
+        native_exit_confirmed &&
+        ledger &&
+        !exact_child_is_live(*ledger);
+
+#ifdef _WIN32
+    if (child_process) {
+        CloseHandle(child_process);
+    }
+#endif
+
+    const bool baseline_valid =
+        resolution_entered &&
+        resolution_entered_before_deadline &&
+        ledger_identity_valid &&
+        start_stamp_verified &&
+        native_identity_verified &&
+        child_alive_during_hold &&
+        trapped_beyond_deadline &&
+        spawn_call_completed &&
+        scalar_zero &&
+        !call_threw &&
+        child_release_written &&
+        child_finalized &&
+        native_exit_confirmed &&
+        native_normal_exit &&
+        survivor_absent &&
+        !forced_cleanup &&
+        child_reap_hook_cleared &&
+        root_finalized;
+
+    if (baseline_valid) {
+        std::printf(
+            "R1_RED_VALID wait_timeout_ms=%lld tolerance_ms=%lld overrun_ms=%lld "
+            "resolve_entered_before_deadline=1 caller_done_at_observation=0 "
+            "native_identity_verified=1 child_alive_during_hold=1 scalar=0 "
+            "child_finalized=1 native_exit_confirmed=1 normal_status=1 "
+            "survivor_absent=1 reap_count=%s\n",
+            static_cast<long long>(k_requested_wait_timeout.count()),
+            static_cast<long long>(k_scheduling_tolerance.count()),
+            static_cast<long long>(overrun_ms),
+#ifdef _WIN32
+            "not_applicable"
+#else
+            "1"
+#endif
+            );
+        std::fflush(stdout);
+        return 1;
+    }
+
+    std::fprintf(
+        stderr,
+        "R1_INVALID resolution_entered=%d entered_before_deadline=%d trapped=%d "
+        "caller_done_at_observation=%d overrun_ms=%lld spawn_completed=%d scalar_zero=%d "
+        "call_threw=%d ledger=%d ledger_identity=%d start_stamp_verified=%d "
+        "native_identity_verified=%d child_alive_during_hold=%d child_alive_at_observation=%d "
+        "child_release=%d child_finalized=%d native_exit_confirmed=%d normal_status=%d "
+        "survivor_absent=%d reap_count=%u reap_status=%d forced_cleanup=%d "
+        "child_reap_hook_cleared=%d root_finalized=%d\n",
+        resolution_entered ? 1 : 0,
+        resolution_entered_before_deadline ? 1 : 0,
+        trapped_beyond_deadline ? 1 : 0,
+        caller_done_at_observation ? 1 : 0,
+        static_cast<long long>(overrun_ms),
+        spawn_call_completed ? 1 : 0,
+        scalar_zero ? 1 : 0,
+        call_threw ? 1 : 0,
+        ledger ? 1 : 0,
+        ledger_identity_valid ? 1 : 0,
+        start_stamp_verified ? 1 : 0,
+        native_identity_verified ? 1 : 0,
+        child_alive_during_hold ? 1 : 0,
+        child_alive_at_observation ? 1 : 0,
+        child_release_written ? 1 : 0,
+        child_finalized ? 1 : 0,
+        native_exit_confirmed ? 1 : 0,
+        native_normal_exit ? 1 : 0,
+        survivor_absent ? 1 : 0,
+        static_cast<unsigned>(reap_count),
+        reap_status,
+        forced_cleanup ? 1 : 0,
+        child_reap_hook_cleared ? 1 : 0,
+        root_finalized ? 1 : 0);
+    return 2;
+}
+
+} // namespace
+
+int main(int argc, char* argv[])
+{
+    sintra::test::Shared_directory shared(
+        "SINTRA_MANAGED_CHILD_READINESS_DEADLINE_DIR",
+        "managed_child_readiness_deadline_contract");
+
+    if (sintra::test::has_argv_flag(argc, argv, k_child_flag)) {
+        return run_child(argc, argv, shared.path());
+    }
+    return run_root(argc, argv, shared);
+}
