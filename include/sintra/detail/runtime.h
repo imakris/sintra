@@ -292,6 +292,8 @@ private:
         const Managed_child_custody&, std::chrono::steady_clock::time_point);
     friend Managed_child_custody_observation release_managed_child(
         const Managed_child_custody&, std::chrono::steady_clock::time_point);
+    friend Managed_child_custody_observation cleanup_managed_child(
+        const Managed_child_custody&, std::chrono::steady_clock::time_point);
     friend Managed_child_custody_observation retry_managed_child_release(
         const Managed_child_custody&, std::chrono::steady_clock::time_point);
 };
@@ -302,6 +304,9 @@ Managed_child_custody_observation wait_managed_child(
     const Managed_child_custody& custody,
     std::chrono::steady_clock::time_point deadline);
 Managed_child_custody_observation release_managed_child(
+    const Managed_child_custody& custody,
+    std::chrono::steady_clock::time_point deadline);
+Managed_child_custody_observation cleanup_managed_child(
     const Managed_child_custody& custody,
     std::chrono::steady_clock::time_point deadline);
 Managed_child_custody_observation retry_managed_child_release(
@@ -1416,6 +1421,16 @@ inline Managed_child_custody_observation release_managed_child(
 {
     if (custody.m_record && s_mproc) {
         s_mproc->request_child_custody_release(custody.m_record);
+    }
+    return wait_managed_child(custody, deadline);
+}
+
+inline Managed_child_custody_observation cleanup_managed_child(
+    const Managed_child_custody& custody,
+    std::chrono::steady_clock::time_point deadline)
+{
+    if (custody.m_record && s_mproc) {
+        s_mproc->request_child_custody_release(custody.m_record, true);
     }
     return wait_managed_child(custody, deadline);
 }

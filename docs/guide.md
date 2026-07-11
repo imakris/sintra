@@ -318,12 +318,16 @@ Accepts durable custody for one additional managed process before authorizing
 OS creation. Use `Spawn_options` to select
 the binary, arguments, optional expected instance name, wait timeout, and
 lifeline policy. The opaque handle supports compact observation and bounded
-`release_managed_child`, `retry_managed_child_release`, and
-`wait_managed_child` operations; readiness timeout never discards custody.
+`release_managed_child`, `cleanup_managed_child`,
+`retry_managed_child_release`, and `wait_managed_child` operations. Graceful
+release remains passive; explicit cleanup monotonically escalates the retained
+custody owner to lifeline release and authoritative retirement. Readiness or
+cleanup timeout never discards custody.
 
 Compiled examples/tests:
 - [`tests/spawn_wait_test.cpp`](../tests/spawn_wait_test.cpp)
 - [`tests/lifeline_basic_test.cpp`](../tests/lifeline_basic_test.cpp)
+- [`tests/managed_child_public_cleanup_contract_test.cpp`](../tests/managed_child_public_cleanup_contract_test.cpp)
 
 ### `sintra::join_swarm`
 
