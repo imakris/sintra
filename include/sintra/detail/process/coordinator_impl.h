@@ -111,6 +111,14 @@ inline std::atomic<Coordinator_begin_process_draining_callback>
 using Coordinator_resolve_instance_callback = void (*)(const string& assigned_name);
 inline std::atomic<Coordinator_resolve_instance_callback>
     s_coordinator_resolve_instance{nullptr};
+
+// Observes the exact coordinator transition that removes a published
+// transceiver's assigned-name mapping. The callback runs while the coordinator
+// publish mutex is held and therefore must not call back into the coordinator.
+using Coordinator_name_retired_callback =
+    void (*)(instance_id_type instance_id, const string& assigned_name);
+inline std::atomic<Coordinator_name_retired_callback>
+    s_coordinator_name_retired{nullptr};
 #endif
 
 }} // namespace detail::test_hooks
@@ -126,6 +134,21 @@ inline void coordinator_lock_stage_for_test(const char* stage)
 }
 #else
 inline void coordinator_lock_stage_for_test(const char*) {}
+#endif
+
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+inline void coordinator_name_retired_for_test(
+    instance_id_type instance_id,
+    const string&    assigned_name)
+{
+    const auto callback =
+        detail::test_hooks::s_coordinator_name_retired.load(std::memory_order_acquire);
+    if (callback) {
+        callback(instance_id, assigned_name);
+    }
+}
+#else
+inline void coordinator_name_retired_for_test(instance_id_type, const string&) {}
 #endif
 
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
@@ -1137,6 +1160,8 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
 
     // keep a copy of the assigned name before deleting it
     auto tn = it->second;
+
+    coordinator_name_retired_for_test(iid, tn.name);
 
     std::vector<Pending_instance_publication> ready_notifications;
     bool     crash_seen     = false;
