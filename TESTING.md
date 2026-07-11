@@ -48,12 +48,12 @@ test_name iterations
 ```
 # Core functionality tests
 dummy_test 1
-ping_pong_test 200
-basic_pub_sub 30
+ping_pong_test 50
+basic_pub_sub 40
 
 # Stress tests
-barrier_stress_test 10
-recovery_test 10
+barrier_stress_test 30
+recovery_test 30
 
 # Manual tests (commented out by default)
 # manual/some_problematic_test 10
@@ -248,9 +248,46 @@ The number of iterations for each test is specified directly in `active_tests.tx
 
 The iteration counts in `active_tests.txt` reflect:
 
-- **Flakiness detection**: Tests with non-deterministic behavior (e.g., `ping_pong_test: 200`) run many times to catch race conditions
+- **Flakiness detection**: Tests with non-deterministic behavior (e.g., `ping_pong_test: 50`) run many times to catch race conditions
 - **Basic validation**: Simple tests (e.g., `dummy_test: 1`) run once per configuration
 - **Stress testing**: Tests that exercise specific edge cases run repeatedly
+
+### Stability Full Run
+
+The checked-in counts are the stable stress schedule. Their historical
+reference is GitHub Actions run `28695736456`, job `85105427012`, at commit
+`566b48471cb088e47af4ff83e60dd32eeb21dcec`. That job used an iteration
+multiplier of `1`, ran both Debug and Release, had no time budget, and exhausted
+every scheduled repetition successfully. The current roster carries those
+historical weights forward for the tests that still exist; new or substantially
+reworked contract tests start at one repetition until dedicated evidence
+justifies a higher weight.
+
+For the current 89-entry roster, a stability full run means all of the
+following:
+
+- use `tests/active_tests.txt` unchanged, with an iteration multiplier of `1`;
+- run both Debug and Release;
+- do not supply `--time-budget` or otherwise stop after partial repetition
+  coverage;
+- complete all 1,480 base roster repetitions in each configuration;
+- include all 27 cases discovered from `ipc_rings_tests`, each of which inherits
+  the roster weight of 10, producing 1,740 actual invocations per configuration
+  and 3,480 across Debug and Release; and
+- exclude tests under `tests/manual/`.
+
+Windows, Linux, and macOS are stability-full lanes only when they run those
+multiplier-1 Debug and Release schedules to completion without a time budget.
+The FreeBSD Release lane uses multiplier `0.5` (894 actual invocations), and the
+Debug coverage lanes use multiplier `0.25` (496 actual invocations). They are
+scaled supporting lanes, not stability full runs.
+
+During active repair, CI may intentionally use a time budget. The runner can
+stop when that budget expires and report success after every selected test has
+passed at least once, even when later scheduled repetitions were not executed.
+Such a run is a broad/progress gate and must not be reported as stability-full
+certification. The repository is considered stable only after the untruncated
+multiplier-1 Debug and Release schedule completes on the stability-full lanes.
 
 ### Special Test Handling
 
@@ -259,7 +296,7 @@ The iteration counts in `active_tests.txt` reflect:
 This test executable contains multiple sub-tests. The runner automatically discovers and expands them:
 
 ```
-ipc_rings_tests 1
+ipc_rings_tests 10
 ```
 
 Becomes:
@@ -327,7 +364,7 @@ python3 run_tests.py [OPTIONS]
 Options:
   --timeout SECONDS     Timeout per test run in seconds (default: 5.0)
   --build-dir PATH      Path to build directory (default: ../build-ninja2)
-  --config CONFIG       Build configuration: Debug or Release (default: Debug)
+  --config CONFIG       Build configuration set (default: Debug,Release)
   --verbose             Show detailed output for each test run
   --preserve-stalled-processes
                         Keep stalled processes for debugging instead of killing them
@@ -421,6 +458,11 @@ CI runs use the same `active_tests.txt` as local development, ensuring:
 - Consistent test coverage across platforms
 - Easy adjustment of test scope (comment out flaky tests temporarily)
 - Single source of truth for all environments
+
+Selection breadth and stability stress depth are separate facts. A CI run that
+selects every roster entry but uses a multiplier below `1` or a time budget is
+not a stability full run; see [Stability Full Run](#stability-full-run) for the
+authoritative counts and lane classification.
 
 ### Build-Only CI
 

@@ -305,9 +305,9 @@ bool test_runtime_process_entry_early_returns(int argc, char* argv[])
 
     sintra::Spawn_options empty_spawn_options;
     ok &= sintra::test::assert_true(
-        sintra::spawn_swarm_process(empty_spawn_options) == 0,
+        !sintra::spawn_swarm_process(empty_spawn_options),
         k_prefix,
-        "spawn_swarm_process() with empty binary should return 0 without runtime");
+        "spawn_swarm_process() with empty binary should reject without runtime");
 
     ok &= sintra::test::assert_true(
         sintra::join_swarm(0) == sintra::invalid_instance_id,
@@ -501,7 +501,7 @@ bool test_teardown_admission_rejects_process_entry_points(int argc, char* argv[]
             : "lifecycle_guardrails_test";
 
         ok &= sintra::test::assert_true(
-            sintra::spawn_swarm_process(spawn_options) == 0,
+            !sintra::spawn_swarm_process(spawn_options),
             k_prefix,
             "spawn_swarm_process() should reject while teardown admission is closed");
 

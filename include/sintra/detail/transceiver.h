@@ -915,6 +915,12 @@ inline constexpr const char* k_stage_rpc_get_until_deadline_before_abandon =
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
 using Rpc_get_until_stage_callback = void (*)(const char* stage);
 inline std::atomic<Rpc_get_until_stage_callback> s_rpc_get_until_stage{nullptr};
+
+// Runs after an RPC invocation has captured and validated its raw target but
+// before transported call state is registered. The test callback may hold the
+// caller thread and must not call back into that RPC.
+using Rpc_outbound_request_callback = void (*)(instance_id_type target);
+inline std::atomic<Rpc_outbound_request_callback> s_rpc_outbound_request{nullptr};
 #endif
 
 }} // namespace detail::test_hooks

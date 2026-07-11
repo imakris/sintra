@@ -28,7 +28,19 @@ struct Spawn_options
     Lifetime_policy            lifetime;
 };
 
-size_t spawn_swarm_process(const Spawn_options& options);
+Managed_child_custody spawn_swarm_process(const Spawn_options& options);
+
+Managed_child_custody_observation observe_managed_child(
+    const Managed_child_custody& custody);
+Managed_child_custody_observation release_managed_child(
+    const Managed_child_custody& custody,
+    std::chrono::steady_clock::time_point deadline);
+Managed_child_custody_observation retry_managed_child_release(
+    const Managed_child_custody& custody,
+    std::chrono::steady_clock::time_point deadline);
+Managed_child_custody_observation wait_managed_child(
+    const Managed_child_custody& custody,
+    std::chrono::steady_clock::time_point deadline);
 ```
 
 Use when:
@@ -48,37 +60,45 @@ Contract:
 - `process_instance_id` defaults to a fresh process instance id. Setting it
   pins the new process to a specific id; the caller must guarantee the id
   is not already in use.
-- `wait_for_instance_name` is optional. When set, the call blocks until the
-  coordinator resolves that name. With `wait_timeout` zero, the wait blocks
-  indefinitely on the coordinator's `rpc_wait_for_instance`. With a
-  positive `wait_timeout`, the call polls `rpc_resolve_instance` with
-  exponential backoff up to the deadline.
+- `wait_for_instance_name` is optional. Readiness resolution runs as
+  Sintra-owned work. With a positive `wait_timeout`, the caller waits only on
+  the custody record's monotone notification through that deadline; timeout
+  returns accepted, incomplete custody and starts failed-readiness cleanup.
+  A zero timeout retains the unbounded legacy readiness wait intentionally.
 - `lifetime` controls the lifeline policy applied to the child (see
   `Lifetime_policy`).
-- The return value is `1` on successful spawn. When the wait phase
-  fails (timeout, exception, or the resolved id remained invalid), the
-  function returns zero even when the OS spawn itself succeeded.
+- A non-empty return handle means Sintra accepted durable logical custody
+  before OS creation authority. `observe_managed_child()` separately reports
+  confirmed readiness, admitted/created/exited occurrence counts, and release
+  state. OS-create failure remains an accepted no-child record rather than a
+  fabricated native identity.
 - Calls made while a lifecycle teardown protocol is active are rejected and
-  return zero with a warning logged.
+  return an empty handle with a warning logged; rejection creates no child.
 
 Threading and lifecycle:
 
-- Call from a top-level user thread, not from a message handler or
-  post-handler callback. The implementation takes the teardown admission
-  lock and issues coordinator RPCs, both of which require a normal control
-  context.
+- Call from a top-level user thread. Acceptance takes the teardown admission
+  lock; deadline-facing waits do not enter coordinator work and wait only on
+  custody notifications.
 - Successful spawns participate in subsequent barriers and coordinator
   membership immediately. The wait variant is the way to gate later code on
   the participant having published its name.
-- A successful return with `wait_for_instance_name` set means the
-  coordinator has observed the name; it does not guarantee the child has
-  finished its own slot activations beyond that publication step.
+- `readiness_reached` means the coordinator observed the requested name; it
+  does not imply release or any later retirement fact.
+- `release_managed_child()` closes recovery before requesting retirement and
+  returns only confirmed facts by its absolute deadline. An incomplete return
+  retains ownership. Retry and wait operate on the same opaque record; they do
+  not reconstruct authority from a process id or name.
+- Complete release joins authoritative exact-occurrence publication and
+  communication retirement with confirmed OS exit for every admitted
+  occurrence. Dropping the handle does not drop Sintra's retained obligation.
 
 Failures:
 
-- Returns zero (with a logged error) when `binary_path` is empty.
-- Returns zero when wait fails: the coordinator returned
-  `invalid_instance_id`, `wait_timeout` elapsed, or the wait RPC threw.
+- Returns an empty handle (with a logged error) when validation or lifecycle
+  admission rejects before custody acceptance.
+- Readiness timeout or resolution failure returns accepted custody with
+  `readiness_reached == false`; it is not a spawn-count failure.
 
 Example source:
 

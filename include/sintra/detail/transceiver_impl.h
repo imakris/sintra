@@ -1163,6 +1163,14 @@ Transceiver::rpc_async_impl(instance_id_type instance_id, Args... args)
         throw std::runtime_error("rpc_async is not available for fire-and-forget RPC exports.");
     }
 
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    if (auto callback =
+            detail::test_hooks::s_rpc_outbound_request.load(std::memory_order_acquire))
+    {
+        callback(instance_id);
+    }
+#endif
+
     using return_type         = typename rpc_storage_type<typename MESSAGE_T::return_type>::type;
     using return_message_type = Message<Enclosure<return_type>, void, not_defined_type_id>;
 

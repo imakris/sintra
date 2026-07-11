@@ -510,8 +510,11 @@ Maps `(type_id, handler_type)` -> handler functions. Handlers are activated with
    coordinator (`Managed_process::enable_recovery`). The coordinator records the process slot in
    `Coordinator::m_requested_recovery`, so a later abnormal termination routes through `Coordinator::recover_if_required()`
    instead of being treated as a permanent shutdown.
-2. `Managed_process::spawn_swarm_process()` caches the executable + argument vector for each spawned child in
-   `m_cached_spawns` and increments a per-process occurrence counter. The counter is appended to the `req`/`rep` ring
+2. The managed-child custody supervisor accepts one durable logical record before
+   `Managed_process::spawn_swarm_process()` receives OS-creation authority. Each
+   launch or recovery appends an immutable occurrence and binds the returned
+   native identity immediately on success. The spawn path caches the executable
+   + argument vector for each spawned child in `m_cached_spawns` and increments a per-process occurrence counter. The counter is appended to the `req`/`rep` ring
    filenames (`Message_ring_{R,W}::get_base_filename`) so every recovery attempt attaches to a fresh pair of shared-memory
    files while previous rings remain available for post-mortem inspection.
 3. Before launching the replacement child the coordinator spins up new `Process_message_reader` instances for the target
@@ -529,6 +532,11 @@ Maps `(type_id, handler_type)` -> handler functions. Handlers are activated with
    traces remain intact while the dumps shrink to the tens-of-megabytes range. macOS does not expose `MADV_DONTDUMP`, so
    the recovery test itself sets `RLIMIT_CORE` to zero just before its intentional `std::abort()` to keep GitHub Actions
    runners from filling their disks with multi-gigabyte Mach-O cores.
+
+Recovery admission also consults the retained custody record and is refused
+after release closes recovery. Publication retirement, communication
+retirement, and OS exit are reported by their authoritative owners into the
+matching occurrence; a replacement never completes its predecessor's facts.
 
 **What "safe respawn" means**: by pre-mapping the request/reply readers before `spawn_detached()` the coordinator guarantees
 that the recovering child sees ready-to-use channels as soon as it reaches user code. No address-space layout promises are

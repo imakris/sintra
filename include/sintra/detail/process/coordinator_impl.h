@@ -89,6 +89,8 @@ inline constexpr const char* k_stage_make_process_group_groups_locked =
     "make_process_group/groups_locked";
 inline constexpr const char* k_stage_reserve_external_invitation_entered =
     "reserve_external_process_invitation/entered";
+inline constexpr const char* k_stage_publish_transceiver_locked =
+    "publish_transceiver/publish_locked";
 
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
 // Coordinator lock-stage hook: tests running in the coordinator process may
@@ -105,6 +107,28 @@ using Coordinator_begin_process_draining_callback =
     void (*)(instance_id_type process_iid);
 inline std::atomic<Coordinator_begin_process_draining_callback>
     s_coordinator_begin_process_draining{nullptr};
+
+// Runs inside the real resolve_instance RPC handler so deadline tests can hold
+// nested synchronous readiness work without replacing the RPC path.
+using Coordinator_resolve_instance_callback = void (*)(const string& assigned_name);
+inline std::atomic<Coordinator_resolve_instance_callback>
+    s_coordinator_resolve_instance{nullptr};
+
+// Observes the exact coordinator transition that removes a published
+// transceiver's assigned-name mapping. The callback runs while the coordinator
+// publish mutex is held and therefore must not call back into the coordinator.
+using Coordinator_name_retired_callback =
+    void (*)(instance_id_type instance_id, const string& assigned_name);
+inline std::atomic<Coordinator_name_retired_callback>
+    s_coordinator_name_retired{nullptr};
+
+// Observes each still-present process-publication registry entry immediately
+// before Coordinator destruction discards the registry as raw container state.
+// The callback must not call back into the coordinator.
+using Coordinator_destroying_publication_callback =
+    void (*)(instance_id_type process_iid) noexcept;
+inline std::atomic<Coordinator_destroying_publication_callback>
+    s_coordinator_destroying_publication{nullptr};
 #endif
 
 }} // namespace detail::test_hooks
@@ -120,6 +144,34 @@ inline void coordinator_lock_stage_for_test(const char* stage)
 }
 #else
 inline void coordinator_lock_stage_for_test(const char*) {}
+#endif
+
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+inline void coordinator_name_retired_for_test(
+    instance_id_type instance_id,
+    const string&    assigned_name)
+{
+    const auto callback =
+        detail::test_hooks::s_coordinator_name_retired.load(std::memory_order_acquire);
+    if (callback) {
+        callback(instance_id, assigned_name);
+    }
+}
+#else
+inline void coordinator_name_retired_for_test(instance_id_type, const string&) {}
+#endif
+
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+inline void coordinator_resolve_instance_for_test(const string& assigned_name)
+{
+    const auto callback =
+        detail::test_hooks::s_coordinator_resolve_instance.load(std::memory_order_acquire);
+    if (callback) {
+        callback(assigned_name);
+    }
+}
+#else
+inline void coordinator_resolve_instance_for_test(const string&) {}
 #endif
 
 // EXPORTED EXCLUSIVELY FOR RPC
@@ -352,6 +404,18 @@ Coordinator::Coordinator():
 inline
 Coordinator::~Coordinator()
 {
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    if (auto callback =
+            detail::test_hooks::s_coordinator_destroying_publication.load(
+                std::memory_order_acquire))
+    {
+        for (const auto& [process_iid, registry] : m_transceiver_registry) {
+            (void)registry;
+            callback(process_iid);
+        }
+    }
+#endif
+
     m_shutdown.store(true, std::memory_order_release);
     {
         std::lock_guard lock(m_external_process_invitations_mutex);
@@ -454,8 +518,11 @@ inline bool Coordinator::process_id_is_known_for_external_invitation(
             }
         }
     }
-    if (s_mproc && s_mproc->m_cached_spawns.count(process_iid) != 0) {
-        return true;
+    if (s_mproc) {
+        std::lock_guard<std::mutex> cache_lock(s_mproc->m_cached_spawns_mutex);
+        if (s_mproc->m_cached_spawns.count(process_iid) != 0) {
+            return true;
+        }
     }
 
     {
@@ -827,8 +894,11 @@ inline bool Coordinator::claim_external_process_invitation(
                 return false;
             }
         }
-        if (s_mproc && s_mproc->m_cached_spawns.count(process_iid) != 0) {
-            return false;
+        if (s_mproc) {
+            std::lock_guard<std::mutex> cache_lock(s_mproc->m_cached_spawns_mutex);
+            if (s_mproc->m_cached_spawns.count(process_iid) != 0) {
+                return false;
+            }
         }
         m_transceiver_registry[process_iid];
         m_external_attached_processes.insert(process_iid);
@@ -900,6 +970,8 @@ type_id_type Coordinator::resolve_type(const string& pretty_name)
 inline
 instance_id_type Coordinator::resolve_instance(const string& assigned_name)
 {
+    coordinator_resolve_instance_for_test(assigned_name);
+
     // Hold spinlock while accessing the iterator to prevent use-after-invalidation
     auto scoped_map = s_mproc->m_instance_id_of_assigned_name.scoped();
     auto it         = scoped_map.get().find(assigned_name);
@@ -969,6 +1041,8 @@ instance_id_type Coordinator::publish_transceiver(
     const string&      assigned_name)
 {
     std::lock_guard lock(m_publish_mutex);
+    coordinator_lock_stage_for_test(
+        detail::test_hooks::k_stage_publish_transceiver_locked);
 
     // empty strings are not valid names
     if (assigned_name.empty()) {
@@ -1117,6 +1191,8 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
     // keep a copy of the assigned name before deleting it
     auto tn = it->second;
 
+    coordinator_name_retired_for_test(iid, tn.name);
+
     std::vector<Pending_instance_publication> ready_notifications;
     bool     crash_seen     = false;
     int      crash_status   = 0;
@@ -1195,6 +1271,12 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
         }
 
         note_draining_state_change();
+        if (s_mproc) {
+            // Registry/group retirement and reader stop are authoritative here;
+            // report them to the exact active custody occurrence before any
+            // recovery can admit its immutable successor.
+            s_mproc->note_child_publication_and_communication_retired(process_iid);
+        }
         {
             std::lock_guard<mutex> crash_lock(m_crash_mutex);
             auto crash_it = m_recent_crash_status.find(process_iid);
@@ -1726,6 +1808,10 @@ void Coordinator::recover_if_required(const Crash_info& info)
         return;
     }
 
+    if (!s_mproc || !s_mproc->child_custody_allows_recovery(info.process_iid)) {
+        return;
+    }
+
     Recovery_policy policy;
     Recovery_runner runner;
     {
@@ -1768,18 +1854,26 @@ void Coordinator::recover_if_required(const Crash_info& info)
         if (should_cancel()) {
             return;
         }
+        if (!s_mproc || !s_mproc->child_custody_allows_recovery(info.process_iid)) {
+            return;
+        }
         if (spawned->exchange(true)) {
             return;
         }
-        auto spawn_it = s_mproc->m_cached_spawns.find(info.process_iid);
-        if (spawn_it == s_mproc->m_cached_spawns.end()) {
-            Log_stream(log_level::warning)
-                << "Recovery skipped for process "
-                << static_cast<unsigned long long>(info.process_iid)
-                << " because no recovery launch command is available.\n";
-            return;
+        Managed_process::Spawn_swarm_process_args spawn_args;
+        {
+            std::lock_guard<std::mutex> cache_lock(s_mproc->m_cached_spawns_mutex);
+            auto spawn_it = s_mproc->m_cached_spawns.find(info.process_iid);
+            if (spawn_it == s_mproc->m_cached_spawns.end()) {
+                Log_stream(log_level::warning)
+                    << "Recovery skipped for process "
+                    << static_cast<unsigned long long>(info.process_iid)
+                    << " because no recovery launch command is available.\n";
+                return;
+            }
+            spawn_args = spawn_it->second;
         }
-        s_mproc->spawn_swarm_process(spawn_it->second);
+        s_mproc->spawn_swarm_process(spawn_args);
     };
 
     if (!runner) {

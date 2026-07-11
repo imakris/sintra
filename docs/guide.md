@@ -311,12 +311,15 @@ child initiates shutdown and hard-exits after the configured timeout.
 Signature:
 
 ```cpp
-size_t spawn_swarm_process(const Spawn_options& options);
+Managed_child_custody spawn_swarm_process(const Spawn_options& options);
 ```
 
-Spawns one additional managed process. Use `Spawn_options` to select
+Accepts durable custody for one additional managed process before authorizing
+OS creation. Use `Spawn_options` to select
 the binary, arguments, optional expected instance name, wait timeout, and
-lifeline policy.
+lifeline policy. The opaque handle supports compact observation and bounded
+`release_managed_child`, `retry_managed_child_release`, and
+`wait_managed_child` operations; readiness timeout never discards custody.
 
 Compiled examples/tests:
 - [`tests/spawn_wait_test.cpp`](../tests/spawn_wait_test.cpp)
