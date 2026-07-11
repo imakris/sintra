@@ -54,6 +54,16 @@ inline constexpr const char* k_stage_spawn_success_before_readiness_wait =
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
 using Runtime_stage_callback = void (*)(const char*);
 inline std::atomic<Runtime_stage_callback> s_runtime_stage{nullptr};
+
+// Observes the completed OS-spawn result after teardown admission has been
+// released and before public readiness waiting begins. Tests may rendezvous at
+// this boundary; production builds compile the call away.
+using Runtime_spawn_success_callback = void (*)(
+    instance_id_type process_iid,
+    int              os_pid,
+    bool             lifeline_enabled,
+    bool             lifeline_write_retained);
+inline std::atomic<Runtime_spawn_success_callback> s_runtime_spawn_success{nullptr};
 #endif
 
 } // namespace test_hooks
@@ -68,6 +78,30 @@ inline void runtime_stage_for_test(const char* stage)
 #else
 inline void runtime_stage_for_test(const char*) {}
 #endif
+
+inline void runtime_spawn_success_for_test(
+    instance_id_type process_iid,
+    int              os_pid,
+    bool             lifeline_enabled,
+    bool             lifeline_write_retained)
+{
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    if (auto callback =
+            test_hooks::s_runtime_spawn_success.load(std::memory_order_acquire))
+    {
+        callback(
+            process_iid,
+            os_pid,
+            lifeline_enabled,
+            lifeline_write_retained);
+    }
+#else
+    (void)process_iid;
+    (void)os_pid;
+    (void)lifeline_enabled;
+    (void)lifeline_write_retained;
+#endif
+}
 
 inline void append_branch(
     std::vector<Process_descriptor>&   branches,
@@ -1112,6 +1146,11 @@ inline size_t spawn_swarm_process(const Spawn_options& options)
     }
 
     if (os_process_created) {
+        detail::runtime_spawn_success_for_test(
+            wait_spawn_result ? wait_spawn_result->instance_id : piid,
+            wait_spawn_result ? wait_spawn_result->os_pid : -1,
+            wait_spawn_result ? wait_spawn_result->lifeline_enabled : options.lifetime.enable_lifeline,
+            wait_spawn_result ? wait_spawn_result->lifeline_write_retained : false);
         detail::runtime_stage_for_test(
             detail::test_hooks::k_stage_spawn_success_before_readiness_wait);
     }

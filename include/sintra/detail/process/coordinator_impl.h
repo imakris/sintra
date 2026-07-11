@@ -119,6 +119,14 @@ using Coordinator_name_retired_callback =
     void (*)(instance_id_type instance_id, const string& assigned_name);
 inline std::atomic<Coordinator_name_retired_callback>
     s_coordinator_name_retired{nullptr};
+
+// Observes each still-present process-publication registry entry immediately
+// before Coordinator destruction discards the registry as raw container state.
+// The callback must not call back into the coordinator.
+using Coordinator_destroying_publication_callback =
+    void (*)(instance_id_type process_iid) noexcept;
+inline std::atomic<Coordinator_destroying_publication_callback>
+    s_coordinator_destroying_publication{nullptr};
 #endif
 
 }} // namespace detail::test_hooks
@@ -394,6 +402,18 @@ Coordinator::Coordinator():
 inline
 Coordinator::~Coordinator()
 {
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    if (auto callback =
+            detail::test_hooks::s_coordinator_destroying_publication.load(
+                std::memory_order_acquire))
+    {
+        for (const auto& [process_iid, registry] : m_transceiver_registry) {
+            (void)registry;
+            callback(process_iid);
+        }
+    }
+#endif
+
     m_shutdown.store(true, std::memory_order_release);
     {
         std::lock_guard lock(m_external_process_invitations_mutex);
