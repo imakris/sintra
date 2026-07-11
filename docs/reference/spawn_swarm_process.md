@@ -35,6 +35,9 @@ Managed_child_custody_observation observe_managed_child(
 Managed_child_custody_observation release_managed_child(
     const Managed_child_custody& custody,
     std::chrono::steady_clock::time_point deadline);
+Managed_child_custody_observation cleanup_managed_child(
+    const Managed_child_custody& custody,
+    std::chrono::steady_clock::time_point deadline);
 Managed_child_custody_observation retry_managed_child_release(
     const Managed_child_custody& custody,
     std::chrono::steady_clock::time_point deadline);
@@ -86,9 +89,18 @@ Threading and lifecycle:
 - `readiness_reached` means the coordinator observed the requested name; it
   does not imply release or any later retirement fact.
 - `release_managed_child()` closes recovery before requesting retirement and
-  returns only confirmed facts by its absolute deadline. An incomplete return
-  retains ownership. Retry and wait operate on the same opaque record; they do
-  not reconstruct authority from a process id or name.
+  waits for graceful/natural retirement, returning only confirmed facts by its
+  absolute deadline. It does not release the child's lifeline or initiate
+  adverse cleanup.
+- `cleanup_managed_child()` is the explicit adverse-path escalation. It closes
+  recovery and monotonically asks Sintra's retained custody owner to drain the
+  exact admitted occurrences, release their lifelines, retire publication and
+  communication authoritatively, and confirm OS exit. The deadline bounds only
+  the caller's wait; an incomplete return retains ownership and cleanup keeps
+  running.
+- Retry and wait operate on the same opaque record; they do not reconstruct
+  authority from a process id or name. A cleanup escalation cannot be
+  downgraded by a later graceful release or retry request.
 - Complete release joins authoritative exact-occurrence publication and
   communication retirement with confirmed OS exit for every admitted
   occurrence. Dropping the handle does not drop Sintra's retained obligation.
@@ -105,6 +117,7 @@ Example source:
 - [tests/spawn_wait_test.cpp](../../tests/spawn_wait_test.cpp)
 - [tests/spawn_detached_test.cpp](../../tests/spawn_detached_test.cpp)
 - [tests/lifeline_basic_test.cpp](../../tests/lifeline_basic_test.cpp)
+- [tests/managed_child_public_cleanup_contract_test.cpp](../../tests/managed_child_public_cleanup_contract_test.cpp)
 
 See also:
 

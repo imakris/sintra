@@ -95,6 +95,11 @@ using Managed_child_prepublication_cleanup_callback =
     void (*)(const char*, instance_id_type, uint32_t);
 inline std::atomic<Managed_child_prepublication_cleanup_callback>
     s_managed_child_prepublication_cleanup{nullptr};
+
+using Managed_child_cleanup_callback =
+    void (*)(const char*, instance_id_type, uint32_t);
+inline std::atomic<Managed_child_cleanup_callback>
+    s_managed_child_cleanup{nullptr};
 #endif
 
 inline constexpr const char* k_managed_child_fail_pre_create_setup =
@@ -105,10 +110,20 @@ inline constexpr const char* k_managed_child_fail_native_observer_start =
     "managed_child_native_observer_start";
 inline constexpr const char* k_managed_child_fail_release_worker =
     "managed_child_release_worker";
+inline constexpr const char* k_managed_child_fail_cleanup_actions =
+    "managed_child_cleanup_actions";
 inline constexpr const char* k_managed_child_prepublication_first_miss =
     "managed_child_prepublication_first_miss";
 inline constexpr const char* k_managed_child_prepublication_reader_terminal =
     "managed_child_prepublication_reader_terminal";
+inline constexpr const char* k_managed_child_cleanup_before_actions =
+    "managed_child_cleanup_before_actions";
+inline constexpr const char* k_managed_child_cleanup_lifeline_released =
+    "managed_child_cleanup_lifeline_released";
+inline constexpr const char* k_managed_child_cleanup_retirement_confirmed =
+    "managed_child_cleanup_retirement_confirmed";
+inline constexpr const char* k_managed_child_release_waiting_passive =
+    "managed_child_release_waiting_passive";
 
 } // namespace test_hooks
 
@@ -174,6 +189,24 @@ inline void managed_child_prepublication_cleanup_for_test(
 {
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
     if (auto callback = test_hooks::s_managed_child_prepublication_cleanup.load(
+            std::memory_order_acquire))
+    {
+        callback(stage, process_instance_id, occurrence);
+    }
+#else
+    (void)stage;
+    (void)process_instance_id;
+    (void)occurrence;
+#endif
+}
+
+inline void managed_child_cleanup_for_test(
+    const char* stage,
+    instance_id_type process_instance_id,
+    uint32_t occurrence)
+{
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    if (auto callback = test_hooks::s_managed_child_cleanup.load(
             std::memory_order_acquire))
     {
         callback(stage, process_instance_id, occurrence);
@@ -2224,7 +2257,6 @@ inline void Managed_process::request_child_custody_release(
                 failure_occurrence);
 
         std::vector<std::pair<uint32_t, instance_id_type>> admitted;
-        bool cleanup_requested = false;
         {
             std::unique_lock<std::mutex> lock(custody->mutex);
             custody->changed.wait(lock, [&]() {
@@ -2235,7 +2267,6 @@ inline void Managed_process::request_child_custody_release(
                             detail::Managed_child_occurrence_record::setup_state::pending;
                     });
             });
-            cleanup_requested = custody->cleanup_requested;
             for (const auto& occurrence : custody->occurrences) {
                 if (occurrence.setup ==
                     detail::Managed_child_occurrence_record::setup_state::ownership_ready)
@@ -2247,6 +2278,7 @@ inline void Managed_process::request_child_custody_release(
             }
         }
 
+        std::vector<std::pair<uint32_t, instance_id_type>> active;
         for (const auto& [occurrence, process_iid] : admitted) {
             bool exact_active_occurrence = false;
             {
@@ -2261,6 +2293,7 @@ inline void Managed_process::request_child_custody_release(
             if (!exact_active_occurrence) {
                 continue;
             }
+            active.emplace_back(occurrence, process_iid);
 
             {
                 std::lock_guard<std::mutex> cache_lock(m_cached_spawns_mutex);
@@ -2273,11 +2306,28 @@ inline void Managed_process::request_child_custody_release(
                 }
             }
 
-            if (cleanup_requested) {
+        }
+
+        auto perform_cleanup = [&]() {
+            if (!active.empty()) {
+                detail::managed_child_failure_for_test(
+                    detail::test_hooks::k_managed_child_fail_cleanup_actions,
+                    active.front().second,
+                    active.front().first);
+            }
+            for (const auto& [occurrence, process_iid] : active) {
+                detail::managed_child_cleanup_for_test(
+                    detail::test_hooks::k_managed_child_cleanup_before_actions,
+                    process_iid,
+                    occurrence);
                 if (s_coord && s_coord->set_draining_state(process_iid, 1)) {
                     s_coord->note_draining_state_change();
                 }
                 release_lifeline(process_iid);
+                detail::managed_child_cleanup_for_test(
+                    detail::test_hooks::k_managed_child_cleanup_lifeline_released,
+                    process_iid,
+                    occurrence);
                 if (s_coord && !s_coord->unpublish_transceiver(process_iid)) {
                     // A first miss is provisional: a publish RPC may already
                     // be in flight. Stop and terminally join the exact reader,
@@ -2308,39 +2358,103 @@ inline void Managed_process::request_child_custody_release(
                         custody->changed.notify_all();
                     }
                 }
-            }
-        }
-
-#ifdef _WIN32
-        // If native observer registration failed after handle bind, release
-        // owns the retained handle and performs the fallback wait here. This
-        // worker may block; the public deadline caller only waits on custody.
-        while (true) {
-            HANDLE fallback_handle = nullptr;
-            uint32_t fallback_occurrence = 0;
-            {
-                std::lock_guard<std::mutex> lock(custody->mutex);
-                for (auto& occurrence : custody->occurrences) {
-                    if (occurrence.setup ==
-                            detail::Managed_child_occurrence_record::setup_state::ownership_ready &&
-                        !occurrence.os_exit_confirmed &&
-                        !occurrence.os_exit_observer_registered &&
-                        occurrence.os_process_handle_owned &&
-                        occurrence.os_process_handle != 0)
-                    {
-                        fallback_handle = reinterpret_cast<HANDLE>(
-                            occurrence.os_process_handle);
-                        fallback_occurrence = occurrence.occurrence;
-                        occurrence.os_exit_observer_registered = true;
-                        break;
-                    }
+                if (s_coord) {
+                    // The coordinator path above either reported the exact
+                    // occurrence's publication/communication retirement, or
+                    // the canonical second miss confirmed both after its
+                    // reader became terminal.
+                    detail::managed_child_cleanup_for_test(
+                        detail::test_hooks::k_managed_child_cleanup_retirement_confirmed,
+                        process_iid,
+                        occurrence);
                 }
             }
-            if (!fallback_handle) {
-                break;
+        };
+
+        auto all_terminal_locked = [&]() {
+            return std::all_of(
+                custody->occurrences.begin(), custody->occurrences.end(),
+                [](const detail::Managed_child_occurrence_record& occurrence) {
+                    return
+                        occurrence.setup ==
+                            detail::Managed_child_occurrence_record::setup_state::no_child ||
+                        (occurrence.setup ==
+                            detail::Managed_child_occurrence_record::setup_state::ownership_ready &&
+                         occurrence.publication_retired &&
+                         occurrence.communication_retired &&
+                         occurrence.os_exit_confirmed);
+                });
+        };
+
+        bool cleanup_applied = false;
+        bool passive_wait_reported = false;
+        while (true) {
+            bool should_cleanup = false;
+#ifdef _WIN32
+            HANDLE fallback_handle = nullptr;
+            uint32_t fallback_occurrence = 0;
+#endif
+            {
+                std::unique_lock<std::mutex> lock(custody->mutex);
+                if (all_terminal_locked()) {
+                    custody->release_complete = true;
+                    break;
+                }
+                should_cleanup = custody->cleanup_requested && !cleanup_applied;
+                if (!custody->cleanup_requested && !passive_wait_reported) {
+                    // Observation-only test seam: at this point the single
+                    // retained worker has evaluated the monotone cleanup flag
+                    // as false and is about to wait (or poll a fallback native
+                    // handle). The callback must not re-enter custody APIs.
+                    detail::managed_child_cleanup_for_test(
+                        detail::test_hooks::k_managed_child_release_waiting_passive,
+                        active.empty() ? invalid_instance_id : active.front().second,
+                        active.empty() ? 0 : active.front().first);
+                    passive_wait_reported = true;
+                }
+#ifdef _WIN32
+                if (!should_cleanup) {
+                    for (const auto& occurrence : custody->occurrences) {
+                        if (occurrence.setup ==
+                                detail::Managed_child_occurrence_record::setup_state::ownership_ready &&
+                            !occurrence.os_exit_confirmed &&
+                            !occurrence.os_exit_observer_registered &&
+                            occurrence.os_process_handle_owned &&
+                            occurrence.os_process_handle != 0)
+                        {
+                            fallback_handle = reinterpret_cast<HANDLE>(
+                                occurrence.os_process_handle);
+                            fallback_occurrence = occurrence.occurrence;
+                            break;
+                        }
+                    }
+                }
+#endif
+                if (!should_cleanup
+#ifdef _WIN32
+                    && !fallback_handle
+#endif
+                    )
+                {
+                    custody->changed.wait(lock, [&]() {
+                        return all_terminal_locked() ||
+                            (custody->cleanup_requested && !cleanup_applied);
+                    });
+                    continue;
+                }
             }
 
-            const auto wait_result = WaitForSingleObject(fallback_handle, INFINITE);
+            if (should_cleanup) {
+                perform_cleanup();
+                cleanup_applied = true;
+                continue;
+            }
+
+#ifdef _WIN32
+            // A retained fallback handle must not hide a later cleanup upgrade.
+            // Poll briefly in this owned worker, then re-check the custody flag;
+            // public deadline callers continue to wait only on custody->changed.
+            const auto wait_result = WaitForSingleObject(fallback_handle, 20);
             {
                 std::lock_guard<std::mutex> lock(custody->mutex);
                 for (auto& occurrence : custody->occurrences) {
@@ -2354,38 +2468,17 @@ inline void Managed_process::request_child_custody_release(
                             occurrence.os_process_handle_owned = false;
                             occurrence.os_process_handle = 0;
                         }
-                        else {
-                            occurrence.os_exit_observer_registered = false;
-                        }
                         break;
                     }
                 }
                 custody->changed.notify_all();
             }
-            if (wait_result != WAIT_OBJECT_0) {
+            if (wait_result == WAIT_FAILED) {
                 throw std::runtime_error(
                     "Managed-child fallback native-exit wait failed");
             }
-        }
 #endif
-
-        std::unique_lock<std::mutex> lock(custody->mutex);
-        custody->changed.wait(lock, [&]() {
-            return std::all_of(
-                custody->occurrences.begin(), custody->occurrences.end(),
-                [](const detail::Managed_child_occurrence_record& occurrence) {
-                    return
-                        occurrence.setup ==
-                            detail::Managed_child_occurrence_record::setup_state::no_child ||
-                        (occurrence.setup ==
-                            detail::Managed_child_occurrence_record::setup_state::ownership_ready &&
-                         occurrence.publication_retired &&
-                         occurrence.communication_retired &&
-                         occurrence.os_exit_confirmed);
-                });
-        });
-        custody->release_complete = true;
-        lock.unlock();
+        }
         custody->changed.notify_all();
         retire_child_custody_if_complete(custody);
         }
