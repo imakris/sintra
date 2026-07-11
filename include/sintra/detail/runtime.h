@@ -382,7 +382,6 @@ inline void cleanup_failed_init_noexcept()
         }
 
         delete failed_mproc;
-        s_mproc = nullptr;
     }
 
     s_init_once           = false;
@@ -434,8 +433,9 @@ inline void init(
     }));
 
     try {
-        s_mproc = new Managed_process;
-        s_mproc->init(argc, argv);
+        auto* initialized_mproc = new Managed_process;
+        assert(s_mproc == initialized_mproc);
+        initialized_mproc->init(argc, argv);
     }
     catch (...) {
         detail::cleanup_failed_init_noexcept();
@@ -576,7 +576,6 @@ inline bool finalize_impl()
     s_mproc->unpublish_all_transceivers();
 
     delete s_mproc;
-    s_mproc = nullptr;
 
     // Reset flags to allow another init()/finalize() cycle.
     s_init_once = false;

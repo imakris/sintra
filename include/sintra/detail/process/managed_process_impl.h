@@ -504,13 +504,20 @@ namespace {
     {
         std::call_once(signal_dispatcher_once_flag(), []() {
             int pipefd_local[2];
-            if (::pipe(pipefd_local) != 0) {
+            if (detail::call_pipe2(pipefd_local, O_CLOEXEC) != 0) {
                 return;
             }
 
-            int flags = ::fcntl(pipefd_local[1], F_GETFL, 0);
-            if (flags != -1) {
-                ::fcntl(pipefd_local[1], F_SETFL, flags | O_NONBLOCK);
+            const int flags = detail::fcntl_retry(pipefd_local[1], F_GETFL);
+            if (flags == -1 ||
+                detail::fcntl_retry(
+                    pipefd_local[1], F_SETFL, flags | O_NONBLOCK) == -1)
+            {
+                const int saved_errno = errno;
+                ::close(pipefd_local[0]);
+                ::close(pipefd_local[1]);
+                errno = saved_errno;
+                return;
             }
 
             auto& pipefd = signal_pipe();
@@ -1167,8 +1174,11 @@ Managed_process::Managed_process():
     m_messages_rejected_since_reference_time(0),
     m_total_sequences_missed(0)
 {
-    assert(s_mproc == nullptr);
-    s_mproc = this;
+    {
+        Dispatch_unique_lock dispatch_lock(dispatch_shutdown_mutex_instance);
+        assert(s_mproc == nullptr);
+        s_mproc = this;
+    }
 
     m_pid = detail::get_current_process_id();
     if (auto start_stamp = current_process_start_stamp()) {
@@ -1328,46 +1338,19 @@ Managed_process::~Managed_process()
         }
     }
 
-    // Close the signal dispatch pipe to allow the dispatch thread to exit cleanly
-    auto& pipefd = signal_pipe();
-    if (pipefd[1] != -1) {
-        ::close(pipefd[1]);
-        pipefd[1] = -1;
-    }
-    if (pipefd[0] != -1) {
-        ::close(pipefd[0]);
-        pipefd[0] = -1;
-    }
-
-    // Wait for any in-flight signal dispatches to complete before clearing s_mproc.
-    // On POSIX: The dispatch thread may still be executing dispatch_signal_number()
-    //           after we closed the pipes above.
-    // On Windows: The CRT signal handler thread may be executing s_signal_handler().
-    // Taking an exclusive lock here ensures all shared locks are released before we
-    // clear s_mproc and destroy the object, preventing use-after-free.
-    {
-        Dispatch_unique_lock dispatch_lock(dispatch_shutdown_mutex_instance);
-        s_mproc = nullptr;
-        s_mproc_id = 0;
-    }
-#else
-    // Close the signal dispatch event to allow the dispatch thread to exit cleanly
-    if (signal_event() != NULL) {
-        CloseHandle(signal_event());
-        signal_event() = NULL;
-    }
-
-    // Wait for any in-flight signal dispatches to complete before clearing s_mproc.
-    // The Windows dispatcher thread may still be executing dispatch_signal_number()
-    // after we closed the event above.
-    // Taking an exclusive lock ensures all shared locks are released before we
-    // clear s_mproc and destroy the object, preventing use-after-free.
-    {
-        Dispatch_unique_lock dispatch_lock(dispatch_shutdown_mutex_instance);
-        s_mproc = nullptr;
-        s_mproc_id = 0;
-    }
 #endif
+
+    // The once-created signal pipe/event and its detached dispatcher are
+    // process-lifetime infrastructure. Keep the transport live across runtime
+    // teardown so a later init can bind to the same dispatcher. The OS closes
+    // the process-owned descriptors/handle at process exit. Taking the unique
+    // lock here waits out any callback bound to this runtime and prevents a new
+    // callback from observing the pointer while it is cleared.
+    {
+        Dispatch_unique_lock dispatch_lock(dispatch_shutdown_mutex_instance);
+        s_mproc = nullptr;
+        s_mproc_id = 0;
+    }
 }
 
 #ifndef _WIN32
