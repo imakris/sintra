@@ -6,11 +6,17 @@ Status: Slices 1, 1A, 1B.1, 1B.2, 2, and 5 are closed; Slices 1B.3,
 FreeBSD, macOS, and Windows. Slice 6 remains conditional and cannot open before
 the protected A0 evidence/successor sequence closes.
 
-Sibling-track status, 2026-07-11: managed-child custody is open at Batch 1 plan
-closure. The custody track does not change the closed/drop decisions above, does
-not authorize Batch 2 evidence or production work yet, and does not reorder the
-protected A0 evidence -> managed transport successor -> fence successor ->
-conditional later-slices sequence.
+Sibling-track status, 2026-07-11, is derived from validated repository state:
+Batch 0/1 is **closed** and Batch 2 (or a later custody descendant) is authorized
+if and only if current HEAD's first-parent ancestry contains exactly one valid
+closure commit and the fresh live protection predicate in **Finite Batch 0/1
+Closure And Batch 2 Authorization** also passes. Before that commit, or on any
+missing/multiple/mismatched ancestry or live-state fact, Batch 0/1 is **open**
+and Batch 2/continuation is blocked. This descendant-safe predicate, not an
+earlier prose snapshot or chat verdict, is authoritative. The custody track does
+not change the legacy closed/drop decisions or reorder the protected A0 evidence
+-> managed transport successor -> fence successor -> conditional later-slices
+sequence.
 
 ## Relation To Existing Lifecycle Plans
 
@@ -305,9 +311,259 @@ Provenance, not a closure verdict:
   or `spinlocked_umap::try_scoped()`.
 - The initial Batch 0/1 diagnosis covered architecture/plan,
   dependency-pair, future evidence/migration, and governance/state lanes. It
-  produced the R3 and ordered 4A/4B/4C amendments recorded here. This edited
-  candidate has not yet received the required frozen-candidate verification or
-  unanimous independent plan review; no GREEN is claimed in this record.
+  produced the R3 and ordered 4A/4B/4C amendments recorded here. The exact
+  execution, remediation, verification, review, commit, and still-open boundary
+  state are recorded below; earlier candidate-level GREEN does not convert the
+  non-unanimous first boundary round into closure.
+
+### Batch 0/1 Execution, Verification, And Review Record
+
+All named workers, verifiers, and reviewers in this record ran as
+`gpt-5.6-sol`, xhigh reasoning, priority service tier. With the orchestrator
+occupying one of four active slots, each maximum review round used all three
+available fresh independent worker slots. `b01_plan_author` authored and
+remediated the plan; no author served as verifier or reviewer. Verifiers and
+reviewers received frozen candidates, and completed agents were closed before
+fresh rounds.
+
+Chronology and frozen identities:
+
+1. The initial maximum pre-author pool returned:
+   `b01_architecture_plan` **RED as expected before an author candidate**;
+   `b01_dependency` **GREEN**; and `b01_evidence_governance` **RED** on the
+   original R3/R4 ordering. This was diagnosis, not candidate closure.
+2. Focused diagnosis followed. `r34_harness_feasibility` returned
+   **INFEASIBLE** for a lawful framework R4 harness before dependency
+   decontamination. `r34_batch_order` and `r34_architecture_resolution` supplied
+   the adopted resolution: keep R4 source-only in Batch 2, make R3 a distinct
+   Sintra gate, and order the truthful framework 4A/4B/4C cutover recorded here.
+3. `b01_plan_author` froze the initial one-file author patch at SHA-256
+   `5812E249F34FD73572959A85A3B0EA23FF7DE4B21B085C4A4353843A35A73BA8`;
+   the historical working-file SHA-256 (non-gating for durable closure) was
+   `775375FF22CA011BEAA3982A9002D63557C325E2544166F63452B89ECA6DD558`.
+   Independent `b01_plan_verifier` returned **RED** with four findings:
+   impossible pre-create native-identity timing; reconciliation incorrectly
+   requiring A0 disposition before either track could land; R7/R8 lacking exact
+   source-supported causal baseline outcomes; and the legacy one-reviewer rule
+   not explicitly subordinated to custody's maximum-fresh/unanimous protocol.
+4. The author remediation froze patch SHA-256
+   `D135CBDFB32BF2E951476795D78EB5D7BE9507935A75992C19A722C5474E222A`
+   and historical working-file SHA-256 (non-gating for durable closure)
+   `C94E934EFEE1262926316E19C8DFC6414EB6053159C56CE8FE320F6A6EFD7B33`.
+   Independent `b01_plan_verifier_r2` returned **GREEN**.
+5. The first maximum final-candidate review returned
+   `b01_final_arch_review` **GREEN**,
+   `b01_final_governance_review` **GREEN**, and
+   `b01_final_evidence_review` **RED** with two material findings: the 4A
+   pin-only/custody-consumption split created an unbuildable defer trap after
+   Batch 3's source break, and R7 falsely implied lifeline release for a
+   lifeline-disabled child.
+6. Remediation made 4A the complete source-breaking framework custody call-site
+   cutover/deletion atom, preserved only the async admission/quiescence defect
+   for 4B RED, restricted 4C to async repair/orphan deletion, and corrected R7
+   to authoritative lifeline absence. The final candidate was 53815 bytes,
+   patch SHA-256
+   `B77623DCDD8F93DE5300C05D0698DE102ADC1AB374B4FBD98925E1A3C45065CD`,
+   with historical working-file SHA-256 (non-gating for durable closure)
+   `44940F6FE6E9439EC3B7988841A56E0E1AAC67ABD12F218794058ACDCD573CFF`.
+   Independent `b01_plan_verifier_r3` returned **GREEN**.
+7. The second maximum final-candidate review was unanimously unqualified
+   **GREEN**: `b01_final_arch_review_r2`, `b01_final_evidence_review_r2`, and
+   `b01_final_governance_review_r2`.
+8. The exact reviewed one-file candidate was committed locally and unpushed as
+   `cdd2d4a1cdcb3dca4dbcf575ad3d94ca73a443b5`, parent
+   `c60c1045dfc2382609eae36afbd637fe274b2871`, with 851 insertions and 8
+   deletions. The worktree was clean after commit. The commit used `--no-verify`
+   because this was documentation-only, its static verification was delegated,
+   and no compiler/build/test gate applied; this was not a waiver of any
+   applicable verification.
+9. The first maximum cumulative boundary round was **not unanimous**.
+   `b01_boundary_arch` returned **RED** and `b01_boundary_governance` returned
+   **RED**, both solely because the repository lacked this durable execution and
+   closure record. `b01_boundary_evidence` returned **GREEN**. No other boundary
+   defect was reported, but the two RED verdicts keep Batch 2 blocked.
+10. The first closure-record candidate was 14007 bytes with patch SHA-256
+    `92ED0AE58D7C75E5FF7B58279C8CB791CCD9E7C2EB77F629DE357107877D3823`;
+    its historical working-file SHA-256 (non-gating) was
+    `335DF1141069ECC72474B04320F3E1C076ADFC62C499560277730EB9BCA4B890`.
+    The second cumulative boundary round was also **not unanimous**:
+    `b01_boundary_arch_r2` returned **RED** with two findings—status/Next Action
+    would remain stale-open after a valid closure commit, and the required plan
+    identity used ambiguous working-file bytes instead of the raw Git blob.
+    `b01_boundary_evidence_r2` and `b01_boundary_governance_r2` both returned
+    **GREEN**. This remediation addresses those two findings; it does not convert
+    that historical round to unanimous GREEN.
+11. The transition-safe/raw-blob candidate was 17520 bytes with patch SHA-256
+    `A5AC6FB617B3E2559EA98F5074815FADB9EA70955CFADD560A41181E06D89D3E`;
+    its raw staged Git blob was 121734 bytes with SHA-256
+    `2EFA3D9786D61721D5F1DC252D42DC9BB832EF472A0AB9AA5FCB6935ED9DE96C`.
+    The third cumulative boundary round was **not unanimous**:
+    `b01_boundary_arch_r3` and `b01_boundary_governance_r3` returned **GREEN**;
+    `b01_boundary_evidence_r3` returned **RED** because a current-HEAD-only
+    predicate would reopen Batch 0/1 immediately after the first Batch 2 commit.
+    This remediation moves identity to one unique validated closure commit in
+    first-parent ancestry plus fresh live protection checks. It does not convert
+    the historical r3 round to unanimous GREEN.
+
+Delegated verifier gate summary:
+
+- Scope/state used `git status --short --branch`,
+  `git diff --cached --name-status`, `git diff --cached --stat`, and
+  `git diff --cached --numstat`; every frozen candidate contained only
+  `docs/lifecycle_recovery_plan.md` and no unstaged file.
+- Static patch validation used `git diff --cached --check` (exit `0`). Binary
+  patch identity used
+  `git diff --cached --binary --output=<temporary-file>`, `Get-Item` for exact
+  bytes, and `Get-FileHash -Algorithm SHA256`. Historical working-file hashes
+  above used `Get-FileHash -Algorithm SHA256 docs/lifecycle_recovery_plan.md`;
+  they are diagnostic only. Durable closure instead hashes the raw staged and
+  committed Git blobs byte-for-byte as specified below.
+- Source searches checked the named Sintra/framework control flow, forbidden
+  salvage surfaces, R3/R4/R7/R8 seams, dependency selection, and worktree/path
+  scope. Positive searches returned their expected matches; absence searches
+  returned `rg` exit `1` as the expected no-match result, not as a failure.
+- A0 status plus `git diff --cached --binary` byte/hash pipelines ran before and
+  after the plan batch and stayed at the exact seven paths, 155101 bytes, and
+  SHA-256 recorded below. Canonical/worktree status and porcelain collision
+  checks were recorded. The final process audit found no custody build, test,
+  server, child, or verifier process left running.
+- No compiler, configure, build, or test command was applicable to this
+  documentation-only Batch 1 change. This no-build determination was itself
+  independently verified; it is not missing evidence.
+
+Current reconstructable state at the opening of this closure-record candidate:
+
+- Dedicated custody worktree/branch is clean at local, unpushed
+  `cdd2d4a1cdcb3dca4dbcf575ad3d94ca73a443b5`; its parent and immutable
+  production base are `c60c1045dfc2382609eae36afbd637fe274b2871`.
+  Roll back this closure-record atom to `cdd2d4a...`; roll back the whole custody
+  plan branch to `c60c104...`.
+- Canonical Sintra remains clean on `master` at
+  `c60c1045dfc2382609eae36afbd637fe274b2871`, matching `origin/master`.
+- Canonical framework remains tracked-clean on `master` at
+  `3a69bfc8ccb8c0e42584542c96474113beeefbbb`. No framework custody worktree
+  exists. Protected untracked `mexce_protected_pow_probe.obj` is 3102372 bytes,
+  SHA-256
+  `767F8C138768E87FEF1FDBF828B853D5D60D6307D721FA805D3256763B52331E`.
+- Protected A0 remains branch `lifecycle-recovery-slice1`, HEAD
+  `099d78a7e1e4e53f875c64d8f9f295f686d0a8fb`, with the exact seven staged
+  paths listed below. Its binary patch remains 155101 bytes, SHA-256
+  `CEC127D3C964E27268702EFC5654B8FB4AC9804BCA6938B4F5A3F86DCB54C03C`.
+- The accepted online-review archive
+  `C:/plms/stress_artifacts/sintra_framework_lifecycle_online_review_20260711.zip`
+  remains evidence with SHA-256
+  `163F8C91FFEC7A1457240F63BF62233A43E95C6BE0069B0787A09A093FD630F9`.
+
+#### Finite Batch 0/1 Closure And Batch 2 Authorization
+
+The current closure-record edit is not self-authorizing. Freeze one exact staged
+identity pair: (a) the binary index diff against HEAD and (b) the raw Git blob
+already stored in the index for `docs/lifecycle_recovery_plan.md`. Require
+independent `b01_closure_verifier_r3` and a fresh maximum cumulative boundary
+round consisting of `b01_boundary_arch_r4`, `b01_boundary_evidence_r4`, and
+`b01_boundary_governance_r4`. All four must return unqualified **GREEN** on that
+identical staged patch/blob pair. Any edit, identity change, or non-GREEN
+restarts verification and the entire fresh boundary round.
+
+The gating plan identity is SHA-256 of the raw Git blob, not the filesystem
+working copy. Extract it byte-for-byte to an external temporary file; do not use
+`Get-Content`, `Set-Content`, `Out-File`, or a PowerShell text pipeline. The
+reproducible Windows/PowerShell sequence for the staged candidate is:
+
+```powershell
+$tmp = Join-Path ([IO.Path]::GetTempPath()) ("custody-plan-" + [guid]::NewGuid() + ".blob")
+$cmd = 'git cat-file blob :docs/lifecycle_recovery_plan.md > "' + $tmp + '"'
+cmd.exe /d /s /c $cmd
+if ($LASTEXITCODE -ne 0) { throw "staged blob extraction failed" }
+(Get-Item -LiteralPath $tmp).Length
+(Get-FileHash -Algorithm SHA256 -LiteralPath $tmp).Hash
+```
+
+The staged closure patch is generated with
+`git diff --cached --binary --output=<external-temporary-file>` and hashed with
+`Get-FileHash -Algorithm SHA256`. After commit, identity belongs to the selected
+closure commit, not necessarily HEAD. Extract object
+`<closure>:docs/lifecycle_recovery_plan.md` through the same byte-preserving
+`git cat-file blob` redirection and require its SHA-256 to equal trailer
+`Custody-Closure-Plan-Blob-SHA256`. Require exactly one first parent, verify it
+equals `Custody-Closure-Parent`, regenerate with
+`git diff --binary <closure>^ <closure> --output=<external-temporary-file>`, and
+require that SHA-256 to equal `Custody-Closure-Patch-SHA256`. Raw blob bytes and
+the parent-to-closure binary diff therefore remain reproducible after the index
+and working file disappear and while HEAD advances through later descendants. A
+working-file hash may be logged as a non-gating diagnostic only.
+
+After the four required GREEN verdicts, commit those exact unchanged reviewed
+bytes with message
+`docs(lifecycle): record managed-child custody Batch 0/1 closure` and these Git
+trailers, populated with the verifier-frozen staged values:
+
+```text
+Custody-Closure-Patch-SHA256: <exact reviewed staged/parent-to-closure binary patch SHA-256>
+Custody-Closure-Plan-Blob-SHA256: <exact reviewed raw Git blob SHA-256>
+Custody-Closure-Verifier: b01_closure_verifier_r3 GREEN
+Custody-Boundary-Reviewer: b01_boundary_arch_r4 GREEN
+Custody-Boundary-Reviewer: b01_boundary_evidence_r4 GREEN
+Custody-Boundary-Reviewer: b01_boundary_governance_r4 GREEN
+Custody-A0-Patch-SHA256: CEC127D3C964E27268702EFC5654B8FB4AC9804BCA6938B4F5A3F86DCB54C03C
+Custody-Closure-Parent: cdd2d4a1cdcb3dca4dbcf575ad3d94ca73a443b5
+Custody-Rollback: cdd2d4a1cdcb3dca4dbcf575ad3d94ca73a443b5
+Custody-No-Build: doc-only; delegated static verification; no compiler/build/test applicable
+```
+
+Closure lookup is confined to current HEAD's first-parent ancestry. Enumerate it
+with `git log --first-parent --format="%H%x09%s" HEAD`. For every commit whose
+subject is exactly
+`docs(lifecycle): record managed-child custody Batch 0/1 closure`, read the full
+message with `git show -s --format=%B <commit>` and parse trailers with
+`git interpret-trailers --parse`. Select only commits containing every required
+trailer key above, then require exactly one selected commit. Zero or multiple
+selected commits is a hard block; a later duplicate closure commit cannot
+supersede the first by convention.
+
+Call that unique commit `<closure>` and validate it reproducibly:
+
+1. `git merge-base --is-ancestor <closure> HEAD` must exit `0`, and `<closure>`
+   must occur in `git rev-list --first-parent HEAD`; second-parent-only ancestry
+   is invalid.
+2. `git rev-list --parents -n 1 <closure>` must contain exactly `<closure>` and
+   one parent. That exact first parent must be
+   `cdd2d4a1cdcb3dca4dbcf575ad3d94ca73a443b5` and must equal both the
+   `Custody-Closure-Parent` and `Custody-Rollback` trailers.
+3. Byte-preservingly extract raw object
+   `<closure>:docs/lifecycle_recovery_plan.md` as specified above and require its
+   SHA-256 to equal `Custody-Closure-Plan-Blob-SHA256`.
+4. Run
+   `git diff --binary <closure>^ <closure> --output=<external-temporary-file>`
+   and require its SHA-256 to equal `Custody-Closure-Patch-SHA256`.
+5. Require the exact verifier trailer `b01_closure_verifier_r3 GREEN`, the exact
+   three-reviewer multiset `b01_boundary_arch_r4 GREEN`,
+   `b01_boundary_evidence_r4 GREEN`, and
+   `b01_boundary_governance_r4 GREEN`, with no missing, duplicate, substituted,
+   or non-GREEN identity. Require the exact A0 hash and no-build trailers above.
+
+Commit identity is necessary but not sufficient for descendants. At every
+Batch 2 or later atomic/batch boundary, separately refresh the live protection
+predicate: canonical Sintra remains at the recorded immutable baseline and
+clean; A0 still has its exact seven staged paths, 155101-byte binary patch, and
+recorded SHA-256 until separately reviewed disposition; canonical framework
+remains at its recorded tracked-clean baseline; the protected OBJ retains its
+recorded path, 3102372-byte size, and SHA-256; `git worktree list --porcelain`
+shows no unexpected reuse/collision (no framework custody worktree before Batch
+4, or only the exact reviewed Batch 4 worktree after its authorized creation);
+the custody worktree matches its current frozen step/rollback state; and the
+process audit shows no unexpected custody build, test, server, child, verifier,
+or reviewer process. A separately reviewed later A0/framework state transition
+updates its owning durable record; it is not silently treated as drift.
+
+Before the closure commit exists, ancestry selection yields zero and Batch 0/1
+is open. Once the unique commit passes every identity check, it remains valid for
+first-parent Batch 2 and later descendants while the fresh live protection
+predicate also passes. Missing/multiple closure commits, mismatch, non-first-
+parent ancestry, or live protection failure blocks Batch 2 or continuation. The
+matching commit metadata is the finite repository control-plane closure record;
+no follow-up edit is required to restate its own commit hash. Earlier candidate
+or boundary verdicts cannot substitute for this gate.
 
 ### Batch 0 Isolation Record And Rollback Points
 
@@ -322,10 +578,11 @@ The following state was recorded before this amendment was authored:
 - The dedicated custody worktree is
   `C:/plms/bsd_licensed/sintra-managed-child-custody`, branch
   `managed-child-custody-20260711`, created from exact Sintra revision
-  `c60c1045dfc2382609eae36afbd637fe274b2871`. It was clean before this plan
-  edit. Until the first reviewed plan commit, its rollback point is that base;
-  after every accepted atomic step, the preceding reviewed commit is recorded
-  as the new rollback point.
+  `c60c1045dfc2382609eae36afbd637fe274b2871`. The reviewed Batch 0/1 plan is
+  committed at `cdd2d4a1cdcb3dca4dbcf575ad3d94ca73a443b5`; the worktree was clean
+  before this closure-record edit. The closure-record rollback point is `cdd2d4a...`;
+  the whole custody-plan rollback/base remains `c60c104...`. After every later
+  accepted atomic step, record the preceding reviewed commit as its rollback.
 - The protected A0 worktree is
   `C:/plms/bsd_licensed/sintra-lifecycle-recovery-impl`, branch
   `lifecycle-recovery-slice1`, HEAD
@@ -1786,15 +2043,19 @@ Do not code in the preserved dirty worktree. The accepted and dropped slice
 history above remains unchanged, Slice 5 is closed at `f95cf6e`, and the
 test/CI recovery remediation is closed at `266fa2b`.
 
-For the custody sibling, freeze this one-file Batch 1 candidate, independently
-verify its diff/status and unchanged A0 hash, then run the maximum available
-fresh `gpt-5.6-sol` xhigh priority plan-review pool. It must cover named gates,
-ownership, impossible-state reduction, dependency truthfulness, A0 isolation,
-deletion points, and Batch 2 readiness, including the twelve-question
-architecture lane. Any non-GREEN requires delegated remediation, repeated
-verification, a new frozen candidate, and a complete fresh review round. Batch 2
-is blocked until every reviewer returns unqualified GREEN and the Batch 0/1
-cumulative boundary review also returns unanimous GREEN.
+For the custody sibling, first evaluate the unique first-parent closure-commit
+identity and fresh live protection predicate in **Finite Batch 0/1 Closure And
+Batch 2 Authorization**. If both pass, Batch 0/1 remains closed even when HEAD
+is a later first-parent descendant, and the next action is to freeze the current
+Batch 2-or-later atom's exact files, causal gate, prohibited scope, verifier,
+rollback, and reviewer lanes before delegation. If either fails, Batch 0/1 is
+open or continuation is blocked: freeze this exact one-file closure-record
+candidate, delegate `b01_closure_verifier_r3`, and run the fresh maximum boundary
+pool `b01_boundary_arch_r4`, `b01_boundary_evidence_r4`, and
+`b01_boundary_governance_r4` on the identical staged patch/raw-blob pair. Any
+edit or non-GREEN restarts that full loop. Only then commit unchanged bytes with
+the exact subject and trailers above. Do not infer closure from chat, an earlier
+candidate round, a second-parent merge, or a partially matching commit.
 
 The protected A0 evidence and its plan edits retain their separate ownership
 and order. Slice 6 remains conditional after A0 evidence, its managed transport
