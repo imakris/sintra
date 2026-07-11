@@ -3,7 +3,14 @@
 Status: Slices 1, 1A, 1B.1, 1B.2, 2, and 5 are closed; Slices 1B.3,
 1C, 3, and 4 are durably dropped. The test/CI recovery remediation is closed at
 `266fa2b` with local green evidence and full-selection CI green on Linux,
-FreeBSD, macOS, and Windows. Slice 6 is ready for scope validation only.
+FreeBSD, macOS, and Windows. Slice 6 remains conditional and cannot open before
+the protected A0 evidence/successor sequence closes.
+
+Sibling-track status, 2026-07-11: managed-child custody is open at Batch 1 plan
+closure. The custody track does not change the closed/drop decisions above, does
+not authorize Batch 2 evidence or production work yet, and does not reorder the
+protected A0 evidence -> managed transport successor -> fence successor ->
+conditional later-slices sequence.
 
 ## Relation To Existing Lifecycle Plans
 
@@ -248,6 +255,820 @@ Slice 1 architecture review record, 2026-07-09:
   `7634b5344e0ea0c934b82949f2df84aa009a33d9` succeeded on Linux
   (`28988282975`), macOS (`28988282969`), Windows (`28988282967`), and FreeBSD
   (`28988282901`).
+
+## Managed-Child Custody Sibling Program
+
+### Material Amendment Record And Scope
+
+This section is the one durable plan amendment for Sintra-managed child custody.
+It is a sibling track inside this canonical lifecycle plan, not a second plan and
+not a restoration of historical salvage primitives. Its purpose is to close the
+confirmed gap between OS child creation and durable Sintra ownership, then move
+the framework to the same semantic contract. The target may expose launch,
+observation, release, retry, and wait operations over one opaque custody
+identity; this amendment intentionally does not choose function, type, status,
+or result-matrix spellings before the RED evidence and Batch 3 design exist.
+
+The sequencing below is a material amendment. Earlier convergence material
+placed framework async-start evidence beside the initial Sintra RED work. Source
+diagnosis now proves that framework `3a69bfc` cannot compile against Sintra
+`c60c104` because it consumes five absent salvage surfaces. An R4 executable
+built before dependency decontamination would therefore test a fabricated shim,
+an unrelated revision, or no runnable pair. Because Batch 3 source-breakingly
+deletes the scalar launch/cleanup composition, dependency pinning alone also
+cannot create an intermediate buildable pair. The amended sequence keeps R4 at
+source diagnosis only in Batch 2; Batch 4A pins exact Batch 3 Sintra, migrates
+every synchronous and asynchronous framework custody call site, and deletes all
+raw/name/salvage cleanup authority in the same atomic source-breaking cutover,
+while intentionally preserving only the existing async admission/quiescence
+defect. Batch 4B adds the real-child causal R4 RED on that exact migrated pair
+with join/detach/reset behavior unchanged. Batch 4C changes async admission/join
+and deletes newly orphaned R4-only seams/adapters/helpers. No temporary adapter or
+unbuildable transition is permitted. R3 is also narrowed to the Sintra-only
+failed-readiness case described below so it does not duplicate R5. The fourteen
+fixed anchors remain unchanged.
+
+Provenance, not a closure verdict:
+
+- The accepted online validation at
+  `C:/plms/stress_artifacts/sintra_online_lifecycle_review_validation_20260711.md`
+  returned `ARCHITECTURE VERDICT: CONVERGED` after its critical source claims
+  were checked locally.
+- The earlier convergence report at
+  `C:/plms/stress_artifacts/sintra_owned_child_custody_convergence_20260711.md`
+  established the custody direction but remained AMBER pending this durable
+  amendment and causal baseline evidence.
+- The rejected framework patch, blocker statement, and blocked review remain
+  evidence only. They do not authorize copying
+  `Force_process_release_result`, `Degraded_shutdown_result`,
+  `force_release_process()`, `force_release_known_processes_for_degraded_shutdown()`,
+  or `spinlocked_umap::try_scoped()`.
+- The initial Batch 0/1 diagnosis covered architecture/plan,
+  dependency-pair, future evidence/migration, and governance/state lanes. It
+  produced the R3 and ordered 4A/4B/4C amendments recorded here. This edited
+  candidate has not yet received the required frozen-candidate verification or
+  unanimous independent plan review; no GREEN is claimed in this record.
+
+### Batch 0 Isolation Record And Rollback Points
+
+The following state was recorded before this amendment was authored:
+
+- Canonical Sintra is
+  `C:/plms/bsd_licensed/sintra`, branch `master`, at
+  `c60c1045dfc2382609eae36afbd637fe274b2871`, matching `origin/master` and
+  clean. It is the immutable production baseline and is never an implementation
+  worktree. Its rollback point is the same exact revision; no custody commit is
+  made there.
+- The dedicated custody worktree is
+  `C:/plms/bsd_licensed/sintra-managed-child-custody`, branch
+  `managed-child-custody-20260711`, created from exact Sintra revision
+  `c60c1045dfc2382609eae36afbd637fe274b2871`. It was clean before this plan
+  edit. Until the first reviewed plan commit, its rollback point is that base;
+  after every accepted atomic step, the preceding reviewed commit is recorded
+  as the new rollback point.
+- The protected A0 worktree is
+  `C:/plms/bsd_licensed/sintra-lifecycle-recovery-impl`, branch
+  `lifecycle-recovery-slice1`, HEAD
+  `099d78a7e1e4e53f875c64d8f9f295f686d0a8fb`. Exactly seven paths are staged:
+  `docs/lifecycle_recovery_plan.md`,
+  `include/sintra/detail/ipc/rings.h`, `tests/active_tests.txt`,
+  `tests/message_ring_autonomous_dead_reader_contract_test.cpp`,
+  `tests/message_ring_reentrant_deadlock_contract_test.cpp`,
+  `tests/message_ring_reentrant_loss_contract_test.cpp`, and
+  `tests/runner/configuration.py`. The exact `git diff --cached --binary`
+  artifact is 155101 bytes with SHA-256
+  `CEC127D3C964E27268702EFC5654B8FB4AC9804BCA6938B4F5A3F86DCB54C03C`.
+  Its rollback point is not a reset target: it is the exact HEAD plus this
+  staged index. No custody step may edit, stage, unstage, commit, reset, clean,
+  merge, rebase, build, or otherwise touch that worktree or index. The hash and
+  seven-path status are checked before and after Batch 0/1 and at every later
+  integration boundary until A0 receives an explicit separately reviewed
+  disposition.
+- Canonical framework is `C:/plms/varinomics/vnm_framework`, branch `master`,
+  at `3a69bfc8ccb8c0e42584542c96474113beeefbbb`, with tracked state clean. Its
+  protected untracked artifact is
+  `mexce_protected_pow_probe.obj`, 3102372 bytes, SHA-256
+  `767F8C138768E87FEF1FDBF828B853D5D60D6307D721FA805D3256763B52331E`.
+  Neither the canonical framework tree nor that OBJ may be modified or removed.
+  Batch 1 creates no framework worktree and makes no framework edit. The
+  framework rollback point remains exact revision `3a69bfc8...` until the
+  collision-checked Batch 4 worktree is created from it.
+- `git worktree list --porcelain` was inspected before the custody worktree was
+  used. Historical, salvage, quarry, nested review, and detached worktrees are
+  protected: do not prune, remove, reuse, or clean any of them. Before any
+  later worktree is created, repeat the porcelain listing and prove both the
+  proposed path and branch name unused.
+
+The staged A0 plan contains protected, uncommitted sibling edits. This amendment
+was authored from the clean `c60c104` plan and does not copy or silently absorb
+those edits. Landing order controls reconciliation: custody may land first while
+A0 remains staged and undisposed, or A0 may receive its separate reviewed
+disposition and land first. Preserve and hash-check A0 in either case. Only
+before the later track with the overlapping plan edit is integrated, a delegated
+plan-content reconciliation starts from both frozen diffs and the then-landed
+canonical plan. It must preserve both semantic tracks, resolve the single-file
+overlap deliberately, re-run independent verification and the full fresh
+reviewer pool, and record the resulting commit/hash. A textual merge or custody
+commit does not dispose of, supersede, or absorb A0, and A0 disposition is not a
+prerequisite for custody to land first.
+
+### Fixed Contract Anchors
+
+All implementation mechanics and later amendments serve these anchors:
+
+1. Durable custody acceptance precedes every path that can create an OS child.
+2. Rejected launch means no child can later appear for that request.
+3. Accepted launch means Sintra remains responsible through readiness failure,
+   timeout, caller cancellation, and public-handle destruction.
+4. Readiness is observation after acceptance, never the ownership boundary.
+5. Every admitted recovery occurrence has immutable occurrence identity. A
+   successful OS creation binds its returned immutable native identity to that
+   pre-existing occurrence immediately, before any path can discard or retarget
+   it; failed creation records no child and fabricates no native identity.
+6. Replacement occurrence state never satisfies predecessor state.
+7. Release closes future recovery before retiring already admitted occurrences.
+8. Name state, exact publication retirement, exact communication retirement,
+   and confirmed OS exit are distinct monotone facts.
+9. Communication retirement means no future participation and terminal or
+   aborted affected waiters; it does not mean prior delivery or processing.
+10. Deadline expiry returns only confirmed facts, changes no ownership, and
+    manufactures no milestone.
+11. Deadline-facing operations perform no known unbounded nested coordinator
+    RPC, local dispatch, registry wait, reader wait, or process wait.
+12. Cleanup may continue after the caller deadline under retained Sintra
+    ownership.
+13. Finalization cannot erase unresolved custody or report successful
+    completion while it remains unresolved.
+14. Framework owns async-task admission and quiescence until Sintra accepts
+    custody and cannot report successful shutdown while a task can still cross
+    that boundary.
+
+Deadlines are caller-wait bounds with explicit scheduling tolerance, not hard
+real-time scheduling guarantees.
+
+### Smaller State Machine And Impossible States
+
+The contract prevents states instead of wrapping the old uncertainty in a wide
+coordinator or result matrix.
+
+```text
+launch request
+  unaccepted
+    +-- reject --------------------------> rejected/no-child-possible
+    `-- durable accept ------------------> custody-open
+                                              |
+                                              +-- admit occurrence N
+                                              |     (immutable occurrence is
+                                              |      committed before OS-create
+                                              |      authority)
+                                              |          |
+                                              |          +-- create fails --> no-child
+                                              |          `-- create returns success
+                                              |                `-- bind returned native
+                                              |                    identity immediately
+                                              |
+                                              `-- close recovery ------------> release-closed
+                                                                                   |
+                                                                                   `-- retire every
+                                                                                       admitted N ----> settled
+
+occurrence N facts (monotone and independently authoritative)
+  reserved-before-create -> no-child
+                         `-> create-success/native-identity-bound
+                                  +----> publication retired
+                                  +----> communication retired
+                                  `----> exact OS exit confirmed
+```
+
+Readiness and names are observations attached to an accepted custody or exact
+occurrence; they are not state-machine commit edges. A deadline returns a
+snapshot of already confirmed facts and creates no edge. Retry and wait observe
+or advance the same retained record; they never reconstruct authority from a
+raw process ID or name.
+
+This makes the following states unrepresentable by the canonical path: a
+rejected request that later creates a child; an OS-created child without a
+pre-existing Sintra custody/occurrence record; a successful OS-create result
+escaping without its returned native identity bound to that exact occurrence;
+a failed create with a fabricated native identity; an accepted child abandoned
+by timeout, cancellation, or wrapper destruction; a replacement satisfying an
+old occurrence; release cleanup racing with newly admitted recovery; name
+absence or OS exit alone satisfying complete release; successful finalization
+with an unresolved record; and successful framework shutdown while an admitted
+task can still accept custody or do process-capable work.
+
+### Authority Partition And Semantic Operations
+
+Custody is a supervisor that joins facts from their authoritative owners. It is
+not one giant owner of coordinator, reader, RPC, barrier, recovery, lifeline,
+and OS internals.
+
+- The custody supervisor owns the durable acceptance boundary, the opaque
+  logical custody identity, the set of admitted immutable occurrences, recovery
+  closure, retained cleanup obligation, and the compact caller-visible
+  observation of confirmed facts.
+- Spawn/managed-process code owns launch preparation and the native child
+  handle or PID/reap identity. It commits the occurrence before authorizing the
+  OS-create call. If that call succeeds, it binds the returned native identity
+  to the pre-existing occurrence immediately, before returning or entering any
+  path that can discard or retarget the result; failed creation records no-child
+  without an invented identity. Failed readiness cannot discard a bound native
+  identity.
+- Recovery owns admission of a new immutable occurrence. It must consult the
+  custody record under the recovery-open boundary and cannot admit after release
+  closes recovery.
+- Coordinator publication, name resolution, reader/communication retirement,
+  RPC waiter cancellation, barriers/departure, lifelines, and native process
+  observation retain their existing authoritative meanings. Each reports its
+  exact-occurrence milestone to custody; custody does not infer one milestone
+  from another or expose all internal booleans publicly.
+- Framework owns admission and quiescence of its async startup task until the
+  task either stops before acceptance or crosses the Sintra acceptance boundary.
+  After acceptance it retains the opaque custody identity and uses only the
+  canonical Sintra semantic contract. It does not reach through raw Sintra
+  globals/maps or regain cleanup authority by name.
+
+The one semantic contract may support these operations without requiring one
+giant function:
+
+- launch: atomically reject with no future child or accept durable custody
+  before any occurrence can create an OS child;
+- observe: report readiness and independently confirmed lifecycle facts for the
+  opaque custody/exact occurrence;
+- release: close recovery first, then request retirement of every admitted
+  occurrence while Sintra retains responsibility;
+- retry: idempotently continue the same release after an incomplete deadline,
+  without accepting a new occurrence or manufacturing prior milestones; and
+- wait: wait only on bounded custody-record notifications until an absolute
+  deadline and return the then-confirmed snapshot.
+
+The public shape is compact and source-breaking migration is permitted when the
+Batch 3 design is reviewed. No compatibility wrapper, `_v2` API, raw-ID/name
+reconstructor, wide drain/RPC/reader/lifeline matrix, or silent degraded success
+is allowed.
+
+### Deadline, Release, And Finalization Rules
+
+- Acceptance is the ownership commit. A readiness timeout, failed requested
+  publication, cancellation, exception, or destroyed wrapper leaves custody in
+  Sintra.
+- Deadline-facing launch observation, release, retry, and wait paths use one
+  absolute deadline and do not enter a known unbounded synchronous RPC,
+  coordinator/local dispatch, spinlocked registry acquisition, reader readiness
+  wait, or native process wait. They wait on custody-owned monotone notification
+  only to the deadline plus explicit scheduling tolerance.
+- Deadline expiry returns an incomplete observation containing only already
+  confirmed facts. Cleanup remains admitted and may continue asynchronously;
+  expiry never drops ownership, closes the record, or reports an unconfirmed
+  milestone.
+- Release atomically closes recovery before it requests cleanup. It covers the
+  complete set of occurrences admitted before closure and never targets the
+  current occupant of a reusable slot by raw ID or name.
+- Exact publication retirement, communication retirement, and OS exit are
+  separate terminal prerequisites. Communication retirement aborts or
+  terminally resolves affected waiters and forbids future participation; it
+  makes no claim about delivery or processing of earlier messages.
+- Runtime finalization first closes new custody admission and recovery. It may
+  wait within an explicit bounded policy or return a typed incomplete/blocking
+  outcome, but it cannot delete authoritative state, erase records, or report
+  success while any custody or admitted cleanup remains unresolved.
+
+### Relationship To A0 And Existing Slice Order
+
+Managed-child custody and A0 managed transport/fence recovery are independent
+production tracks and either may land first. They share only exact occurrence/
+generation identity and the rule that communication retirement is not delivery
+or processing completion. Custody does not consume staged A0 mechanics, does not
+make A0 a prerequisite without new causal evidence, and does not change A0's
+production design. If current transport prevents exact communication
+retirement, custody remains explicitly incomplete rather than substituting name
+absence or OS exit.
+
+The canonical order outside this sibling remains:
+
+```text
+A0 evidence -> managed transport successor -> fence successor
+            -> full A0 closure -> conditional Slice 6 and later slices
+```
+
+Any future evidence of a true semantic dependency first stops both affected
+steps, amends this one plan through delegated review, and preserves the fixed
+anchors. File overlap alone is not a semantic dependency.
+
+### Future RED/GREEN Matrix
+
+Batch 1 records these gates. Batch 2 implements only the Sintra evidence named
+for that batch; R4 remains source diagnosis until Batch 4B.
+
+#### R0: exact dependency contract
+
+- Baseline pair is exact Sintra
+  `c60c1045dfc2382609eae36afbd637fe274b2871` plus framework
+  `3a69bfc8ccb8c0e42584542c96474113beeefbbb`.
+- A framework remote-runtime smoke configure against that explicit local Sintra
+  is expected GREEN because current CMake checks only for headers. Compiling the
+  target that consumes `vnm_remote_runtime.cpp` is expected RED specifically on
+  the absent `Force_process_release_result`,
+  `Managed_process::force_release_process()`, `Degraded_shutdown_result`,
+  `force_release_known_processes_for_degraded_shutdown()`, and
+  `spinlocked_umap::try_scoped()` surfaces. A configure failure, unrelated
+  compile failure, timeout, or generic failure is not R0.
+- The corrected pair is GREEN only when the framework consumes the actual
+  Batch 3 custody surface, every explicit-local, workspace, fallback-fetch,
+  install/package, and downstream consumer selection path deterministically
+  selects or rejects an exact compatible Sintra, and fallback uses a full
+  40-character reviewed Sintra commit pin. Default-branch fetching,
+  header-existence-only acceptance, or a capability check for an invented or
+  forbidden pre-adoption API spelling is invalid.
+- Batch 1 documents this expected RED and creates no framework worktree/edit.
+  Batch 4A owns the first truthful pin/capability/build change and the complete
+  source-breaking consumer call-site migration after Batch 3 has produced the
+  surface actually consumed. A pin with unmigrated scalar/raw/name consumers is
+  still R0 RED, not an intermediate pair.
+
+#### R1: hard readiness deadline
+
+Hold the baseline nested synchronous resolution/readiness work causally after
+the requested deadline. Baseline RED is the caller remaining trapped beyond the
+deadline. Corrected GREEN returns incomplete by the deadline plus scheduling
+tolerance while the accepted custody and cleanup responsibility persist.
+
+#### R2: accepted child, readiness not reached
+
+Launch a real child that Sintra accepts but that never reaches the requested
+readiness target. Baseline RED is scalar zero with no way to report that the
+child existed or remains owned. Corrected GREEN exposes accepted opaque custody
+and later exact terminal facts; readiness failure does not close custody.
+
+#### R3: failed readiness before requested-target publication
+
+This is a Sintra-only real-child gate. The managed-process occurrence is
+published and its launch nonce, exact occurrence, and native identity are
+recorded, while the distinct requested readiness target is causally withheld.
+Baseline RED is scalar zero and removal of the relevant name while that
+nonce-qualified native child remains alive. Corrected GREEN retains accepted
+custody and reports only confirmed occurrence facts until exact retirement/exit.
+This is not R5: R3 never permits the requested readiness target to publish.
+
+#### R4: async start versus framework shutdown
+
+Batch 2 performs source diagnosis only and makes no R4 test or shim. Batch 4A
+creates the first truthful buildable pair by completing the source-breaking
+custody migration at every synchronous and asynchronous framework call site,
+including custody-qualified launch observation and release, while deliberately
+leaving startup-thread admission/join/detach/reset behavior unchanged. Batch 4B
+then adds a real-child causal RED on that exact migrated pair: one hold is before
+Sintra acceptance; a second is after acceptance/OS-creation authority. Shutdown
+must not report success while the task can cross acceptance or still perform
+process-capable work. Corrected 4C GREEN changes only the async admission and
+quiescence lifecycle (plus same-atom orphan removal); custody consumption is
+already canonical in 4A. If a lawful R4 RED cannot be produced after 4A without
+shims, fakes, invented APIs, or oracle substitution, return architecture RED and
+stop.
+
+#### R5: name disappears after actual requested publication
+
+Allow the requested target to publish, then causally remove its name before
+later exact publication/departure, communication, or OS retirement completes.
+Baseline RED is name absence being treated as release while the exact native
+child or another required retirement fact remains nonterminal. Corrected GREEN
+keeps release incomplete. Unlike R3, this gate proves actual requested
+publication followed by name removal.
+
+#### R6: recovery occurrence isolation
+
+Admit occurrence `n`, recover as immutable occurrence `n+1`, and hold a
+predecessor milestone. Baseline RED demonstrates reusable-slot/raw identity can
+let replacement state stand in for `n`. Corrected GREEN never lets `n+1`
+satisfy `n`; release closes recovery first and covers every occurrence admitted
+before closure.
+
+#### R7: adverse coordinator/reader cleanup
+
+Use the existing test-only coordinator seam
+`k_stage_unpublish_pre_barrier_collection` in
+`Coordinator::unpublish_transceiver()`. Launch a real lifeline-disabled child
+with a nonce-qualified exact occurrence and withhold its requested readiness
+target. Let failed-readiness cleanup enter synchronous normal unpublish and hold
+it at that seam: current source has already erased the reverse name and process
+registry entries and set draining, but has not collected barrier completions,
+stopped the exact reader, emitted final lifecycle/unpublish notifications, or
+confirmed native exit. Because this child is lifeline-disabled, failed-start
+cleanup skips its lifeline-release block; no lifeline entry existed for this
+occurrence and none remains at the seam. The coordinator's later
+`release_lifeline()` lookup therefore finds no entry/returns false. That is
+authoritative absence, not a successful lifeline release and not a release
+milestone.
+
+Exact baseline RED is the public spawn caller remaining blocked beyond its
+requested deadline plus tolerance inside that held cleanup call, with the seam
+marker complete, the exact occurrence/native child still alive, the name absent,
+and the exact reader/communication-retirement state still nonterminal. This is
+a causal deadline overrun and loss of a caller-visible authoritative cleanup
+result: the scalar API cannot return the unresolved responsibility while the
+cleanup stack is held. A generic watchdog timeout, name absence, stopped
+communication, native exit alone, or a hold reached before the named seam is
+invalid. Corrected behavior returns incomplete by the deadline plus tolerance,
+retains responsibility, aborts/terminally resolves affected waiters only when
+communication retirement is authoritative, and later completes without
+residue after the seam is released.
+
+#### R8: finalization with unresolved custody
+
+Batch 2 adds one minimal semantic test-only runtime seam immediately after the
+admission-guarded `Managed_process::spawn_swarm_process()` returns a successful
+`Spawn_result` and the admission mutex is released, but before the public
+readiness wait begins. This is current-source accepted-like state, not a future
+custody API: the result says `success`/`os_process_created`, contains the exact
+PID/handle, and current managed-process state has the occurrence reader,
+spawn/recovery bookkeeping, and coordinator registry work. The child is
+lifeline-disabled, so this state contains no lifeline entry and claims no
+lifeline-release fact.
+
+At the seam, hold the root spawn caller. The real lifeline-disabled child
+publishes its managed-process occurrence, causally calls the existing
+begin-process-draining path so coordinator finalization need not hang on its
+draining wait, withholds the requested readiness target, and remains alive on a
+native latch. A second root thread invokes current `detail::finalize()`, which
+closes teardown admission. Exact baseline RED is `finalize()` returning `true`,
+deleting/resetting `s_mproc` and restoring lifecycle state to idle while the
+held spawn caller still owns the successful current `Spawn_result` and the
+nonce/occurrence-qualified native child remains alive. After the seam releases,
+the readiness failure reaches current `cleanup_failed_wait()` with `!s_mproc`,
+logs that cleanup cannot run, returns scalar zero, and still has no confirmed
+native exit. Finalization success/state reset while old process-capable work can
+resume is the required false-success/erase/unsafe-progress manifestation.
+
+A hang in draining/finalization, a generic timeout, a child that never reached
+the spawn seam, synthetic registry mutation, or a child already exited is
+invalid R8 evidence. If the real child cannot make the exact source-supported
+draining/seam choreography executable on `c60c104`, R8 returns architecture RED:
+stop Batch 2, amend this plan, and assign the unresolved finalization proof to a
+named pre-Batch-3 evidence successor before any custody production code; do not
+invent a custody handle or accept a weaker oracle. Corrected behavior closes
+admission and recovery, admits no new occurrence, retains the record, and cannot
+erase it, reset to idle, or report successful finalization until it settles.
+
+Every behavioral gate uses a real child, unique launch nonce, exact occurrence,
+native process identity, causal markers/latches, and native exit observation.
+Timeout is a watchdog only. Name absence, synthetic registry mutation,
+cancellation, generic timeout, crash, clean exit, stopped communication, or
+state reset alone is an invalid oracle. Each run records commands, exit codes,
+causal fields, surviving process audit, and repository state.
+
+### Six Batches
+
+Each atomic step freezes its owner files, adopted contract, expected gate,
+prohibited adjacent scope, and rollback commit before delegation. Later-batch
+file families are boundaries, not permission to touch every listed file.
+
+#### Batch 0: protect staged A0 evidence
+
+- Owner is orchestration state only; no implementation file is writable.
+- Gate is exact branch/base/status/worktree collision evidence plus A0's seven
+  staged paths, 155101-byte binary patch, and SHA-256 above before and after the
+  batch. The canonical trees and protected OBJ remain unchanged.
+- Prohibited scope is every edit, build, test, clean, reset, commit, merge,
+  rebase, or index operation in A0/canonical/historical worktrees.
+- Rollback is removal only of a newly created, still-clean dedicated custody
+  worktree/branch after proving its resolved path; never reset a protected tree.
+
+#### Batch 1: one-plan amendment and exact-pair specification
+
+- Writable owner file is only `docs/lifecycle_recovery_plan.md` in the
+  dedicated custody worktree.
+- Gate is documentation/static verification, frozen one-file diff and hash,
+  unchanged A0 hash/status, then a maximum fresh independent review round with
+  unanimous unqualified GREEN. No build is applicable to this doc-only step.
+- Prohibited scope is production lifecycle behavior, child-custody RED tests,
+  framework CMake/CI/runtime edits, an invented API spelling/capability probe,
+  or a second plan.
+- Rollback is exact custody base `c60c104...` until the reviewed narrow plan
+  commit exists; the resulting plan commit becomes Batch 2's rollback point.
+
+#### Batch 2: deterministic baseline RED evidence only
+
+- Owner families are new custody contract test sources, their test registration
+  and runner configuration, and the smallest semantic test-only causal seams
+  under `SINTRA_ENABLE_TEST_HOOKS`. The atomic step must enumerate exact files
+  before editing.
+- Implement real-child R1, R2, R3, R5, R6, R7, and R8 gates as separable atomic
+  steps where write sets or causal oracles differ. R0 runs as the exact-pair
+  configure-GREEN/compile-RED dependency proof. R4 is source diagnosis only.
+- Expected gate is the exact causal baseline result for each named RED, not a
+  timeout or generic failure. An independent verifier records commands, exit
+  codes, causal markers, survivors, and repository state.
+- Prohibited scope is all production lifecycle semantics, framework behavior,
+  compatibility shims, synthetic registry oracles, and A0 mechanics.
+- Rollback is the reviewed Batch 1 commit; every accepted RED step advances a
+  new recorded reviewed commit. Any gate that cannot produce its intended
+  source-supported RED stops production and requires a reviewed plan amendment
+  or explicit dropped/rescoped gate.
+
+#### Batch 3: Sintra custody implementation and cleanup absorption
+
+- Owner families are the canonical public/runtime launch surface and the
+  minimum managed-process, recovery, coordinator/reader notification,
+  lifeline/native-process, and finalization internals required to implement the
+  supervisor and join authoritative facts. Exact files and disjoint write sets
+  are frozen per atomic step.
+- Add the one canonical custody contract and supervisor/records; commit durable
+  custody and immutable occurrence identity before OS child creation authority;
+  on successful creation bind the returned native identity immediately before
+  any path can discard/retarget it, and record failed creation as no-child;
+  implement bounded observation/release/retry/wait; close recovery before
+  cleanup; retain unresolved records through finalization.
+- Absorb failed-start cleanup into the authoritative custody owner in the same
+  atomic migration that makes it redundant. Delete the old scalar-result/
+  discarded-cleanup composition, duplicate cleanup authority, and every newly
+  orphaned helper/test path in that same commit after call-site proof. Run an
+  exact symbol/call-site orphan sweep; do not defer deletion.
+- Expected Sintra GREEN is R1/R2/R3/R5/R6/R7/R8 plus focused existing launch,
+  recovery, lifeline, publication/departure, communication, RPC, and
+  finalization gates selected from the changed surface in Debug and Release.
+  This establishes the Sintra R3/release contract only; the framework-consumer
+  R3/release cutover and GREEN belong to 4A. R0 remains RED for the archived
+  pair; R4 still awaits the complete runnable 4A pair.
+- Prohibited scope is framework migration, A0 transport/fence behavior,
+  historical salvage primitives, raw-ID/name authority, a public substep
+  matrix, or unbounded deadline-facing work.
+- Rollback is the reviewed Batch 2 evidence commit; each accepted implementation
+  atom advances only after independent verification and unanimous review.
+
+#### Batch 4: framework custody cutover, R4 evidence, async repair, and deletion
+
+Create a separate framework worktree from exact `3a69bfc...` only after a fresh
+porcelain collision check. Suggested path/branch are
+`C:/plms/varinomics/vnm_framework-managed-child-custody` and
+`managed-child-custody-dependency-20260711`; change them if either is occupied.
+Never use the canonical framework worktree or protected OBJ.
+
+1. **4A complete source-breaking custody cutover and dependency
+   decontamination.** Owner families are dependency selection/CMake/package/
+   consumer configuration; `cpp/remote_ui_runtime/vnm_remote_runtime.*`;
+   `cpp/remote_ui_runtime/vnm_remote_runtime_internal.h` (migrate its surviving
+   declarations or delete it after call-site proof);
+   `cpp/remote_ui_runtime/vnm_hosted_worker_session.*`;
+   `cpp/remote_ui_runtime/vnm_hosted_worker_host_lifecycle.*`; their focused
+   session/host-lifecycle/remote-runtime tests; and no other framework files
+   unless frozen call-site inventory proves them consumers. Pin a full
+   40-character exact reviewed Batch 3 Sintra commit and check only the actual
+   custody surface consumed. In the same atomic source-breaking cutover:
+
+   - migrate every synchronous and asynchronous launch result, stored session
+     state, failure cleanup, release, observation, retry/wait, and shutdown-side
+     call site from scalar process count/raw process ID/name authority to the
+     opaque custody identity and canonical custody observations;
+   - make the framework-consumer form of R3/release GREEN: failed requested
+     readiness retains custody, framework cleanup/release targets that custody,
+     and no name/raw-ID fact manufactures release;
+   - delete every phantom consumer of the five absent salvage surfaces, raw
+     Sintra reach-through, raw-ID/name cleanup authority, name-polling success,
+     duplicate result matrix, obsolete helper/test/CMake path, and newly
+     orphaned declaration in the same atom, including migration or deletion of
+     `vnm_hosted_worker_host_lifecycle.*` and
+     `vnm_remote_runtime_internal.h` as their exact call-site proof requires;
+     and
+   - prove deterministic explicit-local, workspace, fallback-fetch,
+     install/package, and downstream-consumer selection and compilation.
+
+   4A creates the first truthful buildable pair. It may reshape data carried by
+   the startup task only as necessary to use custody, but intentionally preserves
+   the existing async admission/quiescence defect: do not change startup-thread
+   admission closure, wait/join timing, detach behavior, process-state reset, or
+   the condition under which shutdown reports success. There is no temporary
+   scalar/raw/name adapter, compatibility bridge, or intermediate unbuildable
+   commit. Exact 4A gates are R0 corrected-pair GREEN, migrated framework R3/
+   release GREEN, focused synchronous and async call-site compilation/behavior
+   GREEN, and source/diff proof that the named async lifecycle control flow is
+   unchanged and remains eligible for R4 RED.
+
+2. **4B R4 evidence on the exact 4A pair.** Owner families are new focused
+   framework real-child test support, registration, and minimal semantic causal
+   seams only. With 4A custody use and deletion frozen and async admission/join/
+   detach/reset behavior unchanged, add the pre-acceptance and post-acceptance/
+   OS-creation holds and record exact R4 RED. No custody adapter, deleted raw/
+   name authority, or async production fix may ride with the evidence. If lawful
+   RED requires shims, fakes, restored authority, or oracle substitution,
+   architecture RED stops the program for diagnosis and reviewed plan amendment.
+
+3. **4C async admission/quiescence repair and R4-orphan deletion.** Owner
+   families are `cpp/remote_ui_runtime/vnm_hosted_worker_session.*`, only the
+   already custody-migrated remote-runtime/host-lifecycle files whose exact
+   call sites require async-lifecycle adjustment, the permanent R4 test, and
+   their registration. Make startup-task admission closure and join/quiescence
+   authoritative; after acceptance the already-carried custody remains retained
+   and settled; prevent detach/reset/successful shutdown while the task can cross
+   acceptance or perform process-capable work. Do not repeat or defer custody
+   call-site migration from 4A. In this same atom delete every R4 causal seam,
+   test adapter, lifecycle helper, declaration, test branch, and build entry
+   newly orphaned by the repair; retain a seam only when the permanent R4 GREEN
+   regression still calls it and its semantic test-only scope is independently
+   accepted. Exact 4C gate is R4 GREEN plus focused async shutdown/session and
+   survivor/clean-state gates.
+
+Batch 4 cumulative GREEN is 4A's R0 corrected-pair and framework R3/release
+GREEN, 4B's exact R4 RED evidence, 4C's R4 GREEN, and all migrated focused
+framework/package/consumer gates. Each 4A/4B/4C atom has its own rollback pair
+of exact Sintra/framework commits, verifier, frozen diff, and unanimous review:
+4A rolls back to exact framework `3a69bfc...` plus the reviewed Batch 3 Sintra
+commit; 4B rolls back to the reviewed 4A pair; 4C rolls back to the reviewed 4B
+pair. No compatibility path may preserve deleted authority. Prohibited scope is
+A0 transport/fence production, changes in either canonical worktree, any async
+join/detach/reset fix in 4A or 4B, any custody/raw/name compatibility adapter,
+an unbuildable intermediate commit, or retention of an orphan for later cleanup.
+
+#### Batch 5: cumulative gates and paired release
+
+- Owner families are only test/CI roster/workflow/package configuration and
+  this plan's closure record unless a failure reopens the owning earlier batch.
+- Run focused Debug/Release gates, supported-platform targeted CI, complete
+  active rosters where selected, sanitizer/race lanes where supported,
+  install/package and downstream consumer builds, exact paired revision checks,
+  native survivor audits, and clean-state audits. A failure is not patched in
+  Batch 5: delegate diagnosis/remediation to the owning batch, rerun its local
+  gate, and repeat its full fresh unanimous review before repush.
+- After implementation is otherwise complete, separately delegate a final
+  full-suite enablement change. Independently verify it, freeze its exact diff,
+  obtain the maximum fresh reviewer pool's unanimous GREEN, commit and push it,
+  then require full paired supported-platform CI/package/consumer closure. No
+  earlier focused or background run substitutes for this final gate.
+- Record final branch/commit hashes, exact paired package revisions, CI run IDs,
+  test counts, review verdicts, deleted paths/symbols, residual risks, rollback
+  points, clean statuses, A0 hash/protected state and any separately reviewed
+  disposition that already exists, and proof that no process, thread, custody
+  record, build, helper, reviewer, or CI session remains unresolved. Custody
+  landing first does not manufacture or require an A0 disposition.
+- Prohibited scope is new lifecycle semantics, opportunistic production repair,
+  weakening a confirmed oracle, treating a background run as a blocking gate,
+  or bypassing an owning batch's remediation/review loop. The rollback point is
+  the last exact unanimously reviewed Sintra/framework commit pair before each
+  CI/packaging atom; the final release pair is recorded only after all closure
+  gates pass.
+
+### CI Selection And Push Policy
+
+Commits, pushes, and PRs are authorized after the applicable frozen-candidate
+verification and unanimous review. Intermediate commits/pushes/PRs may leave the
+full roster enabled; such runs are non-gating background evidence and every
+observed failure is still reported and assigned. They do not permit advancing a
+blocked atomic step.
+
+Whenever pre-final CI is deliberately observed as a blocking gate, select only
+the exact union of:
+
+1. tests failing in the preceding 72-hour window; and
+2. tests newly introduced by the atomic step.
+
+The delegated CI verifier records the UTC query time and cutoff, repository and
+branch/workflow filters, query command/API, source run IDs and attempts, exact
+failed test identities extracted from logs/artifacts, de-duplicated selected
+roster, new-test list, triggered commit/run IDs, and all outcomes. Selection
+must be evidence-based; a guessed historical roster is invalid. Every observed
+failure is reported, causally diagnosed, and remediated through the owning
+atomic loop. The final Batch 5 full-suite enablement and closure are mandatory
+even if an intermediate background full-roster run happened to pass.
+
+### Mandatory Atomic-Step And Review Protocol
+
+Every plan edit, test/evidence change, production change, dependency migration,
+deletion, remediation, build, test run, CI change, and substantive verification
+uses this loop. All workers and reviewers are `gpt-5.6-sol`, xhigh reasoning,
+priority service tier.
+
+1. Freeze one atomic step: exact owner files, adopted contract, expected named
+   RED/GREEN, prohibited adjacent scope, and rollback commit(s).
+2. Delegate edits to one or more workers only when write sets are genuinely
+   disjoint. Workers know other work exists and never revert unrelated/user
+   changes.
+3. Delegate verification to a worker other than every author. Record exact
+   commands, exit codes, causal evidence, survivors, and repository state. A
+   timeout or generic failure is never accepted as the named result.
+4. Freeze exact candidate commit/diff, file list, evidence, and hashes. No edit
+   occurs while it is under review.
+5. Close completed workers and use the maximum available number of fresh
+   independent reviewers. Cover correctness, concurrency/lifecycle, oracle
+   quality, cross-platform behavior, governance/deletion, and architecture.
+   No author reviews their own change.
+6. Require every reviewer to return unqualified `GREEN`. `AMBER`, conditional
+   green, required changes, unresolved questions, or material suggestions are
+   non-GREEN.
+7. On any non-GREEN, stop and delegate remediation. Re-run the exact independent
+   verification, freeze a new candidate, and repeat a full maximum-fresh review
+   round. Findings are not dismissed or patched by the orchestrator.
+8. Commit/advance only after closure. Push/CI follows the reviewed frozen local
+   commit. Any CI failure reopens the same atom for delegated diagnosis,
+   remediation, local rerun, and another full unanimous review before repush.
+
+At each batch boundary, freeze the entire cumulative batch and run a new maximum
+fresh reviewer convergence round over plan conformance, evidence, deletions,
+state, and next-batch preconditions. Per-step GREEN does not imply batch GREEN.
+Review findings distinguish current blockers from risks owned by a named future
+batch and from notes; later mechanics are not demanded before their predecessor
+evidence exists. Every concrete build, test, crash, leak, or other failure a
+reviewer observes is nevertheless a finding with its identity, provenance
+(introduced, perpetuated, or exposed), and delegated remediation path; multiple
+failures are counted prominently and grouped. No failure is omitted as merely
+pre-existing or outside the changed diff.
+
+At least one fresh reviewer in every round is the architecture lane. It receives
+this durable plan, the online validation, cumulative frozen diff, current
+evidence, and A0/neighbor state, and answers explicitly:
+
+1. Does custody acceptance precede every possible OS child creation?
+2. Is custody retained through readiness failure, timeout, cancellation,
+   wrapper destruction, recovery, and finalization?
+3. Are logical custody and immutable occurrence distinct, and can replacement
+   state satisfy any predecessor fact?
+4. Does release close recovery before cleanup and cover every admitted
+   occurrence without raw ID/name targeting?
+5. Are name, publication retirement, communication retirement, and exact OS
+   exit distinct authoritative facts?
+6. Does every deadline path avoid known unbounded nested work and retain
+   ownership after timeout?
+7. Can finalization or framework shutdown report success while custody or an
+   async task remains capable of process work?
+8. Is communication retirement conflated with delivery/processing, or has an
+   unjustified A0 dependency appeared?
+9. Has a duplicate authority, compatibility path, result matrix, raw reach-
+   through, or undeleted obsolete path appeared?
+10. Does the change match this plan; if different, is there new causal evidence
+    and a reviewed material amendment rather than drift?
+11. Has new state/mechanism made an invalid state representable that the
+    architecture intended to eliminate?
+12. Do the next step and batch order still hold, or has evidence invalidated a
+    prerequisite?
+
+An architecture RED stops all implementation. Delegate diagnosis and any plan
+amendment first, then freeze and obtain a full maximum-reviewer unanimous GREEN
+before code resumes.
+
+### Same-Batch Deletion And Orphan Proof
+
+Every migration atom inventories all callers before editing and repeats exact
+symbol/file searches after editing. The commit that removes the final caller
+also deletes the newly orphaned helper, test, documentation claim, build entry,
+configuration branch, generated/derived artifact, and compatibility path.
+False-hypothesis artifacts are deleted rather than retained as speculative
+utilities. If a required deletion cannot share the atom, split the atom before
+implementation; do not defer it. Batch 3 owns failed-start cleanup absorption;
+Batch 4A owns the complete framework custody call-site cutover plus raw/name/
+salvage, obsolete lifecycle-helper/test, and dependency-path deletion; Batch 4C
+owns every R4 seam/adapter/helper newly orphaned by async repair.
+
+### Non-Goals
+
+- Do not restore the historical salvage implementation or any of its forbidden
+  symbols, and do not use historical branches/patches except as scenario quarry.
+- Do not create a monolithic custody owner for all subsystem internals or a
+  public matrix of their substeps.
+- Do not preserve old and new public launch/release authority through aliases or
+  compatibility wrappers.
+- Do not promise hard real-time deadlines, message delivery/processing from
+  communication retirement, or release from name absence/OS exit alone.
+- Do not make framework async admission Sintra-owned, expose raw internal maps,
+  or let the framework reconstruct custody from process ID/name.
+- Do not make A0 a custody prerequisite from overlapping files alone, alter A0
+  mechanics, or silently merge its staged plan.
+- Do not implement RED tests or production behavior in Batch 1, and do not
+  pre-adopt API spelling through a dependency capability check.
+- Do not create a temporary scalar/raw-ID/name custody adapter, compatibility
+  bridge, or unbuildable pin-only framework transition between Batch 3 and 4A.
+
+### Custody Stop Conditions
+
+Stop before commit/advance and amend through the full loop if:
+
+- A0's staged path set, 155101-byte size, or SHA-256 changes;
+- any work is proposed in a canonical, protected A0, or historical worktree, or
+  the protected framework OBJ changes;
+- a second canonical lifecycle document is created;
+- custody becomes a giant owner of coordinator, reader, RPC, barrier, recovery,
+  and OS internals instead of a supervisor joining authoritative facts;
+- acceptance can follow OS creation, rejected launch can later create a child,
+  or accepted ownership can be dropped by timeout/cancellation/destruction;
+- raw process ID/name can reconstruct custody or replacement state can satisfy
+  predecessor facts;
+- release does not close recovery before cleanup or omit an admitted occurrence;
+- deadline expiry manufactures success, enters known unbounded nested work, or
+  drops retained ownership;
+- finalization can erase unresolved custody or report success;
+- framework async admission is assigned wholly to Sintra or framework shutdown
+  can succeed while task/process-capable work remains;
+- communication retirement is equated with delivery/processing or custody gains
+  an unjustified A0 dependency;
+- the dependency gate assumes a not-yet-adopted/forbidden spelling, default
+  branch, or header-only compatibility;
+- Batch 1 adds runtime behavior/tests/framework edits; Batch 2 adds production;
+  or historical salvage is imported rather than used as evidence;
+- R3 permits requested-target publication, R5 omits it, 4A fails to migrate all
+  synchronous/asynchronous custody consumers and delete raw/name/salvage
+  authority in the same buildable atom, 4A changes async join/detach/reset
+  behavior, 4B runs on anything other than the exact migrated 4A pair, 4C
+  repeats deferred custody migration or leaves a newly orphaned R4 path, or any
+  R4 evidence/fix begins before truthful 4A closure; or
+- any reviewer returns non-GREEN, an architecture question is unresolved, or
+  the required independent verification/review evidence is missing.
 
 ## Implementation Slices
 
@@ -944,7 +1765,13 @@ Only if reproduced after earlier slices:
 - Do not patch around the same class of review finding twice. Stop and shrink
   the slice.
 
-## Review Rule
+## Review Rule (Legacy Recovery Slices Only)
+
+This rule governs only the pre-existing recovery slices below the custody
+amendment. It cannot narrow, replace, inherit into, or override the managed-child
+custody protocol above: every custody atom and batch boundary always requires
+the maximum fresh independent `gpt-5.6-sol` xhigh priority reviewer pool and
+unanimous unqualified GREEN.
 
 This recovery plan gets the current six-Codex-plus-Claude review because the
 baseline is uncertain. Future slices do not inherit that ceremony.
@@ -957,9 +1784,25 @@ changes, the slice becomes multi-domain, or the same blocker class repeats.
 
 Do not code in the preserved dirty worktree. The accepted and dropped slice
 history above remains unchanged, Slice 5 is closed at `f95cf6e`, and the
-test/CI recovery remediation is closed at `266fa2b`. The next action is Slice 6
-scope validation. Open Slice 6 only if duplicate group-membership authority is
-proven to block cleanup correctness; otherwise durably drop it and move to
-Slice 7. The separate delivery-vs-processing contract risk is not part of
-Slice 6 and requires its own reviewed architecture decision before production
-barrier semantics change.
+test/CI recovery remediation is closed at `266fa2b`.
+
+For the custody sibling, freeze this one-file Batch 1 candidate, independently
+verify its diff/status and unchanged A0 hash, then run the maximum available
+fresh `gpt-5.6-sol` xhigh priority plan-review pool. It must cover named gates,
+ownership, impossible-state reduction, dependency truthfulness, A0 isolation,
+deletion points, and Batch 2 readiness, including the twelve-question
+architecture lane. Any non-GREEN requires delegated remediation, repeated
+verification, a new frozen candidate, and a complete fresh review round. Batch 2
+is blocked until every reviewer returns unqualified GREEN and the Batch 0/1
+cumulative boundary review also returns unanimous GREEN.
+
+The protected A0 evidence and its plan edits retain their separate ownership
+and order. Slice 6 remains conditional after A0 evidence, its managed transport
+successor, fence successor, and closure; open it only if duplicate group-
+membership authority is then proven to block cleanup correctness, otherwise
+durably drop it and move to Slice 7. Custody may land first with A0 still staged
+and hash-protected. Before whichever overlapping track integrates second,
+reconcile its plan edit with the already-landed canonical plan through the
+separately delegated, frozen, verified, unanimous-review procedure above. The
+delivery-vs-processing contract is not custody and must not be silently resolved
+by this amendment.
